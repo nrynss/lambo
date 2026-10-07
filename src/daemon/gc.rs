@@ -1,7 +1,9 @@
 //! GC — spec §9, periodic only (T4.5; canonization's food).
 //!
-//! Runs every `gc_interval` mutations (the caller — T4.6's loop — decides
-//! *when*; this module decides *what*). [`run`] is a pure, fixture-testable
+//! Runs every `gc_interval` mutations, or once `gc_max_interval` has elapsed
+//! since the last sweep and at least `gc_idle_floor` mutations happened since
+//! (issue #29; [`sweep_due`] is that rule, the caller — T4.6's loop — applies
+//! it; this module decides *what*). [`run`] is a pure, fixture-testable
 //! function over `&mut Graph`: it performs the seven spec steps and returns a
 //! [`GcOutcome`] the owner records for T5.4 (cache epoch) and T6.4 (canonical
 //! budget).
@@ -19,29 +21,66 @@
 //!    sub-threshold concepts are collected, **excluding** Venerable,
 //!    Canonical, and root-goal concepts. The cut takes the **session's**
 //!    [`ScoringWeights`] (ALGO-4 — GC must not rank eviction with weights
-//!    nothing else uses), scores over the live dimensions while `access_count`
-//!    is dead session-wide (ALGO-1), and compares against a per-type bar
+//!    nothing else uses), scores each concept over the live dimensions plus
+//!    its own frequency term
+//!    ([`crate::daemon::score::score_live_plus_frequency`], issue #29 — an
+//!    access can only raise a score, never another concept's), and compares against a per-type bar
 //!    scaled by [`crate::types::ConceptType::eviction_resistance`] (ALGO-11).
 //!    See [`MIN_CONCEPT_SCORE`] for the calibration and its evidence.
+//!
+//!    Four protections (issue #29) keep the score cut from deleting reasoning
+//!    by session age once sweeps run daily:
+//!
+//!    * **Logic, Constraint and Observation are exempt from the score cut**
+//!      ([`ConceptType::exempt_from_gc_score_cut`]; Observation joined the
+//!      list by operator decision, 2026-10-07). They are still collected as
+//!      orphans or disconnected components — those clauses are structural, not
+//!      age-based. The score cut therefore only removes Entities and
+//!      Resources, and a Resource with dependents is spared it too.
+//!    * **A Resource with dependents is spared the score cut**
+//!      ([`resources_with_dependents`], operator decision): another concept has
+//!      a `Dependency`/`Causal`/`Hierarchical` edge into it, or its blast radius
+//!      is non-zero. An isolated, untouched Resource still ages out. Counted in
+//!      [`GcOutcome::resources_spared_by_dependents`].
+//!    * **Eviction recency is time since last touch** over a fixed
+//!      [`GC_RECENCY_WINDOW`] ([`eviction_recency`]), not position in the
+//!      session's interaction span, so a session growing older does not by
+//!      itself push old concepts under the bar. This is GC's cut only: the
+//!      daemon's ranking ([`crate::daemon::score::rescore`]), recall and
+//!      canonization keep the span-relative recency.
+//!    * **Collections per sweep are capped** ([`collection_cap`]), over steps
+//!      2 and 3 together. Under the cap structural garbage goes first —
+//!      orphans, then disconnected components — and the score cut's
+//!      candidates last, furthest under their bar first; concepts cut off by
+//!      the score cut's collections (step 3's cascade) take what budget is
+//!      left. Candidates past the cap are listed in [`GcOutcome::deferred`]
+//!      (counted in [`GcOutcome::collections_deferred`]) and re-evaluated on
+//!      the next sweep.
 //! 3. **Disconnected-component cleanup** — a cycle-safe BFS (visited set, per
 //!    the G6 binding note — never assume Hierarchical acyclicity) from the
 //!    temporal chain over the full undirected graph; every concept not reached
 //!    is collected. Protected classes are exempt ("protected classes survive"
-//!    contract); interactions are append-only and never collected.
+//!    contract); interactions are append-only and never collected. Measured
+//!    twice: on the post-step-1 graph (ranked before the score cut under the
+//!    cap), and again after the collections, so a concept reachable only
+//!    through a score-cut concept still goes in the same sweep.
 //! 4. **Index maintenance** — the inverted index (T2.6) is owner-side (P3
 //!    contract, `src/graph/mod.rs`), so `run(&mut Graph, …)` cannot reach it.
 //!    [`GcOutcome::concepts_collected`] + [`sync_index`] are the hook: the
 //!    owner MUST call `sync_index(&outcome, &mut index)` after `run` (each
 //!    collected id → `InvertedIndex::remove`). Survivor bumps never change
 //!    content, so no re-`add` is ever needed.
-//! 5. **`gc_survived += 1` on all survivors** — via
+//! 5. **`gc_survived += 1` on all survivors** — except candidates the cap held
+//!    back, which this sweep judged collectable (issue #29) — via
 //!    [`Graph::bump_gc_survived`] (saturating `i32`), which emits `UpsertNode`
 //!    mutations so the durable store mirrors the counter. Stage 1's input —
 //!    the reason GC cannot be cut. **Chunked** (CONC-6/XP-10): one call applies
 //!    at most [`GC_SURVIVOR_BUMP_CHUNK`] bumps and returns the rest in
 //!    [`GcOutcome::survivors_pending`], which the owner drains with
 //!    [`drain_survivor_bumps`] over later cycles — see that function for why
-//!    the store still converges exactly.
+//!    the store still converges exactly. The bump order is rotated per sweep
+//!    ([`survivor_drain_order`]) so the bumps a restart loses are not always
+//!    the same ids'.
 //! 6. **Canonical budget** — GC *records* the Canonical count and the
 //!    over-budget flag in [`GcOutcome`]; demotion (lowest-blast-radius, spec
 //!    §10) is T6.4's job — GC never demotes.
@@ -80,6 +119,21 @@ use crate::types::{CanonizationStatus, Concept, ConceptType, EdgeType, NodeId};
 /// v0.6.0's value is not in-repo — v0.1 decision. Kept below the structural
 /// write weights (`Derives` 0.9, `Temporal`/`Dependency`/`Causal` 1.0) so
 /// provenance and load-bearing edges survive a default run.
+///
+/// ### The CoOccurrence margin is zero, deliberately (issue #29)
+///
+/// `derive` writes every `CoOccurrence` edge at exactly
+/// [`crate::graph::derive::COOCCURRENCE_WEIGHT`] (0.5) and the cut is a strict
+/// `<`, so a never-reinforced co-occurrence edge is **kept**; reinforcement only
+/// raises weights and nothing in the codebase decays them. Step 1 therefore
+/// removes only `Semantic` edges written below 0.5. That is intended: a
+/// co-occurrence edge is the only edge `lambo_derive` writes between the
+/// concepts of one call, so cutting it after the TTL would strip most derived
+/// reasoning of its only concept-to-concept link on the first sweep, collapse
+/// its density, and hand the step-2 cut a cascade (the #29 dry run: 321 of 537
+/// first-sweep collections touched a CoOccurrence edge). Lowering this bar, or
+/// the write weight, is a behaviour change, not a tidy-up —
+/// `cooccurrence_edges_sit_exactly_on_the_step_one_bar_and_survive` pins both.
 pub const MIN_EDGE_WEIGHT: f64 = 0.5;
 /// An edge untouched for this long is "past `gc_edge_ttl`" (step 1).
 pub const GC_EDGE_TTL: ChronoDuration = ChronoDuration::seconds(3600);
@@ -87,11 +141,15 @@ pub const GC_EDGE_TTL: ChronoDuration = ChronoDuration::seconds(3600);
 /// v0.6.0's value is not in-repo — v0.1 decision, **recalibrated** (ALGO-1).
 ///
 /// The threshold is not applied flat: the concept's eviction score is
-/// [`crate::daemon::score::score_over_live_dimensions`] (frequency excluded
-/// while `access_count` is dead session-wide) and the comparison is against
+/// [`crate::daemon::score::score_over_live_dimensions`] plus the concept's own
+/// frequency term ([`crate::daemon::score::score_live_plus_frequency`], issue
+/// #29; an unread concept scores exactly the live-dimension score this bar was
+/// calibrated against, whatever else has been read) and the comparison is against
 /// `MIN_CONCEPT_SCORE / ConceptType::eviction_resistance()` — the spec §5
 /// resistances (Constraint 1.5 … Observation 0.7) scale the bar per type
-/// instead of every type facing the identical cut (ALGO-11). Dividing the
+/// instead of every type facing the identical cut (ALGO-11); the types
+/// [`ConceptType::exempt_from_gc_score_cut`] names (Logic, Constraint,
+/// Observation) never reach the bar at all. Dividing the
 /// threshold by the resistance is algebraically the same as multiplying the
 /// score by it; the threshold form is used so the *bar* is what varies and the
 /// score stays comparable to recall's.
@@ -112,13 +170,60 @@ pub const GC_EDGE_TTL: ChronoDuration = ChronoDuration::seconds(3600);
 /// Entity bar is `0.12 / 1.2 = 0.10`, ~50% below that floor, so every healthy
 /// mid-session concept survives with margin while the clause still bites where
 /// it should: a concept whose recency **and** density have both decayed to ~0
-/// scores at most its type modifier (Entity +0.05, Observation −0.10 → 0.0),
-/// which is below every type's bar. Orphans and disconnected components are
-/// collected by their own clauses regardless of score, so the score cut is
-/// deliberately the conservative one while a fifth of the composite is dead.
+/// scores at most its type modifier (Entity +0.05, Resource 0.0), which is
+/// below both bars that still apply (Entity 0.10, Resource 0.12). Orphans and
+/// disconnected components are collected by their own clauses regardless of score, so the score cut is
+/// deliberately the conservative one. Reading a concept only adds headroom:
+/// its frequency term is added on top of this scale, never traded for it
+/// (issue #29).
 pub const MIN_CONCEPT_SCORE: f64 = 0.12;
 /// Advisory concept-count ceiling: warn above, never evict (spec §9).
 pub const MAX_CONCEPT_NODES: usize = 10_000;
+
+/// Default `gc_max_interval` (issue #29): a session still taking writes sweeps
+/// at least this often. One day — the Metal rig's working rhythm.
+pub const GC_MAX_INTERVAL: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+/// Default `gc_idle_floor` (issue #29): the time bound fires only after this
+/// many session mutations since the last sweep. Measured on the Metal rig
+/// (lower bound, concepts + edges + interactions per day over 49 days): a
+/// floor of 100 skips the 12 trivial active days (1–8 interactions) and sweeps
+/// on the 24 working days.
+pub const GC_IDLE_FLOOR: u64 = 100;
+
+/// Step 2's eviction recency window (issue #29): a concept touched `now` has
+/// eviction recency 1.0, falling linearly to 0.0 at this age and staying
+/// there. See [`eviction_recency`]. A scoring constant, not a cadence, so it is
+/// not settable from `lambo.toml` (see [`crate::config::DaemonConfig`]).
+///
+/// ### Why 365 days
+///
+/// Lambo is long-term memory, and what the score cut can still reach is
+/// mostly long-tail pointers: file paths, PRs, commits, verdicts, the Entities
+/// and Resources a session mentioned once. Those are exactly what someone
+/// returns to a year later, and they are a small slice of the store (about 4%
+/// on the Metal rig once Logic, Constraint, Observation and Resources with
+/// dependents are spared), so the space a short window would reclaim is
+/// negligible next to what losing one of them costs. Whatever the window, an
+/// untouched store converges on the same set once every concept is older than
+/// it; the window sets how long an unused, sparsely connected concept is kept,
+/// not whether. A year keeps a project's pointers through a long pause, and
+/// once recall records accesses (issue #30) a concept that is still being used
+/// keeps resetting its own clock.
+///
+/// The window started at 90 days (measured on the rig snapshot, see the
+/// dev-diary note `gc-time-bound-29.md`, whose sensitivity table is the
+/// 90-day-era measurement) and was widened to a year by operator decision once
+/// Observations left the cut.
+pub const GC_RECENCY_WINDOW: ChronoDuration = ChronoDuration::days(365);
+
+/// Step 2+3 collection cap as a fraction of the sweep's unprotected concepts
+/// (issue #29); see [`collection_cap`].
+pub const GC_MAX_COLLECT_FRACTION: f64 = 0.05;
+
+/// The cap never drops below this many collections, so a small session can
+/// still clear its orphans in one sweep (issue #29); see [`collection_cap`].
+pub const GC_MIN_COLLECT_CAP: usize = 32;
 
 /// Step 5 bumps at most this many survivors per call; the rest come back as
 /// [`GcOutcome::survivors_pending`] for the owner to drain over later cycles
@@ -158,6 +263,12 @@ pub struct GcParams {
     /// ([`GC_SURVIVOR_BUMP_CHUNK`]). The remainder is returned in
     /// [`GcOutcome::survivors_pending`].
     pub max_survivor_bumps: usize,
+    /// Step 2: the eviction recency window ([`GC_RECENCY_WINDOW`]).
+    pub recency_window: ChronoDuration,
+    /// Steps 2+3: collection cap fraction ([`GC_MAX_COLLECT_FRACTION`]).
+    pub max_collect_fraction: f64,
+    /// Steps 2+3: collection cap floor ([`GC_MIN_COLLECT_CAP`]).
+    pub min_collect_cap: usize,
 }
 
 impl Default for GcParams {
@@ -171,7 +282,107 @@ impl Default for GcParams {
             max_concept_nodes: MAX_CONCEPT_NODES,
             max_canonical_nodes: 1000, // spec §10
             max_survivor_bumps: GC_SURVIVOR_BUMP_CHUNK,
+            recency_window: GC_RECENCY_WINDOW,
+            max_collect_fraction: GC_MAX_COLLECT_FRACTION,
+            min_collect_cap: GC_MIN_COLLECT_CAP,
         }
+    }
+}
+
+/// How far in the future a stored `last_gc_at` may be before the daemon treats
+/// it as a wall-clock jump and re-anchors the time bound at `now` (issue #29);
+/// see [`gc_clock_ahead`].
+///
+/// ### Why 5 minutes
+///
+/// Large enough that ordinary clock discipline never trips it: NTP slews and
+/// steps on a healthy host are milliseconds to seconds, and the daemon's own
+/// cycle and the flush interval are seconds, so a sweep time written a moment
+/// ago is never mistaken for a jump. Small against `gc_max_interval` (a day by
+/// default, and the reason this matters at all): within the tolerance a future
+/// stamp delays the time trigger by at most five minutes, while any jump big
+/// enough to matter — an hour, a day, a wrong year — is caught on the next
+/// cycle. Not configurable: it is a sanity bound on the host clock, not a
+/// cadence.
+pub const GC_CLOCK_SKEW_TOLERANCE: ChronoDuration = ChronoDuration::minutes(5);
+
+/// Is the mark's `last_gc_at` later than `now` by more than
+/// [`GC_CLOCK_SKEW_TOLERANCE`]? (Issue #29.)
+///
+/// A forward wall-clock jump stamps a future sweep (or anchor) time, and the
+/// store's monotonic merge keeps it once the clock is corrected, so
+/// [`sweep_due`]'s time trigger would read "not elapsed" until real time
+/// caught up — possibly years. When this returns `true` the daemon re-anchors
+/// the clock at `now` ([`Graph::reanchor_gc_clock`]), which persists through
+/// the one regression path the store merge allows
+/// ([`crate::types::GcMark::last_gc_at_reset`]). The mutation trigger and
+/// `last_gc_epoch` are unaffected.
+pub fn gc_clock_ahead(mark: crate::types::GcMark, now: DateTime<Utc>) -> bool {
+    match mark.last_gc_at {
+        Some(at) => at.signed_duration_since(now) > GC_CLOCK_SKEW_TOLERANCE,
+        None => false,
+    }
+}
+
+/// Why the daemon started a sweep (issue #29).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GcTrigger {
+    /// `gc_interval` session mutations since the last sweep (spec §9).
+    Mutations,
+    /// `gc_max_interval` elapsed since the last sweep, with at least
+    /// `gc_idle_floor` session mutations since it.
+    Elapsed,
+}
+
+impl GcTrigger {
+    /// The wire name: `"mutations"` or `"elapsed"` (`lambo_stats`' GC block).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            GcTrigger::Mutations => "mutations",
+            GcTrigger::Elapsed => "elapsed",
+        }
+    }
+}
+
+/// The sweep trigger (issue #29): is a sweep due, and why?
+///
+/// `since` is the session mutations since the last sweep — `epoch -
+/// mark.last_gc_epoch`, which excludes GC's own deferred writes (NEW-2). The
+/// mutation trigger is unchanged from spec §9 and is not gated by the floor.
+/// The time trigger needs both the elapsed bound and the floor, so an idle
+/// session never sweeps on time alone, and it measures from one stored
+/// instant, so a writer that was down for N intervals sweeps **once** (no
+/// backlog). A never-anchored mark (`last_gc_at == None`) cannot time-trigger;
+/// the daemon anchors it on first observation ([`Graph::anchor_gc_clock`]).
+/// A never-*swept* session has `last_gc_epoch == 0`, so `since` is its whole
+/// lifetime mutation count: one with at least `gc_idle_floor` of them sweeps
+/// once, `gc_max_interval` after the anchor, **even if idle since** — a
+/// deliberate catch-up for a store that grew before sweeps ran on time, not
+/// an accident of the floor
+/// (`never_swept_session_over_the_floor_catches_up_once_after_the_anchor`). A
+/// clock that went backwards past the mark reads as "not elapsed" — the time
+/// trigger waits, the mutation trigger is unaffected. A mark more than
+/// [`GC_CLOCK_SKEW_TOLERANCE`] in the future is the daemon's to re-anchor
+/// before calling this ([`gc_clock_ahead`]); this function stays pure.
+pub fn sweep_due(
+    epoch: u64,
+    mark: crate::types::GcMark,
+    now: DateTime<Utc>,
+    gc_interval: u64,
+    gc_max_interval: std::time::Duration,
+    gc_idle_floor: u64,
+) -> Option<GcTrigger> {
+    let since = epoch.saturating_sub(mark.last_gc_epoch);
+    if since >= gc_interval {
+        return Some(GcTrigger::Mutations);
+    }
+    if since < gc_idle_floor {
+        return None;
+    }
+    let bound = ChronoDuration::from_std(gc_max_interval).unwrap_or(ChronoDuration::MAX);
+    match mark.last_gc_at {
+        Some(at) if now.signed_duration_since(at) >= bound => Some(GcTrigger::Elapsed),
+        _ => None,
     }
 }
 
@@ -182,13 +393,20 @@ pub struct GcOutcome {
     pub edges_removed: Vec<NodeId>,
     /// Steps 2+3: concept ids collected, together with their incident edges.
     pub concepts_collected: Vec<NodeId>,
-    /// Step 5: every concept id that survived this run.
+    /// Step 5: every concept id that survived this run **and takes its
+    /// `gc_survived += 1`** — every remaining concept except
+    /// [`deferred`](GcOutcome::deferred). Id-ascending.
     pub survivors: Vec<NodeId>,
-    /// Step 5: the tail of [`survivors`](GcOutcome::survivors) whose
+    /// Step 5: the part of [`survivors`](GcOutcome::survivors) whose
     /// `gc_survived += 1` this run **deferred** — the owner must drain it with
     /// [`drain_survivor_bumps`] on later cycles (CONC-6/XP-10). Empty when the
-    /// survivor set fit in one chunk.
+    /// survivor set fit in one chunk. In **drain order**
+    /// ([`survivor_drain_order`]), not id order.
     pub survivors_pending: Vec<NodeId>,
+    /// Steps 2+3: the candidates the cap held back (issue #29), id-ascending.
+    /// They stay in the graph, are re-evaluated next sweep, and do **not** take
+    /// this sweep's survivor bump. `deferred.len() == collections_deferred`.
+    pub deferred: Vec<NodeId>,
     /// Step 6: number of Canonical concepts after cleanup.
     pub canonical_count: usize,
     /// Step 6: `canonical_count > max_canonical_nodes` — recorded for T6.4's
@@ -201,12 +419,36 @@ pub struct GcOutcome {
     /// Step 7: epoch before / after — GC's mutations bump it (see module docs).
     pub epoch_before: u64,
     pub epoch_after: u64,
+    /// Steps 2+3: the most concepts this sweep could collect
+    /// ([`collection_cap`], issue #29).
+    pub collection_cap: usize,
+    /// Steps 2+3: candidates the cap held back this sweep (they survive it and
+    /// are re-evaluated on the next one). Non-zero exactly when the cap bound;
+    /// a warning in [`GcOutcome::warnings`] says so too.
+    pub collections_deferred: usize,
+    /// Why the daemon ran this sweep. `None` when `run` was called directly
+    /// (tests, tooling); the daemon fills it in.
+    pub trigger: Option<GcTrigger>,
+    /// Step 2: Resources that scored under their bar this sweep and were kept
+    /// only because they have dependents ([`resources_with_dependents`], issue
+    /// #29 operator decision). A spared Resource that step 3 collects anyway,
+    /// as a disconnected component, is not counted: it was not spared.
+    pub resources_spared_by_dependents: usize,
+}
+
+impl GcOutcome {
+    /// Did the per-sweep collection cap hold anything back?
+    pub fn cap_bound(&self) -> bool {
+        self.collections_deferred > 0
+    }
 }
 
 /// Run one full GC cycle (spec §9 steps 1–7, in order).
 ///
-/// Pure RAM work: no I/O, no locks — the caller owns the graph lock. All
-/// outcome vectors are id-ascending so results are deterministic.
+/// Pure RAM work: no I/O, no locks — the caller owns the graph lock. Every
+/// outcome vector is id-ascending except
+/// [`GcOutcome::survivors_pending`], which is in drain order; all of them are
+/// deterministic for a given graph and epoch.
 pub fn run(graph: &mut Graph, params: GcParams) -> GcOutcome {
     let epoch_before = graph.epoch();
     let mut outcome = GcOutcome {
@@ -231,72 +473,147 @@ pub fn run(graph: &mut Graph, params: GcParams) -> GcOutcome {
         }
     }
 
+    // Issue #29: one collection budget for steps 2 and 3 together.
+    let unprotected = graph
+        .concepts()
+        .filter(|c| !protected.contains(&c.id))
+        .count();
+    outcome.collection_cap = collection_cap(unprotected, params);
+    let mut budget = outcome.collection_cap;
+
     // Step 2 — concept cleanup: orphans + sub-threshold, excluding protected.
     // Scored against post-step-1 state with the session's own weights (ALGO-4),
-    // over the live dimensions only while `access_count` is dead session-wide
-    // (ALGO-1), and cut per concept type (ALGO-11).
+    // each concept's own frequency on top of the live dimensions (issue #29),
+    // GC's time-anchored recency (issue #29), and cut per concept type
+    // (ALGO-11). Logic, Constraint and Observation are exempt from the score cut, not from
+    // the orphan clause, and a Resource with dependents is spared it (issue
+    // #29).
     let ctx = crate::daemon::score::SessionContext::compute(graph);
-    let frequency_is_live = graph.concepts().any(|c| c.access_count > 0);
-    let mut candidates: Vec<NodeId> = Vec::new();
+    // Issue #29 operator decision: a Resource with dependents is spared the
+    // score cut (see `resources_with_dependents`). Computed once, post-step-1.
+    let depended_on = resources_with_dependents(graph);
+    let mut orphans: Vec<NodeId> = Vec::new();
+    let mut below: Vec<(f64, NodeId)> = Vec::new();
+    // Under-bar Resources the dependents rule kept; counted below, once the
+    // disconnected components are known (a spared Resource that is also
+    // disconnected is collected as that, so it was not spared).
+    let mut spared: Vec<NodeId> = Vec::new();
     for c in graph.concepts() {
         if protected.contains(&c.id) {
             continue;
         }
-        let orphan = graph.incident_edges(c.id).is_empty();
-        let below = eviction_score(graph, c, &ctx, params, frequency_is_live)
-            < eviction_threshold(params.min_concept_score, c.concept_type);
-        if orphan || below {
-            candidates.push(c.id);
+        if graph.incident_edges(c.id).is_empty() {
+            orphans.push(c.id);
+            continue;
         }
-    }
-    candidates.sort_by_key(|id| id.0);
-    for id in &candidates {
-        if graph.remove_node(*id).is_ok() {
-            outcome.concepts_collected.push(*id);
+        if c.concept_type.exempt_from_gc_score_cut() {
+            continue;
+        }
+        let score = eviction_score(graph, c, &ctx, params);
+        let bar = eviction_threshold(params.min_concept_score, c.concept_type);
+        if score < bar {
+            if depended_on.contains(&c.id) {
+                spared.push(c.id);
+                continue;
+            }
+            below.push((score / bar, c.id));
         }
     }
 
-    // Step 3 — disconnected components: cycle-safe BFS from the temporal chain.
-    let mut reachable: HashSet<NodeId> = HashSet::new();
-    let mut stack: Vec<NodeId> = graph.temporal_chain().to_vec();
-    for &seed in &stack {
-        reachable.insert(seed);
-    }
-    while let Some(n) = stack.pop() {
-        for nb in graph.out_neighbors(n) {
-            if reachable.insert(nb) {
-                stack.push(nb);
-            }
-        }
-        for nb in graph.in_neighbors(n) {
-            if reachable.insert(nb) {
-                stack.push(nb);
-            }
-        }
-    }
+    // Step 3 — disconnected components, measured on the same post-step-1
+    // graph: a cycle-safe BFS from the temporal chain. An orphan is also
+    // unreachable; it is listed once, as an orphan.
+    let reachable = reachable_from_temporal_chain(graph);
+    let orphan_set: HashSet<NodeId> = orphans.iter().copied().collect();
     let mut disconnected: Vec<NodeId> = graph
         .concepts()
         .map(|c| c.id)
-        .filter(|id| !reachable.contains(id) && !protected.contains(id))
+        .filter(|id| !reachable.contains(id) && !protected.contains(id) && !orphan_set.contains(id))
         .collect();
+    let disconnected_set: HashSet<NodeId> = disconnected.iter().copied().collect();
+    outcome.resources_spared_by_dependents = spared
+        .iter()
+        .filter(|id| !disconnected_set.contains(id))
+        .count();
+
+    // Under the cap, structural garbage goes first — orphans, then the other
+    // disconnected components — and the score cut's candidates last, furthest
+    // under their bar first. A concept both disconnected and under its bar is
+    // taken as disconnected. Ids break ties so the choice is deterministic.
+    orphans.sort_by_key(|id| id.0);
     disconnected.sort_by_key(|id| id.0);
-    for id in &disconnected {
+    below.retain(|(_, id)| !disconnected_set.contains(id));
+    below.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1 .0.cmp(&b.1 .0)));
+    let candidates: Vec<NodeId> = orphans
+        .into_iter()
+        .chain(disconnected)
+        .chain(below.into_iter().map(|(_, id)| id))
+        .collect();
+    let take = candidates.len().min(budget);
+    let mut held_back: Vec<NodeId> = candidates[take..].to_vec();
+    for id in &candidates[..take] {
+        if graph.remove_node(*id).is_ok() {
+            outcome.concepts_collected.push(*id);
+            budget -= 1;
+        }
+    }
+
+    // Step 3, cascade — concepts the collections above cut off from the
+    // temporal chain (reachable only through a score-cut concept). Collected
+    // in the same sweep, as before the cap existed, with whatever budget is
+    // left; a candidate already held back above is not counted twice.
+    let reachable = reachable_from_temporal_chain(graph);
+    let already: HashSet<NodeId> = held_back.iter().copied().collect();
+    let mut cascade: Vec<NodeId> = graph
+        .concepts()
+        .map(|c| c.id)
+        .filter(|id| !reachable.contains(id) && !protected.contains(id) && !already.contains(id))
+        .collect();
+    cascade.sort_by_key(|id| id.0);
+    let take = cascade.len().min(budget);
+    held_back.extend_from_slice(&cascade[take..]);
+    for id in &cascade[..take] {
         if graph.remove_node(*id).is_ok() {
             outcome.concepts_collected.push(*id);
         }
     }
     outcome.concepts_collected.sort_by_key(|id| id.0);
+    held_back.sort_by_key(|id| id.0);
+    outcome.collections_deferred = held_back.len();
+    if outcome.cap_bound() {
+        outcome.warnings.push(format!(
+            "GC collection cap bound: collected {} of {} candidates (cap {} = max({}, {:.0}% of {} \
+             unprotected concepts)); {} deferred to the next sweep",
+            outcome.concepts_collected.len(),
+            outcome.concepts_collected.len() + outcome.collections_deferred,
+            outcome.collection_cap,
+            params.min_collect_cap,
+            params.max_collect_fraction * 100.0,
+            unprotected,
+            outcome.collections_deferred
+        ));
+    }
 
-    // Step 5 — survivors: every remaining concept gets gc_survived += 1, but at
-    // most `max_survivor_bumps` of them here; the tail is deferred to later
-    // cycles (CONC-6/XP-10 — see `drain_survivor_bumps` for the convergence
-    // argument).
-    let mut survivors: Vec<NodeId> = graph.concepts().map(|c| c.id).collect();
+    // Step 5 — survivors: every remaining concept gets gc_survived += 1,
+    // except the candidates the cap held back (issue #29: this sweep judged
+    // them collectable, so it must not credit them with surviving it — Stage 1
+    // reads the counter). At most `max_survivor_bumps` land here; the tail is
+    // deferred to later cycles (CONC-6/XP-10 — see `drain_survivor_bumps` for
+    // the convergence argument), in a drain order rotated per sweep so no id
+    // range is always last (see `survivor_drain_order`).
+    let held: HashSet<NodeId> = held_back.iter().copied().collect();
+    let mut survivors: Vec<NodeId> = graph
+        .concepts()
+        .map(|c| c.id)
+        .filter(|id| !held.contains(id))
+        .collect();
     survivors.sort_by_key(|id| id.0);
-    let split = survivors.len().min(params.max_survivor_bumps);
-    graph.bump_gc_survived(&survivors[..split]);
-    outcome.survivors_pending = survivors[split..].to_vec();
+    let order = survivor_drain_order(&survivors, epoch_before);
+    let split = order.len().min(params.max_survivor_bumps);
+    graph.bump_gc_survived(&order[..split]);
+    outcome.survivors_pending = order[split..].to_vec();
     outcome.survivors = survivors;
+    outcome.deferred = held_back;
 
     // Step 6 — canonical budget: record only; T6.4 demotes (never here).
     outcome.canonical_count = graph
@@ -325,6 +642,58 @@ pub fn run(graph: &mut Graph, params: GcParams) -> GcOutcome {
     // Step 7 — the epoch is bumped by the mutations above (see module docs).
     outcome.epoch_after = graph.epoch();
     outcome
+}
+
+/// Every node reachable from the temporal chain over the undirected graph —
+/// step 3's cycle-safe BFS (visited set, per the G6 binding note: never assume
+/// Hierarchical acyclicity).
+fn reachable_from_temporal_chain(graph: &Graph) -> HashSet<NodeId> {
+    let mut reachable: HashSet<NodeId> = HashSet::new();
+    let mut stack: Vec<NodeId> = graph.temporal_chain().to_vec();
+    for &seed in &stack {
+        reachable.insert(seed);
+    }
+    while let Some(n) = stack.pop() {
+        for nb in graph.out_neighbors(n) {
+            if reachable.insert(nb) {
+                stack.push(nb);
+            }
+        }
+        for nb in graph.in_neighbors(n) {
+            if reachable.insert(nb) {
+                stack.push(nb);
+            }
+        }
+    }
+    reachable
+}
+
+/// The order a sweep's survivor bumps are applied in (issue #29): the
+/// id-ascending survivor list rotated by an offset derived from the sweep's
+/// starting epoch.
+///
+/// Pending bumps live in the daemon, not the store, so a writer restart in the
+/// middle of a drain loses the rest of that sweep's bumps. With a fixed
+/// id-ascending order the lost tail was always the same high-id concepts, so a
+/// restart-prone writer systematically starved them of `gc_survived` (Stage 1's
+/// input). Rotating the start per sweep spreads that loss across the id space:
+/// each concept lands in the tail about as often as any other. The offset is a
+/// SplitMix64 mix of `epoch_before`, so two sweeps a few mutations apart do not
+/// start at neighbouring positions, and the order is still deterministic for a
+/// given graph and epoch. Persisting the pending set instead was not done: it
+/// is a new store column and schema change for a counter whose only loss is a
+/// bounded, now unbiased delay.
+pub fn survivor_drain_order(survivors: &[NodeId], epoch_before: u64) -> Vec<NodeId> {
+    let mut order = survivors.to_vec();
+    if order.len() > 1 {
+        let mut z = epoch_before.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^= z >> 31;
+        let offset = (z % order.len() as u64) as usize;
+        order.rotate_left(offset);
+    }
+    order
 }
 
 /// Apply up to `max` deferred survivor bumps, removing them from `pending`
@@ -368,11 +737,118 @@ pub fn sync_index(outcome: &GcOutcome, index: &mut InvertedIndex) {
     }
 }
 
+/// The per-sweep collection cap (issue #29): `max(min_collect_cap,
+/// ceil(max_collect_fraction × unprotected))`, counted over steps 2 and 3
+/// together.
+///
+/// The cap bounds how much a single sweep can delete if a scoring change, a
+/// calibration miss or a bug misjudges a whole class of concepts: with daily
+/// sweeps the worst case is a 5%-per-day erosion that an operator sees in the
+/// `GC collection cap bound` warning, instead of one sweep taking a sixth of
+/// the store (the #29 dry run's first sweep). A non-finite or negative
+/// fraction counts as 0, leaving the floor.
+pub fn collection_cap(unprotected: usize, params: GcParams) -> usize {
+    let fraction = if params.max_collect_fraction.is_finite() && params.max_collect_fraction > 0.0 {
+        params.max_collect_fraction.min(1.0)
+    } else {
+        0.0
+    };
+    let by_fraction = (unprotected as f64 * fraction).ceil() as usize;
+    by_fraction.max(params.min_collect_cap)
+}
+
+/// Resources the step-2 score cut must not collect because other concepts
+/// depend on them (issue #29 operator decision, 2026-10-07).
+///
+/// "Dependents" uses the two senses the codebase already gives the word, over
+/// the structural edge kinds blast radius counts
+/// ([`crate::recall::format::STRUCTURAL_EDGE_TYPES`]: `Dependency`, `Causal`,
+/// `Hierarchical`; never `Derives`, `Temporal`, `CoOccurrence` or `Semantic`),
+/// and only concept-to-concept edges with a source other than the Resource
+/// itself (a self-loop is not a dependent):
+///
+/// * **Incoming** — another concept has a structural edge **into** the
+///   Resource. This is `record_action`'s direction (`src/graph/action.rs`):
+///   the action node is the source of `Dependency` edges to what it depends
+///   on and of `Causal` edges to what it produces or modifies, so a Resource
+///   that some action depends on, produced or modified has one. This is the
+///   operator's rule as stated.
+/// * **Blast radius** — the Resource has a non-zero blast radius
+///   ([`crate::recall::format::blast_radius`]): some concept's *only*
+///   structural source is this Resource, which is exactly what the load-bearing
+///   warning reports as "N nodes depend on this". This is the outgoing side:
+///   a `record_action` node is the sole source of the Resources it alone
+///   produced or depends on.
+///
+/// The second sense is included because the first alone erodes from the
+/// source end: an action node usually has no incoming structural edge, so it
+/// would be collected, its targets would lose their only incoming edge with it,
+/// and the next sweep would collect them too — the dependency graph blast
+/// radius reads would disappear one layer per day.
+///
+/// Only the score cut honours this. A Resource with no structural edge at all
+/// (an isolated, untouched one) ages out under [`eviction_recency`] like any
+/// other concept, and orphan and disconnected-component cleanup are unchanged.
+pub fn resources_with_dependents(graph: &Graph) -> HashSet<NodeId> {
+    let is_resource = |id: NodeId| {
+        matches!(
+            graph.node(id),
+            Some(crate::types::Node::Concept(c)) if c.concept_type == ConceptType::Resource
+        )
+    };
+    let mut out = HashSet::new();
+    for (dst, srcs) in crate::recall::format::inbound_sources(graph) {
+        if is_resource(dst) && srcs.iter().any(|s| *s != dst) {
+            out.insert(dst);
+        }
+        if let [only] = srcs.as_slice() {
+            if *only != dst && is_resource(*only) {
+                out.insert(*only);
+            }
+        }
+    }
+    out
+}
+
+/// GC's eviction recency for one concept (issue #29): `1 − age / window`,
+/// clamped to `[0, 1]`, where `age = now − last touch` and the last touch is
+/// the later of `created_at` and `last_accessed`.
+///
+/// This replaces the span-relative recency of
+/// [`crate::daemon::score::score_concept`] **in GC's cut only**. Span-relative
+/// recency puts the session's oldest concept at 0 however recently the session
+/// started, so a session that simply keeps going pushes ever more untouched
+/// concepts under the bar (the #29 projection: 537 → 1,049 collections as the
+/// span grew by 60 days with no new concepts). Anchored to a fixed window, a
+/// concept's eviction recency depends only on how long since anything touched
+/// it, and once every untouched concept is past the window, more session age
+/// changes nothing. A concept recalled again (`last_accessed`, issue #30)
+/// regains recency. A future-dated touch (clock skew) counts as `now`; a
+/// non-positive window degrades to 0 for every concept rather than dividing by
+/// zero.
+pub fn eviction_recency(c: &Concept, now: DateTime<Utc>, window: ChronoDuration) -> f64 {
+    let last_touch = match c.last_accessed {
+        Some(at) => at.max(c.created_at),
+        None => c.created_at,
+    };
+    let window_ms = window.num_milliseconds();
+    if window_ms <= 0 {
+        return 0.0;
+    }
+    let age_ms = now
+        .signed_duration_since(last_touch)
+        .num_milliseconds()
+        .max(0);
+    (1.0 - age_ms as f64 / window_ms as f64).clamp(0.0, 1.0)
+}
+
 /// The step-2 bar for one concept type: [`MIN_CONCEPT_SCORE`] divided by the
 /// spec §5 [`ConceptType::eviction_resistance`] (ALGO-11).
 ///
-/// A Constraint (1.5) faces a bar a third lower than a Resource (1.0); an
-/// Observation (0.7) faces one ~43% higher. A non-positive or non-finite
+/// An Entity (1.2) faces a bar a sixth lower than a Resource (1.0). The
+/// exempt types (Logic, Constraint, Observation) never get here; their
+/// resistances still scale Solo promotion ([`crate::canon::policy`]). A
+/// non-positive or non-finite
 /// resistance would invert or poison the comparison, so it falls back to the
 /// unscaled threshold (the `const fn` cannot produce one today — this is a
 /// guard against a future table edit, not a live branch).
@@ -387,35 +863,32 @@ fn eviction_threshold(min_concept_score: f64, ty: ConceptType) -> f64 {
 
 /// One concept's step-2 eviction score.
 ///
-/// `frequency_is_live` is computed once per run over the whole session: while
-/// **no** concept has been accessed, the frequency dimension is structurally
-/// dead and is renormalized out of the cut (ALGO-1,
-/// [`crate::daemon::score::score_over_live_dimensions`]). The moment any
-/// access lands the full spec §9 composite is used again — so the session
-/// switches scoring functions exactly once.
+/// The live-dimension score plus this concept's own frequency term
+/// ([`crate::daemon::score::score_live_plus_frequency`]), with GC's
+/// time-anchored recency in place of the span-relative one.
 ///
-/// That switch **lowers** every score whose frequency is still 0 (NEW-6): the
-/// live composite renormalizes over the surviving weights, so going back to the
-/// full one re-applies the live weight total — `0.8 ×` the weighted part at the
-/// default weights. On the shipped `session-rest-api` fixture all 22 concepts
-/// drop (factor 0.83–0.89) and the smallest margin to a type bar falls from
-/// **1.49× to 1.33×**; nothing crosses, so no concept is collected *because of*
-/// the switch. The direction matters for calibration — see
-/// [`crate::daemon::score::score_over_live_dimensions`] for the measurements —
-/// and it is the opposite of what this block claimed before.
+/// Issue #29 replaced ALGO-1's **session-wide** switch here. That switch moved
+/// every concept from the live-dimension score to the full composite as soon
+/// as *any* concept had an access, which lowers every unread concept's score
+/// (the full composite is `0.8 ×` the live one on the weighted part at
+/// frequency 0, NEW-6). Under a time-anchored recency that was a cliff: on the
+/// Metal rig snapshot one access on one Entity took the first sweep from 159
+/// to 412 candidates. Per concept and additive, an access can only raise the
+/// accessed concept's score and never touches anyone else's, and an unread
+/// concept keeps exactly the scale [`MIN_CONCEPT_SCORE`] and
+/// [`GC_RECENCY_WINDOW`] were calibrated on. Recall ranking, the daemon's score
+/// table and canonization are unchanged.
 fn eviction_score(
     graph: &Graph,
     c: &Concept,
     ctx: &crate::daemon::score::SessionContext,
     params: GcParams,
-    frequency_is_live: bool,
 ) -> f64 {
-    let dims = crate::daemon::score::score_concept(graph, c, ctx);
-    if frequency_is_live {
-        crate::daemon::score::score(dims, &params.weights)
-    } else {
-        crate::daemon::score::score_over_live_dimensions(dims, &params.weights)
-    }
+    let mut dims = crate::daemon::score::score_concept(graph, c, ctx);
+    // Issue #29: GC's cut measures recency from the last touch, not from the
+    // concept's position in the session span (see `eviction_recency`).
+    dims.recency = eviction_recency(c, params.now, params.recency_window);
+    crate::daemon::score::score_live_plus_frequency(dims, &params.weights)
 }
 
 /// A concept is protected when it is Venerable or Canonical, or it is one of
@@ -514,6 +987,16 @@ mod tests {
     fn default_params() -> GcParams {
         GcParams {
             now: ts(100),
+            ..Default::default()
+        }
+    }
+
+    /// `default_params` with the clock moved past [`GC_RECENCY_WINDOW`], so
+    /// every `ts(0)` concept has zero eviction recency (issue #29: GC's
+    /// recency is time since last touch, not position in the session span).
+    fn aged_params() -> GcParams {
+        GcParams {
+            now: ts(0) + GC_RECENCY_WINDOW + ChronoDuration::days(1),
             ..Default::default()
         }
     }
@@ -706,12 +1189,13 @@ mod tests {
 
         // Orphan: no edges at all -> step 2, not protected.
         let orphan = insert_isolated(&mut g, concept(10, 1, "orphan", ConceptType::Entity), 1);
-        // Sub-threshold (and not an orphan): an Observation whose only edge is
+        // Sub-threshold (and not an orphan): a Resource whose only edge is
         // its Derives provenance — zero recency, minimum density (1 of the
-        // hub's 4), and the Observation modifier (−0.10) against the highest
-        // per-type bar in the table (resistance 0.7 ⇒ 0.12/0.7 = 0.171).
+        // hub's 4), no type bonus, against the 0.12 bar (resistance 1.0). It
+        // has no structural dependents, so the dependents rule does not spare
+        // it. (An Observation is no longer in the score cut at all.)
         let low_id = nid(11);
-        g.insert_concept(concept(11, 1, "low value", ConceptType::Observation), iid)
+        g.insert_concept(concept(11, 1, "low value", ConceptType::Resource), iid)
             .unwrap();
         // Protected: Venerable, isolated -> must survive both step 2 and 3.
         let protected = insert_isolated(
@@ -726,7 +1210,7 @@ mod tests {
             CanonizationStatus::Venerable,
         ))
         .unwrap();
-        // A hub (13) plus three spokes: max incident = 4, so the Observation's
+        // A hub (13) plus three spokes: max incident = 4, so the Resource's
         // density is 1/4. All four must survive.
         for id in [13u64, 14, 15, 16] {
             g.insert_concept(
@@ -740,20 +1224,40 @@ mod tests {
                 .unwrap();
         }
 
-        // Sanity: the Observation really is sub-threshold under the cut GC
+        // Sanity: the Resource really is sub-threshold under the cut GC
         // applies — live-dimension score vs. its own type's bar (ALGO-1/11).
-        let params = default_params();
+        // Aged past the recency window: GC's recency is time-anchored (#29).
+        // A Resource carries no type modifier, so against the default 0.12 bar
+        // this fixture's leaf (density 1/4, derived by half the interactions)
+        // is out of the cut's reach; 0.3 sits above the leaf's score and below
+        // the Entity anchors' own bar (0.3 / 1.2 = 0.25), asserted below.
+        let params = GcParams {
+            min_concept_score: 0.3,
+            ..aged_params()
+        };
         let ctx = crate::daemon::score::SessionContext::compute(&g);
         let low = match g.node(low_id).unwrap() {
             Node::Concept(c) => c,
             _ => unreachable!(),
         };
-        let low_score = eviction_score(&g, low, &ctx, params, false);
-        let low_bar = eviction_threshold(params.min_concept_score, ConceptType::Observation);
+        let low_score = eviction_score(&g, low, &ctx, params);
+        let low_bar = eviction_threshold(params.min_concept_score, ConceptType::Resource);
         assert!(
             low_score < low_bar,
-            "test premise: score {low_score} must be under the Observation bar {low_bar}"
+            "test premise: score {low_score} must be under the Resource bar {low_bar}"
         );
+        for id in [13u64, 14, 15, 16] {
+            let anchor = match g.node(nid(id)).unwrap() {
+                Node::Concept(c) => c,
+                _ => unreachable!(),
+            };
+            let bar = eviction_threshold(params.min_concept_score, ConceptType::Entity);
+            let score = eviction_score(&g, anchor, &ctx, params);
+            assert!(
+                score >= bar,
+                "test premise: anchor {id} score {score} must clear its bar {bar}"
+            );
+        }
 
         let outcome = run(&mut g, params);
         assert_eq!(outcome.concepts_collected, vec![nid(10), nid(11)]);
@@ -843,13 +1347,16 @@ mod tests {
 
     /// ALGO-11: the cut consults [`ConceptType::eviction_resistance`].
     ///
-    /// `Entity` and `Logic` share a `score_multiplier` (1.05), so two
-    /// structurally identical concepts of those types score **identically**;
-    /// their resistances differ (1.2 vs 1.1). Choosing
-    /// `min_concept_score = 1.15 · score` puts the Entity bar (score/1.2·1.15 =
-    /// 0.958·score) below the score and the Logic bar (1.045·score) above it,
-    /// so the resistance factor is the *only* thing deciding their fate. Under
-    /// the pre-fix flat cut both shared one bar and one outcome.
+    /// `Entity` (resistance 1.2) and `Resource` (1.0) leaves of identical
+    /// structure differ only by the type modifier (+0.05 vs 0), so
+    /// `score_r < score_e`. Choosing `min_concept_score = 1.1 · score_e` puts a
+    /// **flat** bar above both scores — both collected — while the Entity's own
+    /// bar (`1.1/1.2 · score_e`) sits below its score: the resistance factor is
+    /// the only thing that saves it.
+    ///
+    /// (Before issue #29 this pinned Entity against Logic, which share a
+    /// modifier; Logic is now exempt from the score cut, see
+    /// `logic_constraint_and_observation_are_exempt_from_the_score_cut`.)
     #[test]
     fn eviction_resistance_discriminates_at_the_threshold_boundary() {
         let mut g = Graph::new(sid());
@@ -866,41 +1373,44 @@ mod tests {
             .unwrap();
         g.insert_concept(concept(11, 1, "entity leaf", ConceptType::Entity), iid)
             .unwrap();
-        g.insert_concept(concept(12, 1, "logic leaf", ConceptType::Logic), iid)
+        g.insert_concept(concept(12, 1, "resource leaf", ConceptType::Resource), iid)
             .unwrap();
         g.upsert_edge(edge(100, 11, 10, EdgeType::Dependency, 1.0, 0))
             .unwrap();
         g.upsert_edge(edge(101, 12, 10, EdgeType::Dependency, 1.0, 0))
             .unwrap();
 
-        // The two leaves score identically — same structure, same modifier.
         let ctx = crate::daemon::score::SessionContext::compute(&g);
-        let base = default_params();
+        let base = aged_params();
         let score_of = |g: &Graph, id: NodeId, ctx: &crate::daemon::score::SessionContext| {
             let c = match g.node(id).unwrap() {
                 Node::Concept(c) => c.clone(),
                 _ => unreachable!(),
             };
-            eviction_score(g, &c, ctx, base, false)
+            eviction_score(g, &c, ctx, base)
         };
         let entity_score = score_of(&g, nid(11), &ctx);
-        let logic_score = score_of(&g, nid(12), &ctx);
-        assert_eq!(
-            entity_score, logic_score,
-            "test premise: Entity and Logic share score_multiplier"
+        let resource_score = score_of(&g, nid(12), &ctx);
+        assert!(
+            resource_score < entity_score,
+            "test premise: same structure, Entity carries the larger modifier"
         );
 
         let params = GcParams {
-            min_concept_score: entity_score * 1.15,
+            min_concept_score: entity_score * 1.1,
             ..base
         };
         assert!(
-            eviction_threshold(params.min_concept_score, ConceptType::Entity) < entity_score,
-            "Entity bar must sit below the shared score"
+            params.min_concept_score > entity_score,
+            "a flat bar would collect the Entity too"
         );
         assert!(
-            eviction_threshold(params.min_concept_score, ConceptType::Logic) > logic_score,
-            "Logic bar must sit above the shared score"
+            eviction_threshold(params.min_concept_score, ConceptType::Entity) < entity_score,
+            "the Entity's own bar must sit below its score"
+        );
+        assert!(
+            eviction_threshold(params.min_concept_score, ConceptType::Resource) > resource_score,
+            "the Resource bar must sit above its score"
         );
 
         let outcome = run(&mut g, params);
@@ -910,7 +1420,7 @@ mod tests {
             "only the less resistant type is collected"
         );
         assert!(g.node(nid(11)).is_some(), "Entity (1.2) resists the cut");
-        assert!(g.node(nid(12)).is_none(), "Logic (1.1) does not");
+        assert!(g.node(nid(12)).is_none(), "Resource (1.0) does not");
     }
 
     /// ALGO-4: the cut uses the **session's** weights, not a second default.
@@ -942,13 +1452,14 @@ mod tests {
 
         // Default weights (density 0.35): the leaf's density carries it.
         let mut g = build();
-        let outcome = run(&mut g, default_params());
+        let outcome = run(&mut g, aged_params());
         assert!(
             outcome.concepts_collected.is_empty(),
             "under the session's default weights the leaf is worth keeping"
         );
 
-        // Session weights that value only recency, which the leaf has none of.
+        // Session weights that value only recency, which the leaf (aged past
+        // the window) has none of.
         let mut g = build();
         let outcome = run(
             &mut g,
@@ -959,7 +1470,7 @@ mod tests {
                     session_activity: 0.0,
                     density: 0.0,
                 },
-                ..default_params()
+                ..aged_params()
             },
         );
         assert!(
@@ -979,9 +1490,9 @@ mod tests {
         let i1 = interaction(1, None);
         let iid = i1.id;
         g.insert_interaction(i1).unwrap();
-        // An Observation with only its Derives edge in a session with a hub —
+        // A Resource with only its Derives edge in a session with a hub —
         // dead under any sane weighting.
-        g.insert_concept(concept(11, 1, "low value", ConceptType::Observation), iid)
+        g.insert_concept(concept(11, 1, "low value", ConceptType::Resource), iid)
             .unwrap();
         for id in [13u64, 14, 15, 16] {
             g.insert_concept(
@@ -1004,6 +1515,9 @@ mod tests {
                     session_activity: -1.0,
                     density: 0.35,
                 },
+                // Every concept is far under this bar, so only a NaN composite
+                // (`NaN < bar` is false) could keep the leaf.
+                min_concept_score: 5.0,
                 ..default_params()
             },
         );
@@ -1434,10 +1948,13 @@ mod tests {
         let outcome = run(&mut g, params);
 
         assert_eq!(outcome.survivors, ids, "every concept survived");
+        // Issue #29: the bumps go in the sweep's drain order (a rotation of
+        // the id order), and the tail past the chunk is deferred in that order.
+        let order = survivor_drain_order(&ids, outcome.epoch_before);
         assert_eq!(
             outcome.survivors_pending,
-            ids[4..],
-            "the tail past the chunk is deferred, id-ascending"
+            order[4..],
+            "the tail past the chunk is deferred, in drain order"
         );
         let upserts = g
             .drain_log()
@@ -1446,7 +1963,7 @@ mod tests {
             .filter(|m| matches!(m, Mutation::UpsertNode { .. }))
             .count();
         assert_eq!(upserts, 4, "one flush chunk of upserts, not ten");
-        for (i, id) in ids.iter().enumerate() {
+        for (i, id) in order.iter().enumerate() {
             let c = match g.node(*id).unwrap() {
                 Node::Concept(c) => c,
                 _ => unreachable!(),
@@ -1552,5 +2069,941 @@ mod tests {
             };
             assert_eq!(c.gc_survived, 1);
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Issue #29 — step-2 protections, the collection cap, the trigger
+    // ------------------------------------------------------------------
+
+    /// A session with one interaction-spanning hub (13 → 14/15/16) so a
+    /// leaf's density is 1/4, plus the given low-value leaves, each with only
+    /// its `Derives` edge. Leaves are created at `ts(0)`.
+    fn hub_session(leaves: &[(u64, ConceptType)]) -> Graph {
+        hub_session_patched(leaves, |c| c)
+    }
+
+    /// [`hub_session`] with every concept passed through `patch` before it is
+    /// inserted (access counts, timestamps).
+    fn hub_session_patched(
+        leaves: &[(u64, ConceptType)],
+        patch: impl Fn(Concept) -> Concept,
+    ) -> Graph {
+        let mut g = Graph::new(sid());
+        let i1 = interaction(1, None);
+        let i2 = Interaction {
+            created_at: ts(100),
+            ..interaction(2, Some(1))
+        };
+        let iid = i1.id;
+        g.insert_interaction(i1).unwrap();
+        g.insert_interaction(i2).unwrap();
+        for id in [13u64, 14, 15, 16] {
+            g.insert_concept(
+                patch(concept(id, 1, &format!("anchor {id}"), ConceptType::Entity)),
+                iid,
+            )
+            .unwrap();
+        }
+        for (eid, tgt) in [(101u64, 14u64), (102, 15), (103, 16)] {
+            g.upsert_edge(edge(eid, 13, tgt, EdgeType::Dependency, 1.0, 0))
+                .unwrap();
+        }
+        for (id, ty) in leaves {
+            g.insert_concept(patch(concept(*id, 1, &format!("leaf {id}"), *ty)), iid)
+                .unwrap();
+        }
+        g
+    }
+
+    /// Issue #29 option (a), extended to Observation by operator decision
+    /// (2026-10-07): Logic, Constraint and Observation are exempt from the
+    /// score cut. With the same structure and zero recency, an Entity and an
+    /// isolated Resource leaf are collected and the exempt types are not, with
+    /// the bar raised far above every score. Pre-fix the Logic leaf went with
+    /// them (the #29 dry run collected 42 Logic concepts — early operator
+    /// rulings among them — on one sweep) and Observations were the first
+    /// victims (324 of 467).
+    #[test]
+    fn logic_constraint_and_observation_are_exempt_from_the_score_cut() {
+        let mut g = hub_session(&[
+            (20, ConceptType::Observation),
+            (21, ConceptType::Logic),
+            (22, ConceptType::Constraint),
+            (23, ConceptType::Resource),
+            (24, ConceptType::Entity),
+        ]);
+        // A bar so high every leaf is far under it, whatever its type.
+        let params = GcParams {
+            min_concept_score: 5.0,
+            ..aged_params()
+        };
+        let outcome = run(&mut g, params);
+        assert!(outcome.concepts_collected.contains(&nid(23)));
+        assert!(outcome.concepts_collected.contains(&nid(24)));
+        for (id, ty) in [(20u64, "Observation"), (21, "Logic"), (22, "Constraint")] {
+            assert!(
+                g.node(nid(id)).is_some(),
+                "{ty} is exempt from the score cut"
+            );
+        }
+        for ty in [
+            ConceptType::Logic,
+            ConceptType::Constraint,
+            ConceptType::Observation,
+        ] {
+            assert!(ty.exempt_from_gc_score_cut(), "{ty:?} is exempt");
+        }
+        for ty in [ConceptType::Entity, ConceptType::Resource] {
+            assert!(!ty.exempt_from_gc_score_cut(), "{ty:?} stays under the cut");
+        }
+    }
+
+    /// Issue #29 operator decision: a Resource that other concepts depend on
+    /// survives the score cut; an isolated, untouched one ages out. Both
+    /// senses of "dependents" are covered — the incoming edge `record_action`
+    /// writes into what an action depends on (23) and produced (24), and the
+    /// action node itself (22), whose blast radius is non-zero because it is
+    /// the only structural source of 23. 25 has only its Derives edge and is
+    /// collected. A Resource whose only structural edge is a self-loop has no
+    /// dependent (26).
+    #[test]
+    fn resources_with_dependents_survive_the_score_cut_isolated_ones_age_out() {
+        let mut g = hub_session(&[
+            (22, ConceptType::Resource),
+            (23, ConceptType::Resource),
+            (24, ConceptType::Resource),
+            (25, ConceptType::Resource),
+            (26, ConceptType::Resource),
+            (27, ConceptType::Entity),
+        ]);
+        // record_action shape: action 22 -> depends_on 23, action 22 -> produces 24.
+        g.upsert_edge(edge(200, 22, 23, EdgeType::Dependency, 1.0, 0))
+            .unwrap();
+        g.upsert_edge(edge(201, 22, 24, EdgeType::Causal, 1.0, 0))
+            .unwrap();
+        // 24 has a second producer, so 22 is not its sole source; 24 is still
+        // depended on (incoming), and 27 (an Entity) is not protected by this.
+        g.upsert_edge(edge(202, 27, 24, EdgeType::Causal, 1.0, 0))
+            .unwrap();
+        g.upsert_edge(edge(203, 26, 26, EdgeType::Dependency, 1.0, 0))
+            .unwrap();
+        let protected = resources_with_dependents(&g);
+        assert!(protected.contains(&nid(22)), "blast radius > 0");
+        assert!(protected.contains(&nid(23)), "incoming Dependency");
+        assert!(protected.contains(&nid(24)), "incoming Causal");
+        assert!(!protected.contains(&nid(25)), "isolated");
+        assert!(
+            !protected.contains(&nid(26)),
+            "a self-loop is not a dependent"
+        );
+        assert!(!protected.contains(&nid(27)), "only Resources are spared");
+
+        let params = GcParams {
+            min_concept_score: 5.0,
+            ..aged_params()
+        };
+        let outcome = run(&mut g, params);
+        for kept in [22u64, 23, 24] {
+            assert!(
+                g.node(nid(kept)).is_some(),
+                "Resource {kept} has dependents and must survive the score cut"
+            );
+        }
+        assert!(outcome.concepts_collected.contains(&nid(25)));
+        assert!(outcome.concepts_collected.contains(&nid(26)));
+        assert!(outcome.concepts_collected.contains(&nid(27)));
+        assert_eq!(outcome.resources_spared_by_dependents, 3);
+    }
+
+    /// A Resource under its bar with dependents is counted as spared only if
+    /// it survives: one that is also a disconnected component (here an island
+    /// of two Resources joined only to each other, each the other's dependent)
+    /// is collected by step 3 and is not counted.
+    #[test]
+    fn a_spared_resource_collected_as_disconnected_is_not_counted_as_spared() {
+        let mut g = hub_session(&[(22, ConceptType::Resource), (23, ConceptType::Resource)]);
+        // 22 depends on 23, and they are linked to the temporal chain only
+        // through their Derives edges: reachable, so both are spared.
+        g.upsert_edge(edge(200, 22, 23, EdgeType::Dependency, 1.0, 0))
+            .unwrap();
+        // An island: 40 -> 41, neither reachable from the chain.
+        let a = insert_isolated(&mut g, concept(40, 1, "island a", ConceptType::Resource), 1);
+        let b = insert_isolated(&mut g, concept(41, 1, "island b", ConceptType::Resource), 1);
+        g.upsert_edge(edge(400, 40, 41, EdgeType::Dependency, 1.0, 0))
+            .unwrap();
+        assert!(resources_with_dependents(&g).contains(&a), "premise");
+        assert!(resources_with_dependents(&g).contains(&b), "premise");
+        let params = GcParams {
+            min_concept_score: 5.0,
+            ..aged_params()
+        };
+        let outcome = run(&mut g, params);
+        assert!(outcome.concepts_collected.contains(&a));
+        assert!(outcome.concepts_collected.contains(&b));
+        assert_eq!(
+            outcome.resources_spared_by_dependents, 2,
+            "only 22 and 23 were spared; the island went as disconnected"
+        );
+        assert!(g.node(nid(22)).is_some() && g.node(nid(23)).is_some());
+    }
+
+    /// An isolated Resource touched recently survives on recency alone, and
+    /// the same Resource left untouched past the window is collected: the
+    /// dependents rule does not freeze Resources in general.
+    #[test]
+    fn an_isolated_resource_survives_while_fresh_and_ages_out_untouched() {
+        let mut fresh = hub_session(&[(25, ConceptType::Resource)]);
+        let outcome = run(&mut fresh, default_params());
+        assert!(!outcome.concepts_collected.contains(&nid(25)));
+        assert!(fresh.node(nid(25)).is_some());
+
+        let mut old = hub_session(&[(25, ConceptType::Resource)]);
+        let outcome = run(
+            &mut old,
+            GcParams {
+                min_concept_score: 5.0,
+                ..aged_params()
+            },
+        );
+        assert!(outcome.concepts_collected.contains(&nid(25)));
+        assert_eq!(outcome.resources_spared_by_dependents, 0);
+    }
+
+    /// Issue #29 item 1: an access on one concept never lowers any other
+    /// concept's GC score. Pre-fix, the first access anywhere switched the
+    /// whole session to the full composite (ALGO-1), which is `0.8 ×` the
+    /// live one on the weighted part for every unread concept — on the Metal
+    /// rig snapshot one access on one Entity took the first sweep from 159
+    /// candidates to 412. Here the hub (13) is read heavily; every other
+    /// concept's score must be bit-identical, and the collection set at a bar
+    /// just above the unread leaves' scores must not grow.
+    #[test]
+    fn an_access_on_another_concept_never_lowers_an_unread_concepts_gc_score() {
+        let leaves = [
+            (20, ConceptType::Resource),
+            (21, ConceptType::Entity),
+            (22, ConceptType::Entity),
+        ];
+        let unread = hub_session(&leaves);
+        let params = aged_params();
+        let read_at = params.now - ChronoDuration::days(1);
+        let read = hub_session_patched(&leaves, |c| {
+            if c.id == nid(13) {
+                Concept {
+                    access_count: 40,
+                    last_accessed: Some(read_at),
+                    ..c
+                }
+            } else {
+                c
+            }
+        });
+        let score_in = |g: &Graph, id: u64| {
+            let ctx = crate::daemon::score::SessionContext::compute(g);
+            let c = match g.node(nid(id)) {
+                Some(crate::types::Node::Concept(c)) => c.clone(),
+                _ => panic!("concept {id}"),
+            };
+            eviction_score(g, &c, &ctx, params)
+        };
+        for id in [14u64, 15, 16, 20, 21, 22] {
+            assert_eq!(
+                score_in(&read, id).to_bits(),
+                score_in(&unread, id).to_bits(),
+                "concept {id}: another concept's access changed its GC score"
+            );
+        }
+        assert!(score_in(&read, 13) > score_in(&unread, 13));
+
+        // End to end: a bar between the leaves' (unread) scores and the
+        // full-composite version of them. The old session-wide switch put the
+        // leaves under it the moment the hub was read; now nothing changes.
+        let resource_bar_scale =
+            |id: u64| score_in(&unread, id) * ConceptType::Resource.eviction_resistance();
+        let params_bar = GcParams {
+            min_concept_score: resource_bar_scale(20) * 0.95,
+            ..params
+        };
+        let mut a = unread.clone();
+        let mut b = read.clone();
+        let before = run(&mut a, params_bar);
+        let after = run(&mut b, params_bar);
+        assert_eq!(before.concepts_collected, after.concepts_collected);
+        assert!(!after.concepts_collected.contains(&nid(20)));
+    }
+
+    /// Issue #29 item 1: reading a concept can only raise its own GC score —
+    /// for any access count and any access time (none, before creation,
+    /// mid-window, now), its score is at least its never-read score.
+    #[test]
+    fn an_accessed_concepts_gc_score_is_at_least_its_no_access_score() {
+        let params = aged_params();
+        let created = ts(0);
+        for ty in [
+            ConceptType::Observation,
+            ConceptType::Resource,
+            ConceptType::Entity,
+        ] {
+            let leaves = [(20u64, ty)];
+            let base_graph = hub_session(&leaves);
+            let ctx = crate::daemon::score::SessionContext::compute(&base_graph);
+            let base_c = match base_graph.node(nid(20)) {
+                Some(crate::types::Node::Concept(c)) => c.clone(),
+                _ => unreachable!(),
+            };
+            let base = eviction_score(&base_graph, &base_c, &ctx, params);
+            for count in [1, 3, 25, 1_000, i32::MAX] {
+                for at in [
+                    None,
+                    Some(created - ChronoDuration::days(5)),
+                    Some(created + ChronoDuration::days(45)),
+                    Some(params.now),
+                ] {
+                    let g = hub_session_patched(&leaves, |c| {
+                        if c.id == nid(20) {
+                            Concept {
+                                access_count: count,
+                                last_accessed: at,
+                                ..c
+                            }
+                        } else {
+                            c
+                        }
+                    });
+                    let ctx = crate::daemon::score::SessionContext::compute(&g);
+                    let c = match g.node(nid(20)) {
+                        Some(crate::types::Node::Concept(c)) => c.clone(),
+                        _ => unreachable!(),
+                    };
+                    let s = eviction_score(&g, &c, &ctx, params);
+                    assert!(
+                        s >= base,
+                        "{ty:?} count {count} at {at:?}: {s} < no-access {base}"
+                    );
+                    assert!(s.is_finite() && s <= 1.0 + crate::daemon::score::MAX_BONUS);
+                }
+            }
+        }
+    }
+
+    /// The exemption is from the score cut only: a Logic concept with no edge
+    /// at all is still an orphan, and an unreachable one is still a
+    /// disconnected component.
+    #[test]
+    fn exempt_types_are_still_collected_as_orphans_and_islands() {
+        let mut g = Graph::new(sid());
+        let i1 = interaction(1, None);
+        let iid = i1.id;
+        g.insert_interaction(i1).unwrap();
+        g.insert_concept(concept(10, 1, "anchored", ConceptType::Entity), iid)
+            .unwrap();
+        let orphan = insert_isolated(&mut g, concept(20, 1, "lone rule", ConceptType::Logic), 1);
+        let a = insert_isolated(
+            &mut g,
+            concept(21, 1, "island a", ConceptType::Constraint),
+            1,
+        );
+        let b = insert_isolated(&mut g, concept(22, 1, "island b", ConceptType::Logic), 1);
+        g.upsert_edge(edge(100, 21, 22, EdgeType::Dependency, 1.0, 0))
+            .unwrap();
+        let note = insert_isolated(
+            &mut g,
+            concept(23, 1, "lone note", ConceptType::Observation),
+            1,
+        );
+        let c = insert_isolated(
+            &mut g,
+            concept(24, 1, "island c", ConceptType::Observation),
+            1,
+        );
+        g.upsert_edge(edge(101, 24, 21, EdgeType::Dependency, 1.0, 0))
+            .unwrap();
+        let outcome = run(&mut g, default_params());
+        assert_eq!(outcome.concepts_collected, vec![orphan, a, b, note, c]);
+    }
+
+    /// Issue #29: GC's eviction recency is time since last touch, not the
+    /// concept's position in the session span. The same concept, the same
+    /// clock, two sessions whose spans differ only by a later interaction:
+    /// span-relative recency moves from 1.0 to ~0 (that is what made the dry
+    /// run's collections grow with session age), GC's eviction score does not
+    /// move at all.
+    #[test]
+    fn eviction_recency_ignores_the_session_span() {
+        let leaf = |g: &Graph| match g.node(nid(20)).unwrap() {
+            Node::Concept(c) => c.clone(),
+            _ => unreachable!(),
+        };
+        let build = |extra_span: bool| {
+            let mut g = hub_session(&[]);
+            // Created at the end of the short span.
+            let c = Concept {
+                created_at: ts(100),
+                ..concept(20, 2, "late observation", ConceptType::Observation)
+            };
+            g.insert_concept(c, nid(2)).unwrap();
+            if extra_span {
+                let i3 = Interaction {
+                    created_at: ts(100) + ChronoDuration::days(9),
+                    ..interaction(3, Some(2))
+                };
+                g.insert_interaction(i3).unwrap();
+            }
+            g
+        };
+        let params = GcParams {
+            now: ts(100) + ChronoDuration::days(10),
+            ..Default::default()
+        };
+        let short = build(false);
+        let long = build(true);
+        let span_recency = |g: &Graph| {
+            let ctx = crate::daemon::score::SessionContext::compute(g);
+            crate::daemon::score::score_concept(g, &leaf(g), &ctx).recency
+        };
+        assert_eq!(span_recency(&short), 1.0, "premise: end of the short span");
+        assert!(span_recency(&long) < 0.01, "premise: start of the long one");
+
+        let gc_score = |g: &Graph| {
+            let ctx = crate::daemon::score::SessionContext::compute(g);
+            eviction_score(g, &leaf(g), &ctx, params)
+        };
+        let (a, b) = (gc_score(&short), gc_score(&long));
+        // The extra interaction does not change the leaf's degree or the hub,
+        // only `session_activity`'s denominator (1/2 → 1/3); recency itself
+        // is identical.
+        let expected = eviction_recency(&leaf(&short), params.now, params.recency_window);
+        let window_days = params.recency_window.num_days() as f64;
+        assert!((expected - (1.0 - 10.0 / window_days)).abs() < 1e-3);
+        assert_eq!(
+            eviction_recency(&leaf(&long), params.now, params.recency_window),
+            expected
+        );
+        assert!(
+            (a - b).abs() < 0.05,
+            "span growth alone must not move GC's score materially: {a} vs {b}"
+        );
+    }
+
+    /// The window is a year (operator decision, 2026-10-07): a concept
+    /// untouched for six months keeps about half its eviction recency, and one
+    /// untouched for 365 days has none.
+    #[test]
+    fn the_recency_window_is_a_year() {
+        assert_eq!(GC_RECENCY_WINDOW, ChronoDuration::days(365));
+        assert_eq!(GcParams::default().recency_window, GC_RECENCY_WINDOW);
+        let c = concept(1, 1, "c", ConceptType::Entity);
+        let half = eviction_recency(&c, ts(0) + ChronoDuration::days(183), GC_RECENCY_WINDOW);
+        assert!((half - 0.5).abs() < 0.01, "{half}");
+        assert_eq!(
+            eviction_recency(&c, ts(0) + ChronoDuration::days(365), GC_RECENCY_WINDOW),
+            0.0
+        );
+    }
+
+    /// `eviction_recency`'s edges: linear in age inside the window, 0 past
+    /// it, a fresh access restores it, future touches clamp to 1, and a
+    /// non-positive window cannot divide by zero.
+    #[test]
+    fn eviction_recency_is_linear_clamped_and_access_aware() {
+        let w = ChronoDuration::days(30);
+        let c = concept(1, 1, "c", ConceptType::Entity); // created ts(0)
+        assert_eq!(eviction_recency(&c, ts(0), w), 1.0);
+        let half = eviction_recency(&c, ts(0) + ChronoDuration::days(15), w);
+        assert!((half - 0.5).abs() < 1e-9);
+        assert_eq!(
+            eviction_recency(&c, ts(0) + ChronoDuration::days(31), w),
+            0.0
+        );
+        assert_eq!(
+            eviction_recency(&c, ts(0) - ChronoDuration::days(1), w),
+            1.0
+        );
+        let touched = Concept {
+            access_count: 1,
+            last_accessed: Some(ts(0) + ChronoDuration::days(40)),
+            ..c.clone()
+        };
+        assert_eq!(
+            eviction_recency(&touched, ts(0) + ChronoDuration::days(40), w),
+            1.0,
+            "a recall (issue #30) re-anchors recency"
+        );
+        // An access stamp older than creation cannot age the concept.
+        let odd = Concept {
+            last_accessed: Some(ts(0) - ChronoDuration::days(100)),
+            ..c.clone()
+        };
+        assert_eq!(eviction_recency(&odd, ts(0), w), 1.0);
+        assert_eq!(eviction_recency(&c, ts(0), ChronoDuration::zero()), 0.0);
+    }
+
+    /// The span-anchored ranking is untouched: `rescore` (recall, Stage 1)
+    /// still uses span-relative recency; only GC's cut changed.
+    #[test]
+    fn daemon_ranking_keeps_span_relative_recency() {
+        let g = hub_session(&[(20, ConceptType::Observation)]);
+        let ctx = crate::daemon::score::SessionContext::compute(&g);
+        let c = match g.node(nid(20)).unwrap() {
+            Node::Concept(c) => c.clone(),
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            crate::daemon::score::score_concept(&g, &c, &ctx).recency,
+            0.0,
+            "ts(0) is the start of the span"
+        );
+        assert_eq!(
+            eviction_recency(&c, ts(100), GC_RECENCY_WINDOW),
+            1.0 - 100.0 / GC_RECENCY_WINDOW.num_minutes() as f64,
+        );
+    }
+
+    /// Issue #29: collections per sweep are capped; the cap is reported, the
+    /// held-back candidates survive and are counted once (an orphan is also a
+    /// disconnected component), and the next sweep takes the next slice.
+    #[test]
+    fn the_collection_cap_binds_reports_and_defers() {
+        let mut g = Graph::new(sid());
+        let i1 = interaction(1, None);
+        let iid = i1.id;
+        g.insert_interaction(i1).unwrap();
+        g.insert_concept(concept(10, 1, "anchored", ConceptType::Entity), iid)
+            .unwrap();
+        let orphans: Vec<NodeId> = (100..112u64)
+            .map(|n| {
+                insert_isolated(
+                    &mut g,
+                    concept(n, 1, &format!("o{n}"), ConceptType::Entity),
+                    1,
+                )
+            })
+            .collect();
+        let params = GcParams {
+            max_collect_fraction: 0.0,
+            min_collect_cap: 5,
+            ..default_params()
+        };
+        let first = run(&mut g, params);
+        assert_eq!(first.collection_cap, 5);
+        assert_eq!(first.concepts_collected, orphans[..5].to_vec());
+        assert_eq!(first.collections_deferred, 7, "counted once, not twice");
+        assert!(first.cap_bound());
+        assert!(
+            first
+                .warnings
+                .iter()
+                .any(|w| w.contains("collection cap bound")),
+            "{:?}",
+            first.warnings
+        );
+        for id in &orphans[5..] {
+            assert!(g.node(*id).is_some(), "held back, not collected");
+        }
+        let second = run(&mut g, params);
+        assert_eq!(second.concepts_collected, orphans[5..10].to_vec());
+        let third = run(&mut g, params);
+        assert_eq!(third.concepts_collected, orphans[10..].to_vec());
+        assert!(!third.cap_bound());
+        assert!(!third.warnings.iter().any(|w| w.contains("collection cap")));
+    }
+
+    /// Issue #29 item 4: when the cap binds with orphans present, the orphans
+    /// are taken first and the score cut gets only what is left — weakest
+    /// first. Item 5: the candidate held back keeps its `gc_survived` (it is
+    /// not credited with surviving a sweep that judged it collectable), while
+    /// every real survivor takes its bump.
+    #[test]
+    fn the_cap_takes_orphans_before_score_cut_candidates() {
+        let mut g = hub_session(&[(20, ConceptType::Entity), (21, ConceptType::Resource)]);
+        let orphans: Vec<NodeId> = (30..33u64)
+            .map(|n| {
+                insert_isolated(
+                    &mut g,
+                    concept(n, 1, &format!("o{n}"), ConceptType::Entity),
+                    1,
+                )
+            })
+            .collect();
+        // Score-cut candidates are 13..16 and 20 (Entities) and 21 (an
+        // isolated Resource) under a bar of 5.0; the cap is 4: three orphans
+        // + the single weakest.
+        let params = GcParams {
+            min_concept_score: 5.0,
+            max_collect_fraction: 0.0,
+            min_collect_cap: 4,
+            ..aged_params()
+        };
+        let outcome = run(&mut g, params);
+        for o in &orphans {
+            assert!(outcome.concepts_collected.contains(o), "orphan {o:?} first");
+        }
+        assert_eq!(outcome.concepts_collected.len(), 4);
+        assert!(
+            outcome.concepts_collected.contains(&nid(21)),
+            "then the score cut, furthest under its bar first (the Resource)"
+        );
+        assert!(outcome.cap_bound());
+        assert_eq!(outcome.collections_deferred, outcome.deferred.len());
+        assert_eq!(outcome.deferred.len(), 5, "13, 14, 15, 16, 20");
+        for id in &outcome.deferred {
+            let c = match g.node(*id) {
+                Some(Node::Concept(c)) => c,
+                _ => panic!("held back, not collected"),
+            };
+            assert_eq!(
+                c.gc_survived, 0,
+                "a held-back candidate takes no survivor bump"
+            );
+            assert!(!outcome.survivors.contains(id));
+        }
+        for id in &outcome.survivors {
+            let c = match g.node(*id) {
+                Some(Node::Concept(c)) => c,
+                _ => unreachable!(),
+            };
+            assert_eq!(c.gc_survived, 1, "a real survivor is bumped");
+        }
+    }
+
+    /// Issue #29 item 4: disconnected components are structural garbage and go
+    /// before the score cut when the cap binds; an island concept that is
+    /// also under its bar is counted once, as disconnected.
+    #[test]
+    fn the_cap_takes_disconnected_components_before_score_cut_candidates() {
+        let mut g = hub_session(&[(20, ConceptType::Resource)]);
+        let a = insert_isolated(&mut g, concept(40, 1, "island a", ConceptType::Entity), 1);
+        let b = insert_isolated(&mut g, concept(41, 1, "island b", ConceptType::Entity), 1);
+        g.upsert_edge(edge(400, 40, 41, EdgeType::Dependency, 1.0, 0))
+            .unwrap();
+        let params = GcParams {
+            min_concept_score: 5.0,
+            max_collect_fraction: 0.0,
+            min_collect_cap: 2,
+            ..aged_params()
+        };
+        let outcome = run(&mut g, params);
+        assert_eq!(outcome.concepts_collected, vec![a, b]);
+        assert!(
+            g.node(nid(20)).is_some(),
+            "the score cut waits for the next sweep"
+        );
+        assert!(outcome.deferred.contains(&nid(20)));
+        assert!(!outcome.deferred.contains(&a) && !outcome.deferred.contains(&b));
+    }
+
+    /// Ordering structural garbage first must not lose the cascade: a concept
+    /// reachable from the chain only through a score-cut concept is still
+    /// collected in the same sweep, after it (uncapped), and counted once.
+    #[test]
+    fn a_component_cut_off_by_the_score_cut_goes_in_the_same_sweep() {
+        // An Entity: a Resource with a dependent (50) would be spared the cut.
+        let mut g = hub_session(&[(20, ConceptType::Entity)]);
+        // 50 (Logic, exempt from the score cut) hangs only off leaf 20.
+        let tail = insert_isolated(&mut g, concept(50, 1, "rule", ConceptType::Logic), 1);
+        g.upsert_edge(edge(500, 20, 50, EdgeType::Dependency, 1.0, 0))
+            .unwrap();
+        let params = GcParams {
+            min_concept_score: 0.5,
+            ..aged_params()
+        };
+        let outcome = run(&mut g, params);
+        assert!(outcome.concepts_collected.contains(&nid(20)));
+        assert!(
+            outcome.concepts_collected.contains(&tail),
+            "cascade, same sweep"
+        );
+        assert!(!outcome.cap_bound());
+        let mut dedup = outcome.concepts_collected.clone();
+        dedup.dedup();
+        assert_eq!(dedup, outcome.concepts_collected, "each id collected once");
+    }
+
+    /// Issue #29 item 6: the drain order is a rotation of the id order (a
+    /// permutation: every survivor exactly once) whose start depends on the
+    /// sweep epoch, and over many sweeps every concept lands in a fixed-size
+    /// tail about equally often — a restart that loses the tail no longer
+    /// always costs the same high ids.
+    #[test]
+    fn survivor_drain_order_is_a_rotation_that_spreads_the_tail() {
+        let ids: Vec<NodeId> = (0..10u64).map(nid).collect();
+        let mut tail_hits = vec![0u32; ids.len()];
+        let mut starts = HashSet::new();
+        for epoch in 0..2_000u64 {
+            let order = survivor_drain_order(&ids, epoch);
+            let mut sorted = order.clone();
+            sorted.sort_by_key(|id| id.0);
+            assert_eq!(sorted, ids, "a permutation");
+            let start = ids.iter().position(|id| *id == order[0]).unwrap();
+            let rotated: Vec<NodeId> = ids[start..].iter().chain(&ids[..start]).copied().collect();
+            assert_eq!(order, rotated, "a rotation of the id order");
+            starts.insert(start);
+            for id in &order[7..] {
+                tail_hits[ids.iter().position(|x| x == id).unwrap()] += 1;
+            }
+        }
+        assert_eq!(starts.len(), ids.len(), "every start position occurs");
+        // 2,000 sweeps × 3 tail slots / 10 ids = 600 expected per id.
+        for (i, hits) in tail_hits.iter().enumerate() {
+            assert!(
+                (450..=750).contains(hits),
+                "id {i} in the tail {hits} times of ~600"
+            );
+        }
+        assert_eq!(survivor_drain_order(&ids[..1], 7), ids[..1].to_vec());
+        assert!(survivor_drain_order(&[], 7).is_empty());
+        assert_eq!(
+            survivor_drain_order(&ids, 42),
+            survivor_drain_order(&ids, 42)
+        );
+    }
+
+    /// Under the cap the score cut's candidates go furthest-under-the-bar
+    /// first.
+    #[test]
+    fn the_cap_takes_the_weakest_score_candidates_first() {
+        // The Entity has the lower id, so a cap that took candidates in id
+        // order would take it; the ratio order takes the Resource.
+        let mut g = hub_session(&[(20, ConceptType::Entity), (21, ConceptType::Resource)]);
+        let params = GcParams {
+            min_concept_score: 5.0,
+            max_collect_fraction: 0.0,
+            min_collect_cap: 1,
+            ..aged_params()
+        };
+        // Resource: lower score (no +0.05 Entity modifier) against a higher
+        // bar (resistance 1.0 against 1.2) — the smaller score/bar ratio.
+        let outcome = run(&mut g, params);
+        assert_eq!(outcome.concepts_collected, vec![nid(21)]);
+        assert!(outcome.cap_bound());
+    }
+
+    #[test]
+    fn collection_cap_is_a_fraction_with_a_floor() {
+        let p = GcParams::default();
+        assert_eq!(collection_cap(0, p), GC_MIN_COLLECT_CAP);
+        assert_eq!(collection_cap(100, p), GC_MIN_COLLECT_CAP);
+        assert_eq!(
+            collection_cap(3370, p),
+            169,
+            "5% of the Metal rig, rounded up"
+        );
+        for bad in [f64::NAN, f64::INFINITY, -1.0] {
+            let q = GcParams {
+                max_collect_fraction: bad,
+                ..p
+            };
+            assert_eq!(collection_cap(10_000, q), GC_MIN_COLLECT_CAP, "{bad}");
+        }
+        let all = GcParams {
+            max_collect_fraction: 7.0,
+            ..p
+        };
+        assert_eq!(collection_cap(1000, all), 1000, "a fraction is capped at 1");
+    }
+
+    /// Issue #29: the CoOccurrence margin is zero on purpose. `derive` writes
+    /// co-occurrence edges at exactly `MIN_EDGE_WEIGHT` and step 1 is a strict
+    /// `<`, so a stale, never-reinforced co-occurrence edge survives. If
+    /// either constant moves, this fails and the change has to be made
+    /// deliberately (see `MIN_EDGE_WEIGHT`).
+    #[test]
+    fn cooccurrence_edges_sit_exactly_on_the_step_one_bar_and_survive() {
+        assert_eq!(crate::graph::derive::COOCCURRENCE_WEIGHT, MIN_EDGE_WEIGHT);
+        let mut g = Graph::new(sid());
+        let i1 = interaction(1, None);
+        let iid = i1.id;
+        g.insert_interaction(i1).unwrap();
+        g.insert_concept(concept(10, 1, "a", ConceptType::Entity), iid)
+            .unwrap();
+        g.insert_concept(concept(11, 1, "b", ConceptType::Entity), iid)
+            .unwrap();
+        g.upsert_edge(edge(
+            100,
+            10,
+            11,
+            EdgeType::CoOccurrence,
+            crate::graph::derive::COOCCURRENCE_WEIGHT,
+            0,
+        ))
+        .unwrap();
+        let outcome = run(&mut g, aged_params());
+        assert!(outcome.edges_removed.is_empty());
+        assert!(g.edge(nid(100)).is_some());
+    }
+
+    // ---- the trigger -------------------------------------------------
+
+    /// Issue #29 item 3: only a stored time beyond the tolerance counts as
+    /// "in the future"; an unset mark never does.
+    #[test]
+    fn gc_clock_ahead_needs_more_than_the_tolerance() {
+        let now = ts(0);
+        assert!(!gc_clock_ahead(mark(0, None), now));
+        assert!(!gc_clock_ahead(mark(0, Some(now)), now));
+        assert!(!gc_clock_ahead(
+            mark(0, Some(now - ChronoDuration::days(3))),
+            now
+        ));
+        assert!(!gc_clock_ahead(
+            mark(0, Some(now + GC_CLOCK_SKEW_TOLERANCE)),
+            now
+        ));
+        assert!(gc_clock_ahead(
+            mark(
+                0,
+                Some(now + GC_CLOCK_SKEW_TOLERANCE + ChronoDuration::seconds(1))
+            ),
+            now
+        ));
+        assert!(gc_clock_ahead(
+            mark(0, Some(now + ChronoDuration::days(365))),
+            now
+        ));
+    }
+
+    fn mark(epoch: u64, at: Option<DateTime<Utc>>) -> crate::types::GcMark {
+        crate::types::GcMark {
+            last_gc_epoch: epoch,
+            last_gc_at: at,
+            last_gc_at_reset: false,
+        }
+    }
+
+    const DAY: std::time::Duration = std::time::Duration::from_secs(86_400);
+
+    /// A never-swept, anchored session (mark epoch 0) measures the floor
+    /// against its whole lifetime: with at least `gc_idle_floor` mutations it
+    /// time-sweeps once a full interval after the anchor with no write in
+    /// between; below the floor it never does. The sweep then moves the mark,
+    /// so it is once, not daily.
+    #[test]
+    fn never_swept_session_over_the_floor_catches_up_once_after_the_anchor() {
+        let anchor = ts(0);
+        let lifetime = 500u64;
+        assert_eq!(
+            sweep_due(
+                lifetime,
+                mark(0, Some(anchor)),
+                anchor + ChronoDuration::hours(23),
+                10_000,
+                DAY,
+                100
+            ),
+            None,
+            "not before the interval"
+        );
+        assert_eq!(
+            sweep_due(
+                lifetime,
+                mark(0, Some(anchor)),
+                anchor + ChronoDuration::hours(24),
+                10_000,
+                DAY,
+                100
+            ),
+            Some(GcTrigger::Elapsed),
+            "an idle never-swept session over the floor sweeps one interval after the anchor"
+        );
+        assert_eq!(
+            sweep_due(
+                99,
+                mark(0, Some(anchor)),
+                anchor + ChronoDuration::days(30),
+                10_000,
+                DAY,
+                100
+            ),
+            None,
+            "below the floor it never time-sweeps"
+        );
+        // After that sweep the mark is (epoch, now): idle again, nothing due.
+        let after = anchor + ChronoDuration::hours(24);
+        assert_eq!(
+            sweep_due(
+                lifetime,
+                mark(lifetime, Some(after)),
+                after + ChronoDuration::days(30),
+                10_000,
+                DAY,
+                100
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn sweep_due_mutation_trigger_is_unchanged_and_ungated() {
+        // gc_interval mutations since the mark: due, with or without a clock,
+        // and regardless of the floor.
+        assert_eq!(
+            sweep_due(10_000, mark(0, None), ts(0), 10_000, DAY, 100),
+            Some(GcTrigger::Mutations)
+        );
+        assert_eq!(
+            sweep_due(10_050, mark(50, Some(ts(0))), ts(1), 10_000, DAY, 20_000),
+            Some(GcTrigger::Mutations)
+        );
+        assert_eq!(
+            sweep_due(9_999, mark(0, Some(ts(0))), ts(1), 10_000, DAY, 100_000),
+            None
+        );
+    }
+
+    #[test]
+    fn sweep_due_time_trigger_needs_the_interval_and_the_floor() {
+        let at = ts(0);
+        let day_later = at + ChronoDuration::days(1);
+        // Elapsed and over the floor.
+        assert_eq!(
+            sweep_due(600, mark(500, Some(at)), day_later, 10_000, DAY, 100),
+            Some(GcTrigger::Elapsed)
+        );
+        // Elapsed, one mutation short of the floor: an idle session does not
+        // sweep on time alone.
+        assert_eq!(
+            sweep_due(599, mark(500, Some(at)), day_later, 10_000, DAY, 100),
+            None
+        );
+        // Over the floor, one second short of the interval.
+        assert_eq!(
+            sweep_due(
+                600,
+                mark(500, Some(at)),
+                day_later - ChronoDuration::seconds(1),
+                10_000,
+                DAY,
+                100
+            ),
+            None
+        );
+        // Never anchored: the time trigger cannot fire.
+        assert_eq!(
+            sweep_due(600, mark(500, None), day_later, 10_000, DAY, 100),
+            None
+        );
+        // Clock behind the mark: not elapsed.
+        assert_eq!(
+            sweep_due(
+                600,
+                mark(500, Some(at)),
+                at - ChronoDuration::days(3),
+                10_000,
+                DAY,
+                100
+            ),
+            None
+        );
+        // Thirty days down: due once — and once the sweep is recorded, not
+        // again (no backlog).
+        let late = at + ChronoDuration::days(30);
+        assert_eq!(
+            sweep_due(600, mark(500, Some(at)), late, 10_000, DAY, 100),
+            Some(GcTrigger::Elapsed)
+        );
+        assert_eq!(
+            sweep_due(700, mark(700, Some(late)), late, 10_000, DAY, 100),
+            None
+        );
     }
 }

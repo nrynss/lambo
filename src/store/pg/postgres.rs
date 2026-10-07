@@ -1638,6 +1638,7 @@ mod tests {
             .flush(
                 &MutationBatch {
                     mutation_epoch: 0,
+                    gc_mark: Default::default(),
                     mutations,
                 },
                 None,
@@ -1835,6 +1836,7 @@ mod tests {
                 .flush(
                     &MutationBatch {
                         mutation_epoch: 0,
+                        gc_mark: Default::default(),
                         mutations,
                     },
                     None,
@@ -1895,6 +1897,7 @@ mod tests {
         let ts = Utc.with_ymd_and_hms(2026, 8, 23, 12, 0, 0).unwrap();
         let batch = MutationBatch {
             mutation_epoch: 0,
+            gc_mark: Default::default(),
             mutations: vec![
                 Mutation::UpsertNode {
                     node: Node::Interaction(Interaction {
@@ -1960,6 +1963,7 @@ mod tests {
             .flush(
                 &MutationBatch {
                     mutation_epoch: 0,
+                    gc_mark: Default::default(),
                     mutations: vec![Mutation::SetEmbedding {
                         session_id: sid.clone(),
                         embedding: Some(contract.clone()),

@@ -131,12 +131,16 @@ pub enum ConceptType {
     Constraint,
     /// An artifact an agent produced or touched.
     Resource,
-    /// Something an agent noticed. The weakest kind, and the first evicted.
+    /// Something an agent noticed. The weakest kind: GC's score cut spares it
+    /// like Logic and Constraint (it still goes as an orphan or island), and
+    /// it is the only kind that can later be demoted.
     Observation,
 }
 
 impl ConceptType {
-    /// Relative resistance to GC eviction (higher = stickier). From v0.6.0 design.
+    /// Relative resistance to GC eviction (higher = stickier). From v0.6.0
+    /// design. Scales GC's step-2 bar for the types still under the score cut
+    /// and Solo promotion's score; see [`Self::exempt_from_gc_score_cut`].
     pub const fn eviction_resistance(self) -> f64 {
         match self {
             Self::Constraint => 1.5,
@@ -144,6 +148,21 @@ impl ConceptType {
             Self::Logic => 1.1,
             Self::Resource => 1.0,
             Self::Observation => 0.7,
+        }
+    }
+
+    /// Whether GC's step-2 score cut never collects this type (issue #29).
+    ///
+    /// `Logic`, `Constraint` and `Observation` are exempt: they carry what an
+    /// agent decided, required or noticed, and the score cut ranks by
+    /// structure and age, neither of which says a note has stopped mattering.
+    /// They are still collected as orphans and as disconnected components,
+    /// which are structural clauses. Exhaustive on purpose: a new type has to
+    /// state which side it is on.
+    pub const fn exempt_from_gc_score_cut(self) -> bool {
+        match self {
+            Self::Logic | Self::Constraint | Self::Observation => true,
+            Self::Entity | Self::Resource => false,
         }
     }
 
@@ -678,6 +697,120 @@ pub struct MutationBatch {
     /// no-op against any stored value.
     #[serde(default)]
     pub mutation_epoch: u64,
+    /// The graph's [`GcMark`] at drain time (issue #29) — the GC sweep
+    /// watermark and the time of the last sweep, carried exactly the way
+    /// [`MutationBatch::mutation_epoch`] is: an absolute value stamped by
+    /// `Graph::drain_log` and persisted monotonically ([`GcMark::merge`]) in
+    /// the flush transaction, so a writer restart neither resets GC's
+    /// accounting (the defect that let every restart past `gc_interval`
+    /// lifetime mutations sweep and bump `gc_survived`) nor resets the
+    /// `gc_max_interval` clock. Hand-built batches default to the unset mark,
+    /// a no-op against any stored value.
+    #[serde(default, skip_serializing_if = "GcMark::is_unset")]
+    pub gc_mark: GcMark,
+}
+
+/// GC's durable sweep accounting for one session (issue #29).
+///
+/// Persisted with the session beside `mutation_epoch` (`sessions.last_gc_epoch`
+/// / `sessions.last_gc_at`) and resumed by `Graph::from_snapshot`, so the
+/// daemon's sweep trigger survives a writer restart instead of starting from
+/// zero in every process.
+///
+/// Both fields only ever move forward, independently: [`GcMark::merge`] is a
+/// field-wise max, which is what the adapters' `MAX`/`GREATEST` upsert applies,
+/// so a replayed batch converges and a stale stamp can never rewind either.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GcMark {
+    /// The epoch the next `gc_interval` (and the idle floor) is measured from:
+    /// the epoch after the last sweep, advanced by every deferred survivor-bump
+    /// drain so GC's own writes are never credited as session mutations
+    /// (NEW-2). `0` for a session that has never swept.
+    #[serde(default)]
+    pub last_gc_epoch: u64,
+    /// When the last sweep ran — or, for a session that has never swept, when a
+    /// writer first observed it without one (the daemon anchors the
+    /// `gc_max_interval` clock there rather than sweeping on attach). `None`
+    /// until either happens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_gc_at: Option<DateTime<Utc>>,
+    /// `last_gc_at` was **re-anchored** by this writer after the stored value
+    /// was found in the future (a forward wall-clock jump that was later
+    /// corrected; see `crate::daemon::gc::gc_clock_ahead`). The one case
+    /// where `last_gc_at` may move backwards: a mark carrying it **replaces**
+    /// the stored `last_gc_at` instead of max-merging with it, so the corrected
+    /// anchor persists instead of the future one re-asserting itself on every
+    /// restart. Writer-side only: never persisted (stored marks are always
+    /// `false`), omitted from JSON when `false`. `last_gc_epoch` is never
+    /// affected — it stays strictly monotonic.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub last_gc_at_reset: bool,
+}
+
+impl GcMark {
+    /// True for the never-swept, never-anchored mark (the serde default).
+    pub fn is_unset(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// Merge an older mark (`self`) with a newer one (`other`): field-wise max,
+    /// except that a newer mark carrying [`GcMark::last_gc_at_reset`] supplies
+    /// `last_gc_at` outright. This is the flush loop's carry: the newer stamp
+    /// comes from the same writer's graph, which re-anchored deliberately, so
+    /// its time is the truth even when it is earlier — and even when the older
+    /// mark carries the flag too (a second re-anchor in one process: the
+    /// pending mark still holds the first jump's future sweep time, which a
+    /// max-merge would keep). The reset flag is sticky (`a || b`): once a
+    /// writer re-anchored, every later stamp of its graph is derived from the
+    /// corrected anchor and must keep replacing the stored future one until it
+    /// has landed. `last_gc_epoch` is always the strict max.
+    /// Whether this mark's re-anchor may replace `against`'s `last_gc_at`:
+    /// it must carry the reset flag **and** be at least as current as the mark
+    /// it replaces (`last_gc_epoch >=`). A re-anchor never changes the epoch,
+    /// so a writer's own re-anchor always qualifies; a replayed or stale reset
+    /// from before a later sweep (a lower epoch) does not, and falls back to
+    /// the ordinary max-merge, so it cannot rewind a newer sweep's time.
+    pub fn reset_is_current_for(&self, against: &Self) -> bool {
+        self.last_gc_at_reset && self.last_gc_epoch >= against.last_gc_epoch
+    }
+
+    pub fn merge(self, other: Self) -> Self {
+        Self {
+            last_gc_epoch: self.last_gc_epoch.max(other.last_gc_epoch),
+            last_gc_at: if other.reset_is_current_for(&self) {
+                other.last_gc_at.or(self.last_gc_at)
+            } else {
+                match (self.last_gc_at, other.last_gc_at) {
+                    (Some(a), Some(b)) => Some(a.max(b)),
+                    (a, b) => a.or(b),
+                }
+            },
+            last_gc_at_reset: self.last_gc_at_reset || other.last_gc_at_reset,
+        }
+    }
+
+    /// The store-side merge every adapter applies on flush: `self` is the
+    /// stored mark, `incoming` the batch's. `last_gc_epoch` is the max;
+    /// `last_gc_at` is the max unless `incoming` carries
+    /// [`GcMark::last_gc_at_reset`] and is at least as current as the stored
+    /// mark ([`GcMark::reset_is_current_for`]), in which case it replaces the
+    /// stored value (a `None` never erases one). The result is a stored mark, so its
+    /// reset flag is always `false`. The SQL adapters implement exactly this
+    /// in their session upsert.
+    pub fn apply_to_stored(self, incoming: Self) -> Self {
+        Self {
+            last_gc_epoch: self.last_gc_epoch.max(incoming.last_gc_epoch),
+            last_gc_at: if incoming.reset_is_current_for(&self) {
+                incoming.last_gc_at.or(self.last_gc_at)
+            } else {
+                match (self.last_gc_at, incoming.last_gc_at) {
+                    (Some(a), Some(b)) => Some(a.max(b)),
+                    (a, b) => a.or(b),
+                }
+            },
+            last_gc_at_reset: false,
+        }
+    }
 }
 
 impl MutationBatch {
@@ -743,6 +876,13 @@ pub struct GraphSnapshot {
     /// zero and accumulate forward.
     #[serde(default)]
     pub mutation_epoch: u64,
+    /// GC's sweep accounting when this snapshot was taken (issue #29).
+    /// [`crate::graph::Graph::from_snapshot`] resumes it, so a writer restart
+    /// does not reset `last_gc_epoch` (and with it, sweep once more and bump
+    /// every `gc_survived`) or the `gc_max_interval` clock. Unset on snapshots
+    /// written before the field existed.
+    #[serde(default, skip_serializing_if = "GcMark::is_unset")]
+    pub gc_mark: GcMark,
 }
 
 /// Identity of the dense embedding space used in a session.
@@ -1174,10 +1314,179 @@ mod tests {
         assert_eq!(back.id(), id);
     }
 
+    /// Issue #29: a re-anchored mark is the one way `last_gc_at` moves back.
+    /// In the flush carry (older `merge` newer) the newer reset stamp supplies
+    /// the time and the flag sticks, so later stamps of the same writer keep
+    /// replacing the stored future value; at the store
+    /// (`apply_to_stored`) the reset replaces the time, never erases it with
+    /// `None`, never rewinds the epoch, and the stored result carries no flag.
+    /// The flag is omitted from JSON when false.
+    #[test]
+    fn gc_mark_reset_replaces_the_time_once_and_only_the_time() {
+        let t =
+            |d: i64| Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap() + chrono::Duration::days(d);
+        let stored_future = GcMark {
+            last_gc_epoch: 50,
+            last_gc_at: Some(t(400)),
+            last_gc_at_reset: false,
+        };
+        // A re-anchor keeps the writer's current epoch (it is not a sweep).
+        let reset = GcMark {
+            last_gc_epoch: 50,
+            last_gc_at: Some(t(2)),
+            last_gc_at_reset: true,
+        };
+        let carried = stored_future.merge(reset);
+        assert_eq!(carried.last_gc_at, Some(t(2)));
+        assert_eq!(carried.last_gc_epoch, 50);
+        assert!(carried.last_gc_at_reset);
+        // A later stamp from the same writer (still flagged) moves forward.
+        let later = GcMark {
+            last_gc_epoch: 60,
+            last_gc_at: Some(t(3)),
+            last_gc_at_reset: true,
+        };
+        assert_eq!(carried.merge(later).last_gc_at, Some(t(3)));
+        // A second re-anchor: the carried mark is already flagged and holds the
+        // first jump's later future sweep time; the newer flagged stamp still
+        // supplies the time (a max-merge would keep the future one), and the
+        // epoch stays a strict max.
+        let second_future = GcMark {
+            last_gc_epoch: 70,
+            last_gc_at: Some(t(900)),
+            last_gc_at_reset: true,
+        };
+        let second_reanchor = GcMark {
+            last_gc_epoch: 70,
+            last_gc_at: Some(t(5)),
+            last_gc_at_reset: true,
+        };
+        let twice = carried.merge(second_future).merge(second_reanchor);
+        assert_eq!(twice.last_gc_at, Some(t(5)));
+        assert_eq!(twice.last_gc_epoch, 70, "last_gc_epoch is a strict max");
+        assert!(twice.last_gc_at_reset);
+        // An unflagged newer stamp is max-merged as before.
+        assert_eq!(
+            carried
+                .merge(GcMark {
+                    last_gc_at_reset: false,
+                    ..later
+                })
+                .last_gc_at,
+            Some(t(3))
+        );
+
+        let applied = stored_future.apply_to_stored(reset);
+        assert_eq!(
+            applied,
+            GcMark {
+                last_gc_epoch: 50,
+                last_gc_at: Some(t(2)),
+                last_gc_at_reset: false,
+            }
+        );
+        let no_time = GcMark {
+            last_gc_at: None,
+            ..reset
+        };
+        assert_eq!(
+            stored_future.apply_to_stored(no_time).last_gc_at,
+            Some(t(400))
+        );
+        // Unflagged: exactly the old max-merge.
+        let plain = GcMark {
+            last_gc_at_reset: false,
+            ..reset
+        };
+        assert_eq!(
+            stored_future.apply_to_stored(plain),
+            stored_future.merge(plain)
+        );
+
+        // A stale reset (replayed from before a later sweep: lower epoch) never
+        // rewinds that sweep's time, in the carry or at the store; the epoch
+        // stays a strict max and the time falls back to the max-merge.
+        let later_sweep = GcMark {
+            last_gc_epoch: 80,
+            last_gc_at: Some(t(10)),
+            last_gc_at_reset: false,
+        };
+        let stale_reset = GcMark {
+            last_gc_epoch: 70,
+            last_gc_at: Some(t(5)),
+            last_gc_at_reset: true,
+        };
+        assert!(!stale_reset.reset_is_current_for(&later_sweep));
+        assert_eq!(
+            later_sweep.apply_to_stored(stale_reset),
+            GcMark {
+                last_gc_epoch: 80,
+                last_gc_at: Some(t(10)),
+                last_gc_at_reset: false,
+            }
+        );
+        assert_eq!(later_sweep.merge(stale_reset).last_gc_at, Some(t(10)));
+        assert_eq!(later_sweep.merge(stale_reset).last_gc_epoch, 80);
+
+        let json = serde_json::to_string(&stored_future).unwrap();
+        assert!(!json.contains("last_gc_at_reset"), "{json}");
+        let back: GcMark = serde_json::from_str(&serde_json::to_string(&reset).unwrap()).unwrap();
+        assert_eq!(back, reset);
+    }
+
+    /// Issue #29: the GC mark merges field-wise (each field only moves
+    /// forward), the unset mark is the identity, and old JSON without the
+    /// field still parses (batches and snapshots written before #29).
+    #[test]
+    fn gc_mark_merge_is_fieldwise_max_and_serde_defaults() {
+        use chrono::TimeZone;
+        let t = |h| Utc.with_ymd_and_hms(2026, 10, 7, h, 0, 0).unwrap();
+        let a = GcMark {
+            last_gc_epoch: 10,
+            last_gc_at: Some(t(9)),
+            last_gc_at_reset: false,
+        };
+        let b = GcMark {
+            last_gc_epoch: 4,
+            last_gc_at: Some(t(11)),
+            last_gc_at_reset: false,
+        };
+        assert_eq!(
+            a.merge(b),
+            GcMark {
+                last_gc_epoch: 10,
+                last_gc_at: Some(t(11)),
+                last_gc_at_reset: false,
+            }
+        );
+        assert_eq!(a.merge(b), b.merge(a), "commutative");
+        assert_eq!(a.merge(GcMark::default()), a);
+        assert_eq!(GcMark::default().merge(a), a);
+        assert!(GcMark::default().is_unset());
+        assert!(!a.is_unset());
+
+        let old_batch: MutationBatch =
+            serde_json::from_str(r#"{"mutations":[],"mutation_epoch":3}"#).unwrap();
+        assert!(old_batch.gc_mark.is_unset());
+        let with = MutationBatch {
+            gc_mark: a,
+            ..MutationBatch::default()
+        };
+        let back: MutationBatch =
+            serde_json::from_str(&serde_json::to_string(&with).unwrap()).unwrap();
+        assert_eq!(back.gc_mark, a);
+        // The unset mark is not serialized, so pre-#29 golden JSON is
+        // byte-identical.
+        assert!(!serde_json::to_string(&MutationBatch::default())
+            .unwrap()
+            .contains("gc_mark"));
+    }
+
     #[test]
     fn mutation_batch_json_roundtrip() {
         let batch = MutationBatch {
             mutation_epoch: 0,
+            gc_mark: Default::default(),
             mutations: vec![Mutation::DeleteNode { id: NodeId::new() }],
         };
         let s = serde_json::to_string(&batch).unwrap();

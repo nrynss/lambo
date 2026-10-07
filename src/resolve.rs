@@ -250,6 +250,11 @@ pub fn resolve_backends(file: LamboFile) -> Result<ResolvedBackends, LamboError>
         config.promotion_policy = policy;
     }
     config.validate()?;
+    // Accepted-but-inert settings (issue #29: an idle floor that makes the
+    // time trigger unreachable) are logged, not refused.
+    for warning in config.warnings() {
+        tracing::warn!(target: "lambo::config", "{warning}");
+    }
     // A store whose vector column carries no width of its own (SQLite's BLOB) reports
     // the operator's `store.vector_dim` pin when one is set, and otherwise **echoes**
     // the configured embedder width — an echo, not a store-side authority, which is

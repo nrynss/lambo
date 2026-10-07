@@ -151,6 +151,12 @@ pub struct CycleParams {
     pub hot_list_max: usize,
     /// GC runs every this many session mutations (`gc_interval`, spec §9).
     pub gc_interval: u64,
+    /// ...or once this much time has passed since the last sweep
+    /// (`gc_max_interval`, issue #29)...
+    pub gc_max_interval: Duration,
+    /// ...provided at least this many session mutations happened since it
+    /// (`gc_idle_floor`, issue #29). See [`gc::sweep_due`].
+    pub gc_idle_floor: u64,
     /// Canonical budget ceiling GC records (`max_canonical_nodes`, spec §10).
     pub max_canonical_nodes: usize,
     /// Broadcast capacity (see [`events::EVENT_CAPACITY`]).
@@ -172,6 +178,8 @@ impl From<&Config> for CycleParams {
             high_risk_window: events::HIGH_RISK_WRITE_WINDOW,
             hot_list_max: config.hot_list_max,
             gc_interval: config.gc_interval,
+            gc_max_interval: config.gc_max_interval,
+            gc_idle_floor: config.gc_idle_floor,
             max_canonical_nodes: config.max_canonical_nodes,
             event_capacity: events::EVENT_CAPACITY,
             gc_survivor_bump_chunk: gc::GC_SURVIVOR_BUMP_CHUNK,
@@ -743,16 +751,28 @@ fn condition_set(
 ///    Drift, then the single session Stale ([`Condition::severity`]) — so a
 ///    consumer draining a burst in order sees the most actionable event
 ///    first. Ring-eviction protection is re-arm's job, not ordering's.
-/// 3. Run GC once the mutation counter crosses `gc_interval` (spec §9). The
-///    counter spans the deployment's whole lifetime — the epoch resumes from
-///    the durable snapshot on a writer restart (issue #17), so a low-write
-///    deployment crosses the interval cumulatively instead of never — and GC
-///    resets it to its own `epoch_after` so the next interval measures session
-///    mutations only. The watermark starts at 0, the deployment's baseline:
-///    a writer attaching to a session whose lifetime counter has already
-///    crossed the interval sweeps once immediately (the sweep that no process
-///    before it observed), then resumes the normal cadence; NEW-2's fixed
-///    point bounds that catch-up to one sweep per restart.
+/// 3. Run GC when [`gc::sweep_due`] says so: `gc_interval` session mutations
+///    since the last sweep (spec §9), or `gc_max_interval` elapsed since it with
+///    at least `gc_idle_floor` session mutations (issue #29). The counter spans
+///    the deployment's whole lifetime — the epoch resumes from the durable
+///    snapshot on a writer restart (issue #17), so a low-write deployment
+///    crosses the interval cumulatively instead of never — and GC moves the
+///    watermark ([`crate::types::GcMark`]) to its own `epoch_after` so the next
+///    interval measures session mutations only.
+///
+///    **The watermark is durable too (issue #29).** It lives on the graph,
+///    rides every flushed batch beside the epoch and resumes with it, so a
+///    restart measures from the last sweep, not from 0. Before, it was
+///    per-process state starting at 0: once a session's lifetime count passed
+///    `gc_interval`, *every* writer restart swept once and bumped every
+///    `gc_survived` — three restarts alone reached Stage 1's floor. A session
+///    that has never swept still has watermark 0, so #17's one catch-up sweep
+///    on attach is unchanged for it. The time of the last sweep persists the
+///    same way; a never-swept session's clock is anchored (not swept) the
+///    first time a writer observes it. A previously swept session is not
+///    swept *because* of a restart, but a writer that was down for N
+///    intervals with at least `gc_idle_floor` unswept mutations finds a sweep
+///    due and sweeps once on its first cycle back, not N times (intended).
 ///    Detection runs before GC: events reflect what the session's writes
 ///    did, GC is housekeeping after.
 ///
@@ -834,18 +854,13 @@ async fn run_loop(state: LoopState, weights: ScoringWeights, tick: Duration, par
 }
 
 /// The loop's carry-over state between cycles.
+///
+/// GC's watermark is **not** here (issue #29): it is durable graph state
+/// ([`Graph::gc_mark`]) so a restart resumes it instead of starting from 0.
 #[derive(Default)]
 struct CycleState {
     /// `None` → the first cycle always rescores (warm-up), then epoch-gated.
     last_epoch: Option<u64>,
-    /// GC watermark: the epoch the next `gc_interval` is measured from. Set to
-    /// `GcOutcome::epoch_after` when a sweep runs, then advanced by every
-    /// deferred-bump drain so GC's own mutations are never credited as session
-    /// mutations (NEW-2 — see `run_loop`'s step 3). It starts at 0 — the
-    /// deployment's baseline, not this writer's: the epoch itself resumes from
-    /// the durable snapshot (issue #17), so the first interval of a fresh
-    /// writer counts the mutations of every writer before it.
-    last_gc_epoch: u64,
     /// Emit-on-transition (finding 3) + re-arm (CONC-2): every currently-held
     /// `(condition, node)` maps to the channel's publication index at its last
     /// emission ([`events::EventSender::send`]'s return). A pair absent from the
@@ -994,23 +1009,69 @@ fn run_cycle(
     //     one chunk per cycle, and always to empty before the next run, so
     //     no concept ever carries two outstanding bumps.
     if !cs.gc_pending.is_empty() {
-        let applied = {
-            let mut g = graph.write();
-            gc::drain_survivor_bumps(&mut g, &mut cs.gc_pending, params.gc_survivor_bump_chunk)
-        };
+        let mut g = graph.write();
+        let applied =
+            gc::drain_survivor_bumps(&mut g, &mut cs.gc_pending, params.gc_survivor_bump_chunk);
         // NEW-2: a drain's own mutations must not be credited as session
         // mutations toward the next `gc_interval`. `bump_gc_survived` appends
         // exactly one `UpsertNode` per applied bump and the epoch bumps once
         // per appended mutation, so advancing the watermark by `applied`
-        // cancels GC's own writes out of 3b's measure exactly.
-        cs.last_gc_epoch = cs.last_gc_epoch.saturating_add(applied as u64);
+        // cancels GC's own writes out of 3b's measure exactly. Same guard as
+        // the bumps (issue #29), so the batch that carries them carries the
+        // advanced watermark too.
+        g.exempt_from_gc_measure(applied as u64);
     }
 
-    // 3b. Periodic GC (spec §9): every `gc_interval` session mutations.
-    if cs.gc_pending.is_empty() && epoch.saturating_sub(cs.last_gc_epoch) >= params.gc_interval {
+    // 3b. Periodic GC: `gc_interval` session mutations, or `gc_max_interval`
+    //     elapsed with at least `gc_idle_floor` of them (issue #29).
+    let mut mark = graph.read().gc_mark();
+    if mark.last_gc_at.is_none() {
+        // Issue #29: a session that has never swept starts its time bound
+        // when a writer first sees it — never "overdue" on attach. Rides the
+        // next flushed batch. A mark-only batch cannot persist (sessions are
+        // resolved from mutations), so a restart before any write re-anchors.
+        // For a never-swept session already over the idle floor this postpones
+        // the timed catch-up: it needs one write or `gc_max_interval` of uptime.
+        // The count-based catch-up at `gc_interval` (#17) is unaffected.
+        let mut g = graph.write();
+        g.anchor_gc_clock(now);
+        mark = g.gc_mark();
+    } else if gc::gc_clock_ahead(mark, now) {
+        // Issue #29: the stored sweep time is in the future beyond the skew
+        // tolerance — a forward wall-clock jump, since corrected, stamped it
+        // and the monotonic merge kept it. Re-anchor at `now` (the mark's one
+        // permitted regression, persisted through `last_gc_at_reset`) instead
+        // of leaving the time trigger off until real time catches up.
+        tracing::warn!(
+            target: "lambo::daemon::gc",
+            last_gc_at = ?mark.last_gc_at,
+            now = %now,
+            "GC sweep time is in the future (wall-clock jump?); re-anchoring the \
+             gc_max_interval clock at now"
+        );
+        let mut g = graph.write();
+        g.reanchor_gc_clock(now);
+        mark = g.gc_mark();
+    }
+    // The drain above may have moved the watermark past this cycle's `epoch`
+    // snapshot; `sweep_due` saturates, so that reads as zero elapsed (GC one
+    // cycle late, never early — NEW-2).
+    let trigger = if cs.gc_pending.is_empty() {
+        gc::sweep_due(
+            epoch,
+            mark,
+            now,
+            params.gc_interval,
+            params.gc_max_interval,
+            params.gc_idle_floor,
+        )
+    } else {
+        None
+    };
+    if let Some(trigger) = trigger {
         let outcome = {
             let mut g = graph.write();
-            let outcome = gc::run(
+            let mut outcome = gc::run(
                 &mut g,
                 gc::GcParams {
                     now,
@@ -1022,6 +1083,10 @@ fn run_cycle(
                     ..Default::default()
                 },
             );
+            outcome.trigger = Some(trigger);
+            // Issue #29: the durable watermark and sweep time, set under the
+            // sweep's own guard so they drain with its mutations.
+            g.record_gc_sweep(outcome.epoch_after, now);
             // Spec §9 step 4 (XP-5): mirror collections into the owner's
             // index when it gave us one. Held WITH the graph lock so
             // recall's (graph, index) read pair sees an atomic publication
@@ -1039,6 +1104,9 @@ fn run_cycle(
         }
         tracing::debug!(
             target: "lambo::daemon::gc",
+            trigger = ?outcome.trigger,
+            collection_cap = outcome.collection_cap,
+            collections_deferred = outcome.collections_deferred,
             edges_removed = outcome.edges_removed.len(),
             concepts_collected = outcome.concepts_collected.len(),
             survivors = outcome.survivors.len(),
@@ -1048,7 +1116,6 @@ fn run_cycle(
             epoch_after = outcome.epoch_after,
             "GC sweep complete"
         );
-        cs.last_gc_epoch = outcome.epoch_after;
         cs.gc_pending = outcome.survivors_pending.clone();
         *last_gc.write() = Some(outcome);
     }
@@ -1741,6 +1808,294 @@ mod tests {
             };
             assert_eq!(c.gc_survived, 1, "survivor bumped exactly once");
         }
+        handle.abort();
+    }
+
+    /// `gc_survived` of every concept in `ids`, in order.
+    fn survived(graph: &Arc<RwLock<Graph>>, ids: &[NodeId]) -> Vec<i32> {
+        let g = graph.read();
+        ids.iter()
+            .map(|id| match g.node(*id) {
+                Some(crate::types::Node::Concept(c)) => c.gc_survived,
+                _ => panic!("{id} missing"),
+            })
+            .collect()
+    }
+
+    /// A controllable cycle clock: the returned cell sets the daemon's `now`.
+    fn settable_clock(
+        start: chrono::DateTime<Utc>,
+    ) -> (Arc<std::sync::Mutex<chrono::DateTime<Utc>>>, Clock) {
+        let cell = Arc::new(std::sync::Mutex::new(start));
+        let clock: Clock = {
+            let cell = cell.clone();
+            Arc::new(move || *cell.lock().unwrap())
+        };
+        (cell, clock)
+    }
+
+    /// Issue #29 (a defect in #17's landed behaviour): the GC watermark is
+    /// durable. Pre-fix it was per-process state starting at 0, so once a
+    /// session's lifetime count passed `gc_interval` every writer restart swept
+    /// once and bumped every `gc_survived` — three restarts alone reached
+    /// Stage 1's `>= 3`. Now the restarted writer resumes the mark with the
+    /// epoch and a restart with no new writes sweeps nothing.
+    #[tokio::test(start_paused = true)]
+    async fn restart_past_gc_interval_does_not_sweep_or_bump_again() {
+        let (graph, ids) = locked_graph_with_canonical_concepts(3);
+        let params = CycleParams {
+            gc_interval: 3,
+            ..Default::default()
+        };
+        // Process 1: the lifetime count crosses the interval; one sweep.
+        let daemon = Daemon::with_params(
+            graph.clone(),
+            ScoringWeights::default(),
+            Duration::from_secs(3600),
+            params,
+        );
+        let handle = daemon.spawn();
+        wait_until(|| daemon.last_gc().is_some()).await;
+        handle.abort();
+        assert_eq!(survived(&graph, &ids), vec![1, 1, 1]);
+        let mark = graph.read().gc_mark();
+        assert!(mark.last_gc_epoch >= 3 && mark.last_gc_at.is_some());
+
+        // Three restarts, no writes in between.
+        let mut current = graph;
+        for restart in 1..=3 {
+            let resumed = Graph::from_snapshot(current.read().snapshot()).unwrap();
+            assert_eq!(
+                resumed.gc_mark(),
+                mark,
+                "restart {restart} resumes the mark"
+            );
+            current = Arc::new(RwLock::new(resumed));
+            let daemon = Daemon::with_params(
+                current.clone(),
+                ScoringWeights::default(),
+                Duration::from_secs(3600),
+                params,
+            );
+            let handle = daemon.spawn();
+            for _ in 0..3 {
+                wake_and_settle(&daemon).await;
+            }
+            handle.abort();
+            assert!(
+                daemon.last_gc().is_none(),
+                "restart {restart} must not sweep a session nobody wrote to"
+            );
+        }
+        assert_eq!(
+            survived(&current, &ids),
+            vec![1, 1, 1],
+            "restarts alone must never move gc_survived toward Stage 1"
+        );
+    }
+
+    /// Issue #29: a previously swept session whose writer was down past
+    /// `gc_max_interval` with at least `gc_idle_floor` unswept mutations finds
+    /// a sweep already due and sweeps once on its first cycle back — the sweep
+    /// the downtime delayed, intended (and the case "restarts never sweep"
+    /// wording got wrong). Below the floor it does not.
+    #[tokio::test(start_paused = true)]
+    async fn a_previously_swept_session_sweeps_once_on_attach_when_already_due() {
+        let t0 = Utc.timestamp_opt(1_800_000_000, 0).unwrap();
+        let params = CycleParams {
+            gc_interval: 1_000_000,
+            gc_max_interval: Duration::from_secs(3600),
+            gc_idle_floor: 3,
+            ..Default::default()
+        };
+        for (unswept, expect_sweep) in [(3u64, true), (2, false)] {
+            let (graph, ids) = locked_graph_with_canonical_concepts(3);
+            let epoch = graph.read().epoch();
+            // As loaded: swept a week ago, `unswept` mutations since.
+            graph
+                .write()
+                .record_gc_sweep(epoch - unswept, t0 - chrono::Duration::days(7));
+            let (_cell, clock) = settable_clock(t0);
+            let daemon = Daemon::with_params(
+                graph.clone(),
+                ScoringWeights::default(),
+                Duration::from_secs(3600),
+                params,
+            )
+            .with_clock(clock);
+            let handle = daemon.spawn();
+            wake_and_settle(&daemon).await;
+            wake_and_settle(&daemon).await;
+            match daemon.last_gc() {
+                Some(o) if expect_sweep => {
+                    assert_eq!(o.trigger, Some(gc::GcTrigger::Elapsed));
+                    assert_eq!(graph.read().gc_mark().last_gc_at, Some(t0));
+                    assert_eq!(survived(&graph, &ids), vec![1, 1, 1], "once");
+                }
+                None if !expect_sweep => {
+                    assert_eq!(survived(&graph, &ids), vec![0, 0, 0]);
+                }
+                other => panic!("unswept {unswept}: expected sweep {expect_sweep}, got {other:?}"),
+            }
+            handle.abort();
+        }
+    }
+
+    /// Issue #29 item 3: a sweep time left in the future by a forward clock
+    /// jump (and kept by the monotonic merge) is re-anchored at `now` on the
+    /// first cycle, so the time trigger fires one interval later instead of
+    /// waiting for real time to catch up; a stamp within the tolerance is left
+    /// alone; the epoch watermark never moves.
+    #[tokio::test(start_paused = true)]
+    async fn a_future_sweep_time_is_reanchored_and_the_time_trigger_recovers() {
+        let (graph, ids) = locked_graph_with_canonical_concepts(3);
+        let iid = match graph.read().node(ids[0]).unwrap() {
+            crate::types::Node::Concept(c) => c.origin_interaction,
+            _ => unreachable!(),
+        };
+        let t0 = Utc.timestamp_opt(1_800_000_000, 0).unwrap();
+        let epoch = graph.read().epoch();
+        // As loaded after a jump to next year: swept "then", nothing since.
+        graph
+            .write()
+            .record_gc_sweep(epoch, t0 + chrono::Duration::days(365));
+        let params = CycleParams {
+            gc_interval: 1_000_000,
+            gc_max_interval: Duration::from_secs(3600),
+            gc_idle_floor: 1,
+            ..Default::default()
+        };
+        let (clock_cell, clock) = settable_clock(t0);
+        let set_clock = |t| *clock_cell.lock().unwrap() = t;
+        let daemon = Daemon::with_params(
+            graph.clone(),
+            ScoringWeights::default(),
+            Duration::from_secs(3600),
+            params,
+        )
+        .with_clock(clock);
+        let handle = daemon.spawn();
+
+        wake_and_settle(&daemon).await;
+        let mark = graph.read().gc_mark();
+        assert_eq!(mark.last_gc_at, Some(t0), "re-anchored at now");
+        assert!(mark.last_gc_at_reset, "the regression must persist");
+        assert_eq!(mark.last_gc_epoch, epoch, "the epoch watermark never moves");
+        assert!(daemon.last_gc().is_none(), "re-anchoring is not a sweep");
+
+        graph
+            .write()
+            .insert_concept(concept(60, iid, "after the jump"), iid)
+            .unwrap();
+        set_clock(t0 + chrono::Duration::seconds(3600));
+        wake_and_settle(&daemon).await;
+        let swept = daemon.last_gc().expect("the time trigger recovered");
+        assert_eq!(swept.trigger, Some(gc::GcTrigger::Elapsed));
+        handle.abort();
+
+        // Within the tolerance: left alone (and so not yet elapsed).
+        let (graph, _) = locked_graph_with_canonical_concepts(3);
+        let near = t0 + gc::GC_CLOCK_SKEW_TOLERANCE - chrono::Duration::seconds(1);
+        let epoch = graph.read().epoch();
+        graph.write().record_gc_sweep(epoch, near);
+        let (_cell, clock) = settable_clock(t0);
+        let daemon = Daemon::with_params(
+            graph.clone(),
+            ScoringWeights::default(),
+            Duration::from_secs(3600),
+            params,
+        )
+        .with_clock(clock);
+        let handle = daemon.spawn();
+        wake_and_settle(&daemon).await;
+        let mark = graph.read().gc_mark();
+        assert_eq!(mark.last_gc_at, Some(near));
+        assert!(!mark.last_gc_at_reset);
+        handle.abort();
+    }
+
+    /// Issue #29: the time bound. A session far below `gc_interval` sweeps once
+    /// `gc_max_interval` has passed since its last sweep **and** at least
+    /// `gc_idle_floor` mutations happened since; never on attach (the clock
+    /// is anchored, not overdue), never when idle, and once — not N times —
+    /// after a long gap.
+    #[tokio::test(start_paused = true)]
+    async fn timed_sweep_needs_the_interval_and_the_floor_and_has_no_backlog() {
+        let (graph, ids) = locked_graph_with_canonical_concepts(3);
+        let iid = match graph.read().node(ids[0]).unwrap() {
+            crate::types::Node::Concept(c) => c.origin_interaction,
+            _ => unreachable!(),
+        };
+        let floor = 5;
+        let params = CycleParams {
+            gc_interval: 1_000_000,
+            gc_max_interval: Duration::from_secs(3600),
+            gc_idle_floor: floor,
+            ..Default::default()
+        };
+        let t0 = Utc.timestamp_opt(1_800_000_000, 0).unwrap();
+        let (clock_cell, clock) = settable_clock(t0);
+        let set_clock = |t| *clock_cell.lock().unwrap() = t;
+        let daemon = Daemon::with_params(
+            graph.clone(),
+            ScoringWeights::default(),
+            Duration::from_secs(3600),
+            params,
+        )
+        .with_clock(clock);
+        let handle = daemon.spawn();
+
+        // Attach: the warm-up epoch (7) is over the floor, but the session
+        // never swept, so its clock is anchored at t0 — not overdue.
+        wake_and_settle(&daemon).await;
+        assert_eq!(graph.read().gc_mark().last_gc_at, Some(t0));
+        assert!(daemon.last_gc().is_none(), "no sweep on attach");
+
+        // One second short of the interval: nothing.
+        set_clock(t0 + chrono::Duration::seconds(3599));
+        wake_and_settle(&daemon).await;
+        assert!(daemon.last_gc().is_none());
+
+        // Interval elapsed and the floor met: the timed sweep fires.
+        let t1 = t0 + chrono::Duration::seconds(3600);
+        set_clock(t1);
+        wake_and_settle(&daemon).await;
+        let first = daemon.last_gc().expect("timed sweep");
+        assert_eq!(first.trigger, Some(gc::GcTrigger::Elapsed));
+        assert_eq!(survived(&graph, &ids), vec![1, 1, 1]);
+        assert_eq!(graph.read().gc_mark().last_gc_at, Some(t1));
+
+        // Idle for a day: elapsed, but zero mutations since — no sweep.
+        set_clock(t1 + chrono::Duration::days(1));
+        wake_and_settle(&daemon).await;
+        wake_and_settle(&daemon).await;
+        assert_eq!(survived(&graph, &ids), vec![1, 1, 1], "idle never sweeps");
+
+        // Below the floor: two concept inserts are 4 mutations (node +
+        // Derives each), one short of 5.
+        {
+            let mut g = graph.write();
+            g.insert_concept(concept(50, iid, "w1"), iid).unwrap();
+            g.insert_concept(concept(52, iid, "w3"), iid).unwrap();
+        }
+        wake_and_settle(&daemon).await;
+        assert_eq!(survived(&graph, &ids), vec![1, 1, 1], "below the floor");
+
+        // One more write reaches the floor; a month has passed since the last
+        // sweep — exactly one sweep, no backlog.
+        graph
+            .write()
+            .insert_concept(concept(51, iid, "w2"), iid)
+            .unwrap();
+        set_clock(t1 + chrono::Duration::days(30));
+        for _ in 0..4 {
+            wake_and_settle(&daemon).await;
+        }
+        assert_eq!(
+            survived(&graph, &ids),
+            vec![2, 2, 2],
+            "thirty missed intervals are one sweep"
+        );
         handle.abort();
     }
 

@@ -58,7 +58,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     embedding_kind  TEXT,   -- session embedding contract (S5; written by seed, read by load_session)
     embedding_model TEXT,
     embedding_dim   INTEGER,
-    mutation_epoch  INTEGER NOT NULL DEFAULT 0  -- durable mutation counter (issue #17; written by flush, resumed by load_session)
+    mutation_epoch  INTEGER NOT NULL DEFAULT 0, -- durable mutation counter (issue #17; written by flush, resumed by load_session)
+    last_gc_epoch   INTEGER NOT NULL DEFAULT 0, -- GC sweep watermark (issue #29; written by flush, monotonic max, resumed by load_session)
+    last_gc_at      TEXT                        -- last GC sweep / gc_max_interval anchor (issue #29; NULL = never swept, never anchored)
 );
 
 CREATE TABLE IF NOT EXISTS interactions (

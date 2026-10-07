@@ -40,10 +40,11 @@
 //!   multiplicatively.
 
 use chrono::{DateTime, Utc};
+use std::collections::HashMap;
 
 use crate::config::ScoringWeights;
 use crate::graph::Graph;
-use crate::types::{tie_break_by_key, Concept, ConceptType, EdgeType, NodeId, Scored};
+use crate::types::{tie_break_by_key, Concept, ConceptType, EdgeType, Node, NodeId, Scored};
 
 /// Frequency saturates at this many accesses (documented interpretation).
 pub const FREQUENCY_NORMALIZER: f64 = 10.0;
@@ -138,9 +139,12 @@ pub fn score(dims: ScoreDims, weights: &ScoringWeights) -> f64 {
 /// remaining weights, so the result occupies the same `[0,1]`-plus-bonus range
 /// as [`score`].
 ///
-/// GC's step-2 cut uses this while `access_count` is dead session-wide
-/// (ALGO-1). The spec formula reserves 20% of the composite for a dimension no
-/// write path feeds until P5 recall lands, so an **absolute** threshold against
+/// GC's step-2 cut builds on this: [`score_live_plus_frequency`] adds each
+/// concept's own frequency term on top. Issue #29 replaced ALGO-1's
+/// session-wide switch to [`score`] (measured in the NEW-6 note below) with
+/// that per-concept addition. The spec formula reserves 20% of the composite
+/// for a dimension no write path feeds until P5 recall lands, so an
+/// **absolute** threshold against
 /// the full composite measures every concept against a fifth of a score it
 /// cannot yet earn. Recall *ranking* is unaffected by the dead term (a
 /// constant-zero dimension cannot reorder anything), which is why [`score`]
@@ -157,8 +161,10 @@ pub fn score(dims: ScoreDims, weights: &ScoringWeights) -> f64 {
 /// type modifier are untouched). Only a concept whose frequency has actually
 /// started earning comes out ahead.
 ///
-/// Measured on the shipped `session-rest-api` fixture (all 22 concepts, at the
-/// moment the first access lands and GC's cut flips): **every** concept's
+/// GC's cut no longer flips (issue #29, [`score_live_plus_frequency`]); this
+/// note records why it must not. Measured on the shipped `session-rest-api`
+/// fixture (all 22 concepts, at the moment the first access lands and the old
+/// cut flipped): **every** concept's
 /// eviction score falls, by a factor of 0.83–0.89, and the smallest margin to its
 /// type's bar goes from **1.49× to 1.33×**. Nothing crosses the bar, so the
 /// switch does not by itself make GC collect anything — but the headroom
@@ -176,6 +182,33 @@ pub fn score_over_live_dimensions(dims: ScoreDims, weights: &ScoringWeights) -> 
         0.0
     };
     finite_or_zero(weighted + bonus_and_modifier(dims))
+}
+
+/// GC's step-2 eviction composite (issue #29): the live-dimension score
+/// ([`score_over_live_dimensions`]) **plus** the frequency term at its spec
+/// weight, `w.frequency × clamp(frequency)`, under the same `[0, 1 +
+/// MAX_BONUS]` bound every composite here has.
+///
+/// GC's cut used to switch the whole session from the live-dimension score to
+/// the full composite the moment any concept recorded an access (ALGO-1).
+/// Under #29's time-anchored recency that switch made every unread concept
+/// ~20% easier to collect at once: on the Metal rig snapshot one access on one
+/// Entity took the first sweep from 159 to 412 candidates, and the untouched
+/// end state from 1,468 to 2,034. The additive form has no session-wide state:
+///
+/// * a concept with `frequency == 0` scores exactly its live-dimension score,
+///   the scale `crate::daemon::gc::MIN_CONCEPT_SCORE` and the one-year window
+///   were calibrated on, however many other concepts have been read;
+/// * reading a concept can only raise its own score (frequency is
+///   non-negative, and its `last_accessed` only raises GC's recency).
+///
+/// It is not the spec composite (the weighted part can exceed 1 before the
+/// clamp), so it is **only** for GC's threshold comparison. Recall ranking,
+/// the daemon's score table and canonization keep [`score`].
+pub fn score_live_plus_frequency(dims: ScoreDims, weights: &ScoringWeights) -> f64 {
+    let w = weights.sanitized();
+    let live = score_over_live_dimensions(dims, &w);
+    finite_or_zero(live + clamp_dim(dims.frequency) * w.frequency)
 }
 
 /// The two additive terms, each clamped to its defined range.
@@ -200,11 +233,23 @@ fn finite_or_zero(x: f64) -> f64 {
 
 /// Session-wide values shared by every concept's dimensions. Compute once per
 /// rescore, not once per concept.
+///
+/// Compute it from the same graph state the concepts are then scored against
+/// (it caches each concept's derivation count and the connectivity baseline):
+/// a context that outlives a write to the graph scores against the old counts.
 pub struct SessionContext {
     start: DateTime<Utc>,
     end: DateTime<Utc>,
     total_interactions: usize,
     max_incident: usize,
+    /// Per concept, how many interactions carry a `Derives` edge to it — the
+    /// numerator of `session_activity`. Counted once for the whole session
+    /// (one pass over the edge set) so scoring a concept is `O(its degree)`
+    /// instead of a scan of every interaction per concept: a GC sweep scores
+    /// every concept under the write lock, and the per-concept scan made that
+    /// `O(concepts × interactions)`. A concept absent from the map is derived
+    /// by none.
+    derived_by: HashMap<NodeId, usize>,
 }
 
 impl SessionContext {
@@ -230,11 +275,20 @@ impl SessionContext {
             .map(|c| graph.incident_edges(c.id).len())
             .max()
             .unwrap_or(0);
+        let mut derived_by: HashMap<NodeId, usize> = HashMap::new();
+        for e in graph.edges() {
+            if e.edge_type == EdgeType::Derives
+                && matches!(graph.node(e.source), Some(Node::Interaction(_)))
+            {
+                *derived_by.entry(e.target).or_default() += 1;
+            }
+        }
         Self {
             start,
             end,
             total_interactions,
             max_incident,
+            derived_by,
         }
     }
 }
@@ -251,10 +305,7 @@ pub fn score_concept(graph: &Graph, c: &Concept, ctx: &SessionContext) -> ScoreD
 
     let frequency = c.access_count as f64 / FREQUENCY_NORMALIZER;
 
-    let derived_by = graph
-        .interactions()
-        .filter(|i| graph.edge_between(i.id, c.id, EdgeType::Derives).is_some())
-        .count();
+    let derived_by = ctx.derived_by.get(&c.id).copied().unwrap_or(0);
     let session_activity = if ctx.total_interactions == 0 {
         0.0
     } else {
@@ -372,6 +423,142 @@ mod tests {
         let c2_id = c2.id;
         g.insert_concept(c2, iid).unwrap();
         (g, c1_id, c2_id)
+    }
+
+    /// The pre-optimization `score_concept`, kept verbatim as a test oracle:
+    /// `session_activity`'s numerator is found by scanning every interaction
+    /// for a `Derives` edge to the concept (`O(interactions)` per concept).
+    /// [`score_concept`] now reads a once-per-sweep count from the
+    /// [`SessionContext`]; the two must agree bit for bit.
+    fn score_concept_reference(graph: &Graph, c: &Concept, ctx: &SessionContext) -> ScoreDims {
+        let last_touch = c.last_accessed.unwrap_or(c.created_at);
+        let span_ms = (ctx.end - ctx.start).num_milliseconds();
+        let recency = if span_ms == 0 {
+            1.0
+        } else {
+            (last_touch - ctx.start).num_milliseconds() as f64 / span_ms as f64
+        };
+        let frequency = c.access_count as f64 / FREQUENCY_NORMALIZER;
+        let derived_by = graph
+            .interactions()
+            .filter(|i| graph.edge_between(i.id, c.id, EdgeType::Derives).is_some())
+            .count();
+        let session_activity = if ctx.total_interactions == 0 {
+            0.0
+        } else {
+            derived_by as f64 / ctx.total_interactions as f64
+        };
+        let incident = graph.incident_edges(c.id);
+        let density = if ctx.max_incident == 0 {
+            0.0
+        } else {
+            incident.len() as f64 / ctx.max_incident as f64
+        };
+        let edge_type_bonus = incident
+            .iter()
+            .map(|e| edge_type_bonus_value(e.edge_type))
+            .sum();
+        ScoreDims {
+            recency,
+            frequency,
+            session_activity,
+            density,
+            edge_type_bonus,
+            concept_type_modifier: concept_type_modifier(c.concept_type),
+        }
+    }
+
+    fn assert_scores_match_reference(g: &Graph) {
+        let ctx = SessionContext::compute(g);
+        let mut n = 0;
+        for c in g.concepts() {
+            let (a, b) = (
+                score_concept(g, c, &ctx),
+                score_concept_reference(g, c, &ctx),
+            );
+            for (name, x, y) in [
+                ("recency", a.recency, b.recency),
+                ("frequency", a.frequency, b.frequency),
+                ("session_activity", a.session_activity, b.session_activity),
+                ("density", a.density, b.density),
+                ("edge_type_bonus", a.edge_type_bonus, b.edge_type_bonus),
+                (
+                    "concept_type_modifier",
+                    a.concept_type_modifier,
+                    b.concept_type_modifier,
+                ),
+            ] {
+                assert_eq!(x.to_bits(), y.to_bits(), "{} {name}: {x} vs {y}", c.content);
+            }
+            n += 1;
+        }
+        assert!(n > 0, "the fixture must have concepts");
+    }
+
+    /// The once-per-sweep derived-by count equals the per-concept scan:
+    /// concepts derived by one, several and no interaction (a hand-built
+    /// concept with no `Derives` edge at all), a
+    /// concept-to-concept edge into the same concept (not a derivation).
+    #[test]
+    fn score_concept_matches_the_per_concept_scan_on_a_hand_built_session() {
+        let (mut g, c1, c2) = graph_with_two_concepts();
+        let i1 = NodeId(Uuid::from_u64_pair(0, 1));
+        let i2 = NodeId(Uuid::from_u64_pair(0, 2));
+        let i3 = interaction(3, Some(2), 25);
+        let i3_id = i3.id;
+        g.insert_interaction(i3).unwrap();
+        let edge = |id: u64, src: NodeId, tgt: NodeId, ty: EdgeType| crate::types::Edge {
+            event_time: None,
+            id: NodeId(Uuid::from_u64_pair(5, id)),
+            session_id: sid(),
+            source: src,
+            target: tgt,
+            edge_type: ty,
+            weight: 0.9,
+            reinforcements: 1,
+            created_at: ts(0),
+            last_reinforced: ts(0),
+        };
+        // c1 is derived by i1 (insert_concept) and again by i2 and i3.
+        g.upsert_edge(edge(1, i2, c1, EdgeType::Derives)).unwrap();
+        g.upsert_edge(edge(2, i3_id, c1, EdgeType::Derives))
+            .unwrap();
+        // A concept-to-concept edge adds density but no derivation.
+        g.upsert_edge(edge(3, c1, c2, EdgeType::Causal)).unwrap();
+        // A concept with no provenance edge at all.
+        let lone = concept(9, i1, "no provenance", 5);
+        g.insert_concept(lone, i1).unwrap();
+        let lone_id = NodeId(Uuid::from_u64_pair(1, 9));
+        g.remove_edge(g.edge_between(i1, lone_id, EdgeType::Derives).unwrap().id)
+            .unwrap();
+        assert_scores_match_reference(&g);
+
+        let ctx = SessionContext::compute(&g);
+        let c = |id: NodeId| match g.node(id) {
+            Some(Node::Concept(c)) => c.clone(),
+            _ => unreachable!(),
+        };
+        let total = ctx.total_interactions as f64;
+        assert_eq!(
+            score_concept(&g, &c(c1), &ctx).session_activity,
+            3.0 / total
+        );
+        assert_eq!(
+            score_concept(&g, &c(c2), &ctx).session_activity,
+            1.0 / total
+        );
+        assert_eq!(score_concept(&g, &c(lone_id), &ctx).session_activity, 0.0);
+    }
+
+    /// The shipped fixture session scores identically under both.
+    #[cfg(feature = "fixtures")]
+    #[test]
+    fn score_concept_matches_the_per_concept_scan_on_the_fixture_session() {
+        for name in ["session-rest-api", "session-drift"] {
+            let snap = crate::fixtures::load_snapshot(name).expect("fixture");
+            let g = Graph::from_snapshot(snap).unwrap();
+            assert_scores_match_reference(&g);
+        }
     }
 
     // ------------------------------------------------------------------
@@ -502,6 +689,65 @@ mod tests {
         }
         .is_valid());
         assert!(ScoringWeights::default().is_valid());
+    }
+
+    /// Issue #29: GC's composite is the live score plus the concept's own
+    /// frequency term — identical to the live score at frequency 0, strictly
+    /// above it once the concept earns frequency, monotone in frequency,
+    /// bounded like every composite, and finite for poisoned input.
+    #[test]
+    fn live_plus_frequency_adds_only_the_concepts_own_frequency() {
+        let w = ScoringWeights::default();
+        let dims = ScoreDims {
+            recency: 0.3,
+            frequency: 0.0,
+            session_activity: 0.1,
+            density: 0.2,
+            edge_type_bonus: 0.02,
+            concept_type_modifier: -0.1,
+        };
+        let live = score_over_live_dimensions(dims, &w);
+        assert_eq!(
+            score_live_plus_frequency(dims, &w).to_bits(),
+            live.to_bits()
+        );
+        let mut prev = live;
+        for f in [0.1, 0.5, 1.0, 7.0] {
+            let s = score_live_plus_frequency(
+                ScoreDims {
+                    frequency: f,
+                    ..dims
+                },
+                &w,
+            );
+            assert!(s > prev || (f > 1.0 && s == prev), "f={f}: {s} vs {prev}");
+            prev = s;
+        }
+        let one = score_live_plus_frequency(
+            ScoreDims {
+                frequency: 1.0,
+                ..dims
+            },
+            &w,
+        );
+        assert!((one - (live + w.frequency)).abs() < 1e-12);
+        let maxed = ScoreDims {
+            recency: 1.0,
+            frequency: 1.0,
+            session_activity: 1.0,
+            density: 1.0,
+            edge_type_bonus: MAX_EDGE_BONUS,
+            concept_type_modifier: MAX_CONCEPT_MODIFIER,
+        };
+        assert_eq!(score_live_plus_frequency(maxed, &w), 1.0 + MAX_BONUS);
+        let poisoned = ScoreDims {
+            frequency: f64::NAN,
+            ..dims
+        };
+        assert_eq!(
+            score_live_plus_frequency(poisoned, &w).to_bits(),
+            live.to_bits()
+        );
     }
 
     /// ALGO-1: the live-dimension composite drops `frequency` and renormalizes

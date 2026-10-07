@@ -140,5 +140,20 @@ url = "http://127.0.0.1:8080"
 # the canonization state machine work on a small swarm session.
 # gc_interval = 1
 #
+# GC also sweeps on time (issue #29): once gc_max_interval_secs has passed since
+# the session's last sweep AND at least gc_idle_floor session mutations happened
+# since it, whichever of this and gc_interval comes first. An idle session never
+# sweeps on time alone. The last sweep's time and watermark persist with the
+# session (sessions.last_gc_at / last_gc_epoch), so a restart does not reset the
+# clock and does not by itself sweep; a writer that was down for days with at
+# least gc_idle_floor unswept mutations sweeps once on its first cycle back. A
+# session that has never swept starts the clock when a writer first sees it.
+# Seconds; default 86400 (one day). Must be > 0.
+# gc_max_interval_secs = 86400
+#
+# Session mutations since the last sweep below which the time bound does not
+# fire. Default 100. Must be >= 1. Does not gate gc_interval.
+# gc_idle_floor = 100
+#
 # Seconds between canonization evaluation passes. Default 60.
 # canonization_eval_interval_secs = 5

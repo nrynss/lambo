@@ -230,6 +230,17 @@
 //! `load_session` returns it in `GraphSnapshot.mutation_epoch` so
 //! `Graph::from_snapshot` resumes the accounting instead of a restart
 //! resetting it — GC's `gc_interval` measures deployment-lifetime mutations.
+//!
+//! ## GC sweep mark (issue #29)
+//!
+//! `sessions.last_gc_epoch` (`NOT NULL DEFAULT 0`) and `sessions.last_gc_at`
+//! (nullable fixed-width UTC text) carry GC's sweep watermark and the time of
+//! the last sweep. They ride the same `ensure_sessions` statement as the epoch
+//! with a field-wise monotonic merge (`GcMark::merge`), are converged on
+//! pre-existing databases by the same guarded ALTER, and come back from
+//! `load_session` in `GraphSnapshot.gc_mark`, so a writer restart neither
+//! resets GC's measure nor the `gc_max_interval` clock (it sweeps only if a
+//! sweep was already due by the stored mark).
 
 // Clippy's `explicit_auto_deref` suggestion is wrong for sqlx: `&mut *tx` reborrows
 // the `Transaction` (which implements `sqlx::Executor`), while the suggested `&mut tx`
@@ -260,7 +271,7 @@ use super::{
     SessionFlushStats,
 };
 use crate::types::{
-    tie_break_by_key, CanonizationEvent, Concept, Edge, EmbeddingContract, GraphSnapshot,
+    tie_break_by_key, CanonizationEvent, Concept, Edge, EmbeddingContract, GcMark, GraphSnapshot,
     Interaction, InteractionSpan, Mutation, MutationBatch, Node, NodeId, Scored, SessionId,
     StoreError,
 };
@@ -491,16 +502,40 @@ impl SqliteStore {
         tx: &mut sqlx::SqliteConnection,
         sessions: &HashSet<String>,
         mutation_epoch: u64,
+        gc_mark: GcMark,
     ) -> Result<(), StoreError> {
         let epoch = i64::try_from(mutation_epoch).unwrap_or(i64::MAX);
+        let last_gc_epoch = i64::try_from(gc_mark.last_gc_epoch).unwrap_or(i64::MAX);
+        let last_gc_at = gc_mark.last_gc_at.map(ts_to_text);
         for sid in sessions {
+            // Issue #29: GC's sweep mark rides the same statement with the
+            // store-side merge (`GcMark::apply_to_stored`). `last_gc_at` is
+            // fixed-width millisecond UTC text (`ts_to_text`), so the
+            // lexicographic MAX is the chronological one; SQLite's two-argument
+            // MAX returns NULL if either side is NULL, hence the COALESCE
+            // fallbacks. The one exception to the max is a re-anchored mark
+            // (`last_gc_at_reset`, the last bind) at least as current as the
+            // stored mark (`last_gc_epoch >=`, read from the pre-update row):
+            // its time replaces the stored one, so a future time left by a
+            // corrected clock jump cannot keep the time trigger off, while a
+            // stale reset replayed after a later sweep cannot rewind it
+            // (`GcMark::reset_is_current_for`). `last_gc_epoch` is a max either way.
             sqlx::query(
-                "INSERT INTO sessions (session_id, mutation_epoch) VALUES (?, ?) \
+                "INSERT INTO sessions (session_id, mutation_epoch, last_gc_epoch, last_gc_at) \
+                 VALUES (?, ?, ?, ?) \
                  ON CONFLICT (session_id) DO UPDATE SET \
-                     mutation_epoch = MAX(mutation_epoch, excluded.mutation_epoch)",
+                     mutation_epoch = MAX(mutation_epoch, excluded.mutation_epoch), \
+                     last_gc_epoch = MAX(last_gc_epoch, excluded.last_gc_epoch), \
+                     last_gc_at = CASE WHEN ? AND excluded.last_gc_epoch >= last_gc_epoch \
+                         THEN COALESCE(excluded.last_gc_at, last_gc_at) \
+                         ELSE COALESCE(MAX(last_gc_at, excluded.last_gc_at), \
+                                       last_gc_at, excluded.last_gc_at) END",
             )
             .bind(sid)
             .bind(epoch)
+            .bind(last_gc_epoch)
+            .bind(last_gc_at.as_deref())
+            .bind(gc_mark.last_gc_at_reset)
             .execute(&mut *tx)
             .await
             .map_err(|e| map_write_err(e, |m| format!("ensure session row: {m}")))?;
@@ -555,8 +590,9 @@ impl SqliteStore {
         sqlx::query(
             "INSERT INTO sessions (\
                  session_id, root_goal, created_at, closed_at, \
-                 embedding_kind, embedding_model, embedding_dim, mutation_epoch) \
-             VALUES (?, ?, COALESCE(?, strftime('%Y-%m-%dT%H:%M:%fZ','now')), ?, ?, ?, ?, ?) \
+                 embedding_kind, embedding_model, embedding_dim, mutation_epoch, \
+                 last_gc_epoch, last_gc_at) \
+             VALUES (?, ?, COALESCE(?, strftime('%Y-%m-%dT%H:%M:%fZ','now')), ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT (session_id) DO UPDATE SET \
                  root_goal = excluded.root_goal, \
                  created_at = excluded.created_at, \
@@ -564,7 +600,9 @@ impl SqliteStore {
                  embedding_kind = excluded.embedding_kind, \
                  embedding_model = excluded.embedding_model, \
                  embedding_dim = excluded.embedding_dim, \
-                 mutation_epoch = excluded.mutation_epoch",
+                 mutation_epoch = excluded.mutation_epoch, \
+                 last_gc_epoch = excluded.last_gc_epoch, \
+                 last_gc_at = excluded.last_gc_at",
         )
         .bind(&snapshot.session_id.0)
         .bind(root_goal.as_deref())
@@ -574,6 +612,8 @@ impl SqliteStore {
         .bind(embedding_model)
         .bind(embedding_dim)
         .bind(i64::try_from(snapshot.mutation_epoch).unwrap_or(i64::MAX))
+        .bind(i64::try_from(snapshot.gc_mark.last_gc_epoch).unwrap_or(i64::MAX))
+        .bind(snapshot.gc_mark.last_gc_at.map(ts_to_text))
         .execute(&mut *tx)
         .await
         .map_err(|e| map_write_err(e, |m| format!("upsert session row: {m}")))?;
@@ -765,6 +805,23 @@ impl GraphStore for SqliteStore {
             "sessions",
             "mutation_epoch",
             "ALTER TABLE sessions ADD COLUMN mutation_epoch INTEGER NOT NULL DEFAULT 0",
+        )
+        .await?;
+        // Issue #29: GC's sweep accounting. The epoch backfills 0 (never
+        // swept) and the time NULL, which the daemon treats as "anchor the
+        // `gc_max_interval` clock on first attach", never "sweep now".
+        ensure_column(
+            self.pool(),
+            "sessions",
+            "last_gc_epoch",
+            "ALTER TABLE sessions ADD COLUMN last_gc_epoch INTEGER NOT NULL DEFAULT 0",
+        )
+        .await?;
+        ensure_column(
+            self.pool(),
+            "sessions",
+            "last_gc_at",
+            "ALTER TABLE sessions ADD COLUMN last_gc_at TEXT",
         )
         .await?;
         Ok(())
@@ -1039,7 +1096,7 @@ impl GraphStore for SqliteStore {
                 Mutation::DeleteNode { .. } | Mutation::DeleteEdge { .. } => {}
             }
         }
-        self.ensure_sessions(&mut *tx, &sessions, batch.mutation_epoch)
+        self.ensure_sessions(&mut *tx, &sessions, batch.mutation_epoch, batch.gc_mark)
             .await?;
 
         // Fencing-token gate (#1): reject a stale/missing token for every
@@ -1101,7 +1158,8 @@ impl GraphStore for SqliteStore {
         // the durable mutation counter (issue #17): flush stamps it, and this
         // read is what a writer restart resumes it from.
         let row = sqlx::query(
-            "SELECT embedding_kind, embedding_model, embedding_dim, root_goal, mutation_epoch \
+            "SELECT embedding_kind, embedding_model, embedding_dim, root_goal, mutation_epoch, \
+                    last_gc_epoch, last_gc_at \
              FROM sessions WHERE session_id = ?",
         )
         .bind(&session.0)
@@ -1126,6 +1184,14 @@ impl GraphStore for SqliteStore {
             .transpose()
             .map_err(|e| StoreError::Backend(format!("parse root_goal JSON: {e}")))?;
         let mutation_epoch: i64 = row.try_get(4).map_err(|e| db_err("lookup session", e))?;
+        // Issue #29: GC's sweep accounting, resumed with the epoch.
+        let last_gc_epoch: i64 = row.try_get(5).map_err(|e| db_err("lookup session", e))?;
+        let last_gc_at: Option<String> = row.try_get(6).map_err(|e| db_err("lookup session", e))?;
+        let gc_mark = GcMark {
+            last_gc_epoch: u64::try_from(last_gc_epoch).unwrap_or(0),
+            last_gc_at: last_gc_at.as_deref().map(text_to_ts).transpose()?,
+            last_gc_at_reset: false,
+        };
         let embedding = session_embedding_from_parts(
             embedding_kind,
             embedding_model,
@@ -1161,6 +1227,7 @@ impl GraphStore for SqliteStore {
             embedding,
             write_intents,
             mutation_epoch: u64::try_from(mutation_epoch).unwrap_or(u64::MAX),
+            gc_mark,
         })
     }
 
@@ -1392,6 +1459,7 @@ impl GraphStore for SqliteStore {
                    SELECT 1 FROM edges e \
                    JOIN concepts src ON src.id = e.source AND src.session_id = ? \
                    WHERE e.target = c.id AND e.source = ? \
+                     AND e.edge_type IN ({STRUCTURAL_EDGE_IN}) \
                      AND COALESCE(e.event_time, e.created_at) <= ?) \
                AND NOT EXISTS ( \
                    SELECT 1 FROM edges e2 \
@@ -3271,6 +3339,7 @@ mod tests {
             .flush(
                 &MutationBatch {
                     mutation_epoch: 0,
+                    gc_mark: Default::default(),
                     mutations,
                 },
                 None,
@@ -3376,6 +3445,7 @@ mod tests {
             .flush(
                 &MutationBatch {
                     mutation_epoch: 0,
+                    gc_mark: Default::default(),
                     mutations: vec![plant_concept(
                         &sid,
                         bare,
@@ -3678,6 +3748,7 @@ mod tests {
             .flush(
                 &MutationBatch {
                     mutation_epoch: 0,
+                    gc_mark: Default::default(),
                     mutations: vec![
                         plant_interaction(&sid, origin, None, ts),
                         plant_concept(
@@ -3791,6 +3862,7 @@ mod tests {
         // a 4-wide concept, then a 3-wide one.
         let batch = MutationBatch {
             mutation_epoch: 0,
+            gc_mark: Default::default(),
             mutations: vec![
                 plant_interaction(&sid, origin, None, ts),
                 Mutation::SetEmbedding {
@@ -3856,6 +3928,7 @@ mod tests {
             .flush(
                 &MutationBatch {
                     mutation_epoch: 0,
+                    gc_mark: Default::default(),
                     mutations: vec![
                         plant_interaction(&fresh, origin, None, ts),
                         Mutation::SetEmbedding {
@@ -3889,6 +3962,7 @@ mod tests {
             .flush(
                 &MutationBatch {
                     mutation_epoch: 0,
+                    gc_mark: Default::default(),
                     mutations: vec![
                         plant_interaction(&pre, origin2, None, ts),
                         plant_concept_with_vector(
@@ -3956,6 +4030,7 @@ mod tests {
             .flush(
                 &MutationBatch {
                     mutation_epoch: 0,
+                    gc_mark: Default::default(),
                     mutations: vec![
                         plant_interaction(&sid, origin, None, ts),
                         Mutation::SetEmbedding {
@@ -4011,6 +4086,7 @@ mod tests {
             .flush(
                 &MutationBatch {
                     mutation_epoch: 0,
+                    gc_mark: Default::default(),
                     mutations: vec![
                         plant_interaction(&sid, origin, None, ts),
                         Mutation::SetEmbedding {
@@ -4047,6 +4123,7 @@ mod tests {
             .flush(
                 &MutationBatch {
                     mutation_epoch: 0,
+                    gc_mark: Default::default(),
                     mutations: vec![
                         Mutation::SetEmbedding {
                             session_id: sid.clone(),
@@ -4164,6 +4241,7 @@ mod tests {
             .flush(
                 &MutationBatch {
                     mutation_epoch: 0,
+                    gc_mark: Default::default(),
                     mutations: vec![Mutation::SetEmbedding {
                         session_id: sid.clone(),
                         embedding: Some(renamed.clone()),
@@ -4200,6 +4278,7 @@ mod tests {
             .flush(
                 &MutationBatch {
                     mutation_epoch: 0,
+                    gc_mark: Default::default(),
                     mutations: vec![Mutation::SetEmbedding {
                         session_id: sid.clone(),
                         embedding: Some(rekinded.clone()),
@@ -4288,6 +4367,7 @@ mod tests {
         let goal = serde_json::json!(["launch the product", "ship the API"]);
         let batch = MutationBatch {
             mutation_epoch: 0,
+            gc_mark: Default::default(),
             mutations: vec![
                 plant_interaction(&sid, NodeId::new(), None, ts),
                 Mutation::SetRootGoal {
@@ -4307,6 +4387,7 @@ mod tests {
         // Last write wins, and a clear is durable (not "no change").
         let replace = MutationBatch {
             mutation_epoch: 0,
+            gc_mark: Default::default(),
             mutations: vec![Mutation::SetRootGoal {
                 session_id: sid.clone(),
                 goal: Some(serde_json::json!("only this one")),
@@ -4319,6 +4400,7 @@ mod tests {
         );
         let clear = MutationBatch {
             mutation_epoch: 0,
+            gc_mark: Default::default(),
             mutations: vec![Mutation::SetRootGoal {
                 session_id: sid.clone(),
                 goal: None,
@@ -4354,6 +4436,7 @@ mod tests {
             .flush(
                 &MutationBatch {
                     mutation_epoch: 0,
+                    gc_mark: Default::default(),
                     mutations: vec![
                         plant_interaction(
                             &sid,
@@ -4402,6 +4485,7 @@ mod tests {
                 .flush(
                     &MutationBatch {
                         mutation_epoch: 0,
+                        gc_mark: Default::default(),
                         mutations: vec![Mutation::SetEmbedding {
                             session_id: sid.clone(),
                             embedding: Some(contract.clone()),
@@ -4434,6 +4518,7 @@ mod tests {
         let emb = vec![0.25, -0.5, 1.0, 0.0];
         let batch = MutationBatch {
             mutation_epoch: 0,
+            gc_mark: Default::default(),
             mutations: vec![
                 plant_interaction(&sid, i1, None, ts),
                 Mutation::UpsertNode {
@@ -4509,6 +4594,7 @@ mod tests {
             .flush(
                 &MutationBatch {
                     mutation_epoch: 0,
+                    gc_mark: Default::default(),
                     mutations: vec![
                         plant_interaction(&sid, interaction, None, ts),
                         concept_mutation,
@@ -4545,6 +4631,7 @@ mod tests {
             .flush(
                 &MutationBatch {
                     mutation_epoch: 0,
+                    gc_mark: Default::default(),
                     mutations: vec![Mutation::SetEmbedding {
                         session_id: sid.clone(),
                         embedding: Some(EmbeddingContract {
@@ -4657,6 +4744,7 @@ mod tests {
             .flush(
                 &MutationBatch {
                     mutation_epoch: 0,
+                    gc_mark: Default::default(),
                     mutations: vec![plant_interaction(
                         &sid,
                         NodeId::new(),
@@ -4872,6 +4960,7 @@ mod tests {
         let ts = Utc.with_ymd_and_hms(2026, 8, 20, 12, 0, 0).unwrap();
         let batch = MutationBatch {
             mutation_epoch: 42,
+            gc_mark: Default::default(),
             mutations: vec![
                 plant_interaction(&sid, i1, None, ts),
                 plant_concept(&sid, c1, i1, "user schema", ConceptType::Entity, ts),
@@ -4886,6 +4975,7 @@ mod tests {
         // flush) carries a lower watermark: monotonic max keeps the counter.
         let older = MutationBatch {
             mutation_epoch: 7,
+            gc_mark: Default::default(),
             mutations: vec![plant_interaction(&sid, NodeId::new(), Some(i1), ts)],
         };
         store.flush(&older, None).await.unwrap();
@@ -4893,6 +4983,176 @@ mod tests {
         assert_eq!(
             snap.mutation_epoch, 42,
             "a stale stamp must not rewind the durable counter"
+        );
+    }
+
+    /// Issue #29: the `sessions` row carries GC's sweep mark beside the
+    /// epoch. flush stamps it with a field-wise monotonic merge (an older
+    /// stamp, or one with no sweep time, never rewinds either field — the
+    /// NULL handling is the part SQLite's two-argument `MAX` gets wrong on its
+    /// own), `seed` overwrites it, and `load_session` returns it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn flush_stamps_and_load_resumes_the_gc_mark() {
+        let store = test_store();
+        store.init_schema().await.unwrap();
+
+        let sid = SessionId::from("gc-mark");
+        let i1 = NodeId::new();
+        let ts = Utc.with_ymd_and_hms(2026, 8, 20, 12, 0, 0).unwrap();
+        let swept = Utc.with_ymd_and_hms(2026, 10, 7, 9, 30, 0).unwrap();
+        let flush = |mark: GcMark, prev: Option<NodeId>| MutationBatch {
+            mutation_epoch: 1,
+            gc_mark: mark,
+            mutations: vec![plant_interaction(&sid, NodeId::new(), prev, ts)],
+        };
+
+        // A never-swept session loads the unset mark.
+        store
+            .flush(
+                &MutationBatch {
+                    mutation_epoch: 1,
+                    gc_mark: GcMark::default(),
+                    mutations: vec![plant_interaction(&sid, i1, None, ts)],
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(store.load_session(&sid).await.unwrap().gc_mark.is_unset());
+
+        let mark = GcMark {
+            last_gc_epoch: 40,
+            last_gc_at: Some(swept),
+            last_gc_at_reset: false,
+        };
+        store.flush(&flush(mark, Some(i1)), None).await.unwrap();
+        assert_eq!(store.load_session(&sid).await.unwrap().gc_mark, mark);
+
+        // Older stamps — a lower epoch, an earlier time, no time at all —
+        // change nothing.
+        for stale in [
+            GcMark::default(),
+            GcMark {
+                last_gc_epoch: 7,
+                last_gc_at: None,
+                last_gc_at_reset: false,
+            },
+            GcMark {
+                last_gc_epoch: 39,
+                last_gc_at: Some(swept - chrono::Duration::days(1)),
+                last_gc_at_reset: false,
+            },
+        ] {
+            store.flush(&flush(stale, Some(i1)), None).await.unwrap();
+            assert_eq!(
+                store.load_session(&sid).await.unwrap().gc_mark,
+                mark,
+                "stale stamp {stale:?} must not rewind the mark"
+            );
+        }
+
+        // A drain advances the epoch without a new time; a later sweep moves
+        // both.
+        let drained = GcMark {
+            last_gc_epoch: 45,
+            last_gc_at: None,
+            last_gc_at_reset: false,
+        };
+        store.flush(&flush(drained, Some(i1)), None).await.unwrap();
+        assert_eq!(
+            store.load_session(&sid).await.unwrap().gc_mark,
+            GcMark {
+                last_gc_epoch: 45,
+                last_gc_at: Some(swept),
+                last_gc_at_reset: false,
+            }
+        );
+        let later = GcMark {
+            last_gc_epoch: 90,
+            last_gc_at: Some(swept + chrono::Duration::days(1)),
+            last_gc_at_reset: false,
+        };
+        store.flush(&flush(later, Some(i1)), None).await.unwrap();
+        assert_eq!(store.load_session(&sid).await.unwrap().gc_mark, later);
+
+        // Issue #29: a forward clock jump persisted a future sweep time. A
+        // plain (max-merged) earlier stamp cannot correct it; a re-anchored
+        // one replaces it — the one regression the merge allows — while the
+        // epoch stays a max, and the stored mark never carries the flag.
+        let future = GcMark {
+            last_gc_epoch: 95,
+            last_gc_at: Some(swept + chrono::Duration::days(400)),
+            last_gc_at_reset: false,
+        };
+        store.flush(&flush(future, Some(i1)), None).await.unwrap();
+        let corrected = swept + chrono::Duration::days(2);
+        let plain = GcMark {
+            last_gc_epoch: 95,
+            last_gc_at: Some(corrected),
+            last_gc_at_reset: false,
+        };
+        store.flush(&flush(plain, Some(i1)), None).await.unwrap();
+        assert_eq!(store.load_session(&sid).await.unwrap().gc_mark, future);
+        // A re-anchor keeps the writer's current epoch (it is not a sweep).
+        let reset = GcMark {
+            last_gc_epoch: 95,
+            last_gc_at: Some(corrected),
+            last_gc_at_reset: true,
+        };
+        store.flush(&flush(reset, Some(i1)), None).await.unwrap();
+        let stored = store.load_session(&sid).await.unwrap().gc_mark;
+        assert_eq!(
+            stored,
+            GcMark {
+                last_gc_epoch: 95,
+                last_gc_at: Some(corrected),
+                last_gc_at_reset: false,
+            },
+            "a re-anchor replaces the time, never rewinds the epoch"
+        );
+        assert_eq!(stored, future.apply_to_stored(reset), "same rule as memory");
+        // A re-anchored stamp with no time cannot erase one.
+        let no_time = GcMark {
+            last_gc_epoch: 95,
+            last_gc_at: None,
+            last_gc_at_reset: true,
+        };
+        store.flush(&flush(no_time, Some(i1)), None).await.unwrap();
+        assert_eq!(
+            store.load_session(&sid).await.unwrap().gc_mark.last_gc_at,
+            Some(corrected)
+        );
+
+        // A reset replayed after a later sweep (its epoch is older than the
+        // stored mark's) must not rewind that sweep's time: it falls back to
+        // the max-merge, exactly as `GcMark::apply_to_stored` does.
+        let newer_sweep = GcMark {
+            last_gc_epoch: 120,
+            last_gc_at: Some(corrected + chrono::Duration::days(1)),
+            last_gc_at_reset: false,
+        };
+        store
+            .flush(&flush(newer_sweep, Some(i1)), None)
+            .await
+            .unwrap();
+        let replayed_reset = GcMark {
+            last_gc_epoch: 95,
+            last_gc_at: Some(corrected),
+            last_gc_at_reset: true,
+        };
+        store
+            .flush(&flush(replayed_reset, Some(i1)), None)
+            .await
+            .unwrap();
+        let stored = store.load_session(&sid).await.unwrap().gc_mark;
+        assert_eq!(
+            stored, newer_sweep,
+            "a stale reset cannot rewind a later sweep"
+        );
+        assert_eq!(
+            stored,
+            newer_sweep.apply_to_stored(replayed_reset),
+            "same rule as memory"
         );
     }
 
@@ -4959,7 +5219,15 @@ mod tests {
                 .fetch_all(store.pool())
                 .await
                 .unwrap();
-        for want in ["embedding_kind", "embedding_model", "embedding_dim"] {
+        for want in [
+            "embedding_kind",
+            "embedding_model",
+            "embedding_dim",
+            "mutation_epoch",
+            // Issue #29: GC's sweep accounting converges the same way.
+            "last_gc_epoch",
+            "last_gc_at",
+        ] {
             assert!(
                 session_cols.iter().any(|c| c == want),
                 "{want} must be added to a pre-existing sessions table"
@@ -4982,6 +5250,7 @@ mod tests {
         let ts = Utc::now();
         let batch = MutationBatch {
             mutation_epoch: 0,
+            gc_mark: Default::default(),
             mutations: vec![
                 plant_interaction(&sid, i1, None, ts),
                 Mutation::UpsertNode {
@@ -5120,6 +5389,7 @@ mod tests {
         let ts = Utc.with_ymd_and_hms(2026, 8, 20, 12, 0, 0).unwrap();
         let batch = MutationBatch {
             mutation_epoch: 0,
+            gc_mark: Default::default(),
             mutations: vec![
                 Mutation::UpsertNode {
                     node: NodeKind::Interaction(Interaction {
@@ -5218,6 +5488,7 @@ mod tests {
         let ts = Utc::now();
         let batch = MutationBatch {
             mutation_epoch: 0,
+            gc_mark: Default::default(),
             mutations: vec![
                 plant_interaction(&sid, i1, None, ts),
                 plant_concept(&sid, c1, i1, "user schema design", ConceptType::Entity, ts),
@@ -5478,6 +5749,7 @@ mod tests {
                 .flush(
                     &MutationBatch {
                         mutation_epoch: 0,
+                        gc_mark: Default::default(),
                         mutations,
                     },
                     None,
@@ -6334,6 +6606,7 @@ mod tests {
                 }
                 let batch = MutationBatch {
                     mutation_epoch: 0,
+                    gc_mark: Default::default(),
                     mutations,
                 };
 
@@ -6442,6 +6715,7 @@ mod tests {
             }
             let batch = MutationBatch {
                 mutation_epoch: 0,
+                gc_mark: Default::default(),
                 mutations,
             };
 
@@ -7125,6 +7399,7 @@ mod tests {
         let alone = NodeId::new();
         let batch = MutationBatch {
             mutation_epoch: 0,
+            gc_mark: Default::default(),
             mutations: vec![
                 plant_interaction(&sid, i1, None, ts),
                 plant_concept(&sid, pillar, i1, "pillar", ConceptType::Entity, ts),
@@ -7161,6 +7436,66 @@ mod tests {
         }
     }
 
+    /// Issue #35: a dependent is reached through a **structural** edge from
+    /// the focus (`Dependency`/`Causal`/`Hierarchical`), as Postgres/Cockroach
+    /// (`BLAST_RADIUS_SQL`), MemoryStore and the graph's `blast_radii` define
+    /// it. SQLite's first `EXISTS` had no `edge_type` filter, so a concept the
+    /// focus only co-occurs with (`CoOccurrence`), resembles (`Semantic`) or
+    /// precedes (`Temporal`) counted as a dependent and inflated Stage 3.
+    #[cfg(feature = "store-memory")]
+    #[tokio::test]
+    async fn blast_radius_counts_only_structural_edges_from_the_focus() {
+        let store = test_store();
+        store.init_schema().await.unwrap();
+        let sid = SessionId::from("structural-only");
+        let ts = Utc.with_ymd_and_hms(2026, 8, 10, 9, 0, 0).unwrap();
+        let i1 = NodeId::new();
+        let pillar = NodeId::new();
+        let dep = NodeId::new();
+        let co = NodeId::new();
+        let sem = NodeId::new();
+        let tmp = NodeId::new();
+        let batch = MutationBatch {
+            mutation_epoch: 0,
+            gc_mark: Default::default(),
+            mutations: vec![
+                plant_interaction(&sid, i1, None, ts),
+                plant_concept(&sid, pillar, i1, "pillar", ConceptType::Entity, ts),
+                plant_concept(&sid, dep, i1, "dep", ConceptType::Entity, ts),
+                plant_concept(&sid, co, i1, "co", ConceptType::Entity, ts),
+                plant_concept(&sid, sem, i1, "sem", ConceptType::Entity, ts),
+                plant_concept(&sid, tmp, i1, "tmp", ConceptType::Entity, ts),
+                // The one real dependent.
+                plant_edge(&sid, pillar, dep, EdgeType::Dependency, ts),
+                // Non-structural edges from the focus: none of these targets
+                // has any structural inbound edge, so a missing filter on the
+                // first EXISTS would count each as an exclusive dependent.
+                plant_edge(&sid, pillar, co, EdgeType::CoOccurrence, ts),
+                plant_edge(&sid, pillar, sem, EdgeType::Semantic, ts),
+                plant_edge(&sid, pillar, tmp, EdgeType::Temporal, ts),
+            ],
+        };
+        store.flush(&batch, None).await.unwrap();
+        let memory = MemoryStore::new();
+        memory.flush(&batch, None).await.unwrap();
+
+        for min_age in [Duration::from_secs(0), Duration::from_secs(3600)] {
+            let want = memory
+                .blast_radius(&sid, pillar, min_age, Utc::now())
+                .await
+                .unwrap();
+            assert_eq!(want, 1, "oracle sanity: only the Dependency target counts");
+            let got = store
+                .blast_radius(&sid, pillar, min_age, Utc::now())
+                .await
+                .unwrap();
+            assert_eq!(
+                got, want,
+                "SQLite must count structural dependents only, like MemoryStore (min_age {min_age:?})"
+            );
+        }
+    }
+
     /// R2-3: `blast_radius` must be session-scoped on the **source** side of
     /// both structural subqueries, exactly as Cockroach's `BLAST_RADIUS_SQL`
     /// is and as MemoryStore is by construction (it walks one session's
@@ -7191,6 +7526,7 @@ mod tests {
 
         let local = MutationBatch {
             mutation_epoch: 0,
+            gc_mark: Default::default(),
             mutations: vec![
                 plant_interaction(&here, i1, None, ts),
                 plant_concept(&here, hub, i1, "hub", ConceptType::Entity, ts),
@@ -7204,6 +7540,7 @@ mod tests {
         };
         let elsewhere = MutationBatch {
             mutation_epoch: 0,
+            gc_mark: Default::default(),
             mutations: vec![
                 plant_interaction(&there, i2, None, ts),
                 plant_concept(&there, foreign, i2, "foreign", ConceptType::Entity, ts),
@@ -7278,6 +7615,7 @@ mod tests {
         // probe). `other`'s origin is DISTINCT i2 — the fresh edge's source.
         let base = MutationBatch {
             mutation_epoch: 0,
+            gc_mark: Default::default(),
             mutations: vec![
                 plant_interaction(&sid, i1, None, old_ts),
                 plant_interaction(&sid, i2, None, old_ts),
@@ -7311,6 +7649,7 @@ mod tests {
         // Then a genuinely FRESH other -> orphan dependency (created now).
         let fresh = MutationBatch {
             mutation_epoch: 0,
+            gc_mark: Default::default(),
             mutations: vec![plant_edge(&sid, other, orphan, EdgeType::Dependency, now)],
         };
         store.flush(&fresh, None).await.unwrap();
@@ -7479,6 +7818,7 @@ mod tests {
         }
         let batch = MutationBatch {
             mutation_epoch: 0,
+            gc_mark: Default::default(),
             mutations,
         };
         store.flush(&batch, None).await.unwrap();
@@ -7524,6 +7864,7 @@ mod tests {
         let orphan = NodeId::new();
         let batch = MutationBatch {
             mutation_epoch: 0,
+            gc_mark: Default::default(),
             mutations: vec![
                 plant_interaction(&sid, i1, None, ts),
                 plant_concept(&sid, pillar, i1, "pillar", ConceptType::Entity, ts),
@@ -7591,6 +7932,7 @@ mod tests {
             .flush(
                 &MutationBatch {
                     mutation_epoch: 0,
+                    gc_mark: Default::default(),
                     mutations: vec![
                         plant_interaction(&sid, i1, None, ts),
                         plant_concept(&sid, c1, i1, "pillar", ConceptType::Entity, ts),
@@ -7615,6 +7957,7 @@ mod tests {
             .flush(
                 &MutationBatch {
                     mutation_epoch: 0,
+                    gc_mark: Default::default(),
                     mutations: vec![Mutation::CanonizationTransition { event: ev1.clone() }],
                 },
                 None,
@@ -7672,6 +8015,7 @@ mod tests {
             .flush(
                 &MutationBatch {
                     mutation_epoch: 0,
+                    gc_mark: Default::default(),
                     mutations: vec![Mutation::CanonizationTransition { event: ev1.clone() }],
                 },
                 None,
@@ -7704,6 +8048,7 @@ mod tests {
             .flush(
                 &MutationBatch {
                     mutation_epoch: 0,
+                    gc_mark: Default::default(),
                     mutations: vec![
                         plant_interaction(&sid, i1, None, ts),
                         plant_concept(&sid, c1, i1, "pillar", ConceptType::Entity, ts),
@@ -7813,6 +8158,7 @@ mod tests {
             .flush(
                 &MutationBatch {
                     mutation_epoch: 0,
+                    gc_mark: Default::default(),
                     mutations: vec![plant_interaction(&sid, i1, None, ts), plant.clone()],
                 },
                 None,
@@ -7836,6 +8182,7 @@ mod tests {
             .flush(
                 &MutationBatch {
                     mutation_epoch: 0,
+                    gc_mark: Default::default(),
                     mutations: vec![
                         with_stale_canonization(plant, CanonizationStatus::None, None, None),
                         Mutation::CanonizationTransition { event: hop },
@@ -7904,6 +8251,7 @@ mod tests {
             .flush(
                 &MutationBatch {
                     mutation_epoch: 0,
+                    gc_mark: Default::default(),
                     mutations: vec![
                         plant_interaction(&sid, i1, None, ts),
                         born,
@@ -7967,6 +8315,7 @@ mod tests {
             .flush(
                 &MutationBatch {
                     mutation_epoch: 0,
+                    gc_mark: Default::default(),
                     mutations: vec![
                         plant_interaction(&sid, i1, None, ts),
                         plant_interaction(&sid, i1, None, ts),
@@ -7993,6 +8342,7 @@ mod tests {
             .flush(
                 &MutationBatch {
                     mutation_epoch: 0,
+                    gc_mark: Default::default(),
                     mutations: vec![
                         plant_interaction(&sid, i1, None, ts),
                         plant_interaction(&sid, i2, Some(i1), ts),
@@ -8074,6 +8424,7 @@ mod tests {
             .flush(
                 &MutationBatch {
                     mutation_epoch: 0,
+                    gc_mark: Default::default(),
                     mutations,
                 },
                 None,
@@ -8112,6 +8463,7 @@ mod tests {
             .flush(
                 &MutationBatch {
                     mutation_epoch: 0,
+                    gc_mark: Default::default(),
                     mutations: vec![plant_interaction(&sid, i1, None, ts), plant.clone()],
                 },
                 None,
@@ -8153,6 +8505,7 @@ mod tests {
             .flush(
                 &MutationBatch {
                     mutation_epoch: 0,
+                    gc_mark: Default::default(),
                     mutations: vec![
                         with_stale_canonization(
                             plant,
@@ -8196,6 +8549,7 @@ mod tests {
             .flush(
                 &MutationBatch {
                     mutation_epoch: 0,
+                    gc_mark: Default::default(),
                     mutations: vec![
                         plant_interaction(&sid, NodeId::new(), None, t1),
                         plant_interaction(&sid, NodeId::new(), None, t2),
@@ -8261,6 +8615,7 @@ mod tests {
             .flush(
                 &MutationBatch {
                     mutation_epoch: 0,
+                    gc_mark: Default::default(),
                     mutations: vec![
                         plant_interaction(&sid, i1, None, ts),
                         plant_concept(
@@ -8296,6 +8651,7 @@ mod tests {
             .flush(
                 &MutationBatch {
                     mutation_epoch: 0,
+                    gc_mark: Default::default(),
                     mutations: vec![plant_concept(
                         &sid,
                         e2,
@@ -8336,6 +8692,7 @@ mod tests {
                 s.flush(
                     &MutationBatch {
                         mutation_epoch: 0,
+                        gc_mark: Default::default(),
                         mutations: vec![
                             plant_interaction(&sid, i1, None, ts),
                             plant_concept(&sid, c1, i1, &format!("n{n}"), ConceptType::Entity, ts),
@@ -8383,6 +8740,7 @@ mod tests {
             .flush(
                 &MutationBatch {
                     mutation_epoch: 0,
+                    gc_mark: Default::default(),
                     mutations: vec![
                         plant_interaction(&sid, i1, None, ts),
                         plant_concept(&sid, c1, i1, "registry concept", ConceptType::Entity, ts),
@@ -8440,6 +8798,7 @@ mod tests {
                 .flush(
                     &MutationBatch {
                         mutation_epoch: 0,
+                        gc_mark: Default::default(),
                         mutations: vec![
                             plant_interaction(&sid, i1, None, ts),
                             plant_concept(
@@ -9228,6 +9587,7 @@ mod tests {
             .flush(
                 &MutationBatch {
                     mutation_epoch: 0,
+                    gc_mark: Default::default(),
                     mutations: vec![
                         interaction(i_stamped, None, Some(about)),
                         interaction(i_plain, Some(i_stamped), None),
@@ -9304,6 +9664,7 @@ mod tests {
             .flush(
                 &MutationBatch {
                     mutation_epoch: 0,
+                    gc_mark: Default::default(),
                     mutations: vec![
                         Mutation::UpsertNode {
                             node: NodeKind::Interaction(Interaction {

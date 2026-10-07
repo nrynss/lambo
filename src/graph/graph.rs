@@ -25,9 +25,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::types::{
-    CanonizationEvent, CanonizationStatus, Concept, ConceptType, Edge, EdgeType, GraphSnapshot,
-    Interaction, LamboError, Mutation, MutationBatch, Node, NodeId, Reservation, SessionId,
-    StoreError, Synonym, WriteIntent, WriteIntentOutcome,
+    CanonizationEvent, CanonizationStatus, Concept, ConceptType, Edge, EdgeType, GcMark,
+    GraphSnapshot, Interaction, LamboError, Mutation, MutationBatch, Node, NodeId, Reservation,
+    SessionId, StoreError, Synonym, WriteIntent, WriteIntentOutcome,
 };
 
 /// Edge-weight bump per reinforcement (v0.6.0 §5.4 semantics; see module docs).
@@ -80,6 +80,15 @@ pub struct Graph {
     /// after it does not. The durable watermark is therefore never behind the
     /// count of durable mutations; it may run ahead of it by RAM-local bumps.
     epoch: u64,
+    /// GC's sweep accounting (issue #29): the epoch the next sweep interval is
+    /// measured from and the time of the last sweep. Graph state for the same
+    /// reason `epoch` is — [`Graph::from_snapshot`] resumes it and
+    /// [`Graph::drain_log`] stamps it onto every flushed batch, so a writer
+    /// restart neither re-runs a sweep nobody owed nor resets the
+    /// `gc_max_interval` clock. Setting it is **not** a mutation: it never
+    /// bumps `epoch` and never enters the log (it rides the next batch's
+    /// stamp, the way `epoch` does).
+    gc_mark: GcMark,
 }
 
 impl Graph {
@@ -101,6 +110,7 @@ impl Graph {
             embedding: None,
             mutation_log: Vec::new(),
             epoch: 0,
+            gc_mark: GcMark::default(),
         }
     }
 
@@ -263,6 +273,17 @@ impl Graph {
         // mid-construction. `Graph::new` started it at 0; the snapshot's value
         // is the deployment's count through its last durable mutation.
         g.epoch = snap.mutation_epoch;
+        // Issue #29: GC's sweep accounting resumes with it, so a restart does
+        // not measure the next sweep from 0 (which swept once per restart and
+        // bumped every `gc_survived` once the lifetime count passed the
+        // interval).
+        // The reset flag is writer-side only (stored marks are always
+        // `false`): a snapshot that somehow carries it must not make this
+        // fresh writer replace the stored time on its first flush.
+        g.gc_mark = GcMark {
+            last_gc_at_reset: false,
+            ..snap.gc_mark
+        };
         Ok(g)
     }
 
@@ -327,6 +348,12 @@ impl Graph {
             // restart it, or GC's `gc_interval` would measure per-process
             // mutations again.
             mutation_epoch: self.epoch,
+            // A snapshot is a stored view: the writer-side re-anchor flag
+            // never leaves the graph this way (only `drain_log` carries it).
+            gc_mark: GcMark {
+                last_gc_at_reset: false,
+                ..self.gc_mark
+            },
         }
     }
 
@@ -1399,6 +1426,84 @@ impl Graph {
         MutationBatch {
             mutations: std::mem::take(&mut self.mutation_log),
             mutation_epoch: self.epoch,
+            gc_mark: self.gc_mark,
+        }
+    }
+
+    /// GC's durable sweep accounting (issue #29); see [`GcMark`].
+    pub fn gc_mark(&self) -> GcMark {
+        self.gc_mark
+    }
+
+    /// Record a completed GC sweep: the next interval is measured from
+    /// `epoch_after` and the `gc_max_interval` clock restarts at `at`.
+    ///
+    /// Not a mutation (no epoch bump, no log entry): the mark rides the next
+    /// drained batch's stamp. The caller (the daemon) calls this inside the
+    /// same write guard as the sweep, so the mark and the sweep's mutations
+    /// drain — and so persist — together.
+    pub fn record_gc_sweep(&mut self, epoch_after: u64, at: chrono::DateTime<chrono::Utc>) {
+        self.gc_mark = self.gc_mark.merge(GcMark {
+            last_gc_epoch: epoch_after,
+            last_gc_at: Some(at),
+            last_gc_at_reset: false,
+        });
+    }
+
+    /// Exclude `n` epoch bumps from GC's session-mutation measure by advancing
+    /// [`GcMark::last_gc_epoch`] by `n` (NEW-2), never past [`Graph::epoch`].
+    ///
+    /// GC's deferred survivor-bump drains use this: their own `UpsertNode`s
+    /// advance the epoch, and crediting them as session writes made GC
+    /// self-sustaining on an idle session. It is only for writes that **did**
+    /// advance the epoch, called under the same write guard that appended
+    /// them, with `n` equal to the bumps they caused.
+    ///
+    /// A write that does not advance the epoch needs no exemption and must not
+    /// call this: the measure is `epoch - last_gc_epoch`, so such a write is
+    /// already invisible to it, and "exempting" it would cancel real session
+    /// writes out of `gc_interval` and the idle floor and suppress sweeps.
+    /// (Issue #30 records accesses without advancing the epoch, so it is in
+    /// this category.)
+    ///
+    /// The watermark is clamped to the current epoch: a watermark ahead of the
+    /// epoch would hide the next writes from the measure until the epoch caught
+    /// up. An `n` that would overshoot is a caller bug (debug-asserted).
+    pub fn exempt_from_gc_measure(&mut self, n: u64) {
+        let advanced = self.gc_mark.last_gc_epoch.saturating_add(n);
+        debug_assert!(
+            advanced <= self.epoch,
+            "exempt_from_gc_measure({n}) would move last_gc_epoch {} past epoch {}: \
+             only exempt bumps that were actually appended",
+            self.gc_mark.last_gc_epoch,
+            self.epoch
+        );
+        self.gc_mark.last_gc_epoch = advanced.min(self.epoch).max(self.gc_mark.last_gc_epoch);
+    }
+
+    /// Re-anchor the `gc_max_interval` clock at `at` after the stored
+    /// `last_gc_at` was found in the future (issue #29: a forward wall-clock
+    /// jump persisted a future sweep time, and the max-merge would otherwise
+    /// keep it — disabling the time trigger until real time caught up).
+    ///
+    /// Not a mutation; rides the next drained batch like every mark change.
+    /// Sets [`GcMark::last_gc_at_reset`] so the flush carry and the store
+    /// accept this one regression of `last_gc_at` instead of max-merging it
+    /// away. `last_gc_epoch` is untouched. The caller (the daemon) decides when
+    /// a stored time is "in the future" — see
+    /// [`crate::daemon::gc::gc_clock_ahead`].
+    pub fn reanchor_gc_clock(&mut self, at: chrono::DateTime<chrono::Utc>) {
+        self.gc_mark.last_gc_at = Some(at);
+        self.gc_mark.last_gc_at_reset = true;
+    }
+
+    /// Start the `gc_max_interval` clock for a session that has never swept
+    /// (issue #29): a no-op once [`GcMark::last_gc_at`] is set. The first timed
+    /// sweep is then due a full interval after a writer first observed the
+    /// session, never immediately on attach.
+    pub fn anchor_gc_clock(&mut self, at: chrono::DateTime<chrono::Utc>) {
+        if self.gc_mark.last_gc_at.is_none() {
+            self.gc_mark.last_gc_at = Some(at);
         }
     }
 
@@ -1977,6 +2082,81 @@ mod tests {
             human_confirmed: 0,
             chunk_group_id: None,
         }
+    }
+
+    /// A graph with a few writes behind it (epoch > 0).
+    fn graph_with_writes() -> Graph {
+        let mut g = Graph::new(sid());
+        let mut prev = None;
+        for i in 0..3 {
+            let ix = interaction(9_000 + i, prev, i as i64);
+            prev = Some(ix.id);
+            g.insert_interaction(ix).unwrap();
+        }
+        assert!(g.epoch() >= 3);
+        g
+    }
+
+    /// Issue #29 item 2: exempting exactly the bumps a writer appended moves
+    /// the watermark to the epoch, so those writes are invisible to GC's
+    /// measure and the next real write is visible again.
+    #[test]
+    fn exempting_appended_bumps_moves_the_watermark_up_to_the_epoch() {
+        let mut g = graph_with_writes();
+        let e = g.epoch();
+        g.record_gc_sweep(e - 2, ts(0));
+        g.exempt_from_gc_measure(2);
+        assert_eq!(g.gc_mark().last_gc_epoch, e);
+        let tail = g.temporal_chain().last().copied();
+        g.insert_interaction(interaction(1, tail, 99)).unwrap();
+        assert!(
+            g.epoch() > g.gc_mark().last_gc_epoch,
+            "the next write counts"
+        );
+    }
+
+    /// Issue #29 item 2: an over-large exemption cannot move the watermark
+    /// past the epoch (which would hide the next writes from GC's measure and
+    /// suppress sweeps). Debug builds treat it as the caller bug it is; release
+    /// builds clamp. Either way the mark never ends up ahead of the epoch.
+    #[test]
+    #[cfg_attr(debug_assertions, should_panic(expected = "past epoch"))]
+    fn exempt_from_gc_measure_never_moves_the_watermark_past_the_epoch() {
+        let mut g = graph_with_writes();
+        let e = g.epoch();
+        g.record_gc_sweep(e - 1, ts(0));
+        g.exempt_from_gc_measure(10);
+        assert_eq!(g.gc_mark().last_gc_epoch, e, "clamped to the epoch");
+    }
+
+    /// Issue #29 review: the writer-side reset flag never reaches a snapshot
+    /// and never survives `from_snapshot`, while `drain_log` still carries it
+    /// (the flush path is the one place it is meant to travel).
+    #[test]
+    fn the_gc_reset_flag_never_leaves_or_enters_through_a_snapshot() {
+        let mut g = graph_with_writes();
+        g.reanchor_gc_clock(ts(5));
+        assert!(g.gc_mark().last_gc_at_reset);
+        let snap = g.snapshot();
+        assert!(!snap.gc_mark.last_gc_at_reset, "snapshot is a stored view");
+        assert_eq!(snap.gc_mark.last_gc_at, Some(ts(5)));
+        assert!(
+            g.drain_log().gc_mark.last_gc_at_reset,
+            "drain still carries"
+        );
+
+        let flagged = GraphSnapshot {
+            gc_mark: GcMark {
+                last_gc_epoch: 3,
+                last_gc_at: Some(ts(7)),
+                last_gc_at_reset: true,
+            },
+            ..snap
+        };
+        let resumed = Graph::from_snapshot(flagged).unwrap();
+        assert!(!resumed.gc_mark().last_gc_at_reset);
+        assert_eq!(resumed.gc_mark().last_gc_at, Some(ts(7)));
+        assert_eq!(resumed.gc_mark().last_gc_epoch, 3);
     }
 
     fn edge(id: u64, src: NodeId, tgt: NodeId, ty: EdgeType, w: f64) -> Edge {
@@ -3901,6 +4081,7 @@ mod tests {
             canonization_events: vec![],
             embedding: None,
             mutation_epoch: 0,
+            gc_mark: Default::default(),
         };
         // Every concept derives from the interaction (assert_invariants
         // requires it) plus a single Causal chain c0 -> c1 -> ... -> c(N-1).

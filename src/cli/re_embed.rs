@@ -466,6 +466,7 @@ mod tests {
         };
         let batch = MutationBatch {
             mutation_epoch: 0,
+            gc_mark: Default::default(),
             mutations: vec![
                 interaction,
                 set_contract,

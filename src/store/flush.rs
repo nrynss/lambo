@@ -495,6 +495,16 @@ impl FlushLoop {
             // MAX/GREATEST, so a retained batch retried with the same stamp (or
             // the same watermark arriving twice) is idempotent at the store.
             self.pending.mutation_epoch = self.pending.mutation_epoch.max(drained.mutation_epoch);
+            // Issue #29: GC's sweep mark rides the same carry for the same
+            // reason — without it every routine flush would present the unset
+            // mark and the durable `last_gc_epoch`/`last_gc_at` would never
+            // move, so a restart would sweep again. `GcMark::merge` is the
+            // field-wise max (the adapters apply the same rule,
+            // `GcMark::apply_to_stored`), so the carried value is monotone and
+            // a repeat is idempotent — except a re-anchored `last_gc_at`
+            // (`last_gc_at_reset`), which replaces the carried and stored time
+            // once after a corrected forward clock jump.
+            self.pending.gc_mark = self.pending.gc_mark.merge(drained.gc_mark);
             self.pending.mutations.extend(drained.mutations);
         }
 
@@ -2278,5 +2288,153 @@ mod tests {
             "the stamp survived retention and the empty-drain cycles"
         );
         assert!(snap.mutation_epoch > 0);
+    }
+
+    /// Issue #29: GC's sweep mark rides the flush loop exactly like the epoch
+    /// stamp. Recording a sweep is not a mutation, so it lands with the next
+    /// flushed batch; the store keeps the field-wise max; a restarted writer
+    /// resumes it. Fails on a loop that drops `gc_mark` in `cycle` (the store
+    /// would keep the unset mark and a restart would sweep again — the
+    /// restart defect #29 fixes).
+    #[tokio::test(start_paused = true)]
+    async fn flush_loop_carries_the_gc_mark_and_a_restart_resumes_it() {
+        use chrono::TimeZone;
+        let store = Arc::new(FlakyStore::new(Arc::new(MemoryStore::new())));
+        let graph = new_graph();
+        let task = FlushTask::new(
+            graph.clone(),
+            store.clone(),
+            params(Duration::from_secs(1), 100, 3, 1_000),
+        );
+        let _handle = task.spawn();
+        let_task_arm().await;
+
+        let swept_at = chrono::Utc.with_ymd_and_hms(2026, 10, 7, 9, 0, 0).unwrap();
+        let iid = add_interaction(&graph, 1, None);
+        add_concept(&graph, 1, iid);
+        let epoch = graph.read().epoch();
+        graph.write().record_gc_sweep(epoch, swept_at);
+        assert_eq!(
+            graph.read().epoch(),
+            epoch,
+            "recording a sweep is not a mutation"
+        );
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        wait_until_async(|| async { store.load_session(&sid()).await.is_ok() }).await;
+        let stored = store.load_session(&sid()).await.unwrap().gc_mark;
+        assert_eq!(
+            stored.last_gc_epoch, epoch,
+            "the loop flush carries the mark"
+        );
+        assert_eq!(stored.last_gc_at, Some(swept_at));
+
+        // A later write flushes the same mark again (the carry is never
+        // reset); the store value cannot regress.
+        let _ = add_interaction(&graph, 2, Some(iid));
+        tokio::time::advance(Duration::from_secs(1)).await;
+        wait_until_async(|| async {
+            matches!(store.load_session(&sid()).await, Ok(s) if s.interactions.len() == 2)
+        })
+        .await;
+        let snapshot = store.load_session(&sid()).await.unwrap();
+        assert_eq!(snapshot.gc_mark, stored);
+
+        let restarted = Graph::from_snapshot(snapshot).unwrap();
+        assert_eq!(restarted.gc_mark(), stored, "a restart resumes the mark");
+
+        // Issue #29 item 3: a re-anchor after a forward clock jump is the one
+        // regression of `last_gc_at` the carry and the store accept. It lands
+        // with the next write and survives a restart; the epoch does not move.
+        let corrected = swept_at - chrono::Duration::days(1);
+        graph.write().reanchor_gc_clock(corrected);
+        let tail = graph.read().temporal_chain().last().copied();
+        let _ = add_interaction(&graph, 3, tail);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        wait_until_async(|| async {
+            matches!(store.load_session(&sid()).await, Ok(s) if s.interactions.len() == 3)
+        })
+        .await;
+        let snapshot = store.load_session(&sid()).await.unwrap();
+        assert_eq!(snapshot.gc_mark.last_gc_at, Some(corrected));
+        assert_eq!(snapshot.gc_mark.last_gc_epoch, epoch);
+        assert!(
+            !snapshot.gc_mark.last_gc_at_reset,
+            "stored marks carry no flag"
+        );
+        let restarted = Graph::from_snapshot(snapshot).unwrap();
+        assert_eq!(restarted.gc_mark().last_gc_at, Some(corrected));
+    }
+
+    /// Issue #29 review: a SECOND wall-clock jump in one process must persist
+    /// its correction too. jump → sweep → correct → re-anchor → flush, twice,
+    /// in one writer: the store holds the corrected time both times. Pre-fix
+    /// the pending mark kept its flag and the first jump's future time, the
+    /// second re-anchor fell to a max-merge, and the second future time
+    /// stayed in the store (so a restart would not time-sweep until real time
+    /// caught up).
+    #[tokio::test(start_paused = true)]
+    async fn a_second_reanchor_in_one_process_is_persisted() {
+        use chrono::TimeZone;
+        let store = Arc::new(FlakyStore::new(Arc::new(MemoryStore::new())));
+        let graph = new_graph();
+        let task = FlushTask::new(
+            graph.clone(),
+            store.clone(),
+            params(Duration::from_secs(1), 100, 3, 1_000),
+        );
+        let _handle = task.spawn();
+        let_task_arm().await;
+
+        let base = chrono::Utc.with_ymd_and_hms(2026, 10, 7, 9, 0, 0).unwrap();
+        let mut tail = Some(add_interaction(&graph, 1, None));
+        let mut n = 1u64;
+        let mut flush_one = |graph: &Arc<RwLock<Graph>>, tail: &mut Option<NodeId>| {
+            n += 1;
+            *tail = Some(add_interaction(graph, n, *tail));
+            n
+        };
+        for (round, (future, corrected)) in [
+            (base + chrono::Duration::days(400), base),
+            (
+                base + chrono::Duration::days(900),
+                base + chrono::Duration::days(1),
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            // The clock jumped forward and a sweep stamped the future time.
+            let epoch = graph.read().epoch();
+            graph.write().record_gc_sweep(epoch, future);
+            let want = flush_one(&graph, &mut tail) as usize;
+            tokio::time::advance(Duration::from_secs(1)).await;
+            wait_until_async(|| async {
+                matches!(store.load_session(&sid()).await, Ok(s) if s.interactions.len() == want)
+            })
+            .await;
+            assert_eq!(
+                store.load_session(&sid()).await.unwrap().gc_mark.last_gc_at,
+                Some(future),
+                "round {round}: the future sweep time lands"
+            );
+
+            // The clock was corrected and the daemon re-anchored.
+            graph.write().reanchor_gc_clock(corrected);
+            let want = flush_one(&graph, &mut tail) as usize;
+            tokio::time::advance(Duration::from_secs(1)).await;
+            wait_until_async(|| async {
+                matches!(store.load_session(&sid()).await, Ok(s) if s.interactions.len() == want)
+            })
+            .await;
+            let stored = store.load_session(&sid()).await.unwrap().gc_mark;
+            assert_eq!(
+                stored.last_gc_at,
+                Some(corrected),
+                "round {round}: the re-anchor persists"
+            );
+            assert!(!stored.last_gc_at_reset, "stored marks carry no flag");
+            assert!(stored.last_gc_epoch > 0, "the epoch stays monotone");
+        }
     }
 }
