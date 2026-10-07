@@ -38,8 +38,10 @@ on:
         type: boolean
         default: true
 
+# Least privilege: read-only by default. Only `release`, which creates the
+# GitHub release, gets contents: write.
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -48,6 +50,10 @@ jobs:
   build:
     name: build-${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    # Builds third-party code (every dependency's build script runs here), so
+    # its token must not be able to write to the repository.
+    permissions:
+      contents: read
 
     # Cargo features are per matrix entry. An entry without `features` gets the
     # full ship profile (T8.9): every compiled adapter in one binary, with
@@ -91,8 +97,12 @@ jobs:
           # The Metal flavour: ship plus the in-process candle embedder with its
           # Metal backend (`[embedder] kind = "candle"`, `device = "metal"`).
           # The stock ship assets carry no candle at all, so without this asset
-          # a Metal rig can only run a hand-built binary. Same runner class as
-          # CI's candle-metal job. Metal is a system framework, so the binary
+          # a Metal rig can only run a hand-built binary. Pinned to macos-14,
+          # like the stock macos-arm64 entry, so both Apple silicon assets come
+          # from one image and SDK. CI's candle-metal job runs on macos-latest
+          # and is a compile-only check (`cargo check`); it is left floating on
+          # purpose so CI notices a newer image first, while the release stays
+          # on a known image. Metal is a system framework, so the binary
           # still links nothing outside /System/Library and /usr/lib; the
           # "Assert system-only dylibs" step below enforces that.
           - os: macos-14
@@ -264,6 +274,8 @@ jobs:
     # including a dispatch started on a tag ref; see the header.
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
