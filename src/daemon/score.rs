@@ -17,8 +17,8 @@
 //! carries. All four weighted dimensions are session-relative, so the same
 //! graph scores identically regardless of wall clock (fixture-friendly):
 //!
-//! * **recency** — how recently the concept was last touched
-//!   (`last_accessed`, falling back to `created_at`) relative to the session's
+//! * **recency** — how recently the concept was last touched (the later of
+//!   `last_accessed` and `created_at`) relative to the session's
 //!   interaction temporal extent: `(last_touch − start) / (end − start)`,
 //!   clamped. A single-point extent (all timestamps equal) yields `1.0`
 //!   (everything is "now").
@@ -295,7 +295,14 @@ impl SessionContext {
 
 /// Compute the six dimension values for one concept from graph state.
 pub fn score_concept(graph: &Graph, c: &Concept, ctx: &SessionContext) -> ScoreDims {
-    let last_touch = c.last_accessed.unwrap_or(c.created_at);
+    // The later of the two: a concept is never "touched" before it existed. A
+    // read stamped from a different clock than the write (issue #30 — reads
+    // use the wall clock, `lambo demo` scripts its writes) must not move a
+    // concept's recency backwards. Identical to `unwrap_or` whenever
+    // `last_accessed >= created_at`, which every production stamp is.
+    let last_touch = c
+        .last_accessed
+        .map_or(c.created_at, |t| t.max(c.created_at));
     let span_ms = (ctx.end - ctx.start).num_milliseconds();
     let recency = if span_ms == 0 {
         1.0
