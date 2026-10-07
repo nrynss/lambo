@@ -122,6 +122,14 @@ impl AccessLedger {
         let mut state = self.state.lock();
         if state.closed {
             state.dropped_after_close += 1;
+            if state.dropped_after_close == 1 {
+                // Once, not per note: a late recall is expected and harmless,
+                // but a closed session still being read is worth one line.
+                // The running total is [`AccessLedger::dropped_after_close`].
+                tracing::debug!(
+                    "access ledger closed: dropping reads that finish after close                      (counts only; later drops are not logged)"
+                );
+            }
             return false;
         }
         for id in seen {
