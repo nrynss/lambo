@@ -163,6 +163,18 @@
   instance's authorized networks, idempotently, preserving entries it did not add.
 - Released binaries (`ship`) now carry `store-postgres` and `embed-gemini`, so a
   `lambo.toml` naming `postgres` or `gemini` runs on a prebuilt binary.
+- `lambo serve` embedder keep-warm (issue #13): a holder-side task embeds one
+  short fixed probe every interval and discards the vector, so an idle writer's
+  model weights stay out of the OS memory compressor. Set with `[embedder]
+  keep_warm_secs` / `LAMBO_EMBED_KEEP_WARM_SECS`: omitted means auto, `0` is
+  off, `N` is every N seconds for any embedder kind. **Behaviour change for
+  candle on Metal:** auto is on there (every 30 s), because those weights sit in
+  unified memory the macOS pager compresses. Everything else defaults off: CUDA
+  weights live in VRAM, the fixture has no weights, and `bge_m3`/`gemini` hold
+  their weights in another process. A touch writes nothing (no store I/O, graph
+  mutation, ledger line or recall-cache entry), is not part of the embedding
+  contract, and first fires one interval after startup, so the handshake gains
+  no work. Proxies and one-shot CLI commands never run it.
 
 ### Fixed
 
