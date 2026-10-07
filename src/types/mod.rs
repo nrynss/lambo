@@ -757,14 +757,17 @@ impl GcMark {
     /// except that a newer mark carrying [`GcMark::last_gc_at_reset`] supplies
     /// `last_gc_at` outright. This is the flush loop's carry: the newer stamp
     /// comes from the same writer's graph, which re-anchored deliberately, so
-    /// its time is the truth even when it is earlier. The reset flag is sticky
-    /// (`a || b`): once a writer re-anchored, every later stamp of its graph is
-    /// derived from the corrected anchor and must keep replacing the stored
-    /// future one until it has landed.
+    /// its time is the truth even when it is earlier — and even when the older
+    /// mark carries the flag too (a second re-anchor in one process: the
+    /// pending mark still holds the first jump's future sweep time, which a
+    /// max-merge would keep). The reset flag is sticky (`a || b`): once a
+    /// writer re-anchored, every later stamp of its graph is derived from the
+    /// corrected anchor and must keep replacing the stored future one until it
+    /// has landed. `last_gc_epoch` is always the strict max.
     pub fn merge(self, other: Self) -> Self {
         Self {
             last_gc_epoch: self.last_gc_epoch.max(other.last_gc_epoch),
-            last_gc_at: if other.last_gc_at_reset && !self.last_gc_at_reset {
+            last_gc_at: if other.last_gc_at_reset {
                 other.last_gc_at.or(self.last_gc_at)
             } else {
                 match (self.last_gc_at, other.last_gc_at) {
@@ -1332,6 +1335,24 @@ mod tests {
             last_gc_at_reset: true,
         };
         assert_eq!(carried.merge(later).last_gc_at, Some(t(3)));
+        // A second re-anchor: the carried mark is already flagged and holds the
+        // first jump's later future sweep time; the newer flagged stamp still
+        // supplies the time (a max-merge would keep the future one), and the
+        // epoch stays a strict max.
+        let second_future = GcMark {
+            last_gc_epoch: 70,
+            last_gc_at: Some(t(900)),
+            last_gc_at_reset: true,
+        };
+        let second_reanchor = GcMark {
+            last_gc_epoch: 65,
+            last_gc_at: Some(t(5)),
+            last_gc_at_reset: true,
+        };
+        let twice = carried.merge(second_future).merge(second_reanchor);
+        assert_eq!(twice.last_gc_at, Some(t(5)));
+        assert_eq!(twice.last_gc_epoch, 70, "last_gc_epoch is a strict max");
+        assert!(twice.last_gc_at_reset);
         // An unflagged newer stamp is max-merged as before.
         assert_eq!(
             carried
