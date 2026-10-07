@@ -23,6 +23,9 @@ use std::time::Duration;
 use lambo::store::{GraphStore, SqliteStore};
 use lambo::types::SessionId;
 
+mod common;
+use common::{RuntimeDir, RUNTIME_DIR_VAR};
+
 const SESSION: &str = "t8.2-sigterm-durability";
 const ACTION: &str = "wrote src/durability_probe.rs under SIGTERM";
 const PRODUCES: &str = "src/durability_probe.rs";
@@ -93,8 +96,11 @@ fn a_sigterm_flushes_the_recorded_action_to_the_durable_store() {
         store.init_schema().await.expect("init_schema");
     });
 
-    // Launch the shipped binary exactly as an MCP client would.
+    // Launch the shipped binary exactly as an MCP client would, but with its
+    // endpoint directory inside the test's own runtime dir (#15).
+    let runtime = RuntimeDir::new();
     let mut child = Command::new(env!("CARGO_BIN_EXE_lambo"))
+        .env(RUNTIME_DIR_VAR, runtime.path())
         .args([
             "--config",
             cfg_path.to_str().unwrap(),

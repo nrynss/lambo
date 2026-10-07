@@ -27,6 +27,9 @@ use std::time::{Duration, Instant};
 
 use lambo::store::{GraphStore, SqliteStore};
 
+mod common;
+use common::RuntimeDir;
+
 const SESSION: &str = "j4-lease-conflict";
 
 fn sigterm(pid: u32) {
@@ -63,13 +66,19 @@ fn write_frame(stdin: &mut impl Write, frame: &str) {
 }
 
 /// One `lambo serve` subprocess plus a reader for its stdout.
+///
+/// Its endpoint directory is `runtime`, the test's own (#15): the conflict
+/// paths below SIGKILL serves, and a killed serve never unlinks its socket, so
+/// the only safe place for that socket is a directory the test owns.
 fn spawn_serve(
     cfg: &std::path::Path,
     agent: &str,
     transport: &str,
     ledger: &std::path::Path,
+    runtime: &RuntimeDir,
 ) -> Child {
     let child = Command::new(env!("CARGO_BIN_EXE_lambo"))
+        .env(common::RUNTIME_DIR_VAR, runtime.path())
         .args([
             "--config",
             cfg.to_str().unwrap(),
@@ -156,7 +165,8 @@ fn refused_acquire_appears_in_the_ledger_from_both_sides() {
     });
 
     // Holder A: acquires and holds the lease, with the shared ledger attached.
-    let a = spawn_serve(&cfg, "agent-a", "stdio", &ledger);
+    let runtime = RuntimeDir::new();
+    let a = spawn_serve(&cfg, "agent-a", "stdio", &ledger, &runtime);
     let a_pid = a.id();
     let mut a: Child = a;
     let a_stdout = a.stdout.take().expect("A stdout");
@@ -185,7 +195,7 @@ fn refused_acquire_appears_in_the_ledger_from_both_sides() {
     // Loser B: same session, same store, http transport (refusal is terminal
     // there). It must write its OWN startup + refused lines, persist the refusal
     // to the store, and exit non-zero.
-    let b = spawn_serve(&cfg, "agent-b", "http", &ledger);
+    let b = spawn_serve(&cfg, "agent-b", "http", &ledger, &runtime);
     let (out_tx, out_rx) = mpsc::channel();
     std::thread::spawn(move || {
         let _ = out_tx.send(b.wait_with_output());
@@ -316,7 +326,8 @@ fn a_proxying_serve_writes_a_proxying_line() {
     });
 
     // Holder A on stdio.
-    let a = spawn_serve(&cfg, "agent-a", "stdio", &ledger);
+    let runtime = RuntimeDir::new();
+    let a = spawn_serve(&cfg, "agent-a", "stdio", &ledger, &runtime);
     let a_pid = a.id();
     let mut a: Child = a;
     let a_stdout = a.stdout.take().expect("A stdout");
@@ -338,7 +349,7 @@ fn a_proxying_serve_writes_a_proxying_line() {
 
     // Proxy B: stdio, refused, but proxying is viable → becomes a proxy. It
     // writes its own `proxying` line before any frame flows.
-    let mut b = spawn_serve(&cfg, "agent-b", "stdio", &ledger);
+    let mut b = spawn_serve(&cfg, "agent-b", "stdio", &ledger, &runtime);
     let b_pid = b.id();
 
     // J4 — the proxy path must also satisfy "from both sides" (finding
@@ -461,7 +472,8 @@ fn an_idle_proxy_books_the_degraded_state_when_its_holder_dies() {
     });
 
     // Holder A on stdio.
-    let a = spawn_serve(&cfg, "agent-a", "stdio", &ledger);
+    let runtime = RuntimeDir::new();
+    let a = spawn_serve(&cfg, "agent-a", "stdio", &ledger, &runtime);
     let a_pid = a.id();
     let mut a: Child = a;
     let a_stdout = a.stdout.take().expect("A stdout");
@@ -483,7 +495,7 @@ fn an_idle_proxy_books_the_degraded_state_when_its_holder_dies() {
 
     // Proxy B: refused, degrades to a proxy, and then sits IDLE. Its own stdin
     // is never written to, so no call is ever in flight.
-    let mut b = spawn_serve(&cfg, "agent-b", "stdio", &ledger);
+    let mut b = spawn_serve(&cfg, "agent-b", "stdio", &ledger, &runtime);
     let b_pid = b.id();
     wait_ledger(
         &ledger,

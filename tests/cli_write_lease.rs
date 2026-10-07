@@ -12,6 +12,9 @@ use std::time::Duration;
 
 use lambo::store::{GraphStore, SqliteStore};
 
+mod common;
+use common::RuntimeDir;
+
 const SESSION: &str = "t8.3-cli-lease";
 
 fn sigterm(pid: u32) {
@@ -48,8 +51,10 @@ fn lambo() -> Command {
     cmd
 }
 
-fn serve_cmd(cfg_path: &std::path::Path, agent: &str) -> Command {
+/// A stdio serve whose endpoint directory is the test's own (#15).
+fn serve_cmd(cfg_path: &std::path::Path, agent: &str, runtime: &RuntimeDir) -> Command {
     let mut cmd = lambo();
+    runtime.isolate(&mut cmd);
     cmd.args([
         "--config",
         cfg_path.to_str().unwrap(),
@@ -108,6 +113,7 @@ fn derive_cmd(cfg: &std::path::Path, agent: &str) -> Command {
 #[test]
 fn derive_succeeds_with_no_serve_and_fails_closed_while_serve_holds() {
     let (dir, cfg, db_str) = scratch();
+    let runtime = RuntimeDir::new();
     let rt = tokio::runtime::Runtime::new().expect("runtime");
     rt.block_on(async {
         let store = SqliteStore::connect(&db_str).expect("connect");
@@ -137,7 +143,7 @@ fn derive_succeeds_with_no_serve_and_fails_closed_while_serve_holds() {
     );
 
     // Serve holds the session.
-    let mut a: Child = serve_cmd(&cfg, "agent-a")
+    let mut a: Child = serve_cmd(&cfg, "agent-a", &runtime)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())

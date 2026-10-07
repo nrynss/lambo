@@ -83,6 +83,9 @@ use std::time::Duration;
 use lambo::store::{GraphStore, SqliteStore};
 use lambo::types::SessionId;
 
+mod common;
+use common::{RuntimeDir, RUNTIME_DIR_VAR};
+
 const SESSION: &str = "t8.2-pre-handshake-durability";
 
 /// Send `SIGTERM` to `pid` via the `kill` binary — avoids pulling `libc`/`nix`
@@ -119,6 +122,8 @@ fn a_pre_handshake_sigterm_still_flushes_the_session_row() {
     )
     .expect("write config");
 
+    // The serves below resolve their endpoint under the test's own dir (#15).
+    let runtime = RuntimeDir::new();
     let rt = tokio::runtime::Runtime::new().expect("runtime");
 
     // Provision the schema, then drop the store so its connection is not holding
@@ -133,6 +138,7 @@ fn a_pre_handshake_sigterm_still_flushes_the_session_row() {
     // point) is a tracing line on stderr, and we must not send the signal until
     // the session is genuinely attached.
     let mut child = Command::new(env!("CARGO_BIN_EXE_lambo"))
+        .env(RUNTIME_DIR_VAR, runtime.path())
         .args([
             "--config",
             cfg_path.to_str().unwrap(),
@@ -301,6 +307,8 @@ fn a_pre_handshake_sigterm_to_a_proxy_exits_cleanly_and_leaves_the_holder_intact
     )
     .expect("write config");
 
+    // The serves below resolve their endpoint under the test's own dir (#15).
+    let runtime = RuntimeDir::new();
     let rt = tokio::runtime::Runtime::new().expect("runtime");
     rt.block_on(async {
         let store = SqliteStore::connect(&db_str).expect("connect for provision");
@@ -309,6 +317,7 @@ fn a_pre_handshake_sigterm_to_a_proxy_exits_cleanly_and_leaves_the_holder_intact
 
     let spawn = |agent: &str| {
         Command::new(env!("CARGO_BIN_EXE_lambo"))
+            .env(RUNTIME_DIR_VAR, runtime.path())
             .args([
                 "--config",
                 cfg_path.to_str().unwrap(),
@@ -513,6 +522,8 @@ fn a_pre_handshake_client_hangup_closes_the_session_and_exits_zero() {
     )
     .expect("write config");
 
+    // The serves below resolve their endpoint under the test's own dir (#15).
+    let runtime = RuntimeDir::new();
     let rt = tokio::runtime::Runtime::new().expect("runtime");
     rt.block_on(async {
         let store = SqliteStore::connect(&db_str).expect("connect for provision");
@@ -520,6 +531,7 @@ fn a_pre_handshake_client_hangup_closes_the_session_and_exits_zero() {
     });
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_lambo"))
+        .env(RUNTIME_DIR_VAR, runtime.path())
         .args([
             "--config",
             cfg_path.to_str().unwrap(),

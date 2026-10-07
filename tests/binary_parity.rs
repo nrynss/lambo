@@ -29,6 +29,9 @@ use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+mod common;
+use common::RuntimeDir;
+
 // ---------------------------------------------------------------------------
 // Scratch config + binary helpers
 // ---------------------------------------------------------------------------
@@ -36,6 +39,9 @@ use std::time::{Duration, Instant};
 struct Scratch {
     dir: std::path::PathBuf,
     config: std::path::PathBuf,
+    /// The `XDG_RUNTIME_DIR` every serve this test spawns resolves its endpoint
+    /// under, so none can bind in the production endpoint directory (#15).
+    runtime: RuntimeDir,
 }
 
 fn scratch(tag: &str) -> Scratch {
@@ -58,7 +64,11 @@ fn scratch(tag: &str) -> Scratch {
         ),
     )
     .expect("write config");
-    Scratch { dir, config }
+    Scratch {
+        dir,
+        config,
+        runtime: RuntimeDir::new(),
+    }
 }
 impl Drop for Scratch {
     fn drop(&mut self) {
@@ -144,6 +154,7 @@ struct Mcp {
 
 fn spawn_serve_stdio(s: &Scratch, session: &str, agent: &str) -> Mcp {
     let mut cmd = lambo();
+    s.runtime.isolate(&mut cmd);
     cmd.args([
         "--config",
         s.config.to_str().unwrap(),

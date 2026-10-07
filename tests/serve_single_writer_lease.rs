@@ -41,6 +41,9 @@ use std::time::Duration;
 
 use lambo::store::{GraphStore, SqliteStore};
 
+mod common;
+use common::RuntimeDir;
+
 const SESSION: &str = "t8.6-single-writer";
 
 fn sigterm(pid: u32) {
@@ -69,8 +72,16 @@ fn write_frame(stdin: &mut impl Write, frame: &str) {
     stdin.flush().expect("flush frame");
 }
 
-fn serve_cmd_on(cfg_path: &std::path::Path, agent: &str, transport: &str) -> Command {
+/// Both serves in a test share `runtime`, the test's own endpoint directory
+/// (#15), exactly as two clients on one login session share theirs.
+fn serve_cmd_on(
+    cfg_path: &std::path::Path,
+    agent: &str,
+    transport: &str,
+    runtime: &RuntimeDir,
+) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_lambo"));
+    runtime.isolate(&mut cmd);
     cmd.args([
         "--config",
         cfg_path.to_str().unwrap(),
@@ -85,8 +96,8 @@ fn serve_cmd_on(cfg_path: &std::path::Path, agent: &str, transport: &str) -> Com
     cmd
 }
 
-fn serve_cmd(cfg_path: &std::path::Path, agent: &str) -> Command {
-    serve_cmd_on(cfg_path, agent, "stdio")
+fn serve_cmd(cfg_path: &std::path::Path, agent: &str, runtime: &RuntimeDir) -> Command {
+    serve_cmd_on(cfg_path, agent, "stdio", runtime)
 }
 
 #[test]
@@ -110,6 +121,7 @@ fn a_second_process_on_one_session_is_refused_by_the_lease() {
         ),
     )
     .expect("write config");
+    let runtime = RuntimeDir::new();
 
     let rt = tokio::runtime::Runtime::new().expect("runtime");
     // Provision the schema (creates session_leases), then drop the connection.
@@ -119,7 +131,7 @@ fn a_second_process_on_one_session_is_refused_by_the_lease() {
     });
 
     // Process A: attaches and holds the lease.
-    let mut a: Child = serve_cmd(&cfg_path, "agent-a")
+    let mut a: Child = serve_cmd(&cfg_path, "agent-a", &runtime)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -157,7 +169,7 @@ fn a_second_process_on_one_session_is_refused_by_the_lease() {
     // its refusal exactly as it was). It must fail closed at build time, before
     // it ever serves. A free port is not needed: the refusal happens before any
     // bind.
-    let b = serve_cmd_on(&cfg_path, "agent-b", "http")
+    let b = serve_cmd_on(&cfg_path, "agent-b", "http", &runtime)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

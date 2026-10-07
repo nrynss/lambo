@@ -44,6 +44,9 @@ use lambo::types::{
     WriteIntent, WriteIntentPayload,
 };
 
+mod common;
+use common::{RuntimeDir, RUNTIME_DIR_VAR};
+
 /// A fabricated previous-process epoch, distinct from anything a live pipeline
 /// can mint for itself in this test's lifetime.
 const OLD_EPOCH: &str = "00000000deadbeef";
@@ -89,8 +92,11 @@ struct Serve {
 }
 
 impl Serve {
-    fn launch(cfg: &std::path::Path, session: &str) -> Self {
+    /// `runtime` is the test's own endpoint directory (#15): the kill-9 path
+    /// below leaves a socket nothing unlinks, and it must land there.
+    fn launch(cfg: &std::path::Path, runtime: &RuntimeDir, session: &str) -> Self {
         let mut child = Command::new(env!("CARGO_BIN_EXE_lambo"))
+            .env(RUNTIME_DIR_VAR, runtime.path())
             .args([
                 "--config",
                 cfg.to_str().unwrap(),
@@ -234,6 +240,8 @@ struct Rig {
     db: String,
     session: SessionId,
     rt: tokio::runtime::Runtime,
+    /// Every serve this rig launches resolves its endpoint under here (#15).
+    runtime: RuntimeDir,
 }
 
 impl Rig {
@@ -262,6 +270,7 @@ impl Rig {
             db,
             session: SessionId::new(session),
             rt: tokio::runtime::Runtime::new().expect("runtime"),
+            runtime: RuntimeDir::new(),
         }
     }
 
@@ -395,7 +404,7 @@ fn seeded_intents_replay_in_lane_order_and_answer_applied_after_restart() {
     // The placeholder ids must be the seeded interaction's real id.
     fix_interactions(&rig, interaction);
 
-    let mut serve = Serve::launch(&rig.cfg, "j3-intent-replay");
+    let mut serve = Serve::launch(&rig.cfg, &rig.runtime, "j3-intent-replay");
     let stats = await_replayed(&mut serve, 3);
     assert_eq!(stats["write_queue_replayed"], 3, "{stats}");
     assert_eq!(
@@ -482,7 +491,7 @@ fn a_kill_nine_mid_replay_re_replays_idempotently() {
     // inside it, so on this rig the common interleaving is "nothing durable
     // yet" — the full re-replay case; a slower rig can land the partial one,
     // and the assertions below hold for every interleaving).
-    let serve = Serve::launch(&rig.cfg, "j3-intent-kill9");
+    let serve = Serve::launch(&rig.cfg, &rig.runtime, "j3-intent-kill9");
     std::thread::sleep(Duration::from_millis(150));
     serve.kill_nine();
     rig.clear_lease();
@@ -490,7 +499,7 @@ fn a_kill_nine_mid_replay_re_replays_idempotently() {
     // Second serve: replays whatever the crash left unconsumed (how much that
     // is depends on where the kill landed against the flush cadence — the
     // assertions below hold for every interleaving), then closes cleanly.
-    let mut serve = Serve::launch(&rig.cfg, "j3-intent-kill9");
+    let mut serve = Serve::launch(&rig.cfg, &rig.runtime, "j3-intent-kill9");
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
     let mut last = u64::MAX;
     let mut stable = 0;
@@ -589,6 +598,7 @@ fn an_unmigrated_store_refuses_the_attach_naming_lambo_provision() {
     });
 
     let out = Command::new(env!("CARGO_BIN_EXE_lambo"))
+        .env(RUNTIME_DIR_VAR, rig.runtime.path())
         .args([
             "--config",
             rig.cfg.to_str().unwrap(),
