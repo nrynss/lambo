@@ -972,8 +972,7 @@ mod tests {
     /// The eviction-resistance multiplier applies per concept type BEFORE the
     /// band comparison, on identical evidence: three ≥24h-apart sessions
     /// (raw 3.0) admit an Entity (3 × 1.2 = 3.6) but not an Observation
-    /// (3 × 0.7 = 2.1) — the weakest kind is the first evicted, never the
-    /// first promoted.
+    /// (3 × 0.7 = 2.1) — the weakest kind is the last promoted.
     ///
     /// Mutation: drop the multiplier in `solo_score` → both classify alike and
     /// the Observation half goes red; apply the daemon's additive modifier

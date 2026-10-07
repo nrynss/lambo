@@ -92,8 +92,8 @@ use crate::writeq::{ReceiptAnswer, ReceiptId};
 /// - `logic` — a rule, decision, or piece of reasoning about how things work.
 /// - `constraint` — a requirement or limit that must keep holding.
 /// - `resource` — something produced, consumed, or acted on by the work.
-/// - `observation` — something noticed in passing; the weakest, most
-///   evictable kind, and the only one that can later be demoted.
+/// - `observation` — something noticed in passing; the weakest kind, and
+///   the only one that can later be demoted.
 #[derive(Clone, Copy, Debug, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WireConceptType {
