@@ -186,7 +186,7 @@
   weights plus the coalescer threads) without ever embedding; the backends are
   now released before the proxy starts. The model is still loaded while the
   backends resolve and through the election wait, until the role is known
-  (tracked in #28). Pre-existing, found in the issue #13 review.
+  (tracked in #31). Pre-existing, found in the issue #13 review.
 - Canonization now fires in long-running low-write deployments: the mutation
   epoch the GC interval measures persists with the session instead of resetting
   on every writer start (issue #17). Thirteen days of dogfooding produced zero

@@ -210,7 +210,7 @@ Readings:
 * **`mlock` the weights.** Competes with the rest of an 18 GB laptop, and the
   Metal buffers are candle's allocations, not ours to wire.
 * **Skip touches when recently active.** Needs activity tracking at every
-  embed call site to save one minimal forward per 30 s.
+  embed call site to save one minimal forward per 10 s.
 * **Keep-warm in `lambo serve-web`.** Out of scope; it is a reader with its
   own lifecycle (#28 is decomposing it).
 
@@ -235,4 +235,4 @@ Readings:
   from the device load, a lazy `Embedder` behind the public
   `ResolvedBackends.embedder`, and the resolve-time dim check moved to
   hidden-size-from-config, which is restructuring of backend construction.
-  Design write-up routed to #28.
+  Design write-up routed to #31.
