@@ -7134,6 +7134,38 @@ mod tests {
             }
         }
 
+        /// Drops the throwaway database an H3 live test created, on every exit
+        /// path (pass, assert failure, panic): `DROP DATABASE … WITH (FORCE)`
+        /// also closes the connections the test's stores still hold. Best
+        /// effort, never panics. Declare it right after `CREATE DATABASE`, so
+        /// the stores declared later drop first.
+        #[cfg(feature = "store-postgres")]
+        struct H3Db {
+            admin_dsn: String,
+            db: String,
+        }
+
+        #[cfg(feature = "store-postgres")]
+        impl Drop for H3Db {
+            fn drop(&mut self) {
+                let (admin_dsn, db) = (self.admin_dsn.clone(), self.db.clone());
+                crate::test_util::run_blocking(async move {
+                    let admin = match sqlx::PgPool::connect(&admin_dsn).await {
+                        Ok(p) => p,
+                        Err(e) => return eprintln!("cleanup: connect admin for {db}: {e}"),
+                    };
+                    if let Err(e) =
+                        sqlx::query(&format!("DROP DATABASE IF EXISTS {db} WITH (FORCE)"))
+                            .execute(&admin)
+                            .await
+                    {
+                        eprintln!("cleanup: drop {db}: {e}");
+                    }
+                    admin.close().await;
+                });
+            }
+        }
+
         /// **Acceptance: H3**: the same harness against pgvector.
         /// Forced-exact lane (`postgres-exact`) must show zero adapter skew
         /// vs sqlite/memory-oracle (same ids and order, score within
@@ -7161,6 +7193,10 @@ mod tests {
                 .execute(&admin)
                 .await
                 .unwrap_or_else(|e| panic!("H3: create {db}: {e}"));
+            let _db_guard = H3Db {
+                admin_dsn: admin_dsn.clone(),
+                db: db.clone(),
+            };
             let dsn = dsn_for_database(&admin_dsn, &db);
 
             // E2E-F4: the camera-proof EXPLAIN that used to sit here has been
@@ -7445,6 +7481,10 @@ mod tests {
                 .execute(&admin)
                 .await
                 .unwrap_or_else(|e| panic!("H3 scale: create {db}: {e}"));
+            let _db_guard = H3Db {
+                admin_dsn: admin_dsn.clone(),
+                db: db.clone(),
+            };
             let dsn = dsn_for_database(&admin_dsn, &db);
 
             let cfg = StoreConfig {
