@@ -759,6 +759,53 @@ impl Graph {
         Ok(confirmed)
     }
 
+    /// Apply coalesced read accesses (issue #30): for each `(id, count, at)`,
+    /// `access_count += count` (saturating, `i32` is the column type) and
+    /// `last_accessed = max(last_accessed, at)`. Returns how many concepts were
+    /// updated.
+    ///
+    /// Each updated concept is emitted as one `UpsertNode` so the write-behind
+    /// flush persists it through the existing columns, exactly like
+    /// [`Self::bump_gc_survived`] — **except that the epoch is not bumped**.
+    /// An access is bookkeeping about a read, not a change to what the graph
+    /// says: no node, edge, key or status that recall, canonicalization or a
+    /// hybrid plan reads changes. Bumping would (a) count reads toward GC's
+    /// `gc_interval` trigger, so a read-heavy session would sweep on reads
+    /// alone, (b) invalidate every recall-cache entry on every recall, turning
+    /// the cache off for the read-mostly case it exists for, and (c) force a
+    /// concurrent hybrid commit to replan against a graph nothing changed. The
+    /// same reasoning already keeps [`Self::record_write_intent`] off the epoch.
+    ///
+    /// The durable mutation watermark is unaffected: the next drain stamps the
+    /// unchanged epoch, and the adapters persist `MAX` of it.
+    ///
+    /// Ids that are missing, or that are not concepts (an interaction hit), are
+    /// skipped: a concept collected or retracted between the read and this
+    /// apply has nothing left to count against. `count == 0` is a no-op for
+    /// that id. Applied in id order so the emitted log is deterministic.
+    pub fn record_accesses(
+        &mut self,
+        accesses: &[(NodeId, u32, chrono::DateTime<chrono::Utc>)],
+    ) -> usize {
+        let mut ordered: Vec<&(NodeId, u32, chrono::DateTime<chrono::Utc>)> =
+            accesses.iter().filter(|(_, n, _)| *n > 0).collect();
+        ordered.sort_by_key(|(id, _, _)| id.0);
+        let mut updated = 0;
+        for &(id, count, at) in ordered {
+            let Some(Node::Concept(c)) = self.nodes.get_mut(&id) else {
+                continue;
+            };
+            let delta = i32::try_from(count).unwrap_or(i32::MAX);
+            c.access_count = c.access_count.saturating_add(delta);
+            c.last_accessed = Some(c.last_accessed.map_or(at, |prev| prev.max(at)));
+            let node = Node::Concept(c.clone());
+            // Deliberately NOT `append_mutation`: see the doc comment.
+            self.mutation_log.push(Mutation::UpsertNode { node });
+            updated += 1;
+        }
+        updated
+    }
+
     // -----------------------------------------------------------------------
     // Write path — session metadata, synonyms, reservations
     // -----------------------------------------------------------------------
@@ -1404,7 +1451,10 @@ impl Graph {
     }
 
     /// `MutationEpoch` — bumps once per appended mutation; unchanged by reads and
-    /// by draining. Recall caches key on this (spec §8).
+    /// by draining. Recall caches key on this (spec §8). Two kinds of logged
+    /// mutation are deliberately not counted, because neither changes what the
+    /// graph says: write intents ([`Graph::record_write_intent`]) and read-access
+    /// bookkeeping ([`Graph::record_accesses`], issue #30).
     pub fn epoch(&self) -> u64 {
         self.epoch
     }
@@ -4211,4 +4261,93 @@ mod tests {
         fn assert_sync<T: Sync>() {}
         let _ = [assert_send::<Graph>, assert_sync::<Graph>];
     };
+
+    // -----------------------------------------------------------------------
+    // Issue #30 — read accesses
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn record_accesses_updates_count_and_last_accessed_without_bumping_the_epoch() {
+        let (mut g, iid, cid) = small_graph();
+        g.drain_log();
+        let epoch = g.epoch();
+
+        let applied = g.record_accesses(&[(cid, 3, ts(10)), (iid, 5, ts(10))]);
+        assert_eq!(
+            applied, 1,
+            "the interaction id carries no counter and is skipped"
+        );
+        let Some(Node::Concept(c)) = g.node(cid) else {
+            panic!("concept missing")
+        };
+        assert_eq!(c.access_count, 3);
+        assert_eq!(c.last_accessed, Some(ts(10)));
+        assert_eq!(
+            g.epoch(),
+            epoch,
+            "an access must not advance the mutation epoch"
+        );
+
+        // The update is durable state: one UpsertNode per updated concept, and
+        // the drained batch carries the UNCHANGED epoch as its watermark.
+        let batch = g.drain_log();
+        assert_eq!(batch.mutation_epoch, epoch);
+        assert_eq!(batch.mutations.len(), 1);
+        match &batch.mutations[0] {
+            Mutation::UpsertNode {
+                node: Node::Concept(c),
+            } => {
+                assert_eq!(c.id, cid);
+                assert_eq!(c.access_count, 3);
+                assert_eq!(c.last_accessed, Some(ts(10)));
+            }
+            other => panic!("expected a concept UpsertNode, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn record_accesses_accumulates_keeps_the_latest_instant_and_saturates() {
+        let (mut g, _iid, cid) = small_graph();
+        g.record_accesses(&[(cid, 2, ts(20))]);
+        // An older instant arriving later (a slow caller) never moves the
+        // timestamp backwards.
+        g.record_accesses(&[(cid, 1, ts(5))]);
+        let Some(Node::Concept(c)) = g.node(cid) else {
+            panic!()
+        };
+        assert_eq!(c.access_count, 3);
+        assert_eq!(c.last_accessed, Some(ts(20)));
+
+        g.record_accesses(&[(cid, u32::MAX, ts(21))]);
+        g.record_accesses(&[(cid, u32::MAX, ts(22))]);
+        let Some(Node::Concept(c)) = g.node(cid) else {
+            panic!()
+        };
+        assert_eq!(c.access_count, i32::MAX, "saturating, never wraps negative");
+    }
+
+    #[test]
+    fn record_accesses_skips_missing_ids_and_zero_counts() {
+        let (mut g, _iid, cid) = small_graph();
+        g.drain_log();
+        let applied = g.record_accesses(&[(uid(999), 4, ts(1)), (cid, 0, ts(1))]);
+        assert_eq!(applied, 0);
+        assert_eq!(g.log_len(), 0, "nothing to persist");
+        let Some(Node::Concept(c)) = g.node(cid) else {
+            panic!()
+        };
+        assert_eq!((c.access_count, c.last_accessed), (0, None));
+    }
+
+    #[test]
+    fn accesses_survive_a_snapshot_round_trip() {
+        let (mut g, _iid, cid) = small_graph();
+        g.record_accesses(&[(cid, 7, ts(30))]);
+        let back = Graph::from_snapshot(g.snapshot()).unwrap();
+        let Some(Node::Concept(c)) = back.node(cid) else {
+            panic!()
+        };
+        assert_eq!((c.access_count, c.last_accessed), (7, Some(ts(30))));
+        assert_eq!(back.epoch(), g.epoch());
+    }
 }
