@@ -74,9 +74,13 @@ EOF
 Keep it on `127.0.0.1`. (Sharing one embedder over LAN works — instances are fungible —
 but binds a network service for no real saving; the model is 605 MB.)
 
-## 2. The pinned binary (per machine, per arch — binaries do not travel)
+## 2. The pinned binary (per machine, per arch)
 
-Two paths, by rig. **The Metal rig installs a published release** (§2a): from v0.3.0 on,
+A binary **built** on one rig never travels to another: it is shaped by that host's
+toolkit (CUDA, an SDK, Homebrew libraries) and is copied only into that rig's own `bin/`.
+A **release asset** is the one binary that does travel, by design: `release.yml` builds it
+on a clean runner and asserts it links nothing outside the OS, so it runs on any machine
+of its platform. Two paths, by rig. **The Metal rig installs a published release** (§2a): from v0.3.0 on,
 every release carries `lambo-<version>-macos-arm64-metal`, built by `release.yml` with
 `ship,embed-candle-metal` (a superset of the rig's `store-sqlite,embed-candle-metal,embed-bge`)
 and with `LAMBO_GIT_SHA` set to the release commit. **The CUDA rig builds from source**
@@ -124,7 +128,15 @@ grep -o 'lambo-dogfood/bin/lambo-[^<]*' ~/Library/LaunchAgents/dev.lambo.dogfood
 # 4. start it
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.lambo.dogfood.plist
 
-# 5. verify
+# 5. verify. bootstrap returns as soon as launchd has the job, before serve has
+#    loaded the embedder, taken the lease and bound :7700, so a lease check run at
+#    once can read an empty table. Wait (up to 60 s) for the port to answer first:
+for i in $(seq 1 60); do
+  code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:7700/mcp)
+  [ "$code" != "000" ] && break
+  sleep 1
+done
+echo "mcp port answered HTTP $code after ${i}s"   # 000 = never came up: read the unit's log
 sqlite3 ~/lambo-dogfood/lambo-dev.db "select holder from session_leases;"   # http-shared-writer
 ```
 
@@ -134,6 +146,28 @@ ledger heartbeat (≤ 300 s): it is the line that carries the serving binary's i
 `version` = `$V` and a `git_sha` that is the release commit (§6's `jq` line). A `git_sha`
 of `unknown` means the asset predates the workflow setting `LAMBO_GIT_SHA`; a version
 other than `$V` means the plist still names the old binary.
+**This is the first time the release's Metal code actually runs.** The release workflow's
+parity test (`tests/binary_parity.rs`) drives the Metal asset with the **fixture**
+embedder over SQLite: it proves the binary starts, takes the lease, writes and reads,
+but it never loads candle, the BGE-M3 weights or a Metal device, and CI's
+`candle-metal` job only compiles. So the rig's start, first heartbeat and first recall
+are the release's real Metal runtime check. Check, in order:
+
+- the unit stays up after bootstrap (`launchctl print gui/$(id -u)/dev.lambo.dogfood`
+  shows `state = running`, no restart loop). `device = "metal"` refuses to start when
+  no Metal device is available, so a crash here is the Metal backend, not the store;
+- `lambo_stats` answers and its `embedded_concepts` equals `concept_count` (a
+  concept written while the embedder is broken is stored without a vector);
+- one `lambo_derive` of a throwaway concept, then `lambo_stats` again:
+  `embedded_concepts` rose with `concept_count`. That write went through candle on
+  the GPU;
+- one `lambo_recall` for a topic the graph already holds returns semantic hits, not
+  only keyword ones. An embedder failure degrades recall to keyword-only with a
+  warning; that warning is the failure signal;
+- the first ledger heartbeat (above) names `$V` and the release commit.
+
+If any of these fails, roll back (step 3 with the old name) before debugging.
+
 Keep the previous `lambo-<old>` in `bin/` until the new one has served for a while:
 rolling back is step 3 with the old name.
 
