@@ -3707,6 +3707,7 @@ mod tests {
                         interactions: 1,
                         concepts: 256,
                         edges: 512,
+                        accesses: 256,
                     },
                 ),
             } + 2;

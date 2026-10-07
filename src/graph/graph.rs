@@ -764,9 +764,10 @@ impl Graph {
     /// `last_accessed = max(last_accessed, at)`. Returns how many concepts were
     /// updated.
     ///
-    /// Each updated concept is emitted as one `UpsertNode` so the write-behind
-    /// flush persists it through the existing columns, exactly like
-    /// [`Self::bump_gc_survived`] — **except that the epoch is not bumped**.
+    /// Each updated concept is emitted as one [`Mutation::RecordAccess`]
+    /// carrying its new absolute values, which the adapters apply as a narrow,
+    /// monotonic update of the two access columns (no full-row rewrite, no
+    /// embedding, no vector-index touch) — and **the epoch is not bumped**.
     /// An access is bookkeeping about a read, not a change to what the graph
     /// says: no node, edge, key or status that recall, canonicalization or a
     /// hybrid plan reads changes. Bumping would (a) count reads toward GC's
@@ -798,9 +799,13 @@ impl Graph {
             let delta = i32::try_from(count).unwrap_or(i32::MAX);
             c.access_count = c.access_count.saturating_add(delta);
             c.last_accessed = Some(c.last_accessed.map_or(at, |prev| prev.max(at)));
-            let node = Node::Concept(c.clone());
             // Deliberately NOT `append_mutation`: see the doc comment.
-            self.mutation_log.push(Mutation::UpsertNode { node });
+            self.mutation_log.push(Mutation::RecordAccess {
+                session_id: c.session_id.clone(),
+                id,
+                access_count: c.access_count,
+                last_accessed: c.last_accessed.unwrap_or(at),
+            });
             updated += 1;
         }
         updated
@@ -3869,7 +3874,8 @@ mod tests {
                 | Mutation::SetRootGoal { .. }
                 | Mutation::SetEmbedding { .. }
                 | Mutation::PutWriteIntent { .. }
-                | Mutation::ConsumeWriteIntent { .. } => {}
+                | Mutation::ConsumeWriteIntent { .. }
+                | Mutation::RecordAccess { .. } => {}
             }
         }
         assert!(saw_delete);
@@ -3970,6 +3976,7 @@ mod tests {
                 Mutation::SetEmbedding { .. } => "set_embedding",
                 Mutation::PutWriteIntent { .. } => "put_write_intent",
                 Mutation::ConsumeWriteIntent { .. } => "consume_write_intent",
+                Mutation::RecordAccess { .. } => "record_access",
             })
             .collect();
         let expected = [
@@ -4288,21 +4295,20 @@ mod tests {
             "an access must not advance the mutation epoch"
         );
 
-        // The update is durable state: one UpsertNode per updated concept, and
+        // The update is durable state: one narrow RecordAccess per updated
+        // concept carrying its absolute values (not a full-row UpsertNode), and
         // the drained batch carries the UNCHANGED epoch as its watermark.
         let batch = g.drain_log();
         assert_eq!(batch.mutation_epoch, epoch);
-        assert_eq!(batch.mutations.len(), 1);
-        match &batch.mutations[0] {
-            Mutation::UpsertNode {
-                node: Node::Concept(c),
-            } => {
-                assert_eq!(c.id, cid);
-                assert_eq!(c.access_count, 3);
-                assert_eq!(c.last_accessed, Some(ts(10)));
-            }
-            other => panic!("expected a concept UpsertNode, got {other:?}"),
-        }
+        assert_eq!(
+            batch.mutations,
+            [Mutation::RecordAccess {
+                session_id: g.session_id().clone(),
+                id: cid,
+                access_count: 3,
+                last_accessed: ts(10),
+            }]
+        );
     }
 
     #[test]

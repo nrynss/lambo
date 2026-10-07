@@ -51,6 +51,30 @@
 //!   [`ConceptRow`] for the one subtle case) **at the position row-by-row replay
 //!   would have first written them** (see `dedupe_last_at_first_position`).
 //!
+//! # Read accesses (issue #30)
+//!
+//! [`Mutation::RecordAccess`] is bucketed too, into [`FlushStep::Accesses`]: a
+//! narrow `UPDATE … SET access_count, last_accessed` that never inserts. Its
+//! bucket is emitted **after** the segment's concept upserts, so a concept
+//! born in the same batch exists before its access lands. Order against a
+//! concept upsert of the same concept does not matter for correctness, which
+//! is why the bucket may move past one:
+//!
+//! * the access update is **monotonic** (`max(stored, new)` on both columns),
+//!   so running after an upsert can only raise what the upsert wrote, never
+//!   lower it;
+//! * the graph only ever raises the two fields, so an upsert appended **after**
+//!   an access carries values at least as high as the access's — the
+//!   access-after-upsert execution order therefore leaves exactly what
+//!   row-by-row replay would (the later, higher upsert value; the `max` is a
+//!   no-op on it).
+//!
+//! A barrier (a delete, above) still flushes the bucket first, so an access
+//! never crosses the deletion of its row. Duplicates collapse to one row per
+//! concept holding the **maximum** of each column — under the monotonicity
+//! above that is the last occurrence's value, stated as a `max` so the
+//! collapse is right even if it were not.
+//!
 //! Duplicate collapsing is not an optimisation, it is **required**: PostgreSQL
 //! and CockroachDB both reject a multi-row `INSERT … ON CONFLICT DO UPDATE`
 //! whose input rows collide on the conflict target ("cannot affect row a second
@@ -77,6 +101,9 @@ pub const INTERACTION_COLUMNS: usize = 7;
 pub const CONCEPT_COLUMNS: usize = 17;
 /// See [`INTERACTION_COLUMNS`].
 pub const EDGE_COLUMNS: usize = 10;
+/// See [`INTERACTION_COLUMNS`]: `id`, `session_id`, `access_count`,
+/// `last_accessed` per row of the batched access update (issue #30).
+pub const ACCESS_COLUMNS: usize = 4;
 ///
 /// Rows per multi-row durable-intent statement. `write_intents` has 11 columns,
 /// so this keeps the binder far under the backend limit while still collapsing
@@ -98,6 +125,22 @@ pub struct BulkLimits {
     pub concepts: usize,
     /// Rows per `edges` statement (10 columns).
     pub edges: usize,
+    /// Rows per batched access `UPDATE` ([`ACCESS_COLUMNS`] binds per row).
+    pub accesses: usize,
+}
+
+/// One row of a batched read-access update (issue #30) — a deduplicated
+/// [`Mutation::RecordAccess`]. Absolute values, applied monotonically.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AccessUpdate<'a> {
+    /// The concept's session.
+    pub session_id: &'a SessionId,
+    /// The concept.
+    pub id: NodeId,
+    /// Total access count (the adapter keeps the larger of this and the row's).
+    pub access_count: i32,
+    /// Latest access (the adapter keeps the later of this and the row's).
+    pub last_accessed: DateTime<Utc>,
 }
 
 /// The three canonization columns, snapshotted from a concept upsert.
@@ -191,6 +234,10 @@ pub enum FlushStep<'a> {
     /// consumes and each consume's put precedes it in the log, so
     /// put-before-consume holds within and across drains.
     ConsumeIntents(Vec<(&'a SessionId, &'a str, &'a WriteIntentOutcome)>),
+    /// A batched, monotonic read-access update (issue #30): one
+    /// `UPDATE concepts … SET access_count, last_accessed` for the chunk,
+    /// existing rows only. See the module docs for its ordering rule.
+    Accesses(Vec<AccessUpdate<'a>>),
 }
 
 /// Plan the statements one [`crate::types::MutationBatch`] costs.
@@ -212,6 +259,17 @@ pub fn plan_flush<'a>(mutations: &'a [Mutation], limits: BulkLimits) -> Vec<Flus
             } => buckets.concepts.push(c),
             Mutation::UpsertEdge { edge } => buckets.edges.push(edge),
             Mutation::PutWriteIntent { intent } => buckets.put_intents.push(intent),
+            Mutation::RecordAccess {
+                session_id,
+                id,
+                access_count,
+                last_accessed,
+            } => buckets.accesses.push(AccessUpdate {
+                session_id,
+                id: *id,
+                access_count: *access_count,
+                last_accessed: *last_accessed,
+            }),
             Mutation::ConsumeWriteIntent {
                 session_id,
                 receipt,
@@ -232,6 +290,7 @@ struct Buckets<'a> {
     interactions: Vec<&'a Interaction>,
     concepts: Vec<&'a Concept>,
     edges: Vec<&'a Edge>,
+    accesses: Vec<AccessUpdate<'a>>,
     put_intents: Vec<&'a WriteIntent>,
     consume_intents: Vec<(&'a SessionId, &'a str, &'a WriteIntentOutcome)>,
 }
@@ -249,6 +308,14 @@ impl<'a> Buckets<'a> {
         let concepts = dedupe_concepts(std::mem::take(&mut self.concepts));
         for chunk in chunks(concepts, limits.concepts) {
             steps.push(FlushStep::Concepts(chunk));
+        }
+
+        // Issue #30: after the concept upserts, so a concept born in this
+        // segment exists before its access update looks for it. See the module
+        // docs for why moving past an upsert of the same concept is safe.
+        let accesses = dedupe_accesses(std::mem::take(&mut self.accesses));
+        for chunk in chunks(accesses, limits.accesses) {
+            steps.push(FlushStep::Accesses(chunk));
         }
 
         // Natural-key conflict target, matching `UPSERT_EDGE_SQL`'s
@@ -373,6 +440,29 @@ fn dedupe_last_at_first_position<T, K: Eq + std::hash::Hash + Clone>(
         .collect()
 }
 
+/// One row per concept, at the first occurrence's position, holding the
+/// **maximum** of each column over every occurrence (issue #30). Two rows for
+/// one concept in one `UPDATE … FROM (VALUES …)` would make the result depend
+/// on which joined row the engine applies last; the max is what replaying them
+/// one by one through the monotonic update leaves.
+fn dedupe_accesses(items: Vec<AccessUpdate<'_>>) -> Vec<AccessUpdate<'_>> {
+    let mut merged: HashMap<NodeId, AccessUpdate<'_>> = HashMap::with_capacity(items.len());
+    let mut order: Vec<NodeId> = Vec::with_capacity(items.len());
+    for a in items {
+        merged
+            .entry(a.id)
+            .and_modify(|m| {
+                m.access_count = m.access_count.max(a.access_count);
+                m.last_accessed = m.last_accessed.max(a.last_accessed);
+            })
+            .or_insert_with(|| {
+                order.push(a.id);
+                a
+            });
+    }
+    order.into_iter().map(|id| merged[&id]).collect()
+}
+
 /// `dedupe_last_at_first_position` by concept id, keeping the **first**
 /// occurrence's canonization columns. See [`ConceptRow`] for why the two halves
 /// differ.
@@ -432,6 +522,7 @@ pub fn batch_session_ids(mutations: &[Mutation]) -> Vec<&str> {
             | Mutation::SetEmbedding { session_id, .. }
             | Mutation::ConsumeWriteIntent { session_id, .. } => session_id.as_str(),
             Mutation::PutWriteIntent { intent } => intent.session_id.as_str(),
+            Mutation::RecordAccess { session_id, .. } => session_id.as_str(),
             Mutation::DeleteNode { .. } | Mutation::DeleteEdge { .. } => continue,
         };
         if !out.contains(&sid) {
@@ -477,6 +568,7 @@ mod tests {
         interactions: 1,
         concepts: 256,
         edges: 512,
+        accesses: 256,
     };
 
     fn ts(secs: i64) -> DateTime<Utc> {
@@ -1022,6 +1114,7 @@ mod tests {
             interactions: 1,
             concepts: 3,
             edges: 3,
+            accesses: 3,
         };
         let steps = plan_flush(&mutations, limits);
         assert_eq!(steps.len(), 4, "10 rows at 3 per statement");
@@ -1066,6 +1159,7 @@ mod tests {
                 FlushStep::Single(_) => 1,
                 FlushStep::PutIntents(r) => r.len(),
                 FlushStep::ConsumeIntents(r) => r.len(),
+                FlushStep::Accesses(r) => r.len(),
             })
             .sum();
         assert_eq!(
@@ -1144,5 +1238,103 @@ mod tests {
             },
         ];
         assert_eq!(batch_session_ids(&mutations), vec!["plan", "other"]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #30 — read accesses
+    // -----------------------------------------------------------------------
+
+    fn access(id: NodeId, count: i32, at: i64) -> Mutation {
+        Mutation::RecordAccess {
+            session_id: sid(),
+            id,
+            access_count: count,
+            last_accessed: ts(at),
+        }
+    }
+
+    fn step_kinds(steps: &[FlushStep<'_>]) -> Vec<&'static str> {
+        steps
+            .iter()
+            .map(|s| match s {
+                FlushStep::Interactions(_) => "interactions",
+                FlushStep::Concepts(_) => "concepts",
+                FlushStep::Edges(_) => "edges",
+                FlushStep::Single(_) => "single",
+                FlushStep::PutIntents(_) => "put_intents",
+                FlushStep::ConsumeIntents(_) => "consume_intents",
+                FlushStep::Accesses(_) => "accesses",
+            })
+            .collect()
+    }
+
+    /// An access in the log ahead of its concept's upsert (the drained order
+    /// can put it there when a later upsert snapshots the same concept) is
+    /// still emitted after the segment's concept bucket — the concept row
+    /// exists before the update looks for it — and repeats collapse to one row
+    /// holding the maximum of each column.
+    #[test]
+    fn accesses_follow_the_segments_concepts_and_collapse_to_the_max() {
+        let iid = NodeId::new();
+        let (a, b) = (NodeId::new(), NodeId::new());
+        let mutations = vec![
+            access(a, 3, 30),
+            Mutation::UpsertNode {
+                node: Node::Interaction(interaction(iid, None)),
+            },
+            Mutation::UpsertNode {
+                node: Node::Concept(concept(a, iid, "a")),
+            },
+            access(b, 1, 5),
+            access(a, 5, 20),
+            access(a, 4, 40),
+        ];
+        let steps = plan_flush(&mutations, LIMITS);
+        assert_eq!(
+            step_kinds(&steps),
+            ["interactions", "concepts", "accesses"],
+            "one access statement, after the concept upserts"
+        );
+        let FlushStep::Accesses(rows) = &steps[2] else {
+            unreachable!()
+        };
+        assert_eq!(
+            rows.iter()
+                .map(|r| (r.id, r.access_count, r.last_accessed))
+                .collect::<Vec<_>>(),
+            [(a, 5, ts(40)), (b, 1, ts(5))],
+            "one row per concept, first-seen order, each column's maximum"
+        );
+        assert_eq!(planned_statements(&mutations, LIMITS), 3);
+    }
+
+    /// A barrier flushes the access bucket first, so an access is never
+    /// carried past the deletion of its row (or past a canonization move that
+    /// reads it); the next segment's accesses land in their own statement.
+    #[test]
+    fn a_barrier_flushes_pending_accesses_first() {
+        let (a, b) = (NodeId::new(), NodeId::new());
+        let mutations = vec![
+            access(a, 1, 1),
+            Mutation::DeleteNode { id: a },
+            access(b, 2, 2),
+        ];
+        let steps = plan_flush(&mutations, LIMITS);
+        assert_eq!(step_kinds(&steps), ["accesses", "single", "accesses"]);
+    }
+
+    /// Accesses chunk to `BulkLimits::accesses` rows per statement, and every
+    /// row's session is a session the batch writes into (the fencing gate and
+    /// the `sessions` row cover it).
+    #[test]
+    fn accesses_chunk_and_name_their_session() {
+        let limits = BulkLimits {
+            accesses: 2,
+            ..LIMITS
+        };
+        let mutations: Vec<Mutation> = (0..5).map(|k| access(NodeId::new(), k, k as i64)).collect();
+        let steps = plan_flush(&mutations, limits);
+        assert_eq!(step_kinds(&steps), ["accesses", "accesses", "accesses"]);
+        assert_eq!(batch_session_ids(&mutations), [sid().as_str()]);
     }
 }

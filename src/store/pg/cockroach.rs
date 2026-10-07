@@ -998,6 +998,24 @@ WHERE session_id = $1
             .contains("ON CONFLICT (source, target, edge_type)"));
     }
 
+    /// Issue #30: the shared narrow access update binds `ACCESS_COLUMNS` per
+    /// row and carries no `::VECTOR` (or any) cast — the same text as on
+    /// PostgreSQL, so CockroachDB never rewrites the embedding for a read.
+    #[test]
+    fn the_access_update_is_shared_and_cast_free() {
+        let sid = crate::types::SessionId::from("issue-30");
+        let rows = [crate::store::batch::AccessUpdate {
+            session_id: &sid,
+            id: NodeId::new(),
+            access_count: 1,
+            last_accessed: chrono::Utc::now(),
+        }];
+        let access_sql = access_update_query(&rows).sql().to_string();
+        assert_eq!(placeholder_max(&access_sql), ACCESS_COLUMNS);
+        assert!(!access_sql.contains("::"), "{access_sql}");
+        assert!(access_sql.contains("GREATEST(concepts.access_count, v.access_count)"));
+    }
+
     /// **L82-1.** The flush issues one *multi-row* statement per planned chunk,
     /// and the generated SQL is the half of that change no test on this machine
     /// can put in front of a cluster — so it is asserted directly.

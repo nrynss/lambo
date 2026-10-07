@@ -8,7 +8,8 @@
 //! a few hash inserts and never while any other lock is acquired. The
 //! session's daemon cycle (one tick, default 1s) then takes the whole map and
 //! applies it in ONE write-guard section through [`Graph::record_accesses`],
-//! which emits one `UpsertNode` per touched concept into the write-behind log.
+//! which emits one narrow `RecordAccess` per touched concept into the
+//! write-behind log.
 //! Recall pays a hash insert per hit; the graph pays one brief write section
 //! per tick, however many recalls ran in it.
 //!
@@ -29,7 +30,7 @@
 //!
 //! See [`Graph::record_accesses`]: GC's `gc_interval` trigger, the recall
 //! cache key and hybrid replanning all key on the epoch, and none of them is
-//! about reads. The access upserts still ride the normal flush, so they are
+//! about reads. The access updates still ride the normal flush, so they are
 //! durable without a separate dirty set or a schema change.
 //!
 //! ## Loss bound

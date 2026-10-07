@@ -434,11 +434,13 @@ mod tests {
         }
     }
 
-    /// Issue #30 (no live server: SQL text is the contract). Recall and
-    /// inspect now write `access_count` / `last_accessed` through an ordinary
-    /// concept `UpsertNode`, so both must be bound on insert, carried by the
-    /// conflict update (an existing row is the normal case), and read back on
-    /// load — the shared statement path both pg dialects run.
+    /// Issue #30 (no live server: SQL text is the contract). Accesses reach
+    /// the store through the narrow `RecordAccess` update (next test), but the
+    /// graph's in-RAM counts also ride every full concept `UpsertNode` (a GC
+    /// survivor bump, a re-derive), so both columns must be bound on insert,
+    /// carried by the conflict update — an upsert must not reset a count the
+    /// access update raised — and read back on load: the shared statement
+    /// path both pg dialects run.
     #[test]
     fn access_columns_ride_the_concept_upsert_and_the_load() {
         let at = Utc.timestamp_opt(1_800_000_000, 0).unwrap();
@@ -476,6 +478,53 @@ mod tests {
         }
         let select = crate::store::pg::DialectSql::for_dialect::<PostgresDialect>().select_concepts;
         assert!(select.contains("access_count, last_accessed"), "{select}");
+    }
+
+    /// Issue #30: the access update is one narrow, monotonic, multi-row
+    /// `UPDATE … FROM (VALUES …)`: it sets the two access columns only (no
+    /// `embedding`, so a read never re-touches the hnsw index and the row
+    /// update stays HOT-eligible), both through `GREATEST`, joins on id **and**
+    /// session, binds four values per row, and carries no dialect token — the
+    /// same text runs on CockroachDB.
+    #[test]
+    fn the_access_update_is_narrow_monotonic_and_dialect_free() {
+        let sid = SessionId::from("issue-30");
+        let at = Utc.timestamp_opt(1_800_000_000, 0).unwrap();
+        let rows: Vec<crate::store::batch::AccessUpdate<'_>> = (0..3)
+            .map(|k| crate::store::batch::AccessUpdate {
+                session_id: &sid,
+                id: NodeId::new(),
+                access_count: k,
+                last_accessed: at,
+            })
+            .collect();
+        let sql = crate::store::pg::access_update_query(&rows)
+            .sql()
+            .to_string();
+        let set = &sql[sql.find(" SET").unwrap()..sql.find("FROM (").unwrap()];
+        assert_eq!(set.matches(" = ").count(), 2, "two columns only: {sql}");
+        assert!(
+            set.contains("access_count = GREATEST(concepts.access_count, v.access_count)"),
+            "{sql}"
+        );
+        assert!(
+            set.contains(
+                "last_accessed = GREATEST(COALESCE(concepts.last_accessed, v.last_accessed), \
+                 v.last_accessed)"
+            ),
+            "{sql}"
+        );
+        for absent in ["embedding", "INSERT", PostgresDialect::VECTOR_CAST, "::"] {
+            assert!(!sql.contains(absent), "{absent:?} in {sql}");
+        }
+        assert!(
+            sql.ends_with("WHERE concepts.id = v.id AND concepts.session_id = v.session_id"),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("$12") && !sql.contains("$13"),
+            "3 rows x 4 binds: {sql}"
+        );
     }
 
     #[test]
