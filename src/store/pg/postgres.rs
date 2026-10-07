@@ -2216,6 +2216,23 @@ mod tests {
                         Mutation::UpsertNode {
                             node: Node::Concept(concept.clone()),
                         },
+                        Mutation::UpsertEdge {
+                            // Every concept carries a Derives edge from its origin
+                            // interaction (spec §5.7); a session without it is
+                            // refused at load.
+                            edge: crate::types::Edge {
+                                id: NodeId::new(),
+                                session_id: sid.clone(),
+                                source: origin,
+                                target: concept.id,
+                                edge_type: crate::types::EdgeType::Derives,
+                                weight: 0.9,
+                                reinforcements: 0,
+                                created_at: t0,
+                                last_reinforced: t0,
+                                event_time: None,
+                            },
+                        },
                     ],
                 },
                 token,
