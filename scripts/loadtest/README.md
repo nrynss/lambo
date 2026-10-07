@@ -84,6 +84,12 @@ scripts/loadtest/capture_sigterm.sh \
     --out evidence/concurrency --workers 12 --session c-load-20260818 --delay 5
 ```
 
+The harness listens on port 17700 by default and refuses 7700, the port a
+live `lambo serve` writer conventionally holds, unless `--allow-production-port`
+is passed. The spawned serve gets a private `XDG_RUNTIME_DIR` (a `mktemp`
+directory removed on exit), so its session endpoint never lands in the shared
+per-user runtime dir a live writer advertises itself in.
+
 The harness writes into `--out`: `stderr-<run>.log` (the server's full stderr,
 containing the exact `lambo serve: session closed, tail durable` line),
 `ledger-<run>.jsonl`, `durability-<run>.txt`, `run-<run>.json` (machine +
@@ -98,10 +104,14 @@ metadata records the `<SCRATCH-TOKEN>` placeholder.
 
 ```bash
 python3 scripts/loadtest/mcp_load.py \
+    --endpoint http://127.0.0.1:17700/mcp \
     --session c-load-20260818 --ledger /tmp/load-ledger.jsonl \
     --workers 12 --seed 0 \
-    --main-secs 45 --burst-secs 25 --delay-hint 5
+    --main-secs 45 --burst-secs 25
 ```
+
+`--endpoint` defaults to `http://127.0.0.1:17700/mcp`. An endpoint on port 7700
+is refused unless `--allow-production-port` is passed.
 
 Stdlib only (urllib + threads), mirroring the streamable-HTTP MCP client in
 `examples/drive_mcp_soak.py`: `initialize` → `notifications/initialized` →

@@ -26,22 +26,35 @@
 # as taking precedence over --auth-token). run-<run>.json records the
 # placeholder <SCRATCH-TOKEN>.
 #
+# Isolation from a live writer on the same machine:
+#   * the default port is 17700, never 7700 (the conventional port of a
+#     long-lived `lambo serve`, e.g. a dogfood writer). The harness refuses
+#     7700 unless --allow-production-port is passed, because taking it either
+#     fails against the live writer or keeps that writer from starting.
+#   * the spawned serve gets its own XDG_RUNTIME_DIR (a mktemp directory,
+#     mode 700, removed on exit), so its session endpoint file never lands in
+#     the shared per-user runtime dir a live writer advertises itself in.
+#   * the driver is pointed at this harness's own port explicitly.
+#
 # Usage:
 #   scripts/loadtest/capture_sigterm.sh [--out evidence/concurrency] [--workers 12]
 #                                       [--session c-load-20260818] [--delay 5]
-#                                       [--bin target/debug/lambo]
+#                                       [--bin target/debug/lambo] [--port 17700]
+#                                       [--allow-production-port]
 
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
 
+PRODUCTION_PORT=7700
 OUT="$REPO/evidence/concurrency"
 WORKERS=12
 SESSION="c-load-$(date +%Y%m%d)"
 DELAY=5                     # seconds after burst-start before SIGTERM
 BIN="$REPO/target/debug/lambo"
-PORT=7700
+PORT=17700
+ALLOW_PRODUCTION_PORT=0
 MAIN_SECS=45
 BURST_SECS=25
 
@@ -53,18 +66,40 @@ while [[ $# -gt 0 ]]; do
         --delay) DELAY="$2"; shift 2 ;;
         --bin) BIN="$2"; shift 2 ;;
         --port) PORT="$2"; shift 2 ;;
+        --allow-production-port) ALLOW_PRODUCTION_PORT=1; shift ;;
         --main-secs) MAIN_SECS="$2"; shift 2 ;;
         --burst-secs) BURST_SECS="$2"; shift 2 ;;
         *) echo "unknown arg: $1" >&2; exit 2 ;;
     esac
 done
 
+if [[ "$PORT" == "$PRODUCTION_PORT" && "$ALLOW_PRODUCTION_PORT" != 1 ]]; then
+    echo "refusing to run on port $PRODUCTION_PORT, the port a live lambo serve" \
+         "writer listens on; pick another --port, or pass --allow-production-port" \
+         "if this machine runs no such writer" >&2
+    exit 2
+fi
+
 RUN="$(date -u +%Y%m%d-%H%M%S)"
 mkdir -p "$OUT"
 TOKEN_FILE="$(mktemp /tmp/c-series-token.XXXXXX)"
 TOKEN="scratch-$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 printf '%s' "$TOKEN" > "$TOKEN_FILE"
-trap 'rm -f "$TOKEN_FILE"; if [[ -n "${SERVE_PID:-}" ]] && kill -0 "$SERVE_PID" 2>/dev/null; then kill -TERM "$SERVE_PID" 2>/dev/null || true; fi' EXIT
+# A private runtime dir for the spawned serve (see the isolation note above).
+# Deliberately short and under /tmp rather than $TMPDIR: serve binds a unix
+# socket at <dir>/lambo/<38-byte name>, and a socket address has ~104 bytes
+# on macOS, which a /var/folders/... TMPDIR plus a long name would overrun.
+RUNTIME_DIR="$(mktemp -d /tmp/lambo-lt.XXXXXX)"
+chmod 700 "$RUNTIME_DIR"
+cleanup() {
+    rm -f "$TOKEN_FILE"
+    if [[ -n "${SERVE_PID:-}" ]] && kill -0 "$SERVE_PID" 2>/dev/null; then
+        kill -TERM "$SERVE_PID" 2>/dev/null || true
+        wait "$SERVE_PID" 2>/dev/null || true
+    fi
+    rm -rf "$RUNTIME_DIR"
+}
+trap cleanup EXIT
 
 DB="$OUT/$SESSION.db"
 CFG="$OUT/lambo.sqlite.toml"
@@ -93,6 +128,7 @@ echo "== machine: $(uname -srm) | $(lscpu 2>/dev/null | awk -F: '/Model name/{pr
 
 "$BIN" provision --config "$CFG" >/dev/null
 
+XDG_RUNTIME_DIR="$RUNTIME_DIR" \
 "$BIN" serve --config "$CFG" --session "$SESSION" --agent c-load \
     --transport http --port "$PORT" --bind 127.0.0.1 \
     > "$STDERR" 2>&1 &
@@ -111,7 +147,10 @@ echo "serve listening (port $PORT)"
 
 STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
+DRIVER_PORT_FLAG=()
+if [[ "$ALLOW_PRODUCTION_PORT" == 1 ]]; then DRIVER_PORT_FLAG=(--allow-production-port); fi
 python3 "$HERE/mcp_load.py" \
+    --endpoint "http://127.0.0.1:$PORT/mcp" ${DRIVER_PORT_FLAG[@]+"${DRIVER_PORT_FLAG[@]}"} \
     --session "$SESSION" --ledger "$LEDGER" \
     --workers "$WORKERS" --seed 0 \
     --rate 40 --burst-rate 45 --overdrive 2 --overdrive-calls 120 \
