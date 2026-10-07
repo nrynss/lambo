@@ -218,13 +218,32 @@ jobs:
         run: |
           set -euo pipefail
           BIN="dist/lambo-${VERSION}-${{ matrix.name }}"
-          otool -L "$BIN"
+          # Fail closed. `otool -L` exits 0 on a file that is not Mach-O at all
+          # (it prints "is not an object file" and lists nothing), so a dylib
+          # filter alone would pass a truncated download, a text file or a
+          # Linux ELF. Require an arm64 Mach-O executable first, then a load
+          # list that names libSystem (every macOS executable links it, so an
+          # empty or unparsed list fails here instead of passing).
+          kind=$(file -b "$BIN")
+          echo "file: $kind"
+          if [[ "$kind" != "Mach-O 64-bit executable arm64"* ]]; then
+            echo "::error::$BIN is not a Mach-O arm64 executable: $kind" >&2
+            exit 1
+          fi
+          libs=$(otool -L "$BIN")
+          echo "$libs"
+          deps=$(tail -n +2 <<<"$libs" | awk '{print $1}')
+          # A here-string, not a pipe: `grep -q` exits on the first match, and
+          # under pipefail a writer killed by SIGPIPE would fail the check.
+          if ! grep -qx '/usr/lib/libSystem.B.dylib' <<<"$deps"; then
+            echo "::error::$BIN does not list /usr/lib/libSystem.B.dylib; otool -L output was not a load list" >&2
+            exit 1
+          fi
           # Metal, Foundation and friends are system frameworks, so a clean
           # macOS needs nothing installed. A dependency that starts linking a
           # Homebrew or bundled dylib (/opt/homebrew, @rpath, ...) would ship a
           # binary that fails to launch on a machine without it; fail here.
-          bad=$(otool -L "$BIN" | tail -n +2 | awk '{print $1}' \
-            | grep -v -e '^/System/Library/' -e '^/usr/lib/' || true)
+          bad=$(grep -v -e '^/System/Library/' -e '^/usr/lib/' <<<"$deps" || true)
           if [[ -n "$bad" ]]; then
             echo "::error::$BIN links libraries outside /System/Library and /usr/lib:" >&2
             echo "$bad" >&2
