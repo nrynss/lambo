@@ -959,8 +959,7 @@ mod tests {
     #[cfg(feature = "embed-gemini")]
     fn gemini_feature_on_builds_adapter_from_credentials() {
         use super::gemini::TEST_RSA_PRIVATE_KEY_PEM;
-        let dir = std::env::temp_dir().join(format!("lambo-a3-gemini-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_util::ScratchDir::new("lambo-a3-gemini");
         let creds_path = dir.join("sa.json");
         let creds_json = serde_json::json!({
             "client_email": "test@example.com",
@@ -996,8 +995,7 @@ mod tests {
     fn gemini_resolves_the_shared_credential_variable() {
         use super::gemini::TEST_RSA_PRIVATE_KEY_PEM;
         let _g = crate::test_util::env_lock();
-        let dir = std::env::temp_dir().join(format!("lambo-l1-shared-cred-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_util::ScratchDir::new("lambo-l1-shared-cred");
         let creds_path = dir.join("sa.json");
         std::fs::write(
             &creds_path,

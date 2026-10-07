@@ -726,14 +726,8 @@ mod tests {
     use super::*;
 
     /// A ledger under a temp dir, plus the dir (kept alive by the caller).
-    fn temp_dir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "lambo-ledger-{tag}-{}-{}",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        dir
+    fn temp_dir(tag: &str) -> crate::test_util::ScratchDir {
+        crate::test_util::ScratchDir::new(&format!("lambo-ledger-{tag}"))
     }
 
     /// Spin until `f` holds or the budget expires. The writer is a real thread,

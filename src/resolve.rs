@@ -670,15 +670,7 @@ mod tests {
             .map(|k| (k, std::env::var_os(k)))
             .collect();
 
-        let dir = std::env::temp_dir().join(format!(
-            "lambo-resolve-env-vars-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock after epoch")
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let dir = crate::test_util::ScratchDir::new("lambo-resolve-env-vars");
         let path = dir.join("lambo.toml");
 
         for o in &table {
@@ -790,8 +782,7 @@ mod tests {
         use crate::embed::gemini::TEST_RSA_PRIVATE_KEY_PEM;
         use crate::embed::EmbedderKind;
         use crate::store::StoreKind;
-        let dir = std::env::temp_dir().join(format!("lambo-resolve-gemini-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_util::ScratchDir::new("lambo-resolve-gemini");
         let creds_path = dir.join("sa.json");
         let creds_json = serde_json::json!({
             "client_email": "test@example.com",

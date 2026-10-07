@@ -802,17 +802,8 @@ mod tests {
 
     /// A scratch directory for the env-override tests, unique per process and
     /// per call so two of them can never share a `lambo.toml`.
-    fn scratch_config_dir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "lambo-promotion-policy-{tag}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock after epoch")
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).expect("scratch dir");
-        dir
+    fn scratch_config_dir(tag: &str) -> crate::test_util::ScratchDir {
+        crate::test_util::ScratchDir::new(&format!("lambo-promotion-policy-{tag}"))
     }
 
     #[test]

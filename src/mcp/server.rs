@@ -5781,14 +5781,8 @@ mod tests {
     // =======================================================================
 
     /// A scratch directory outside the repo, unique per test.
-    fn ledger_dir(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "lambo-i1-{tag}-{}-{}",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&dir).expect("scratch dir");
-        dir
+    fn ledger_dir(tag: &str) -> crate::test_util::ScratchDir {
+        crate::test_util::ScratchDir::new(&format!("lambo-i1-{tag}"))
     }
 
     /// The same [`server`] fixture, with a ledger attached.

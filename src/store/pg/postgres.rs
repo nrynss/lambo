@@ -941,8 +941,7 @@ mod tests {
             then.status(200)
                 .json_body(serde_json::json!({ "access_token": "tok", "expires_in": 61 }));
         });
-        let dir = std::env::temp_dir().join(format!("lambo-iam-rotate-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let dir = crate::test_util::ScratchDir::new("lambo-iam-rotate");
         let creds = dir.join("sa.json");
         std::fs::write(
             &creds,
@@ -1032,8 +1031,7 @@ mod tests {
             }
         });
 
-        let dir = std::env::temp_dir().join(format!("lambo-iam-pw-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let dir = crate::test_util::ScratchDir::new("lambo-iam-pw");
         let creds = dir.join("sa.json");
         std::fs::write(
             &creds,

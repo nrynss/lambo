@@ -859,16 +859,8 @@ mod sqlite_tests {
     /// resolves something other than what it wrote to disk.
     const ENV_KEYS: &[&str] = crate::resolve::RESOLVE_ENV_VARS;
 
-    fn scratch() -> (std::path::PathBuf, std::path::PathBuf) {
-        let dir = std::env::temp_dir().join(format!(
-            "lambo-cli-sqlite-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+    fn scratch() -> (crate::test_util::ScratchDir, std::path::PathBuf) {
+        let dir = crate::test_util::ScratchDir::new("lambo-cli-sqlite");
         let db = dir.join("t.sqlite");
         let cfg = dir.join("lambo.toml");
         std::fs::write(

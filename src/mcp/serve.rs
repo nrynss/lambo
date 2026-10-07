@@ -3205,12 +3205,7 @@ mod tests {
     #[cfg(all(feature = "store-memory", feature = "embed-fixture"))]
     #[tokio::test(start_paused = true)]
     async fn i2_the_heartbeat_fires_on_its_interval() {
-        let dir = std::env::temp_dir().join(format!(
-            "lambo-i2-hb-{}-{}",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let dir = crate::test_util::ScratchDir::new("lambo-i2-hb");
         let path = dir.join("calls.jsonl");
         let ledger = Ledger::open(&path);
 
@@ -4853,12 +4848,7 @@ mod tests {
         /// it is the same assumption the J2 outage story already rests on.
         #[tokio::test]
         async fn a_fenced_holder_shutdown_cancels_a_running_transport_and_books_the_loss() {
-            let dir = std::env::temp_dir().join(format!(
-                "lambo-r2-compose-{}-{}",
-                std::process::id(),
-                uuid::Uuid::new_v4()
-            ));
-            std::fs::create_dir_all(&dir).expect("scratch dir");
+            let dir = crate::test_util::ScratchDir::new("lambo-r2-compose");
             let path = dir.join("calls.jsonl");
             let ledger = Ledger::open(&path);
 

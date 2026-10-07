@@ -93,15 +93,7 @@ mod live {
             );
         };
 
-        let dir = std::env::temp_dir().join(format!(
-            "lambo-cli-crdb-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).expect("scratch");
+        let dir = crate::test_util::ScratchDir::new("lambo-cli-crdb");
         let cfg = dir.join("lambo.toml");
         std::fs::write(
             &cfg,

@@ -353,14 +353,7 @@ mod marker_tests {
         const PUSHED: &str = "postgres://pushed-resolved@127.0.0.1:1/resolved";
         const DECOY: &str = "postgres://dotenv-decoy@127.0.0.1:1/dotenv";
 
-        let root = std::env::temp_dir().join(format!(
-            "lambo-prov-dotenv-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let root = crate::test_util::ScratchDir::new("lambo-prov-dotenv");
         fs::create_dir_all(root.join("scripts")).expect("scratch scripts");
         fs::create_dir_all(root.join("migrations").join("cockroach")).expect("scratch migrations");
         fs::create_dir_all(root.join("stub")).expect("scratch stub");
@@ -460,14 +453,7 @@ mod marker_tests {
 
     #[test]
     fn provision_script_without_lambo_marker_is_ignored() {
-        let dir = std::env::temp_dir().join(format!(
-            "lambo-prov-marker-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let dir = crate::test_util::ScratchDir::new("lambo-prov-marker");
         fs::create_dir_all(dir.join("scripts")).expect("scratch");
         fs::write(dir.join("scripts").join("provision.sh"), "#!/bin/sh\n").expect("script");
         assert!(

@@ -816,8 +816,7 @@ mod tests {
     /// `CloudSqlTokenSource` deserialized service-account JSON only and refused this file.
     #[test]
     fn an_authorized_user_adc_file_loads_for_the_cloud_sql_path() {
-        let dir = std::env::temp_dir().join(format!("lambo-adc-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_util::ScratchDir::new("lambo-adc");
         let path = dir.join("application_default_credentials.json");
         std::fs::write(
             &path,
@@ -847,8 +846,7 @@ mod tests {
 
     #[test]
     fn an_unknown_credential_type_is_named() {
-        let dir = std::env::temp_dir().join(format!("lambo-cred-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_util::ScratchDir::new("lambo-cred");
         let path = dir.join("external.json");
         std::fs::write(&path, r#"{"type":"external_account"}"#).unwrap();
         let err = load_credentials(&path).unwrap_err();

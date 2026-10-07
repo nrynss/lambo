@@ -1089,9 +1089,7 @@ mod tests {
     #[test]
     fn sha256_file_hashes_the_bytes_actually_on_disk() {
         // K2-R1-1/R1-8 foundation: the digest comes from the file, not a const.
-        let dir =
-            std::env::temp_dir().join(format!("lambo-candle-sha-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_util::ScratchDir::new("lambo-candle-sha-test");
         let path = dir.join("artifact.bin");
         std::fs::write(&path, b"abc").unwrap();
         let got = sha256_file(&path).unwrap();

@@ -782,6 +782,39 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
+    /// A unique scratch directory removed on drop, so a failing test leaves
+    /// nothing under `$TMPDIR`. (`main.rs` is its own crate, so it cannot reach
+    /// the library's `test_util::ScratchDir`.)
+    struct ScratchDir(std::path::PathBuf);
+
+    impl ScratchDir {
+        fn new() -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "lambo-cli-test-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+
+    impl std::ops::Deref for ScratchDir {
+        type Target = std::path::Path;
+        fn deref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for ScratchDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     use super::*;
     use clap::CommandFactory;
 
@@ -998,16 +1031,7 @@ mod tests {
             std::env::remove_var(k);
         }
 
-        let mut dir = std::env::temp_dir();
-        dir.push(format!(
-            "lambo-cli-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = ScratchDir::new();
         let path = dir.join("lambo-test.toml");
         {
             let mut f = std::fs::File::create(&path).unwrap();
@@ -1027,6 +1051,5 @@ dim = 1024
         assert_eq!(full.embedding.dim, 1024);
         assert!(full.store.vector_dimensions().is_none());
         let _ = resolve_store_only(Some(&path)).expect("store only");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

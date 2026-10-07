@@ -6374,8 +6374,8 @@ mod tests {
             // Copy rather than open in place: a live pool may write WAL/SHM
             // sidecars next to whatever it opens, and the committed evidence
             // file must never pick up untracked write artifacts.
-            let tmp =
-                std::env::temp_dir().join(format!("lambo-h1-bge-{}.db", uuid::Uuid::new_v4()));
+            let scratch = crate::test_util::ScratchDir::new("lambo-h1-bge");
+            let tmp = scratch.join("corpus.db");
             if std::fs::copy(src, &tmp).is_err() {
                 eprintln!("H1: could not copy the real-embedder corpus, skipping optional leg");
                 return false;
@@ -8572,16 +8572,8 @@ mod tests {
     }
 
     /// A scratch sqlite file path this test owns; the caller removes the dir.
-    fn scratch_db() -> (std::path::PathBuf, String) {
-        let dir = std::env::temp_dir().join(format!(
-            "lambo-lease-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+    fn scratch_db() -> (crate::test_util::ScratchDir, String) {
+        let dir = crate::test_util::ScratchDir::new("lambo-lease");
         let path = dir.join("lease.sqlite");
         let s = path.to_str().unwrap().to_string();
         (dir, s)

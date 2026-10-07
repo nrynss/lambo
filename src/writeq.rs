@@ -5569,15 +5569,7 @@ mod pipeline_tests {
     /// was ever emitted.
     #[tokio::test]
     async fn j4_a_completion_line_records_the_applied_derive_lifecycle() {
-        let dir = std::env::temp_dir().join(format!(
-            "lambo-j4-wq-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_util::ScratchDir::new("lambo-j4-wq");
         let ledger_path = dir.join("calls.jsonl");
         let ledger = crate::ledger::Ledger::open(&ledger_path);
 

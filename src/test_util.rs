@@ -21,6 +21,51 @@ pub fn env_lock() -> MutexGuard<'static, ()> {
 }
 
 // ---------------------------------------------------------------------------
+// Scratch directories
+// ---------------------------------------------------------------------------
+
+/// A unique scratch directory under `std::env::temp_dir()`, removed on drop so a
+/// test that panics part-way leaves nothing under `$TMPDIR`. Derefs to
+/// [`std::path::Path`]. Not for socket paths: `temp_dir()` is 46 bytes on macOS,
+/// which is why `mcp::endpoint`'s tests keep their own short-path guard.
+pub struct ScratchDir {
+    path: std::path::PathBuf,
+}
+
+impl ScratchDir {
+    /// Create `<temp_dir>/<prefix>-<pid>-<uuid>`.
+    pub fn new(prefix: &str) -> Self {
+        let path = std::env::temp_dir().join(format!(
+            "{prefix}-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&path)
+            .unwrap_or_else(|e| panic!("scratch dir {}: {e}", path.display()));
+        Self { path }
+    }
+}
+
+impl std::ops::Deref for ScratchDir {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl AsRef<std::path::Path> for ScratchDir {
+    fn as_ref(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tracing capture
 // ---------------------------------------------------------------------------
 
