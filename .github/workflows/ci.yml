@@ -366,6 +366,18 @@ jobs:
           grep -q 'test store::pg::postgres::tests::interaction_span_coverage_decodes_on_both_arms ... ok' postgres-coverage.log
           grep -q 'test store::pg::postgres::tests::canonization_cycle_makes_the_stage2_hop_on_postgres ... ok' postgres-coverage.log
 
+      # Issue #30: read accesses reach PostgreSQL through the narrow, monotonic
+      # RecordAccess update (fenced, replay-safe, embedding untouched) and
+      # survive a writer restart. Its own step with the grep-the-ok-line guard.
+      - name: Live Postgres access counts (narrow update, reattach)
+        run: |
+          set -o pipefail
+          cargo test --no-default-features --features store-postgres --lib \
+            -- --ignored --nocapture --exact \
+            store::pg::postgres::tests::access_counts_round_trip_through_the_narrow_update_and_survive_reattach \
+            2>&1 | tee postgres-access.log
+          grep -q 'test store::pg::postgres::tests::access_counts_round_trip_through_the_narrow_update_and_survive_reattach ... ok' postgres-access.log
+
       - name: Live Postgres H3 recall parity
         run: |
           set -o pipefail

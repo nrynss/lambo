@@ -3354,6 +3354,147 @@ mod conformance {
             "EXPLAIN must not fall back to a full scan (non-partial index?), got:\n{text}"
         );
     }
+
+    /// Issue #30, live: the shared narrow `RecordAccess` update on
+    /// CockroachDB — the dialect where `GREATEST`'s operand typing and
+    /// `UPDATE … FROM (VALUES …)` are the risk — inside the fenced flush,
+    /// monotonic against a replay and an older presentation, read back by a
+    /// second pool (a writer restart), and kept below a later full upsert in
+    /// the same batch.
+    ///
+    /// `#[ignore]`d like every live cockroach test. **Not run in CI**: the
+    /// `cockroach-live` job is disabled by operator decision (2026-10-06). Run:
+    /// `cargo test --features store-cockroach,fixtures --lib -- --ignored
+    /// access_counts_round_trip`.
+    #[tokio::test]
+    #[ignore = "live: requires LAMBO_COCKROACH_DSN"]
+    async fn access_counts_round_trip_through_the_narrow_update_on_cockroach() {
+        let Some(dsn) =
+            dsn_or_skip("access_counts_round_trip_through_the_narrow_update_on_cockroach")
+        else {
+            return;
+        };
+        use crate::store::lease::{LeaseHolder, LeaseOutcome};
+        let store = new_store(&dsn);
+        store.init_schema().await.expect("init_schema");
+        let sid = SessionId::from(format!("issue-30-live-{}", Uuid::new_v4()));
+        let holder = LeaseHolder {
+            endpoint: None,
+            agent: AgentId::new("issue-30"),
+            pid: 30,
+            host: "test".into(),
+        };
+        let LeaseOutcome::Acquired(info) = store
+            .acquire_lease(&sid, &holder, Duration::from_secs(45))
+            .await
+            .expect("acquire")
+        else {
+            panic!("expected Acquired");
+        };
+        let token = Some(info.token);
+        let t0 = chrono::Utc.with_ymd_and_hms(2026, 10, 7, 12, 0, 0).unwrap();
+        let t = |s: i64| t0 + chrono::Duration::seconds(s);
+        let (origin, cid) = (NodeId::new(), NodeId::new());
+        let concept = crate::types::Concept {
+            id: cid,
+            session_id: sid.clone(),
+            content: format!("read often {cid}"),
+            canonical_key: format!("read often {cid}"),
+            concept_type: ConceptType::Entity,
+            origin_interaction: origin,
+            origin_agent: AgentId::new("issue-30"),
+            created_at: t0,
+            access_count: 0,
+            last_accessed: None,
+            gc_survived: 1,
+            canonization_status: crate::types::CanonizationStatus::None,
+            blast_radius: None,
+            last_demotion_time: None,
+            embedding: None,
+            human_confirmed: 0,
+            chunk_group_id: None,
+        };
+        let access = |n: i32, at: i64| Mutation::RecordAccess {
+            session_id: sid.clone(),
+            id: cid,
+            access_count: n,
+            last_accessed: t(at),
+        };
+        let batch = |mutations: Vec<Mutation>| MutationBatch {
+            mutation_epoch: 5,
+            gc_mark: Default::default(),
+            mutations,
+        };
+        store
+            .flush(
+                &batch(vec![
+                    Mutation::UpsertNode {
+                        node: Node::Interaction(Interaction {
+                            event_time: None,
+                            id: origin,
+                            session_id: sid.clone(),
+                            agent_id: AgentId::new("issue-30"),
+                            prompt_text: Some("p".into()),
+                            previous_id: None,
+                            created_at: t0,
+                        }),
+                    },
+                    Mutation::UpsertNode {
+                        node: Node::Concept(concept.clone()),
+                    },
+                ]),
+                token,
+            )
+            .await
+            .expect("seed");
+        store
+            .flush(&batch(vec![access(3, 30)]), token)
+            .await
+            .expect("access");
+        store
+            .flush(&batch(vec![access(3, 30)]), token)
+            .await
+            .expect("replay");
+        store
+            .flush(&batch(vec![access(1, 10)]), token)
+            .await
+            .expect("older");
+        let stale = store
+            .flush(&batch(vec![access(7, 70)]), Some(info.token - 1))
+            .await;
+        assert!(
+            matches!(stale, Err(StoreError::StaleWrite(_))),
+            "the access update is fenced like every write, got {stale:?}"
+        );
+
+        let restarted = new_store(&dsn);
+        let snap = restarted.load_session(&sid).await.expect("reload");
+        let c = snap.concepts.iter().find(|c| c.id == cid).expect("concept");
+        assert_eq!((c.access_count, c.last_accessed), (3, Some(t(30))));
+        assert_eq!(c.gc_survived, 1, "no other column moves");
+        assert_eq!(snap.mutation_epoch, 5);
+
+        let mut later = c.clone();
+        later.access_count = 9;
+        later.last_accessed = Some(t(90));
+        restarted
+            .flush(
+                &batch(vec![
+                    access(4, 40),
+                    Mutation::UpsertNode {
+                        node: Node::Concept(later),
+                    },
+                    access(10, 100),
+                ]),
+                token,
+            )
+            .await
+            .expect("mixed batch");
+        let snap = restarted.load_session(&sid).await.expect("load");
+        let c = snap.concepts.iter().find(|c| c.id == cid).unwrap();
+        assert_eq!((c.access_count, c.last_accessed), (10, Some(t(100))));
+        let _ = restarted.release_lease(&sid, &holder).await;
+    }
 }
 
 /// H2 — the **live Cockroach leg** of cross-store recall parity

@@ -1393,6 +1393,13 @@ mod tests {
     }
 
     async fn unique_live_store(test: &str, dim: usize) -> Option<PostgresStore> {
+        let dsn = unique_live_dsn(test).await?;
+        Some(live_store_at(test, &dsn, dim).await)
+    }
+
+    /// A fresh database on the live server, by DSN — for a test that needs a
+    /// second connection to the same data (a writer restart).
+    async fn unique_live_dsn(test: &str) -> Option<String> {
         let admin_dsn = postgres_dsn_or_skip(test)?;
         let admin = sqlx::PgPool::connect(&admin_dsn)
             .await
@@ -1402,10 +1409,14 @@ mod tests {
             .execute(&admin)
             .await
             .unwrap_or_else(|e| panic!("{test}: create {db}: {e}"));
-        let dsn = dsn_for_database(&admin_dsn, &db);
+        Some(dsn_for_database(&admin_dsn, &db))
+    }
+
+    /// A store on `dsn` with its schema initialised (idempotent).
+    async fn live_store_at(test: &str, dsn: &str, dim: usize) -> PostgresStore {
         let store = PostgresStore::new(StoreConfig {
             kind: StoreKind::Postgres,
-            dsn: Some(dsn),
+            dsn: Some(dsn.to_string()),
             path: None,
             vector_dim: Some(dim),
         })
@@ -1414,7 +1425,7 @@ mod tests {
             .init_schema()
             .await
             .unwrap_or_else(|e| panic!("{test}: init_schema: {e}"));
-        Some(store)
+        store
     }
 
     /// Camera-proof EXPLAIN of the production `vector_candidates` SQL.
@@ -2075,5 +2086,195 @@ mod tests {
             hits.is_empty(),
             "concepts with NULL embeddings must not be candidates, got {hits:?}"
         );
+    }
+
+    /// Issue #30, live: read accesses reach PostgreSQL through the narrow
+    /// `RecordAccess` update — inside the fenced flush transaction — and a
+    /// writer restart (a second store on a fresh pool, loading the session
+    /// into a new graph) gets them back. The update is monotonic against a
+    /// replay and an older presentation, leaves the embedding (and so the
+    /// hnsw index entry) alone, does not move the mutation watermark, and a
+    /// later full upsert in the same batch keeps its higher values.
+    #[tokio::test]
+    #[ignore = "live: requires LAMBO_POSTGRES_DSN against pinned pgvector/pgvector:pg17"]
+    async fn access_counts_round_trip_through_the_narrow_update_and_survive_reattach() {
+        const TEST: &str =
+            "access_counts_round_trip_through_the_narrow_update_and_survive_reattach";
+        let Some(dsn) = unique_live_dsn(TEST).await else {
+            return;
+        };
+        let store = live_store_at(TEST, &dsn, 8).await;
+        let sid = SessionId::from("issue-30-live");
+        let holder = LeaseHolder {
+            agent: AgentId::from("issue-30"),
+            pid: 1,
+            host: "test".into(),
+            endpoint: None,
+        };
+        let LeaseOutcome::Acquired(info) = store
+            .acquire_lease(&sid, &holder, std::time::Duration::from_secs(45))
+            .await
+            .expect("acquire")
+        else {
+            panic!("expected Acquired");
+        };
+        let token = Some(info.token);
+
+        let t0 = Utc.with_ymd_and_hms(2026, 10, 7, 12, 0, 0).unwrap();
+        let t = |s: i64| t0 + chrono::Duration::seconds(s);
+        let contract = EmbeddingContract {
+            kind: "fixture".into(),
+            model: Some("issue-30".into()),
+            dim: 8,
+        };
+        let (origin, cid) = (NodeId::new(), NodeId::new());
+        let probe = vec![1.0f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let concept = Concept {
+            id: cid,
+            session_id: sid.clone(),
+            content: "read often".into(),
+            canonical_key: "read often".into(),
+            concept_type: ConceptType::Entity,
+            origin_interaction: origin,
+            origin_agent: AgentId::from("issue-30"),
+            created_at: t0,
+            access_count: 0,
+            last_accessed: None,
+            gc_survived: 1,
+            canonization_status: crate::types::CanonizationStatus::None,
+            blast_radius: None,
+            last_demotion_time: None,
+            embedding: Some(probe.clone()),
+            human_confirmed: 0,
+            chunk_group_id: None,
+        };
+        store
+            .flush(
+                &MutationBatch {
+                    mutation_epoch: 5,
+                    gc_mark: Default::default(),
+                    mutations: vec![
+                        Mutation::SetEmbedding {
+                            session_id: sid.clone(),
+                            embedding: Some(contract.clone()),
+                        },
+                        Mutation::UpsertNode {
+                            node: Node::Interaction(Interaction {
+                                event_time: None,
+                                id: origin,
+                                session_id: sid.clone(),
+                                agent_id: AgentId::from("issue-30"),
+                                prompt_text: Some("p".into()),
+                                previous_id: None,
+                                created_at: t0,
+                            }),
+                        },
+                        Mutation::UpsertNode {
+                            node: Node::Concept(concept.clone()),
+                        },
+                    ],
+                },
+                token,
+            )
+            .await
+            .expect("seed");
+
+        // The writer's path: a loaded graph applies reads in RAM, and the
+        // flush takes them as narrow access updates (no log entry, no epoch).
+        let mut graph = crate::store::load::load_session_async(&store, &sid)
+            .await
+            .expect("load")
+            .graph;
+        assert_eq!(graph.record_accesses(&[(cid, 3, t(30))]), 1);
+        let accesses = graph.drain_accesses(usize::MAX);
+        assert!(matches!(
+            accesses.as_slice(),
+            [Mutation::RecordAccess { .. }]
+        ));
+        let batch = MutationBatch {
+            mutation_epoch: graph.epoch(),
+            gc_mark: Default::default(),
+            mutations: accesses,
+        };
+        store.flush(&batch, token).await.expect("accesses");
+        store.flush(&batch, token).await.expect("replay converges");
+        let older = MutationBatch {
+            mutation_epoch: 0,
+            gc_mark: Default::default(),
+            mutations: vec![Mutation::RecordAccess {
+                session_id: sid.clone(),
+                id: cid,
+                access_count: 1,
+                last_accessed: t(10),
+            }],
+        };
+        store.flush(&older, token).await.expect("older access");
+        let stale = store.flush(&batch, Some(info.token - 1)).await;
+        assert!(
+            matches!(stale, Err(crate::store::StoreError::StaleWrite(_))),
+            "the access update is fenced like every write, got {stale:?}"
+        );
+
+        // Writer restart: a second store, a fresh pool, a new graph.
+        let restarted = live_store_at(TEST, &dsn, 8).await;
+        let reloaded = crate::store::load::load_session_async(&restarted, &sid)
+            .await
+            .expect("reload")
+            .graph;
+        let Some(Node::Concept(c)) = reloaded.node(cid) else {
+            panic!("concept missing after reattach");
+        };
+        assert_eq!((c.access_count, c.last_accessed), (3, Some(t(30))));
+        assert_eq!(c.gc_survived, 1, "no other column moves");
+        assert_eq!(
+            c.embedding.as_deref(),
+            Some(probe.as_slice()),
+            "embedding intact"
+        );
+        assert_eq!(reloaded.epoch(), 5, "accesses never move the watermark");
+        let hits = restarted
+            .vector_candidates_checked(&sid, &probe, &contract, 5)
+            .await
+            .expect("vector read");
+        assert!(
+            hits.iter().any(|h| h.item == cid),
+            "the concept is still a vector candidate: {hits:?}"
+        );
+
+        // Same batch: a later full upsert keeps its higher values; an access
+        // after an upsert is not undone by it.
+        let mut later = c.clone();
+        later.access_count = 9;
+        later.last_accessed = Some(t(90));
+        restarted
+            .flush(
+                &MutationBatch {
+                    mutation_epoch: 5,
+                    gc_mark: Default::default(),
+                    mutations: vec![
+                        Mutation::RecordAccess {
+                            session_id: sid.clone(),
+                            id: cid,
+                            access_count: 4,
+                            last_accessed: t(40),
+                        },
+                        Mutation::UpsertNode {
+                            node: Node::Concept(later),
+                        },
+                        Mutation::RecordAccess {
+                            session_id: sid.clone(),
+                            id: cid,
+                            access_count: 10,
+                            last_accessed: t(100),
+                        },
+                    ],
+                },
+                token,
+            )
+            .await
+            .expect("mixed batch");
+        let snap = restarted.load_session(&sid).await.expect("load");
+        let c = snap.concepts.iter().find(|c| c.id == cid).unwrap();
+        assert_eq!((c.access_count, c.last_accessed), (10, Some(t(100))));
     }
 }
