@@ -321,7 +321,7 @@ const _: () = assert!(
 /// hygiene, not a bound (J3 redesign: no rate sizes a bound any more).
 ///
 /// `ObservedRate::items_per_sec` and `rate_of` reach for this when a wall
-/// time reads zero or absurd — the [`crate::FixtureEmbedder`] case, which
+/// time reads zero or absurd — the `crate::FixtureEmbedder` case, which
 /// "measures" ~98 000 items/s by not doing work. One full queue
 /// ([`WRITE_QUEUE_MAX`]) per second is comfortably above any real embedder
 /// this project has measured (110 to 141 items/s 4-wide, llama.cpp BGE-M3 on
