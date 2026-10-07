@@ -1439,16 +1439,34 @@ impl Graph {
     }
 
     /// Exclude `n` epoch bumps from GC's session-mutation measure by advancing
-    /// [`GcMark::last_gc_epoch`] by exactly `n` (NEW-2).
+    /// [`GcMark::last_gc_epoch`] by `n` (NEW-2), never past [`Graph::epoch`].
     ///
     /// GC's deferred survivor-bump drains use this: their own `UpsertNode`s
     /// advance the epoch, and crediting them as session writes made GC
-    /// self-sustaining on an idle session. Any other writer of mutations that
-    /// must not count toward `gc_interval` or the idle floor (issue #30's
-    /// access-count updates are the expected one) uses the same seam, under the
-    /// same write guard that appended them.
+    /// self-sustaining on an idle session. It is only for writes that **did**
+    /// advance the epoch, called under the same write guard that appended
+    /// them, with `n` equal to the bumps they caused.
+    ///
+    /// A write that does not advance the epoch needs no exemption and must not
+    /// call this: the measure is `epoch - last_gc_epoch`, so such a write is
+    /// already invisible to it, and "exempting" it would cancel real session
+    /// writes out of `gc_interval` and the idle floor and suppress sweeps.
+    /// (Issue #30 records accesses without advancing the epoch, so it is in
+    /// this category.)
+    ///
+    /// The watermark is clamped to the current epoch: a watermark ahead of the
+    /// epoch would hide the next writes from the measure until the epoch caught
+    /// up. An `n` that would overshoot is a caller bug (debug-asserted).
     pub fn exempt_from_gc_measure(&mut self, n: u64) {
-        self.gc_mark.last_gc_epoch = self.gc_mark.last_gc_epoch.saturating_add(n);
+        let advanced = self.gc_mark.last_gc_epoch.saturating_add(n);
+        debug_assert!(
+            advanced <= self.epoch,
+            "exempt_from_gc_measure({n}) would move last_gc_epoch {} past epoch {}: \
+             only exempt bumps that were actually appended",
+            self.gc_mark.last_gc_epoch,
+            self.epoch
+        );
+        self.gc_mark.last_gc_epoch = advanced.min(self.epoch).max(self.gc_mark.last_gc_epoch);
     }
 
     /// Start the `gc_max_interval` clock for a session that has never swept
@@ -2036,6 +2054,51 @@ mod tests {
             human_confirmed: 0,
             chunk_group_id: None,
         }
+    }
+
+    /// A graph with a few writes behind it (epoch > 0).
+    fn graph_with_writes() -> Graph {
+        let mut g = Graph::new(sid());
+        let mut prev = None;
+        for i in 0..3 {
+            let ix = interaction(9_000 + i, prev, i as i64);
+            prev = Some(ix.id);
+            g.insert_interaction(ix).unwrap();
+        }
+        assert!(g.epoch() >= 3);
+        g
+    }
+
+    /// Issue #29 item 2: exempting exactly the bumps a writer appended moves
+    /// the watermark to the epoch, so those writes are invisible to GC's
+    /// measure and the next real write is visible again.
+    #[test]
+    fn exempting_appended_bumps_moves_the_watermark_up_to_the_epoch() {
+        let mut g = graph_with_writes();
+        let e = g.epoch();
+        g.record_gc_sweep(e - 2, ts(0));
+        g.exempt_from_gc_measure(2);
+        assert_eq!(g.gc_mark().last_gc_epoch, e);
+        let tail = g.temporal_chain().last().copied();
+        g.insert_interaction(interaction(1, tail, 99)).unwrap();
+        assert!(
+            g.epoch() > g.gc_mark().last_gc_epoch,
+            "the next write counts"
+        );
+    }
+
+    /// Issue #29 item 2: an over-large exemption cannot move the watermark
+    /// past the epoch (which would hide the next writes from GC's measure and
+    /// suppress sweeps). Debug builds treat it as the caller bug it is; release
+    /// builds clamp. Either way the mark never ends up ahead of the epoch.
+    #[test]
+    #[cfg_attr(debug_assertions, should_panic(expected = "past epoch"))]
+    fn exempt_from_gc_measure_never_moves_the_watermark_past_the_epoch() {
+        let mut g = graph_with_writes();
+        let e = g.epoch();
+        g.record_gc_sweep(e - 1, ts(0));
+        g.exempt_from_gc_measure(10);
+        assert_eq!(g.gc_mark().last_gc_epoch, e, "clamped to the epoch");
     }
 
     fn edge(id: u64, src: NodeId, tgt: NodeId, ty: EdgeType, w: f64) -> Edge {

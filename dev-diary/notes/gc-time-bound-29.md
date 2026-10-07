@@ -139,10 +139,14 @@ Rows rewritten by one sweep: 3,211 survivor upserts (of 3,703 mutations).
 
 ## Interface points with #30
 
-- Access updates are mutations and bump the epoch. #30 must exclude them from
-  GC's measure with `Graph::exempt_from_gc_measure(n)` under the same write
-  guard that appended them (the seam GC's own drains use), or a read-heavy
-  session meets the idle floor and `gc_interval` on reads alone.
+- GC's measure is `epoch − last_gc_epoch`. A write that does **not** advance
+  the epoch is already invisible to it and needs no exemption; #30 records
+  accesses without advancing the epoch, so it must **not** call
+  `Graph::exempt_from_gc_measure` (that would cancel real session writes out
+  of `gc_interval` and the idle floor and suppress sweeps). The seam is only
+  for writes that did advance the epoch, with `n` equal to the bumps they
+  appended, under the same write guard (GC's own survivor drains). It now
+  clamps the watermark to the epoch and debug-asserts an overshoot.
 - GC's eviction recency reads `last_accessed`; #30's writes protect recalled
   concepts directly. When `access_count` becomes live, ALGO-1 switches GC to
   the full composite (weighted part × 0.8 for unaccessed concepts). The
