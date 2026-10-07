@@ -76,7 +76,9 @@
 //!    at most [`GC_SURVIVOR_BUMP_CHUNK`] bumps and returns the rest in
 //!    [`GcOutcome::survivors_pending`], which the owner drains with
 //!    [`drain_survivor_bumps`] over later cycles — see that function for why
-//!    the store still converges exactly.
+//!    the store still converges exactly. The bump order is rotated per sweep
+//!    ([`survivor_drain_order`]) so the bumps a restart loses are not always
+//!    the same ids'.
 //! 6. **Canonical budget** — GC *records* the Canonical count and the
 //!    over-budget flag in [`GcOutcome`]; demotion (lowest-blast-radius, spec
 //!    §10) is T6.4's job — GC never demotes.
@@ -371,7 +373,8 @@ pub struct GcOutcome {
     /// Step 5: the part of [`survivors`](GcOutcome::survivors) whose
     /// `gc_survived += 1` this run **deferred** — the owner must drain it with
     /// [`drain_survivor_bumps`] on later cycles (CONC-6/XP-10). Empty when the
-    /// survivor set fit in one chunk.
+    /// survivor set fit in one chunk. In **drain order**
+    /// ([`survivor_drain_order`]), not id order.
     pub survivors_pending: Vec<NodeId>,
     /// Steps 2+3: the candidates the cap held back (issue #29), id-ascending.
     /// They stay in the graph, are re-evaluated next sweep, and do **not** take
@@ -414,8 +417,10 @@ impl GcOutcome {
 
 /// Run one full GC cycle (spec §9 steps 1–7, in order).
 ///
-/// Pure RAM work: no I/O, no locks — the caller owns the graph lock. All
-/// outcome vectors are id-ascending so results are deterministic.
+/// Pure RAM work: no I/O, no locks — the caller owns the graph lock. Every
+/// outcome vector is id-ascending except
+/// [`GcOutcome::survivors_pending`], which is in drain order; all of them are
+/// deterministic for a given graph and epoch.
 pub fn run(graph: &mut Graph, params: GcParams) -> GcOutcome {
     let epoch_before = graph.epoch();
     let mut outcome = GcOutcome {
@@ -558,7 +563,8 @@ pub fn run(graph: &mut Graph, params: GcParams) -> GcOutcome {
     // them collectable, so it must not credit them with surviving it — Stage 1
     // reads the counter). At most `max_survivor_bumps` land here; the tail is
     // deferred to later cycles (CONC-6/XP-10 — see `drain_survivor_bumps` for
-    // the convergence argument).
+    // the convergence argument), in a drain order rotated per sweep so no id
+    // range is always last (see `survivor_drain_order`).
     let held: HashSet<NodeId> = held_back.iter().copied().collect();
     let mut survivors: Vec<NodeId> = graph
         .concepts()
@@ -566,9 +572,10 @@ pub fn run(graph: &mut Graph, params: GcParams) -> GcOutcome {
         .filter(|id| !held.contains(id))
         .collect();
     survivors.sort_by_key(|id| id.0);
-    let split = survivors.len().min(params.max_survivor_bumps);
-    graph.bump_gc_survived(&survivors[..split]);
-    outcome.survivors_pending = survivors[split..].to_vec();
+    let order = survivor_drain_order(&survivors, epoch_before);
+    let split = order.len().min(params.max_survivor_bumps);
+    graph.bump_gc_survived(&order[..split]);
+    outcome.survivors_pending = order[split..].to_vec();
     outcome.survivors = survivors;
     outcome.deferred = held_back;
 
@@ -623,6 +630,34 @@ fn reachable_from_temporal_chain(graph: &Graph) -> HashSet<NodeId> {
         }
     }
     reachable
+}
+
+/// The order a sweep's survivor bumps are applied in (issue #29): the
+/// id-ascending survivor list rotated by an offset derived from the sweep's
+/// starting epoch.
+///
+/// Pending bumps live in the daemon, not the store, so a writer restart in the
+/// middle of a drain loses the rest of that sweep's bumps. With a fixed
+/// id-ascending order the lost tail was always the same high-id concepts, so a
+/// restart-prone writer systematically starved them of `gc_survived` (Stage 1's
+/// input). Rotating the start per sweep spreads that loss across the id space:
+/// each concept lands in the tail about as often as any other. The offset is a
+/// SplitMix64 mix of `epoch_before`, so two sweeps a few mutations apart do not
+/// start at neighbouring positions, and the order is still deterministic for a
+/// given graph and epoch. Persisting the pending set instead was not done: it
+/// is a new store column and schema change for a counter whose only loss is a
+/// bounded, now unbiased delay.
+pub fn survivor_drain_order(survivors: &[NodeId], epoch_before: u64) -> Vec<NodeId> {
+    let mut order = survivors.to_vec();
+    if order.len() > 1 {
+        let mut z = epoch_before.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^= z >> 31;
+        let offset = (z % order.len() as u64) as usize;
+        order.rotate_left(offset);
+    }
+    order
 }
 
 /// Apply up to `max` deferred survivor bumps, removing them from `pending`
@@ -1868,10 +1903,13 @@ mod tests {
         let outcome = run(&mut g, params);
 
         assert_eq!(outcome.survivors, ids, "every concept survived");
+        // Issue #29: the bumps go in the sweep's drain order (a rotation of
+        // the id order), and the tail past the chunk is deferred in that order.
+        let order = survivor_drain_order(&ids, outcome.epoch_before);
         assert_eq!(
             outcome.survivors_pending,
-            ids[4..],
-            "the tail past the chunk is deferred, id-ascending"
+            order[4..],
+            "the tail past the chunk is deferred, in drain order"
         );
         let upserts = g
             .drain_log()
@@ -1880,7 +1918,7 @@ mod tests {
             .filter(|m| matches!(m, Mutation::UpsertNode { .. }))
             .count();
         assert_eq!(upserts, 4, "one flush chunk of upserts, not ten");
-        for (i, id) in ids.iter().enumerate() {
+        for (i, id) in order.iter().enumerate() {
             let c = match g.node(*id).unwrap() {
                 Node::Concept(c) => c,
                 _ => unreachable!(),
@@ -2569,6 +2607,45 @@ mod tests {
         let mut dedup = outcome.concepts_collected.clone();
         dedup.dedup();
         assert_eq!(dedup, outcome.concepts_collected, "each id collected once");
+    }
+
+    /// Issue #29 item 6: the drain order is a rotation of the id order (a
+    /// permutation: every survivor exactly once) whose start depends on the
+    /// sweep epoch, and over many sweeps every concept lands in a fixed-size
+    /// tail about equally often — a restart that loses the tail no longer
+    /// always costs the same high ids.
+    #[test]
+    fn survivor_drain_order_is_a_rotation_that_spreads_the_tail() {
+        let ids: Vec<NodeId> = (0..10u64).map(nid).collect();
+        let mut tail_hits = vec![0u32; ids.len()];
+        let mut starts = HashSet::new();
+        for epoch in 0..2_000u64 {
+            let order = survivor_drain_order(&ids, epoch);
+            let mut sorted = order.clone();
+            sorted.sort_by_key(|id| id.0);
+            assert_eq!(sorted, ids, "a permutation");
+            let start = ids.iter().position(|id| *id == order[0]).unwrap();
+            let rotated: Vec<NodeId> = ids[start..].iter().chain(&ids[..start]).copied().collect();
+            assert_eq!(order, rotated, "a rotation of the id order");
+            starts.insert(start);
+            for id in &order[7..] {
+                tail_hits[ids.iter().position(|x| x == id).unwrap()] += 1;
+            }
+        }
+        assert_eq!(starts.len(), ids.len(), "every start position occurs");
+        // 2,000 sweeps × 3 tail slots / 10 ids = 600 expected per id.
+        for (i, hits) in tail_hits.iter().enumerate() {
+            assert!(
+                (450..=750).contains(hits),
+                "id {i} in the tail {hits} times of ~600"
+            );
+        }
+        assert_eq!(survivor_drain_order(&ids[..1], 7), ids[..1].to_vec());
+        assert!(survivor_drain_order(&[], 7).is_empty());
+        assert_eq!(
+            survivor_drain_order(&ids, 42),
+            survivor_drain_order(&ids, 42)
+        );
     }
 
     /// Under the cap the score cut's candidates go furthest-under-the-bar

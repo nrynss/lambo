@@ -139,6 +139,11 @@ Rows rewritten by one sweep: 3,211 survivor upserts (of 3,703 mutations).
 - **Lost deferred bumps.** Pending survivor bumps live in the daemon, not the
   store. A restart mid-drain loses the rest of that sweep's bumps (as before
   #29); the watermark already counts the drained part, so nothing double-counts.
+  The drain order used to be id-ascending, so the lost tail was always the
+  same high ids; it is now rotated per sweep by a mix of the sweep's starting
+  epoch (`gc::survivor_drain_order`), which spreads the loss evenly. Persisting
+  the pending set was not done (a new column for a bounded, now unbiased
+  delay).
 - **Postgres/Cockroach SQL untested live.** The pg-family upsert, seed and load
   are compile- and string-parity-covered offline only (no live database here).
 
