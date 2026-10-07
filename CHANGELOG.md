@@ -80,6 +80,54 @@
   nothing" is distinguishable from "created concepts and left them unembedded",
   which is the exact distinction whose absence hid the defect below.
 
+- Public types gained fields since v0.2.2. None of these structs is
+  `#[non_exhaustive]`, so external struct-literal construction and exhaustive
+  destructuring break; field access and `..Default::default()` / `..` patterns
+  do not. Serialized forms stay compatible: every new serde field is
+  `#[serde(default)]`, so JSON written by v0.2.2 still loads.
+  - Graph types: `Concept::human_confirmed: i32`;
+    `event_time: Option<DateTime<Utc>>` on `Interaction`, `Edge` and
+    `lambo::graph::Action` (omitted from JSON when unset);
+    `GraphSnapshot::{mutation_epoch, write_intents}`;
+    `MutationBatch::mutation_epoch`.
+  - Outcomes and stats: `DeriveOutcome::embedded`,
+    `MemoryStats::embedded_concepts`, `CanonicalMemory::canonical_key`.
+  - Configuration: `Config::promotion_policy`, `EvalParams::promotion_policy`,
+    `StoreConfig::vector_dim`, `ServeOptions::{ledger, ledger_heartbeat}`, and
+    eleven `EmbedderConfig` fields for the candle and Gemini embedders
+    (`device`, `repo`, `revision`, `weights_dir`, `weights_file`, `offline`,
+    `keep_warm_secs`, `gemini_project`, `gemini_location`, `gemini_model`,
+    `gemini_credentials`).
+  - Leases and loading: `LeaseHolder::endpoint`, `LeaseInfo::endpoint`,
+    `LoadedSession::write_intents`.
+  - MCP parameter structs: `DeriveParams::event_time`,
+    `RecordActionParams::event_time`, `StatsParams::{receipt, wait_ms}`; the
+    CLI's `re_embed::Args` gained `allow_embedding_mismatch` and
+    `missing_only`.
+
+  **Operator action:** the new `event_time` (interactions, edges),
+  `human_confirmed` (concepts) and `session_leases.endpoint` columns are added
+  in place by `lambo provision` (guarded `ALTER`, no data touched); the same
+  re-provision #17 and #29 call for covers them.
+- Public enums gained variants, and none is `#[non_exhaustive]`, so an
+  exhaustive `match` on them no longer compiles: `StoreKind::Postgres`,
+  `EmbedderKind::{Candle, Gemini}`, `LamboError::{EmbedUnavailable, SoftLock}`,
+  `Mutation::{PutWriteIntent, ConsumeWriteIntent}` and
+  `lambo::store::batch::FlushStep::PutIntents`.
+- `lambo::cli::provision::run` takes a third argument, `dsn: Option<&str>`
+  (the resolved `store.dsn`; only the Cockroach arm reads it).
+  `lambo::store::cockroach::CockroachStore` is now a type alias for
+  `PgStore<CockroachDialect>`; its `new` and `seed` keep their signatures.
+- Public constants changed value. `lambo::recall::candidates::RECENT_SCORE`
+  dropped from `0.5` to `0.35`, a **behaviour change**: concepts that enter
+  recall only through the recent-interaction leg now score 0.35, so they rank
+  below any genuine BM25 or vector hit (BGE-M3 calibration put the lowest
+  durable true semantic hit at 0.3991) instead of above many of them, and
+  recall scores a client sees for those concepts drop accordingly (see
+  `evidence/mooshik-g-recall-calibration/`). The bind-parameter counts in
+  `lambo::store::batch` grew with the new columns: `CONCEPT_COLUMNS` 16 to 17,
+  `INTERACTION_COLUMNS` 6 to 7, `EDGE_COLUMNS` 9 to 10.
+
 ### Added
 
 - `lambo_stats` (and the `serve --ledger` heartbeat) carries a `gc` object:
@@ -229,6 +277,13 @@
   `dry_run=false` is refused. Release binaries are now built with
   `LAMBO_GIT_SHA`, so the `serve --ledger` heartbeat names the release commit
   instead of `unknown`.
+
+- Historical event time on writes (D1/D2). `lambo_derive` and
+  `lambo_record_action` accept an optional `event_time`, an RFC3339
+  about-time such as a commit or document date, stored on the interaction and
+  its edges beside the server-stamped `created_at`. Omit it for a live fact,
+  which is about now. Every other timestamp argument is still refused by
+  name, so `created_at` stays server-owned.
 
 ### Fixed
 
