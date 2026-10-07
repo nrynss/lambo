@@ -55,6 +55,9 @@
 
 ### Added
 
+- `SessionEndpoint::resolve_in` is now public: `resolve` with the endpoint
+  directory supplied, for deriving the address a holder would bind in a
+  directory other than this process's own.
 - `promotion_policy` as a top-level `lambo.toml` key with a
   `LAMBO_PROMOTION_POLICY` environment override (non-empty env wins; an empty
   value is unset, as everywhere else Lambo overlays the environment). It

@@ -241,12 +241,13 @@ impl SessionEndpoint {
     /// tests racing on `XDG_RUNTIME_DIR` is exactly the kind of flake that reads
     /// as a real defect on a loaded CI runner.
     ///
-    /// `dir` is the endpoint directory itself (what `endpoint_dir` returns, e.g.
-    /// `$XDG_RUNTIME_DIR/lambo`), not the runtime base. Public so integration
-    /// tests that hand a spawned serve its own `XDG_RUNTIME_DIR` (#15) can
-    /// derive the exact address that serve will, instead of resolving against
-    /// the test process's ambient environment — which is the operator's live
-    /// endpoint directory, and which can be too long to resolve at all.
+    /// `dir` is the endpoint directory itself (what the process would derive
+    /// from `$XDG_RUNTIME_DIR`, i.e. `$XDG_RUNTIME_DIR/lambo`), not the runtime
+    /// base above it. Returns the address a holder of `session` on `store`
+    /// would bind inside that directory, without creating or checking the
+    /// directory. Refuses, as [`SessionEndpoint::resolve`] does, when the
+    /// resulting path would not fit [`SUN_PATH_MAX`]. Use it to derive the
+    /// address for an endpoint directory other than this process's own.
     pub fn resolve_in(dir: &Path, session: &str, store: &StoreConfig) -> Result<Self, LamboError> {
         // Identity is the hash over BOTH halves. The session must be in it: two
         // sessions on one store differ only by the cosmetic prefix otherwise,
@@ -557,6 +558,10 @@ fn endpoint_dir() -> PathBuf {
 /// order and the uid discriminator are testable without `set_var`, which is
 /// process-global and makes two tests racing on an environment variable look
 /// like a real defect on a loaded runner.
+///
+/// The first rung (`<base>/lambo`) is mirrored by `RuntimeDir::derived_endpoint_dir`
+/// in `tests/common/mod.rs`, which cannot call this private function; change
+/// one and update the other.
 fn endpoint_dir_from(xdg: Option<&str>, uid: u32) -> PathBuf {
     if let Some(base) = xdg.and_then(non_empty_dir) {
         return base.join("lambo");
