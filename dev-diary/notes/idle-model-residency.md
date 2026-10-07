@@ -76,8 +76,10 @@ the shape, not the decimals.
 Probe text forward (the touch itself): p50 17.3 ms warm.
 `top` CMPRS was 1.12-1.38 GB in **both** arms at every sample.
 
-Reading: keep-warm removes the gap-growing component (150-206 ms down to
-54-59 ms at 60-420 s, which is about the 5 s-gap figure); what remains is the
+Reading: keep-warm removed the gap-growing component in these samples
+(150-206 ms down to 54-59 ms at 60-420 s, which is about the 5 s-gap figure;
+but see the worst-case table below: a call late in the period can still pay
+it); what remains is the
 ~30 ms wake cost a 5 s gap already shows, which an interval cannot reach. The
 off arm's 60 s figure (175 ms) is close to the live rig's < 2 min bucket
 (186 ms p50).
@@ -86,6 +88,56 @@ Not measured: gaps beyond 7 minutes, the > 30 min bucket and its 9 s p90
 (a fresh process does not age the way a 21 h writer under 8 GB of swap does),
 and anything on the live writer itself. The store and graph side of a real
 recall was not in this probe (embed only).
+
+### Worst case and a better residency metric (review follow-up, 2026-10-07)
+
+The A/B above never placed a call just before the next touch. Same method
+(two concurrent fresh processes, candle on Metal, offline cached weights, the
+same 14-word query, n = 1 per row), with the keep-warm arm wrapping the
+embedder so the probe knows when each touch finished and times the call at
+an exact age since the last touch. System swap was **8.9-9.0 of 10 GB**, more
+pressure than the first run (8.2/9.2). Before each call the probe ran
+`footprint --swapped` on itself and read the **`IOAccelerator (graphics)`**
+row, which is the Metal weight buffers (~1.08 GB dirty).
+
+| idle before the call | keep-warm off: first ms / gfx swapped | keep-warm 30 s: first ms / gfx swapped |
+|---|---|---|
+| 5 s | 43.6 / 0.3 MB | 72.5 / 0 B |
+| 10 s | 179.6 / 917 MB | 45.7 / 0 B |
+| 15 s | 58.2 / 64 MB | 59.0 / 0 B |
+| 20 s | 181.8 / 1079 MB | 79.7 / 0.7 MB |
+| 25 s | 113.0 / 6 MB (at 21 s) | **198.2 / 1082 MB** (at 21 s) |
+| 28 s | 192.6 | **261.5** |
+| 29 s | 172.3 | **190.8** |
+| 29 s | 195.7 | 64.4 |
+
+("Idle" is since the last query for the off arm and since the last touch for
+the keep-warm arm. Second calls were 19-21 ms throughout. The 25-29 s rows
+had a snapshot only before the first call.)
+
+Readings:
+
+1. **`footprint`'s `IOAccelerator (graphics)` Swapped column is the
+   residency metric `top` CMPRS is not.** It tracks latency sample by sample:
+   0 B swapped goes with 46-80 ms, ~1 GB swapped with 180-260 ms. Over the
+   same samples `top` CMPRS sat at 1.27-1.44 GB in *both* arms, including
+   the rows where the weight buffers had 0 B swapped. `vmmap --summary`
+   shows the same row (SWAPPED 1.1 G on the 21 s keep-warm sample, 6 MB on
+   the off arm's). Use `footprint --swapped <pid>` for the live-rig check
+   and for the issue's acceptance item in place of CMPRS.
+2. **Under this pressure the pager takes the whole weight set within 10-21 s
+   of last use**, stochastically (the off arm's 15 s sample kept it, its 10 s
+   one lost 917 MB). So a 30 s interval protects calls that land within
+   ~20 s of a touch and **not** the last third of the period: calls at
+   21-29 s paid 191-262 ms in 3 of 4 samples, no better than off. Averaged
+   over a uniform arrival phase, 30 s still helps (5-20 s rows: 46-80 ms
+   against 44-182 ms off), but the worst case is not bounded by it.
+3. Implication for the default, **not acted on here** (it is a design change
+   and n = 1): under heavy swap the interval would need to be ~10 s to keep
+   the buffers resident through the whole period; at ~17 ms per probe that is
+   ~0.2% GPU duty, still small. Pressure on the live rig varies, so the
+   cheaper confirmation is `footprint --swapped` on the re-pinned writer
+   before choosing a number.
 
 ## Design
 
@@ -127,6 +179,9 @@ recall was not in this probe (embed only).
 * **30 s default:** the rig already paid 2.6x at its shortest bucket
   (< 2 min), so the period must sit well inside that; 30 s is a 4x margin. A
   probe forward costs ~17 ms on the M3 Pro, so ~0.06% GPU duty.
+  **Qualified by the worst-case table:** under 9 GB of swap the buffers were
+  lost within 10-21 s of last use, so 30 s does not cover the last third of
+  each period. Kept for now; see follow-ups.
 * **Config path:** `EmbedderConfig.keep_warm_secs` (TOML, `deny_unknown_fields`
   still refuses typos), env overlay in `overlay_env`, name added to
   `RESOLVE_ENV_VARS` and its override table. Derived by a method on
@@ -157,4 +212,7 @@ recall was not in this probe (embed only).
   touched.
 * The `ProcessType = Interactive` A/B on the launchd job (operator change;
   see Diagnosis item 4 for why not Adaptive).
-* Replace the issue's `CMPRS` acceptance item with a latency-by-gap one.
+* Replace the issue's `CMPRS` acceptance item with latency by gap plus the
+  `footprint --swapped` `IOAccelerator (graphics)` row.
+* Decide whether the 30 s auto interval should drop (~10 s) given the worst-
+  case table above; measure on the live writer first.
