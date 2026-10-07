@@ -1335,3 +1335,91 @@ fn a_holder_whose_endpoint_refuses_is_not_described_as_still_refreshing() {
         "and the operator needs the conclusion the probe supports: {err}"
     );
 }
+
+/// Issue #30: a recall through a proxy is an access counted **once**, in the
+/// holder. The proxy is a byte pipe with no graph, so it has nothing to count
+/// with; the holder executes the forwarded call and notes its hits exactly as
+/// it notes its own client's. One recall from each client, one hit each, two
+/// accesses, durable through the holder's clean shutdown.
+#[test]
+fn a_recall_through_the_proxy_counts_once_in_the_holder() {
+    let (_dir, cfg, db) = scratch("access");
+    let runtime = RuntimeDir::new();
+    provision(&db);
+
+    let mut a = Serve::spawn(&cfg, "agent-a", &runtime);
+    a.initialize(1);
+    let mut b = Serve::spawn(&cfg, "agent-b", &runtime);
+    b.initialize(1);
+
+    let content = "the frequency dimension counts proxied reads";
+    let derived = a.call(
+        2,
+        "lambo_derive",
+        serde_json::json!({
+            "agent_id": "agent-a",
+            "concepts": [{"content": content, "concept_type": "logic"}]
+        }),
+    );
+    let receipt = derived["result"]["structuredContent"]["receipt"]
+        .as_str()
+        .unwrap_or_else(|| panic!("derive ack carries a receipt: {}", text_of(&derived)))
+        .to_string();
+    let waited = a.call(
+        3,
+        "lambo_stats",
+        serde_json::json!({"agent_id": "agent-a", "receipt": receipt, "wait_ms": 4000}),
+    );
+    assert_eq!(
+        waited["result"]["structuredContent"]["receipt"]["state"].as_str(),
+        Some("applied"),
+        "{}",
+        text_of(&waited)
+    );
+
+    for (serve, agent) in [(&mut a, "agent-a"), (&mut b, "agent-b")] {
+        let recalled = serve.call(
+            4,
+            "lambo_recall",
+            serde_json::json!({"agent_id": agent, "query": content, "top_k": 1}),
+        );
+        let hits = recalled["result"]["structuredContent"]["hits"]
+            .as_array()
+            .unwrap_or_else(|| panic!("recall hits: {}", text_of(&recalled)));
+        assert_eq!(hits.len(), 1, "{}", text_of(&recalled));
+        assert_eq!(hits[0]["content"].as_str(), Some(content));
+    }
+
+    b.sigterm();
+    let _ = b.child.wait();
+    a.sigterm();
+    let _ = a.child.wait();
+
+    let snapshot = tokio::runtime::Runtime::new()
+        .expect("runtime")
+        .block_on(async {
+            SqliteStore::connect(&db)
+                .expect("connect")
+                .load_session(&SessionId::from(SESSION))
+                .await
+                .expect("load")
+        });
+    let concept = snapshot
+        .concepts
+        .iter()
+        .find(|c| c.content == content)
+        .expect("the derived concept is durable");
+    assert_eq!(
+        concept.access_count, 2,
+        "one direct recall + one proxied recall = two accesses, counted in the holder only"
+    );
+    assert!(concept.last_accessed.is_some());
+    assert!(
+        snapshot
+            .concepts
+            .iter()
+            .filter(|c| c.content != content)
+            .all(|c| c.access_count == 0),
+        "nothing else was returned, so nothing else counts"
+    );
+}

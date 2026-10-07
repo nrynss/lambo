@@ -2010,7 +2010,7 @@ impl LamboServer {
         let resolved = {
             let g = self.mem.graph().read();
             match resolve_focus(&g, p.focus.trim()) {
-                Focus::Exact(id) => Ok((None, render_neighbourhood(&g, id, depth))),
+                Focus::Exact(id) => Ok((id, None, render_neighbourhood(&g, id, depth))),
                 Focus::Fuzzy {
                     id,
                     content,
@@ -2037,13 +2037,13 @@ impl LamboServer {
                             MAX_INSPECT_SCAN_CONCEPTS
                         ),
                     };
-                    Ok((Some(note), render_neighbourhood(&g, id, depth)))
+                    Ok((id, Some(note), render_neighbourhood(&g, id, depth)))
                 }
                 other => Err(other),
             }
         };
 
-        let (note, (text, structured)) = match resolved {
+        let (focus_id, note, (text, structured)) = match resolved {
             Ok(v) => v,
             Err(Focus::Ambiguous {
                 candidates,
@@ -2170,6 +2170,13 @@ impl LamboServer {
         // resolution the caller did not ask for is exactly the friction
         // DOGFOOD metric 6 is looking for.
         note_facts(|| json!({ "depth": depth, "fuzzy": note.is_some() }));
+
+        // Issue #30: an inspect that resolved returned its focus concept to the
+        // caller — an access. The focus only: the neighbourhood is context
+        // around what was asked for (depth up to 5 can reach hundreds of
+        // concepts), and a refusal (ambiguous / missing / oversized) returned
+        // no concept at all.
+        self.mem.note_accesses([focus_id]);
 
         let mut out = CallToolResult::success(vec![ContentBlock::text(text.clone())]);
         attach_warnings(&mut out, &warnings);
@@ -5387,6 +5394,76 @@ mod tests {
             text_of(&exact)
         );
         s.mem.close().await.expect("close");
+    }
+
+    /// Issue #30 over the tool surface: a resolved inspect counts its focus
+    /// (not the neighbourhood), a refused one counts nothing, and a recall
+    /// counts exactly the hits its structured payload returned.
+    #[tokio::test]
+    async fn inspect_focus_and_recall_hits_are_counted_as_accesses() {
+        let s = server("mcp-issue-30").await;
+        call(
+            &s,
+            "lambo_derive",
+            serde_json::json!({
+                "agent_id": "agent-a",
+                "concepts": [
+                    {"content": "auth middleware", "concept_type": "entity"},
+                    {"content": "auth middleware rewrite", "concept_type": "entity"},
+                    {"content": "session token store", "concept_type": "entity"}
+                ],
+                "parent_of": [{"parent": "auth middleware", "child": "session token store"}]
+            }),
+        )
+        .await;
+
+        // Exact focus, depth 2: the child is in the neighbourhood.
+        let exact = call(
+            &s,
+            "lambo_inspect",
+            serde_json::json!({"agent_id": "agent-a", "focus": "auth middleware"}),
+        )
+        .await;
+        assert_eq!(exact.is_error, Some(false), "{exact:?}");
+        assert!(text_of(&exact).contains("session token store"));
+        // Ambiguous: refused, nothing returned, nothing counted.
+        let refused = call(
+            &s,
+            "lambo_inspect",
+            serde_json::json!({"agent_id": "agent-a", "focus": "auth"}),
+        )
+        .await;
+        assert_eq!(refused.is_error, Some(true), "{refused:?}");
+
+        let recall = call(
+            &s,
+            "lambo_recall",
+            serde_json::json!({"agent_id": "agent-a", "query": "auth middleware rewrite"}),
+        )
+        .await;
+        assert_eq!(recall.is_error, Some(false), "{recall:?}");
+        let returned: std::collections::HashSet<String> =
+            recall.structured_content.as_ref().unwrap()["hits"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|h| h["content"].as_str().unwrap().to_string())
+                .collect();
+        assert!(!returned.is_empty());
+
+        // `close` applies whatever the daemon had not yet.
+        s.mem.close().await.expect("close");
+        let g = s.mem.graph().read();
+        for c in g.concepts() {
+            let expected = i32::from(c.content == "auth middleware")
+                + i32::from(returned.contains(&c.content));
+            assert_eq!(
+                c.access_count, expected,
+                "{}: inspect focus + recall hits only",
+                c.content
+            );
+            assert_eq!(c.last_accessed.is_some(), expected > 0, "{}", c.content);
+        }
     }
 
     /// A single substring match is usable — but the caller is told, in the
