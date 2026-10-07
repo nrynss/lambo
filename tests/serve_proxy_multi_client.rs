@@ -23,7 +23,7 @@
 #![cfg(all(feature = "store-sqlite", feature = "embed-fixture", unix))]
 
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{ChildStdin, Command, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -31,13 +31,14 @@ use lambo::store::{GraphStore, SqliteStore};
 use lambo::types::SessionId;
 
 mod common;
-use common::{RuntimeDir, RUNTIME_DIR_VAR};
+use common::{RuntimeDir, ServeChild, RUNTIME_DIR_VAR};
 
 const SESSION: &str = "j2-proxy-multi-client";
 
 /// One `lambo serve` subprocess plus the plumbing to speak JSON-RPC to it.
 struct Serve {
-    child: Child,
+    /// Killed and reaped on drop; see [`ServeChild`].
+    child: ServeChild,
     stdin: ChildStdin,
     rx: mpsc::Receiver<String>,
     pid: u32,
@@ -51,24 +52,26 @@ impl Serve {
     /// address, as on one login session — and a SIGKILLed holder's socket stays
     /// inside the test's directory instead of the operator's.
     fn spawn(cfg: &std::path::Path, agent: &str, runtime: &RuntimeDir) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_lambo"))
-            .env(RUNTIME_DIR_VAR, runtime.path())
-            .args([
-                "--config",
-                cfg.to_str().unwrap(),
-                "serve",
-                "--session",
-                SESSION,
-                "--agent",
-                agent,
-                "--transport",
-                "stdio",
-            ])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .unwrap_or_else(|e| panic!("spawn {agent}: {e}"));
+        let mut child = ServeChild::new(
+            Command::new(env!("CARGO_BIN_EXE_lambo"))
+                .env(RUNTIME_DIR_VAR, runtime.path())
+                .args([
+                    "--config",
+                    cfg.to_str().unwrap(),
+                    "serve",
+                    "--session",
+                    SESSION,
+                    "--agent",
+                    agent,
+                    "--transport",
+                    "stdio",
+                ])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .unwrap_or_else(|e| panic!("spawn {agent}: {e}")),
+        );
         let pid = child.id();
         let stdout = child.stdout.take().expect("stdout");
         let (tx, rx) = mpsc::channel();
@@ -993,24 +996,26 @@ fn a_base_directory_too_long_for_a_socket_still_serves_its_own_client() {
         "and production's own derivation must refuse it, or the serve would not degrade"
     );
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_lambo"))
-        .args([
-            "--config",
-            cfg.to_str().unwrap(),
-            "serve",
-            "--session",
-            SESSION,
-            "--agent",
-            "agent-long",
-            "--transport",
-            "stdio",
-        ])
-        .env(RUNTIME_DIR_VAR, &long_tmp)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .expect("spawn");
+    let mut child = ServeChild::new(
+        Command::new(env!("CARGO_BIN_EXE_lambo"))
+            .args([
+                "--config",
+                cfg.to_str().unwrap(),
+                "serve",
+                "--session",
+                SESSION,
+                "--agent",
+                "agent-long",
+                "--transport",
+                "stdio",
+            ])
+            .env(RUNTIME_DIR_VAR, &long_tmp)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("spawn"),
+    );
     let pid = child.id();
     let stdout = child.stdout.take().expect("stdout");
     let (tx, rx) = mpsc::channel();

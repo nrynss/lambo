@@ -28,9 +28,11 @@
 // Each integration test file is its own crate and uses a different subset.
 #![allow(dead_code)]
 
+use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, Output};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::{Duration, Instant};
 
 /// The variable `endpoint_dir()` consults first.
 pub const RUNTIME_DIR_VAR: &str = "XDG_RUNTIME_DIR";
@@ -113,4 +115,91 @@ fn create_private(path: &Path) {
 fn create_private(path: &Path) {
     std::fs::create_dir(path)
         .unwrap_or_else(|e| panic!("per-test runtime dir {}: {e}", path.display()));
+}
+
+/// A spawned serve that is SIGKILLed and reaped when dropped, so a test that
+/// panics part-way leaves no `lambo serve` behind holding a lease, a store, or
+/// a socket — and none that outlives its [`RuntimeDir`] and recreates it via
+/// `bind`'s mkdir. Declare the `RuntimeDir` *before* any `ServeChild` (locals
+/// drop in reverse order) so the children are reaped before the directory goes.
+///
+/// Derefs to [`Child`], so `id()`, `wait()`, `kill()` and the stdio fields work
+/// unchanged. Drop is a no-op for a child already reaped — a test that SIGTERMs
+/// and inspects the exit status, or SIGKILLs on purpose, is unaffected — and it
+/// ignores every error: it is a backstop, never an assertion.
+pub struct ServeChild {
+    child: Option<Child>,
+}
+
+impl ServeChild {
+    pub fn new(child: Child) -> Self {
+        Self { child: Some(child) }
+    }
+
+    /// `Child::wait_with_output` bounded by `timeout`, without giving up the
+    /// guard: `None` on timeout, with the child still owned (and so killed on
+    /// drop) instead of left blocked in a detached waiter thread.
+    pub fn wait_with_output_within(
+        &mut self,
+        timeout: Duration,
+    ) -> Option<std::io::Result<Output>> {
+        fn drain(
+            pipe: Option<impl std::io::Read + Send + 'static>,
+        ) -> std::thread::JoinHandle<Vec<u8>> {
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                if let Some(mut p) = pipe {
+                    let _ = p.read_to_end(&mut buf);
+                }
+                buf
+            })
+        }
+        let child = self.child.as_mut().expect("child present until drop");
+        drop(child.stdin.take());
+        let out = drain(child.stdout.take());
+        let err = drain(child.stderr.take());
+        let deadline = Instant::now() + timeout;
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Ok(None) => return None,
+                Err(e) => return Some(Err(e)),
+            }
+        };
+        Some(Ok(Output {
+            status,
+            stdout: out.join().unwrap_or_default(),
+            stderr: err.join().unwrap_or_default(),
+        }))
+    }
+}
+
+impl Deref for ServeChild {
+    type Target = Child;
+    fn deref(&self) -> &Child {
+        self.child.as_ref().expect("child present until drop")
+    }
+}
+
+impl DerefMut for ServeChild {
+    fn deref_mut(&mut self) -> &mut Child {
+        self.child.as_mut().expect("child present until drop")
+    }
+}
+
+impl Drop for ServeChild {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            // `try_wait` reports a child already reaped by an earlier `wait`
+            // (std caches the status), so a reaped pid — possibly reused by now
+            // — is never signalled.
+            if let Ok(None) = child.try_wait() {
+                let _ = child.kill();
+            }
+            let _ = child.wait();
+        }
+    }
 }

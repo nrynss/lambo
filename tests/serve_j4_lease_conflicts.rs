@@ -21,14 +21,14 @@
 #![cfg(all(feature = "store-sqlite", feature = "embed-fixture", unix))]
 
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use lambo::store::{GraphStore, SqliteStore};
 
 mod common;
-use common::RuntimeDir;
+use common::{RuntimeDir, ServeChild};
 
 const SESSION: &str = "j4-lease-conflict";
 
@@ -76,7 +76,7 @@ fn spawn_serve(
     transport: &str,
     ledger: &std::path::Path,
     runtime: &RuntimeDir,
-) -> Child {
+) -> ServeChild {
     let child = Command::new(env!("CARGO_BIN_EXE_lambo"))
         .env(common::RUNTIME_DIR_VAR, runtime.path())
         .args([
@@ -97,7 +97,7 @@ fn spawn_serve(
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn serve");
-    child
+    ServeChild::new(child)
 }
 
 /// Every JSON object in `path`, one per line, preserving order.
@@ -168,7 +168,7 @@ fn refused_acquire_appears_in_the_ledger_from_both_sides() {
     let runtime = RuntimeDir::new();
     let a = spawn_serve(&cfg, "agent-a", "stdio", &ledger, &runtime);
     let a_pid = a.id();
-    let mut a: Child = a;
+    let mut a = a;
     let a_stdout = a.stdout.take().expect("A stdout");
     let (tx, rx) = mpsc::channel::<String>();
     let reader = std::thread::spawn(move || {
@@ -195,14 +195,11 @@ fn refused_acquire_appears_in_the_ledger_from_both_sides() {
     // Loser B: same session, same store, http transport (refusal is terminal
     // there). It must write its OWN startup + refused lines, persist the refusal
     // to the store, and exit non-zero.
-    let b = spawn_serve(&cfg, "agent-b", "http", &ledger, &runtime);
-    let (out_tx, out_rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = out_tx.send(b.wait_with_output());
-    });
-    let b_out = match out_rx.recv_timeout(Duration::from_secs(20)) {
-        Ok(r) => r.expect("wait B"),
-        Err(_) => {
+    // Bounded; on a timeout B stays owned by its guard, so the panic kills it.
+    let mut b = spawn_serve(&cfg, "agent-b", "http", &ledger, &runtime);
+    let b_out = match b.wait_with_output_within(Duration::from_secs(20)) {
+        Some(r) => r.expect("wait B"),
+        None => {
             sigterm(a_pid);
             let _ = a.wait();
             let _ = reader.join();
@@ -329,7 +326,7 @@ fn a_proxying_serve_writes_a_proxying_line() {
     let runtime = RuntimeDir::new();
     let a = spawn_serve(&cfg, "agent-a", "stdio", &ledger, &runtime);
     let a_pid = a.id();
-    let mut a: Child = a;
+    let mut a = a;
     let a_stdout = a.stdout.take().expect("A stdout");
     let (tx, rx) = mpsc::channel::<String>();
     let reader = std::thread::spawn(move || {
@@ -475,7 +472,7 @@ fn an_idle_proxy_books_the_degraded_state_when_its_holder_dies() {
     let runtime = RuntimeDir::new();
     let a = spawn_serve(&cfg, "agent-a", "stdio", &ledger, &runtime);
     let a_pid = a.id();
-    let mut a: Child = a;
+    let mut a = a;
     let a_stdout = a.stdout.take().expect("A stdout");
     let (tx, rx) = mpsc::channel::<String>();
     let reader = std::thread::spawn(move || {

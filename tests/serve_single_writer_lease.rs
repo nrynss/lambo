@@ -35,14 +35,14 @@
 #![cfg(all(feature = "store-sqlite", feature = "embed-fixture", unix))]
 
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
 
 use lambo::store::{GraphStore, SqliteStore};
 
 mod common;
-use common::RuntimeDir;
+use common::{RuntimeDir, ServeChild};
 
 const SESSION: &str = "t8.6-single-writer";
 
@@ -131,12 +131,14 @@ fn a_second_process_on_one_session_is_refused_by_the_lease() {
     });
 
     // Process A: attaches and holds the lease.
-    let mut a: Child = serve_cmd(&cfg_path, "agent-a", &runtime)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .expect("spawn A");
+    let mut a = ServeChild::new(
+        serve_cmd(&cfg_path, "agent-a", &runtime)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("spawn A"),
+    );
     let a_pid = a.id();
 
     let a_stdout = a.stdout.take().expect("A stdout");
@@ -169,22 +171,21 @@ fn a_second_process_on_one_session_is_refused_by_the_lease() {
     // its refusal exactly as it was). It must fail closed at build time, before
     // it ever serves. A free port is not needed: the refusal happens before any
     // bind.
-    let b = serve_cmd_on(&cfg_path, "agent-b", "http", &runtime)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn B");
+    let mut b = ServeChild::new(
+        serve_cmd_on(&cfg_path, "agent-b", "http", &runtime)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn B"),
+    );
 
     // B exits on its own (no handshake needed); bound the wait so a regression
-    // that lets B open a second writer fails loudly instead of hanging.
-    let (out_tx, out_rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = out_tx.send(b.wait_with_output());
-    });
-    let b_out = match out_rx.recv_timeout(Duration::from_secs(20)) {
-        Ok(r) => r.expect("wait B"),
-        Err(_) => {
+    // that lets B open a second writer fails loudly instead of hanging. On a
+    // timeout B is still owned by its guard, so the panic below kills it.
+    let b_out = match b.wait_with_output_within(Duration::from_secs(20)) {
+        Some(r) => r.expect("wait B"),
+        None => {
             sigterm(a_pid);
             let _ = a.wait();
             let _ = reader.join();

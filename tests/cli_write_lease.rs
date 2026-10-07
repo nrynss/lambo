@@ -6,14 +6,14 @@
 #![cfg(all(feature = "store-sqlite", feature = "embed-fixture", unix))]
 
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
 
 use lambo::store::{GraphStore, SqliteStore};
 
 mod common;
-use common::RuntimeDir;
+use common::{RuntimeDir, ServeChild};
 
 const SESSION: &str = "t8.3-cli-lease";
 
@@ -143,12 +143,14 @@ fn derive_succeeds_with_no_serve_and_fails_closed_while_serve_holds() {
     );
 
     // Serve holds the session.
-    let mut a: Child = serve_cmd(&cfg, "agent-a", &runtime)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .expect("spawn serve");
+    let mut a = ServeChild::new(
+        serve_cmd(&cfg, "agent-a", &runtime)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("spawn serve"),
+    );
     let a_pid = a.id();
     let a_stdout = a.stdout.take().expect("stdout");
     let (tx, rx) = mpsc::channel::<String>();

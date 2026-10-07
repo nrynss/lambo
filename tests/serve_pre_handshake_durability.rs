@@ -84,7 +84,7 @@ use lambo::store::{GraphStore, SqliteStore};
 use lambo::types::SessionId;
 
 mod common;
-use common::{RuntimeDir, RUNTIME_DIR_VAR};
+use common::{RuntimeDir, ServeChild, RUNTIME_DIR_VAR};
 
 const SESSION: &str = "t8.2-pre-handshake-durability";
 
@@ -137,24 +137,26 @@ fn a_pre_handshake_sigterm_still_flushes_the_session_row() {
     // stderr this time, because "session attached" (the pre-handshake sync
     // point) is a tracing line on stderr, and we must not send the signal until
     // the session is genuinely attached.
-    let mut child = Command::new(env!("CARGO_BIN_EXE_lambo"))
-        .env(RUNTIME_DIR_VAR, runtime.path())
-        .args([
-            "--config",
-            cfg_path.to_str().unwrap(),
-            "serve",
-            "--session",
-            SESSION,
-            "--agent",
-            "agent-a",
-            "--transport",
-            "stdio",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn lambo serve");
+    let mut child = ServeChild::new(
+        Command::new(env!("CARGO_BIN_EXE_lambo"))
+            .env(RUNTIME_DIR_VAR, runtime.path())
+            .args([
+                "--config",
+                cfg_path.to_str().unwrap(),
+                "serve",
+                "--session",
+                SESSION,
+                "--agent",
+                "agent-a",
+                "--transport",
+                "stdio",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn lambo serve"),
+    );
     let pid = child.id();
 
     // Pump stderr on a background thread and forward each line, so we can both
@@ -316,24 +318,26 @@ fn a_pre_handshake_sigterm_to_a_proxy_exits_cleanly_and_leaves_the_holder_intact
     });
 
     let spawn = |agent: &str| {
-        Command::new(env!("CARGO_BIN_EXE_lambo"))
-            .env(RUNTIME_DIR_VAR, runtime.path())
-            .args([
-                "--config",
-                cfg_path.to_str().unwrap(),
-                "serve",
-                "--session",
-                SESSION,
-                "--agent",
-                agent,
-                "--transport",
-                "stdio",
-            ])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("spawn lambo serve")
+        ServeChild::new(
+            Command::new(env!("CARGO_BIN_EXE_lambo"))
+                .env(RUNTIME_DIR_VAR, runtime.path())
+                .args([
+                    "--config",
+                    cfg_path.to_str().unwrap(),
+                    "serve",
+                    "--session",
+                    SESSION,
+                    "--agent",
+                    agent,
+                    "--transport",
+                    "stdio",
+                ])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("spawn lambo serve"),
+        )
     };
 
     /// Pump a child's stderr onto a channel so a sync line can be waited for.
@@ -530,24 +534,26 @@ fn a_pre_handshake_client_hangup_closes_the_session_and_exits_zero() {
         store.init_schema().await.expect("init_schema");
     });
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_lambo"))
-        .env(RUNTIME_DIR_VAR, runtime.path())
-        .args([
-            "--config",
-            cfg_path.to_str().unwrap(),
-            "serve",
-            "--session",
-            HANGUP_SESSION,
-            "--agent",
-            "agent-a",
-            "--transport",
-            "stdio",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn lambo serve");
+    let mut child = ServeChild::new(
+        Command::new(env!("CARGO_BIN_EXE_lambo"))
+            .env(RUNTIME_DIR_VAR, runtime.path())
+            .args([
+                "--config",
+                cfg_path.to_str().unwrap(),
+                "serve",
+                "--session",
+                HANGUP_SESSION,
+                "--agent",
+                "agent-a",
+                "--transport",
+                "stdio",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn lambo serve"),
+    );
     let pid = child.id();
 
     let stderr = child.stderr.take().expect("child stderr");

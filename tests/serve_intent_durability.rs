@@ -33,7 +33,7 @@
 ))]
 
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{ChildStdin, Command, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -45,7 +45,7 @@ use lambo::types::{
 };
 
 mod common;
-use common::{RuntimeDir, RUNTIME_DIR_VAR};
+use common::{RuntimeDir, ServeChild, RUNTIME_DIR_VAR};
 
 /// A fabricated previous-process epoch, distinct from anything a live pipeline
 /// can mint for itself in this test's lifetime.
@@ -84,7 +84,8 @@ fn derive_payload(content: &str) -> WriteIntentPayload {
 }
 
 struct Serve {
-    child: Child,
+    /// Killed and reaped on drop; see [`ServeChild`].
+    child: ServeChild,
     stdin: ChildStdin,
     rx: mpsc::Receiver<String>,
     next_id: u64,
@@ -95,24 +96,26 @@ impl Serve {
     /// `runtime` is the test's own endpoint directory (#15): the kill-9 path
     /// below leaves a socket nothing unlinks, and it must land there.
     fn launch(cfg: &std::path::Path, runtime: &RuntimeDir, session: &str) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_lambo"))
-            .env(RUNTIME_DIR_VAR, runtime.path())
-            .args([
-                "--config",
-                cfg.to_str().unwrap(),
-                "serve",
-                "--session",
-                session,
-                "--agent",
-                "agent-a",
-                "--transport",
-                "stdio",
-            ])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn lambo serve");
+        let mut child = ServeChild::new(
+            Command::new(env!("CARGO_BIN_EXE_lambo"))
+                .env(RUNTIME_DIR_VAR, runtime.path())
+                .args([
+                    "--config",
+                    cfg.to_str().unwrap(),
+                    "serve",
+                    "--session",
+                    session,
+                    "--agent",
+                    "agent-a",
+                    "--transport",
+                    "stdio",
+                ])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn lambo serve"),
+        );
         let stdout = child.stdout.take().expect("child stdout");
         let (tx, rx) = mpsc::channel::<String>();
         let reader = std::thread::spawn(move || {
