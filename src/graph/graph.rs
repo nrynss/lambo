@@ -25,9 +25,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::types::{
-    CanonizationEvent, CanonizationStatus, Concept, ConceptType, Edge, EdgeType, GraphSnapshot,
-    Interaction, LamboError, Mutation, MutationBatch, Node, NodeId, Reservation, SessionId,
-    StoreError, Synonym, WriteIntent, WriteIntentOutcome,
+    CanonizationEvent, CanonizationStatus, Concept, ConceptType, Edge, EdgeType, GcMark,
+    GraphSnapshot, Interaction, LamboError, Mutation, MutationBatch, Node, NodeId, Reservation,
+    SessionId, StoreError, Synonym, WriteIntent, WriteIntentOutcome,
 };
 
 /// Edge-weight bump per reinforcement (v0.6.0 §5.4 semantics; see module docs).
@@ -80,6 +80,15 @@ pub struct Graph {
     /// after it does not. The durable watermark is therefore never behind the
     /// count of durable mutations; it may run ahead of it by RAM-local bumps.
     epoch: u64,
+    /// GC's sweep accounting (issue #29): the epoch the next sweep interval is
+    /// measured from and the time of the last sweep. Graph state for the same
+    /// reason `epoch` is — [`Graph::from_snapshot`] resumes it and
+    /// [`Graph::drain_log`] stamps it onto every flushed batch, so a writer
+    /// restart neither re-runs a sweep nobody owed nor resets the
+    /// `gc_max_interval` clock. Setting it is **not** a mutation: it never
+    /// bumps `epoch` and never enters the log (it rides the next batch's
+    /// stamp, the way `epoch` does).
+    gc_mark: GcMark,
 }
 
 impl Graph {
@@ -101,6 +110,7 @@ impl Graph {
             embedding: None,
             mutation_log: Vec::new(),
             epoch: 0,
+            gc_mark: GcMark::default(),
         }
     }
 
@@ -263,6 +273,11 @@ impl Graph {
         // mid-construction. `Graph::new` started it at 0; the snapshot's value
         // is the deployment's count through its last durable mutation.
         g.epoch = snap.mutation_epoch;
+        // Issue #29: GC's sweep accounting resumes with it, so a restart does
+        // not measure the next sweep from 0 (which swept once per restart and
+        // bumped every `gc_survived` once the lifetime count passed the
+        // interval).
+        g.gc_mark = snap.gc_mark;
         Ok(g)
     }
 
@@ -327,6 +342,7 @@ impl Graph {
             // restart it, or GC's `gc_interval` would measure per-process
             // mutations again.
             mutation_epoch: self.epoch,
+            gc_mark: self.gc_mark,
         }
     }
 
@@ -1399,7 +1415,40 @@ impl Graph {
         MutationBatch {
             mutations: std::mem::take(&mut self.mutation_log),
             mutation_epoch: self.epoch,
+            gc_mark: self.gc_mark,
         }
+    }
+
+    /// GC's durable sweep accounting (issue #29); see [`GcMark`].
+    pub fn gc_mark(&self) -> GcMark {
+        self.gc_mark
+    }
+
+    /// Record a completed GC sweep: the next interval is measured from
+    /// `epoch_after` and the `gc_max_interval` clock restarts at `at`.
+    ///
+    /// Not a mutation (no epoch bump, no log entry): the mark rides the next
+    /// drained batch's stamp. The caller (the daemon) calls this inside the
+    /// same write guard as the sweep, so the mark and the sweep's mutations
+    /// drain — and so persist — together.
+    pub fn record_gc_sweep(&mut self, epoch_after: u64, at: chrono::DateTime<chrono::Utc>) {
+        self.gc_mark = self.gc_mark.merge(GcMark {
+            last_gc_epoch: epoch_after,
+            last_gc_at: Some(at),
+        });
+    }
+
+    /// Exclude `n` epoch bumps from GC's session-mutation measure by advancing
+    /// [`GcMark::last_gc_epoch`] by exactly `n` (NEW-2).
+    ///
+    /// GC's deferred survivor-bump drains use this: their own `UpsertNode`s
+    /// advance the epoch, and crediting them as session writes made GC
+    /// self-sustaining on an idle session. Any other writer of mutations that
+    /// must not count toward `gc_interval` or the idle floor (issue #30's
+    /// access-count updates are the expected one) uses the same seam, under the
+    /// same write guard that appended them.
+    pub fn exempt_from_gc_measure(&mut self, n: u64) {
+        self.gc_mark.last_gc_epoch = self.gc_mark.last_gc_epoch.saturating_add(n);
     }
 
     /// Re-append already-drained mutations to the **front** of the log,
@@ -3901,6 +3950,7 @@ mod tests {
             canonization_events: vec![],
             embedding: None,
             mutation_epoch: 0,
+            gc_mark: Default::default(),
         };
         // Every concept derives from the interaction (assert_invariants
         // requires it) plus a single Causal chain c0 -> c1 -> ... -> c(N-1).

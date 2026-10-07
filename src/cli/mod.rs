@@ -1195,6 +1195,7 @@ mod sqlite_tests {
             .flush(
                 &crate::types::MutationBatch {
                     mutation_epoch: 0,
+                    gc_mark: Default::default(),
                     mutations: vec![crate::types::Mutation::SetRootGoal {
                         session_id: SessionId::new("h1-sqlite-legacy"),
                         goal: Some(serde_json::json!("legacy session")),

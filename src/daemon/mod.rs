@@ -747,12 +747,18 @@ fn condition_set(
 ///    counter spans the deployment's whole lifetime — the epoch resumes from
 ///    the durable snapshot on a writer restart (issue #17), so a low-write
 ///    deployment crosses the interval cumulatively instead of never — and GC
-///    resets it to its own `epoch_after` so the next interval measures session
-///    mutations only. The watermark starts at 0, the deployment's baseline:
-///    a writer attaching to a session whose lifetime counter has already
-///    crossed the interval sweeps once immediately (the sweep that no process
-///    before it observed), then resumes the normal cadence; NEW-2's fixed
-///    point bounds that catch-up to one sweep per restart.
+///    moves the watermark ([`crate::types::GcMark`]) to its own `epoch_after`
+///    so the next interval measures session mutations only.
+///
+///    **The watermark is durable too (issue #29).** It lives on the graph,
+///    rides every flushed batch beside the epoch and resumes with it, so a
+///    restart measures from the last sweep, not from 0. Before, it was
+///    per-process state starting at 0: once a session's lifetime count passed
+///    `gc_interval`, *every* writer restart swept once and bumped every
+///    `gc_survived` — three restarts alone reached Stage 1's floor. A session
+///    that has never swept still has watermark 0, so a writer attaching to one
+///    whose lifetime counter already crossed the interval sweeps once
+///    immediately (#17's catch-up), then resumes the normal cadence.
 ///    Detection runs before GC: events reflect what the session's writes
 ///    did, GC is housekeeping after.
 ///
@@ -834,18 +840,13 @@ async fn run_loop(state: LoopState, weights: ScoringWeights, tick: Duration, par
 }
 
 /// The loop's carry-over state between cycles.
+///
+/// GC's watermark is **not** here (issue #29): it is durable graph state
+/// ([`Graph::gc_mark`]) so a restart resumes it instead of starting from 0.
 #[derive(Default)]
 struct CycleState {
     /// `None` → the first cycle always rescores (warm-up), then epoch-gated.
     last_epoch: Option<u64>,
-    /// GC watermark: the epoch the next `gc_interval` is measured from. Set to
-    /// `GcOutcome::epoch_after` when a sweep runs, then advanced by every
-    /// deferred-bump drain so GC's own mutations are never credited as session
-    /// mutations (NEW-2 — see `run_loop`'s step 3). It starts at 0 — the
-    /// deployment's baseline, not this writer's: the epoch itself resumes from
-    /// the durable snapshot (issue #17), so the first interval of a fresh
-    /// writer counts the mutations of every writer before it.
-    last_gc_epoch: u64,
     /// Emit-on-transition (finding 3) + re-arm (CONC-2): every currently-held
     /// `(condition, node)` maps to the channel's publication index at its last
     /// emission ([`events::EventSender::send`]'s return). A pair absent from the
@@ -994,20 +995,26 @@ fn run_cycle(
     //     one chunk per cycle, and always to empty before the next run, so
     //     no concept ever carries two outstanding bumps.
     if !cs.gc_pending.is_empty() {
-        let applied = {
-            let mut g = graph.write();
-            gc::drain_survivor_bumps(&mut g, &mut cs.gc_pending, params.gc_survivor_bump_chunk)
-        };
+        let mut g = graph.write();
+        let applied =
+            gc::drain_survivor_bumps(&mut g, &mut cs.gc_pending, params.gc_survivor_bump_chunk);
         // NEW-2: a drain's own mutations must not be credited as session
         // mutations toward the next `gc_interval`. `bump_gc_survived` appends
         // exactly one `UpsertNode` per applied bump and the epoch bumps once
         // per appended mutation, so advancing the watermark by `applied`
-        // cancels GC's own writes out of 3b's measure exactly.
-        cs.last_gc_epoch = cs.last_gc_epoch.saturating_add(applied as u64);
+        // cancels GC's own writes out of 3b's measure exactly. Same guard as
+        // the bumps (issue #29), so the batch that carries them carries the
+        // advanced watermark too.
+        g.exempt_from_gc_measure(applied as u64);
     }
 
-    // 3b. Periodic GC (spec §9): every `gc_interval` session mutations.
-    if cs.gc_pending.is_empty() && epoch.saturating_sub(cs.last_gc_epoch) >= params.gc_interval {
+    // 3b. Periodic GC (spec §9): every `gc_interval` session mutations,
+    //     measured from the durable watermark (issue #29). The drain above may
+    //     have moved it past this cycle's `epoch` snapshot; the subtraction
+    //     saturates, so that reads as zero elapsed (GC one cycle late, never
+    //     early — NEW-2).
+    let last_gc_epoch = graph.read().gc_mark().last_gc_epoch;
+    if cs.gc_pending.is_empty() && epoch.saturating_sub(last_gc_epoch) >= params.gc_interval {
         let outcome = {
             let mut g = graph.write();
             let outcome = gc::run(
@@ -1022,6 +1029,9 @@ fn run_cycle(
                     ..Default::default()
                 },
             );
+            // Issue #29: the durable watermark and sweep time, set under the
+            // sweep's own guard so they drain with its mutations.
+            g.record_gc_sweep(outcome.epoch_after, now);
             // Spec §9 step 4 (XP-5): mirror collections into the owner's
             // index when it gave us one. Held WITH the graph lock so
             // recall's (graph, index) read pair sees an atomic publication
@@ -1048,7 +1058,6 @@ fn run_cycle(
             epoch_after = outcome.epoch_after,
             "GC sweep complete"
         );
-        cs.last_gc_epoch = outcome.epoch_after;
         cs.gc_pending = outcome.survivors_pending.clone();
         *last_gc.write() = Some(outcome);
     }
@@ -1742,6 +1751,77 @@ mod tests {
             assert_eq!(c.gc_survived, 1, "survivor bumped exactly once");
         }
         handle.abort();
+    }
+
+    /// `gc_survived` of every concept in `ids`, in order.
+    fn survived(graph: &Arc<RwLock<Graph>>, ids: &[NodeId]) -> Vec<i32> {
+        let g = graph.read();
+        ids.iter()
+            .map(|id| match g.node(*id) {
+                Some(crate::types::Node::Concept(c)) => c.gc_survived,
+                _ => panic!("{id} missing"),
+            })
+            .collect()
+    }
+
+    /// Issue #29 (a defect in #17's landed behaviour): the GC watermark is
+    /// durable. Pre-fix it was per-process state starting at 0, so once a
+    /// session's lifetime count passed `gc_interval` every writer restart swept
+    /// once and bumped every `gc_survived` — three restarts alone reached
+    /// Stage 1's `>= 3`. Now the restarted writer resumes the mark with the
+    /// epoch and a restart with no new writes sweeps nothing.
+    #[tokio::test(start_paused = true)]
+    async fn restart_past_gc_interval_does_not_sweep_or_bump_again() {
+        let (graph, ids) = locked_graph_with_canonical_concepts(3);
+        let params = CycleParams {
+            gc_interval: 3,
+            ..Default::default()
+        };
+        // Process 1: the lifetime count crosses the interval; one sweep.
+        let daemon = Daemon::with_params(
+            graph.clone(),
+            ScoringWeights::default(),
+            Duration::from_secs(3600),
+            params,
+        );
+        let handle = daemon.spawn();
+        wait_until(|| daemon.last_gc().is_some()).await;
+        handle.abort();
+        assert_eq!(survived(&graph, &ids), vec![1, 1, 1]);
+        let mark = graph.read().gc_mark();
+        assert!(mark.last_gc_epoch >= 3 && mark.last_gc_at.is_some());
+
+        // Three restarts, no writes in between.
+        let mut current = graph;
+        for restart in 1..=3 {
+            let resumed = Graph::from_snapshot(current.read().snapshot()).unwrap();
+            assert_eq!(
+                resumed.gc_mark(),
+                mark,
+                "restart {restart} resumes the mark"
+            );
+            current = Arc::new(RwLock::new(resumed));
+            let daemon = Daemon::with_params(
+                current.clone(),
+                ScoringWeights::default(),
+                Duration::from_secs(3600),
+                params,
+            );
+            let handle = daemon.spawn();
+            for _ in 0..3 {
+                wake_and_settle(&daemon).await;
+            }
+            handle.abort();
+            assert!(
+                daemon.last_gc().is_none(),
+                "restart {restart} must not sweep a session nobody wrote to"
+            );
+        }
+        assert_eq!(
+            survived(&current, &ids),
+            vec![1, 1, 1],
+            "restarts alone must never move gc_survived toward Stage 1"
+        );
     }
 
     #[tokio::test(start_paused = true)]

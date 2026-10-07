@@ -798,8 +798,9 @@ LIMIT $3
         const PRE_UPSERT_SESSION_SQL: &str = r#"
 INSERT INTO sessions (
     session_id, root_goal, created_at, closed_at,
-    embedding_kind, embedding_model, embedding_dim, mutation_epoch
-) VALUES ($1, $2::JSONB, COALESCE($3, now()), $4, $5::STRING, $6::STRING, $7::INT, $8::INT)
+    embedding_kind, embedding_model, embedding_dim, mutation_epoch,
+    last_gc_epoch, last_gc_at
+) VALUES ($1, $2::JSONB, COALESCE($3, now()), $4, $5::STRING, $6::STRING, $7::INT, $8::INT, $9::BIGINT, $10)
 ON CONFLICT (session_id) DO UPDATE SET
     root_goal = EXCLUDED.root_goal,
     created_at = EXCLUDED.created_at,
@@ -807,7 +808,9 @@ ON CONFLICT (session_id) DO UPDATE SET
     embedding_kind = EXCLUDED.embedding_kind,
     embedding_model = EXCLUDED.embedding_model,
     embedding_dim = EXCLUDED.embedding_dim,
-    mutation_epoch = EXCLUDED.mutation_epoch
+    mutation_epoch = EXCLUDED.mutation_epoch,
+    last_gc_epoch = EXCLUDED.last_gc_epoch,
+    last_gc_at = EXCLUDED.last_gc_at
 "#;
 
         const PRE_SET_EMBEDDING_SQL: &str = r#"
@@ -820,7 +823,8 @@ WHERE session_id = $1
 
         const PRE_SELECT_SESSION_SQL: &str = r#"
 SELECT root_goal::STRING AS root_goal, created_at, closed_at,
-       embedding_kind, embedding_model, embedding_dim, mutation_epoch
+       embedding_kind, embedding_model, embedding_dim, mutation_epoch,
+       last_gc_epoch, last_gc_at
 FROM sessions
 WHERE session_id = $1
 "#;
@@ -1991,6 +1995,7 @@ mod conformance {
             .flush(
                 &MutationBatch {
                     mutation_epoch: 0,
+                    gc_mark: Default::default(),
                     mutations: vec![
                         Mutation::SetEmbedding {
                             session_id: sid.clone(),
@@ -2058,6 +2063,7 @@ mod conformance {
             .flush(
                 &MutationBatch {
                     mutation_epoch: 0,
+                    gc_mark: Default::default(),
                     mutations: vec![
                         Mutation::SetEmbedding {
                             session_id: sid_a.clone(),
@@ -2078,6 +2084,7 @@ mod conformance {
             .flush(
                 &MutationBatch {
                     mutation_epoch: 0,
+                    gc_mark: Default::default(),
                     mutations: vec![
                         Mutation::SetEmbedding {
                             session_id: sid_b.clone(),
@@ -2173,6 +2180,7 @@ mod conformance {
             .flush(
                 &MutationBatch {
                     mutation_epoch: 0,
+                    gc_mark: Default::default(),
                     mutations: vec![
                         plant_interaction(&sid, i1, Utc::now()),
                         plant_concept(&sid, c1, i1, "user schema", Utc::now(), None),
@@ -2215,6 +2223,7 @@ mod conformance {
         let ts = Utc::now();
         let batch = MutationBatch {
             mutation_epoch: 0,
+            gc_mark: Default::default(),
             mutations: vec![
                 plant_interaction(&sid, i1, ts),
                 // Mixed-case content AND canonical_key — selected by the SQL's lower()
@@ -2279,6 +2288,7 @@ mod conformance {
             .flush(
                 &MutationBatch {
                     mutation_epoch: 0,
+                    gc_mark: Default::default(),
                     mutations: vec![
                         plant_interaction(&sid, i1, ts),
                         plant_concept_full(
@@ -2330,6 +2340,7 @@ mod conformance {
         let e2 = NodeId::new();
         let bad = MutationBatch {
             mutation_epoch: 0,
+            gc_mark: Default::default(),
             mutations: vec![
                 plant_concept_full(
                     &sid,
@@ -2374,6 +2385,7 @@ mod conformance {
             .flush(
                 &MutationBatch {
                     mutation_epoch: 0,
+                    gc_mark: Default::default(),
                     mutations: vec![
                         plant_interaction(&sid, i1, ts),
                         plant_concept_full(
@@ -2454,6 +2466,7 @@ mod conformance {
             .flush(
                 &MutationBatch {
                     mutation_epoch: 0,
+                    gc_mark: Default::default(),
                     mutations: vec![
                         plant_interaction(&sid, i1, Utc::now()),
                         plant_concept(&sid, NodeId::new(), i1, "seed concept", Utc::now(), None),
@@ -2481,6 +2494,7 @@ mod conformance {
             .flush(
                 &MutationBatch {
                     mutation_epoch: 0,
+                    gc_mark: Default::default(),
                     mutations: vec![plant_interaction(&plain_sid, NodeId::new(), Utc::now())],
                 },
                 None,
@@ -2670,6 +2684,7 @@ mod conformance {
         // probe). `other`'s origin is DISTINCT i2 — the fresh edge's source.
         let base = MutationBatch {
             mutation_epoch: 0,
+            gc_mark: Default::default(),
             mutations: vec![
                 plant_interaction(&sid, i1, old_ts),
                 plant_interaction(&sid, i2, old_ts),
@@ -2689,6 +2704,7 @@ mod conformance {
         // Then a genuinely FRESH other -> orphan dependency (created now).
         let fresh = MutationBatch {
             mutation_epoch: 0,
+            gc_mark: Default::default(),
             mutations: vec![plant_edge(&sid, other, orphan, EdgeType::Dependency, now)],
         };
         store.flush(&fresh, None).await.unwrap();
@@ -2812,6 +2828,7 @@ mod conformance {
         let alone = NodeId::new();
         let batch = MutationBatch {
             mutation_epoch: 0,
+            gc_mark: Default::default(),
             mutations: vec![
                 plant_interaction(&sid, i1, old_ts),
                 plant_concept(&sid, pillar, i1, "pillar", old_ts, None),
@@ -2861,6 +2878,7 @@ mod conformance {
             .flush(
                 &MutationBatch {
                     mutation_epoch: 0,
+                    gc_mark: Default::default(),
                     mutations: vec![
                         plant_interaction(&sid, i1, ts),
                         plant_concept(&sid, pillar, i1, "pillar", ts, None),
@@ -2877,6 +2895,7 @@ mod conformance {
         mem.flush(
             &MutationBatch {
                 mutation_epoch: 0,
+                gc_mark: Default::default(),
                 mutations: vec![
                     plant_interaction(&sid, i1, ts),
                     plant_concept(&sid, pillar, i1, "pillar", ts, None),
@@ -2926,6 +2945,7 @@ mod conformance {
             .flush(
                 &MutationBatch {
                     mutation_epoch: 0,
+                    gc_mark: Default::default(),
                     mutations: vec![
                         plant_interaction(&sid, i1, Utc::now()),
                         plant_concept(&sid, c1, i1, "pillar", Utc::now(), None),
@@ -3038,6 +3058,7 @@ mod conformance {
             .flush(
                 &MutationBatch {
                     mutation_epoch: 0,
+                    gc_mark: Default::default(),
                     mutations: vec![
                         plant_interaction(&legacy, interaction, now),
                         plant_concept(
@@ -3065,6 +3086,7 @@ mod conformance {
             .flush(
                 &MutationBatch {
                     mutation_epoch: 0,
+                    gc_mark: Default::default(),
                     mutations: vec![Mutation::SetEmbedding {
                         session_id: legacy.clone(),
                         embedding: Some(contract.clone()),
@@ -3107,6 +3129,7 @@ mod conformance {
             .flush(
                 &MutationBatch {
                     mutation_epoch: 0,
+                    gc_mark: Default::default(),
                     mutations: vec![Mutation::SetRootGoal {
                         session_id: sid.clone(),
                         goal: Some(goal.clone()),
@@ -3123,6 +3146,7 @@ mod conformance {
             .flush(
                 &MutationBatch {
                     mutation_epoch: 0,
+                    gc_mark: Default::default(),
                     mutations: vec![Mutation::SetRootGoal {
                         session_id: sid.clone(),
                         goal: None,
@@ -3149,6 +3173,7 @@ mod conformance {
             .flush(
                 &MutationBatch {
                     mutation_epoch: 0,
+                    gc_mark: Default::default(),
                     mutations: vec![Mutation::SetEmbedding {
                         session_id: sid.clone(),
                         embedding: Some(embedding.clone()),
@@ -3845,6 +3870,7 @@ mod h2_cockroach_parity {
         }
         MutationBatch {
             mutation_epoch: 0,
+            gc_mark: Default::default(),
             mutations,
         }
     }
@@ -4059,6 +4085,7 @@ mod h2_cockroach_parity {
         };
         let restamp = MutationBatch {
             mutation_epoch: 0,
+            gc_mark: Default::default(),
             mutations: vec![Mutation::SetEmbedding {
                 session_id: snap.session_id.clone(),
                 embedding: Some(contract_b.clone()),

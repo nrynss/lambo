@@ -240,11 +240,22 @@ const VECTOR_FETCH_CAP: usize = 2048;
 /// A batch of pure deletions resolves no session here; its epoch contribution
 /// lands with the next batch that names one (the stamp is absolute, so the
 /// counter only ever lags, never rewinds).
+///
+/// Issue #29: the same statement stamps GC's sweep mark (`last_gc_epoch`,
+/// `last_gc_at`) with the same field-wise monotonic merge as
+/// [`crate::types::GcMark::merge`]. `last_gc_at` is wrapped in `COALESCE` on
+/// both sides because the two dialects disagree about `GREATEST` over a NULL
+/// argument; the wrapped form means "the later non-NULL value" on either.
 const UPSERT_SESSION_ROW_SQL: &str = r#"
-INSERT INTO sessions (session_id, mutation_epoch)
-VALUES ($1, $2)
+INSERT INTO sessions (session_id, mutation_epoch, last_gc_epoch, last_gc_at)
+VALUES ($1, $2, $3, $4)
 ON CONFLICT (session_id) DO UPDATE SET
-    mutation_epoch = GREATEST(sessions.mutation_epoch, EXCLUDED.mutation_epoch)
+    mutation_epoch = GREATEST(sessions.mutation_epoch, EXCLUDED.mutation_epoch),
+    last_gc_epoch = GREATEST(sessions.last_gc_epoch, EXCLUDED.last_gc_epoch),
+    last_gc_at = GREATEST(
+        COALESCE(sessions.last_gc_at, EXCLUDED.last_gc_at),
+        COALESCE(EXCLUDED.last_gc_at, sessions.last_gc_at)
+    )
 "#;
 
 /// Upserts are issued as **multi-row** statements (L82-1), so each is built as
@@ -603,8 +614,9 @@ LIMIT $3
                 r#"
 INSERT INTO sessions (
     session_id, root_goal, created_at, closed_at,
-    embedding_kind, embedding_model, embedding_dim, mutation_epoch
-) VALUES ($1, $2::JSONB, COALESCE($3, now()), $4, $5{s}, $6{s}, $7::INT, $8::INT)
+    embedding_kind, embedding_model, embedding_dim, mutation_epoch,
+    last_gc_epoch, last_gc_at
+) VALUES ($1, $2::JSONB, COALESCE($3, now()), $4, $5{s}, $6{s}, $7::INT, $8::INT, $9::BIGINT, $10)
 ON CONFLICT (session_id) DO UPDATE SET
     root_goal = EXCLUDED.root_goal,
     created_at = EXCLUDED.created_at,
@@ -612,7 +624,9 @@ ON CONFLICT (session_id) DO UPDATE SET
     embedding_kind = EXCLUDED.embedding_kind,
     embedding_model = EXCLUDED.embedding_model,
     embedding_dim = EXCLUDED.embedding_dim,
-    mutation_epoch = EXCLUDED.mutation_epoch
+    mutation_epoch = EXCLUDED.mutation_epoch,
+    last_gc_epoch = EXCLUDED.last_gc_epoch,
+    last_gc_at = EXCLUDED.last_gc_at
 "#
             ),
             set_embedding: format!(
@@ -627,7 +641,8 @@ WHERE session_id = $1
             select_session: format!(
                 r#"
 SELECT root_goal{s} AS root_goal, created_at, closed_at,
-       embedding_kind, embedding_model, embedding_dim, mutation_epoch
+       embedding_kind, embedding_model, embedding_dim, mutation_epoch,
+       last_gc_epoch, last_gc_at
 FROM sessions
 WHERE session_id = $1
 "#
@@ -1571,6 +1586,9 @@ impl<D: Dialect> PgStore<D> {
         let embedding_model = embedding.and_then(|c| c.model.as_deref());
         // Issue #17: the seeded snapshot carries the mutation accounting.
         let mutation_epoch = i64::try_from(snapshot.mutation_epoch).unwrap_or(i64::MAX);
+        // Issue #29: and GC's sweep mark.
+        let last_gc_epoch = i64::try_from(snapshot.gc_mark.last_gc_epoch).unwrap_or(i64::MAX);
+        let last_gc_at = snapshot.gc_mark.last_gc_at;
         tx_retry(|| async move {
             let mut tx = pool
                 .begin()
@@ -1585,6 +1603,8 @@ impl<D: Dialect> PgStore<D> {
                 .bind(embedding_model)
                 .bind(embedding_dim)
                 .bind(mutation_epoch)
+                .bind(last_gc_epoch)
+                .bind(last_gc_at)
                 .execute(&mut *tx)
                 .await
                 .map_err(|e| map_write_err(e, |m| format!("upsert session row: {m}")))?;
@@ -2693,6 +2713,8 @@ impl<D: Dialect> GraphStore for PgStore<D> {
                 sqlx::query(UPSERT_SESSION_ROW_SQL)
                     .bind(sid)
                     .bind(i64::try_from(batch.mutation_epoch).unwrap_or(i64::MAX))
+                    .bind(i64::try_from(batch.gc_mark.last_gc_epoch).unwrap_or(i64::MAX))
+                    .bind(batch.gc_mark.last_gc_at)
                     .execute(&mut *tx)
                     .await
                     .map_err(|e| map_write_err(e, |m| format!("upsert session row: {m}")))?;
@@ -2789,6 +2811,13 @@ impl<D: Dialect> GraphStore for PgStore<D> {
             // seeded by `seed`; the loading writer resumes it so GC's
             // `gc_interval` measures deployment-lifetime mutations.
             let mutation_epoch: i64 = session_row.try_get("mutation_epoch").map_err(backend)?;
+            // Issue #29: GC's sweep accounting, resumed with the epoch so a
+            // restart neither re-sweeps nor resets the `gc_max_interval` clock.
+            let last_gc_epoch: i64 = session_row.try_get("last_gc_epoch").map_err(backend)?;
+            let gc_mark = crate::types::GcMark {
+                last_gc_epoch: u64::try_from(last_gc_epoch).unwrap_or(0),
+                last_gc_at: session_row.try_get("last_gc_at").map_err(backend)?,
+            };
 
             let interactions = sqlx::query(&self.sql.select_interactions)
                 .bind(sid.0.as_str())
@@ -2861,6 +2890,7 @@ impl<D: Dialect> GraphStore for PgStore<D> {
                 embedding,
                 write_intents,
                 mutation_epoch: u64::try_from(mutation_epoch).unwrap_or(u64::MAX),
+                gc_mark,
             })
         })
         .await

@@ -9,7 +9,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     embedding_kind  STRING,
     embedding_model STRING,
     embedding_dim   INT,
-    mutation_epoch  INT NOT NULL DEFAULT 0
+    mutation_epoch  INT NOT NULL DEFAULT 0,
+    last_gc_epoch   INT NOT NULL DEFAULT 0,
+    last_gc_at      TIMESTAMPTZ
 );
 
 -- P3 review round 1 (schema persistence): sessions now carries the embedding
@@ -28,6 +30,16 @@ ALTER TABLE sessions ADD COLUMN IF NOT EXISTS embedding_dim INT;
 -- Existing clusters predate the column; the ALTER backfills 0 and the
 -- accounting accumulates forward.
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS mutation_epoch INT NOT NULL DEFAULT 0;
+
+-- Issue #29: GC's sweep accounting, persisted beside mutation_epoch the same
+-- way (flush upserts both monotonically in the batch's own transaction;
+-- load_session returns them). last_gc_epoch is the epoch the next gc_interval
+-- and idle floor are measured from, so a writer restart no longer sweeps
+-- again and bumps every gc_survived; last_gc_at is the gc_max_interval clock.
+-- Existing clusters backfill 0 / NULL: the daemon anchors the clock on first
+-- attach rather than sweeping.
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS last_gc_epoch INT NOT NULL DEFAULT 0;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS last_gc_at TIMESTAMPTZ;
 
 CREATE TABLE IF NOT EXISTS interactions (
     id              UUID PRIMARY KEY,

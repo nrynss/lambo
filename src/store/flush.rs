@@ -495,6 +495,13 @@ impl FlushLoop {
             // MAX/GREATEST, so a retained batch retried with the same stamp (or
             // the same watermark arriving twice) is idempotent at the store.
             self.pending.mutation_epoch = self.pending.mutation_epoch.max(drained.mutation_epoch);
+            // Issue #29: GC's sweep mark rides the same carry for the same
+            // reason — without it every routine flush would present the unset
+            // mark and the durable `last_gc_epoch`/`last_gc_at` would never
+            // move, so a restart would sweep again. `GcMark::merge` is the
+            // field-wise max the adapters apply, so the carried value is
+            // monotone and a repeat is idempotent.
+            self.pending.gc_mark = self.pending.gc_mark.merge(drained.gc_mark);
             self.pending.mutations.extend(drained.mutations);
         }
 
@@ -2278,5 +2285,59 @@ mod tests {
             "the stamp survived retention and the empty-drain cycles"
         );
         assert!(snap.mutation_epoch > 0);
+    }
+
+    /// Issue #29: GC's sweep mark rides the flush loop exactly like the epoch
+    /// stamp. Recording a sweep is not a mutation, so it lands with the next
+    /// flushed batch; the store keeps the field-wise max; a restarted writer
+    /// resumes it. Fails on a loop that drops `gc_mark` in `cycle` (the store
+    /// would keep the unset mark and a restart would sweep again — the
+    /// restart defect #29 fixes).
+    #[tokio::test(start_paused = true)]
+    async fn flush_loop_carries_the_gc_mark_and_a_restart_resumes_it() {
+        use chrono::TimeZone;
+        let store = Arc::new(FlakyStore::new(Arc::new(MemoryStore::new())));
+        let graph = new_graph();
+        let task = FlushTask::new(
+            graph.clone(),
+            store.clone(),
+            params(Duration::from_secs(1), 100, 3, 1_000),
+        );
+        let _handle = task.spawn();
+        let_task_arm().await;
+
+        let swept_at = chrono::Utc.with_ymd_and_hms(2026, 10, 7, 9, 0, 0).unwrap();
+        let iid = add_interaction(&graph, 1, None);
+        add_concept(&graph, 1, iid);
+        let epoch = graph.read().epoch();
+        graph.write().record_gc_sweep(epoch, swept_at);
+        assert_eq!(
+            graph.read().epoch(),
+            epoch,
+            "recording a sweep is not a mutation"
+        );
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        wait_until_async(|| async { store.load_session(&sid()).await.is_ok() }).await;
+        let stored = store.load_session(&sid()).await.unwrap().gc_mark;
+        assert_eq!(
+            stored.last_gc_epoch, epoch,
+            "the loop flush carries the mark"
+        );
+        assert_eq!(stored.last_gc_at, Some(swept_at));
+
+        // A later write flushes the same mark again (the carry is never
+        // reset); the store value cannot regress.
+        let _ = add_interaction(&graph, 2, Some(iid));
+        tokio::time::advance(Duration::from_secs(1)).await;
+        wait_until_async(|| async {
+            matches!(store.load_session(&sid()).await, Ok(s) if s.interactions.len() == 2)
+        })
+        .await;
+        let snapshot = store.load_session(&sid()).await.unwrap();
+        assert_eq!(snapshot.gc_mark, stored);
+
+        let restarted = Graph::from_snapshot(snapshot).unwrap();
+        assert_eq!(restarted.gc_mark(), stored, "a restart resumes the mark");
     }
 }

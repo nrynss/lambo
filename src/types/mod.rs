@@ -678,6 +678,61 @@ pub struct MutationBatch {
     /// no-op against any stored value.
     #[serde(default)]
     pub mutation_epoch: u64,
+    /// The graph's [`GcMark`] at drain time (issue #29) — the GC sweep
+    /// watermark and the time of the last sweep, carried exactly the way
+    /// [`MutationBatch::mutation_epoch`] is: an absolute value stamped by
+    /// `Graph::drain_log` and persisted monotonically ([`GcMark::merge`]) in
+    /// the flush transaction, so a writer restart neither resets GC's
+    /// accounting (the defect that let every restart past `gc_interval`
+    /// lifetime mutations sweep and bump `gc_survived`) nor resets the
+    /// `gc_max_interval` clock. Hand-built batches default to the unset mark,
+    /// a no-op against any stored value.
+    #[serde(default, skip_serializing_if = "GcMark::is_unset")]
+    pub gc_mark: GcMark,
+}
+
+/// GC's durable sweep accounting for one session (issue #29).
+///
+/// Persisted with the session beside `mutation_epoch` (`sessions.last_gc_epoch`
+/// / `sessions.last_gc_at`) and resumed by `Graph::from_snapshot`, so the
+/// daemon's sweep trigger survives a writer restart instead of starting from
+/// zero in every process.
+///
+/// Both fields only ever move forward, independently: [`GcMark::merge`] is a
+/// field-wise max, which is what the adapters' `MAX`/`GREATEST` upsert applies,
+/// so a replayed batch converges and a stale stamp can never rewind either.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GcMark {
+    /// The epoch the next `gc_interval` (and the idle floor) is measured from:
+    /// the epoch after the last sweep, advanced by every deferred survivor-bump
+    /// drain so GC's own writes are never credited as session mutations
+    /// (NEW-2). `0` for a session that has never swept.
+    #[serde(default)]
+    pub last_gc_epoch: u64,
+    /// When the last sweep ran — or, for a session that has never swept, when a
+    /// writer first observed it without one (the daemon anchors the
+    /// `gc_max_interval` clock there rather than sweeping on attach). `None`
+    /// until either happens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_gc_at: Option<DateTime<Utc>>,
+}
+
+impl GcMark {
+    /// True for the never-swept, never-anchored mark (the serde default).
+    pub fn is_unset(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// Field-wise max: the monotonic merge every adapter applies on flush.
+    pub fn merge(self, other: Self) -> Self {
+        Self {
+            last_gc_epoch: self.last_gc_epoch.max(other.last_gc_epoch),
+            last_gc_at: match (self.last_gc_at, other.last_gc_at) {
+                (Some(a), Some(b)) => Some(a.max(b)),
+                (a, b) => a.or(b),
+            },
+        }
+    }
 }
 
 impl MutationBatch {
@@ -743,6 +798,13 @@ pub struct GraphSnapshot {
     /// zero and accumulate forward.
     #[serde(default)]
     pub mutation_epoch: u64,
+    /// GC's sweep accounting when this snapshot was taken (issue #29).
+    /// [`crate::graph::Graph::from_snapshot`] resumes it, so a writer restart
+    /// does not reset `last_gc_epoch` (and with it, sweep once more and bump
+    /// every `gc_survived`) or the `gc_max_interval` clock. Unset on snapshots
+    /// written before the field existed.
+    #[serde(default, skip_serializing_if = "GcMark::is_unset")]
+    pub gc_mark: GcMark,
 }
 
 /// Identity of the dense embedding space used in a session.
@@ -1174,10 +1236,56 @@ mod tests {
         assert_eq!(back.id(), id);
     }
 
+    /// Issue #29: the GC mark merges field-wise (each field only moves
+    /// forward), the unset mark is the identity, and old JSON without the
+    /// field still parses (batches and snapshots written before #29).
+    #[test]
+    fn gc_mark_merge_is_fieldwise_max_and_serde_defaults() {
+        use chrono::TimeZone;
+        let t = |h| Utc.with_ymd_and_hms(2026, 10, 7, h, 0, 0).unwrap();
+        let a = GcMark {
+            last_gc_epoch: 10,
+            last_gc_at: Some(t(9)),
+        };
+        let b = GcMark {
+            last_gc_epoch: 4,
+            last_gc_at: Some(t(11)),
+        };
+        assert_eq!(
+            a.merge(b),
+            GcMark {
+                last_gc_epoch: 10,
+                last_gc_at: Some(t(11))
+            }
+        );
+        assert_eq!(a.merge(b), b.merge(a), "commutative");
+        assert_eq!(a.merge(GcMark::default()), a);
+        assert_eq!(GcMark::default().merge(a), a);
+        assert!(GcMark::default().is_unset());
+        assert!(!a.is_unset());
+
+        let old_batch: MutationBatch =
+            serde_json::from_str(r#"{"mutations":[],"mutation_epoch":3}"#).unwrap();
+        assert!(old_batch.gc_mark.is_unset());
+        let with = MutationBatch {
+            gc_mark: a,
+            ..MutationBatch::default()
+        };
+        let back: MutationBatch =
+            serde_json::from_str(&serde_json::to_string(&with).unwrap()).unwrap();
+        assert_eq!(back.gc_mark, a);
+        // The unset mark is not serialized, so pre-#29 golden JSON is
+        // byte-identical.
+        assert!(!serde_json::to_string(&MutationBatch::default())
+            .unwrap()
+            .contains("gc_mark"));
+    }
+
     #[test]
     fn mutation_batch_json_roundtrip() {
         let batch = MutationBatch {
             mutation_epoch: 0,
+            gc_mark: Default::default(),
             mutations: vec![Mutation::DeleteNode { id: NodeId::new() }],
         };
         let s = serde_json::to_string(&batch).unwrap();
