@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Fail if either hand-maintained mirror pair of docs has drifted.
+# Fail if any hand-maintained mirror pair of docs has drifted.
 #
-# The `--ledger`/transport prose exists in four copies:
-#   docs/reference/cli.mdx        <-> site/src/content/docs/cli.mdx
-#   docs/reference/mcp.mdx        <-> site/src/content/docs/mcp.mdx
+# Three pages exist in two copies each:
+#   docs/reference/cli.mdx          <-> site/src/content/docs/cli.mdx
+#   docs/reference/mcp.mdx          <-> site/src/content/docs/mcp.mdx
+#   docs/reference/installation.mdx <-> site/src/content/docs/installation.mdx
 # The two copies of each pair are meant to carry the SAME shared prose, but they
 # are deliberately NOT byte-identical files: the site copies add Astro component
 # imports and a `/lambo/...` link prefix, and mcp.mdx's site copy carries a whole
@@ -15,7 +16,11 @@
 # Astro imports, drops the site-only mcp.mdx section, and normalises the /lambo/
 # link prefix and trailing slashes. If the canonical forms differ, the shared
 # prose has drifted and the gate fails. The J5 rule: keep the pairs in sync, and
-# re-run `scripts/docs/check-mirror-drift.sh` after touching any of the four files.
+# re-run `scripts/docs/check-mirror-drift.sh` after touching any of the six files.
+# installation.mdx joined the gate after its copies drifted unnoticed (the site
+# copy gained the Cursor client sentence, the reference did not); its one
+# site-only line, the link to mcp.mdx's site-only "Verified clients" section, sits
+# in the same lambo-site-only markers.
 #
 # ## The normalisation's one asymmetric input (JE2E-10)
 #
@@ -77,8 +82,10 @@ t = re.sub(r'\]\(/lambo/([a-z0-9-]+)/(#\S*)?\)',
            lambda m: '](/' + m.group(1) + (m.group(2) or '') + ')', t)
 t = re.sub(r'\]\(/lambo/([a-z0-9-]+)(#\S*)?\)',
            lambda m: '](/' + m.group(1) + (m.group(2) or '') + ')', t)
-# Normalise any remaining bare `/lambo/` prefix (e.g. in code spans).
-t = t.replace('/lambo/', '/')
+# Normalise any remaining bare `/lambo/` prefix (e.g. in code spans). Only a
+# path that STARTS with /lambo/ is a site prefix; `nrynss/lambo/releases` in a
+# GitHub URL is the repository name and is identical in both copies.
+t = re.sub(r'(^|[^A-Za-z0-9._-])/lambo/', r'\1/', t, flags=re.M)
 sys.stdout.write(t)
 PY
 }
@@ -89,14 +96,20 @@ PY
 # the prefix strip is applied to both sides, so a site-style link in the
 # reference copy canonicalises into agreement with the site copy's correct one.
 # Run against the raw file, so nothing has been normalised yet.
+#
+# The pattern is a path that STARTS with /lambo/ (start of line, or after a
+# character that cannot be part of a path segment: `(`, a backtick, a space,
+# a quote ...). `github.com/nrynss/lambo/releases` is not a site prefix and must
+# not trip this; installation.mdx is full of such URLs.
+site_prefix_re='(^|[^A-Za-z0-9._-])/lambo/'
 check_no_site_prefix() {
   name="$1"; ref="$2"
-  if grep -n '/lambo/' "$repo/$ref" >/dev/null 2>&1; then
+  if grep -nE "$site_prefix_re" "$repo/$ref" >/dev/null 2>&1; then
     printf '\nFAIL %s: the reference copy %s carries a site-only /lambo/ link prefix\n' \
       "$name" "$ref"
     printf '      The docs site serves no /lambo/ prefix, so these are broken links there.\n'
     printf '      Only the site copy may carry it. Offending lines:\n'
-    grep -n '/lambo/' "$repo/$ref" | sed -n '1,10p' | sed 's/^/        /'
+    grep -nE "$site_prefix_re" "$repo/$ref" | sed -n '1,10p' | sed 's/^/        /'
     fail=1
     return 1
   fi
@@ -117,6 +130,7 @@ check_pair() {
 
 check_pair cli docs/reference/cli.mdx site/src/content/docs/cli.mdx
 check_pair mcp docs/reference/mcp.mdx site/src/content/docs/mcp.mdx
+check_pair installation docs/reference/installation.mdx site/src/content/docs/installation.mdx
 
 printf '\n'
 if [ "$fail" -eq 0 ]; then
