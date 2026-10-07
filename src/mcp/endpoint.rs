@@ -240,7 +240,14 @@ impl SessionEndpoint {
     /// environment: `set_var` is shared by every test in the binary, and two
     /// tests racing on `XDG_RUNTIME_DIR` is exactly the kind of flake that reads
     /// as a real defect on a loaded CI runner.
-    fn resolve_in(dir: &Path, session: &str, store: &StoreConfig) -> Result<Self, LamboError> {
+    ///
+    /// `dir` is the endpoint directory itself (what `endpoint_dir` returns, e.g.
+    /// `$XDG_RUNTIME_DIR/lambo`), not the runtime base. Public so integration
+    /// tests that hand a spawned serve its own `XDG_RUNTIME_DIR` (#15) can
+    /// derive the exact address that serve will, instead of resolving against
+    /// the test process's ambient environment — which is the operator's live
+    /// endpoint directory, and which can be too long to resolve at all.
+    pub fn resolve_in(dir: &Path, session: &str, store: &StoreConfig) -> Result<Self, LamboError> {
         // Identity is the hash over BOTH halves. The session must be in it: two
         // sessions on one store differ only by the cosmetic prefix otherwise,
         // and that prefix is truncated, so two long names sharing their first
