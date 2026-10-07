@@ -101,8 +101,17 @@ printf '%s' "$TOKEN" > "$TOKEN_FILE"
 # on macOS, which a /var/folders/... TMPDIR plus a long name would overrun.
 RUNTIME_DIR="$(mktemp -d /tmp/lambo-lt.XXXXXX)"
 chmod 700 "$RUNTIME_DIR"
+SERVE_PID=
+DRIVER_PID=
 cleanup() {
     rm -f "$TOKEN_FILE"
+    # Stop and reap the load driver first: it writes the ledger and must not
+    # outlive the harness. TERM, not INT: bash starts background jobs with
+    # SIGINT ignored, so an INT would be a no-op for it.
+    if [[ -n "${DRIVER_PID:-}" ]] && kill -0 "$DRIVER_PID" 2>/dev/null; then
+        kill -TERM "$DRIVER_PID" 2>/dev/null || true
+        wait "$DRIVER_PID" 2>/dev/null || true
+    fi
     if [[ -n "${SERVE_PID:-}" ]] && kill -0 "$SERVE_PID" 2>/dev/null; then
         kill -TERM "$SERVE_PID" 2>/dev/null || true
         wait "$SERVE_PID" 2>/dev/null || true
@@ -110,6 +119,10 @@ cleanup() {
     rm -rf "$RUNTIME_DIR"
 }
 trap cleanup EXIT
+# Explicit signal traps so INT and TERM run cleanup with a conventional status
+# (128+signal) rather than leaving the children behind.
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 DB="$OUT/$SESSION.db"
 CFG="$OUT/lambo.sqlite.toml"
@@ -217,7 +230,8 @@ echo "signal->exit: ${SIG_TO_EXIT_MS} ms (exit code $EXIT_CODE)"
 
 # The driver finishes its phases (transport errors after the server died are
 # recorded, not fatal) — wait for it so the ledger is complete.
-wait "$DRIVER_PID" || { echo "driver failed" >&2; exit 1; }
+wait "$DRIVER_PID" || { echo "driver failed" >&2; DRIVER_PID=; exit 1; }
+DRIVER_PID=
 
 # C3 — prove the tail is durable.
 python3 "$HERE/check_durability.py" \
