@@ -30,6 +30,9 @@ use std::time::Duration;
 use lambo::store::{GraphStore, SqliteStore};
 use lambo::types::SessionId;
 
+mod common;
+use common::{RuntimeDir, RUNTIME_DIR_VAR};
+
 const SESSION: &str = "j2-proxy-multi-client";
 
 /// One `lambo serve` subprocess plus the plumbing to speak JSON-RPC to it.
@@ -42,8 +45,14 @@ struct Serve {
 
 impl Serve {
     /// Spawn a serve on stdio, with stdout piped so frames can be read back.
-    fn spawn(cfg: &std::path::Path, agent: &str) -> Self {
+    ///
+    /// Every serve in one test shares `runtime`, the test's own endpoint
+    /// directory (#15): the holder binds there and a proxy derives the same
+    /// address, as on one login session — and a SIGKILLed holder's socket stays
+    /// inside the test's directory instead of the operator's.
+    fn spawn(cfg: &std::path::Path, agent: &str, runtime: &RuntimeDir) -> Self {
         let mut child = Command::new(env!("CARGO_BIN_EXE_lambo"))
+            .env(RUNTIME_DIR_VAR, runtime.path())
             .args([
                 "--config",
                 cfg.to_str().unwrap(),
@@ -254,10 +263,11 @@ fn release_row(db: &str, holder_token: &str) {
 #[test]
 fn two_clients_over_stdio_both_work_through_one_hub() {
     let (dir, cfg, db) = scratch("hub");
+    let runtime = RuntimeDir::new();
     provision(&db);
 
     // A starts first and therefore becomes the hub.
-    let mut a = Serve::spawn(&cfg, "agent-a");
+    let mut a = Serve::spawn(&cfg, "agent-a", &runtime);
     a.initialize(1);
 
     // The lease row proves A holds it AND published where it can be reached —
@@ -280,7 +290,7 @@ fn two_clients_over_stdio_both_work_through_one_hub() {
 
     // B is the process that used to exit 1. Same session, same store, no
     // configuration change — exactly the wiring that broke.
-    let mut b = Serve::spawn(&cfg, "agent-b");
+    let mut b = Serve::spawn(&cfg, "agent-b", &runtime);
     b.initialize(1);
 
     // A write through the proxy. It is durable in the HOLDER, under the
@@ -543,13 +553,14 @@ fn two_clients_over_stdio_both_work_through_one_hub() {
 #[test]
 fn a_dead_holder_leaves_the_proxy_honest_and_the_lease_unclaimed() {
     let (dir, cfg, db) = scratch("dead");
+    let runtime = RuntimeDir::new();
     provision(&db);
 
-    let mut a = Serve::spawn(&cfg, "agent-a");
+    let mut a = Serve::spawn(&cfg, "agent-a", &runtime);
     a.initialize(1);
     let a_holder = lease_row(&db).expect("A holds").holder;
 
-    let mut b = Serve::spawn(&cfg, "agent-b");
+    let mut b = Serve::spawn(&cfg, "agent-b", &runtime);
     b.initialize(1);
     // Prove the hop works before breaking it, so a failure below is the kill
     // and not a broken proxy.
@@ -606,7 +617,7 @@ fn a_dead_holder_leaves_the_proxy_honest_and_the_lease_unclaimed() {
     // documented override) so a new holder can start now rather than in 45s,
     // then let C become the hub.
     release_row(&db, &a_holder);
-    let mut c = Serve::spawn(&cfg, "agent-c");
+    let mut c = Serve::spawn(&cfg, "agent-c", &runtime);
     c.initialize(1);
     let new_row = lease_row(&db).expect("C holds now");
     assert!(
@@ -666,11 +677,15 @@ fn a_call_in_flight_when_the_holder_dies_is_answered_rather_than_lost() {
     use std::os::unix::net::UnixListener;
 
     let (dir, cfg, db) = scratch("inflight");
+    let runtime = RuntimeDir::new();
     provision(&db);
 
     // The endpoint the spawned serve will derive for this session and store.
-    // Derived here through the same public function it uses, so the socket the
-    // fake holder binds is the one the proxy's `proxyable` check demands.
+    // The file name is derived here through the same public function it uses,
+    // so the socket the fake holder binds is the one the proxy's `proxyable`
+    // check demands. The directory is the test's runtime dir, which the spawned
+    // serve is handed as `XDG_RUNTIME_DIR` (#15) — never this process's ambient
+    // one, which is the operator's live endpoint directory.
     let store_cfg = lambo::store::StoreConfig {
         kind: lambo::store::StoreKind::Sqlite,
         path: Some(db.clone()),
@@ -678,14 +693,19 @@ fn a_call_in_flight_when_the_holder_dies_is_answered_rather_than_lost() {
     };
     let endpoint = lambo::mcp::SessionEndpoint::for_store(SESSION, &store_cfg)
         .expect("a file-backed store is shareable and derives an endpoint");
-    let sock = endpoint.path().to_path_buf();
+    let sock = runtime.endpoint_dir().join(
+        endpoint
+            .path()
+            .file_name()
+            .expect("an endpoint names a socket file"),
+    );
     let _ = std::fs::remove_file(&sock);
 
     // Take the lease as the fake holder, publishing that endpoint — the row the
     // spawned serve loses to, and the row it checks before dialling.
     let holder =
         lambo::store::LeaseHolder::for_this_process(&lambo::types::AgentId::new("fake-holder"))
-            .reachable_at(endpoint.published());
+            .reachable_at(sock.to_string_lossy().into_owned());
     {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
@@ -758,7 +778,7 @@ fn a_call_in_flight_when_the_holder_dies_is_answered_rather_than_lost() {
         }
     });
 
-    let mut b = Serve::spawn(&cfg, "agent-b");
+    let mut b = Serve::spawn(&cfg, "agent-b", &runtime);
     b.initialize(1);
 
     // The call that will be lost. Sent, not `call`ed, so the assertion below can
@@ -847,13 +867,14 @@ fn a_call_in_flight_when_the_holder_dies_is_answered_rather_than_lost() {
 #[test]
 fn a_live_endpoint_with_no_lease_row_is_refused_rather_than_dialled() {
     let (dir, cfg, db) = scratch("orphan");
+    let runtime = RuntimeDir::new();
     provision(&db);
 
-    let mut a = Serve::spawn(&cfg, "agent-a");
+    let mut a = Serve::spawn(&cfg, "agent-a", &runtime);
     a.initialize(1);
     let a_holder = lease_row(&db).expect("A holds").holder;
 
-    let mut b = Serve::spawn(&cfg, "agent-b");
+    let mut b = Serve::spawn(&cfg, "agent-b", &runtime);
     b.initialize(1);
     let ok = b.call(
         2,
@@ -872,7 +893,7 @@ fn a_live_endpoint_with_no_lease_row_is_refused_rather_than_dialled() {
 
     // C binds the same endpoint — the address is a pure function of session and
     // store, so it is literally the same path, stale socket and all.
-    let mut c = Serve::spawn(&cfg, "agent-c");
+    let mut c = Serve::spawn(&cfg, "agent-c", &runtime);
     c.initialize(1);
     let c_holder = lease_row(&db).expect("C holds").holder;
     assert!(c_holder.starts_with("agent-c@"), "{c_holder}");
@@ -1043,6 +1064,7 @@ fn a_holder_reachable_only_at_its_own_directory_is_still_forwarded_to() {
     use std::os::unix::net::UnixListener;
 
     let (dir, cfg, db) = scratch("crossdir");
+    let runtime = RuntimeDir::new();
     provision(&db);
 
     let store_cfg = lambo::store::StoreConfig {
@@ -1125,7 +1147,7 @@ fn a_holder_reachable_only_at_its_own_directory_is_still_forwarded_to() {
     });
 
     // The losing serve. Before J2-L1 this refused and waited out its budget.
-    let mut b = Serve::spawn(&cfg, "this-product");
+    let mut b = Serve::spawn(&cfg, "this-product", &runtime);
     let init = b.initialize(1);
     assert_eq!(
         init["result"]["serverInfo"]["name"], "other-product-holder",
@@ -1155,6 +1177,7 @@ fn a_holder_reachable_only_at_its_own_directory_is_still_forwarded_to() {
 #[test]
 fn a_holder_whose_lease_outlasts_the_client_budget_is_refused_at_once() {
     let (dir, cfg, db) = scratch("budget");
+    let runtime = RuntimeDir::new();
     provision(&db);
 
     // A holder with no endpoint: exactly what a `lambo derive` holding the lease
@@ -1174,6 +1197,7 @@ fn a_holder_whose_lease_outlasts_the_client_budget_is_refused_at_once() {
 
     let started = std::time::Instant::now();
     let out = Command::new(env!("CARGO_BIN_EXE_lambo"))
+        .env(RUNTIME_DIR_VAR, runtime.path())
         .args([
             "--config",
             cfg.to_str().unwrap(),
@@ -1236,6 +1260,7 @@ fn a_holder_whose_endpoint_refuses_is_not_described_as_still_refreshing() {
     use std::os::unix::fs::DirBuilderExt as _;
 
     let (dir, cfg, db) = scratch("deadendpoint");
+    let runtime = RuntimeDir::new();
     provision(&db);
 
     let store_cfg = lambo::store::StoreConfig {
@@ -1276,6 +1301,7 @@ fn a_holder_whose_endpoint_refuses_is_not_described_as_still_refreshing() {
     }
 
     let out = Command::new(env!("CARGO_BIN_EXE_lambo"))
+        .env(RUNTIME_DIR_VAR, runtime.path())
         .args([
             "--config",
             cfg.to_str().unwrap(),
