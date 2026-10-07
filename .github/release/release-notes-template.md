@@ -24,6 +24,13 @@ different binary.
 - Not included: `bedrock` (Amazon Bedrock is gated on account authorization and
   lands in a later release)
 
+Apple silicon also gets a Metal build, `lambo-__LAMBO_VERSION__-macos-arm64-metal`:
+the same adapter set plus the in-process `candle` embedder on the GPU
+(`[embedder] kind = "candle"`, `device = "metal"`). The stock binaries do not
+carry candle. It links only macOS system frameworks, so it needs nothing
+installed beyond macOS itself. Set `LAMBO_FLAVOR=metal` for the install script
+to pick it; the script refuses that flavor on any other platform.
+
 The one caveat: the adapter code is compiled in, but its backing service must be
 reachable at runtime. BGE embeddings need a local `llama-server`. CockroachDB
 needs a reachable cluster.
@@ -43,6 +50,7 @@ Each platform release has a binary and a `.sha256` file, for example
 | Linux x86_64 | `lambo-__LAMBO_VERSION__-linux-x86_64` |
 | Linux arm64 | `lambo-__LAMBO_VERSION__-linux-arm64` |
 | macOS arm64 | `lambo-__LAMBO_VERSION__-macos-arm64` |
+| macOS arm64, Metal (candle) | `lambo-__LAMBO_VERSION__-macos-arm64-metal` |
 | Windows x86_64 | `lambo-__LAMBO_VERSION__-windows-x86_64.exe` |
 
 ## Install
@@ -72,6 +80,8 @@ Prebuilt binaries are the primary channel. To build from source instead:
 git clone https://github.com/nrynss/lambo.git
 cd lambo
 cargo build --release --features ship
+# Apple silicon, with the Metal candle embedder:
+cargo build --release --features ship,embed-candle-metal
 ```
 
 The full-feature build is the `ship` profile. For a leaner binary, pick the

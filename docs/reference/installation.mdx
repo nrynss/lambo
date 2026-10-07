@@ -9,7 +9,7 @@ That is the whole deployment model. The released binary carries every adapter. Y
 
 ## Install the binary
 
-Each release carries one `lambo` binary per platform plus a SHA-256 checksum file. Releases are published for Linux x86_64, Linux arm64, macOS arm64, and Windows x86_64, with the full adapter feature set compiled in.
+Each release carries one `lambo` binary per platform plus a SHA-256 checksum file. Releases are published for Linux x86_64, Linux arm64, macOS arm64, and Windows x86_64, with the full adapter feature set compiled in. Apple silicon also gets a Metal build, `lambo-<version>-macos-arm64-metal`, which adds the in-process candle embedder running on the GPU (`[embedder] kind = "candle"`, `device = "metal"`). The stock binaries do not carry candle.
 
 <Steps>
   <Step title="Run the install script">
@@ -30,6 +30,12 @@ To pin a version or choose the install directory:
 ```bash
 LAMBO_VERSION=0.2.0 LAMBO_INSTALL_DIR=/usr/local/bin \
   sh -c "$(curl -fsSL https://raw.githubusercontent.com/nrynss/lambo/main/scripts/install.sh)"
+```
+
+To install the Metal build on Apple silicon, set `LAMBO_FLAVOR=metal`. The script verifies its checksum the same way, and refuses `metal` on any other platform.
+
+```bash
+curl -fsSL https://github.com/nrynss/lambo/releases/latest/download/install.sh | LAMBO_FLAVOR=metal sh
 ```
 
 On Windows, download `lambo-<version>-windows-x86_64.exe` and its `.sha256` file from the [releases page](https://github.com/nrynss/lambo/releases) and verify the checksum yourself.

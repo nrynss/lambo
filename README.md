@@ -112,6 +112,15 @@ curl -fsSL https://github.com/nrynss/lambo/releases/latest/download/install.sh |
 The script verifies a SHA-256 checksum and installs to `~/.local/bin`. Windows binaries sit
 on the [releases page](https://github.com/nrynss/lambo/releases).
 
+On Apple silicon, `LAMBO_FLAVOR=metal` installs the Metal build instead
+(`lambo-<version>-macos-arm64-metal`): the same adapter set plus the in-process candle
+embedder on the GPU (`[embedder] kind = "candle"`, `device = "metal"`). The stock binaries
+do not carry candle. The script refuses `metal` on any other platform.
+
+```bash
+curl -fsSL https://github.com/nrynss/lambo/releases/latest/download/install.sh | LAMBO_FLAVOR=metal sh
+```
+
 `cargo install lambo` is a leaner channel: it builds the crate's default
 features (`memory` store, `fixture` and `bge_m3` embedders). The prebuilt
 binaries above carry the full adapter set (`ship` profile); build from source
