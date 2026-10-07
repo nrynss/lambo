@@ -53,13 +53,39 @@ Store rows may EXCEED the ledger: a call in flight when SIGTERM landed can
 have its mutations flushed by the close drain without ever returning a
 response. That surplus is reported as in-flight-landed, not a discrepancy.
 
-Exit status:
+Exit status (every code but 0 means "do not claim durability"):
   0 — the store is not short of ledger-acknowledged interactions, nor of
-      settled-applied concepts/edges (GC-accounted);
-  2 — it is (the honest "tail was NOT durable" signal);
+      settled-applied concepts/edges (GC-accounted), and at least one
+      acknowledged write was checked;
+  2 — it is short (the honest "tail was NOT durable" signal), including a
+      concept shortfall that GC does not explain when `--gc-logged` says
+      every GC sweep is in the transcript;
   3 — the ledger has successful write calls whose response text this script
       does not recognise. The server's wording drifted; fix the parser rather
-      than trust a comparison built on zero counted writes.
+      than trust a comparison built on zero counted writes;
+  4 — NOTHING TO VERIFY: the ledger holds no acknowledged write (driver
+      crashed early, wrong --ledger, every call refused). A check that checked
+      nothing must not pass; pass `--allow-empty` only when an empty run is the
+      expected outcome (then it exits 0 and says so);
+  5 — UNVERIFIABLE concepts: interactions and edges are fine but the store is
+      short of settled-applied concepts and GC could legitimately explain it,
+      while the transcript does not show that GC activity was logged. Re-run
+      with `--stderr` captured at `lambo::daemon::gc=debug` plus `--gc-logged`;
+  6 — an input could not be read (ledger or store missing/unreadable, not a
+      lambo store, malformed ledger line). The store is opened read-only and
+      is never created or modified;
+  64 — command-line usage error.
+
+Limitation (concepts compare by count, not by id): a settled receipt reports
+only how many concepts it created (`C created`), never their ids (see
+`derive_sentence` / `action_sentence` in `src/writeq.rs`), and the ledger
+carries no concept ids either, so "every settled-applied concept id is in the
+store" cannot be checked. The concept check is a lower bound on the store
+total: concepts from unsettled writes that did land can offset settled ones
+that were lost. When the store is AHEAD while unsettled receipts exist, the
+output says so and the verdict is qualified; it still exits 0, because the
+surplus is also the normal in-flight-landed case. Interactions are 1:1 per
+acknowledged write and are not affected.
 
     python3 scripts/loadtest/check_durability.py \\
         --ledger evidence/concurrency/ledger-<run>.jsonl \\
@@ -72,6 +98,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import pathlib
 import re
 import sqlite3
 import sys
@@ -125,8 +153,25 @@ def classify(answer: str) -> tuple[str, str]:
     return "unknown", answer
 
 
+EXIT_OK = 0
+EXIT_SHORTFALL = 2
+EXIT_PARSER_DRIFT = 3
+EXIT_NOTHING_TO_CHECK = 4
+EXIT_UNVERIFIABLE = 5
+EXIT_BAD_INPUT = 6
+EXIT_USAGE = 64
+
+
+class _Parser(argparse.ArgumentParser):
+    """argparse exits 2 on a usage error, which would read as SHORTFALL."""
+
+    def error(self, message: str):
+        self.print_usage(sys.stderr)
+        self.exit(EXIT_USAGE, f"{self.prog}: error: {message}\n")
+
+
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = _Parser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--ledger", required=True)
     ap.add_argument("--db", required=True)
     ap.add_argument("--session", required=True)
@@ -144,6 +189,12 @@ def main() -> int:
         help="the --stderr transcript was captured with lambo::daemon::gc at debug, "
         "so every GC sweep is in it; a concept shortfall GC does not explain then "
         "fails the check instead of being reported as unverified",
+    )
+    ap.add_argument(
+        "--allow-empty",
+        action="store_true",
+        help="an empty run (no acknowledged write in the ledger) is the expected "
+        "outcome: exit 0 instead of 4",
     )
     args = ap.parse_args()
     if args.gc_logged and not args.stderr:
@@ -178,8 +229,21 @@ def main() -> int:
     # in ledger order when workers interleave).
     answers: dict[str, tuple[str, str]] = {}
 
-    for line in open(args.ledger, encoding="utf-8"):
-        r = json.loads(line)
+    try:
+        with open(args.ledger, encoding="utf-8") as fh:
+            ledger_lines = fh.readlines()
+    except OSError as e:
+        print(f"error: cannot read --ledger {args.ledger}: {e}", file=sys.stderr)
+        return EXIT_BAD_INPUT
+
+    for lineno, line in enumerate(ledger_lines, 1):
+        if not line.strip():
+            continue
+        try:
+            r = json.loads(line)
+        except ValueError as e:
+            print(f"error: --ledger {args.ledger} line {lineno} is not JSON: {e}", file=sys.stderr)
+            return EXIT_BAD_INPUT
         if r.get("kind") != "call":
             continue
         ledger_calls += 1
@@ -272,28 +336,37 @@ def main() -> int:
     expected_record_edges = record_edges
 
     # --- Store side: what is actually durable. ---
-    con = sqlite3.connect(args.db)
-    cur = con.cursor()
-    store_interactions = cur.execute(
-        "SELECT COUNT(*) FROM interactions WHERE session_id = ?", (args.session,)
-    ).fetchone()[0]
-    store_concepts = cur.execute(
-        "SELECT COUNT(*) FROM concepts WHERE session_id = ?", (args.session,)
-    ).fetchone()[0]
-    store_edges = cur.execute(
-        "SELECT COUNT(*) FROM edges WHERE session_id = ?", (args.session,)
-    ).fetchone()[0]
-    store_canon_events = cur.execute(
-        "SELECT COUNT(*) FROM canonization_events WHERE session_id = ?", (args.session,)
-    ).fetchone()[0]
-    lease = cur.execute(
-        "SELECT holder, expires_at, current_token FROM session_leases WHERE session_id = ?",
-        (args.session,),
-    ).fetchone()
-    sess = cur.execute(
-        "SELECT created_at, closed_at FROM sessions WHERE session_id = ?", (args.session,)
-    ).fetchone()
-    con.close()
+    if not os.path.isfile(args.db):
+        print(f"error: --db {args.db} does not exist (the store is never created "
+              "by this check)", file=sys.stderr)
+        return EXIT_BAD_INPUT
+    try:
+        # Read-only URI: never create the file, never write to a store.
+        con = sqlite3.connect(f"{pathlib.Path(args.db).resolve().as_uri()}?mode=ro", uri=True)
+        cur = con.cursor()
+        store_interactions = cur.execute(
+            "SELECT COUNT(*) FROM interactions WHERE session_id = ?", (args.session,)
+        ).fetchone()[0]
+        store_concepts = cur.execute(
+            "SELECT COUNT(*) FROM concepts WHERE session_id = ?", (args.session,)
+        ).fetchone()[0]
+        store_edges = cur.execute(
+            "SELECT COUNT(*) FROM edges WHERE session_id = ?", (args.session,)
+        ).fetchone()[0]
+        store_canon_events = cur.execute(
+            "SELECT COUNT(*) FROM canonization_events WHERE session_id = ?", (args.session,)
+        ).fetchone()[0]
+        lease = cur.execute(
+            "SELECT holder, expires_at, current_token FROM session_leases WHERE session_id = ?",
+            (args.session,),
+        ).fetchone()
+        sess = cur.execute(
+            "SELECT created_at, closed_at FROM sessions WHERE session_id = ?", (args.session,)
+        ).fetchone()
+        con.close()
+    except sqlite3.Error as e:
+        print(f"error: cannot read --db {args.db} as a lambo SQLite store: {e}", file=sys.stderr)
+        return EXIT_BAD_INPUT
 
     def fmt(v):
         return "—" if v is None else str(v)
@@ -358,7 +431,7 @@ def main() -> int:
             "wording no longer matches this script, so no comparison is trustworthy. "
             "Update the parser (see the module docstring for the wording it expects).\n"
         )
-        return 3
+        return EXIT_PARSER_DRIFT
 
     out.write("comparison\n")
     out.write("-" * 78 + "\n")
@@ -376,6 +449,8 @@ def main() -> int:
 
     out.write("  settled-applied concepts <= store concepts : ")
     concepts_verified = True
+    concept_unverifiable = False
+    lower_bound_only = False
     if store_concepts == expected_concepts:
         out.write("MATCH\n")
         concept_ok = True
@@ -383,6 +458,8 @@ def main() -> int:
         out.write(f"store AHEAD by {store_concepts - expected_concepts}"
                   + (f" ({unsettled} unsettled receipt(s) not counted)" if unsettled else "")
                   + "\n")
+        if unsettled:
+            lower_bound_only = True
         concept_ok = True
     else:
         missing = expected_concepts - store_concepts
@@ -405,12 +482,13 @@ def main() -> int:
                 concept_ok = False
         else:
             out.write(
-                f"shortfall {missing} UNVERIFIED (no GC counts in the transcript — a "
-                "created then GC-collected concept is durable work, not tail loss; see "
-                "the runbook for the GC-accounted comparison)\n"
+                f"shortfall {missing} UNVERIFIABLE (no GC counts in the transcript and "
+                "--gc-logged not given — GC may or may not explain it; re-run with "
+                "--stderr captured at lambo::daemon::gc=debug and --gc-logged)\n"
             )
             concept_ok = True
             concepts_verified = False
+            concept_unverifiable = True
 
     out.write("  settled record_action edges <= store edges : ")
     if store_edges + gc_edges_removed >= expected_record_edges:
@@ -428,20 +506,34 @@ def main() -> int:
         )
 
     out.write("\nverdict: ")
-    if interaction_ok and concept_ok and edge_ok:
-        if acked_writes + refused_at_ack == 0:
-            out.write("nothing to check — the ledger holds no acknowledged write call\n")
-        elif concepts_verified:
-            out.write("tail durable — no ledger-acknowledged write is missing from the store\n")
-        else:
-            out.write("tail durable for interactions and edges; the concept shortfall "
-                      "above is unverified\n")
-        return 0
-    out.write(
-        "tail NOT fully durable — ledger-acknowledged writes are missing; "
-        "see the shortfall rows above\n"
-    )
-    return 2
+    if not (interaction_ok and edge_ok and concept_ok):
+        out.write(
+            "tail NOT fully durable — ledger-acknowledged writes are missing; "
+            "see the shortfall rows above\n"
+        )
+        return EXIT_SHORTFALL
+    if acked_writes + refused_at_ack == 0:
+        if args.allow_empty:
+            out.write("nothing to check — the ledger holds no acknowledged write call "
+                      "(--allow-empty: expected)\n")
+            return EXIT_OK
+        out.write("NOTHING VERIFIED — the ledger holds no acknowledged write call, so there "
+                  "was nothing to compare; this is not a pass (--allow-empty if an empty "
+                  "run is expected)\n")
+        return EXIT_NOTHING_TO_CHECK
+    if concept_unverifiable:
+        out.write("UNVERIFIABLE — interactions and edges are durable, but the concept "
+                  "shortfall above could be GC and the transcript does not show GC was "
+                  "logged; not a pass\n")
+        return EXIT_UNVERIFIABLE
+    out.write("tail durable — no ledger-acknowledged write is missing from the store\n")
+    if lower_bound_only:
+        out.write(
+            "  caveat: concepts are compared by count (receipts carry no concept ids) and "
+            f"{unsettled} unsettled receipt(s) exist, so the store being AHEAD could hide a "
+            "loss of settled concepts; interactions are exact\n"
+        )
+    return EXIT_OK
 
 
 if __name__ == "__main__":
