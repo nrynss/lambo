@@ -425,7 +425,8 @@ pub struct GcOutcome {
     pub trigger: Option<GcTrigger>,
     /// Step 2: Resources that scored under their bar this sweep and were kept
     /// only because they have dependents ([`resources_with_dependents`], issue
-    /// #29 operator decision).
+    /// #29 operator decision). A spared Resource that step 3 collects anyway,
+    /// as a disconnected component, is not counted: it was not spared.
     pub resources_spared_by_dependents: usize,
 }
 
@@ -487,6 +488,10 @@ pub fn run(graph: &mut Graph, params: GcParams) -> GcOutcome {
     let depended_on = resources_with_dependents(graph);
     let mut orphans: Vec<NodeId> = Vec::new();
     let mut below: Vec<(f64, NodeId)> = Vec::new();
+    // Under-bar Resources the dependents rule kept; counted below, once the
+    // disconnected components are known (a spared Resource that is also
+    // disconnected is collected as that, so it was not spared).
+    let mut spared: Vec<NodeId> = Vec::new();
     for c in graph.concepts() {
         if protected.contains(&c.id) {
             continue;
@@ -502,7 +507,7 @@ pub fn run(graph: &mut Graph, params: GcParams) -> GcOutcome {
         let bar = eviction_threshold(params.min_concept_score, c.concept_type);
         if score < bar {
             if depended_on.contains(&c.id) {
-                outcome.resources_spared_by_dependents += 1;
+                spared.push(c.id);
                 continue;
             }
             below.push((score / bar, c.id));
@@ -520,6 +525,10 @@ pub fn run(graph: &mut Graph, params: GcParams) -> GcOutcome {
         .filter(|id| !reachable.contains(id) && !protected.contains(id) && !orphan_set.contains(id))
         .collect();
     let disconnected_set: HashSet<NodeId> = disconnected.iter().copied().collect();
+    outcome.resources_spared_by_dependents = spared
+        .iter()
+        .filter(|id| !disconnected_set.contains(id))
+        .count();
 
     // Under the cap, structural garbage goes first — orphans, then the other
     // disconnected components — and the score cut's candidates last, furthest
@@ -2198,6 +2207,38 @@ mod tests {
         assert!(outcome.concepts_collected.contains(&nid(26)));
         assert!(outcome.concepts_collected.contains(&nid(27)));
         assert_eq!(outcome.resources_spared_by_dependents, 3);
+    }
+
+    /// A Resource under its bar with dependents is counted as spared only if
+    /// it survives: one that is also a disconnected component (here an island
+    /// of two Resources joined only to each other, each the other's dependent)
+    /// is collected by step 3 and is not counted.
+    #[test]
+    fn a_spared_resource_collected_as_disconnected_is_not_counted_as_spared() {
+        let mut g = hub_session(&[(22, ConceptType::Resource), (23, ConceptType::Resource)]);
+        // 22 depends on 23, and they are linked to the temporal chain only
+        // through their Derives edges: reachable, so both are spared.
+        g.upsert_edge(edge(200, 22, 23, EdgeType::Dependency, 1.0, 0))
+            .unwrap();
+        // An island: 40 -> 41, neither reachable from the chain.
+        let a = insert_isolated(&mut g, concept(40, 1, "island a", ConceptType::Resource), 1);
+        let b = insert_isolated(&mut g, concept(41, 1, "island b", ConceptType::Resource), 1);
+        g.upsert_edge(edge(400, 40, 41, EdgeType::Dependency, 1.0, 0))
+            .unwrap();
+        assert!(resources_with_dependents(&g).contains(&a), "premise");
+        assert!(resources_with_dependents(&g).contains(&b), "premise");
+        let params = GcParams {
+            min_concept_score: 5.0,
+            ..aged_params()
+        };
+        let outcome = run(&mut g, params);
+        assert!(outcome.concepts_collected.contains(&a));
+        assert!(outcome.concepts_collected.contains(&b));
+        assert_eq!(
+            outcome.resources_spared_by_dependents, 2,
+            "only 22 and 23 were spared; the island went as disconnected"
+        );
+        assert!(g.node(nid(22)).is_some() && g.node(nid(23)).is_some());
     }
 
     /// An isolated Resource touched recently survives on recency alone, and
