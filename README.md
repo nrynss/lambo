@@ -102,8 +102,9 @@ in [`evidence/swarm/`](evidence/swarm/).
 
 ## Install and run
 
-Lambo ships as one binary carrying every adapter. You install it, then write a `lambo.toml`
-that picks a store and an embedder at runtime.
+Lambo ships as one binary carrying the full `ship` adapter set (every store and embedder
+except Bedrock and the in-process candle embedder). You install it, then write a
+`lambo.toml` that picks a store and an embedder at runtime.
 
 ```bash
 curl -fsSL https://github.com/nrynss/lambo/releases/latest/download/install.sh | sh
@@ -116,6 +117,10 @@ On Apple silicon, `LAMBO_FLAVOR=metal` installs the Metal build instead
 (`lambo-<version>-macos-arm64-metal`): the same adapter set plus the in-process candle
 embedder on the GPU (`[embedder] kind = "candle"`, `device = "metal"`). The stock binaries
 do not carry candle. The script refuses `metal` on any other platform.
+`LAMBO_FLAVOR` needs the v0.3.0 install script or later: until v0.3.0 is the latest
+release, the `latest` URL below serves an older script that ignores it and installs the
+stock build, so pin v0.3.0 as shown in the
+[installation guide](docs/reference/installation.mdx).
 
 ```bash
 curl -fsSL https://github.com/nrynss/lambo/releases/latest/download/install.sh | LAMBO_FLAVOR=metal sh

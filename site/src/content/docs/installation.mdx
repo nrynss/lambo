@@ -8,11 +8,11 @@ import Warning from '../../components/MdxWarning.astro';
 
 Lambo ships as a single `lambo` binary that carries both runtime surfaces: the MCP server (`lambo serve`) and the command line verbs. You deploy it in two steps. Install the binary, then write a `lambo.toml` that says which store and which embedder to use.
 
-That is the whole deployment model. The released binary carries every adapter. You move between the in-memory store, SQLite, and CockroachDB by editing config, never by downloading a different build.
+That is the whole deployment model. Every released binary carries the full `ship` adapter set. You move between the in-memory store, SQLite, CockroachDB, and PostgreSQL, or between the fixture, BGE-M3, and Gemini embedders, by editing config, not by downloading a different build. The one exception is the in-process candle embedder: it ships only in the Metal build for Apple silicon, described below.
 
 ## Install the binary
 
-Each release carries one `lambo` binary per platform plus a SHA-256 checksum file. Releases are published for Linux x86_64, Linux arm64, macOS arm64, and Windows x86_64, with the full adapter feature set compiled in. Apple silicon also gets a Metal build, `lambo-<version>-macos-arm64-metal`, which adds the in-process candle embedder running on the GPU (`[embedder] kind = "candle"`, `device = "metal"`). The stock binaries do not carry candle.
+Each release carries one `lambo` binary per platform plus a SHA-256 checksum file. Releases are published for Linux x86_64, Linux arm64, macOS arm64, and Windows x86_64, with the full `ship` adapter set compiled in. Apple silicon also gets a Metal build, `lambo-<version>-macos-arm64-metal`, which adds the in-process candle embedder running on the GPU (`[embedder] kind = "candle"`, `device = "metal"`). The stock binaries do not carry candle.
 
 <Steps>
   <Step title="Run the install script">
@@ -35,11 +35,20 @@ LAMBO_VERSION=0.2.0 LAMBO_INSTALL_DIR=/usr/local/bin \
   sh -c "$(curl -fsSL https://raw.githubusercontent.com/nrynss/lambo/main/scripts/install.sh)"
 ```
 
-To install the Metal build on Apple silicon, set `LAMBO_FLAVOR=metal`. The script verifies its checksum the same way, and refuses `metal` on any other platform.
+To install the Metal build on Apple silicon, set `LAMBO_FLAVOR=metal` on `sh`, the command that reads it. The script verifies its checksum the same way, and refuses `metal` on any other platform.
 
 ```bash
 curl -fsSL https://github.com/nrynss/lambo/releases/latest/download/install.sh | LAMBO_FLAVOR=metal sh
 ```
+
+`LAMBO_FLAVOR` needs the v0.3.0 install script or later. Until v0.3.0 is the latest release, the `latest` URL above serves an older script that ignores `LAMBO_FLAVOR` and installs the stock build. To be sure of the Metal build, download the v0.3.0 script and run it pinned:
+
+```bash
+curl -fsSLo install.sh https://github.com/nrynss/lambo/releases/download/v0.3.0/install.sh
+LAMBO_VERSION=0.3.0 LAMBO_FLAVOR=metal sh install.sh
+```
+
+Set `LAMBO_DRY_RUN=1` the same way to print the asset and URLs the script would fetch without downloading anything.
 
 On Windows, download `lambo-<version>-windows-x86_64.exe` and its `.sha256` file from the [releases page](https://github.com/nrynss/lambo/releases) and verify the checksum yourself.
 
@@ -60,13 +69,13 @@ dim = 1024
 SQLite is a local file, so this still needs no external service, and it survives a restart. Create the schema once with `lambo --config lambo.toml provision`.
 
 <Warning>
-The in-memory store lives inside one process. It is ideal for a single `lambo serve` that many agents connect to, because they all share that one process's graph. It does not survive that process exiting, and a separate command line process cannot read it. Choose `sqlite` or `cockroach` whenever more than one process is involved.
+The in-memory store lives inside one process. It is ideal for a single `lambo serve` that many agents connect to, because they all share that one process's graph. It does not survive that process exiting, and a separate command line process cannot read it. Choose `sqlite`, `cockroach`, or `postgres` whenever more than one process is involved.
 </Warning>
 
 Every key has an environment variable override. See [Configuration](/lambo/config/) for the full set.
 
 <Warning>
-An adapter is compiled into the binary, but its backing service still has to be reachable at runtime. The `bge_m3` embedder needs a `llama-server`, and the `cockroach` store needs a cluster.
+An adapter is compiled into the binary, but its backing service still has to be reachable at runtime. The `bge_m3` embedder needs a `llama-server`, the `gemini` embedder needs Vertex AI credentials, the `cockroach` store needs a cluster, and the `postgres` store needs a server with pgvector.
 </Warning>
 
 ## Run it the first time
@@ -171,12 +180,14 @@ You do not need this to run Lambo. Build from source when you want an unreleased
 git clone https://github.com/nrynss/lambo.git
 cd lambo
 cargo build --release --features ship
+# Apple silicon, with the Metal candle embedder:
+cargo build --release --features ship,embed-candle-metal
 ```
 
-Cargo writes the binary to `target/release/lambo`. The `ship` profile is what releases are built with, so the result matches a downloaded binary. You can also install straight from git, which compiles the default branch and may be newer than the latest tag:
+Cargo writes the binary to `target/release/lambo`. The stock release binaries are built with `--features ship`, so the first command matches them. The Metal release asset is built with `--features ship,embed-candle-metal`, so the second matches that one. You can also install straight from git, which compiles the default branch and may be newer than the latest tag. Without `--features`, that builds the crate's default features (the `memory` store and the `fixture` and `bge_m3` embedders), so add `--features ship` for the full set:
 
 ```bash
-cargo install --git https://github.com/nrynss/lambo.git
+cargo install --git https://github.com/nrynss/lambo.git --features ship
 ```
 
 Cargo features select which adapters are compiled in. List fewer to get a smaller binary.
@@ -186,8 +197,14 @@ Cargo features select which adapters are compiled in. List fewer to get a smalle
 | `store-memory` | In-memory store. This is the default and needs no external service. |
 | `store-sqlite` | SQLite store, backed by a local file. |
 | `store-cockroach` | CockroachDB store, for a hosted cluster. |
+| `store-postgres` | PostgreSQL store with pgvector (`kind = "postgres"`). |
 | `embed-fixture` | Deterministic fixture embedder for tests and quick starts. |
 | `embed-bge` | BGE-M3 embeddings served by `llama-server`. |
+| `embed-gemini` | Vertex AI Gemini embeddings (`gemini-embedding-001`), authenticated with a service account. |
+| `embed-candle` | In-process BGE-M3 through candle (`kind = "candle"`), CPU backend only. Builds anywhere. |
+| `embed-candle-metal` | `embed-candle` plus the Metal GPU backend. Apple silicon only. This is what the Metal release asset adds to `ship`. |
+| `embed-candle-accelerate` | `embed-candle` plus Apple's Accelerate framework for the CPU backend. macOS only. |
+| `embed-candle-cuda` | `embed-candle` plus the CUDA GPU backend. Needs a CUDA toolkit at build time and an NVIDIA GPU at runtime. |
 | `embed-bedrock` | Reserved for Amazon Titan embeddings through Bedrock. Not implemented, so it fails at startup if selected. |
 
-Choosing features only changes what the binary *can* do. Which store and embedder it *does* use is still a `lambo.toml` decision.
+The `ship` feature turns on every store and embedder above except `embed-bedrock` and the `embed-candle` family. Choosing features only changes what the binary *can* do. Which store and embedder it *does* use is still a `lambo.toml` decision.
