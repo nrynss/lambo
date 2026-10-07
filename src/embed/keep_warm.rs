@@ -1,5 +1,5 @@
-//! Embedder keep-warm: periodic tiny embeds that keep model weights resident
-//! in a long-lived, mostly idle `lambo serve` (issue #13).
+//! Embedder keep-warm: periodic tiny embeds that make model weights more likely
+//! to be resident in a long-lived, mostly idle `lambo serve` (issue #13).
 //!
 //! **The problem.** On Apple silicon the candle adapter holds BGE-M3's f16
 //! weights (~1.1 GB) in Metal buffers, and Metal buffers on unified memory are
@@ -10,6 +10,13 @@
 //! forward pays to bring them back. The live rig showed the cost growing with
 //! the idle gap: recall p50 186 ms at < 2 min to 780 ms at > 30 min, p90 9 s,
 //! against 71 ms for an isolated probe on the same store and binary.
+//!
+//! **What it promises, and what it does not.** A touch keeps *recently
+//! touched* weights resident and so reduces how often a call pays the
+//! swap-in; it does not guarantee residency. Under heavy memory pressure the
+//! pager has been seen to take the whole weight set within 10-21 s of last
+//! use, so a call that lands late in an interval can still pay the full
+//! swap-in. The interval is the lever (see [`DEFAULT_KEEP_WARM_INTERVAL`]).
 //!
 //! **The policy.** One short, fixed probe text is embedded every interval and
 //! the vector discarded. Why one tiny forward is enough on Metal: a forward

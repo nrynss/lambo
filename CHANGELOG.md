@@ -165,7 +165,9 @@
   `lambo.toml` naming `postgres` or `gemini` runs on a prebuilt binary.
 - `lambo serve` embedder keep-warm (issue #13): a holder-side task embeds one
   short fixed probe every interval and discards the vector, so an idle writer's
-  model weights stay out of the OS memory compressor. Set with `[embedder]
+  recently touched model weights are more likely to still be resident when the
+  next call lands, which reduces how often a call pays the swap-in. It does not
+  guarantee residency under heavy memory pressure. Set with `[embedder]
   keep_warm_secs` / `LAMBO_EMBED_KEEP_WARM_SECS`: omitted means auto, `0` is
   off, `N` is every N seconds for any embedder kind. **Behaviour change for
   candle on Metal:** auto is on there (every 30 s), because those weights sit in

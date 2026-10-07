@@ -8,6 +8,13 @@ elsewhere), `0` = off, `N` = every N s for any kind. Code:
 `src/embed/keep_warm.rs`, wired in `src/mcp/serve.rs` beside the ledger
 heartbeat, resolved by `ResolvedBackends::keep_warm_interval()`.
 
+**Acceptance status:** the issue's acceptance (p95 < 1 s on the live rig, p50
+at > 30 min within 2x of the isolated probe) is **unconfirmed**. It has not
+been measured on the re-pinned writer; the evidence below is two fresh probe
+processes under heavy swap, n = 1 per row. Keep-warm keeps recently touched
+weights resident and reduces how often a call pays the swap-in; it does not
+guarantee residency under heavy memory pressure (see the worst-case table).
+
 ## Diagnosis
 
 The issue's table (live Metal rig, `lambo-e11fb06`, candle on Metal): recall p50
