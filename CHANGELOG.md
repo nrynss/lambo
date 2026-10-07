@@ -322,6 +322,9 @@
   one access update per concept (and never more than half of
   `backend_log_max`), so read traffic alone cannot degrade a session to
   `durability="none"`, and the latest counts land once the store recovers.
+  That held drain can occupy up to half of the degrade budget, so while reads
+  are active during an outage, writes alone degrade the session at about half
+  the configured bound.
   Accesses do **not** advance the mutation epoch, so GC's `gc_interval`
   trigger, the recall cache and hybrid replanning are unaffected and a
   read-heavy session does not sweep on reads. Reader processes (`lambo

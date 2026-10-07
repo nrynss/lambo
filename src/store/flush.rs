@@ -35,11 +35,16 @@
 //! * **Read accesses do not build backlog (issue #30).** Access counts are
 //!   per-concept state in the graph's dirty set, not log entries. Each cycle
 //!   takes them ([`Graph::drain_accesses`]) only while `pending` holds no
-//!   undelivered accesses, and at most `log_max / 2` minus what `pending`
-//!   already holds; a degraded task takes none. So through any outage reads
-//!   add at most one entry per concept to `depth`, can never by themselves
-//!   reach `log_max`, and catch up — latest values, nothing lost — once a
-//!   flush succeeds.
+//!   undelivered accesses, and at most `log_max / 2` (at least 1, never more
+//!   than `log_max`, so a tiny bound still persists accesses while it is
+//!   healthy) minus what `pending` already holds; a degraded task takes none.
+//!   So through any outage reads add at most one entry per concept to `depth`,
+//!   can never by themselves reach `log_max`, and catch up — latest values,
+//!   nothing lost — once a flush succeeds. **Consequence for the degrade
+//!   bound:** a held access drain can occupy up to half of it, so while reads
+//!   are active during an outage, *writes alone* degrade the session at about
+//!   half the configured `backend_log_max` (the other half is the access
+//!   drain's); with no reads the full bound applies to writes as before.
 //!
 //! ## Lock discipline (spec §6.4)
 //!
@@ -75,6 +80,15 @@ use std::time::Duration;
 use crate::graph::Graph;
 use crate::store::{GraphStore, SessionFlushStats};
 use crate::types::{MutationBatch, StoreError};
+
+/// How many dirty accesses one drain may take: half of `log_max`, but at
+/// least 1 so a bound of 0 or 1 does not starve accesses forever (they would
+/// then persist only at close), and never more than `log_max` itself so a bound
+/// of 0 (which degrades on any entry) is not pushed over by reads alone. What
+/// `pending` already holds counts against it.
+fn access_budget(log_max: usize, pending: usize) -> usize {
+    (log_max / 2).max(1).min(log_max).saturating_sub(pending)
+}
 
 /// Poll cadence for the `max_batch` early-flush trigger and for keeping
 /// `depth` fresh between interval ticks (see module docs).
@@ -532,7 +546,7 @@ impl FlushLoop {
             // for writes. A degraded session takes none (it drops what it
             // drains; the counts stay correct in RAM).
             if !self.holds_accesses && !self.shared.degraded.load(Ordering::Acquire) {
-                let budget = (self.params.log_max / 2).saturating_sub(self.pending.len());
+                let budget = access_budget(self.params.log_max, self.pending.len());
                 let accesses = graph.drain_accesses(budget);
                 if !accesses.is_empty() {
                     self.holds_accesses = true;
@@ -1951,6 +1965,53 @@ mod tests {
 
         assert_eq!(access_flushes(200).await, [30], "budget 100: one drain");
         assert_eq!(access_flushes(40).await, [20, 10], "budget 20: two flushes");
+    }
+
+    #[test]
+    fn access_budget_is_half_the_bound_but_never_zero_when_healthy() {
+        assert_eq!(access_budget(200, 0), 100);
+        assert_eq!(access_budget(200, 30), 70);
+        assert_eq!(access_budget(200, 150), 0, "writes hold more than half");
+        assert_eq!(access_budget(3, 0), 1);
+        assert_eq!(access_budget(2, 0), 1);
+        assert_eq!(
+            access_budget(1, 0),
+            1,
+            "a bound of 1 used to mean 0 forever"
+        );
+        assert_eq!(access_budget(1, 1), 0);
+        assert_eq!(access_budget(0, 0), 0, "a bound of 0 degrades on any entry");
+    }
+
+    /// Issue #30 (remediation r2): with `log_max = 1` the half is 0, which
+    /// used to starve accesses until close. They now drain one at a time.
+    #[tokio::test(start_paused = true)]
+    async fn a_tiny_log_bound_still_persists_accesses() {
+        let store = Arc::new(FlakyStore::new(Arc::new(MemoryStore::new())));
+        let graph = new_graph();
+        let iid = add_interaction(&graph, 1, None);
+        let ids: Vec<NodeId> = (1..=3).map(|k| add_concept(&graph, k, iid)).collect();
+        let seed = graph.write().drain_log();
+        store.inner.flush(&seed, None).await.unwrap();
+        let task = FlushTask::new(
+            graph.clone(),
+            store.clone(),
+            params(Duration::from_secs(1), 10_000, 1, 1),
+        );
+        let handle = task.spawn();
+        let_task_arm().await;
+        let batch: Vec<_> = ids.iter().map(|&id| (id, 1, ts(1))).collect();
+        graph.write().record_accesses(&batch);
+        for _ in 0..8 {
+            tokio::time::advance(Duration::from_secs(1)).await;
+            for _ in 0..20 {
+                tokio::task::yield_now().await;
+            }
+        }
+        assert_eq!(graph.read().pending_accesses(), 0);
+        assert_eq!(store.batch_sizes(), [1, 1, 1]);
+        assert!(!task.degraded());
+        handle.abort();
     }
 
     #[tokio::test(start_paused = true)]
