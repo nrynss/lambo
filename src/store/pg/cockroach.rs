@@ -3355,6 +3355,51 @@ mod conformance {
         );
     }
 
+    /// Deletes every row a live test's unique session left in the shared
+    /// cluster when dropped (best effort; never panics). Children first: the
+    /// foreign keys point at `sessions` and `interactions`.
+    struct SessionRows {
+        dsn: String,
+        session: String,
+    }
+
+    impl Drop for SessionRows {
+        fn drop(&mut self) {
+            const TABLES: [&str; 11] = [
+                "edges",
+                "synonyms",
+                "write_intents",
+                "concepts",
+                "interactions",
+                "canonization_events",
+                "reservations",
+                "session_leases",
+                "lease_refusals",
+                "session_stats",
+                "sessions",
+            ];
+            let (dsn, session) = (self.dsn.clone(), self.session.clone());
+            crate::test_util::run_blocking(async move {
+                let store = new_store(&dsn);
+                let pool = match store.pool().await {
+                    Ok(p) => p,
+                    Err(e) => return eprintln!("cleanup: pool for {session}: {e}"),
+                };
+                for table in TABLES {
+                    if let Err(e) =
+                        sqlx::query(&format!("DELETE FROM {table} WHERE session_id = $1"))
+                            .bind(&session)
+                            .execute(&pool)
+                            .await
+                    {
+                        eprintln!("cleanup: {table} for {session}: {e}");
+                    }
+                }
+                pool.close().await;
+            });
+        }
+    }
+
     /// Issue #30, live: the shared narrow `RecordAccess` update on
     /// CockroachDB — the dialect where `GREATEST`'s operand typing and
     /// `UPDATE … FROM (VALUES …)` are the risk — inside the fenced flush,
@@ -3378,6 +3423,12 @@ mod conformance {
         let store = new_store(&dsn);
         store.init_schema().await.expect("init_schema");
         let sid = SessionId::from(format!("issue-30-live-{}", Uuid::new_v4()));
+        // Removes this test's session rows when it ends, on a panic too. The
+        // cluster is shared, so only the unique session is touched.
+        let _cleanup = SessionRows {
+            dsn: dsn.clone(),
+            session: sid.to_string(),
+        };
         let holder = LeaseHolder {
             endpoint: None,
             agent: AgentId::new("issue-30"),

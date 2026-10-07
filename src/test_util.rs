@@ -20,6 +20,30 @@ pub fn env_lock() -> MutexGuard<'static, ()> {
         .unwrap_or_else(|e| e.into_inner())
 }
 
+/// Run an async cleanup to completion from a synchronous `Drop`, whatever
+/// runtime the test is on: a fresh thread owns its own current-thread runtime,
+/// so this neither needs nor disturbs the caller's (blocking a worker of the
+/// test's own runtime would deadlock a `current_thread` one). Cleanup is best
+/// effort by design: it runs on the panic path too, so it must not panic.
+pub fn run_blocking<F>(cleanup: F)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let joined = std::thread::spawn(move || {
+        match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt.block_on(cleanup),
+            Err(e) => eprintln!("test cleanup: no runtime: {e}"),
+        }
+    })
+    .join();
+    if joined.is_err() {
+        eprintln!("test cleanup: the cleanup thread panicked");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Scratch directories
 // ---------------------------------------------------------------------------
@@ -214,4 +238,25 @@ pub fn quiet_logs() -> tracing::subscriber::DefaultGuard {
             .with_writer(io::sink)
             .finish(),
     )
+}
+
+#[cfg(test)]
+mod run_blocking_tests {
+    use super::run_blocking;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    /// The cleanup runs to completion from a synchronous context on a
+    /// current-thread runtime (what `#[tokio::test]` is), which a plain
+    /// `block_on` on the caller's own thread could not do.
+    #[tokio::test]
+    async fn runs_an_async_cleanup_from_inside_a_current_thread_runtime() {
+        let done = Arc::new(AtomicBool::new(false));
+        let flag = done.clone();
+        run_blocking(async move {
+            tokio::task::yield_now().await;
+            flag.store(true, Ordering::SeqCst);
+        });
+        assert!(done.load(Ordering::SeqCst));
+    }
 }

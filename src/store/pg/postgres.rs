@@ -1392,14 +1392,47 @@ mod tests {
         built
     }
 
+    /// A live test's private database. Dropping it (the test finished, failed
+    /// or panicked) drops the database `WITH (FORCE)`, which also closes the
+    /// connections its stores still hold, so a live run leaves nothing behind.
+    /// Cleanup is best effort and never panics.
+    struct LiveDb {
+        admin_dsn: String,
+        db: String,
+        dsn: String,
+    }
+
+    impl Drop for LiveDb {
+        fn drop(&mut self) {
+            let (admin_dsn, db) = (self.admin_dsn.clone(), self.db.clone());
+            crate::test_util::run_blocking(async move {
+                let admin = match sqlx::PgPool::connect(&admin_dsn).await {
+                    Ok(p) => p,
+                    Err(e) => return eprintln!("cleanup: connect admin for {db}: {e}"),
+                };
+                if let Err(e) = sqlx::query(&format!("DROP DATABASE IF EXISTS {db} WITH (FORCE)"))
+                    .execute(&admin)
+                    .await
+                {
+                    eprintln!("cleanup: drop {db}: {e}");
+                }
+                admin.close().await;
+            });
+        }
+    }
+
     async fn unique_live_store(test: &str, dim: usize) -> Option<PostgresStore> {
-        let dsn = unique_live_dsn(test).await?;
+        let db = unique_live_db(test).await?;
+        let dsn = db.dsn.clone();
+        // Not yet cleaned up: the tests that use this helper predate the guard.
+        std::mem::forget(db);
         Some(live_store_at(test, &dsn, dim).await)
     }
 
-    /// A fresh database on the live server, by DSN — for a test that needs a
-    /// second connection to the same data (a writer restart).
-    async fn unique_live_dsn(test: &str) -> Option<String> {
+    /// A fresh database on the live server — for a test that needs a second
+    /// connection to the same data (a writer restart). Bind the result before
+    /// any store on it: it is dropped (and the database with it) last.
+    async fn unique_live_db(test: &str) -> Option<LiveDb> {
         let admin_dsn = postgres_dsn_or_skip(test)?;
         let admin = sqlx::PgPool::connect(&admin_dsn)
             .await
@@ -1409,7 +1442,9 @@ mod tests {
             .execute(&admin)
             .await
             .unwrap_or_else(|e| panic!("{test}: create {db}: {e}"));
-        Some(dsn_for_database(&admin_dsn, &db))
+        admin.close().await;
+        let dsn = dsn_for_database(&admin_dsn, &db);
+        Some(LiveDb { admin_dsn, db, dsn })
     }
 
     /// A store on `dsn` with its schema initialised (idempotent).
@@ -2100,9 +2135,10 @@ mod tests {
     async fn access_counts_round_trip_through_the_narrow_update_and_survive_reattach() {
         const TEST: &str =
             "access_counts_round_trip_through_the_narrow_update_and_survive_reattach";
-        let Some(dsn) = unique_live_dsn(TEST).await else {
+        let Some(live_db) = unique_live_db(TEST).await else {
             return;
         };
+        let dsn = live_db.dsn.clone();
         let store = live_store_at(TEST, &dsn, 8).await;
         let sid = SessionId::from("issue-30-live");
         let holder = LeaseHolder {
