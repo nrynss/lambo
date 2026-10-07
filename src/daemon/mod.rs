@@ -1049,6 +1049,8 @@ fn run_cycle(
         }
         tracing::debug!(
             target: "lambo::daemon::gc",
+            collection_cap = outcome.collection_cap,
+            collections_deferred = outcome.collections_deferred,
             edges_removed = outcome.edges_removed.len(),
             concepts_collected = outcome.concepts_collected.len(),
             survivors = outcome.survivors.len(),

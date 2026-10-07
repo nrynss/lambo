@@ -23,6 +23,23 @@
 //!    is dead session-wide (ALGO-1), and compares against a per-type bar
 //!    scaled by [`crate::types::ConceptType::eviction_resistance`] (ALGO-11).
 //!    See [`MIN_CONCEPT_SCORE`] for the calibration and its evidence.
+//!
+//!    Three protections (issue #29) keep the score cut from deleting reasoning
+//!    by session age once sweeps run daily:
+//!
+//!    * **Logic and Constraint are exempt from the score cut**
+//!      ([`exempt_from_score_cut`]). They are still collected as orphans or
+//!      disconnected components — those clauses are structural, not
+//!      age-based.
+//!    * **Eviction recency is time since last touch** over a fixed
+//!      [`GC_RECENCY_WINDOW`] ([`eviction_recency`]), not position in the
+//!      session's interaction span, so a session growing older does not by
+//!      itself push old concepts under the bar. This is GC's cut only: the
+//!      daemon's ranking ([`crate::daemon::score::rescore`]), recall and
+//!      canonization keep the span-relative recency.
+//!    * **Collections per sweep are capped** ([`collection_cap`]); candidates
+//!      past the cap are reported in [`GcOutcome::collections_deferred`] and
+//!      re-evaluated on the next sweep.
 //! 3. **Disconnected-component cleanup** — a cycle-safe BFS (visited set, per
 //!    the G6 binding note — never assume Hierarchical acyclicity) from the
 //!    temporal chain over the full undirected graph; every concept not reached
@@ -80,6 +97,21 @@ use crate::types::{CanonizationStatus, Concept, ConceptType, EdgeType, NodeId};
 /// v0.6.0's value is not in-repo — v0.1 decision. Kept below the structural
 /// write weights (`Derives` 0.9, `Temporal`/`Dependency`/`Causal` 1.0) so
 /// provenance and load-bearing edges survive a default run.
+///
+/// ### The CoOccurrence margin is zero, deliberately (issue #29)
+///
+/// `derive` writes every `CoOccurrence` edge at exactly
+/// [`crate::graph::derive::COOCCURRENCE_WEIGHT`] (0.5) and the cut is a strict
+/// `<`, so a never-reinforced co-occurrence edge is **kept**; reinforcement only
+/// raises weights and nothing in the codebase decays them. Step 1 therefore
+/// removes only `Semantic` edges written below 0.5. That is intended: a
+/// co-occurrence edge is the only edge `lambo_derive` writes between the
+/// concepts of one call, so cutting it after the TTL would strip most derived
+/// reasoning of its only concept-to-concept link on the first sweep, collapse
+/// its density, and hand the step-2 cut a cascade (the #29 dry run: 321 of 537
+/// first-sweep collections touched a CoOccurrence edge). Lowering this bar, or
+/// the write weight, is a behaviour change, not a tidy-up —
+/// `cooccurrence_edges_sit_exactly_on_the_step_one_bar_and_survive` pins both.
 pub const MIN_EDGE_WEIGHT: f64 = 0.5;
 /// An edge untouched for this long is "past `gc_edge_ttl`" (step 1).
 pub const GC_EDGE_TTL: ChronoDuration = ChronoDuration::seconds(3600);
@@ -120,6 +152,33 @@ pub const MIN_CONCEPT_SCORE: f64 = 0.12;
 /// Advisory concept-count ceiling: warn above, never evict (spec §9).
 pub const MAX_CONCEPT_NODES: usize = 10_000;
 
+/// Step 2's eviction recency window (issue #29): a concept touched `now` has
+/// eviction recency 1.0, falling linearly to 0.0 at this age and staying
+/// there. See [`eviction_recency`]. A scoring constant, not a cadence, so it is
+/// not settable from `lambo.toml` (see [`crate::config::DaemonConfig`]).
+///
+/// ### Why 90 days
+///
+/// Measured on the Metal rig snapshot (3,370 concepts, 49 days old, uncapped
+/// first sweep, Logic/Constraint exempt): a 30-day window collects 1,046 today
+/// (more than the 537 the span-relative cut took), 60 days 353, **90 days 159
+/// — all Observations**, 120 days 74. Whatever the window, an untouched store
+/// converges on the same set once every concept is older than it (1,468 on
+/// the rig: the concepts whose structure alone is under their bar); the window
+/// sets how long an unused, sparsely connected concept is kept, not whether.
+/// A quarter keeps a working project's context through a pause, and once
+/// recall records accesses (issue #30) a concept that is still being used
+/// keeps resetting its own clock.
+pub const GC_RECENCY_WINDOW: ChronoDuration = ChronoDuration::days(90);
+
+/// Step 2+3 collection cap as a fraction of the sweep's unprotected concepts
+/// (issue #29); see [`collection_cap`].
+pub const GC_MAX_COLLECT_FRACTION: f64 = 0.05;
+
+/// The cap never drops below this many collections, so a small session can
+/// still clear its orphans in one sweep (issue #29); see [`collection_cap`].
+pub const GC_MIN_COLLECT_CAP: usize = 32;
+
 /// Step 5 bumps at most this many survivors per call; the rest come back as
 /// [`GcOutcome::survivors_pending`] for the owner to drain over later cycles
 /// with [`drain_survivor_bumps`] (CONC-6/XP-10).
@@ -158,6 +217,12 @@ pub struct GcParams {
     /// ([`GC_SURVIVOR_BUMP_CHUNK`]). The remainder is returned in
     /// [`GcOutcome::survivors_pending`].
     pub max_survivor_bumps: usize,
+    /// Step 2: the eviction recency window ([`GC_RECENCY_WINDOW`]).
+    pub recency_window: ChronoDuration,
+    /// Steps 2+3: collection cap fraction ([`GC_MAX_COLLECT_FRACTION`]).
+    pub max_collect_fraction: f64,
+    /// Steps 2+3: collection cap floor ([`GC_MIN_COLLECT_CAP`]).
+    pub min_collect_cap: usize,
 }
 
 impl Default for GcParams {
@@ -171,6 +236,9 @@ impl Default for GcParams {
             max_concept_nodes: MAX_CONCEPT_NODES,
             max_canonical_nodes: 1000, // spec §10
             max_survivor_bumps: GC_SURVIVOR_BUMP_CHUNK,
+            recency_window: GC_RECENCY_WINDOW,
+            max_collect_fraction: GC_MAX_COLLECT_FRACTION,
+            min_collect_cap: GC_MIN_COLLECT_CAP,
         }
     }
 }
@@ -201,6 +269,20 @@ pub struct GcOutcome {
     /// Step 7: epoch before / after — GC's mutations bump it (see module docs).
     pub epoch_before: u64,
     pub epoch_after: u64,
+    /// Steps 2+3: the most concepts this sweep could collect
+    /// ([`collection_cap`], issue #29).
+    pub collection_cap: usize,
+    /// Steps 2+3: candidates the cap held back this sweep (they survive it and
+    /// are re-evaluated on the next one). Non-zero exactly when the cap bound;
+    /// a warning in [`GcOutcome::warnings`] says so too.
+    pub collections_deferred: usize,
+}
+
+impl GcOutcome {
+    /// Did the per-sweep collection cap hold anything back?
+    pub fn cap_bound(&self) -> bool {
+        self.collections_deferred > 0
+    }
 }
 
 /// Run one full GC cycle (spec §9 steps 1–7, in order).
@@ -231,28 +313,59 @@ pub fn run(graph: &mut Graph, params: GcParams) -> GcOutcome {
         }
     }
 
+    // Issue #29: one collection budget for steps 2 and 3 together.
+    let unprotected = graph
+        .concepts()
+        .filter(|c| !protected.contains(&c.id))
+        .count();
+    outcome.collection_cap = collection_cap(unprotected, params);
+    let mut budget = outcome.collection_cap;
+
     // Step 2 — concept cleanup: orphans + sub-threshold, excluding protected.
     // Scored against post-step-1 state with the session's own weights (ALGO-4),
     // over the live dimensions only while `access_count` is dead session-wide
-    // (ALGO-1), and cut per concept type (ALGO-11).
+    // (ALGO-1), with GC's time-anchored recency (issue #29), and cut per
+    // concept type (ALGO-11). Logic and Constraint are exempt from the score
+    // cut, not from the orphan clause (issue #29).
     let ctx = crate::daemon::score::SessionContext::compute(graph);
     let frequency_is_live = graph.concepts().any(|c| c.access_count > 0);
-    let mut candidates: Vec<NodeId> = Vec::new();
+    let mut orphans: Vec<NodeId> = Vec::new();
+    let mut below: Vec<(f64, NodeId)> = Vec::new();
     for c in graph.concepts() {
         if protected.contains(&c.id) {
             continue;
         }
-        let orphan = graph.incident_edges(c.id).is_empty();
-        let below = eviction_score(graph, c, &ctx, params, frequency_is_live)
-            < eviction_threshold(params.min_concept_score, c.concept_type);
-        if orphan || below {
-            candidates.push(c.id);
+        if graph.incident_edges(c.id).is_empty() {
+            orphans.push(c.id);
+            continue;
+        }
+        if exempt_from_score_cut(c.concept_type) {
+            continue;
+        }
+        let score = eviction_score(graph, c, &ctx, params, frequency_is_live);
+        let bar = eviction_threshold(params.min_concept_score, c.concept_type);
+        if score < bar {
+            below.push((score / bar, c.id));
         }
     }
-    candidates.sort_by_key(|id| id.0);
-    for id in &candidates {
+    // Under the cap, structural garbage (orphans) goes first, then the score
+    // cut's candidates furthest under their bar; ids break ties so the choice
+    // is deterministic.
+    orphans.sort_by_key(|id| id.0);
+    below.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1 .0.cmp(&b.1 .0)));
+    let candidates: Vec<NodeId> = orphans
+        .into_iter()
+        .chain(below.into_iter().map(|(_, id)| id))
+        .collect();
+    let take = candidates.len().min(budget);
+    // Held back by the cap: counted once here, and kept out of step 3 (an
+    // orphan is also a disconnected component) so it is not counted twice.
+    let held_back: HashSet<NodeId> = candidates[take..].iter().copied().collect();
+    outcome.collections_deferred += held_back.len();
+    for id in &candidates[..take] {
         if graph.remove_node(*id).is_ok() {
             outcome.concepts_collected.push(*id);
+            budget -= 1;
         }
     }
 
@@ -277,15 +390,30 @@ pub fn run(graph: &mut Graph, params: GcParams) -> GcOutcome {
     let mut disconnected: Vec<NodeId> = graph
         .concepts()
         .map(|c| c.id)
-        .filter(|id| !reachable.contains(id) && !protected.contains(id))
+        .filter(|id| !reachable.contains(id) && !protected.contains(id) && !held_back.contains(id))
         .collect();
     disconnected.sort_by_key(|id| id.0);
-    for id in &disconnected {
+    let take = disconnected.len().min(budget);
+    outcome.collections_deferred += disconnected.len() - take;
+    for id in &disconnected[..take] {
         if graph.remove_node(*id).is_ok() {
             outcome.concepts_collected.push(*id);
         }
     }
     outcome.concepts_collected.sort_by_key(|id| id.0);
+    if outcome.cap_bound() {
+        outcome.warnings.push(format!(
+            "GC collection cap bound: collected {} of {} candidates (cap {} = max({}, {:.0}% of {} \
+             unprotected concepts)); {} deferred to the next sweep",
+            outcome.concepts_collected.len(),
+            outcome.concepts_collected.len() + outcome.collections_deferred,
+            outcome.collection_cap,
+            params.min_collect_cap,
+            params.max_collect_fraction * 100.0,
+            unprotected,
+            outcome.collections_deferred
+        ));
+    }
 
     // Step 5 — survivors: every remaining concept gets gc_survived += 1, but at
     // most `max_survivor_bumps` of them here; the tail is deferred to later
@@ -368,6 +496,74 @@ pub fn sync_index(outcome: &GcOutcome, index: &mut InvertedIndex) {
     }
 }
 
+/// The per-sweep collection cap (issue #29): `max(min_collect_cap,
+/// ceil(max_collect_fraction × unprotected))`, counted over steps 2 and 3
+/// together.
+///
+/// The cap bounds how much a single sweep can delete if a scoring change, a
+/// calibration miss or a bug misjudges a whole class of concepts: with daily
+/// sweeps the worst case is a 5%-per-day erosion that an operator sees in the
+/// `GC collection cap bound` warning, instead of one sweep taking a sixth of
+/// the store (the #29 dry run's first sweep). A non-finite or negative
+/// fraction counts as 0, leaving the floor.
+pub fn collection_cap(unprotected: usize, params: GcParams) -> usize {
+    let fraction = if params.max_collect_fraction.is_finite() && params.max_collect_fraction > 0.0 {
+        params.max_collect_fraction.min(1.0)
+    } else {
+        0.0
+    };
+    let by_fraction = (unprotected as f64 * fraction).ceil() as usize;
+    by_fraction.max(params.min_collect_cap)
+}
+
+/// Concept types the step-2 score cut never collects (issue #29 option (a)):
+/// `Logic` and `Constraint`, the types that carry an agent's reasoning —
+/// decisions, rulings, invariants. Orphan and disconnected-component cleanup
+/// still apply to them.
+///
+/// Chosen over "below the bar on two consecutive sweeps": with no new writes a
+/// concept's score does not change between sweeps, so a second sub-threshold
+/// verdict is the same verdict a day later — it delays the loss by one sweep
+/// instead of preventing it, and needs a persisted per-concept counter to do
+/// even that. The #29 dry run collected 42 Logic concepts on the first sweep,
+/// including early operator rulings, purely for being old and sparsely
+/// connected; nothing a later sweep learns changes that.
+pub fn exempt_from_score_cut(ty: ConceptType) -> bool {
+    matches!(ty, ConceptType::Logic | ConceptType::Constraint)
+}
+
+/// GC's eviction recency for one concept (issue #29): `1 − age / window`,
+/// clamped to `[0, 1]`, where `age = now − last touch` and the last touch is
+/// the later of `created_at` and `last_accessed`.
+///
+/// This replaces the span-relative recency of
+/// [`crate::daemon::score::score_concept`] **in GC's cut only**. Span-relative
+/// recency puts the session's oldest concept at 0 however recently the session
+/// started, so a session that simply keeps going pushes ever more untouched
+/// concepts under the bar (the #29 projection: 537 → 1,049 collections as the
+/// span grew by 60 days with no new concepts). Anchored to a fixed window, a
+/// concept's eviction recency depends only on how long since anything touched
+/// it, and once every untouched concept is past the window, more session age
+/// changes nothing. A concept recalled again (`last_accessed`, issue #30)
+/// regains recency. A future-dated touch (clock skew) counts as `now`; a
+/// non-positive window degrades to 0 for every concept rather than dividing by
+/// zero.
+pub fn eviction_recency(c: &Concept, now: DateTime<Utc>, window: ChronoDuration) -> f64 {
+    let last_touch = match c.last_accessed {
+        Some(at) => at.max(c.created_at),
+        None => c.created_at,
+    };
+    let window_ms = window.num_milliseconds();
+    if window_ms <= 0 {
+        return 0.0;
+    }
+    let age_ms = now
+        .signed_duration_since(last_touch)
+        .num_milliseconds()
+        .max(0);
+    (1.0 - age_ms as f64 / window_ms as f64).clamp(0.0, 1.0)
+}
+
 /// The step-2 bar for one concept type: [`MIN_CONCEPT_SCORE`] divided by the
 /// spec §5 [`ConceptType::eviction_resistance`] (ALGO-11).
 ///
@@ -410,7 +606,10 @@ fn eviction_score(
     params: GcParams,
     frequency_is_live: bool,
 ) -> f64 {
-    let dims = crate::daemon::score::score_concept(graph, c, ctx);
+    let mut dims = crate::daemon::score::score_concept(graph, c, ctx);
+    // Issue #29: GC's cut measures recency from the last touch, not from the
+    // concept's position in the session span (see `eviction_recency`).
+    dims.recency = eviction_recency(c, params.now, params.recency_window);
     if frequency_is_live {
         crate::daemon::score::score(dims, &params.weights)
     } else {
@@ -514,6 +713,16 @@ mod tests {
     fn default_params() -> GcParams {
         GcParams {
             now: ts(100),
+            ..Default::default()
+        }
+    }
+
+    /// `default_params` with the clock moved past [`GC_RECENCY_WINDOW`], so
+    /// every `ts(0)` concept has zero eviction recency (issue #29: GC's
+    /// recency is time since last touch, not position in the session span).
+    fn aged_params() -> GcParams {
+        GcParams {
+            now: ts(0) + GC_RECENCY_WINDOW + ChronoDuration::days(1),
             ..Default::default()
         }
     }
@@ -742,7 +951,8 @@ mod tests {
 
         // Sanity: the Observation really is sub-threshold under the cut GC
         // applies — live-dimension score vs. its own type's bar (ALGO-1/11).
-        let params = default_params();
+        // Aged past the recency window: GC's recency is time-anchored (#29).
+        let params = aged_params();
         let ctx = crate::daemon::score::SessionContext::compute(&g);
         let low = match g.node(low_id).unwrap() {
             Node::Concept(c) => c,
@@ -843,13 +1053,16 @@ mod tests {
 
     /// ALGO-11: the cut consults [`ConceptType::eviction_resistance`].
     ///
-    /// `Entity` and `Logic` share a `score_multiplier` (1.05), so two
-    /// structurally identical concepts of those types score **identically**;
-    /// their resistances differ (1.2 vs 1.1). Choosing
-    /// `min_concept_score = 1.15 · score` puts the Entity bar (score/1.2·1.15 =
-    /// 0.958·score) below the score and the Logic bar (1.045·score) above it,
-    /// so the resistance factor is the *only* thing deciding their fate. Under
-    /// the pre-fix flat cut both shared one bar and one outcome.
+    /// `Entity` (resistance 1.2) and `Resource` (1.0) leaves of identical
+    /// structure differ only by the type modifier (+0.05 vs 0), so
+    /// `score_r < score_e`. Choosing `min_concept_score = 1.1 · score_e` puts a
+    /// **flat** bar above both scores — both collected — while the Entity's own
+    /// bar (`1.1/1.2 · score_e`) sits below its score: the resistance factor is
+    /// the only thing that saves it.
+    ///
+    /// (Before issue #29 this pinned Entity against Logic, which share a
+    /// modifier; Logic is now exempt from the score cut, see
+    /// `logic_and_constraint_are_exempt_from_the_score_cut`.)
     #[test]
     fn eviction_resistance_discriminates_at_the_threshold_boundary() {
         let mut g = Graph::new(sid());
@@ -866,16 +1079,15 @@ mod tests {
             .unwrap();
         g.insert_concept(concept(11, 1, "entity leaf", ConceptType::Entity), iid)
             .unwrap();
-        g.insert_concept(concept(12, 1, "logic leaf", ConceptType::Logic), iid)
+        g.insert_concept(concept(12, 1, "resource leaf", ConceptType::Resource), iid)
             .unwrap();
         g.upsert_edge(edge(100, 11, 10, EdgeType::Dependency, 1.0, 0))
             .unwrap();
         g.upsert_edge(edge(101, 12, 10, EdgeType::Dependency, 1.0, 0))
             .unwrap();
 
-        // The two leaves score identically — same structure, same modifier.
         let ctx = crate::daemon::score::SessionContext::compute(&g);
-        let base = default_params();
+        let base = aged_params();
         let score_of = |g: &Graph, id: NodeId, ctx: &crate::daemon::score::SessionContext| {
             let c = match g.node(id).unwrap() {
                 Node::Concept(c) => c.clone(),
@@ -884,23 +1096,27 @@ mod tests {
             eviction_score(g, &c, ctx, base, false)
         };
         let entity_score = score_of(&g, nid(11), &ctx);
-        let logic_score = score_of(&g, nid(12), &ctx);
-        assert_eq!(
-            entity_score, logic_score,
-            "test premise: Entity and Logic share score_multiplier"
+        let resource_score = score_of(&g, nid(12), &ctx);
+        assert!(
+            resource_score < entity_score,
+            "test premise: same structure, Entity carries the larger modifier"
         );
 
         let params = GcParams {
-            min_concept_score: entity_score * 1.15,
+            min_concept_score: entity_score * 1.1,
             ..base
         };
         assert!(
-            eviction_threshold(params.min_concept_score, ConceptType::Entity) < entity_score,
-            "Entity bar must sit below the shared score"
+            params.min_concept_score > entity_score,
+            "a flat bar would collect the Entity too"
         );
         assert!(
-            eviction_threshold(params.min_concept_score, ConceptType::Logic) > logic_score,
-            "Logic bar must sit above the shared score"
+            eviction_threshold(params.min_concept_score, ConceptType::Entity) < entity_score,
+            "the Entity's own bar must sit below its score"
+        );
+        assert!(
+            eviction_threshold(params.min_concept_score, ConceptType::Resource) > resource_score,
+            "the Resource bar must sit above its score"
         );
 
         let outcome = run(&mut g, params);
@@ -910,7 +1126,7 @@ mod tests {
             "only the less resistant type is collected"
         );
         assert!(g.node(nid(11)).is_some(), "Entity (1.2) resists the cut");
-        assert!(g.node(nid(12)).is_none(), "Logic (1.1) does not");
+        assert!(g.node(nid(12)).is_none(), "Resource (1.0) does not");
     }
 
     /// ALGO-4: the cut uses the **session's** weights, not a second default.
@@ -942,13 +1158,14 @@ mod tests {
 
         // Default weights (density 0.35): the leaf's density carries it.
         let mut g = build();
-        let outcome = run(&mut g, default_params());
+        let outcome = run(&mut g, aged_params());
         assert!(
             outcome.concepts_collected.is_empty(),
             "under the session's default weights the leaf is worth keeping"
         );
 
-        // Session weights that value only recency, which the leaf has none of.
+        // Session weights that value only recency, which the leaf (aged past
+        // the window) has none of.
         let mut g = build();
         let outcome = run(
             &mut g,
@@ -959,7 +1176,7 @@ mod tests {
                     session_activity: 0.0,
                     density: 0.0,
                 },
-                ..default_params()
+                ..aged_params()
             },
         );
         assert!(
@@ -1552,5 +1769,346 @@ mod tests {
             };
             assert_eq!(c.gc_survived, 1);
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Issue #29 — step-2 protections and the collection cap
+    // ------------------------------------------------------------------
+
+    /// A session with one interaction-spanning hub (13 → 14/15/16) so a
+    /// leaf's density is 1/4, plus the given low-value leaves, each with only
+    /// its `Derives` edge. Leaves are created at `ts(0)`.
+    fn hub_session(leaves: &[(u64, ConceptType)]) -> Graph {
+        let mut g = Graph::new(sid());
+        let i1 = interaction(1, None);
+        let i2 = Interaction {
+            created_at: ts(100),
+            ..interaction(2, Some(1))
+        };
+        let iid = i1.id;
+        g.insert_interaction(i1).unwrap();
+        g.insert_interaction(i2).unwrap();
+        for id in [13u64, 14, 15, 16] {
+            g.insert_concept(
+                concept(id, 1, &format!("anchor {id}"), ConceptType::Entity),
+                iid,
+            )
+            .unwrap();
+        }
+        for (eid, tgt) in [(101u64, 14u64), (102, 15), (103, 16)] {
+            g.upsert_edge(edge(eid, 13, tgt, EdgeType::Dependency, 1.0, 0))
+                .unwrap();
+        }
+        for (id, ty) in leaves {
+            g.insert_concept(concept(*id, 1, &format!("leaf {id}"), *ty), iid)
+                .unwrap();
+        }
+        g
+    }
+
+    /// Issue #29 option (a): Logic and Constraint are exempt from the score
+    /// cut. With the same structure and zero recency, an Observation leaf is
+    /// collected and a Logic leaf with the bar raised far above its score is
+    /// not. Pre-fix the Logic leaf went with it (the #29 dry run collected 42
+    /// Logic concepts — early operator rulings among them — on one sweep).
+    #[test]
+    fn logic_and_constraint_are_exempt_from_the_score_cut() {
+        let mut g = hub_session(&[
+            (20, ConceptType::Observation),
+            (21, ConceptType::Logic),
+            (22, ConceptType::Constraint),
+            (23, ConceptType::Resource),
+        ]);
+        // A bar so high every leaf is far under it, whatever its type.
+        let params = GcParams {
+            min_concept_score: 5.0,
+            ..aged_params()
+        };
+        let outcome = run(&mut g, params);
+        assert!(outcome.concepts_collected.contains(&nid(20)));
+        assert!(outcome.concepts_collected.contains(&nid(23)));
+        assert!(
+            g.node(nid(21)).is_some(),
+            "Logic is exempt from the score cut"
+        );
+        assert!(
+            g.node(nid(22)).is_some(),
+            "Constraint is exempt from the score cut"
+        );
+        assert!(exempt_from_score_cut(ConceptType::Logic));
+        assert!(exempt_from_score_cut(ConceptType::Constraint));
+        for ty in [
+            ConceptType::Entity,
+            ConceptType::Resource,
+            ConceptType::Observation,
+        ] {
+            assert!(!exempt_from_score_cut(ty), "{ty:?} stays under the cut");
+        }
+    }
+
+    /// The exemption is from the score cut only: a Logic concept with no edge
+    /// at all is still an orphan, and an unreachable one is still a
+    /// disconnected component.
+    #[test]
+    fn exempt_types_are_still_collected_as_orphans_and_islands() {
+        let mut g = Graph::new(sid());
+        let i1 = interaction(1, None);
+        let iid = i1.id;
+        g.insert_interaction(i1).unwrap();
+        g.insert_concept(concept(10, 1, "anchored", ConceptType::Entity), iid)
+            .unwrap();
+        let orphan = insert_isolated(&mut g, concept(20, 1, "lone rule", ConceptType::Logic), 1);
+        let a = insert_isolated(
+            &mut g,
+            concept(21, 1, "island a", ConceptType::Constraint),
+            1,
+        );
+        let b = insert_isolated(&mut g, concept(22, 1, "island b", ConceptType::Logic), 1);
+        g.upsert_edge(edge(100, 21, 22, EdgeType::Dependency, 1.0, 0))
+            .unwrap();
+        let outcome = run(&mut g, default_params());
+        assert_eq!(outcome.concepts_collected, vec![orphan, a, b]);
+    }
+
+    /// Issue #29: GC's eviction recency is time since last touch, not the
+    /// concept's position in the session span. The same concept, the same
+    /// clock, two sessions whose spans differ only by a later interaction:
+    /// span-relative recency moves from 1.0 to ~0 (that is what made the dry
+    /// run's collections grow with session age), GC's eviction score does not
+    /// move at all.
+    #[test]
+    fn eviction_recency_ignores_the_session_span() {
+        let leaf = |g: &Graph| match g.node(nid(20)).unwrap() {
+            Node::Concept(c) => c.clone(),
+            _ => unreachable!(),
+        };
+        let build = |extra_span: bool| {
+            let mut g = hub_session(&[]);
+            // Created at the end of the short span.
+            let c = Concept {
+                created_at: ts(100),
+                ..concept(20, 2, "late observation", ConceptType::Observation)
+            };
+            g.insert_concept(c, nid(2)).unwrap();
+            if extra_span {
+                let i3 = Interaction {
+                    created_at: ts(100) + ChronoDuration::days(9),
+                    ..interaction(3, Some(2))
+                };
+                g.insert_interaction(i3).unwrap();
+            }
+            g
+        };
+        let params = GcParams {
+            now: ts(100) + ChronoDuration::days(10),
+            ..Default::default()
+        };
+        let short = build(false);
+        let long = build(true);
+        let span_recency = |g: &Graph| {
+            let ctx = crate::daemon::score::SessionContext::compute(g);
+            crate::daemon::score::score_concept(g, &leaf(g), &ctx).recency
+        };
+        assert_eq!(span_recency(&short), 1.0, "premise: end of the short span");
+        assert!(span_recency(&long) < 0.01, "premise: start of the long one");
+
+        let gc_score = |g: &Graph| {
+            let ctx = crate::daemon::score::SessionContext::compute(g);
+            eviction_score(g, &leaf(g), &ctx, params, false)
+        };
+        let (a, b) = (gc_score(&short), gc_score(&long));
+        // The extra interaction does not change the leaf's degree or the hub,
+        // only `session_activity`'s denominator (1/2 → 1/3); recency itself
+        // is identical.
+        let expected = eviction_recency(&leaf(&short), params.now, params.recency_window);
+        let window_days = params.recency_window.num_days() as f64;
+        assert!((expected - (1.0 - 10.0 / window_days)).abs() < 1e-3);
+        assert_eq!(
+            eviction_recency(&leaf(&long), params.now, params.recency_window),
+            expected
+        );
+        assert!(
+            (a - b).abs() < 0.05,
+            "span growth alone must not move GC's score materially: {a} vs {b}"
+        );
+    }
+
+    /// `eviction_recency`'s edges: linear in age inside the window, 0 past
+    /// it, a fresh access restores it, future touches clamp to 1, and a
+    /// non-positive window cannot divide by zero.
+    #[test]
+    fn eviction_recency_is_linear_clamped_and_access_aware() {
+        let w = ChronoDuration::days(30);
+        let c = concept(1, 1, "c", ConceptType::Entity); // created ts(0)
+        assert_eq!(eviction_recency(&c, ts(0), w), 1.0);
+        let half = eviction_recency(&c, ts(0) + ChronoDuration::days(15), w);
+        assert!((half - 0.5).abs() < 1e-9);
+        assert_eq!(
+            eviction_recency(&c, ts(0) + ChronoDuration::days(31), w),
+            0.0
+        );
+        assert_eq!(
+            eviction_recency(&c, ts(0) - ChronoDuration::days(1), w),
+            1.0
+        );
+        let touched = Concept {
+            access_count: 1,
+            last_accessed: Some(ts(0) + ChronoDuration::days(40)),
+            ..c.clone()
+        };
+        assert_eq!(
+            eviction_recency(&touched, ts(0) + ChronoDuration::days(40), w),
+            1.0,
+            "a recall (issue #30) re-anchors recency"
+        );
+        // An access stamp older than creation cannot age the concept.
+        let odd = Concept {
+            last_accessed: Some(ts(0) - ChronoDuration::days(100)),
+            ..c.clone()
+        };
+        assert_eq!(eviction_recency(&odd, ts(0), w), 1.0);
+        assert_eq!(eviction_recency(&c, ts(0), ChronoDuration::zero()), 0.0);
+    }
+
+    /// The span-anchored ranking is untouched: `rescore` (recall, Stage 1)
+    /// still uses span-relative recency; only GC's cut changed.
+    #[test]
+    fn daemon_ranking_keeps_span_relative_recency() {
+        let g = hub_session(&[(20, ConceptType::Observation)]);
+        let ctx = crate::daemon::score::SessionContext::compute(&g);
+        let c = match g.node(nid(20)).unwrap() {
+            Node::Concept(c) => c.clone(),
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            crate::daemon::score::score_concept(&g, &c, &ctx).recency,
+            0.0,
+            "ts(0) is the start of the span"
+        );
+        assert_eq!(
+            eviction_recency(&c, ts(100), GC_RECENCY_WINDOW),
+            1.0 - 100.0 / GC_RECENCY_WINDOW.num_minutes() as f64,
+        );
+    }
+
+    /// Issue #29: collections per sweep are capped; the cap is reported, the
+    /// held-back candidates survive and are counted once (an orphan is also a
+    /// disconnected component), and the next sweep takes the next slice.
+    #[test]
+    fn the_collection_cap_binds_reports_and_defers() {
+        let mut g = Graph::new(sid());
+        let i1 = interaction(1, None);
+        let iid = i1.id;
+        g.insert_interaction(i1).unwrap();
+        g.insert_concept(concept(10, 1, "anchored", ConceptType::Entity), iid)
+            .unwrap();
+        let orphans: Vec<NodeId> = (100..112u64)
+            .map(|n| {
+                insert_isolated(
+                    &mut g,
+                    concept(n, 1, &format!("o{n}"), ConceptType::Entity),
+                    1,
+                )
+            })
+            .collect();
+        let params = GcParams {
+            max_collect_fraction: 0.0,
+            min_collect_cap: 5,
+            ..default_params()
+        };
+        let first = run(&mut g, params);
+        assert_eq!(first.collection_cap, 5);
+        assert_eq!(first.concepts_collected, orphans[..5].to_vec());
+        assert_eq!(first.collections_deferred, 7, "counted once, not twice");
+        assert!(first.cap_bound());
+        assert!(
+            first
+                .warnings
+                .iter()
+                .any(|w| w.contains("collection cap bound")),
+            "{:?}",
+            first.warnings
+        );
+        for id in &orphans[5..] {
+            assert!(g.node(*id).is_some(), "held back, not collected");
+        }
+        let second = run(&mut g, params);
+        assert_eq!(second.concepts_collected, orphans[5..10].to_vec());
+        let third = run(&mut g, params);
+        assert_eq!(third.concepts_collected, orphans[10..].to_vec());
+        assert!(!third.cap_bound());
+        assert!(!third.warnings.iter().any(|w| w.contains("collection cap")));
+    }
+
+    /// Under the cap the score cut's candidates go furthest-under-the-bar
+    /// first.
+    #[test]
+    fn the_cap_takes_the_weakest_score_candidates_first() {
+        let mut g = hub_session(&[(20, ConceptType::Observation), (21, ConceptType::Resource)]);
+        let params = GcParams {
+            min_concept_score: 5.0,
+            max_collect_fraction: 0.0,
+            min_collect_cap: 1,
+            ..aged_params()
+        };
+        // Observation: lower score (modifier −0.10) against a higher bar
+        // (resistance 0.7) — the smaller score/bar ratio.
+        let outcome = run(&mut g, params);
+        assert_eq!(outcome.concepts_collected, vec![nid(20)]);
+        assert!(outcome.cap_bound());
+    }
+
+    #[test]
+    fn collection_cap_is_a_fraction_with_a_floor() {
+        let p = GcParams::default();
+        assert_eq!(collection_cap(0, p), GC_MIN_COLLECT_CAP);
+        assert_eq!(collection_cap(100, p), GC_MIN_COLLECT_CAP);
+        assert_eq!(
+            collection_cap(3370, p),
+            169,
+            "5% of the Metal rig, rounded up"
+        );
+        for bad in [f64::NAN, f64::INFINITY, -1.0] {
+            let q = GcParams {
+                max_collect_fraction: bad,
+                ..p
+            };
+            assert_eq!(collection_cap(10_000, q), GC_MIN_COLLECT_CAP, "{bad}");
+        }
+        let all = GcParams {
+            max_collect_fraction: 7.0,
+            ..p
+        };
+        assert_eq!(collection_cap(1000, all), 1000, "a fraction is capped at 1");
+    }
+
+    /// Issue #29: the CoOccurrence margin is zero on purpose. `derive` writes
+    /// co-occurrence edges at exactly `MIN_EDGE_WEIGHT` and step 1 is a strict
+    /// `<`, so a stale, never-reinforced co-occurrence edge survives. If
+    /// either constant moves, this fails and the change has to be made
+    /// deliberately (see `MIN_EDGE_WEIGHT`).
+    #[test]
+    fn cooccurrence_edges_sit_exactly_on_the_step_one_bar_and_survive() {
+        assert_eq!(crate::graph::derive::COOCCURRENCE_WEIGHT, MIN_EDGE_WEIGHT);
+        let mut g = Graph::new(sid());
+        let i1 = interaction(1, None);
+        let iid = i1.id;
+        g.insert_interaction(i1).unwrap();
+        g.insert_concept(concept(10, 1, "a", ConceptType::Entity), iid)
+            .unwrap();
+        g.insert_concept(concept(11, 1, "b", ConceptType::Entity), iid)
+            .unwrap();
+        g.upsert_edge(edge(
+            100,
+            10,
+            11,
+            EdgeType::CoOccurrence,
+            crate::graph::derive::COOCCURRENCE_WEIGHT,
+            0,
+        ))
+        .unwrap();
+        let outcome = run(&mut g, aged_params());
+        assert!(outcome.edges_removed.is_empty());
+        assert!(g.edge(nid(100)).is_some());
     }
 }
