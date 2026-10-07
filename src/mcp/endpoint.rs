@@ -886,22 +886,8 @@ mod tests {
     /// A scratch directory short enough to hold a socket address — the bind
     /// tests need a real directory AND a path under [`SUN_PATH_MAX`], and macOS's
     /// `TMPDIR` is 46 bytes before anything is joined to it.
-    fn short_scratch(tag: &str) -> Scratch {
-        // A process-wide counter, not a clock fragment: two calls in one
-        // process can never collide, and the name stays short for `sun_path`.
-        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        let pid = std::process::id();
-        loop {
-            let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let dir = PathBuf::from(format!("/tmp/lb{tag}{pid}_{n}"));
-            // Exclusive: an existing directory (a recycled pid's leftover) is
-            // not ours, so take the next number rather than share it.
-            match std::fs::create_dir(&dir) {
-                Ok(()) => return Scratch(dir),
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(e) => panic!("short scratch dir {}: {e}", dir.display()),
-            }
-        }
+    fn short_scratch(tag: &str) -> crate::test_util::ScratchDir {
+        crate::test_util::ScratchDir::short(tag)
     }
 
     fn path_of(root: &Path, sub: &str) -> String {

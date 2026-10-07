@@ -4457,36 +4457,6 @@ mod tests {
         use crate::types::EmbeddingContract;
         use std::sync::atomic::{AtomicBool, Ordering};
 
-        /// A private scratch directory, removed on drop. Under `/tmp` rather
-        /// than `std::env::temp_dir()`: the endpoint path inside it must fit a
-        /// unix socket address, and macOS's per-user temp dir is too deep.
-        struct ScratchDir(PathBuf);
-
-        impl ScratchDir {
-            fn new() -> Self {
-                use std::os::unix::fs::DirBuilderExt;
-                let nanos = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .subsec_nanos();
-                let path = PathBuf::from(format!("/tmp/lb13p-{}-{nanos}", std::process::id()));
-                std::fs::DirBuilder::new()
-                    .mode(0o700)
-                    .create(&path)
-                    .expect("create scratch dir");
-                Self(path)
-            }
-            fn path(&self) -> &Path {
-                &self.0
-            }
-        }
-
-        impl Drop for ScratchDir {
-            fn drop(&mut self) {
-                let _ = std::fs::remove_dir_all(&self.0);
-            }
-        }
-
         /// The fixture embedder, plus a flag set when the last owner drops it.
         struct DropFlagged {
             inner: FixtureEmbedder,
@@ -4533,8 +4503,8 @@ mod tests {
 
         #[tokio::test]
         async fn a_proxy_does_not_retain_the_embedder() {
-            let dir = ScratchDir::new();
-            let db = dir.path().join("store.db");
+            let dir = crate::test_util::ScratchDir::short("13p");
+            let db = dir.join("store.db");
             SqliteStore::connect(db.to_str().unwrap())
                 .unwrap()
                 .init_schema()
@@ -4542,7 +4512,7 @@ mod tests {
                 .expect("provision the scratch store");
             // A private (0700, ours) endpoint directory, as `dial_dir` demands,
             // inside the per-test tempdir: never the operator's runtime dir.
-            let ep_dir = dir.path().join("run");
+            let ep_dir = dir.join("run");
             let session = "issue13-proxy-drop";
             let probe_backends = backends(&db, Box::new(FixtureEmbedder::new()));
             let endpoint = SessionEndpoint::resolve_in(&ep_dir, session, &probe_backends.store_cfg)

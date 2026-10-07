@@ -46,6 +46,34 @@ impl ScratchDir {
     }
 }
 
+impl ScratchDir {
+    /// Create `/tmp/lb<tag><pid>_<n>`: a scratch directory short enough to hold
+    /// a unix socket address (`SUN_PATH_MAX`), for the tests that bind or dial
+    /// an endpoint inside it. [`ScratchDir::new`] cannot serve those: macOS's
+    /// `temp_dir()` is 46 bytes before anything is joined to it.
+    ///
+    /// A process-wide counter, not a clock fragment, so two calls in one process
+    /// never collide and the name stays short. Created exclusively (0700 on
+    /// unix): an existing directory (a recycled pid's leftover) is not ours, so
+    /// the next number is taken rather than sharing it.
+    #[cfg(unix)]
+    pub fn short(tag: &str) -> Self {
+        use std::os::unix::fs::DirBuilderExt;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        let pid = std::process::id();
+        loop {
+            let n = NEXT.fetch_add(1, Ordering::Relaxed);
+            let path = std::path::PathBuf::from(format!("/tmp/lb{tag}{pid}_{n}"));
+            match std::fs::DirBuilder::new().mode(0o700).create(&path) {
+                Ok(()) => return Self { path },
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(e) => panic!("short scratch dir {}: {e}", path.display()),
+            }
+        }
+    }
+}
+
 impl std::ops::Deref for ScratchDir {
     type Target = std::path::Path;
     fn deref(&self) -> &std::path::Path {
