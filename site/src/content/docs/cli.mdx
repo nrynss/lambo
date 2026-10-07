@@ -267,7 +267,7 @@ lambo serve --config lambo.toml --session demo --agent agent-a
 
 See [MCP tools](/lambo/mcp/) for the tools it exposes.
 
-While it holds the session, `lambo serve` keeps the embedder warm. With the in-process candle embedder on a Metal device it embeds one short fixed probe every 10 seconds by default, so an idle writer's recently touched model weights are more likely to still be resident when the next call arrives, which reduces how often a call pays the swap-in. It does not guarantee residency under heavy memory pressure. The probe writes nothing. A serve that proxies to another holder runs no keep-warm and holds no model. Set the interval, or turn it off with `0`, through `keep_warm_secs` in [Configuration](/lambo/config/#embedder).
+While it holds the session, `lambo serve` keeps the embedder warm. With the in-process candle embedder on a Metal device it embeds one short fixed probe every 10 seconds by default, so an idle writer's recently touched model weights are more likely to still be resident when the next call arrives, which reduces how often a call pays the swap-in. It does not guarantee residency under heavy memory pressure. The probe writes nothing. A serve that proxies to another holder runs no keep-warm and does not keep a model once it has become a proxy (it still loads one transiently until its role is known; see #31). Set the interval, or turn it off with `0`, through `keep_warm_secs` in [Configuration](/lambo/config/#embedder).
 
 ### stdio versus HTTP for several clients
 
