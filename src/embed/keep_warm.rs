@@ -53,10 +53,12 @@ use super::Embedder;
 /// Auto interval for an embedder whose weights sit in pageable unified memory.
 ///
 /// The live rig already paid 2.6x at its shortest bucket (< 2 min since the
-/// previous call), so the touch period has to sit well inside that; 30 s gives
-/// a 4x margin. The cost is one short forward per interval — on the order of
-/// 10-20 ms of GPU time on an M3 Pro, i.e. well under 0.1% duty.
-pub const DEFAULT_KEEP_WARM_INTERVAL: Duration = Duration::from_secs(30);
+/// previous call), and under heavy memory pressure macOS swapped all ~1.08 GB
+/// of weights within 10-21 s of last use, while a call within 20 s of a touch
+/// ran in 46-80 ms. So the period sits at 10 s (operator decision,
+/// 2026-10-07; was 30 s). The cost is one short forward (~17 ms on an M3 Pro)
+/// per interval, about 0.2% GPU duty.
+pub const DEFAULT_KEEP_WARM_INTERVAL: Duration = Duration::from_secs(10);
 
 /// The text each touch embeds. Short (a handful of tokens) so a touch costs
 /// one minimal forward; non-empty so it clears every adapter's CON-7 guard.

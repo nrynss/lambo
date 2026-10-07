@@ -170,7 +170,7 @@
   guarantee residency under heavy memory pressure. Set with `[embedder]
   keep_warm_secs` / `LAMBO_EMBED_KEEP_WARM_SECS`: omitted means auto, `0` is
   off, `N` is every N seconds for any embedder kind. **Behaviour change for
-  candle on Metal:** auto is on there (every 30 s), because those weights sit in
+  candle on Metal:** auto is on there (every 10 s), because those weights sit in
   unified memory the macOS pager compresses. Everything else defaults off: CUDA
   weights live in VRAM, the fixture has no weights, and `bge_m3`/`gemini` hold
   their weights in another process. A touch writes nothing (no store I/O, graph

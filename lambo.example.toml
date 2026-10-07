@@ -100,7 +100,7 @@ url = "http://127.0.0.1:8080"
 # call pays to bring them back. Keep-warm embeds one short fixed probe every N
 # seconds and discards the vector; it writes nothing. Not part of the
 # embedding contract. LAMBO_EMBED_KEEP_WARM_SECS overrides this value.
-#   omitted = auto: every 30 s when the weights sit in unified memory that the
+#   omitted = auto: every 10 s when the weights sit in unified memory that the
 #             pager can compress (candle on Metal); off for everything else
 #             (CUDA weights live in VRAM, the fixture has no weights, and
 #             bge_m3/gemini hold their weights in another process)
@@ -109,7 +109,7 @@ url = "http://127.0.0.1:8080"
 #             the same Mac; each touch is then one HTTP embed request)
 #             Not for gemini: each touch would be a billed Vertex AI request
 #             and keeps nothing local warm.
-# keep_warm_secs = 30
+# keep_warm_secs = 10
 
 # Daemon cadence. Optional; omit the whole section to use the defaults.
 #

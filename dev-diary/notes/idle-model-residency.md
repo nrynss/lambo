@@ -3,7 +3,7 @@
 **Decision (2026-10-07):** `lambo serve` runs a holder-side keep-warm task that
 embeds one short fixed probe (`"lambo keep-warm probe"`) every interval and
 discards the vector. Knob: `[embedder] keep_warm_secs` /
-`LAMBO_EMBED_KEEP_WARM_SECS`. Omitted = auto (30 s for candle on Metal, off
+`LAMBO_EMBED_KEEP_WARM_SECS`. Omitted = auto (10 s for candle on Metal, off
 elsewhere), `0` = off, `N` = every N s for any kind. Code:
 `src/embed/keep_warm.rs`, wired in `src/mcp/serve.rs` beside the ledger
 heartbeat, resolved by `ResolvedBackends::keep_warm_interval()`.
@@ -57,7 +57,7 @@ What this work adds:
      default. Interactive is the only value that removes the throttling.
    * **Timer coalescing.** launchd coalesces a job's timers by default, and
      `LegacyTimers = true` (precise timers) "may have no effect" unless the
-     job is Interactive. So the 30 s keep-warm sleep may fire late by the
+     job is Interactive. So the 10 s keep-warm sleep may fire late by the
      coalescing leeway. Harmless: the period only has to sit well inside the
      < 2 min bucket, and a touch a few seconds late still does.
 
@@ -139,12 +139,11 @@ Readings:
    21-29 s paid 191-262 ms in 3 of 4 samples, no better than off. Averaged
    over a uniform arrival phase, 30 s still helps (5-20 s rows: 46-80 ms
    against 44-182 ms off), but the worst case is not bounded by it.
-3. Implication for the default, **not acted on here** (it is a design change
-   and n = 1): under heavy swap the interval would need to be ~10 s to keep
-   the buffers resident through the whole period; at ~17 ms per probe that is
-   ~0.2% GPU duty, still small. Pressure on the live rig varies, so the
-   cheaper confirmation is `footprint --swapped` on the re-pinned writer
-   before choosing a number.
+3. Implication for the default: under heavy swap the interval has to be
+   ~10 s to keep the buffers resident through the whole period; at ~17 ms per
+   probe that is ~0.2% GPU duty, still small. The operator chose 10 s on
+   2026-10-07 (see Design). Pressure on the live rig varies, so it is
+   re-checked with `footprint --swapped` on the re-pinned writer.
 
 ## Design
 
@@ -183,12 +182,16 @@ Readings:
   shows no tail; the fixture has no weights; `bge_m3` and `gemini` hold their
   weights in another process. An explicit `N` opts any kind in (a `bge_m3`
   llama-server on the same Mac, a CPU-pinned candle).
-* **30 s default:** the rig already paid 2.6x at its shortest bucket
-  (< 2 min), so the period must sit well inside that; 30 s is a 4x margin. A
-  probe forward costs ~17 ms on the M3 Pro, so ~0.06% GPU duty.
-  **Qualified by the worst-case table:** under 9 GB of swap the buffers were
-  lost within 10-21 s of last use, so 30 s does not cover the last third of
-  each period. Kept for now; see follow-ups.
+* **10 s default (operator decision, 2026-10-07; was 30 s in the first
+  cut):** the rig already paid 2.6x at its shortest bucket (< 2 min). The
+  worst-case table showed that under heavy memory pressure macOS swapped all
+  ~1.08 GB of weights within 10-21 s of last use, and that a call within 20 s
+  of a touch ran in 46-80 ms; a 30 s period left calls at 21-29 s paying
+  190-260 ms. 10 s keeps every call inside the window that was covered. A
+  probe forward costs ~17 ms on the M3 Pro, so ~0.2% GPU duty. To be
+  re-checked on the re-pinned writer with `footprint --swapped`, the
+  `IOAccelerator (graphics)` row; if the pager is quicker than 10 s under
+  real load, the interval (or the approach) needs another look.
 * **Config path:** `EmbedderConfig.keep_warm_secs` (TOML, `deny_unknown_fields`
   still refuses typos), env overlay in `overlay_env`, name added to
   `RESOLVE_ENV_VARS` and its override table. Derived by a method on
@@ -221,5 +224,5 @@ Readings:
   see Diagnosis item 4 for why not Adaptive).
 * Replace the issue's `CMPRS` acceptance item with latency by gap plus the
   `footprint --swapped` `IOAccelerator (graphics)` row.
-* Decide whether the 30 s auto interval should drop (~10 s) given the worst-
-  case table above; measure on the live writer first.
+* Re-check the 10 s auto interval on the re-pinned writer with
+  `footprint --swapped` (`IOAccelerator (graphics)` row) and latency by gap.

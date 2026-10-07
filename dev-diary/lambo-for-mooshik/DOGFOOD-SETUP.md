@@ -474,7 +474,7 @@ back-to-back latency sitting ~2.5x above a terminal-run probe; it is not yet mea
 If you try it, use `<key>ProcessType</key><string>Interactive</string>`, not `Adaptive`:
 Adaptive classifies by XPC activity, which `lambo serve` has none of, so it would most
 likely sit in Background, stricter than the default. launchd also coalesces the job's
-timers (`LegacyTimers` only helps an Interactive job), so the 30 s embedder keep-warm may
+timers (`LegacyTimers` only helps an Interactive job), so the 10 s embedder keep-warm may
 drift by a few seconds; that is harmless. See `dev-diary/notes/idle-model-residency.md`.
 
 Per-harness `--agent` ids are not lost to the shared writer: `origin_agent` comes from each
