@@ -28,11 +28,11 @@ Each release carries one `lambo` binary per platform plus a SHA-256 checksum fil
   </Step>
 </Steps>
 
-To pin a version or choose the install directory:
+To pin a version or choose the install directory, set the variables on `sh`, the command that reads them. `LAMBO_INSTALL_DIR` must be writable by the current user.
 
 ```bash
-LAMBO_VERSION=0.2.0 LAMBO_INSTALL_DIR=/usr/local/bin \
-  sh -c "$(curl -fsSL https://raw.githubusercontent.com/nrynss/lambo/main/scripts/install.sh)"
+curl -fsSLo install.sh https://github.com/nrynss/lambo/releases/download/v0.3.0/install.sh
+LAMBO_VERSION=0.3.0 LAMBO_INSTALL_DIR="$HOME/bin" sh install.sh
 ```
 
 To install the Metal build on Apple silicon, set `LAMBO_FLAVOR=metal` on `sh`, the command that reads it. The script verifies its checksum the same way, and refuses `metal` on any other platform.
