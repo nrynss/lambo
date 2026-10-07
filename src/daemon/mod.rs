@@ -769,8 +769,10 @@ fn condition_set(
 ///    that has never swept still has watermark 0, so #17's one catch-up sweep
 ///    on attach is unchanged for it. The time of the last sweep persists the
 ///    same way; a never-swept session's clock is anchored (not swept) the
-///    first time a writer observes it, and a writer that was down for N
-///    intervals sweeps once, not N times.
+///    first time a writer observes it. A previously swept session is not
+///    swept *because* of a restart, but a writer that was down for N
+///    intervals with at least `gc_idle_floor` unswept mutations finds a sweep
+///    due and sweeps once on its first cycle back, not N times (intended).
 ///    Detection runs before GC: events reflect what the session's writes
 ///    did, GC is housekeeping after.
 ///

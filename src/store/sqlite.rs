@@ -239,7 +239,8 @@
 //! with a field-wise monotonic merge (`GcMark::merge`), are converged on
 //! pre-existing databases by the same guarded ALTER, and come back from
 //! `load_session` in `GraphSnapshot.gc_mark`, so a writer restart neither
-//! sweeps again nor resets the `gc_max_interval` clock.
+//! resets GC's measure nor the `gc_max_interval` clock (it sweeps only if a
+//! sweep was already due by the stored mark).
 
 // Clippy's `explicit_auto_deref` suggestion is wrong for sqlx: `&mut *tx` reborrows
 // the `Transaction` (which implements `sqlx::Executor`), while the suggested `&mut tx`

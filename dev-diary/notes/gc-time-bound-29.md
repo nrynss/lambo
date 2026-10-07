@@ -45,6 +45,12 @@ issue #29's dry-run comment and to #17
    epoch ≥ `gc_interval`) is unchanged for a never-swept session. If the anchor is
    not yet flushed when the writer restarts it re-anchors, which is harmless: the
    floor cannot be met without writes, and a write flushes the anchor.
+   This is about **never-swept** sessions. A previously swept session is not
+   swept *because* a writer attached, but if a sweep is already due by its
+   stored mark (it took at least `gc_idle_floor` mutations since the last
+   sweep and the writer was down past `gc_max_interval`), the first cycle
+   after attach sweeps once. That is intended: it is the sweep the downtime
+   delayed, not a restart artifact.
 5. **Cap: `max(32, ceil(5% × unprotected))` over steps 2 and 3 together.**
    Structural garbage first: orphans, then the other disconnected components
    (both by id, measured on the post-step-1 graph), then score-cut candidates

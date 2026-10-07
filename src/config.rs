@@ -352,8 +352,11 @@ impl Config {
 /// session's last sweep **and** at least `gc_idle_floor` (default 100) session
 /// mutations happened since then — whichever of the two triggers comes first.
 /// The time of the last sweep persists with the session (`sessions.last_gc_at`,
-/// beside `last_gc_epoch`), so a restart neither resets the clock nor sweeps
-/// again, and a writer that was down for N days sweeps once, not N times. Both
+/// beside `last_gc_epoch`), so a restart does not reset the clock and does not
+/// by itself cause a sweep: a restarted writer sweeps only when one was already
+/// due by the stored mark (down past the interval with at least the floor of
+/// unswept mutations — then once on its first cycle, not N times for N days).
+/// A never-swept session anchors the clock on first attach instead. Both
 /// keys are cadences; neither changes what a sweep collects or any promotion
 /// bar. Like the other `[daemon]` keys they have no environment overlay.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]

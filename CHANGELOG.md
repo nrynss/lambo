@@ -216,13 +216,18 @@
   (tracked in #31). Pre-existing, found in the issue #13 review.
 - GC sweeps at human pace without deleting reasoning by session age
   (issue #29). Behaviour changes, each deliberate:
-  - **Restarts no longer sweep.** GC's watermark was per-process state starting
+  - **A restart no longer sweeps by itself.** GC's watermark was per-process state starting
     at 0, so once a session passed `gc_interval` lifetime mutations every writer
     restart swept once and bumped every `gc_survived` — three restarts reached
     Stage 1's floor with no new information. The watermark and the time of the
     last sweep now persist with the session beside `mutation_epoch` (stamped on
     every flushed batch, merged monotonically in the flush transaction,
-    resumed on load). A never-swept session keeps #17's single catch-up sweep.
+    resumed on load), so a restarted writer sweeps only if a sweep was already
+    due by the stored mark: a previously swept session that took at least
+    `gc_idle_floor` mutations and was down past `gc_max_interval` sweeps once
+    on its first cycle back, which is intended. A never-swept session anchors
+    its clock on first attach instead of time-sweeping, and keeps #17's single
+    catch-up sweep on the mutation count.
   - **Timed sweeps.** A session also sweeps once `[daemon] gc_max_interval_secs`
     (default 86 400) has passed since its last sweep, if it took at least
     `[daemon] gc_idle_floor` (default 100) mutations since. Idle sessions never
