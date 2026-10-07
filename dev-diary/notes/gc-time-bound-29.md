@@ -46,10 +46,14 @@ issue #29's dry-run comment and to #17
    not yet flushed when the writer restarts it re-anchors, which is harmless: the
    floor cannot be met without writes, and a write flushes the anchor.
 5. **Cap: `max(32, ceil(5% × unprotected))` over steps 2 and 3 together.**
-   Orphans first, then score-cut candidates by ascending `score / bar`, then
-   disconnected components by id. Held-back candidates survive the sweep (and
-   take its `gc_survived` bump), are counted once in `collections_deferred` (an
-   orphan is also a disconnected component), and are re-evaluated next sweep. A
+   Structural garbage first: orphans, then the other disconnected components
+   (both by id, measured on the post-step-1 graph), then score-cut candidates
+   by ascending `score / bar`; concepts that the score cut's collections cut
+   off from the chain (step 3's cascade) are collected in the same sweep with
+   the budget left. Held-back candidates survive the sweep (and take its
+   `gc_survived` bump), are listed in `GcOutcome::deferred` and counted once in
+   `collections_deferred` (an orphan is also a disconnected component), and are
+   re-evaluated next sweep. A
    bound cap is a `tracing::warn` via `GcOutcome::warnings`. 5% per day bounds a
    scoring mistake to a slow, visible erosion; the floor lets a small session
    clear its orphans.

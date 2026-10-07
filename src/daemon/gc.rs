@@ -46,14 +46,22 @@
 //!      itself push old concepts under the bar. This is GC's cut only: the
 //!      daemon's ranking ([`crate::daemon::score::rescore`]), recall and
 //!      canonization keep the span-relative recency.
-//!    * **Collections per sweep are capped** ([`collection_cap`]); candidates
-//!      past the cap are reported in [`GcOutcome::collections_deferred`] and
-//!      re-evaluated on the next sweep.
+//!    * **Collections per sweep are capped** ([`collection_cap`]), over steps
+//!      2 and 3 together. Under the cap structural garbage goes first —
+//!      orphans, then disconnected components — and the score cut's
+//!      candidates last, furthest under their bar first; concepts cut off by
+//!      the score cut's collections (step 3's cascade) take what budget is
+//!      left. Candidates past the cap are listed in [`GcOutcome::deferred`]
+//!      (counted in [`GcOutcome::collections_deferred`]) and re-evaluated on
+//!      the next sweep.
 //! 3. **Disconnected-component cleanup** — a cycle-safe BFS (visited set, per
 //!    the G6 binding note — never assume Hierarchical acyclicity) from the
 //!    temporal chain over the full undirected graph; every concept not reached
 //!    is collected. Protected classes are exempt ("protected classes survive"
-//!    contract); interactions are append-only and never collected.
+//!    contract); interactions are append-only and never collected. Measured
+//!    twice: on the post-step-1 graph (ranked before the score cut under the
+//!    cap), and again after the collections, so a concept reachable only
+//!    through a score-cut concept still goes in the same sweep.
 //! 4. **Index maintenance** — the inverted index (T2.6) is owner-side (P3
 //!    contract, `src/graph/mod.rs`), so `run(&mut Graph, …)` cannot reach it.
 //!    [`GcOutcome::concepts_collected`] + [`sync_index`] are the hook: the
@@ -355,13 +363,18 @@ pub struct GcOutcome {
     pub edges_removed: Vec<NodeId>,
     /// Steps 2+3: concept ids collected, together with their incident edges.
     pub concepts_collected: Vec<NodeId>,
-    /// Step 5: every concept id that survived this run.
+    /// Step 5: every concept id that survived this run (held-back candidates
+    /// included). Id-ascending.
     pub survivors: Vec<NodeId>,
-    /// Step 5: the tail of [`survivors`](GcOutcome::survivors) whose
+    /// Step 5: the part of [`survivors`](GcOutcome::survivors) whose
     /// `gc_survived += 1` this run **deferred** — the owner must drain it with
     /// [`drain_survivor_bumps`] on later cycles (CONC-6/XP-10). Empty when the
     /// survivor set fit in one chunk.
     pub survivors_pending: Vec<NodeId>,
+    /// Steps 2+3: the candidates the cap held back (issue #29), id-ascending.
+    /// They stay in the graph and are re-evaluated next sweep.
+    /// `deferred.len() == collections_deferred`.
+    pub deferred: Vec<NodeId>,
     /// Step 6: number of Canonical concepts after cleanup.
     pub canonical_count: usize,
     /// Step 6: `canonical_count > max_canonical_nodes` — recorded for T6.4's
@@ -435,10 +448,11 @@ pub fn run(graph: &mut Graph, params: GcParams) -> GcOutcome {
 
     // Step 2 — concept cleanup: orphans + sub-threshold, excluding protected.
     // Scored against post-step-1 state with the session's own weights (ALGO-4),
-    // over the live dimensions only while `access_count` is dead session-wide
-    // (ALGO-1), with GC's time-anchored recency (issue #29), and cut per
-    // concept type (ALGO-11). Logic and Constraint are exempt from the score
-    // cut, not from the orphan clause (issue #29).
+    // each concept's own frequency on top of the live dimensions (issue #29),
+    // GC's time-anchored recency (issue #29), and cut per concept type
+    // (ALGO-11). Logic and Constraint are exempt from the score cut, not from
+    // the orphan clause, and a Resource with dependents is spared it (issue
+    // #29).
     let ctx = crate::daemon::score::SessionContext::compute(graph);
     // Issue #29 operator decision: a Resource with dependents is spared the
     // score cut (see `resources_with_dependents`). Computed once, post-step-1.
@@ -466,20 +480,34 @@ pub fn run(graph: &mut Graph, params: GcParams) -> GcOutcome {
             below.push((score / bar, c.id));
         }
     }
-    // Under the cap, structural garbage (orphans) goes first, then the score
-    // cut's candidates furthest under their bar; ids break ties so the choice
-    // is deterministic.
+
+    // Step 3 — disconnected components, measured on the same post-step-1
+    // graph: a cycle-safe BFS from the temporal chain. An orphan is also
+    // unreachable; it is listed once, as an orphan.
+    let reachable = reachable_from_temporal_chain(graph);
+    let orphan_set: HashSet<NodeId> = orphans.iter().copied().collect();
+    let mut disconnected: Vec<NodeId> = graph
+        .concepts()
+        .map(|c| c.id)
+        .filter(|id| !reachable.contains(id) && !protected.contains(id) && !orphan_set.contains(id))
+        .collect();
+    let disconnected_set: HashSet<NodeId> = disconnected.iter().copied().collect();
+
+    // Under the cap, structural garbage goes first — orphans, then the other
+    // disconnected components — and the score cut's candidates last, furthest
+    // under their bar first. A concept both disconnected and under its bar is
+    // taken as disconnected. Ids break ties so the choice is deterministic.
     orphans.sort_by_key(|id| id.0);
+    disconnected.sort_by_key(|id| id.0);
+    below.retain(|(_, id)| !disconnected_set.contains(id));
     below.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1 .0.cmp(&b.1 .0)));
     let candidates: Vec<NodeId> = orphans
         .into_iter()
+        .chain(disconnected)
         .chain(below.into_iter().map(|(_, id)| id))
         .collect();
     let take = candidates.len().min(budget);
-    // Held back by the cap: counted once here, and kept out of step 3 (an
-    // orphan is also a disconnected component) so it is not counted twice.
-    let held_back: HashSet<NodeId> = candidates[take..].iter().copied().collect();
-    outcome.collections_deferred += held_back.len();
+    let mut held_back: Vec<NodeId> = candidates[take..].to_vec();
     for id in &candidates[..take] {
         if graph.remove_node(*id).is_ok() {
             outcome.concepts_collected.push(*id);
@@ -487,38 +515,28 @@ pub fn run(graph: &mut Graph, params: GcParams) -> GcOutcome {
         }
     }
 
-    // Step 3 — disconnected components: cycle-safe BFS from the temporal chain.
-    let mut reachable: HashSet<NodeId> = HashSet::new();
-    let mut stack: Vec<NodeId> = graph.temporal_chain().to_vec();
-    for &seed in &stack {
-        reachable.insert(seed);
-    }
-    while let Some(n) = stack.pop() {
-        for nb in graph.out_neighbors(n) {
-            if reachable.insert(nb) {
-                stack.push(nb);
-            }
-        }
-        for nb in graph.in_neighbors(n) {
-            if reachable.insert(nb) {
-                stack.push(nb);
-            }
-        }
-    }
-    let mut disconnected: Vec<NodeId> = graph
+    // Step 3, cascade — concepts the collections above cut off from the
+    // temporal chain (reachable only through a score-cut concept). Collected
+    // in the same sweep, as before the cap existed, with whatever budget is
+    // left; a candidate already held back above is not counted twice.
+    let reachable = reachable_from_temporal_chain(graph);
+    let already: HashSet<NodeId> = held_back.iter().copied().collect();
+    let mut cascade: Vec<NodeId> = graph
         .concepts()
         .map(|c| c.id)
-        .filter(|id| !reachable.contains(id) && !protected.contains(id) && !held_back.contains(id))
+        .filter(|id| !reachable.contains(id) && !protected.contains(id) && !already.contains(id))
         .collect();
-    disconnected.sort_by_key(|id| id.0);
-    let take = disconnected.len().min(budget);
-    outcome.collections_deferred += disconnected.len() - take;
-    for id in &disconnected[..take] {
+    cascade.sort_by_key(|id| id.0);
+    let take = cascade.len().min(budget);
+    held_back.extend_from_slice(&cascade[take..]);
+    for id in &cascade[..take] {
         if graph.remove_node(*id).is_ok() {
             outcome.concepts_collected.push(*id);
         }
     }
     outcome.concepts_collected.sort_by_key(|id| id.0);
+    held_back.sort_by_key(|id| id.0);
+    outcome.collections_deferred = held_back.len();
     if outcome.cap_bound() {
         outcome.warnings.push(format!(
             "GC collection cap bound: collected {} of {} candidates (cap {} = max({}, {:.0}% of {} \
@@ -533,16 +551,17 @@ pub fn run(graph: &mut Graph, params: GcParams) -> GcOutcome {
         ));
     }
 
-    // Step 5 — survivors: every remaining concept gets gc_survived += 1, but at
-    // most `max_survivor_bumps` of them here; the tail is deferred to later
-    // cycles (CONC-6/XP-10 — see `drain_survivor_bumps` for the convergence
-    // argument).
+    // Step 5 — survivors: every remaining concept gets gc_survived += 1. At
+    // most `max_survivor_bumps` land here; the tail is
+    // deferred to later cycles (CONC-6/XP-10 — see `drain_survivor_bumps` for
+    // the convergence argument).
     let mut survivors: Vec<NodeId> = graph.concepts().map(|c| c.id).collect();
     survivors.sort_by_key(|id| id.0);
     let split = survivors.len().min(params.max_survivor_bumps);
     graph.bump_gc_survived(&survivors[..split]);
     outcome.survivors_pending = survivors[split..].to_vec();
     outcome.survivors = survivors;
+    outcome.deferred = held_back;
 
     // Step 6 — canonical budget: record only; T6.4 demotes (never here).
     outcome.canonical_count = graph
@@ -571,6 +590,30 @@ pub fn run(graph: &mut Graph, params: GcParams) -> GcOutcome {
     // Step 7 — the epoch is bumped by the mutations above (see module docs).
     outcome.epoch_after = graph.epoch();
     outcome
+}
+
+/// Every node reachable from the temporal chain over the undirected graph —
+/// step 3's cycle-safe BFS (visited set, per the G6 binding note: never assume
+/// Hierarchical acyclicity).
+fn reachable_from_temporal_chain(graph: &Graph) -> HashSet<NodeId> {
+    let mut reachable: HashSet<NodeId> = HashSet::new();
+    let mut stack: Vec<NodeId> = graph.temporal_chain().to_vec();
+    for &seed in &stack {
+        reachable.insert(seed);
+    }
+    while let Some(n) = stack.pop() {
+        for nb in graph.out_neighbors(n) {
+            if reachable.insert(nb) {
+                stack.push(nb);
+            }
+        }
+        for nb in graph.in_neighbors(n) {
+            if reachable.insert(nb) {
+                stack.push(nb);
+            }
+        }
+    }
+    reachable
 }
 
 /// Apply up to `max` deferred survivor bumps, removing them from `pending`
@@ -2408,6 +2451,98 @@ mod tests {
         assert_eq!(third.concepts_collected, orphans[10..].to_vec());
         assert!(!third.cap_bound());
         assert!(!third.warnings.iter().any(|w| w.contains("collection cap")));
+    }
+
+    /// Issue #29 item 4: when the cap binds with orphans present, the orphans
+    /// are taken first and the score cut gets only what is left — weakest
+    /// first.
+    #[test]
+    fn the_cap_takes_orphans_before_score_cut_candidates() {
+        let mut g = hub_session(&[(20, ConceptType::Observation), (21, ConceptType::Resource)]);
+        let orphans: Vec<NodeId> = (30..33u64)
+            .map(|n| {
+                insert_isolated(
+                    &mut g,
+                    concept(n, 1, &format!("o{n}"), ConceptType::Entity),
+                    1,
+                )
+            })
+            .collect();
+        // Score-cut candidates are 13..16 (Entity anchors) and 20/21 under a
+        // bar of 5.0; the cap is 4: three orphans + the single weakest.
+        let params = GcParams {
+            min_concept_score: 5.0,
+            max_collect_fraction: 0.0,
+            min_collect_cap: 4,
+            ..aged_params()
+        };
+        let outcome = run(&mut g, params);
+        for o in &orphans {
+            assert!(outcome.concepts_collected.contains(o), "orphan {o:?} first");
+        }
+        assert_eq!(outcome.concepts_collected.len(), 4);
+        assert!(
+            outcome.concepts_collected.contains(&nid(20)),
+            "then the score cut, furthest under its bar first (the Observation)"
+        );
+        assert!(outcome.cap_bound());
+        assert_eq!(outcome.collections_deferred, outcome.deferred.len());
+        assert_eq!(outcome.deferred.len(), 5, "13, 14, 15, 16, 21");
+        for id in &outcome.deferred {
+            assert!(g.node(*id).is_some(), "held back, not collected");
+        }
+    }
+
+    /// Issue #29 item 4: disconnected components are structural garbage and go
+    /// before the score cut when the cap binds; an island concept that is
+    /// also under its bar is counted once, as disconnected.
+    #[test]
+    fn the_cap_takes_disconnected_components_before_score_cut_candidates() {
+        let mut g = hub_session(&[(20, ConceptType::Observation)]);
+        let a = insert_isolated(&mut g, concept(40, 1, "island a", ConceptType::Entity), 1);
+        let b = insert_isolated(&mut g, concept(41, 1, "island b", ConceptType::Entity), 1);
+        g.upsert_edge(edge(400, 40, 41, EdgeType::Dependency, 1.0, 0))
+            .unwrap();
+        let params = GcParams {
+            min_concept_score: 5.0,
+            max_collect_fraction: 0.0,
+            min_collect_cap: 2,
+            ..aged_params()
+        };
+        let outcome = run(&mut g, params);
+        assert_eq!(outcome.concepts_collected, vec![a, b]);
+        assert!(
+            g.node(nid(20)).is_some(),
+            "the score cut waits for the next sweep"
+        );
+        assert!(outcome.deferred.contains(&nid(20)));
+        assert!(!outcome.deferred.contains(&a) && !outcome.deferred.contains(&b));
+    }
+
+    /// Ordering structural garbage first must not lose the cascade: a concept
+    /// reachable from the chain only through a score-cut concept is still
+    /// collected in the same sweep, after it (uncapped), and counted once.
+    #[test]
+    fn a_component_cut_off_by_the_score_cut_goes_in_the_same_sweep() {
+        let mut g = hub_session(&[(20, ConceptType::Observation)]);
+        // 50 (Logic, exempt from the score cut) hangs only off leaf 20.
+        let tail = insert_isolated(&mut g, concept(50, 1, "rule", ConceptType::Logic), 1);
+        g.upsert_edge(edge(500, 20, 50, EdgeType::Dependency, 1.0, 0))
+            .unwrap();
+        let params = GcParams {
+            min_concept_score: 0.5,
+            ..aged_params()
+        };
+        let outcome = run(&mut g, params);
+        assert!(outcome.concepts_collected.contains(&nid(20)));
+        assert!(
+            outcome.concepts_collected.contains(&tail),
+            "cascade, same sweep"
+        );
+        assert!(!outcome.cap_bound());
+        let mut dedup = outcome.concepts_collected.clone();
+        dedup.dedup();
+        assert_eq!(dedup, outcome.concepts_collected, "each id collected once");
     }
 
     /// Under the cap the score cut's candidates go furthest-under-the-bar
