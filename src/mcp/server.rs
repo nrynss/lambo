@@ -5399,9 +5399,22 @@ mod tests {
     /// Issue #30 over the tool surface: a resolved inspect counts its focus
     /// (not the neighbourhood), a refused one counts nothing, and a recall
     /// counts exactly the hits its structured payload returned.
+    ///
+    /// Deterministic about who applies the counts: a one-hour daemon tick and
+    /// a settled daemon after the derive mean no cycle runs during the reads
+    /// (reads never wake it), the premise is asserted, and `close` is what
+    /// applies them. It used to race the 1 s default tick, so it caught a
+    /// broken close only when the tick happened to lose.
     #[tokio::test]
     async fn inspect_focus_and_recall_hits_are_counted_as_accesses() {
-        let s = server("mcp-issue-30").await;
+        let s = server_with_config(
+            "mcp-issue-30",
+            Config {
+                daemon_tick_interval: Duration::from_secs(3_600),
+                ..Config::default()
+            },
+        )
+        .await;
         call(
             &s,
             "lambo_derive",
@@ -5416,6 +5429,7 @@ mod tests {
             }),
         )
         .await;
+        s.mem.settle_daemon().await;
 
         // Exact focus, depth 2: the child is in the neighbourhood.
         let exact = call(
@@ -5451,7 +5465,9 @@ mod tests {
                 .collect();
         assert!(!returned.is_empty());
 
-        // `close` applies whatever the daemon had not yet.
+        // Premise: every count is still in the ledger, so `close` applies it.
+        assert!(s.mem.unapplied_accesses() > 0);
+        assert!(s.mem.graph().read().concepts().all(|c| c.access_count == 0));
         s.mem.close().await.expect("close");
         let g = s.mem.graph().read();
         for c in g.concepts() {

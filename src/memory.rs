@@ -2970,6 +2970,40 @@ impl Memory {
         self.simulate_lease_loss_to("another-writer@host#1");
     }
 
+    /// Issue #30 test hook: read accesses noted but not yet applied by the
+    /// daemon. Lets a test assert the premise "the daemon has NOT applied
+    /// these" right before a `close`, so the test exercises close's own apply
+    /// rather than racing the daemon. Test-only, gated like the hook above.
+    #[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
+    pub(crate) fn unapplied_accesses(&self) -> usize {
+        self.accesses.pending()
+    }
+
+    /// Issue #30 test hook: wait until the daemon has rescored the current
+    /// epoch and has no cycle left to run (a wake that arrived mid-cycle leaves
+    /// one stored permit, so "settled" means the cycle count stopped moving).
+    /// With a long `daemon_tick_interval` nothing runs a cycle after this
+    /// until something wakes the daemon again — and reads never do.
+    #[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
+    pub(crate) async fn settle_daemon(&self) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let cycles = self.daemon.cycles();
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                if self.daemon.cycles() == cycles
+                    && self.daemon.scores().epoch == self.graph.read().epoch()
+                {
+                    return;
+                }
+                if self.daemon.scores().epoch != self.graph.read().epoch() {
+                    self.daemon.wake();
+                }
+            }
+        })
+        .await
+        .expect("the daemon settles within 10 s");
+    }
+
     /// [`Memory::simulate_lease_loss`] naming the writer that took the session,
     /// for the JE2E-4 wind-down tests that assert the exit line names it.
     #[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
@@ -7623,17 +7657,44 @@ mod tests {
     /// `close` applies whatever the daemon had not, in the final drain, and
     /// the counts come back on the next attach with the epoch where the last
     /// real write left it.
+    ///
+    /// Deterministic about *who* applies: a one-hour daemon tick and a settled
+    /// score table mean no cycle runs between the recalls and `close` (reads
+    /// never wake the daemon), and the premise is asserted right before close.
+    /// Without close's own apply the reattached count is 0.
     #[tokio::test]
     async fn accesses_survive_close_and_reattach_without_moving_the_epoch() {
         let store: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
-        let mem = memory_on(store.clone(), "issue-30-restart").await;
+        let slow_daemon = || Config {
+            daemon_tick_interval: Duration::from_secs(3_600),
+            ..Config::default()
+        };
+        let mem = Memory::builder()
+            .session("issue-30-restart")
+            .agent("agent-a")
+            .config(slow_daemon())
+            .flush_interval(Duration::from_secs(3_600))
+            .store(store.clone())
+            .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
+            .embedding_contract(contract("fixture", 1024))
+            .build()
+            .await
+            .expect("build");
         mem.derive(&[("user schema", ConceptType::Entity)], &ParentOf::none())
             .await
             .unwrap();
+        mem.settle_daemon().await;
         let epoch = mem.stats().epoch;
+        let cycles = mem.daemon.cycles();
         mem.recall(query("user schema")).await.unwrap();
         mem.recall(query("user schema")).await.unwrap();
-        // No settle: close itself must apply what the daemon has not.
+        assert_eq!(
+            mem.unapplied_accesses(),
+            1,
+            "premise: the daemon has not applied the recalls; close must"
+        );
+        assert_eq!(mem.daemon.cycles(), cycles, "premise: no cycle ran");
+        assert_eq!(access_of(&mem, "user schema"), (0, None));
         mem.close().await.unwrap();
 
         let again = memory_on(store, "issue-30-restart").await;
