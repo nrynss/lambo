@@ -275,6 +275,30 @@ impl Config {
         // nothing left to refuse here.
         Ok(())
     }
+
+    /// Advisory problems with a valid config: settings that are accepted but
+    /// cannot do what they say. The resolve path logs each at WARN
+    /// (`resolve::resolve_backends`); nothing is refused.
+    ///
+    /// * `gc_idle_floor >= gc_interval` (issue #29): the time trigger needs at
+    ///   least `gc_idle_floor` mutations since the last sweep, and the
+    ///   mutation trigger fires at `gc_interval` of them, so the mutation
+    ///   trigger always wins and `gc_max_interval` never fires. Equality is
+    ///   included: at exactly `gc_interval` mutations the mutation trigger is
+    ///   checked first. Not an error, because sweeping on mutations alone is a
+    ///   legitimate (pre-#29) configuration — only the time bound is dead.
+    pub fn warnings(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if self.gc_idle_floor >= self.gc_interval {
+            out.push(format!(
+                "gc_idle_floor ({}) >= gc_interval ({}): the gc_max_interval time trigger can \
+                 never fire (the mutation trigger always reaches its count first); lower \
+                 [daemon] gc_idle_floor below gc_interval to enable timed sweeps",
+                self.gc_idle_floor, self.gc_interval
+            ));
+        }
+        out
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -705,6 +729,37 @@ mod tests {
         assert_eq!(f.store.kind, StoreKind::Memory);
         assert_eq!(f.embedder.kind, EmbedderKind::BgeM3);
         assert_eq!(f.embedder.dim, 1024);
+    }
+
+    /// Issue #29 item 8: a floor at or above `gc_interval` makes the time
+    /// trigger unreachable — warned about, not refused; the defaults and a
+    /// floor below the interval are silent.
+    #[test]
+    fn an_idle_floor_at_or_above_gc_interval_warns_that_timed_sweeps_are_dead() {
+        assert!(Config::default().warnings().is_empty());
+        for (floor, interval, warns) in [(100, 101, false), (100, 100, true), (500, 100, true)] {
+            let c = Config {
+                gc_idle_floor: floor,
+                gc_interval: interval,
+                ..Config::default()
+            };
+            c.validate().expect("still a valid config");
+            let w = c.warnings();
+            assert_eq!(
+                !w.is_empty(),
+                warns,
+                "floor {floor} interval {interval}: {w:?}"
+            );
+            if warns {
+                assert!(w[0].contains("gc_max_interval") && w[0].contains("never fire"));
+            }
+        }
+        // Through the file, the way `resolve_backends` builds it.
+        let file =
+            LamboFile::from_toml_str("[daemon]\ngc_interval = 50\ngc_idle_floor = 80\n").unwrap();
+        let mut cfg = Config::default();
+        file.daemon.apply_to(&mut cfg);
+        assert_eq!(cfg.warnings().len(), 1);
     }
 
     /// Wire-visible `[daemon]` field names, parsed from real TOML text, must
