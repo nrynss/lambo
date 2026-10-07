@@ -31,10 +31,12 @@
 //!    Four protections (issue #29) keep the score cut from deleting reasoning
 //!    by session age once sweeps run daily:
 //!
-//!    * **Logic and Constraint are exempt from the score cut**
-//!      ([`exempt_from_score_cut`]). They are still collected as orphans or
-//!      disconnected components — those clauses are structural, not
-//!      age-based.
+//!    * **Logic, Constraint and Observation are exempt from the score cut**
+//!      ([`ConceptType::exempt_from_gc_score_cut`]; Observation joined the
+//!      list by operator decision, 2026-10-07). They are still collected as
+//!      orphans or disconnected components — those clauses are structural, not
+//!      age-based. The score cut therefore only removes Entities and
+//!      Resources, and a Resource with dependents is spared it too.
 //!    * **A Resource with dependents is spared the score cut**
 //!      ([`resources_with_dependents`], operator decision): another concept has
 //!      a `Dependency`/`Causal`/`Hierarchical` edge into it, or its blast radius
@@ -145,7 +147,9 @@ pub const GC_EDGE_TTL: ChronoDuration = ChronoDuration::seconds(3600);
 /// calibrated against, whatever else has been read) and the comparison is against
 /// `MIN_CONCEPT_SCORE / ConceptType::eviction_resistance()` — the spec §5
 /// resistances (Constraint 1.5 … Observation 0.7) scale the bar per type
-/// instead of every type facing the identical cut (ALGO-11). Dividing the
+/// instead of every type facing the identical cut (ALGO-11); the types
+/// [`ConceptType::exempt_from_gc_score_cut`] names (Logic, Constraint,
+/// Observation) never reach the bar at all. Dividing the
 /// threshold by the resistance is algebraically the same as multiplying the
 /// score by it; the threshold form is used so the *bar* is what varies and the
 /// score stays comparable to recall's.
@@ -166,8 +170,8 @@ pub const GC_EDGE_TTL: ChronoDuration = ChronoDuration::seconds(3600);
 /// Entity bar is `0.12 / 1.2 = 0.10`, ~50% below that floor, so every healthy
 /// mid-session concept survives with margin while the clause still bites where
 /// it should: a concept whose recency **and** density have both decayed to ~0
-/// scores at most its type modifier (Entity +0.05, Observation −0.10 → 0.0),
-/// which is below every type's bar. Orphans and disconnected components are
+/// scores at most its type modifier (Entity +0.05, Resource 0.0), which is
+/// below both bars that still apply (Entity 0.10, Resource 0.12). Orphans and disconnected components are
 /// collected by their own clauses regardless of score, so the score cut is
 /// deliberately the conservative one. Reading a concept only adds headroom:
 /// its frequency term is added on top of this scale, never traded for it
@@ -467,7 +471,7 @@ pub fn run(graph: &mut Graph, params: GcParams) -> GcOutcome {
     // Scored against post-step-1 state with the session's own weights (ALGO-4),
     // each concept's own frequency on top of the live dimensions (issue #29),
     // GC's time-anchored recency (issue #29), and cut per concept type
-    // (ALGO-11). Logic and Constraint are exempt from the score cut, not from
+    // (ALGO-11). Logic, Constraint and Observation are exempt from the score cut, not from
     // the orphan clause, and a Resource with dependents is spared it (issue
     // #29).
     let ctx = crate::daemon::score::SessionContext::compute(graph);
@@ -484,7 +488,7 @@ pub fn run(graph: &mut Graph, params: GcParams) -> GcOutcome {
             orphans.push(c.id);
             continue;
         }
-        if exempt_from_score_cut(c.concept_type) {
+        if c.concept_type.exempt_from_gc_score_cut() {
             continue;
         }
         let score = eviction_score(graph, c, &ctx, params);
@@ -731,22 +735,6 @@ pub fn collection_cap(unprotected: usize, params: GcParams) -> usize {
     by_fraction.max(params.min_collect_cap)
 }
 
-/// Concept types the step-2 score cut never collects (issue #29 option (a)):
-/// `Logic` and `Constraint`, the types that carry an agent's reasoning —
-/// decisions, rulings, invariants. Orphan and disconnected-component cleanup
-/// still apply to them.
-///
-/// Chosen over "below the bar on two consecutive sweeps": with no new writes a
-/// concept's score does not change between sweeps, so a second sub-threshold
-/// verdict is the same verdict a day later — it delays the loss by one sweep
-/// instead of preventing it, and needs a persisted per-concept counter to do
-/// even that. The #29 dry run collected 42 Logic concepts on the first sweep,
-/// including early operator rulings, purely for being old and sparsely
-/// connected; nothing a later sweep learns changes that.
-pub fn exempt_from_score_cut(ty: ConceptType) -> bool {
-    matches!(ty, ConceptType::Logic | ConceptType::Constraint)
-}
-
 /// Resources the step-2 score cut must not collect because other concepts
 /// depend on them (issue #29 operator decision, 2026-10-07).
 ///
@@ -835,8 +823,10 @@ pub fn eviction_recency(c: &Concept, now: DateTime<Utc>, window: ChronoDuration)
 /// The step-2 bar for one concept type: [`MIN_CONCEPT_SCORE`] divided by the
 /// spec §5 [`ConceptType::eviction_resistance`] (ALGO-11).
 ///
-/// A Constraint (1.5) faces a bar a third lower than a Resource (1.0); an
-/// Observation (0.7) faces one ~43% higher. A non-positive or non-finite
+/// An Entity (1.2) faces a bar a sixth lower than a Resource (1.0). The
+/// exempt types (Logic, Constraint, Observation) never get here; their
+/// resistances still scale Solo promotion ([`crate::canon::policy`]). A
+/// non-positive or non-finite
 /// resistance would invert or poison the comparison, so it falls back to the
 /// unscaled threshold (the `const fn` cannot produce one today — this is a
 /// guard against a future table edit, not a live branch).
@@ -1177,12 +1167,13 @@ mod tests {
 
         // Orphan: no edges at all -> step 2, not protected.
         let orphan = insert_isolated(&mut g, concept(10, 1, "orphan", ConceptType::Entity), 1);
-        // Sub-threshold (and not an orphan): an Observation whose only edge is
+        // Sub-threshold (and not an orphan): a Resource whose only edge is
         // its Derives provenance — zero recency, minimum density (1 of the
-        // hub's 4), and the Observation modifier (−0.10) against the highest
-        // per-type bar in the table (resistance 0.7 ⇒ 0.12/0.7 = 0.171).
+        // hub's 4), no type bonus, against the 0.12 bar (resistance 1.0). It
+        // has no structural dependents, so the dependents rule does not spare
+        // it. (An Observation is no longer in the score cut at all.)
         let low_id = nid(11);
-        g.insert_concept(concept(11, 1, "low value", ConceptType::Observation), iid)
+        g.insert_concept(concept(11, 1, "low value", ConceptType::Resource), iid)
             .unwrap();
         // Protected: Venerable, isolated -> must survive both step 2 and 3.
         let protected = insert_isolated(
@@ -1197,7 +1188,7 @@ mod tests {
             CanonizationStatus::Venerable,
         ))
         .unwrap();
-        // A hub (13) plus three spokes: max incident = 4, so the Observation's
+        // A hub (13) plus three spokes: max incident = 4, so the Resource's
         // density is 1/4. All four must survive.
         for id in [13u64, 14, 15, 16] {
             g.insert_concept(
@@ -1211,21 +1202,40 @@ mod tests {
                 .unwrap();
         }
 
-        // Sanity: the Observation really is sub-threshold under the cut GC
+        // Sanity: the Resource really is sub-threshold under the cut GC
         // applies — live-dimension score vs. its own type's bar (ALGO-1/11).
         // Aged past the recency window: GC's recency is time-anchored (#29).
-        let params = aged_params();
+        // A Resource carries no type modifier, so against the default 0.12 bar
+        // this fixture's leaf (density 1/4, derived by half the interactions)
+        // is out of the cut's reach; 0.3 sits above the leaf's score and below
+        // the Entity anchors' own bar (0.3 / 1.2 = 0.25), asserted below.
+        let params = GcParams {
+            min_concept_score: 0.3,
+            ..aged_params()
+        };
         let ctx = crate::daemon::score::SessionContext::compute(&g);
         let low = match g.node(low_id).unwrap() {
             Node::Concept(c) => c,
             _ => unreachable!(),
         };
         let low_score = eviction_score(&g, low, &ctx, params);
-        let low_bar = eviction_threshold(params.min_concept_score, ConceptType::Observation);
+        let low_bar = eviction_threshold(params.min_concept_score, ConceptType::Resource);
         assert!(
             low_score < low_bar,
-            "test premise: score {low_score} must be under the Observation bar {low_bar}"
+            "test premise: score {low_score} must be under the Resource bar {low_bar}"
         );
+        for id in [13u64, 14, 15, 16] {
+            let anchor = match g.node(nid(id)).unwrap() {
+                Node::Concept(c) => c,
+                _ => unreachable!(),
+            };
+            let bar = eviction_threshold(params.min_concept_score, ConceptType::Entity);
+            let score = eviction_score(&g, anchor, &ctx, params);
+            assert!(
+                score >= bar,
+                "test premise: anchor {id} score {score} must clear its bar {bar}"
+            );
+        }
 
         let outcome = run(&mut g, params);
         assert_eq!(outcome.concepts_collected, vec![nid(10), nid(11)]);
@@ -1324,7 +1334,7 @@ mod tests {
     ///
     /// (Before issue #29 this pinned Entity against Logic, which share a
     /// modifier; Logic is now exempt from the score cut, see
-    /// `logic_and_constraint_are_exempt_from_the_score_cut`.)
+    /// `logic_constraint_and_observation_are_exempt_from_the_score_cut`.)
     #[test]
     fn eviction_resistance_discriminates_at_the_threshold_boundary() {
         let mut g = Graph::new(sid());
@@ -1458,9 +1468,9 @@ mod tests {
         let i1 = interaction(1, None);
         let iid = i1.id;
         g.insert_interaction(i1).unwrap();
-        // An Observation with only its Derives edge in a session with a hub —
+        // A Resource with only its Derives edge in a session with a hub —
         // dead under any sane weighting.
-        g.insert_concept(concept(11, 1, "low value", ConceptType::Observation), iid)
+        g.insert_concept(concept(11, 1, "low value", ConceptType::Resource), iid)
             .unwrap();
         for id in [13u64, 14, 15, 16] {
             g.insert_concept(
@@ -1483,6 +1493,9 @@ mod tests {
                     session_activity: -1.0,
                     density: 0.35,
                 },
+                // Every concept is far under this bar, so only a NaN composite
+                // (`NaN < bar` is false) could keep the leaf.
+                min_concept_score: 5.0,
                 ..default_params()
             },
         );
@@ -2080,18 +2093,22 @@ mod tests {
         g
     }
 
-    /// Issue #29 option (a): Logic and Constraint are exempt from the score
-    /// cut. With the same structure and zero recency, an Observation leaf is
-    /// collected and a Logic leaf with the bar raised far above its score is
-    /// not. Pre-fix the Logic leaf went with it (the #29 dry run collected 42
-    /// Logic concepts — early operator rulings among them — on one sweep).
+    /// Issue #29 option (a), extended to Observation by operator decision
+    /// (2026-10-07): Logic, Constraint and Observation are exempt from the
+    /// score cut. With the same structure and zero recency, an Entity and an
+    /// isolated Resource leaf are collected and the exempt types are not, with
+    /// the bar raised far above every score. Pre-fix the Logic leaf went with
+    /// them (the #29 dry run collected 42 Logic concepts — early operator
+    /// rulings among them — on one sweep) and Observations were the first
+    /// victims (324 of 467).
     #[test]
-    fn logic_and_constraint_are_exempt_from_the_score_cut() {
+    fn logic_constraint_and_observation_are_exempt_from_the_score_cut() {
         let mut g = hub_session(&[
             (20, ConceptType::Observation),
             (21, ConceptType::Logic),
             (22, ConceptType::Constraint),
             (23, ConceptType::Resource),
+            (24, ConceptType::Entity),
         ]);
         // A bar so high every leaf is far under it, whatever its type.
         let params = GcParams {
@@ -2099,24 +2116,23 @@ mod tests {
             ..aged_params()
         };
         let outcome = run(&mut g, params);
-        assert!(outcome.concepts_collected.contains(&nid(20)));
         assert!(outcome.concepts_collected.contains(&nid(23)));
-        assert!(
-            g.node(nid(21)).is_some(),
-            "Logic is exempt from the score cut"
-        );
-        assert!(
-            g.node(nid(22)).is_some(),
-            "Constraint is exempt from the score cut"
-        );
-        assert!(exempt_from_score_cut(ConceptType::Logic));
-        assert!(exempt_from_score_cut(ConceptType::Constraint));
+        assert!(outcome.concepts_collected.contains(&nid(24)));
+        for (id, ty) in [(20u64, "Observation"), (21, "Logic"), (22, "Constraint")] {
+            assert!(
+                g.node(nid(id)).is_some(),
+                "{ty} is exempt from the score cut"
+            );
+        }
         for ty in [
-            ConceptType::Entity,
-            ConceptType::Resource,
+            ConceptType::Logic,
+            ConceptType::Constraint,
             ConceptType::Observation,
         ] {
-            assert!(!exempt_from_score_cut(ty), "{ty:?} stays under the cut");
+            assert!(ty.exempt_from_gc_score_cut(), "{ty:?} is exempt");
+        }
+        for ty in [ConceptType::Entity, ConceptType::Resource] {
+            assert!(!ty.exempt_from_gc_score_cut(), "{ty:?} stays under the cut");
         }
     }
 
@@ -2210,8 +2226,8 @@ mod tests {
     #[test]
     fn an_access_on_another_concept_never_lowers_an_unread_concepts_gc_score() {
         let leaves = [
-            (20, ConceptType::Observation),
-            (21, ConceptType::Resource),
+            (20, ConceptType::Resource),
+            (21, ConceptType::Entity),
             (22, ConceptType::Entity),
         ];
         let unread = hub_session(&leaves);
@@ -2248,10 +2264,10 @@ mod tests {
         // End to end: a bar between the leaves' (unread) scores and the
         // full-composite version of them. The old session-wide switch put the
         // leaves under it the moment the hub was read; now nothing changes.
-        let observation_bar_scale =
-            |id: u64| score_in(&unread, id) * ConceptType::Observation.eviction_resistance();
+        let resource_bar_scale =
+            |id: u64| score_in(&unread, id) * ConceptType::Resource.eviction_resistance();
         let params_bar = GcParams {
-            min_concept_score: observation_bar_scale(20) * 0.95,
+            min_concept_score: resource_bar_scale(20) * 0.95,
             ..params
         };
         let mut a = unread.clone();
@@ -2336,8 +2352,20 @@ mod tests {
         let b = insert_isolated(&mut g, concept(22, 1, "island b", ConceptType::Logic), 1);
         g.upsert_edge(edge(100, 21, 22, EdgeType::Dependency, 1.0, 0))
             .unwrap();
+        let note = insert_isolated(
+            &mut g,
+            concept(23, 1, "lone note", ConceptType::Observation),
+            1,
+        );
+        let c = insert_isolated(
+            &mut g,
+            concept(24, 1, "island c", ConceptType::Observation),
+            1,
+        );
+        g.upsert_edge(edge(101, 24, 21, EdgeType::Dependency, 1.0, 0))
+            .unwrap();
         let outcome = run(&mut g, default_params());
-        assert_eq!(outcome.concepts_collected, vec![orphan, a, b]);
+        assert_eq!(outcome.concepts_collected, vec![orphan, a, b, note, c]);
     }
 
     /// Issue #29: GC's eviction recency is time since last touch, not the
@@ -2517,7 +2545,7 @@ mod tests {
     /// every real survivor takes its bump.
     #[test]
     fn the_cap_takes_orphans_before_score_cut_candidates() {
-        let mut g = hub_session(&[(20, ConceptType::Observation), (21, ConceptType::Resource)]);
+        let mut g = hub_session(&[(20, ConceptType::Entity), (21, ConceptType::Resource)]);
         let orphans: Vec<NodeId> = (30..33u64)
             .map(|n| {
                 insert_isolated(
@@ -2527,8 +2555,9 @@ mod tests {
                 )
             })
             .collect();
-        // Score-cut candidates are 13..16 (Entity anchors) and 20/21 under a
-        // bar of 5.0; the cap is 4: three orphans + the single weakest.
+        // Score-cut candidates are 13..16 and 20 (Entities) and 21 (an
+        // isolated Resource) under a bar of 5.0; the cap is 4: three orphans
+        // + the single weakest.
         let params = GcParams {
             min_concept_score: 5.0,
             max_collect_fraction: 0.0,
@@ -2541,12 +2570,12 @@ mod tests {
         }
         assert_eq!(outcome.concepts_collected.len(), 4);
         assert!(
-            outcome.concepts_collected.contains(&nid(20)),
-            "then the score cut, furthest under its bar first (the Observation)"
+            outcome.concepts_collected.contains(&nid(21)),
+            "then the score cut, furthest under its bar first (the Resource)"
         );
         assert!(outcome.cap_bound());
         assert_eq!(outcome.collections_deferred, outcome.deferred.len());
-        assert_eq!(outcome.deferred.len(), 5, "13, 14, 15, 16, 21");
+        assert_eq!(outcome.deferred.len(), 5, "13, 14, 15, 16, 20");
         for id in &outcome.deferred {
             let c = match g.node(*id) {
                 Some(Node::Concept(c)) => c,
@@ -2572,7 +2601,7 @@ mod tests {
     /// also under its bar is counted once, as disconnected.
     #[test]
     fn the_cap_takes_disconnected_components_before_score_cut_candidates() {
-        let mut g = hub_session(&[(20, ConceptType::Observation)]);
+        let mut g = hub_session(&[(20, ConceptType::Resource)]);
         let a = insert_isolated(&mut g, concept(40, 1, "island a", ConceptType::Entity), 1);
         let b = insert_isolated(&mut g, concept(41, 1, "island b", ConceptType::Entity), 1);
         g.upsert_edge(edge(400, 40, 41, EdgeType::Dependency, 1.0, 0))
@@ -2598,7 +2627,8 @@ mod tests {
     /// collected in the same sweep, after it (uncapped), and counted once.
     #[test]
     fn a_component_cut_off_by_the_score_cut_goes_in_the_same_sweep() {
-        let mut g = hub_session(&[(20, ConceptType::Observation)]);
+        // An Entity: a Resource with a dependent (50) would be spared the cut.
+        let mut g = hub_session(&[(20, ConceptType::Entity)]);
         // 50 (Logic, exempt from the score cut) hangs only off leaf 20.
         let tail = insert_isolated(&mut g, concept(50, 1, "rule", ConceptType::Logic), 1);
         g.upsert_edge(edge(500, 20, 50, EdgeType::Dependency, 1.0, 0))
@@ -2662,17 +2692,19 @@ mod tests {
     /// first.
     #[test]
     fn the_cap_takes_the_weakest_score_candidates_first() {
-        let mut g = hub_session(&[(20, ConceptType::Observation), (21, ConceptType::Resource)]);
+        // The Entity has the lower id, so a cap that took candidates in id
+        // order would take it; the ratio order takes the Resource.
+        let mut g = hub_session(&[(20, ConceptType::Entity), (21, ConceptType::Resource)]);
         let params = GcParams {
             min_concept_score: 5.0,
             max_collect_fraction: 0.0,
             min_collect_cap: 1,
             ..aged_params()
         };
-        // Observation: lower score (modifier −0.10) against a higher bar
-        // (resistance 0.7) — the smaller score/bar ratio.
+        // Resource: lower score (no +0.05 Entity modifier) against a higher
+        // bar (resistance 1.0 against 1.2) — the smaller score/bar ratio.
         let outcome = run(&mut g, params);
-        assert_eq!(outcome.concepts_collected, vec![nid(20)]);
+        assert_eq!(outcome.concepts_collected, vec![nid(21)]);
         assert!(outcome.cap_bound());
     }
 

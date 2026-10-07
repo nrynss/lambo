@@ -131,12 +131,16 @@ pub enum ConceptType {
     Constraint,
     /// An artifact an agent produced or touched.
     Resource,
-    /// Something an agent noticed. The weakest kind, and the first evicted.
+    /// Something an agent noticed. The weakest kind: GC's score cut spares it
+    /// like Logic and Constraint (it still goes as an orphan or island), and
+    /// it is the only kind that can later be demoted.
     Observation,
 }
 
 impl ConceptType {
-    /// Relative resistance to GC eviction (higher = stickier). From v0.6.0 design.
+    /// Relative resistance to GC eviction (higher = stickier). From v0.6.0
+    /// design. Scales GC's step-2 bar for the types still under the score cut
+    /// and Solo promotion's score; see [`Self::exempt_from_gc_score_cut`].
     pub const fn eviction_resistance(self) -> f64 {
         match self {
             Self::Constraint => 1.5,
@@ -144,6 +148,21 @@ impl ConceptType {
             Self::Logic => 1.1,
             Self::Resource => 1.0,
             Self::Observation => 0.7,
+        }
+    }
+
+    /// Whether GC's step-2 score cut never collects this type (issue #29).
+    ///
+    /// `Logic`, `Constraint` and `Observation` are exempt: they carry what an
+    /// agent decided, required or noticed, and the score cut ranks by
+    /// structure and age, neither of which says a note has stopped mattering.
+    /// They are still collected as orphans and as disconnected components,
+    /// which are structural clauses. Exhaustive on purpose: a new type has to
+    /// state which side it is on.
+    pub const fn exempt_from_gc_score_cut(self) -> bool {
+        match self {
+            Self::Logic | Self::Constraint | Self::Observation => true,
+            Self::Entity | Self::Resource => false,
         }
     }
 
