@@ -213,14 +213,6 @@ fn schema_vector_dim(ddl: &str) -> Option<usize> {
     rest[..end].trim().parse().ok()
 }
 
-/// The Cockroach instantiation of [`DialectSql`], for the SQL-shape tests: the
-/// statements below are exactly what `PgStore<CockroachDialect>` issues, so the
-/// tests still read the real text rather than a re-spelled copy of it.
-#[cfg(test)]
-fn crdb_sql() -> DialectSql {
-    DialectSql::for_dialect::<CockroachDialect>()
-}
-
 /// The durable CockroachDB adapter, under the name every caller already uses.
 ///
 /// The type is `PgStore<CockroachDialect>`: `CockroachStore::new(cfg)` and
