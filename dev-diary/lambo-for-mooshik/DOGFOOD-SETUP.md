@@ -76,6 +76,69 @@ but binds a network service for no real saving; the model is 605 MB.)
 
 ## 2. The pinned binary (per machine, per arch — binaries do not travel)
 
+Two paths, by rig. **The Metal rig installs a published release** (§2a): from v0.3.0 on,
+every release carries `lambo-<version>-macos-arm64-metal`, built by `release.yml` with
+`ship,embed-candle-metal` (a superset of the rig's `store-sqlite,embed-candle-metal,embed-bge`)
+and with `LAMBO_GIT_SHA` set to the release commit. **The CUDA rig builds from source**
+(§2b) at the release tag: no CUDA asset is published, because no release runner has the
+CUDA toolkit. §2b is also the path for running an unreleased commit on either rig.
+
+### 2a. Metal rig: install from a release
+
+Fetch the release's `install.sh` to a file (read it if you like), then let it pick the
+Metal asset and verify the checksum. It installs as `lambo` into a staging directory; the
+copy to `lambo-<version>` is the same isolation rule as §2b's copy out of `target/`.
+
+```sh
+V=0.3.0
+curl -fsSL -o /tmp/lambo-install.sh \
+  "https://github.com/nrynss/lambo/releases/download/v$V/install.sh"
+STAGE=$(mktemp -d)
+LAMBO_VERSION=$V LAMBO_FLAVOR=metal LAMBO_INSTALL_DIR="$STAGE" sh /tmp/lambo-install.sh
+mkdir -p ~/lambo-dogfood/bin
+mv "$STAGE/lambo" ~/lambo-dogfood/bin/lambo-$V && rmdir "$STAGE"
+~/lambo-dogfood/bin/lambo-$V --version   # must print $V
+```
+
+`LAMBO_DRY_RUN=1` on the `sh` line prints the asset URL without downloading anything,
+which is a cheap check that the flavor resolved to `...-macos-arm64-metal`.
+
+Then swap it in. The writer is stopped for the whole window, so the provision never
+races a live serve:
+
+```sh
+# 1. stop the supervised writer (graceful: the lease is released, no 45s TTL wait)
+launchctl bootout gui/$(id -u)/dev.lambo.dogfood
+
+# 2. bring the store's schema up to the new binary (idempotent; v0.3.0 needs it for
+#    #17's mutation_epoch and #29's sessions.last_gc_epoch / last_gc_at)
+~/lambo-dogfood/bin/lambo-$V provision --config ~/lambo-dogfood/lambo.toml
+#    run any repair verbs the release notes call for here, while still stopped
+
+# 3. point the unit at the new binary
+sed -i '' "s#/lambo-dogfood/bin/lambo-[^<]*<#/lambo-dogfood/bin/lambo-$V<#" \
+  ~/Library/LaunchAgents/dev.lambo.dogfood.plist
+plutil -lint ~/Library/LaunchAgents/dev.lambo.dogfood.plist
+grep -o 'lambo-dogfood/bin/lambo-[^<]*' ~/Library/LaunchAgents/dev.lambo.dogfood.plist
+
+# 4. start it
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.lambo.dogfood.plist
+
+# 5. verify
+sqlite3 ~/lambo-dogfood/lambo-dev.db "select holder from session_leases;"   # http-shared-writer
+```
+
+Then confirm the binary that is actually serving, not the file on disk. Make an MCP
+`lambo_stats` call (the writer answers, the store is attached), then wait for the next
+ledger heartbeat (≤ 300 s): it is the line that carries the serving binary's identity,
+`version` = `$V` and a `git_sha` that is the release commit (§6's `jq` line). A `git_sha`
+of `unknown` means the asset predates the workflow setting `LAMBO_GIT_SHA`; a version
+other than `$V` means the plist still names the old binary.
+Keep the previous `lambo-<old>` in `bin/` until the new one has served for a while:
+rolling back is step 3 with the old name.
+
+### 2b. Build from source (CUDA rig; any unreleased commit)
+
 ```sh
 cd <lambo checkout> && git checkout lambo-for-mooshik   # pin: see DOGFOOD.md, currently bbef4b3
 LAMBO_GIT_SHA=$(git rev-parse --short HEAD) \
