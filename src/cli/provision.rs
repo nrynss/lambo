@@ -433,8 +433,6 @@ mod marker_tests {
             dialled.contains(DECOY),
             "with no pushed DSN the script must still read .env, got: {dialled}"
         );
-
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -478,6 +476,5 @@ mod marker_tests {
             find_provision_script_from(&nested, 3).is_some(),
             "3 ancestors reach the marker from a/b/c"
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 }

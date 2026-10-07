@@ -73,9 +73,8 @@ fn scratch(tag: &str) -> Scratch {
 impl Drop for Scratch {
     fn drop(&mut self) {
         // Panic-safe: the unique /tmp scratch dir (parity.sqlite + WAL/shm) is
-        // owned by this guard, so an assertion failure mid-test can't leak it.
-        // `remove_dir_all` is idempotent — a prior `cleanup(&s)` already removed
-        // the dir, and this re-run simply no-ops on the missing path.
+        // owned by this guard, so neither an assertion failure mid-test nor a
+        // normal return leaks it.
         let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
@@ -135,10 +134,6 @@ fn sigterm(pid: u32) {
         .arg("-TERM")
         .arg(pid.to_string())
         .status();
-}
-
-fn cleanup(s: &Scratch) {
-    let _ = std::fs::remove_dir_all(&s.dir);
 }
 
 // ---------------------------------------------------------------------------
@@ -440,8 +435,6 @@ fn demo_outcome_meets_spec_13_and_is_identical_across_two_runs() {
         "two binary runs of the same scenario must produce byte-identical OUTCOME blocks\n\
          ---- run 1 ----\n{o1}\n---- run 2 ----\n{o2}"
     );
-
-    cleanup(&s);
 }
 
 // ---------------------------------------------------------------------------
@@ -524,7 +517,6 @@ fn derive_writes_then_a_second_writer_fails_closed_under_serve() {
     }
 
     mcp.shutdown();
-    cleanup(&s);
 }
 
 // ---------------------------------------------------------------------------
@@ -620,10 +612,9 @@ fn serve_web_serves_live_data_over_http_and_stays_read_only() {
         pulse.body
     );
 
-    // Clean shutdown: SIGTERM + reap via the guard (drives the graceful drain),
-    // then remove the scratch dir.
+    // Clean shutdown: SIGTERM + reap via the guard (drives the graceful drain);
+    // the scratch guard then removes the dir.
     drop(_guard);
-    cleanup(&s);
 }
 
 // ---------------------------------------------------------------------------
@@ -694,5 +685,4 @@ fn mcp_stdio_publishes_exactly_seven_tools_and_refuses_a_client_timestamp() {
     );
 
     mcp.shutdown();
-    cleanup(&s);
 }

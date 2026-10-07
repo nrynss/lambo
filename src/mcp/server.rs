@@ -5901,7 +5901,6 @@ mod tests {
 
         ledger.shutdown();
         s.mem.close().await.expect("close");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// **I1 acceptance (DOGFOOD metrics 4 and 5).** A recall line carries the
@@ -6043,7 +6042,6 @@ mod tests {
 
         ledger.shutdown();
         s.mem.close().await.expect("close");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// **I-R1-1.** The five set-level flags are not all budget-blind, because
@@ -6162,7 +6160,6 @@ mod tests {
 
         ledger.shutdown();
         s.mem.close().await.expect("close");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// **I1 acceptance, relocated by J3.** The metric-2 counts moved from the
@@ -6228,7 +6225,6 @@ mod tests {
 
         ledger.shutdown();
         s.mem.close().await.expect("close");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// **I1 acceptance.** `record_action` reports its edge count and `reserve`
@@ -6339,7 +6335,6 @@ mod tests {
 
         ledger.shutdown();
         s.mem.close().await.expect("close");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// **I1 acceptance — the failure mode that matters.** The ledger path goes
@@ -6639,7 +6634,6 @@ mod tests {
 
         ledger.shutdown();
         s.mem.close().await.expect("close");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// **I1.** Ledger concept text is bounded, and cut on a char boundary —
@@ -6759,6 +6753,5 @@ mod tests {
 
         ledger.shutdown();
         s.mem.close().await.expect("close");
-        std::fs::remove_dir_all(&dir).ok();
     }
 }

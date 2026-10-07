@@ -971,12 +971,11 @@ mod sqlite_tests {
             None => std::env::remove_var("LAMBO_PROMOTION_POLICY"),
         }
         drop(g);
-        std::fs::remove_dir_all(dir).ok();
     }
 
     #[tokio::test]
     async fn provision_then_every_subcommand_against_sqlite() {
-        let (dir, cfg) = scratch();
+        let (_dir, cfg) = scratch();
         let session = "t83-sqlite";
 
         let store = {
@@ -1109,13 +1108,11 @@ mod sqlite_tests {
             released.is_err(),
             "release after a closed reserve must not invent a lock: {released:?}"
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn h1_sqlite_reopen_checks_models_allows_explicit_rename_and_accepts_legacy() {
-        let (dir, cfg) = scratch();
+        let (_dir, cfg) = scratch();
         let store = resolve_clean(&cfg).store;
         crate::cli::provision::run(store, StoreKind::Sqlite, None)
             .await
@@ -1220,7 +1217,5 @@ mod sqlite_tests {
         )
         .await
         .expect("unset contract still opens");
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

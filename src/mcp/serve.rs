@@ -3287,7 +3287,6 @@ mod tests {
             );
         }
         mem.close().await.expect("close");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// **JE2E-1.** The holder's refusal poller must not re-read its whole
@@ -4931,8 +4930,6 @@ mod tests {
                 lost.get("dialled").is_none(),
                 "the winner is a lease token, not a socket path (JE2E-11): {lost}"
             );
-
-            std::fs::remove_dir_all(&dir).ok();
         }
     }
 }

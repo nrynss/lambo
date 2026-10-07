@@ -720,7 +720,6 @@ mod tests {
                 None => std::env::remove_var(k),
             }
         }
-        std::fs::remove_dir_all(dir).ok();
     }
     #[test]
     fn vector_compat_none_store_accepts_any_positive_dim() {
@@ -816,7 +815,6 @@ mod tests {
             Some("gemini-embedding-001"),
             "the Gemini contract must carry the real model id, not NULL"
         );
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// F-R1-2: a width disagreement that is **reachable through

@@ -8571,7 +8571,8 @@ mod tests {
         }
     }
 
-    /// A scratch sqlite file path this test owns; the caller removes the dir.
+    /// A scratch sqlite file path this test owns; the returned guard removes the
+    /// dir on drop, so the caller only has to keep it alive.
     fn scratch_db() -> (crate::test_util::ScratchDir, String) {
         let dir = crate::test_util::ScratchDir::new("lambo-lease");
         let path = dir.join("lease.sqlite");
@@ -8780,7 +8781,7 @@ mod tests {
     /// and told the holder; after a release the second wins.
     #[tokio::test]
     async fn two_connections_on_one_file_serialize_on_the_lease() {
-        let (dir, path) = scratch_db();
+        let (_dir, path) = scratch_db();
         let sid = SessionId::from("shared");
         let a = lease_holder("proc-a", 111);
         let b = lease_holder("proc-b", 222);
@@ -8808,7 +8809,6 @@ mod tests {
 
         drop(store_a);
         drop(store_b);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // -----------------------------------------------------------------------
@@ -9011,7 +9011,7 @@ mod tests {
         async fn sqlite_vector_leg_fires_on_an_organically_derived_concept() {
             let (logs, _guard) = crate::test_util::capture_logs(tracing::Level::WARN);
             let session = SessionId::from("sqlite-organic-vectors");
-            let (dir, path) = scratch_db();
+            let (_dir, path) = scratch_db();
             let store = Arc::new(RecordingSqlite::new(SqliteStore::connect(&path).unwrap()));
             store.init_schema().await.unwrap();
 
@@ -9116,7 +9116,6 @@ mod tests {
 
             reopened.close().await.unwrap();
             drop(store);
-            let _ = std::fs::remove_dir_all(&dir);
         }
 
         /// The same store, the same session, a renamed embedder: the checked read
@@ -9126,7 +9125,7 @@ mod tests {
         async fn a_mid_session_model_swap_is_refused_on_the_recall_path() {
             let _quiet = crate::test_util::quiet_logs();
             let session = SessionId::from("sqlite-contract-swap");
-            let (dir, path) = scratch_db();
+            let (_dir, path) = scratch_db();
             let store = Arc::new(RecordingSqlite::new(SqliteStore::connect(&path).unwrap()));
             store.init_schema().await.unwrap();
             let dim = FixtureEmbedder::new().dimensions();
@@ -9177,7 +9176,6 @@ mod tests {
             );
 
             drop(store);
-            let _ = std::fs::remove_dir_all(&dir);
         }
     }
     /// D-R1-2: the flush→load round-trip claim had no test that actually wrote

@@ -725,7 +725,8 @@ pub fn completion_line(agent: &str, receipt: &str, state: &str, detail: Option<V
 mod tests {
     use super::*;
 
-    /// A ledger under a temp dir, plus the dir (kept alive by the caller).
+    /// A scratch dir for a ledger; removed when the returned guard drops, so the
+    /// caller keeps it alive for the test's duration.
     fn temp_dir(tag: &str) -> crate::test_util::ScratchDir {
         crate::test_util::ScratchDir::new(&format!("lambo-ledger-{tag}"))
     }
@@ -773,7 +774,6 @@ mod tests {
         }
         assert_eq!(ledger.counters().dropped(), 0);
         assert_eq!(ledger.counters().written(), 50);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -805,7 +805,6 @@ mod tests {
         );
         assert_eq!(ledger.counters().written(), 0);
         ledger.shutdown();
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -949,7 +948,6 @@ mod tests {
             overflow,
             "the total is the backpressure drops and nothing else"
         );
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// **I-R1-3.** `Ledger::open` must not perform the ledger's first `open`.
@@ -987,7 +985,6 @@ mod tests {
         if !made {
             // No FIFO available (no `mkfifo`, or a filesystem that refuses one).
             // Nothing to assert; do not fail a platform this claim is not about.
-            std::fs::remove_dir_all(&dir).ok();
             return;
         }
 
@@ -1012,7 +1009,6 @@ mod tests {
             done_rx.recv_timeout(Duration::from_secs(10)).is_ok(),
             "Ledger::open (and append) must return promptly on a path whose open blocks"
         );
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -1064,7 +1060,6 @@ mod tests {
         );
         assert_eq!(ledger.counters().dropped_channel_full(), 0);
         assert_eq!(ledger.counters().written(), 1);
-        std::fs::remove_dir_all(&dir).ok();
     }
     #[test]
     fn j4_line_builders_carry_the_field_head_and_no_aliases() {

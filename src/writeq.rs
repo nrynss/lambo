@@ -5609,6 +5609,5 @@ mod pipeline_tests {
         // Metric 2's fact set: a fresh derive created one concept, matched none.
         assert_eq!(c["created_count"], 1);
         assert_eq!(c["matched_count"], 0);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -979,7 +979,6 @@ mod tests {
         let embedder = r.unwrap_or_else(|e| panic!("feature-on must build the adapter: {e}"));
         let identity = crate::embed::gemini_identity(embedder.as_ref());
         assert_eq!(identity.as_deref(), Some("gemini-embedding-001"));
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// One credential variable means one identity: the embedder resolves
@@ -1060,7 +1059,6 @@ mod tests {
             Some(v) => std::env::set_var("GOOGLE_APPLICATION_CREDENTIALS", v),
             None => std::env::remove_var("GOOGLE_APPLICATION_CREDENTIALS"),
         }
-        std::fs::remove_dir_all(&dir).ok();
 
         let id1 = arm1.unwrap_or_else(|e| {
             panic!(

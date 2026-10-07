@@ -797,7 +797,6 @@ mod tests {
             Some(value) => std::env::set_var("LAMBO_PROMOTION_POLICY", value),
             None => std::env::remove_var("LAMBO_PROMOTION_POLICY"),
         }
-        std::fs::remove_dir_all(dir).ok();
     }
 
     /// A scratch directory for the env-override tests, unique per process and
@@ -840,7 +839,6 @@ mod tests {
             Some(value) => std::env::set_var("LAMBO_PROMOTION_POLICY", value),
             None => std::env::remove_var("LAMBO_PROMOTION_POLICY"),
         }
-        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

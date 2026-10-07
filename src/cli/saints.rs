@@ -140,8 +140,6 @@ mod live {
             stats.contains("n/a") || stats.contains("writer-only"),
             "{stats}"
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
