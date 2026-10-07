@@ -514,16 +514,19 @@ impl SqliteStore {
             // lexicographic MAX is the chronological one; SQLite's two-argument
             // MAX returns NULL if either side is NULL, hence the COALESCE
             // fallbacks. The one exception to the max is a re-anchored mark
-            // (`last_gc_at_reset`, the last bind): its time replaces the stored
-            // one, so a future time left by a corrected clock jump cannot keep
-            // the time trigger off. `last_gc_epoch` is a max either way.
+            // (`last_gc_at_reset`, the last bind) at least as current as the
+            // stored mark (`last_gc_epoch >=`, read from the pre-update row):
+            // its time replaces the stored one, so a future time left by a
+            // corrected clock jump cannot keep the time trigger off, while a
+            // stale reset replayed after a later sweep cannot rewind it
+            // (`GcMark::reset_is_current_for`). `last_gc_epoch` is a max either way.
             sqlx::query(
                 "INSERT INTO sessions (session_id, mutation_epoch, last_gc_epoch, last_gc_at) \
                  VALUES (?, ?, ?, ?) \
                  ON CONFLICT (session_id) DO UPDATE SET \
                      mutation_epoch = MAX(mutation_epoch, excluded.mutation_epoch), \
                      last_gc_epoch = MAX(last_gc_epoch, excluded.last_gc_epoch), \
-                     last_gc_at = CASE WHEN ? \
+                     last_gc_at = CASE WHEN ? AND excluded.last_gc_epoch >= last_gc_epoch \
                          THEN COALESCE(excluded.last_gc_at, last_gc_at) \
                          ELSE COALESCE(MAX(last_gc_at, excluded.last_gc_at), \
                                        last_gc_at, excluded.last_gc_at) END",
@@ -5089,8 +5092,9 @@ mod tests {
         };
         store.flush(&flush(plain, Some(i1)), None).await.unwrap();
         assert_eq!(store.load_session(&sid).await.unwrap().gc_mark, future);
+        // A re-anchor keeps the writer's current epoch (it is not a sweep).
         let reset = GcMark {
-            last_gc_epoch: 3,
+            last_gc_epoch: 95,
             last_gc_at: Some(corrected),
             last_gc_at_reset: true,
         };
@@ -5116,6 +5120,38 @@ mod tests {
         assert_eq!(
             store.load_session(&sid).await.unwrap().gc_mark.last_gc_at,
             Some(corrected)
+        );
+
+        // A reset replayed after a later sweep (its epoch is older than the
+        // stored mark's) must not rewind that sweep's time: it falls back to
+        // the max-merge, exactly as `GcMark::apply_to_stored` does.
+        let newer_sweep = GcMark {
+            last_gc_epoch: 120,
+            last_gc_at: Some(corrected + chrono::Duration::days(1)),
+            last_gc_at_reset: false,
+        };
+        store
+            .flush(&flush(newer_sweep, Some(i1)), None)
+            .await
+            .unwrap();
+        let replayed_reset = GcMark {
+            last_gc_epoch: 95,
+            last_gc_at: Some(corrected),
+            last_gc_at_reset: true,
+        };
+        store
+            .flush(&flush(replayed_reset, Some(i1)), None)
+            .await
+            .unwrap();
+        let stored = store.load_session(&sid).await.unwrap().gc_mark;
+        assert_eq!(
+            stored, newer_sweep,
+            "a stale reset cannot rewind a later sweep"
+        );
+        assert_eq!(
+            stored,
+            newer_sweep.apply_to_stored(replayed_reset),
+            "same rule as memory"
         );
     }
 

@@ -244,10 +244,13 @@ const VECTOR_FETCH_CAP: usize = 2048;
 /// Issue #29: the same statement stamps GC's sweep mark (`last_gc_epoch`,
 /// `last_gc_at`) with the store-side merge
 /// [`crate::types::GcMark::apply_to_stored`]: a field-wise monotonic max,
-/// except that a re-anchored mark (`$5`, `last_gc_at_reset`) replaces the
-/// stored `last_gc_at` (never with NULL), so a future time left by a corrected
-/// wall-clock jump cannot keep the time trigger off. `last_gc_epoch` is a max
-/// either way. `last_gc_at` is wrapped in `COALESCE` on both sides of the
+/// except that a re-anchored mark (`$5`, `last_gc_at_reset`) at least as
+/// current as the stored one (`EXCLUDED.last_gc_epoch >= sessions.last_gc_epoch`,
+/// [`crate::types::GcMark::reset_is_current_for`]) replaces the stored
+/// `last_gc_at` (never with NULL), so a future time left by a corrected
+/// wall-clock jump cannot keep the time trigger off. A stale reset replayed
+/// after a later sweep falls back to the max, so it cannot rewind that sweep's
+/// time. `last_gc_epoch` is a max either way. `last_gc_at` is wrapped in `COALESCE` on both sides of the
 /// `GREATEST` because the two dialects disagree about `GREATEST` over a NULL
 /// argument; the wrapped form means "the later non-NULL value" on either.
 const UPSERT_SESSION_ROW_SQL: &str = r#"
@@ -256,7 +259,7 @@ VALUES ($1, $2, $3, $4)
 ON CONFLICT (session_id) DO UPDATE SET
     mutation_epoch = GREATEST(sessions.mutation_epoch, EXCLUDED.mutation_epoch),
     last_gc_epoch = GREATEST(sessions.last_gc_epoch, EXCLUDED.last_gc_epoch),
-    last_gc_at = CASE WHEN $5::BOOL
+    last_gc_at = CASE WHEN $5::BOOL AND EXCLUDED.last_gc_epoch >= sessions.last_gc_epoch
         THEN COALESCE(EXCLUDED.last_gc_at, sessions.last_gc_at)
         ELSE GREATEST(
             COALESCE(sessions.last_gc_at, EXCLUDED.last_gc_at),

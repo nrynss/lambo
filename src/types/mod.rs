@@ -764,10 +764,20 @@ impl GcMark {
     /// writer re-anchored, every later stamp of its graph is derived from the
     /// corrected anchor and must keep replacing the stored future one until it
     /// has landed. `last_gc_epoch` is always the strict max.
+    /// Whether this mark's re-anchor may replace `against`'s `last_gc_at`:
+    /// it must carry the reset flag **and** be at least as current as the mark
+    /// it replaces (`last_gc_epoch >=`). A re-anchor never changes the epoch,
+    /// so a writer's own re-anchor always qualifies; a replayed or stale reset
+    /// from before a later sweep (a lower epoch) does not, and falls back to
+    /// the ordinary max-merge, so it cannot rewind a newer sweep's time.
+    pub fn reset_is_current_for(&self, against: &Self) -> bool {
+        self.last_gc_at_reset && self.last_gc_epoch >= against.last_gc_epoch
+    }
+
     pub fn merge(self, other: Self) -> Self {
         Self {
             last_gc_epoch: self.last_gc_epoch.max(other.last_gc_epoch),
-            last_gc_at: if other.last_gc_at_reset {
+            last_gc_at: if other.reset_is_current_for(&self) {
                 other.last_gc_at.or(self.last_gc_at)
             } else {
                 match (self.last_gc_at, other.last_gc_at) {
@@ -782,14 +792,15 @@ impl GcMark {
     /// The store-side merge every adapter applies on flush: `self` is the
     /// stored mark, `incoming` the batch's. `last_gc_epoch` is the max;
     /// `last_gc_at` is the max unless `incoming` carries
-    /// [`GcMark::last_gc_at_reset`], in which case it replaces the stored
-    /// value (a `None` never erases one). The result is a stored mark, so its
+    /// [`GcMark::last_gc_at_reset`] and is at least as current as the stored
+    /// mark ([`GcMark::reset_is_current_for`]), in which case it replaces the
+    /// stored value (a `None` never erases one). The result is a stored mark, so its
     /// reset flag is always `false`. The SQL adapters implement exactly this
     /// in their session upsert.
     pub fn apply_to_stored(self, incoming: Self) -> Self {
         Self {
             last_gc_epoch: self.last_gc_epoch.max(incoming.last_gc_epoch),
-            last_gc_at: if incoming.last_gc_at_reset {
+            last_gc_at: if incoming.reset_is_current_for(&self) {
                 incoming.last_gc_at.or(self.last_gc_at)
             } else {
                 match (self.last_gc_at, incoming.last_gc_at) {
@@ -1319,8 +1330,9 @@ mod tests {
             last_gc_at: Some(t(400)),
             last_gc_at_reset: false,
         };
+        // A re-anchor keeps the writer's current epoch (it is not a sweep).
         let reset = GcMark {
-            last_gc_epoch: 10,
+            last_gc_epoch: 50,
             last_gc_at: Some(t(2)),
             last_gc_at_reset: true,
         };
@@ -1345,7 +1357,7 @@ mod tests {
             last_gc_at_reset: true,
         };
         let second_reanchor = GcMark {
-            last_gc_epoch: 65,
+            last_gc_epoch: 70,
             last_gc_at: Some(t(5)),
             last_gc_at_reset: true,
         };
@@ -1390,6 +1402,31 @@ mod tests {
             stored_future.apply_to_stored(plain),
             stored_future.merge(plain)
         );
+
+        // A stale reset (replayed from before a later sweep: lower epoch) never
+        // rewinds that sweep's time, in the carry or at the store; the epoch
+        // stays a strict max and the time falls back to the max-merge.
+        let later_sweep = GcMark {
+            last_gc_epoch: 80,
+            last_gc_at: Some(t(10)),
+            last_gc_at_reset: false,
+        };
+        let stale_reset = GcMark {
+            last_gc_epoch: 70,
+            last_gc_at: Some(t(5)),
+            last_gc_at_reset: true,
+        };
+        assert!(!stale_reset.reset_is_current_for(&later_sweep));
+        assert_eq!(
+            later_sweep.apply_to_stored(stale_reset),
+            GcMark {
+                last_gc_epoch: 80,
+                last_gc_at: Some(t(10)),
+                last_gc_at_reset: false,
+            }
+        );
+        assert_eq!(later_sweep.merge(stale_reset).last_gc_at, Some(t(10)));
+        assert_eq!(later_sweep.merge(stale_reset).last_gc_epoch, 80);
 
         let json = serde_json::to_string(&stored_future).unwrap();
         assert!(!json.contains("last_gc_at_reset"), "{json}");

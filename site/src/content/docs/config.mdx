@@ -30,7 +30,7 @@ url = "http://127.0.0.1:8080"
 Unknown keys are refused, so a typo fails at startup instead of silently falling back to a default. A misspelled `knd`, a misspelled `[embeder]` section, and a key that belongs to the library rather than the file all stop the process before it attaches a session.
 </Warning>
 
-Recall defaults, flush timing, canonization thresholds, and scoring weights are not `lambo.toml` keys. They are library settings you pass when you build a `Memory` in Rust, so putting one in the file stops the process rather than tuning anything. Three settings are exceptions, and none of them is a threshold: `promotion_policy` below, and the two cadence keys in [Daemon cadence](#daemon-cadence). `promotion_policy` is a selector — it sets no number. But do not read that as "the numbers stay the same": `Solo` replaces the ladder rather than re-tuning it, and the store-evidence gates stop deciding anything. See [Library API](/lambo/api/) for what each policy actually measures.
+Recall defaults, flush timing, canonization thresholds, and scoring weights are not `lambo.toml` keys. They are library settings you pass when you build a `Memory` in Rust, so putting one in the file stops the process rather than tuning anything. Five settings are exceptions, and none of them is a threshold: `promotion_policy` below, and the four cadence keys in [Daemon cadence](#daemon-cadence). `promotion_policy` is a selector — it sets no number. But do not read that as "the numbers stay the same": `Solo` replaces the ladder rather than re-tuning it, and the store-evidence gates stop deciding anything. See [Library API](/lambo/api/) for what each policy actually measures.
 
 ```
 $ lambo --config lambo.toml provision
