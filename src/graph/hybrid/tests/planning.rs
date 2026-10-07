@@ -1,0 +1,470 @@
+//! Gather and plan: candidate validation, contracts, parent_of, stale
+//! gathers and request limits.
+
+use super::*;
+
+#[derive(Debug)]
+struct BarrierEmbedder {
+    barrier: Barrier,
+    calls: AtomicUsize,
+}
+
+impl BarrierEmbedder {
+    fn new(parties: usize) -> Self {
+        Self {
+            barrier: Barrier::new(parties),
+            calls: AtomicUsize::new(0),
+        }
+    }
+}
+
+#[async_trait]
+impl Embedder for BarrierEmbedder {
+    fn dimensions(&self) -> usize {
+        1024
+    }
+
+    async fn embed(&self, _text: &str) -> Result<Vec<f32>, EmbedError> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        if call < 2 {
+            self.barrier.wait().await;
+        }
+        Ok(vec![0.0; 1024])
+    }
+}
+
+#[derive(Debug)]
+struct PausingEmbedder {
+    started: Notify,
+    release: Notify,
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl Embedder for PausingEmbedder {
+    fn dimensions(&self) -> usize {
+        1024
+    }
+
+    async fn embed(&self, _text: &str) -> Result<Vec<f32>, EmbedError> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            self.started.notify_one();
+            self.release.notified().await;
+        }
+        Ok(vec![0.0; 1024])
+    }
+}
+
+#[test]
+fn candidate_validation_and_ties_form_one_tier() {
+    let lower = NodeId(Uuid::from_u64_pair(0, 1));
+    let higher = NodeId(Uuid::from_u64_pair(0, 2));
+    let invalid = NodeId(Uuid::from_u64_pair(0, 3));
+    let a = vec![
+        hit(higher, 0.9),
+        hit(invalid, f64::NAN),
+        hit(lower, 0.9),
+        hit(invalid, 1.1),
+    ];
+    let mut b = a.clone();
+    b.reverse();
+    // The 0.9 pair is the whole valid top tier — both members, in either
+    // input order (the gather phase picks none of them: no graph here).
+    let tier_ids = |tier: Vec<&Scored<NodeId>>| tier.iter().map(|c| c.item).collect::<Vec<_>>();
+    let mut ta = tier_ids(top_tier(&a, 0.85));
+    let mut tb = tier_ids(top_tier(&b, 0.85));
+    // NodeId is deliberately not Ord (issue #2: the UUID must not be the
+    // semantic order) — sort by the raw bytes only to compare sets.
+    ta.sort_by_key(|id| id.0);
+    tb.sort_by_key(|id| id.0);
+    assert_eq!(ta, vec![lower, higher]);
+    assert_eq!(tb, vec![lower, higher]);
+    // Invalid candidates are filtered, not merely outranked.
+    assert!(top_tier(&[hit(invalid, f64::INFINITY)], 0.85).is_empty());
+    // A strictly best candidate is a tier of one.
+    assert_eq!(
+        tier_ids(top_tier(&[hit(higher, 0.9), hit(lower, 0.86)], 0.85)),
+        vec![higher]
+    );
+}
+
+#[tokio::test]
+async fn concurrent_first_writers_cannot_mix_embedding_contracts() {
+    let (graph, interaction) =
+        graph_with_interaction("hybrid-contract-race", 1, 0, "concurrent contract race");
+    let embedder = Arc::new(BarrierEmbedder::new(2));
+    let store = Arc::new(SpyStore::with_vector(Vec::new()));
+
+    let spawn = |kind: &'static str, content: &'static str| {
+        let graph = graph.clone();
+        let embedder = embedder.clone();
+        let store = store.clone();
+        tokio::spawn(async move {
+            derive(
+                graph,
+                store.as_ref(),
+                embedder.as_ref(),
+                &contract(kind, 1024),
+                interaction,
+                &agent(),
+                &[(content, ConceptType::Entity)],
+                &ParentOf::none(),
+                10,
+                SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+                None,
+            )
+            .await
+        })
+    };
+    let (a, b) = tokio::join!(spawn("fixture-a", "alpha"), spawn("fixture-b", "beta"));
+    let outcomes = [a.unwrap(), b.unwrap()];
+    assert_eq!(outcomes.iter().filter(|r| r.is_ok()).count(), 1);
+    assert_eq!(outcomes.iter().filter(|r| r.is_err()).count(), 1);
+    let g = graph.read();
+    assert_eq!(
+        g.concepts().count(),
+        1,
+        "losing vector space writes nothing"
+    );
+    g.assert_invariants().unwrap();
+}
+
+/// C4: one derive naming the same content in BOTH `concepts` and a
+/// `parent_of` pair must produce ONE node, under the product's strategy.
+///
+/// The regression this pins is an identity split, not a missing edge:
+/// before the fix the call produced two nodes for one content — the
+/// declared `Observation` (embedded, typed, carrying CoOccurrence /
+/// Derives / Semantic) and a bare `Entity` (unembedded, carrying only
+/// Derives / Hierarchical) — because `canonicalize` never matches an
+/// `Observation` (GRAPH-1). On Mooshik's bootstrap graph that was 170
+/// contents existing as such pairs, holding embedding coverage near 50%
+/// and splitting each fact's supporting interactions across two nodes.
+///
+/// **The count is the assertion.** A test that checked only "a
+/// Hierarchical edge exists" passes on the duplicate — the split satisfies
+/// the edge — which is precisely why this went unnoticed.
+///
+/// `Observation` is the type that reproduces it, so it is the type under
+/// test; `Entity` is carried alongside as the control that was already
+/// correct, so a regression that breaks matching generally is
+/// distinguishable from one that breaks only the Observation path.
+#[tokio::test]
+async fn parent_of_child_resolves_to_a_concept_declared_in_the_same_call() {
+    for concept_type in [ConceptType::Observation, ConceptType::Entity] {
+        let (graph, interaction) =
+            graph_with_interaction("hybrid-same-call", 1, 0, "ingest context");
+        let store = SpyStore::with_vector(Vec::new());
+        let embedder = FixtureEmbedder::new();
+        let pairs = [("document:src.md", "shared content")];
+        derive(
+            graph.clone(),
+            &store,
+            &embedder,
+            &contract("fixture", 1024),
+            interaction,
+            &agent(),
+            &[("shared content", concept_type)],
+            &ParentOf::from_pairs(&pairs),
+            10,
+            SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let g = graph.read();
+        let mine: Vec<_> = g
+            .concepts()
+            .filter(|c| c.content == "shared content")
+            .collect();
+        assert_eq!(
+            mine.len(),
+            1,
+            "{concept_type:?}: one content must be one node, got {:?}",
+            mine.iter()
+                .map(|c| (c.concept_type, c.embedding.is_some()))
+                .collect::<Vec<_>>()
+        );
+        let node = mine[0];
+        assert_eq!(
+            node.concept_type, concept_type,
+            "the surviving node must keep the declared type, not become the \
+                 parent_of default"
+        );
+        assert!(
+            node.embedding.is_some(),
+            "the surviving node must keep its embedding — losing it is what held \
+                 coverage near 50%"
+        );
+
+        let id = node.id;
+        let parent = g
+            .concepts()
+            .find(|c| c.content == "document:src.md")
+            .expect("the parent end is still created")
+            .id;
+        assert!(
+            g.edge_between(interaction, id, EdgeType::Derives).is_some(),
+            "{concept_type:?}: the concept keeps its Derives edge"
+        );
+        assert!(
+            g.edge_between(parent, id, EdgeType::Hierarchical).is_some(),
+            "{concept_type:?}: the pair's Hierarchical edge lands on that same node \
+                 — M9 samples targets of Hierarchical edges, so it is load-bearing"
+        );
+    }
+}
+
+/// C4 control: the fix is scoped to THIS call's own writes, so a
+/// `parent_of` end the graph has never seen is still created fresh as
+/// `PARENT_OF_CONCEPT_TYPE` (`Entity`). Without this, a fix that made
+/// `canonicalize` match Observations generally would pass the test above
+/// while quietly reattaching agent content to demoted context-overflow
+/// records (GRAPH-1).
+#[tokio::test]
+async fn a_brand_new_parent_of_end_is_still_created_as_entity() {
+    let (graph, interaction) = graph_with_interaction("hybrid-fresh-end", 1, 0, "ingest context");
+    let store = SpyStore::with_vector(Vec::new());
+    let embedder = FixtureEmbedder::new();
+    let pairs = [("document:src.md", "never mentioned elsewhere")];
+    derive(
+        graph.clone(),
+        &store,
+        &embedder,
+        &contract("fixture", 1024),
+        interaction,
+        &agent(),
+        &[("an unrelated concept", ConceptType::Observation)],
+        &ParentOf::from_pairs(&pairs),
+        10,
+        SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let g = graph.read();
+    let fresh: Vec<_> = g
+        .concepts()
+        .filter(|c| c.content == "never mentioned elsewhere")
+        .collect();
+    assert_eq!(fresh.len(), 1, "the fresh end is created exactly once");
+    assert_eq!(
+        fresh[0].concept_type, PARENT_OF_CONCEPT_TYPE,
+        "an end this call did not declare is still an Entity"
+    );
+}
+
+#[tokio::test]
+async fn first_use_empty_candidates_still_commits_contract() {
+    // Cockroach returns this safe empty shape for a missing/unstamped
+    // session before the first SetEmbedding commit.
+    let (graph, interaction) =
+        graph_with_interaction("hybrid-first-use", 1, 0, "first use context");
+    let store = SpyStore::with_vector(Vec::new());
+    let embedder = FixtureEmbedder::new();
+    derive(
+        graph.clone(),
+        &store,
+        &embedder,
+        &contract("fixture", 1024),
+        interaction,
+        &agent(),
+        &[("first embedded concept", ConceptType::Entity)],
+        &ParentOf::none(),
+        10,
+        SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(store.vector_calls(), 1);
+    let mut g = graph.write();
+    assert_eq!(g.embedding(), Some(&contract("fixture", 1024)));
+    assert_eq!(g.concepts().count(), 1);
+    // L82-4 (product decision 2026-08-14): the store had no trusted match,
+    // so no merge is recorded — but the vector that was successfully
+    // computed IS persisted, which is what makes an organically-derived
+    // concept vector-recallable. This assertion used to be `is_none()`;
+    // the contract is still committed so every vector lives in one known
+    // space.
+    assert!(
+        g.concepts()
+            .all(|concept| concept.embedding.as_ref().is_some_and(|v| v.len() == 1024)),
+        "a successfully embedded fresh concept persists its vector (L82-4)"
+    );
+    assert_eq!(
+        g.edges()
+            .filter(|e| e.edge_type == EdgeType::Semantic)
+            .count(),
+        0,
+        "no candidate cleared the threshold, so no merge is endorsed"
+    );
+    assert!(g.drain_log().mutations.iter().any(|mutation| matches!(
+        mutation,
+        crate::types::Mutation::SetEmbedding {
+            embedding: Some(_),
+            ..
+        }
+    )));
+}
+
+#[tokio::test]
+async fn intervening_graph_mutation_discards_stale_gather_and_replans() {
+    let (graph, interaction) = graph_with_interaction("hybrid-epoch-race", 1, 0, "epoch race");
+    let embedder = Arc::new(PausingEmbedder {
+        started: Notify::new(),
+        release: Notify::new(),
+        calls: AtomicUsize::new(0),
+    });
+    let store = Arc::new(SpyStore::with_vector(Vec::new()));
+    let task = {
+        let graph = graph.clone();
+        let embedder = embedder.clone();
+        let store = store.clone();
+        tokio::spawn(async move {
+            derive(
+                graph,
+                store.as_ref(),
+                embedder.as_ref(),
+                &contract("fixture", 1024),
+                interaction,
+                &agent(),
+                &[("stale plan", ConceptType::Entity)],
+                &ParentOf::none(),
+                10,
+                SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+                None,
+            )
+            .await
+        })
+    };
+    embedder.started.notified().await;
+    graph
+        .write()
+        .set_root_goal(Some(serde_json::json!("concurrent daemon mutation")));
+    embedder.release.notify_one();
+    task.await.unwrap().unwrap();
+
+    assert_eq!(embedder.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(store.vector_calls(), 2);
+    let g = graph.read();
+    assert_eq!(g.concepts().count(), 1, "stale attempt wrote nothing");
+    g.assert_invariants().unwrap();
+}
+
+#[tokio::test]
+async fn intervening_synonym_change_discards_stale_gather_and_replans() {
+    let (graph, interaction) = graph_with_interaction("hybrid-synonym-race", 1, 0, "synonym race");
+    let embedder = Arc::new(PausingEmbedder {
+        started: Notify::new(),
+        release: Notify::new(),
+        calls: AtomicUsize::new(0),
+    });
+    let store = Arc::new(SpyStore::with_vector(Vec::new()));
+    let task = {
+        let graph = graph.clone();
+        let embedder = embedder.clone();
+        let store = store.clone();
+        tokio::spawn(async move {
+            derive(
+                graph,
+                store.as_ref(),
+                embedder.as_ref(),
+                &contract("fixture", 1024),
+                interaction,
+                &agent(),
+                &[("alias", ConceptType::Entity)],
+                &ParentOf::none(),
+                10,
+                SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+                None,
+            )
+            .await
+        })
+    };
+    embedder.started.notified().await;
+    graph.write().declare_synonym("alias", "canonical target");
+    embedder.release.notify_one();
+    task.await.unwrap().unwrap();
+
+    assert_eq!(embedder.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(store.vector_calls(), 2);
+    let concept = graph.read().concepts().next().unwrap().clone();
+    assert_eq!(concept.canonical_key, "canon target");
+}
+
+#[tokio::test]
+async fn invalid_or_oversized_requests_do_no_external_work() {
+    let (graph, interaction) = graph_with_interaction("hybrid-bounds", 1, 0, "bounded");
+    let embedder = FailingEmbedder::new();
+    let store = SpyStore::with_vector(Vec::new());
+    let concepts = vec![("x", ConceptType::Entity); MAX_HYBRID_CONCEPTS + 1];
+    let err = derive(
+        graph.clone(),
+        &store,
+        &embedder,
+        &contract("fixture", 1024),
+        interaction,
+        &agent(),
+        &concepts,
+        &ParentOf::none(),
+        10,
+        SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, LamboError::Config(_)));
+    assert_eq!(embedder.calls(), 0);
+    assert_eq!(store.vector_calls(), 0);
+
+    let parents: Vec<(String, String)> = (0..=MAX_HYBRID_PARENT_PAIRS)
+        .map(|n| (format!("parent-{n}"), format!("child-{n}")))
+        .collect();
+    let parent_refs: Vec<(&str, &str)> = parents
+        .iter()
+        .map(|(parent, child)| (parent.as_str(), child.as_str()))
+        .collect();
+    let before = graph.read().snapshot();
+    let err = derive(
+        graph.clone(),
+        &store,
+        &embedder,
+        &contract("fixture", 1024),
+        interaction,
+        &agent(),
+        &[("valid", ConceptType::Entity)],
+        &ParentOf::from_pairs(&parent_refs),
+        10,
+        SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, LamboError::Config(_)));
+    assert_eq!(embedder.calls(), 0);
+    assert_eq!(store.vector_calls(), 0);
+    assert_eq!(graph.read().snapshot(), before, "rejection mutates nothing");
+
+    let err = derive(
+        graph,
+        &store,
+        &embedder,
+        &contract("fixture", 1024),
+        interaction,
+        &agent(),
+        &[("valid", ConceptType::Entity)],
+        &ParentOf::none(),
+        10,
+        f64::NAN,
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, LamboError::Config(_)));
+    assert_eq!(embedder.calls(), 0);
+    assert_eq!(store.vector_calls(), 0);
+}
