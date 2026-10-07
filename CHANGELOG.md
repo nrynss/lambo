@@ -242,6 +242,13 @@
     scores the live-dimension score plus its own frequency term
     (`score::score_live_plus_frequency`). Recall ranking, the daemon's score
     table and canonization are unchanged.
+  - **A future sweep time is re-anchored.** A forward wall-clock jump used to
+    persist a future `last_gc_at` that the monotonic merge kept after the
+    clock was corrected, switching the time trigger off until real time caught
+    up. A stored time more than 5 minutes ahead of `now` is now re-anchored at
+    `now`; the regression persists through a flagged path in the session-row
+    upsert (`GcMark::last_gc_at_reset`, never stored). `last_gc_epoch` stays
+    strictly monotonic.
   - On a copy of the Metal rig store the first sweep now collects 159
     Observations and nothing else (was 537, including 42 Logic); collection no
     longer grows with session span alone (span +60 days with the clock fixed:

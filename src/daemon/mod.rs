@@ -1031,6 +1031,22 @@ fn run_cycle(
         let mut g = graph.write();
         g.anchor_gc_clock(now);
         mark = g.gc_mark();
+    } else if gc::gc_clock_ahead(mark, now) {
+        // Issue #29: the stored sweep time is in the future beyond the skew
+        // tolerance — a forward wall-clock jump, since corrected, stamped it
+        // and the monotonic merge kept it. Re-anchor at `now` (the mark's one
+        // permitted regression, persisted through `last_gc_at_reset`) instead
+        // of leaving the time trigger off until real time catches up.
+        tracing::warn!(
+            target: "lambo::daemon::gc",
+            last_gc_at = ?mark.last_gc_at,
+            now = %now,
+            "GC sweep time is in the future (wall-clock jump?); re-anchoring the \
+             gc_max_interval clock at now"
+        );
+        let mut g = graph.write();
+        g.reanchor_gc_clock(now);
+        mark = g.gc_mark();
     }
     // The drain above may have moved the watermark past this cycle's `epoch`
     // snapshot; `sweep_due` saturates, so that reads as zero elapsed (GC one
@@ -1871,6 +1887,79 @@ mod tests {
             vec![1, 1, 1],
             "restarts alone must never move gc_survived toward Stage 1"
         );
+    }
+
+    /// Issue #29 item 3: a sweep time left in the future by a forward clock
+    /// jump (and kept by the monotonic merge) is re-anchored at `now` on the
+    /// first cycle, so the time trigger fires one interval later instead of
+    /// waiting for real time to catch up; a stamp within the tolerance is left
+    /// alone; the epoch watermark never moves.
+    #[tokio::test(start_paused = true)]
+    async fn a_future_sweep_time_is_reanchored_and_the_time_trigger_recovers() {
+        let (graph, ids) = locked_graph_with_canonical_concepts(3);
+        let iid = match graph.read().node(ids[0]).unwrap() {
+            crate::types::Node::Concept(c) => c.origin_interaction,
+            _ => unreachable!(),
+        };
+        let t0 = Utc.timestamp_opt(1_800_000_000, 0).unwrap();
+        let epoch = graph.read().epoch();
+        // As loaded after a jump to next year: swept "then", nothing since.
+        graph
+            .write()
+            .record_gc_sweep(epoch, t0 + chrono::Duration::days(365));
+        let params = CycleParams {
+            gc_interval: 1_000_000,
+            gc_max_interval: Duration::from_secs(3600),
+            gc_idle_floor: 1,
+            ..Default::default()
+        };
+        let (clock_cell, clock) = settable_clock(t0);
+        let set_clock = |t| *clock_cell.lock().unwrap() = t;
+        let daemon = Daemon::with_params(
+            graph.clone(),
+            ScoringWeights::default(),
+            Duration::from_secs(3600),
+            params,
+        )
+        .with_clock(clock);
+        let handle = daemon.spawn();
+
+        wake_and_settle(&daemon).await;
+        let mark = graph.read().gc_mark();
+        assert_eq!(mark.last_gc_at, Some(t0), "re-anchored at now");
+        assert!(mark.last_gc_at_reset, "the regression must persist");
+        assert_eq!(mark.last_gc_epoch, epoch, "the epoch watermark never moves");
+        assert!(daemon.last_gc().is_none(), "re-anchoring is not a sweep");
+
+        graph
+            .write()
+            .insert_concept(concept(60, iid, "after the jump"), iid)
+            .unwrap();
+        set_clock(t0 + chrono::Duration::seconds(3600));
+        wake_and_settle(&daemon).await;
+        let swept = daemon.last_gc().expect("the time trigger recovered");
+        assert_eq!(swept.trigger, Some(gc::GcTrigger::Elapsed));
+        handle.abort();
+
+        // Within the tolerance: left alone (and so not yet elapsed).
+        let (graph, _) = locked_graph_with_canonical_concepts(3);
+        let near = t0 + gc::GC_CLOCK_SKEW_TOLERANCE - chrono::Duration::seconds(1);
+        let epoch = graph.read().epoch();
+        graph.write().record_gc_sweep(epoch, near);
+        let (_cell, clock) = settable_clock(t0);
+        let daemon = Daemon::with_params(
+            graph.clone(),
+            ScoringWeights::default(),
+            Duration::from_secs(3600),
+            params,
+        )
+        .with_clock(clock);
+        let handle = daemon.spawn();
+        wake_and_settle(&daemon).await;
+        let mark = graph.read().gc_mark();
+        assert_eq!(mark.last_gc_at, Some(near));
+        assert!(!mark.last_gc_at_reset);
+        handle.abort();
     }
 
     /// Issue #29: the time bound. A session far below `gc_interval` sweeps once

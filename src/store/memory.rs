@@ -637,8 +637,10 @@ impl GraphStore for MemoryStore {
         // mutations, not per-process ones.
         for (sid, mut data) in work {
             data.snapshot.mutation_epoch = data.snapshot.mutation_epoch.max(batch.mutation_epoch);
-            // Issue #29: GC's sweep mark, same monotonic merge, same commit.
-            data.snapshot.gc_mark = data.snapshot.gc_mark.merge(batch.gc_mark);
+            // Issue #29: GC's sweep mark, same monotonic merge, same commit
+            // (a re-anchored `last_gc_at` replaces the stored one —
+            // `GcMark::apply_to_stored`, the rule the SQL adapters share).
+            data.snapshot.gc_mark = data.snapshot.gc_mark.apply_to_stored(batch.gc_mark);
             map.insert(sid, data);
         }
         Ok(())

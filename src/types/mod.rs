@@ -715,6 +715,17 @@ pub struct GcMark {
     /// until either happens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_gc_at: Option<DateTime<Utc>>,
+    /// `last_gc_at` was **re-anchored** by this writer after the stored value
+    /// was found in the future (a forward wall-clock jump that was later
+    /// corrected; see `crate::daemon::gc::gc_clock_ahead`). The one case
+    /// where `last_gc_at` may move backwards: a mark carrying it **replaces**
+    /// the stored `last_gc_at` instead of max-merging with it, so the corrected
+    /// anchor persists instead of the future one re-asserting itself on every
+    /// restart. Writer-side only: never persisted (stored marks are always
+    /// `false`), omitted from JSON when `false`. `last_gc_epoch` is never
+    /// affected — it stays strictly monotonic.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub last_gc_at_reset: bool,
 }
 
 impl GcMark {
@@ -723,14 +734,48 @@ impl GcMark {
         *self == Self::default()
     }
 
-    /// Field-wise max: the monotonic merge every adapter applies on flush.
+    /// Merge an older mark (`self`) with a newer one (`other`): field-wise max,
+    /// except that a newer mark carrying [`GcMark::last_gc_at_reset`] supplies
+    /// `last_gc_at` outright. This is the flush loop's carry: the newer stamp
+    /// comes from the same writer's graph, which re-anchored deliberately, so
+    /// its time is the truth even when it is earlier. The reset flag is sticky
+    /// (`a || b`): once a writer re-anchored, every later stamp of its graph is
+    /// derived from the corrected anchor and must keep replacing the stored
+    /// future one until it has landed.
     pub fn merge(self, other: Self) -> Self {
         Self {
             last_gc_epoch: self.last_gc_epoch.max(other.last_gc_epoch),
-            last_gc_at: match (self.last_gc_at, other.last_gc_at) {
-                (Some(a), Some(b)) => Some(a.max(b)),
-                (a, b) => a.or(b),
+            last_gc_at: if other.last_gc_at_reset && !self.last_gc_at_reset {
+                other.last_gc_at.or(self.last_gc_at)
+            } else {
+                match (self.last_gc_at, other.last_gc_at) {
+                    (Some(a), Some(b)) => Some(a.max(b)),
+                    (a, b) => a.or(b),
+                }
             },
+            last_gc_at_reset: self.last_gc_at_reset || other.last_gc_at_reset,
+        }
+    }
+
+    /// The store-side merge every adapter applies on flush: `self` is the
+    /// stored mark, `incoming` the batch's. `last_gc_epoch` is the max;
+    /// `last_gc_at` is the max unless `incoming` carries
+    /// [`GcMark::last_gc_at_reset`], in which case it replaces the stored
+    /// value (a `None` never erases one). The result is a stored mark, so its
+    /// reset flag is always `false`. The SQL adapters implement exactly this
+    /// in their session upsert.
+    pub fn apply_to_stored(self, incoming: Self) -> Self {
+        Self {
+            last_gc_epoch: self.last_gc_epoch.max(incoming.last_gc_epoch),
+            last_gc_at: if incoming.last_gc_at_reset {
+                incoming.last_gc_at.or(self.last_gc_at)
+            } else {
+                match (self.last_gc_at, incoming.last_gc_at) {
+                    (Some(a), Some(b)) => Some(a.max(b)),
+                    (a, b) => a.or(b),
+                }
+            },
+            last_gc_at_reset: false,
         }
     }
 }
@@ -1239,6 +1284,82 @@ mod tests {
     /// Issue #29: the GC mark merges field-wise (each field only moves
     /// forward), the unset mark is the identity, and old JSON without the
     /// field still parses (batches and snapshots written before #29).
+    /// Issue #29: a re-anchored mark is the one way `last_gc_at` moves back.
+    /// In the flush carry (older `merge` newer) the newer reset stamp supplies
+    /// the time and the flag sticks, so later stamps of the same writer keep
+    /// replacing the stored future value; at the store
+    /// (`apply_to_stored`) the reset replaces the time, never erases it with
+    /// `None`, never rewinds the epoch, and the stored result carries no flag.
+    /// The flag is omitted from JSON when false.
+    #[test]
+    fn gc_mark_reset_replaces_the_time_once_and_only_the_time() {
+        let t =
+            |d: i64| Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap() + chrono::Duration::days(d);
+        let stored_future = GcMark {
+            last_gc_epoch: 50,
+            last_gc_at: Some(t(400)),
+            last_gc_at_reset: false,
+        };
+        let reset = GcMark {
+            last_gc_epoch: 10,
+            last_gc_at: Some(t(2)),
+            last_gc_at_reset: true,
+        };
+        let carried = stored_future.merge(reset);
+        assert_eq!(carried.last_gc_at, Some(t(2)));
+        assert_eq!(carried.last_gc_epoch, 50);
+        assert!(carried.last_gc_at_reset);
+        // A later stamp from the same writer (still flagged) moves forward.
+        let later = GcMark {
+            last_gc_epoch: 60,
+            last_gc_at: Some(t(3)),
+            last_gc_at_reset: true,
+        };
+        assert_eq!(carried.merge(later).last_gc_at, Some(t(3)));
+        // An unflagged newer stamp is max-merged as before.
+        assert_eq!(
+            carried
+                .merge(GcMark {
+                    last_gc_at_reset: false,
+                    ..later
+                })
+                .last_gc_at,
+            Some(t(3))
+        );
+
+        let applied = stored_future.apply_to_stored(reset);
+        assert_eq!(
+            applied,
+            GcMark {
+                last_gc_epoch: 50,
+                last_gc_at: Some(t(2)),
+                last_gc_at_reset: false,
+            }
+        );
+        let no_time = GcMark {
+            last_gc_at: None,
+            ..reset
+        };
+        assert_eq!(
+            stored_future.apply_to_stored(no_time).last_gc_at,
+            Some(t(400))
+        );
+        // Unflagged: exactly the old max-merge.
+        let plain = GcMark {
+            last_gc_at_reset: false,
+            ..reset
+        };
+        assert_eq!(
+            stored_future.apply_to_stored(plain),
+            stored_future.merge(plain)
+        );
+
+        let json = serde_json::to_string(&stored_future).unwrap();
+        assert!(!json.contains("last_gc_at_reset"), "{json}");
+        let back: GcMark = serde_json::from_str(&serde_json::to_string(&reset).unwrap()).unwrap();
+        assert_eq!(back, reset);
+    }
+
     #[test]
     fn gc_mark_merge_is_fieldwise_max_and_serde_defaults() {
         use chrono::TimeZone;
@@ -1246,16 +1367,19 @@ mod tests {
         let a = GcMark {
             last_gc_epoch: 10,
             last_gc_at: Some(t(9)),
+            last_gc_at_reset: false,
         };
         let b = GcMark {
             last_gc_epoch: 4,
             last_gc_at: Some(t(11)),
+            last_gc_at_reset: false,
         };
         assert_eq!(
             a.merge(b),
             GcMark {
                 last_gc_epoch: 10,
-                last_gc_at: Some(t(11))
+                last_gc_at: Some(t(11)),
+                last_gc_at_reset: false,
             }
         );
         assert_eq!(a.merge(b), b.merge(a), "commutative");

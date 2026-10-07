@@ -267,6 +267,41 @@ impl Default for GcParams {
     }
 }
 
+/// How far in the future a stored `last_gc_at` may be before the daemon treats
+/// it as a wall-clock jump and re-anchors the time bound at `now` (issue #29);
+/// see [`gc_clock_ahead`].
+///
+/// ### Why 5 minutes
+///
+/// Large enough that ordinary clock discipline never trips it: NTP slews and
+/// steps on a healthy host are milliseconds to seconds, and the daemon's own
+/// cycle and the flush interval are seconds, so a sweep time written a moment
+/// ago is never mistaken for a jump. Small against `gc_max_interval` (a day by
+/// default, and the reason this matters at all): within the tolerance a future
+/// stamp delays the time trigger by at most five minutes, while any jump big
+/// enough to matter — an hour, a day, a wrong year — is caught on the next
+/// cycle. Not configurable: it is a sanity bound on the host clock, not a
+/// cadence.
+pub const GC_CLOCK_SKEW_TOLERANCE: ChronoDuration = ChronoDuration::minutes(5);
+
+/// Is the mark's `last_gc_at` later than `now` by more than
+/// [`GC_CLOCK_SKEW_TOLERANCE`]? (Issue #29.)
+///
+/// A forward wall-clock jump stamps a future sweep (or anchor) time, and the
+/// store's monotonic merge keeps it once the clock is corrected, so
+/// [`sweep_due`]'s time trigger would read "not elapsed" until real time
+/// caught up — possibly years. When this returns `true` the daemon re-anchors
+/// the clock at `now` ([`Graph::reanchor_gc_clock`]), which persists through
+/// the one regression path the store merge allows
+/// ([`crate::types::GcMark::last_gc_at_reset`]). The mutation trigger and
+/// `last_gc_epoch` are unaffected.
+pub fn gc_clock_ahead(mark: crate::types::GcMark, now: DateTime<Utc>) -> bool {
+    match mark.last_gc_at {
+        Some(at) => at.signed_duration_since(now) > GC_CLOCK_SKEW_TOLERANCE,
+        None => false,
+    }
+}
+
 /// Why the daemon started a sweep (issue #29).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GcTrigger {
@@ -288,7 +323,9 @@ pub enum GcTrigger {
 /// backlog). A never-anchored mark (`last_gc_at == None`) cannot time-trigger;
 /// the daemon anchors it on first observation ([`Graph::anchor_gc_clock`]). A
 /// clock that went backwards past the mark reads as "not elapsed" — the time
-/// trigger waits, the mutation trigger is unaffected.
+/// trigger waits, the mutation trigger is unaffected. A mark more than
+/// [`GC_CLOCK_SKEW_TOLERANCE`] in the future is the daemon's to re-anchor
+/// before calling this ([`gc_clock_ahead`]); this function stays pure.
 pub fn sweep_due(
     epoch: u64,
     mark: crate::types::GcMark,
@@ -2447,10 +2484,39 @@ mod tests {
 
     // ---- the trigger -------------------------------------------------
 
+    /// Issue #29 item 3: only a stored time beyond the tolerance counts as
+    /// "in the future"; an unset mark never does.
+    #[test]
+    fn gc_clock_ahead_needs_more_than_the_tolerance() {
+        let now = ts(0);
+        assert!(!gc_clock_ahead(mark(0, None), now));
+        assert!(!gc_clock_ahead(mark(0, Some(now)), now));
+        assert!(!gc_clock_ahead(
+            mark(0, Some(now - ChronoDuration::days(3))),
+            now
+        ));
+        assert!(!gc_clock_ahead(
+            mark(0, Some(now + GC_CLOCK_SKEW_TOLERANCE)),
+            now
+        ));
+        assert!(gc_clock_ahead(
+            mark(
+                0,
+                Some(now + GC_CLOCK_SKEW_TOLERANCE + ChronoDuration::seconds(1))
+            ),
+            now
+        ));
+        assert!(gc_clock_ahead(
+            mark(0, Some(now + ChronoDuration::days(365))),
+            now
+        ));
+    }
+
     fn mark(epoch: u64, at: Option<DateTime<Utc>>) -> crate::types::GcMark {
         crate::types::GcMark {
             last_gc_epoch: epoch,
             last_gc_at: at,
+            last_gc_at_reset: false,
         }
     }
 

@@ -1435,6 +1435,7 @@ impl Graph {
         self.gc_mark = self.gc_mark.merge(GcMark {
             last_gc_epoch: epoch_after,
             last_gc_at: Some(at),
+            last_gc_at_reset: false,
         });
     }
 
@@ -1467,6 +1468,22 @@ impl Graph {
             self.epoch
         );
         self.gc_mark.last_gc_epoch = advanced.min(self.epoch).max(self.gc_mark.last_gc_epoch);
+    }
+
+    /// Re-anchor the `gc_max_interval` clock at `at` after the stored
+    /// `last_gc_at` was found in the future (issue #29: a forward wall-clock
+    /// jump persisted a future sweep time, and the max-merge would otherwise
+    /// keep it — disabling the time trigger until real time caught up).
+    ///
+    /// Not a mutation; rides the next drained batch like every mark change.
+    /// Sets [`GcMark::last_gc_at_reset`] so the flush carry and the store
+    /// accept this one regression of `last_gc_at` instead of max-merging it
+    /// away. `last_gc_epoch` is untouched. The caller (the daemon) decides when
+    /// a stored time is "in the future" — see
+    /// [`crate::daemon::gc::gc_clock_ahead`].
+    pub fn reanchor_gc_clock(&mut self, at: chrono::DateTime<chrono::Utc>) {
+        self.gc_mark.last_gc_at = Some(at);
+        self.gc_mark.last_gc_at_reset = true;
     }
 
     /// Start the `gc_max_interval` clock for a session that has never swept

@@ -242,9 +242,13 @@ const VECTOR_FETCH_CAP: usize = 2048;
 /// counter only ever lags, never rewinds).
 ///
 /// Issue #29: the same statement stamps GC's sweep mark (`last_gc_epoch`,
-/// `last_gc_at`) with the same field-wise monotonic merge as
-/// [`crate::types::GcMark::merge`]. `last_gc_at` is wrapped in `COALESCE` on
-/// both sides because the two dialects disagree about `GREATEST` over a NULL
+/// `last_gc_at`) with the store-side merge
+/// [`crate::types::GcMark::apply_to_stored`]: a field-wise monotonic max,
+/// except that a re-anchored mark (`$5`, `last_gc_at_reset`) replaces the
+/// stored `last_gc_at` (never with NULL), so a future time left by a corrected
+/// wall-clock jump cannot keep the time trigger off. `last_gc_epoch` is a max
+/// either way. `last_gc_at` is wrapped in `COALESCE` on both sides of the
+/// `GREATEST` because the two dialects disagree about `GREATEST` over a NULL
 /// argument; the wrapped form means "the later non-NULL value" on either.
 const UPSERT_SESSION_ROW_SQL: &str = r#"
 INSERT INTO sessions (session_id, mutation_epoch, last_gc_epoch, last_gc_at)
@@ -252,10 +256,13 @@ VALUES ($1, $2, $3, $4)
 ON CONFLICT (session_id) DO UPDATE SET
     mutation_epoch = GREATEST(sessions.mutation_epoch, EXCLUDED.mutation_epoch),
     last_gc_epoch = GREATEST(sessions.last_gc_epoch, EXCLUDED.last_gc_epoch),
-    last_gc_at = GREATEST(
-        COALESCE(sessions.last_gc_at, EXCLUDED.last_gc_at),
-        COALESCE(EXCLUDED.last_gc_at, sessions.last_gc_at)
-    )
+    last_gc_at = CASE WHEN $5::BOOL
+        THEN COALESCE(EXCLUDED.last_gc_at, sessions.last_gc_at)
+        ELSE GREATEST(
+            COALESCE(sessions.last_gc_at, EXCLUDED.last_gc_at),
+            COALESCE(EXCLUDED.last_gc_at, sessions.last_gc_at)
+        )
+    END
 "#;
 
 /// Upserts are issued as **multi-row** statements (L82-1), so each is built as
@@ -2715,6 +2722,7 @@ impl<D: Dialect> GraphStore for PgStore<D> {
                     .bind(i64::try_from(batch.mutation_epoch).unwrap_or(i64::MAX))
                     .bind(i64::try_from(batch.gc_mark.last_gc_epoch).unwrap_or(i64::MAX))
                     .bind(batch.gc_mark.last_gc_at)
+                    .bind(batch.gc_mark.last_gc_at_reset)
                     .execute(&mut *tx)
                     .await
                     .map_err(|e| map_write_err(e, |m| format!("upsert session row: {m}")))?;
@@ -2817,6 +2825,7 @@ impl<D: Dialect> GraphStore for PgStore<D> {
             let gc_mark = crate::types::GcMark {
                 last_gc_epoch: u64::try_from(last_gc_epoch).unwrap_or(0),
                 last_gc_at: session_row.try_get("last_gc_at").map_err(backend)?,
+                last_gc_at_reset: false,
             };
 
             let interactions = sqlx::query(&self.sql.select_interactions)

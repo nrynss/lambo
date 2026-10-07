@@ -499,8 +499,11 @@ impl FlushLoop {
             // reason — without it every routine flush would present the unset
             // mark and the durable `last_gc_epoch`/`last_gc_at` would never
             // move, so a restart would sweep again. `GcMark::merge` is the
-            // field-wise max the adapters apply, so the carried value is
-            // monotone and a repeat is idempotent.
+            // field-wise max (the adapters apply the same rule,
+            // `GcMark::apply_to_stored`), so the carried value is monotone and
+            // a repeat is idempotent — except a re-anchored `last_gc_at`
+            // (`last_gc_at_reset`), which replaces the carried and stored time
+            // once after a corrected forward clock jump.
             self.pending.gc_mark = self.pending.gc_mark.merge(drained.gc_mark);
             self.pending.mutations.extend(drained.mutations);
         }
@@ -2339,5 +2342,27 @@ mod tests {
 
         let restarted = Graph::from_snapshot(snapshot).unwrap();
         assert_eq!(restarted.gc_mark(), stored, "a restart resumes the mark");
+
+        // Issue #29 item 3: a re-anchor after a forward clock jump is the one
+        // regression of `last_gc_at` the carry and the store accept. It lands
+        // with the next write and survives a restart; the epoch does not move.
+        let corrected = swept_at - chrono::Duration::days(1);
+        graph.write().reanchor_gc_clock(corrected);
+        let tail = graph.read().temporal_chain().last().copied();
+        let _ = add_interaction(&graph, 3, tail);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        wait_until_async(|| async {
+            matches!(store.load_session(&sid()).await, Ok(s) if s.interactions.len() == 3)
+        })
+        .await;
+        let snapshot = store.load_session(&sid()).await.unwrap();
+        assert_eq!(snapshot.gc_mark.last_gc_at, Some(corrected));
+        assert_eq!(snapshot.gc_mark.last_gc_epoch, epoch);
+        assert!(
+            !snapshot.gc_mark.last_gc_at_reset,
+            "stored marks carry no flag"
+        );
+        let restarted = Graph::from_snapshot(snapshot).unwrap();
+        assert_eq!(restarted.gc_mark().last_gc_at, Some(corrected));
     }
 }

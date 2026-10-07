@@ -965,6 +965,15 @@ WHERE session_id = $1
         assert!(upsert_session.contains("last_gc_at = EXCLUDED.last_gc_at"));
         assert!(upsert_session.contains("embedding_kind = EXCLUDED.embedding_kind"));
         assert!(upsert_session.contains("embedding_dim = EXCLUDED.embedding_dim"));
+        // Issue #29: the per-flush session-row stamp (shared by both pg
+        // dialects) carries the re-anchor flag as $5 and keeps the epoch merge
+        // a plain GREATEST.
+        let stamp = crate::store::pg::UPSERT_SESSION_ROW_SQL;
+        assert_eq!(placeholder_max(stamp), 5);
+        assert!(stamp.contains("CASE WHEN $5::BOOL"));
+        assert!(stamp.contains(
+            "last_gc_epoch = GREATEST(sessions.last_gc_epoch, EXCLUDED.last_gc_epoch)"
+        ));
         assert_eq!(placeholder_max(INSERT_CANONIZATION_EVENT_SQL), 8);
         assert_eq!(placeholder_max(UPDATE_CONCEPT_STATUS_SQL), 5);
         assert_eq!(placeholder_max(UPSERT_SYNONYM_SQL), 3);

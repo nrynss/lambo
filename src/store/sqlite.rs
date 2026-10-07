@@ -507,24 +507,31 @@ impl SqliteStore {
         let last_gc_epoch = i64::try_from(gc_mark.last_gc_epoch).unwrap_or(i64::MAX);
         let last_gc_at = gc_mark.last_gc_at.map(ts_to_text);
         for sid in sessions {
-            // Issue #29: GC's sweep mark rides the same statement with the same
-            // monotonic merge (`GcMark::merge`). `last_gc_at` is fixed-width
-            // millisecond UTC text (`ts_to_text`), so the lexicographic MAX is
-            // the chronological one; SQLite's two-argument MAX returns NULL if
-            // either side is NULL, hence the COALESCE fallbacks.
+            // Issue #29: GC's sweep mark rides the same statement with the
+            // store-side merge (`GcMark::apply_to_stored`). `last_gc_at` is
+            // fixed-width millisecond UTC text (`ts_to_text`), so the
+            // lexicographic MAX is the chronological one; SQLite's two-argument
+            // MAX returns NULL if either side is NULL, hence the COALESCE
+            // fallbacks. The one exception to the max is a re-anchored mark
+            // (`last_gc_at_reset`, the last bind): its time replaces the stored
+            // one, so a future time left by a corrected clock jump cannot keep
+            // the time trigger off. `last_gc_epoch` is a max either way.
             sqlx::query(
                 "INSERT INTO sessions (session_id, mutation_epoch, last_gc_epoch, last_gc_at) \
                  VALUES (?, ?, ?, ?) \
                  ON CONFLICT (session_id) DO UPDATE SET \
                      mutation_epoch = MAX(mutation_epoch, excluded.mutation_epoch), \
                      last_gc_epoch = MAX(last_gc_epoch, excluded.last_gc_epoch), \
-                     last_gc_at = COALESCE(MAX(last_gc_at, excluded.last_gc_at), \
-                                           last_gc_at, excluded.last_gc_at)",
+                     last_gc_at = CASE WHEN ? \
+                         THEN COALESCE(excluded.last_gc_at, last_gc_at) \
+                         ELSE COALESCE(MAX(last_gc_at, excluded.last_gc_at), \
+                                       last_gc_at, excluded.last_gc_at) END",
             )
             .bind(sid)
             .bind(epoch)
             .bind(last_gc_epoch)
             .bind(last_gc_at.as_deref())
+            .bind(gc_mark.last_gc_at_reset)
             .execute(&mut *tx)
             .await
             .map_err(|e| map_write_err(e, |m| format!("ensure session row: {m}")))?;
@@ -1179,6 +1186,7 @@ impl GraphStore for SqliteStore {
         let gc_mark = GcMark {
             last_gc_epoch: u64::try_from(last_gc_epoch).unwrap_or(0),
             last_gc_at: last_gc_at.as_deref().map(text_to_ts).transpose()?,
+            last_gc_at_reset: false,
         };
         let embedding = session_embedding_from_parts(
             embedding_kind,
@@ -5010,6 +5018,7 @@ mod tests {
         let mark = GcMark {
             last_gc_epoch: 40,
             last_gc_at: Some(swept),
+            last_gc_at_reset: false,
         };
         store.flush(&flush(mark, Some(i1)), None).await.unwrap();
         assert_eq!(store.load_session(&sid).await.unwrap().gc_mark, mark);
@@ -5021,10 +5030,12 @@ mod tests {
             GcMark {
                 last_gc_epoch: 7,
                 last_gc_at: None,
+                last_gc_at_reset: false,
             },
             GcMark {
                 last_gc_epoch: 39,
                 last_gc_at: Some(swept - chrono::Duration::days(1)),
+                last_gc_at_reset: false,
             },
         ] {
             store.flush(&flush(stale, Some(i1)), None).await.unwrap();
@@ -5040,21 +5051,71 @@ mod tests {
         let drained = GcMark {
             last_gc_epoch: 45,
             last_gc_at: None,
+            last_gc_at_reset: false,
         };
         store.flush(&flush(drained, Some(i1)), None).await.unwrap();
         assert_eq!(
             store.load_session(&sid).await.unwrap().gc_mark,
             GcMark {
                 last_gc_epoch: 45,
-                last_gc_at: Some(swept)
+                last_gc_at: Some(swept),
+                last_gc_at_reset: false,
             }
         );
         let later = GcMark {
             last_gc_epoch: 90,
             last_gc_at: Some(swept + chrono::Duration::days(1)),
+            last_gc_at_reset: false,
         };
         store.flush(&flush(later, Some(i1)), None).await.unwrap();
         assert_eq!(store.load_session(&sid).await.unwrap().gc_mark, later);
+
+        // Issue #29: a forward clock jump persisted a future sweep time. A
+        // plain (max-merged) earlier stamp cannot correct it; a re-anchored
+        // one replaces it — the one regression the merge allows — while the
+        // epoch stays a max, and the stored mark never carries the flag.
+        let future = GcMark {
+            last_gc_epoch: 95,
+            last_gc_at: Some(swept + chrono::Duration::days(400)),
+            last_gc_at_reset: false,
+        };
+        store.flush(&flush(future, Some(i1)), None).await.unwrap();
+        let corrected = swept + chrono::Duration::days(2);
+        let plain = GcMark {
+            last_gc_epoch: 95,
+            last_gc_at: Some(corrected),
+            last_gc_at_reset: false,
+        };
+        store.flush(&flush(plain, Some(i1)), None).await.unwrap();
+        assert_eq!(store.load_session(&sid).await.unwrap().gc_mark, future);
+        let reset = GcMark {
+            last_gc_epoch: 3,
+            last_gc_at: Some(corrected),
+            last_gc_at_reset: true,
+        };
+        store.flush(&flush(reset, Some(i1)), None).await.unwrap();
+        let stored = store.load_session(&sid).await.unwrap().gc_mark;
+        assert_eq!(
+            stored,
+            GcMark {
+                last_gc_epoch: 95,
+                last_gc_at: Some(corrected),
+                last_gc_at_reset: false,
+            },
+            "a re-anchor replaces the time, never rewinds the epoch"
+        );
+        assert_eq!(stored, future.apply_to_stored(reset), "same rule as memory");
+        // A re-anchored stamp with no time cannot erase one.
+        let no_time = GcMark {
+            last_gc_epoch: 95,
+            last_gc_at: None,
+            last_gc_at_reset: true,
+        };
+        store.flush(&flush(no_time, Some(i1)), None).await.unwrap();
+        assert_eq!(
+            store.load_session(&sid).await.unwrap().gc_mark.last_gc_at,
+            Some(corrected)
+        );
     }
 
     /// Migration path for pre-existing databases (P3 wave 2): a database built
