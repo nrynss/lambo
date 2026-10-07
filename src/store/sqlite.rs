@@ -1459,6 +1459,7 @@ impl GraphStore for SqliteStore {
                    SELECT 1 FROM edges e \
                    JOIN concepts src ON src.id = e.source AND src.session_id = ? \
                    WHERE e.target = c.id AND e.source = ? \
+                     AND e.edge_type IN ({STRUCTURAL_EDGE_IN}) \
                      AND COALESCE(e.event_time, e.created_at) <= ?) \
                AND NOT EXISTS ( \
                    SELECT 1 FROM edges e2 \
@@ -7431,6 +7432,66 @@ mod tests {
             assert_eq!(
                 got, want,
                 "SQLite must ignore provenance Derives exactly like MemoryStore (min_age {min_age:?})"
+            );
+        }
+    }
+
+    /// Issue #35: a dependent is reached through a **structural** edge from
+    /// the focus (`Dependency`/`Causal`/`Hierarchical`), as Postgres/Cockroach
+    /// (`BLAST_RADIUS_SQL`), MemoryStore and the graph's `blast_radii` define
+    /// it. SQLite's first `EXISTS` had no `edge_type` filter, so a concept the
+    /// focus only co-occurs with (`CoOccurrence`), resembles (`Semantic`) or
+    /// precedes (`Temporal`) counted as a dependent and inflated Stage 3.
+    #[cfg(feature = "store-memory")]
+    #[tokio::test]
+    async fn blast_radius_counts_only_structural_edges_from_the_focus() {
+        let store = test_store();
+        store.init_schema().await.unwrap();
+        let sid = SessionId::from("structural-only");
+        let ts = Utc.with_ymd_and_hms(2026, 8, 10, 9, 0, 0).unwrap();
+        let i1 = NodeId::new();
+        let pillar = NodeId::new();
+        let dep = NodeId::new();
+        let co = NodeId::new();
+        let sem = NodeId::new();
+        let tmp = NodeId::new();
+        let batch = MutationBatch {
+            mutation_epoch: 0,
+            gc_mark: Default::default(),
+            mutations: vec![
+                plant_interaction(&sid, i1, None, ts),
+                plant_concept(&sid, pillar, i1, "pillar", ConceptType::Entity, ts),
+                plant_concept(&sid, dep, i1, "dep", ConceptType::Entity, ts),
+                plant_concept(&sid, co, i1, "co", ConceptType::Entity, ts),
+                plant_concept(&sid, sem, i1, "sem", ConceptType::Entity, ts),
+                plant_concept(&sid, tmp, i1, "tmp", ConceptType::Entity, ts),
+                // The one real dependent.
+                plant_edge(&sid, pillar, dep, EdgeType::Dependency, ts),
+                // Non-structural edges from the focus: none of these targets
+                // has any structural inbound edge, so a missing filter on the
+                // first EXISTS would count each as an exclusive dependent.
+                plant_edge(&sid, pillar, co, EdgeType::CoOccurrence, ts),
+                plant_edge(&sid, pillar, sem, EdgeType::Semantic, ts),
+                plant_edge(&sid, pillar, tmp, EdgeType::Temporal, ts),
+            ],
+        };
+        store.flush(&batch, None).await.unwrap();
+        let memory = MemoryStore::new();
+        memory.flush(&batch, None).await.unwrap();
+
+        for min_age in [Duration::from_secs(0), Duration::from_secs(3600)] {
+            let want = memory
+                .blast_radius(&sid, pillar, min_age, Utc::now())
+                .await
+                .unwrap();
+            assert_eq!(want, 1, "oracle sanity: only the Dependency target counts");
+            let got = store
+                .blast_radius(&sid, pillar, min_age, Utc::now())
+                .await
+                .unwrap();
+            assert_eq!(
+                got, want,
+                "SQLite must count structural dependents only, like MemoryStore (min_age {min_age:?})"
             );
         }
     }

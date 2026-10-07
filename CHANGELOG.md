@@ -207,6 +207,17 @@
 
 ### Fixed
 
+- SQLite's blast radius now counts only structural dependents (#35). A concept
+  the focus reached through any edge, including `CoOccurrence`, `Semantic` and
+  `Temporal`, counted as a dependent, while Postgres, Cockroach, the in-memory
+  store and the graph count `Dependency`, `Causal` and `Hierarchical` edges
+  only. On a 3,370-concept dogfood store 673 concepts got a different value and
+  14 cleared Stage 3's `blast_radius > 5` bar through non-structural edges
+  alone. Stage 3 and budget demotion recompute blast radius when they evaluate a
+  concept, so new decisions use the corrected value; values already stored on
+  concepts and in canonization events keep the old count until that concept is
+  evaluated again.
+
 - A `lambo serve` that loses the election and proxies to the session holder no
   longer keeps its resolved embedder alive. It used to hold the full model for
   as long as its client stayed attached (with candle on Metal, ~1.1 GB of
