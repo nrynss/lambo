@@ -171,15 +171,16 @@ pub fn score(dims: ScoreDims, weights: &ScoringWeights) -> f64 {
 /// [`crate::daemon::gc::MIN_CONCEPT_SCORE`] was calibrated against is ~11%
 /// smaller after it, which is the number to anchor on when tuning the threshold.
 ///
-/// On a real store the switch **does** collect (issue #30 dry run, Metal rig
-/// snapshot, 3,370 concepts): one access anywhere — nothing else changed — takes
-/// a first sweep from 537 to 677 collections (+108 Observation, +23 Resource,
-/// +6 Entity, +3 Logic), because every concept that has not been read loses the
-/// 1.25× renormalization at once. A synthetic replay of two recalls per
-/// interaction more than pays that back (398 collected; 162 of the baseline's
-/// 537 saved, 23 newly collected). The switch is session-wide by design and is
-/// left as is: changing the cut is #29's step-2 work, which must account for
-/// this cliff. Evidence and method: `dev-diary/notes/issue-30-access-count.md`.
+/// Issue #30 made `access_count` live, which is why GC's cut no longer
+/// switches: with a session-wide switch the first access anywhere would have
+/// dropped every unread concept's eviction score at once (on the Metal rig
+/// snapshot that alone raised a first sweep's collections by roughly a quarter
+/// on the cut as it stood before #29). [`score_live_plus_frequency`] adds the
+/// frequency term per concept, so an access only raises the accessed concept's
+/// score. [`score`], which recall ranking, the daemon score table and
+/// canonization Stage 1 use, has no session-wide term either: there too an
+/// access moves only the accessed concept's score.
+/// Evidence and method: `dev-diary/notes/issue-30-access-count.md`.
 pub fn score_over_live_dimensions(dims: ScoreDims, weights: &ScoringWeights) -> f64 {
     let w = weights.sanitized();
     let live_total = w.recency + w.session_activity + w.density;
@@ -1061,6 +1062,32 @@ mod tests {
         for w in a.windows(2) {
             assert!(w[0].score >= w[1].score);
         }
+    }
+
+    /// Issue #30: [`score`] (recall ranking, the daemon score table,
+    /// canonization Stage 1) has no session-wide term, so the first access in
+    /// a session moves exactly one score — the accessed concept's, upwards —
+    /// and every other concept scores bit-for-bit what it did. GC's cut has no
+    /// session-wide switch either since #29 (`score_live_plus_frequency`).
+    #[test]
+    fn an_access_moves_only_the_accessed_concepts_score() {
+        let (mut g, c1, c2) = graph_with_two_concepts();
+        let weights = ScoringWeights::default();
+        let before: std::collections::HashMap<NodeId, f64> = rescore(&g, &weights)
+            .into_iter()
+            .map(|s| (s.item, s.score))
+            .collect();
+        assert_eq!(g.record_accesses(&[(c2, 1, ts(10))]), 1);
+        let after: std::collections::HashMap<NodeId, f64> = rescore(&g, &weights)
+            .into_iter()
+            .map(|s| (s.item, s.score))
+            .collect();
+        assert_eq!(
+            after[&c1].to_bits(),
+            before[&c1].to_bits(),
+            "an unread concept's score must not move when another is read"
+        );
+        assert!(after[&c2] > before[&c2], "the read concept gains frequency");
     }
 
     // ------------------------------------------------------------------
