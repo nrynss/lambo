@@ -2,6 +2,7 @@
 //! characters, panic containment and warnings.
 
 use super::*;
+use crate::cli::caps::MAX_CONTENT_BYTES;
 
 #[tokio::test]
 async fn bad_parameters_are_refused_as_readable_tool_errors() {
