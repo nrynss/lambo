@@ -75,6 +75,13 @@
 
 ### Added
 
+- `lambo_stats` (and the `serve --ledger` heartbeat) carries a `gc` object:
+  the session's durable sweep mark (`last_gc_at`, `last_gc_epoch`) and the
+  last sweep this server ran (`trigger`, `collected`, `deferred`,
+  `collection_cap`, `cap_bound`, `resources_spared_by_dependents`,
+  `survivors_deferred`; `null` until one runs), plus a `gc:` line on the text
+  summary. Additive: no existing key changed. Library: `Memory::gc_stats`,
+  `GcStats`, `GcSweepSummary` (issue #29).
 - `SessionEndpoint::resolve_in` is now public: `resolve` with the endpoint
   directory supplied, for deriving the address a holder would bind in a
   directory other than this process's own.

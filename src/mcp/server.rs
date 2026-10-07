@@ -6605,6 +6605,8 @@ mod tests {
             // has to infer it from a flat `canonical_count` is back to the
             // dead end the selector exists to end.
             "promotion_policy",
+            // Issue #29: GC sweep accounting (an additive key).
+            "gc",
             "warnings",
         ] {
             assert!(
