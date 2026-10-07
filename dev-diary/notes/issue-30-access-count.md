@@ -166,24 +166,29 @@ the epoch does not count). The outage bound above is why it has one now.
 
 ### 4. Scoring with the dimension live
 
-`score::score` and the ALGO-1 switch are unchanged here; thresholds are
-unchanged.
+`score::score` is unchanged and thresholds are unchanged.
 
-- **GC's cut has a cliff, and #29 owns it.** `frequency_is_live` is
-  session-wide, so the first applied access removes the 1.25× renormalization
-  from every unread concept at once (the dry run below measured it against the
-  pre-#29 cut). #29 replaces the switch in GC's cut with an additive rule (the
-  live-dimension score plus `w.frequency × frequency`), so a read can only
-  raise a concept's eviction score. Not changed here, to avoid two conflicting
-  fixes to `gc.rs`.
+- **GC's cut has no cliff (landed with #29, which this branch is rebased
+  onto).** The first cut of this branch found that ALGO-1's session-wide
+  `frequency_is_live` switch would remove the 1.25x renormalization from every
+  unread concept at the first applied access (the dry run below measured it
+  against the pre-#29 cut). #29's additive rule replaced the switch in GC's
+  cut: each concept scores the live-dimension score plus its own frequency
+  term (`score::score_live_plus_frequency`), so a read can only raise that
+  concept's eviction score. Pinned on the combined tree by #29's
+  `an_access_on_another_concept_never_lowers_an_unread_concepts_gc_score`.
 - **Nothing else has the cliff (verified).** Recall ranking, the daemon score
   table and canonization Stage 1 (its p90 is of peer scores from the same
   table) use `score()`, whose `SessionContext` does not depend on accesses: an
   access moves only the accessed concept's score
   (`score::tests::an_access_moves_only_the_accessed_concepts_score`, bit-exact
-  for the unread concept). `score_over_live_dimensions` has one caller, GC's
-  cut.
-- `MIN_CONCEPT_SCORE` was not moved; it is re-examined with #29's cut.
+  for the unread concept).
+- `MIN_CONCEPT_SCORE` was not moved by this branch; #29's cut and its
+  protections define what it measures.
+- **GC's recency anchor reads `last_accessed`.** #29's 365-day cut measures
+  time since the later of `created_at` and `last_accessed`, so a recalled old
+  Entity or isolated Resource is not collected on age
+  (`a_recalled_old_entity_and_isolated_resource_survive_the_365_day_cut`).
 
 ### 5. Operator decisions (2026-10-07)
 
@@ -241,17 +246,19 @@ remediated 533.9-554.7 µs (median 540); SQLite p50 (1,000 recalls, 2 runs)
 60.7-62.0 / 62.1-62.7 / 61.7-64.0 ms. Inside run-to-run noise; the read path
 did not change (one leaf-mutex section per recall, plus a flag check).
 
-## Interface with #29
+## Interface with #29 (landed; this branch is rebased onto it)
 
-- `last_accessed` is now a real "last touch" for #29's "anchor recency to time
-  since last touch": reads count as touches.
-- #29's mutation-floor and persisted `last_gc_epoch` should keep reading
-  `Graph::epoch()`: accesses never move it, so no adjustment is needed.
-- The daemon cycle gained step 0 (apply ledger) before rescore/detect/GC; #29's
-  timed trigger edits step 3. Merge order does not matter, but keep step 0
-  first so a sweep sees fresh counts.
-- #29's additive step-2 rule removes the ALGO-1 cliff in GC's cut (§4); the
-  dry-run numbers below describe the pre-#29 cut and are history, not a
-  calibration target.
+- `last_accessed` is a real "last touch" for #29's 365-day recency anchor:
+  reads count as touches (see §4).
+- #29's mutation floor, `gc_idle_floor` and persisted `last_gc_epoch` read
+  `Graph::epoch()`; accesses never move it, so they cannot satisfy either
+  trigger (`applied_accesses_do_not_advance_the_gc_trigger`,
+  `applied_accesses_do_not_satisfy_the_idle_floor_of_the_timed_trigger`).
+- The daemon cycle's step 0 (apply ledger) runs before rescore/detect/GC;
+  #29's timed trigger lives in step 3, so a sweep sees fresh counts.
+- #29's additive step-2 rule is what GC's cut uses; the dry-run numbers above
+  describe the pre-#29 cut and are history, not a calibration target.
 - Accesses do not bump the epoch, so #29's `exempt_from_gc_measure` seam is not
   needed for them (§3).
+- `lambo_stats` keeps #29's `gc` block; #30 adds no stats key
+  (`stats_gc_block_is_unmoved_by_recall_and_inspect_accesses`).
