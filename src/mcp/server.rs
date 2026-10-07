@@ -3526,6 +3526,67 @@ mod tests {
         );
     }
 
+    /// Issues #29 and #30 coexist in `lambo_stats`: recalling and inspecting
+    /// (accesses noted, then applied) leaves the `gc` object present, the
+    /// epoch and the durable sweep mark where they were, and the payload's
+    /// key set exactly as before, so no access accounting leaked into it.
+    #[tokio::test]
+    async fn stats_gc_block_is_unmoved_by_recall_and_inspect_accesses() {
+        let s = server_with_config(
+            "mcp-gc-stats-access",
+            Config {
+                daemon_tick_interval: Duration::from_secs(3_600),
+                ..Config::default()
+            },
+        )
+        .await;
+        call(
+            &s,
+            "lambo_derive",
+            json!({
+                "agent_id": "agent-a",
+                "concepts": [{"content": "auth middleware", "concept_type": "entity"}]
+            }),
+        )
+        .await;
+        s.mem.settle_daemon().await;
+        let stats_call = || call(&s, "lambo_stats", json!({"agent_id": "agent-a"}));
+        let before = stats_call().await.structured_content.expect("payload");
+
+        let inspect = call(
+            &s,
+            "lambo_inspect",
+            json!({"agent_id": "agent-a", "focus": "auth middleware"}),
+        )
+        .await;
+        assert_eq!(inspect.is_error, Some(false), "{inspect:?}");
+        let recall = call(
+            &s,
+            "lambo_recall",
+            json!({"agent_id": "agent-a", "query": "auth middleware"}),
+        )
+        .await;
+        assert_eq!(recall.is_error, Some(false), "{recall:?}");
+        assert!(
+            s.mem.unapplied_accesses() > 0,
+            "premise: accesses are noted"
+        );
+        s.mem.settle_daemon().await;
+
+        let after = stats_call().await.structured_content.expect("payload");
+        assert!(after["gc"].is_object(), "{after}");
+        assert_eq!(after["epoch"], before["epoch"], "accesses never move it");
+        assert_eq!(
+            after["gc"]["last_gc_epoch"], before["gc"]["last_gc_epoch"],
+            "nor the durable sweep mark"
+        );
+        let keys = |p: &serde_json::Value| -> Vec<String> {
+            p.as_object().unwrap().keys().cloned().collect()
+        };
+        assert_eq!(keys(&after), keys(&before));
+        s.mem.close().await.expect("close");
+    }
+
     /// Issue #29: `lambo_stats` carries a `gc` object — the durable sweep mark
     /// and the last sweep this process ran (null before one) — and a matching
     /// summary line. Read-side only: asking twice changes nothing.
