@@ -146,6 +146,11 @@ and what it displaces is precise level-1 provenance:
 | `J3 projection bound remediation lanes EWMA` | the same hub | `dev-diary/lambo-for-mooshik/J-multi-client.md` (1) |
 | `per-call agent identity J1 attribution reserve` | the same hub | `mcp::server::tests::two_agents_through_one_server_hold_distinct_locks` (1) |
 
+The cells quote concept text from the graph as it stood for this spike. The
+last one names a test that has since moved: it is now
+`mcp::server::tests::tools::two_agents_through_one_server_hold_distinct_locks`
+(`src/mcp/server/tests/tools.rs`).
+
 This is textbook PageRank popularity bias. On a memory graph whose level-1
 dependents *are* the precise provenance an agent asked for, mass-based ranking
 prefers the globally popular concept over the answer. A human judge reading the
