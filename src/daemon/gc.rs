@@ -196,19 +196,26 @@ pub const GC_IDLE_FLOOR: u64 = 100;
 /// there. See [`eviction_recency`]. A scoring constant, not a cadence, so it is
 /// not settable from `lambo.toml` (see [`crate::config::DaemonConfig`]).
 ///
-/// ### Why 90 days
+/// ### Why 365 days
 ///
-/// Measured on the Metal rig snapshot (3,370 concepts, 49 days old, uncapped
-/// first sweep, Logic/Constraint exempt): a 30-day window collects 1,046 today
-/// (more than the 537 the span-relative cut took), 60 days 353, **90 days 159
-/// — all Observations**, 120 days 74. Whatever the window, an untouched store
-/// converges on the same set once every concept is older than it (1,468 on
-/// the rig: the concepts whose structure alone is under their bar); the window
-/// sets how long an unused, sparsely connected concept is kept, not whether.
-/// A quarter keeps a working project's context through a pause, and once
-/// recall records accesses (issue #30) a concept that is still being used
+/// Lambo is long-term memory, and what the score cut can still reach is
+/// mostly long-tail pointers: file paths, PRs, commits, verdicts, the Entities
+/// and Resources a session mentioned once. Those are exactly what someone
+/// returns to a year later, and they are a small slice of the store (about 4%
+/// on the Metal rig once Logic, Constraint, Observation and Resources with
+/// dependents are spared), so the space a short window would reclaim is
+/// negligible next to what losing one of them costs. Whatever the window, an
+/// untouched store converges on the same set once every concept is older than
+/// it; the window sets how long an unused, sparsely connected concept is kept,
+/// not whether. A year keeps a project's pointers through a long pause, and
+/// once recall records accesses (issue #30) a concept that is still being used
 /// keeps resetting its own clock.
-pub const GC_RECENCY_WINDOW: ChronoDuration = ChronoDuration::days(90);
+///
+/// The window started at 90 days (measured on the rig snapshot, see the
+/// dev-diary note `gc-time-bound-29.md`, whose sensitivity table is the
+/// 90-day-era measurement) and was widened to a year by operator decision once
+/// Observations left the cut.
+pub const GC_RECENCY_WINDOW: ChronoDuration = ChronoDuration::days(365);
 
 /// Step 2+3 collection cap as a fraction of the sweep's unprotected concepts
 /// (issue #29); see [`collection_cap`].
@@ -849,7 +856,7 @@ fn eviction_threshold(min_concept_score: f64, ty: ConceptType) -> f64 {
 /// every concept from the live-dimension score to the full composite as soon
 /// as *any* concept had an access, which lowers every unread concept's score
 /// (the full composite is `0.8 ×` the live one on the weighted part at
-/// frequency 0, NEW-6). Under the 90-day recency that was a cliff: on the
+/// frequency 0, NEW-6). Under a time-anchored recency that was a cliff: on the
 /// Metal rig snapshot one access on one Entity took the first sweep from 159
 /// to 412 candidates. Per concept and additive, an access can only raise the
 /// accessed concept's score and never touches anyone else's, and an unread
@@ -2428,6 +2435,22 @@ mod tests {
         assert!(
             (a - b).abs() < 0.05,
             "span growth alone must not move GC's score materially: {a} vs {b}"
+        );
+    }
+
+    /// The window is a year (operator decision, 2026-10-07): a concept
+    /// untouched for six months keeps about half its eviction recency, and one
+    /// untouched for 365 days has none.
+    #[test]
+    fn the_recency_window_is_a_year() {
+        assert_eq!(GC_RECENCY_WINDOW, ChronoDuration::days(365));
+        assert_eq!(GcParams::default().recency_window, GC_RECENCY_WINDOW);
+        let c = concept(1, 1, "c", ConceptType::Entity);
+        let half = eviction_recency(&c, ts(0) + ChronoDuration::days(183), GC_RECENCY_WINDOW);
+        assert!((half - 0.5).abs() < 0.01, "{half}");
+        assert_eq!(
+            eviction_recency(&c, ts(0) + ChronoDuration::days(365), GC_RECENCY_WINDOW),
+            0.0
         );
     }
 

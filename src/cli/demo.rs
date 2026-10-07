@@ -1382,10 +1382,13 @@ async fn wait_until<F: FnMut() -> bool>(label: &str, mut cond: F) -> Result<(), 
 /// `GcParams::default()` for it — so this is measured against the same
 /// constant GC uses, and mirrors GC's composite (the live-dimension score
 /// plus each concept's own frequency term, issue #29) and its per-type bar
-/// (ALGO-11). Recency is the span-relative one, not GC's 90-day time-anchored
-/// one: for a session younger than the window, read near its last write (the
-/// demo), span-relative recency is never above GC's, so the headroom printed
-/// here is a lower bound on GC's.
+/// (ALGO-11). Recency is the span-relative one, not GC's time-anchored one
+/// ([`crate::daemon::gc::GC_RECENCY_WINDOW`], 365 days): for a session no
+/// older than the window, read near its last write (the demo), span-relative
+/// recency `1 − x/span` is never above GC's `1 − x/window` (`span ≤ window`), so
+/// the headroom printed here is a lower bound on GC's, and a wider window only
+/// widens it. Every concept is measured, including the types the score cut
+/// exempts, which makes the bound conservative rather than exact.
 pub fn gc_headroom(graph: &Graph) -> Vec<(String, f64)> {
     use crate::daemon::gc::MIN_CONCEPT_SCORE;
     use crate::daemon::score::{score_concept, score_live_plus_frequency, SessionContext};

@@ -196,7 +196,7 @@ pub fn score_over_live_dimensions(dims: ScoreDims, weights: &ScoringWeights) -> 
 /// end state from 1,468 to 2,034. The additive form has no session-wide state:
 ///
 /// * a concept with `frequency == 0` scores exactly its live-dimension score,
-///   the scale `crate::daemon::gc::MIN_CONCEPT_SCORE` and the 90-day window
+///   the scale `crate::daemon::gc::MIN_CONCEPT_SCORE` and the one-year window
 ///   were calibrated on, however many other concepts have been read;
 /// * reading a concept can only raise its own score (frequency is
 ///   non-negative, and its `last_accessed` only raises GC's recency).
