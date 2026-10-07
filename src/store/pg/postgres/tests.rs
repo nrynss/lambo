@@ -409,26 +409,34 @@ fn explain_vector_candidates_uses_store_forced_exact_scan() {
     ]
     .concat();
     let base = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/store/pg/mod.rs"));
+    // Compare with all whitespace removed, so rustfmt reflowing a call across
+    // lines (`store\n    .issue_forced_exact_scan(..)`) cannot hide it.
+    let squash = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+    let camera = squash(&camera);
+    let base = squash(base);
+    // Every needle is split across `concat!` pieces so this function's own
+    // source text, which `camera` includes, never contains it. Spelled as
+    // one literal, a needle matches itself and the scan cannot fail.
     assert!(
-        camera.contains("store.issue_forced_exact_scan(&mut tx)"),
+        camera.contains(concat!("store", ".issue_forced_exact_scan(&muttx)")),
         "camera-proof must issue the GUC via the production helper"
     );
     assert!(
-        base.contains("self.issue_forced_exact_scan(&mut tx)"),
+        base.contains(concat!("self", ".issue_forced_exact_scan(&muttx)")),
         "vector_candidates_checked must issue the GUC via the shared helper"
     );
+    // The exact lane's EXPLAIN goes through `corpus::plan`, which takes no
+    // extra_set at all and issues the GUC through the production helper.
     assert!(
-        camera.contains("explain_vector_candidates(&exact, None)"),
-        "exact-lane EXPLAIN must not pass the GUC as extra_set"
+        camera.contains(concat!("corpus::plan", "(&exact,")),
+        "exact-lane EXPLAIN must go through corpus::plan, which takes no extra_set"
     );
     assert!(
-        !camera.contains(
-            "explain_vector_candidates(&exact, Some(\"SET LOCAL enable_indexscan = off\"))"
-        ),
+        !camera.contains(concat!("explain_vector_candidates", "(&exact,Some(")),
         "exact-lane EXPLAIN must not inject the GUC as extra_set"
     );
     assert!(
-        camera.contains("store.forced_exact_scan()"),
+        camera.contains(concat!("store", ".forced_exact_scan()")),
         "camera-proof rustdoc/comments must name the flag the helper reads"
     );
 }
