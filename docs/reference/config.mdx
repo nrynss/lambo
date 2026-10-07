@@ -117,6 +117,8 @@ Do not switch embedder models in the middle of a session without re-embedding, b
 | Key | Default | What it sets |
 |---|---|---|
 | `gc_interval` | `10000` | Mutations between GC sweeps. |
+| `gc_max_interval_secs` | `86400` | Seconds after the last GC sweep at which a session that is still taking writes sweeps anyway. |
+| `gc_idle_floor` | `100` | Session mutations since the last sweep below which the time bound does not fire. |
 | `canonization_eval_interval_secs` | `60` | Seconds between canonization evaluation passes. |
 
 A degenerate value is refused rather than quietly clamped — `gc_interval = 0` is a mutation counter and not a period, so it stops the process:
@@ -140,6 +142,8 @@ $ lambo --config lambo.toml saints --session s
 A bad `promotion_policy` has the wider scope of the two, and the difference is worth knowing: an unparseable policy is refused while the file is being read, so it stops every command, those four included. A degenerate cadence is refused later, when the backends are built. See [Promotion policy](#promotion-policy).
 
 Under the default `Swarm` policy `gc_interval` is the one worth understanding. Stage 1 requires `gc_survived >= 3`, so at the default a concept needs roughly 30000 mutations before it can be promoted at all, which an ordinary session of a few dozen concepts never reaches — this is why `lambo demo` sets it to 1 internally. Under `Solo` it does not participate at all; see [Promotion policy](#promotion-policy). `lambo.example.toml` carries the same notes inline.
+
+GC also sweeps on time. When `gc_max_interval_secs` has passed since a session's last sweep and the session took at least `gc_idle_floor` mutations since then, it sweeps even though it is far below `gc_interval`; whichever trigger comes first wins. An idle session never sweeps on time alone, so `gc_survived` keeps measuring survival under eviction pressure rather than age. The time and watermark of the last sweep are stored with the session, so a writer restart neither resets the clock nor sweeps again, and a writer that was down for a week sweeps once when it comes back, not seven times. A session that has never swept starts its clock when a writer first attaches to it. Both keys must be positive; zero is refused the same way `gc_interval = 0` is. Neither changes what a sweep collects.
 
 ## Environment variables
 

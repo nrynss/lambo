@@ -1451,6 +1451,16 @@ impl Graph {
         self.gc_mark.last_gc_epoch = self.gc_mark.last_gc_epoch.saturating_add(n);
     }
 
+    /// Start the `gc_max_interval` clock for a session that has never swept
+    /// (issue #29): a no-op once [`GcMark::last_gc_at`] is set. The first timed
+    /// sweep is then due a full interval after a writer first observed the
+    /// session, never immediately on attach.
+    pub fn anchor_gc_clock(&mut self, at: chrono::DateTime<chrono::Utc>) {
+        if self.gc_mark.last_gc_at.is_none() {
+            self.gc_mark.last_gc_at = Some(at);
+        }
+    }
+
     /// Re-append already-drained mutations to the **front** of the log,
     /// preserving chronological order (T8.1 shutdown drain).
     ///

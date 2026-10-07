@@ -1,7 +1,9 @@
 //! GC — spec §9, periodic only (T4.5; canonization's food).
 //!
-//! Runs every `gc_interval` mutations (the caller — T4.6's loop — decides
-//! *when*; this module decides *what*). [`run`] is a pure, fixture-testable
+//! Runs every `gc_interval` mutations, or once `gc_max_interval` has elapsed
+//! since the last sweep and at least `gc_idle_floor` mutations happened since
+//! (issue #29; [`sweep_due`] is that rule, the caller — T4.6's loop — applies
+//! it; this module decides *what*). [`run`] is a pure, fixture-testable
 //! function over `&mut Graph`: it performs the seven spec steps and returns a
 //! [`GcOutcome`] the owner records for T5.4 (cache epoch) and T6.4 (canonical
 //! budget).
@@ -152,6 +154,17 @@ pub const MIN_CONCEPT_SCORE: f64 = 0.12;
 /// Advisory concept-count ceiling: warn above, never evict (spec §9).
 pub const MAX_CONCEPT_NODES: usize = 10_000;
 
+/// Default `gc_max_interval` (issue #29): a session still taking writes sweeps
+/// at least this often. One day — the Metal rig's working rhythm.
+pub const GC_MAX_INTERVAL: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+/// Default `gc_idle_floor` (issue #29): the time bound fires only after this
+/// many session mutations since the last sweep. Measured on the Metal rig
+/// (lower bound, concepts + edges + interactions per day over 49 days): a
+/// floor of 100 skips the 12 trivial active days (1–8 interactions) and sweeps
+/// on the 24 working days.
+pub const GC_IDLE_FLOOR: u64 = 100;
+
 /// Step 2's eviction recency window (issue #29): a concept touched `now` has
 /// eviction recency 1.0, falling linearly to 0.0 at this age and staying
 /// there. See [`eviction_recency`]. A scoring constant, not a cadence, so it is
@@ -243,6 +256,50 @@ impl Default for GcParams {
     }
 }
 
+/// Why the daemon started a sweep (issue #29).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GcTrigger {
+    /// `gc_interval` session mutations since the last sweep (spec §9).
+    Mutations,
+    /// `gc_max_interval` elapsed since the last sweep, with at least
+    /// `gc_idle_floor` session mutations since it.
+    Elapsed,
+}
+
+/// The sweep trigger (issue #29): is a sweep due, and why?
+///
+/// `since` is the session mutations since the last sweep — `epoch -
+/// mark.last_gc_epoch`, which excludes GC's own deferred writes (NEW-2). The
+/// mutation trigger is unchanged from spec §9 and is not gated by the floor.
+/// The time trigger needs both the elapsed bound and the floor, so an idle
+/// session never sweeps on time alone, and it measures from one stored
+/// instant, so a writer that was down for N intervals sweeps **once** (no
+/// backlog). A never-anchored mark (`last_gc_at == None`) cannot time-trigger;
+/// the daemon anchors it on first observation ([`Graph::anchor_gc_clock`]). A
+/// clock that went backwards past the mark reads as "not elapsed" — the time
+/// trigger waits, the mutation trigger is unaffected.
+pub fn sweep_due(
+    epoch: u64,
+    mark: crate::types::GcMark,
+    now: DateTime<Utc>,
+    gc_interval: u64,
+    gc_max_interval: std::time::Duration,
+    gc_idle_floor: u64,
+) -> Option<GcTrigger> {
+    let since = epoch.saturating_sub(mark.last_gc_epoch);
+    if since >= gc_interval {
+        return Some(GcTrigger::Mutations);
+    }
+    if since < gc_idle_floor {
+        return None;
+    }
+    let bound = ChronoDuration::from_std(gc_max_interval).unwrap_or(ChronoDuration::MAX);
+    match mark.last_gc_at {
+        Some(at) if now.signed_duration_since(at) >= bound => Some(GcTrigger::Elapsed),
+        _ => None,
+    }
+}
+
 /// Everything one GC run did, for the owner (T4.6), T5.4, and T6.4.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct GcOutcome {
@@ -276,6 +333,9 @@ pub struct GcOutcome {
     /// are re-evaluated on the next one). Non-zero exactly when the cap bound;
     /// a warning in [`GcOutcome::warnings`] says so too.
     pub collections_deferred: usize,
+    /// Why the daemon ran this sweep. `None` when `run` was called directly
+    /// (tests, tooling); the daemon fills it in.
+    pub trigger: Option<GcTrigger>,
 }
 
 impl GcOutcome {
@@ -1772,7 +1832,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Issue #29 — step-2 protections and the collection cap
+    // Issue #29 — step-2 protections, the collection cap, the trigger
     // ------------------------------------------------------------------
 
     /// A session with one interaction-spanning hub (13 → 14/15/16) so a
@@ -2110,5 +2170,91 @@ mod tests {
         let outcome = run(&mut g, aged_params());
         assert!(outcome.edges_removed.is_empty());
         assert!(g.edge(nid(100)).is_some());
+    }
+
+    // ---- the trigger -------------------------------------------------
+
+    fn mark(epoch: u64, at: Option<DateTime<Utc>>) -> crate::types::GcMark {
+        crate::types::GcMark {
+            last_gc_epoch: epoch,
+            last_gc_at: at,
+        }
+    }
+
+    const DAY: std::time::Duration = std::time::Duration::from_secs(86_400);
+
+    #[test]
+    fn sweep_due_mutation_trigger_is_unchanged_and_ungated() {
+        // gc_interval mutations since the mark: due, with or without a clock,
+        // and regardless of the floor.
+        assert_eq!(
+            sweep_due(10_000, mark(0, None), ts(0), 10_000, DAY, 100),
+            Some(GcTrigger::Mutations)
+        );
+        assert_eq!(
+            sweep_due(10_050, mark(50, Some(ts(0))), ts(1), 10_000, DAY, 20_000),
+            Some(GcTrigger::Mutations)
+        );
+        assert_eq!(
+            sweep_due(9_999, mark(0, Some(ts(0))), ts(1), 10_000, DAY, 100_000),
+            None
+        );
+    }
+
+    #[test]
+    fn sweep_due_time_trigger_needs_the_interval_and_the_floor() {
+        let at = ts(0);
+        let day_later = at + ChronoDuration::days(1);
+        // Elapsed and over the floor.
+        assert_eq!(
+            sweep_due(600, mark(500, Some(at)), day_later, 10_000, DAY, 100),
+            Some(GcTrigger::Elapsed)
+        );
+        // Elapsed, one mutation short of the floor: an idle session does not
+        // sweep on time alone.
+        assert_eq!(
+            sweep_due(599, mark(500, Some(at)), day_later, 10_000, DAY, 100),
+            None
+        );
+        // Over the floor, one second short of the interval.
+        assert_eq!(
+            sweep_due(
+                600,
+                mark(500, Some(at)),
+                day_later - ChronoDuration::seconds(1),
+                10_000,
+                DAY,
+                100
+            ),
+            None
+        );
+        // Never anchored: the time trigger cannot fire.
+        assert_eq!(
+            sweep_due(600, mark(500, None), day_later, 10_000, DAY, 100),
+            None
+        );
+        // Clock behind the mark: not elapsed.
+        assert_eq!(
+            sweep_due(
+                600,
+                mark(500, Some(at)),
+                at - ChronoDuration::days(3),
+                10_000,
+                DAY,
+                100
+            ),
+            None
+        );
+        // Thirty days down: due once — and once the sweep is recorded, not
+        // again (no backlog).
+        let late = at + ChronoDuration::days(30);
+        assert_eq!(
+            sweep_due(600, mark(500, Some(at)), late, 10_000, DAY, 100),
+            Some(GcTrigger::Elapsed)
+        );
+        assert_eq!(
+            sweep_due(700, mark(700, Some(late)), late, 10_000, DAY, 100),
+            None
+        );
     }
 }

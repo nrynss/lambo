@@ -114,6 +114,18 @@ pub struct Config {
     pub drift_threshold: usize,
 
     pub gc_interval: u64,
+    /// Wall-clock bound on the time between GC sweeps (issue #29): a session
+    /// that has not taken `gc_interval` mutations still sweeps once this much
+    /// time has passed since its last sweep, provided it took at least
+    /// [`Config::gc_idle_floor`] mutations since then. Default 24h. A cadence,
+    /// not a threshold — see [`DaemonConfig`].
+    pub gc_max_interval: Duration,
+    /// Minimum session mutations since the last sweep before the
+    /// `gc_max_interval` bound may trigger one (issue #29). Default 100. An idle
+    /// session never sweeps on time alone, or `gc_survived` would measure age
+    /// rather than surviving eviction pressure. Does not gate the
+    /// `gc_interval` trigger.
+    pub gc_idle_floor: u64,
     pub max_canonical_nodes: usize,
 
     pub canonization_min_peer_count: usize,
@@ -166,6 +178,8 @@ impl Default for Config {
             drift_threshold: crate::daemon::drift::DRIFT_THRESHOLD,
 
             gc_interval: 10_000,
+            gc_max_interval: crate::daemon::gc::GC_MAX_INTERVAL,
+            gc_idle_floor: crate::daemon::gc::GC_IDLE_FLOOR,
             max_canonical_nodes: 1000,
 
             canonization_min_peer_count: 20,
@@ -216,6 +230,22 @@ impl Config {
             return Err(LamboError::Config(format!(
                 "gc_interval must be >= 1 (a mutation counter), got {}",
                 self.gc_interval
+            )));
+        }
+        // Issue #29: a zero time bound would sweep on every cycle once the
+        // floor is met, and a zero floor would sweep an idle session on time
+        // alone — the exact age-not-pressure `gc_survived` the floor exists to
+        // prevent. Both fail closed.
+        if self.gc_max_interval == Duration::ZERO {
+            return Err(LamboError::Config(format!(
+                "gc_max_interval must be > 0, got {:?}",
+                self.gc_max_interval
+            )));
+        }
+        if self.gc_idle_floor == 0 {
+            return Err(LamboError::Config(format!(
+                "gc_idle_floor must be >= 1 (session mutations since the last sweep), got {}",
+                self.gc_idle_floor
             )));
         }
         if self.daemon_tick_interval == Duration::ZERO {
@@ -289,6 +319,19 @@ impl Config {
 /// lower `gc_interval`**; lowering it changes nothing about promotion. The
 /// "30 000 mutations" arithmetic and the "not settable from a file" framing
 /// both describe swarm, which remains the default.
+///
+/// # GC also sweeps on time (issue #29)
+///
+/// At human pace even the deployment-lifetime count takes months: the Metal
+/// dogfood rig took ~3.3k writes in 13 days. GC therefore also sweeps when
+/// `gc_max_interval_secs` (default 86 400, one day) has elapsed since the
+/// session's last sweep **and** at least `gc_idle_floor` (default 100) session
+/// mutations happened since then — whichever of the two triggers comes first.
+/// The time of the last sweep persists with the session (`sessions.last_gc_at`,
+/// beside `last_gc_epoch`), so a restart neither resets the clock nor sweeps
+/// again, and a writer that was down for N days sweeps once, not N times. Both
+/// keys are cadences; neither changes what a sweep collects or any promotion
+/// bar. Like the other `[daemon]` keys they have no environment overlay.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct DaemonConfig {
@@ -296,6 +339,15 @@ pub struct DaemonConfig {
     pub gc_interval: Option<u64>,
     /// Seconds between canonization evaluation passes.
     pub canonization_eval_interval_secs: Option<u64>,
+    /// Maximum seconds between GC sweeps of a session that is still taking
+    /// writes (issue #29); see the type docs. Named `_secs` like
+    /// `canonization_eval_interval_secs`, the other duration in this table.
+    #[serde(default)]
+    pub gc_max_interval_secs: Option<u64>,
+    /// Session mutations since the last sweep below which the time bound does
+    /// not fire (issue #29). Does not gate `gc_interval`.
+    #[serde(default)]
+    pub gc_idle_floor: Option<u64>,
 }
 
 impl DaemonConfig {
@@ -306,6 +358,12 @@ impl DaemonConfig {
         }
         if let Some(secs) = self.canonization_eval_interval_secs {
             cfg.canonization_eval_interval = std::time::Duration::from_secs(secs);
+        }
+        if let Some(secs) = self.gc_max_interval_secs {
+            cfg.gc_max_interval = std::time::Duration::from_secs(secs);
+        }
+        if let Some(v) = self.gc_idle_floor {
+            cfg.gc_idle_floor = v;
         }
     }
 }
@@ -439,6 +497,8 @@ mod tests {
         assert_eq!(c.drift_threshold, 5);
 
         assert_eq!(c.gc_interval, 10_000);
+        assert_eq!(c.gc_max_interval, Duration::from_secs(24 * 60 * 60));
+        assert_eq!(c.gc_idle_floor, 100);
         assert_eq!(c.max_canonical_nodes, 1000);
 
         assert_eq!(c.canonization_min_peer_count, 20);
@@ -579,6 +639,7 @@ mod tests {
         DaemonConfig {
             gc_interval: Some(0),
             canonization_eval_interval_secs: Some(0),
+            ..Default::default()
         }
         .apply_to(&mut cfg);
         assert!(cfg.validate().is_err(), "zero overrides must fail");
@@ -588,6 +649,7 @@ mod tests {
         DaemonConfig {
             gc_interval: None,
             canonization_eval_interval_secs: Some(0),
+            ..Default::default()
         }
         .apply_to(&mut only_canon);
         assert!(
@@ -599,6 +661,7 @@ mod tests {
         DaemonConfig {
             gc_interval: Some(0),
             canonization_eval_interval_secs: None,
+            ..Default::default()
         }
         .apply_to(&mut only_gc);
         assert!(
@@ -611,6 +674,7 @@ mod tests {
         DaemonConfig {
             gc_interval: Some(1),
             canonization_eval_interval_secs: Some(60),
+            ..Default::default()
         }
         .apply_to(&mut ok);
         ok.validate().unwrap();
@@ -681,6 +745,54 @@ mod tests {
             cfg_canon.validate().is_err(),
             "zero canonization_eval_interval_secs alone must fail"
         );
+    }
+
+    /// Issue #29: the two time-bound keys parse from `[daemon]`, reach
+    /// `Config`, leave unset keys alone, fail `validate()` at zero, and a typo
+    /// is still a hard error.
+    #[test]
+    fn lambo_file_gc_time_bound_keys_parse_apply_and_validate() {
+        let f = LamboFile::from_toml_str(
+            "[daemon]\ngc_max_interval_secs = 3600\ngc_idle_floor = 25\n\n[store]\n[embedder]\n",
+        )
+        .unwrap();
+        assert_eq!(f.daemon.gc_max_interval_secs, Some(3600));
+        assert_eq!(f.daemon.gc_idle_floor, Some(25));
+        let mut cfg = Config::default();
+        f.daemon.apply_to(&mut cfg);
+        assert_eq!(cfg.gc_max_interval, Duration::from_secs(3600));
+        assert_eq!(cfg.gc_idle_floor, 25);
+        assert_eq!(cfg.gc_interval, 10_000, "unset keys keep their default");
+        cfg.validate().unwrap();
+
+        // Absent keys leave the defaults.
+        let mut untouched = Config::default();
+        LamboFile::from_toml_str("[daemon]\ngc_interval = 50\n")
+            .unwrap()
+            .daemon
+            .apply_to(&mut untouched);
+        assert_eq!(untouched.gc_max_interval, Config::default().gc_max_interval);
+        assert_eq!(untouched.gc_idle_floor, Config::default().gc_idle_floor);
+
+        for zero in ["gc_max_interval_secs = 0", "gc_idle_floor = 0"] {
+            let mut cfg = Config::default();
+            LamboFile::from_toml_str(&format!("[daemon]\n{zero}\n"))
+                .unwrap()
+                .daemon
+                .apply_to(&mut cfg);
+            assert!(cfg.validate().is_err(), "{zero} must fail validate()");
+        }
+
+        for typo in [
+            "gc_max_interval = 3600",
+            "gc_max_interval_sec = 3600",
+            "gc_idle_flor = 5",
+        ] {
+            assert!(
+                LamboFile::from_toml_str(&format!("[daemon]\n{typo}\n")).is_err(),
+                "unknown [daemon] key {typo:?} must fail closed"
+            );
+        }
     }
 
     #[test]
