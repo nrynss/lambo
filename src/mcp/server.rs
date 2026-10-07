@@ -1050,6 +1050,14 @@ impl LamboServer {
     /// the tool would make the whole time axis in `scripts/observability`
     /// unreadable.
     fn stats_json(&self) -> serde_json::Value {
+        self.stats_json_with_gc(&self.mem.gc_stats())
+    }
+
+    /// [`Self::stats_json`] over a `gc` reading the caller already took, so
+    /// `lambo_stats` can render its structured `gc` object and its text `gc:`
+    /// line from one value (two reads straddling the daemon's first anchor or a
+    /// sweep could otherwise disagree within one answer).
+    fn stats_json_with_gc(&self, gc: &crate::memory::GcStats) -> serde_json::Value {
         let s = self.mem.stats();
         let mut payload = json!({
             "session": s.session.0,
@@ -1081,7 +1089,7 @@ impl LamboServer {
             // key: `last_gc_at`/`last_gc_epoch` are the durable mark,
             // `last_sweep` the last sweep THIS process ran (null after a
             // restart until the next one).
-            "gc": gc_stats_json(&self.mem.gc_stats()),
+            "gc": gc_stats_json(gc),
         });
         // I1: dropped lines are reported next to written ones so a gap in the
         // ledger is never mistaken for a gap in the traffic. Emitted ONLY when
@@ -2271,6 +2279,8 @@ impl LamboServer {
         };
 
         let s = self.mem.stats();
+        // One GC reading for both halves of the answer (see `stats_json_with_gc`).
+        let gc = self.mem.gc_stats();
         let text = format!(
             "session '{}' (owner agent '{}')\n\
              nodes={} edges={} concepts={} canonical={}\n\
@@ -2300,14 +2310,14 @@ impl LamboServer {
             // reading the tool output should not have to open the structured
             // payload to learn which policy the cycle counts above belong to.
             self.mem.config().promotion_policy.as_str(),
-            gc_summary_line(&self.mem.gc_stats()),
+            gc_summary_line(&gc),
         );
         // One payload builder shared with the I2 heartbeat, so a heartbeat can
         // never report different numbers than the tool. With `--ledger` off
         // this is exactly the payload it always was; with it on, the six
         // `ledger_*` keys are appended (I1: the dropped-line counter has to be
         // reachable from `lambo_stats`, or silence is invisible).
-        let mut payload = self.stats_json();
+        let mut payload = self.stats_json_with_gc(&gc);
 
         let mut lines = vec![text.clone()];
         if let Some((id, answer)) = &receipt {
@@ -3540,6 +3550,27 @@ mod tests {
             json!(epoch_before),
             "reading GC stats writes nothing"
         );
+        s.mem.close().await.expect("close");
+    }
+
+    /// `lambo_stats` renders its structured `gc` object from the reading it is
+    /// handed, not from a second read: a fabricated reading that no daemon
+    /// state could produce must come back verbatim.
+    #[tokio::test]
+    async fn stats_json_renders_the_gc_reading_it_is_given() {
+        use chrono::TimeZone;
+        let s = server("mcp-gc-one-read").await;
+        let fabricated = crate::memory::GcStats {
+            last_gc_at: Some(
+                chrono::Utc
+                    .with_ymd_and_hms(1999, 12, 31, 23, 0, 0)
+                    .unwrap(),
+            ),
+            last_gc_epoch: 987_654_321,
+            last_sweep: None,
+        };
+        let payload = s.stats_json_with_gc(&fabricated);
+        assert_eq!(payload["gc"], gc_stats_json(&fabricated));
         s.mem.close().await.expect("close");
     }
 
