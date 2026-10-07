@@ -89,8 +89,9 @@ live `lambo serve` writer conventionally holds, unless `--allow-production-port`
 is passed. The spawned serve gets a private `XDG_RUNTIME_DIR` (a `mktemp`
 directory removed on exit), so its session endpoint never lands in the shared
 per-user runtime dir a live writer advertises itself in.
-The driver and serve are stopped and reaped on every exit path, including
-SIGTERM and SIGINT.
+The harness's exit status is the durability check's (0 only when it passed; see
+the codes above), and the driver and serve are stopped and reaped on every exit
+path, including SIGTERM and SIGINT.
 
 The harness writes into `--out`: `stderr-<run>.log` (the server's full stderr,
 containing the exact `lambo serve: session closed, tail durable` line),

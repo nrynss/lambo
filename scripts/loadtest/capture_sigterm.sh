@@ -36,6 +36,16 @@
 #     the shared per-user runtime dir a live writer advertises itself in.
 #   * the driver is pointed at this harness's own port explicitly.
 #
+# Exit status: 0 only when serve ran, the driver finished and the C3 durability
+# check passed (check_durability.py exit 0). A durability result of 2 (shortfall),
+# 3 (ledger format drift), 4 (nothing verified), 5 (concepts unverifiable) or 6
+# (unreadable input) is the harness's exit status too, after every artifact is
+# written; run-<run>.json records it as durability.exit_code. 1 is a harness
+# failure (serve/driver did not run as expected) and 2 from the argument
+# checks below is a usage error, before anything is started. The driver and
+# serve are stopped and reaped, and the runtime dir and token file removed, on
+# every exit path including SIGTERM and SIGINT.
+#
 # Usage:
 #   scripts/loadtest/capture_sigterm.sh [--out evidence/concurrency] [--workers 12]
 #                                       [--session c-load-20260818] [--delay 5]
@@ -233,11 +243,15 @@ echo "signal->exit: ${SIG_TO_EXIT_MS} ms (exit code $EXIT_CODE)"
 wait "$DRIVER_PID" || { echo "driver failed" >&2; DRIVER_PID=; exit 1; }
 DRIVER_PID=
 
-# C3 — prove the tail is durable.
+# C3 — prove the tail is durable. Its exit status is the harness's: 0 only when
+# the check ran and passed. Artifacts are written first, then the status is
+# returned, so a failing run still leaves its evidence behind.
+DUR_RC=0
 python3 "$HERE/check_durability.py" \
     --ledger "$LEDGER" --db "$DB" --session "$SESSION" \
     --stderr "$STDERR" ${GC_LOGGED_FLAG[@]+"${GC_LOGGED_FLAG[@]}"} \
-    > "$OUT/durability-$RUN.txt" || true   # exit 2 is the honest SHORTFALL signal
+    > "$OUT/durability-$RUN.txt" || DUR_RC=$?
+echo "durability check exit code: $DUR_RC (0 durable, 2 shortfall, 3 format drift, 4 nothing verified, 5 unverifiable, 6 bad input)"
 
 cat > "$OUT/run-$RUN.json" <<EOF
 {
@@ -277,6 +291,9 @@ cat > "$OUT/run-$RUN.json" <<EOF
     "assertion_met": "$(grep -q 'lambo serve: session closed, tail durable' "$STDERR" && echo true || echo false)",
     "tail_lost_present": "$(grep -q 'tail lost on exit' "$STDERR" && echo true || echo false)"
   },
+  "durability": {
+    "exit_code": $DUR_RC
+  },
   "artifacts": {
     "stderr": "stderr-$RUN.log",
     "ledger": "ledger-$RUN.jsonl",
@@ -290,3 +307,7 @@ EOF
 
 echo "== done: $OUT"
 echo "== artifacts: $(ls "$OUT" | tr '\n' ' ')"
+if (( DUR_RC != 0 )); then
+    echo "== FAILED: durability check exited $DUR_RC; see $OUT/durability-$RUN.txt" >&2
+fi
+exit "$DUR_RC"
