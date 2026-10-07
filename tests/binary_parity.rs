@@ -321,17 +321,36 @@ fn wait_for(addr: &str, path: &str, seconds: u64) {
     }
 }
 
-/// SIGTERM + reap a spawned serve-web process on drop, so a panicking
-/// assertion cannot leak a live child that holds the harness open.
+/// SIGTERM + reap a spawned serve process on drop, so a panicking assertion
+/// cannot leak a live child that holds the harness open. The stop is graceful
+/// first (SIGTERM drives the drain) but bounded: a child still alive after
+/// [`KillOnDrop::GRACE`] is SIGKILLed, so a serve that ignores SIGTERM cannot
+/// hang a panicking test.
 struct KillOnDrop {
     child: Option<Child>,
 }
 impl KillOnDrop {
-    /// SIGTERM + reap the child if it is still owned; safe to call more than
-    /// once (a no-op on later calls once the child has been taken/reaped).
+    /// How long a SIGTERMed child gets to exit before it is SIGKILLed.
+    const GRACE: Duration = Duration::from_secs(10);
+
+    /// SIGTERM, wait up to [`Self::GRACE`], then SIGKILL, and reap the child if
+    /// it is still owned; safe to call more than once (a no-op on later calls
+    /// once the child has been taken/reaped).
     fn reap(&mut self) {
         if let Some(mut child) = self.child.take() {
             sigterm(child.id());
+            let deadline = Instant::now() + Self::GRACE;
+            loop {
+                match child.try_wait() {
+                    Ok(Some(_)) => return,
+                    Ok(None) if Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    // Past the grace, or the wait itself failed: stop waiting.
+                    _ => break,
+                }
+            }
+            let _ = child.kill();
             let _ = child.wait();
         }
     }
