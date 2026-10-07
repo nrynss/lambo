@@ -1891,6 +1891,53 @@ mod tests {
         );
     }
 
+    /// Issue #29: a previously swept session whose writer was down past
+    /// `gc_max_interval` with at least `gc_idle_floor` unswept mutations finds
+    /// a sweep already due and sweeps once on its first cycle back — the sweep
+    /// the downtime delayed, intended (and the case "restarts never sweep"
+    /// wording got wrong). Below the floor it does not.
+    #[tokio::test(start_paused = true)]
+    async fn a_previously_swept_session_sweeps_once_on_attach_when_already_due() {
+        let t0 = Utc.timestamp_opt(1_800_000_000, 0).unwrap();
+        let params = CycleParams {
+            gc_interval: 1_000_000,
+            gc_max_interval: Duration::from_secs(3600),
+            gc_idle_floor: 3,
+            ..Default::default()
+        };
+        for (unswept, expect_sweep) in [(3u64, true), (2, false)] {
+            let (graph, ids) = locked_graph_with_canonical_concepts(3);
+            let epoch = graph.read().epoch();
+            // As loaded: swept a week ago, `unswept` mutations since.
+            graph
+                .write()
+                .record_gc_sweep(epoch - unswept, t0 - chrono::Duration::days(7));
+            let (_cell, clock) = settable_clock(t0);
+            let daemon = Daemon::with_params(
+                graph.clone(),
+                ScoringWeights::default(),
+                Duration::from_secs(3600),
+                params,
+            )
+            .with_clock(clock);
+            let handle = daemon.spawn();
+            wake_and_settle(&daemon).await;
+            wake_and_settle(&daemon).await;
+            match daemon.last_gc() {
+                Some(o) if expect_sweep => {
+                    assert_eq!(o.trigger, Some(gc::GcTrigger::Elapsed));
+                    assert_eq!(graph.read().gc_mark().last_gc_at, Some(t0));
+                    assert_eq!(survived(&graph, &ids), vec![1, 1, 1], "once");
+                }
+                None if !expect_sweep => {
+                    assert_eq!(survived(&graph, &ids), vec![0, 0, 0]);
+                }
+                other => panic!("unswept {unswept}: expected sweep {expect_sweep}, got {other:?}"),
+            }
+            handle.abort();
+        }
+    }
+
     /// Issue #29 item 3: a sweep time left in the future by a forward clock
     /// jump (and kept by the monotonic merge) is re-anchored at `now` on the
     /// first cycle, so the time trigger fires one interval later instead of
