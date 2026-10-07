@@ -157,7 +157,7 @@ pub const GC_EDGE_TTL: ChronoDuration = ChronoDuration::seconds(3600);
 /// ### Why 0.12
 ///
 /// The original 0.3 was calibrated against nothing: with `access_count`
-/// identically 0 (no write path feeds it until P5 recall) and `density`
+/// identically 0 (no write path fed it until issue #30) and `density`
 /// max-normalized against the session hub, an ordinary well-connected concept
 /// in the shipped `session-rest-api` fixture scores 0.13–0.34 — so 0.3
 /// collected **15 of its 22 concepts on the first sweep**, including `auth
@@ -2383,6 +2383,100 @@ mod tests {
                     assert!(s.is_finite() && s <= 1.0 + crate::daemon::score::MAX_BONUS);
                 }
             }
+        }
+    }
+
+    /// Issue #30 x #29: `last_accessed` is GC's recency anchor, so an old
+    /// Entity and an isolated Resource that agents keep recalling are not
+    /// collected by the 365-day cut, while the same concepts untouched are.
+    /// The access goes through the real write path (`Graph::record_accesses`),
+    /// not a patched field. A second comparison holds the access count fixed
+    /// (one read, long ago versus recently) so the frequency term cannot be
+    /// what saves the concept: only the recency anchor separates them.
+    #[test]
+    fn a_recalled_old_entity_and_isolated_resource_survive_the_365_day_cut() {
+        let params = aged_params();
+        let at = params.now - ChronoDuration::days(1);
+        for ty in [ConceptType::Resource, ConceptType::Entity] {
+            // 20 is recalled, 22 is not; both are old, isolated leaves.
+            let leaves = [(20u64, ty), (22, ty)];
+            let untouched = hub_session(&leaves);
+            let mut recalled = untouched.clone();
+            assert_eq!(recalled.record_accesses(&[(nid(20), 1, at)]), 1);
+
+            let score_of = |g: &Graph, id: u64| {
+                let ctx = crate::daemon::score::SessionContext::compute(g);
+                let c = match g.node(nid(id)) {
+                    Some(crate::types::Node::Concept(c)) => c.clone(),
+                    _ => panic!("concept {id}"),
+                };
+                eviction_score(g, &c, &ctx, params)
+            };
+            let old = score_of(&untouched, 20);
+            let read = score_of(&recalled, 20);
+            assert!(read > old, "{ty:?}: a recent read lifts the score");
+            assert_eq!(
+                score_of(&recalled, 22).to_bits(),
+                score_of(&untouched, 22).to_bits(),
+                "{ty:?}: the unread twin is unchanged"
+            );
+
+            // A bar between the two scores (the bar is `min / resistance`).
+            let bar_params = GcParams {
+                min_concept_score: (old + read) / 2.0 * ty.eviction_resistance(),
+                ..params
+            };
+            let mut baseline = untouched.clone();
+            let base = run(&mut baseline, bar_params);
+            assert!(
+                base.concepts_collected.contains(&nid(20))
+                    && base.concepts_collected.contains(&nid(22)),
+                "{ty:?} setup: untouched old leaves age out, got {:?}",
+                base.concepts_collected
+            );
+            let out = run(&mut recalled, bar_params);
+            assert!(
+                !out.concepts_collected.contains(&nid(20)),
+                "{ty:?}: the recalled leaf must survive the recency cut"
+            );
+            assert!(recalled.node(nid(20)).is_some());
+            assert!(
+                out.concepts_collected.contains(&nid(22)),
+                "{ty:?}: the unread twin still ages out"
+            );
+
+            // Recency alone: the same single read, once long ago (at creation)
+            // and once recently. The frequency term is identical, so only the
+            // `last_accessed` recency anchor can separate them.
+            let created = match untouched.node(nid(20)) {
+                Some(crate::types::Node::Concept(c)) => c.created_at,
+                _ => panic!("concept 20"),
+            };
+            let mut stale_read = untouched.clone();
+            assert_eq!(stale_read.record_accesses(&[(nid(20), 1, created)]), 1);
+            let stale = score_of(&stale_read, 20);
+            assert!(
+                read > stale,
+                "{ty:?}: a recent read must outscore an old read of the same count"
+            );
+            let recency_bar = GcParams {
+                min_concept_score: (stale + read) / 2.0 * ty.eviction_resistance(),
+                ..params
+            };
+            let mut recent = untouched.clone();
+            assert_eq!(recent.record_accesses(&[(nid(20), 1, at)]), 1);
+            assert!(
+                run(&mut stale_read, recency_bar)
+                    .concepts_collected
+                    .contains(&nid(20)),
+                "{ty:?}: a leaf last read long ago ages out"
+            );
+            assert!(
+                !run(&mut recent, recency_bar)
+                    .concepts_collected
+                    .contains(&nid(20)),
+                "{ty:?}: the same leaf read recently survives on recency alone"
+            );
         }
     }
 

@@ -63,7 +63,7 @@
 //! **The scope of both promises, stated once more where the mechanism is**
 //! (J3-R1-10): one agent's *sequential* submissions. The chain position is pinned
 //! by `begin_interaction_full` and the
-//! lane position by the `lanes.lock()` inside [`WritePipeline::admit`], and
+//! lane position by the `lanes.lock()` inside `WritePipeline::admit`, and
 //! those are two critical sections with no ordering between them across
 //! threads. So for two `lambo_derive` calls one agent has in flight *at the
 //! same time*, the chain order and the drain order can disagree — task A can
@@ -161,7 +161,7 @@ use crate::types::{
 // ---------------------------------------------------------------------------
 
 /// How long a clean `close()` drains the queue before **deferring** the
-/// remainder ([`WritePipeline::quiesce`]).
+/// remainder (`WritePipeline::quiesce`).
 ///
 /// Under J3's durable intents this stops being a durability deadline: whatever
 /// does not drain inside the budget survives as a durable intent and the next
@@ -173,7 +173,7 @@ use crate::types::{
 ///
 /// Two seconds, and the ceiling on that choice is `close()`'s own budget:
 /// `lambo serve` wraps `Memory::close` in
-/// [`crate::mcp::serve::CLOSE_FLUSH_GRACE`] (8 s), out of which
+/// `crate::mcp::serve::CLOSE_FLUSH_GRACE` (8 s), out of which
 /// `SHUTDOWN_GRACE + CLOSE_GRACE ≤ SHUTDOWN_BUDGET` is sized. The quiesce runs
 /// **in series before** the existing final flush, so it is carved out of that
 /// 8 s rather than added on top — the same reasoning `LEASE_RELEASE_GRACE`
@@ -320,8 +320,8 @@ const _: () = assert!(
 /// Sanitization clamp on a **reported** rate, in items/second — telemetry
 /// hygiene, not a bound (J3 redesign: no rate sizes a bound any more).
 ///
-/// [`ObservedRate::items_per_sec`] and [`rate_of`] reach for this when a wall
-/// time reads zero or absurd — the [`crate::FixtureEmbedder`] case, which
+/// `ObservedRate::items_per_sec` and `rate_of` reach for this when a wall
+/// time reads zero or absurd — the `crate::FixtureEmbedder` case, which
 /// "measures" ~98 000 items/s by not doing work. One full queue
 /// ([`WRITE_QUEUE_MAX`]) per second is comfortably above any real embedder
 /// this project has measured (110 to 141 items/s 4-wide, llama.cpp BGE-M3 on
@@ -426,7 +426,7 @@ pub const PROBE_WARMUP_EMBEDS: usize = 1;
 /// [`PROBE_CONCURRENCY`] together.
 ///
 /// Seven rather than six. The seventh is the representative serial leg, and it
-/// is best-effort: [`probe_embedder`] carries on with the short figure when it
+/// is best-effort: `probe_embedder` carries on with the short figure when it
 /// fails, so the count is a budget input rather than a requirement.
 pub const PROBE_EMBEDS: usize = PROBE_WARMUP_EMBEDS + 2 + PROBE_CONCURRENCY;
 
@@ -436,7 +436,7 @@ pub const PROBE_EMBEDS: usize = PROBE_WARMUP_EMBEDS + 2 + PROBE_CONCURRENCY;
 /// [`PROBE_CONCURRENCY`], so the observed rate never rests on fewer embeds than
 /// the probe's own leg did. This is J3-R1-2's remediation (a): the worker
 /// already has the timings, a lane is single-consumer so those timings *are*
-/// serial service time, and it covers the whole of [`WriteCtx::run`] rather
+/// serial service time, and it covers the whole of `WriteCtx::run` rather
 /// than the embed alone. Once it takes over, a cold probe stops being a
 /// sentence the whole session has to live with — including a probe that failed
 /// outright and left the session with no rate telemetry at all (J3 round-1 N3:
@@ -525,7 +525,7 @@ pub const PROBE_TEXT: &str = "lambo write queue calibration probe";
 ///   that moved, so 1024 keeps a full power-of-two of headroom.
 ///
 /// The leg is **best effort** on top of that: if this size is refused anyway,
-/// [`probe_embedder`] keeps the short figure and says nothing it did not
+/// `probe_embedder` keeps the short figure and says nothing it did not
 /// measure. And the number it produces sizes nothing load-bearing — since the
 /// J3 redesign, no probe number does. This leg makes
 /// the probe's *published* rate honest, so that the probe-versus-observed
@@ -578,7 +578,7 @@ const fn is_ascii(s: &str) -> bool {
 /// An **unsettled** receipt never expires at all (J3-R1-3). Nothing caps how
 /// long a job sits in a lane, so issue-time expiry could — and did, measured —
 /// answer `expired` about a job that was still running, after which
-/// [`settle_one`] discarded its outcome.
+/// `settle_one` discarded its outcome.
 pub const RECEIPT_RETENTION: Duration = Duration::from_secs(300);
 
 /// Build-time invariant: the durable intent record's retention (the
@@ -704,7 +704,7 @@ const _: () = assert!(
 ///
 /// Both ends are bounded: [`RECEIPT_WAIT_MAX`] caps how long one wait holds a
 /// slot, and this caps how many exist. Half of
-/// [`crate::mcp::proxy::INFLIGHT_DEPTH_WARN`] is left for ordinary traffic, so
+/// `crate::mcp::proxy::INFLIGHT_DEPTH_WARN` is left for ordinary traffic, so
 /// receipt waits alone cannot be what trips the depth warning.
 pub const MAX_CONCURRENT_RECEIPT_WAITS: usize = 16;
 
@@ -937,7 +937,7 @@ pub enum ReceiptAnswer {
     /// file path has no `://`, and "no producer today" is a fact about today.
     ///
     /// So it carries what the synchronous path carries, built from the same
-    /// [`crate::mcp::server::err_class`] rather than a second match, and the
+    /// `crate::mcp::server::err_class` rather than a second match, and the
     /// operator's copy is written at the same site twice over: the `completion`
     /// line's `error` field (operator-facing JSONL) and a `tracing::warn!`.
     /// [`ReceiptAnswer::Dropped`] is deliberately untouched — its string is
@@ -1266,7 +1266,7 @@ impl Calibration {
     /// (J3-R2-4).
     ///
     /// The observed rate is better evidence about the drain than the probe's
-    /// serial leg is — it times the whole of [`WriteCtx::run`] rather than the
+    /// serial leg is — it times the whole of `WriteCtx::run` rather than the
     /// embed alone, on the caller's own content rather than the probe's, and it
     /// keeps tracking an embedder that degrades after startup — so it wins
     /// outright rather than being averaged in. Winning is not the same as

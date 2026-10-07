@@ -223,7 +223,7 @@ impl SessionEndpoint {
     /// a caller can call it before taking any lease; the one filesystem access
     /// is `store_identity`'s read-only `canonicalize`.
     ///
-    /// Fails only when the derived path cannot fit [`SUN_PATH_MAX`], which is a
+    /// Fails only when the derived path cannot fit `SUN_PATH_MAX`, which is a
     /// property of the *endpoint directory*, not of the session name — the name's
     /// contribution is bounded by construction. The message therefore points at
     /// the thing the operator can change. [`SessionEndpoint::for_store`] turns
@@ -301,7 +301,7 @@ impl SessionEndpoint {
     ///
     /// The directory is created 0700 and then **checked three ways** — it is not
     /// a symlink, it is owned by this euid, and its mode grants nothing to group
-    /// or other. Together with the per-uid name (see [`endpoint_dir`]) that is
+    /// or other. Together with the per-uid name (see `endpoint_dir`) that is
     /// what makes the shared `/tmp` fallback safe rather than assumed safe.
     ///
     /// Each check answers a distinct attack, and the first two were added by

@@ -8,11 +8,11 @@
 //! floor. Both are category errors the doc calls out — "what depends on X"
 //! has an exact answer reachable by traversal, so ranking it is wrong.
 //!
-//! [`try_structural`] recognizes a dependency question, resolves the entity it
+//! `try_structural` recognizes a dependency question, resolves the entity it
 //! names, and answers it **by traversal** over the structural edge types
 //! (`Dependency` / `Hierarchical` / `Causal`), returning the anchor's
 //! dependents ranked by how strongly the graph binds each one to it. It is a
-//! *dispatch*: when it fires it produces the whole [`RecallResult`] and the
+//! *dispatch*: when it fires it produces the whole `RecallResult` and the
 //! blended pipeline never runs. When it cannot (a general query, or a
 //! structural phrasing with no resolvable anchor / no dependents) it returns
 //! `None` and the caller falls through to the normal word/blend path — the
@@ -187,7 +187,7 @@ fn resolve_anchor(graph: &Graph, query: &str) -> Option<NodeId> {
 /// gather only when the dispatch is actually about to fire, so a structural
 /// phrasing that cannot dispatch falls through to the FULL blend (never a
 /// degraded keyword-only answer). The dispatch itself re-validates under the
-/// final graph lock inside [`try_structural`], so this is a gather-skip
+/// final graph lock inside `try_structural`, so this is a gather-skip
 /// decision, not a short-circuit of correctness.
 pub fn fits_structural(graph: &Graph, query: &str) -> bool {
     if !matches!(classify(query), RecallKind::Structural) {

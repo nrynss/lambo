@@ -57,7 +57,7 @@
 //! the agent set. This is the only reading consistent with the planted conflict
 //! in `fixtures/session-rest-api.json` (the caching layer: agent-a's `Derives`
 //! edge is old, agent-b's `Dependency` edges are fresh — the conflict must
-//! still fire) and with [`crate::fixtures::load_store_relative`]'s documented
+//! still fire) and with `crate::fixtures::load_store_relative`'s documented
 //! contract ("Makes the P4 conflict / recency window runnable").
 //!
 //! ## Write activity and the window

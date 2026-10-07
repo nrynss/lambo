@@ -24,6 +24,13 @@
   `gc_max_interval` clock rather than sweeping, so the first timed sweep comes
   a day (and at least 100 mutations) after the upgrade.
 
+- `lambo::Mutation` gained a `RecordAccess` variant (issue #30: the narrow,
+  monotonic access-column update), so an exhaustive `match` on it no longer
+  compiles; `lambo::store::batch::FlushStep` gained `Accesses` and
+  `BulkLimits` gained an `accesses` field for the same reason. Not a wire or
+  persisted format: mutations are applied in-process, and the only serialized
+  form (the fixtures' JSON loader) gains an additive `record_access` tag.
+
 - `lambo::canon::gate_progress` takes a `PromotionPolicy` argument (fourth
   position, before `min_edge_age`). It decides whether the four store-evidence
   gates are measured at all, so the caller cannot be trusted to check it: under
@@ -298,6 +305,47 @@
     Resources kept by the dependents rule and no change in the concepts above
     Stage 3's blast-radius bar (41 before and after). One access never adds a
     collection. Details in `dev-diary/notes/gc-time-bound-29.md`.
+- `access_count` and `last_accessed` are now written (issue #30). No path ever
+  wrote them, so the spec §9 `frequency` dimension was dead: GC's step 2 ran on
+  the renormalized three-dimension score (ALGO-1) and could not see what agents
+  actually recall (all 3,370 concepts on the Metal rig read 0). Every concept
+  hit a writer's recall returns now counts once per recall — cache-served or
+  not, inside the token budget or not — and a resolved `lambo_inspect` counts
+  its focus concept (not the neighbourhood; a refusal counts nothing). Reads
+  note hits in a leaf-locked ledger; the daemon applies them in RAM once per
+  tick and marks the concepts access-dirty; the write-behind flush persists
+  them as one narrow, monotonic update per concept (`access_count` and
+  `last_accessed` only, `max` of stored and new — no full-row rewrite, no
+  embedding, no vector-index touch; idempotent on replay, fenced like every
+  write) through the existing columns (no schema change, no re-provision), and
+  `close` takes the remainder, so the counts survive a writer restart. A
+  recall that finishes after `close` took the ledger is not counted. Reads
+  never grow the mutation log: during a store outage the flush holds at most
+  one access update per concept (and never more than half of
+  `backend_log_max`), so read traffic alone cannot degrade a session to
+  `durability="none"`, and the latest counts land once the store recovers.
+  That held drain can occupy up to half of the degrade budget, so while reads
+  are active during an outage, writes alone degrade the session at about half
+  the configured bound.
+  Accesses do **not** advance the mutation epoch, so GC's `gc_interval`
+  trigger, the recall cache and hybrid replanning are unaffected and a
+  read-heavy session does not sweep on reads. Reader processes (`lambo
+  recall`, `serve-web`) count nothing; a proxied call counts once, in the
+  holder. Operator-visible effects: recency counts a read as a touch (the later
+  of `created_at` and `last_accessed`); **a read-only session no longer goes
+  Stale** — reads are activity, by decision (the staleness detector already
+  read `last_accessed`; it now has something to read); the daemon score
+  table, which recall ranks with, picks up new frequency only at the next real
+  write (it rescores on epoch change; an accepted lag: ranking between two
+  writes stays stable and cacheable); `lambo_saints` reports non-zero `access_count`. GC's
+  score cut adds each concept's own frequency term on top of the live-dimension
+  score (#29's additive rule), so an access can only raise that concept's score
+  and never makes another concept easier to collect; accesses never advance the
+  epoch, so they cannot reach `gc_interval` or `gc_idle_floor`, and a read
+  postpones GC's 365-day recency cut for the recalled concept (see
+  `dev-diary/notes/issue-30-access-count.md`). Recall ranking, the score table
+  and canonization Stage 1 have no such switch: an access moves only the
+  accessed concept's score.
 - Canonization now fires in long-running low-write deployments: the mutation
   epoch the GC interval measures persists with the session instead of resetting
   on every writer start (issue #17). Thirteen days of dogfooding produced zero

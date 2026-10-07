@@ -219,6 +219,30 @@ impl MemoryStore {
             Mutation::DeleteEdge { id } => {
                 snap.edges.retain(|e| e.id != *id);
             }
+            // Issue #30: the narrow, monotonic access update the SQL adapters
+            // run as `UPDATE … SET access_count = max, last_accessed = max`.
+            // Existing rows only — a concept collected or retracted before the
+            // flush has nothing to count against — and no other column moves.
+            Mutation::RecordAccess {
+                session_id,
+                id,
+                access_count,
+                last_accessed,
+            } => {
+                if *session_id != snap.session_id {
+                    return Err(StoreError::Invariant(format!(
+                        "record_access session {session_id} != snapshot {}",
+                        snap.session_id
+                    )));
+                }
+                if let Some(c) = snap.concepts.iter_mut().find(|c| c.id == *id) {
+                    c.access_count = c.access_count.max(*access_count);
+                    c.last_accessed = Some(
+                        c.last_accessed
+                            .map_or(*last_accessed, |prev| prev.max(*last_accessed)),
+                    );
+                }
+            }
             Mutation::CanonizationTransition { event } => {
                 if event.session_id != snap.session_id {
                     return Err(StoreError::Invariant(format!(
@@ -555,6 +579,7 @@ impl GraphStore for MemoryStore {
                 Mutation::SetEmbedding { session_id, .. } => Some(session_id.clone()),
                 Mutation::PutWriteIntent { intent } => Some(intent.session_id.clone()),
                 Mutation::ConsumeWriteIntent { session_id, .. } => Some(session_id.clone()),
+                Mutation::RecordAccess { session_id, .. } => Some(session_id.clone()),
                 Mutation::DeleteNode { id } => Self::resolve_session_for_node(&map, *id),
                 Mutation::DeleteEdge { id } => Self::resolve_session_for_edge(&map, *id),
             }
@@ -616,6 +641,7 @@ impl GraphStore for MemoryStore {
                 Mutation::SetEmbedding { session_id, .. } => session_id.clone(),
                 Mutation::PutWriteIntent { intent } => intent.session_id.clone(),
                 Mutation::ConsumeWriteIntent { session_id, .. } => session_id.clone(),
+                Mutation::RecordAccess { session_id, .. } => session_id.clone(),
                 Mutation::DeleteNode { id } => match Self::resolve_session_for_node(&work, *id) {
                     Some(s) => s,
                     None => continue,
@@ -1597,6 +1623,71 @@ mod tests {
                 .unwrap_err(),
             StoreError::Invariant(_)
         ));
+    }
+
+    /// Issue #30: the memory adapter applies `RecordAccess` exactly as the SQL
+    /// adapters' narrow update does — existing rows only, two columns only,
+    /// monotonic on each, idempotent on replay.
+    #[tokio::test]
+    async fn record_access_is_monotonic_and_touches_only_the_access_columns() {
+        let store = MemoryStore::new();
+        let sid = SessionId::from("issue-30-memory");
+        let t0 = Utc::now() - chrono::Duration::hours(1);
+        let t = |s: i64| t0 + chrono::Duration::seconds(s);
+        let (i1, c1) = (NodeId::new(), NodeId::new());
+        let mut batch = MutationBatch::new();
+        batch.push(Mutation::UpsertNode {
+            node: Node::Interaction(Interaction {
+                event_time: None,
+                id: i1,
+                session_id: sid.clone(),
+                agent_id: AgentId::from("a"),
+                prompt_text: None,
+                previous_id: None,
+                created_at: t0,
+            }),
+        });
+        batch.push(plant_concept(&sid, c1, i1, "c", t0));
+        store.flush(&batch, None).await.unwrap();
+        let before = store.load_session(&sid).await.unwrap().concepts[0].clone();
+
+        let access = |n: i32, at: i64| Mutation::RecordAccess {
+            session_id: sid.clone(),
+            id: c1,
+            access_count: n,
+            last_accessed: t(at),
+        };
+        let ghost = Mutation::RecordAccess {
+            session_id: sid.clone(),
+            id: NodeId::new(),
+            access_count: 7,
+            last_accessed: t(1),
+        };
+        for mutations in [
+            vec![access(5, 20)],
+            vec![access(5, 20)], // replay
+            vec![access(3, 30), access(1, 10), ghost],
+        ] {
+            store
+                .flush(
+                    &MutationBatch {
+                        mutation_epoch: 0,
+                        gc_mark: Default::default(),
+                        mutations,
+                    },
+                    None,
+                )
+                .await
+                .unwrap();
+        }
+        let snap = store.load_session(&sid).await.unwrap();
+        assert_eq!(snap.concepts.len(), 1, "an access never inserts");
+        let after = &snap.concepts[0];
+        assert_eq!((after.access_count, after.last_accessed), (5, Some(t(30))));
+        let mut expect = before;
+        expect.access_count = 5;
+        expect.last_accessed = Some(t(30));
+        assert_eq!(*after, expect, "no other column moves");
     }
 
     #[tokio::test]

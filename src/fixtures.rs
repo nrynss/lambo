@@ -289,6 +289,7 @@ mod tests {
                 Mutation::SetEmbedding { .. } => "set_embedding",
                 Mutation::PutWriteIntent { .. } => "put_write_intent",
                 Mutation::ConsumeWriteIntent { .. } => "consume_write_intent",
+                Mutation::RecordAccess { .. } => "record_access",
             };
             kinds.insert(k);
         }

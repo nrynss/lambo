@@ -78,8 +78,8 @@ use sqlx::postgres::{PgPoolOptions, PgRow};
 use sqlx::{PgPool, Row};
 
 use crate::store::batch::{
-    batch_session_ids, plan_flush, BulkLimits, ConceptRow, FlushStep, CONCEPT_COLUMNS,
-    EDGE_COLUMNS, INTERACTION_COLUMNS,
+    batch_session_ids, plan_flush, AccessUpdate, BulkLimits, ConceptRow, FlushStep, ACCESS_COLUMNS,
+    CONCEPT_COLUMNS, EDGE_COLUMNS, INTERACTION_COLUMNS,
 };
 #[cfg(feature = "fixtures")]
 use crate::store::batch::{seed_concept_rows, seed_edge_rows};
@@ -165,6 +165,9 @@ const BULK_LIMITS: BulkLimits = BulkLimits {
     interactions: 256,
     concepts: 256,
     edges: 512,
+    // Issue #30: 4 binds per row; a whole realistic tick's accesses in one
+    // round-trip on a serverless cluster.
+    accesses: 1024,
 };
 
 /// PostgreSQL's wire-protocol ceiling on bind parameters per statement, which
@@ -186,6 +189,10 @@ const _: () = assert!(
 const _: () = assert!(
     BULK_LIMITS.edges * EDGE_COLUMNS <= PG_MAX_BIND_PARAMETERS,
     "edges chunk exceeds the PostgreSQL bind-parameter limit"
+);
+const _: () = assert!(
+    BULK_LIMITS.accesses * ACCESS_COLUMNS <= PG_MAX_BIND_PARAMETERS,
+    "accesses chunk exceeds the PostgreSQL bind-parameter limit"
 );
 
 // ---------------------------------------------------------------------------
@@ -2081,7 +2088,62 @@ async fn apply_step(
         FlushStep::Single(m) => apply_single(&mut *tx, m, sql).await,
         FlushStep::PutIntents(intents) => bulk_put_write_intents(&mut *tx, intents).await,
         FlushStep::ConsumeIntents(consumes) => bulk_consume_write_intents(&mut *tx, consumes).await,
+        FlushStep::Accesses(rows) => bulk_update_accesses(&mut *tx, rows).await,
     }
+}
+
+// Issue #30: the batched read-access update. Byte-identical on both dialects —
+// every bind is typed by the driver (UUID, text, INT8, TIMESTAMPTZ), so no cast
+// token is needed and it lives here rather than in `DialectSql`. Same
+// `UPDATE … FROM (VALUES …) AS v(…)` shape as the write-intent consume above;
+// `push_values` emits the `VALUES` keyword itself.
+//
+// Monotonic on both columns, so replaying a retained batch, or running after a
+// concept upsert in the same flush, can never lower what is stored. `GREATEST`
+// ignores NULLs on PostgreSQL; the `COALESCE` makes the never-read row
+// explicit rather than relying on that per engine.
+const UPDATE_ACCESSES_PREFIX_SQL: &str = r#"
+UPDATE concepts SET
+    access_count = GREATEST(concepts.access_count, v.access_count),
+    last_accessed = GREATEST(COALESCE(concepts.last_accessed, v.last_accessed), v.last_accessed)
+    FROM ("#;
+
+const UPDATE_ACCESSES_SUFFIX_SQL: &str = r#") AS v(
+    id, session_id, access_count, last_accessed
+) WHERE concepts.id = v.id AND concepts.session_id = v.session_id"#;
+
+/// Apply one chunk of read accesses (issue #30) as ONE narrow `UPDATE` of the
+/// two access columns: no embedding rewrite, so on PostgreSQL the row update
+/// changes no indexed column and is eligible for a HOT update, and neither
+/// engine re-touches the vector index for a read. Existing rows only.
+async fn bulk_update_accesses(
+    tx: &mut sqlx::PgConnection,
+    rows: &[AccessUpdate<'_>],
+) -> Result<(), StoreError> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    access_update_query(rows)
+        .build()
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| map_write_err(e, |m| format!("record accesses: {m}")))?;
+    Ok(())
+}
+
+/// The statement [`bulk_update_accesses`] runs, built but not executed.
+fn access_update_query<'a>(rows: &'a [AccessUpdate<'a>]) -> sqlx::QueryBuilder<'a, sqlx::Postgres> {
+    let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new(UPDATE_ACCESSES_PREFIX_SQL);
+    qb.push_values(rows.iter(), |mut b, r| {
+        b.push_bind(r.id.0)
+            .push_bind(r.session_id.0.as_str())
+            // INT8 on the wire: the column is BIGINT (PostgreSQL) / INT8
+            // (CockroachDB), and `GREATEST` wants one type on both sides.
+            .push_bind(i64::from(r.access_count))
+            .push_bind(r.last_accessed);
+    });
+    qb.push(UPDATE_ACCESSES_SUFFIX_SQL);
+    qb
 }
 
 /// Apply one mutation the planner could not bulk — a deletion, a canonization
@@ -2199,6 +2261,20 @@ async fn apply_single(
             outcome,
         } => {
             consume_write_intent(&mut *tx, session_id, receipt, outcome).await?;
+        }
+        Mutation::RecordAccess {
+            session_id,
+            id,
+            access_count,
+            last_accessed,
+        } => {
+            let row = AccessUpdate {
+                session_id,
+                id: *id,
+                access_count: *access_count,
+                last_accessed: *last_accessed,
+            };
+            bulk_update_accesses(&mut *tx, &[row]).await?;
         }
     }
     Ok(())

@@ -304,7 +304,7 @@ where
 /// receives the stage's evidence verdict and has the final word. Swarm keeps
 /// the evidence as the whole decision — byte-for-byte the pre-seam pipeline.
 /// Solo substitutes its own resistant-score bands (spec §3.2), so the
-/// published [`VENERABLE_BAR`] and [`CANONICAL_BAR`] drive the actual ladder
+/// published `VENERABLE_BAR` and `CANONICAL_BAR` drive the actual ladder
 /// instead of merely describing it: a concept climbs exactly as high as its
 /// band, and no store verdict can lift it past that.
 pub trait PromotionScorer: Send + Sync + std::fmt::Debug {

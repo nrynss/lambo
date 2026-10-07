@@ -571,6 +571,38 @@ pub enum Mutation {
         /// What became of the write.
         outcome: WriteIntentOutcome,
     },
+    /// Read-access bookkeeping for one concept (issue #30): the concept's
+    /// **absolute** `access_count` and `last_accessed` as the graph holds them
+    /// when the access is drained — not a delta.
+    ///
+    /// Applied as a narrow, **monotonic** column update — `access_count =
+    /// max(stored, this)`, `last_accessed = max(stored, this)` — on an existing
+    /// row only; a missing row (collected, retracted) is a no-op. It never
+    /// inserts, and it touches no other column: unlike [`Mutation::UpsertNode`]
+    /// it does not rewrite the embedding, so a read never re-touches the vector
+    /// index. Monotonic + absolute makes it idempotent under replay (a retained
+    /// batch re-sent) and safe against reordering with a concept upsert in the
+    /// same batch: the graph only ever raises these two fields, so an upsert
+    /// appended after an access carries values at least as high, and the
+    /// planner emits accesses after the concept upserts of the same segment
+    /// (`store::batch`), where the `max` can never lower what an upsert wrote.
+    ///
+    /// Not counted by the mutation epoch (see `Graph::record_accesses`). Not a
+    /// persisted or wire format: mutations live only in the in-process
+    /// write-behind log and are applied by the adapters, never serialized to a
+    /// store (durable write intents carry a `WriteIntentPayload`, not a
+    /// `Mutation`).
+    RecordAccess {
+        /// The concept's session (the fencing gate and the session row cover it
+        /// like every other mutation).
+        session_id: SessionId,
+        /// The concept.
+        id: NodeId,
+        /// The concept's total access count.
+        access_count: i32,
+        /// The concept's latest access.
+        last_accessed: DateTime<Utc>,
+    },
 }
 
 /// The payload of a [`WriteIntent`] — the validated job, exactly as acked.

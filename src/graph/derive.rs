@@ -1807,6 +1807,9 @@ mod tests {
                 Mutation::DeleteNode { .. } | Mutation::DeleteEdge { .. } => {
                     panic!("derive must not delete: {m:?}");
                 }
+                Mutation::RecordAccess { .. } => {
+                    panic!("derive must not record a read access: {m:?}");
+                }
                 Mutation::CanonizationTransition { .. } => {}
             }
         }

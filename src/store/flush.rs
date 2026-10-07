@@ -32,6 +32,19 @@
 //!   for the task's lifetime. While degraded the task keeps draining the log
 //!   but DROPS each drained batch (STORE-3, spec §2.3 "none = pure RAM") —
 //!   post-degrade retention must not grow without bound.
+//! * **Read accesses do not build backlog (issue #30).** Access counts are
+//!   per-concept state in the graph's dirty set, not log entries. Each cycle
+//!   takes them ([`Graph::drain_accesses`]) only while `pending` holds no
+//!   undelivered accesses, and at most `log_max / 2` (at least 1, never more
+//!   than `log_max`, so a tiny bound still persists accesses while it is
+//!   healthy) minus what `pending` already holds; a degraded task takes none.
+//!   So through any outage reads add at most one entry per concept to `depth`,
+//!   can never by themselves reach `log_max`, and catch up — latest values,
+//!   nothing lost — once a flush succeeds. **Consequence for the degrade
+//!   bound:** a held access drain can occupy up to half of it, so while reads
+//!   are active during an outage, *writes alone* degrade the session at about
+//!   half the configured `backend_log_max` (the other half is the access
+//!   drain's); with no reads the full bound applies to writes as before.
 //!
 //! ## Lock discipline (spec §6.4)
 //!
@@ -67,6 +80,15 @@ use std::time::Duration;
 use crate::graph::Graph;
 use crate::store::{GraphStore, SessionFlushStats};
 use crate::types::{MutationBatch, StoreError};
+
+/// How many dirty accesses one drain may take: half of `log_max`, but at
+/// least 1 so a bound of 0 or 1 does not starve accesses forever (they would
+/// then persist only at close), and never more than `log_max` itself so a bound
+/// of 0 (which degrades on any entry) is not pushed over by reads alone. What
+/// `pending` already holds counts against it.
+fn access_budget(log_max: usize, pending: usize) -> usize {
+    (log_max / 2).max(1).min(log_max).saturating_sub(pending)
+}
 
 /// Poll cadence for the `max_batch` early-flush trigger and for keeping
 /// `depth` fresh between interval ticks (see module docs).
@@ -256,6 +278,7 @@ impl FlushTask {
                 token,
                 pending: MutationBatch::default(),
                 retry_after: None,
+                holds_accesses: false,
             }
             .run()
             .await
@@ -378,6 +401,12 @@ struct FlushLoop {
     /// retained batch exhausted its retries (F3, `RETAINED_BACKOFF`). `None`
     /// when no batch is in the post-retry hold.
     retry_after: Option<tokio::time::Instant>,
+    /// `pending` holds read-access updates not yet durable (issue #30). While
+    /// it does, no further accesses are drained from the graph: they stay in
+    /// its per-concept dirty set, so however long the store is unreachable,
+    /// `pending` carries at most one access drain — never a growing backlog
+    /// from reads. Cleared whenever `pending` is emptied.
+    holds_accesses: bool,
 }
 
 impl FlushLoop {
@@ -418,7 +447,7 @@ impl FlushLoop {
             // bounded the in-flight cycle.)
             if self.fenced() {
                 let dropped = self.pending.mutations.len();
-                self.pending.mutations.clear();
+                self.clear_pending();
                 self.refresh_depth();
                 tracing::error!(
                     dropped,
@@ -459,6 +488,7 @@ impl FlushLoop {
     /// running and no graph lock held.
     fn requeue_pending(&mut self) {
         let pending = std::mem::take(&mut self.pending);
+        self.holds_accesses = false;
         if !pending.mutations.is_empty() {
             let count = pending.mutations.len();
             // WRITE lock only for the splice; no I/O, no await under it.
@@ -506,6 +536,23 @@ impl FlushLoop {
             // once after a corrected forward clock jump.
             self.pending.gc_mark = self.pending.gc_mark.merge(drained.gc_mark);
             self.pending.mutations.extend(drained.mutations);
+
+            // Issue #30 — read accesses, bounded. They are per-concept state
+            // in the graph's dirty set, not log entries, and are taken here at
+            // most once per `pending` lifetime: not again until what was taken
+            // is durable (or dropped), so a store outage cannot turn steady
+            // read traffic into backlog. The budget keeps reads alone from
+            // ever filling more than half of `log_max` — the degrade bound is
+            // for writes. A degraded session takes none (it drops what it
+            // drains; the counts stay correct in RAM).
+            if !self.holds_accesses && !self.shared.degraded.load(Ordering::Acquire) {
+                let budget = access_budget(self.params.log_max, self.pending.len());
+                let accesses = graph.drain_accesses(budget);
+                if !accesses.is_empty() {
+                    self.holds_accesses = true;
+                    self.pending.mutations.extend(accesses);
+                }
+            }
         }
 
         self.refresh_depth();
@@ -518,7 +565,7 @@ impl FlushLoop {
             // drained batch instead of retaining it — post-degrade retention
             // used to grow without bound for the session's remaining life.
             // Depth is the in-graph log only.
-            self.pending.mutations.clear();
+            self.clear_pending();
             self.refresh_depth();
             return;
         }
@@ -554,7 +601,7 @@ impl FlushLoop {
 
         match self.flush_with_retry().await {
             Ok(()) => {
-                self.pending.mutations.clear();
+                self.clear_pending();
                 self.retry_after = None;
                 *self.shared.last_success.lock() = tokio::time::Instant::now();
                 // Writes may have landed while we flushed; depth is the log only now.
@@ -568,7 +615,7 @@ impl FlushLoop {
                 // stats, session continues, never degrade for a dead-lettered
                 // batch.
                 let batch_len = self.pending.len();
-                self.pending.mutations.clear();
+                self.clear_pending();
                 self.retry_after = None;
                 self.shared.dead_lettered.fetch_add(1, Ordering::AcqRel);
                 self.refresh_depth();
@@ -701,6 +748,14 @@ impl FlushLoop {
         self.fence
             .as_ref()
             .is_some_and(|f| f.load(Ordering::Acquire))
+    }
+
+    /// Empty `pending` (flushed, dead-lettered, dropped while degraded or
+    /// fenced). The epoch watermark is deliberately kept (see `pending`), and
+    /// the access gate reopens: whatever `pending` held is no longer owed.
+    fn clear_pending(&mut self) {
+        self.pending.mutations.clear();
+        self.holds_accesses = false;
     }
 
     /// depth = pending batch + in-graph log (everything not yet durable).
@@ -862,6 +917,12 @@ mod tests {
 
         fn fail_forever(&self) {
             self.fail_always.store(true, Ordering::SeqCst);
+        }
+
+        /// End a `fail_forever` outage: later flushes reach the inner store.
+        fn recover(&self) {
+            self.fail_always.store(false, Ordering::SeqCst);
+            self.fail_remaining.store(0, Ordering::SeqCst);
         }
 
         fn flush_calls(&self) -> usize {
@@ -1783,6 +1844,174 @@ mod tests {
         assert_eq!(snap.concepts.len(), 1);
         assert_eq!(snap.edges.len(), 2); // Derives + Temporal
         assert_eq!(task.stats().depth, 0);
+    }
+
+    /// Issue #30: read traffic during a store outage must neither grow the
+    /// not-yet-durable backlog nor degrade the session, and no count is lost
+    /// once the store comes back.
+    ///
+    /// 20 concepts, every one read once a second for 200 seconds of outage,
+    /// against `log_max = 100`. Reads used to append one log entry per touched
+    /// concept per apply: 4,000 entries, degraded after five seconds. Now the
+    /// counts live in the graph's per-concept dirty set and `pending` holds at
+    /// most one access drain, so depth never exceeds the concept count.
+    #[tokio::test(start_paused = true)]
+    async fn read_traffic_during_an_outage_neither_grows_the_backlog_nor_degrades() {
+        let _callsites = quiet_logs();
+        let inner: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+        let store = Arc::new(FlakyStore::new(inner));
+        let graph = new_graph();
+        let iid = add_interaction(&graph, 1, None);
+        let ids: Vec<NodeId> = (1..=20).map(|k| add_concept(&graph, k, iid)).collect();
+        let task = FlushTask::new(
+            graph.clone(),
+            store.clone(),
+            params(Duration::from_secs(1), 10_000, 1, 100),
+        );
+        let _handle = task.spawn();
+        let_task_arm().await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        wait_until(|| store.flush_calls() >= 1).await;
+        wait_until(|| task.stats().depth == 0).await;
+
+        store.fail_forever();
+        let reads = 200;
+        let mut max_depth = 0;
+        for round in 0..reads {
+            let batch: Vec<_> = ids.iter().map(|&id| (id, 1, ts(round))).collect();
+            graph.write().record_accesses(&batch);
+            tokio::time::advance(Duration::from_secs(1)).await;
+            for _ in 0..20 {
+                tokio::task::yield_now().await;
+            }
+            let depth = task.stats().depth;
+            max_depth = max_depth.max(depth);
+            assert!(
+                depth <= ids.len(),
+                "round {round}: reads grew the backlog to {depth}"
+            );
+            assert!(
+                !task.degraded(),
+                "round {round}: reads alone degraded the session"
+            );
+            assert!(graph.read().pending_accesses() <= ids.len());
+        }
+        assert!(
+            store.flush_calls() > 2,
+            "the outage was real: attempts kept failing"
+        );
+        assert_eq!(max_depth, ids.len(), "one access drain was held, no more");
+
+        // Recovery: the held drain lands, the dirty set follows, nothing lost.
+        store.recover();
+        for _ in 0..30 {
+            tokio::time::advance(Duration::from_secs(1)).await;
+            for _ in 0..20 {
+                tokio::task::yield_now().await;
+            }
+        }
+        assert_eq!(task.stats().depth, 0);
+        assert_eq!(graph.read().pending_accesses(), 0);
+        assert!(!task.degraded());
+        let snap = store.load_session(&sid()).await.unwrap();
+        assert_eq!(snap.concepts.len(), ids.len());
+        for c in &snap.concepts {
+            assert_eq!(
+                (c.access_count, c.last_accessed),
+                (reads as i32, Some(ts(reads - 1))),
+                "{}: every read counted once the store recovered",
+                c.content
+            );
+        }
+    }
+
+    /// Issue #30: an access drain never takes more than half of `log_max`, so
+    /// reads alone cannot push a healthy session to the degrade bound even
+    /// with more touched concepts than the bound; the rest drain on later
+    /// cycles, one held drain at a time.
+    #[tokio::test(start_paused = true)]
+    async fn an_access_drain_is_capped_at_half_the_log_bound() {
+        /// Flush sizes of the access traffic for 30 freshly read concepts.
+        async fn access_flushes(log_max: usize) -> Vec<usize> {
+            let store = Arc::new(FlakyStore::new(Arc::new(MemoryStore::new())));
+            let graph = new_graph();
+            let iid = add_interaction(&graph, 1, None);
+            let ids: Vec<NodeId> = (1..=30).map(|k| add_concept(&graph, k, iid)).collect();
+            // Make the graph durable directly, so the task starts with an empty
+            // log whatever `log_max` is.
+            let seed = graph.write().drain_log();
+            store.inner.flush(&seed, None).await.unwrap();
+            let task = FlushTask::new(
+                graph.clone(),
+                store.clone(),
+                params(Duration::from_secs(1), 10_000, 1, log_max),
+            );
+            let handle = task.spawn();
+            let_task_arm().await;
+            let batch: Vec<_> = ids.iter().map(|&id| (id, 1, ts(1))).collect();
+            graph.write().record_accesses(&batch);
+            for _ in 0..4 {
+                tokio::time::advance(Duration::from_secs(1)).await;
+                for _ in 0..20 {
+                    tokio::task::yield_now().await;
+                }
+            }
+            assert_eq!(graph.read().pending_accesses(), 0);
+            assert_eq!(task.stats().depth, 0);
+            assert!(!task.degraded());
+            handle.abort();
+            store.batch_sizes()
+        }
+
+        assert_eq!(access_flushes(200).await, [30], "budget 100: one drain");
+        assert_eq!(access_flushes(40).await, [20, 10], "budget 20: two flushes");
+    }
+
+    #[test]
+    fn access_budget_is_half_the_bound_but_never_zero_when_healthy() {
+        assert_eq!(access_budget(200, 0), 100);
+        assert_eq!(access_budget(200, 30), 70);
+        assert_eq!(access_budget(200, 150), 0, "writes hold more than half");
+        assert_eq!(access_budget(3, 0), 1);
+        assert_eq!(access_budget(2, 0), 1);
+        assert_eq!(
+            access_budget(1, 0),
+            1,
+            "a bound of 1 used to mean 0 forever"
+        );
+        assert_eq!(access_budget(1, 1), 0);
+        assert_eq!(access_budget(0, 0), 0, "a bound of 0 degrades on any entry");
+    }
+
+    /// Issue #30 (remediation r2): with `log_max = 1` the half is 0, which
+    /// used to starve accesses until close. They now drain one at a time.
+    #[tokio::test(start_paused = true)]
+    async fn a_tiny_log_bound_still_persists_accesses() {
+        let store = Arc::new(FlakyStore::new(Arc::new(MemoryStore::new())));
+        let graph = new_graph();
+        let iid = add_interaction(&graph, 1, None);
+        let ids: Vec<NodeId> = (1..=3).map(|k| add_concept(&graph, k, iid)).collect();
+        let seed = graph.write().drain_log();
+        store.inner.flush(&seed, None).await.unwrap();
+        let task = FlushTask::new(
+            graph.clone(),
+            store.clone(),
+            params(Duration::from_secs(1), 10_000, 1, 1),
+        );
+        let handle = task.spawn();
+        let_task_arm().await;
+        let batch: Vec<_> = ids.iter().map(|&id| (id, 1, ts(1))).collect();
+        graph.write().record_accesses(&batch);
+        for _ in 0..8 {
+            tokio::time::advance(Duration::from_secs(1)).await;
+            for _ in 0..20 {
+                tokio::task::yield_now().await;
+            }
+        }
+        assert_eq!(graph.read().pending_accesses(), 0);
+        assert_eq!(store.batch_sizes(), [1, 1, 1]);
+        assert!(!task.degraded());
+        handle.abort();
     }
 
     #[tokio::test(start_paused = true)]

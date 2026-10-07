@@ -446,7 +446,7 @@ impl NotProxyable {
 /// **The trust boundary is unchanged: it is the store.** The published path is
 /// store data, so a writer who could forge it could already write graph content
 /// the model reads, which is strictly more power. The one thing added on top is
-/// symmetry — [`HubProxy::dial`] runs the published directory through the same
+/// symmetry — `HubProxy::dial` runs the published directory through the same
 /// private-directory check `bind` runs, so a directory this process would refuse
 /// to place a socket in is one it refuses to reach a socket in.
 pub fn proxyable(
@@ -571,7 +571,7 @@ fn error_frame(id: &serde_json::Value, code: i64, message: &str) -> String {
 }
 
 /// Synthesize the JSON-RPC error a client gets for a call the proxy could not
-/// forward — or `None` when the frame needs no answer (see [`request_id`]).
+/// forward — or `None` when the frame needs no answer (see `request_id`).
 ///
 /// This is the *never left this process* case: nothing was read or written.
 pub fn unreachable_reply(client_frame: &str) -> Option<String> {
@@ -1111,7 +1111,7 @@ impl HubProxy {
     /// whose socket file is still on disk refuses the connect, so that dial
     /// spends `CONNECT_BUDGET + CONNECT_RETRY` ≈ 2.1s retrying before it gives up
     /// (the probe measured ~2s for exactly this path); and the whole dial,
-    /// including the lease-row read that opens it, is capped at [`DIAL_BUDGET`].
+    /// including the lease-row read that opens it, is capped at `DIAL_BUDGET`.
     ///
     /// # Why the pump tracks in-flight ids (J2-R1-1)
     ///
@@ -1128,7 +1128,7 @@ impl HubProxy {
     /// So the pump keeps every forwarded request id, tagged with the hub
     /// connection ("generation") it went out on, and retires it when a response
     /// answers it. When a connection ends, every id still outstanding **on that
-    /// connection** is answered with [`HUB_LOST_MESSAGE`] — outcome *unknown*,
+    /// connection** is answered with `HUB_LOST_MESSAGE` — outcome *unknown*,
     /// not "nothing happened", because this process genuinely cannot tell. The
     /// client then has its answer, sends its next request, and that request
     /// drives the reconnect exactly as before. The wedge closes at both halves.

@@ -738,7 +738,7 @@ async fn heartbeat_loop(server: LamboServer, ledger: Arc<Ledger>, every: Duratio
 /// `crate::mcp`, and because "build the one `Memory` a serve-shaped process
 /// owns, with the `[daemon]` cadence applied" is a useful thing for an embedder
 /// to be able to ask for in one call. J2 replaced the serve path's use of it
-/// with [`serve_builder`] plus `resolve_role`, because the startup election has
+/// with `serve_builder` plus `resolve_role`, because the startup election has
 /// to retry the *attach* against the same configuration and therefore needs the
 /// builder rather than the built `Memory`. `rg build_memory` finds no call site
 /// in this tree.

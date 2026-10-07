@@ -315,7 +315,13 @@ fn session_last_activity(graph: &Graph, now: DateTime<Utc>) -> Option<(NodeId, D
         }
     };
     for c in graph.concepts() {
-        consider(c.id, c.last_accessed.unwrap_or(c.created_at));
+        // Both instants are activity (issue #30: a read access now sets
+        // `last_accessed`, possibly from a different clock than the write);
+        // `consider` keeps the later one that is not in the future.
+        consider(c.id, c.created_at);
+        if let Some(read_at) = c.last_accessed {
+            consider(c.id, read_at);
+        }
     }
     for e in graph.edges() {
         let w = e.last_reinforced.max(e.created_at);

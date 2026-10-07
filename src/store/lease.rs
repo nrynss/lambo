@@ -193,7 +193,7 @@ impl LeaseHolder {
 
     /// Publish an endpoint alongside this holder's identity (J2).
     ///
-    /// Only [`crate::mcp::serve`] calls this: a serve process is the only writer
+    /// Only [`crate::mcp::serve`](mod@crate::mcp::serve) calls this: a serve process is the only writer
     /// another process can forward tool calls to, so it is the only one whose
     /// reachability is worth recording. A CLI writer holds the lease for the
     /// length of one verb and is not proxyable, which is why the column is

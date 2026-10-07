@@ -434,6 +434,99 @@ mod tests {
         }
     }
 
+    /// Issue #30 (no live server: SQL text is the contract). Accesses reach
+    /// the store through the narrow `RecordAccess` update (next test), but the
+    /// graph's in-RAM counts also ride every full concept `UpsertNode` (a GC
+    /// survivor bump, a re-derive), so both columns must be bound on insert,
+    /// carried by the conflict update — an upsert must not reset a count the
+    /// access update raised — and read back on load: the shared statement
+    /// path both pg dialects run.
+    #[test]
+    fn access_columns_ride_the_concept_upsert_and_the_load() {
+        let at = Utc.timestamp_opt(1_800_000_000, 0).unwrap();
+        let c = Concept {
+            id: NodeId::new(),
+            session_id: SessionId::from("issue-30"),
+            content: "read often".into(),
+            canonical_key: "read often".into(),
+            concept_type: ConceptType::Logic,
+            origin_interaction: NodeId::new(),
+            origin_agent: AgentId::from("a"),
+            created_at: at,
+            access_count: 9,
+            last_accessed: Some(at),
+            gc_survived: 0,
+            canonization_status: crate::types::CanonizationStatus::None,
+            blast_radius: None,
+            last_demotion_time: None,
+            embedding: None,
+            human_confirmed: 0,
+            chunk_group_id: None,
+        };
+        let rows = [crate::store::batch::ConceptRow::new(&c)];
+        let sql =
+            crate::store::pg::concept_upsert_query(&rows, &[None], PostgresDialect::VECTOR_CAST)
+                .sql()
+                .to_string();
+        let (insert, on_conflict) = sql.split_once("ON CONFLICT").expect("an upsert");
+        assert!(insert.contains("access_count, last_accessed"), "{sql}");
+        for column in ["access_count", "last_accessed"] {
+            assert!(
+                on_conflict.contains(&format!("{column} = EXCLUDED.{column}")),
+                "the conflict update must carry {column}: {sql}"
+            );
+        }
+        let select = crate::store::pg::DialectSql::for_dialect::<PostgresDialect>().select_concepts;
+        assert!(select.contains("access_count, last_accessed"), "{select}");
+    }
+
+    /// Issue #30: the access update is one narrow, monotonic, multi-row
+    /// `UPDATE … FROM (VALUES …)`: it sets the two access columns only (no
+    /// `embedding`, so a read never re-touches the hnsw index and the row
+    /// update stays HOT-eligible), both through `GREATEST`, joins on id **and**
+    /// session, binds four values per row, and carries no dialect token — the
+    /// same text runs on CockroachDB.
+    #[test]
+    fn the_access_update_is_narrow_monotonic_and_dialect_free() {
+        let sid = SessionId::from("issue-30");
+        let at = Utc.timestamp_opt(1_800_000_000, 0).unwrap();
+        let rows: Vec<crate::store::batch::AccessUpdate<'_>> = (0..3)
+            .map(|k| crate::store::batch::AccessUpdate {
+                session_id: &sid,
+                id: NodeId::new(),
+                access_count: k,
+                last_accessed: at,
+            })
+            .collect();
+        let sql = crate::store::pg::access_update_query(&rows)
+            .sql()
+            .to_string();
+        let set = &sql[sql.find(" SET").unwrap()..sql.find("FROM (").unwrap()];
+        assert_eq!(set.matches(" = ").count(), 2, "two columns only: {sql}");
+        assert!(
+            set.contains("access_count = GREATEST(concepts.access_count, v.access_count)"),
+            "{sql}"
+        );
+        assert!(
+            set.contains(
+                "last_accessed = GREATEST(COALESCE(concepts.last_accessed, v.last_accessed), \
+                 v.last_accessed)"
+            ),
+            "{sql}"
+        );
+        for absent in ["embedding", "INSERT", PostgresDialect::VECTOR_CAST, "::"] {
+            assert!(!sql.contains(absent), "{absent:?} in {sql}");
+        }
+        assert!(
+            sql.ends_with("WHERE concepts.id = v.id AND concepts.session_id = v.session_id"),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("$12") && !sql.contains("$13"),
+            "3 rows x 4 binds: {sql}"
+        );
+    }
+
     #[test]
     fn dialect_tokens_are_not_cockroach_sql() {
         assert_ne!(
@@ -760,6 +853,13 @@ mod tests {
                 .await
                 .unwrap_or_else(|e| panic!("create {db}: {e}"));
             let dsn = dsn_for_database(&admin_dsn, &db);
+            // Dropped at the end of the iteration, after the store and pool
+            // below (reverse declaration order), on a panic too.
+            let _cleanup = LiveDb {
+                admin_dsn: admin_dsn.clone(),
+                db: db.clone(),
+                dsn: dsn.clone(),
+            };
             let store = PostgresStore::new(StoreConfig {
                 kind: StoreKind::Postgres,
                 dsn: Some(dsn.clone()),
@@ -854,7 +954,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "live: requires LAMBO_POSTGRES_DSN against pinned pgvector/pgvector:pg17"]
     async fn live_schema_width_refuses_a_config_that_disagrees() {
-        let Some(store768) =
+        let Some((_db768, store768)) =
             unique_live_store("live_schema_width_refuses_a_config_that_disagrees", 768).await
         else {
             return;
@@ -1299,7 +1399,48 @@ mod tests {
         built
     }
 
-    async fn unique_live_store(test: &str, dim: usize) -> Option<PostgresStore> {
+    /// A live test's private database. Dropping it (the test finished, failed
+    /// or panicked) drops the database `WITH (FORCE)`, which also closes the
+    /// connections its stores still hold, so a live run leaves nothing behind.
+    /// Cleanup is best effort and never panics.
+    struct LiveDb {
+        admin_dsn: String,
+        db: String,
+        dsn: String,
+    }
+
+    impl Drop for LiveDb {
+        fn drop(&mut self) {
+            let (admin_dsn, db) = (self.admin_dsn.clone(), self.db.clone());
+            crate::test_util::run_blocking(async move {
+                let admin = match sqlx::PgPool::connect(&admin_dsn).await {
+                    Ok(p) => p,
+                    Err(e) => return eprintln!("cleanup: connect admin for {db}: {e}"),
+                };
+                if let Err(e) = sqlx::query(&format!("DROP DATABASE IF EXISTS {db} WITH (FORCE)"))
+                    .execute(&admin)
+                    .await
+                {
+                    eprintln!("cleanup: drop {db}: {e}");
+                }
+                admin.close().await;
+            });
+        }
+    }
+
+    /// A store on a fresh [`LiveDb`]. Callers bind `Some((_db, store))`, the
+    /// guard first: bindings drop in reverse order, so the store (and its pool)
+    /// goes before the database does.
+    async fn unique_live_store(test: &str, dim: usize) -> Option<(LiveDb, PostgresStore)> {
+        let db = unique_live_db(test).await?;
+        let store = live_store_at(test, &db.dsn, dim).await;
+        Some((db, store))
+    }
+
+    /// A fresh database on the live server — for a test that needs a second
+    /// connection to the same data (a writer restart). Bind the result before
+    /// any store on it: it is dropped (and the database with it) last.
+    async fn unique_live_db(test: &str) -> Option<LiveDb> {
         let admin_dsn = postgres_dsn_or_skip(test)?;
         let admin = sqlx::PgPool::connect(&admin_dsn)
             .await
@@ -1309,10 +1450,16 @@ mod tests {
             .execute(&admin)
             .await
             .unwrap_or_else(|e| panic!("{test}: create {db}: {e}"));
+        admin.close().await;
         let dsn = dsn_for_database(&admin_dsn, &db);
+        Some(LiveDb { admin_dsn, db, dsn })
+    }
+
+    /// A store on `dsn` with its schema initialised (idempotent).
+    async fn live_store_at(test: &str, dsn: &str, dim: usize) -> PostgresStore {
         let store = PostgresStore::new(StoreConfig {
             kind: StoreKind::Postgres,
-            dsn: Some(dsn),
+            dsn: Some(dsn.to_string()),
             path: None,
             vector_dim: Some(dim),
         })
@@ -1321,7 +1468,7 @@ mod tests {
             .init_schema()
             .await
             .unwrap_or_else(|e| panic!("{test}: init_schema: {e}"));
-        Some(store)
+        store
     }
 
     /// Camera-proof EXPLAIN of the production `vector_candidates` SQL.
@@ -1400,7 +1547,7 @@ mod tests {
     async fn explain_recall_uses_hnsw() {
         const DIM: usize = 8;
         let rows = corpus::PLANNER_CROSSOVER_ROWS * 4;
-        let Some(store) = unique_live_store("explain_recall_uses_hnsw", DIM).await else {
+        let Some((_db, store)) = unique_live_store("explain_recall_uses_hnsw", DIM).await else {
             return;
         };
         let contract = crate::types::EmbeddingContract {
@@ -1517,7 +1664,7 @@ mod tests {
         use crate::types::{CanonizationStatus, Edge, EdgeType};
         use parking_lot::RwLock;
 
-        let Some(store) =
+        let Some((_db, store)) =
             unique_live_store("canonization_cycle_makes_the_stage2_hop_on_postgres", 8).await
         else {
             return;
@@ -1728,7 +1875,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "live: requires LAMBO_POSTGRES_DSN against pinned pgvector/pgvector:pg17"]
     async fn interaction_span_coverage_decodes_on_both_arms() {
-        let Some(store) =
+        let Some((_db, store)) =
             unique_live_store("interaction_span_coverage_decodes_on_both_arms", 8).await
         else {
             return;
@@ -1870,7 +2017,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "live: requires LAMBO_POSTGRES_DSN against pinned pgvector/pgvector:pg17"]
     async fn fencing_refuses_stale_write_and_upserts_replay() {
-        let Some(store) =
+        let Some((_db, store)) =
             unique_live_store("fencing_refuses_stale_write_and_upserts_replay", 8).await
         else {
             return;
@@ -1982,5 +2129,213 @@ mod tests {
             hits.is_empty(),
             "concepts with NULL embeddings must not be candidates, got {hits:?}"
         );
+    }
+
+    /// Issue #30, live: read accesses reach PostgreSQL through the narrow
+    /// `RecordAccess` update — inside the fenced flush transaction — and a
+    /// writer restart (a second store on a fresh pool, loading the session
+    /// into a new graph) gets them back. The update is monotonic against a
+    /// replay and an older presentation, leaves the embedding (and so the
+    /// hnsw index entry) alone, does not move the mutation watermark, and a
+    /// later full upsert in the same batch keeps its higher values.
+    #[tokio::test]
+    #[ignore = "live: requires LAMBO_POSTGRES_DSN against pinned pgvector/pgvector:pg17"]
+    async fn access_counts_round_trip_through_the_narrow_update_and_survive_reattach() {
+        const TEST: &str =
+            "access_counts_round_trip_through_the_narrow_update_and_survive_reattach";
+        let Some(live_db) = unique_live_db(TEST).await else {
+            return;
+        };
+        let dsn = live_db.dsn.clone();
+        let store = live_store_at(TEST, &dsn, 8).await;
+        let sid = SessionId::from("issue-30-live");
+        let holder = LeaseHolder {
+            agent: AgentId::from("issue-30"),
+            pid: 1,
+            host: "test".into(),
+            endpoint: None,
+        };
+        let LeaseOutcome::Acquired(info) = store
+            .acquire_lease(&sid, &holder, std::time::Duration::from_secs(45))
+            .await
+            .expect("acquire")
+        else {
+            panic!("expected Acquired");
+        };
+        let token = Some(info.token);
+
+        let t0 = Utc.with_ymd_and_hms(2026, 10, 7, 12, 0, 0).unwrap();
+        let t = |s: i64| t0 + chrono::Duration::seconds(s);
+        let contract = EmbeddingContract {
+            kind: "fixture".into(),
+            model: Some("issue-30".into()),
+            dim: 8,
+        };
+        let (origin, cid) = (NodeId::new(), NodeId::new());
+        let probe = vec![1.0f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let concept = Concept {
+            id: cid,
+            session_id: sid.clone(),
+            content: "read often".into(),
+            canonical_key: "read often".into(),
+            concept_type: ConceptType::Entity,
+            origin_interaction: origin,
+            origin_agent: AgentId::from("issue-30"),
+            created_at: t0,
+            access_count: 0,
+            last_accessed: None,
+            gc_survived: 1,
+            canonization_status: crate::types::CanonizationStatus::None,
+            blast_radius: None,
+            last_demotion_time: None,
+            embedding: Some(probe.clone()),
+            human_confirmed: 0,
+            chunk_group_id: None,
+        };
+        store
+            .flush(
+                &MutationBatch {
+                    mutation_epoch: 5,
+                    gc_mark: Default::default(),
+                    mutations: vec![
+                        Mutation::SetEmbedding {
+                            session_id: sid.clone(),
+                            embedding: Some(contract.clone()),
+                        },
+                        Mutation::UpsertNode {
+                            node: Node::Interaction(Interaction {
+                                event_time: None,
+                                id: origin,
+                                session_id: sid.clone(),
+                                agent_id: AgentId::from("issue-30"),
+                                prompt_text: Some("p".into()),
+                                previous_id: None,
+                                created_at: t0,
+                            }),
+                        },
+                        Mutation::UpsertNode {
+                            node: Node::Concept(concept.clone()),
+                        },
+                        Mutation::UpsertEdge {
+                            // Every concept carries a Derives edge from its origin
+                            // interaction (spec §5.7); a session without it is
+                            // refused at load.
+                            edge: crate::types::Edge {
+                                id: NodeId::new(),
+                                session_id: sid.clone(),
+                                source: origin,
+                                target: concept.id,
+                                edge_type: crate::types::EdgeType::Derives,
+                                weight: 0.9,
+                                reinforcements: 0,
+                                created_at: t0,
+                                last_reinforced: t0,
+                                event_time: None,
+                            },
+                        },
+                    ],
+                },
+                token,
+            )
+            .await
+            .expect("seed");
+
+        // The writer's path: a loaded graph applies reads in RAM, and the
+        // flush takes them as narrow access updates (no log entry, no epoch).
+        let mut graph = crate::store::load::load_session_async(&store, &sid)
+            .await
+            .expect("load")
+            .graph;
+        assert_eq!(graph.record_accesses(&[(cid, 3, t(30))]), 1);
+        let accesses = graph.drain_accesses(usize::MAX);
+        assert!(matches!(
+            accesses.as_slice(),
+            [Mutation::RecordAccess { .. }]
+        ));
+        let batch = MutationBatch {
+            mutation_epoch: graph.epoch(),
+            gc_mark: Default::default(),
+            mutations: accesses,
+        };
+        store.flush(&batch, token).await.expect("accesses");
+        store.flush(&batch, token).await.expect("replay converges");
+        let older = MutationBatch {
+            mutation_epoch: 0,
+            gc_mark: Default::default(),
+            mutations: vec![Mutation::RecordAccess {
+                session_id: sid.clone(),
+                id: cid,
+                access_count: 1,
+                last_accessed: t(10),
+            }],
+        };
+        store.flush(&older, token).await.expect("older access");
+        let stale = store.flush(&batch, Some(info.token - 1)).await;
+        assert!(
+            matches!(stale, Err(crate::store::StoreError::StaleWrite(_))),
+            "the access update is fenced like every write, got {stale:?}"
+        );
+
+        // Writer restart: a second store, a fresh pool, a new graph.
+        let restarted = live_store_at(TEST, &dsn, 8).await;
+        let reloaded = crate::store::load::load_session_async(&restarted, &sid)
+            .await
+            .expect("reload")
+            .graph;
+        let Some(Node::Concept(c)) = reloaded.node(cid) else {
+            panic!("concept missing after reattach");
+        };
+        assert_eq!((c.access_count, c.last_accessed), (3, Some(t(30))));
+        assert_eq!(c.gc_survived, 1, "no other column moves");
+        assert_eq!(
+            c.embedding.as_deref(),
+            Some(probe.as_slice()),
+            "embedding intact"
+        );
+        assert_eq!(reloaded.epoch(), 5, "accesses never move the watermark");
+        let hits = restarted
+            .vector_candidates_checked(&sid, &probe, &contract, 5)
+            .await
+            .expect("vector read");
+        assert!(
+            hits.iter().any(|h| h.item == cid),
+            "the concept is still a vector candidate: {hits:?}"
+        );
+
+        // Same batch: a later full upsert keeps its higher values; an access
+        // after an upsert is not undone by it.
+        let mut later = c.clone();
+        later.access_count = 9;
+        later.last_accessed = Some(t(90));
+        restarted
+            .flush(
+                &MutationBatch {
+                    mutation_epoch: 5,
+                    gc_mark: Default::default(),
+                    mutations: vec![
+                        Mutation::RecordAccess {
+                            session_id: sid.clone(),
+                            id: cid,
+                            access_count: 4,
+                            last_accessed: t(40),
+                        },
+                        Mutation::UpsertNode {
+                            node: Node::Concept(later),
+                        },
+                        Mutation::RecordAccess {
+                            session_id: sid.clone(),
+                            id: cid,
+                            access_count: 10,
+                            last_accessed: t(100),
+                        },
+                    ],
+                },
+                token,
+            )
+            .await
+            .expect("mixed batch");
+        let snap = restarted.load_session(&sid).await.expect("load");
+        let c = snap.concepts.iter().find(|c| c.id == cid).unwrap();
+        assert_eq!((c.access_count, c.last_accessed), (10, Some(t(100))));
     }
 }

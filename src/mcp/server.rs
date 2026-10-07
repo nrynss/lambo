@@ -2010,7 +2010,7 @@ impl LamboServer {
         let resolved = {
             let g = self.mem.graph().read();
             match resolve_focus(&g, p.focus.trim()) {
-                Focus::Exact(id) => Ok((None, render_neighbourhood(&g, id, depth))),
+                Focus::Exact(id) => Ok((id, None, render_neighbourhood(&g, id, depth))),
                 Focus::Fuzzy {
                     id,
                     content,
@@ -2037,13 +2037,13 @@ impl LamboServer {
                             MAX_INSPECT_SCAN_CONCEPTS
                         ),
                     };
-                    Ok((Some(note), render_neighbourhood(&g, id, depth)))
+                    Ok((id, Some(note), render_neighbourhood(&g, id, depth)))
                 }
                 other => Err(other),
             }
         };
 
-        let (note, (text, structured)) = match resolved {
+        let (focus_id, note, (text, structured)) = match resolved {
             Ok(v) => v,
             Err(Focus::Ambiguous {
                 candidates,
@@ -2170,6 +2170,13 @@ impl LamboServer {
         // resolution the caller did not ask for is exactly the friction
         // DOGFOOD metric 6 is looking for.
         note_facts(|| json!({ "depth": depth, "fuzzy": note.is_some() }));
+
+        // Issue #30: an inspect that resolved returned its focus concept to the
+        // caller — an access. The focus only: the neighbourhood is context
+        // around what was asked for (depth up to 5 can reach hundreds of
+        // concepts), and a refusal (ambiguous / missing / oversized) returned
+        // no concept at all.
+        self.mem.note_accesses([focus_id]);
 
         let mut out = CallToolResult::success(vec![ContentBlock::text(text.clone())]);
         attach_warnings(&mut out, &warnings);
@@ -3517,6 +3524,67 @@ mod tests {
             CanonizationStatus::None,
             "the same lone-writer corpus must not silently change Swarm"
         );
+    }
+
+    /// Issues #29 and #30 coexist in `lambo_stats`: recalling and inspecting
+    /// (accesses noted, then applied) leaves the `gc` object present, the
+    /// epoch and the durable sweep mark where they were, and the payload's
+    /// key set exactly as before, so no access accounting leaked into it.
+    #[tokio::test]
+    async fn stats_gc_block_is_unmoved_by_recall_and_inspect_accesses() {
+        let s = server_with_config(
+            "mcp-gc-stats-access",
+            Config {
+                daemon_tick_interval: Duration::from_secs(3_600),
+                ..Config::default()
+            },
+        )
+        .await;
+        call(
+            &s,
+            "lambo_derive",
+            json!({
+                "agent_id": "agent-a",
+                "concepts": [{"content": "auth middleware", "concept_type": "entity"}]
+            }),
+        )
+        .await;
+        s.mem.settle_daemon().await;
+        let stats_call = || call(&s, "lambo_stats", json!({"agent_id": "agent-a"}));
+        let before = stats_call().await.structured_content.expect("payload");
+
+        let inspect = call(
+            &s,
+            "lambo_inspect",
+            json!({"agent_id": "agent-a", "focus": "auth middleware"}),
+        )
+        .await;
+        assert_eq!(inspect.is_error, Some(false), "{inspect:?}");
+        let recall = call(
+            &s,
+            "lambo_recall",
+            json!({"agent_id": "agent-a", "query": "auth middleware"}),
+        )
+        .await;
+        assert_eq!(recall.is_error, Some(false), "{recall:?}");
+        assert!(
+            s.mem.unapplied_accesses() > 0,
+            "premise: accesses are noted"
+        );
+        s.mem.settle_daemon().await;
+
+        let after = stats_call().await.structured_content.expect("payload");
+        assert!(after["gc"].is_object(), "{after}");
+        assert_eq!(after["epoch"], before["epoch"], "accesses never move it");
+        assert_eq!(
+            after["gc"]["last_gc_epoch"], before["gc"]["last_gc_epoch"],
+            "nor the durable sweep mark"
+        );
+        let keys = |p: &serde_json::Value| -> Vec<String> {
+            p.as_object().unwrap().keys().cloned().collect()
+        };
+        assert_eq!(keys(&after), keys(&before));
+        s.mem.close().await.expect("close");
     }
 
     /// Issue #29: `lambo_stats` carries a `gc` object — the durable sweep mark
@@ -5387,6 +5455,92 @@ mod tests {
             text_of(&exact)
         );
         s.mem.close().await.expect("close");
+    }
+
+    /// Issue #30 over the tool surface: a resolved inspect counts its focus
+    /// (not the neighbourhood), a refused one counts nothing, and a recall
+    /// counts exactly the hits its structured payload returned.
+    ///
+    /// Deterministic about who applies the counts: a one-hour daemon tick and
+    /// a settled daemon after the derive mean no cycle runs during the reads
+    /// (reads never wake it), the premise is asserted, and `close` is what
+    /// applies them. It used to race the 1 s default tick, so it caught a
+    /// broken close only when the tick happened to lose.
+    #[tokio::test]
+    async fn inspect_focus_and_recall_hits_are_counted_as_accesses() {
+        let s = server_with_config(
+            "mcp-issue-30",
+            Config {
+                daemon_tick_interval: Duration::from_secs(3_600),
+                ..Config::default()
+            },
+        )
+        .await;
+        call(
+            &s,
+            "lambo_derive",
+            serde_json::json!({
+                "agent_id": "agent-a",
+                "concepts": [
+                    {"content": "auth middleware", "concept_type": "entity"},
+                    {"content": "auth middleware rewrite", "concept_type": "entity"},
+                    {"content": "session token store", "concept_type": "entity"}
+                ],
+                "parent_of": [{"parent": "auth middleware", "child": "session token store"}]
+            }),
+        )
+        .await;
+        s.mem.settle_daemon().await;
+
+        // Exact focus, depth 2: the child is in the neighbourhood.
+        let exact = call(
+            &s,
+            "lambo_inspect",
+            serde_json::json!({"agent_id": "agent-a", "focus": "auth middleware"}),
+        )
+        .await;
+        assert_eq!(exact.is_error, Some(false), "{exact:?}");
+        assert!(text_of(&exact).contains("session token store"));
+        // Ambiguous: refused, nothing returned, nothing counted.
+        let refused = call(
+            &s,
+            "lambo_inspect",
+            serde_json::json!({"agent_id": "agent-a", "focus": "auth"}),
+        )
+        .await;
+        assert_eq!(refused.is_error, Some(true), "{refused:?}");
+
+        let recall = call(
+            &s,
+            "lambo_recall",
+            serde_json::json!({"agent_id": "agent-a", "query": "auth middleware rewrite"}),
+        )
+        .await;
+        assert_eq!(recall.is_error, Some(false), "{recall:?}");
+        let returned: std::collections::HashSet<String> =
+            recall.structured_content.as_ref().unwrap()["hits"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|h| h["content"].as_str().unwrap().to_string())
+                .collect();
+        assert!(!returned.is_empty());
+
+        // Premise: every count is still in the ledger, so `close` applies it.
+        assert!(s.mem.unapplied_accesses() > 0);
+        assert!(s.mem.graph().read().concepts().all(|c| c.access_count == 0));
+        s.mem.close().await.expect("close");
+        let g = s.mem.graph().read();
+        for c in g.concepts() {
+            let expected = i32::from(c.content == "auth middleware")
+                + i32::from(returned.contains(&c.content));
+            assert_eq!(
+                c.access_count, expected,
+                "{}: inspect focus + recall hits only",
+                c.content
+            );
+            assert_eq!(c.last_accessed.is_some(), expected > 0, "{}", c.content);
+        }
     }
 
     /// A single substring match is usable — but the caller is told, in the
