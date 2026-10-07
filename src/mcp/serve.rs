@@ -1971,7 +1971,7 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
 /// call, a touch only competes with the final drain (and on a slow remote
 /// embedder could keep a request in flight across it). Aborting is idempotent,
 /// so `serve` still aborts the same task after close on its usual path.
-async fn run_and_close(
+pub(crate) async fn run_and_close(
     mem: Arc<Memory>,
     transport: impl Future<Output = Result<(), LamboError>>,
     event_pump: tokio::task::JoinHandle<()>,
@@ -4653,9 +4653,10 @@ mod tests {
         /// Issue #13 review: the keep-warm stops when the transport returns,
         /// not after the close. `run_and_close` owns that now (serve passes the
         /// keep-warm's abort handle), so a task handed to it must come back
-        /// cancelled even though nobody else aborts it. Exact ordering against
-        /// the close is not observable from here (a cancelled task is dropped
-        /// when the runtime next polls it); the abort itself is.
+        /// cancelled even though nobody else aborts it. The ordering against
+        /// the close needs a close that takes time and is pinned in
+        /// `memory::tests::the_keep_warm_is_stopped_before_the_close_starts`;
+        /// this one pins the abort itself.
         #[tokio::test]
         async fn run_and_close_stops_the_tasks_it_is_handed() {
             let m = mem("serve-close-stops-keep-warm").await;

@@ -3856,6 +3856,70 @@ mod tests {
         );
     }
 
+    /// Issue #13: the embedder keep-warm is stopped when the transport returns,
+    /// **before** the close starts, not after it.
+    ///
+    /// `run_and_close` is handed the task's abort handle and must use it ahead
+    /// of `close_bounded`; `serve` aborts the same task again after the close
+    /// as a backstop, so the post-close abort alone would still pass every
+    /// other test. What tells the orders apart is a close that takes time: this
+    /// one pays 30 ms per statement, so while it is in flight the handed task
+    /// must already be gone. The ordering is observed at 1 ms, with the close
+    /// demonstrably unfinished, so aborting after the close fails it.
+    #[tokio::test(start_paused = true)]
+    async fn the_keep_warm_is_stopped_before_the_close_starts() {
+        struct DropFlag(Arc<AtomicBool>);
+        impl Drop for DropFlag {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let store = Arc::new(RoundTripStore::new(
+            Arc::new(MemoryStore::new()),
+            CostModel::PerPlannedStatement,
+            Duration::from_millis(30),
+        ));
+        let mem = Arc::new(memory_on(store.clone(), "i13-keep-warm-before-close").await);
+        at_cap_burst(&mem).await;
+
+        let gone = Arc::new(AtomicBool::new(false));
+        let keep_warm = {
+            let flag = DropFlag(Arc::clone(&gone));
+            tokio::spawn(async move {
+                let _flag = flag;
+                std::future::pending::<()>().await
+            })
+        };
+        let handles = vec![keep_warm.abort_handle()];
+        let pump = tokio::spawn(async {});
+        let closing = tokio::spawn(async move {
+            crate::mcp::serve::run_and_close(
+                mem,
+                async { Ok(()) },
+                pump,
+                &handles,
+                &crate::mcp::serve::EarlyShutdown::unarmed(),
+            )
+            .await
+        });
+
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        assert!(
+            !closing.is_finished(),
+            "control: the close must still be in flight, or this test observes nothing"
+        );
+        assert!(
+            gone.load(Ordering::SeqCst),
+            "the keep-warm must be stopped before the close starts, so a touch cannot \
+             start (or sit in flight) across the final drain"
+        );
+        closing
+            .await
+            .expect("run_and_close does not panic")
+            .expect("the burst drains inside the close window");
+    }
+
     /// The happy path must not gain a second release: `close()` already handed
     /// the lease off, and a redundant holder-scoped DELETE is a wasted
     /// round-trip on the way out.
