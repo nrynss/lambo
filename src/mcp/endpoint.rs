@@ -246,8 +246,9 @@ impl SessionEndpoint {
     /// base above it. Returns the address a holder of `session` on `store`
     /// would bind inside that directory, without creating or checking the
     /// directory. Refuses, as [`SessionEndpoint::resolve`] does, when the
-    /// resulting path would not fit [`SUN_PATH_MAX`]. Use it to derive the
-    /// address for an endpoint directory other than this process's own.
+    /// resulting path would not fit a unix socket address (`SUN_PATH_MAX`).
+    /// Use it to derive the address for an endpoint directory other than this
+    /// process's own.
     pub fn resolve_in(dir: &Path, session: &str, store: &StoreConfig) -> Result<Self, LamboError> {
         // Identity is the hash over BOTH halves. The session must be in it: two
         // sessions on one store differ only by the cosmetic prefix otherwise,
