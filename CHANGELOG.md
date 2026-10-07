@@ -184,8 +184,9 @@
   longer keeps its resolved embedder alive. It used to hold the full model for
   as long as its client stayed attached (with candle on Metal, ~1.1 GB of
   weights plus the coalescer threads) without ever embedding; the backends are
-  now released before the proxy starts. Pre-existing, found in the issue #13
-  review.
+  now released before the proxy starts. The model is still loaded while the
+  backends resolve and through the election wait, until the role is known
+  (tracked in #28). Pre-existing, found in the issue #13 review.
 - Canonization now fires in long-running low-write deployments: the mutation
   epoch the GC interval measures persists with the session instead of resetting
   on every writer start (issue #17). Thirteen days of dogfooding produced zero

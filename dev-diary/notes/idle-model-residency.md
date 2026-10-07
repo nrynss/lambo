@@ -226,3 +226,13 @@ Readings:
   `footprint --swapped` `IOAccelerator (graphics)` row.
 * Re-check the 10 s auto interval on the re-pinned writer with
   `footprint --swapped` (`IOAccelerator (graphics)` row) and latency by gap.
+* **A proxy still loads the model transiently.** `resolve_backends` builds the
+  embedder eagerly (`build_embedder` -> `CandleEmbedder::new` hashes the weight
+  file for the contract identity and loads the model onto the device in one
+  constructor), so a serve that will lose the election holds the full model from
+  resolve until `resolve_role` releases it, up to `ELECTION_BUDGET`. Not fixed
+  here: a lazy embedder needs candle's identity (source + weight sha256) split
+  from the device load, a lazy `Embedder` behind the public
+  `ResolvedBackends.embedder`, and the resolve-time dim check moved to
+  hidden-size-from-config, which is restructuring of backend construction.
+  Design write-up routed to #28.
