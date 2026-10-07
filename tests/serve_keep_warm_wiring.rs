@@ -4,89 +4,65 @@
 //! The unit tests in `src/embed/keep_warm.rs` pin the policy and the loop, and
 //! `src/mcp/serve.rs` pins that a proxy releases its embedder. What neither
 //! can see is whether the real binary spawns the task where the design says:
-//! a holder with `keep_warm_secs = 1` must log "lambo serve: embedder
-//! keep-warm armed", and a second serve on the same session, which becomes a
-//! proxy, must not.
+//! a holder with `keep_warm_secs = 1` must arm it and actually touch the
+//! embedder, and a second serve on the same session, which becomes a proxy,
+//! must do neither.
 //!
-//! Self-contained on purpose: the scratch directory, the per-test
-//! `XDG_RUNTIME_DIR` and the kill-and-reap child guard are local to this file.
-//! Once the #15 test-isolation helpers (`tests/common`) land, this should
-//! switch to them.
+//! Spawning, environment scrubbing and isolation come from `tests/common`
+//! (#15): `lambo_command`, `RuntimeDir`, `ServeChild`, `ScratchDir`.
 #![cfg(all(feature = "store-sqlite", feature = "embed-fixture", unix))]
 
 use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::path::Path;
+use std::process::Stdio;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use lambo::store::{GraphStore, SqliteStore};
 
+mod common;
+use common::{RuntimeDir, ScratchDir, ServeChild, RUNTIME_DIR_VAR};
+
 const SESSION: &str = "issue13-keep-warm-wiring";
 const ARMED: &str = "lambo serve: embedder keep-warm armed";
+/// The loop's per-touch line (`tracing::debug!` in `keep_warm_loop`). Only
+/// emitted at debug level, so the serve runs with `LOG_FILTER`.
+const TOUCH: &str = "embedder keep-warm: touch";
+/// `lambo_command` clears an ambient `RUST_LOG`; this is the one this test
+/// wants: the serve's default info level plus the keep-warm debug line.
+const LOG_FILTER: &str = "lambo=info,rmcp=warn,lambo::embed::keep_warm=debug";
 
-/// A scratch directory under `/tmp` (short enough for the endpoint socket
-/// address), removed on drop.
-struct Scratch(PathBuf);
-
-impl Scratch {
-    fn new() -> Self {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .subsec_nanos();
-        let dir = PathBuf::from(format!("/tmp/lb13kw-{}-{nanos}", std::process::id()));
-        std::fs::create_dir_all(dir.join("run")).expect("scratch dir");
-        Self(dir)
-    }
-
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-/// A `lambo serve` child that is killed and reaped on drop, so a failing
-/// assertion never leaks a serve holding a lease or a socket.
-struct ServeChild {
-    child: Child,
+/// A running `lambo serve` plus a channel of its stderr lines.
+struct Serve {
+    /// Held for its drop: kills and reaps the serve.
+    _guard: ServeChild,
     stderr: mpsc::Receiver<String>,
 }
 
-impl ServeChild {
-    fn spawn(cfg: &Path, runtime_dir: &Path, agent: &str) -> Self {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_lambo"));
-        // Ambient LAMBO_* overrides (an operator's shell, a dogfood rig) must
-        // not reach this serve: the env overlay beats the file, so an inherited
-        // LAMBO_EMBED_KEEP_WARM_SECS=0 would switch off what is under test.
-        for (key, _) in std::env::vars_os() {
-            if key.to_string_lossy().starts_with("LAMBO_") {
-                cmd.env_remove(&key);
-            }
-        }
-        let mut child = cmd
-            .args([
-                "--config",
-                cfg.to_str().unwrap(),
-                "serve",
-                "--session",
-                SESSION,
-                "--agent",
-                agent,
-                "--transport",
-                "stdio",
-            ])
-            .env("XDG_RUNTIME_DIR", runtime_dir)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap_or_else(|e| panic!("spawn {agent}: {e}"));
+impl Serve {
+    fn spawn(cfg: &Path, runtime: &RuntimeDir, agent: &str) -> Self {
+        let mut child = ServeChild::new(
+            common::lambo_command()
+                .env(RUNTIME_DIR_VAR, runtime.path())
+                // After `lambo_command` cleared the ambient value.
+                .env("RUST_LOG", LOG_FILTER)
+                .args([
+                    "--config",
+                    cfg.to_str().unwrap(),
+                    "serve",
+                    "--session",
+                    SESSION,
+                    "--agent",
+                    agent,
+                    "--transport",
+                    "stdio",
+                ])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap_or_else(|e| panic!("spawn {agent}: {e}")),
+        );
         let stderr = child.stderr.take().expect("stderr");
         let (tx, rx) = mpsc::channel();
         let tag = agent.to_string();
@@ -98,7 +74,10 @@ impl ServeChild {
                 }
             }
         });
-        Self { child, stderr: rx }
+        Self {
+            _guard: child,
+            stderr: rx,
+        }
     }
 
     /// Collect stderr lines into `seen` until one contains `needle` (`true`)
@@ -135,18 +114,14 @@ impl ServeChild {
     }
 }
 
-impl Drop for ServeChild {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
 #[test]
-fn the_holder_arms_the_keep_warm_and_a_proxy_does_not() {
-    let scratch = Scratch::new();
-    let db = scratch.path().join("lambo.db");
-    let cfg = scratch.path().join("lambo.toml");
+fn the_holder_arms_and_touches_the_keep_warm_and_a_proxy_does_not() {
+    // Declaration order is drop order reversed: the serves are reaped before
+    // their runtime dir and scratch files go.
+    let scratch = ScratchDir::new("lb13kw");
+    let runtime = RuntimeDir::new();
+    let db = scratch.join("lambo.db");
+    let cfg = scratch.join("lambo.toml");
     // The fixture embedder is off under the auto rule (no weights), so the
     // explicit `keep_warm_secs = 1` is what opts it in: the wiring under test,
     // not the auto policy (that is unit-tested).
@@ -166,9 +141,8 @@ fn the_holder_arms_the_keep_warm_and_a_proxy_does_not() {
             .await
             .expect("provision");
     });
-    let runtime_dir = scratch.path().join("run");
 
-    let holder = ServeChild::spawn(&cfg, &runtime_dir, "agent-holder");
+    let holder = Serve::spawn(&cfg, &runtime, "agent-holder");
     let mut holder_log = Vec::new();
     assert!(
         holder.wait_for(
@@ -185,8 +159,17 @@ fn the_holder_arms_the_keep_warm_and_a_proxy_does_not() {
          line):\n{}",
         holder_log.join("\n")
     );
+    // "Armed" is logged before the task is spawned, so it cannot prove the
+    // spawn. An actual touch can: the first one lands one interval (1 s) after
+    // arming, so 2.5 s is generous without being a flake budget.
+    assert!(
+        holder.wait_for(TOUCH, Duration::from_millis(2_500), &mut holder_log),
+        "the holder armed the keep-warm but never touched the embedder within 2.5 s \
+         (interval 1 s):\n{}",
+        holder_log.join("\n")
+    );
 
-    let proxy = ServeChild::spawn(&cfg, &runtime_dir, "agent-proxy");
+    let proxy = Serve::spawn(&cfg, &runtime, "agent-proxy");
     let mut proxy_log = Vec::new();
     assert!(
         proxy.wait_for(
@@ -201,8 +184,10 @@ fn the_holder_arms_the_keep_warm_and_a_proxy_does_not() {
     // have had time to log and touch.
     proxy.drain_for(Duration::from_millis(1_500), &mut proxy_log);
     assert!(
-        !proxy_log.iter().any(|l| l.contains(ARMED)),
-        "a proxy holds no embedder and must not arm a keep-warm:\n{}",
+        !proxy_log
+            .iter()
+            .any(|l| l.contains(ARMED) || l.contains(TOUCH)),
+        "a proxy holds no embedder and must neither arm nor run a keep-warm:\n{}",
         proxy_log.join("\n")
     );
 
