@@ -107,6 +107,8 @@ url = "http://127.0.0.1:8080"
 #   0       = off
 #   N       = every N seconds, for any kind (e.g. a bge_m3 llama-server on
 #             the same Mac; each touch is then one HTTP embed request)
+#             Not for gemini: each touch would be a billed Vertex AI request
+#             and keeps nothing local warm.
 # keep_warm_secs = 30
 
 # Daemon cadence. Optional; omit the whole section to use the defaults.

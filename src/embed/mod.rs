@@ -427,9 +427,14 @@ pub fn candle_identity(_embedder: &dyn Embedder) -> Option<String> {
 /// Does this embedder hold its model weights in host-pageable unified memory
 /// inside this process — memory the OS pager can compress or swap while the
 /// process idles (issue #13)? Today that is exactly the candle adapter on a
-/// Metal device. CUDA weights live in VRAM; CPU candle is an explicit
-/// fallback the operator can opt into keep-warm for; the remote adapters hold
-/// their weights in another process; the fixture has none.
+/// Metal device. CUDA weights live in VRAM; the remote adapters hold their
+/// weights in another process; the fixture has none.
+///
+/// CPU candle answering `false` is a policy choice, not a claim that its
+/// weights are safe: its f32 weights (~2.2 GB of anonymous memory) are just as
+/// pageable and compressible. Auto stays off there because CPU candle is an
+/// explicit fallback (`device = "cpu"`) whose idle tax has not been measured,
+/// and an operator who sees it can opt in with an explicit `keep_warm_secs`.
 ///
 /// Drives the `keep_warm_secs` auto default
 /// ([`keep_warm::resolve_keep_warm`]).

@@ -12,9 +12,16 @@
 //! against 71 ms for an isolated probe on the same store and binary.
 //!
 //! **The policy.** One short, fixed probe text is embedded every interval and
-//! the vector discarded. A forward reads every encoder weight, so a periodic
-//! forward keeps them in the pager's recently-used set. The touch writes
-//! nothing: no store I/O, no graph mutation, no ledger line, no recall cache.
+//! the vector discarded. Why one tiny forward is enough on Metal: a forward
+//! runs every encoder layer, and Metal makes residency decisions per buffer
+//! per command buffer, so each weight buffer a kernel binds is made resident
+//! whole, however few of its bytes the kernel reads. That covers the large
+//! word-embedding table too (~250k x 1024 f16, about 512 MB) even though the
+//! probe only gathers a handful of its rows. On CPU candle or llama.cpp the
+//! same touch reads only the pages it uses, so most of that table stays cold
+//! there; the encoder layers, which every forward reads in full, are what
+//! a touch keeps warm on those backends. The touch writes nothing: no store
+//! I/O, no graph mutation, no ledger line, no recall cache.
 //!
 //! * `keep_warm_secs` absent ⇒ **auto**: on (every
 //!   [`DEFAULT_KEEP_WARM_INTERVAL`]) only when the resolved embedder holds its
@@ -95,14 +102,19 @@ fn next_touch_state(prev: TouchState, ok: bool) -> (TouchState, TouchLog) {
 }
 
 /// Embed [`KEEP_WARM_PROBE`] every `every`, discarding the vector. Runs until
-/// the task is aborted (the serve holder path aborts it at close, beside the
-/// ledger heartbeat).
+/// the task is aborted (the serve holder path aborts it as soon as the
+/// transport returns, before the close, and again beside the ledger heartbeat
+/// after it).
 ///
 /// Holds no lock across an await: the only await is the embed itself, and
 /// what an adapter does inside it (the candle coalescer's queue mutex, an
 /// HTTP request) is the same thing a recall does. A touch that coincides with
-/// a real call is coalesced into the candle adapter's batch, or delays it by
-/// at most one minimal forward.
+/// a real call either delays it by at most one minimal forward or is
+/// coalesced into the candle adapter's batch. Coalesced, the batch is padded
+/// to its longest member (`PaddingStrategy::BatchLongest`), so the forward is
+/// two rows at the query's length rather than one, and batching can move the
+/// query's vector by f16 rounding noise. That is no new effect: any two
+/// concurrent real calls already batch the same way.
 ///
 /// The period is measured from the end of one touch to the start of the next
 /// (a sleep, not an interval timer): a touch that stalls (a cold swap-in, a

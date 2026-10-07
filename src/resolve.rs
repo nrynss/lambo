@@ -48,10 +48,11 @@ use crate::LamboFile;
 ///   side: a harness that clears this list, writes `kind = "postgres"` with no
 ///   `dsn`, and runs `lambo provision` takes its DSN from the ambient shell and
 ///   issues DDL against a cluster the config never names.
-/// * The five `LAMBO_EMBED_DEVICE` / `LAMBO_GEMINI_*` names are read
-///   **unconditionally** by `EmbedderConfig::overlay_env`, regardless of
+/// * The other five, the `LAMBO_EMBED_DEVICE` / `LAMBO_GEMINI_*` names, are
+///   read **unconditionally** by `EmbedderConfig::overlay_env`, regardless of
 ///   `embedder.kind` — a `kind = "fixture"` test still picks up an exported
-///   `LAMBO_GEMINI_PROJECT`.
+///   `LAMBO_GEMINI_PROJECT`. `LAMBO_EMBED_KEEP_WARM_SECS` (issue #13, added
+///   later) is read the same unconditional way.
 ///
 /// `DATABASE_URL` is the one entry that is not a `LAMBO_*` name, and it stays —
 /// deliberately, not by inheritance. It is the DSN fallback both wire-Postgres
@@ -537,10 +538,11 @@ mod tests {
                 file: MEMORY,
                 resolved: Some(|p| format!("{:?}", load(p).embedder.llama_model)),
             },
-            // The five below are read unconditionally by
-            // `EmbedderConfig::overlay_env`, whatever `embedder.kind` says, so
-            // a fixture-embedder test picks them up too. All five were missing
-            // from the pre-T3 list.
+            // From here to `LAMBO_EMBED_KEEP_WARM_SECS` inclusive, every name
+            // is read unconditionally by `EmbedderConfig::overlay_env`,
+            // whatever `embedder.kind` says, so a fixture-embedder test picks
+            // them up too. The device and Gemini names were missing from the
+            // pre-T3 list.
             Override {
                 var: "LAMBO_EMBED_DEVICE",
                 value: "cpu",
@@ -573,7 +575,7 @@ mod tests {
             },
             Override {
                 // Issue #13: read unconditionally by `overlay_env` like the
-                // five above; it selects no backend, but it changes what a
+                // device and Gemini names above; it selects no backend, but it changes what a
                 // resolved serve does while idle, so a hermetic harness clears it.
                 var: "LAMBO_EMBED_KEEP_WARM_SECS",
                 value: "17",

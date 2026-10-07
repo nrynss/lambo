@@ -40,8 +40,19 @@ What this work adds:
    throttling its CPU usage and I/O bandwidth". The isolated 71 ms probe ran
    from a terminal, unthrottled. That is a candidate for the gap-independent
    part of the tax (back-to-back live calls at 2.5x the probe) and is an
-   operator change (`ProcessType = Interactive` or `Adaptive` in
-   `dev.lambo.dogfood.plist`), not code. Not measured.
+   operator change, not code: `ProcessType = Interactive` in
+   `dev.lambo.dogfood.plist`. Not measured.
+   * **Interactive, not Adaptive.** The man page defines Adaptive as moving
+     between Background and Interactive "based on activity over XPC
+     connections". `lambo serve` takes its calls over stdio, a unix socket or
+     HTTP and opens no XPC transactions, so an Adaptive job would most likely
+     sit in Background, which is a *stricter* class than the unspecified
+     default. Interactive is the only value that removes the throttling.
+   * **Timer coalescing.** launchd coalesces a job's timers by default, and
+     `LegacyTimers = true` (precise timers) "may have no effect" unless the
+     job is Interactive. So the 30 s keep-warm sleep may fire late by the
+     coalescing leeway. Harmless: the period only has to sit well inside the
+     < 2 min bucket, and a touch a few seconds late still does.
 
 ## Measurement
 
@@ -85,10 +96,25 @@ recall was not in this probe (embed only).
 * **Where:** spawned on the holder path below the shutdown arming, beside the
   heartbeat, before the serve-level "session attached" line. Spawning awaits
   nothing, so the pre-handshake window is unchanged; the first touch is one
-  full interval after arming, so startup gains no forward. Aborted at close
-  with the heartbeat. Proxies (no embedder) and one-shot CLI commands never
-  run it. Off for fixture builds, so `serve_pre_handshake_durability` runs the
-  same timeline as before.
+  full interval after arming, so startup gains no forward. Aborted as soon as
+  the transport returns, before the close and its final drain (review nit;
+  `run_and_close`'s `stop_before_close`), and again beside the heartbeat after
+  it. Proxies and one-shot CLI commands never run it. A proxy also no longer
+  *holds* a model: before the review fix, `serve` kept the resolved builder
+  (embedder included, ~1.1 GB on Metal) alive through the whole proxy arm;
+  `resolve_role` now takes it by value. Off for fixture builds unless
+  `keep_warm_secs` is set, so `serve_pre_handshake_durability` runs the same
+  timeline as before; `tests/serve_keep_warm_wiring.rs` sets it to 1 to pin
+  holder-arms / proxy-does-not.
+* **Why one tiny forward is enough:** on Metal, residency is per buffer per
+  command buffer, so every weight buffer a kernel binds is made resident
+  whole, the ~512 MB word-embedding table included, though the probe gathers
+  only a few of its rows. On CPU candle or llama.cpp a touch reads only the
+  pages it uses, so most of that table stays cold there.
+* **Concurrency:** a touch that meets a real query in the candle coalescer
+  joins its batch, padded to the longest member (`BatchLongest`): two rows at
+  the query's length, and the query vector may differ by f16 batching noise,
+  exactly as with any two concurrent real calls.
 * **Cadence:** sleep after each touch, not an interval timer, so a stalled
   touch (cold swap-in, slow remote) is followed by a full interval of quiet,
   never a catch-up burst. A failing embedder warns once per outage.
@@ -129,5 +155,6 @@ recall was not in this probe (embed only).
   2x of the isolated probe; p95 < 1 s over a week) needs the rig re-pinned to
   a binary carrying this change. Not done here: the live writer was not
   touched.
-* The `ProcessType` A/B on the launchd job (operator change).
+* The `ProcessType = Interactive` A/B on the launchd job (operator change;
+  see Diagnosis item 4 for why not Adaptive).
 * Replace the issue's `CMPRS` acceptance item with a latency-by-gap one.
