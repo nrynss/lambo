@@ -24,7 +24,7 @@ use lambo::store::{GraphStore, SqliteStore};
 use lambo::types::SessionId;
 
 mod common;
-use common::{RuntimeDir, ServeChild, RUNTIME_DIR_VAR};
+use common::{RuntimeDir, ScratchDir, ServeChild, RUNTIME_DIR_VAR};
 
 const SESSION: &str = "t8.2-sigterm-durability";
 const ACTION: &str = "wrote src/durability_probe.rs under SIGTERM";
@@ -67,15 +67,7 @@ fn write_frame(stdin: &mut impl Write, frame: &str) {
 #[test]
 fn a_sigterm_flushes_the_recorded_action_to_the_durable_store() {
     // A scratch dir the test owns; the sqlite file lives inside it.
-    let dir = std::env::temp_dir().join(format!(
-        "lambo-sigterm-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&dir).expect("create scratch dir");
+    let dir = ScratchDir::new("lambo-sigterm");
     let db_path = dir.join("durability.sqlite");
     let db_str = db_path.to_str().expect("utf-8 path").to_string();
     let cfg_path = dir.join("lambo.toml");
@@ -187,7 +179,6 @@ fn a_sigterm_flushes_the_recorded_action_to_the_durable_store() {
             let _ = Command::new("kill").arg("-9").arg(pid.to_string()).status();
             let _ = waiter.join();
             let _ = reader.join();
-            let _ = std::fs::remove_dir_all(&dir);
             panic!("lambo serve did not exit within 15s of SIGTERM — close() may not run");
         }
     }
@@ -214,6 +205,4 @@ fn a_sigterm_flushes_the_recorded_action_to_the_durable_store() {
         contents.contains(&PRODUCES),
         "the produced-resource concept must have survived too; got {contents:?}"
     );
-
-    let _ = std::fs::remove_dir_all(&dir);
 }

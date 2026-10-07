@@ -20,6 +20,8 @@
 //! the exact commands and expected output for it.
 #![cfg(all(feature = "store-memory", feature = "embed-fixture"))]
 
+mod common;
+
 use std::sync::Arc;
 
 use lambo::cli::demo::{
@@ -199,18 +201,11 @@ fn scenario_is_identical_twice_on_the_memory_store() {
 #[cfg(feature = "store-sqlite")]
 mod sqlite {
     use super::*;
+    use crate::common::ScratchDir;
     use lambo::store::SqliteStore;
 
-    fn scratch_db() -> (std::path::PathBuf, String) {
-        let dir = std::env::temp_dir().join(format!(
-            "lambo-t84-demo-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).expect("scratch dir");
+    fn scratch_db() -> (ScratchDir, String) {
+        let dir = ScratchDir::new("lambo-t84-demo");
         let db = dir.join("demo.sqlite");
         let path = db.to_str().expect("utf-8 path").to_string();
         (dir, path)
@@ -221,7 +216,7 @@ mod sqlite {
     /// outcomes in its own fresh session (R3-1).
     #[test]
     fn scenario_is_identical_twice_on_sqlite() {
-        let (dir, path) = scratch_db();
+        let (_dir, path) = scratch_db();
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -248,7 +243,6 @@ mod sqlite {
         );
 
         runtime.shutdown_background();
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

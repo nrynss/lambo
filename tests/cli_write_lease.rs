@@ -13,7 +13,7 @@ use std::time::Duration;
 use lambo::store::{GraphStore, SqliteStore};
 
 mod common;
-use common::{RuntimeDir, ServeChild};
+use common::{RuntimeDir, ScratchDir, ServeChild};
 
 const SESSION: &str = "t8.3-cli-lease";
 
@@ -69,16 +69,8 @@ fn serve_cmd(cfg_path: &std::path::Path, agent: &str, runtime: &RuntimeDir) -> C
     cmd
 }
 
-fn scratch() -> (std::path::PathBuf, std::path::PathBuf, String) {
-    let dir = std::env::temp_dir().join(format!(
-        "lambo-cli-lease-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&dir).expect("scratch");
+fn scratch() -> (ScratchDir, std::path::PathBuf, String) {
+    let dir = ScratchDir::new("lambo-cli-lease");
     let db_path = dir.join("lease.sqlite");
     let db_str = db_path.to_str().expect("utf-8").to_string();
     let cfg_path = dir.join("lambo.toml");
@@ -112,7 +104,7 @@ fn derive_cmd(cfg: &std::path::Path, agent: &str) -> Command {
 
 #[test]
 fn derive_succeeds_with_no_serve_and_fails_closed_while_serve_holds() {
-    let (dir, cfg, db_str) = scratch();
+    let (_dir, cfg, db_str) = scratch();
     let runtime = RuntimeDir::new();
     let rt = tokio::runtime::Runtime::new().expect("runtime");
     rt.block_on(async {
@@ -222,20 +214,11 @@ fn derive_succeeds_with_no_serve_and_fails_closed_while_serve_holds() {
     let _ = a.wait();
     drop(a_stdin);
     let _ = reader.join();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn h1_mismatch_refusal_releases_lease_for_immediate_cross_process_retries() {
-    let dir = std::env::temp_dir().join(format!(
-        "lambo-h1-lease-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&dir).expect("scratch");
+    let dir = ScratchDir::new("lambo-h1-lease");
     let db = dir.join("h1.sqlite");
     let db_str = db.to_str().unwrap();
     let config = |model: &str| {
@@ -292,6 +275,4 @@ fn h1_mismatch_refusal_releases_lease_for_immediate_cross_process_retries() {
         "override retry was lease-blocked: {}",
         String::from_utf8_lossy(&override_retry.stderr)
     );
-
-    let _ = std::fs::remove_dir_all(&dir);
 }

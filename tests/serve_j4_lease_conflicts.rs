@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 use lambo::store::{GraphStore, SqliteStore};
 
 mod common;
-use common::{RuntimeDir, ServeChild};
+use common::{RuntimeDir, ScratchDir, ServeChild};
 
 const SESSION: &str = "j4-lease-conflict";
 
@@ -137,15 +137,7 @@ fn wait_ledger<F: Fn(&[serde_json::Value]) -> bool>(
 /// away. FAILS on pre-J4 code, where neither half existed.
 #[test]
 fn refused_acquire_appears_in_the_ledger_from_both_sides() {
-    let dir = std::env::temp_dir().join(format!(
-        "lambo-j4-bothsides-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&dir).expect("create scratch dir");
+    let dir = ScratchDir::new("lambo-j4-bothsides");
     let db = dir.join("lease.sqlite");
     let ledger = dir.join("shared.jsonl");
     let cfg = dir.join("lambo.toml");
@@ -203,7 +195,6 @@ fn refused_acquire_appears_in_the_ledger_from_both_sides() {
             sigterm(a_pid);
             let _ = a.wait();
             let _ = reader.join();
-            let _ = std::fs::remove_dir_all(&dir);
             panic!("B did not exit within 20s — it may have become a second writer");
         }
     };
@@ -287,7 +278,6 @@ fn refused_acquire_appears_in_the_ledger_from_both_sides() {
     let _ = a.wait();
     drop(a_stdin);
     let _ = reader.join();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// J2→J4 handoff: a proxying serve is alive and books its own lines — at least
@@ -295,15 +285,7 @@ fn refused_acquire_appears_in_the_ledger_from_both_sides() {
 /// where "a proxy books no ledger lines of its own".)
 #[test]
 fn a_proxying_serve_writes_a_proxying_line() {
-    let dir = std::env::temp_dir().join(format!(
-        "lambo-j4-proxy-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&dir).expect("create scratch dir");
+    let dir = ScratchDir::new("lambo-j4-proxy");
     let db = dir.join("lease.sqlite");
     let ledger = dir.join("proxy.jsonl");
     let cfg = dir.join("lambo.toml");
@@ -420,7 +402,6 @@ fn a_proxying_serve_writes_a_proxying_line() {
     let _ = a.wait();
     let _ = b.wait();
     let _ = reader.join();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// **JE2E-3.** A holder that dies while the proxy is **idle** must still leave
@@ -441,15 +422,7 @@ fn a_proxying_serve_writes_a_proxying_line() {
 /// drive the line.
 #[test]
 fn an_idle_proxy_books_the_degraded_state_when_its_holder_dies() {
-    let dir = std::env::temp_dir().join(format!(
-        "lambo-j4-idle-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&dir).expect("create scratch dir");
+    let dir = ScratchDir::new("lambo-j4-idle");
     let db = dir.join("lease.sqlite");
     let ledger = dir.join("idle.jsonl");
     let cfg = dir.join("lambo.toml");
@@ -567,5 +540,4 @@ fn an_idle_proxy_books_the_degraded_state_when_its_holder_dies() {
     let _ = b.wait();
     drop(a_stdin);
     let _ = reader.join();
-    let _ = std::fs::remove_dir_all(&dir);
 }

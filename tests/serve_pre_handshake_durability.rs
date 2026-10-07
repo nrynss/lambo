@@ -84,7 +84,7 @@ use lambo::store::{GraphStore, SqliteStore};
 use lambo::types::SessionId;
 
 mod common;
-use common::{RuntimeDir, ServeChild, RUNTIME_DIR_VAR};
+use common::{RuntimeDir, ScratchDir, ServeChild, RUNTIME_DIR_VAR};
 
 const SESSION: &str = "t8.2-pre-handshake-durability";
 
@@ -102,15 +102,7 @@ fn sigterm(pid: u32) {
 #[test]
 fn a_pre_handshake_sigterm_still_flushes_the_session_row() {
     // A scratch dir the test owns; the sqlite file lives inside it.
-    let dir = std::env::temp_dir().join(format!(
-        "lambo-pre-handshake-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&dir).expect("create scratch dir");
+    let dir = ScratchDir::new("lambo-pre-handshake");
     let db_path = dir.join("durability.sqlite");
     let db_str = db_path.to_str().expect("utf-8 path").to_string();
     let cfg_path = dir.join("lambo.toml");
@@ -246,7 +238,6 @@ fn a_pre_handshake_sigterm_still_flushes_the_session_row() {
             let _ = waiter.join();
             let _ = ereader.join();
             let _ = out_reader.join();
-            let _ = std::fs::remove_dir_all(&dir);
             panic!(
                 "lambo serve did not exit within 15s of a pre-handshake SIGTERM — close() may not run"
             );
@@ -267,8 +258,6 @@ fn a_pre_handshake_sigterm_still_flushes_the_session_row() {
                  i.e. close() ran and flushed the attach mutation",
         );
     });
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// J2: a SIGTERM to a **proxy** in its own pre-handshake window.
@@ -286,15 +275,7 @@ fn a_pre_handshake_sigterm_still_flushes_the_session_row() {
 /// them.
 #[test]
 fn a_pre_handshake_sigterm_to_a_proxy_exits_cleanly_and_leaves_the_holder_intact() {
-    let dir = std::env::temp_dir().join(format!(
-        "lambo-pre-handshake-proxy-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&dir).expect("create scratch dir");
+    let dir = ScratchDir::new("lambo-pre-handshake-proxy");
     let db_str = dir
         .join("durability.sqlite")
         .to_str()
@@ -416,7 +397,6 @@ fn a_pre_handshake_sigterm_to_a_proxy_exits_cleanly_and_leaves_the_holder_intact
                 .arg(proxy_pid.to_string())
                 .status();
             sigterm(holder_pid);
-            let _ = std::fs::remove_dir_all(&dir);
             panic!("the proxy did not exit within 15s of a SIGTERM — its shutdown is not wired");
         }
     }
@@ -460,7 +440,6 @@ fn a_pre_handshake_sigterm_to_a_proxy_exits_cleanly_and_leaves_the_holder_intact
                 .arg("-9")
                 .arg(holder_pid.to_string())
                 .status();
-            let _ = std::fs::remove_dir_all(&dir);
             panic!("the holder did not exit within 20s — a proxy's lifecycle damaged it");
         }
     }
@@ -473,7 +452,6 @@ fn a_pre_handshake_sigterm_to_a_proxy_exits_cleanly_and_leaves_the_holder_intact
             .await
             .expect("the holder's session row must be durable");
     });
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The exit-status contract the flake in CI run 33085161710 was really about.
@@ -503,15 +481,7 @@ fn a_pre_handshake_sigterm_to_a_proxy_exits_cleanly_and_leaves_the_holder_intact
 fn a_pre_handshake_client_hangup_closes_the_session_and_exits_zero() {
     const HANGUP_SESSION: &str = "t8.2-pre-handshake-hangup";
 
-    let dir = std::env::temp_dir().join(format!(
-        "lambo-pre-handshake-hangup-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&dir).expect("create scratch dir");
+    let dir = ScratchDir::new("lambo-pre-handshake-hangup");
     let db_str = dir
         .join("durability.sqlite")
         .to_str()
@@ -598,7 +568,6 @@ fn a_pre_handshake_client_hangup_closes_the_session_and_exits_zero() {
     }
     if !attached {
         let _ = Command::new("kill").arg("-9").arg(pid.to_string()).status();
-        let _ = std::fs::remove_dir_all(&dir);
         panic!("never saw 'lambo serve: session attached' — cannot hang up pre-handshake");
     }
 
@@ -624,7 +593,6 @@ fn a_pre_handshake_client_hangup_closes_the_session_and_exits_zero() {
         Err(_) => {
             let _ = Command::new("kill").arg("-9").arg(pid.to_string()).status();
             let _ = waiter.join();
-            let _ = std::fs::remove_dir_all(&dir);
             panic!("lambo serve did not exit within 30s of a pre-handshake client hangup");
         }
     }
@@ -645,6 +613,4 @@ fn a_pre_handshake_client_hangup_closes_the_session_and_exits_zero() {
              skipped close() would leave nothing here",
             );
     });
-
-    let _ = std::fs::remove_dir_all(&dir);
 }

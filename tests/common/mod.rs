@@ -103,6 +103,55 @@ impl Drop for RuntimeDir {
     }
 }
 
+/// A unique scratch directory under `std::env::temp_dir()`, removed on drop —
+/// including when the test panics, which the success-path `remove_dir_all` it
+/// replaces never covered, so a failing test leaked its sqlite files and ledger
+/// under `/var/folders`. Derefs to [`Path`].
+///
+/// Declare it *before* the [`RuntimeDir`] and any [`ServeChild`] (locals drop in
+/// reverse order): the serves must be reaped before the files they hold open
+/// are removed. `std::env::temp_dir()` is right here, unlike for [`RuntimeDir`],
+/// because nothing in it is a socket path.
+pub struct ScratchDir {
+    path: PathBuf,
+}
+
+impl ScratchDir {
+    /// Create `<temp_dir>/<prefix>-<pid>-<nanos>-<n>`. Unique per call.
+    pub fn new(prefix: &str) -> Self {
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after the epoch")
+            .as_nanos();
+        let path =
+            std::env::temp_dir().join(format!("{prefix}-{}-{nanos}-{n}", std::process::id()));
+        std::fs::create_dir_all(&path)
+            .unwrap_or_else(|e| panic!("scratch dir {}: {e}", path.display()));
+        Self { path }
+    }
+}
+
+impl Deref for ScratchDir {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl AsRef<Path> for ScratchDir {
+    fn as_ref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
 #[cfg(unix)]
 fn create_private(path: &Path) {
     use std::os::unix::fs::DirBuilderExt;

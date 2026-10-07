@@ -42,7 +42,7 @@ use std::time::Duration;
 use lambo::store::{GraphStore, SqliteStore};
 
 mod common;
-use common::{RuntimeDir, ServeChild};
+use common::{RuntimeDir, ScratchDir, ServeChild};
 
 const SESSION: &str = "t8.6-single-writer";
 
@@ -102,15 +102,7 @@ fn serve_cmd(cfg_path: &std::path::Path, agent: &str, runtime: &RuntimeDir) -> C
 
 #[test]
 fn a_second_process_on_one_session_is_refused_by_the_lease() {
-    let dir = std::env::temp_dir().join(format!(
-        "lambo-lease-proc-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&dir).expect("create scratch dir");
+    let dir = ScratchDir::new("lambo-lease-proc");
     let db_path = dir.join("lease.sqlite");
     let db_str = db_path.to_str().expect("utf-8 path").to_string();
     let cfg_path = dir.join("lambo.toml");
@@ -189,7 +181,6 @@ fn a_second_process_on_one_session_is_refused_by_the_lease() {
             sigterm(a_pid);
             let _ = a.wait();
             let _ = reader.join();
-            let _ = std::fs::remove_dir_all(&dir);
             panic!("process B did not exit within 20s — it may have opened a second writer");
         }
     };
@@ -270,6 +261,4 @@ fn a_second_process_on_one_session_is_refused_by_the_lease() {
             "the winner's clean close must have released the lease; a new writer got {outcome:?}"
         );
     });
-
-    let _ = std::fs::remove_dir_all(&dir);
 }

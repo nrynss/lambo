@@ -23,16 +23,11 @@ fn bin() -> Command {
     cmd
 }
 
-fn scratch() -> (std::path::PathBuf, std::path::PathBuf) {
-    let dir = std::env::temp_dir().join(format!(
-        "lambo-cli-prov-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&dir).expect("scratch");
+mod common;
+use common::ScratchDir;
+
+fn scratch() -> (ScratchDir, std::path::PathBuf) {
+    let dir = ScratchDir::new("lambo-cli-prov");
     let db = dir.join("session.sqlite");
     let cfg = dir.join("lambo.toml");
     std::fs::write(
@@ -49,7 +44,7 @@ fn scratch() -> (std::path::PathBuf, std::path::PathBuf) {
 #[test]
 fn provision_on_a_fresh_sqlite_file_makes_recall_work() {
     let _g = env_lock();
-    let (dir, cfg) = scratch();
+    let (_dir, cfg) = scratch();
     let cfg_s = cfg.to_str().unwrap();
 
     let provision = bin()
@@ -128,6 +123,4 @@ fn provision_on_a_fresh_sqlite_file_makes_recall_work() {
     );
     let ctx = String::from_utf8_lossy(&recall2.stdout);
     assert!(ctx.contains("user schema"), "{ctx}");
-
-    let _ = std::fs::remove_dir_all(&dir);
 }

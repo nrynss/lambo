@@ -31,7 +31,7 @@ use lambo::store::{GraphStore, SqliteStore};
 use lambo::types::SessionId;
 
 mod common;
-use common::{RuntimeDir, ServeChild, RUNTIME_DIR_VAR};
+use common::{RuntimeDir, ScratchDir, ServeChild, RUNTIME_DIR_VAR};
 
 const SESSION: &str = "j2-proxy-multi-client";
 
@@ -198,16 +198,8 @@ fn derived_endpoint(runtime: &RuntimeDir, db: &str) -> lambo::mcp::SessionEndpoi
         .expect("a per-test runtime dir is short enough to derive an endpoint in")
 }
 
-fn scratch(tag: &str) -> (std::path::PathBuf, std::path::PathBuf, String) {
-    let dir = std::env::temp_dir().join(format!(
-        "lambo-j2-{tag}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&dir).expect("scratch dir");
+fn scratch(tag: &str) -> (ScratchDir, std::path::PathBuf, String) {
+    let dir = ScratchDir::new(&format!("lambo-j2-{tag}"));
     let db = dir.join("lambo.db");
     let cfg = dir.join("lambo.toml");
     std::fs::write(
@@ -279,7 +271,7 @@ fn release_row(db: &str, holder_token: &str) {
 /// contended lock is told who holds it.
 #[test]
 fn two_clients_over_stdio_both_work_through_one_hub() {
-    let (dir, cfg, db) = scratch("hub");
+    let (_dir, cfg, db) = scratch("hub");
     let runtime = RuntimeDir::new();
     provision(&db);
 
@@ -557,7 +549,6 @@ fn two_clients_over_stdio_both_work_through_one_hub() {
         .expect("proxied derive interaction persisted");
     assert_eq!(interaction.event_time, Some(expected_event_time));
     assert_eq!(interaction.about_time(), expected_event_time);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Done-when: killing the holder uncleanly leaves proxies **failing honestly
@@ -569,7 +560,7 @@ fn two_clients_over_stdio_both_work_through_one_hub() {
 /// proxy restart.
 #[test]
 fn a_dead_holder_leaves_the_proxy_honest_and_the_lease_unclaimed() {
-    let (dir, cfg, db) = scratch("dead");
+    let (_dir, cfg, db) = scratch("dead");
     let runtime = RuntimeDir::new();
     provision(&db);
 
@@ -660,7 +651,6 @@ fn a_dead_holder_leaves_the_proxy_honest_and_the_lease_unclaimed() {
     c.sigterm();
     let _ = b.child.wait();
     let _ = c.child.wait();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// J2-R1-1, the reviewer's exact scenario: a call is **already inside the
@@ -693,7 +683,7 @@ fn a_call_in_flight_when_the_holder_dies_is_answered_rather_than_lost() {
     use std::io::Write as _;
     use std::os::unix::net::UnixListener;
 
-    let (dir, cfg, db) = scratch("inflight");
+    let (_dir, cfg, db) = scratch("inflight");
     let runtime = RuntimeDir::new();
     provision(&db);
 
@@ -848,7 +838,6 @@ fn a_call_in_flight_when_the_holder_dies_is_answered_rather_than_lost() {
     let _ = b.child.wait();
     let _ = holder_thread.join();
     let _ = std::fs::remove_file(&sock);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// J2-R1-6: the lease re-read on the reconnect path, pinned at the mechanism.
@@ -875,7 +864,7 @@ fn a_call_in_flight_when_the_holder_dies_is_answered_rather_than_lost() {
 /// authority on whether there is a holder at all.
 #[test]
 fn a_live_endpoint_with_no_lease_row_is_refused_rather_than_dialled() {
-    let (dir, cfg, db) = scratch("orphan");
+    let (_dir, cfg, db) = scratch("orphan");
     let runtime = RuntimeDir::new();
     provision(&db);
 
@@ -941,7 +930,6 @@ fn a_live_endpoint_with_no_lease_row_is_refused_rather_than_dialled() {
     c.sigterm();
     let _ = b.child.wait();
     let _ = c.child.wait();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// J2-R1-5 at the binary: a base directory too long for a socket address must
@@ -963,7 +951,7 @@ fn a_live_endpoint_with_no_lease_row_is_refused_rather_than_dialled() {
 /// rather than dialling.
 #[test]
 fn a_base_directory_too_long_for_a_socket_still_serves_its_own_client() {
-    let (dir, cfg, db) = scratch("longtmp");
+    let (_dir, cfg, db) = scratch("longtmp");
     let runtime = RuntimeDir::new();
     provision(&db);
 
@@ -1070,7 +1058,6 @@ fn a_base_directory_too_long_for_a_socket_still_serves_its_own_client() {
         .arg(pid.to_string())
         .status();
     let _ = child.wait();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// J2-L1, at the binary: **two client products derive two endpoint directories
@@ -1097,7 +1084,7 @@ fn a_holder_reachable_only_at_its_own_directory_is_still_forwarded_to() {
     use std::io::Write as _;
     use std::os::unix::net::UnixListener;
 
-    let (dir, cfg, db) = scratch("crossdir");
+    let (_dir, cfg, db) = scratch("crossdir");
     let runtime = RuntimeDir::new();
     provision(&db);
 
@@ -1184,7 +1171,6 @@ fn a_holder_reachable_only_at_its_own_directory_is_still_forwarded_to() {
     b.sigterm();
     let _ = b.child.wait();
     let _ = holder_thread.join();
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// J2-L2, at the binary: a serve that **cannot** win inside a client's patience
@@ -1201,7 +1187,7 @@ fn a_holder_reachable_only_at_its_own_directory_is_still_forwarded_to() {
 /// to the session is its lease lapsing, 45s away.
 #[test]
 fn a_holder_whose_lease_outlasts_the_client_budget_is_refused_at_once() {
-    let (dir, cfg, db) = scratch("budget");
+    let (_dir, cfg, db) = scratch("budget");
     let runtime = RuntimeDir::new();
     provision(&db);
 
@@ -1266,8 +1252,6 @@ fn a_holder_whose_lease_outlasts_the_client_budget_is_refused_at_once() {
         "a live-but-unforwardable holder is still refreshing its lease, and the refusal must \
          keep saying so: {err}"
     );
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// J2-R2-3, at the binary: a holder whose endpoint refuses connections must not
@@ -1282,7 +1266,7 @@ fn a_holder_whose_lease_outlasts_the_client_budget_is_refused_at_once() {
 /// may be a whole `LEASE_HEARTBEAT_INTERVAL` old.
 #[test]
 fn a_holder_whose_endpoint_refuses_is_not_described_as_still_refreshing() {
-    let (dir, cfg, db) = scratch("deadendpoint");
+    let (_dir, cfg, db) = scratch("deadendpoint");
     let runtime = RuntimeDir::new();
     provision(&db);
 
@@ -1350,6 +1334,4 @@ fn a_holder_whose_endpoint_refuses_is_not_described_as_still_refreshing() {
         err.contains("most likely died"),
         "and the operator needs the conclusion the probe supports: {err}"
     );
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
