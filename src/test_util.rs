@@ -27,7 +27,7 @@ pub fn env_lock() -> MutexGuard<'static, ()> {
 /// A unique scratch directory under `std::env::temp_dir()`, removed on drop so a
 /// test that panics part-way leaves nothing under `$TMPDIR`. Derefs to
 /// [`std::path::Path`]. Not for socket paths: `temp_dir()` is 46 bytes on macOS,
-/// which is why `mcp::endpoint`'s tests keep their own short-path guard.
+/// so tests that bind or dial an endpoint use [`ScratchDir::short`].
 pub struct ScratchDir {
     path: std::path::PathBuf,
 }
@@ -44,9 +44,7 @@ impl ScratchDir {
             .unwrap_or_else(|e| panic!("scratch dir {}: {e}", path.display()));
         Self { path }
     }
-}
 
-impl ScratchDir {
     /// Create `/tmp/lb<tag><pid>_<n>`: a scratch directory short enough to hold
     /// a unix socket address (`SUN_PATH_MAX`), for the tests that bind or dial
     /// an endpoint inside it. [`ScratchDir::new`] cannot serve those: macOS's
