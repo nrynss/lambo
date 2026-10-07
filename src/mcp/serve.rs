@@ -1787,7 +1787,9 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     // beside the heartbeat, for the same reasons: spawning awaits nothing, so
     // the pre-handshake window is not widened, and the loop's first touch is
     // one full interval out, so startup gains no forward. Holder path only: a
-    // proxy has no embedder. Aborted at close like the heartbeat.
+    // proxy holds no embedder (it is released when `resolve_role` returns).
+    // Aborted when the transport returns, before the close (see
+    // `run_and_close`), and again beside the heartbeat after it.
     let keep_warm_task = keep_warm.map(|every| {
         tracing::info!(
             interval_secs = every.as_secs(),
@@ -1889,7 +1891,20 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
         }
     };
 
-    let outcome = run_and_close(mem.clone(), transport, event_pump, &early).await;
+    // Issue #13: the keep-warm stops when the transport does, before the close
+    // and its final drain; see `run_and_close`.
+    let stop_before_close: Vec<_> = keep_warm_task
+        .iter()
+        .map(tokio::task::JoinHandle::abort_handle)
+        .collect();
+    let outcome = run_and_close(
+        mem.clone(),
+        transport,
+        event_pump,
+        &stop_before_close,
+        &early,
+    )
+    .await;
 
     // After `close()`, deliberately: the tail's durability is the load-bearing
     // guarantee and the ledger is not allowed to be in front of it. The
@@ -1899,7 +1914,9 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     if let Some(heartbeat) = heartbeat {
         heartbeat.abort();
     }
-    // Issue #13. Nothing to drain: a touch writes nothing.
+    // Issue #13. Already aborted inside `run_and_close`, before the close;
+    // repeated here (idempotent) so this exit path aborts it without relying
+    // on that. Nothing to drain: a touch writes nothing.
     if let Some(task) = keep_warm_task {
         task.abort();
     }
@@ -1947,13 +1964,24 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
 /// The event pump is aborted *after* `close()` (R1/T82-17): canonization and
 /// conflict events emitted during the final drain are exactly what an operator
 /// debugging a failed close wants on stderr, and aborting first threw them away.
+///
+/// `stop_before_close` is the opposite case: tasks nothing needs during the
+/// close, aborted the moment the transport returns and before `close()`
+/// starts. Today that is the issue-13 embedder keep-warm: once no client can
+/// call, a touch only competes with the final drain (and on a slow remote
+/// embedder could keep a request in flight across it). Aborting is idempotent,
+/// so `serve` still aborts the same task after close on its usual path.
 async fn run_and_close(
     mem: Arc<Memory>,
     transport: impl Future<Output = Result<(), LamboError>>,
     event_pump: tokio::task::JoinHandle<()>,
+    stop_before_close: &[tokio::task::AbortHandle],
     early: &EarlyShutdown,
 ) -> Result<(), LamboError> {
     let outcome = transport.await;
+    for task in stop_before_close {
+        task.abort();
+    }
     let closed = close_bounded(&mem, early).await;
     event_pump.abort();
 
@@ -4622,6 +4650,38 @@ mod tests {
             );
         }
 
+        /// Issue #13 review: the keep-warm stops when the transport returns,
+        /// not after the close. `run_and_close` owns that now (serve passes the
+        /// keep-warm's abort handle), so a task handed to it must come back
+        /// cancelled even though nobody else aborts it. Exact ordering against
+        /// the close is not observable from here (a cancelled task is dropped
+        /// when the runtime next polls it); the abort itself is.
+        #[tokio::test]
+        async fn run_and_close_stops_the_tasks_it_is_handed() {
+            let m = mem("serve-close-stops-keep-warm").await;
+            let pump = tokio::spawn(async {});
+            let keep_warm = tokio::spawn(std::future::pending::<()>());
+            let out = run_and_close(
+                m.clone(),
+                async { Ok(()) },
+                pump,
+                &[keep_warm.abort_handle()],
+                &EarlyShutdown::unarmed(),
+            )
+            .await;
+            assert!(out.is_ok(), "{out:?}");
+            let joined = tokio::time::timeout(Duration::from_secs(5), keep_warm)
+                .await
+                .expect("the handed task must end once run_and_close returns");
+            assert!(
+                joined
+                    .expect_err("it never completes on its own")
+                    .is_cancelled(),
+                "run_and_close must abort what it is handed before the close"
+            );
+            assert_closed(&m, "stop-before-close path");
+        }
+
         /// **The first signal must never abandon a close; the second must.**
         ///
         /// `close_bounded`'s escape hatch is the operator who watches a close
@@ -4725,8 +4785,14 @@ mod tests {
         async fn close_runs_when_the_transport_returns_ok() {
             let m = mem("serve-close-ok").await;
             let pump = tokio::spawn(std::future::pending::<()>());
-            let out =
-                run_and_close(m.clone(), async { Ok(()) }, pump, &EarlyShutdown::unarmed()).await;
+            let out = run_and_close(
+                m.clone(),
+                async { Ok(()) },
+                pump,
+                &[],
+                &EarlyShutdown::unarmed(),
+            )
+            .await;
             assert!(out.is_ok(), "clean transport exit closes cleanly: {out:?}");
             assert_closed(&m, "ok path");
         }
@@ -4739,6 +4805,7 @@ mod tests {
                 m.clone(),
                 async { Err(LamboError::Config("transport blew up".into())) },
                 pump,
+                &[],
                 &EarlyShutdown::unarmed(),
             )
             .await;
@@ -4778,6 +4845,7 @@ mod tests {
                 first.clone(),
                 async { Ok(()) },
                 pump,
+                &[],
                 &EarlyShutdown::unarmed(),
             )
             .await;
@@ -5004,8 +5072,14 @@ mod tests {
             // identity-licensed unlink — runs on this path exactly as it does
             // on the clean one.
             let pump = tokio::spawn(std::future::pending::<()>());
-            let out =
-                run_and_close(m.clone(), async { Ok(()) }, pump, &EarlyShutdown::unarmed()).await;
+            let out = run_and_close(
+                m.clone(),
+                async { Ok(()) },
+                pump,
+                &[],
+                &EarlyShutdown::unarmed(),
+            )
+            .await;
             assert!(
                 out.is_err(),
                 "a fenced close must not claim success: {out:?}"
