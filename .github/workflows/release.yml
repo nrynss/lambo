@@ -122,10 +122,16 @@ jobs:
           # Intel Macs are not a target audience for this project, and Apple
           # silicon users are served by macos-arm64 below. Restore this entry if
           # that changes; nothing else in the workflow assumes five targets.
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            name: windows-x86_64
-            ext: ".exe"
+          #
+          # Windows (x86_64-pc-windows-msvc) is not built for 0.3.0: the shared
+          # session endpoint uses Unix sockets and Unix file metadata with no
+          # platform gate, so the crate does not compile there (#39). Restore
+          #   - os: windows-latest
+          #     target: x86_64-pc-windows-msvc
+          #     name: windows-x86_64
+          #     ext: ".exe"
+          # once #39 lands. The bash default shell and the Windows branches in
+          # the steps below stay so the entry can come back unchanged.
     steps:
       - name: Refuse a non-dry-run dispatch
         if: github.event_name == 'workflow_dispatch' && !inputs.dry_run

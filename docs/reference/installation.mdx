@@ -9,7 +9,7 @@ That is the whole deployment model. Every released binary carries the full `ship
 
 ## Install the binary
 
-Each release carries one `lambo` binary per platform plus a SHA-256 checksum file. Releases are published for Linux x86_64, Linux arm64, macOS arm64, and Windows x86_64, with the full `ship` adapter set compiled in. Apple silicon also gets a Metal build, `lambo-<version>-macos-arm64-metal`, which adds the in-process candle embedder running on the GPU (`[embedder] kind = "candle"`, `device = "metal"`). The stock binaries do not carry candle.
+Each release carries one `lambo` binary per platform plus a SHA-256 checksum file. Releases are published for Linux x86_64, Linux arm64 and macOS arm64, with the full `ship` adapter set compiled in. Apple silicon also gets a Metal build, `lambo-<version>-macos-arm64-metal`, which adds the in-process candle embedder running on the GPU (`[embedder] kind = "candle"`, `device = "metal"`). The stock binaries do not carry candle.
 
 <Steps>
   <Step title="Run the install script">
@@ -47,7 +47,7 @@ LAMBO_VERSION=0.3.0 LAMBO_FLAVOR=metal sh install.sh
 
 Set `LAMBO_DRY_RUN=1` the same way to print the asset and URLs the script would fetch without downloading anything.
 
-On Windows, download `lambo-<version>-windows-x86_64.exe` and its `.sha256` file from the [releases page](https://github.com/nrynss/lambo/releases) and verify the checksum yourself.
+There is no Windows binary from v0.3.0: the shared session endpoint does not compile on Windows yet ([#39](https://github.com/nrynss/lambo/issues/39)). v0.2.2's `lambo-0.2.2-windows-x86_64.exe` is on the [releases page](https://github.com/nrynss/lambo/releases).
 
 ## Write a lambo.toml
 

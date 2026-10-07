@@ -55,7 +55,8 @@ directory holding both files: `sha256sum -c <asset>.sha256` on Linux,
 | Linux arm64 | `lambo-__LAMBO_VERSION__-linux-arm64` |
 | macOS arm64 | `lambo-__LAMBO_VERSION__-macos-arm64` |
 | macOS arm64, Metal (candle) | `lambo-__LAMBO_VERSION__-macos-arm64-metal` |
-| Windows x86_64 | `lambo-__LAMBO_VERSION__-windows-x86_64.exe` |
+
+There is no Windows binary in this release: the shared session endpoint does not compile on Windows yet ([#39](https://github.com/nrynss/lambo/issues/39)). v0.2.2 is the last release with a Windows build.
 
 ## Install
 

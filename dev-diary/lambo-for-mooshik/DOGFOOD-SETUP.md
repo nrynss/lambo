@@ -115,8 +115,12 @@ races a live serve:
 launchctl bootout gui/$(id -u)/dev.lambo.dogfood
 
 # 2. back up the store first: provisioning adds columns, and an older binary may
-#    refuse the new schema, so this copy is what makes a rollback possible
-sqlite3 ~/lambo-dogfood/lambo-dev.db ".backup '$HOME/lambo-dogfood/backup-pre-$V.db'"
+#    refuse the new schema, so this copy is what makes a rollback possible. The name
+#    is unique per attempt (`.backup` overwrites), so a re-run never replaces the
+#    original pre-upgrade copy; the earliest backup-pre-$V-* file is that copy.
+BK="$HOME/lambo-dogfood/backup-pre-$V-$(date +%Y%m%d-%H%M%S).db"
+[ ! -e "$BK" ] || { echo "refusing to overwrite $BK"; false; }
+sqlite3 ~/lambo-dogfood/lambo-dev.db ".backup '$BK'"
 #    then bring the schema up to the new binary (idempotent; v0.3.0 needs it for
 #    #17's mutation_epoch and #29's sessions.last_gc_epoch / last_gc_at)
 ~/lambo-dogfood/bin/lambo-$V provision --config ~/lambo-dogfood/lambo.toml
@@ -183,13 +187,14 @@ sed -i '' "s#/lambo-dogfood/bin/lambo-[^<]*<#/lambo-dogfood/bin/lambo-$OLD<#" \
   ~/Library/LaunchAgents/dev.lambo.dogfood.plist
 # only if the old binary refuses the provisioned schema: restore the step-2 backup.
 # This discards anything written since the upgrade.
-#   cp ~/lambo-dogfood/backup-pre-$V.db ~/lambo-dogfood/lambo-dev.db
+#   (the EARLIEST backup-pre-$V-* is the pre-upgrade copy: ls -1 shows the oldest first)
+#   cp "$(ls -1 ~/lambo-dogfood/backup-pre-$V-*.db | head -1)" ~/lambo-dogfood/lambo-dev.db
 #   rm -f ~/lambo-dogfood/lambo-dev.db-wal ~/lambo-dogfood/lambo-dev.db-shm
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.lambo.dogfood.plist
 ```
 
 Then run the step-5 wait and checks again. Keep the previous `lambo-<old>` in `bin/`,
-and the `backup-pre-$V.db`, until the new one has served for a while.
+and the `backup-pre-$V-*.db` files, until the new one has served for a while.
 
 ### 2b. Build from source (CUDA rig; any unreleased commit)
 

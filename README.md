@@ -110,8 +110,9 @@ except Bedrock and the in-process candle embedder). You install it, then write a
 curl -fsSL https://github.com/nrynss/lambo/releases/latest/download/install.sh | sh
 ```
 
-The script verifies a SHA-256 checksum and installs to `~/.local/bin`. Windows binaries sit
-on the [releases page](https://github.com/nrynss/lambo/releases).
+The script verifies a SHA-256 checksum and installs to `~/.local/bin`. There is no Windows
+binary from v0.3.0 ([#39](https://github.com/nrynss/lambo/issues/39)); v0.2.2's is on the
+[releases page](https://github.com/nrynss/lambo/releases).
 
 On Apple silicon, `LAMBO_FLAVOR=metal` installs the Metal build instead
 (`lambo-<version>-macos-arm64-metal`): the same adapter set plus the in-process candle

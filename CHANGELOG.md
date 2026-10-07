@@ -4,6 +4,13 @@
 
 ### Breaking
 
+- No Windows binary in 0.3.0. The shared session endpoint added for multiple
+  clients uses Unix sockets and Unix file metadata with no platform gate, so the
+  crate does not compile for `x86_64-pc-windows-msvc`, and regular CI never built
+  for Windows to catch it. The release matrix drops the Windows entry and
+  `install.sh` points Windows users at v0.2.2, the last release with a Windows
+  build. Restoring Windows is #39.
+
 - GC sweep accounting is durable and GC's step-2 cut changed (issue #29). Public
   structs gained fields, so struct-literal construction breaks where
   `..Default::default()` is not used: `MutationBatch::gc_mark` and

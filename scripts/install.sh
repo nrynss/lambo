@@ -55,7 +55,7 @@ case "$OS" in
   Linux)  OS="linux" ;;
   Darwin) OS="macos" ;;
   *)
-    echo "error: unsupported platform '$OS' (install.sh supports macOS and Linux; Windows users should grab the .exe from the release page)" >&2
+    echo "error: unsupported platform '$OS' (install.sh supports macOS and Linux; no Windows build is published from v0.3.0, see https://github.com/nrynss/lambo/issues/39; v0.2.2 has a Windows .exe on the release page)" >&2
     exit 1
     ;;
 esac
