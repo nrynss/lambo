@@ -54,7 +54,11 @@
 //! for as long as an outage lasts otherwise, like the retained batch). A
 //! crash loses what had not reached the store, which is a frequency signal,
 //! not an acknowledged write. `Memory::close` applies what is left and takes
-//! the whole dirty set into its final flush, so a clean shutdown loses nothing.
+//! the whole dirty set into its final flush, so a clean shutdown loses nothing
+//! noted before close took the ledger. A recall still in flight then, that
+//! finishes after, is not counted: [`AccessLedger::close`] shuts the ledger in
+//! the same critical section as that take, and later notes are dropped and
+//! counted rather than left in a ledger nothing will apply.
 
 use std::collections::HashMap;
 
@@ -77,7 +81,17 @@ struct Pending {
 /// between its read paths and its daemon.
 #[derive(Debug, Default)]
 pub struct AccessLedger {
-    pending: Mutex<HashMap<NodeId, Pending>>,
+    state: Mutex<State>,
+}
+
+#[derive(Debug, Default)]
+struct State {
+    pending: HashMap<NodeId, Pending>,
+    /// Set by [`AccessLedger::close`], under the same lock as its take: from
+    /// then on [`AccessLedger::record`] drops instead of noting.
+    closed: bool,
+    /// Reads dropped because they finished after the close took the ledger.
+    dropped_after_close: u64,
 }
 
 impl AccessLedger {
@@ -90,16 +104,29 @@ impl AccessLedger {
     ///
     /// Takes only the ledger's own mutex — callers may hold the graph read
     /// lock or nothing; it never blocks on, or waits for, the graph.
-    pub fn record(&self, ids: impl IntoIterator<Item = NodeId>, at: DateTime<Utc>) {
+    ///
+    /// Returns `false`, noting nothing, once the ledger is [closed]
+    /// (`Self::close`): a read that finishes after its session's close took
+    /// the ledger has no apply left to reach the store, so it is dropped (and
+    /// counted in [`Self::dropped_after_close`]) rather than left pending in a
+    /// ledger nobody will drain again.
+    ///
+    /// [closed]: Self::close
+    pub fn record(&self, ids: impl IntoIterator<Item = NodeId>, at: DateTime<Utc>) -> bool {
         let mut seen: Vec<NodeId> = ids.into_iter().collect();
         if seen.is_empty() {
-            return;
+            return true;
         }
         seen.sort_unstable_by_key(|id| id.0);
         seen.dedup();
-        let mut pending = self.pending.lock();
+        let mut state = self.state.lock();
+        if state.closed {
+            state.dropped_after_close += 1;
+            return false;
+        }
         for id in seen {
-            pending
+            state
+                .pending
                 .entry(id)
                 .and_modify(|p| {
                     p.count = p.count.saturating_add(1);
@@ -107,17 +134,42 @@ impl AccessLedger {
                 })
                 .or_insert(Pending { count: 1, last: at });
         }
+        true
     }
 
     /// Concepts with accesses noted but not yet applied.
     pub fn pending(&self) -> usize {
-        self.pending.lock().len()
+        self.state.lock().pending.len()
+    }
+
+    /// Reads [`Self::record`] dropped because the ledger was already closed.
+    pub fn dropped_after_close(&self) -> u64 {
+        self.state.lock().dropped_after_close
     }
 
     /// Take everything noted so far as `(id, count, last)` triples, leaving
     /// the ledger empty. Id-ascending, so the apply order is deterministic.
     pub fn take(&self) -> Vec<(NodeId, u32, DateTime<Utc>)> {
-        let drained = std::mem::take(&mut *self.pending.lock());
+        let drained = std::mem::take(&mut self.state.lock().pending);
+        Self::sorted(drained)
+    }
+
+    /// The owner's final take (`Memory::close`): everything noted so far, and
+    /// — **in the same critical section** — the ledger closes, so every
+    /// [`Self::record`] either landed before this take (and is in the returned
+    /// batch) or comes after it and is dropped. No read can slip in between
+    /// and sit in a ledger that will never be applied. Idempotent: a second
+    /// close (a retried `Memory::close`) returns nothing.
+    pub fn close(&self) -> Vec<(NodeId, u32, DateTime<Utc>)> {
+        let drained = {
+            let mut state = self.state.lock();
+            state.closed = true;
+            std::mem::take(&mut state.pending)
+        };
+        Self::sorted(drained)
+    }
+
+    fn sorted(drained: HashMap<NodeId, Pending>) -> Vec<(NodeId, u32, DateTime<Utc>)> {
         let mut out: Vec<_> = drained
             .into_iter()
             .map(|(id, p)| (id, p.count, p.last))
@@ -288,5 +340,46 @@ mod tests {
         assert_eq!(applier.join().unwrap(), 1);
         assert_eq!(ledger.apply(&graph), 1);
         assert_eq!(count(&graph.read(), nid(2, 1)), (2, Some(ts(2))));
+    }
+
+    /// Issue #30 (close race): `close` takes and shuts in one critical
+    /// section. A note before it is in the returned batch; a note after it is
+    /// dropped and counted, never left pending; a second close returns nothing.
+    #[test]
+    fn close_takes_everything_and_drops_later_notes() {
+        let ledger = AccessLedger::new();
+        assert!(ledger.record([nid(2, 1)], ts(1)));
+        assert_eq!(ledger.close(), vec![(nid(2, 1), 1, ts(1))]);
+        assert!(!ledger.record([nid(2, 1), nid(2, 2)], ts(2)), "closed");
+        assert_eq!(ledger.pending(), 0, "a late note is not left pending");
+        assert_eq!(ledger.dropped_after_close(), 1);
+        assert!(ledger.close().is_empty(), "idempotent");
+        assert!(ledger.take().is_empty());
+    }
+
+    /// Notes racing a close are each either in the close's batch or counted as
+    /// dropped — none is lost silently and none survives in the ledger.
+    #[test]
+    fn notes_racing_close_land_in_the_batch_or_are_counted_dropped() {
+        let ledger = std::sync::Arc::new(AccessLedger::new());
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(5));
+        let recorders: Vec<_> = (0..4u64)
+            .map(|t| {
+                let (l, b) = (ledger.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    b.wait();
+                    (0..500u64)
+                        .filter(|k| l.record([nid(3, t * 1_000 + k)], ts(0)))
+                        .count() as u64
+                })
+            })
+            .collect();
+        barrier.wait();
+        std::thread::yield_now();
+        let closed = ledger.close().len() as u64;
+        let noted: u64 = recorders.into_iter().map(|h| h.join().unwrap()).sum();
+        assert_eq!(noted, closed, "every accepted note is in the close's batch");
+        assert_eq!(noted + ledger.dropped_after_close(), 4 * 500);
+        assert_eq!(ledger.pending(), 0);
     }
 }

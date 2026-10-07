@@ -2240,6 +2240,11 @@ impl Memory {
     /// interaction of the script by each recall it retried. Scoring takes the
     /// later of `created_at` and `last_accessed` as the last touch, so a read
     /// stamped before a scripted `created_at` cannot age a concept.
+    ///
+    /// A read that completes after [`Memory::close`] took the ledger is not
+    /// counted: the ledger is closed then and drops it (see
+    /// [`AccessLedger::close`]). "A clean close loses nothing" means nothing
+    /// noted before that point.
     pub(crate) fn note_accesses(&self, ids: impl IntoIterator<Item = NodeId>) {
         self.accesses.record(ids, Utc::now());
     }
@@ -2653,8 +2658,11 @@ impl Memory {
         // applied in the same section, and every access the flush had not yet
         // taken from the graph's dirty set rides the tail after the log, so a
         // clean close loses none (issue #30). The ledger is taken before the
-        // graph lock: it stays a leaf.
-        let accesses = self.accesses.take();
+        // graph lock: it stays a leaf. `close` (not `take`) shuts it in the
+        // same critical section, so a recall still in flight that finishes
+        // after this point is dropped explicitly instead of noting into a
+        // ledger nothing will apply again.
+        let accesses = self.accesses.close();
         let batch = {
             let mut g = self.graph.write();
             g.record_accesses(&accesses);
@@ -7703,6 +7711,24 @@ mod tests {
         assert!(last.is_some());
         assert_eq!(again.stats().epoch, epoch);
         again.close().await.unwrap();
+    }
+
+    /// Issue #30 (close race): a recall that was in flight when `close` took
+    /// the ledger notes its hits after it. Those are dropped by the closed
+    /// ledger, explicitly, instead of sitting in a ledger nothing applies.
+    #[tokio::test]
+    async fn a_read_finishing_after_close_is_dropped_not_left_pending() {
+        let mem = memory_on(Arc::new(MemoryStore::new()), "issue-30-late-read").await;
+        mem.derive(&[("user schema", ConceptType::Entity)], &ParentOf::none())
+            .await
+            .unwrap();
+        let id = mem.graph.read().concepts().next().unwrap().id;
+        mem.close().await.unwrap();
+
+        // What a recall's `note_accesses` does once its pipeline returns.
+        mem.note_accesses([id]);
+        assert_eq!(mem.unapplied_accesses(), 0);
+        assert_eq!(mem.accesses.dropped_after_close(), 1);
     }
 
     /// The same round trip through the real SQLite adapter (file-backed, a
