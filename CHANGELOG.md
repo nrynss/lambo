@@ -268,8 +268,10 @@
   still carry no candle.
 - `install.sh` takes `LAMBO_FLAVOR=metal` to install that asset, with the same
   SHA-256 verification. It is refused with an error on anything but macOS arm64;
-  unset, the script installs the stock build as before. `LAMBO_DRY_RUN=1`
-  prints the asset and URLs it would fetch, then exits without downloading.
+  unset, the script installs the stock build as before. `LAMBO_DRY_RUN` set to
+  any non-empty value other than `0` (`1`, `yes`, `true`, ...) prints the asset
+  and URLs it would fetch, then exits without downloading; unset, empty or `0`
+  installs.
 - The release workflow can be run by hand (`workflow_dispatch`, `dry_run`
   default true) to build, parity-test and checksum every asset as workflow
   artifacts without tagging. A dispatch never publishes a GitHub release or a
@@ -597,6 +599,10 @@
   that had already passed. It now waits for the concept to have reached **at
   least** the rung in question, which is what the demo means and cannot be
   missed.
+
+- `install.sh` on Apple silicon from an x86_64 (Rosetta) shell installs the
+  native arm64 build instead of refusing the machine as Intel macOS: it checks
+  `sysctl hw.optional.arm64` when `uname -m` says `x86_64`.
 
 ### Notes
 

@@ -21,8 +21,14 @@
 #   LAMBO_INSTALL_DIR  install directory (default ~/.local/bin). Must be
 #                    writable by the current user.
 #   LAMBO_REPO       owner/repo on GitHub (default nrynss/lambo).
-#   LAMBO_DRY_RUN    set to 1 to print the asset and URLs that would be
-#                    downloaded, then exit without downloading or installing.
+#   LAMBO_DRY_RUN    any non-empty value other than "0" (1, yes, true, ...)
+#                    prints the asset and URLs that would be downloaded, then
+#                    exits without downloading or installing. Unset, empty or
+#                    "0" installs. An unrecognised value errs toward the dry run.
+#
+# Apple silicon under Rosetta: an x86_64 shell on an arm64 Mac (uname -m says
+# x86_64, sysctl hw.optional.arm64 says 1) installs the arm64 build, which is
+# what the machine runs natively; there is no Intel macOS asset.
 #
 # Example, the Metal build on Apple silicon:
 #
@@ -36,7 +42,10 @@ set -eu
 REPO="${LAMBO_REPO:-nrynss/lambo}"
 VERSION="${LAMBO_VERSION:-}"
 FLAVOR="${LAMBO_FLAVOR:-}"
-DRY_RUN="${LAMBO_DRY_RUN:-}"
+case "${LAMBO_DRY_RUN:-}" in
+  ""|0) DRY_RUN=0 ;;
+  *)    DRY_RUN=1 ;;
+esac
 INSTALL_DIR="${LAMBO_INSTALL_DIR:-$HOME/.local/bin}"
 BASE_URL="https://github.com/${REPO}/releases/download"
 
@@ -61,6 +70,18 @@ case "$ARCH" in
     exit 1
     ;;
 esac
+
+# Rosetta: a shell translated from x86_64 (an Intel Homebrew, a Rosetta
+# Terminal) reports x86_64 on Apple silicon. The hardware is arm64 and runs the
+# arm64 asset natively from any shell, so install that rather than refusing the
+# machine as Intel. hw.optional.arm64 is 1 on Apple silicon, translated or not,
+# and absent on Intel Macs (the 2>/dev/null and || true cover that).
+if [ "$OS" = "macos" ] && [ "$ARCH" = "x86_64" ]; then
+  if [ "$(sysctl -n hw.optional.arm64 2>/dev/null || true)" = "1" ]; then
+    echo "note: this shell runs under Rosetta (x86_64) on Apple silicon; installing the native arm64 build"
+    ARCH="arm64"
+  fi
+fi
 
 # No macos-x86_64 asset is published: the Intel macOS runner class never picked
 # up the release job, so that target was dropped from the matrix rather than
@@ -118,7 +139,7 @@ ASSET="lambo-${VERSION}-${OS}-${ARCH}${SUFFIX}"
 URL="${BASE_URL}/v${VERSION}/${ASSET}"
 SHA_URL="${URL}.sha256"
 
-if [ "$DRY_RUN" = "1" ]; then
+if [ "$DRY_RUN" -eq 1 ]; then
   echo "dry run: would download ${URL}"
   echo "dry run: would verify against ${SHA_URL}"
   echo "dry run: would install to ${INSTALL_DIR}/lambo"
