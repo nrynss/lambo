@@ -397,29 +397,61 @@ fn explain_vector_candidates_uses_store_forced_exact_scan() {
     // helpers in this file, which lived in one file before the tests moved
     // out; scan both. Anchored on the crate root so a later move of this
     // file cannot silently retarget the scan.
-    let camera = [
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/store/pg/postgres.rs"
-        )),
-        include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/store/pg/postgres/tests.rs"
-        )),
-    ]
-    .concat();
+    let corpus_src = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/store/pg/postgres.rs"
+    ));
+    let helper_src = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/store/pg/postgres/tests.rs"
+    ));
     let base = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/store/pg/mod.rs"));
-    // Compare with all whitespace removed, so rustfmt reflowing a call across
-    // lines (`store\n    .issue_forced_exact_scan(..)`) cannot hide it.
-    let squash = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
-    let camera = squash(&camera);
+    // Compare with line comments dropped and all whitespace removed: rustfmt
+    // reflowing a call across lines (`store\n    .issue_forced_exact_scan(..)`)
+    // cannot hide it, and a needle left in a comment cannot satisfy it.
+    let squash = |s: &str| {
+        s.lines()
+            .map(|line| {
+                line.split_once(concat!("/", "/"))
+                    .map_or(line, |(code, _)| code)
+            })
+            .flat_map(str::chars)
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>()
+    };
+    let corpus_src = squash(corpus_src);
+    let helper_src = squash(helper_src);
+    let camera = format!("{corpus_src}{helper_src}");
     let base = squash(base);
-    // Every needle is split across `concat!` pieces so this function's own
-    // source text, which `camera` includes, never contains it. Spelled as
-    // one literal, a needle matches itself and the scan cannot fail.
+    // The text of one function: from its signature to the first `tx.commit()`
+    // after it. Each camera-proof site is checked inside its own function, so
+    // the other site (or a comment elsewhere) cannot satisfy the needle for it.
+    let body = |src: &str, signature: &str| -> String {
+        let start = src
+            .find(signature)
+            .unwrap_or_else(|| panic!("camera-proof function `{signature}` not found"));
+        let rest = &src[start..];
+        let end = rest
+            .find(concat!("tx", ".commit()"))
+            .unwrap_or_else(|| panic!("`{signature}` has no commit to bound its body"));
+        rest[..end].to_string()
+    };
+    // Every needle and signature is split across `concat!` pieces so this
+    // function's own source text, which the scanned files include, never
+    // contains it. Spelled as one literal, a needle matches itself and the
+    // scan cannot fail.
+    let plan_body = body(&corpus_src, concat!("pub(crate)", "asyncfnplan("));
     assert!(
-        camera.contains(concat!("store", ".issue_forced_exact_scan(&muttx)")),
-        "camera-proof must issue the GUC via the production helper"
+        plan_body.contains(concat!("store", ".issue_forced_exact_scan(&muttx)")),
+        "corpus::plan must issue the GUC via the production helper"
+    );
+    let explain_body = body(
+        &helper_src,
+        concat!("asyncfn", "explain_vector_candidates("),
+    );
+    assert!(
+        explain_body.contains(concat!("store", ".issue_forced_exact_scan(&muttx)")),
+        "explain_vector_candidates must issue the GUC via the production helper"
     );
     assert!(
         base.contains(concat!("self", ".issue_forced_exact_scan(&muttx)")),
