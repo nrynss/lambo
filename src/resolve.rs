@@ -110,6 +110,7 @@ pub const RESOLVE_ENV_VARS: &[&str] = &[
     "LAMBO_GEMINI_LOCATION",
     "LAMBO_GEMINI_MODEL",
     "LAMBO_GEMINI_CREDENTIALS",
+    "LAMBO_EMBED_KEEP_WARM_SECS",
     "LAMBO_PROMOTION_POLICY",
     // Read past the file, while the backends are built — see "A resolve is not
     // only the file overlay" above.
@@ -155,6 +156,23 @@ pub struct ResolvedBackends {
     /// Product config with any `[daemon]` cadence overrides from the file
     /// already applied. Writers pass this to `Memory::builder().config(..)`.
     pub config: crate::Config,
+}
+
+impl ResolvedBackends {
+    /// The effective `lambo serve` embedder keep-warm interval (issue #13):
+    /// `[embedder] keep_warm_secs` / `LAMBO_EMBED_KEEP_WARM_SECS`, already
+    /// overlaid at resolve, applied against where the resolved embedder holds
+    /// its weights. `None` = no keep-warm task.
+    ///
+    /// Derived from this bundle rather than stored in it so the resolve stays
+    /// the single construction site with no new field to keep in sync; pure,
+    /// no I/O.
+    pub fn keep_warm_interval(&self) -> Option<std::time::Duration> {
+        crate::embed::keep_warm::resolve_keep_warm(
+            self.embedder_cfg.keep_warm_secs,
+            crate::embed::weights_in_unified_memory(self.embedder.as_ref()),
+        )
+    }
 }
 
 /// Store vector width vs embedder output dim.
@@ -554,6 +572,15 @@ mod tests {
                 resolved: Some(|p| format!("{:?}", load(p).embedder.gemini_credentials)),
             },
             Override {
+                // Issue #13: read unconditionally by `overlay_env` like the
+                // five above; it selects no backend, but it changes what a
+                // resolved serve does while idle, so a hermetic harness clears it.
+                var: "LAMBO_EMBED_KEEP_WARM_SECS",
+                value: "17",
+                file: MEMORY,
+                resolved: Some(|p| format!("{:?}", load(p).embedder.keep_warm_secs)),
+            },
+            Override {
                 var: "LAMBO_PROMOTION_POLICY",
                 value: "Solo",
                 file: MEMORY,
@@ -733,6 +760,28 @@ mod tests {
         check_vector_compatibility(Some(1024), 1024).unwrap();
         let err = check_vector_compatibility(Some(1024), 512).unwrap_err();
         assert!(err.to_string().contains("incompatible"), "{err}");
+    }
+
+    /// Issue #13: keep-warm resolves through the single resolve site. Auto is
+    /// off for the fixture (no weights); an explicit interval is honoured for
+    /// any kind; `0` is off.
+    #[test]
+    #[cfg(all(feature = "store-memory", feature = "embed-fixture"))]
+    fn keep_warm_interval_resolves_from_the_embedder_section() {
+        // `from_toml_str` applies no env overlay (that is `load_resolved`, whose
+        // half is pinned by the override table), so no env lock is needed.
+        let resolve = |extra: &str| {
+            let toml =
+                format!("[store]\nkind = \"memory\"\n[embedder]\nkind = \"fixture\"\n{extra}");
+            let file = LamboFile::from_toml_str(&toml).unwrap();
+            resolve_backends(file).unwrap().keep_warm_interval()
+        };
+        assert_eq!(resolve(""), None, "auto is off for the fixture");
+        assert_eq!(resolve("keep_warm_secs = 0\n"), None);
+        assert_eq!(
+            resolve("keep_warm_secs = 45\n"),
+            Some(std::time::Duration::from_secs(45))
+        );
     }
 
     #[test]

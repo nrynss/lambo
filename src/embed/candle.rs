@@ -501,6 +501,10 @@ fn is_macos() -> bool {
 pub struct CandleEmbedder {
     dim: usize,
     identity: String,
+    /// The weights live in Metal buffers: unified memory the macOS pager can
+    /// compress while the process idles (issue #13). Drives the keep-warm
+    /// auto default through [`crate::embed::weights_in_unified_memory`].
+    on_metal: bool,
     /// Shutdown ownership: `Handle::drop` fires only when the LAST adapter
     /// handle is gone (K2-R1-7), so dropping one clone never kills the
     /// coalescer the other clones still serve.
@@ -598,6 +602,7 @@ impl CandleEmbedder {
             )));
         }
 
+        let on_metal = device.is_metal();
         let core = load_core(&config_path, &tokenizer_path, &weights_path, &device, dtype)?;
 
         let shared = Arc::new(Shared {
@@ -631,8 +636,14 @@ impl CandleEmbedder {
         Ok(Self {
             dim,
             identity,
+            on_metal,
             handle: Arc::new(Handle { shared }),
         })
+    }
+
+    /// Whether the loaded weights sit on a Metal device (issue #13).
+    pub fn on_metal(&self) -> bool {
+        self.on_metal
     }
 
     /// The served-artifact identity string to stamp into the session's
@@ -1063,6 +1074,7 @@ mod tests {
                 None,
                 WEIGHT_SHA256,
             ),
+            on_metal: false,
             handle: Arc::new(Handle { shared }),
         }
     }
@@ -1084,6 +1096,19 @@ mod tests {
             Some(expected),
             "candle_identity must recover the artifact identity through the trait object"
         );
+    }
+
+    /// Issue #13: the keep-warm auto default reads memory placement through the
+    /// same trait-object downcast. A CPU-device candle embedder is not on
+    /// unified Metal memory, so auto keep-warm stays off for it; an
+    /// accelerator-specific positive case needs a real Metal device and the
+    /// weights, so it is covered by the measurement, not this unit test.
+    #[test]
+    fn cpu_candle_is_not_reported_as_unified_memory() {
+        let e = weightless_embedder();
+        assert!(!e.on_metal());
+        let dyn_ref: &dyn Embedder = &e;
+        assert!(!crate::embed::weights_in_unified_memory(dyn_ref));
     }
 
     #[test]

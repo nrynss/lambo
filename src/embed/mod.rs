@@ -4,6 +4,7 @@
 //! `lambo.toml` / env select among compiled kinds. See
 //! `dev-diary/notes/level-b-pluggability.md`.
 
+pub mod keep_warm;
 mod math;
 
 #[cfg(feature = "embed-bge")]
@@ -292,6 +293,12 @@ pub struct EmbedderConfig {
     /// Explicit Google service-account JSON key file path; overrides ADC (A3).
     #[serde(default)]
     pub gemini_credentials: Option<std::path::PathBuf>,
+    /// Seconds between `lambo serve` keep-warm touches (issue #13). Absent =
+    /// auto (on only where the weights sit in pageable unified memory: candle
+    /// on Metal); `0` = off; `N` = every `N` s for any kind. Not part of the
+    /// embedding contract. See [`keep_warm`].
+    #[serde(default)]
+    pub keep_warm_secs: Option<u64>,
 }
 
 impl Default for EmbedderConfig {
@@ -311,6 +318,7 @@ impl Default for EmbedderConfig {
             gemini_location: None,
             gemini_model: None,
             gemini_credentials: None,
+            keep_warm_secs: None,
         }
     }
 }
@@ -376,6 +384,16 @@ impl EmbedderConfig {
                 self.gemini_credentials = Some(v.into());
             }
         }
+        if let Ok(v) = env::var("LAMBO_EMBED_KEEP_WARM_SECS") {
+            if !v.is_empty() {
+                self.keep_warm_secs = Some(v.parse().map_err(|e| {
+                    EmbedError::Unavailable(format!(
+                        "invalid LAMBO_EMBED_KEEP_WARM_SECS {v:?}: {e} (expected whole seconds; \
+                         0 disables keep-warm)"
+                    ))
+                })?);
+            }
+        }
         Ok(self)
     }
 }
@@ -404,6 +422,29 @@ pub fn candle_identity(embedder: &dyn Embedder) -> Option<String> {
 #[cfg(not(feature = "embed-candle"))]
 pub fn candle_identity(_embedder: &dyn Embedder) -> Option<String> {
     None
+}
+
+/// Does this embedder hold its model weights in host-pageable unified memory
+/// inside this process — memory the OS pager can compress or swap while the
+/// process idles (issue #13)? Today that is exactly the candle adapter on a
+/// Metal device. CUDA weights live in VRAM; CPU candle is an explicit
+/// fallback the operator can opt into keep-warm for; the remote adapters hold
+/// their weights in another process; the fixture has none.
+///
+/// Drives the `keep_warm_secs` auto default
+/// ([`keep_warm::resolve_keep_warm`]).
+#[cfg(feature = "embed-candle")]
+pub fn weights_in_unified_memory(embedder: &dyn Embedder) -> bool {
+    embedder
+        .as_any()
+        .and_then(|a| a.downcast_ref::<candle::CandleEmbedder>())
+        .is_some_and(|c| c.on_metal())
+}
+
+/// Same as [`weights_in_unified_memory`] on builds without the candle feature.
+#[cfg(not(feature = "embed-candle"))]
+pub fn weights_in_unified_memory(_embedder: &dyn Embedder) -> bool {
+    false
 }
 
 /// The served-model identity the Gemini adapter stamps into the session contract
@@ -767,6 +808,61 @@ mod tests {
         let cfg = EmbedderConfig::from_env().unwrap();
         assert_eq!(cfg.gemini_project.as_deref(), Some("   "));
         env::remove_var("LAMBO_GEMINI_PROJECT");
+    }
+
+    /// Issue #13: `keep_warm_secs` is a real `[embedder]` key (absent = auto),
+    /// and the table stays `deny_unknown_fields` — a typo of it is refused.
+    #[test]
+    fn keep_warm_secs_toml_key() {
+        let cfg: EmbedderConfig =
+            toml::from_str("kind = \"fixture\"\nkeep_warm_secs = 45\n").unwrap();
+        assert_eq!(cfg.keep_warm_secs, Some(45));
+        let cfg: EmbedderConfig = toml::from_str("kind = \"fixture\"\n").unwrap();
+        assert_eq!(cfg.keep_warm_secs, None, "absent means auto");
+        let cfg: EmbedderConfig = toml::from_str("keep_warm_secs = 0\n").unwrap();
+        assert_eq!(cfg.keep_warm_secs, Some(0));
+        let err = toml::from_str::<EmbedderConfig>("keep_warm = 30\n").unwrap_err();
+        assert!(err.to_string().contains("keep_warm"), "{err}");
+        assert!(toml::from_str::<EmbedderConfig>("keep_warm_secs = -1\n").is_err());
+    }
+
+    /// Issue #13: `LAMBO_EMBED_KEEP_WARM_SECS` overlays the file value with the
+    /// usual rules (non-empty env wins, empty leaves the base), and garbage is
+    /// a hard error naming the variable, not a silent auto.
+    #[test]
+    fn keep_warm_secs_env_overlay() {
+        let _g = crate::test_util::env_lock();
+        env::remove_var("LAMBO_EMBED_KEEP_WARM_SECS");
+        let base = EmbedderConfig {
+            keep_warm_secs: Some(60),
+            ..Default::default()
+        };
+        assert_eq!(base.clone().overlay_env().unwrap().keep_warm_secs, Some(60));
+
+        env::set_var("LAMBO_EMBED_KEEP_WARM_SECS", "0");
+        assert_eq!(base.clone().overlay_env().unwrap().keep_warm_secs, Some(0));
+
+        env::set_var("LAMBO_EMBED_KEEP_WARM_SECS", "");
+        assert_eq!(base.clone().overlay_env().unwrap().keep_warm_secs, Some(60));
+
+        env::set_var("LAMBO_EMBED_KEEP_WARM_SECS", "soon");
+        let err = base.overlay_env().unwrap_err().to_string();
+        assert!(err.contains("LAMBO_EMBED_KEEP_WARM_SECS"), "{err}");
+        env::remove_var("LAMBO_EMBED_KEEP_WARM_SECS");
+    }
+
+    /// Issue #13: auto keep-warm is off for every non-candle adapter — the
+    /// fixture has no weights, and the remote adapters' weights live in another
+    /// process.
+    #[cfg(feature = "embed-fixture")]
+    #[test]
+    fn fixture_is_not_reported_as_unified_memory() {
+        let e = FixtureEmbedder::new();
+        assert!(!weights_in_unified_memory(&e));
+        assert_eq!(
+            keep_warm::resolve_keep_warm(None, weights_in_unified_memory(&e)),
+            None
+        );
     }
 
     /// CON-7 agreement: every compiled embedder rejects empty/whitespace input
