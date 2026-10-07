@@ -112,11 +112,15 @@ Memory::close: ledger.close() (take + shut), then in the final drain's write sec
 - Loss bound: a crash loses what had not reached the store (≤ one tick + about
   two flush intervals while healthy; for as long as an outage lasts
   otherwise, like any retained batch). A clean close loses nothing noted
-  before close took the ledger.
+  before close took the ledger. A batch the store rejects deterministically
+  (dead-lettered, STORE-4/D5) takes its `RecordAccess` entries with it; the
+  in-RAM values stay correct and the counts self-heal on the next read or
+  upsert of the concept.
 - **Close race (remediation).** A recall in flight when `close` took the
   ledger used to note into a ledger nothing would apply. `AccessLedger::close`
   now takes and shuts under one lock; a later note is dropped and counted
-  (`dropped_after_close`), never left pending
+  (`dropped_after_close`; the first drop logs once at debug, the count is read
+  through `AccessLedger::dropped_after_close`), never left pending
   (`notes_racing_close_land_in_the_batch_or_are_counted_dropped`,
   `a_read_finishing_after_close_is_dropped_not_left_pending`).
 - Not a persisted or wire format: `Mutation` is applied in-process; the only
