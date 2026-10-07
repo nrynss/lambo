@@ -63,9 +63,13 @@ never a threshold.
 ### Running it
 
 ```sh
-lambo serve --session <id> --transport http --port 7700 --bind 127.0.0.1
-python3 examples/drive_mcp_soak.py --session <id>
+lambo serve --session <id> --transport http --port 17701 --bind 127.0.0.1
+python3 examples/drive_mcp_soak.py --session <id> --endpoint http://127.0.0.1:17701/mcp
 ```
+
+`--endpoint` is required: there is no default, so the driver never loads a
+long-lived writer by omission. An endpoint on port 7700, where such a writer
+conventionally listens, is refused unless `--allow-production-port` is passed.
 
 Needs a writer already running, because that is the point: a short-lived
 `lambo derive` exits long before the daemon can evaluate anything.

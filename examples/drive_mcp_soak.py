@@ -26,7 +26,15 @@ Nothing here lowers the bar for promotion. Blast radius, distinct interactions,
 coverage and the peer score cut are all still enforced by `canon::stage{1,2,3}`.
 This only supplies interactions and lets the daemon run long enough to look.
 
-    python3 scripts/cloudops/drive_mcp_soak.py --session cloudops-exhibit
+    lambo serve --session cloudops-exhibit --transport http --port 17701 --bind 127.0.0.1
+    python3 examples/drive_mcp_soak.py --session cloudops-exhibit \\
+        --endpoint http://127.0.0.1:17701/mcp
+
+`--endpoint` is required and there is no default: this script writes derives
+into whatever answers there, and a default pointing at a long-lived writer
+(port 7700 is where one conventionally listens) would load it by accident. An
+endpoint on 7700 is refused unless `--allow-production-port` is passed, the
+same rule scripts/loadtest applies.
 """
 
 from __future__ import annotations
@@ -36,9 +44,12 @@ import json
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
-DEFAULT_ENDPOINT = "http://127.0.0.1:7700/mcp"
+# The port a long-lived `lambo serve` writer (e.g. a dogfood writer) holds by
+# convention. There is deliberately no default endpoint: see the module docstring.
+PRODUCTION_PORT = 7700
 PROTOCOL_VERSION = "2025-06-18"
 
 # The pillars the exhibit is about, reinforced as themselves. Same contents the
@@ -147,18 +158,43 @@ def tool_text(result: dict) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--session", required=True, help="session the writer owns (for reporting only)")
-    ap.add_argument("--endpoint", default=DEFAULT_ENDPOINT)
+    ap.add_argument(
+        "--endpoint",
+        required=True,
+        help="MCP endpoint of the writer to drive, e.g. http://127.0.0.1:17701/mcp "
+        "(required: no default, so a live writer is never hit by omission)",
+    )
+    ap.add_argument(
+        "--allow-production-port",
+        action="store_true",
+        help=f"permit an endpoint on port {PRODUCTION_PORT}, the port a live writer listens on",
+    )
     ap.add_argument("--agent", default="cloudops-soak")
     ap.add_argument("--max-passes", type=int, default=40)
     ap.add_argument("--interval", type=float, default=8.0, help="seconds between passes")
     args = ap.parse_args()
+    try:
+        # int compare: "07700" is 7700; a non-numeric port raises ValueError.
+        endpoint_port = urllib.parse.urlsplit(args.endpoint).port
+    except ValueError as e:
+        print(f"error: --endpoint {args.endpoint!r} has an invalid port: {e}", file=sys.stderr)
+        return 2
+    if endpoint_port == PRODUCTION_PORT and not args.allow_production_port:
+        print(
+            f"refusing to drive {args.endpoint}: port {PRODUCTION_PORT} is where a live "
+            "lambo serve writer listens. Point --endpoint at a scratch serve, or pass "
+            "--allow-production-port if you mean to drive that writer.",
+            file=sys.stderr,
+        )
+        return 2
 
     mcp = Mcp(args.endpoint)
     try:
         info = mcp.handshake()
     except (urllib.error.URLError, OSError) as e:
         print(f"error: cannot reach {args.endpoint}: {e}", file=sys.stderr)
-        print("hint: start `lambo serve --transport http --port 7700` first.", file=sys.stderr)
+        print("hint: start a writer first, e.g. `lambo serve --transport http --port 17701`, "
+              "and pass its /mcp URL as --endpoint.", file=sys.stderr)
         return 2
     server = info.get("serverInfo", {})
     print(f"connected: {server.get('name', '?')} {server.get('version', '')}".rstrip())
