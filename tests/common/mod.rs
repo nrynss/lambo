@@ -62,7 +62,8 @@ impl RuntimeDir {
 
     /// The directory a serve given this runtime dir derives its endpoint in:
     /// `$XDG_RUNTIME_DIR/lambo`, the first rung of `endpoint_dir_from` in
-    /// `src/mcp/endpoint.rs` (private there, so mirrored here). Creates
+    /// `src/mcp/endpoint.rs` (private there, so mirrored here; keep the two in
+    /// step, `endpoint_dir_from` carries the matching note). Creates
     /// nothing; for a test asserting where the serve does or does not look.
     pub fn derived_endpoint_dir(&self) -> PathBuf {
         self.path.join("lambo")
@@ -139,6 +140,10 @@ impl ServeChild {
     /// `Child::wait_with_output` bounded by `timeout`, without giving up the
     /// guard: `None` on timeout, with the child still owned (and so killed on
     /// drop) instead of left blocked in a detached waiter thread.
+    ///
+    /// The stdin/stdout/stderr pipes are taken and handed to drain threads on
+    /// the first call, so after a timeout they are consumed: a second call
+    /// returns empty `stdout`/`stderr`. Call it once per child.
     pub fn wait_with_output_within(
         &mut self,
         timeout: Duration,
