@@ -198,7 +198,7 @@ impl SessionEndpoint {
         Self::for_store_in(&endpoint_dir(), session, store)
     }
 
-    /// [`SessionEndpoint::for_store`] with the base directory supplied, for the
+    /// [`SessionEndpoint::for_store`] with the endpoint directory supplied, for the
     /// same reason [`SessionEndpoint::resolve_in`] exists.
     fn for_store_in(dir: &Path, session: &str, store: &StoreConfig) -> Option<Self> {
         if !store_is_shareable(store) {
@@ -839,7 +839,7 @@ mod tests {
         }
     }
 
-    /// A short, fixed base directory, so these tests assert on the derivation
+    /// A short, fixed endpoint directory, so these tests assert on the derivation
     /// rather than on whatever `TMPDIR` this machine happens to have.
     fn at(session: &str, store: &StoreConfig) -> SessionEndpoint {
         SessionEndpoint::resolve_in(Path::new("/run/lambo"), session, store).unwrap()
