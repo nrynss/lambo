@@ -784,9 +784,11 @@ fn main() -> ExitCode {
 mod tests {
     /// A unique scratch directory removed on drop, so a failing test leaves
     /// nothing under `$TMPDIR`. (`main.rs` is its own crate, so it cannot reach
-    /// the library's `test_util::ScratchDir`.)
+    /// the library's `test_util::ScratchDir`.) Gated like its only user.
+    #[cfg(all(feature = "store-memory", feature = "embed-bge"))]
     struct ScratchDir(std::path::PathBuf);
 
+    #[cfg(all(feature = "store-memory", feature = "embed-bge"))]
     impl ScratchDir {
         fn new() -> Self {
             let dir = std::env::temp_dir().join(format!(
@@ -802,6 +804,7 @@ mod tests {
         }
     }
 
+    #[cfg(all(feature = "store-memory", feature = "embed-bge"))]
     impl std::ops::Deref for ScratchDir {
         type Target = std::path::Path;
         fn deref(&self) -> &std::path::Path {
@@ -809,6 +812,7 @@ mod tests {
         }
     }
 
+    #[cfg(all(feature = "store-memory", feature = "embed-bge"))]
     impl Drop for ScratchDir {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
