@@ -844,9 +844,32 @@ mod tests {
         SessionEndpoint::resolve_in(Path::new("/run/lambo"), session, store).unwrap()
     }
 
+    /// A scratch directory removed on drop, so a test that panics part-way
+    /// leaves nothing behind. Derefs to [`Path`].
+    struct Scratch(PathBuf);
+
+    impl std::ops::Deref for Scratch {
+        type Target = Path;
+        fn deref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl AsRef<Path> for Scratch {
+        fn as_ref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     /// A unique scratch directory for the tests that need real files — the
     /// canonicalization ones do, since that is the whole point of them.
-    fn scratch(tag: &str) -> PathBuf {
+    fn scratch(tag: &str) -> Scratch {
         let dir = std::env::temp_dir().join(format!(
             "lambo-endpoint-{tag}-{}-{}",
             std::process::id(),
@@ -856,13 +879,13 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        dir
+        Scratch(dir)
     }
 
     /// A scratch directory short enough to hold a socket address — the bind
     /// tests need a real directory AND a path under [`SUN_PATH_MAX`], and macOS's
     /// `TMPDIR` is 46 bytes before anything is joined to it.
-    fn short_scratch(tag: &str) -> PathBuf {
+    fn short_scratch(tag: &str) -> Scratch {
         let dir = PathBuf::from(format!(
             "/tmp/lb{tag}{}{}",
             std::process::id(),
@@ -873,7 +896,7 @@ mod tests {
                 % 100_000
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        dir
+        Scratch(dir)
     }
 
     fn path_of(root: &Path, sub: &str) -> String {
@@ -1011,7 +1034,6 @@ mod tests {
             &cfg(StoreKind::Sqlite, Some(&path_of(&root, "b")), None),
         );
         assert_ne!(a, b, "two SQLite files must never derive one socket");
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// One graph, one socket — the other half of the decision, and the reason
@@ -1038,7 +1060,6 @@ mod tests {
             at("s", &store(root.join("real").join(".").join("lambo.db"))),
             "a redundant spelling is the same store"
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A file that does not exist yet resolves through its parent, which is
@@ -1055,7 +1076,6 @@ mod tests {
             canonical_store_path(&root.join("lambo.db").to_string_lossy()),
             real.join("lambo.db").to_string_lossy()
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A URI spelling is left verbatim: `canonicalize` cannot resolve it, and
@@ -1167,7 +1187,6 @@ mod tests {
             !err.to_string().contains("  "),
             "an operator message must not carry a collapsed continuation indent: {err}"
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The mode gate itself, which the old docstring over-credited but which is
@@ -1194,7 +1213,6 @@ mod tests {
             !err.to_string().contains("  "),
             "an operator message must not carry a collapsed continuation indent: {err}"
         );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The real derivation on the real environment must fit on THIS machine —
@@ -1477,8 +1495,6 @@ mod tests {
         // not earn.
         b.unlink_if_ours(Some(b_bound));
         assert_eq!(b.file_identity(), None, "a holder clears its own socket");
-
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// **JE2E-R2-3.** The licence used to be `(dev, ino)`, and inode numbers are
@@ -1551,8 +1567,6 @@ mod tests {
             Some(second_id),
             "the live socket survives a superseded holder's exit"
         );
-
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
