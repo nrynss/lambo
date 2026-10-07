@@ -594,7 +594,14 @@ def main() -> int:
         help=f"permit an endpoint on port {PRODUCTION_PORT}, the port a live writer listens on",
     )
     args = ap.parse_args()
-    if urllib.parse.urlsplit(args.endpoint).port == PRODUCTION_PORT and not args.allow_production_port:
+    try:
+        # `.port` is an int, so "07700" and "+7700" compare as 7700; a
+        # non-numeric or out-of-range port raises ValueError.
+        endpoint_port = urllib.parse.urlsplit(args.endpoint).port
+    except ValueError as e:
+        print(f"error: --endpoint {args.endpoint!r} has an invalid port: {e}", file=sys.stderr)
+        return 2
+    if endpoint_port == PRODUCTION_PORT and not args.allow_production_port:
         print(
             f"refusing to load-test {args.endpoint}: port {PRODUCTION_PORT} is where a live "
             "lambo serve writer listens. Point --endpoint at a scratch serve, or pass "

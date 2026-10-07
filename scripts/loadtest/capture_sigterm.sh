@@ -73,7 +73,17 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ "$PORT" == "$PRODUCTION_PORT" && "$ALLOW_PRODUCTION_PORT" != 1 ]]; then
+# Compare the port as a number: "07700", "+7700" and " 7700" all bind 7700.
+if [[ ! "$PORT" =~ ^[0-9]+$ ]]; then
+    echo "--port must be a decimal number, got '$PORT'" >&2
+    exit 2
+fi
+PORT=$((10#$PORT))
+if (( PORT < 1 || PORT > 65535 )); then
+    echo "--port $PORT is outside 1-65535" >&2
+    exit 2
+fi
+if (( PORT == PRODUCTION_PORT )) && [[ "$ALLOW_PRODUCTION_PORT" != 1 ]]; then
     echo "refusing to run on port $PRODUCTION_PORT, the port a live lambo serve" \
          "writer listens on; pick another --port, or pass --allow-production-port" \
          "if this machine runs no such writer" >&2

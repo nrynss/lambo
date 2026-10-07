@@ -84,7 +84,7 @@ scripts/loadtest/capture_sigterm.sh \
     --out evidence/concurrency --workers 12 --session c-load-20260818 --delay 5
 ```
 
-The harness listens on port 17700 by default and refuses 7700, the port a
+The harness listens on port 17700 by default and refuses 7700 (however spelled), the port a
 live `lambo serve` writer conventionally holds, unless `--allow-production-port`
 is passed. The spawned serve gets a private `XDG_RUNTIME_DIR` (a `mktemp`
 directory removed on exit), so its session endpoint never lands in the shared
@@ -111,7 +111,8 @@ python3 scripts/loadtest/mcp_load.py \
 ```
 
 `--endpoint` defaults to `http://127.0.0.1:17700/mcp`. An endpoint on port 7700
-is refused unless `--allow-production-port` is passed.
+is refused unless `--allow-production-port` is passed; the port is compared as a
+number, so `07700` is refused too and a non-numeric port is an error.
 
 Stdlib only (urllib + threads), mirroring the streamable-HTTP MCP client in
 `examples/drive_mcp_soak.py`: `initialize` → `notifications/initialized` →
