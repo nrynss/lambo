@@ -224,7 +224,7 @@ impl SessionEndpoint {
     /// is `store_identity`'s read-only `canonicalize`.
     ///
     /// Fails only when the derived path cannot fit [`SUN_PATH_MAX`], which is a
-    /// property of the *base directory*, not of the session name — the name's
+    /// property of the *endpoint directory*, not of the session name — the name's
     /// contribution is bounded by construction. The message therefore points at
     /// the thing the operator can change. [`SessionEndpoint::for_store`] turns
     /// that failure into `None` rather than a refused start (J2-R1-5); this
@@ -234,7 +234,7 @@ impl SessionEndpoint {
         Self::resolve_in(&endpoint_dir(), session, store)
     }
 
-    /// [`SessionEndpoint::resolve`] with the base directory supplied.
+    /// [`SessionEndpoint::resolve`] with the endpoint directory supplied.
     ///
     /// Split out so the derivation is testable without touching process-global
     /// environment: `set_var` is shared by every test in the binary, and two
@@ -266,7 +266,7 @@ impl SessionEndpoint {
             return Err(LamboError::Config(format!(
                 "this session can have no local endpoint: the address would be {len} bytes, over \
                  the {SUN_PATH_MAX}-byte limit a unix socket address has room for. The session \
-                 name is not the problem — its contribution is bounded — the base directory is. \
+                 name is not the problem — its contribution is bounded — the endpoint directory is. \
                  Unset XDG_RUNTIME_DIR to fall back to a short private directory under tmp, or \
                  point it at a shorter path, so other clients on this machine can attach to \
                  this session."
