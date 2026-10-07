@@ -30,7 +30,7 @@ asynchronously to the durable store.
 
 Any number of readers query the store directly and see eventually consistent state.
 Dashboards and the CockroachDB managed MCP server work this way. Readers never write.
-Multi-writer coordination stays out of scope for v0.2.
+Multi-writer coordination stays out of scope as of v0.3.
 
 Real agents drive this. Claude Code and the Cursor Agent CLI each connect over stdio and
 list all seven tools, and two different models have driven the tools autonomously: DeepSeek
