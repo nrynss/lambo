@@ -277,7 +277,13 @@ impl Graph {
         // not measure the next sweep from 0 (which swept once per restart and
         // bumped every `gc_survived` once the lifetime count passed the
         // interval).
-        g.gc_mark = snap.gc_mark;
+        // The reset flag is writer-side only (stored marks are always
+        // `false`): a snapshot that somehow carries it must not make this
+        // fresh writer replace the stored time on its first flush.
+        g.gc_mark = GcMark {
+            last_gc_at_reset: false,
+            ..snap.gc_mark
+        };
         Ok(g)
     }
 
@@ -342,7 +348,12 @@ impl Graph {
             // restart it, or GC's `gc_interval` would measure per-process
             // mutations again.
             mutation_epoch: self.epoch,
-            gc_mark: self.gc_mark,
+            // A snapshot is a stored view: the writer-side re-anchor flag
+            // never leaves the graph this way (only `drain_log` carries it).
+            gc_mark: GcMark {
+                last_gc_at_reset: false,
+                ..self.gc_mark
+            },
         }
     }
 
@@ -2116,6 +2127,36 @@ mod tests {
         g.record_gc_sweep(e - 1, ts(0));
         g.exempt_from_gc_measure(10);
         assert_eq!(g.gc_mark().last_gc_epoch, e, "clamped to the epoch");
+    }
+
+    /// Issue #29 review: the writer-side reset flag never reaches a snapshot
+    /// and never survives `from_snapshot`, while `drain_log` still carries it
+    /// (the flush path is the one place it is meant to travel).
+    #[test]
+    fn the_gc_reset_flag_never_leaves_or_enters_through_a_snapshot() {
+        let mut g = graph_with_writes();
+        g.reanchor_gc_clock(ts(5));
+        assert!(g.gc_mark().last_gc_at_reset);
+        let snap = g.snapshot();
+        assert!(!snap.gc_mark.last_gc_at_reset, "snapshot is a stored view");
+        assert_eq!(snap.gc_mark.last_gc_at, Some(ts(5)));
+        assert!(
+            g.drain_log().gc_mark.last_gc_at_reset,
+            "drain still carries"
+        );
+
+        let flagged = GraphSnapshot {
+            gc_mark: GcMark {
+                last_gc_epoch: 3,
+                last_gc_at: Some(ts(7)),
+                last_gc_at_reset: true,
+            },
+            ..snap
+        };
+        let resumed = Graph::from_snapshot(flagged).unwrap();
+        assert!(!resumed.gc_mark().last_gc_at_reset);
+        assert_eq!(resumed.gc_mark().last_gc_at, Some(ts(7)));
+        assert_eq!(resumed.gc_mark().last_gc_epoch, 3);
     }
 
     fn edge(id: u64, src: NodeId, tgt: NodeId, ty: EdgeType, w: f64) -> Edge {
