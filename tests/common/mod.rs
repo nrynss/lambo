@@ -58,14 +58,33 @@ impl RuntimeDir {
         &self.path
     }
 
-    /// The directory a serve given this runtime dir derives its endpoint in
-    /// (`$XDG_RUNTIME_DIR/lambo`), created private as `bind` would create it.
-    /// For a test that stands in for a holder the spawned serve must find.
+    /// The directory a serve given this runtime dir derives its endpoint in:
+    /// `$XDG_RUNTIME_DIR/lambo`, the first rung of `endpoint_dir_from` in
+    /// `src/mcp/endpoint.rs` (private there, so mirrored here). Creates
+    /// nothing; for a test asserting where the serve does or does not look.
+    pub fn derived_endpoint_dir(&self) -> PathBuf {
+        self.path.join("lambo")
+    }
+
+    /// [`RuntimeDir::derived_endpoint_dir`], created private as `bind` would
+    /// create it. For a test that stands in for a holder the spawned serve must
+    /// find.
     pub fn endpoint_dir(&self) -> PathBuf {
-        let dir = self.path.join("lambo");
+        let dir = self.derived_endpoint_dir();
         if !dir.exists() {
             create_private(&dir);
         }
+        dir
+    }
+
+    /// A private (0700) subdirectory `name` of this runtime dir, created fresh.
+    /// Removed with the runtime dir on drop, so a test that binds a socket in it
+    /// and then panics leaves nothing outside its own directory. `name` must not
+    /// be `lambo`, which is where the spawned serve derives its endpoint.
+    pub fn private_subdir(&self, name: &str) -> PathBuf {
+        assert_ne!(name, "lambo", "that is the serve's own endpoint directory");
+        let dir = self.path.join(name);
+        create_private(&dir);
         dir
     }
 

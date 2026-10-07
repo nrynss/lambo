@@ -181,6 +181,20 @@ fn piggyback_of(v: &serde_json::Value) -> String {
 }
 
 /// A scratch dir plus a `lambo.toml` pointing at a SQLite file inside it.
+/// The endpoint a serve spawned with `runtime` as its `XDG_RUNTIME_DIR` derives
+/// for [`SESSION`] on `db`, through production's own derivation with the
+/// directory supplied — never this process's ambient environment, which is the
+/// operator's live endpoint directory (#15) and can be too long to resolve.
+fn derived_endpoint(runtime: &RuntimeDir, db: &str) -> lambo::mcp::SessionEndpoint {
+    let store_cfg = lambo::store::StoreConfig {
+        kind: lambo::store::StoreKind::Sqlite,
+        path: Some(db.into()),
+        ..lambo::store::StoreConfig::default()
+    };
+    lambo::mcp::SessionEndpoint::resolve_in(&runtime.derived_endpoint_dir(), SESSION, &store_cfg)
+        .expect("a per-test runtime dir is short enough to derive an endpoint in")
+}
+
 fn scratch(tag: &str) -> (std::path::PathBuf, std::path::PathBuf, String) {
     let dir = std::env::temp_dir().join(format!(
         "lambo-j2-{tag}-{}-{}",
@@ -680,25 +694,17 @@ fn a_call_in_flight_when_the_holder_dies_is_answered_rather_than_lost() {
     let runtime = RuntimeDir::new();
     provision(&db);
 
-    // The endpoint the spawned serve will derive for this session and store.
-    // The file name is derived here through the same public function it uses,
-    // so the socket the fake holder binds is the one the proxy's `proxyable`
-    // check demands. The directory is the test's runtime dir, which the spawned
-    // serve is handed as `XDG_RUNTIME_DIR` (#15) — never this process's ambient
-    // one, which is the operator's live endpoint directory.
-    let store_cfg = lambo::store::StoreConfig {
-        kind: lambo::store::StoreKind::Sqlite,
-        path: Some(db.clone()),
-        ..lambo::store::StoreConfig::default()
-    };
-    let endpoint = lambo::mcp::SessionEndpoint::for_store(SESSION, &store_cfg)
-        .expect("a file-backed store is shareable and derives an endpoint");
-    let sock = runtime.endpoint_dir().join(
-        endpoint
-            .path()
-            .file_name()
-            .expect("an endpoint names a socket file"),
+    // The endpoint the spawned serve will derive for this session and store,
+    // derived here through the same production function with the test's runtime
+    // dir — the one the serve is handed as `XDG_RUNTIME_DIR` (#15) — so the
+    // socket the fake holder binds is the one the proxy's `proxyable` check
+    // demands. `endpoint_dir()` creates the directory private, as `bind` would.
+    let endpoint = derived_endpoint(&runtime, &db);
+    assert_eq!(
+        endpoint.path().parent(),
+        Some(runtime.endpoint_dir().as_path())
     );
+    let sock = endpoint.path().to_path_buf();
     let _ = std::fs::remove_file(&sock);
 
     // Take the lease as the fake holder, publishing that endpoint — the row the
@@ -955,12 +961,37 @@ fn a_live_endpoint_with_no_lease_row_is_refused_rather_than_dialled() {
 #[test]
 fn a_base_directory_too_long_for_a_socket_still_serves_its_own_client() {
     let (dir, cfg, db) = scratch("longtmp");
+    let runtime = RuntimeDir::new();
     provision(&db);
 
-    // Long enough that `<dir>/lambo/<38-byte filename>` cannot fit the 104-byte
-    // sun_path bound. Real, because a runtime directory has to be usable.
-    let long_tmp = std::path::PathBuf::from(format!("/tmp/{}", "x".repeat(80)));
-    std::fs::create_dir_all(&long_tmp).expect("a long but real runtime directory");
+    // Long enough that `<long_tmp>/lambo/<filename>` cannot fit a sun_path on
+    // either platform: 104 bytes with the NUL on macOS (the bound production
+    // enforces everywhere), 108 on Linux. Real, because a runtime directory has
+    // to be usable; inside the test's runtime dir, so it is removed on drop.
+    let long_tmp = runtime.private_subdir(&"x".repeat(80));
+    let name = derived_endpoint(&runtime, &db)
+        .path()
+        .file_name()
+        .unwrap()
+        .to_owned();
+    let would_be = long_tmp.join("lambo").join(&name);
+    let would_be_len = would_be.as_os_str().len();
+    assert!(
+        would_be_len + 1 > 108,
+        "this test is only meaningful if the endpoint cannot fit a sun_path on Linux or macOS: \
+         {would_be_len} bytes at {}",
+        would_be.display()
+    );
+    let store_cfg = lambo::store::StoreConfig {
+        kind: lambo::store::StoreKind::Sqlite,
+        path: Some(db.clone()),
+        ..lambo::store::StoreConfig::default()
+    };
+    assert!(
+        lambo::mcp::SessionEndpoint::resolve_in(&long_tmp.join("lambo"), SESSION, &store_cfg)
+            .is_err(),
+        "and production's own derivation must refuse it, or the serve would not degrade"
+    );
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_lambo"))
         .args([
@@ -974,7 +1005,7 @@ fn a_base_directory_too_long_for_a_socket_still_serves_its_own_client() {
             "--transport",
             "stdio",
         ])
-        .env("XDG_RUNTIME_DIR", &long_tmp)
+        .env(RUNTIME_DIR_VAR, &long_tmp)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -1034,7 +1065,6 @@ fn a_base_directory_too_long_for_a_socket_still_serves_its_own_client() {
         .arg(pid.to_string())
         .status();
     let _ = child.wait();
-    let _ = std::fs::remove_dir_all(&long_tmp);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1060,37 +1090,28 @@ fn a_base_directory_too_long_for_a_socket_still_serves_its_own_client() {
 #[test]
 fn a_holder_reachable_only_at_its_own_directory_is_still_forwarded_to() {
     use std::io::Write as _;
-    use std::os::unix::fs::DirBuilderExt as _;
     use std::os::unix::net::UnixListener;
 
     let (dir, cfg, db) = scratch("crossdir");
     let runtime = RuntimeDir::new();
     provision(&db);
 
-    let store_cfg = lambo::store::StoreConfig {
-        kind: lambo::store::StoreKind::Sqlite,
-        path: Some(db.clone()),
-        ..lambo::store::StoreConfig::default()
-    };
-    let ours = lambo::mcp::SessionEndpoint::for_store(SESSION, &store_cfg)
-        .expect("a file-backed store is shareable");
+    // Exactly the address the spawned serve derives from its `XDG_RUNTIME_DIR`
+    // (#15); the holder below publishes the same name in another directory.
+    let ours = derived_endpoint(&runtime, &db);
     let name = ours.path().file_name().unwrap().to_owned();
 
     // A directory the spawned serve will NOT derive — standing in for the other
     // client product's inherited environment. Private and self-owned, because
-    // the dial side runs the same check the bind side does.
-    let elsewhere = std::path::PathBuf::from(format!("/tmp/lbx{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&elsewhere);
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&elsewhere)
-        .expect("a private directory the serve would not derive");
+    // the dial side runs the same check the bind side does. Inside the test's
+    // runtime dir, so a panic below cannot leave the bound socket in /tmp.
+    let elsewhere = runtime.private_subdir("x");
     let sock = elsewhere.join(&name);
     assert_ne!(
         sock.as_path(),
         ours.path(),
-        "this test is only meaningful if the two directories differ"
+        "this test is only meaningful if the holder's directory differs from the one the \
+         spawned serve derives"
     );
 
     let holder =
@@ -1158,7 +1179,6 @@ fn a_holder_reachable_only_at_its_own_directory_is_still_forwarded_to() {
     b.sigterm();
     let _ = b.child.wait();
     let _ = holder_thread.join();
-    let _ = std::fs::remove_dir_all(&elsewhere);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1257,32 +1277,23 @@ fn a_holder_whose_lease_outlasts_the_client_budget_is_refused_at_once() {
 /// may be a whole `LEASE_HEARTBEAT_INTERVAL` old.
 #[test]
 fn a_holder_whose_endpoint_refuses_is_not_described_as_still_refreshing() {
-    use std::os::unix::fs::DirBuilderExt as _;
-
     let (dir, cfg, db) = scratch("deadendpoint");
     let runtime = RuntimeDir::new();
     provision(&db);
 
-    let store_cfg = lambo::store::StoreConfig {
-        kind: lambo::store::StoreKind::Sqlite,
-        path: Some(db.clone()),
-        ..lambo::store::StoreConfig::default()
-    };
-    let ours = lambo::mcp::SessionEndpoint::for_store(SESSION, &store_cfg)
-        .expect("a file-backed store is shareable");
-    let name = ours.path().file_name().unwrap().to_owned();
+    let name = derived_endpoint(&runtime, &db)
+        .path()
+        .file_name()
+        .unwrap()
+        .to_owned();
 
     // A private, self-owned directory so the dial-side directory check passes and
     // the probe gets as far as the connect — which is the outcome under test.
     // Nothing is ever bound at the path, which is exactly what an abruptly dead
     // holder leaves behind once its socket has been cleaned up.
-    let gone = std::path::PathBuf::from(format!("/tmp/lbdead{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&gone);
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&gone)
-        .expect("a private directory for an endpoint that is not there");
+    // Inside the test's runtime dir (and not its `lambo` subdirectory, which
+    // the spawned serve derives), so nothing is left in /tmp on a panic.
+    let gone = runtime.private_subdir("dead");
     let sock = gone.join(&name);
 
     let holder =
@@ -1335,6 +1346,5 @@ fn a_holder_whose_endpoint_refuses_is_not_described_as_still_refreshing() {
         "and the operator needs the conclusion the probe supports: {err}"
     );
 
-    let _ = std::fs::remove_dir_all(&gone);
     let _ = std::fs::remove_dir_all(&dir);
 }
