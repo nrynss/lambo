@@ -26,13 +26,18 @@
 //!    scaled by [`crate::types::ConceptType::eviction_resistance`] (ALGO-11).
 //!    See [`MIN_CONCEPT_SCORE`] for the calibration and its evidence.
 //!
-//!    Three protections (issue #29) keep the score cut from deleting reasoning
+//!    Four protections (issue #29) keep the score cut from deleting reasoning
 //!    by session age once sweeps run daily:
 //!
 //!    * **Logic and Constraint are exempt from the score cut**
 //!      ([`exempt_from_score_cut`]). They are still collected as orphans or
 //!      disconnected components — those clauses are structural, not
 //!      age-based.
+//!    * **A Resource with dependents is spared the score cut**
+//!      ([`resources_with_dependents`], operator decision): another concept has
+//!      a `Dependency`/`Causal`/`Hierarchical` edge into it, or its blast radius
+//!      is non-zero. An isolated, untouched Resource still ages out. Counted in
+//!      [`GcOutcome::resources_spared_by_dependents`].
 //!    * **Eviction recency is time since last touch** over a fixed
 //!      [`GC_RECENCY_WINDOW`] ([`eviction_recency`]), not position in the
 //!      session's interaction span, so a session growing older does not by
@@ -336,6 +341,10 @@ pub struct GcOutcome {
     /// Why the daemon ran this sweep. `None` when `run` was called directly
     /// (tests, tooling); the daemon fills it in.
     pub trigger: Option<GcTrigger>,
+    /// Step 2: Resources that scored under their bar this sweep and were kept
+    /// only because they have dependents ([`resources_with_dependents`], issue
+    /// #29 operator decision).
+    pub resources_spared_by_dependents: usize,
 }
 
 impl GcOutcome {
@@ -389,6 +398,9 @@ pub fn run(graph: &mut Graph, params: GcParams) -> GcOutcome {
     // cut, not from the orphan clause (issue #29).
     let ctx = crate::daemon::score::SessionContext::compute(graph);
     let frequency_is_live = graph.concepts().any(|c| c.access_count > 0);
+    // Issue #29 operator decision: a Resource with dependents is spared the
+    // score cut (see `resources_with_dependents`). Computed once, post-step-1.
+    let depended_on = resources_with_dependents(graph);
     let mut orphans: Vec<NodeId> = Vec::new();
     let mut below: Vec<(f64, NodeId)> = Vec::new();
     for c in graph.concepts() {
@@ -405,6 +417,10 @@ pub fn run(graph: &mut Graph, params: GcParams) -> GcOutcome {
         let score = eviction_score(graph, c, &ctx, params, frequency_is_live);
         let bar = eviction_threshold(params.min_concept_score, c.concept_type);
         if score < bar {
+            if depended_on.contains(&c.id) {
+                outcome.resources_spared_by_dependents += 1;
+                continue;
+            }
             below.push((score / bar, c.id));
         }
     }
@@ -590,6 +606,59 @@ pub fn collection_cap(unprotected: usize, params: GcParams) -> usize {
 /// connected; nothing a later sweep learns changes that.
 pub fn exempt_from_score_cut(ty: ConceptType) -> bool {
     matches!(ty, ConceptType::Logic | ConceptType::Constraint)
+}
+
+/// Resources the step-2 score cut must not collect because other concepts
+/// depend on them (issue #29 operator decision, 2026-10-07).
+///
+/// "Dependents" uses the two senses the codebase already gives the word, over
+/// the structural edge kinds blast radius counts
+/// ([`crate::recall::format::STRUCTURAL_EDGE_TYPES`]: `Dependency`, `Causal`,
+/// `Hierarchical`; never `Derives`, `Temporal`, `CoOccurrence` or `Semantic`),
+/// and only concept-to-concept edges with a source other than the Resource
+/// itself (a self-loop is not a dependent):
+///
+/// * **Incoming** — another concept has a structural edge **into** the
+///   Resource. This is `record_action`'s direction (`src/graph/action.rs`):
+///   the action node is the source of `Dependency` edges to what it depends
+///   on and of `Causal` edges to what it produces or modifies, so a Resource
+///   that some action depends on, produced or modified has one. This is the
+///   operator's rule as stated.
+/// * **Blast radius** — the Resource has a non-zero blast radius
+///   ([`crate::recall::format::blast_radius`]): some concept's *only*
+///   structural source is this Resource, which is exactly what the load-bearing
+///   warning reports as "N nodes depend on this". This is the outgoing side:
+///   a `record_action` node is the sole source of the Resources it alone
+///   produced or depends on.
+///
+/// The second sense is included because the first alone erodes from the
+/// source end: an action node usually has no incoming structural edge, so it
+/// would be collected, its targets would lose their only incoming edge with it,
+/// and the next sweep would collect them too — the dependency graph blast
+/// radius reads would disappear one layer per day.
+///
+/// Only the score cut honours this. A Resource with no structural edge at all
+/// (an isolated, untouched one) ages out under [`eviction_recency`] like any
+/// other concept, and orphan and disconnected-component cleanup are unchanged.
+pub fn resources_with_dependents(graph: &Graph) -> HashSet<NodeId> {
+    let is_resource = |id: NodeId| {
+        matches!(
+            graph.node(id),
+            Some(crate::types::Node::Concept(c)) if c.concept_type == ConceptType::Resource
+        )
+    };
+    let mut out = HashSet::new();
+    for (dst, srcs) in crate::recall::format::inbound_sources(graph) {
+        if is_resource(dst) && srcs.iter().any(|s| *s != dst) {
+            out.insert(dst);
+        }
+        if let [only] = srcs.as_slice() {
+            if *only != dst && is_resource(*only) {
+                out.insert(*only);
+            }
+        }
+    }
+    out
 }
 
 /// GC's eviction recency for one concept (issue #29): `1 − age / window`,
@@ -1904,6 +1973,85 @@ mod tests {
         ] {
             assert!(!exempt_from_score_cut(ty), "{ty:?} stays under the cut");
         }
+    }
+
+    /// Issue #29 operator decision: a Resource that other concepts depend on
+    /// survives the score cut; an isolated, untouched one ages out. Both
+    /// senses of "dependents" are covered — the incoming edge `record_action`
+    /// writes into what an action depends on (23) and produced (24), and the
+    /// action node itself (22), whose blast radius is non-zero because it is
+    /// the only structural source of 23. 25 has only its Derives edge and is
+    /// collected. A Resource whose only structural edge is a self-loop has no
+    /// dependent (26).
+    #[test]
+    fn resources_with_dependents_survive_the_score_cut_isolated_ones_age_out() {
+        let mut g = hub_session(&[
+            (22, ConceptType::Resource),
+            (23, ConceptType::Resource),
+            (24, ConceptType::Resource),
+            (25, ConceptType::Resource),
+            (26, ConceptType::Resource),
+            (27, ConceptType::Entity),
+        ]);
+        // record_action shape: action 22 -> depends_on 23, action 22 -> produces 24.
+        g.upsert_edge(edge(200, 22, 23, EdgeType::Dependency, 1.0, 0))
+            .unwrap();
+        g.upsert_edge(edge(201, 22, 24, EdgeType::Causal, 1.0, 0))
+            .unwrap();
+        // 24 has a second producer, so 22 is not its sole source; 24 is still
+        // depended on (incoming), and 27 (an Entity) is not protected by this.
+        g.upsert_edge(edge(202, 27, 24, EdgeType::Causal, 1.0, 0))
+            .unwrap();
+        g.upsert_edge(edge(203, 26, 26, EdgeType::Dependency, 1.0, 0))
+            .unwrap();
+        let protected = resources_with_dependents(&g);
+        assert!(protected.contains(&nid(22)), "blast radius > 0");
+        assert!(protected.contains(&nid(23)), "incoming Dependency");
+        assert!(protected.contains(&nid(24)), "incoming Causal");
+        assert!(!protected.contains(&nid(25)), "isolated");
+        assert!(
+            !protected.contains(&nid(26)),
+            "a self-loop is not a dependent"
+        );
+        assert!(!protected.contains(&nid(27)), "only Resources are spared");
+
+        let params = GcParams {
+            min_concept_score: 5.0,
+            ..aged_params()
+        };
+        let outcome = run(&mut g, params);
+        for kept in [22u64, 23, 24] {
+            assert!(
+                g.node(nid(kept)).is_some(),
+                "Resource {kept} has dependents and must survive the score cut"
+            );
+        }
+        assert!(outcome.concepts_collected.contains(&nid(25)));
+        assert!(outcome.concepts_collected.contains(&nid(26)));
+        assert!(outcome.concepts_collected.contains(&nid(27)));
+        assert_eq!(outcome.resources_spared_by_dependents, 3);
+    }
+
+    /// An isolated Resource touched recently survives on recency alone, and
+    /// the same Resource left untouched past the window is collected: the
+    /// dependents rule does not freeze Resources in general.
+    #[test]
+    fn an_isolated_resource_survives_while_fresh_and_ages_out_untouched() {
+        let mut fresh = hub_session(&[(25, ConceptType::Resource)]);
+        let outcome = run(&mut fresh, default_params());
+        assert!(!outcome.concepts_collected.contains(&nid(25)));
+        assert!(fresh.node(nid(25)).is_some());
+
+        let mut old = hub_session(&[(25, ConceptType::Resource)]);
+        let outcome = run(
+            &mut old,
+            GcParams {
+                min_concept_score: 5.0,
+                ..aged_params()
+            },
+        );
+        assert!(outcome.concepts_collected.contains(&nid(25)));
+        assert_eq!(outcome.resources_spared_by_dependents, 0);
     }
 
     /// The exemption is from the score cut only: a Logic concept with no edge

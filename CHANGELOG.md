@@ -228,6 +228,13 @@
     still use the span-relative score. Collections per sweep are capped at
     `max(32, 5%)` of unprotected concepts; a sweep that hits the cap logs a
     warning and reports `GcOutcome::collections_deferred`.
+  - **Resources with dependents are kept (operator decision).** The score cut
+    no longer collects a Resource that another concept has a `Dependency`,
+    `Causal` or `Hierarchical` edge into (what `record_action` writes into the
+    things an action depends on, produces or modifies), nor one whose blast
+    radius is non-zero (the action node that is the only structural source of
+    something). Isolated, untouched Resources still age out over the 90-day
+    window. Reported as `GcOutcome::resources_spared_by_dependents`.
   - On a copy of the Metal rig store the first sweep now collects 159
     Observations and nothing else (was 537, including 42 Logic); collection no
     longer grows with session span alone (span +60 days with the clock fixed:
