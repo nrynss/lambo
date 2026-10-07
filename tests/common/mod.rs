@@ -47,8 +47,16 @@ pub const RUNTIME_DIR_VAR: &str = "XDG_RUNTIME_DIR";
 /// and, so a variable added later is covered without editing a list, every
 /// `LAMBO_`-prefixed variable present in this process. A test that means to set
 /// one does so on the returned command, after this clears it.
+///
+/// `RUST_LOG` is cleared too: the serve's log filter reads it (`init_tracing`),
+/// and the tests that wait on a serve log line ("session attached", "proxying
+/// to the session holder", ...) only see it at the default `lambo=info`. A
+/// shell exporting `RUST_LOG=warn` would silence those lines and turn the wait
+/// into a 25 s timeout. A test that needs a different level sets `RUST_LOG`
+/// on the returned command explicitly, after this clears it.
 pub fn lambo_command() -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_lambo"));
+    cmd.env_remove("RUST_LOG");
     for k in lambo::RESOLVE_ENV_VARS {
         cmd.env_remove(k);
     }
