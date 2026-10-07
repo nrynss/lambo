@@ -4,6 +4,26 @@
 
 ### Breaking
 
+- GC sweep accounting is durable and GC's step-2 cut changed (issue #29). Public
+  structs gained fields, so struct-literal construction breaks where
+  `..Default::default()` is not used: `MutationBatch::gc_mark` and
+  `GraphSnapshot::gc_mark` (new `lambo::types::GcMark`; serde-defaulted and
+  omitted when unset, so pre-#29 JSON round-trips unchanged),
+  `Config::{gc_max_interval, gc_idle_floor}`,
+  `DaemonConfig::{gc_max_interval_secs, gc_idle_floor}`,
+  `CycleParams::{gc_max_interval, gc_idle_floor}`,
+  `GcParams::{recency_window, max_collect_fraction, min_collect_cap}` and
+  `GcOutcome::{collection_cap, collections_deferred, trigger}`.
+  **Operator action:** the schema gains `sessions.last_gc_epoch` and
+  `sessions.last_gc_at` on all three dialects, so an already-provisioned
+  store (SQLite included: the attach preflight reads the DDL) refuses to
+  attach until `lambo provision` re-runs; provisioning adds the columns in
+  place (guarded `ALTER`, no data touched). If the rigs have not yet been re-provisioned for
+  #17's `mutation_epoch`, one re-provision covers both. Existing rows backfill
+  watermark 0 and no sweep time: the first writer to attach starts the
+  `gc_max_interval` clock rather than sweeping, so the first timed sweep comes
+  a day (and at least 100 mutations) after the upgrade.
+
 - `lambo::canon::gate_progress` takes a `PromotionPolicy` argument (fourth
   position, before `min_edge_age`). It decides whether the four store-evidence
   gates are measured at all, so the caller cannot be trusted to check it: under
@@ -187,6 +207,32 @@
   now released before the proxy starts. The model is still loaded while the
   backends resolve and through the election wait, until the role is known
   (tracked in #31). Pre-existing, found in the issue #13 review.
+- GC sweeps at human pace without deleting reasoning by session age
+  (issue #29). Behaviour changes, each deliberate:
+  - **Restarts no longer sweep.** GC's watermark was per-process state starting
+    at 0, so once a session passed `gc_interval` lifetime mutations every writer
+    restart swept once and bumped every `gc_survived` — three restarts reached
+    Stage 1's floor with no new information. The watermark and the time of the
+    last sweep now persist with the session beside `mutation_epoch` (stamped on
+    every flushed batch, merged monotonically in the flush transaction,
+    resumed on load). A never-swept session keeps #17's single catch-up sweep.
+  - **Timed sweeps.** A session also sweeps once `[daemon] gc_max_interval_secs`
+    (default 86 400) has passed since its last sweep, if it took at least
+    `[daemon] gc_idle_floor` (default 100) mutations since. Idle sessions never
+    sweep on time; a writer down for N days sweeps once. The 10 000-mutation
+    trigger and every promotion threshold are unchanged.
+  - **Step 2 protects reasoning.** Logic and Constraint are exempt from the
+    score cut (orphans and disconnected components are still collected). GC's
+    eviction recency is now time since last touch over a fixed 90-day window
+    instead of position in the session span; recall ranking and canonization
+    still use the span-relative score. Collections per sweep are capped at
+    `max(32, 5%)` of unprotected concepts; a sweep that hits the cap logs a
+    warning and reports `GcOutcome::collections_deferred`.
+  - On a copy of the Metal rig store the first sweep now collects 159
+    Observations and nothing else (was 537, including 42 Logic); collection no
+    longer grows with session span alone (span +60 days with the clock fixed:
+    159, was 1,049). Untouched sparse concepts still age out once older than
+    the window. Details in `dev-diary/notes/gc-time-bound-29.md`.
 - Canonization now fires in long-running low-write deployments: the mutation
   epoch the GC interval measures persists with the session instead of resetting
   on every writer start (issue #17). Thirteen days of dogfooding produced zero
