@@ -263,6 +263,44 @@ pub struct MemoryStats {
     pub canonization_failures: u64,
 }
 
+/// GC's sweep accounting for `lambo_stats` (issue #29): read-side only.
+///
+/// `last_gc_at` / `last_gc_epoch` are the session's durable sweep mark (they
+/// survive a writer restart). `last_sweep` is the most recent sweep **this
+/// process** ran, so it is `None` after a restart until the next sweep even
+/// when `last_gc_at` is set.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GcStats {
+    /// When the last sweep ran, or when a never-swept session's clock was
+    /// anchored. `None` until either happens.
+    pub last_gc_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// The epoch GC's next interval and idle floor are measured from.
+    pub last_gc_epoch: u64,
+    /// The last sweep this process ran, if any.
+    pub last_sweep: Option<GcSweepSummary>,
+}
+
+/// One sweep's headline numbers (issue #29), from
+/// [`crate::daemon::gc::GcOutcome`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GcSweepSummary {
+    /// Why it ran; `None` only for a sweep not started by the daemon.
+    pub trigger: Option<crate::daemon::gc::GcTrigger>,
+    /// Concepts collected (steps 2 and 3).
+    pub collected: usize,
+    /// Candidates the per-sweep cap held back.
+    pub deferred: usize,
+    /// The cap it ran under.
+    pub collection_cap: usize,
+    /// Did the cap hold anything back?
+    pub cap_bound: bool,
+    /// Resources under their bar kept only because they have dependents.
+    pub resources_spared_by_dependents: usize,
+    /// Survivor bumps still waiting to be drained from that sweep **at the
+    /// time it ran** (not live).
+    pub survivors_deferred: usize,
+}
+
 // ---------------------------------------------------------------------------
 // Second-writer detection (T81-8)
 // ---------------------------------------------------------------------------
@@ -2243,6 +2281,25 @@ impl Memory {
         };
         drop(g);
         stats
+    }
+
+    /// GC's sweep accounting (issue #29): the durable mark from the graph and
+    /// the last sweep this process ran. Read-only; see [`GcStats`].
+    pub fn gc_stats(&self) -> GcStats {
+        let mark = self.graph.read().gc_mark();
+        GcStats {
+            last_gc_at: mark.last_gc_at,
+            last_gc_epoch: mark.last_gc_epoch,
+            last_sweep: self.daemon.last_gc().map(|o| GcSweepSummary {
+                trigger: o.trigger,
+                collected: o.concepts_collected.len(),
+                deferred: o.collections_deferred,
+                collection_cap: o.collection_cap,
+                cap_bound: o.cap_bound(),
+                resources_spared_by_dependents: o.resources_spared_by_dependents,
+                survivors_deferred: o.survivors_pending.len(),
+            }),
+        }
     }
 
     /// Subscribe to `Conflict` / `Drift` / `Stale` / `HighRisk` / `Canonized`

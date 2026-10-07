@@ -890,6 +890,49 @@ async fn contain_panic(
 /// `AgentId` itself stay uncapped (trusted, process-side).
 const MAX_AGENT_ID_CHARS: usize = 256;
 
+/// The text half of the `gc` object, one line on the `lambo_stats` summary.
+fn gc_summary_line(g: &crate::memory::GcStats) -> String {
+    let at = g
+        .last_gc_at
+        .map(|t| t.to_rfc3339())
+        .unwrap_or_else(|| "never".into());
+    match &g.last_sweep {
+        None => format!(
+            "gc: last_gc_at={at} last_gc_epoch={} last_sweep=none (this process)",
+            g.last_gc_epoch
+        ),
+        Some(s) => format!(
+            "gc: last_gc_at={at} last_gc_epoch={} last_sweep trigger={} collected={} \
+             deferred={} cap={} cap_bound={}",
+            g.last_gc_epoch,
+            s.trigger.map(|t| t.as_str()).unwrap_or("direct"),
+            s.collected,
+            s.deferred,
+            s.collection_cap,
+            s.cap_bound
+        ),
+    }
+}
+
+/// `lambo_stats`' `gc` object (issue #29) — one builder for the tool and the
+/// I2 heartbeat. `last_gc_at` is RFC 3339 or null; `last_sweep` is null until
+/// this process has swept.
+fn gc_stats_json(g: &crate::memory::GcStats) -> serde_json::Value {
+    json!({
+        "last_gc_at": g.last_gc_at.map(|t| t.to_rfc3339()),
+        "last_gc_epoch": g.last_gc_epoch,
+        "last_sweep": g.last_sweep.as_ref().map(|s| json!({
+            "trigger": s.trigger.map(|t| t.as_str()),
+            "collected": s.collected,
+            "deferred": s.deferred,
+            "collection_cap": s.collection_cap,
+            "cap_bound": s.cap_bound,
+            "resources_spared_by_dependents": s.resources_spared_by_dependents,
+            "survivors_deferred": s.survivors_deferred,
+        })),
+    })
+}
+
 impl LamboServer {
     /// Wrap a live [`Memory`]. The `Arc` is the point: every clone of this
     /// server — one per HTTP request, in the streamable-http transport — shares
@@ -1034,6 +1077,11 @@ impl LamboServer {
             // live `Config`, so it reports the value that WON — file, env, or
             // default — rather than any one of the three inputs.
             "promotion_policy": self.mem.config().promotion_policy.as_str(),
+            // Issue #29: GC's sweep accounting, read-side only. An additive
+            // key: `last_gc_at`/`last_gc_epoch` are the durable mark,
+            // `last_sweep` the last sweep THIS process ran (null after a
+            // restart until the next one).
+            "gc": gc_stats_json(&self.mem.gc_stats()),
         });
         // I1: dropped lines are reported next to written ones so a gap in the
         // ledger is never mistaken for a gap in the traffic. Emitted ONLY when
@@ -2229,7 +2277,8 @@ impl LamboServer {
              embedded={}/{}\n\
              flush_lag={:?} log_depth={} flush_depth={} dead_lettered={} degraded={}\n\
              epoch={} daemon_cycles={} canonization_cycles={} canonization_failures={}\n\
-             promotion_policy={}",
+             promotion_policy={}\n\
+             {}",
             s.session.0,
             s.agent.0,
             s.node_count,
@@ -2251,6 +2300,7 @@ impl LamboServer {
             // reading the tool output should not have to open the structured
             // payload to learn which policy the cycle counts above belong to.
             self.mem.config().promotion_policy.as_str(),
+            gc_summary_line(&self.mem.gc_stats()),
         );
         // One payload builder shared with the I2 heartbeat, so a heartbeat can
         // never report different numbers than the tool. With `--ledger` off
@@ -3457,6 +3507,91 @@ mod tests {
             CanonizationStatus::None,
             "the same lone-writer corpus must not silently change Swarm"
         );
+    }
+
+    /// Issue #29: `lambo_stats` carries a `gc` object — the durable sweep mark
+    /// and the last sweep this process ran (null before one) — and a matching
+    /// summary line. Read-side only: asking twice changes nothing.
+    #[tokio::test]
+    async fn stats_reports_gc_sweep_accounting() {
+        let s = server("mcp-gc-stats").await;
+        let epoch_before = s.mem.stats().epoch;
+        // The daemon's first cycle may anchor the clock concurrently, so the
+        // payload must match the mark read just before or just after it.
+        let before = s.mem.gc_stats();
+        let stats = call(&s, "lambo_stats", json!({"agent_id": "agent-a"})).await;
+        let after = s.mem.gc_stats();
+        let payload = stats.structured_content.expect("stats payload");
+        let gc = payload["gc"].as_object().expect("gc object");
+        let matches = |m: &crate::memory::GcStats| {
+            gc["last_gc_epoch"] == json!(m.last_gc_epoch)
+                && gc["last_gc_at"] == json!(m.last_gc_at.map(|t| t.to_rfc3339()))
+        };
+        assert!(matches(&before) || matches(&after), "{payload}");
+        assert!(gc["last_sweep"].is_null(), "no sweep yet: {payload}");
+        let summary = payload["summary"].as_str().unwrap();
+        assert!(
+            summary.contains("gc: last_gc_at=") && summary.contains("last_sweep=none"),
+            "{summary}"
+        );
+        let again = call(&s, "lambo_stats", json!({"agent_id": "agent-a"})).await;
+        assert_eq!(
+            again.structured_content.unwrap()["epoch"],
+            json!(epoch_before),
+            "reading GC stats writes nothing"
+        );
+        s.mem.close().await.expect("close");
+    }
+
+    /// The `gc` object and line render a completed sweep's numbers.
+    #[test]
+    fn gc_stats_json_and_line_render_a_sweep() {
+        use chrono::TimeZone;
+        let at = chrono::Utc.with_ymd_and_hms(2026, 10, 7, 9, 0, 0).unwrap();
+        let g = crate::memory::GcStats {
+            last_gc_at: Some(at),
+            last_gc_epoch: 1234,
+            last_sweep: Some(crate::memory::GcSweepSummary {
+                trigger: Some(crate::daemon::gc::GcTrigger::Elapsed),
+                collected: 32,
+                deferred: 7,
+                collection_cap: 32,
+                cap_bound: true,
+                resources_spared_by_dependents: 5,
+                survivors_deferred: 2_700,
+            }),
+        };
+        assert_eq!(
+            gc_stats_json(&g),
+            json!({
+                "last_gc_at": "2026-10-07T09:00:00+00:00",
+                "last_gc_epoch": 1234,
+                "last_sweep": {
+                    "trigger": "elapsed",
+                    "collected": 32,
+                    "deferred": 7,
+                    "collection_cap": 32,
+                    "cap_bound": true,
+                    "resources_spared_by_dependents": 5,
+                    "survivors_deferred": 2700,
+                },
+            })
+        );
+        assert_eq!(
+            gc_summary_line(&g),
+            "gc: last_gc_at=2026-10-07T09:00:00+00:00 last_gc_epoch=1234 last_sweep \
+             trigger=elapsed collected=32 deferred=7 cap=32 cap_bound=true"
+        );
+        let none = crate::memory::GcStats {
+            last_gc_at: None,
+            last_gc_epoch: 0,
+            last_sweep: None,
+        };
+        assert_eq!(
+            gc_stats_json(&none),
+            json!({"last_gc_at": null, "last_gc_epoch": 0, "last_sweep": null})
+        );
+        assert!(gc_summary_line(&none).contains("last_gc_at=never"));
     }
 
     /// P2-b: `lambo_stats` names the live promotion policy, in both halves of

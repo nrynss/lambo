@@ -323,6 +323,16 @@ pub enum GcTrigger {
     Elapsed,
 }
 
+impl GcTrigger {
+    /// The wire name: `"mutations"` or `"elapsed"` (`lambo_stats`' GC block).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            GcTrigger::Mutations => "mutations",
+            GcTrigger::Elapsed => "elapsed",
+        }
+    }
+}
+
 /// The sweep trigger (issue #29): is a sweep due, and why?
 ///
 /// `since` is the session mutations since the last sweep — `epoch -
