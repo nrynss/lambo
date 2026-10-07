@@ -4,7 +4,7 @@
 //! GC = writer), embeds the query only when the store claims `VECTOR_SEARCH`,
 //! and prints the T5.3 context block.
 //!
-//! H3: the public [`run`] stays a thin wrapper over [`run_detailed`], the
+//! H3: the public [`run`] stays a thin wrapper over `run_detailed`, the
 //! single-execution seam that produces BOTH the operator-visible string and
 //! the structured presentation model the HTTP `/api/recall` payload is
 //! serialized from. The CLI string and the HTTP `context` are the same

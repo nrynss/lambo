@@ -7,11 +7,11 @@
 //! session is the corruption it guards against. That refusal is correct for
 //! every ordinary attach — and exactly wrong for the one operation that ENDS a
 //! mixed-space risk instead of creating one. `re-embed` attaches through
-//! [`crate::memory::MemoryBuilder::reembed_mode`], embeds every concept
+//! `crate::memory::MemoryBuilder::reembed_mode`, embeds every concept
 //! content outside any lock, then appends the whole rewrite as one ordered
 //! batch via [`crate::graph::Graph::reembed_all`]: every `UpsertNode` first,
 //! the trailing `SetEmbedding` last. The final flush in
-//! [`super::close_writer`] drains that batch transactionally with the lease
+//! `super::close_writer` drains that batch transactionally with the lease
 //! token (one store transaction per batch), so the durable session goes
 //! old-consistent → new-consistent with no observable window in between —
 //! and on a crash mid-migration the old contract and old vectors survive

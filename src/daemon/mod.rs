@@ -373,7 +373,7 @@ impl Daemon {
     /// warning rather than failing the read.
     /// Three-phase recall (spec §8; P5), projected onto the public flattened
     /// [`RecallResult`] from the same single execution that builds the H3
-    /// presentation model ([`Self::recall_detailed`]).
+    /// presentation model (`Self::recall_detailed`).
     pub async fn recall(
         &self,
         session: &SessionId,

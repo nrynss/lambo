@@ -96,7 +96,7 @@ const MAX_BATCH_BYTES: usize = 1 << 20;
 /// Bounded on purpose: an unresponsive filesystem must not hold process exit
 /// hostage. Exceeding it loses at most **[`CHANNEL_CAPACITY`] lines plus one
 /// in-flight batch** (the batch the writer is holding inside its `write`, itself
-/// bounded by [`MAX_BATCH_BYTES`]) — and those lines are *counted*, as
+/// bounded by `MAX_BATCH_BYTES`) — and those lines are *counted*, as
 /// `dropped_write_failed`, by [`Ledger::shutdown`] before it returns. The policy
 /// is documented, bounded and visible rather than a surprise.
 pub const SHUTDOWN_DRAIN: Duration = Duration::from_millis(500);
@@ -199,7 +199,7 @@ impl LedgerCounters {
     ///
     /// Bounded by [`CHANNEL_CAPACITY`] plus one in-flight batch. Subtracts
     /// `write_failed` and **not** `dropped`, for the reason on
-    /// [`LedgerCounters::accepted`]: a `channel_full` drop was never accepted, so
+    /// `LedgerCounters::accepted`: a `channel_full` drop was never accepted, so
     /// subtracting it would understate the depth by exactly the backpressure
     /// count — and would drive this key back to `0` in the stalled-and-full case
     /// it exists to make visible.
@@ -412,7 +412,7 @@ impl Ledger {
     /// was still holding are **counted as drops before this returns** — the
     /// sender is already gone, so `accepted - written - write_failed` is exactly
     /// what the abandoned writer had in hand plus whatever is still queued,
-    /// bounded by [`CHANNEL_CAPACITY`] plus one [`MAX_BATCH_BYTES`] batch.
+    /// bounded by [`CHANNEL_CAPACITY`] plus one `MAX_BATCH_BYTES` batch.
     pub fn shutdown(&self) {
         // Dropping the sender is what tells the writer loop to finish.
         drop(self.tx.lock().take());
@@ -608,7 +608,7 @@ pub fn stats_line(stats: Value, uptime: Duration) -> Value {
 /// A serve that loses the lease — and so exits before it can open a ledger, or
 /// opens one only *after* acquiring — was structurally invisible to I1. This
 /// line is the fix's first half: it is appended the moment the ledger opens,
-/// before [`crate::mcp::serve`]'s `resolve_role` makes its first lease-acquire
+/// before [`crate::mcp::serve`](mod@crate::mcp::serve)'s `resolve_role` makes its first lease-acquire
 /// attempt, so even a serve that is about to lose the lease has already left an
 /// artifact recording that it tried.
 pub fn startup_line(session: &str, agent: &str, transport: &str) -> Value {

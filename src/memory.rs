@@ -740,7 +740,7 @@ impl MemoryBuilder {
     /// Where this writer can be reached, published into the lease row's
     /// `endpoint` column when the lease is acquired (J2).
     ///
-    /// Set by [`crate::mcp::serve`] and by nothing else. A `serve` process is
+    /// Set by [`crate::mcp::serve`](mod@crate::mcp::serve) and by nothing else. A `serve` process is
     /// the only writer another process can forward MCP tool calls to, so it is
     /// the only one whose address is worth recording; unset — every CLI writer
     /// verb, every library caller, every test — leaves the column NULL, which a
@@ -1608,7 +1608,7 @@ impl Memory {
     /// server-authority rule is about *observed-at* claims, not about-time,
     /// which no store-side clock could know. Canonization's age floors,
     /// coverage bar and session separation then measure the replayed history
-    /// on its own timeline; see [`crate::canon::event_time`].
+    /// on its own timeline; see `crate::canon::event_time`.
     ///
     /// Passing `None` is exactly [`Memory::derive`]: the fallback rule makes
     /// the interaction behave as if D never happened.
@@ -2473,7 +2473,7 @@ impl Memory {
     ///    log (R3-1).
     ///
     ///    **J3's write pipeline is drained inside this step, and BEFORE the
-    ///    gate is taken** ([`crate::writeq::WritePipeline::quiesce`]). The
+    ///    gate is taken** (`crate::writeq::WritePipeline::quiesce`). The
     ///    order is forced, not chosen: the gate's write side is held for the
     ///    rest of this method, so a background worker that had to pass through
     ///    the gate could never finish and a `close` waiting for it would

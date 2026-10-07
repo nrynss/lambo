@@ -412,7 +412,7 @@ fn plan(graph: &Graph, action: &Action) -> Result<Plan, LamboError> {
 /// **before** deciding to write — J3's asynchronous ack path
 /// ([`crate::Memory::record_action_async_as`]).
 ///
-/// Runs the real steps 2 to 4 through [`plan`] and discards the plan, so the
+/// Runs the real steps 2 to 4 through `plan` and discards the plan, so the
 /// errors an agent can fix (an unresolvable content, an empty canonical key, an
 /// edge that would close a cycle) surface at call time instead of on a receipt.
 /// Nothing is written whether it passes or fails.

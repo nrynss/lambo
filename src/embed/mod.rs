@@ -57,7 +57,7 @@ impl EmbedError {
     ///   or reached and answered with a status the rule table classes as
     ///   transient or unclassified. The shipped BGE-M3 adapter produces it
     ///   from a transport failure (`llama.cpp unreachable`) and from every
-    ///   status in [`crate::embed::bge_m3::classify_status`]'s `Transient` /
+    ///   status in `crate::embed::bge_m3::classify_status`'s `Transient` /
     ///   `Unclassified` classes (408/425/429/500/502/503/504, any un-named
     ///   5xx, and unrecognised statuses). Nothing about the *input* was
     ///   rejected, so the same input against a healthy server is untried.
@@ -72,7 +72,7 @@ impl EmbedError {
     /// durability decision turns on whether a non-success status speaks about
     /// the *input*, the *deployment*, or the *server's momentary state* — HTTP
     /// collapses those into three buckets plus "no rule". The adapter classifies
-    /// at the site that knows the status ([`crate::embed::bge_m3::classify_status`]),
+    /// at the site that knows the status (`crate::embed::bge_m3::classify_status`),
     /// and statuses that do not mention the input are `Transient` -> here, so a
     /// `503`/`502`/`429` from a live embedder is no longer mistaken for a content
     /// refusal. Two further things bound a residual misclassification rather than

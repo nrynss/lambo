@@ -274,7 +274,7 @@ pub fn render_context(blocks: &[String]) -> String {
 
 /// The built-in token estimator: `ceil(byte_len / 3.5)` — the common
 /// "roughly 3.5 bytes per token" heuristic for mixed prose. Pass this to
-/// [`crate::recall::assemble::assemble`] (or any `Fn(&str) -> usize`) as the
+/// `crate::recall::assemble::assemble` (or any `Fn(&str) -> usize`) as the
 /// `token_fn`.
 pub fn default_token_count(s: &str) -> usize {
     (s.len() as f64 / 3.5).ceil() as usize

@@ -4,7 +4,7 @@
 //! substring; ambiguous refuses with named candidates; deterministic sort) is
 //! shared with `lambo_inspect`. Caps: [`MAX_INSPECT_DEPTH`],
 //! [`MAX_INSPECT_NODES`], [`MAX_INSPECT_CANDIDATES`],
-//! [`MAX_INSPECT_SCAN_CONCEPTS`], [`MAX_INSPECT_BOUNDED_SCAN`].
+//! `MAX_INSPECT_SCAN_CONCEPTS`, `MAX_INSPECT_BOUNDED_SCAN`.
 
 use serde_json::json;
 

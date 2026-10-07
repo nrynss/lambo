@@ -1,7 +1,7 @@
 //! Phase-3 scoring, hot-list force-inclusion, and assembly to `max_tokens`
 //! (T5.3, spec §8) — the final read-path stage.
 //!
-//! [`assemble`] turns the phase-2 [`ExpandedSet`] into a [`RecallResult`]:
+//! `assemble` turns the phase-2 [`ExpandedSet`] into a `RecallResult`:
 //! every member (required AND `chunk_group_id` siblings, "scored
 //! independently") gets a final score, hot-listed members are force-included
 //! after condition re-validation, and the rendered context is truncated to
