@@ -13,27 +13,56 @@ name: release
 # must be v<version>; the release job asserts that so a stale tag can never
 # publish mismatched artifacts. To release: bump Cargo.toml, push, then
 # `git tag v<version> && git push origin v<version>`.
+#
+# Dry run (workflow_dispatch): Actions -> release -> "Run workflow" on any
+# branch builds, parity-tests, checksums and uploads every matrix asset as a
+# workflow artifact, and publishes NOTHING. Two independent guards make that
+# hold:
+#   1. `release` and `publish-crate` run only when the event is a tag push
+#      (`github.event_name == 'push'` AND a refs/tags/v ref). Checking the ref
+#      alone is not enough: a dispatch can be started ON a tag, and then
+#      github.ref is refs/tags/v... too. `publish-crate` also needs `release`,
+#      so a skipped release skips it a second way.
+#   2. `dry_run` defaults to true, and a dispatch with dry_run=false is refused
+#      outright by the first build step rather than silently doing a dry run
+#      anyway: a real release is only ever a tag push.
 
 on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build and upload the assets as workflow artifacts only. Must stay true: publishing happens only from a v* tag push."
+        type: boolean
+        default: true
 
+# Least privilege: read-only by default. Only `release`, which creates the
+# GitHub release, gets contents: write.
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
-  # The full ship profile (T8.9): every compiled adapter in one binary.
-  # `[store] kind` / `[embedder] kind` pick the adapter at runtime. The one
-  # caveat: the adapter code is compiled in, but its backing service must be
-  # reachable at runtime (a `llama-server` for BGE, a cluster for Cockroach).
-  FEATURES: ship
 
 jobs:
   build:
     name: build-${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    # Builds third-party code (every dependency's build script runs here), so
+    # its token must not be able to write to the repository.
+    permissions:
+      contents: read
+
+    # Cargo features are per matrix entry. An entry without `features` gets the
+    # full ship profile (T8.9): every compiled adapter in one binary, with
+    # `[store] kind` / `[embedder] kind` picking the adapter at runtime. The one
+    # caveat: the adapter code is compiled in, but its backing service must be
+    # reachable at runtime (a `llama-server` for BGE, a cluster for Cockroach).
+    # Only the Metal flavour sets `features`; the stock assets are unchanged.
+    env:
+      FEATURES: ${{ matrix.features || 'ship' }}
 
     # Every `run:` step here is bash. windows-latest defaults to PowerShell, which
     # parses `VERSION=$(...)` as a module name and fails the job before it builds.
@@ -61,9 +90,28 @@ jobs:
             target: aarch64-unknown-linux-gnu
             name: linux-arm64
             ext: ""
-          - os: macos-14
+          - os: macos-15
             target: aarch64-apple-darwin
             name: macos-arm64
+            ext: ""
+          # The Metal flavour: ship plus the in-process candle embedder with its
+          # Metal backend (`[embedder] kind = "candle"`, `device = "metal"`).
+          # The stock ship assets carry no candle at all, so without this asset
+          # a Metal rig can only run a hand-built binary. Pinned to macos-15,
+          # like the stock macos-arm64 entry, so both Apple silicon assets come
+          # from one image and SDK. (macos-14 is retired on 2026-11-02 and has
+          # scheduled brownouts before then: actions/runner-images#13518. The
+          # binaries still target macOS 11.0, the aarch64-apple-darwin default,
+          # whichever image builds them.) CI's candle-metal job runs on macos-latest
+          # and is a compile-only check (`cargo check`); it is left floating on
+          # purpose so CI notices a newer image first, while the release stays
+          # on a known image. Metal is a system framework, so the binary
+          # still links nothing outside /System/Library and /usr/lib; the
+          # "Assert system-only dylibs" step below enforces that.
+          - os: macos-15
+            target: aarch64-apple-darwin
+            name: macos-arm64-metal
+            features: ship,embed-candle-metal
             ext: ""
           # x86_64-apple-darwin is deliberately not built. The macos-13 (Intel)
           # runner class never picked up this job across four tagged runs — it
@@ -74,11 +122,23 @@ jobs:
           # Intel Macs are not a target audience for this project, and Apple
           # silicon users are served by macos-arm64 below. Restore this entry if
           # that changes; nothing else in the workflow assumes five targets.
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            name: windows-x86_64
-            ext: ".exe"
+          #
+          # Windows (x86_64-pc-windows-msvc) is not built for 0.3.0: the shared
+          # session endpoint uses Unix sockets and Unix file metadata with no
+          # platform gate, so the crate does not compile there (#39). Restore
+          #   - os: windows-latest
+          #     target: x86_64-pc-windows-msvc
+          #     name: windows-x86_64
+          #     ext: ".exe"
+          # once #39 lands. The bash default shell and the Windows branches in
+          # the steps below stay so the entry can come back unchanged.
     steps:
+      - name: Refuse a non-dry-run dispatch
+        if: github.event_name == 'workflow_dispatch' && !inputs.dry_run
+        run: |
+          echo "::error::A manual run is always a dry run. Publish by pushing a v<version> tag; re-run this dispatch with dry_run left true." >&2
+          exit 1
+
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Rust toolchain
@@ -91,11 +151,22 @@ jobs:
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # macos-arm64 and macos-arm64-metal share an OS and a target triple, so
+          # the default key would make them fight over one cache with different
+          # feature sets. Key by asset name instead.
+          key: ${{ matrix.name }}
 
-      - name: Derive version from Cargo.toml
+      - name: Derive version and git sha
         run: |
           VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          # LAMBO_GIT_SHA is an option_env! read at compile time (src/ledger.rs):
+          # without it the `serve --ledger` heartbeat reports git_sha
+          # "unknown", and a rig that installs this asset cannot tell one
+          # release binary from another in its ledger. Set it for both the
+          # build and the parity test so the parity relink keeps the same value.
+          echo "LAMBO_GIT_SHA=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_ENV"
 
       - name: Build release binary
         run: cargo build --release --features "$FEATURES" --target ${{ matrix.target }}
@@ -103,7 +174,7 @@ jobs:
       - name: Binary + TOML parity test (release artifact)
         run: |
           set -euo pipefail
-          # Drive the exact shipped binary (the `--features ship --target <triple>`
+          # Drive the exact shipped binary (the `--features $FEATURES --target <triple>`
           # release artifact built above) with a real lambo.toml via
           # tests/binary_parity.rs. unix targets only: KillOnDrop/SIGTERM is unix.
           if [[ "${{ runner.os }}" == "Windows" ]]; then
@@ -114,14 +185,15 @@ jobs:
           # the build step, so env!("CARGO_BIN_EXE_lambo") resolves to
           # target/<triple>/release/lambo -- the exact artifact the Stage step
           # below copies and publishes -- not a fresh NESTED rebuild.
-          # `--features ship` is a superset of the parity test's cfg gate
-          # (store-sqlite + embed-fixture are both in ship), so this step
-          # compiles the full ship profile, never a store-sqlite,embed-fixture
-          # subset. Cargo still relinks `lambo` into that same path with full
-          # ship features (identical feature set, same release profile), so the
-          # staged artifact stays feature-complete and is never clobbered by a
-          # subset binary. Because the parity run builds the whole ship profile,
-          # a ship-only regression now fails this build job.
+          # Every entry's $FEATURES contains ship, a superset of the parity
+          # test's cfg gate (store-sqlite + embed-fixture are both in ship), so
+          # this step compiles the entry's full feature set, never a
+          # store-sqlite,embed-fixture subset. Cargo still relinks `lambo` into
+          # that same path with the SAME features as the build step (same
+          # release profile), so the staged artifact stays feature-complete and
+          # is never clobbered by a subset binary. Because the parity run builds
+          # the whole feature set, a ship-only (or Metal-only) regression fails
+          # this build job.
           cargo test --release --features "$FEATURES" \
             --test binary_parity --target ${{ matrix.target }}
 
@@ -160,6 +232,43 @@ jobs:
             exit 1
           fi
 
+      - name: Assert system-only dylibs (Metal asset)
+        if: matrix.name == 'macos-arm64-metal'
+        run: |
+          set -euo pipefail
+          BIN="dist/lambo-${VERSION}-${{ matrix.name }}"
+          # Fail closed. `otool -L` exits 0 on a file that is not Mach-O at all
+          # (it prints "is not an object file" and lists nothing), so a dylib
+          # filter alone would pass a truncated download, a text file or a
+          # Linux ELF. Require an arm64 Mach-O executable first, then a load
+          # list that names libSystem (every macOS executable links it, so an
+          # empty or unparsed list fails here instead of passing).
+          kind=$(file -b "$BIN")
+          echo "file: $kind"
+          if [[ "$kind" != "Mach-O 64-bit executable arm64"* ]]; then
+            echo "::error::$BIN is not a Mach-O arm64 executable: $kind" >&2
+            exit 1
+          fi
+          libs=$(otool -L "$BIN")
+          echo "$libs"
+          deps=$(tail -n +2 <<<"$libs" | awk '{print $1}')
+          # A here-string, not a pipe: `grep -q` exits on the first match, and
+          # under pipefail a writer killed by SIGPIPE would fail the check.
+          if ! grep -qx '/usr/lib/libSystem.B.dylib' <<<"$deps"; then
+            echo "::error::$BIN does not list /usr/lib/libSystem.B.dylib; otool -L output was not a load list" >&2
+            exit 1
+          fi
+          # Metal, Foundation and friends are system frameworks, so a clean
+          # macOS needs nothing installed. A dependency that starts linking a
+          # Homebrew or bundled dylib (/opt/homebrew, @rpath, ...) would ship a
+          # binary that fails to launch on a machine without it; fail here.
+          bad=$(grep -v -e '^/System/Library/' -e '^/usr/lib/' <<<"$deps" || true)
+          if [[ -n "$bad" ]]; then
+            echo "::error::$BIN links libraries outside /System/Library and /usr/lib:" >&2
+            echo "$bad" >&2
+            exit 1
+          fi
+
       - name: Upload binaries
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -170,7 +279,12 @@ jobs:
   release:
     name: publish-release
     needs: build
+    # Tag pushes only. A dry-run dispatch skips this job (and so publish-crate),
+    # including a dispatch started on a tag ref; see the header.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
@@ -202,7 +316,7 @@ jobs:
           # sequence may appear in this script; the placeholder is
           # deliberately brace-free.
           sed "s/__LAMBO_VERSION__/$VERSION/g" \
-            .github/release/release-notes-template.md > /tmp/notes-$VERSION.md
+            .github/release/release-notes-template.md > "/tmp/notes-$VERSION.md"
 
       - name: Publish release
         env:
@@ -216,13 +330,16 @@ jobs:
           cp scripts/install.sh dist/install.sh
           gh release create "$GITHUB_REF_NAME" \
             --title "Lambo v$VERSION" \
-            --notes-file /tmp/notes-$VERSION.md \
+            --notes-file "/tmp/notes-$VERSION.md" \
             --verify-tag \
             dist/lambo-* dist/install.sh
 
   publish-crate:
     name: publish-crate
     needs: release
+    # Same guard as `release`, stated again so this job never depends on the
+    # skip propagating through `needs` alone.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: read

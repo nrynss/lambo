@@ -74,7 +74,129 @@ EOF
 Keep it on `127.0.0.1`. (Sharing one embedder over LAN works — instances are fungible —
 but binds a network service for no real saving; the model is 605 MB.)
 
-## 2. The pinned binary (per machine, per arch — binaries do not travel)
+## 2. The pinned binary (per machine, per arch)
+
+A binary **built** on one rig never travels to another: it is shaped by that host's
+toolkit (CUDA, an SDK, Homebrew libraries) and is copied only into that rig's own `bin/`.
+A **release asset** is the one binary that does travel, by design: `release.yml` builds it
+on a clean runner and asserts it links nothing outside the OS, so it runs on any machine
+of its platform. Two paths, by rig. **The Metal rig installs a published release** (§2a): from v0.3.0 on,
+every release carries `lambo-<version>-macos-arm64-metal`, built by `release.yml` with
+`ship,embed-candle-metal` (a superset of the rig's `store-sqlite,embed-candle-metal,embed-bge`)
+and with `LAMBO_GIT_SHA` set to the release commit. **The CUDA rig builds from source**
+(§2b) at the release tag: no CUDA asset is published, because no release runner has the
+CUDA toolkit. §2b is also the path for running an unreleased commit on either rig.
+
+### 2a. Metal rig: install from a release
+
+Fetch the release's `install.sh` to a file (read it if you like), then let it pick the
+Metal asset and verify the checksum. It installs as `lambo` into a staging directory; the
+copy to `lambo-<version>` is the same isolation rule as §2b's copy out of `target/`.
+
+```sh
+V=0.3.0
+curl -fsSL -o /tmp/lambo-install.sh \
+  "https://github.com/nrynss/lambo/releases/download/v$V/install.sh"
+STAGE=$(mktemp -d)
+LAMBO_VERSION=$V LAMBO_FLAVOR=metal LAMBO_INSTALL_DIR="$STAGE" sh /tmp/lambo-install.sh
+mkdir -p ~/lambo-dogfood/bin
+mv "$STAGE/lambo" ~/lambo-dogfood/bin/lambo-$V && rmdir "$STAGE"
+~/lambo-dogfood/bin/lambo-$V --version   # must print $V
+```
+
+`LAMBO_DRY_RUN=1` on the `sh` line prints the asset URL without downloading anything,
+which is a cheap check that the flavor resolved to `...-macos-arm64-metal`.
+
+Then swap it in. The writer is stopped for the whole window, so the provision never
+races a live serve:
+
+```sh
+# 1. stop the supervised writer (graceful: the lease is released, no 45s TTL wait)
+launchctl bootout gui/$(id -u)/dev.lambo.dogfood
+
+# 2. back up the store first: provisioning adds columns, and an older binary may
+#    refuse the new schema, so this copy is what makes a rollback possible. The name
+#    is unique per attempt (`.backup` overwrites), so a re-run never replaces the
+#    original pre-upgrade copy; the earliest backup-pre-$V-* file is that copy.
+BK="$HOME/lambo-dogfood/backup-pre-$V-$(date +%Y%m%d-%H%M%S).db"
+[ ! -e "$BK" ] || { echo "refusing to overwrite $BK"; false; }
+sqlite3 ~/lambo-dogfood/lambo-dev.db ".backup '$BK'"
+#    then bring the schema up to the new binary (idempotent; v0.3.0 needs it for
+#    #17's mutation_epoch and #29's sessions.last_gc_epoch / last_gc_at)
+~/lambo-dogfood/bin/lambo-$V provision --config ~/lambo-dogfood/lambo.toml
+#    run any repair verbs the release notes call for here, while still stopped
+
+# 3. point the unit at the new binary
+sed -i '' "s#/lambo-dogfood/bin/lambo-[^<]*<#/lambo-dogfood/bin/lambo-$V<#" \
+  ~/Library/LaunchAgents/dev.lambo.dogfood.plist
+plutil -lint ~/Library/LaunchAgents/dev.lambo.dogfood.plist
+grep -o 'lambo-dogfood/bin/lambo-[^<]*' ~/Library/LaunchAgents/dev.lambo.dogfood.plist
+
+# 4. start it
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.lambo.dogfood.plist
+
+# 5. verify. bootstrap returns as soon as launchd has the job, before serve has
+#    loaded the embedder, taken the lease and bound :7700, so a lease check run at
+#    once can read an empty table. Wait (up to 60 s in total) for the port to
+#    answer first. Each probe is capped at 2 s, so a connection that is accepted
+#    but never answered cannot stall the loop past its deadline:
+deadline=$((SECONDS + 60)); code=000
+while [ "$SECONDS" -lt "$deadline" ]; do
+  code=$(curl -s -m 2 -o /dev/null -w '%{http_code}' http://127.0.0.1:7700/mcp)
+  [ "$code" != "000" ] && break
+  sleep 1
+done
+echo "mcp port answered HTTP $code"   # 000 = never came up within 60 s: read the unit's log
+sqlite3 ~/lambo-dogfood/lambo-dev.db "select holder from session_leases;"   # http-shared-writer
+```
+
+Then confirm the binary that is actually serving, not the file on disk. Make an MCP
+`lambo_stats` call (the writer answers, the store is attached), then wait for the next
+ledger heartbeat (≤ 300 s): it is the line that carries the serving binary's identity,
+`version` = `$V` and a `git_sha` that is the release commit (§6's `jq` line). A `git_sha`
+of `unknown` means the asset predates the workflow setting `LAMBO_GIT_SHA`; a version
+other than `$V` means the plist still names the old binary.
+**This is the first time the release's Metal code actually runs.** The release workflow's
+parity test (`tests/binary_parity.rs`) drives the Metal asset with the **fixture**
+embedder over SQLite: it proves the binary starts, takes the lease, writes and reads,
+but it never loads candle, the BGE-M3 weights or a Metal device, and CI's
+`candle-metal` job only compiles. So the rig's start, first heartbeat and first recall
+are the release's real Metal runtime check. Check, in order:
+
+- the unit stays up after bootstrap (`launchctl print gui/$(id -u)/dev.lambo.dogfood`
+  shows `state = running`, no restart loop). `device = "metal"` refuses to start when
+  no Metal device is available, so a crash here is the Metal backend, not the store;
+- `lambo_stats` answers and its `embedded_concepts` equals `concept_count` (a
+  concept written while the embedder is broken is stored without a vector);
+- one `lambo_derive` of a throwaway concept, then `lambo_stats` again:
+  `embedded_concepts` rose with `concept_count`. That write went through candle on
+  the GPU;
+- one `lambo_recall` for a topic the graph already holds returns semantic hits, not
+  only keyword ones. An embedder failure degrades recall to keyword-only with a
+  warning; that warning is the failure signal;
+- the first ledger heartbeat (above) names `$V` and the release commit.
+
+If any of these fails, roll back before debugging. Editing the plist alone is not
+enough: launchd keeps the job definition it loaded, so the job must be booted out and
+bootstrapped again around the edit. With `OLD` set to the previous binary's suffix:
+
+```sh
+OLD=e11fb06   # the binary that served before this upgrade
+launchctl bootout gui/$(id -u)/dev.lambo.dogfood
+sed -i '' "s#/lambo-dogfood/bin/lambo-[^<]*<#/lambo-dogfood/bin/lambo-$OLD<#" \
+  ~/Library/LaunchAgents/dev.lambo.dogfood.plist
+# only if the old binary refuses the provisioned schema: restore the step-2 backup.
+# This discards anything written since the upgrade.
+#   (the EARLIEST backup-pre-$V-* is the pre-upgrade copy: ls -1 shows the oldest first)
+#   cp "$(ls -1 ~/lambo-dogfood/backup-pre-$V-*.db | head -1)" ~/lambo-dogfood/lambo-dev.db
+#   rm -f ~/lambo-dogfood/lambo-dev.db-wal ~/lambo-dogfood/lambo-dev.db-shm
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.lambo.dogfood.plist
+```
+
+Then run the step-5 wait and checks again. Keep the previous `lambo-<old>` in `bin/`,
+and the `backup-pre-$V-*.db` files, until the new one has served for a while.
+
+### 2b. Build from source (CUDA rig; any unreleased commit)
 
 ```sh
 cd <lambo checkout> && git checkout lambo-for-mooshik   # pin: see DOGFOOD.md, currently bbef4b3

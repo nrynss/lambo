@@ -9,11 +9,30 @@
 # standard tools found on any macOS or Linux box.
 #
 # Overrides (all optional):
-#   LAMBO_VERSION    the release version to install, e.g. "0.2.0" (default:
+#   LAMBO_VERSION    the release version to install, e.g. "0.3.0" (default:
 #                    the latest release). Use it to pin a specific version.
+#   LAMBO_FLAVOR     which build of the binary to install (default: the stock
+#                    build). "metal" picks the macOS arm64 asset that also
+#                    carries the in-process candle embedder with its Metal
+#                    backend (`[embedder] kind = "candle"`, `device = "metal"`),
+#                    lambo-<version>-macos-arm64-metal. It exists only for
+#                    Apple silicon; any other platform is refused with an error.
+#                    The stock assets carry no candle embedder at all.
 #   LAMBO_INSTALL_DIR  install directory (default ~/.local/bin). Must be
 #                    writable by the current user.
 #   LAMBO_REPO       owner/repo on GitHub (default nrynss/lambo).
+#   LAMBO_DRY_RUN    any non-empty value other than "0" (1, yes, true, ...)
+#                    prints the asset and URLs that would be downloaded, then
+#                    exits without downloading or installing. Unset, empty or
+#                    "0" installs. An unrecognised value errs toward the dry run.
+#
+# Apple silicon under Rosetta: an x86_64 shell on an arm64 Mac (uname -m says
+# x86_64, sysctl hw.optional.arm64 says 1) installs the arm64 build, which is
+# what the machine runs natively; there is no Intel macOS asset.
+#
+# Example, the Metal build on Apple silicon:
+#
+#   curl -fsSL https://github.com/nrynss/lambo/releases/latest/download/install.sh | LAMBO_FLAVOR=metal sh
 #
 # The binary is installed with mode 0755. Add $LAMBO_INSTALL_DIR to PATH if it
 # is not already there, then run `lambo --version` to confirm.
@@ -22,6 +41,11 @@ set -eu
 
 REPO="${LAMBO_REPO:-nrynss/lambo}"
 VERSION="${LAMBO_VERSION:-}"
+FLAVOR="${LAMBO_FLAVOR:-}"
+case "${LAMBO_DRY_RUN:-}" in
+  ""|0) DRY_RUN=0 ;;
+  *)    DRY_RUN=1 ;;
+esac
 INSTALL_DIR="${LAMBO_INSTALL_DIR:-$HOME/.local/bin}"
 BASE_URL="https://github.com/${REPO}/releases/download"
 
@@ -31,7 +55,7 @@ case "$OS" in
   Linux)  OS="linux" ;;
   Darwin) OS="macos" ;;
   *)
-    echo "error: unsupported platform '$OS' (install.sh supports macOS and Linux; Windows users should grab the .exe from the release page)" >&2
+    echo "error: unsupported platform '$OS' (install.sh supports macOS and Linux; no Windows build is published from v0.3.0, see https://github.com/nrynss/lambo/issues/39; v0.2.2 has a Windows .exe on the release page)" >&2
     exit 1
     ;;
 esac
@@ -47,6 +71,18 @@ case "$ARCH" in
     ;;
 esac
 
+# Rosetta: a shell translated from x86_64 (an Intel Homebrew, a Rosetta
+# Terminal) reports x86_64 on Apple silicon. The hardware is arm64 and runs the
+# arm64 asset natively from any shell, so install that rather than refusing the
+# machine as Intel. hw.optional.arm64 is 1 on Apple silicon, translated or not,
+# and absent on Intel Macs (the 2>/dev/null and || true cover that).
+if [ "$OS" = "macos" ] && [ "$ARCH" = "x86_64" ]; then
+  if [ "$(sysctl -n hw.optional.arm64 2>/dev/null || true)" = "1" ]; then
+    echo "note: this shell runs under Rosetta (x86_64) on Apple silicon; installing the native arm64 build"
+    ARCH="arm64"
+  fi
+fi
+
 # No macos-x86_64 asset is published: the Intel macOS runner class never picked
 # up the release job, so that target was dropped from the matrix rather than
 # leaving every release blocked on it. Say so plainly here — otherwise this
@@ -58,7 +94,29 @@ if [ "$OS" = "macos" ] && [ "$ARCH" = "x86_64" ]; then
   exit 1
 fi
 
-echo "platform: ${OS}-${ARCH}"
+# --- Resolve flavor ---------------------------------------------------------
+# The asset name is lambo-<version>-<os>-<arch><suffix>. Only the stock build
+# (no suffix) exists for every platform; checked before any network access so a
+# wrong flavor fails fast and says why instead of 404ing on a missing asset.
+case "$FLAVOR" in
+  ""|stock)
+    SUFFIX=""
+    ;;
+  metal)
+    if [ "$OS" != "macos" ] || [ "$ARCH" != "arm64" ]; then
+      echo "error: LAMBO_FLAVOR=metal is only published for macOS on Apple silicon (macos-arm64); this is ${OS}-${ARCH}." >&2
+      echo "  Unset LAMBO_FLAVOR to install the stock build for this platform." >&2
+      exit 1
+    fi
+    SUFFIX="-metal"
+    ;;
+  *)
+    echo "error: unknown LAMBO_FLAVOR '${FLAVOR}' (supported: metal; unset for the stock build)" >&2
+    exit 1
+    ;;
+esac
+
+echo "platform: ${OS}-${ARCH}${SUFFIX}"
 
 # --- Resolve version --------------------------------------------------------
 if [ -z "$VERSION" ]; then
@@ -77,9 +135,16 @@ else
   echo "installing pinned version: ${VERSION}"
 fi
 
-ASSET="lambo-${VERSION}-${OS}-${ARCH}"
+ASSET="lambo-${VERSION}-${OS}-${ARCH}${SUFFIX}"
 URL="${BASE_URL}/v${VERSION}/${ASSET}"
 SHA_URL="${URL}.sha256"
+
+if [ "$DRY_RUN" -eq 1 ]; then
+  echo "dry run: would download ${URL}"
+  echo "dry run: would verify against ${SHA_URL}"
+  echo "dry run: would install to ${INSTALL_DIR}/lambo"
+  exit 0
+fi
 
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT HUP INT TERM

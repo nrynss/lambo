@@ -30,7 +30,7 @@ asynchronously to the durable store.
 
 Any number of readers query the store directly and see eventually consistent state.
 Dashboards and the CockroachDB managed MCP server work this way. Readers never write.
-Multi-writer coordination stays out of scope for v0.2.
+Multi-writer coordination stays out of scope as of v0.3.
 
 Real agents drive this. Claude Code and the Cursor Agent CLI each connect over stdio and
 list all seven tools, and two different models have driven the tools autonomously: DeepSeek
@@ -102,15 +102,30 @@ in [`evidence/swarm/`](evidence/swarm/).
 
 ## Install and run
 
-Lambo ships as one binary carrying every adapter. You install it, then write a `lambo.toml`
-that picks a store and an embedder at runtime.
+Lambo ships as one binary carrying the full `ship` adapter set (every store and embedder
+except Bedrock and the in-process candle embedder). You install it, then write a
+`lambo.toml` that picks a store and an embedder at runtime.
 
 ```bash
 curl -fsSL https://github.com/nrynss/lambo/releases/latest/download/install.sh | sh
 ```
 
-The script verifies a SHA-256 checksum and installs to `~/.local/bin`. Windows binaries sit
-on the [releases page](https://github.com/nrynss/lambo/releases).
+The script verifies a SHA-256 checksum and installs to `~/.local/bin`. There is no Windows
+binary from v0.3.0 ([#39](https://github.com/nrynss/lambo/issues/39)); v0.2.2's is on the
+[releases page](https://github.com/nrynss/lambo/releases).
+
+On Apple silicon, `LAMBO_FLAVOR=metal` installs the Metal build instead
+(`lambo-<version>-macos-arm64-metal`): the same adapter set plus the in-process candle
+embedder on the GPU (`[embedder] kind = "candle"`, `device = "metal"`). The stock binaries
+do not carry candle. The script refuses `metal` on any other platform.
+`LAMBO_FLAVOR` needs the v0.3.0 install script or later: until v0.3.0 is the latest
+release, the `latest` URL below serves an older script that ignores it and installs the
+stock build, so pin v0.3.0 as shown in the
+[installation guide](docs/reference/installation.mdx).
+
+```bash
+curl -fsSL https://github.com/nrynss/lambo/releases/latest/download/install.sh | LAMBO_FLAVOR=metal sh
+```
 
 `cargo install lambo` is a leaner channel: it builds the crate's default
 features (`memory` store, `fixture` and `bge_m3` embedders). The prebuilt
