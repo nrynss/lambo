@@ -13,11 +13,30 @@ name: release
 # must be v<version>; the release job asserts that so a stale tag can never
 # publish mismatched artifacts. To release: bump Cargo.toml, push, then
 # `git tag v<version> && git push origin v<version>`.
+#
+# Dry run (workflow_dispatch): Actions -> release -> "Run workflow" on any
+# branch builds, parity-tests, checksums and uploads every matrix asset as a
+# workflow artifact, and publishes NOTHING. Two independent guards make that
+# hold:
+#   1. `release` and `publish-crate` run only when the event is a tag push
+#      (`github.event_name == 'push'` AND a refs/tags/v ref). Checking the ref
+#      alone is not enough: a dispatch can be started ON a tag, and then
+#      github.ref is refs/tags/v... too. `publish-crate` also needs `release`,
+#      so a skipped release skips it a second way.
+#   2. `dry_run` defaults to true, and a dispatch with dry_run=false is refused
+#      outright by the first build step rather than silently doing a dry run
+#      anyway: a real release is only ever a tag push.
 
 on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build and upload the assets as workflow artifacts only. Must stay true: publishing happens only from a v* tag push."
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -95,6 +114,12 @@ jobs:
             name: windows-x86_64
             ext: ".exe"
     steps:
+      - name: Refuse a non-dry-run dispatch
+        if: github.event_name == 'workflow_dispatch' && !inputs.dry_run
+        run: |
+          echo "::error::A manual run is always a dry run. Publish by pushing a v<version> tag; re-run this dispatch with dry_run left true." >&2
+          exit 1
+
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Rust toolchain
@@ -216,6 +241,9 @@ jobs:
   release:
     name: publish-release
     needs: build
+    # Tag pushes only. A dry-run dispatch skips this job (and so publish-crate),
+    # including a dispatch started on a tag ref; see the header.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -269,6 +297,9 @@ jobs:
   publish-crate:
     name: publish-crate
     needs: release
+    # Same guard as `release`, stated again so this job never depends on the
+    # skip propagating through `needs` alone.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: read
