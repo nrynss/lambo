@@ -115,9 +115,13 @@ pub(crate) async fn run_detailed(
     // The same embed step `Memory::recall_detailed` uses (#27). The source is
     // the store: this is a reader, and the graph-backed source (#8) is chosen
     // only by a session holder (`VectorCandidates::for_holder`), whose graph is
-    // the freshest copy. Over the snapshot loaded above the two would rank the
-    // same; reading the store keeps the reader's vector leg on the store's own
-    // contract check, in one transaction with its candidates.
+    // the freshest copy. Over the same flushed state the two rank the same,
+    // but the store read below is a later transaction than the snapshot load
+    // above: if a writer (`lambo serve`) flushes in between, the store's
+    // vector hits can include concepts this snapshot lacks, and assembly skips
+    // them. Ranking against the snapshot's own graph instead would keep the
+    // vector leg consistent with assembly and drop the second vector parse
+    // (a follow-up in dev-diary/notes/feature-8-vector-source.md).
     let vectors = VectorCandidates::from_store(backends.store.as_ref());
     let embedding = match candidates::embed_query(vectors, backends.embedder.as_ref(), query).await
     {
