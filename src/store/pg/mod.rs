@@ -92,6 +92,17 @@ pub use dialect::Dialect;
 ))]
 pub(crate) mod delete_fencing;
 
+// #23 session erasure: the offline DDL-coverage check plus the shared live
+// check (Postgres test here, Cockroach leg in its conformance suite).
+#[cfg(all(
+    test,
+    any(
+        feature = "store-postgres",
+        all(feature = "store-cockroach", feature = "fixtures")
+    )
+))]
+pub(crate) mod erase;
+
 // Postgres-only: the flush fence's lease row stays locked until commit.
 #[cfg(all(test, feature = "store-postgres"))]
 mod lease_race;
@@ -393,6 +404,15 @@ impl<D: Dialect> GraphStore for PgStore<D> {
         now: DateTime<Utc>,
     ) -> Result<InteractionSpan, StoreError> {
         self.select_interaction_span(session, node, min_age, now)
+            .await
+    }
+
+    async fn erase_session(
+        &self,
+        session: &SessionId,
+        eraser: &LeaseHolder,
+    ) -> Result<crate::store::EraseOutcome, StoreError> {
+        self.erase(session, eraser, &crate::store::erase::no_fault)
             .await
     }
 

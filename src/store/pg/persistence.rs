@@ -10,7 +10,10 @@
 //! * `record_canonization` — the canon task's immediate write, fenced the same
 //!   way inside its own transaction.
 //! * `seed` (fixtures) — the full-snapshot path.
-//! * The writer-published flush stats row (`session_stats`).
+//! * `erase` — session erasure (#23): the lease read `FOR UPDATE`, the shared
+//!   gate, the tombstone and every session-keyed DELETE in one transaction.
+//! * The writer-published flush stats row (`session_stats`), suppressed for an
+//!   erased session.
 //!
 //! The statements themselves are in `write_rows.rs` and never own a
 //! transaction.
@@ -18,8 +21,12 @@
 use sqlx::Row;
 
 use super::codec::backend;
+use super::leases::{lease_info_from_ts, LeaseRowTs, LEASE_ROW_SQL};
 use super::pool::tx_retry;
-use super::sql::{DELETED_ROW_SESSIONS_SQL, LEASE_TOKEN_FOR_SHARE_SQL, UPSERT_SESSION_ROW_SQL};
+use super::sql::{
+    DELETED_ROW_SESSIONS_SQL, ERASE_LEASE_FOR_UPDATE_SQL, ERASE_STATEMENTS, LEASE_HOLDER_SQL,
+    LEASE_TOKEN_FOR_SHARE_SQL, UPSERT_SESSION_ROW_SQL,
+};
 #[cfg(feature = "fixtures")]
 use super::sql::{UPSERT_RESERVATION_SQL, UPSERT_SYNONYM_SQL};
 use super::write_rows::{apply_canonization, apply_step};
@@ -28,6 +35,7 @@ use super::write_rows::{
     bulk_upsert_concepts, bulk_upsert_edges, bulk_upsert_interactions, insert_canonization_event,
     put_write_intent,
 };
+use super::write_rows::{count_session_vectors, delete_session_rows, write_erase_tombstone};
 use super::{Dialect, PgStore};
 use crate::store::batch::{
     batch_deleted_ids, batch_session_ids, plan_flush, BulkLimits, ACCESS_COLUMNS, CONCEPT_COLUMNS,
@@ -35,7 +43,11 @@ use crate::store::batch::{
 };
 #[cfg(feature = "fixtures")]
 use crate::store::batch::{seed_concept_rows, seed_edge_rows};
-use crate::store::lease::lease_permits_write;
+use crate::store::erase::{
+    erase_gate, fence_refusal, EraseCounts, EraseGate, EraseOutcome, EraseReport, EraseStepHook,
+    PriorLease, ERASED_HOLDER,
+};
+use crate::store::lease::{lease_permits_write, LeaseHolder};
 use crate::store::{map_write_err, SessionFlushStats};
 #[cfg(feature = "fixtures")]
 use crate::types::GraphSnapshot;
@@ -213,9 +225,14 @@ impl<D: Dialect> PgStore<D> {
         // contract as `flush`). Only the writer's FlushTask calls this;
         // readers only read. `updated_at` is stamped from the cluster clock
         // (now()).
+        //
+        // #23: not for an erased session (see the SQLite adapter's twin): a
+        // fenced writer's last publish must not put a row back.
         sqlx::query(
             "INSERT INTO session_stats (session_id, flush_lag_ms, log_depth, updated_at) \
-             VALUES ($1, $2, $3, now()) \
+             SELECT $1, $2, $3, now() \
+             WHERE NOT EXISTS (SELECT 1 FROM session_leases \
+                               WHERE session_id = $1 AND holder = $4) \
              ON CONFLICT (session_id) DO UPDATE SET \
                flush_lag_ms = excluded.flush_lag_ms, \
                log_depth = excluded.log_depth, \
@@ -224,6 +241,7 @@ impl<D: Dialect> PgStore<D> {
         .bind(&session.0)
         .bind(stats.flush_lag_ms as i64)
         .bind(stats.log_depth as i64)
+        .bind(ERASED_HOLDER)
         .execute(pool)
         .await
         .map_err(|e| map_write_err(e, |m| format!("write flush stats: {m}")))?;
@@ -338,19 +356,19 @@ impl<D: Dialect> PgStore<D> {
             fenced.sort_unstable();
             for sid in &fenced {
                 let current: Option<i64> = sqlx::query_scalar(LEASE_TOKEN_FOR_SHARE_SQL)
-                .bind(sid)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(backend)?;
+                    .bind(sid)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(backend)?;
                 if let Some(cur) = current {
                     let cur = u64::try_from(cur).map_err(|_| {
-                        StoreError::Invariant(format!("session {sid}: negative lease current_token"))
+                        StoreError::Invariant(format!(
+                            "session {sid}: negative lease current_token"
+                        ))
                     })?;
                     if !lease_permits_write(cur, token) {
-                        return Err(StoreError::StaleWrite(format!(
-                            "session {sid}: presented token {token:?} is stale (lease token {cur}) — \
-                             single-writer fence (GitHub issue #1)"
-                        )));
+                        let holder = lease_holder(&mut tx, sid).await?;
+                        return Err(fence_refusal(sid, token, cur, holder.as_deref()));
                     }
                 }
             }
@@ -403,11 +421,13 @@ impl<D: Dialect> PgStore<D> {
                     ))
                 })?;
                 if !lease_permits_write(cur, token) {
-                    return Err(StoreError::StaleWrite(format!(
-                        "session {}: presented token {token:?} is stale (lease token {cur}) — \
-                         single-writer fence (GitHub issue #1)",
-                        event.session_id,
-                    )));
+                    let holder = lease_holder(&mut tx, event.session_id.as_str()).await?;
+                    return Err(fence_refusal(
+                        event.session_id.as_str(),
+                        token,
+                        cur,
+                        holder.as_deref(),
+                    ));
                 }
             }
             apply_canonization(&mut *tx, event).await?;
@@ -420,4 +440,107 @@ impl<D: Dialect> PgStore<D> {
         })
         .await
     }
+
+    /// Erase every row keyed to `session` and leave the tombstone (#23; see
+    /// `store::erase`). One transaction inside `tx_retry`, like `flush`.
+    ///
+    /// The lease row is read `FOR UPDATE` first, which waits out any flush
+    /// already holding its `FOR SHARE` fence lock and makes every later fence
+    /// read wait for this commit and then see the tombstone. When there is no
+    /// row there is nothing to lock; the tombstone insert's own conflict
+    /// handling then decides a race with a concurrent first acquire (an empty
+    /// `RETURNING` is a live holder, reported as `Held`). An unleased flush
+    /// (seed / fixture parity) racing an erase of a never-leased session is the
+    /// one window left under READ COMMITTED, the same residual the flush fence
+    /// documents; Cockroach's SERIALIZABLE aborts one side.
+    ///
+    /// A failure at any step (`hook` included) drops the transaction: the
+    /// session is left as it was, and a rerun completes.
+    pub(super) async fn erase(
+        &self,
+        session: &SessionId,
+        eraser: &LeaseHolder,
+        hook: EraseStepHook<'_>,
+    ) -> Result<EraseOutcome, StoreError> {
+        let pool = &self.pool().await?;
+        let eraser_token = eraser.token();
+        let eraser_token = eraser_token.as_str();
+        tx_retry(|| async move {
+            let mut tx = pool
+                .begin()
+                .await
+                .map_err(|e| map_write_err(e, |m| format!("begin erase transaction: {m}")))?;
+            let prior: Option<(String, bool)> = sqlx::query_as(ERASE_LEASE_FOR_UPDATE_SQL)
+                .bind(session.as_str())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| map_write_err(e, |m| format!("erase_session: read lease: {m}")))?;
+            let gate = erase_gate(
+                prior.as_ref().map(|(holder, live)| PriorLease {
+                    holder,
+                    live: *live,
+                }),
+                eraser_token,
+            );
+            let EraseGate::Proceed { replaces_lease } = gate else {
+                return held(&mut tx, session).await;
+            };
+            let Some(fence_token) = write_erase_tombstone(&mut tx, session, eraser_token).await?
+            else {
+                return held(&mut tx, session).await;
+            };
+
+            let mut removed = EraseCounts {
+                vectors: count_session_vectors(&mut tx, session).await?,
+                leases: u64::from(replaces_lease),
+                ..Default::default()
+            };
+            hook("vectors")?;
+            for (table, sql) in ERASE_STATEMENTS {
+                let n = delete_session_rows(&mut tx, table, sql, session).await?;
+                removed.add_table(table, n)?;
+                hook(table)?;
+            }
+            tx.commit()
+                .await
+                .map_err(|e| map_write_err(e, |m| format!("commit erase transaction: {m}")))?;
+            Ok(EraseOutcome::Erased(EraseReport::new(
+                session.clone(),
+                removed,
+                fence_token,
+            )))
+        })
+        .await
+    }
+}
+
+/// The live lease that refused an erase, read inside the erase transaction
+/// (nothing was written, so dropping it rolls back nothing).
+async fn held(
+    tx: &mut sqlx::PgConnection,
+    session: &SessionId,
+) -> Result<EraseOutcome, StoreError> {
+    let row: LeaseRowTs = sqlx::query_as(LEASE_ROW_SQL)
+        .bind(session.as_str())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(backend)?;
+    let current = lease_info_from_ts(row)?;
+    let age = (chrono::Utc::now() - current.acquired_at)
+        .to_std()
+        .unwrap_or(std::time::Duration::ZERO);
+    Ok(EraseOutcome::Held { current, age })
+}
+
+/// The lease row's holder, for a fence refusal's message (a tombstone says
+/// "erased"). Read only on the refusal path.
+async fn lease_holder(
+    tx: &mut sqlx::PgConnection,
+    session: &str,
+) -> Result<Option<String>, StoreError> {
+    sqlx::query_scalar(LEASE_HOLDER_SQL)
+        .bind(session)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(backend)
 }

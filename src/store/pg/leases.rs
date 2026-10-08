@@ -176,13 +176,18 @@ impl<D: Dialect> PgStore<D> {
         current_holder: &str,
     ) -> Result<(), StoreError> {
         let pool = &self.pool().await?;
+        // #23: never against an erased session's tombstone (see the SQLite
+        // adapter's twin).
         sqlx::query(
             "INSERT INTO lease_refusals (session_id, refused_at, refused_by, current_holder) \
-             VALUES ($1, now(), $2, $3)",
+             SELECT $1, now(), $2, $3 \
+             WHERE NOT EXISTS (SELECT 1 FROM session_leases \
+                               WHERE session_id = $1 AND holder = $4)",
         )
         .bind(&session.0)
         .bind(refused_by)
         .bind(current_holder)
+        .bind(crate::store::erase::ERASED_HOLDER)
         .execute(pool)
         .await
         .map_err(|e| map_write_err(e, |m| format!("record lease refusal: {m}")))?;

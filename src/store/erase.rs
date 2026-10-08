@@ -400,6 +400,11 @@ pub fn no_fault(_step: &str) -> Result<(), StoreError> {
 /// adapter-specific.
 #[cfg(test)]
 pub(crate) mod testkit {
+    #[cfg(any(
+        feature = "store-sqlite",
+        feature = "store-postgres",
+        all(feature = "store-cockroach", feature = "fixtures")
+    ))]
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use chrono::Utc;
@@ -408,7 +413,7 @@ pub(crate) mod testkit {
     use crate::types::{
         AgentId, CanonizationEvent, CanonizationStatus, Concept, ConceptType, Edge, EdgeType,
         EmbeddingContract, Interaction, Mutation, MutationBatch, Node, NodeId, SessionId,
-        StoreError, WriteIntent, WriteIntentPayload,
+        WriteIntent, WriteIntentPayload,
     };
 
     /// The contract the planted vectors are written under.
@@ -560,12 +565,23 @@ pub(crate) mod testkit {
     }
 
     /// A fault hook that fails the `n`th step it sees (0-based) and every
-    /// later one, like a connection lost mid-erase.
+    /// later one, like a connection lost mid-erase. Only the SQL adapters
+    /// have steps: `MemoryStore` erases in one critical section.
+    #[cfg(any(
+        feature = "store-sqlite",
+        feature = "store-postgres",
+        all(feature = "store-cockroach", feature = "fixtures")
+    ))]
     pub(crate) struct FailAt {
         pub(crate) n: usize,
         seen: AtomicUsize,
     }
 
+    #[cfg(any(
+        feature = "store-sqlite",
+        feature = "store-postgres",
+        all(feature = "store-cockroach", feature = "fixtures")
+    ))]
     impl FailAt {
         pub(crate) fn new(n: usize) -> Self {
             Self {
@@ -574,9 +590,11 @@ pub(crate) mod testkit {
             }
         }
 
-        pub(crate) fn step(&self, step: &str) -> Result<(), StoreError> {
+        pub(crate) fn step(&self, step: &str) -> Result<(), crate::types::StoreError> {
+            // `Invariant`, not `Backend`: the pg family's `tx_retry` replays
+            // a `Backend` error, and a crash test must fail exactly once.
             if self.seen.fetch_add(1, Ordering::SeqCst) >= self.n {
-                return Err(StoreError::Backend(format!(
+                return Err(crate::types::StoreError::Invariant(format!(
                     "injected failure after erase step {step}"
                 )));
             }
