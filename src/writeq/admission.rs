@@ -12,7 +12,9 @@
 //!   branch so the `PutWriteIntent` is in the mutation log before a worker can
 //!   see the job. No other site nests these two locks.
 //! * **Per-agent FIFO:** one lane per agent, one consumer per lane
-//!   ([`super::execution`]); presence in `Lanes::workers` *is* liveness.
+//!   ([`super::execution`]); presence in `Lanes::workers` *is* liveness
+//!   (or, once sealed, an aborted worker still owed a join; see
+//!   `drain::WorkerCustody`).
 //! * A refusal never enters [`super::WriteQueueCounters::accepted`]; it is
 //!   born settled with a `dropped` receipt.
 
@@ -269,6 +271,10 @@ pub(super) struct Lanes {
     /// own entry under this same lock immediately before returning, and an
     /// enqueue spawns one only when the entry is absent — so the
     /// "lane emptied, worker exited, new job arrived" race cannot be entered.
+    /// One exception, only once the lanes are sealed: a `close()` cancelled
+    /// inside `abort_workers` puts back handles it aborted but had not yet
+    /// joined (`drain::WorkerCustody`), so the next `abort_workers` joins
+    /// them. Those entries are owed a join, not live consumers.
     pub(super) workers: HashMap<AgentId, JoinHandle<()>>,
     pub(super) queued: usize,
     pub(super) bytes: usize,
