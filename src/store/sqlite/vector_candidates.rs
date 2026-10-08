@@ -5,17 +5,15 @@
 //! selection/scoring seam are described in the adapter's module doc
 //! ("Vector search").
 
+use async_trait::async_trait;
 use sqlx::Row;
 
 use super::codec::{db_err, node_id, session_embedding_from_parts};
 use super::SqliteStore;
 use crate::store::vector::decode_vector_blob;
+use crate::store::vector_source::{rank_by_cosine, VectorCandidate, VectorCandidateSource};
 use crate::store::{validate_vector_candidate_limit, GraphStore};
-use crate::types::{tie_break_by_key, EmbeddingContract, NodeId, Scored, SessionId, StoreError};
-
-/// One decoded stored vector, before scoring, with the concept's canonical key
-/// riding along (the issue-2 tie-break consumes it on exact score ties).
-pub(super) type VectorCandidate = (NodeId, Vec<f32>, String);
+use crate::types::{EmbeddingContract, NodeId, Scored, SessionId, StoreError};
 
 /// **Candidate selection** — the swappable half of the vector query path (F1).
 ///
@@ -73,36 +71,6 @@ pub(super) async fn select_session_vectors(
     Ok(out)
 }
 
-/// **Candidate scoring**, the fixed half. Exact cosine, best first; ties
-/// broken by canonical key ascending, then the smaller node id
-/// ([`tie_break_by_key`], issue #2), so the answer is deterministic across
-/// runs as well as within one (MemoryStore / Cockroach parity). Stays exact
-/// whatever [`select_session_vectors`] becomes: an approximate index would
-/// prune the pool, never the ranking.
-pub(super) fn rank_by_cosine(
-    probe: &[f32],
-    candidates: Vec<VectorCandidate>,
-    limit: usize,
-) -> Vec<Scored<NodeId>> {
-    let mut scored: Vec<(Scored<NodeId>, String)> = candidates
-        .into_iter()
-        .map(|(id, vector, key)| {
-            (
-                Scored::new(id, f64::from(crate::embed::cosine(probe, &vector))),
-                key,
-            )
-        })
-        .collect();
-    scored.sort_by(|(a, a_key), (b, b_key)| {
-        b.score
-            .total_cmp(&a.score)
-            .then_with(|| tie_break_by_key(Some(a_key), &a.item, Some(b_key), &b.item))
-    });
-    let mut scored: Vec<Scored<NodeId>> = scored.into_iter().map(|(s, _)| s).collect();
-    scored.truncate(limit);
-    scored
-}
-
 impl SqliteStore {
     pub(super) async fn legacy_vector_candidates(
         &self,
@@ -130,7 +98,10 @@ impl SqliteStore {
         self.vector_candidates_checked(session, embedding, &stored, limit)
             .await
     }
+}
 
+#[async_trait]
+impl VectorCandidateSource for SqliteStore {
     /// Exact cosine over the session's flushed embeddings (F1, issue #5).
     ///
     /// **One transaction covers the contract read and the candidate read.** The race
@@ -151,7 +122,7 @@ impl SqliteStore {
     /// durable contract yet, and a session whose concepts carry no vectors all return
     /// an empty candidate list — the shape a vector-capable store returns before its
     /// first embedding lands. Only a corrupt row or a contract change is an error.
-    pub(super) async fn checked_vector_candidates(
+    async fn checked_vector_candidates(
         &self,
         session: &SessionId,
         embedding: &[f32],

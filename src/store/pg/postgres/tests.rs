@@ -507,12 +507,10 @@ fn explain_vector_candidates_uses_store_forced_exact_scan() {
         explain_body.contains(concat!("store", ".issue_forced_exact_scan(&muttx)")),
         "explain_vector_candidates must issue the GUC via the production helper"
     );
-    // Scoped to the production function, like the two camera-proof sites, so
-    // a call elsewhere in the module cannot satisfy it.
-    let checked_body = body(
-        &base,
-        concat!("pub(super)", "asyncfnchecked_vector_candidates("),
-    );
+    // Scoped to the production function (the `VectorCandidateSource` impl),
+    // like the two camera-proof sites, so a call elsewhere in the module cannot
+    // satisfy it.
+    let checked_body = body(&base, concat!("asyncfn", "checked_vector_candidates("));
     assert!(
         checked_body.contains(concat!("self", ".issue_forced_exact_scan(&muttx)")),
         "vector_candidates_checked must issue the GUC via the shared helper"

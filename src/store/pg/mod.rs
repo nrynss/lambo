@@ -100,6 +100,7 @@ use std::time::Duration;
 use sqlx::PgPool;
 
 use crate::store::lease::{LeaseHolder, LeaseInfo, LeaseOutcome};
+use crate::store::vector_source::VectorCandidateSource;
 use crate::store::{Capabilities, GraphStore, SessionFlushStats, StoreConfig};
 use crate::types::{
     CanonizationEvent, EmbeddingContract, GraphSnapshot, InteractionSpan, MutationBatch, NodeId,
@@ -348,8 +349,14 @@ impl<D: Dialect> GraphStore for PgStore<D> {
         expected_contract: &EmbeddingContract,
         limit: usize,
     ) -> Result<Vec<Scored<NodeId>>, StoreError> {
-        self.checked_vector_candidates(session, embedding, expected_contract, limit)
-            .await
+        VectorCandidateSource::checked_vector_candidates(
+            self,
+            session,
+            embedding,
+            expected_contract,
+            limit,
+        )
+        .await
     }
 
     async fn blast_radius(

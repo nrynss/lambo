@@ -6,6 +6,7 @@
 //! rules (DECISION D1). Scores come from the database's distance through
 //! [`Dialect::distance_to_score`].
 
+use async_trait::async_trait;
 use sqlx::Row;
 
 use super::codec::{
@@ -14,6 +15,7 @@ use super::codec::{
 use super::pool::tx_retry;
 use super::{Dialect, PgStore};
 use crate::store::vector::encode_vector;
+use crate::store::vector_source::VectorCandidateSource;
 use crate::store::{validate_vector_candidate_limit, GraphStore};
 use crate::types::{EmbeddingContract, NodeId, Scored, SessionId, StoreError};
 
@@ -197,8 +199,11 @@ impl<D: Dialect> PgStore<D> {
         self.vector_candidates_checked(session, embedding, &stored, limit)
             .await
     }
+}
 
-    pub(super) async fn checked_vector_candidates(
+#[async_trait]
+impl<D: Dialect> VectorCandidateSource for PgStore<D> {
+    async fn checked_vector_candidates(
         &self,
         session: &SessionId,
         embedding: &[f32],

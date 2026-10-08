@@ -54,6 +54,15 @@ pub(crate) use error::map_write_err;
 ))]
 pub(crate) mod vector;
 
+// #26 — the vector candidate seam (#8): one narrow selection interface that the
+// SQLite scan and the pg-family queries implement, plus the shared exact scorer.
+#[cfg(any(
+    feature = "store-cockroach",
+    feature = "store-postgres",
+    feature = "store-sqlite"
+))]
+pub(crate) mod vector_source;
+
 // DSN spelling -> DSN identity. Store-agnostic and always compiled: both the
 // session endpoint (J2) and `StoreConfig::overlay_env` (E2E-F2) need the rule,
 // and neither is feature-gated.

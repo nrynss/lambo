@@ -74,7 +74,7 @@
 //! ### The scan is a seam
 //!
 //! Candidate *selection* ([`vector_candidates::select_session_vectors`]) is separated from candidate
-//! *scoring* ([`vector_candidates::rank_by_cosine`]) on purpose. Today selection is a full session scan and
+//! *scoring* ([`crate::store::vector_source::rank_by_cosine`]) on purpose. Today selection is a full session scan and
 //! scoring is exact cosine, which is right while `n` is small: at 1024 f32 a concept
 //! vector is 4 KB and the largest measured session held ~1,400 of them. But "n is small
 //! by construction" was a property of *session-scoped* graphs, and a single unified
@@ -83,6 +83,10 @@
 //! exactly that reason, even though an exact scan ignores both — and `rank_by_cosine`
 //! keeps re-ranking the survivors exactly. No caller and no other adapter method
 //! changes.
+//!
+//! Since #26 the checked read is this adapter's implementation of the
+//! store-wide seam, `store::vector_source::VectorCandidateSource`, and the exact
+//! scorer is shared from there, so #8's graph-backed source ranks identically.
 //!
 //! **Trigger to revisit: `hybrid::derive`, not recall** (F-R1-3). Recall runs one scan
 //! per query. `derive` calls `vector_candidates_checked` *inside* its per-unmatched-
@@ -283,6 +287,7 @@ use std::time::Duration;
 
 use super::lease::{LeaseHolder, LeaseInfo, LeaseOutcome};
 use super::{Capabilities, GraphStore, SessionFlushStats};
+use crate::store::vector_source::VectorCandidateSource;
 use crate::types::{
     CanonizationEvent, EmbeddingContract, GraphSnapshot, InteractionSpan, MutationBatch, NodeId,
     Scored, SessionId, StoreError,
@@ -553,8 +558,14 @@ impl GraphStore for SqliteStore {
         expected_contract: &EmbeddingContract,
         limit: usize,
     ) -> Result<Vec<Scored<NodeId>>, StoreError> {
-        self.checked_vector_candidates(session, embedding, expected_contract, limit)
-            .await
+        VectorCandidateSource::checked_vector_candidates(
+            self,
+            session,
+            embedding,
+            expected_contract,
+            limit,
+        )
+        .await
     }
 
     async fn blast_radius(
