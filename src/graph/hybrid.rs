@@ -173,7 +173,8 @@ use crate::graph::derive::{
     DeriveOutcome, ParentOf, COOCCURRENCE_WEIGHT, HIERARCHICAL_WEIGHT, PARENT_OF_CONCEPT_TYPE,
 };
 use crate::graph::Graph;
-use crate::store::{Capabilities, GraphStore};
+use crate::store::vector_source::VectorCandidates;
+use crate::store::GraphStore;
 use crate::types::{
     tie_break_by_key, AgentId, CanonizationStatus, Concept, ConceptType, Edge, EdgeType,
     EmbeddingContract, LamboError, Node, NodeId, SessionId, StoreError,
@@ -428,6 +429,40 @@ pub async fn derive(
     semantic_match_threshold: f64,
     on_commit: Option<CommitHook>,
 ) -> Result<DeriveOutcome, LamboError> {
+    derive_with(
+        graph,
+        VectorCandidates::from_store(store),
+        embedder,
+        embedding,
+        interaction,
+        agent,
+        concepts,
+        parent_of,
+        max_cooccurrence_per_derive,
+        semantic_match_threshold,
+        on_commit,
+    )
+    .await
+}
+
+/// [`derive`](fn@derive), reaching vector candidates through the source the
+/// caller was given (#27's caller-side seam) instead of a store. `Memory` and
+/// the write queue call this; with `VectorCandidates::Store` it is exactly
+/// `derive`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn derive_with(
+    graph: Arc<RwLock<Graph>>,
+    vectors: VectorCandidates<'_>,
+    embedder: &dyn Embedder,
+    embedding: &EmbeddingContract,
+    interaction: NodeId,
+    agent: &AgentId,
+    concepts: &[(&str, ConceptType)],
+    parent_of: &ParentOf<'_>,
+    max_cooccurrence_per_derive: usize,
+    semantic_match_threshold: f64,
+    on_commit: Option<CommitHook>,
+) -> Result<DeriveOutcome, LamboError> {
     validate_limits(concepts, parent_of, semantic_match_threshold)?;
 
     // Writers outside hybrid (daemon maintenance, future MCP tasks) need not
@@ -436,7 +471,7 @@ pub async fn derive(
     let io_deadline = tokio::time::Instant::now() + HYBRID_IO_TIMEOUT;
     derive_planned(
         graph,
-        store,
+        vectors,
         embedder,
         embedding,
         interaction,
@@ -639,7 +674,7 @@ pub fn validate_embed_budget(
 #[allow(clippy::too_many_arguments)]
 async fn derive_planned(
     graph: Arc<RwLock<Graph>>,
-    store: &dyn GraphStore,
+    vectors: VectorCandidates<'_>,
     embedder: &dyn Embedder,
     embedding: &EmbeddingContract,
     interaction: NodeId,
@@ -657,7 +692,7 @@ async fn derive_planned(
         // The vector leg can run only when the store advertises it. Probed once,
         // synchronously, before any I/O (mirrors the recall RAM-tier promise:
         // zero async store calls when the capability is absent).
-        let vector_ok = store.capabilities().contains(Capabilities::VECTOR_SEARCH);
+        let vector_ok = vectors.available();
 
         // -----------------------------------------------------------------------
         // Phase 1 — plan under a brief read lock (no I/O, no await).
@@ -791,7 +826,7 @@ async fn derive_planned(
                     attempted_embed = true;
                     probed_store = true;
                     match checked_candidates(
-                        store,
+                        vectors,
                         &session_id,
                         &emb,
                         embedding,
@@ -883,7 +918,7 @@ async fn derive_planned(
                 // keyword-only, exactly as it leaves a concept.
                 if !probed_store {
                     probed_store = true;
-                    if checked_candidates(store, &session_id, &emb, embedding, 1, io_deadline)
+                    if checked_candidates(vectors, &session_id, &emb, embedding, 1, io_deadline)
                         .await?
                         .is_none()
                     {
@@ -1250,7 +1285,7 @@ fn pair_direction(graph: &Graph, a: NodeId, b: NodeId) -> (NodeId, NodeId) {
 /// degrades to keyword-only. A timeout or any other store error fails the
 /// write.
 async fn checked_candidates(
-    store: &dyn GraphStore,
+    vectors: VectorCandidates<'_>,
     session_id: &SessionId,
     emb: &[f32],
     embedding: &EmbeddingContract,
@@ -1259,7 +1294,7 @@ async fn checked_candidates(
 ) -> Result<Option<Vec<crate::types::Scored<NodeId>>>, LamboError> {
     match tokio::time::timeout_at(
         io_deadline,
-        store.vector_candidates_checked(session_id, emb, embedding, limit),
+        vectors.checked(session_id, emb, embedding, limit),
     )
     .await
     {

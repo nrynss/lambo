@@ -21,7 +21,7 @@
 //! so one eval cycle has exactly one `now` and a mocked clock can drive the
 //! inflation guard end to end.
 //!
-//! Stage 2 is evidence-only: [`CanonizationStatus`] is not consulted.
+//! Stage 2 is evidence-only: [`CanonizationStatus`](crate::types::CanonizationStatus) is not consulted.
 //! Candidate is not a prerequisite (T6.4 sequences transitions).
 
 use std::time::Duration;

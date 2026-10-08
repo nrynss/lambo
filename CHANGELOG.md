@@ -53,6 +53,14 @@
 
 ### Fixed
 
+- A `Memory::close()` cancelled while it was stopping the background write
+  queue (for example by a caller's timeout) no longer leaves lane workers or
+  the durable-intent replay running. Every worker is aborted before any is
+  joined, and handles not yet joined are kept, so a retried `close()` waits for
+  them before it drains the log (#27). That retried `close()` also no longer
+  waits the full 2 s write-queue drain budget for workers the cancelled call
+  had already aborted; it goes straight to joining them. No write was lost
+  before: each job is a durable intent the next serve replays.
 - Concepts created as `parent_of` ends are embedded (issue #16 §2). Hybrid
   `derive` created an end named only in `parent_of` with no vector, so it was
   invisible to recall's vector leg until `re-embed --missing-only` backfilled

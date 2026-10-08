@@ -6,7 +6,7 @@
 //! hops this cycle will emit, in order, are:
 //!
 //! 1. Stage 1: `None → Candidate` for nodes still-None in
-//!    [`stage1_candidates`].
+//!    [`crate::canon::stage1_candidates`].
 //! 2. Stage 2: `Candidate → Venerable` for nodes that were already
 //!    Candidate *before* this cycle's Stage 1 hop (a node that just
 //!    became Candidate is not re-checked for Venerable in the same tick).

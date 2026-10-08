@@ -20,9 +20,14 @@
 //! #8 adds a graph-backed implementation that ranks against the vectors the
 //! in-memory graph already holds. It implements this trait without implementing
 //! `GraphStore`, and it reuses [`rank_by_cosine`] so its ranking is bit-identical
-//! to the SQLite scan's (the CON-8 text codec round-trips `f32` exactly). The
-//! caller side of the seam (recall's vector leg and derive's semantic match
-//! reaching candidates through a source they are given) is #27's.
+//! to the SQLite scan's (the CON-8 text codec round-trips `f32` exactly).
+//!
+//! **The caller side** (#27) is [`VectorCandidates`]: recall's vector leg
+//! (`recall::candidates::gather_from`) and hybrid derive's semantic match
+//! (`graph::hybrid::derive_with`) reach candidates only through the value they
+//! are handed, never by calling the store. The owners that hand it out are
+//! `Memory::vector_candidates` and `WriteCtx::vector_candidates`; #8 changes
+//! what those two return (a graph-backed variant here), and nothing else.
 //!
 //! The module compiles in every build, the Memory-only default included, so
 //! #8's graph-backed source can implement the trait and call the scorer
@@ -34,7 +39,61 @@
 
 use async_trait::async_trait;
 
+use crate::store::{Capabilities, GraphStore};
 use crate::types::{tie_break_by_key, EmbeddingContract, NodeId, Scored, SessionId, StoreError};
+
+/// Where a caller's vector candidates come from (#27, caller side).
+///
+/// Recall and hybrid derive are given one of these instead of a store, and ask
+/// it two things: whether a vector leg exists at all ([`Self::available`], no
+/// I/O), and the checked candidates for a probe ([`Self::checked`]). Today the
+/// only source is the durable store, with exactly the behaviour the callers
+/// had when they called it directly: the capability bit is
+/// `Capabilities::VECTOR_SEARCH`, and the read is
+/// `GraphStore::vector_candidates_checked`, capability refusal included. #8
+/// adds a graph-backed variant (a [`VectorCandidateSource`] over the in-memory
+/// graph) and the callers do not change.
+///
+/// An enum rather than a trait object so the store path stays statically
+/// dispatched.
+#[derive(Clone, Copy)]
+pub(crate) enum VectorCandidates<'a> {
+    /// The durable store's checked read.
+    Store(&'a dyn GraphStore),
+}
+
+impl<'a> VectorCandidates<'a> {
+    /// The store as the source: today's behaviour.
+    pub(crate) fn from_store(store: &'a dyn GraphStore) -> Self {
+        Self::Store(store)
+    }
+
+    /// Whether the vector leg can run at all. Synchronous and I/O-free, so a
+    /// caller can skip the query embed when it cannot.
+    pub(crate) fn available(&self) -> bool {
+        match self {
+            Self::Store(store) => store.capabilities().contains(Capabilities::VECTOR_SEARCH),
+        }
+    }
+
+    /// Checked candidates for `probe`, under the contract of
+    /// [`VectorCandidateSource::checked_vector_candidates`].
+    pub(crate) async fn checked(
+        &self,
+        session: &SessionId,
+        probe: &[f32],
+        expected_contract: &EmbeddingContract,
+        limit: usize,
+    ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+        match self {
+            Self::Store(store) => {
+                store
+                    .vector_candidates_checked(session, probe, expected_contract, limit)
+                    .await
+            }
+        }
+    }
+}
 
 /// Selects and scores vector candidates for one session.
 ///

@@ -255,6 +255,19 @@ const MAX_REPLAY_FRAMES: usize = 64;
 /// it, the peer is doing something no legitimate client does.
 pub(crate) const INFLIGHT_DEPTH_WARN: usize = 64;
 
+/// Build-time invariant tying the two ceilings together, so neither can be
+/// moved without the other being considered.
+///
+/// Asserted here, on the proxy side, because the proxy is the consumer whose
+/// in-flight list a receipt wait occupies; the write queue is core and does
+/// not depend on the transport (#27).
+const _: () = assert!(
+    crate::writeq::MAX_CONCURRENT_RECEIPT_WAITS * 2 <= INFLIGHT_DEPTH_WARN,
+    "MAX_CONCURRENT_RECEIPT_WAITS must leave half of INFLIGHT_DEPTH_WARN for ordinary traffic — \
+     a waiting lambo_stats(receipt=...) holds a proxy inflight slot, and answer_lost writes one un-raced \
+     frame per slot (J2-R2-7, J2-R3-3)",
+);
+
 /// The `LEASE_TTL` figure quoted verbatim in [`HUB_UNREACHABLE_MESSAGE`].
 ///
 /// Model-facing text cannot be `format!`ed into a `const`, so the number is

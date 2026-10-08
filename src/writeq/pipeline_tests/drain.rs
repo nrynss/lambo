@@ -9,23 +9,17 @@ async fn quiesce_settles_everything_it_could_not_apply() {
     let rig = Rig::fixture("wq-quiesce");
     let agent = AgentId::new("agent-a");
     let submitted = rig.derive(&agent, "tail concept").await;
-    let abandoned = rig.pipeline.quiesce().await;
+    let deferred = rig.pipeline.quiesce().await;
     let answer = rig.pipeline.lookup(&agent, submitted.receipt);
     assert!(
         answer.is_settled(),
         "close must leave no receipt pending: {answer:?}"
     );
-    // Either it drained inside the budget (applied) or it was abandoned and
-    // said so — never `pending`, and never a silent loss.
+    // Either it drained inside the budget (applied) or it was deferred to a
+    // durable intent and said so — never `pending`, and never a silent loss.
     match answer {
-        ReceiptAnswer::Applied(_) => assert_eq!(abandoned, 0),
-        ReceiptAnswer::Failed(ref why) => {
-            assert_eq!(abandoned, 1);
-            assert!(
-                why.contains("closed before this write was applied"),
-                "{why}"
-            );
-        }
+        ReceiptAnswer::Applied(_) => assert_eq!(deferred, 0),
+        ReceiptAnswer::IntentRecorded => assert_eq!(deferred, 1),
         other => panic!("unexpected {other:?}"),
     }
     // And the queue is sealed against anything new.
@@ -342,4 +336,246 @@ async fn a_close_that_cannot_drain_defers_acked_writes_as_durable_intents() {
         unconsumed, durable,
         "every deferred write's intent survives, unconsumed, for the final flush"
     );
+}
+
+/// Blocks its thread inside `embed` while `busy` is set (a synchronous
+/// stretch, as a large graph commit is), then yields once before answering,
+/// so an abort that landed during the stretch takes effect at that yield.
+struct BusyEmbedder {
+    busy: Arc<AtomicBool>,
+    inner: FixtureEmbedder,
+    calls: Arc<AtomicUsize>,
+    /// Stretches that have ended.
+    finished: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl Embedder for BusyEmbedder {
+    fn dimensions(&self) -> usize {
+        self.inner.dimensions()
+    }
+    async fn embed(&self, text: &str) -> Result<Vec<f32>, crate::EmbedError> {
+        if self.busy.load(Ordering::SeqCst) {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(400));
+            self.finished.fetch_add(1, Ordering::SeqCst);
+            tokio::task::yield_now().await;
+        }
+        self.inner.embed(text).await
+    }
+}
+
+/// R3-1, at the write queue: a `close()` cancelled while
+/// [`WritePipeline::abort_workers`] is joining one lane worker must not leave
+/// the **other** workers un-aborted, nor let a retried close return before
+/// the workers it could not join have stopped. `close()`'s contract is that a
+/// cancelled close strands no background task; a worker dropped un-aborted
+/// keeps applying its job into a graph the retried close may already have
+/// drained, and one dropped un-joined can still finish a synchronous stretch
+/// after it.
+///
+/// A join is only pending while its task is *running*, so both workers are
+/// held in a synchronous stretch on their own runtime threads when the abort
+/// is polled once and dropped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cancelled_abort_leaves_no_lane_worker_running() {
+    let busy = Arc::new(AtomicBool::new(false));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let finished = Arc::new(AtomicUsize::new(0));
+    let rig = Rig::hybrid(
+        "wq-cancelled-abort",
+        Arc::new(BusyEmbedder {
+            busy: busy.clone(),
+            inner: FixtureEmbedder::new(),
+            calls: calls.clone(),
+            finished: finished.clone(),
+        }),
+    );
+    until(
+        || rig.pipeline.calibration().is_some(),
+        "the probe to finish",
+    )
+    .await;
+    busy.store(true, Ordering::SeqCst);
+
+    // Two lanes, each running inside its own job's embed.
+    rig.derive(&AgentId::new("agent-a"), "alpha concept").await;
+    rig.derive(&AgentId::new("agent-b"), "beta concept").await;
+    until(
+        || calls.load(Ordering::SeqCst) >= 2,
+        "both jobs inside the embedder",
+    )
+    .await;
+
+    // Poll the abort once, then drop it: a close() cancelled mid-join.
+    {
+        let abort = rig.pipeline.abort_workers();
+        tokio::pin!(abort);
+        let polled = tokio::time::timeout(Duration::ZERO, &mut abort).await;
+        assert!(polled.is_err(), "the first join completed inside one poll");
+    }
+
+    // The retried close's abort must join what the cancelled one could not:
+    // when it returns, both stretches are over.
+    rig.pipeline.abort_workers().await;
+    assert_eq!(
+        finished.load(Ordering::SeqCst),
+        2,
+        "the retried abort_workers returned while a worker it never joined was still running"
+    );
+
+    // An aborted worker is cancelled at the yield after its stretch; a worker
+    // that was never aborted applies its job.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let concepts = rig.graph.read().concepts().count();
+    assert_eq!(
+        concepts, 0,
+        "a lane worker kept running after a cancelled abort_workers and applied its job"
+    );
+}
+
+/// R3-1, at the intent replay: a `close()` cancelled while
+/// [`WritePipeline::stop_replay`] is joining the replay task must leave the
+/// handle where a retried close finds it, so the retry does not return while
+/// the replay is still inside a synchronous stretch that can write the graph.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cancelled_stop_replay_leaves_the_replay_joinable() {
+    let busy = Arc::new(AtomicBool::new(false));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let finished = Arc::new(AtomicUsize::new(0));
+    let rig = Rig::hybrid(
+        "wq-cancelled-stop-replay",
+        Arc::new(BusyEmbedder {
+            busy: busy.clone(),
+            inner: FixtureEmbedder::new(),
+            calls: calls.clone(),
+            finished: finished.clone(),
+        }),
+    );
+    // Let the calibration probe through first, so only the replay's own
+    // embeds (the liveness check, then the intent) are held.
+    until(
+        || rig.pipeline.calibration().is_some(),
+        "the probe to finish",
+    )
+    .await;
+    busy.store(true, Ordering::SeqCst);
+    let agent = AgentId::new("agent-a");
+    let interaction = rig.interaction(&agent);
+    let now = *rig.now.lock();
+    // A durable intent "left by a previous process": a foreign epoch.
+    let receipt = ReceiptId::new(rig.pipeline.epoch ^ 1, now, 1);
+    let intent = crate::types::WriteIntent {
+        session_id: rig.graph.read().session_id().clone(),
+        receipt: receipt.to_string(),
+        agent: agent.clone(),
+        interaction,
+        lane_seq: 1,
+        issued_ms: receipt.issued_ms(),
+        payload: crate::types::WriteIntentPayload::Derive {
+            concepts: vec![("gamma concept".into(), ConceptType::Entity)],
+            pairs: Vec::new(),
+        },
+        created_at: now,
+        outcome: None,
+    };
+    let Rig {
+        pipeline, graph, ..
+    } = rig;
+    let pipeline = Arc::new(pipeline);
+    pipeline.spawn_replay(vec![intent]);
+
+    // The liveness embed, then the intent's own embed, are both entered.
+    until(
+        || calls.load(Ordering::SeqCst) >= 2,
+        "the replay inside its intent's embed",
+    )
+    .await;
+
+    // Poll the stop once, then drop it: a close() cancelled mid-join.
+    {
+        let stop = pipeline.stop_replay();
+        tokio::pin!(stop);
+        let polled = tokio::time::timeout(Duration::ZERO, &mut stop).await;
+        assert!(polled.is_err(), "the join completed inside one poll");
+    }
+
+    pipeline.stop_replay().await;
+    assert_eq!(
+        finished.load(Ordering::SeqCst),
+        2,
+        "the retried stop_replay returned while the replay task was still running"
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        graph.read().concepts().count(),
+        0,
+        "an aborted replay applied its intent"
+    );
+}
+
+/// A retried close after a cancelled [`WritePipeline::abort_workers`] must
+/// not spend its drain budget waiting on workers that can never settle. The
+/// cancelled call already drained the queues and aborted every worker; an
+/// aborted worker never runs its `running -= 1`, so `outstanding()` stays
+/// above zero and nothing will ever notify `settled`. The retried
+/// [`WritePipeline::quiesce`] must go straight to the joins instead of
+/// sleeping out [`WRITE_QUEUE_DRAIN_BUDGET`] first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_quiesce_after_a_cancelled_abort_does_not_wait_out_the_budget() {
+    let busy = Arc::new(AtomicBool::new(false));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let finished = Arc::new(AtomicUsize::new(0));
+    let rig = Rig::hybrid(
+        "wq-retried-quiesce",
+        Arc::new(BusyEmbedder {
+            busy: busy.clone(),
+            inner: FixtureEmbedder::new(),
+            calls: calls.clone(),
+            finished: finished.clone(),
+        }),
+    );
+    until(
+        || rig.pipeline.calibration().is_some(),
+        "the probe to finish",
+    )
+    .await;
+    busy.store(true, Ordering::SeqCst);
+
+    rig.derive(&AgentId::new("agent-a"), "alpha concept").await;
+    rig.derive(&AgentId::new("agent-b"), "beta concept").await;
+    until(
+        || calls.load(Ordering::SeqCst) >= 2,
+        "both jobs inside the embedder",
+    )
+    .await;
+
+    // A close() cancelled inside abort_workers.
+    {
+        let abort = rig.pipeline.abort_workers();
+        tokio::pin!(abort);
+        let polled = tokio::time::timeout(Duration::ZERO, &mut abort).await;
+        assert!(polled.is_err(), "the first join completed inside one poll");
+    }
+    assert!(
+        rig.pipeline.outstanding() > 0,
+        "the aborted workers' jobs still count as running, or this proves nothing"
+    );
+
+    // The retried close's quiesce: the stretches end within 400 ms, so a
+    // quiesce that goes straight to the joins returns well inside the budget.
+    let started = std::time::Instant::now();
+    let deferred = rig.pipeline.quiesce().await;
+    let took = started.elapsed();
+    assert!(
+        took < WRITE_QUEUE_DRAIN_BUDGET / 2,
+        "the retried quiesce waited {took:?} on workers that were already aborted"
+    );
+    assert_eq!(
+        finished.load(Ordering::SeqCst),
+        2,
+        "the retried quiesce returned before joining the aborted workers"
+    );
+    assert_eq!(rig.pipeline.outstanding(), 0);
+    assert_eq!(deferred, 2, "both acked jobs are deferred, not lost");
 }

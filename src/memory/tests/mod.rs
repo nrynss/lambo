@@ -1,16 +1,32 @@
 //! Unit tests for `Memory`, grouped by subject.
 
+use super::leases::ACTIVE_SESSIONS;
+use super::writes::RETRACT_IO_TIMEOUT;
 use super::*;
 use crate::embed::FixtureEmbedder;
+use crate::graph::action::Action;
+use crate::graph::derive::ParentOf;
+use crate::store::flush::FLUSH_ATTEMPT_TIMEOUT;
+use crate::store::lease::{LeaseOutcome, LEASE_TTL};
+use crate::store::Capabilities;
 use crate::store::MemoryStore;
 use crate::test_util::capture_logs;
+// Only the fixtures-gated replay test builds an `Interaction` by hand.
+#[cfg(feature = "fixtures")]
+use crate::types::Interaction;
 use crate::types::{
     tie_break_by_key, CanonizationEvent, GraphSnapshot, InteractionSpan, Mutation, MutationBatch,
     Scored, StoreError,
 };
+use crate::types::{
+    CanonizationStatus, ConceptType, LamboError, MatchStrategy, NodeId, RecallQuery,
+};
 use async_trait::async_trait;
+use chrono::DateTime;
+use chrono::Utc;
 use std::collections::HashSet;
 use std::sync::atomic::AtomicUsize;
+use std::time::Duration;
 
 mod access;
 mod attach;

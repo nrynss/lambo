@@ -95,7 +95,7 @@ pub(crate) async fn load_reader_graph_with_contract(
     })
 }
 
-/// Open exactly one writer via [`Memory::build`] (acquires the T8.6 lease).
+/// Open exactly one writer via [`MemoryBuilder::build`](crate::MemoryBuilder::build) (acquires the T8.6 lease).
 ///
 /// A [`LamboError::Conflict`] is returned as-is — it already names the holder,
 /// age, and `OPERATOR_OVERRIDE`.

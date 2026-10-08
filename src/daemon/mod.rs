@@ -410,6 +410,30 @@ impl Daemon {
         weights: RecallWeights,
         cache: &mut RecallCache<RecallPipeline>,
     ) -> DetailedRecall {
+        self.recall_with(
+            session,
+            query,
+            crate::store::vector_source::VectorCandidates::from_store(store),
+            embedding,
+            weights,
+            cache,
+        )
+        .await
+    }
+
+    /// [`Daemon::recall_detailed`], reaching vector candidates through the
+    /// source the caller was given (#27's caller-side seam) instead of a
+    /// store. `Memory::recall_detailed` calls this; with
+    /// `VectorCandidates::Store` it is exactly `recall_detailed`.
+    pub(crate) async fn recall_with(
+        &self,
+        session: &SessionId,
+        query: RecallQuery,
+        vectors: crate::store::vector_source::VectorCandidates<'_>,
+        embedding: Option<(&[f32], &crate::types::EmbeddingContract)>,
+        weights: RecallWeights,
+        cache: &mut RecallCache<RecallPipeline>,
+    ) -> DetailedRecall {
         if let Err(err) = crate::store::validate_vector_candidate_limit(query.top_k) {
             return DetailedRecall::warn_only(format!("recall: {err}"));
         }
@@ -454,7 +478,7 @@ impl Daemon {
         let input = if dispatch_ready {
             candidates::Phase1Input::default()
         } else {
-            match candidates::gather(store, &graph_session, embedding, query.top_k).await {
+            match candidates::gather_from(vectors, &graph_session, embedding, query.top_k).await {
                 Ok(input) => input,
                 Err(err) => {
                     tracing::warn!(target: "lambo::recall", "phase-1 gather degraded: {err}");

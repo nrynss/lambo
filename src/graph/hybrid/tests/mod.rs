@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 use super::*;
 use crate::embed::{EmbedError, Embedder, FixtureEmbedder, FAR, NEAR_A, NEAR_B};
+use crate::store::Capabilities;
 
 use crate::types::{Interaction, MutationBatch, Scored};
 

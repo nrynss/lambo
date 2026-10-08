@@ -11,7 +11,7 @@
 //!    (handoff T5.1), and a chain ordered by insertion may carry arbitrary
 //!    timestamps.
 //! 3. **Vector** — [`GraphStore::vector_candidates_checked`], only when the store
-//!    advertises [`Capabilities::VECTOR_SEARCH`]. The call is async I/O, so it
+//!    advertises [`Capabilities::VECTOR_SEARCH`](crate::store::Capabilities::VECTOR_SEARCH). The call is async I/O, so it
 //!    is gathered by [`gather`] BEFORE any graph lock is taken; [`candidates`]
 //!    itself is pure and lock-safe.
 //!
@@ -56,7 +56,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::graph::index::InvertedIndex;
 use crate::graph::Graph;
-use crate::store::{validate_vector_candidate_limit, Capabilities, GraphStore};
+use crate::store::vector_source::VectorCandidates;
+use crate::store::{validate_vector_candidate_limit, GraphStore};
 use crate::types::{
     tie_break_by_key, EmbeddingContract, Node, NodeId, Scored, SessionId, StoreError,
 };
@@ -150,7 +151,7 @@ pub struct Phase1Input {
 /// Gather phase-1 store I/O BEFORE taking any graph lock.
 ///
 /// The only I/O performed is the vector leg, and only when BOTH the store
-/// advertises [`Capabilities::VECTOR_SEARCH`] and a query embedding is
+/// advertises [`Capabilities::VECTOR_SEARCH`](crate::store::Capabilities::VECTOR_SEARCH) and a query embedding is
 /// available. Every other path makes zero async store calls and logs exactly
 /// one line (RAM-tier promise, spec §3.2). A capability-present store that
 /// errors propagates [`StoreError`]: swallowing a real backend failure into
@@ -161,8 +162,26 @@ pub async fn gather(
     embedding: Option<(&[f32], &EmbeddingContract)>,
     limit: usize,
 ) -> Result<Phase1Input, StoreError> {
+    gather_from(
+        VectorCandidates::from_store(store),
+        session,
+        embedding,
+        limit,
+    )
+    .await
+}
+
+/// [`gather`], reaching vector candidates through the source the caller was
+/// given (#27's caller-side seam) rather than a store. With
+/// `VectorCandidates::Store` it is exactly [`gather`].
+pub(crate) async fn gather_from(
+    vectors: VectorCandidates<'_>,
+    session: &SessionId,
+    embedding: Option<(&[f32], &EmbeddingContract)>,
+    limit: usize,
+) -> Result<Phase1Input, StoreError> {
     validate_vector_candidate_limit(limit)?;
-    if !store.capabilities().contains(Capabilities::VECTOR_SEARCH) {
+    if !vectors.available() {
         tracing::debug!(
             target: "lambo::recall",
             "phase-1 vector leg disabled: store lacks VECTOR_SEARCH; zero store I/O (RAM-tier promise)"
@@ -176,10 +195,34 @@ pub async fn gather(
         );
         return Ok(Phase1Input::default());
     };
-    let vector = store
-        .vector_candidates_checked(session, emb, expected_contract, limit)
+    let vector = vectors
+        .checked(session, emb, expected_contract, limit)
         .await?;
     Ok(Phase1Input { vector })
+}
+
+/// Recall's query embed, as its own step (#27, for #14).
+///
+/// Embeds `query` only when the vector leg can run (`vectors.available()`);
+/// otherwise the embed would be wasted latency, since the leg would be skipped
+/// anyway. `Ok(None)` means "no vector leg", `Err` carries the warning line a
+/// failed embed degrades to (the read continues on the keyword and recent
+/// legs). Every recall caller embeds through here, so #14 can move the recall
+/// cache check ahead of this call in one place.
+pub(crate) async fn embed_query(
+    vectors: VectorCandidates<'_>,
+    embedder: &dyn crate::embed::Embedder,
+    query: &str,
+) -> Result<Option<Vec<f32>>, String> {
+    if !vectors.available() {
+        return Ok(None);
+    }
+    match embedder.embed(query).await {
+        Ok(vector) => Ok(Some(vector)),
+        Err(err) => Err(format!(
+            "recall: query embedding failed ({err}); vector leg skipped"
+        )),
+    }
 }
 
 /// Phase-1 candidates: the deterministic union of the keyword, recent, and
@@ -361,6 +404,7 @@ fn recent_concepts(graph: &Graph) -> Vec<NodeId> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::Capabilities;
     use crate::test_util::capture_logs;
     use chrono::{DateTime, TimeZone, Utc};
     use std::sync::atomic::{AtomicUsize, Ordering};

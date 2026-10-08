@@ -82,6 +82,19 @@ const CLOSE_GRACE: Duration = Duration::from_secs(10);
 /// against the real budget instead of a copy of the number.
 pub(crate) const CLOSE_FLUSH_GRACE: Duration = Duration::from_secs(8);
 
+/// Build-time invariant: the write queue's close quiesce cannot become the
+/// reason a `close()` blows the deadline `serve` gives it.
+///
+/// Asserted here, on the serving side, because the dependency runs this way:
+/// the write queue is core and knows nothing about transports, while `serve`
+/// is the consumer that sizes `close()`'s budget around it (#27).
+const _: () = assert!(
+    crate::writeq::WRITE_QUEUE_DRAIN_BUDGET.as_secs() * 4 <= CLOSE_FLUSH_GRACE.as_secs(),
+    "WRITE_QUEUE_DRAIN_BUDGET must stay at or under a quarter of CLOSE_FLUSH_GRACE — the write \
+     queue quiesce runs in series BEFORE the final flush, so it is carved out of close()'s \
+     budget, not added to it",
+);
+
 /// Bound on the best-effort lease release that follows an abandoned `close()`
 /// (L82-1).
 ///
@@ -768,7 +781,7 @@ pub async fn build_memory(
         .map_err(explain_startup_failure)
 }
 
-/// The one [`MemoryBuilder`] a serve process configures.
+/// The one [`MemoryBuilder`](crate::MemoryBuilder) a serve process configures.
 ///
 /// Split out of [`build_memory`] so J2's startup election can retry the attach
 /// against the **same** configuration: `MemoryBuilder` is `Clone` and every
@@ -2899,6 +2912,19 @@ impl EarlyShutdown {
         if rx.wait_for(|seen| *seen >= n).await.is_err() {
             std::future::pending::<()>().await;
         }
+    }
+}
+
+/// The builder's view of the pre-arm (#27): `memory` names this trait, not
+/// the type, so the core does not depend on the serving layer. Both methods
+/// forward to the inherent ones above.
+impl crate::memory::AttachShutdown for EarlyShutdown {
+    fn arm(&self) {
+        EarlyShutdown::arm(self);
+    }
+
+    fn fired(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(EarlyShutdown::fired(self))
     }
 }
 
