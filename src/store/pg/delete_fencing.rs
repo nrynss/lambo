@@ -159,7 +159,12 @@ pub(crate) async fn check_delete_only_batch_is_fenced<D: Dialect>(store: &PgStor
         .await
         .expect("deleting a gone row is a no-op");
 
-    // Best-effort cleanup of the unique session, children first.
+    cleanup_session(store, &sid).await;
+    check_incident_edge_is_fenced(store).await;
+}
+
+/// Best-effort cleanup of a unique session, children first.
+async fn cleanup_session<D: Dialect>(store: &PgStore<D>, sid: &SessionId) {
     let pool = store.pool().await.expect("pool");
     for table in [
         "edges",
@@ -174,6 +179,139 @@ pub(crate) async fn check_delete_only_batch_is_fenced<D: Dialect>(store: &PgStor
             .execute(&pool)
             .await;
     }
+}
+
+/// A node delete also removes the edges incident to the node, and edges are
+/// session-scoped while node ids are global. Plant a concept in session A
+/// (whose token the caller still holds) with its only incident edge in session
+/// B, whose lease has been taken over: the delete must be fenced on B's lease
+/// too. A sibling concept with no foreign edge deletes under the same token,
+/// so only the incident-edge arm of `DELETED_ROW_SESSIONS_SQL` can refuse.
+async fn check_incident_edge_is_fenced<D: Dialect>(store: &PgStore<D>) {
+    let tag = Uuid::new_v4();
+    let (a, b) = (
+        SessionId::from(format!("fenced-edge-a-{tag}")),
+        SessionId::from(format!("fenced-edge-b-{tag}")),
+    );
+    let ts = Utc::now();
+    let (origin_a, shared, plain, origin_b, cross) = (
+        NodeId::new(),
+        NodeId::new(),
+        NodeId::new(),
+        NodeId::new(),
+        NodeId::new(),
+    );
+    let interaction = |sid: &SessionId, id: NodeId| Mutation::UpsertNode {
+        node: Node::Interaction(Interaction {
+            event_time: None,
+            id,
+            session_id: sid.clone(),
+            agent_id: AgentId::new("fenced-edge"),
+            prompt_text: Some("p".into()),
+            previous_id: None,
+            created_at: ts,
+        }),
+    };
+    let concept = |id: NodeId| Mutation::UpsertNode {
+        node: Node::Concept(Concept {
+            id,
+            session_id: a.clone(),
+            content: format!("fenced {id}"),
+            canonical_key: format!("fenced {id}"),
+            concept_type: ConceptType::Entity,
+            origin_interaction: origin_a,
+            origin_agent: AgentId::new("fenced-edge"),
+            created_at: ts,
+            access_count: 0,
+            last_accessed: None,
+            gc_survived: 0,
+            canonization_status: CanonizationStatus::None,
+            blast_radius: None,
+            last_demotion_time: None,
+            embedding: None,
+            human_confirmed: 0,
+            chunk_group_id: None,
+        }),
+    };
+    let planted = MutationBatch {
+        mutation_epoch: 1,
+        gc_mark: Default::default(),
+        mutations: vec![
+            interaction(&a, origin_a),
+            concept(shared),
+            concept(plain),
+            interaction(&b, origin_b),
+            // Session B's edge points at session A's concept.
+            Mutation::UpsertEdge {
+                edge: Edge {
+                    id: cross,
+                    session_id: b.clone(),
+                    source: origin_b,
+                    target: shared,
+                    edge_type: EdgeType::Derives,
+                    weight: 1.0,
+                    reinforcements: 0,
+                    created_at: ts,
+                    last_reinforced: ts,
+                    event_time: None,
+                },
+            },
+        ],
+    };
+    store.flush(&planted, None).await.expect("plant (unleased)");
+
+    // A is held by its first holder; B lapses and is taken over, so the token
+    // A's holder presents is current for A and stale for B only.
+    let LeaseOutcome::Acquired(held_a) = store
+        .acquire_lease(&a, &holder("holder-a", 1), Duration::from_secs(60))
+        .await
+        .expect("acquire a")
+    else {
+        panic!("A must acquire");
+    };
+    let short = Duration::from_secs(1);
+    store
+        .acquire_lease(&b, &holder("zombie-b", 2), short)
+        .await
+        .expect("acquire b");
+    tokio::time::sleep(Duration::from_millis(1_300)).await;
+    let LeaseOutcome::Acquired(taken_b) = store
+        .acquire_lease(&b, &holder("successor-b", 3), short)
+        .await
+        .expect("take b over")
+    else {
+        panic!("the successor must take B over");
+    };
+    assert!(taken_b.token > held_a.token);
+
+    let deletes = |id: NodeId| MutationBatch {
+        mutation_epoch: 2,
+        gc_mark: Default::default(),
+        mutations: vec![Mutation::DeleteNode { id }],
+    };
+    let got = store.flush(&deletes(shared), Some(held_a.token)).await;
+    assert!(
+        matches!(got, Err(StoreError::StaleWrite(_))),
+        "a node delete whose incident edge is in a taken-over session must be fenced, got {got:?}"
+    );
+    assert_eq!(rows_with_id(store, "concepts", shared).await, 1);
+    assert_eq!(rows_with_id(store, "edges", cross).await, 1);
+
+    store
+        .flush(&deletes(plain), Some(held_a.token))
+        .await
+        .expect("a node with no foreign edge deletes under A's token");
+    assert_eq!(rows_with_id(store, "concepts", plain).await, 0);
+
+    store
+        .flush(&deletes(shared), Some(taken_b.token))
+        .await
+        .expect("B's current token covers both sessions");
+    assert_eq!(rows_with_id(store, "concepts", shared).await, 0);
+    assert_eq!(rows_with_id(store, "edges", cross).await, 0);
+
+    cleanup_session(store, &a).await;
+    cleanup_session(store, &b).await;
 }
 
 #[cfg(feature = "store-postgres")]
