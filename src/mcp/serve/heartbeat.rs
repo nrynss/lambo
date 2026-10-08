@@ -6,7 +6,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::hub::SessionEndpoint;
 use super::{ServeOptions, Transport};
 use crate::ledger::Ledger;
 use crate::mcp::server::LamboServer;
@@ -79,10 +78,7 @@ pub(super) async fn heartbeat_loop(server: LamboServer, ledger: Arc<Ledger>, eve
 /// The J4 pre-lease startup line: this serve's intent to acquire the
 /// single-writer lease, written to the ledger before `resolve_role` makes its
 /// first acquire attempt. See [`crate::ledger::startup_line`].
-pub(super) fn serve_startup_line(
-    opts: &ServeOptions,
-    _endpoint: &Option<SessionEndpoint>,
-) -> serde_json::Value {
+pub(super) fn serve_startup_line(opts: &ServeOptions) -> serde_json::Value {
     crate::ledger::startup_line(
         &opts.session,
         &opts.agent,

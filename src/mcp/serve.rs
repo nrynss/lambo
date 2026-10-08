@@ -234,7 +234,7 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     // misconfigured `--ledger-heartbeat`-without-`--ledger` pairing first.
     let ledger = opts.ledger.as_ref().map(|path| Ledger::open(path.clone()));
     if let Some(ledger) = &ledger {
-        ledger.append(&serve_startup_line(&opts, &endpoint));
+        ledger.append(&serve_startup_line(&opts));
     }
     // Issue #13 — read before `serve_builder` consumes the backends. Pure (a
     // config lookup and a type downcast), no I/O, so it belongs in this
