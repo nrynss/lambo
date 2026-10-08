@@ -175,7 +175,24 @@ pub async fn refused_as_erased(
 /// One field per session-keyed table, plus `vectors` (concepts that carried an
 /// embedding; those rows are also counted in `concepts`) and `leases` (1 when
 /// a holder's lease row was replaced by the tombstone).
+///
+/// `#[non_exhaustive]` (#23 review L7): a table added to the schema adds a
+/// field here (the coverage tests force it), and that must not break a
+/// downstream struct literal or exhaustive destructuring. Read the fields;
+/// build one with `Default` and field assignment inside this crate. The JSON
+/// shape is unaffected.
+///
+/// ```compile_fail
+/// // Outside the crate a struct literal does not compile, even with `..`.
+/// let _ = lambo::store::EraseCounts { sessions: 1, ..Default::default() };
+/// ```
+///
+/// ```
+/// // Reading it does.
+/// fn total(c: &lambo::store::EraseCounts) -> u64 { c.rows() + c.vectors }
+/// ```
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct EraseCounts {
     /// The `sessions` row, with the embedding contract and GC mark (0 or 1).
     pub sessions: u64,
@@ -241,7 +258,11 @@ impl EraseCounts {
 
 /// What a completed erase removed. Returned only after the store committed,
 /// so a caller (an account-deletion fan-out) may mark the target done.
+///
+/// `#[non_exhaustive]` (#23 review L7), like [`EraseCounts`]; built with
+/// [`EraseReport::new`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[non_exhaustive]
 pub struct EraseReport {
     pub session: SessionId,
     /// `true` when nothing of the session was left to remove: a repeat of a
