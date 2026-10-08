@@ -49,6 +49,24 @@
 //! pipe does not apply — and the outage J2 exists to fix is the stdio one, where
 //! the client spawns the process itself and never chose a port. `lambo serve
 //! --transport http` therefore keeps working exactly as-is.
+//!
+//! # Its interface with `serve`
+//!
+//! `serve`'s role resolution reaches this module through `serve::hub` only,
+//! and through five items: [`proxyable`], `dial_dir` and `connect` for the
+//! election's probe of the holder, then [`HubProxy::new`] and
+//! [`HubProxy::run`] for the proxy role. Nothing else crosses.
+//!
+//! # Modules
+//!
+//! | module | holds |
+//! |---|---|
+//! | this file | [`HubProxy`] and the pump ([`HubProxy::run`]) |
+//! | `dialing` | the budgets, [`proxyable`], the dial-side directory check, the connect, the shutdown-raced dial |
+//! | `handshake` | the remembered handshake and its replay on reconnect |
+//! | `forwarding` | request and response ids, the holder reader task, the framed write, the in-flight warning |
+//! | `disconnect` | the honest errors: never-left-this-process and lost-with-the-holder |
+//! | `framing` | the bounded, resynchronising frame reader |
 
 use std::sync::Arc;
 
