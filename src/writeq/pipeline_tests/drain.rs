@@ -9,23 +9,17 @@ async fn quiesce_settles_everything_it_could_not_apply() {
     let rig = Rig::fixture("wq-quiesce");
     let agent = AgentId::new("agent-a");
     let submitted = rig.derive(&agent, "tail concept").await;
-    let abandoned = rig.pipeline.quiesce().await;
+    let deferred = rig.pipeline.quiesce().await;
     let answer = rig.pipeline.lookup(&agent, submitted.receipt);
     assert!(
         answer.is_settled(),
         "close must leave no receipt pending: {answer:?}"
     );
-    // Either it drained inside the budget (applied) or it was abandoned and
-    // said so — never `pending`, and never a silent loss.
+    // Either it drained inside the budget (applied) or it was deferred to a
+    // durable intent and said so — never `pending`, and never a silent loss.
     match answer {
-        ReceiptAnswer::Applied(_) => assert_eq!(abandoned, 0),
-        ReceiptAnswer::Failed(ref why) => {
-            assert_eq!(abandoned, 1);
-            assert!(
-                why.contains("closed before this write was applied"),
-                "{why}"
-            );
-        }
+        ReceiptAnswer::Applied(_) => assert_eq!(deferred, 0),
+        ReceiptAnswer::IntentRecorded => assert_eq!(deferred, 1),
         other => panic!("unexpected {other:?}"),
     }
     // And the queue is sealed against anything new.
