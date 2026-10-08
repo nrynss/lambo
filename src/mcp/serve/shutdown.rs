@@ -2,6 +2,27 @@
 //! relations between them, the one shutdown future the transports accept
 //! ([`HolderShutdown`], always [`wind_down`]), and the close that runs on
 //! every exit path ([`run_and_close`], [`close_bounded`]).
+//!
+//! # The holder's shutdown, stage by stage
+//!
+//! [`serve`] runs these in this order on every exit path of the holder branch
+//! (signal, lease loss, client disconnect, transport error). Each stage is one
+//! named step below, so stage logging (#40) attaches at one call each.
+//!
+//! | # | stage | step | bound |
+//! |---|---|---|---|
+//! | 1 | transport drain (HTTP graceful drain, stdio cancel) | the transport future inside [`run_and_close`], ended by [`wind_down`] | [`SHUTDOWN_GRACE`] |
+//! | 2 | keep-warm abort | `stop_before_close` in [`run_and_close`], from [`HolderTasks::stop_before_close`] | instant |
+//! | 3 | session close | [`close_bounded`]: [`Memory::close`] and its own numbered stages (queue drain, writers gate, heartbeat abort and fence check, producer joins, flush join, final drain, degraded check, final flush, lease release; `src/memory/shutdown.rs`), or on abandonment the bounded lease release | [`CLOSE_GRACE`] |
+//! | 4 | event pump abort | after the close, in [`run_and_close`], so final-drain events still reach the log | instant |
+//! | 5 | background tasks | [`HolderTasks::stop`]: ledger heartbeat, keep-warm (again), refusal poller | instant |
+//! | 6 | endpoint release | `hub::Hub::release`: accept loop, then the socket file if still ours | instant |
+//! | 7 | ledger close | [`close_ledger`] | the ledger's own shutdown bound |
+//!
+//! Stages 1 to 4 are [`run_and_close`], the seam the "close always runs"
+//! tests drive. The order is load-bearing: nothing that can write to the
+//! ledger is running when stage 7 drains it, and the tail is durable (or
+//! honestly lost) before any proxy connection is cut in stage 6.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -324,11 +345,15 @@ pub(crate) async fn run_and_close(
     stop_before_close: &[tokio::task::AbortHandle],
     early: &EarlyShutdown,
 ) -> Result<(), LamboError> {
+    // Stage 1: the transport winds down (bounded inside the transport).
     let outcome = transport.await;
+    // Stage 2: tasks nothing needs during the close.
     for task in stop_before_close {
         task.abort();
     }
+    // Stage 3: the session close.
     let closed = close_bounded(&mem, early).await;
+    // Stage 4: the event pump, after the close.
     event_pump.abort();
 
     match (outcome, closed) {
@@ -469,6 +494,71 @@ pub(super) async fn release_lease_bounded(mem: &Memory) {
             "lambo serve: could not release the single-writer lease within its window after an \
              abandoned close; the row will lapse at LEASE_TTL instead, and until then this \
              session refuses new writers"
+        );
+    }
+}
+
+/// The holder's background tasks: spawned beside the transport on the holder
+/// path, stopped after the close (stage 5), except the keep-warm, which is
+/// also stopped before it (stage 2).
+pub(super) struct HolderTasks {
+    /// I2 heartbeat, when `--ledger-heartbeat` is set.
+    pub(super) heartbeat: Option<tokio::task::JoinHandle<()>>,
+    /// Issue #13 embedder keep-warm, when the backends ask for one.
+    pub(super) keep_warm: Option<tokio::task::JoinHandle<()>>,
+    /// J4 holder-side refusal poller, when a ledger is attached.
+    pub(super) refusal_poller: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl HolderTasks {
+    /// Stage 2's handles: the keep-warm, which stops when the transport does,
+    /// before the close and its final drain (issue #13); see
+    /// [`run_and_close`].
+    pub(super) fn stop_before_close(&self) -> Vec<tokio::task::AbortHandle> {
+        self.keep_warm
+            .iter()
+            .map(tokio::task::JoinHandle::abort_handle)
+            .collect()
+    }
+
+    /// Stage 5: stop every background task, after `close()`.
+    ///
+    /// After the close, deliberately: the tail's durability is the
+    /// load-bearing guarantee and the ledger is not allowed to be in front of
+    /// it. The heartbeat is stopped first so it cannot enqueue a line into a
+    /// ledger that is draining (stage 7, which is bounded: a writer stuck on a
+    /// hung filesystem is abandoned, never allowed to hold process exit).
+    pub(super) fn stop(self) {
+        if let Some(heartbeat) = self.heartbeat {
+            heartbeat.abort();
+        }
+        // Issue #13. Already aborted inside `run_and_close`, before the close;
+        // repeated here (idempotent) so this exit path aborts it without
+        // relying on that. Nothing to drain: a touch writes nothing.
+        if let Some(task) = self.keep_warm {
+            task.abort();
+        }
+        // J4. The refusal-recorder task is stopped before the ledger drains, so
+        // it cannot enqueue a line into a closing ledger.
+        if let Some(poller) = self.refusal_poller {
+            poller.abort();
+        }
+    }
+}
+
+/// Stage 7: drain the call ledger and report what it wrote, last of all.
+///
+/// Every task that appends to it has stopped (stages 4 to 6), and the
+/// `lease:lost` line a fenced holder books in [`wind_down`] is already queued,
+/// so this drain carries the session's last lines.
+pub(super) fn close_ledger(ledger: Option<Arc<Ledger>>) {
+    if let Some(ledger) = ledger {
+        ledger.shutdown();
+        tracing::info!(
+            written = ledger.counters().written(),
+            dropped = ledger.counters().dropped(),
+            path = %ledger.path().display(),
+            "lambo serve: call ledger closed"
         );
     }
 }

@@ -36,7 +36,7 @@ pub use http_guards::{
 };
 use hub::bind_hub;
 use roles::{resolve_role, Role};
-use shutdown::holder_shutdown;
+use shutdown::{close_ledger, holder_shutdown, HolderTasks};
 use signals::shutdown_signal;
 use transport::{serve_http, serve_stdio};
 
@@ -473,6 +473,13 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
         }
         None => None,
     };
+    // Stopped after the close (and the keep-warm before it); see
+    // `shutdown::HolderTasks` and the stage table in `shutdown`.
+    let tasks = HolderTasks {
+        heartbeat,
+        keep_warm: keep_warm_task,
+        refusal_poller,
+    };
 
     // J2 — the session endpoint, bound HERE: below the arming and below
     // `LamboServer`, which it needs. A bind failure degrades, it does not stop
@@ -501,12 +508,10 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
         }
     };
 
-    // Issue #13: the keep-warm stops when the transport does, before the close
-    // and its final drain; see `run_and_close`.
-    let stop_before_close: Vec<_> = keep_warm_task
-        .iter()
-        .map(tokio::task::JoinHandle::abort_handle)
-        .collect();
+    // The holder's shutdown, in the order `shutdown`'s stage table names.
+    // Stages 1-4: transport drain, keep-warm abort (issue #13), the bounded
+    // session close, the event pump.
+    let stop_before_close = tasks.stop_before_close();
     let outcome = run_and_close(
         mem.clone(),
         transport,
@@ -515,39 +520,13 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
         &early,
     )
     .await;
-
-    // After `close()`, deliberately: the tail's durability is the load-bearing
-    // guarantee and the ledger is not allowed to be in front of it. The
-    // heartbeat is stopped first so it cannot enqueue a line into a ledger
-    // that is draining, and `shutdown` is bounded — a writer stuck on a hung
-    // filesystem is abandoned, never allowed to hold process exit.
-    if let Some(heartbeat) = heartbeat {
-        heartbeat.abort();
-    }
-    // Issue #13. Already aborted inside `run_and_close`, before the close;
-    // repeated here (idempotent) so this exit path aborts it without relying
-    // on that. Nothing to drain: a touch writes nothing.
-    if let Some(task) = keep_warm_task {
-        task.abort();
-    }
-    // J4. The refusal-recorder task is stopped before the ledger drains, so it
-    // cannot enqueue a line into a closing ledger.
-    if let Some(poller) = refusal_poller {
-        poller.abort();
-    }
-    // J2 / JE2E-2. The accept loop stops AFTER `close()` (that is where
-    // `run_and_close` returned from), then the socket file goes, only if it is
-    // still the one this process bound; see `hub::Hub::release`.
+    // Stage 5: heartbeat, keep-warm (again), refusal poller.
+    tasks.stop();
+    // Stage 6 (J2 / JE2E-2): the accept loop stops AFTER `close()`, then the
+    // socket file goes, only if it is still the one this process bound.
     hub.release(endpoint.as_ref());
-    if let Some(ledger) = ledger {
-        ledger.shutdown();
-        tracing::info!(
-            written = ledger.counters().written(),
-            dropped = ledger.counters().dropped(),
-            path = %ledger.path().display(),
-            "lambo serve: call ledger closed"
-        );
-    }
+    // Stage 7: the call ledger drains last.
+    close_ledger(ledger);
 
     outcome
 }
