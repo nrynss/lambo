@@ -71,6 +71,11 @@ mod proxy_releases_the_model;
 #[cfg(all(feature = "store-memory", feature = "embed-fixture"))]
 mod close_runs;
 
+/// #40: the shutdown stages and `Memory::close`'s steps each log `started`
+/// and `finished in N ms`; an abandoned close names its step.
+#[cfg(all(feature = "store-memory", feature = "embed-fixture"))]
+mod stages;
+
 /// #28 review L2: stage 6 (`Hub::release`) ends every endpoint session and
 /// waits for it, so none outlives the release or appends to the ledger
 /// stage 7 drains.

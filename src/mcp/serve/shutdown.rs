@@ -20,7 +20,10 @@
 //! | 7 | ledger close | [`close_ledger`] | the ledger's own shutdown bound |
 //!
 //! Stages 1 to 4 are [`run_and_close`], the seam the "close always runs"
-//! tests drive. The order is load-bearing:
+//! tests drive. Every stage logs a `started` and a `finished in N ms` line
+//! through [`ShutdownProgress`] (#40; the line format is in
+//! [`super::stages`]), so a shutdown that stalls names its stage. The order
+//! is load-bearing:
 //!
 //! * the tail is durable (or honestly lost) before any proxy connection is
 //!   cut, in stage 6. Until then an endpoint session stays connected; a call
@@ -40,6 +43,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::signals::{shutdown_signal, EarlyShutdown};
+use super::stages::{ShutdownProgress, Stage};
 use crate::ledger::Ledger;
 use crate::memory::Memory;
 use crate::store::lease;
@@ -222,12 +226,23 @@ impl Future for HolderShutdown {
 /// place of it. A signal that landed in the window between the two arming
 /// points is recorded only by `early`; one that lands after is seen by both.
 /// See [`EarlyShutdown`].
+///
+/// When the wind-down resolves, the holder's shutdown has begun: stage 1
+/// (the transport drain) is started on `progress` before the transport sees
+/// the future ready (#40).
 pub(super) fn holder_shutdown(
     mem: Arc<Memory>,
     ledger: Option<Arc<Ledger>>,
     early: EarlyShutdown,
+    progress: ShutdownProgress,
 ) -> HolderShutdown {
-    HolderShutdown(Box::pin(wind_down(shutdown_signal(), early, mem, ledger)))
+    // Evaluated here, outside the `async` block, so the registration stays
+    // eager (see `shutdown_signal`).
+    let signal = shutdown_signal();
+    HolderShutdown(Box::pin(async move {
+        wind_down(signal, early, mem, ledger).await;
+        progress.begin(Stage::TransportDrain);
+    }))
 }
 
 /// What ends a holder's transport: a signal, **or** losing the single-writer
@@ -345,23 +360,33 @@ pub(super) async fn wind_down(
 /// call, a touch only competes with the final drain (and on a slow remote
 /// embedder could keep a request in flight across it). Aborting is idempotent,
 /// so `serve` still aborts the same task after close on its usual path.
+///
+/// Each stage is logged on `progress` (#40). Stage 1 was started by the
+/// shutdown future when it resolved; a transport that ended on its own
+/// (client hangup, transport error) gets both of its lines here.
 pub(crate) async fn run_and_close(
     mem: Arc<Memory>,
     transport: impl Future<Output = Result<(), LamboError>>,
     event_pump: tokio::task::JoinHandle<()>,
     stop_before_close: &[tokio::task::AbortHandle],
     early: &EarlyShutdown,
+    progress: &ShutdownProgress,
 ) -> Result<(), LamboError> {
     // Stage 1: the transport winds down (bounded inside the transport).
     let outcome = transport.await;
+    progress.end(Stage::TransportDrain);
     // Stage 2: tasks nothing needs during the close.
-    for task in stop_before_close {
-        task.abort();
-    }
+    progress.run(Stage::KeepWarmAbort, || {
+        for task in stop_before_close {
+            task.abort();
+        }
+    });
     // Stage 3: the session close.
+    progress.begin(Stage::SessionClose);
     let closed = close_bounded(&mem, early).await;
+    progress.end(Stage::SessionClose);
     // Stage 4: the event pump, after the close.
-    event_pump.abort();
+    progress.run(Stage::EventPumpAbort, || event_pump.abort());
 
     match (outcome, closed) {
         (Err(e), _) => Err(e),
