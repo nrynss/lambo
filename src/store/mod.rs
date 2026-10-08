@@ -76,7 +76,10 @@ pub mod flush;
 // T8.6 — single-writer lease (spec §2.2, store-enforced). Holder identity,
 // TTL/heartbeat constants, acquire/refresh/release outcomes.
 pub mod lease;
+// #23 — session erasure: report, tombstone and the shared lease gate.
+pub mod erase;
 
+pub use erase::{EraseCounts, EraseOutcome, EraseReport};
 pub use lease::{LeaseHolder, LeaseInfo, LeaseOutcome};
 
 use async_trait::async_trait;
@@ -466,6 +469,39 @@ pub trait GraphStore: Send + Sync {
         event: &CanonizationEvent,
         token: Option<u64>,
     ) -> Result<(), StoreError>;
+
+    /// Erase a whole session for account deletion (#23): every row keyed to
+    /// `session` in every table, the `sessions` row with its embedding
+    /// contract included, and replace its lease row with the erasure
+    /// tombstone. See [`erase`] for the tombstone and the lease rule.
+    ///
+    /// **Fenced.** The lease is taken inside the erase's own transaction, on
+    /// the terms of [`erase::erase_gate`]: a live lease held by anyone other
+    /// than `eraser` is returned as [`EraseOutcome::Held`] with nothing
+    /// touched. After the commit the tombstone's token is newer than any a
+    /// writer holds, so a stale or unleased write is refused with
+    /// [`erase::erased_session_error`] and cannot recreate the session, and no
+    /// acquire can take the session over.
+    ///
+    /// **Complete when it returns.** [`EraseOutcome::Erased`] is returned only
+    /// after the deletion committed. **Safe to repeat**: a rerun after a
+    /// completed erase reports `already_absent`; a rerun after a failure part
+    /// way (a crash, a dropped connection) finishes the job, because the
+    /// deletion is one transaction on every adapter and a failed one leaves
+    /// the session as it was.
+    ///
+    /// Default: [`StoreError::Capability`]. Fail closed, never a silent
+    /// success: a store that cannot erase must not let a deletion fan-out
+    /// mark it done.
+    async fn erase_session(
+        &self,
+        _session: &SessionId,
+        _eraser: &LeaseHolder,
+    ) -> Result<EraseOutcome, StoreError> {
+        Err(StoreError::Capability(
+            "this store does not implement erase_session".into(),
+        ))
+    }
 
     // -----------------------------------------------------------------------
     // Single-writer lease (spec §2.2, T8.6)
