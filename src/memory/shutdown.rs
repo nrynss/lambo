@@ -352,15 +352,24 @@ impl Memory {
     /// ## Bounding this against the lease — caller's contract (T86-4)
     ///
     /// `close()` aborts the lease heartbeat as soon as it holds the writers
-    /// gate (after latching `closed` and draining the write queue, and before
-    /// it stops anything else), because the success paths below release the
-    /// lease explicitly and it must not keep being refreshed underneath that
-    /// release. (This said "**first** (right after latching `closed`)", which
-    /// stopped being true when J3 put the queue drain ahead of the gate; the
-    /// drain is bounded by `WRITE_QUEUE_DRAIN_BUDGET`, so the lease is still
-    /// refreshing for at most that long into the close.) From that moment the lease is no longer refreshed, so it stays valid only for its
-    /// **remaining TTL** — at worst one [`LEASE_HEARTBEAT_INTERVAL`](crate::store::lease::LEASE_HEARTBEAT_INTERVAL) short of a
-    /// full [`LEASE_TTL`](crate::store::lease::LEASE_TTL) (≈30s) if the last beat landed just before close.
+    /// gate (after latching `closed`, stopping the probe and the intent
+    /// replay, and draining the write queue; before the background tasks),
+    /// because the success paths below release the lease explicitly and it
+    /// must not keep being refreshed underneath that release. (This said
+    /// "**first** (right after latching `closed`)", which stopped being true
+    /// when J3 put the queue drain ahead of the gate.) Until the gate is held
+    /// the lease keeps refreshing: through the replay stop and its join, the
+    /// quiesce (bounded by `WRITE_QUEUE_DRAIN_BUDGET`) plus the joins of the
+    /// workers it aborts, and the wait for the gate's write side, which an
+    /// unbounded embedder can stretch indefinitely (the R2-5 paragraph
+    /// below). That window has no fixed bound, but extra refresh is the
+    /// safe direction: the lease only outlives a close that is still running.
+    ///
+    /// From that moment the lease is no longer refreshed, so it stays valid
+    /// only for its **remaining TTL** — at worst one
+    /// [`LEASE_HEARTBEAT_INTERVAL`](crate::store::lease::LEASE_HEARTBEAT_INTERVAL)
+    /// short of a full [`LEASE_TTL`](crate::store::lease::LEASE_TTL) (≈30s) if
+    /// the last beat landed just before close.
     ///
     /// This method is otherwise **unbounded**: the step-2 flush-task join and the
     /// step-4 final flush each have their own internal timeout ladders, but their
