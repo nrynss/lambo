@@ -556,9 +556,10 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     .await;
     // Stage 5: heartbeat, keep-warm (again), refusal poller.
     tasks.stop();
-    // Stage 6 (J2 / JE2E-2): the accept loop stops AFTER `close()`, then the
-    // socket file goes, only if it is still the one this process bound.
-    hub.release(endpoint.as_ref());
+    // Stage 6 (J2 / JE2E-2): AFTER `close()`, the accept loop stops and every
+    // endpoint session is ended (bounded), then the socket file goes, only if
+    // it is still the one this process bound.
+    hub.release(endpoint.as_ref()).await;
     // Stage 7: the call ledger drains last.
     close_ledger(ledger);
 

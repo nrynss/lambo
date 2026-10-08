@@ -17,8 +17,11 @@
 //!   the rest of `serve` names through this module.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use rmcp::ServiceExt;
+use tokio::sync::watch;
+use tokio::task::{JoinHandle, JoinSet};
 
 use super::roles::ENDPOINT_NOT_ACCEPTING;
 use crate::mcp::endpoint::SocketIdentity;
@@ -39,10 +42,36 @@ pub(super) fn derive_endpoint(session: &str, store: &StoreConfig) -> Option<Sess
     SessionEndpoint::for_store(session, store)
 }
 
+/// How long [`Hub::release`] waits for the endpoint's live sessions to end
+/// once it has told them to stop.
+///
+/// A stopped session cancels its rmcp service, which drains the responses of
+/// calls already in flight for up to 2 s (rmcp's own bound on a cancelled
+/// service) and then closes the connection. By stage 6 `Memory` is closed, so
+/// those calls are refused rather than run; the drain is short in practice.
+/// This is the ceiling above rmcp's 2 s; a session still running at it is
+/// aborted. It sits after the lease release and the final flush, so it
+/// delays process exit, never the tail's durability, and like the ledger's
+/// own drain it is outside `SHUTDOWN_BUDGET`.
+pub(super) const ENDPOINT_RELEASE_GRACE: Duration = Duration::from_secs(3);
+
+/// The endpoint's live sessions: one task per accepted connection, shared
+/// between the accept loop (which spawns into it) and [`Hub::release`]
+/// (which ends them).
+type Connections = Arc<parking_lot::Mutex<JoinSet<()>>>;
+
 /// A holder's session endpoint once [`bind_hub`] has run: the accept loop, if
-/// the bind succeeded, and the identity of the socket file it created.
+/// the bind succeeded, its sessions, and the identity of the socket file it
+/// created.
 pub(super) struct Hub {
-    accept_loop: Option<tokio::task::JoinHandle<()>>,
+    accept_loop: Option<JoinHandle<()>>,
+    /// Every session the accept loop started. Tracked, not detached, so
+    /// [`Hub::release`] can end them at stage 6 instead of leaving them to the
+    /// runtime's drop (#28 review L2).
+    connections: Connections,
+    /// Flipped to `true` by [`Hub::release`]: each session cancels its rmcp
+    /// service and ends.
+    stop: watch::Sender<bool>,
     /// JE2E-2: the identity of the socket file this process creates, captured
     /// the instant after the bind. It is what licenses the unlink at exit; see
     /// `SessionEndpoint::unlink_if_ours` for why the path and the lease are not
@@ -74,6 +103,8 @@ pub(super) fn bind_hub(
     max_sessions: usize,
 ) -> Hub {
     let mut bound_socket: Option<SocketIdentity> = None;
+    let connections: Connections = Arc::default();
+    let (stop, stopped) = watch::channel(false);
     let accept_loop = match endpoint.map(|ep| (ep.path().display().to_string(), ep.bind())) {
         None => None,
         Some((path, Ok(listener))) => {
@@ -87,6 +118,8 @@ pub(super) fn bind_hub(
                 listener,
                 server.clone(),
                 max_sessions,
+                Arc::clone(&connections),
+                stopped,
             )))
         }
         Some((path, Err(e))) => {
@@ -102,17 +135,36 @@ pub(super) fn bind_hub(
     };
     Hub {
         accept_loop,
+        connections,
+        stop,
         bound_socket,
     }
 }
 
 impl Hub {
-    /// Stop the accept loop, then remove the socket file if it is still ours.
+    /// Stop accepting, end every endpoint session, then remove the socket file
+    /// if it is still ours.
     ///
-    /// The loop is aborted AFTER `close()` (the caller runs this once
-    /// `run_and_close` has returned), deliberately: a proxy's in-flight call
-    /// must not be cut off before the tail it may have just written is
-    /// durable. Then the socket file goes, so the next start does not log a
+    /// Runs AFTER `close()` (the caller runs this once `run_and_close` has
+    /// returned), deliberately: a proxy's in-flight call must not be cut off
+    /// before the tail it may have just written is durable.
+    ///
+    /// In order:
+    ///
+    /// 1. every session is told to stop, and the accept loop is aborted and
+    ///    awaited, so no session starts after this point;
+    /// 2. each session cancels its rmcp service and waits for it to finish
+    ///    (in-flight responses drained, connection closed). The proxy on the
+    ///    other end sees its hub connection drop, exactly as it does when a
+    ///    holder exits, and answers with its lost-with-the-holder error;
+    /// 3. the wait is bounded by [`ENDPOINT_RELEASE_GRACE`]; a session still
+    ///    running then is aborted, with a WARN naming how many.
+    ///
+    /// So when this returns no endpoint session holds the server, and none can
+    /// append to the ledger that stage 7 drains. Before #28's remediation the
+    /// sessions were detached and lived on until the runtime dropped.
+    ///
+    /// Then the socket file goes, so the next start does not log a
     /// stale-socket warning it did not earn.
     ///
     /// JE2E-2. The unlink is licensed by the socket's own identity, not by the
@@ -120,9 +172,26 @@ impl Hub {
     /// successor is already listening at this address, and even a clean close
     /// released the lease a few statements ago. `unlink_if_ours` removes the
     /// file only while it is still the inode this process bound.
-    pub(super) fn release(self, endpoint: Option<&SessionEndpoint>) {
+    pub(super) async fn release(self, endpoint: Option<&SessionEndpoint>) {
+        self.stop.send_replace(true);
         if let Some(accept_loop) = self.accept_loop {
             accept_loop.abort();
+            // Cancelled is the expected outcome; awaiting it only guarantees
+            // the loop can no longer spawn a session.
+            let _ = accept_loop.await;
+        }
+        let mut sessions = std::mem::take(&mut *self.connections.lock());
+        let drained = tokio::time::timeout(ENDPOINT_RELEASE_GRACE, async {
+            while sessions.join_next().await.is_some() {}
+        })
+        .await;
+        if drained.is_err() {
+            tracing::warn!(
+                left = sessions.len(),
+                grace = ?ENDPOINT_RELEASE_GRACE,
+                "lambo serve: endpoint sessions did not end within the release grace; aborting them"
+            );
+            sessions.shutdown().await;
         }
         if let Some(endpoint) = endpoint {
             endpoint.unlink_if_ours(self.bound_socket);
@@ -172,13 +241,17 @@ pub(super) async fn probe_holder(
 /// newline-delimited JSON-RPC the stdio transport speaks — which is what lets a
 /// proxy be a byte pipe rather than a re-implementation of the tool surface.
 ///
-/// Runs until aborted. The caller aborts it alongside the heartbeat, *after*
-/// [`Memory::close`](crate::memory::Memory::close), so a proxy's in-flight call is not cut off before the tail
-/// it may have just written is durable.
+/// Runs until aborted. Each session is spawned into `connections`, not
+/// detached, so [`Hub::release`] can end it; the caller releases the hub
+/// *after* [`Memory::close`](crate::memory::Memory::close), so a proxy's
+/// in-flight call is not cut off before the tail it may have just written is
+/// durable.
 pub(super) async fn serve_endpoint(
     listener: tokio::net::UnixListener,
     server: LamboServer,
     max_sessions: usize,
+    connections: Connections,
+    stopped: watch::Receiver<bool>,
 ) {
     // The same ceiling `--max-sessions` puts on the HTTP transport, for the same
     // reason: concurrently live MCP sessions are the resource, and the endpoint
@@ -204,19 +277,59 @@ pub(super) async fn serve_endpoint(
             drop(stream);
             continue;
         };
-        let server = server.clone();
-        tokio::spawn(async move {
-            let _permit = permit;
-            match server.serve(stream).await {
-                Ok(service) => {
-                    if let Err(e) = service.waiting().await {
-                        tracing::warn!(error = %e, "lambo serve: endpoint session ended in error");
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "lambo serve: endpoint handshake failed");
-                }
-            }
-        });
+        let mut sessions = connections.lock();
+        // Reap the sessions that have ended, so the set holds live ones only.
+        while sessions.try_join_next().is_some() {}
+        sessions.spawn(serve_connection(
+            server.clone(),
+            stream,
+            permit,
+            stopped.clone(),
+        ));
     }
+}
+
+/// One endpoint session: the MCP handshake, then the session until the client
+/// leaves or [`Hub::release`] stops it.
+///
+/// On stop, the rmcp service is cancelled and awaited rather than dropped, so
+/// its loop drains the responses already in flight and closes the connection
+/// before this returns (see [`ENDPOINT_RELEASE_GRACE`]).
+async fn serve_connection(
+    server: LamboServer,
+    stream: tokio::net::UnixStream,
+    permit: tokio::sync::OwnedSemaphorePermit,
+    mut stopped: watch::Receiver<bool>,
+) {
+    let _permit = permit;
+    let service = tokio::select! {
+        biased;
+        () = stop_requested(&mut stopped) => return,
+        served = server.serve(stream) => match served {
+            Ok(service) => service,
+            Err(e) => {
+                tracing::warn!(error = %e, "lambo serve: endpoint handshake failed");
+                return;
+            }
+        },
+    };
+    let cancel = service.cancellation_token();
+    let waiting = service.waiting();
+    tokio::pin!(waiting);
+    let ended = tokio::select! {
+        ended = &mut waiting => ended,
+        () = stop_requested(&mut stopped) => {
+            cancel.cancel();
+            waiting.await
+        }
+    };
+    if let Err(e) = ended {
+        tracing::warn!(error = %e, "lambo serve: endpoint session ended in error");
+    }
+}
+
+/// Resolves once [`Hub::release`] has asked the sessions to stop. A dropped
+/// sender counts as a stop: the hub that owned these sessions is gone.
+async fn stop_requested(stopped: &mut watch::Receiver<bool>) {
+    let _ = stopped.wait_for(|stop| *stop).await;
 }

@@ -16,13 +16,23 @@
 //! | 3 | session close | [`close_bounded`]: [`Memory::close`] and its own numbered stages (queue drain, writers gate, heartbeat abort and fence check, producer joins, flush join, final drain, degraded check, final flush, lease release; `src/memory/shutdown.rs`), or on abandonment the bounded lease release | [`CLOSE_GRACE`] |
 //! | 4 | event pump abort | after the close, in [`run_and_close`], so final-drain events still reach the log | instant |
 //! | 5 | background tasks | [`HolderTasks::stop`]: ledger heartbeat, keep-warm (again), refusal poller | instant |
-//! | 6 | endpoint release | `hub::Hub::release`: accept loop, then the socket file if still ours | instant |
+//! | 6 | endpoint release | `hub::Hub::release`: stop accepting, end every endpoint session (each cancels its rmcp service and waits for it), then the socket file if still ours | `hub::ENDPOINT_RELEASE_GRACE`, then the stragglers are aborted |
 //! | 7 | ledger close | [`close_ledger`] | the ledger's own shutdown bound |
 //!
 //! Stages 1 to 4 are [`run_and_close`], the seam the "close always runs"
-//! tests drive. The order is load-bearing: nothing that can write to the
-//! ledger is running when stage 7 drains it, and the tail is durable (or
-//! honestly lost) before any proxy connection is cut in stage 6.
+//! tests drive. The order is load-bearing:
+//!
+//! * the tail is durable (or honestly lost) before any proxy connection is
+//!   cut, in stage 6. Until then an endpoint session stays connected; a call
+//!   it makes after stage 3 reaches a closed `Memory` and is refused;
+//! * nothing that can write to the ledger is running when stage 7 drains it.
+//!   Stages 4 and 5 abort the event pump and the background tasks; stage 6
+//!   ends the endpoint sessions and waits for them. One residue remains:
+//!   rmcp runs each tool call in a task of its own, which a cancelled
+//!   session waits on for up to 2 s (rmcp's drain) but does not join. A call
+//!   still running past that drain, against a closed `Memory`, can still
+//!   append its line; once stage 7 has begun, the ledger counts it as
+//!   `write_failed`. Bounded and counted, never silent.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -545,9 +555,12 @@ impl HolderTasks {
 
 /// Stage 7: drain the call ledger and report what it wrote, last of all.
 ///
-/// Every task that appends to it has stopped (stages 4 to 6), and the
-/// `lease:lost` line a fenced holder books in [`wind_down`] is already queued,
-/// so this drain carries the session's last lines.
+/// Every task that appends to it has been stopped (stages 4 to 6: the event
+/// pump, the background tasks, the endpoint sessions), and the `lease:lost`
+/// line a fenced holder books in [`wind_down`] is already queued, so this
+/// drain carries the session's last lines. The one exception is the residue
+/// the stage table names: a tool call rmcp is still running past its 2 s
+/// cancel drain may append after this, and is counted, not lost silently.
 pub(super) fn close_ledger(ledger: Option<Arc<Ledger>>) {
     if let Some(ledger) = ledger {
         ledger.shutdown();
