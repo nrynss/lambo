@@ -276,9 +276,6 @@ use crate::types::{
     StoreError,
 };
 
-/// Structural edge types counted by both structural queries (spec §4.1 errata:
-/// concept-to-concept `Dependency`/`Causal`/`Hierarchical` only — provenance
-/// `Derives`/`Temporal` must not un-orphan concepts).
 /// Rows per multi-row upsert statement (L82-1).
 ///
 /// Chosen against SQLite's *most conservative* `SQLITE_MAX_VARIABLE_NUMBER` of
@@ -325,6 +322,9 @@ const _: () = assert!(
     "accesses chunk exceeds SQLITE_MAX_VARIABLE_NUMBER"
 );
 
+/// Structural edge types counted by both structural queries (spec §4.1 errata:
+/// concept-to-concept `Dependency`/`Causal`/`Hierarchical` only — provenance
+/// `Derives`/`Temporal` must not un-orphan concepts).
 const STRUCTURAL_EDGE_IN: &str = "'Dependency', 'Causal', 'Hierarchical'";
 
 /// T3.1 DDL — embedded and executed verbatim by [`SqliteStore::init_schema`],
