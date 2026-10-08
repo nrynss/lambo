@@ -214,6 +214,18 @@ pub(super) const LEASE_TOKEN_FOR_SHARE_SQL: &str =
 // Session erasure (#23). The transaction is `persistence.rs`'s `erase`.
 // ---------------------------------------------------------------------------
 
+/// The erase transaction's first lock: the session's `sessions` row, taken
+/// before the lease row (#23 review L1). A flush stamps (and so row-locks)
+/// `sessions` first and reads its lease fence second; an erase that locked the
+/// lease first and deleted `sessions` last took the same two rows in the
+/// opposite order, so a zombie flush and an erase could deadlock (40P01 on
+/// Postgres, retried by `tx_retry` after `deadlock_timeout`). Taking
+/// `sessions` first gives both transactions one order. No row (a never-written
+/// session) locks nothing, and there is then no cycle to break: a flush that
+/// inserts the row concurrently blocks on the lease row instead.
+pub(super) const ERASE_SESSION_ROW_FOR_UPDATE_SQL: &str =
+    "SELECT 1 FROM sessions WHERE session_id = $1 FOR UPDATE";
+
 /// The erase transaction's lease read. `FOR UPDATE` takes the row lock every
 /// flush's `FOR SHARE` fence read conflicts with, so a flush already past its
 /// fence commits before the erase reads on, and one arriving later waits for

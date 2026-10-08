@@ -24,8 +24,8 @@ use super::codec::backend;
 use super::leases::{lease_info_from_ts, LeaseRowTs, LEASE_ROW_SQL};
 use super::pool::tx_retry;
 use super::sql::{
-    DELETED_ROW_SESSIONS_SQL, ERASE_LEASE_FOR_UPDATE_SQL, ERASE_STATEMENTS,
-    LEASE_TOKEN_FOR_SHARE_SQL, UPSERT_SESSION_ROW_SQL,
+    DELETED_ROW_SESSIONS_SQL, ERASE_LEASE_FOR_UPDATE_SQL, ERASE_SESSION_ROW_FOR_UPDATE_SQL,
+    ERASE_STATEMENTS, LEASE_TOKEN_FOR_SHARE_SQL, UPSERT_SESSION_ROW_SQL,
 };
 #[cfg(feature = "fixtures")]
 use super::sql::{UPSERT_RESERVATION_SQL, UPSERT_SYNONYM_SQL};
@@ -433,7 +433,9 @@ impl<D: Dialect> PgStore<D> {
     /// Erase every row keyed to `session` and leave the tombstone (#23; see
     /// `store::erase`). One transaction inside `tx_retry`, like `flush`.
     ///
-    /// The lease row is read `FOR UPDATE` first, which waits out any flush
+    /// The `sessions` row is locked first, then the lease row: the order a
+    /// flush takes them in (stamp, then fence), so the two cannot deadlock
+    /// (#23 review L1). The lease row is read `FOR UPDATE`, which waits out any flush
     /// already holding its `FOR SHARE` fence lock and makes every later fence
     /// read wait for this commit and then see the tombstone. When there is no
     /// row there is nothing to lock; the tombstone insert's own conflict
@@ -460,6 +462,12 @@ impl<D: Dialect> PgStore<D> {
                 .begin()
                 .await
                 .map_err(|e| map_write_err(e, |m| format!("begin erase transaction: {m}")))?;
+            // L1: `sessions` before the lease row, the flush's own order.
+            sqlx::query(ERASE_SESSION_ROW_FOR_UPDATE_SQL)
+                .bind(session.as_str())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| map_write_err(e, |m| format!("erase_session: lock session: {m}")))?;
             let prior: Option<(String, bool)> = sqlx::query_as(ERASE_LEASE_FOR_UPDATE_SQL)
                 .bind(session.as_str())
                 .fetch_optional(&mut *tx)
