@@ -24,7 +24,7 @@ use super::codec::backend;
 use super::leases::{lease_info_from_ts, LeaseRowTs, LEASE_ROW_SQL};
 use super::pool::tx_retry;
 use super::sql::{
-    DELETED_ROW_SESSIONS_SQL, ERASE_LEASE_FOR_UPDATE_SQL, ERASE_STATEMENTS, LEASE_HOLDER_SQL,
+    DELETED_ROW_SESSIONS_SQL, ERASE_LEASE_FOR_UPDATE_SQL, ERASE_STATEMENTS,
     LEASE_TOKEN_FOR_SHARE_SQL, UPSERT_SESSION_ROW_SQL,
 };
 #[cfg(feature = "fixtures")]
@@ -44,10 +44,10 @@ use crate::store::batch::{
 #[cfg(feature = "fixtures")]
 use crate::store::batch::{seed_concept_rows, seed_edge_rows};
 use crate::store::erase::{
-    erase_gate, fence_refusal, EraseCounts, EraseGate, EraseOutcome, EraseReport, EraseStepHook,
+    check_fence, erase_gate, EraseCounts, EraseGate, EraseOutcome, EraseReport, EraseStepHook,
     PriorLease, ERASED_HOLDER,
 };
-use crate::store::lease::{lease_permits_write, LeaseHolder};
+use crate::store::lease::LeaseHolder;
 use crate::store::{map_write_err, SessionFlushStats};
 #[cfg(feature = "fixtures")]
 use crate::types::GraphSnapshot;
@@ -355,21 +355,18 @@ impl<D: Dialect> PgStore<D> {
             // seed / fixture parity, where sessions run unleased.
             fenced.sort_unstable();
             for sid in &fenced {
-                let current: Option<i64> = sqlx::query_scalar(LEASE_TOKEN_FOR_SHARE_SQL)
+                let lease: Option<(i64, String)> = sqlx::query_as(LEASE_TOKEN_FOR_SHARE_SQL)
                     .bind(sid)
                     .fetch_optional(&mut *tx)
                     .await
                     .map_err(backend)?;
-                if let Some(cur) = current {
+                if let Some((cur, holder)) = lease {
                     let cur = u64::try_from(cur).map_err(|_| {
                         StoreError::Invariant(format!(
                             "session {sid}: negative lease current_token"
                         ))
                     })?;
-                    if !lease_permits_write(cur, token) {
-                        let holder = lease_holder(&mut tx, sid).await?;
-                        return Err(fence_refusal(sid, token, cur, holder.as_deref()));
-                    }
+                    check_fence(sid, token, cur, &holder)?;
                 }
             }
 
@@ -408,27 +405,19 @@ impl<D: Dialect> PgStore<D> {
             // token inside this transaction, atomically with the write
             // (rolls back on `?`), with the lease row share-locked to commit
             // (see the flush gate).
-            let current: Option<i64> = sqlx::query_scalar(LEASE_TOKEN_FOR_SHARE_SQL)
+            let lease: Option<(i64, String)> = sqlx::query_as(LEASE_TOKEN_FOR_SHARE_SQL)
                 .bind(event.session_id.as_str())
                 .fetch_optional(&mut *tx)
                 .await
                 .map_err(backend)?;
-            if let Some(cur) = current {
+            if let Some((cur, holder)) = lease {
                 let cur = u64::try_from(cur).map_err(|_| {
                     StoreError::Invariant(format!(
                         "session {}: negative lease current_token",
                         event.session_id
                     ))
                 })?;
-                if !lease_permits_write(cur, token) {
-                    let holder = lease_holder(&mut tx, event.session_id.as_str()).await?;
-                    return Err(fence_refusal(
-                        event.session_id.as_str(),
-                        token,
-                        cur,
-                        holder.as_deref(),
-                    ));
-                }
+                check_fence(event.session_id.as_str(), token, cur, &holder)?;
             }
             apply_canonization(&mut *tx, event).await?;
             tx.commit().await.map_err(|e| {
@@ -462,8 +451,9 @@ impl<D: Dialect> PgStore<D> {
         eraser: &LeaseHolder,
         hook: EraseStepHook<'_>,
     ) -> Result<EraseOutcome, StoreError> {
-        let pool = &self.pool().await?;
         let eraser_token = eraser.token();
+        crate::store::lease::refuse_reserved_holder(&eraser_token)?;
+        let pool = &self.pool().await?;
         let eraser_token = eraser_token.as_str();
         tx_retry(|| async move {
             let mut tx = pool
@@ -530,17 +520,4 @@ async fn held(
         .to_std()
         .unwrap_or(std::time::Duration::ZERO);
     Ok(EraseOutcome::Held { current, age })
-}
-
-/// The lease row's holder, for a fence refusal's message (a tombstone says
-/// "erased"). Read only on the refusal path.
-async fn lease_holder(
-    tx: &mut sqlx::PgConnection,
-    session: &str,
-) -> Result<Option<String>, StoreError> {
-    sqlx::query_scalar(LEASE_HOLDER_SQL)
-        .bind(session)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(backend)
 }

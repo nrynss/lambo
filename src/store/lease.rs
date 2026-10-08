@@ -187,6 +187,31 @@ pub fn is_released_holder(holder: &str) -> bool {
     holder == RELEASED_HOLDER
 }
 
+/// `true` for a holder value the store writes itself and no writer may take
+/// as its identity: [`RELEASED_HOLDER`] and the erasure tombstone's
+/// [`crate::store::erase::ERASED_HOLDER`].
+pub fn is_reserved_holder(holder: &str) -> bool {
+    is_released_holder(holder) || crate::store::erase::is_erased_holder(holder)
+}
+
+/// Refuse a caller whose holder token is a reserved value (#23 review H1).
+///
+/// Every acquire, refresh and erase runs this first. A [`LeaseHolder::token`]
+/// is `agent@host#pid` and cannot equal either reserved value, so this never
+/// fires for a real caller; it is here so that holding the tombstone or the
+/// released marker can never be a writer's lease even if the token format
+/// changes, which would otherwise let a "refresh" extend a tombstone or a
+/// write fence pass as its holder.
+pub fn refuse_reserved_holder(holder: &str) -> Result<(), crate::types::StoreError> {
+    if is_reserved_holder(holder) {
+        return Err(crate::types::StoreError::Invariant(format!(
+            "lease holder {holder:?} is reserved for the store's own rows (a released lease or \
+             an erased session) and cannot take a lease or erase"
+        )));
+    }
+    Ok(())
+}
+
 /// Who holds a session lease — agent id + process id + host.
 ///
 /// This is the human-readable identity an operator sees in a refusal ("held by
@@ -570,6 +595,24 @@ mod tests {
         // Stable: the same holder always produces the same token (refresh /
         // release depend on it).
         assert_eq!(h.token(), h.clone().token());
+    }
+
+    #[test]
+    fn the_reserved_holders_are_refused_and_no_real_token_is_one() {
+        for reserved in [RELEASED_HOLDER, crate::store::erase::ERASED_HOLDER] {
+            assert!(is_reserved_holder(reserved));
+            assert!(matches!(
+                refuse_reserved_holder(reserved),
+                Err(crate::types::StoreError::Invariant(_))
+            ));
+            let lookalike = LeaseHolder {
+                agent: AgentId::new(reserved),
+                pid: 0,
+                host: reserved.into(),
+                endpoint: None,
+            };
+            assert!(refuse_reserved_holder(&lookalike.token()).is_ok());
+        }
     }
 
     #[test]

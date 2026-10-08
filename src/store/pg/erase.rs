@@ -265,6 +265,34 @@ pub(crate) async fn check_erase_session<D: Dialect>(store: &PgStore<D>) {
     cleanup(store, &other).await;
 }
 
+/// #23 review H1 on a live engine: release, erase, then a zombie's write under
+/// any token is refused and recreates nothing.
+pub(crate) async fn check_erase_after_release<D: Dialect>(store: &PgStore<D>) {
+    let sid = SessionId::from(format!("erase-after-release-{}", Uuid::new_v4()));
+    crate::store::erase::testkit::check_erase_after_release_fences(store, &sid).await;
+    cleanup(store, &sid).await;
+}
+
+#[cfg(feature = "store-postgres")]
+#[tokio::test]
+#[ignore = "live: requires LAMBO_POSTGRES_DSN against pinned pgvector/pgvector:pg17"]
+async fn postgres_erase_after_a_release_fences_every_token() {
+    let Some(dsn) =
+        super::postgres::postgres_dsn_or_skip("postgres_erase_after_a_release_fences_every_token")
+    else {
+        return;
+    };
+    let store = super::postgres::PostgresStore::new(crate::store::StoreConfig {
+        kind: crate::store::StoreKind::Postgres,
+        dsn: Some(dsn),
+        path: None,
+        vector_dim: None,
+    })
+    .expect("construct");
+    store.init_schema().await.expect("init_schema");
+    check_erase_after_release(&store).await;
+}
+
 #[cfg(feature = "store-postgres")]
 #[tokio::test]
 #[ignore = "live: requires LAMBO_POSTGRES_DSN against pinned pgvector/pgvector:pg17"]

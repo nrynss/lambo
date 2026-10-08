@@ -18,11 +18,20 @@
 //! * `holder` = [`ERASED_HOLDER`], a value no [`LeaseHolder::token`] can
 //!   produce (a real token always contains `@` and `#`);
 //! * `current_token` = the prior token plus one (one on a never-leased
-//!   session), so every token minted before the erase is stale and an
-//!   unleased write (`None`) is refused too (`lease_permits_write`);
+//!   session). A release keeps the row and its token (`store::lease`, #23
+//!   review H2), so the prior token is the session's high-water mark and every
+//!   token minted before the erase is below the tombstone's;
 //! * `expires_at` = [`tombstone_expires_at`] (year 9999), so the expiry guard
 //!   every acquire carries never lets anyone take the session over;
 //! * `endpoint` = NULL; `acquired_at` = the store clock at the first erase.
+//!
+//! Every fence also refuses a tombstoned session **whatever token is
+//! presented** ([`check_fence`], #23 review H1), the tombstone's own token
+//! and `None` included. The token arithmetic above already refuses every
+//! pre-erase writer; the holder check is the defense in depth that does not
+//! rest on it. No writer can hold the tombstone's holder value: acquire,
+//! refresh and erase refuse a reserved holder
+//! ([`crate::store::lease::refuse_reserved_holder`]).
 //!
 //! The row holds the session id and nothing else of the session's. It is what
 //! makes "a later write to an erased session id is refused and does not
@@ -110,6 +119,32 @@ pub fn fence_refusal(
         "session {session}: presented token {token:?} is stale (lease token {current}) — \
          single-writer fence (GitHub issue #1)"
     ))
+}
+
+/// The store-side fence every durable write gate runs (#1, #23): may a write
+/// presenting `token` proceed against a lease row whose current token is
+/// `current` and whose holder is `holder`?
+///
+/// An erasure tombstone refuses **whatever token is presented** (#23 review
+/// H1). The tombstone is minted above every earlier token, so the token rule
+/// alone already refuses a pre-erase writer now that a release keeps the
+/// token (H2); the holder check is the defense in depth that does not depend
+/// on any token arithmetic being right, and it is decided on the typed holder
+/// value rather than on a number. Anything else is the ordinary
+/// [`crate::store::lease::lease_permits_write`] rule.
+pub fn check_fence(
+    session: &str,
+    token: Option<u64>,
+    current: u64,
+    holder: &str,
+) -> Result<(), StoreError> {
+    if is_erased_holder(holder) {
+        return Err(erased_session_error(session));
+    }
+    if !crate::store::lease::lease_permits_write(current, token) {
+        return Err(fence_refusal(session, token, current, Some(holder)));
+    }
+    Ok(())
 }
 
 /// Rows removed per kind by one [`crate::store::GraphStore::erase_session`].
@@ -387,6 +422,22 @@ mod tests {
     }
 
     #[test]
+    fn the_fence_refuses_a_tombstone_whatever_the_token() {
+        for token in [None, Some(1), Some(7), Some(8), Some(u64::MAX)] {
+            let err = check_fence("s", token, 7, ERASED_HOLDER).expect_err("erased");
+            assert!(err.to_string().contains("was erased"), "{token:?}: {err}");
+        }
+        assert!(check_fence("s", Some(7), 7, "w@h#1").is_ok());
+        assert!(check_fence("s", Some(8), 7, "w@h#1").is_ok());
+        assert!(matches!(
+            check_fence("s", Some(6), 7, "w@h#1"),
+            Err(StoreError::StaleWrite(m)) if m.contains("is stale")
+        ));
+        assert!(check_fence("s", None, 7, "w@h#1").is_err());
+        assert!(check_fence("s", None, 0, "w@h#1").is_ok());
+    }
+
+    #[test]
     fn the_tombstone_expiry_is_year_9999() {
         assert_eq!(
             tombstone_expires_at().to_rfc3339(),
@@ -575,6 +626,122 @@ pub(crate) mod testkit {
             write_intents: 1,
             ..Default::default()
         }
+    }
+
+    /// The #23 review's H1 scenario, on any store, plus the defense in depth
+    /// behind it.
+    ///
+    /// `serve` X holds token t1 and its lease lapses; a CLI verb Y takes the
+    /// session over, writes and closes cleanly (a release); the operator
+    /// erases. Zombie X's flush and canonization with t1 must be refused with
+    /// the erased error and recreate nothing. Before the H2 fix the release
+    /// deleted the row, the tombstone was minted at token 1 and X's write
+    /// passed. Defense in depth: every fence refuses a tombstoned session
+    /// whatever token is presented, including the tombstone's own token and
+    /// one above it, so no token arithmetic can let a write through.
+    ///
+    /// `sid` must be a fresh id (the pg legs share a cluster).
+    pub(crate) async fn check_erase_after_release_fences(
+        store: &dyn crate::store::GraphStore,
+        sid: &SessionId,
+    ) {
+        use std::time::Duration;
+
+        use crate::store::lease::testkit::{holder, interaction_batch};
+        use crate::store::lease::LeaseOutcome;
+        use crate::types::StoreError;
+
+        let x = holder("serve-x", 1);
+        let y = holder("derive-y", 2);
+        let LeaseOutcome::Acquired(xl) = store
+            .acquire_lease(sid, &x, Duration::from_secs(1))
+            .await
+            .expect("acquire x")
+        else {
+            panic!("x takes the fresh session");
+        };
+        store
+            .flush(&interaction_batch(sid, "x before"), Some(xl.token))
+            .await
+            .expect("x writes");
+        tokio::time::sleep(Duration::from_millis(1_300)).await;
+        let LeaseOutcome::Acquired(yl) = store
+            .acquire_lease(sid, &y, Duration::from_secs(60))
+            .await
+            .expect("acquire y")
+        else {
+            panic!("y takes the lapsed session over");
+        };
+        store
+            .flush(&interaction_batch(sid, "y"), Some(yl.token))
+            .await
+            .expect("y writes");
+        store
+            .release_lease(sid, &y)
+            .await
+            .expect("y closes cleanly");
+
+        let report = match store
+            .erase_session(sid, &holder("lambo-erase-session", 3))
+            .await
+            .expect("erase")
+        {
+            super::EraseOutcome::Erased(r) => r,
+            held => panic!("nothing live holds the session: {held:?}"),
+        };
+        assert!(!report.already_absent);
+        assert!(
+            report.fence_token > yl.token && yl.token > xl.token,
+            "the tombstone is minted above every earlier token: x {} y {} tomb {}",
+            xl.token,
+            yl.token,
+            report.fence_token
+        );
+
+        let erased = |res: Result<(), StoreError>, what: &str| match res {
+            Err(StoreError::StaleWrite(m)) if m.contains("was erased") => {}
+            other => panic!("{what} must be refused as erased, got {other:?}"),
+        };
+        for token in [
+            Some(xl.token),
+            Some(yl.token),
+            None,
+            Some(report.fence_token),
+            Some(report.fence_token + 1),
+            Some(u64::MAX >> 1),
+        ] {
+            erased(
+                store
+                    .flush(&interaction_batch(sid, "zombie x"), token)
+                    .await,
+                &format!("a flush presenting {token:?}"),
+            );
+            erased(
+                store
+                    .record_canonization(
+                        &CanonizationEvent {
+                            id: NodeId::new(),
+                            session_id: sid.clone(),
+                            node_id: NodeId::new(),
+                            from_status: CanonizationStatus::None,
+                            to_status: CanonizationStatus::Candidate,
+                            blast_radius: Some(1),
+                            last_demotion_time: None,
+                            occurred_at: Utc::now(),
+                        },
+                        token,
+                    )
+                    .await,
+                &format!("a canonization presenting {token:?}"),
+            );
+        }
+        assert!(
+            matches!(
+                store.load_session(sid).await,
+                Err(StoreError::SessionNotFound(_))
+            ),
+            "nothing of the erased session may come back"
+        );
     }
 
     /// A fault hook that fails the `n`th step it sees (0-based) and every

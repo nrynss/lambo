@@ -358,3 +358,16 @@ async fn erasing_an_unknown_session_tombstones_it_and_reports_already_absent() {
         .expect_err("the tombstone fences even a never-used id");
     assert!(err.to_string().contains("was erased"), "{err}");
 }
+
+/// #23 review H1: release, then erase, then a zombie's write under any token
+/// is refused and recreates nothing.
+#[tokio::test]
+async fn an_erase_after_a_release_fences_every_token_on_sqlite() {
+    let store = test_store();
+    store.init_schema().await.unwrap();
+    crate::store::erase::testkit::check_erase_after_release_fences(
+        &store,
+        &SessionId::from("erase-after-release"),
+    )
+    .await;
+}

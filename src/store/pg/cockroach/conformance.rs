@@ -1751,6 +1751,7 @@ async fn conformance_suite() {
     crate::store::pg::delete_fencing::check_delete_only_batch_is_fenced(&store).await;
     crate::store::pg::release_fencing::check_release_keeps_the_token(&store).await;
     crate::store::pg::erase::check_erase_session(&store).await;
+    crate::store::pg::erase::check_erase_after_release(&store).await;
 }
 
 /// DECISION D1 item 3 camera-proof: the global vector query must execute as

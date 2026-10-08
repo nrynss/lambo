@@ -13,10 +13,10 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use super::erase::{
-    erase_gate, fence_refusal, is_erased_holder, tombstone_expires_at, EraseCounts, EraseGate,
+    check_fence, erase_gate, is_erased_holder, tombstone_expires_at, EraseCounts, EraseGate,
     EraseOutcome, EraseReport, PriorLease, ERASED_HOLDER,
 };
-use super::lease::{lease_permits_write, LeaseHolder, LeaseInfo, LeaseOutcome};
+use super::lease::{LeaseHolder, LeaseInfo, LeaseOutcome};
 use super::{validate_vector_candidate_limit, Capabilities, GraphStore, SessionFlushStats};
 use crate::types::{
     tie_break_by_key, CanonizationEvent, EdgeType, GraphSnapshot, InteractionSpan, Mutation,
@@ -432,6 +432,7 @@ impl GraphStore for MemoryStore {
             + chrono::Duration::from_std(ttl)
                 .map_err(|e| StoreError::Backend(format!("lease ttl out of range: {e}")))?;
         let token = holder.token();
+        crate::store::lease::refuse_reserved_holder(&token)?;
         let mut leases = self.leases.write();
         match leases.get(&session.0).cloned() {
             // A live lease held by someone else — refuse, fail closed.
@@ -643,14 +644,7 @@ impl GraphStore for MemoryStore {
             let leases = self.leases.read();
             for sid in &affected {
                 if let Some(row) = leases.get(&sid.0) {
-                    if !lease_permits_write(row.current_token, token) {
-                        return Err(fence_refusal(
-                            &sid.0,
-                            token,
-                            row.current_token,
-                            Some(&row.holder),
-                        ));
-                    }
+                    check_fence(&sid.0, token, row.current_token, &row.holder)?;
                 }
             }
         }
@@ -927,6 +921,7 @@ impl GraphStore for MemoryStore {
         session: &SessionId,
         eraser: &LeaseHolder,
     ) -> Result<EraseOutcome, StoreError> {
+        crate::store::lease::refuse_reserved_holder(&eraser.token())?;
         let now = Utc::now();
         let mut map = self.inner.write();
         let mut leases = self.leases.write();
@@ -1004,14 +999,7 @@ impl GraphStore for MemoryStore {
         {
             let leases = self.leases.read();
             if let Some(row) = leases.get(&event.session_id.0) {
-                if !lease_permits_write(row.current_token, token) {
-                    return Err(fence_refusal(
-                        &event.session_id.0,
-                        token,
-                        row.current_token,
-                        Some(&row.holder),
-                    ));
-                }
+                check_fence(&event.session_id.0, token, row.current_token, &row.holder)?;
             }
         }
         let data = Self::ensure_session(&mut map, &event.session_id);
@@ -2650,6 +2638,17 @@ mod tests {
                 EraseOutcome::Erased(r) => r,
                 EraseOutcome::Held { current, .. } => panic!("held by {}", current.holder),
             }
+        }
+
+        /// #23 review H1: release, then erase, then a zombie's write under
+        /// any token is refused and recreates nothing.
+        #[tokio::test]
+        async fn an_erase_after_a_release_fences_every_token_on_memory() {
+            crate::store::erase::testkit::check_erase_after_release_fences(
+                &MemoryStore::new(),
+                &SessionId::from("erase-after-release"),
+            )
+            .await;
         }
 
         #[tokio::test]

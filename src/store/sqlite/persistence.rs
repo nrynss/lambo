@@ -40,10 +40,10 @@ use crate::store::batch::{
 #[cfg(feature = "fixtures")]
 use crate::store::batch::{seed_concept_rows, seed_edge_rows};
 use crate::store::erase::{
-    erase_gate, fence_refusal, EraseCounts, EraseGate, EraseOutcome, EraseReport, EraseStepHook,
+    check_fence, erase_gate, EraseCounts, EraseGate, EraseOutcome, EraseReport, EraseStepHook,
     PriorLease, ERASED_HOLDER,
 };
-use crate::store::lease::{lease_permits_write, LeaseHolder};
+use crate::store::lease::LeaseHolder;
 use crate::store::{map_write_err, SessionFlushStats};
 #[cfg(feature = "fixtures")]
 use crate::types::GraphSnapshot;
@@ -421,21 +421,16 @@ impl SqliteStore {
         // that is current; an unleased session has no row and passes (seed /
         // fixture parity).
         for sid in &fenced {
-            let current: Option<i64> = sqlx::query_scalar(
-                "SELECT current_token FROM session_leases WHERE session_id = ?1",
-            )
-            .bind(sid)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|e| db_err("flush: read lease token", e))?;
-            if let Some(cur) = current {
+            let lease: Option<(i64, String)> = sqlx::query_as(LEASE_FENCE_SQL)
+                .bind(sid)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| db_err("flush: read lease token", e))?;
+            if let Some((cur, holder)) = lease {
                 let cur = u64::try_from(cur).map_err(|_| {
                     StoreError::Invariant(format!("session {sid}: negative lease current_token"))
                 })?;
-                if !lease_permits_write(cur, token) {
-                    let holder = lease_holder(&mut *tx, sid).await?;
-                    return Err(fence_refusal(sid, token, cur, holder.as_deref()));
-                }
+                check_fence(sid, token, cur, &holder)?;
             }
         }
 
@@ -465,28 +460,19 @@ impl SqliteStore {
         // Fencing-token gate (#1): this durable write path HAD no lease check
         // at all — the canon task bypassed `lease_lost`. Check the token inside
         // this transaction, atomically with the write (rolls back on `?`).
-        let current: Option<i64> =
-            sqlx::query_scalar("SELECT current_token FROM session_leases WHERE session_id = ?1")
-                .bind(&event.session_id.0)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(|e| db_err("record_canonization: read lease token", e))?;
-        if let Some(cur) = current {
+        let lease: Option<(i64, String)> = sqlx::query_as(LEASE_FENCE_SQL)
+            .bind(&event.session_id.0)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| db_err("record_canonization: read lease token", e))?;
+        if let Some((cur, holder)) = lease {
             let cur = u64::try_from(cur).map_err(|_| {
                 StoreError::Invariant(format!(
                     "session {}: negative lease current_token",
                     event.session_id
                 ))
             })?;
-            if !lease_permits_write(cur, token) {
-                let holder = lease_holder(&mut *tx, &event.session_id.0).await?;
-                return Err(fence_refusal(
-                    &event.session_id.0,
-                    token,
-                    cur,
-                    holder.as_deref(),
-                ));
-            }
+            check_fence(&event.session_id.0, token, cur, &holder)?;
         }
         apply_canonization_transition(&mut *tx, event).await?;
         tx.commit().await.map_err(|e| {
@@ -512,6 +498,7 @@ impl SqliteStore {
         eraser: &LeaseHolder,
         hook: EraseStepHook<'_>,
     ) -> Result<EraseOutcome, StoreError> {
+        crate::store::lease::refuse_reserved_holder(&eraser.token())?;
         let mut tx = self
             .pool()
             .begin_with("BEGIN IMMEDIATE")
@@ -584,18 +571,11 @@ async fn held(
     Ok(EraseOutcome::Held { current, age })
 }
 
-/// The lease row's holder, for a fence refusal's message (a tombstone says
-/// "erased"). Read only on the refusal path.
-async fn lease_holder(
-    tx: &mut sqlx::SqliteConnection,
-    session: &str,
-) -> Result<Option<String>, StoreError> {
-    sqlx::query_scalar("SELECT holder FROM session_leases WHERE session_id = ?1")
-        .bind(session)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|e| db_err("fence: read lease holder", e))
-}
+/// The fence's read of a session's lease row: the token and the holder, so
+/// [`check_fence`] can refuse an erasure tombstone whatever the token (#23
+/// review H1). Runs inside the write transaction.
+const LEASE_FENCE_SQL: &str =
+    "SELECT current_token, holder FROM session_leases WHERE session_id = ?1";
 
 /// Ids per lookup statement. Each id is bound once and referenced by number in
 /// every arm, so this is also the bind count; well under SQLite's historical

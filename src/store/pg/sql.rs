@@ -203,12 +203,12 @@ UNION SELECT session_id FROM edges
 /// row (acquire, renew, release) are the ones that must wait. CockroachDB runs
 /// SERIALIZABLE and already aborts the loser; the clause is accepted there and
 /// harmless, so the statement stays shared rather than dialect-specific.
+///
+/// The holder comes back with the token (second column, so a scalar read of
+/// the first still sees the token) so the fence can refuse an erasure
+/// tombstone whatever token a write presents (#23 review H1).
 pub(super) const LEASE_TOKEN_FOR_SHARE_SQL: &str =
-    "SELECT current_token FROM session_leases WHERE session_id = $1 FOR SHARE";
-
-/// The holder of a session's lease row, read only on a fence refusal so a
-/// write to an erased session (#23) says so.
-pub(super) const LEASE_HOLDER_SQL: &str = "SELECT holder FROM session_leases WHERE session_id = $1";
+    "SELECT current_token, holder FROM session_leases WHERE session_id = $1 FOR SHARE";
 
 // ---------------------------------------------------------------------------
 // Session erasure (#23). The transaction is `persistence.rs`'s `erase`.

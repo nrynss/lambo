@@ -39,6 +39,7 @@ pub(super) async fn acquire_or_refresh(
     // the production 45s. Bound as a strftime modifier, e.g. "+45 seconds".
     let ttl_modifier = format!("+{} seconds", ttl.as_secs_f64());
     let token = holder.token();
+    crate::store::lease::refuse_reserved_holder(&token)?;
     const ACQUIRE_SQL: &str = "\
         INSERT INTO session_leases \
             (session_id, holder, acquired_at, expires_at, current_token, endpoint) \

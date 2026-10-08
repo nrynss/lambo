@@ -77,8 +77,9 @@ impl<D: Dialect> PgStore<D> {
             WHERE session_leases.expires_at <= now() \
                OR session_leases.holder = excluded.holder \
             RETURNING holder, acquired_at, expires_at, current_token, endpoint";
-        let pool = &self.pool().await?;
         let token = holder.token();
+        crate::store::lease::refuse_reserved_holder(&token)?;
+        let pool = &self.pool().await?;
         let ttl_secs = ttl.as_secs_f64();
         // T86-3: wrap the acquire in `tx_retry`, exactly like every other
         // contended write in this file. sqlx does not auto-retry a SQLSTATE 40001
