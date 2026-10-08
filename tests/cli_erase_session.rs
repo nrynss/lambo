@@ -91,6 +91,17 @@ fn erase_session_removes_the_session_refuses_rewrites_and_is_safe_to_repeat() {
     assert_eq!(report["session"], "user-42");
     assert_eq!(report["already_absent"], false);
     assert_eq!(report["removed"]["sessions"], 1);
+    // The derive above took the lease (token 1) and released it on close. A
+    // release keeps the row and its token (#23 review H2), so the tombstone is
+    // minted above it: every pre-erase token is below the fence.
+    assert!(
+        report["fence_token"].as_u64().unwrap() >= 2,
+        "the tombstone must be minted above the released derive's token: {report}"
+    );
+    assert_eq!(
+        report["removed"]["leases"], 0,
+        "a released row is no holder's lease: {report}"
+    );
     assert!(
         report["removed"]["concepts"].as_u64().unwrap() >= 1,
         "{report}"
