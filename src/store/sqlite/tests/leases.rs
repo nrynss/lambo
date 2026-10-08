@@ -518,3 +518,72 @@ async fn a_node_delete_is_fenced_on_the_session_of_an_incident_edge() {
     assert_eq!(rows_with_id(&store, "concepts", shared).await, 0);
     assert_eq!(rows_with_id(&store, "edges", cross).await, 0);
 }
+
+/// The delete lookup is chunked over an `IN` list. A batch with more ids than
+/// one chunk still fences on a single leased row wherever it falls, and the
+/// same batch minus that row deletes everything.
+#[tokio::test]
+async fn a_delete_batch_larger_than_one_lookup_chunk_is_still_fenced() {
+    let store = test_store();
+    store.init_schema().await.unwrap();
+    let (free, leased) = (SessionId::from("free"), SessionId::from("leased"));
+    let ts = Utc::now();
+    let origin_free = NodeId::new();
+    let origin_leased = NodeId::new();
+    let mut mutations = vec![
+        plant_interaction(&free, origin_free, None, ts),
+        plant_interaction(&leased, origin_leased, None, ts),
+    ];
+    let free_ids: Vec<NodeId> = (0..450).map(|_| NodeId::new()).collect();
+    for (i, id) in free_ids.iter().enumerate() {
+        mutations.push(plant_concept(
+            &free,
+            *id,
+            origin_free,
+            &format!("free-{i}"),
+            ConceptType::Entity,
+            ts,
+        ));
+    }
+    let fenced_node = NodeId::new();
+    mutations.push(plant_concept(
+        &leased,
+        fenced_node,
+        origin_leased,
+        "leased",
+        ConceptType::Entity,
+        ts,
+    ));
+    let planted = MutationBatch {
+        mutation_epoch: 1,
+        gc_mark: Default::default(),
+        mutations,
+    };
+    store.flush(&planted, None).await.unwrap();
+    store
+        .acquire_lease(&leased, &lease_holder("holder", 1), Duration::from_secs(60))
+        .await
+        .unwrap();
+
+    let delete = |ids: &[NodeId]| MutationBatch {
+        mutation_epoch: 2,
+        gc_mark: Default::default(),
+        mutations: ids
+            .iter()
+            .map(|id| Mutation::DeleteNode { id: *id })
+            .collect(),
+    };
+    let mut all = free_ids.clone();
+    all.push(fenced_node);
+    let got = store.flush(&delete(&all), None).await;
+    assert!(
+        matches!(got, Err(StoreError::StaleWrite(_))),
+        "a leased row among 451 deletes must fence the batch, got {got:?}"
+    );
+    assert_eq!(rows_with_id(&store, "concepts", fenced_node).await, 1);
+    assert_eq!(rows_with_id(&store, "concepts", free_ids[0]).await, 1);
+
+    store.flush(&delete(&free_ids), None).await.unwrap();
+    assert_eq!(rows_with_id(&store, "concepts", free_ids[449]).await, 0);
+    assert_eq!(rows_with_id(&store, "concepts", fenced_node).await, 1);
+}

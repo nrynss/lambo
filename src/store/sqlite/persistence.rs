@@ -478,31 +478,60 @@ impl SqliteStore {
     }
 }
 
+/// Ids per lookup statement. Each id is bound once and referenced by number in
+/// every arm, so this is also the bind count; well under SQLite's historical
+/// 999-variable limit.
+const DELETE_LOOKUP_CHUNK: usize = 400;
+
+/// `?1, ?2, ..., ?n`, for an `IN (...)` list over numbered binds.
+fn numbered_placeholders(n: usize) -> String {
+    (1..=n)
+        .map(|i| format!("?{i}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Owning sessions of the rows the batch's deletes will remove, read before
 /// any of them runs. Mirrors the delete statements exactly: a `DeleteNode`
 /// removes the interaction or concept with that id plus every edge incident
 /// to it (`write_rows::delete_node`); a `DeleteEdge` removes the edge row.
+/// One query per chunk of ids rather than one per id.
 async fn deleted_row_sessions(
     tx: &mut sqlx::SqliteConnection,
     mutations: &[Mutation],
 ) -> Result<HashSet<String>, StoreError> {
     let (nodes, edges) = batch_deleted_ids(mutations);
+    let nodes: Vec<String> = nodes.iter().map(|id| id.0.to_string()).collect();
+    let edges: Vec<String> = edges.iter().map(|id| id.0.to_string()).collect();
     let mut out = HashSet::new();
-    for id in nodes {
-        let rows: Vec<String> = sqlx::query_scalar(
-            "SELECT session_id FROM interactions WHERE id = ?1 \
-             UNION SELECT session_id FROM concepts WHERE id = ?1 \
-             UNION SELECT session_id FROM edges WHERE source = ?1 OR target = ?1 OR id = ?1",
-        )
-        .bind(id.0.to_string())
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(|e| db_err("flush: resolve deleted node session", e))?;
+    for chunk in nodes.chunks(DELETE_LOOKUP_CHUNK) {
+        let ids = numbered_placeholders(chunk.len());
+        let sql = format!(
+            "SELECT session_id FROM interactions WHERE id IN ({ids}) \
+             UNION SELECT session_id FROM concepts WHERE id IN ({ids}) \
+             UNION SELECT session_id FROM edges \
+                 WHERE source IN ({ids}) OR target IN ({ids}) OR id IN ({ids})"
+        );
+        let mut query = sqlx::query_scalar::<_, String>(&sql);
+        for id in chunk {
+            query = query.bind(id);
+        }
+        let rows = query
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|e| db_err("flush: resolve deleted node session", e))?;
         out.extend(rows);
     }
-    for id in edges {
-        let rows: Vec<String> = sqlx::query_scalar("SELECT session_id FROM edges WHERE id = ?1")
-            .bind(id.0.to_string())
+    for chunk in edges.chunks(DELETE_LOOKUP_CHUNK) {
+        let sql = format!(
+            "SELECT session_id FROM edges WHERE id IN ({})",
+            numbered_placeholders(chunk.len())
+        );
+        let mut query = sqlx::query_scalar::<_, String>(&sql);
+        for id in chunk {
+            query = query.bind(id);
+        }
+        let rows = query
             .fetch_all(&mut *tx)
             .await
             .map_err(|e| db_err("flush: resolve deleted edge session", e))?;
