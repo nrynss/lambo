@@ -2,12 +2,13 @@
 //! batch for the flush, re-queueing a drained batch at shutdown, durable write
 //! intents (J3), and GC's sweep mark and clock (issue #29).
 //!
-//! Every graph mutation reaches the log through the root's `append_mutation`,
-//! under the caller's write lock. The batch [`Graph::drain_log`] returns is in
-//! chronological order and is replayed in order, never re-sorted (the replay
-//! contract in `src/graph/mod.rs`). Write intents and GC mark changes are the
-//! deliberate exceptions to "every append bumps the epoch"; each method says
-//! why.
+//! Every change to graph state reaches the log through the root's
+//! `append_mutation`, which also bumps the epoch, under the caller's write
+//! lock. The batch [`Graph::drain_log`] returns is in chronological order and
+//! is replayed in order, never re-sorted (the replay contract in
+//! `src/graph/mod.rs`). Two deliberate exceptions, each explained on its
+//! method: write intents are appended here directly, without an epoch bump,
+//! and GC mark changes never enter the log at all.
 
 use super::Graph;
 use crate::types::{GcMark, Mutation, MutationBatch, WriteIntent, WriteIntentOutcome};

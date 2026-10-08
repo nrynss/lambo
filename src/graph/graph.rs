@@ -21,6 +21,26 @@
 //! Load path: [`Graph::from_snapshot`] seeds state without touching the mutation
 //! log (a loaded session's history is already durable) and runs
 //! `assert_invariants` before returning.
+//!
+//! ## Layout
+//!
+//! This file holds the [`Graph`] struct, so its fields stay private to this
+//! module, together with construction, the structural write path
+//! (`insert_interaction`, `insert_concept`, `upsert_edge`, `remove_node`,
+//! `remove_edge`), the structural reads and neighbour queries, and the private
+//! helpers every write goes through (`append_mutation`, `record_edge`, the
+//! adjacency index, the cycle DFS). The other `impl Graph` blocks live in child
+//! modules by responsibility; as descendants they reach the fields and helpers
+//! without any of them being widened:
+//!
+//! * `snapshot.rs`: `from_snapshot` and `snapshot`;
+//! * `transitions.rs`: the §10 canonization write gate, GC survivor and human
+//!   confirmation counters;
+//! * `embeddings.rs`: the embedding contract, re-embed and backfill;
+//! * `mutation_log.rs`: the log, the epoch, write intents, GC's mark and clock;
+//! * `accesses.rs`: read-access bookkeeping (issue #30);
+//! * `root_goal.rs`: the root goal, synonyms and reservations;
+//! * `invariants.rs`: [`Graph::assert_invariants`], the single §5.7 checker.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
