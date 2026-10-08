@@ -79,7 +79,7 @@ use std::time::Duration;
 
 use crate::graph::Graph;
 use crate::store::{GraphStore, SessionFlushStats};
-use crate::types::{MutationBatch, StoreError};
+use crate::types::{MutationBatch, SessionId, StoreError};
 
 /// How many dirty accesses one drain may take: half of `log_max`, but at
 /// least 1 so a bound of 0 or 1 does not starve accesses forever (they would
@@ -208,6 +208,9 @@ pub struct FlushTask {
     /// takeover. `None` for a task with no lease (every test store, the
     /// advisory-default backends).
     token: Option<u64>,
+    /// Called when the store refuses a flush because the session was erased
+    /// (#23 review L2); see [`FlushTask::with_erased_latch`].
+    erased_latch: Option<crate::store::erase::ErasedLatch>,
 }
 
 impl FlushTask {
@@ -220,6 +223,7 @@ impl FlushTask {
             shared: Arc::new(Shared::new()),
             fence: None,
             token: None,
+            erased_latch: None,
         }
     }
 
@@ -238,6 +242,16 @@ impl FlushTask {
     /// it acquired with the lease.
     pub fn with_token(mut self, token: u64) -> Self {
         self.token = Some(token);
+        self
+    }
+
+    /// Call `latch` when the store refuses a flush because the session was
+    /// erased (#23 review L2), confirmed on the lease row. `Memory::build`
+    /// passes one that latches the lease fence, so this loop stops and drops
+    /// its tail on its next iteration and the handle refuses reads of the
+    /// deleted data at once, rather than one heartbeat later.
+    pub fn with_erased_latch(mut self, latch: crate::store::erase::ErasedLatch) -> Self {
+        self.erased_latch = Some(latch);
         self
     }
 
@@ -268,6 +282,7 @@ impl FlushTask {
         let params = self.params; // Copy — do not capture `self` into the 'static task
         let fence = self.fence.clone();
         let token = self.token;
+        let erased_latch = self.erased_latch.clone();
         tokio::spawn(async move {
             FlushLoop {
                 graph,
@@ -276,6 +291,7 @@ impl FlushTask {
                 shared,
                 fence,
                 token,
+                erased_latch,
                 pending: MutationBatch::default(),
                 retry_after: None,
                 holds_accesses: false,
@@ -388,6 +404,8 @@ struct FlushLoop {
     /// Monotonic fencing token presented on every `store.flush` (GitHub issue
     /// #1); see [`FlushTask::with_token`].
     token: Option<u64>,
+    /// See [`FlushTask::with_erased_latch`].
+    erased_latch: Option<crate::store::erase::ErasedLatch>,
     /// Mutations not yet durable. Retained batches stay at the front; newly
     /// drained mutations are appended in chronological order — never re-sorted
     /// (mod.rs contract). The batch's `mutation_epoch` is a carried watermark:
@@ -628,6 +646,18 @@ impl FlushLoop {
                      mutations dropped (dead-letter D5, drop-after-log), session continues",
                 );
             }
+            Err(err) if self.erased(&session, &err).await => {
+                // #23 review L2: the session was erased. The latch fences
+                // this handle, and the top of the next iteration drops
+                // `pending` and stops; nothing is retried against a
+                // tombstone.
+                tracing::error!(
+                    session = %session,
+                    error = %err,
+                    "FlushTask: the session was erased; fencing this handle now rather than at \
+                     its next heartbeat"
+                );
+            }
             Err(err) => {
                 // Retries exhausted: RETAIN the batch — it is still in
                 // `self.pending`, never dropped, and flushes before new drains
@@ -740,6 +770,20 @@ impl FlushLoop {
                 }
             }
         }
+    }
+
+    /// `true` (after calling the latch) when `err` refused the flush because
+    /// the session was erased (#23 review L2). `false`, without reading the
+    /// store, for a task with no latch armed.
+    async fn erased(&self, session: &SessionId, err: &StoreError) -> bool {
+        let Some(latch) = &self.erased_latch else {
+            return false;
+        };
+        if !crate::store::erase::refused_as_erased(self.store.as_ref(), session, err).await {
+            return false;
+        }
+        latch();
+        true
     }
 
     /// `true` once the single-writer lease has been lost (T86-2). `false` for a

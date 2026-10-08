@@ -147,6 +147,29 @@ pub fn check_fence(
     Ok(())
 }
 
+/// What a writer's background task calls once the store has refused one of
+/// its writes because the session was erased (#23 review L2). `Memory` passes
+/// one that latches its lease fence and the serve wake-up with
+/// [`ERASED_HOLDER`] as the winner, so the handle stops serving reads of the
+/// deleted data at once instead of at its next heartbeat.
+pub type ErasedLatch = std::sync::Arc<dyn Fn() + Send + Sync>;
+
+/// `true` when a store call for `session` failed because the session is
+/// erased, decided on typed data: the lease row, re-read after the failure, is
+/// the tombstone (never by matching the message). Any store error qualifies,
+/// not only the fence's stale-write refusal: a canonization cycle over an
+/// erased session usually fails earlier, on a read that finds the session
+/// gone (`SessionNotFound`). A transient error over a live session, or a
+/// lease read that fails, answers `false`, and the heartbeat still catches
+/// the erasure.
+pub async fn refused_as_erased(
+    store: &dyn crate::store::GraphStore,
+    session: &SessionId,
+    _err: &StoreError,
+) -> bool {
+    matches!(store.read_lease(session).await, Ok(Some(row)) if is_tombstone(&row))
+}
+
 /// Rows removed per kind by one [`crate::store::GraphStore::erase_session`].
 ///
 /// One field per session-keyed table, plus `vectors` (concepts that carried an

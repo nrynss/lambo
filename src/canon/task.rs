@@ -91,6 +91,9 @@ pub struct CanonizationTask {
     /// `record_canonization`, so the store rejects a stale/missing one after a
     /// takeover. `None` for tests / advisory-default backends (no lease).
     token: Option<u64>,
+    /// Called when the store refuses a canonization because the session was
+    /// erased (#23 review L2); see [`CanonizationTask::with_erased_latch`].
+    erased_latch: Option<crate::store::erase::ErasedLatch>,
 }
 
 impl CanonizationTask {
@@ -116,6 +119,7 @@ impl CanonizationTask {
             wake: Arc::new(Notify::new()),
             shared: Arc::new(Shared::default()),
             token: None,
+            erased_latch: None,
         }
     }
 
@@ -124,6 +128,15 @@ impl CanonizationTask {
     /// `Memory::build` passes the token it acquired with the lease.
     pub fn with_token(mut self, token: u64) -> Self {
         self.token = Some(token);
+        self
+    }
+
+    /// Call `latch` when the store refuses a canonization write because the
+    /// session was erased (#23 review L2), confirmed on the lease row: the
+    /// same latch the flush task gets, so whichever background write meets
+    /// the tombstone first fences the handle.
+    pub fn with_erased_latch(mut self, latch: crate::store::erase::ErasedLatch) -> Self {
+        self.erased_latch = Some(latch);
         self
     }
 
@@ -186,6 +199,7 @@ impl CanonizationTask {
             wake: self.wake.clone(),
             shared: self.shared.clone(),
             token: self.token,
+            erased_latch: self.erased_latch.clone(),
             evaluator: Evaluator::new(),
         };
         tokio::spawn(async move { loop_state.run().await })
@@ -223,6 +237,8 @@ struct CanonizationLoop {
     /// Fencing token presented on every `record_canonization` (GitHub issue
     /// #1); see [`CanonizationTask::with_token`].
     token: Option<u64>,
+    /// See [`CanonizationTask::with_erased_latch`].
+    erased_latch: Option<crate::store::erase::ErasedLatch>,
     /// Round-robin cursors live here, across cycles — that is the whole point
     /// of the ring (spec §10 "anti-starvation preserved").
     evaluator: Evaluator,
@@ -282,6 +298,22 @@ impl CanonizationLoop {
                 );
                 self.shared.failures.fetch_add(1, Ordering::Release);
                 self.shared.cycles.fetch_add(1, Ordering::Release);
+                // #23 review L2: a refusal because the session was erased
+                // fences the handle now, not at its next heartbeat.
+                if let (Some(latch), crate::types::LamboError::Store(store_err)) =
+                    (&self.erased_latch, &err.source)
+                {
+                    let session = self.graph.read().session_id().clone();
+                    if crate::store::erase::refused_as_erased(
+                        self.store.as_ref(),
+                        &session,
+                        store_err,
+                    )
+                    .await
+                    {
+                        latch();
+                    }
+                }
             }
             Err(payload) => {
                 tracing::error!(
@@ -539,6 +571,19 @@ mod tests {
             }
             self.inner.record_canonization(event, token).await
         }
+        async fn read_lease(
+            &self,
+            session: &SessionId,
+        ) -> Result<Option<crate::store::lease::LeaseInfo>, crate::types::StoreError> {
+            self.inner.read_lease(session).await
+        }
+        async fn erase_session(
+            &self,
+            session: &SessionId,
+            eraser: &crate::store::lease::LeaseHolder,
+        ) -> Result<crate::store::EraseOutcome, crate::types::StoreError> {
+            self.inner.erase_session(session, eraser).await
+        }
     }
 
     /// R2-5: the `Ok(Err(_))` arm. A cycle that returns `EvalError` must be
@@ -588,6 +633,51 @@ mod tests {
             out.contains("record_canonization is down"),
             "with the store error attached: {out}"
         );
+        handle.abort();
+    }
+
+    /// #23 review L2: a canonization cycle that fails because the session was
+    /// erased (here on a read that finds it gone, before the durable record)
+    /// calls the erased latch, confirmed on the lease row, so the owning
+    /// handle is fenced at once rather than at its next heartbeat. An
+    /// ordinary failure does not.
+    #[tokio::test(start_paused = true)]
+    async fn a_canonization_refused_as_erased_calls_the_erased_latch() {
+        let (graph, store, scores) = session();
+        let store = Arc::new(FaultyStore::wrapping(store));
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let latch: crate::store::erase::ErasedLatch = {
+            let calls = calls.clone();
+            Arc::new(move || {
+                calls.fetch_add(1, Ordering::SeqCst);
+            })
+        };
+
+        // An ordinary refusal first: no latch.
+        store.fail_records(true);
+        let (tx, _rx) = event_channel();
+        let task = task(graph.clone(), store.clone(), scores, tx).with_erased_latch(latch);
+        let handle = task.spawn();
+        tokio::time::sleep(Duration::from_secs(61)).await;
+        assert_eq!(task.failures(), 1);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "a store outage is not an erase"
+        );
+
+        // Now the session is erased under the task.
+        store.fail_records(false);
+        let eraser = crate::store::lease::testkit::holder("lambo-erase-session", 9);
+        let outcome = store.erase_session(&sid(), &eraser).await.unwrap();
+        assert!(matches!(outcome, crate::store::EraseOutcome::Erased(_)));
+        graph
+            .write()
+            .insert_concept(concept(21), iid(1))
+            .expect("a fresh concept to promote");
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        assert_eq!(task.failures(), 2, "the cycle failed on the erased session");
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "and the latch fired");
         handle.abort();
     }
 

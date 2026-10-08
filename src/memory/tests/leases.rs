@@ -600,3 +600,56 @@ async fn a_handle_fenced_by_an_erase_refuses_reads_and_writes() {
         "nothing of the erased session came back"
     );
 }
+
+/// #23 review L2: a handle whose background flush is refused because the
+/// session was erased is fenced by that refusal at once, not one heartbeat
+/// (15 s) later, so it stops answering reads from its copy of the deleted
+/// data. No `simulate_lease_loss` here: the flush task's latch is what flips
+/// `erased()`.
+#[tokio::test]
+async fn a_flush_refused_as_erased_fences_the_handle_without_the_heartbeat() {
+    let store = Arc::new(MemoryStore::new());
+    let session = SessionId::new("erased-mid-flush");
+    let mem = Memory::builder()
+        .session("erased-mid-flush")
+        .agent("agent-a")
+        .flush_interval(Duration::from_millis(50))
+        .store(store.clone() as Arc<dyn GraphStore>)
+        .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
+        .embedding_contract(contract("fixture", 1024))
+        .build()
+        .await
+        .expect("build");
+
+    // The lease lapses (a starved heartbeat) and the operator erases.
+    store.force_expire_lease(&session);
+    let eraser = LeaseHolder::for_this_process(&AgentId::new("lambo-erase-session"));
+    let outcome = store.erase_session(&session, &eraser).await.unwrap();
+    assert!(matches!(outcome, crate::store::EraseOutcome::Erased(_)));
+    assert!(!mem.erased(), "nothing has told the handle yet");
+
+    // The next write reaches the store through the flush task and is refused.
+    mem.derive(
+        &[("after the erase", ConceptType::Entity)],
+        &ParentOf::none(),
+    )
+    .await
+    .unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !mem.erased() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the refused flush must fence the handle well inside one heartbeat interval"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let err = mem
+        .recall(query("after the erase"))
+        .await
+        .expect_err("reads stop at once");
+    assert!(err.to_string().contains("was erased"), "{err}");
+    assert!(
+        store.load_session(&session).await.is_err(),
+        "nothing of the erased session came back"
+    );
+}

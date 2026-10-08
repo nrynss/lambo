@@ -692,8 +692,21 @@ impl MemoryBuilder {
         )
         .with_fence(lease_lost.clone())
         .with_token(lease_token);
+        // #23 review L2: a background write refused because the session was
+        // erased latches the fence and the wake-up at once, with the
+        // tombstone as the winner, exactly as the heartbeat would on its next
+        // beat — so `erased()` holds and reads of the deleted data stop now.
+        let erased_latch: crate::store::erase::ErasedLatch = {
+            let (fence, signal) = (lease_lost.clone(), lease_lost_signal.clone());
+            Arc::new(move || {
+                fence.store(true, std::sync::atomic::Ordering::Release);
+                signal.latch(crate::store::erase::ERASED_HOLDER);
+            })
+        };
+        let flush = flush.with_erased_latch(erased_latch.clone());
         let canon = CanonizationTask::from_daemon(graph.clone(), store.clone(), &daemon, &config)
-            .with_token(lease_token);
+            .with_token(lease_token)
+            .with_erased_latch(erased_latch);
 
         // Each `spawn` panics if called twice — each is called exactly once,
         // here, and nowhere else in this type.
