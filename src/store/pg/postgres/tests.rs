@@ -421,19 +421,24 @@ fn strip_line_comment(line: &str) -> &str {
 /// execute and must not inject the GUC as extra_set on the exact lane.
 #[test]
 fn explain_vector_candidates_uses_store_forced_exact_scan() {
-    // The camera-proof is the `corpus` helper in postgres.rs plus the EXPLAIN
-    // helpers in this file, which lived in one file before the tests moved
-    // out; scan both. Anchored on the crate root so a later move of this
-    // file cannot silently retarget the scan.
+    // The camera-proof is the `corpus` helper in postgres/test_support.rs plus
+    // the EXPLAIN helpers in this file, which lived in one file before the
+    // tests moved out; scan both. Anchored on the crate root so a later move of
+    // this file cannot silently retarget the scan.
     let corpus_src = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/src/store/pg/postgres.rs"
+        "/src/store/pg/postgres/test_support.rs"
     ));
     let helper_src = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/src/store/pg/postgres/tests.rs"
     ));
-    let base = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/store/pg/mod.rs"));
+    // The production checked read (GraphStore::vector_candidates_checked
+    // delegates to it) lives in the family's vector-candidate module.
+    let base = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/store/pg/vector_candidates.rs"
+    ));
     // The comment marker is never written as one token here, so it cannot
     // match itself in the scanned text.
     let slash = concat!("/", "/");
@@ -502,8 +507,12 @@ fn explain_vector_candidates_uses_store_forced_exact_scan() {
         explain_body.contains(concat!("store", ".issue_forced_exact_scan(&muttx)")),
         "explain_vector_candidates must issue the GUC via the production helper"
     );
+    // Scoped to the production function (the `VectorCandidateSource` impl),
+    // like the two camera-proof sites, so a call elsewhere in the module cannot
+    // satisfy it.
+    let checked_body = body(&base, concat!("asyncfn", "checked_vector_candidates("));
     assert!(
-        base.contains(concat!("self", ".issue_forced_exact_scan(&muttx)")),
+        checked_body.contains(concat!("self", ".issue_forced_exact_scan(&muttx)")),
         "vector_candidates_checked must issue the GUC via the shared helper"
     );
     // The exact lane's EXPLAIN goes through `corpus::plan`, which takes no

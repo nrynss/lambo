@@ -605,7 +605,7 @@ impl InspectResponse {
 }
 
 /// The structural edge types the page may show. Mirrors
-/// `STRUCTURAL_EDGE_IN` in `src/store/sqlite.rs`: blast radius,
+/// `STRUCTURAL_EDGE_IN` in `src/store/sqlite/structural.rs`: blast radius,
 /// interaction span and this page all exclude `CoOccurrence`/`Semantic`.
 fn is_structural(ty: EdgeType) -> bool {
     matches!(

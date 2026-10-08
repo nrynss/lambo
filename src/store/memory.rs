@@ -117,19 +117,25 @@ impl MemoryStore {
         Ok(())
     }
 
-    fn resolve_session_for_node(
-        map: &HashMap<String, SessionData>,
-        id: NodeId,
-    ) -> Option<SessionId> {
-        for (sid, data) in map.iter() {
-            if data.snapshot.interactions.iter().any(|i| i.id == id)
-                || data.snapshot.concepts.iter().any(|c| c.id == id)
-                || data.snapshot.edges.iter().any(|e| e.id == id)
-            {
-                return Some(SessionId(sid.clone()));
-            }
-        }
-        None
+    /// Every session a `DeleteNode` removes rows from: the session holding the
+    /// node (or an edge with that id) and any session holding an edge incident
+    /// to it. Edges are session-scoped while node ids are global, so an edge
+    /// in another session can point at the node, and the SQL adapters delete
+    /// that edge with the node; this does the same and lets the fencing gate
+    /// cover every session whose rows change.
+    fn sessions_for_node_delete(map: &HashMap<String, SessionData>, id: NodeId) -> Vec<SessionId> {
+        map.iter()
+            .filter(|(_, data)| {
+                let snap = &data.snapshot;
+                snap.interactions.iter().any(|i| i.id == id)
+                    || snap.concepts.iter().any(|c| c.id == id)
+                    || snap
+                        .edges
+                        .iter()
+                        .any(|e| e.id == id || e.source == id || e.target == id)
+            })
+            .map(|(sid, _)| SessionId(sid.clone()))
+            .collect()
     }
 
     fn resolve_session_for_edge(
@@ -570,28 +576,31 @@ impl GraphStore for MemoryStore {
         // leave every session exactly as it was, matching the SQL adapters
         // (which roll back the whole transaction). Only the sessions the
         // batch touches are copied, not the whole store.
-        let resolve_committed = |m: &Mutation| -> Option<SessionId> {
+        // A delete resolves to every session whose rows it removes (none when
+        // the node/edge is already gone: an idempotent no-op).
+        let resolve_committed = |m: &Mutation| -> Vec<SessionId> {
             match m {
-                Mutation::UpsertNode { node } => Some(node.session_id().clone()),
-                Mutation::UpsertEdge { edge } => Some(edge.session_id.clone()),
-                Mutation::CanonizationTransition { event } => Some(event.session_id.clone()),
-                Mutation::SetRootGoal { session_id, .. } => Some(session_id.clone()),
-                Mutation::SetEmbedding { session_id, .. } => Some(session_id.clone()),
-                Mutation::PutWriteIntent { intent } => Some(intent.session_id.clone()),
-                Mutation::ConsumeWriteIntent { session_id, .. } => Some(session_id.clone()),
-                Mutation::RecordAccess { session_id, .. } => Some(session_id.clone()),
-                Mutation::DeleteNode { id } => Self::resolve_session_for_node(&map, *id),
-                Mutation::DeleteEdge { id } => Self::resolve_session_for_edge(&map, *id),
+                Mutation::UpsertNode { node } => vec![node.session_id().clone()],
+                Mutation::UpsertEdge { edge } => vec![edge.session_id.clone()],
+                Mutation::CanonizationTransition { event } => vec![event.session_id.clone()],
+                Mutation::SetRootGoal { session_id, .. } => vec![session_id.clone()],
+                Mutation::SetEmbedding { session_id, .. } => vec![session_id.clone()],
+                Mutation::PutWriteIntent { intent } => vec![intent.session_id.clone()],
+                Mutation::ConsumeWriteIntent { session_id, .. } => vec![session_id.clone()],
+                Mutation::RecordAccess { session_id, .. } => vec![session_id.clone()],
+                Mutation::DeleteNode { id } => Self::sessions_for_node_delete(&map, *id),
+                Mutation::DeleteEdge { id } => Self::resolve_session_for_edge(&map, *id)
+                    .into_iter()
+                    .collect(),
             }
         };
 
         let mut affected: Vec<SessionId> = Vec::new();
         for m in &batch.mutations {
-            let Some(sid) = resolve_committed(m) else {
-                continue; // idempotent no-op if the deleted node/edge is already gone
-            };
-            if !affected.iter().any(|s| s == &sid) {
-                affected.push(sid);
+            for sid in resolve_committed(m) {
+                if !affected.iter().any(|s| s == &sid) {
+                    affected.push(sid);
+                }
             }
         }
 
@@ -633,26 +642,26 @@ impl GraphStore for MemoryStore {
         // resolve against the WORKING state so a node upserted earlier in
         // this same batch is visible (pre-atomicity semantics preserved).
         for m in &batch.mutations {
-            let sid = match m {
-                Mutation::UpsertNode { node } => node.session_id().clone(),
-                Mutation::UpsertEdge { edge } => edge.session_id.clone(),
-                Mutation::CanonizationTransition { event } => event.session_id.clone(),
-                Mutation::SetRootGoal { session_id, .. } => session_id.clone(),
-                Mutation::SetEmbedding { session_id, .. } => session_id.clone(),
-                Mutation::PutWriteIntent { intent } => intent.session_id.clone(),
-                Mutation::ConsumeWriteIntent { session_id, .. } => session_id.clone(),
-                Mutation::RecordAccess { session_id, .. } => session_id.clone(),
-                Mutation::DeleteNode { id } => match Self::resolve_session_for_node(&work, *id) {
-                    Some(s) => s,
-                    None => continue,
-                },
-                Mutation::DeleteEdge { id } => match Self::resolve_session_for_edge(&work, *id) {
-                    Some(s) => s,
-                    None => continue,
-                },
+            let sids: Vec<SessionId> = match m {
+                Mutation::UpsertNode { node } => vec![node.session_id().clone()],
+                Mutation::UpsertEdge { edge } => vec![edge.session_id.clone()],
+                Mutation::CanonizationTransition { event } => vec![event.session_id.clone()],
+                Mutation::SetRootGoal { session_id, .. } => vec![session_id.clone()],
+                Mutation::SetEmbedding { session_id, .. } => vec![session_id.clone()],
+                Mutation::PutWriteIntent { intent } => vec![intent.session_id.clone()],
+                Mutation::ConsumeWriteIntent { session_id, .. } => vec![session_id.clone()],
+                Mutation::RecordAccess { session_id, .. } => vec![session_id.clone()],
+                // Every session holding the node or an edge incident to it,
+                // so a cross-session edge goes with its node as in SQL.
+                Mutation::DeleteNode { id } => Self::sessions_for_node_delete(&work, *id),
+                Mutation::DeleteEdge { id } => Self::resolve_session_for_edge(&work, *id)
+                    .into_iter()
+                    .collect(),
             };
-            let data = work.get_mut(&sid.0).expect("affected session present");
-            Self::apply_mutation(data, m)?;
+            for sid in sids {
+                let data = work.get_mut(&sid.0).expect("affected session present");
+                Self::apply_mutation(data, m)?;
+            }
         }
 
         // Commit: swap the working copies in on full success. Issue #17: the
@@ -2228,6 +2237,156 @@ mod tests {
         );
         // …while the new holder writes fine with the bumped token.
         store.flush(&batch, Some(rb.token)).await.unwrap();
+    }
+
+    /// Delete-only batches are fenced too. MemoryStore resolves a delete's
+    /// session from the stored row before the gate, which the SQL adapters
+    /// did not (they skipped deletes and so fenced nothing); this pins the
+    /// reference behaviour they now match.
+    #[tokio::test]
+    async fn a_stale_token_cannot_flush_a_delete_only_batch() {
+        let store = MemoryStore::new();
+        let sid = SessionId::from("fenced-deletes");
+        let (i1, c1) = (NodeId::new(), NodeId::new());
+        let ts = Utc::now();
+        let plant = MutationBatch {
+            mutation_epoch: 0,
+            gc_mark: Default::default(),
+            mutations: vec![plant_concept(&sid, c1, i1, "doomed", ts)],
+        };
+        store.flush(&plant, None).await.unwrap();
+
+        let ttl = Duration::from_secs(30);
+        let LeaseOutcome::Acquired(ra) = store
+            .acquire_lease(&sid, &holder("zombie", 1), ttl)
+            .await
+            .unwrap()
+        else {
+            panic!("the first holder must acquire");
+        };
+        store.force_expire_lease(&sid);
+        let LeaseOutcome::Acquired(rb) = store
+            .acquire_lease(&sid, &holder("successor", 2), ttl)
+            .await
+            .unwrap()
+        else {
+            panic!("the successor must take the lease over");
+        };
+
+        let delete = MutationBatch {
+            mutation_epoch: 1,
+            gc_mark: Default::default(),
+            mutations: vec![Mutation::DeleteNode { id: c1 }],
+        };
+        for token in [Some(ra.token), None] {
+            assert!(
+                matches!(
+                    store.flush(&delete, token).await,
+                    Err(StoreError::StaleWrite(_))
+                ),
+                "a delete-only batch under token {token:?} must be fenced"
+            );
+        }
+        let snap = store.load_session(&sid).await.unwrap();
+        assert!(snap.concepts.iter().any(|c| c.id == c1));
+
+        store.flush(&delete, Some(rb.token)).await.unwrap();
+        let snap = store.load_session(&sid).await.unwrap();
+        assert!(!snap.concepts.iter().any(|c| c.id == c1));
+    }
+
+    /// A node delete also removes the edges incident to the node, and edges are
+    /// session-scoped while node ids are global, so the delete can reach a
+    /// second session. Like the SQL adapters, MemoryStore removes that edge
+    /// with the node and fences the delete on that session's lease as well.
+    #[tokio::test]
+    async fn a_node_delete_is_fenced_on_the_session_of_an_incident_edge() {
+        let store = MemoryStore::new();
+        let (a, b) = (SessionId::from("fence-a"), SessionId::from("fence-b"));
+        let ts = Utc::now();
+        let (origin_a, shared, plain, cross) =
+            (NodeId::new(), NodeId::new(), NodeId::new(), NodeId::new());
+        let plant = MutationBatch {
+            mutation_epoch: 0,
+            gc_mark: Default::default(),
+            mutations: vec![
+                plant_concept(&a, shared, origin_a, "shared", ts),
+                plant_concept(&a, plain, origin_a, "plain", ts),
+                // Session B's edge points at session A's concept.
+                Mutation::UpsertEdge {
+                    edge: Edge {
+                        event_time: None,
+                        id: cross,
+                        session_id: b.clone(),
+                        source: NodeId::new(),
+                        target: shared,
+                        edge_type: EdgeType::Derives,
+                        weight: 1.0,
+                        reinforcements: 0,
+                        created_at: ts,
+                        last_reinforced: ts,
+                    },
+                },
+            ],
+        };
+        store.flush(&plant, None).await.unwrap();
+
+        // A stays with its first holder; B is taken over, so A's token is
+        // current for A and stale for B only.
+        let ttl = Duration::from_secs(30);
+        let LeaseOutcome::Acquired(held_a) = store
+            .acquire_lease(&a, &holder("holder-a", 1), ttl)
+            .await
+            .unwrap()
+        else {
+            panic!("A must acquire");
+        };
+        store
+            .acquire_lease(&b, &holder("zombie-b", 2), ttl)
+            .await
+            .unwrap();
+        store.force_expire_lease(&b);
+        let LeaseOutcome::Acquired(taken_b) = store
+            .acquire_lease(&b, &holder("successor-b", 3), ttl)
+            .await
+            .unwrap()
+        else {
+            panic!("the successor must take B over");
+        };
+        assert!(taken_b.token > held_a.token);
+
+        let delete = |id: NodeId| MutationBatch {
+            mutation_epoch: 1,
+            gc_mark: Default::default(),
+            mutations: vec![Mutation::DeleteNode { id }],
+        };
+        assert!(
+            matches!(
+                store.flush(&delete(shared), Some(held_a.token)).await,
+                Err(StoreError::StaleWrite(_))
+            ),
+            "the delete must be fenced on the incident edge's session"
+        );
+        let snap_a = store.load_session(&a).await.unwrap();
+        assert!(snap_a.concepts.iter().any(|c| c.id == shared));
+        let snap_b = store.load_session(&b).await.unwrap();
+        assert!(snap_b.edges.iter().any(|e| e.id == cross));
+
+        // A node with no foreign edge deletes under the same token.
+        store
+            .flush(&delete(plain), Some(held_a.token))
+            .await
+            .unwrap();
+
+        // B's current token covers both sessions; the edge goes with the node.
+        store
+            .flush(&delete(shared), Some(taken_b.token))
+            .await
+            .unwrap();
+        let snap_a = store.load_session(&a).await.unwrap();
+        assert!(!snap_a.concepts.iter().any(|c| c.id == shared));
+        let snap_b = store.load_session(&b).await.unwrap();
+        assert!(!snap_b.edges.iter().any(|e| e.id == cross));
     }
 
     #[tokio::test]

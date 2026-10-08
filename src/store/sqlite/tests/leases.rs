@@ -321,3 +321,269 @@ async fn two_connections_on_one_file_serialize_on_the_lease() {
     drop(store_a);
     drop(store_b);
 }
+
+/// Rows of `table` with this id, read straight from the store.
+async fn rows_with_id(store: &SqliteStore, table: &str, id: NodeId) -> i64 {
+    sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table} WHERE id = ?1"))
+        .bind(id.0.to_string())
+        .fetch_one(store.pool())
+        .await
+        .unwrap()
+}
+
+/// #1 fencing, delete-only batches. `DeleteNode`/`DeleteEdge` carry no
+/// session, so the fenced set used to be built from the other mutations only,
+/// and a batch of nothing but deletes (what a GC sweep drains) committed with
+/// no token check at all. This is the zombie-writer shape: the first holder's
+/// lease lapses, a second writer takes the session over (token 2), and the
+/// first one's stale token must not be able to delete the second one's rows,
+/// through either delete kind.
+#[tokio::test]
+async fn a_stale_token_cannot_flush_a_delete_only_batch() {
+    let store = test_store();
+    store.init_schema().await.unwrap();
+    let sid = SessionId::from("fenced-deletes");
+    let ts = Utc::now();
+    let (origin, concept, derives) = (NodeId::new(), NodeId::new(), NodeId::new());
+    let planted = MutationBatch {
+        mutation_epoch: 1,
+        gc_mark: Default::default(),
+        mutations: vec![
+            plant_interaction(&sid, origin, None, ts),
+            plant_concept(&sid, concept, origin, "doomed", ConceptType::Entity, ts),
+            Mutation::UpsertEdge {
+                edge: crate::types::Edge {
+                    id: derives,
+                    session_id: sid.clone(),
+                    source: origin,
+                    target: concept,
+                    edge_type: EdgeType::Derives,
+                    weight: 1.0,
+                    reinforcements: 0,
+                    created_at: ts,
+                    last_reinforced: ts,
+                    event_time: None,
+                },
+            },
+        ],
+    };
+    store.flush(&planted, None).await.unwrap();
+
+    // Holder 1 lapses; holder 2 takes over and mints token 2.
+    let ttl = Duration::from_secs(1);
+    let LeaseOutcome::Acquired(first) = store
+        .acquire_lease(&sid, &lease_holder("zombie", 1), ttl)
+        .await
+        .unwrap()
+    else {
+        panic!("the first holder must acquire");
+    };
+    tokio::time::sleep(Duration::from_millis(1_300)).await;
+    let LeaseOutcome::Acquired(second) = store
+        .acquire_lease(&sid, &lease_holder("successor", 2), ttl)
+        .await
+        .unwrap()
+    else {
+        panic!("the successor must take the lapsed lease over");
+    };
+    assert!(second.token > first.token);
+
+    let deletes = |mutations: Vec<Mutation>| MutationBatch {
+        mutation_epoch: 2,
+        gc_mark: Default::default(),
+        mutations,
+    };
+    let edge_only = deletes(vec![Mutation::DeleteEdge { id: derives }]);
+    let node_only = deletes(vec![Mutation::DeleteNode { id: concept }]);
+    for (what, batch) in [("DeleteEdge", &edge_only), ("DeleteNode", &node_only)] {
+        for token in [Some(first.token), None] {
+            let got = store.flush(batch, token).await;
+            assert!(
+                matches!(got, Err(StoreError::StaleWrite(_))),
+                "a {what}-only batch under token {token:?} must be fenced, got {got:?}"
+            );
+        }
+    }
+    assert_eq!(rows_with_id(&store, "concepts", concept).await, 1);
+    assert_eq!(rows_with_id(&store, "edges", derives).await, 1);
+
+    // The current holder's token passes, and the deletes land.
+    store.flush(&edge_only, Some(second.token)).await.unwrap();
+    store.flush(&node_only, Some(second.token)).await.unwrap();
+    assert_eq!(rows_with_id(&store, "concepts", concept).await, 0);
+    assert_eq!(rows_with_id(&store, "edges", derives).await, 0);
+
+    // A delete of a row that is already gone resolves no session: a no-op,
+    // not an error, whatever the token.
+    store.flush(&node_only, Some(first.token)).await.unwrap();
+}
+
+/// #1 fencing, delete-only batches, cross-session edge. A node delete also
+/// removes every edge incident to the node, and edges are session-scoped while
+/// node ids are global, so the deleted node can sit in session A (whose lease
+/// the caller still holds) with an incident edge in session B (whose lease has
+/// moved on). The delete must be fenced on B's lease too; a node with no
+/// foreign edge is deleted normally, so only the incident-edge lookup can be
+/// what refuses the first batch.
+#[tokio::test]
+async fn a_node_delete_is_fenced_on_the_session_of_an_incident_edge() {
+    let store = test_store();
+    store.init_schema().await.unwrap();
+    let (a, b) = (SessionId::from("fence-a"), SessionId::from("fence-b"));
+    let ts = Utc::now();
+    let (origin_a, shared, plain, origin_b, cross) = (
+        NodeId::new(),
+        NodeId::new(),
+        NodeId::new(),
+        NodeId::new(),
+        NodeId::new(),
+    );
+    let planted = MutationBatch {
+        mutation_epoch: 1,
+        gc_mark: Default::default(),
+        mutations: vec![
+            plant_interaction(&a, origin_a, None, ts),
+            plant_concept(&a, shared, origin_a, "shared", ConceptType::Entity, ts),
+            plant_concept(&a, plain, origin_a, "plain", ConceptType::Entity, ts),
+            plant_interaction(&b, origin_b, None, ts),
+            // Session B's edge points at session A's concept.
+            Mutation::UpsertEdge {
+                edge: crate::types::Edge {
+                    id: cross,
+                    session_id: b.clone(),
+                    source: origin_b,
+                    target: shared,
+                    edge_type: EdgeType::Derives,
+                    weight: 1.0,
+                    reinforcements: 0,
+                    created_at: ts,
+                    last_reinforced: ts,
+                    event_time: None,
+                },
+            },
+        ],
+    };
+    store.flush(&planted, None).await.unwrap();
+
+    // A is held by its first holder (token 1). B lapses and is taken over, so
+    // its current token is 2 and token 1 is stale for B only.
+    let long = Duration::from_secs(60);
+    let LeaseOutcome::Acquired(held_a) = store
+        .acquire_lease(&a, &lease_holder("holder-a", 1), long)
+        .await
+        .unwrap()
+    else {
+        panic!("A must acquire");
+    };
+    let short = Duration::from_secs(1);
+    store
+        .acquire_lease(&b, &lease_holder("zombie-b", 2), short)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(1_300)).await;
+    let LeaseOutcome::Acquired(taken_b) = store
+        .acquire_lease(&b, &lease_holder("successor-b", 3), short)
+        .await
+        .unwrap()
+    else {
+        panic!("the successor must take B over");
+    };
+    assert!(taken_b.token > held_a.token);
+
+    let deletes = |mutations: Vec<Mutation>| MutationBatch {
+        mutation_epoch: 2,
+        gc_mark: Default::default(),
+        mutations,
+    };
+    // The node lives in A (token current) but its incident edge is B's.
+    let shared_only = deletes(vec![Mutation::DeleteNode { id: shared }]);
+    let got = store.flush(&shared_only, Some(held_a.token)).await;
+    assert!(
+        matches!(got, Err(StoreError::StaleWrite(_))),
+        "deleting a node whose incident edge is in a taken-over session must be fenced, got {got:?}"
+    );
+    assert_eq!(rows_with_id(&store, "concepts", shared).await, 1);
+    assert_eq!(rows_with_id(&store, "edges", cross).await, 1);
+
+    // Control: a node of A with no foreign edge is deleted under the same token.
+    let plain_only = deletes(vec![Mutation::DeleteNode { id: plain }]);
+    store.flush(&plain_only, Some(held_a.token)).await.unwrap();
+    assert_eq!(rows_with_id(&store, "concepts", plain).await, 0);
+
+    // B's current token covers both sessions (>= each lease), so it deletes.
+    store
+        .flush(&shared_only, Some(taken_b.token))
+        .await
+        .unwrap();
+    assert_eq!(rows_with_id(&store, "concepts", shared).await, 0);
+    assert_eq!(rows_with_id(&store, "edges", cross).await, 0);
+}
+
+/// The delete lookup is chunked over an `IN` list. A batch with more ids than
+/// one chunk still fences on a single leased row wherever it falls, and the
+/// same batch minus that row deletes everything.
+#[tokio::test]
+async fn a_delete_batch_larger_than_one_lookup_chunk_is_still_fenced() {
+    let store = test_store();
+    store.init_schema().await.unwrap();
+    let (free, leased) = (SessionId::from("free"), SessionId::from("leased"));
+    let ts = Utc::now();
+    let origin_free = NodeId::new();
+    let origin_leased = NodeId::new();
+    let mut mutations = vec![
+        plant_interaction(&free, origin_free, None, ts),
+        plant_interaction(&leased, origin_leased, None, ts),
+    ];
+    let free_ids: Vec<NodeId> = (0..450).map(|_| NodeId::new()).collect();
+    for (i, id) in free_ids.iter().enumerate() {
+        mutations.push(plant_concept(
+            &free,
+            *id,
+            origin_free,
+            &format!("free-{i}"),
+            ConceptType::Entity,
+            ts,
+        ));
+    }
+    let fenced_node = NodeId::new();
+    mutations.push(plant_concept(
+        &leased,
+        fenced_node,
+        origin_leased,
+        "leased",
+        ConceptType::Entity,
+        ts,
+    ));
+    let planted = MutationBatch {
+        mutation_epoch: 1,
+        gc_mark: Default::default(),
+        mutations,
+    };
+    store.flush(&planted, None).await.unwrap();
+    store
+        .acquire_lease(&leased, &lease_holder("holder", 1), Duration::from_secs(60))
+        .await
+        .unwrap();
+
+    let delete = |ids: &[NodeId]| MutationBatch {
+        mutation_epoch: 2,
+        gc_mark: Default::default(),
+        mutations: ids
+            .iter()
+            .map(|id| Mutation::DeleteNode { id: *id })
+            .collect(),
+    };
+    let mut all = free_ids.clone();
+    all.push(fenced_node);
+    let got = store.flush(&delete(&all), None).await;
+    assert!(
+        matches!(got, Err(StoreError::StaleWrite(_))),
+        "a leased row among 451 deletes must fence the batch, got {got:?}"
+    );
+    assert_eq!(rows_with_id(&store, "concepts", fenced_node).await, 1);
+    assert_eq!(rows_with_id(&store, "concepts", free_ids[0]).await, 1);
+
+    store.flush(&delete(&free_ids), None).await.unwrap();
+    assert_eq!(rows_with_id(&store, "concepts", free_ids[449]).await, 0);
+    assert_eq!(rows_with_id(&store, "concepts", fenced_node).await, 1);
+}

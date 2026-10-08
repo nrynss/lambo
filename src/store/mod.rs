@@ -54,6 +54,11 @@ pub(crate) use error::map_write_err;
 ))]
 pub(crate) mod vector;
 
+// #26 — the vector candidate seam (#8): one narrow selection interface that the
+// SQLite scan and the pg-family queries implement, plus the shared exact scorer.
+// Ungated: #8's graph-backed source implements it in Memory-only builds too.
+pub(crate) mod vector_source;
+
 // DSN spelling -> DSN identity. Store-agnostic and always compiled: both the
 // session endpoint (J2) and `StoreConfig::overlay_env` (E2E-F2) need the rule,
 // and neither is feature-gated.
@@ -673,7 +678,7 @@ pub const FALLBACK_DSN_ENV: &str = "DATABASE_URL";
 /// [`crate::RESOLVE_ENV_VARS`] is one list for every feature row: which
 /// variables a build *reads* varies with the compiled adapters, but what a
 /// hermetic harness must *clear* does not. Must equal
-/// `store::pg::LAMBO_POSTGRES_IAM_ENV`, which is what `PgStore::new` actually
+/// `store::pg::pool::LAMBO_POSTGRES_IAM_ENV`, which is what `PgStore::new` actually
 /// reads; `store::pg`'s test module asserts it under `store-postgres`.
 ///
 /// It selects a *login mode*, not a database — which is why leaving it out of
@@ -1126,7 +1131,7 @@ pub fn build_store_with_vector_dim(
         StoreKind::Sqlite => {
             // Real gate: type only exists under this feature. The pool is
             // created lazily on first async use (build_store runs in a sync
-            // startup context; see sqlite.rs).
+            // startup context; see sqlite/mod.rs).
             #[cfg(feature = "store-sqlite")]
             {
                 // CON-3 (D2): a missing path is a hard error, mirroring

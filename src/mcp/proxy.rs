@@ -163,7 +163,7 @@ const CONNECT_RETRY: std::time::Duration = std::time::Duration::from_millis(100)
 ///   overrides sqlx's default `acquire_timeout`, which is **30s** (sqlx 0.8.6,
 ///   `PoolOptions::default`). Worst case ≈ 38s.
 /// * **cockroach** — `statement_timeout` 20s per statement
-///   (`cockroach::STATEMENT_TIMEOUT`), behind the same 30s pool acquire, which
+///   (`store::pg::pool::STATEMENT_TIMEOUT`), behind the same 30s pool acquire, which
 ///   for a lazily-created pool includes the TCP connect and the auth handshake.
 ///   Worst case ≈ 50s.
 ///

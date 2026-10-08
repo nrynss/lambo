@@ -13,7 +13,8 @@
 //! authoritative: every decision it records is a decision about behaviour B0
 //! moved without altering, so it stays written where it was reviewed rather
 //! than being paraphrased into a new file. Where it says "this module", read
-//! "this adapter"; the code it describes is in `pg/mod.rs`.
+//! "this adapter"; the code it describes is the family base in `pg/` (the
+//! module map is on `pg/mod.rs`).
 //!
 //! # Design decisions (see PHASE-3-stores.md Handoff Log T3.2)
 //!
@@ -187,7 +188,8 @@ impl Dialect for CockroachDialect {
     }
 
     fn apply_connect_options(options: PgConnectOptions) -> Result<PgConnectOptions, StoreError> {
-        let beam = super::vector_beam_size_from_env()?.unwrap_or(super::DEFAULT_VECTOR_BEAM_SIZE);
+        let beam = super::pool::vector_beam_size_from_env()?
+            .unwrap_or(super::pool::DEFAULT_VECTOR_BEAM_SIZE);
         Ok(options.options([("vector_search_beam_size", beam.to_string())]))
     }
 }
