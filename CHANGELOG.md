@@ -1,5 +1,44 @@
 # Changelog
 
+## Unreleased
+
+### Breaking
+
+- Under the hybrid strategy (the default) an applied `record_action` receipt
+  now reads `recorded action: N concept(s) created (M embedded), E edge(s)`
+  and its JSON carries `embedded`, as a hybrid `derive` receipt does. Under
+  `canonical` the sentence and JSON are unchanged. A client that parses the
+  sentence must accept the optional `(M embedded)`;
+  `scripts/loadtest/check_durability.py` now does.
+- Hybrid `derive` refuses more inputs, each with a `Config` error and nothing
+  written, because `parent_of` ends are now embedded (below):
+  - a `parent_of` end the call creates whose origin-framed context is over
+    16 KiB, the rule the call's own concepts already had;
+  - a call whose only new concepts are `parent_of` ends, when the session's
+    embedding contract does not match the live embedder (such a call used to
+    apply keyword-only);
+  - a call that would embed more than 256 items (`MAX_HYBRID_EMBEDS`): new
+    concepts plus the `parent_of` ends it creates. On the asynchronous MCP path
+    this is refused at the call, not on the receipt. Split the call. A store
+    without vector search embeds nothing and is not limited.
+
+### Fixed
+
+- Concepts created as `parent_of` ends are embedded (issue #16 §2). Hybrid
+  `derive` created an end named only in `parent_of` with no vector, so it was
+  invisible to recall's vector leg until `re-embed --missing-only` backfilled
+  it, and the receipt read "2 created (1 embedded)". Ends the call creates are
+  now embedded with the same context, deadline, failure rule and contract
+  stamp as its concepts, and counted in `embedded`. They are not matched
+  against existing concepts. A store that advertises vector search but refuses
+  the checked lookup leaves them keyword-only, whatever else the call carries.
+- Hybrid `record_action` no longer embeds on a store without vector search,
+  matching `derive`: nothing is embedded or stamped, and the receipt says
+  `(0 embedded)`. Pre-existing.
+- The hybrid embedding-context cap counts the real framing bytes (5 with an
+  origin, 9 without, not 3), so a context can no longer exceed 16 KiB by up to
+  6 bytes. Pre-existing.
+
 ## 0.3.0 (2026-10-07)
 
 ### Breaking
