@@ -462,6 +462,83 @@ async fn parent_of_end_embedding_follows_the_concepts_degrade_rules() {
     assert!(g.embedding().is_none());
 }
 
+/// A store that advertises `VECTOR_SEARCH` but refuses the checked lookup
+/// with a capability miss serves no vectors, so the ends stay keyword-only,
+/// exactly as the call's own concepts do. That must not depend on what else
+/// is in the call: with an unmatched concept, the concept's lookup sees the
+/// refusal first; in a call with no unmatched concept, the ends ask the store
+/// themselves (once, with the first end's vector) and stop there.
+#[tokio::test]
+async fn parent_of_ends_stay_keyword_only_when_the_store_refuses_vectors() {
+    let pairs = [("document:src.md", "a child"), ("document:other.md", "a child")];
+
+    // With an unmatched concept in the call.
+    let (graph, interaction) =
+        graph_with_interaction("hybrid-parent-refused", 1, 0, "ingest context");
+    let store = SpyStore::refusing();
+    let embedder = RecordingEmbedder::new();
+    let out = derive(
+        graph.clone(),
+        &store,
+        &embedder,
+        &contract("fixture", 1024),
+        interaction,
+        &agent(),
+        &[("a child", ConceptType::Entity)],
+        &ParentOf::from_pairs(&pairs),
+        10,
+        SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(out.created.len(), 3);
+    assert_eq!(out.embedded, 0);
+    assert_eq!(store.vector_calls(), 1, "the concept's lookup saw the refusal");
+    assert_eq!(
+        embedder.embedded_texts(),
+        ["a child — ingest context"],
+        "after the refusal no end is embedded"
+    );
+    assert!(graph.read().concepts().all(|c| c.embedding.is_none()));
+
+    // Ends only: no concept asked the store, so the first end does.
+    let (graph, interaction) =
+        graph_with_interaction("hybrid-parent-refused-ends", 1, 0, "ingest context");
+    let store = SpyStore::refusing();
+    let embedder = RecordingEmbedder::new();
+    let out = derive(
+        graph.clone(),
+        &store,
+        &embedder,
+        &contract("fixture", 1024),
+        interaction,
+        &agent(),
+        &[],
+        &ParentOf::from_pairs(&pairs),
+        10,
+        SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(out.created.len(), 3, "both parents and the child are created");
+    assert_eq!(
+        out.embedded, 0,
+        "a store that refuses vectors gets none, whatever else the call carries"
+    );
+    assert_eq!(store.vector_calls(), 1, "one probe, with the first end's vector");
+    assert_eq!(
+        embedder.embedded_texts().len(),
+        1,
+        "the refusal stops the ends' embeds: {:?}",
+        embedder.embedded_texts()
+    );
+    let g = graph.read();
+    assert!(g.concepts().all(|c| c.embedding.is_none()));
+    g.assert_invariants().unwrap();
+}
+
 #[tokio::test]
 async fn first_use_empty_candidates_still_commits_contract() {
     // Cockroach returns this safe empty shape for a missing/unstamped

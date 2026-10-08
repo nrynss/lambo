@@ -663,6 +663,11 @@ async fn derive_planned(
         // capability miss after advertising the capability: the session then
         // writes keyword-only for this call, `parent_of` ends included.
         let mut store_refused_vectors = false;
+        // Whether this attempt has asked the store, through the checked
+        // lookup, whether it will serve vectors at all. Only an unmatched
+        // concept asks on its own; the `parent_of` ends below ask when no
+        // concept did.
+        let mut probed_store = false;
         let mut resolutions: Vec<Resolution> = Vec::with_capacity(items.len());
         for (content, _concept_type, key, matched) in &items {
             let res = match matched {
@@ -692,25 +697,18 @@ async fn derive_planned(
                     // attempt must not bind the session to an embedding
                     // space it produced no vector in (MINOR-2).
                     attempted_embed = true;
-                    match tokio::time::timeout_at(
+                    probed_store = true;
+                    match checked_candidates(
+                        store,
+                        &session_id,
+                        &emb,
+                        embedding,
+                        VECTOR_CANDIDATE_LIMIT,
                         io_deadline,
-                        store.vector_candidates_checked(
-                            &session_id,
-                            &emb,
-                            embedding,
-                            VECTOR_CANDIDATE_LIMIT,
-                        ),
                     )
-                    .await
+                    .await?
                     {
-                        Err(_) => {
-                            return Err(StoreError::Backend(format!(
-                                "hybrid vector candidate lookup timed out after \
-                                         {HYBRID_IO_TIMEOUT:?}"
-                            ))
-                            .into())
-                        }
-                        Ok(Ok(hits)) => {
+                        Some(hits) => {
                             // The tier tied at the highest score
                             // at/above threshold (store results are not
                             // guaranteed sorted). Every member is
@@ -748,17 +746,9 @@ async fn derive_planned(
                                 }
                             }
                         }
-                        Ok(Err(StoreError::Capability(_))) => {
+                        None => {
                             store_refused_vectors = true;
-                            if note_fallback_logged(&session_id) {
-                                tracing::warn!(
-                                    target: "lambo::hybrid",
-                                    session = %session_id,
-                                    "store refused vector_candidates (capability miss) — \
-                                     degrading to MatchStrategy::Canonical (creating \
-                                     keyword-only concept)"
-                                );
-                            }
+                            note_store_refused_vectors(&session_id);
                             // A vector exists here, but the store just
                             // refused to query vectors at all — so it can
                             // serve neither a merge nor recall's vector
@@ -772,7 +762,6 @@ async fn derive_planned(
                                 embedding: None,
                             }
                         }
-                        Ok(Err(e)) => return Err(e.into()),
                     }
                 }
             };
@@ -794,10 +783,26 @@ async fn derive_planned(
                 let context = context_text(content, origin_text.as_deref());
                 let emb = embed_or_refuse(embedder, &context, io_deadline).await?;
                 attempted_embed = true;
+                // A call whose concepts all matched (or that has none) has
+                // not asked the store whether it serves vectors, so the
+                // capability-miss rule above would depend on what else is
+                // in the call. Ask once with the first end's vector (one
+                // candidate, result discarded): a refusal leaves every end
+                // keyword-only, exactly as it leaves a concept.
+                if !probed_store {
+                    probed_store = true;
+                    if checked_candidates(store, &session_id, &emb, embedding, 1, io_deadline)
+                        .await?
+                        .is_none()
+                    {
+                        // `parent_vectors` is still empty: this is the first end.
+                        note_store_refused_vectors(&session_id);
+                        break;
+                    }
+                }
                 parent_vectors.insert(key.clone(), emb);
             }
         }
-        let _ = has_unmatched;
 
         // -----------------------------------------------------------------------
         // Phase 3 — commit under a write lock (sync, no await).
@@ -1143,6 +1148,48 @@ fn pair_direction(graph: &Graph, a: NodeId, b: NodeId) -> (NodeId, NodeId) {
         (b, a)
     } else {
         (a, b)
+    }
+}
+
+/// One `vector_candidates_checked` call under the call's I/O deadline.
+///
+/// `Ok(None)` is the store's capability refusal: it advertised
+/// `VECTOR_SEARCH` but will not serve the checked lookup, and the caller
+/// degrades to keyword-only. A timeout or any other store error fails the
+/// write.
+async fn checked_candidates(
+    store: &dyn GraphStore,
+    session_id: &SessionId,
+    emb: &[f32],
+    embedding: &EmbeddingContract,
+    limit: usize,
+    io_deadline: tokio::time::Instant,
+) -> Result<Option<Vec<crate::types::Scored<NodeId>>>, LamboError> {
+    match tokio::time::timeout_at(
+        io_deadline,
+        store.vector_candidates_checked(session_id, emb, embedding, limit),
+    )
+    .await
+    {
+        Err(_) => Err(StoreError::Backend(format!(
+            "hybrid vector candidate lookup timed out after {HYBRID_IO_TIMEOUT:?}"
+        ))
+        .into()),
+        Ok(Ok(hits)) => Ok(Some(hits)),
+        Ok(Err(StoreError::Capability(_))) => Ok(None),
+        Ok(Err(e)) => Err(e.into()),
+    }
+}
+
+/// Log, once per session, that the store refused the checked vector lookup.
+fn note_store_refused_vectors(session_id: &SessionId) {
+    if note_fallback_logged(session_id) {
+        tracing::warn!(
+            target: "lambo::hybrid",
+            session = %session_id,
+            "store refused vector_candidates (capability miss) — degrading to \
+             MatchStrategy::Canonical (creating keyword-only concept)"
+        );
     }
 }
 
