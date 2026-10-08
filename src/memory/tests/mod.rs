@@ -6,6 +6,7 @@ use super::*;
 use crate::embed::FixtureEmbedder;
 use crate::graph::action::Action;
 use crate::graph::derive::ParentOf;
+use crate::store::flush::FLUSH_ATTEMPT_TIMEOUT;
 use crate::store::lease::{LeaseOutcome, LEASE_TTL};
 use crate::store::Capabilities;
 use crate::store::MemoryStore;
@@ -15,7 +16,7 @@ use crate::types::{
     Scored, StoreError,
 };
 use crate::types::{
-    CanonizationStatus, ConceptType, Interaction, MatchStrategy, NodeId, RecallQuery,
+    CanonizationStatus, ConceptType, Interaction, LamboError, MatchStrategy, NodeId, RecallQuery,
 };
 use async_trait::async_trait;
 use chrono::DateTime;
