@@ -709,15 +709,46 @@ def _source_focus_missing_text() -> str:
     )
 
 
+def _check_cli_missing_arm() -> None:
+    """Fail unless the CLI's `Focus::Missing` arm (`src/cli/inspect.rs`) still
+    renders its error with `missing_refusal(` and maps it to
+    `CliError::Runtime`. Pinning `missing_refusal`'s text alone would keep
+    passing if `lambo inspect` stopped calling it, or changed how the error
+    leaves the process, and the sentinel guards what `lambo inspect` prints.
+    """
+    inspect_rs = REPO_ROOT / "src" / "cli" / "inspect.rs"
+    try:
+        lines = inspect_rs.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise SystemExit(
+            "self-test FAILED: could not read the CLI inspect source "
+            f"{inspect_rs}: {exc}"
+        ) from exc
+    for i, line in enumerate(lines):
+        if "Focus::Missing" in line:
+            # The arm may be wrapped by rustfmt; look a few lines ahead.
+            arm = "\n".join(lines[i : i + 4])
+            if "missing_refusal(" in arm and "CliError::Runtime" in arm:
+                return
+    raise SystemExit(
+        "self-test FAILED: no `Focus::Missing` arm in "
+        f"{inspect_rs} maps `missing_refusal(` to `CliError::Runtime`; "
+        "EMPTY_SESSION_ERR no longer pins what `lambo inspect` prints"
+    )
+
+
 def _self_test_empty_session_sentinel() -> None:
     """Regression for T8-R1-2: `EMPTY_SESSION_ERR` must still match the live
     `lambo inspect` empty-session error — the `Focus::Missing` arm at
     `src/cli/inspect.rs` emits `missing_refusal`'s `no concept matching
-    '{focus}' in session '{session}'` (`src/surface/focus.rs`). This sources the actual Rust source at self-test time (see
-    `_source_focus_missing_text`), so a reword of the CLI fails loudly instead
-    of a stale sentinel silently reverting 03_crossover_protect.py's guard to
-    a hard abort on empty sessions (the original T3-2-P2-1 bug).
+    '{focus}' in session '{session}'` (`src/surface/focus.rs`). This sources
+    the actual Rust source at self-test time (see
+    `_source_focus_missing_text` and `_check_cli_missing_arm`), so a reword of
+    the CLI, or a CLI arm that stops using `missing_refusal`, fails loudly
+    instead of a stale sentinel silently reverting 03_crossover_protect.py's
+    guard to a hard abort on empty sessions (the original T3-2-P2-1 bug).
     """
+    _check_cli_missing_arm()
     live = _source_focus_missing_text()
     if EMPTY_SESSION_ERR not in live:
         raise SystemExit(
