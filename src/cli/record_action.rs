@@ -1,9 +1,10 @@
 //! `lambo record-action` — lease-held thin adapter over [`crate::memory::Memory::record_action`].
 
-use super::caps::{check_size_cli, require_nonempty, CliError, MAX_ACTION_TARGETS};
+use super::caps::{check_size_cli, require_nonempty, CliError};
 use super::{close_writer, open_writer};
 use crate::graph::action::Action;
 use crate::resolve::ResolvedBackends;
+use crate::surface::validate::check_action_targets;
 
 /// Parsed `record-action` flags.
 pub struct Args {
@@ -25,12 +26,7 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
     check_size_cli("action", &args.action)?;
 
     let total = args.produces.len() + args.modifies.len() + args.depends_on.len();
-    if total > MAX_ACTION_TARGETS {
-        return Err(CliError::Usage(format!(
-            "produces + modifies + depends_on must total at most {MAX_ACTION_TARGETS} \
-             entries ({total} given)"
-        )));
-    }
+    check_action_targets(total).map_err(CliError::Usage)?;
     for s in args
         .produces
         .iter()

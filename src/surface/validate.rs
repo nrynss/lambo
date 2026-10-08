@@ -6,7 +6,7 @@
 //! its own status. The rule and the message text live here once, so the
 //! surfaces cannot drift.
 
-use super::limits::MAX_CONTENT_BYTES;
+use super::limits::{MAX_ACTION_TARGETS, MAX_CONCEPTS_PER_DERIVE, MAX_CONTENT_BYTES};
 use crate::graph::canonical::{is_invisible, is_text_required_invisible};
 
 /// Is `c` an invisible character refused by [`check_size`] (L82-2 / R1-2)?
@@ -130,6 +130,31 @@ where
 {
     if value < lo || value > hi {
         return Err(format!("{field} must be in {lo}..={hi}"));
+    }
+    Ok(())
+}
+
+/// Refuse a derive carrying more than [`MAX_CONCEPTS_PER_DERIVE`] concepts.
+///
+/// `count` is every concept the request carries, however the surface collects
+/// them (the CLI counts the positional content plus each `--concept`).
+pub fn check_concept_count(count: usize) -> Result<(), String> {
+    if count > MAX_CONCEPTS_PER_DERIVE {
+        return Err(format!(
+            "concepts must contain at most {MAX_CONCEPTS_PER_DERIVE} entries"
+        ));
+    }
+    Ok(())
+}
+
+/// Refuse a `record_action` whose `produces`, `modifies` and `depends_on`
+/// lists hold more than [`MAX_ACTION_TARGETS`] entries between them (N1).
+pub fn check_action_targets(total: usize) -> Result<(), String> {
+    if total > MAX_ACTION_TARGETS {
+        return Err(format!(
+            "produces + modifies + depends_on must total at most {MAX_ACTION_TARGETS} \
+             entries ({total} given)"
+        ));
     }
     Ok(())
 }
@@ -325,5 +350,27 @@ mod tests {
             "focus must be a non-empty string"
         );
         require_nonempty("focus", " x ").unwrap();
+    }
+
+    /// The two count caps' wording, shared by `lambo derive` /
+    /// `lambo record-action` and `lambo_derive` / `lambo_record_action`. The
+    /// texts are pinned literally, so a change to either surface's refusal is
+    /// a change here.
+    #[test]
+    fn count_cap_refusals_carry_the_shared_wording() {
+        check_concept_count(MAX_CONCEPTS_PER_DERIVE).unwrap();
+        assert_eq!(
+            check_concept_count(MAX_CONCEPTS_PER_DERIVE + 1).unwrap_err(),
+            format!("concepts must contain at most {MAX_CONCEPTS_PER_DERIVE} entries")
+        );
+        check_action_targets(MAX_ACTION_TARGETS).unwrap();
+        assert_eq!(
+            check_action_targets(MAX_ACTION_TARGETS + 2).unwrap_err(),
+            format!(
+                "produces + modifies + depends_on must total at most {MAX_ACTION_TARGETS} \
+                 entries ({} given)",
+                MAX_ACTION_TARGETS + 2
+            )
+        );
     }
 }

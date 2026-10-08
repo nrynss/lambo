@@ -10,8 +10,7 @@ use crate::mcp::server::params::{check_size, DeriveParams, RecordActionParams};
 use crate::mcp::server::response::{bad_param, redact_urls, tool_err};
 use crate::mcp::server::trace::note_facts;
 use crate::mcp::server::LamboServer;
-use crate::surface::limits::{MAX_ACTION_TARGETS, MAX_CONCEPTS_PER_DERIVE};
-use crate::surface::validate::require_nonempty;
+use crate::surface::validate::{check_action_targets, check_concept_count, require_nonempty};
 use crate::types::ConceptType;
 
 impl LamboServer {
@@ -32,10 +31,8 @@ impl LamboServer {
         if p.concepts.is_empty() {
             return bad_param("concepts must contain at least one entry");
         }
-        if p.concepts.len() > MAX_CONCEPTS_PER_DERIVE {
-            return bad_param(format!(
-                "concepts must contain at most {MAX_CONCEPTS_PER_DERIVE} entries"
-            ));
+        if let Err(msg) = check_concept_count(p.concepts.len()) {
+            return bad_param(msg);
         }
         if let Some(bad) = p.concepts.iter().find(|c| c.content.trim().is_empty()) {
             let _ = bad;
@@ -185,11 +182,8 @@ impl LamboServer {
         // out into a concept and an edge — the stall vector `lambo_derive` is
         // already guarded against, on the tool that had no guard.
         let total = produces.len() + modifies.len() + depends_on.len();
-        if total > MAX_ACTION_TARGETS {
-            return bad_param(format!(
-                "produces + modifies + depends_on must total at most {MAX_ACTION_TARGETS} \
-                 entries ({total} given)"
-            ));
+        if let Err(msg) = check_action_targets(total) {
+            return bad_param(msg);
         }
         if produces
             .iter()

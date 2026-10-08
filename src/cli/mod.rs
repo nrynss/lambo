@@ -553,6 +553,111 @@ mod tests {
         assert!(!err.to_string().contains('\u{0001}'), "{err}");
     }
 
+    /// #25: the two count-cap refusals come from one builder each
+    /// (`surface::validate::check_concept_count` / `check_action_targets`), so
+    /// the CLI's usage error and MCP's tool error carry the same bytes.
+    #[tokio::test]
+    async fn cli_and_mcp_count_cap_refusals_are_byte_identical() {
+        use crate::surface::limits::{MAX_ACTION_TARGETS, MAX_CONCEPTS_PER_DERIVE};
+        use crate::surface::validate::{check_action_targets, check_concept_count};
+        use rmcp::model::ContentBlock;
+
+        fn mcp_text(r: &rmcp::model::CallToolResult) -> String {
+            assert_eq!(r.is_error, Some(true), "{r:?}");
+            match &r.content[0] {
+                ContentBlock::Text(t) => t.text.clone(),
+                other => panic!("expected text content, got {other:?}"),
+            }
+        }
+        fn usage(e: CliError) -> String {
+            match e {
+                CliError::Usage(m) => m,
+                other => panic!("a cap refusal is a usage error, got {other:?}"),
+            }
+        }
+
+        let store = Arc::new(MemoryStore::new());
+        let mcp_mem = Memory::builder()
+            .session("cli-mcp-caps-mcp")
+            .agent("agent-a")
+            .store(Arc::new(MemoryStore::new()) as Arc<dyn GraphStore>)
+            .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn crate::embed::Embedder>)
+            .embedding_contract(EmbeddingContract {
+                kind: "fixture".into(),
+                model: None,
+                dim: 1024,
+            })
+            .flush_interval(Duration::from_secs(3_600))
+            .build()
+            .await
+            .expect("mcp memory");
+        let server = LamboServer::new(Arc::new(mcp_mem));
+
+        // One over the derive cap: the CLI counts the positional content too.
+        let cli = crate::cli::derive::run(
+            backends_on(store.clone()),
+            crate::cli::derive::Args {
+                session: "cli-mcp-caps-cli".into(),
+                agent: "agent-a".into(),
+                content: "c0".into(),
+                kind: ConceptKind::Entity,
+                parent_of: vec![],
+                concept: (1..=MAX_CONCEPTS_PER_DERIVE)
+                    .map(|i| format!("c{i}:entity"))
+                    .collect(),
+            },
+        )
+        .await
+        .unwrap_err();
+        let mcp = server
+            .derive_impl(DeriveParams {
+                agent_id: "agent-a".into(),
+                concepts: (0..=MAX_CONCEPTS_PER_DERIVE)
+                    .map(|i| WireConcept {
+                        content: format!("c{i}"),
+                        concept_type: WireConceptType::Entity,
+                    })
+                    .collect(),
+                parent_of: None,
+                event_time: None,
+            })
+            .await;
+        let shared = check_concept_count(MAX_CONCEPTS_PER_DERIVE + 1).unwrap_err();
+        assert_eq!(usage(cli), shared);
+        assert_eq!(mcp_text(&mcp), shared);
+
+        // One over the action-target cap, split across the lists.
+        let produces: Vec<String> = (0..MAX_ACTION_TARGETS).map(|i| format!("p{i}")).collect();
+        let cli = crate::cli::record_action::run(
+            backends_on(store),
+            crate::cli::record_action::Args {
+                session: "cli-mcp-caps-cli".into(),
+                agent: "agent-a".into(),
+                action: "touch everything".into(),
+                produces: produces.clone(),
+                modifies: vec!["m0".into()],
+                depends_on: vec![],
+            },
+        )
+        .await
+        .unwrap_err();
+        let mcp = server
+            .record_action_impl(RecordActionParams {
+                agent_id: "agent-a".into(),
+                action: "touch everything".into(),
+                event_time: None,
+                produces: Some(produces.into_iter().map(WireResource).collect()),
+                modifies: Some(vec![WireResource("m0".into())]),
+                depends_on: None,
+            })
+            .await;
+        let shared = check_action_targets(MAX_ACTION_TARGETS + 1).unwrap_err();
+        assert_eq!(usage(cli), shared);
+        assert_eq!(mcp_text(&mcp), shared);
+
+        server.memory().close().await.expect("mcp close");
+    }
+
     #[test]
     fn shared_validators_are_the_caps_module() {
         // Once extracted, MCP and CLI cannot drift: there is one check_size.
