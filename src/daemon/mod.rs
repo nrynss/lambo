@@ -524,12 +524,11 @@ impl Daemon {
         // mutation. The daemon HotList tracks conflict/condition entries, not recall
         // recency - neither the blend nor this path bumps recall recency - so there
         // is no recency to refresh here.
-        if structural {
-            if let Some(result) =
+        if structural
+            && let Some(result) =
                 dispatch::try_structural(&graph, &query.query, query.top_k, query.max_tokens)
-            {
-                return result;
-            }
+        {
+            return result;
         }
 
         let scores = self.scores.read().clone();

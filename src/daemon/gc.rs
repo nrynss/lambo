@@ -801,10 +801,11 @@ pub fn resources_with_dependents(graph: &Graph) -> HashSet<NodeId> {
         if is_resource(dst) && srcs.iter().any(|s| *s != dst) {
             out.insert(dst);
         }
-        if let [only] = srcs.as_slice() {
-            if *only != dst && is_resource(*only) {
-                out.insert(*only);
-            }
+        if let [only] = srcs.as_slice()
+            && *only != dst
+            && is_resource(*only)
+        {
+            out.insert(*only);
         }
     }
     out
@@ -945,12 +946,11 @@ fn dead_edge_ids(graph: &Graph, params: GcParams) -> Vec<NodeId> {
     {
         for ty in DECAYING_TYPES {
             for tgt in graph.out_neighbors_typed(node, ty) {
-                if let Some(e) = graph.edge_between(node, tgt, ty) {
-                    if e.weight < params.min_edge_weight
-                        && params.now.signed_duration_since(e.last_reinforced) > params.gc_edge_ttl
-                    {
-                        dead.push(e.id);
-                    }
+                if let Some(e) = graph.edge_between(node, tgt, ty)
+                    && e.weight < params.min_edge_weight
+                    && params.now.signed_duration_since(e.last_reinforced) > params.gc_edge_ttl
+                {
+                    dead.push(e.id);
                 }
             }
         }

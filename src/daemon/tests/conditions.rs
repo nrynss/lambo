@@ -603,10 +603,10 @@ async fn external_publisher_flood_cannot_permanently_evict_a_held_conflict() {
     for _ in 0..8 {
         wake_and_settle(&daemon).await;
         while let Ok(evt) = rx.try_recv() {
-            if let DaemonEvent::Conflict { node_id, .. } = evt {
-                if node_id == c1_id {
-                    saw_conflict = true;
-                }
+            if let DaemonEvent::Conflict { node_id, .. } = evt
+                && node_id == c1_id
+            {
+                saw_conflict = true;
             }
         }
         if saw_conflict {
