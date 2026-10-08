@@ -345,9 +345,13 @@ jobs:
             -- --ignored --nocapture --exact \
             store::pg::postgres::tests::explain_recall_uses_hnsw \
             store::pg::postgres::tests::fencing_refuses_stale_write_and_upserts_replay \
+            store::pg::delete_fencing::postgres_fences_a_delete_only_batch \
+            store::pg::lease_race::postgres_takeover_waits_for_the_fence_check \
             2>&1 | tee postgres-b3.log
           grep -q 'test store::pg::postgres::tests::explain_recall_uses_hnsw ... ok' postgres-b3.log
           grep -q 'test store::pg::postgres::tests::fencing_refuses_stale_write_and_upserts_replay ... ok' postgres-b3.log
+          grep -q 'test store::pg::delete_fencing::postgres_fences_a_delete_only_batch ... ok' postgres-b3.log
+          grep -q 'test store::pg::lease_race::postgres_takeover_waits_for_the_fence_check ... ok' postgres-b3.log
       # B0-R4-1: the Stage-2 `coverage` decode. Only a live PostgreSQL >= 14
       # can exercise it -- that is where `extract(epoch ...)` began returning
       # `numeric`, and SQLite's type affinity hides the mismatch entirely, so
