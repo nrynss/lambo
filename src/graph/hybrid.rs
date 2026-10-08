@@ -192,9 +192,22 @@ pub const VECTOR_CANDIDATE_LIMIT: usize = 8;
 /// Hard request bounds are checked before the first await. They prevent one
 /// derive call from turning attacker-controlled input into unbounded external
 /// embed/store work while leaving normal multi-concept calls ample headroom.
+///
+/// `MAX_HYBRID_CONCEPTS`, `MAX_HYBRID_PARENT_PAIRS` and `MAX_HYBRID_WORK_ITEMS`
+/// bound the request's size (concepts plus pairs, each pair one item): the
+/// canonicalization work under the read lock. They do not bound the embeds,
+/// because each pair can name two new ends; [`MAX_HYBRID_EMBEDS`] does.
 pub const MAX_HYBRID_CONCEPTS: usize = 256;
 pub const MAX_HYBRID_PARENT_PAIRS: usize = 256;
 pub const MAX_HYBRID_WORK_ITEMS: usize = 512;
+/// The most embeds one hybrid derive may make: one per unmatched concept plus
+/// one per `parent_of` end it will create (issue #16 §2), all inside one
+/// [`HYBRID_IO_TIMEOUT`]. It keeps the ceiling the call had before ends were
+/// embedded (`MAX_HYBRID_CONCEPTS`), so embedding ends cannot push a call
+/// that fit the deadline past it. Checked at the J3 ack
+/// ([`validate_embed_budget`]) and again at plan, before any I/O; a call
+/// over it is refused with a `Config` error rather than timing out at apply.
+pub const MAX_HYBRID_EMBEDS: usize = MAX_HYBRID_CONCEPTS;
 pub const MAX_HYBRID_CONTEXT_BYTES: usize = 16 * 1024;
 pub const HYBRID_IO_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_HYBRID_REPLANS: usize = 8;
@@ -522,6 +535,97 @@ pub fn validate_graph_inputs(graph: &Graph, parent_of: &ParentOf<'_>) -> Result<
     Ok(())
 }
 
+/// A call's unique concepts with their canonical key and match so far, in
+/// call order.
+type PlannedItems<'a> = Vec<(&'a str, ConceptType, String, Option<NodeId>)>;
+/// The `parent_of` ends a call will create, with their canonical key.
+type PlannedEnds<'a> = Vec<(&'a str, String)>;
+
+/// Plan a call against `g`: its unique concepts, and the `parent_of` ends it
+/// will create. Read-only; the caller holds the read lock.
+fn plan_inputs<'a>(
+    g: &Graph,
+    concepts: &[(&'a str, ConceptType)],
+    parent_of: &ParentOf<'a>,
+) -> Result<(PlannedItems<'a>, PlannedEnds<'a>), LamboError> {
+    // Step 2 — dedup by content + canonicalize. Items are the unique concepts
+    // of this call with their resolution so far (canonical match id if any).
+    let mut seen: HashSet<&str> = HashSet::with_capacity(concepts.len());
+    let mut items: PlannedItems<'a> = Vec::with_capacity(concepts.len());
+    for &(content, concept_type) in concepts {
+        if !seen.insert(content) {
+            continue;
+        }
+        let (key, matched) = match canonicalize(content, g)? {
+            CanonicalizeResult::Matched { key, node } => (key, Some(node)),
+            CanonicalizeResult::Unmatched { key } => (key, None),
+        };
+        reject_empty_key(content, &key)?;
+        items.push((content, concept_type, key, matched));
+    }
+
+    // Issue #16 §2: the `parent_of` ends this call will CREATE — not matched
+    // in the graph, and not one of this call's own `concepts` (those resolve
+    // to the item at commit) — one per canonical key, first spelling wins, as
+    // commit's re-canonicalization does. Before this they were created with
+    // `embedding: None` and stayed invisible to recall's vector leg.
+    let item_keys: HashSet<&str> = items.iter().map(|(_, _, k, _)| k.as_str()).collect();
+    let mut end_keys: HashSet<String> = HashSet::new();
+    let mut parent_ends: PlannedEnds<'a> = Vec::new();
+    for &(parent, child) in parent_of.pairs() {
+        for content in [parent, child] {
+            if let CanonicalizeResult::Unmatched { key } = canonicalize(content, g)? {
+                if !item_keys.contains(key.as_str()) && end_keys.insert(key.clone()) {
+                    parent_ends.push((content, key));
+                }
+            }
+        }
+    }
+    Ok((items, parent_ends))
+}
+
+/// Refuse a plan whose embeds exceed [`MAX_HYBRID_EMBEDS`]: one per
+/// unmatched concept and one per `parent_of` end the call will create.
+fn check_embed_budget(
+    items: &PlannedItems<'_>,
+    parent_ends: &PlannedEnds<'_>,
+) -> Result<(), LamboError> {
+    let planned = items
+        .iter()
+        .filter(|(_, _, _, matched)| matched.is_none())
+        .count()
+        + parent_ends.len();
+    if planned > MAX_HYBRID_EMBEDS {
+        return Err(LamboError::Config(format!(
+            "hybrid derive would embed {planned} new concepts and parent_of ends in one call; \
+             at most {MAX_HYBRID_EMBEDS} fit the {HYBRID_IO_TIMEOUT:?} embed deadline, so split \
+             the call"
+        )));
+    }
+    Ok(())
+}
+
+/// [`derive`](fn@derive)'s embed budget, on its own so J3's asynchronous ack
+/// path can refuse an over-budget call at call time instead of on a receipt.
+///
+/// Counts what the plan phase will embed against `graph` as it is now:
+/// unmatched concepts plus the `parent_of` ends the call will create. When
+/// the store has no vector search nothing is embedded, so nothing is
+/// refused. The plan phase runs the same check again, against the graph as
+/// it is at apply.
+pub fn validate_embed_budget(
+    graph: &Graph,
+    concepts: &[(&str, ConceptType)],
+    parent_of: &ParentOf<'_>,
+    vector_search: bool,
+) -> Result<(), LamboError> {
+    if !vector_search {
+        return Ok(());
+    }
+    let (items, parent_ends) = plan_inputs(graph, concepts, parent_of)?;
+    check_embed_budget(&items, &parent_ends)
+}
+
 /// [`derive`](fn@derive)'s plan/embed/write loop, after [`validate_limits`].
 #[allow(clippy::too_many_arguments)]
 async fn derive_planned(
@@ -541,6 +645,11 @@ async fn derive_planned(
     // Survives replans: the hook fires exactly once, at the commit that wins.
     let mut on_commit = on_commit;
     for _attempt in 0..MAX_HYBRID_REPLANS {
+        // The vector leg can run only when the store advertises it. Probed once,
+        // synchronously, before any I/O (mirrors the recall RAM-tier promise:
+        // zero async store calls when the capability is absent).
+        let vector_ok = store.capabilities().contains(Capabilities::VECTOR_SEARCH);
+
         // -----------------------------------------------------------------------
         // Phase 1 — plan under a brief read lock (no I/O, no await).
         // -----------------------------------------------------------------------
@@ -576,21 +685,10 @@ async fn derive_planned(
 
             validate_graph_inputs(&g, parent_of)?;
 
-            // Step 2 — dedup by content + canonicalize. Items are the unique concepts
-            // of this call with their resolution so far (canonical match id if any).
-            let mut seen: HashSet<&str> = HashSet::with_capacity(concepts.len());
-            let mut items: Vec<(&str, ConceptType, String, Option<NodeId>)> =
-                Vec::with_capacity(concepts.len());
-            for &(content, concept_type) in concepts {
-                if !seen.insert(content) {
-                    continue;
-                }
-                let (key, matched) = match canonicalize(content, &g)? {
-                    CanonicalizeResult::Matched { key, node } => (key, Some(node)),
-                    CanonicalizeResult::Unmatched { key } => (key, None),
-                };
-                reject_empty_key(content, &key)?;
-                items.push((content, concept_type, key, matched));
+            let (items, parent_ends) = plan_inputs(&g, concepts, parent_of)?;
+            // Bound the embed work before any I/O (see MAX_HYBRID_EMBEDS).
+            if vector_ok {
+                check_embed_budget(&items, &parent_ends)?;
             }
 
             if origin_text
@@ -601,25 +699,6 @@ async fn derive_planned(
                     "hybrid interaction context exceeds {MAX_HYBRID_CONTEXT_BYTES} bytes"
                 )));
             }
-            // Issue #16 §2: the `parent_of` ends this call will CREATE — not
-            // matched in the graph, and not one of this call's own `concepts`
-            // (those resolve to the item at commit) — one per canonical key,
-            // first spelling wins, as commit's re-canonicalization does. Before
-            // this they were created with `embedding: None` and stayed
-            // invisible to recall's vector leg.
-            let item_keys: HashSet<&str> = items.iter().map(|(_, _, k, _)| k.as_str()).collect();
-            let mut end_keys: HashSet<String> = HashSet::new();
-            let mut parent_ends: Vec<(&str, String)> = Vec::new();
-            for &(parent, child) in parent_of.pairs() {
-                for content in [parent, child] {
-                    if let CanonicalizeResult::Unmatched { key } = canonicalize(content, &g)? {
-                        if !item_keys.contains(key.as_str()) && end_keys.insert(key.clone()) {
-                            parent_ends.push((content, key));
-                        }
-                    }
-                }
-            }
-
             let unmatched_contents = items
                 .iter()
                 .filter(|(_, _, _, matched)| matched.is_none())
@@ -644,11 +723,6 @@ async fn derive_planned(
                 parent_ends,
             )
         };
-
-        // The vector leg can run only when the store advertises it. Probed once,
-        // synchronously, before any I/O (mirrors the recall RAM-tier promise:
-        // zero async store calls when the capability is absent).
-        let vector_ok = store.capabilities().contains(Capabilities::VECTOR_SEARCH);
 
         // Mid-session contract check — refuse a kind/model/dim swap BEFORE any embed
         // ("without re-embed"). Only enforced when we are actually about to embed

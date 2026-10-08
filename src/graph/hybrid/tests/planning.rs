@@ -699,6 +699,130 @@ async fn the_context_cap_counts_the_real_framing_bytes() {
     assert_eq!(embeds, 0);
 }
 
+/// `n` pairs, each naming two ends neither in the graph nor in the call.
+fn fresh_end_pairs(n: usize) -> Vec<(String, String)> {
+    (0..n)
+        .map(|i| (format!("parent end {i}"), format!("child end {i}")))
+        .collect()
+}
+
+/// Issue #16 §2 made `parent_of` ends embed, so a call's embeds are its
+/// unmatched concepts plus the ends it creates — up to 768 under the request
+/// limits, all inside one `HYBRID_IO_TIMEOUT`. `MAX_HYBRID_EMBEDS` keeps the
+/// old ceiling: exactly the budget applies, one over is refused with a
+/// `Config` error before any embed or store call. A store without vector
+/// search embeds nothing, so the same call is not refused there.
+#[tokio::test]
+async fn the_embed_budget_counts_concepts_and_new_parent_of_ends() {
+    let pairs = fresh_end_pairs(MAX_HYBRID_EMBEDS / 2);
+    let pair_refs: Vec<(&str, &str)> = pairs
+        .iter()
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect();
+
+    // Exactly the budget: every end is embedded.
+    let (graph, interaction) = graph_with_interaction("hybrid-budget-at", 1, 0, "bulk");
+    let embedder = RecordingEmbedder::new();
+    let out = derive(
+        graph,
+        &SpyStore::with_vector(Vec::new()),
+        &embedder,
+        &contract("fixture", 1024),
+        interaction,
+        &agent(),
+        &[],
+        &ParentOf::from_pairs(&pair_refs),
+        10,
+        SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(out.embedded, MAX_HYBRID_EMBEDS);
+    assert_eq!(embedder.embedded_texts().len(), MAX_HYBRID_EMBEDS);
+
+    // One new concept more: refused before any I/O, nothing written.
+    let (graph, interaction) = graph_with_interaction("hybrid-budget-over", 1, 0, "bulk");
+    let store = SpyStore::with_vector(Vec::new());
+    let embedder = RecordingEmbedder::new();
+    let before = graph.read().snapshot();
+    let err = derive(
+        graph.clone(),
+        &store,
+        &embedder,
+        &contract("fixture", 1024),
+        interaction,
+        &agent(),
+        &[("one more", ConceptType::Entity)],
+        &ParentOf::from_pairs(&pair_refs),
+        10,
+        SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(&err, LamboError::Config(m) if m.contains("would embed 257")),
+        "unexpected error: {err:?}"
+    );
+    assert!(embedder.embedded_texts().is_empty());
+    assert_eq!(store.vector_calls(), 0);
+    assert_eq!(graph.read().snapshot(), before, "nothing was written");
+
+    // A store without vector search embeds nothing, so nothing is refused.
+    let (graph, interaction) = graph_with_interaction("hybrid-budget-nocap", 1, 0, "bulk");
+    let out = derive(
+        graph,
+        &SpyStore::without_vector(),
+        &RecordingEmbedder::new(),
+        &contract("fixture", 1024),
+        interaction,
+        &agent(),
+        &[("one more", ConceptType::Entity)],
+        &ParentOf::from_pairs(&pair_refs),
+        10,
+        SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(out.created.len(), MAX_HYBRID_EMBEDS + 1);
+    assert_eq!(out.embedded, 0);
+}
+
+/// The J3 ack runs the same count against the graph as it is at the call:
+/// matched concepts and existing ends are free, and nothing is refused
+/// without vector search.
+#[test]
+fn validate_embed_budget_counts_only_what_the_call_would_embed() {
+    let (graph, interaction) = graph_with_interaction("hybrid-budget-ack", 1, 0, "bulk");
+    {
+        let mut g = graph.write();
+        crate::graph::derive::derive(
+            &mut g,
+            interaction,
+            &agent(),
+            &[("existing", ConceptType::Entity)],
+            &ParentOf::none(),
+            10,
+        )
+        .unwrap();
+    }
+    let pairs = fresh_end_pairs(MAX_HYBRID_EMBEDS / 2);
+    let pair_refs: Vec<(&str, &str)> = pairs
+        .iter()
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect();
+    let g = graph.read();
+    let ends = ParentOf::from_pairs(&pair_refs);
+    validate_embed_budget(&g, &[], &ends, true).unwrap();
+    validate_embed_budget(&g, &[("existing", ConceptType::Entity)], &ends, true).unwrap();
+    let err =
+        validate_embed_budget(&g, &[("one more", ConceptType::Entity)], &ends, true).unwrap_err();
+    assert!(matches!(err, LamboError::Config(_)), "{err:?}");
+    validate_embed_budget(&g, &[("one more", ConceptType::Entity)], &ends, false).unwrap();
+}
+
 #[tokio::test]
 async fn first_use_empty_candidates_still_commits_contract() {
     // Cockroach returns this safe empty shape for a missing/unstamped

@@ -617,3 +617,54 @@ async fn a_content_refusal_at_replay_still_settles_the_intent_failed() {
         "nothing was written for a refused replay"
     );
 }
+
+/// Issue #16 §2 made `parent_of` ends embed, so a call can now ask for more
+/// embeds than fit one `HYBRID_IO_TIMEOUT`. Under hybrid the J3 ack refuses
+/// a call over `MAX_HYBRID_EMBEDS` at call time with a `Config` error, rather
+/// than acking it and letting it time out at apply (and, as a kept intent,
+/// time out again at replay). Exactly the budget is admitted.
+#[tokio::test]
+async fn an_over_budget_derive_is_refused_at_the_ack() {
+    use crate::graph::hybrid::MAX_HYBRID_EMBEDS;
+    let inner = Arc::new(MemoryStore::new());
+    let mem = Memory::builder()
+        .session("embed-budget-ack")
+        .agent("agent-a")
+        .flush_interval(Duration::from_secs(3_600))
+        .store(Arc::new(VectorSearchable(inner)) as Arc<dyn GraphStore>)
+        .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
+        .embedding_contract(contract("fixture", 1024))
+        .match_strategy(MatchStrategy::Hybrid)
+        .build()
+        .await
+        .expect("build");
+    let agent = AgentId::new("agent-a");
+    let pairs: Vec<(String, String)> = (0..MAX_HYBRID_EMBEDS / 2)
+        .map(|i| (format!("parent end {i}"), format!("child end {i}")))
+        .collect();
+    let pair_refs: Vec<(&str, &str)> = pairs
+        .iter()
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect();
+
+    let err = mem
+        .derive_async_as(
+            &agent,
+            &[("one more", ConceptType::Entity)],
+            &ParentOf::from_pairs(&pair_refs),
+            None,
+        )
+        .await
+        .expect_err("over budget is refused at the ack");
+    assert!(
+        matches!(&err, LamboError::Config(m) if m.contains("would embed")),
+        "unexpected error: {err:?}"
+    );
+
+    let submitted = mem
+        .derive_async_as(&agent, &[], &ParentOf::from_pairs(&pair_refs), None)
+        .await
+        .expect("exactly the budget is admitted");
+    assert!(!submitted.dropped());
+    mem.close().await.expect("close");
+}

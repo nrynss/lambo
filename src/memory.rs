@@ -1796,7 +1796,8 @@ impl Memory {
     ///   pre-pass the session's `match_strategy` actually uses**, and the two
     ///   are not the same set of rules:
     ///   * `Hybrid` (the default — see `config.rs`): `hybrid::validate_limits`
-    ///     then `hybrid::validate_graph_inputs`, which is deliberately the
+    ///     then `hybrid::validate_graph_inputs` and
+    ///     `hybrid::validate_embed_budget`, which is deliberately the
     ///     **smaller** set. It omits the repeated-`Observation` and
     ///     single-`Hierarchical`-parent rejections, because hybrid's own write
     ///     path does not enforce them and validation that disagrees with the
@@ -1862,7 +1863,19 @@ impl Memory {
         {
             let g = self.graph.read();
             match self.config.match_strategy {
-                MatchStrategy::Hybrid => hybrid::validate_graph_inputs(&g, parent_of)?,
+                MatchStrategy::Hybrid => {
+                    hybrid::validate_graph_inputs(&g, parent_of)?;
+                    // The embed budget too: an over-budget call is refused
+                    // here, not after the ack as a timeout at apply.
+                    hybrid::validate_embed_budget(
+                        &g,
+                        concepts,
+                        parent_of,
+                        self.store
+                            .capabilities()
+                            .contains(Capabilities::VECTOR_SEARCH),
+                    )?;
+                }
                 MatchStrategy::Canonical => {
                     crate::graph::derive::validate(&g, concepts, parent_of)?
                 }
