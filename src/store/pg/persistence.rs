@@ -341,7 +341,6 @@ impl<D: Dialect> PgStore<D> {
                 }
             }
 
-
             // Replay the batch as planned statements rather than one statement
             // per mutation (L82-1). Order is still the batch's own — see
             // `store::batch` for why bucketing upserts by table preserves it,
