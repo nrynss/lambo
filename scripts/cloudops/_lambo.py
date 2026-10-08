@@ -117,8 +117,9 @@ PILLAR_WARNING_PREFIX = "⚑ Load-bearing pillar"
 STRUCTURAL_EDGE_LABELS = ("Causal", "Dependency", "Hierarchical")
 
 # `lambo inspect` emits this exact phrase when the focus concept is not in the
-# session at all — the `Focus::Missing` arm at `src/cli/inspect.rs` produces
-# `no concept matching '{focus}' in session '{session}'` and exits 1 — which is
+# session at all — the CLI's `Focus::Missing` arm renders `missing_refusal` in
+# `src/surface/focus.rs`, which produces
+# `no concept matching '{focus}' in session '{session}'`, and exits 1 — which is
 # the one condition `03_crossover_protect.py` treats as "nothing to protect".
 # The sentinel lives here (beside the reader-verb contract) rather than inline
 # in 03 so re-using it is a named constant, and `_self_test_empty_session_sentinel`
@@ -128,7 +129,7 @@ EMPTY_SESSION_ERR = "no concept matching"
 
 # `inspect` renders a neighbour as `content [Type{, status}]`, where the
 # bracketed tail is render metadata (ConceptType plus optional canonization
-# status; see `src/cli/inspect.rs` `render_neighbourhood`/`label`). The content
+# status; see `src/surface/neighbourhood.rs` `render_neighbourhood`/`label`). The content
 # itself may legitimately contain a ` [`, so the tail is stripped with this
 # anchored pattern rather than a blind `rsplit(" [", 1)` — which would truncate
 # bracketed concept text. `Parse outbound neighbour` rows are always concept
@@ -676,42 +677,43 @@ def _self_test_structural_whitelist() -> None:
 
 
 def _source_focus_missing_text() -> str:
-    """Return the live `Focus::Missing` error-formatting source from the Rust
-    CLI, so `EMPTY_SESSION_ERR` is pinned to the real string rather than a
-    duplicated copy. Reads `src/cli/inspect.rs` (resolved against REPO_ROOT)
-    and returns the text of the `Focus::Missing` match arm. Fails loudly —
-    raising SystemExit — if the source can't be found or read, or if the arm
-    is no longer present, so this self-test never silently vacates.
+    """Return the live `Focus::Missing` error-formatting source, so
+    `EMPTY_SESSION_ERR` is pinned to the real string rather than a duplicated
+    copy. The CLI's `Focus::Missing` arm (`src/cli/inspect.rs`) renders its
+    error with `missing_refusal`, which lives in `src/surface/focus.rs`
+    (resolved against REPO_ROOT) beside `resolve_focus`; this returns the text
+    of that function. Fails loudly — raising SystemExit — if the source can't
+    be found or read, or if the function is no longer present, so this
+    self-test never silently vacates.
     """
-    inspect_rs = REPO_ROOT / "src" / "cli" / "inspect.rs"
+    focus_rs = REPO_ROOT / "src" / "surface" / "focus.rs"
     try:
-        text = inspect_rs.read_text(encoding="utf-8")
+        text = focus_rs.read_text(encoding="utf-8")
     except OSError as exc:
         raise SystemExit(
-            "self-test FAILED: could not read the live CLI error source "
-            f"{inspect_rs} to pin EMPTY_SESSION_ERR: {exc}"
+            "self-test FAILED: could not read the live inspect error source "
+            f"{focus_rs} to pin EMPTY_SESSION_ERR: {exc}"
         ) from exc
     lines = text.splitlines()
     for i, line in enumerate(lines):
-        # Target the *error-formatting* arm (`Focus::Missing => Err(...)`) —
-        # not the unrelated `return Focus::Missing;` in `resolve_focus` — so we
-        # pin against the actual runtime message source.
-        if "Focus::Missing" in line and "=> Err(" in line:
-            # This arm spans this line and the following ones; collect a bounded
-            # window so a reword that drops or renames the phrase still fails
-            # the assertion below.
+        # Target the *error-formatting* function — not the `Focus::Missing`
+        # values `resolve_focus` returns — so we pin against the actual runtime
+        # message source.
+        if "fn missing_refusal(" in line:
+            # Collect a bounded window over the function body so a reword that
+            # drops or renames the phrase still fails the assertion below.
             return "\n".join(lines[i : i + 12])
     raise SystemExit(
-        "self-test FAILED: `Focus::Missing` arm not found in the live CLI "
-        f"source {inspect_rs}; EMPTY_SESSION_ERR can no longer be pinned"
+        "self-test FAILED: `missing_refusal` not found in the live inspect "
+        f"source {focus_rs}; EMPTY_SESSION_ERR can no longer be pinned"
     )
 
 
 def _self_test_empty_session_sentinel() -> None:
     """Regression for T8-R1-2: `EMPTY_SESSION_ERR` must still match the live
     `lambo inspect` empty-session error — the `Focus::Missing` arm at
-    `src/cli/inspect.rs` emits `no concept matching '{focus}' in session
-    '{session}'`. This sources the actual Rust source at self-test time (see
+    `src/cli/inspect.rs` emits `missing_refusal`'s `no concept matching
+    '{focus}' in session '{session}'` (`src/surface/focus.rs`). This sources the actual Rust source at self-test time (see
     `_source_focus_missing_text`), so a reword of the CLI fails loudly instead
     of a stale sentinel silently reverting 03_crossover_protect.py's guard to
     a hard abort on empty sessions (the original T3-2-P2-1 bug).
