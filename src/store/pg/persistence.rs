@@ -152,6 +152,14 @@ impl<D: Dialect> PgStore<D> {
                 .begin()
                 .await
                 .map_err(|e| map_write_err(e, |m| format!("begin seed transaction: {m}")))?;
+            // Same lock order as an erase and a flush: the `sessions` row
+            // first, the lease row second, so a seed racing an erase cannot
+            // deadlock (no row yet locks nothing, as in the erase).
+            sqlx::query(super::sql::ERASE_SESSION_ROW_FOR_UPDATE_SQL)
+                .bind(sid)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(backend)?;
             // #23 review L5: a seed is off-lease, but it must not recreate an
             // erased session. `FOR SHARE` waits out an erase in flight (it
             // holds the row `FOR UPDATE`) and then sees its tombstone.
