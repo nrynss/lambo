@@ -9,9 +9,9 @@ use crate::graph::derive::ParentOf;
 use crate::store::flush::FLUSH_ATTEMPT_TIMEOUT;
 use crate::store::lease::{LeaseOutcome, LEASE_TTL};
 use crate::store::Capabilities;
-// Only the fixtures-gated replay test builds an `Interaction` by hand.
 use crate::store::MemoryStore;
 use crate::test_util::capture_logs;
+// Only the fixtures-gated replay test builds an `Interaction` by hand.
 #[cfg(feature = "fixtures")]
 use crate::types::Interaction;
 use crate::types::{
