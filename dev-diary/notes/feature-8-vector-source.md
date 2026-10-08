@@ -48,11 +48,15 @@ pg family also does not parse vector text in the process, which is SQLite's
 cost (below). Opting in later is a one-line override plus a parity run against
 live Postgres and Cockroach; measure first.
 
-**MemoryStore stays without a vector leg.** It does not advertise
+**MemoryStore stays without a vector leg: a deviation from #8's stated
+scope.** The issue says graph-side ranking "applies to SQLite and Memory for
+certain"; this change applies it to SQLite only. MemoryStore does not advertise
 `VECTOR_SEARCH`, and `for_holder` never offers the graph as a way to switch a
 vector leg on: doing so would change every MemoryStore recall and derive
-(embeds, merges, the recall goldens' leg composition). A separate decision if
-wanted.
+(embeds, merges, the recall goldens' leg composition), which is a behaviour
+change, not the cost fix #8 is. There is also no store read to remove on
+MemoryStore today. Giving MemoryStore a graph-ranked vector leg is a separate
+decision with its own golden review if wanted.
 
 **Readers keep the store.** `lambo recall` and `lambo serve-web` load a reader
 graph and still read vectors from the store, in the store's own contract-checked
