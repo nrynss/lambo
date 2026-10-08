@@ -196,13 +196,13 @@ pub fn check_vector_compatibility(
     if embedder_dim == 0 {
         return Err(LamboError::Config("embedder dimension must be > 0".into()));
     }
-    if let Some(store_dim) = store_vector_dim {
-        if store_dim != embedder_dim {
-            return Err(LamboError::Config(format!(
+    if let Some(store_dim) = store_vector_dim
+        && store_dim != embedder_dim
+    {
+        return Err(LamboError::Config(format!(
                 "embedder dim {embedder_dim} is incompatible with store vector width {store_dim} \
                  (store schema is the authority; change the embedder or the store, not a global constant)"
             )));
-        }
     }
     Ok(())
 }
@@ -291,16 +291,16 @@ pub fn resolve_backends(file: LamboFile) -> Result<ResolvedBackends, LamboError>
     // MemoryStore has no vector column). A stale pin failing loud is the pin's job, so
     // the message states the general property — the width this deployment's vectors use
     // — rather than claiming anything about what a particular database already holds.
-    if let Some(pinned) = store_cfg.vector_dim {
-        if pinned != embed_dim {
-            return Err(LamboError::Config(format!(
-                "store.vector_dim is pinned to {pinned} but the configured embedder emits \
+    if let Some(pinned) = store_cfg.vector_dim
+        && pinned != embed_dim
+    {
+        return Err(LamboError::Config(format!(
+            "store.vector_dim is pinned to {pinned} but the configured embedder emits \
                  {embed_dim} — refusing to resolve: the pin asserts the width this \
                  deployment's vectors use, and serving with a different width would write \
                  or read vectors against an asserted width that is not theirs (drop the \
                  pin, change the embedder, or re-embed)"
-            )));
-        }
+        )));
     }
     check_vector_compatibility(store.vector_dimensions(), embed_dim)?;
 
