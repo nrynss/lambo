@@ -53,9 +53,10 @@
 //! # Its interface with `serve`
 //!
 //! `serve`'s role resolution reaches this module through `serve::hub` only,
-//! and through five items: [`proxyable`], `dial_dir` and `connect` for the
-//! election's probe of the holder, then [`HubProxy::new`] and
-//! [`HubProxy::run`] for the proxy role. Nothing else crosses.
+//! and through six items: [`proxyable`] and [`NotProxyable::explain`] (the
+//! refusal's wording when the holder cannot be proxied), `dial_dir` and
+//! `connect` for the election's probe of the holder, then [`HubProxy::new`]
+//! and [`HubProxy::run`] for the proxy role. Nothing else crosses.
 //!
 //! # Modules
 //!
