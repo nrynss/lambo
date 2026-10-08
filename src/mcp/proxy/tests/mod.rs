@@ -1,6 +1,8 @@
 //! Unit tests for the session proxy, grouped by subject.
 
 use super::*;
+use super::{dialing::*, disconnect::*, framing::*, handshake::*};
+use crate::store::lease::LeaseInfo;
 use crate::store::StoreConfig;
 use chrono::Utc;
 

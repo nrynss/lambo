@@ -83,8 +83,8 @@ async fn read_only_router_has_no_mutating_route() {
 /// route registered on a path that was also left out of [`ROUTES`].
 #[test]
 fn the_module_registers_only_get_routes() {
-    let src = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/cli/serve_web.rs"));
-    let prod = src.split("#[cfg(all(test").next().unwrap_or(src);
+    let prod = production_source();
+    let prod = prod.as_str();
     for banned in [
         "routing::post",
         "routing::put",
@@ -119,7 +119,7 @@ fn the_module_registers_only_get_routes() {
 /// sweep above cannot silently miss one.
 #[test]
 fn routes_constant_covers_every_registered_route() {
-    let src = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/cli/serve_web.rs"));
+    let src = router_source();
     let body = src
         .split("fn router(")
         .nth(1)
@@ -140,4 +140,42 @@ fn routes_constant_covers_every_registered_route() {
         );
     }
     assert_eq!(registered.len(), ROUTES.len(), "ROUTES has stale entries");
+}
+
+/// #28: the source scans above read [`PRODUCTION_SOURCES`], and a portal
+/// source missing from it would be scanned by nothing. Every `.rs` file
+/// under `src/cli/serve_web/`, at any depth (the `serve_web/tests/`
+/// directory aside), and the root must be listed. The walk recurses so a
+/// further split into a subdirectory (`serve_web/routes/graph.rs`) cannot
+/// slip past the scans.
+#[test]
+fn the_source_scans_cover_every_production_file() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/cli");
+    let mut on_disk = vec!["serve_web.rs".to_string()];
+    let mut pending = vec![("serve_web".to_string(), root.join("serve_web"))];
+    while let Some((rel, dir)) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("read {rel}: {e}")) {
+            let path = entry.expect("dir entry").path();
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            let child = format!("{rel}/{name}");
+            if path.is_dir() {
+                if child != "serve_web/tests" {
+                    pending.push((child, path));
+                }
+            } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                on_disk.push(child);
+            }
+        }
+    }
+    on_disk.sort();
+    let mut listed: Vec<String> = PRODUCTION_SOURCES
+        .iter()
+        .map(|(name, _)| (*name).to_string())
+        .collect();
+    listed.sort();
+    assert_eq!(
+        listed, on_disk,
+        "PRODUCTION_SOURCES must list every portal production file, so the read-only and \
+         route-coverage scans see all of them"
+    );
 }

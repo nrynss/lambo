@@ -9,6 +9,9 @@
 //! * [`limits`]: request caps (`MAX_TOP_K`, `MAX_CONTENT_BYTES`, ...) and the
 //!   config-default clamp.
 //! * [`validate`]: string validation ([`validate::check_size`]).
+//! * `bearer`: the constant-time bearer-token check both HTTP surfaces
+//!   (`lambo serve --transport http` and the web portal) enforce,
+//!   crate-internal (#28).
 //! * `error`: the model-safe class of a `LamboError` (`err_class`, N4),
 //!   shared by MCP's tool errors and the write queue's receipts, crate-internal.
 //! * `focus`: `inspect` focus resolution (`resolve_focus`), crate-internal.
@@ -21,6 +24,7 @@
 //! neighbourhood projection from `cli::inspect`, `err_class` from
 //! `mcp::server`) moved without aliases; every in-crate caller was rewritten.
 
+pub(crate) mod bearer;
 pub(crate) mod error;
 pub(crate) mod focus;
 pub mod limits;

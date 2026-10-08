@@ -1,6 +1,13 @@
 //! Unit tests for `lambo serve`, grouped by subject.
 
+use super::http_guards::*;
 use super::*;
+use super::{heartbeat::*, roles::*, shutdown::*, transport::*};
+use crate::store::lease;
+use crate::surface::bearer::tokens_match;
+use rmcp::service::ServerInitializeError;
+use std::net::SocketAddr;
+use std::time::Instant;
 
 mod heartbeat;
 mod http_guards;
@@ -63,3 +70,9 @@ mod proxy_releases_the_model;
 /// rather than in production as a silently-dropped tail.
 #[cfg(all(feature = "store-memory", feature = "embed-fixture"))]
 mod close_runs;
+
+/// #28 review L2: stage 6 (`Hub::release`) ends every endpoint session and
+/// waits for it, so none outlives the release or appends to the ledger
+/// stage 7 drains.
+#[cfg(all(unix, feature = "store-memory", feature = "embed-fixture"))]
+mod hub_release;
