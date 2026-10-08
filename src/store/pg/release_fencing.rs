@@ -18,7 +18,6 @@ use uuid::Uuid;
 use super::sql::ERASE_STATEMENTS;
 use super::{Dialect, PgStore};
 use crate::store::lease::testkit::check_release_keeps_the_fencing_token;
-use crate::store::GraphStore;
 use crate::types::SessionId;
 
 /// Remove every row the check wrote, the lease rows included (a test
@@ -47,6 +46,8 @@ pub(crate) async fn check_release_keeps_the_token<D: Dialect>(store: &PgStore<D>
 #[tokio::test]
 #[ignore = "live: requires LAMBO_POSTGRES_DSN against pinned pgvector/pgvector:pg17"]
 async fn postgres_release_keeps_the_fencing_token() {
+    use crate::store::GraphStore;
+
     let Some(dsn) =
         super::postgres::postgres_dsn_or_skip("postgres_release_keeps_the_fencing_token")
     else {
