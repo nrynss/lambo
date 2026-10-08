@@ -9,14 +9,17 @@ use crate::graph::derive::ParentOf;
 use crate::store::flush::FLUSH_ATTEMPT_TIMEOUT;
 use crate::store::lease::{LeaseOutcome, LEASE_TTL};
 use crate::store::Capabilities;
+// Only the fixtures-gated replay test builds an `Interaction` by hand.
 use crate::store::MemoryStore;
 use crate::test_util::capture_logs;
+#[cfg(feature = "fixtures")]
+use crate::types::Interaction;
 use crate::types::{
     tie_break_by_key, CanonizationEvent, GraphSnapshot, InteractionSpan, Mutation, MutationBatch,
     Scored, StoreError,
 };
 use crate::types::{
-    CanonizationStatus, ConceptType, Interaction, LamboError, MatchStrategy, NodeId, RecallQuery,
+    CanonizationStatus, ConceptType, LamboError, MatchStrategy, NodeId, RecallQuery,
 };
 use async_trait::async_trait;
 use chrono::DateTime;
