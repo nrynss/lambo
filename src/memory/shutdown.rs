@@ -2,30 +2,46 @@
 //! that make a cancelled or failed close lose nothing.
 //!
 //! All of the shutdown orchestration is in [`Memory::close`], in one function,
-//! so its order can be read top to bottom. The stages, in order:
+//! so its order can be read top to bottom. The steps, in order, with the name
+//! each one logs under:
 //!
-//! 1. serialize on `close_state`; latch `closed`;
-//! 2. the write queue: abort the probe, stop the intent replay (abort and
-//!    join), quiesce (bounded; what is left is deferred as `intent_durable`);
-//! 3. take the writers gate's write side (waits out in-flight writes);
-//! 4. abort the lease heartbeat; a fenced handle stops here, drops its tail
-//!    and does not release the lease;
-//! 5. stop canonization, then the daemon (abort **and join**, each in a
-//!    [`HandleCustody`]);
-//! 6. stop the flush task and join it (in a [`HandleCustody`]);
-//! 7. final drain under one graph write lock: close the access ledger (#30),
-//!    apply its accesses, drain the log plus the dirty accesses into one
-//!    batch held by a [`TailCustody`];
-//! 8. a degraded session errors here, before the empty-log shortcut;
-//! 9. flush the tail with [`final_flush`] (timeout + panic containment), and
-//!    only on success release the lease and latch success.
+//! 1. `serialize`: serialize on `close_state` (a concurrent close parks
+//!    here); latch `closed`;
+//! 2. `replay_stop`: abort the write queue's probe, stop the intent replay
+//!    (abort and join);
+//! 3. `queue_quiesce`: drain the write queue (bounded; what is left is
+//!    deferred as `intent_durable`; its workers are aborted and joined);
+//! 4. `writers_gate`: take the writers gate's write side (waits out
+//!    in-flight writes);
+//! 5. `heartbeat_abort`: abort the lease heartbeat; a fenced handle stops
+//!    here, drops its tail and does not release the lease;
+//! 6. `producer_joins`: stop canonization, then the daemon (abort **and
+//!    join**, each in a [`HandleCustody`]);
+//! 7. `flush_join`: stop the flush task and join it (in a [`HandleCustody`]);
+//! 8. `final_drain`: under one graph write lock, close the access ledger
+//!    (#30), apply its accesses, drain the log plus the dirty accesses into
+//!    one batch held by a [`TailCustody`]; a degraded session errors here,
+//!    before the empty-log shortcut;
+//! 9. `final_flush`: flush the tail with [`final_flush`] (timeout + panic
+//!    containment); skipped for an empty tail;
+//! 10. `lease_release`: only after a durable tail, release the lease and
+//!     latch success.
+//!
+//! # Step logging (#40)
+//!
+//! Every step logs `close: step N/10 <name> started` and `close: step N/10
+//! <name> finished in M ms` at INFO, with the session. A step whose future
+//! is dropped before it finishes (an outer timeout abandoned the close) logs
+//! `close: step N/10 <name> abandoned after M ms` at WARN, so an abandoned
+//! close names the step it was abandoned in. Inside `lambo serve` these
+//! lines sit inside shutdown stage 3 (`src/mcp/serve/stages.rs`).
 //!
 //! `lambo serve` stops its own keep-warm task *before* calling `close()`
 //! (`stop_before_close`, #13); that ordering lives on the serve side and is
 //! pinned by `memory::tests::shutdown::the_keep_warm_is_stopped_before_the_close_starts`.
-//! #40's per-stage logging belongs at the numbered steps above.
 
 use std::sync::atomic::Ordering;
+use std::time::Instant;
 
 use parking_lot::{Mutex as PlMutex, RwLock};
 use tokio::task::JoinHandle;
@@ -267,6 +283,72 @@ impl Drop for TailCustody<'_> {
         self.graph
             .write()
             .push_front_log(std::mem::take(&mut self.batch.mutations));
+    }
+}
+
+/// How many steps [`Memory::close`] logs; the denominator in every line.
+const CLOSE_STEPS: u8 = 10;
+
+/// One logged step of [`Memory::close`] (#40): `started` when it is made,
+/// `finished in N ms` from [`CloseStep::done`], and `abandoned after N ms` at
+/// WARN if it is dropped first, which is what an outer timeout or a second
+/// signal does to a close in flight.
+pub(super) struct CloseStep<'a> {
+    session: &'a crate::types::SessionId,
+    number: u8,
+    name: &'static str,
+    started: Instant,
+    done: bool,
+}
+
+impl<'a> CloseStep<'a> {
+    fn start(session: &'a crate::types::SessionId, number: u8, name: &'static str) -> Self {
+        tracing::info!(
+            session = %session,
+            step = number,
+            step_name = name,
+            "close: step {number}/{CLOSE_STEPS} {name} started"
+        );
+        Self {
+            session,
+            number,
+            name,
+            started: Instant::now(),
+            done: false,
+        }
+    }
+
+    fn done(mut self) {
+        self.done = true;
+        let elapsed_ms = self.started.elapsed().as_millis();
+        tracing::info!(
+            session = %self.session,
+            step = self.number,
+            step_name = self.name,
+            elapsed_ms,
+            "close: step {}/{CLOSE_STEPS} {} finished in {elapsed_ms} ms",
+            self.number,
+            self.name,
+        );
+    }
+}
+
+impl Drop for CloseStep<'_> {
+    fn drop(&mut self) {
+        if self.done {
+            return;
+        }
+        let elapsed_ms = self.started.elapsed().as_millis();
+        tracing::warn!(
+            session = %self.session,
+            step = self.number,
+            step_name = self.name,
+            elapsed_ms,
+            "close: step {}/{CLOSE_STEPS} {} abandoned after {elapsed_ms} ms (the close was \
+             dropped before this step finished)",
+            self.number,
+            self.name,
+        );
     }
 }
 
@@ -522,8 +604,10 @@ impl Memory {
         // here and, when it gets in, either sees the success flag or re-runs
         // the (idempotent) shutdown — never an early `Ok` over an in-flight
         // final flush.
+        let step = CloseStep::start(&self.session, 1, "serialize");
         let mut succeeded = self.close_state.lock().await;
         if *succeeded {
+            step.done();
             return Ok(());
         }
 
@@ -533,6 +617,7 @@ impl Memory {
         // acknowledged can still be on its way to the log. Held for the rest of
         // `close` — the drain below must be the last word on the log.
         self.closed.store(true, Ordering::Release);
+        step.done();
 
         // 0a — J3's background write queue, drained BEFORE the writers gate is
         // taken. The order is forced, not chosen: the gate's write side is held
@@ -544,6 +629,7 @@ impl Memory {
         // workers. Bounded by `WRITE_QUEUE_DRAIN_BUDGET`; anything left over is
         // deferred (receipt `intent_durable`, durable intent replayed by the
         // next serve) rather than waited for.
+        let step = CloseStep::start(&self.session, 2, "replay_stop");
         self.pipeline.abort_probe();
         // The intent replay is stopped — aborted AND joined — before the
         // quiesce and therefore well before the final drain: an aborted task
@@ -551,14 +637,20 @@ impl Memory {
         // the join returns (R3-1). Whatever it had not yet consumed stays
         // durable for the next serve.
         self.pipeline.stop_replay().await;
+        step.done();
+        let step = CloseStep::start(&self.session, 3, "queue_quiesce");
         self.pipeline.quiesce().await;
+        step.done();
 
+        let step = CloseStep::start(&self.session, 4, "writers_gate");
         let _quiesced = self.writers.write().await;
+        step.done();
 
         // Stop the lease heartbeat before anything else in the shutdown: from
         // here the lease is released explicitly on the success paths below, so
         // it must not keep being refreshed. Aborting is synchronous and the task
         // touches neither the graph nor the tail, so no custody/join is needed.
+        let step = CloseStep::start(&self.session, 5, "heartbeat_abort");
         self.abort_heartbeat();
 
         // T86-2: a fenced handle lost its lease — another writer owns the
@@ -583,8 +675,10 @@ impl Memory {
                  ({undrained} mutations discarded) and NOT releasing the lease — another writer \
                  owns the session"
             );
+            step.done();
             return Err(self.lease_lost_error());
         }
+        step.done();
 
         // ...and the two mutation producers off, before the drain. Every
         // handle travels in a `HandleCustody` guard: cancelled on a join, this
@@ -602,6 +696,7 @@ impl Memory {
         // reasoning per-handle about window width is exactly the mistake R3-1
         // caught. Same class of documented blind spot as `begin_write_sync`'s
         // re-check (R2-6) and the flush select's `biased;` (T81-4).
+        let step = CloseStep::start(&self.session, 6, "producer_joins");
         let mut canon = HandleCustody::take(&self.canon_handle);
         canon.abort();
         let _ = canon.join().await;
@@ -611,8 +706,10 @@ impl Memory {
         daemon.abort();
         let _ = daemon.join().await;
         drop(daemon);
+        step.done();
 
         // 1 — graceful stop; the loop returns custody of `pending`.
+        let step = CloseStep::start(&self.session, 7, "flush_join");
         self.flush.stop();
 
         // 2 — join. After this the flush task cannot touch the graph. This is
@@ -628,6 +725,7 @@ impl Memory {
             }
         }
         drop(flush);
+        step.done();
 
         // 3 — final drain. Short critical section, guard dies with the block.
         // Accesses noted since the daemon's last cycle (it is stopped now) are
@@ -638,6 +736,7 @@ impl Memory {
         // same critical section, so a recall still in flight that finishes
         // after this point is dropped explicitly instead of noting into a
         // ledger nothing will apply again.
+        let step = CloseStep::start(&self.session, 8, "final_drain");
         let accesses = self.accesses.close();
         let batch = {
             let mut g = self.graph.write();
@@ -677,17 +776,28 @@ impl Memory {
             } else {
                 format!("{count} tail mutations were not flushed")
             };
+            step.done();
             return Err(LamboError::Store(StoreError::Backend(format!(
                 "close: session {} degraded to durability=\"none\"; {detail}",
                 self.session
             ))));
         }
 
+        step.done();
+
         if tail.is_empty() {
+            tracing::info!(
+                session = %self.session,
+                step = 9,
+                step_name = "final_flush",
+                "close: step 9/{CLOSE_STEPS} final_flush skipped (empty tail)"
+            );
             // Graceful close: hand off the lease now rather than waiting out the
             // TTL, so the next writer takes the session immediately (T8.6).
+            let step = CloseStep::start(&self.session, 10, "lease_release");
             self.release_lease_once().await;
             self.latch_success(&mut succeeded);
+            step.done();
             return Ok(());
         }
 
@@ -695,7 +805,9 @@ impl Memory {
         // bound out of the `match` scrutinee so the borrow of `tail` ends
         // here rather than spanning the arms.
         let count = tail.len();
+        let step = CloseStep::start(&self.session, 9, "final_flush");
         let flushed = final_flush(self.store.as_ref(), tail.batch(), Some(self.lease_token)).await;
+        step.done();
         match flushed {
             Ok(()) => {
                 // Custody ends: the tail is durable, so it must NOT go back
@@ -711,8 +823,10 @@ impl Memory {
                 // (T8.6). A failed flush (the `Err` arm below) deliberately does
                 // NOT release — it keeps the lease for a retry and lets it lapse
                 // at TTL if none comes.
+                let step = CloseStep::start(&self.session, 10, "lease_release");
                 self.release_lease_once().await;
                 self.latch_success(&mut succeeded);
+                step.done();
                 Ok(())
             }
             Err(err) => {

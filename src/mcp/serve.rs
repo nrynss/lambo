@@ -27,7 +27,8 @@
 //!    client ends it.
 //! 5. **Shutdown**, the seven named stages in `shutdown`: transport drain,
 //!    keep-warm abort, the bounded session close, event pump, background
-//!    tasks, endpoint release, ledger close.
+//!    tasks, endpoint release, ledger close. Each logs when it starts and
+//!    finishes (`stages`, #40).
 //!
 //! # Modules
 //!
@@ -41,6 +42,8 @@
 //! | `transport` | stdio, streamable HTTP, the bounded wind-down both share |
 //! | `signals` | the eager signal registration and J6's pre-arm (`EarlyShutdown`) |
 //! | `shutdown` | the grace budgets, the shutdown future, the close, the named stages (the #40 seam) |
+//! | `stages` | the stage record and its `started` / `finished` log lines (#40) |
+//! | `watchdog` | the OS-thread bound on the whole shutdown, independent of the runtime (#40) |
 
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
@@ -60,7 +63,9 @@ mod hub;
 mod roles;
 mod shutdown;
 mod signals;
+mod stages;
 mod transport;
+mod watchdog;
 
 pub use builder::{build_memory, resolve_serve_backends};
 pub use heartbeat::authorize_ledger;
@@ -75,10 +80,12 @@ use hub::bind_hub;
 use roles::{resolve_role, Role};
 use shutdown::{close_ledger, holder_shutdown, HolderTasks};
 use signals::shutdown_signal;
+use stages::Stage;
 use transport::{serve_http, serve_stdio};
 
 pub(crate) use shutdown::run_and_close;
 pub(crate) use signals::EarlyShutdown;
+pub(crate) use stages::ShutdownProgress;
 // The crate paths the `memory` and `writeq` tests name; nothing outside a
 // test build reads them through `serve`, so each is gated like its readers.
 #[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
@@ -436,7 +443,14 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     // by `wind_down` for the shutdown itself, and by `close_bounded` for the
     // "was that a SECOND Ctrl-C?" escape hatch. Both readers must see one
     // count, which is exactly why `EarlyShutdown` is `Clone` over shared state.
-    let shutdown = holder_shutdown(mem.clone(), ledger.clone(), early.clone());
+    // #40: the shutdown's stage record, shared by the shutdown future (which
+    // starts stage 1), `run_and_close` (stages 1 to 4) and the tail below.
+    // Its first stage starts the watchdog, an OS thread that aborts the
+    // process if the shutdown outlives every one of its own timers; the
+    // guard stands it down on every way out of this function.
+    let progress = ShutdownProgress::with_production_watchdog();
+    let _disarm = progress.disarm_on_drop();
+    let shutdown = holder_shutdown(mem.clone(), ledger.clone(), early.clone(), progress.clone());
     tokio::pin!(shutdown);
 
     // I1/I2. `Ledger::open` never fails — a bad path warns once and counts
@@ -552,16 +566,20 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
         event_pump,
         &stop_before_close,
         &early,
+        &progress,
     )
     .await;
     // Stage 5: heartbeat, keep-warm (again), refusal poller.
-    tasks.stop();
+    progress.run(Stage::BackgroundTasks, || tasks.stop());
     // Stage 6 (J2 / JE2E-2): AFTER `close()`, the accept loop stops and every
     // endpoint session is ended (bounded), then the socket file goes, only if
     // it is still the one this process bound.
+    progress.begin(Stage::EndpointRelease);
     hub.release(endpoint.as_ref()).await;
+    progress.end(Stage::EndpointRelease);
     // Stage 7: the call ledger drains last.
-    close_ledger(ledger);
+    progress.run(Stage::LedgerClose, || close_ledger(ledger));
+    progress.complete();
 
     outcome
 }

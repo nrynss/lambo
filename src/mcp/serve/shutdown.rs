@@ -13,14 +13,17 @@
 //! |---|---|---|---|
 //! | 1 | transport drain (HTTP graceful drain, stdio cancel) | the transport future inside [`run_and_close`], ended by [`wind_down`] | [`SHUTDOWN_GRACE`] |
 //! | 2 | keep-warm abort | `stop_before_close` in [`run_and_close`], from [`HolderTasks::stop_before_close`] | instant |
-//! | 3 | session close | [`close_bounded`]: [`Memory::close`] and its own numbered stages (queue drain, writers gate, heartbeat abort and fence check, producer joins, flush join, final drain, degraded check, final flush, lease release; `src/memory/shutdown.rs`), or on abandonment the bounded lease release | [`CLOSE_GRACE`] |
+//! | 3 | session close | [`close_bounded`]: [`Memory::close`] and its own ten logged steps (`serialize`, `replay_stop`, `queue_quiesce`, `writers_gate`, `heartbeat_abort`, `producer_joins`, `flush_join`, `final_drain`, `final_flush`, `lease_release`; `src/memory/shutdown.rs`), or on abandonment the bounded lease release | [`CLOSE_GRACE`] |
 //! | 4 | event pump abort | after the close, in [`run_and_close`], so final-drain events still reach the log | instant |
 //! | 5 | background tasks | [`HolderTasks::stop`]: ledger heartbeat, keep-warm (again), refusal poller | instant |
-//! | 6 | endpoint release | `hub::Hub::release`: stop accepting, end every endpoint session (each cancels its rmcp service and waits for it), then the socket file if still ours | `hub::ENDPOINT_RELEASE_GRACE`, then the stragglers are aborted |
+//! | 6 | endpoint release | `hub::Hub::release`: stop accepting, end every endpoint session (each cancels its rmcp service and waits for it), then the socket file if still ours | `hub::ENDPOINT_RELEASE_GRACE`, then the stragglers are aborted and joined (unbounded, but milliseconds in practice; the watchdog's 1 s overrun allowance covers it) |
 //! | 7 | ledger close | [`close_ledger`] | the ledger's own shutdown bound |
 //!
 //! Stages 1 to 4 are [`run_and_close`], the seam the "close always runs"
-//! tests drive. The order is load-bearing:
+//! tests drive. Every stage logs a `started` and a `finished in N ms` line
+//! through [`ShutdownProgress`] (#40; the line format is in
+//! [`super::stages`]), so a shutdown that stalls names its stage. The order
+//! is load-bearing:
 //!
 //! * the tail is durable (or honestly lost) before any proxy connection is
 //!   cut, in stage 6. Until then an endpoint session stays connected; a call
@@ -33,6 +36,11 @@
 //!   still running past that drain, against a closed `Memory`, can still
 //!   append its line; once stage 7 has begun, the ledger counts it as
 //!   `write_failed`. Bounded and counted, never silent.
+//!
+//! Not watched: everything after `serve` returns. The watchdog is disarmed
+//! when `serve` ends, before the `Memory`, store and embedder are dropped and
+//! before the runtime shuts down, so a hang in those drops or in process exit
+//! is still unlogged and is left to the supervisor's kill.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -40,6 +48,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::signals::{shutdown_signal, EarlyShutdown};
+use super::stages::{ShutdownProgress, Stage};
 use crate::ledger::Ledger;
 use crate::memory::Memory;
 use crate::store::lease;
@@ -133,20 +142,28 @@ const _: () = assert!(
      those two steps in series and nothing else, and SHUTDOWN_BUDGET is sized on CLOSE_GRACE",
 );
 
-/// Documented worst-case wall-clock a clean shutdown can take, end to end (R4).
+/// Worst-case wall-clock from the shutdown signal to a durable (or honestly
+/// lost) tail and a released lease (R4): stages 1 to 4.
 ///
-/// The shutdown is two bounded phases in series: the transport winds down within
-/// [`SHUTDOWN_GRACE`] (rmcp's own graceful drain happens *inside* that window —
-/// `run_until_shutdown` gives the whole transport, drain included, exactly
-/// `SHUTDOWN_GRACE` after cancel), then the final flush runs within
-/// [`CLOSE_GRACE`]. The only work outside these two is `event_pump.abort()` and
-/// process teardown, both effectively instant. So the true aggregate cap is
-/// `SHUTDOWN_GRACE + CLOSE_GRACE`, and this is the number an operator must budget
-/// for: a supervisor's SIGKILL escalation (systemd `TimeoutStopSec`, Kubernetes
-/// `terminationGracePeriodSeconds` — default 30 s) must exceed it, or the final
-/// flush is cut off and the tail is lost. The compile-time guard just below (and
-/// `the_grace_windows_are_sane`) pins the sum to this budget so a later bump to
-/// either window cannot silently push the aggregate past what a supervisor allows.
+/// Those stages are two bounded phases in series: the transport winds down
+/// within [`SHUTDOWN_GRACE`] (rmcp's own graceful drain happens *inside* that
+/// window — `run_until_shutdown` gives the whole transport, drain included,
+/// exactly `SHUTDOWN_GRACE` after cancel), then the final flush runs within
+/// [`CLOSE_GRACE`]; the keep-warm and event-pump aborts are instant. The
+/// compile-time guard just below (and `the_grace_windows_are_sane`) pins the
+/// sum to this budget so a later bump to either window cannot silently push
+/// it past what a supervisor allows.
+///
+/// **It is not the time to process exit.** This said "the true aggregate cap",
+/// with only `event_pump.abort()` and process teardown outside it; since #28
+/// stage 6 waits up to `hub::ENDPOINT_RELEASE_GRACE` (3 s) and stage 7 up to
+/// the ledger's `SHUTDOWN_DRAIN` (0.5 s), both after the lease release. The
+/// exit bound is `watchdog::EXIT_BUDGET` (18.5 s), and the hard stop that holds
+/// even when these timers cannot fire is `watchdog::SHUTDOWN_WATCHDOG` (20 s,
+/// #40). A supervisor's SIGKILL escalation (launchd `ExitTimeOut`, systemd
+/// `TimeoutStopSec`, Kubernetes `terminationGracePeriodSeconds`) must exceed
+/// the watchdog, or the final flush can be cut off and the stall goes
+/// unnamed: 30 s is the recommendation.
 pub(super) const SHUTDOWN_BUDGET: Duration = Duration::from_secs(15);
 
 /// Build-time invariant: the end-to-end shutdown cost fits [`SHUTDOWN_BUDGET`].
@@ -222,12 +239,23 @@ impl Future for HolderShutdown {
 /// place of it. A signal that landed in the window between the two arming
 /// points is recorded only by `early`; one that lands after is seen by both.
 /// See [`EarlyShutdown`].
+///
+/// When the wind-down resolves, the holder's shutdown has begun: stage 1
+/// (the transport drain) is started on `progress` before the transport sees
+/// the future ready (#40).
 pub(super) fn holder_shutdown(
     mem: Arc<Memory>,
     ledger: Option<Arc<Ledger>>,
     early: EarlyShutdown,
+    progress: ShutdownProgress,
 ) -> HolderShutdown {
-    HolderShutdown(Box::pin(wind_down(shutdown_signal(), early, mem, ledger)))
+    // Evaluated here, outside the `async` block, so the registration stays
+    // eager (see `shutdown_signal`).
+    let signal = shutdown_signal();
+    HolderShutdown(Box::pin(async move {
+        wind_down(signal, early, mem, ledger).await;
+        progress.begin(Stage::TransportDrain);
+    }))
 }
 
 /// What ends a holder's transport: a signal, **or** losing the single-writer
@@ -345,23 +373,33 @@ pub(super) async fn wind_down(
 /// call, a touch only competes with the final drain (and on a slow remote
 /// embedder could keep a request in flight across it). Aborting is idempotent,
 /// so `serve` still aborts the same task after close on its usual path.
+///
+/// Each stage is logged on `progress` (#40). Stage 1 was started by the
+/// shutdown future when it resolved; a transport that ended on its own
+/// (client hangup, transport error) gets both of its lines here.
 pub(crate) async fn run_and_close(
     mem: Arc<Memory>,
     transport: impl Future<Output = Result<(), LamboError>>,
     event_pump: tokio::task::JoinHandle<()>,
     stop_before_close: &[tokio::task::AbortHandle],
     early: &EarlyShutdown,
+    progress: &ShutdownProgress,
 ) -> Result<(), LamboError> {
     // Stage 1: the transport winds down (bounded inside the transport).
     let outcome = transport.await;
+    progress.end(Stage::TransportDrain);
     // Stage 2: tasks nothing needs during the close.
-    for task in stop_before_close {
-        task.abort();
-    }
+    progress.run(Stage::KeepWarmAbort, || {
+        for task in stop_before_close {
+            task.abort();
+        }
+    });
     // Stage 3: the session close.
+    progress.begin(Stage::SessionClose);
     let closed = close_bounded(&mem, early).await;
+    progress.end(Stage::SessionClose);
     // Stage 4: the event pump, after the close.
-    event_pump.abort();
+    progress.run(Stage::EventPumpAbort, || event_pump.abort());
 
     match (outcome, closed) {
         (Err(e), _) => Err(e),
@@ -414,24 +452,22 @@ pub(super) async fn close_bounded(mem: &Memory, early: &EarlyShutdown) -> Result
 /// argument lets `memory`'s tests drive the real body with
 /// `std::future::pending()` — see `an_abandoned_close_releases_the_lease_through_serve`.
 ///
-/// # J6's pre-arm is deliberately NOT wired in here
+/// # The second signal is a count on J6's pre-arm
 ///
-/// A third registration now exists in a serve process — [`EarlyShutdown`],
-/// armed at the acquire — and the question it raises is whether the escape
-/// hatch above still works, because that pre-arm's record is *latched*: once a
-/// signal sets it, it stays set for the life of the process. Feeding it into
-/// this `select!` would make the second arm ready on the first poll of every
-/// signal-initiated close, so the close it is meant to rescue would be
-/// abandoned before it had a chance to run — the tail lost by the very
-/// mechanism that exists to save it.
-///
-/// So [`close_bounded`] keeps building a **fresh** `shutdown_signal()`, and the
-/// property that makes that correct is `tokio::signal`'s: a registration
-/// created after a signal was delivered does not replay it, and a signal is
-/// delivered to *every* live registration rather than consumed by the first.
-/// The first Ctrl-C therefore starts the shutdown and does not abandon the
-/// close; a genuine second one reaches this fresh registration and does. The
-/// pre-arm can neither trip this early nor swallow the signal that should.
+/// This section said J6's pre-arm ([`EarlyShutdown`]) was "deliberately NOT
+/// wired in here" and that [`close_bounded`] "keeps building a **fresh**
+/// `shutdown_signal()`". Neither is true any more: [`close_bounded`] passes
+/// `early.second_signal()`, which resolves once the pre-arm has *counted* two
+/// signals. The fresh registration read the first signal as a second under
+/// CPU contention (its delivery reaches registrations only when the signal
+/// driver runs, so one created in that gap catches the first signal) and
+/// abandoned a close nobody asked to abandon; the count cannot be fooled by
+/// when the record is written. The full argument is on
+/// [`EarlyShutdown::second_signal`], and
+/// `one_signal_does_not_abandon_the_close_but_two_do` pins it. A latched
+/// record would still be wrong here, for the reason this section gave: it
+/// would make the escape hatch ready on the first poll of every
+/// signal-initiated close.
 pub(crate) async fn close_bounded_until(
     mem: &Memory,
     shutdown: impl Future<Output = ()>,
