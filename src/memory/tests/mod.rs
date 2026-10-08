@@ -7,15 +7,19 @@ use crate::embed::FixtureEmbedder;
 use crate::graph::action::Action;
 use crate::graph::derive::ParentOf;
 use crate::store::lease::{LeaseOutcome, LEASE_TTL};
+use crate::store::Capabilities;
 use crate::store::MemoryStore;
 use crate::test_util::capture_logs;
 use crate::types::{
     tie_break_by_key, CanonizationEvent, GraphSnapshot, InteractionSpan, Mutation, MutationBatch,
     Scored, StoreError,
 };
-use crate::types::{ConceptType, Interaction, MatchStrategy};
+use crate::types::{
+    CanonizationStatus, ConceptType, Interaction, MatchStrategy, NodeId, RecallQuery,
+};
 use async_trait::async_trait;
 use chrono::DateTime;
+use chrono::Utc;
 use std::collections::HashSet;
 use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
