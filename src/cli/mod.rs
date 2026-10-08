@@ -2,8 +2,9 @@
 //! write verbs open exactly one [`Memory`] (which acquires the T8.6 writer
 //! lease), perform the op, and [`Memory::close`].
 //!
-//! Validators and inspect resolution live here so MCP can share them without
-//! a `cli` → `mcp` cycle.
+//! The request limits and validators the CLI enforces live in
+//! [`crate::surface`], shared with MCP, the web portal and the write queue;
+//! [`caps`] adapts them to [`CliError`] and re-exports them.
 
 pub mod caps;
 pub mod demo;

@@ -57,7 +57,7 @@ static STEMMER: LazyLock<Stemmer> = LazyLock::new(|| Stemmer::create(Algorithm::
 /// * **Concealment / reordering.** A `U+202E` RIGHT-TO-LEFT OVERRIDE in a
 ///   concept's `content` survives human review of a recall context block while
 ///   changing what the model reads. Nothing legitimate needs it, so
-///   [`crate::cli::caps::check_size`] **refuses** it at the surface.
+///   [`crate::surface::validate::check_size`] **refuses** it at the surface.
 /// * **Key forking.** An invisible codepoint that a *human cannot see* still
 ///   sits inside a token, defeats the stemmer, and yields an unrelated canonical
 ///   key. `"billing retries change"` and `"billing\u{200D} retries change"`
@@ -69,7 +69,7 @@ static STEMMER: LazyLock<Stemmer> = LazyLock::new(|| Stemmer::create(Algorithm::
 ///
 /// So this table is the **strip** set — [`normalize_tokens`] removes every
 /// codepoint in it, so no invisible character can ever fork a key — and
-/// [`crate::cli::caps`] refuses the whole table **except**
+/// [`crate::surface::validate`] refuses the whole table **except**
 /// [`TEXT_REQUIRED_INVISIBLE`]. The two rules compose: whatever a caller is
 /// allowed to store cannot affect a key, and whatever could affect a key cannot
 /// be stored. One table means the two cannot drift apart.

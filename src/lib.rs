@@ -76,7 +76,8 @@
 //! * [`Memory`] and [`MemoryBuilder`] — the API surface.
 //! * [`types`] — the contracts every surface shares.
 //! * [`store`] and [`embed`] — the adapter traits and the shipped adapters.
-//! * [`mcp`] and [`cli`] — the two user-facing surfaces.
+//! * [`mcp`] and [`cli`] — the two user-facing surfaces, and [`surface`] — the
+//!   request limits and validation they share.
 
 pub mod canon;
 pub mod cli;
@@ -97,6 +98,7 @@ pub mod recall;
 pub mod resolve;
 
 pub mod store;
+pub mod surface;
 #[cfg(test)]
 pub mod test_util;
 pub mod types;

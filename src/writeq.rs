@@ -140,7 +140,6 @@ use serde_json::json;
 use tokio::sync::{watch, Notify, Semaphore};
 use tokio::task::JoinHandle;
 
-use crate::cli::caps::{MAX_CONCEPTS_PER_DERIVE, MAX_CONTENT_BYTES};
 use crate::embed::Embedder;
 use crate::graph::action::{
     record_action_with_embeddings as graph_record_action_embedded, Action, ActionEmbeddings,
@@ -150,6 +149,7 @@ use crate::graph::hybrid;
 use crate::graph::index::InvertedIndex;
 use crate::graph::Graph;
 use crate::store::GraphStore;
+use crate::surface::limits::{MAX_CONCEPTS_PER_DERIVE, MAX_CONTENT_BYTES};
 use crate::types::{
     AgentId, ConceptType, EmbeddingContract, LamboError, MatchStrategy, Node, NodeId, SessionId,
     WriteIntent, WriteIntentOutcome, WriteIntentPayload,
