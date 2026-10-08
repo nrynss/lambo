@@ -937,7 +937,7 @@ pub enum ReceiptAnswer {
     /// file path has no `://`, and "no producer today" is a fact about today.
     ///
     /// So it carries what the synchronous path carries, built from the same
-    /// `crate::mcp::server::err_class` rather than a second match, and the
+    /// `crate::surface::error::err_class` rather than a second match, and the
     /// operator's copy is written at the same site twice over: the `completion`
     /// line's `error` field (operator-facing JSONL) and a `tracing::warn!`.
     /// [`ReceiptAnswer::Dropped`] is deliberately untouched — its string is
@@ -1004,7 +1004,7 @@ pub enum ReceiptAnswer {
 /// the log, never the raw error, which can carry a store URL, a store file path
 /// or a driver message. This is the same sentence `mcp::server::tool_err`
 /// produces for the synchronous path, built from the same
-/// [`crate::mcp::server::err_class`] so the two cannot drift.
+/// [`crate::surface::error::err_class`] so the two cannot drift.
 ///
 /// Every caller writes the raw error to the operator at the same site — a
 /// `completion` ledger line and a `tracing::warn!` — so nothing is lost, only
@@ -1012,7 +1012,7 @@ pub enum ReceiptAnswer {
 fn model_safe_failure(err: &LamboError) -> String {
     format!(
         "{} (the detail was logged server-side)",
-        crate::mcp::server::err_class(err)
+        crate::surface::error::err_class(err)
     )
 }
 
@@ -3285,7 +3285,7 @@ impl WritePipeline {
                         // — so it survives on both.
                         let why = format!(
                             "replay after restart was refused ({}); nothing was written",
-                            crate::mcp::server::err_class(&LamboError::Embed(e.clone()))
+                            crate::surface::error::err_class(&LamboError::Embed(e.clone()))
                         );
                         let detail =
                             format!("replay after restart was refused ({e}); nothing was written");

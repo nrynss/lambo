@@ -39,6 +39,7 @@ use crate::ledger::Ledger;
 use crate::memory::Memory;
 use crate::recall::detail::AnnotationKind;
 use crate::store::flush::{panic_message, CatchUnwindPoll};
+pub(crate) use crate::surface::error::err_class;
 use crate::surface::focus::{
     ambiguous_refusal, fuzzy_note, missing_refusal, oversized_refusal, resolve_focus, Focus,
 };
@@ -559,36 +560,6 @@ fn note_error(kind: &'static str) {
 /// ledger will actually consume it.
 fn note_facts(facts: impl FnOnce() -> serde_json::Value) {
     let _ = TRACE.try_with(|t| t.borrow_mut().facts = Some(facts()));
-}
-
-/// A short, detail-free class for a `Memory` failure (N4).
-///
-/// The full error can interpolate a DSN, a store URL, a file path or a driver
-/// message — none of which the model needs and any of which is worth keeping
-/// out of a model-facing string. Return the class; the detail is logged.
-///
-/// `pub(crate)` since JE2E-12, so `writeq`'s async write path can render the
-/// same class the synchronous path does. The alternative was a second match in
-/// `writeq.rs`, which is how a new `LamboError` variant would come to have one
-/// class on the sync path and another on the async one — the drift this
-/// function exists to prevent, reintroduced one module over.
-pub(crate) fn err_class(err: &LamboError) -> &'static str {
-    match err {
-        LamboError::Store(_) => "store error",
-        // J3 round-1 N1: same pairing as the Conflict/SoftLock one below. The
-        // split lets the durable-intent replay tell "not reached" from "refused
-        // this input"; it must not give the model, the operator or the ledger a
-        // new error class to learn.
-        LamboError::Embed(_) | LamboError::EmbedUnavailable(_) => "embedding error",
-        LamboError::Config(_) => "configuration error",
-        // J1-R2-2: two variants, one class. The split exists so N4 can tell a
-        // model-safe §11 refusal from a lease-lost one; an operator and the
-        // ledger see the same `error_kind` either way, so nothing downstream of
-        // this function moved.
-        LamboError::Conflict(_) => "conflict",
-        LamboError::SoftLock(_) => "conflict",
-        LamboError::Other(_) => "internal error",
-    }
 }
 
 /// Render a `Memory` failure as a caller-visible tool error (N4).
