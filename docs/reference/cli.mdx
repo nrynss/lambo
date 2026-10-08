@@ -345,7 +345,7 @@ Running it again is safe. For a CockroachDB store it runs the repository's provi
 
 ```bash
 $ lambo --config lambo.toml erase-session --session user-42 --confirm user-42
-{"session":"user-42","already_absent":false,"removed":{"sessions":1,"interactions":3,"concepts":5,"vectors":5,"edges":7,"synonyms":0,"canonization_events":1,"reservations":0,"write_intents":0,"session_stats":1,"lease_refusals":0,"leases":0},"fence_token":1}
+{"session":"user-42","already_absent":false,"removed":{"sessions":1,"interactions":3,"concepts":5,"vectors":5,"edges":7,"synonyms":0,"canonization_events":1,"reservations":0,"write_intents":0,"session_stats":1,"lease_refusals":0,"leases":0},"fence_token":2}
 ```
 
 The report is printed only after the store has committed the deletion, so a script can treat exit `0` as done. Running it again is safe: a repeat reports `"already_absent":true`. A run that fails part way, for example on a lost connection, changes nothing, and the next run completes.
