@@ -650,3 +650,52 @@ fn invariant_report_lists_every_violation() {
     let err = g.insert_concept(c, uid(999)).unwrap_err().to_string();
     assert!(err.contains("not an interaction"), "{err}");
 }
+
+#[test]
+fn insert_concept_refuses_an_id_that_names_an_interaction() {
+    // #50 review F1: interactions are append-only and cannot be re-typed. A
+    // concept that reuses an interaction's id must be refused at the write
+    // gate before any node write or log append: otherwise the flush persists
+    // both rows (separate id-keyed tables) and the next load fails.
+    let mut g = Graph::new(sid());
+    let i1 = interaction(1, None, 0);
+    let i2 = interaction(2, Some(i1.id), 5);
+    let (i1_id, i2_id) = (i1.id, i2.id);
+    g.insert_interaction(i1).unwrap();
+    g.insert_interaction(i2).unwrap();
+    let epoch = g.epoch();
+    let log_len = g.log_len();
+    let chain = g.temporal_chain().to_vec();
+    let nodes = g.node_count();
+    let edges = g.edge_count();
+
+    // Case A: the id of another interaction, derived from i1.
+    let mut a = concept(1, i1_id, "reuses i2");
+    a.id = i2_id;
+    let err = g.insert_concept(a, i1_id).unwrap_err();
+    assert!(
+        matches!(err, LamboError::Store(StoreError::Invariant(_))),
+        "{err:?}"
+    );
+    assert!(err.to_string().contains("names an interaction"), "{err}");
+
+    // Case B: the id of the interaction it derives from (self-derive). Before
+    // the fix this overwrote the node and logged an UpsertNode, then failed
+    // on the Derives edge, leaving a partial mutation.
+    let mut b = concept(2, i1_id, "reuses i1");
+    b.id = i1_id;
+    let err = g.insert_concept(b, i1_id).unwrap_err();
+    assert!(
+        matches!(err, LamboError::Store(StoreError::Invariant(_))),
+        "{err:?}"
+    );
+
+    assert!(matches!(g.node(i1_id), Some(Node::Interaction(_))));
+    assert!(matches!(g.node(i2_id), Some(Node::Interaction(_))));
+    assert_eq!(g.epoch(), epoch);
+    assert_eq!(g.log_len(), log_len);
+    assert_eq!(g.temporal_chain(), chain.as_slice());
+    assert_eq!(g.node_count(), nodes);
+    assert_eq!(g.edge_count(), edges);
+    g.assert_invariants().unwrap();
+}

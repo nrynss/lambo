@@ -261,14 +261,26 @@ impl Graph {
     /// `derives_from` (the interaction that produced it) by construction, so the
     /// §5.7 invariant "every concept has ≥ 1 Derives edge" holds at write time.
     ///
-    /// `derives_from` must name an existing interaction node. Re-upserting an
-    /// existing concept is idempotent; its `Derives` edge reinforces if already
-    /// present (duplicate natural-key write).
+    /// `derives_from` must name an existing interaction node, and `c.id` must
+    /// not name an existing interaction (interactions are append-only and are
+    /// never re-typed). Re-upserting an existing concept is idempotent; its
+    /// `Derives` edge reinforces if already present (duplicate natural-key
+    /// write).
     pub fn insert_concept(&mut self, c: Concept, derives_from: NodeId) -> Result<(), LamboError> {
         if c.session_id != self.session_id {
             return Err(invariant(format!(
                 "concept {} session {} != graph {}",
                 c.id, c.session_id, self.session_id
+            )));
+        }
+        // Refused before any node write or log append: overwriting an
+        // interaction would leave the chain and its Temporal edges touching a
+        // concept, and the flush would persist both rows under one id.
+        if matches!(self.nodes.get(&c.id), Some(Node::Interaction(_))) {
+            return Err(invariant(format!(
+                "concept {} id already names an interaction in this graph; \
+                 interactions are append-only and cannot be re-typed",
+                c.id
             )));
         }
         let interaction_event_time = match self.nodes.get(&derives_from) {
