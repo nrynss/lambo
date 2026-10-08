@@ -123,6 +123,47 @@ async fn an_applied_action_receipt_reports_its_embedded_count() {
     assert!(rig.graph.read().concepts().all(|c| c.embedding.is_some()));
 }
 
+/// Hybrid `derive` embeds nothing when the store has no `VECTOR_SEARCH`, and
+/// says "(0 embedded)". A hybrid `record_action` on the same store follows
+/// the same rule: nothing embedded, no contract stamped, and a receipt that
+/// counts zero rather than vectors the store cannot search.
+#[tokio::test]
+async fn a_hybrid_action_receipt_without_vector_search_embeds_nothing() {
+    let mut rig = Rig::fixture("wq-action-no-vector");
+    Arc::get_mut(&mut rig.pipeline.ctx)
+        .expect("sole owner at build")
+        .match_strategy = MatchStrategy::Hybrid;
+    let agent = AgentId::new("agent-a");
+    let interaction = rig.interaction(&agent);
+    let submitted = rig
+        .pipeline
+        .submit_action(
+            agent.clone(),
+            interaction,
+            "ran the migration".to_string(),
+            vec!["schema v2".to_string()],
+            Vec::new(),
+            Vec::new(),
+        )
+        .await;
+    let settled = rig
+        .pipeline
+        .wait(&agent, submitted.receipt, RECEIPT_WAIT_MAX)
+        .await;
+    let ReceiptAnswer::Applied(s) = settled else {
+        panic!("expected applied, got {settled:?}");
+    };
+    assert_eq!(s.created_count, 2);
+    assert_eq!(s.embedded, Some(0), "{}", s.summary);
+    assert_eq!(
+        s.summary,
+        "recorded action: 2 concept(s) created (0 embedded), 1 edge(s)"
+    );
+    let g = rig.graph.read();
+    assert!(g.concepts().all(|c| c.embedding.is_none()));
+    assert!(g.embedding().is_none(), "no contract stamped");
+}
+
 /// Under `Canonical` nothing embeds, so the field stays absent rather than
 /// reading as a zero of something that was attempted.
 #[tokio::test]

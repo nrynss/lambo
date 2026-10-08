@@ -1880,13 +1880,20 @@ impl WriteCtx {
                 //
                 // Gated on the strategy for the same reason `derive` is: under
                 // `Canonical` there is no vector leg at all, and embedding here
-                // would stamp a contract on a session that asked for none.
+                // would stamp a contract on a session that asked for none. And
+                // on the store's VECTOR_SEARCH, as hybrid `derive` is: a store
+                // that cannot search vectors keeps none, so the write is
+                // keyword-only and its receipt says "(0 embedded)".
+                let vector_search = self
+                    .store
+                    .capabilities()
+                    .contains(crate::store::Capabilities::VECTOR_SEARCH);
                 let embeddings = match self.match_strategy {
-                    MatchStrategy::Hybrid => {
+                    MatchStrategy::Hybrid if vector_search => {
                         crate::graph::action::embed_action_contents(self.embedder.as_ref(), &act)
                             .await?
                     }
-                    MatchStrategy::Canonical => ActionEmbeddings::new(),
+                    MatchStrategy::Hybrid | MatchStrategy::Canonical => ActionEmbeddings::new(),
                 };
                 let outcome = {
                     let mut g = self.graph.write();

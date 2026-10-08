@@ -1733,6 +1733,8 @@ impl Memory {
     /// Under [`MatchStrategy::Canonical`] this is exactly
     /// [`Memory::record_action_as`]: that strategy has no vector leg, and
     /// embedding here would stamp a contract on a session that asked for none.
+    /// Under `Hybrid` on a store without `VECTOR_SEARCH` nothing is embedded
+    /// either, the same degrade hybrid `derive` makes.
     ///
     /// An embedder failure fails the call with **nothing written** (J3-R3-1's
     /// rule, see [`crate::graph::action::embed_action_contents`]).
@@ -1751,9 +1753,17 @@ impl Memory {
             let g = self.graph.read();
             crate::graph::action::validate(&g, action)?;
         }
-        // Off-lock: real model calls.
-        let embeddings =
-            crate::graph::action::embed_action_contents(self.embedder.as_ref(), action).await?;
+        // Off-lock: real model calls. Skipped when the store cannot search
+        // vectors, as hybrid `derive` skips them: the write is keyword-only.
+        let embeddings = if self
+            .store
+            .capabilities()
+            .contains(Capabilities::VECTOR_SEARCH)
+        {
+            crate::graph::action::embed_action_contents(self.embedder.as_ref(), action).await?
+        } else {
+            crate::graph::action::ActionEmbeddings::new()
+        };
         let interaction =
             self.begin_interaction_full(agent, Some(action.action.to_string()), action.event_time)?;
         let outcome = {
