@@ -25,9 +25,11 @@
 //! hanging up) never had a drain: its stage 1 starts and finishes at once.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex};
+
+use super::watchdog::{self, WatchSpec};
 
 /// One of the holder's shutdown stages, in the order `serve` runs them. The
 /// stage table in [`super::shutdown`] is the authority for what each does.
@@ -82,11 +84,25 @@ impl Stage {
 }
 
 #[derive(Debug, Default)]
-struct State {
+pub(super) struct State {
     /// When the first stage started: the shutdown's own clock.
-    began: Option<Instant>,
+    pub(super) began: Option<Instant>,
     /// The stage running now, and when it started.
-    current: Option<(Stage, Instant)>,
+    pub(super) current: Option<(Stage, Instant)>,
+    /// Set by [`ShutdownProgress::complete`] or a [`Disarm`] guard: the
+    /// shutdown is over and the watchdog, if any, stands down.
+    pub(super) disarmed: bool,
+}
+
+/// What a [`ShutdownProgress`] shares between its clones and its watchdog.
+#[derive(Default)]
+pub(super) struct Shared {
+    pub(super) state: Mutex<State>,
+    /// Notified on every stage change and on disarm, so the watchdog
+    /// re-reads the state instead of sleeping out a stale deadline.
+    pub(super) changed: Condvar,
+    /// The watchdog to start with the first stage; taken when it starts.
+    watch: Mutex<Option<WatchSpec>>,
 }
 
 /// The holder's shutdown progress: which stage is running and since when.
@@ -97,28 +113,69 @@ struct State {
 ///
 /// The lock is a `parking_lot` mutex held for one statement at a time and
 /// never across an `.await`; logging happens after it is released.
+///
+/// Built by `serve` with [`ShutdownProgress::watched`], it also starts the
+/// shutdown watchdog (`super::watchdog`) when the first stage begins.
 #[derive(Clone, Default)]
 pub(crate) struct ShutdownProgress {
-    state: Arc<Mutex<State>>,
+    shared: Arc<Shared>,
 }
 
 impl ShutdownProgress {
-    /// A fresh record with no stage started.
+    /// A fresh record with no stage started and no watchdog: the tests'
+    /// record, which logs and never aborts anything. Gated as its only
+    /// callers are (the close and stage tests need the in-memory store and
+    /// the fixture embedder), so no feature row sees it unused.
+    #[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    /// A record whose first stage starts the shutdown watchdog described by
+    /// `spec` (see `super::watchdog`). `serve` uses
+    /// [`watchdog::production`]; tests pass their own actions and bounds.
+    pub(crate) fn watched(spec: WatchSpec) -> Self {
+        let progress = Self::default();
+        *progress.shared.watch.lock() = Some(spec);
+        progress
+    }
+
+    /// The production record: the watchdog fires at
+    /// [`watchdog::SHUTDOWN_WATCHDOG`] and aborts the process.
+    pub(crate) fn with_production_watchdog() -> Self {
+        Self::watched(watchdog::production())
+    }
+
+    /// A guard that disarms the watchdog when it drops, so a `serve` that
+    /// returns (or unwinds) by any path never leaves one running.
+    pub(crate) fn disarm_on_drop(&self) -> Disarm {
+        Disarm(self.clone())
+    }
+
+    fn disarm(&self) {
+        self.shared.state.lock().disarmed = true;
+        self.shared.changed.notify_all();
     }
 
     /// Start `stage`: log it and make it the current one. Idempotent for the
     /// stage already running (its start time is kept).
     pub(crate) fn begin(&self, stage: Stage) {
         let now = Instant::now();
-        {
-            let mut state = self.state.lock();
+        let first = {
+            let mut state = self.shared.state.lock();
             if matches!(state.current, Some((running, _)) if running == stage) {
                 return;
             }
+            let first = state.began.is_none();
             state.began.get_or_insert(now);
             state.current = Some((stage, now));
+            first
+        };
+        self.shared.changed.notify_all();
+        if first {
+            if let Some(spec) = self.shared.watch.lock().take() {
+                watchdog::start(Arc::clone(&self.shared), spec, now);
+            }
         }
         tracing::info!(
             stage = stage.number(),
@@ -134,7 +191,7 @@ impl ShutdownProgress {
     /// begun and finished here, so every stage of a shutdown has both lines.
     pub(crate) fn end(&self, stage: Stage) {
         let started = {
-            let state = self.state.lock();
+            let state = self.shared.state.lock();
             match state.current {
                 Some((running, at)) if running == stage => Some(at),
                 _ => None,
@@ -148,7 +205,8 @@ impl ShutdownProgress {
             }
         };
         let elapsed_ms = started.elapsed().as_millis();
-        self.state.lock().current = None;
+        self.shared.state.lock().current = None;
+        self.shared.changed.notify_all();
         tracing::info!(
             stage = stage.number(),
             stage_name = stage.name(),
@@ -168,15 +226,44 @@ impl ShutdownProgress {
         out
     }
 
-    /// Log the whole shutdown's elapsed time, from the first stage's start.
+    /// Log the whole shutdown's elapsed time, from the first stage's start,
+    /// and stand the watchdog down.
     pub(crate) fn complete(&self) {
-        let began = self.state.lock().began;
+        self.disarm();
+        let began = self.shared.state.lock().began;
         if let Some(began) = began {
             let elapsed_ms = began.elapsed().as_millis();
             tracing::info!(
                 elapsed_ms,
                 "lambo serve: shutdown finished in {elapsed_ms} ms"
             );
+        }
+    }
+}
+
+/// Disarms a [`ShutdownProgress`]'s watchdog on drop; see
+/// [`ShutdownProgress::disarm_on_drop`].
+pub(crate) struct Disarm(ShutdownProgress);
+
+impl Drop for Disarm {
+    fn drop(&mut self) {
+        self.0.disarm();
+    }
+}
+
+impl Stage {
+    /// The longest this stage runs when the runtime is healthy: the timer
+    /// that bounds it, or zero for a stage that only aborts tasks. The
+    /// watchdog warns when a stage overruns this (plus its slack), which
+    /// can only happen when that timer did not fire.
+    pub(crate) fn bound(self) -> Duration {
+        use super::shutdown::{CLOSE_GRACE, SHUTDOWN_GRACE};
+        match self {
+            Stage::TransportDrain => SHUTDOWN_GRACE,
+            Stage::SessionClose => CLOSE_GRACE,
+            Stage::EndpointRelease => super::hub::ENDPOINT_RELEASE_GRACE,
+            Stage::LedgerClose => crate::ledger::SHUTDOWN_DRAIN,
+            Stage::KeepWarmAbort | Stage::EventPumpAbort | Stage::BackgroundTasks => Duration::ZERO,
         }
     }
 }

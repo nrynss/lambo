@@ -76,6 +76,10 @@ mod close_runs;
 #[cfg(all(feature = "store-memory", feature = "embed-fixture"))]
 mod stages;
 
+/// #40: the OS-thread watchdog bounds a shutdown whose tokio timers cannot
+/// fire (a wedged runtime), names the stage, and stands down when disarmed.
+mod watchdog;
+
 /// #28 review L2: stage 6 (`Hub::release`) ends every endpoint session and
 /// waits for it, so none outlives the release or appends to the ledger
 /// stage 7 drains.

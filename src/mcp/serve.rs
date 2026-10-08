@@ -43,6 +43,7 @@
 //! | `signals` | the eager signal registration and J6's pre-arm (`EarlyShutdown`) |
 //! | `shutdown` | the grace budgets, the shutdown future, the close, the named stages (the #40 seam) |
 //! | `stages` | the stage record and its `started` / `finished` log lines (#40) |
+//! | `watchdog` | the OS-thread bound on the whole shutdown, independent of the runtime (#40) |
 
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
@@ -64,6 +65,7 @@ mod shutdown;
 mod signals;
 mod stages;
 mod transport;
+mod watchdog;
 
 pub use builder::{build_memory, resolve_serve_backends};
 pub use heartbeat::authorize_ledger;
@@ -443,7 +445,11 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     // count, which is exactly why `EarlyShutdown` is `Clone` over shared state.
     // #40: the shutdown's stage record, shared by the shutdown future (which
     // starts stage 1), `run_and_close` (stages 1 to 4) and the tail below.
-    let progress = ShutdownProgress::new();
+    // Its first stage starts the watchdog, an OS thread that aborts the
+    // process if the shutdown outlives every one of its own timers; the
+    // guard stands it down on every way out of this function.
+    let progress = ShutdownProgress::with_production_watchdog();
+    let _disarm = progress.disarm_on_drop();
     let shutdown = holder_shutdown(mem.clone(), ledger.clone(), early.clone(), progress.clone());
     tokio::pin!(shutdown);
 

@@ -137,20 +137,28 @@ const _: () = assert!(
      those two steps in series and nothing else, and SHUTDOWN_BUDGET is sized on CLOSE_GRACE",
 );
 
-/// Documented worst-case wall-clock a clean shutdown can take, end to end (R4).
+/// Worst-case wall-clock from the shutdown signal to a durable (or honestly
+/// lost) tail and a released lease (R4): stages 1 to 4.
 ///
-/// The shutdown is two bounded phases in series: the transport winds down within
-/// [`SHUTDOWN_GRACE`] (rmcp's own graceful drain happens *inside* that window —
-/// `run_until_shutdown` gives the whole transport, drain included, exactly
-/// `SHUTDOWN_GRACE` after cancel), then the final flush runs within
-/// [`CLOSE_GRACE`]. The only work outside these two is `event_pump.abort()` and
-/// process teardown, both effectively instant. So the true aggregate cap is
-/// `SHUTDOWN_GRACE + CLOSE_GRACE`, and this is the number an operator must budget
-/// for: a supervisor's SIGKILL escalation (systemd `TimeoutStopSec`, Kubernetes
-/// `terminationGracePeriodSeconds` — default 30 s) must exceed it, or the final
-/// flush is cut off and the tail is lost. The compile-time guard just below (and
-/// `the_grace_windows_are_sane`) pins the sum to this budget so a later bump to
-/// either window cannot silently push the aggregate past what a supervisor allows.
+/// Those stages are two bounded phases in series: the transport winds down
+/// within [`SHUTDOWN_GRACE`] (rmcp's own graceful drain happens *inside* that
+/// window — `run_until_shutdown` gives the whole transport, drain included,
+/// exactly `SHUTDOWN_GRACE` after cancel), then the final flush runs within
+/// [`CLOSE_GRACE`]; the keep-warm and event-pump aborts are instant. The
+/// compile-time guard just below (and `the_grace_windows_are_sane`) pins the
+/// sum to this budget so a later bump to either window cannot silently push
+/// it past what a supervisor allows.
+///
+/// **It is not the time to process exit.** This said "the true aggregate cap",
+/// with only `event_pump.abort()` and process teardown outside it; since #28
+/// stage 6 waits up to `hub::ENDPOINT_RELEASE_GRACE` (3 s) and stage 7 up to
+/// the ledger's `SHUTDOWN_DRAIN` (0.5 s), both after the lease release. The
+/// exit bound is `watchdog::EXIT_BUDGET` (18.5 s), and the hard stop that holds
+/// even when these timers cannot fire is `watchdog::SHUTDOWN_WATCHDOG` (20 s,
+/// #40). A supervisor's SIGKILL escalation (launchd `ExitTimeOut`, systemd
+/// `TimeoutStopSec`, Kubernetes `terminationGracePeriodSeconds`) must exceed
+/// the watchdog, or the final flush can be cut off and the stall goes
+/// unnamed: 30 s is the recommendation.
 pub(super) const SHUTDOWN_BUDGET: Duration = Duration::from_secs(15);
 
 /// Build-time invariant: the end-to-end shutdown cost fits [`SHUTDOWN_BUDGET`].
