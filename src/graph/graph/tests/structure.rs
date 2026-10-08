@@ -699,3 +699,27 @@ fn insert_concept_refuses_an_id_that_names_an_interaction() {
     assert_eq!(g.edge_count(), edges);
     g.assert_invariants().unwrap();
 }
+
+#[test]
+fn insert_interaction_refuses_an_id_that_names_a_concept() {
+    // #50 review F3: the refusal was already pre-mutation, but it read as
+    // internal corruption ("missing from the temporal chain"). It is a caller
+    // error and must say so.
+    let (mut g, _iid, cid) = small_graph();
+    let (epoch, log_len, nodes) = (g.epoch(), g.log_len(), g.node_count());
+    let chain = g.temporal_chain().to_vec();
+    let mut i = interaction(2, Some(chain[0]), 5);
+    i.id = cid;
+    let err = g.insert_interaction(i).unwrap_err();
+    assert!(
+        matches!(err, LamboError::Store(StoreError::Invariant(_))),
+        "{err:?}"
+    );
+    assert!(err.to_string().contains("names a concept"), "{err}");
+    assert!(matches!(g.node(cid), Some(Node::Concept(_))));
+    assert_eq!(g.epoch(), epoch);
+    assert_eq!(g.log_len(), log_len);
+    assert_eq!(g.temporal_chain(), chain.as_slice());
+    assert_eq!(g.node_count(), nodes);
+    g.assert_invariants().unwrap();
+}

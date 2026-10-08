@@ -164,12 +164,22 @@ impl Graph {
     ///   so the §5.7 predecessor invariant holds by construction.
     ///
     /// Re-upserting an existing interaction is idempotent (no duplicate chain
-    /// entry) but must keep its chain position (`previous_id` unchanged).
+    /// entry) but must keep its chain position (`previous_id` unchanged). An id
+    /// that already names a concept is refused.
     pub fn insert_interaction(&mut self, i: Interaction) -> Result<(), LamboError> {
         if i.session_id != self.session_id {
             return Err(invariant(format!(
                 "interaction {} session {} != graph {}",
                 i.id, i.session_id, self.session_id
+            )));
+        }
+        // A caller error, not chain corruption: say so before the chain match
+        // (whose `(true, None)` arm would otherwise report it as corruption).
+        if matches!(self.nodes.get(&i.id), Some(Node::Concept(_))) {
+            return Err(invariant(format!(
+                "interaction {} id already names a concept in this graph; \
+                 node ids are unique across interactions and concepts",
+                i.id
             )));
         }
         let known = self.nodes.contains_key(&i.id);
