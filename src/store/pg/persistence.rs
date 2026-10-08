@@ -293,6 +293,13 @@ impl<D: Dialect> PgStore<D> {
             // delete runs, and only when the batch deletes anything; a row
             // that is already gone resolves nothing and its delete is a no-op.
             // The stamp loop above is deliberately unchanged.
+            //
+            // Residual window: this lookup is a plain read (a UNION cannot take
+            // `FOR SHARE`), so under READ COMMITTED an edge from another session
+            // that commits between this lookup and the delete is removed with
+            // the node without its session being fenced. That needs a
+            // concurrent writer adding an edge to a node GC is deleting; the
+            // lease-row lock below still covers every session resolved here.
             let mut fenced: Vec<String> = batch_session_ids(&batch.mutations)
                 .into_iter()
                 .map(str::to_owned)
@@ -320,11 +327,14 @@ impl<D: Dialect> PgStore<D> {
             // takes `FOR SHARE` on the lease row, held to commit, so a
             // takeover or renewal of any fenced session waits for this flush
             // instead of committing between the check and our commit (plain
-            // reads are not enough under READ COMMITTED). Rows are locked in
-            // sorted session order so two flushes spanning the same sessions
-            // acquire in one order. An unleased session (no row / current_token
-            // 0) passes: there is no row to lock, matching seed / fixture
-            // parity.
+            // reads are not enough under READ COMMITTED). Lease rows are locked
+            // in sorted session order so two flushes spanning the same sessions
+            // acquire them in one order; the session-row stamps above still run
+            // in batch order, which this ordering does not cover. An unleased
+            // session (no row / current_token 0) passes and is not locked: with
+            // no lease row there is nothing to hold, so a lease created for it
+            // concurrently is not serialised against this flush. That matches
+            // seed / fixture parity, where sessions run unleased.
             fenced.sort_unstable();
             for sid in &fenced {
                 let current: Option<i64> = sqlx::query_scalar(LEASE_TOKEN_FOR_SHARE_SQL)
