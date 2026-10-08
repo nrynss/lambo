@@ -20,6 +20,13 @@
 //! SQLite on a shared file is deliberate and required: two processes can only
 //! contend through a store they actually share, and the endpoint is only derived
 //! for a store a second process can see.
+
+// Edition 2024 (#42): clippy's `collapsible_if` now asks for let-chains
+// (`if let A = a && cond`). Rewriting existing nested `if let`s is a separate,
+// opportunistic change, so the lint is allowed while that backlog exists; new
+// code should use let-chains anyway. Remove this allow once the backlog is
+// cleared (#48).
+#![allow(clippy::collapsible_if)]
 #![cfg(all(feature = "store-sqlite", feature = "embed-fixture", unix))]
 
 use std::io::{BufRead, BufReader, Write};

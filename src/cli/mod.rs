@@ -1165,12 +1165,10 @@ mod sqlite_tests {
             .expect("load");
         let node = {
             let g = loaded.graph.read();
-            let id = g
-                .concepts()
+            g.concepts()
                 .find(|c| c.content == "user schema")
                 .map(|c| c.id)
-                .expect("user schema concept");
-            id
+                .expect("user schema concept")
         };
         let reserved = crate::cli::reserve::reserve(
             resolve_clean(&cfg),

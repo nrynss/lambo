@@ -80,7 +80,6 @@ impl EnvGuard {
     /// That residual exposure is the one every `cargo test` binary that sets
     /// a variable carries; the lock removes the test-against-test races. Callers must
     /// hold the env mutex: only `EnvGuard` methods and its `Drop` call this.
-    #[allow(unused_unsafe)] // set_var/remove_var are unsafe from edition 2024
     unsafe fn mutate(key: &std::ffi::OsStr, value: Option<&std::ffi::OsStr>) {
         match value {
             Some(v) => unsafe { std::env::set_var(key, v) },

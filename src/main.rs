@@ -1032,7 +1032,16 @@ mod tests {
         // closed by design — but because a `LAMBO_PROMOTION_POLICY=Solo` left
         // in the ambient shell would silently change what this test resolves.
         for k in lambo::RESOLVE_ENV_VARS {
-            std::env::remove_var(k);
+            // SAFETY: the libtest harness runs this binary's tests on
+            // parallel threads, so "single-threaded" is not the argument.
+            // The argument is that this is the only test in the bin target
+            // that mutates the environment (`LOCK` only guards against a
+            // future second one), and every Rust reader on other threads goes
+            // through std, whose environment lock synchronises it with
+            // `remove_var`. The residual exposure is a C library reading the
+            // environment via libc while this runs, the same one the lib's
+            // `test_util::EnvGuard` documents.
+            unsafe { std::env::remove_var(k) };
         }
 
         let dir = ScratchDir::new();
