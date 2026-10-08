@@ -539,6 +539,89 @@ async fn parent_of_ends_stay_keyword_only_when_the_store_refuses_vectors() {
     g.assert_invariants().unwrap();
 }
 
+/// A `parent_of` end the call will create is embedded with the origin
+/// framing, so its framed context is held to `MAX_HYBRID_CONTEXT_BYTES` like
+/// a concept's. The end itself is under the per-string cap that
+/// `validate_limits` checks; only the framed context is over. The refusal is
+/// a `Config` error before any embed or store call, with nothing written.
+#[tokio::test]
+async fn an_oversized_parent_of_end_context_is_refused_before_any_embed() {
+    let (graph, interaction) =
+        graph_with_interaction("hybrid-parent-oversized", 1, 0, "ingest context");
+    let store = SpyStore::with_vector(Vec::new());
+    let embedder = RecordingEmbedder::new();
+    let long_end = "p".repeat(MAX_HYBRID_CONTEXT_BYTES);
+    let pairs = [(long_end.as_str(), "a child")];
+    let before = graph.read().snapshot();
+    let err = derive(
+        graph.clone(),
+        &store,
+        &embedder,
+        &contract("fixture", 1024),
+        interaction,
+        &agent(),
+        &[("a child", ConceptType::Entity)],
+        &ParentOf::from_pairs(&pairs),
+        10,
+        SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(&err, LamboError::Config(m) if m.contains("embedding context")),
+        "unexpected error: {err:?}"
+    );
+    assert!(embedder.embedded_texts().is_empty());
+    assert_eq!(store.vector_calls(), 0);
+    assert_eq!(graph.read().snapshot(), before, "nothing was written");
+}
+
+/// A call whose only new concepts are `parent_of` ends still embeds, so a
+/// mid-session contract swap is refused before the first embed, as it is for
+/// a call with a new concept. Without the check the ends would be embedded in
+/// the wrong space and only the commit-phase recheck would refuse.
+#[tokio::test]
+async fn an_ends_only_call_checks_the_contract_before_any_embed() {
+    let (graph, interaction) =
+        graph_with_interaction("hybrid-parent-swap", 1, 0, "ingest context");
+    graph
+        .write()
+        .stamp_embedding(contract("fixture", 1024))
+        .unwrap();
+    let store = SpyStore::with_vector(Vec::new());
+    let embedder = RecordingEmbedder::new();
+    let pairs = [("new parent", "new child")];
+    let err = derive(
+        graph.clone(),
+        &store,
+        &embedder,
+        &contract("bedrock", 1024),
+        interaction,
+        &agent(),
+        &[],
+        &ParentOf::from_pairs(&pairs),
+        10,
+        SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(err, LamboError::Config(_)),
+        "unexpected error: {err:?}"
+    );
+    assert!(
+        embedder.embedded_texts().is_empty(),
+        "refused before any embed: {:?}",
+        embedder.embedded_texts()
+    );
+    assert_eq!(store.vector_calls(), 0);
+    let g = graph.read();
+    assert_eq!(g.node_count(), 1, "interaction only — nothing was written");
+    assert_eq!(g.embedding().unwrap().kind, "fixture", "stamp preserved");
+}
+
 #[tokio::test]
 async fn first_use_empty_candidates_still_commits_contract() {
     // Cockroach returns this safe empty shape for a missing/unstamped
