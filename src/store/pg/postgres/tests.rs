@@ -421,13 +421,13 @@ fn strip_line_comment(line: &str) -> &str {
 /// execute and must not inject the GUC as extra_set on the exact lane.
 #[test]
 fn explain_vector_candidates_uses_store_forced_exact_scan() {
-    // The camera-proof is the `corpus` helper in postgres.rs plus the EXPLAIN
-    // helpers in this file, which lived in one file before the tests moved
-    // out; scan both. Anchored on the crate root so a later move of this
-    // file cannot silently retarget the scan.
+    // The camera-proof is the `corpus` helper in postgres/test_support.rs plus
+    // the EXPLAIN helpers in this file, which lived in one file before the
+    // tests moved out; scan both. Anchored on the crate root so a later move of
+    // this file cannot silently retarget the scan.
     let corpus_src = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/src/store/pg/postgres.rs"
+        "/src/store/pg/postgres/test_support.rs"
     ));
     let helper_src = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
