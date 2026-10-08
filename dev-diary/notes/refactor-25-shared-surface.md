@@ -54,8 +54,18 @@ intermediate states that would each need temporary cross-imports.
 
 - `scripts/cloudops/_lambo.py`'s empty-session self-test had been failing since
   #9 reshaped the `Focus::Missing` arm; it now pins to `missing_refusal`.
-- `INVISIBLE_RANGES` skipped unassigned Default_Ignorable codepoints (J1-R3-3,
-  open advisory) and the Mongolian free variation selectors (key forking).
+- `INVISIBLE_RANGES` skipped unassigned Default_Ignorable codepoints and the
+  Mongolian free variation selectors (key forking). This is a **re-land**, not
+  a new fix. It is finding V1 of the t8.2-t8.3 review, fixed on 2026-08-15 by
+  `c95a014` (table) and `aac5cd5` (tests). The next commit, `9686b40`
+  ("docs(L82): final verify"), silently reverted both: its src tree is
+  byte-identical to the pre-R3 base `2ac39f0`, and its src diff is exactly the
+  inverse of those two commits (nothing else in it was lost; its only other
+  change is the appended verify note). `9ce776e` re-landed the table, and a
+  follow-up commit (`0e55e3d`) restored every `aac5cd5` test row.
+  `9ce776e`'s message calls the gap "advisory J1-R3-3, left open"; that is
+  wrong twice. J1-R3-3 is the `U+2028`/`U+2029` argument, and V1 had been
+  closed, then reverted.
 - The `Clock` doc comment was attached to `RecallPipeline`.
 
 ## Left for later phases

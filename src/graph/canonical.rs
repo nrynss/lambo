@@ -90,9 +90,11 @@ static STEMMER: LazyLock<Stemmer> = LazyLock::new(|| Stemmer::create(Algorithm::
 /// It also covers every **unassigned** `Default_Ignorable_Code_Point`
 /// (`U+2065`, `U+FFF0–U+FFF8`, `U+E0080–U+E00FF`, `U+E01F0–U+E0FFF`): Unicode
 /// requires renderers to show nothing for them, so they meet the same
-/// invisibility criterion, and a superset survives future assignments (J1-R3-3).
-/// The Mongolian free variation selectors (`U+180B–U+180D`, `U+180F`) are
-/// listed too, as text-required (below).
+/// invisibility criterion, and a superset survives future assignments. The
+/// Mongolian free variation selectors (`U+180B–U+180D`, `U+180F`) are listed
+/// too, as text-required (below). This is finding V1 of the t8.2-t8.3 review:
+/// fixed on 2026-08-15 (`c95a014`, `aac5cd5`), silently reverted the same day
+/// by `9686b40`, and re-landed in #25.
 ///
 /// Arabic number-formatting signs (`U+0600–U+0605`, `U+06DD`, `U+070F`,
 /// `U+0890–U+0891`, `U+08E2`) are *Cf* but deliberately **absent**: they prefix
@@ -708,12 +710,13 @@ mod tests {
 
     /// Every `Default_Ignorable_Code_Point` renders as nothing, which is the
     /// table's own criterion, but the table skipped the unassigned ones
-    /// (`U+2065`, `U+FFF0..U+FFF8`, `U+E0080..U+E00FF`, `U+E01F0..U+E0FFF`,
-    /// J1-R3-3) and the Mongolian free variation selectors (`U+180B..U+180D`,
-    /// `U+180F`). The unassigned ones passed the surface while rendering as
-    /// nothing; the variation selectors are legitimate text, but forked the key
-    /// of text that renders identically. Both halves of the policy now hold for
-    /// every one: refused or text-required at the surface, stripped from keys.
+    /// (`U+2065`, `U+FFF0..U+FFF8`, `U+E0080..U+E00FF`, `U+E01F0..U+E0FFF`)
+    /// and the Mongolian free variation selectors (`U+180B..U+180D`, `U+180F`)
+    /// while `9686b40` had reverted V1. The unassigned ones passed the surface
+    /// while rendering as nothing; the variation selectors are legitimate
+    /// text, but forked the key of text that renders identically. Both halves
+    /// of the policy now hold for every one: refused or text-required at the
+    /// surface, stripped from keys.
     #[test]
     fn default_ignorable_gaps_are_stripped_and_unassigned_ones_refused() {
         let plain = "billing retries change";
