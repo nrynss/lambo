@@ -612,7 +612,16 @@ fn check_embed_budget(
 /// unmatched concepts plus the `parent_of` ends the call will create. When
 /// the store has no vector search nothing is embedded, so nothing is
 /// refused. The plan phase runs the same check again, against the graph as
-/// it is at apply.
+/// it is at apply, and that check is the authoritative one.
+///
+/// The two counts can differ when the graph changes between ack and apply,
+/// and both outcomes are safe. If an earlier queued write has not applied yet
+/// and will create concepts this call's `parent_of` names, the ack counts
+/// those ends as new and may refuse a call that would have fit; a retry after
+/// that write applies succeeds. If a concept this call would match is removed
+/// in between, the ack accepts and the plan refuses, which yields a `Failed`
+/// receipt with nothing written. Nothing is ever embedded past the budget,
+/// because the plan re-checks before any I/O.
 pub fn validate_embed_budget(
     graph: &Graph,
     concepts: &[(&str, ConceptType)],
