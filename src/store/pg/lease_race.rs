@@ -78,11 +78,16 @@ async fn takeover_during_open_tx<D: Dialect>(
     };
     tokio::pin!(racer);
     // Long enough for a takeover that is not blocked to finish many times over.
-    let finished_early = tokio::time::timeout(Duration::from_millis(1_500), &mut racer)
-        .await
-        .is_ok();
+    let early = tokio::time::timeout(Duration::from_millis(1_500), &mut racer).await;
+    let finished_early = early.is_ok();
     tx.commit().await.expect("commit");
-    let outcome = racer.await.expect("join").expect("takeover");
+    // A JoinHandle must not be polled again once it has yielded its result, so
+    // keep the early result instead of awaiting the finished handle a second time.
+    let joined = match early {
+        Ok(joined) => joined,
+        Err(_elapsed) => racer.await,
+    };
+    let outcome = joined.expect("join").expect("takeover");
     let LeaseOutcome::Acquired(second) = outcome else {
         panic!("the lapsed lease must be taken over once the reader is done");
     };
