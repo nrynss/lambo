@@ -61,6 +61,11 @@
   waits the full 2 s write-queue drain budget for workers the cancelled call
   had already aborted; it goes straight to joining them. No write was lost
   before: each job is a durable intent the next serve replays.
+- `lambo serve-web` checks its bearer token with the same constant-time
+  comparison as `lambo serve --transport http` (#28). Its own copy looped
+  over the configured token, so the time a check took tracked the secret's
+  length; the shared one loops over the presented value, which the caller
+  already knows. Which tokens are accepted is unchanged. Pre-existing.
 - Concepts created as `parent_of` ends are embedded (issue #16 §2). Hybrid
   `derive` created an end named only in `parent_of` with no vector, so it was
   invisible to recall's vector leg until `re-embed --missing-only` backfilled
