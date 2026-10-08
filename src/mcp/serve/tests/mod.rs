@@ -3,6 +3,8 @@
 #[allow(unused_imports)]
 use super::http_guards::*;
 use super::*;
+#[allow(unused_imports)]
+use super::{builder::*, heartbeat::*, hub::*, roles::*};
 use crate::surface::bearer::tokens_match;
 
 mod heartbeat;

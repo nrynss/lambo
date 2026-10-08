@@ -2,6 +2,7 @@ use super::*;
 use crate::embed::{EmbedError, Embedder, FixtureEmbedder};
 use crate::store::{GraphStore, SqliteStore, StoreConfig, StoreKind};
 use crate::types::EmbeddingContract;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// The fixture embedder, plus a flag set when the last owner drops it.
