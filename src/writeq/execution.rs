@@ -184,9 +184,10 @@ pub(super) fn action_sentence(
 impl WriteCtx {
     /// The vector-candidate source a background job's hybrid derive and
     /// record-action embed gate are given (#27's caller-side seam): the twin
-    /// of `Memory::vector_candidates`, kept identical to it. #8 changes both.
+    /// of `Memory::vector_candidates`, built by the same constructor
+    /// ([`VectorCandidates::for_holder`], #8) so the two cannot diverge.
     pub(crate) fn vector_candidates(&self) -> VectorCandidates<'_> {
-        VectorCandidates::from_store(self.store.as_ref())
+        VectorCandidates::for_holder(self.store.as_ref(), &self.graph)
     }
 
     /// Run one job through the ordinary write path.

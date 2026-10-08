@@ -96,11 +96,12 @@ impl Memory {
     }
 
     /// The vector-candidate source this session's recall and hybrid derive
-    /// are given (#27's caller-side seam). Today the durable store, exactly as
-    /// before; #8 returns a graph-backed source from here, and the write
-    /// queue's twin is `WriteCtx::vector_candidates`.
+    /// are given (#27's caller-side seam): this holder's own graph when the
+    /// store's checked read is an exact scan of the same vectors, else the
+    /// store (#8, [`VectorCandidates::for_holder`]). The write queue's twin is
+    /// `WriteCtx::vector_candidates`, built by the same constructor.
     pub(crate) fn vector_candidates(&self) -> VectorCandidates<'_> {
-        VectorCandidates::from_store(self.store.as_ref())
+        VectorCandidates::for_holder(self.store.as_ref(), &self.graph)
     }
 
     /// Note that a read returned `ids` to a caller (issue #30). Cheap and

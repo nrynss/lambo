@@ -79,14 +79,21 @@
 //! vector is 4 KB and the largest measured session held ~1,400 of them. But "n is small
 //! by construction" was a property of *session-scoped* graphs, and a single unified
 //! autobiographical session is not bounded that way. An ANN index replaces
-//! `select_session_vectors` — whose signature already takes the probe and the limit for
-//! exactly that reason, even though an exact scan ignores both — and `rank_by_cosine`
-//! keeps re-ranking the survivors exactly. No caller and no other adapter method
-//! changes.
+//! `select_session_vectors` behind this adapter's `VectorCandidateSource`
+//! implementation, which already receives the probe and the limit (the scan itself
+//! takes neither, since an exact scan can use neither), and `rank_by_cosine` keeps
+//! re-ranking the survivors exactly. No caller and no other adapter method changes.
 //!
 //! Since #26 the checked read is this adapter's implementation of the
 //! store-wide seam, `store::vector_source::VectorCandidateSource`, and the exact
 //! scorer is shared from there, so #8's graph-backed source ranks identically.
+//!
+//! **Since #8 the session holder does not run this scan.** The adapter declares it
+//! exact (`GraphStore::exact_vector_scan`), so the holder's recall and hybrid derive
+//! rank the vectors its in-memory graph already holds, with the same scorer and
+//! the same answer, and never call this store for vectors. What follows describes
+//! the scan as readers without a graph (`lambo recall`, `serve-web`) still run it,
+//! and as a holder ran it before #8.
 //!
 //! **Trigger to revisit: `hybrid::derive`, not recall** (F-R1-3). Recall runs one scan
 //! per query. `derive` calls `vector_candidates_checked` *inside* its per-unmatched-
@@ -459,6 +466,15 @@ impl GraphStore for SqliteStore {
     /// the session's durable `sessions.embedding_dim` is what candidate reads enforce.
     fn vector_dimensions(&self) -> Option<usize> {
         Some(self.vector_dim)
+    }
+
+    /// #8: the checked read is an exact scan, every stored vector of the
+    /// session scored by the shared `rank_by_cosine` (see
+    /// `vector_candidates.rs`), and the BLOB codec round-trips `f32` exactly
+    /// (CON-8). So the session holder ranks the same vectors in its graph and
+    /// never calls this store for them; readers without a graph still do.
+    fn exact_vector_scan(&self) -> bool {
+        true
     }
 
     async fn acquire_lease(

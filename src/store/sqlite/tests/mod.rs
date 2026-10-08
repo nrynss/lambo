@@ -17,6 +17,8 @@ mod persistence;
 mod schema;
 mod structural;
 mod vectors;
+// #8: the holder's graph-backed vector source against the SQLite scan.
+mod vector_graph_parity;
 
 fn test_store() -> SqliteStore {
     SqliteStore::connect("sqlite::memory:").unwrap()

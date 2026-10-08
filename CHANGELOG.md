@@ -51,8 +51,39 @@
     this is refused at the call, not on the receipt. Split the call. A store
     without vector search embeds nothing and is not limited.
 
+### Changed
+
+- On SQLite, the process that holds a session (`lambo serve`, or an embedded
+  `Memory`) now ranks recall's vector leg and hybrid `derive`'s semantic match
+  against the vectors its in-memory graph already holds, instead of reading,
+  decoding and re-parsing every stored vector from the database on each recall
+  and once per unmatched concept on each derive (#8). Rankings over flushed
+  data are unchanged, bit for bit: same candidates, order, scores, ties and
+  refusals. Measured on a 3,600-concept session (fixture embedder, release,
+  macOS): warm recall p50 219 ms to 4.3 ms, a one-concept derive acknowledged
+  to applied 246 ms to 14 ms, a three-concept derive 670 ms to 20 ms. No
+  memory is added: the scan borrows the vectors the graph holds.
+  - A concept is a vector candidate as soon as it is written, before the
+    write-behind flush (which can lag by minutes), so recall finds it and a
+    later `derive` can merge a near paraphrase into it. A removed concept stops
+    being a candidate at once.
+  - Readers without a live session (`lambo recall`, `lambo serve-web`) still
+    scan the database. Postgres and CockroachDB keep their database-side
+    search: they score by database distance, so their ranking would change.
+  - A derive no longer competes with the flush for SQLite's single connection
+    while it matches, and the matching scan no longer spends the derive's 30 s
+    store-I/O deadline: it runs in memory, about 0.8 µs per stored vector at
+    1,024 dimensions.
+
 ### Added
 
+- `GraphStore::exact_vector_scan()` (default `false`): an adapter declares its
+  checked vector read is an exact cosine scan of every vector it stores, so a
+  session holder may answer that read from its graph (#8). `SqliteStore`
+  returns `true`. A wrapper around SQLite keeps the database path unless it
+  forwards the method, which it should do only when its vector read is plain
+  delegation (a wrapper that filters, records or tiers that read must not, or
+  a holder would bypass it). Additive: existing adapters are unaffected.
 - `lambo serve` logs each of its seven shutdown stages when it starts and
   when it finishes, with the elapsed time (`lambo serve: shutdown stage 3/7
   session_close finished in 12 ms`), then `lambo serve: shutdown finished in
