@@ -58,7 +58,9 @@
 //! it diffs the list against the fresh detection pass
 //! ([`HotList::retain_conditions`]), which replaces the old
 //! O(hot_len × graph) per-cycle re-validation scan (T4.6 finding 2).
-//! [`HotList::revalidate`] is recall's (T5.3) read-time path.
+//! [`HotList::revalidate`] is recall's (T5.3) read-time path, run through
+//! [`HotList::revalidate_members`] by the daemon's recall entry before
+//! assembly.
 //! It takes `&Graph` explicitly — rather than stashing a graph handle inside
 //! the hot list — so recall never takes a hidden lock on top of the one it
 //! already holds (the daemon's `RwLock<Graph>` is not reentrant; spec §6.4
@@ -66,7 +68,7 @@
 
 use chrono::{DateTime, Utc};
 use std::cmp::Ordering;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
@@ -304,6 +306,47 @@ impl HotList {
         });
         any_valid
     }
+
+    /// Re-validate the hot entries of every node in `members` **at `now`** and
+    /// return the surviving payloads per node, freshly rebuilt (T5.3
+    /// force-inclusion, XP-3).
+    ///
+    /// This is recall's read-time maintenance of the hot list, run by
+    /// [`crate::daemon::Daemon::recall_detailed`] over the recall's expanded
+    /// members before assembly: each member on the list goes through
+    /// [`HotList::revalidate`], so lapsed entries are evicted here and a
+    /// survivor's payload is the one its predicate just rebuilt against `now`.
+    /// Recall then renders the returned map and never touches the list itself,
+    /// which keeps the dependency one-way (daemon → recall).
+    ///
+    /// The caller passes the same `now` it renders with (reservations, the
+    /// context block), and holds the graph read guard before this list's write
+    /// guard (module lock order). A node whose entries all lapsed, or that is
+    /// not on the list, is absent from the map; duplicate ids in `members` are
+    /// re-validated once.
+    pub fn revalidate_members(
+        &mut self,
+        graph: &Graph,
+        members: impl IntoIterator<Item = NodeId>,
+        now: DateTime<Utc>,
+    ) -> HashMap<NodeId, Vec<HotListPayload>> {
+        let ids: HashSet<NodeId> = members.into_iter().collect();
+        let mut payloads: HashMap<NodeId, Vec<HotListPayload>> = HashMap::new();
+        for id in ids {
+            if self.contains(id) && self.revalidate(graph, id, now) {
+                let surviving: Vec<HotListPayload> = self
+                    .iter()
+                    .filter(|e| e.node() == id)
+                    .map(|e| e.payload().clone())
+                    .collect();
+                if !surviving.is_empty() {
+                    payloads.insert(id, surviving);
+                }
+            }
+        }
+        payloads
+    }
+
     /// Drop every entry whose `(node, condition)` is not in `fresh` (T4.6
     /// finding 2). The daemon loop calls this once per cycle with the
     /// current detection pass's hits, so the hot list always equals the
@@ -663,6 +706,60 @@ mod tests {
         let g = Graph::new(sid());
         assert!(!list.revalidate(&g, nid(2), t(0)), "no entry → not hot");
         assert_eq!(list.len(), 1);
+    }
+
+    /// T5.3 force-include, the hot-list half (moved from
+    /// `recall::assemble::tests::hot_force_include_keeps_live_and_drops_lapsed`
+    /// when #25 moved re-validation out of `assemble`): over recall's expanded
+    /// members, a live entry survives with its payload rebuilt at the caller's
+    /// `now` (not the stale sentinel it was inserted with), a lapsed one is
+    /// evicted from the list, a member that is not hot is absent from the map,
+    /// and a hot node that is not a member is left alone.
+    #[test]
+    fn revalidate_members_keeps_live_and_drops_lapsed() {
+        let g = Graph::new(sid());
+        let now = t(60);
+        let mut list = HotList::new();
+        // nid(1): live (write 11s before now, 30s window).
+        let _ = list.insert(clock_reading_entry(
+            nid(1),
+            now - chrono::Duration::seconds(11),
+            30,
+        ));
+        // nid(2): lapsed (write 31s before now).
+        let _ = list.insert(clock_reading_entry(
+            nid(2),
+            now - chrono::Duration::seconds(31),
+            30,
+        ));
+        // nid(4): lapsed too, but not a recall member, so not re-validated.
+        let _ = list.insert(clock_reading_entry(
+            nid(4),
+            now - chrono::Duration::seconds(31),
+            30,
+        ));
+
+        // nid(3) is a member that is not hot; nid(1) is listed twice.
+        let payloads = list.revalidate_members(&g, [nid(1), nid(2), nid(3), nid(1)], now);
+
+        assert_eq!(
+            payloads,
+            HashMap::from([(nid(1), vec![conflict_payload(11)])]),
+            "only the live member, with its payload rebuilt at now (not the 0 sentinel)"
+        );
+        assert!(list.contains(nid(1)), "the live entry persists");
+        assert!(
+            !list.contains(nid(2)),
+            "the lapsed member's entry was evicted"
+        );
+        assert!(list.contains(nid(4)), "a non-member is not re-validated");
+        assert_eq!(
+            list.iter()
+                .find(|e| e.node() == nid(1))
+                .map(|e| e.payload().clone()),
+            Some(conflict_payload(11)),
+            "the list holds the read-time payload too"
+        );
     }
     #[test]
     fn retain_conditions_keeps_only_fresh_pairs() {

@@ -555,12 +555,28 @@ impl Daemon {
         };
 
         let now = (self.clock)();
+        // T5.3 / XP-3: re-validate the expanded members' hot-list entries at
+        // the SAME `now` the assembly renders with, under the guards already
+        // held (graph read, then hot write). Lapsed entries are evicted here;
+        // the survivors' freshly rebuilt payloads are what assembly
+        // force-includes and renders. Done here rather than inside
+        // `assemble` so recall reads a map and never mutates daemon state.
+        let hot_payloads = hot.revalidate_members(
+            &graph,
+            pipeline
+                .expanded
+                .required
+                .iter()
+                .chain(pipeline.expanded.siblings.iter())
+                .map(|s| s.item),
+            now,
+        );
         let mut result = assemble::assemble(
             &graph,
             &pipeline.expanded,
             &pipeline.phase1,
             &scores,
-            &mut hot,
+            &hot_payloads,
             &query,
             weights,
             now,
