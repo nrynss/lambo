@@ -187,7 +187,8 @@ impl Dialect for CockroachDialect {
     }
 
     fn apply_connect_options(options: PgConnectOptions) -> Result<PgConnectOptions, StoreError> {
-        let beam = super::vector_beam_size_from_env()?.unwrap_or(super::DEFAULT_VECTOR_BEAM_SIZE);
+        let beam = super::pool::vector_beam_size_from_env()?
+            .unwrap_or(super::pool::DEFAULT_VECTOR_BEAM_SIZE);
         Ok(options.options([("vector_search_beam_size", beam.to_string())]))
     }
 }
