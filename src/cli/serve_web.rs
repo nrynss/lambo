@@ -81,6 +81,27 @@
 //!   *kind* only — never the DSN, the SQLite path, or the embedder URL.
 //!   `session_info_never_leaks_the_dsn_path_or_embedder_url` pins that.
 //!
+//!
+//! # Modules
+//!
+//! [`run`] is the composition root: it resolves auth, loads the reader graph
+//! once to report the embedding contract, builds the one `AppState` and
+//! serves `router` until a signal. Everything a request touches is in a
+//! child module.
+//!
+//! | module | holds |
+//! |---|---|
+//! | this file | the embedded assets, [`Args`], [`run`], the bounded serve, the signal registration |
+//! | `auth` | [`AuthToken`], env-over-flag resolution, the non-loopback refusal, the bearer gate |
+//! | `state` | `AppState` and the freshness tracker |
+//! | `dto` | every response and query type |
+//! | `projections` | the reads: hop-1 structural dependents, the ordered event feed, the stats |
+//! | `routes` | the handlers and `router`, `GET` only |
+//!
+//! Request bounds are the shared ones (`crate::surface::limits`, through
+//! `crate::cli::caps`); the only portal-local caps are `/api/graph`'s node
+//! and edge ceilings, beside that handler.
+//!
 //! [`Memory`]: crate::memory::Memory
 //! [`Memory::events`]: crate::memory::Memory::events
 
