@@ -188,3 +188,41 @@ fn from_snapshot_rejects_violating_graphs() {
     snap.edges[0] = bad;
     assert!(Graph::from_snapshot(snap).is_err());
 }
+
+#[test]
+fn from_snapshot_rejects_duplicate_node_ids() {
+    // #50 review F4: the loaded graph must equal the stored snapshot
+    // (GRAPH-7), so a node id that appears twice is refused up front with a
+    // clear message instead of loading last-wins (concepts) or failing later
+    // on an unrelated-looking chain or edge check.
+    let (mut g, i1, c1) = small_graph();
+    let i2 = interaction(2, Some(i1), 5);
+    let i2_id = i2.id;
+    g.insert_interaction(i2).unwrap();
+    let base = g.snapshot();
+    Graph::from_snapshot(base.clone()).unwrap();
+
+    // Duplicate concept id with different content: was silently last-wins.
+    let mut snap = base.clone();
+    let mut dup = snap.concepts[0].clone();
+    assert_eq!(dup.id, c1);
+    dup.content = "shadow".into();
+    snap.concepts.push(dup);
+    let err = Graph::from_snapshot(snap).unwrap_err().to_string();
+    assert!(err.contains("duplicate concept id"), "{err}");
+
+    // Duplicate interaction id.
+    let mut snap = base.clone();
+    let dup = snap.interactions[1].clone();
+    snap.interactions.push(dup);
+    let err = Graph::from_snapshot(snap).unwrap_err().to_string();
+    assert!(err.contains("duplicate interaction id"), "{err}");
+
+    // A concept whose id names an interaction (the shape #50 F1 could write).
+    let mut snap = base;
+    let mut clash = concept(9, i1, "clash");
+    clash.id = i2_id;
+    snap.concepts.push(clash);
+    let err = Graph::from_snapshot(snap).unwrap_err().to_string();
+    assert!(err.contains("names an interaction"), "{err}");
+}
