@@ -16,8 +16,9 @@ use chrono::Utc;
 use tokio::sync::broadcast;
 
 use super::{CanonicalMemory, GcStats, GcSweepSummary, Memory, MemoryStats};
+use crate::recall::candidates;
 use crate::recall::format;
-use crate::store::Capabilities;
+use crate::store::vector_source::VectorCandidates;
 use crate::types::{
     tie_break_by_key, CanonizationStatus, DaemonEvent, LamboError, NodeId, RecallQuery,
     RecallResult,
@@ -52,24 +53,19 @@ impl Memory {
     ) -> Result<crate::recall::detail::DetailedRecall, LamboError> {
         self.ensure_open()?;
 
+        // The one source this recall's vector leg reaches candidates through
+        // (#27); the query embed is its own step, skipped when the leg cannot
+        // run (#14 moves the cache check ahead of it).
+        let vectors = self.vector_candidates();
         let mut warnings = Vec::new();
-        let embedding = if self
-            .store
-            .capabilities()
-            .contains(Capabilities::VECTOR_SEARCH)
-        {
-            match self.embedder.embed(&query.query).await {
-                Ok(vector) => Some(vector),
-                Err(err) => {
-                    warnings.push(format!(
-                        "recall: query embedding failed ({err}); vector leg skipped"
-                    ));
+        let embedding =
+            match candidates::embed_query(vectors, self.embedder.as_ref(), &query.query).await {
+                Ok(vector) => vector,
+                Err(warning) => {
+                    warnings.push(warning);
                     None
                 }
-            }
-        } else {
-            None
-        };
+            };
 
         // The recall cache is `&mut` across `Daemon::recall`'s awaits. This is
         // NOT the graph lock — `Daemon::recall` takes and releases that itself,
@@ -77,10 +73,10 @@ impl Memory {
         let mut cache = self.recall_cache.lock().await;
         let mut result = self
             .daemon
-            .recall_detailed(
+            .recall_with(
                 &self.session,
                 query,
-                self.store.as_ref(),
+                vectors,
                 embedding.as_deref().map(|vector| (vector, &self.embedding)),
                 self.config.recall_weights,
                 &mut cache,
@@ -97,6 +93,14 @@ impl Memory {
         warnings.append(&mut result.warnings);
         result.warnings = warnings;
         Ok(result)
+    }
+
+    /// The vector-candidate source this session's recall and hybrid derive
+    /// are given (#27's caller-side seam). Today the durable store, exactly as
+    /// before; #8 returns a graph-backed source from here, and the write
+    /// queue's twin is `WriteCtx::vector_candidates`.
+    pub(crate) fn vector_candidates(&self) -> VectorCandidates<'_> {
+        VectorCandidates::from_store(self.store.as_ref())
     }
 
     /// Note that a read returned `ids` to a caller (issue #30). Cheap and

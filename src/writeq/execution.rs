@@ -38,6 +38,7 @@ use crate::graph::derive::{derive as graph_derive, ParentOf};
 use crate::graph::hybrid;
 use crate::graph::index::InvertedIndex;
 use crate::graph::Graph;
+use crate::store::vector_source::VectorCandidates;
 use crate::store::GraphStore;
 use crate::types::{
     AgentId, ConceptType, EmbeddingContract, LamboError, MatchStrategy, Node, NodeId, SessionId,
@@ -181,6 +182,13 @@ pub(super) fn action_sentence(
 }
 
 impl WriteCtx {
+    /// The vector-candidate source a background job's hybrid derive and
+    /// record-action embed gate are given (#27's caller-side seam): the twin
+    /// of `Memory::vector_candidates`, kept identical to it. #8 changes both.
+    pub(crate) fn vector_candidates(&self) -> VectorCandidates<'_> {
+        VectorCandidates::from_store(self.store.as_ref())
+    }
+
     /// Run one job through the ordinary write path.
     ///
     /// `consume`, when present, consumes the job's durable intent **inside the
@@ -229,9 +237,9 @@ impl WriteCtx {
                                 },
                             ) as hybrid::CommitHook
                         });
-                        hybrid::derive(
+                        hybrid::derive_with(
                             self.graph.clone(),
-                            self.store.as_ref(),
+                            self.vector_candidates(),
                             self.embedder.as_ref(),
                             &self.embedding,
                             job.interaction,
@@ -321,10 +329,7 @@ impl WriteCtx {
                 // on the store's VECTOR_SEARCH, as hybrid `derive` is: a store
                 // that cannot search vectors keeps none, so the write is
                 // keyword-only and its receipt says "(0 embedded)".
-                let vector_search = self
-                    .store
-                    .capabilities()
-                    .contains(crate::store::Capabilities::VECTOR_SEARCH);
+                let vector_search = self.vector_candidates().available();
                 let embeddings = match self.match_strategy {
                     MatchStrategy::Hybrid if vector_search => {
                         crate::graph::action::embed_action_contents(self.embedder.as_ref(), &act)

@@ -28,7 +28,6 @@ use crate::graph::derive::{derive as graph_derive, DeriveOutcome, ParentOf};
 use crate::graph::reserve::{release as graph_release, reserve as graph_reserve};
 use crate::graph::{hybrid, Graph};
 use crate::recall::format;
-use crate::store::Capabilities;
 use crate::types::{
     AgentId, Concept, ConceptType, Interaction, LamboError, MatchStrategy, Node, NodeId,
     Reservation, StoreError,
@@ -225,9 +224,9 @@ impl Memory {
 
         let outcome = match self.config.match_strategy {
             MatchStrategy::Hybrid => {
-                hybrid::derive(
+                hybrid::derive_with(
                     self.graph.clone(),
-                    self.store.as_ref(),
+                    self.vector_candidates(),
                     self.embedder.as_ref(),
                     &self.embedding,
                     interaction,
@@ -336,11 +335,7 @@ impl Memory {
         }
         // Off-lock: real model calls. Skipped when the store cannot search
         // vectors, as hybrid `derive` skips them: the write is keyword-only.
-        let embeddings = if self
-            .store
-            .capabilities()
-            .contains(Capabilities::VECTOR_SEARCH)
-        {
+        let embeddings = if self.vector_candidates().available() {
             crate::graph::action::embed_action_contents(self.embedder.as_ref(), action).await?
         } else {
             crate::graph::action::ActionEmbeddings::new()
@@ -462,9 +457,7 @@ impl Memory {
                         &g,
                         concepts,
                         parent_of,
-                        self.store
-                            .capabilities()
-                            .contains(Capabilities::VECTOR_SEARCH),
+                        self.vector_candidates().available(),
                     )?;
                 }
                 MatchStrategy::Canonical => {

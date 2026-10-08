@@ -18,9 +18,10 @@ use super::load_reader_graph_with_contract;
 use crate::config::Config;
 use crate::daemon::{Daemon, RecallPipeline};
 use crate::recall::cache::RecallCache;
+use crate::recall::candidates;
 use crate::recall::detail::{Annotation, AnnotationKind, DetailedHit, DetailedRecall};
 use crate::resolve::ResolvedBackends;
-use crate::store::Capabilities;
+use crate::store::vector_source::VectorCandidates;
 use crate::types::RecallQuery;
 
 /// The result of one detailed recall: the full `lambo recall` string plus the
@@ -111,21 +112,15 @@ pub(crate) async fn run_detailed(
     // H3: the embed-failure line is a typed, response-global annotation
     // (`vector_degraded`) captured at its producer — never text-parsed later.
     let mut extra_annotations: Vec<Annotation> = Vec::new();
-    let embedding = if backends
-        .store
-        .capabilities()
-        .contains(Capabilities::VECTOR_SEARCH)
+    // The same source and embed step `Memory::recall_detailed` uses (#27).
+    let vectors = VectorCandidates::from_store(backends.store.as_ref());
+    let embedding = match candidates::embed_query(vectors, backends.embedder.as_ref(), query).await
     {
-        match backends.embedder.embed(query).await {
-            Ok(vector) => Some(vector),
-            Err(err) => {
-                let text = format!("recall: query embedding failed ({err}); vector leg skipped");
-                extra_annotations.push(Annotation::new(AnnotationKind::VectorDegraded, text));
-                None
-            }
+        Ok(vector) => vector,
+        Err(text) => {
+            extra_annotations.push(Annotation::new(AnnotationKind::VectorDegraded, text));
+            None
         }
-    } else {
-        None
     };
 
     let mut cache = RecallCache::<RecallPipeline>::new();
@@ -136,10 +131,10 @@ pub(crate) async fn run_detailed(
         traversal_depth,
     };
     let mut detail = daemon
-        .recall_detailed(
+        .recall_with(
             &loaded.session,
             rq,
-            backends.store.as_ref(),
+            vectors,
             embedding
                 .as_deref()
                 .map(|vector| (vector, &backends.embedding)),
