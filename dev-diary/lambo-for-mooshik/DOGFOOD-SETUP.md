@@ -111,8 +111,14 @@ Then swap it in. The writer is stopped for the whole window, so the provision ne
 races a live serve:
 
 ```sh
-# 1. stop the supervised writer (graceful: the lease is released, no 45s TTL wait)
+# 1. stop the supervised writer (graceful: the lease is released, no 45s TTL wait).
+#    bootout returns at once, while the process is still shutting down (up to
+#    18.5 s when healthy, 20 s before its watchdog aborts it, #40), so wait for
+#    the pid to be gone before any offline verb; lease refusal is a backstop,
+#    not the sequencing.
+PID=$(launchctl print gui/$(id -u)/dev.lambo.dogfood | awk '$1 == "pid" {print $3; exit}')
 launchctl bootout gui/$(id -u)/dev.lambo.dogfood
+while [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; do sleep 0.5; done
 
 # 2. back up the store first: provisioning adds columns, and an older binary may
 #    refuse the new schema, so this copy is what makes a rollback possible. The name
@@ -182,7 +188,9 @@ bootstrapped again around the edit. With `OLD` set to the previous binary's suff
 
 ```sh
 OLD=e11fb06   # the binary that served before this upgrade
+PID=$(launchctl print gui/$(id -u)/dev.lambo.dogfood | awk '$1 == "pid" {print $3; exit}')
 launchctl bootout gui/$(id -u)/dev.lambo.dogfood
+while [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; do sleep 0.5; done
 sed -i '' "s#/lambo-dogfood/bin/lambo-[^<]*<#/lambo-dogfood/bin/lambo-$OLD<#" \
   ~/Library/LaunchAgents/dev.lambo.dogfood.plist
 # only if the old binary refuses the provisioned schema: restore the step-2 backup.
@@ -578,12 +586,28 @@ cleanup:
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>60</integer>
+  <key>ExitTimeOut</key><integer>30</integer>
   <key>StandardOutPath</key><string>/Users/&lt;you&gt;/lambo-dogfood/serve.log</string>
   <key>StandardErrorPath</key><string>/Users/&lt;you&gt;/lambo-dogfood/serve.log</string>
   <key>WorkingDirectory</key><string>/Users/&lt;you&gt;/lambo-dogfood</string>
 </dict>
 </plist>
 ```
+
+`ExitTimeOut` is how long launchd waits after SIGTERM before it sends SIGKILL; its
+default is 20 s. A healthy `lambo serve` shutdown takes at most 18.5 s (`SHUTDOWN_BUDGET`
+15 s, the endpoint release 3 s, the ledger drain 0.5 s), and at 20 s the server's own
+watchdog logs the stage it is stuck in and aborts, leaving a crash report with every
+thread's stack (#40). 30 s lets the watchdog act before launchd does. Changing it means
+bootout, edit, bootstrap, as for a binary swap.
+
+**If a stop stalls** (#40), read `serve.log` for the last `lambo serve: shutdown stage
+N/7 <name> started` with no matching `finished`, and inside stage 3 the last `close:
+step N/10 <name> started`. A `shutdown watchdog: ... past its N ms bound` line means the
+stage's own timer never fired: the runtime was wedged. The watchdog's abort writes
+`~/Library/Logs/DiagnosticReports/lambo-*.ips`; keep it with `serve.log` and
+`calls.jsonl` from the window. A manual `sample <pid> 5 -file ~/lambo-dogfood/hang-$(date
++%s).txt` taken before the abort is still useful, but no longer the only stack you get.
 
 `plutil -lint` the file before loading it — launchd reports a malformed plist as a
 generic load failure, which is a poor way to spend ten minutes. Loopback binding means no
