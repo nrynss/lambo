@@ -369,10 +369,10 @@ impl GoogleOAuthTokenSource {
     /// so it rebuilds its pool at this instant rather than discovering expiry as a login
     /// failure an hour into a session.
     pub async fn access_token_with_expiry(&mut self) -> Result<(String, Instant), GoogleAuthError> {
-        if let Some((token, expires_at)) = &self.cached {
-            if Instant::now() < *expires_at {
-                return Ok((token.clone(), *expires_at));
-            }
+        if let Some((token, expires_at)) = &self.cached
+            && Instant::now() < *expires_at
+        {
+            return Ok((token.clone(), *expires_at));
         }
         let params: Vec<(&'static str, String)> = match &self.creds {
             GoogleCredentials::ServiceAccount { .. } => {
