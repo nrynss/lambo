@@ -34,6 +34,20 @@ pub(super) const HUB_UNREACHABLE_CODE: i64 = -32001;
 /// "nothing".
 pub(super) const HUB_LOST_CODE: i64 = -32002;
 
+/// JSON-RPC error code returned when the session was erased (#23 review L3).
+///
+/// Its own code because, unlike [`HUB_UNREACHABLE_CODE`], a retry never
+/// helps: the session is gone for good and the proxy exits after answering.
+pub(super) const HUB_ERASED_CODE: i64 = -32003;
+
+/// What a caller is told when the session it reaches through this proxy was
+/// erased (#23 review L3). Same N4 discipline as [`HUB_UNREACHABLE_MESSAGE`]:
+/// no socket path, no store URL, no lease state.
+pub(super) const HUB_ERASED_MESSAGE: &str =
+    "lambo: this session's memory was erased by an operator. NOTHING WAS READ OR WRITTEN, \
+     and every later call to this session is refused: it does not come back. Do not retry; \
+     carry on with the work without memory.";
+
 /// What a caller is told when the holder cannot be reached.
 ///
 /// Written for the **model**, which is who reads a tool error, and under the
@@ -100,6 +114,12 @@ pub(super) fn error_frame(id: &serde_json::Value, code: i64, message: &str) -> S
 pub fn unreachable_reply(client_frame: &str) -> Option<String> {
     request_id(client_frame)
         .map(|id| error_frame(&id, HUB_UNREACHABLE_CODE, HUB_UNREACHABLE_MESSAGE))
+}
+
+/// The error a client gets for a call made to an erased session (#23 review
+/// L3), or `None` when the frame needs no answer.
+pub(super) fn erased_reply(client_frame: &str) -> Option<String> {
+    request_id(client_frame).map(|id| error_frame(&id, HUB_ERASED_CODE, HUB_ERASED_MESSAGE))
 }
 
 /// The error a client gets for a call that was forwarded and then lost with the

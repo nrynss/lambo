@@ -205,3 +205,87 @@ async fn a_shutdown_during_the_proxys_first_dial_exits_cleanly() {
         "the first dial must be raced against the signal, not merely capped: {waited:?}"
     );
 }
+
+/// A proxy for `session` over a real `MemoryStore`.
+fn proxy_onto(store: Arc<crate::store::MemoryStore>, session: &str) -> HubProxy {
+    HubProxy::new(
+        crate::types::SessionId::new(session),
+        ours(),
+        store,
+        "this-host".to_string(),
+        "this-host".to_string(),
+        None,
+    )
+}
+
+/// #23 review L3: a proxy whose session was erased gets the store's stable
+/// erased error from its dial — typed as `Dialled::Erased`, so the pump
+/// answers with the erased reply and exits — not a holder-has-no-endpoint
+/// conflict naming the tombstone as a holder, and not a retry forever.
+#[tokio::test]
+async fn a_dial_onto_an_erased_session_reports_the_erasure() {
+    let store = Arc::new(crate::store::MemoryStore::new());
+    let eraser = crate::store::lease::testkit::holder("lambo-erase-session", 1);
+    crate::store::GraphStore::erase_session(
+        store.as_ref(),
+        &crate::types::SessionId::new("gone"),
+        &eraser,
+    )
+    .await
+    .unwrap();
+    let proxy = proxy_onto(store.clone(), "gone");
+    let shutdown = std::future::pending::<()>();
+    tokio::pin!(shutdown);
+    let outcome = proxy
+        .dial_bounded(&Handshake::default(), shutdown.as_mut())
+        .await;
+    let Dialled::Erased(e) = outcome else {
+        panic!("an erased session must be reported as erased");
+    };
+    assert!(e.to_string().contains("was erased"), "{e}");
+
+    // The first dial ends the proxy with the same error, before any client
+    // traffic.
+    let err = proxy_onto(store, "gone")
+        .run(std::future::pending())
+        .await
+        .expect_err("the proxy exits on an erased session");
+    assert!(err.to_string().contains("was erased"), "{err}");
+    assert!(
+        matches!(
+            erased_reply(r#"{"jsonrpc":"2.0","id":7,"method":"tools/call"}"#),
+            Some(reply) if reply.contains("-32003") && reply.contains("erased")
+        ),
+        "a call is answered with the erased code"
+    );
+}
+
+/// #23 review H2: a released lease row (kept, with its fencing token) names
+/// no holder, so the dial reports "no lease holder" exactly as for no row,
+/// rather than a CLI-writer explanation naming the released marker.
+#[tokio::test]
+async fn a_dial_onto_a_released_lease_reports_no_holder() {
+    let store = Arc::new(crate::store::MemoryStore::new());
+    let sid = crate::types::SessionId::new("released");
+    let writer = crate::store::lease::testkit::holder("cli", 1);
+    crate::store::GraphStore::acquire_lease(
+        store.as_ref(),
+        &sid,
+        &writer,
+        std::time::Duration::from_secs(60),
+    )
+    .await
+    .unwrap();
+    crate::store::GraphStore::release_lease(store.as_ref(), &sid, &writer)
+        .await
+        .unwrap();
+    let shutdown = std::future::pending::<()>();
+    tokio::pin!(shutdown);
+    let outcome = proxy_onto(store, "released")
+        .dial_bounded(&Handshake::default(), shutdown.as_mut())
+        .await;
+    let Dialled::Failed(e) = outcome else {
+        panic!("a released row is no holder to dial");
+    };
+    assert!(e.to_string().contains("has no lease holder"), "{e}");
+}
