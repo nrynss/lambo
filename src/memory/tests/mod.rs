@@ -3,6 +3,7 @@
 use super::leases::ACTIVE_SESSIONS;
 use super::*;
 use crate::embed::FixtureEmbedder;
+use crate::store::lease::{LeaseOutcome, LEASE_TTL};
 use crate::store::MemoryStore;
 use crate::test_util::capture_logs;
 use crate::types::{
