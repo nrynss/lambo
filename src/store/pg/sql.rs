@@ -260,6 +260,19 @@ pub(super) const ERASE_TOMBSTONE_SQL: &str = "\
 pub(super) const COUNT_SESSION_VECTORS_SQL: &str =
     "SELECT COUNT(*) FROM concepts WHERE session_id = $1 AND embedding IS NOT NULL";
 
+/// Edges in **other** sessions incident to the erased session's nodes (#23
+/// review L4). Node ids are global and edges session-scoped, so an edge in
+/// session B can point at a node of session A; `DeleteNode` removes such
+/// edges with the node, and erasure does the same so no row keeps a deleted
+/// account's node id. Run with the `edges` step, before `concepts` and
+/// `interactions` go (the subqueries read them); counted in `edges`.
+pub(super) const ERASE_CROSS_SESSION_EDGES_SQL: &str = "\
+    DELETE FROM edges WHERE session_id <> $1 AND ( \
+        source IN (SELECT id FROM concepts WHERE session_id = $1) \
+     OR source IN (SELECT id FROM interactions WHERE session_id = $1) \
+     OR target IN (SELECT id FROM concepts WHERE session_id = $1) \
+     OR target IN (SELECT id FROM interactions WHERE session_id = $1))";
+
 /// Every session-keyed table erasure empties, with its DELETE, in dependency
 /// order: referencing rows first (`write_intents`, `synonyms`, `edges` and
 /// `concepts` reference `sessions`; `concepts` references `interactions`;

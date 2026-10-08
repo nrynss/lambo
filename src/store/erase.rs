@@ -651,6 +651,79 @@ pub(crate) mod testkit {
         }
     }
 
+    /// #23 review L4: edges in another session that point at the erased
+    /// session's nodes go with them, like `DeleteNode` removes a node's
+    /// incident edges in every session, and are counted in `edges`. The other
+    /// session's own rows stay. `a` (erased) and `b` must be fresh ids.
+    pub(crate) async fn check_erase_removes_cross_session_edges(
+        store: &dyn crate::store::GraphStore,
+        a: &SessionId,
+        b: &SessionId,
+    ) {
+        let (ia, ca, ib1, ib2) = (NodeId::new(), NodeId::new(), NodeId::new(), NodeId::new());
+        let interaction = |sid: &SessionId, id: NodeId| Mutation::UpsertNode {
+            node: Node::Interaction(Interaction {
+                event_time: None,
+                id,
+                session_id: sid.clone(),
+                agent_id: AgentId::new("erase-test"),
+                prompt_text: Some("x".into()),
+                previous_id: None,
+                created_at: Utc::now(),
+            }),
+        };
+        let batch = |mutations| MutationBatch {
+            mutations,
+            ..Default::default()
+        };
+        store
+            .flush(
+                &batch(vec![
+                    interaction(a, ia),
+                    concept(a, ca, ia, &format!("erased fact {ca}"), None),
+                ]),
+                None,
+            )
+            .await
+            .expect("plant a");
+        store
+            .flush(
+                &batch(vec![
+                    interaction(b, ib1),
+                    interaction(b, ib2),
+                    derives(b, ib1, ib2),
+                    // B's edge onto A's concept: B's row, A's node.
+                    derives(b, ib1, ca),
+                ]),
+                None,
+            )
+            .await
+            .expect("plant b");
+
+        let report = match store
+            .erase_session(a, &crate::store::lease::testkit::holder("eraser", 1))
+            .await
+            .expect("erase")
+        {
+            super::EraseOutcome::Erased(r) => r,
+            held => panic!("nothing holds a: {held:?}"),
+        };
+        assert_eq!(report.removed.edges, 1, "the cross-session edge is counted");
+        assert_eq!(report.removed.concepts, 1);
+        assert_eq!(report.removed.interactions, 1);
+
+        let kept = store.load_session(b).await.expect("b is untouched");
+        assert_eq!(kept.interactions.len(), 2, "b's nodes stay");
+        assert_eq!(
+            kept.edges
+                .iter()
+                .map(|e| (e.source, e.target))
+                .collect::<Vec<_>>(),
+            vec![(ib1, ib2)],
+            "only b's edge onto the erased node goes"
+        );
+    }
+
     /// The #23 review's H1 scenario, on any store, plus the defense in depth
     /// behind it.
     ///

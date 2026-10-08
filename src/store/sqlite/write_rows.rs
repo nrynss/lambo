@@ -855,6 +855,19 @@ pub(super) const ERASE_STATEMENTS: &[(&str, &str)] = &[
     ("sessions", "DELETE FROM sessions WHERE session_id = ?1"),
 ];
 
+/// Edges in **other** sessions incident to the erased session's nodes (#23
+/// review L4). Node ids are global and edges session-scoped, so an edge in
+/// session B can point at a node of session A; `DeleteNode` removes such
+/// edges with the node, and erasure does the same so no row keeps a deleted
+/// account's node id. Run with the `edges` step, before `concepts` and
+/// `interactions` go (the subqueries read them); counted in `edges`.
+pub(super) const ERASE_CROSS_SESSION_EDGES_SQL: &str = "\
+    DELETE FROM edges WHERE session_id <> ?1 AND ( \
+        source IN (SELECT id FROM concepts WHERE session_id = ?1) \
+     OR source IN (SELECT id FROM interactions WHERE session_id = ?1) \
+     OR target IN (SELECT id FROM concepts WHERE session_id = ?1) \
+     OR target IN (SELECT id FROM interactions WHERE session_id = ?1))";
+
 /// Concepts of the session that carry an embedding, counted before they go.
 pub(super) async fn count_session_vectors(
     tx: &mut sqlx::SqliteConnection,

@@ -266,11 +266,21 @@ pub(crate) async fn check_erase_session<D: Dialect>(store: &PgStore<D>) {
 }
 
 /// #23 review H1 on a live engine: release, erase, then a zombie's write under
-/// any token is refused and recreates nothing.
+/// any token is refused and recreates nothing. Also L4: another session's
+/// edges onto the erased nodes go with them.
 pub(crate) async fn check_erase_after_release<D: Dialect>(store: &PgStore<D>) {
     let sid = SessionId::from(format!("erase-after-release-{}", Uuid::new_v4()));
     crate::store::erase::testkit::check_erase_after_release_fences(store, &sid).await;
     cleanup(store, &sid).await;
+
+    let run = Uuid::new_v4();
+    let (a, b) = (
+        SessionId::from(format!("erase-cross-a-{run}")),
+        SessionId::from(format!("erase-cross-b-{run}")),
+    );
+    crate::store::erase::testkit::check_erase_removes_cross_session_edges(store, &a, &b).await;
+    cleanup(store, &a).await;
+    cleanup(store, &b).await;
 }
 
 #[cfg(feature = "store-postgres")]

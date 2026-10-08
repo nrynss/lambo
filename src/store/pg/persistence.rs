@@ -24,8 +24,9 @@ use super::codec::backend;
 use super::leases::{lease_info_from_ts, LeaseRowTs, LEASE_ROW_SQL};
 use super::pool::tx_retry;
 use super::sql::{
-    DELETED_ROW_SESSIONS_SQL, ERASE_LEASE_FOR_UPDATE_SQL, ERASE_SESSION_ROW_FOR_UPDATE_SQL,
-    ERASE_STATEMENTS, LEASE_TOKEN_FOR_SHARE_SQL, UPSERT_SESSION_ROW_SQL,
+    DELETED_ROW_SESSIONS_SQL, ERASE_CROSS_SESSION_EDGES_SQL, ERASE_LEASE_FOR_UPDATE_SQL,
+    ERASE_SESSION_ROW_FOR_UPDATE_SQL, ERASE_STATEMENTS, LEASE_TOKEN_FOR_SHARE_SQL,
+    UPSERT_SESSION_ROW_SQL,
 };
 #[cfg(feature = "fixtures")]
 use super::sql::{UPSERT_RESERVATION_SQL, UPSERT_SYNONYM_SQL};
@@ -495,7 +496,12 @@ impl<D: Dialect> PgStore<D> {
             };
             hook("vectors")?;
             for (table, sql) in ERASE_STATEMENTS {
-                let n = delete_session_rows(&mut tx, table, sql, session).await?;
+                let mut n = delete_session_rows(&mut tx, table, sql, session).await?;
+                if *table == "edges" {
+                    n +=
+                        delete_session_rows(&mut tx, table, ERASE_CROSS_SESSION_EDGES_SQL, session)
+                            .await?;
+                }
                 removed.add_table(table, n)?;
                 hook(table)?;
             }

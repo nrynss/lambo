@@ -28,7 +28,7 @@ use super::codec::{db_err, ts_to_text};
 use super::leases::{lease_info_from_text, LeaseRowText, LEASE_ROW_SQL};
 use super::write_rows::{
     apply_canonization_transition, apply_step, count_session_vectors, delete_session_rows,
-    write_erase_tombstone, ERASE_STATEMENTS,
+    write_erase_tombstone, ERASE_CROSS_SESSION_EDGES_SQL, ERASE_STATEMENTS,
 };
 #[cfg(feature = "fixtures")]
 use super::write_rows::{put_write_intent, upsert_concepts, upsert_edges, upsert_interactions};
@@ -537,7 +537,11 @@ impl SqliteStore {
         };
         hook("vectors")?;
         for (table, sql) in ERASE_STATEMENTS {
-            let n = delete_session_rows(&mut tx, table, sql, session).await?;
+            let mut n = delete_session_rows(&mut tx, table, sql, session).await?;
+            if *table == "edges" {
+                n += delete_session_rows(&mut tx, table, ERASE_CROSS_SESSION_EDGES_SQL, session)
+                    .await?;
+            }
             removed.add_table(table, n)?;
             hook(table)?;
         }

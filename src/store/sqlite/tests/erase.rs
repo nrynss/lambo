@@ -371,3 +371,16 @@ async fn an_erase_after_a_release_fences_every_token_on_sqlite() {
     )
     .await;
 }
+
+/// #23 review L4: another session's edges onto the erased nodes go.
+#[tokio::test]
+async fn erase_removes_cross_session_edges_on_sqlite() {
+    let store = test_store();
+    store.init_schema().await.unwrap();
+    crate::store::erase::testkit::check_erase_removes_cross_session_edges(
+        &store,
+        &SessionId::from("erased-a"),
+        &SessionId::from("kept-b"),
+    )
+    .await;
+}

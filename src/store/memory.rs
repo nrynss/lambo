@@ -973,6 +973,22 @@ impl GraphStore for MemoryStore {
             removed.canonization_events = snap.canonization_events.len() as u64;
             removed.reservations = snap.reservations.len() as u64;
             removed.write_intents = snap.write_intents.len() as u64;
+            // #23 review L4: another session's edges onto the erased nodes go
+            // too, as `DeleteNode` removes them (see `sessions_for_node_delete`).
+            let erased_nodes: HashSet<NodeId> = snap
+                .interactions
+                .iter()
+                .map(|i| i.id)
+                .chain(snap.concepts.iter().map(|c| c.id))
+                .collect();
+            for data in map.values_mut() {
+                let edges = &mut data.snapshot.edges;
+                let before = edges.len();
+                edges.retain(|e| {
+                    !erased_nodes.contains(&e.source) && !erased_nodes.contains(&e.target)
+                });
+                removed.edges += (before - edges.len()) as u64;
+            }
         }
         removed.session_stats = u64::from(self.flush_stats.write().remove(&session.0).is_some());
         let mut refusals = self.refusals.write();
@@ -2638,6 +2654,17 @@ mod tests {
                 EraseOutcome::Erased(r) => r,
                 EraseOutcome::Held { current, .. } => panic!("held by {}", current.holder),
             }
+        }
+
+        /// #23 review L4: another session's edges onto the erased nodes go.
+        #[tokio::test]
+        async fn erase_removes_cross_session_edges_on_memory() {
+            crate::store::erase::testkit::check_erase_removes_cross_session_edges(
+                &MemoryStore::new(),
+                &SessionId::from("erased-a"),
+                &SessionId::from("kept-b"),
+            )
+            .await;
         }
 
         /// #23 review H1: release, then erase, then a zombie's write under
