@@ -1441,7 +1441,7 @@ impl HubProxy {
                     tracing::warn!("lambo serve: the proxy's hub channel closed");
                     break;
                 }
-                Step::FromHub(Some((gen, event))) => {
+                Step::FromHub(Some((event_generation, event))) => {
                     match event {
                         FromHub::Frame(frame) => {
                             // A response retires the id it answers, from ANY
@@ -1459,7 +1459,7 @@ impl HubProxy {
                                 Self::send(&mut stdout, &frame).await.map_err(client_gone)?;
                                 continue;
                             }
-                            if gen != generation {
+                            if event_generation != generation {
                                 // Not an answer anyone is waiting for, from a
                                 // connection we no longer talk to: a
                                 // notification, or a server-initiated request
@@ -1467,7 +1467,7 @@ impl HubProxy {
                                 // gone. Dropping it is honest; forwarding it
                                 // would invite the client to answer nobody.
                                 tracing::warn!(
-                                    generation = gen,
+                                    generation = event_generation,
                                     current = generation,
                                     "lambo serve: dropped a frame from a superseded holder \
                                      connection — it answers nothing this client is waiting for"
@@ -1481,10 +1481,12 @@ impl HubProxy {
                             // what its ending means for the pump: those ids are
                             // owed an answer whether or not the connection was
                             // still the current one.
-                            let lost = Self::answer_lost(&mut stdout, &mut inflight, gen).await?;
+                            let lost =
+                                Self::answer_lost(&mut stdout, &mut inflight, event_generation)
+                                    .await?;
                             if lost > 0 {
                                 tracing::warn!(
-                                    generation = gen,
+                                    generation = event_generation,
                                     lost,
                                     "lambo serve: the session holder closed the connection with \
                                      calls still in flight — each was answered with an honest \
@@ -1492,7 +1494,7 @@ impl HubProxy {
                                      whether the holder applied them before it died"
                                 );
                             }
-                            if gen == generation {
+                            if event_generation == generation {
                                 // J4 / **JE2E-3: the artifact is booked HERE,
                                 // on the current connection ending, not inside
                                 // `lost > 0`.**
@@ -1534,7 +1536,7 @@ impl HubProxy {
                                     ));
                                 }
                                 tracing::warn!(
-                                    generation = gen,
+                                    generation = event_generation,
                                     "lambo serve: the session holder closed the connection — the \
                                      next call will re-read the lease and try the current holder"
                                 );
@@ -1569,8 +1571,8 @@ impl HubProxy {
         generation: u64,
     ) -> Result<usize, LamboError> {
         let mut lost = Vec::new();
-        inflight.retain(|(gen, id)| {
-            if *gen == generation {
+        inflight.retain(|(request_generation, id)| {
+            if *request_generation == generation {
                 lost.push(id.clone());
                 false
             } else {

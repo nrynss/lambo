@@ -267,12 +267,10 @@ async fn inspect_missing_suggests_near_matches_with_their_node_ids() {
     .await;
     let codec_id = {
         let g = s.mem.graph().read();
-        let found = g
-            .concepts()
+        g.concepts()
             .find(|c| c.content == "vector storage codec")
             .map(|c| c.id.0.to_string())
-            .expect("the derived concept");
-        found
+            .expect("the derived concept")
     };
 
     let out = call(

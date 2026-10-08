@@ -604,31 +604,19 @@ mod tests {
     /// must not shadow a working `GOOGLE_APPLICATION_CREDENTIALS`.
     #[test]
     fn the_shared_variable_wins_but_an_empty_one_does_not_shadow() {
-        let _g = crate::test_util::env_lock();
-        let prev_gcp = std::env::var_os("GCP_LAMBO_CREDENTIALS");
-        let prev_adc = std::env::var_os("GOOGLE_APPLICATION_CREDENTIALS");
-
-        std::env::set_var("GCP_LAMBO_CREDENTIALS", "/shared/creds.json");
-        std::env::set_var("GOOGLE_APPLICATION_CREDENTIALS", "/adc/creds.json");
+        let env = crate::test_util::env_lock();
+        env.set("GCP_LAMBO_CREDENTIALS", "/shared/creds.json");
+        env.set("GOOGLE_APPLICATION_CREDENTIALS", "/adc/creds.json");
         let both = credentials_path_from_env();
 
-        std::env::set_var("GCP_LAMBO_CREDENTIALS", "");
+        env.set("GCP_LAMBO_CREDENTIALS", "");
         let shared_empty = credentials_path_from_env();
 
-        std::env::remove_var("GCP_LAMBO_CREDENTIALS");
+        env.remove("GCP_LAMBO_CREDENTIALS");
         let shared_unset = credentials_path_from_env();
 
-        std::env::set_var("GOOGLE_APPLICATION_CREDENTIALS", "");
+        env.set("GOOGLE_APPLICATION_CREDENTIALS", "");
         let both_empty = credentials_path_from_env();
-
-        match prev_gcp {
-            Some(v) => std::env::set_var("GCP_LAMBO_CREDENTIALS", v),
-            None => std::env::remove_var("GCP_LAMBO_CREDENTIALS"),
-        }
-        match prev_adc {
-            Some(v) => std::env::set_var("GOOGLE_APPLICATION_CREDENTIALS", v),
-            None => std::env::remove_var("GOOGLE_APPLICATION_CREDENTIALS"),
-        }
 
         assert_eq!(
             both.as_deref(),

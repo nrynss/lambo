@@ -688,16 +688,16 @@ mod tests {
 
     #[test]
     fn empty_embedder_env_defaults_kind() {
-        let _g = crate::test_util::env_lock();
+        let env = crate::test_util::env_lock();
 
-        env::remove_var("LAMBO_EMBEDDER");
-        env::remove_var("LAMBO_EMBED_DIM");
-        env::remove_var("LAMBO_LLAMA_EMBED_URL");
-        env::remove_var("LAMBO_LLAMA_MODEL");
-        env::remove_var("LAMBO_GEMINI_PROJECT");
-        env::remove_var("LAMBO_GEMINI_LOCATION");
-        env::remove_var("LAMBO_GEMINI_MODEL");
-        env::remove_var("LAMBO_GEMINI_CREDENTIALS");
+        env.remove("LAMBO_EMBEDDER");
+        env.remove("LAMBO_EMBED_DIM");
+        env.remove("LAMBO_LLAMA_EMBED_URL");
+        env.remove("LAMBO_LLAMA_MODEL");
+        env.remove("LAMBO_GEMINI_PROJECT");
+        env.remove("LAMBO_GEMINI_LOCATION");
+        env.remove("LAMBO_GEMINI_MODEL");
+        env.remove("LAMBO_GEMINI_CREDENTIALS");
         let cfg = EmbedderConfig::from_env().unwrap();
         assert_eq!(cfg.kind, EmbedderKind::BgeM3);
         assert_eq!(cfg.dim, 1024);
@@ -707,14 +707,14 @@ mod tests {
         assert_eq!(cfg.gemini_credentials, None);
 
         // Empty string is unset — still BgeM3 (must not call FromStr("") which errors).
-        env::set_var("LAMBO_EMBEDDER", "");
+        env.set("LAMBO_EMBEDDER", "");
         let cfg = EmbedderConfig::from_env().unwrap();
         assert_eq!(cfg.kind, EmbedderKind::BgeM3);
         assert_eq!(
             EmbedderConfig::from_env().unwrap(),
             EmbedderConfig::default().overlay_env().unwrap()
         );
-        env::remove_var("LAMBO_EMBEDDER");
+        env.remove("LAMBO_EMBEDDER");
     }
 
     #[test]
@@ -755,12 +755,12 @@ mod tests {
 
     #[test]
     fn gemini_overlay_env_picks_up_vars() {
-        let _g = crate::test_util::env_lock();
+        let env = crate::test_util::env_lock();
 
-        env::set_var("LAMBO_GEMINI_PROJECT", "proj-1");
-        env::set_var("LAMBO_GEMINI_LOCATION", "us-west1");
-        env::set_var("LAMBO_GEMINI_MODEL", "gemini-embedding-001");
-        env::set_var("LAMBO_GEMINI_CREDENTIALS", "/tmp/sa.json");
+        env.set("LAMBO_GEMINI_PROJECT", "proj-1");
+        env.set("LAMBO_GEMINI_LOCATION", "us-west1");
+        env.set("LAMBO_GEMINI_MODEL", "gemini-embedding-001");
+        env.set("LAMBO_GEMINI_CREDENTIALS", "/tmp/sa.json");
         let cfg = EmbedderConfig::from_env().unwrap();
         assert_eq!(cfg.gemini_project.as_deref(), Some("proj-1"));
         assert_eq!(cfg.gemini_location.as_deref(), Some("us-west1"));
@@ -771,7 +771,7 @@ mod tests {
         );
 
         // Empty env value leaves the base intact.
-        env::set_var("LAMBO_GEMINI_PROJECT", "");
+        env.set("LAMBO_GEMINI_PROJECT", "");
         let cfg = EmbedderConfig::from_env().unwrap();
         assert_eq!(cfg.gemini_project, None);
         assert_eq!(cfg.gemini_location.as_deref(), Some("us-west1"));
@@ -780,11 +780,11 @@ mod tests {
     fn gemini_overlay_env_base_then_env_precedence() {
         // A2-R1-1 closure: with a file base set, non-empty env wins and empty env
         // leaves the base intact. The base simulates a `lambo.toml` value.
-        let _g = crate::test_util::env_lock();
-        env::remove_var("LAMBO_GEMINI_PROJECT");
-        env::remove_var("LAMBO_GEMINI_LOCATION");
-        env::remove_var("LAMBO_GEMINI_MODEL");
-        env::remove_var("LAMBO_GEMINI_CREDENTIALS");
+        let env = crate::test_util::env_lock();
+        env.remove("LAMBO_GEMINI_PROJECT");
+        env.remove("LAMBO_GEMINI_LOCATION");
+        env.remove("LAMBO_GEMINI_MODEL");
+        env.remove("LAMBO_GEMINI_CREDENTIALS");
 
         let base = EmbedderConfig {
             gemini_project: Some("from-file".to_string()),
@@ -792,12 +792,12 @@ mod tests {
         };
 
         // Non-empty env overrides the set base.
-        env::set_var("LAMBO_GEMINI_PROJECT", "from-env");
+        env.set("LAMBO_GEMINI_PROJECT", "from-env");
         let cfg = base.clone().overlay_env().unwrap();
         assert_eq!(cfg.gemini_project.as_deref(), Some("from-env"));
 
         // Empty env leaves the set base intact.
-        env::set_var("LAMBO_GEMINI_PROJECT", "");
+        env.set("LAMBO_GEMINI_PROJECT", "");
         let cfg = base.overlay_env().unwrap();
         assert_eq!(cfg.gemini_project.as_deref(), Some("from-file"));
     }
@@ -807,12 +807,12 @@ mod tests {
         // A2-R1-2 closure: whitespace is non-empty, so it wins over the base,
         // consistent with the untrimmed llama pattern. This locks the corner so a
         // future trim must be a deliberate contract change, not a silent one.
-        let _g = crate::test_util::env_lock();
-        env::remove_var("LAMBO_GEMINI_PROJECT");
-        env::set_var("LAMBO_GEMINI_PROJECT", "   ");
+        let env = crate::test_util::env_lock();
+        env.remove("LAMBO_GEMINI_PROJECT");
+        env.set("LAMBO_GEMINI_PROJECT", "   ");
         let cfg = EmbedderConfig::from_env().unwrap();
         assert_eq!(cfg.gemini_project.as_deref(), Some("   "));
-        env::remove_var("LAMBO_GEMINI_PROJECT");
+        env.remove("LAMBO_GEMINI_PROJECT");
     }
 
     /// Issue #13: `keep_warm_secs` is a real `[embedder]` key (absent = auto),
@@ -836,24 +836,24 @@ mod tests {
     /// a hard error naming the variable, not a silent auto.
     #[test]
     fn keep_warm_secs_env_overlay() {
-        let _g = crate::test_util::env_lock();
-        env::remove_var("LAMBO_EMBED_KEEP_WARM_SECS");
+        let env = crate::test_util::env_lock();
+        env.remove("LAMBO_EMBED_KEEP_WARM_SECS");
         let base = EmbedderConfig {
             keep_warm_secs: Some(60),
             ..Default::default()
         };
         assert_eq!(base.clone().overlay_env().unwrap().keep_warm_secs, Some(60));
 
-        env::set_var("LAMBO_EMBED_KEEP_WARM_SECS", "0");
+        env.set("LAMBO_EMBED_KEEP_WARM_SECS", "0");
         assert_eq!(base.clone().overlay_env().unwrap().keep_warm_secs, Some(0));
 
-        env::set_var("LAMBO_EMBED_KEEP_WARM_SECS", "");
+        env.set("LAMBO_EMBED_KEEP_WARM_SECS", "");
         assert_eq!(base.clone().overlay_env().unwrap().keep_warm_secs, Some(60));
 
-        env::set_var("LAMBO_EMBED_KEEP_WARM_SECS", "soon");
+        env.set("LAMBO_EMBED_KEEP_WARM_SECS", "soon");
         let err = base.overlay_env().unwrap_err().to_string();
         assert!(err.contains("LAMBO_EMBED_KEEP_WARM_SECS"), "{err}");
-        env::remove_var("LAMBO_EMBED_KEEP_WARM_SECS");
+        env.remove("LAMBO_EMBED_KEEP_WARM_SECS");
     }
 
     /// Issue #13: auto keep-warm is off for every non-candle adapter — the
@@ -1019,11 +1019,9 @@ mod tests {
         // absent: the embedder now reads GCP_LAMBO_CREDENTIALS too, so a developer with
         // either exported would otherwise see this test build an embedder instead of
         // refusing, and a sibling test setting one would race it.
-        let _g = crate::test_util::env_lock();
-        let prev_gcp = std::env::var_os("GCP_LAMBO_CREDENTIALS");
-        let prev_adc = std::env::var_os("GOOGLE_APPLICATION_CREDENTIALS");
-        std::env::remove_var("GCP_LAMBO_CREDENTIALS");
-        std::env::remove_var("GOOGLE_APPLICATION_CREDENTIALS");
+        let env = crate::test_util::env_lock();
+        env.remove("GCP_LAMBO_CREDENTIALS");
+        env.remove("GOOGLE_APPLICATION_CREDENTIALS");
         let r = build_embedder(EmbedderConfig {
             kind: EmbedderKind::Gemini,
             dim: 1536,
@@ -1031,12 +1029,6 @@ mod tests {
             llama_model: None,
             ..Default::default()
         });
-        if let Some(v) = prev_gcp {
-            std::env::set_var("GCP_LAMBO_CREDENTIALS", v);
-        }
-        if let Some(v) = prev_adc {
-            std::env::set_var("GOOGLE_APPLICATION_CREDENTIALS", v);
-        }
         let Err(err) = r else {
             panic!("expected Unavailable, got Ok (silent fallback forbidden)");
         };
@@ -1094,7 +1086,7 @@ mod tests {
     #[cfg(feature = "embed-gemini")]
     fn gemini_resolves_the_shared_credential_variable() {
         use super::gemini::TEST_RSA_PRIVATE_KEY_PEM;
-        let _g = crate::test_util::env_lock();
+        let env = crate::test_util::env_lock();
         let dir = crate::test_util::ScratchDir::new("lambo-l1-shared-cred");
         let creds_path = dir.join("sa.json");
         std::fs::write(
@@ -1117,32 +1109,29 @@ mod tests {
             ..Default::default()
         };
 
-        let prev_gcp = std::env::var_os("GCP_LAMBO_CREDENTIALS");
-        let prev_adc = std::env::var_os("GOOGLE_APPLICATION_CREDENTIALS");
-
         // Arm 1: the shared variable alone. This is the arm that used to refuse.
-        std::env::set_var("GCP_LAMBO_CREDENTIALS", &creds_path);
-        std::env::remove_var("GOOGLE_APPLICATION_CREDENTIALS");
+        env.set("GCP_LAMBO_CREDENTIALS", &creds_path);
+        env.remove("GOOGLE_APPLICATION_CREDENTIALS");
         let built = build_embedder(cfg());
         let arm1 = built.map(|e| crate::embed::gemini_identity(e.as_ref()));
 
         // Arm 2: the Google-standard variable alone, which must keep working.
-        std::env::remove_var("GCP_LAMBO_CREDENTIALS");
-        std::env::set_var("GOOGLE_APPLICATION_CREDENTIALS", &creds_path);
+        env.remove("GCP_LAMBO_CREDENTIALS");
+        env.set("GOOGLE_APPLICATION_CREDENTIALS", &creds_path);
         let built = build_embedder(cfg());
         let arm2 = built.map(|e| crate::embed::gemini_identity(e.as_ref()));
 
         // Arm 3: neither. The refusal must name both variables and the config key, so an
         // operator reading it knows every way to answer it.
-        std::env::remove_var("GCP_LAMBO_CREDENTIALS");
-        std::env::remove_var("GOOGLE_APPLICATION_CREDENTIALS");
+        env.remove("GCP_LAMBO_CREDENTIALS");
+        env.remove("GOOGLE_APPLICATION_CREDENTIALS");
         let arm3 = build_embedder(cfg()).err().map(|e| e.to_string());
 
         // Arm 4 (L1-R2-2): the config key outranks BOTH variables. Both point at a file
         // that does not exist, so an embedder that consulted the environment first cannot
         // build, and one that honours the config key can.
-        std::env::set_var("GCP_LAMBO_CREDENTIALS", dir.join("absent-shared.json"));
-        std::env::set_var(
+        env.set("GCP_LAMBO_CREDENTIALS", dir.join("absent-shared.json"));
+        env.set(
             "GOOGLE_APPLICATION_CREDENTIALS",
             dir.join("absent-adc.json"),
         );
@@ -1151,15 +1140,6 @@ mod tests {
             ..cfg()
         })
         .map(|e| crate::embed::gemini_identity(e.as_ref()));
-
-        match prev_gcp {
-            Some(v) => std::env::set_var("GCP_LAMBO_CREDENTIALS", v),
-            None => std::env::remove_var("GCP_LAMBO_CREDENTIALS"),
-        }
-        match prev_adc {
-            Some(v) => std::env::set_var("GOOGLE_APPLICATION_CREDENTIALS", v),
-            None => std::env::remove_var("GOOGLE_APPLICATION_CREDENTIALS"),
-        }
 
         let id1 = arm1.unwrap_or_else(|e| {
             panic!(

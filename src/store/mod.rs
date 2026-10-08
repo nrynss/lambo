@@ -1522,12 +1522,12 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
 
     #[test]
     fn dsn_from_env_and_overlay_aligned() {
-        let _g = env_lock();
+        let env = env_lock();
         // Clean slate.
-        env::remove_var("LAMBO_COCKROACH_DSN");
-        env::remove_var("DATABASE_URL");
-        env::remove_var("LAMBO_STORE");
-        env::remove_var("LAMBO_SQLITE_PATH");
+        env.remove("LAMBO_COCKROACH_DSN");
+        env.remove("DATABASE_URL");
+        env.remove("LAMBO_STORE");
+        env.remove("LAMBO_SQLITE_PATH");
 
         // E2E-F2: the base kind used to be `Memory`, a kind with no DSN at all,
         // and the overlay handed it one anyway. The overlay is kind-aware now,
@@ -1547,14 +1547,14 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
         assert_eq!(StoreConfig::dsn_from_env(), None);
 
         // Empty primary (placeholder in .env) is unset, not a selection.
-        env::set_var("LAMBO_COCKROACH_DSN", "");
-        env::remove_var("DATABASE_URL");
+        env.set("LAMBO_COCKROACH_DSN", "");
+        env.remove("DATABASE_URL");
         assert_eq!(StoreConfig::dsn_from_env(), None);
         assert_eq!(base.clone().overlay_env().unwrap().dsn, None);
 
         // Empty primary, secondary set: DATABASE_URL still works, which is the
         // secret path E2E-F2's fix must not break.
-        env::set_var("DATABASE_URL", "from-database-url");
+        env.set("DATABASE_URL", "from-database-url");
         assert_eq!(
             StoreConfig::dsn_from_env().as_deref(),
             Some("from-database-url")
@@ -1565,7 +1565,7 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
         );
 
         // Primary non-empty beats secondary.
-        env::set_var("LAMBO_COCKROACH_DSN", "from-primary");
+        env.set("LAMBO_COCKROACH_DSN", "from-primary");
         assert_eq!(StoreConfig::dsn_from_env().as_deref(), Some("from-primary"));
         assert_eq!(
             base.clone().overlay_env().unwrap().dsn.as_deref(),
@@ -1573,13 +1573,13 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
         );
 
         // Both empty (vars present) is unset.
-        env::set_var("LAMBO_COCKROACH_DSN", "");
-        env::set_var("DATABASE_URL", "");
+        env.set("LAMBO_COCKROACH_DSN", "");
+        env.set("DATABASE_URL", "");
         assert_eq!(StoreConfig::dsn_from_env(), None);
         assert_eq!(base.overlay_env().unwrap().dsn, None);
 
-        env::remove_var("LAMBO_COCKROACH_DSN");
-        env::remove_var("DATABASE_URL");
+        env.remove("LAMBO_COCKROACH_DSN");
+        env.remove("DATABASE_URL");
     }
 
     /// E2E-F2, the secret path: a file DSN that names the database and an
@@ -1588,10 +1588,10 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
     /// credentials) is what the process opens.
     #[test]
     fn env_dsn_that_only_adds_credentials_overlays_the_file_dsn() {
-        let _g = env_lock();
-        env::remove_var("LAMBO_COCKROACH_DSN");
-        env::remove_var("DATABASE_URL");
-        env::remove_var("LAMBO_STORE");
+        let env = env_lock();
+        env.remove("LAMBO_COCKROACH_DSN");
+        env.remove("DATABASE_URL");
+        env.remove("LAMBO_STORE");
 
         let file = StoreConfig {
             kind: StoreKind::Cockroach,
@@ -1599,7 +1599,7 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
             path: None,
             vector_dim: None,
         };
-        env::set_var(
+        env.set(
             "LAMBO_COCKROACH_DSN",
             "postgres://u:s3cret@db.example:26257/lambo",
         );
@@ -1614,11 +1614,11 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
         );
 
         // Same story through DATABASE_URL.
-        env::remove_var("LAMBO_COCKROACH_DSN");
-        env::set_var("DATABASE_URL", "postgres://u:s3cret@db.example:26257/lambo");
+        env.remove("LAMBO_COCKROACH_DSN");
+        env.set("DATABASE_URL", "postgres://u:s3cret@db.example:26257/lambo");
         assert!(file.overlay_env().is_ok(), "DATABASE_URL must stay usable");
 
-        env::remove_var("DATABASE_URL");
+        env.remove("DATABASE_URL");
     }
 
     /// E2E-F2, the precedence path: an explicitly configured `store.dsn` is
@@ -1630,11 +1630,11 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
     /// container's DSN in their `lambo.toml`.
     #[test]
     fn env_dsn_naming_a_different_database_is_refused_not_preferred() {
-        let _g = env_lock();
-        env::remove_var("LAMBO_COCKROACH_DSN");
-        env::remove_var("LAMBO_POSTGRES_DSN");
-        env::remove_var("DATABASE_URL");
-        env::remove_var("LAMBO_STORE");
+        let env = env_lock();
+        env.remove("LAMBO_COCKROACH_DSN");
+        env.remove("LAMBO_POSTGRES_DSN");
+        env.remove("DATABASE_URL");
+        env.remove("LAMBO_STORE");
 
         for (kind, var) in [
             (StoreKind::Cockroach, "LAMBO_COCKROACH_DSN"),
@@ -1648,12 +1648,12 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
                 path: None,
                 vector_dim: None,
             };
-            env::set_var(var, "postgresql://prod:hunter2@cluster.example:26257/decoy");
+            env.set(var, "postgresql://prod:hunter2@cluster.example:26257/decoy");
             let err = cfg
                 .overlay_env()
                 .expect_err("a different database must be refused, not silently preferred")
                 .to_string();
-            env::remove_var(var);
+            env.remove(var);
 
             assert!(
                 err.contains(var),
@@ -1696,10 +1696,10 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
     /// placeholder — which is exactly what round 3 shipped.
     #[test]
     fn two_unquotable_dsns_still_reach_the_disagreement_refusal() {
-        let _g = env_lock();
-        env::remove_var("LAMBO_COCKROACH_DSN");
-        env::remove_var("DATABASE_URL");
-        env::remove_var("LAMBO_STORE");
+        let env = env_lock();
+        env.remove("LAMBO_COCKROACH_DSN");
+        env.remove("DATABASE_URL");
+        env.remove("LAMBO_STORE");
 
         let cfg = StoreConfig {
             kind: StoreKind::Postgres,
@@ -1707,7 +1707,7 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
             path: None,
             vector_dim: None,
         };
-        env::set_var("LAMBO_POSTGRES_DSN", "postgres://app@host-b:/db_password_b");
+        env.set("LAMBO_POSTGRES_DSN", "postgres://app@host-b:/db_password_b");
         let err = cfg
             .clone()
             .overlay_env()
@@ -1731,12 +1731,12 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
         // The same spelling on both sides is not a disagreement, and still is
         // not one when it is a spelling we cannot parse. This is the half of
         // round 3's behaviour that the digest deliberately keeps.
-        env::set_var("LAMBO_POSTGRES_DSN", "postgres://app@host-a:/db_password_a");
+        env.set("LAMBO_POSTGRES_DSN", "postgres://app@host-a:/db_password_a");
         assert_eq!(
             cfg.overlay_env().unwrap().dsn.as_deref(),
             Some("postgres://app@host-a:/db_password_a"),
         );
-        env::remove_var("LAMBO_POSTGRES_DSN");
+        env.remove("LAMBO_POSTGRES_DSN");
     }
 
     /// E2E-F2: `LAMBO_POSTGRES_DSN` is the Postgres kind's variable and
@@ -1745,11 +1745,11 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
     /// production `LAMBO_COCKROACH_DSN` in `.env` from opening that cluster.
     #[test]
     fn each_kind_reads_its_own_dsn_env_var() {
-        let _g = env_lock();
-        env::remove_var("DATABASE_URL");
-        env::remove_var("LAMBO_STORE");
-        env::set_var("LAMBO_COCKROACH_DSN", "crdb-dsn");
-        env::set_var("LAMBO_POSTGRES_DSN", "pg-dsn");
+        let env = env_lock();
+        env.remove("DATABASE_URL");
+        env.remove("LAMBO_STORE");
+        env.set("LAMBO_COCKROACH_DSN", "crdb-dsn");
+        env.set("LAMBO_POSTGRES_DSN", "pg-dsn");
 
         let of = |kind| {
             StoreConfig {
@@ -1767,7 +1767,7 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
         // Kinds with no DSN take none, from any variable.
         assert_eq!(of(StoreKind::Sqlite), None);
         assert_eq!(of(StoreKind::Memory), None);
-        env::set_var("DATABASE_URL", "shared-dsn");
+        env.set("DATABASE_URL", "shared-dsn");
         assert_eq!(of(StoreKind::Sqlite), None);
         assert_eq!(of(StoreKind::Memory), None);
 
@@ -1781,9 +1781,9 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
         );
         assert_eq!(StoreConfig::dsn_from_env_for_kind(StoreKind::Sqlite), None);
 
-        env::remove_var("LAMBO_COCKROACH_DSN");
-        env::remove_var("LAMBO_POSTGRES_DSN");
-        env::remove_var("DATABASE_URL");
+        env.remove("LAMBO_COCKROACH_DSN");
+        env.remove("LAMBO_POSTGRES_DSN");
+        env.remove("DATABASE_URL");
     }
 
     #[test]
@@ -1801,23 +1801,23 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
 
     #[test]
     fn from_env_is_default_overlay() {
-        let _g = env_lock();
-        env::remove_var("LAMBO_STORE");
-        env::remove_var("LAMBO_COCKROACH_DSN");
-        env::remove_var("DATABASE_URL");
-        env::remove_var("LAMBO_SQLITE_PATH");
+        let env = env_lock();
+        env.remove("LAMBO_STORE");
+        env.remove("LAMBO_COCKROACH_DSN");
+        env.remove("DATABASE_URL");
+        env.remove("LAMBO_SQLITE_PATH");
         assert_eq!(
             StoreConfig::from_env().unwrap(),
             StoreConfig::default().overlay_env().unwrap()
         );
-        env::set_var("LAMBO_STORE", "sqlite");
-        env::set_var("LAMBO_SQLITE_PATH", "/tmp/x.db");
+        env.set("LAMBO_STORE", "sqlite");
+        env.set("LAMBO_SQLITE_PATH", "/tmp/x.db");
         assert_eq!(
             StoreConfig::from_env().unwrap(),
             StoreConfig::default().overlay_env().unwrap()
         );
-        env::remove_var("LAMBO_STORE");
-        env::remove_var("LAMBO_SQLITE_PATH");
+        env.remove("LAMBO_STORE");
+        env.remove("LAMBO_SQLITE_PATH");
     }
 
     #[test]
@@ -1827,10 +1827,10 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
 
     #[test]
     fn empty_lambo_store_env_keeps_default_kind() {
-        let _g = env_lock();
-        env::set_var("LAMBO_STORE", "");
-        env::remove_var("LAMBO_COCKROACH_DSN");
-        env::remove_var("DATABASE_URL");
+        let env = env_lock();
+        env.set("LAMBO_STORE", "");
+        env.remove("LAMBO_COCKROACH_DSN");
+        env.remove("DATABASE_URL");
         let cfg = StoreConfig::from_env().unwrap();
         assert_eq!(cfg.kind, StoreKind::Memory);
         let o = StoreConfig {
@@ -1843,7 +1843,7 @@ CREATE INDEX IF NOT EXISTS sessions_idx ON sessions (session_id);
         .unwrap();
         // Empty LAMBO_STORE is unset → keep file kind.
         assert_eq!(o.kind, StoreKind::Sqlite);
-        env::remove_var("LAMBO_STORE");
+        env.remove("LAMBO_STORE");
     }
     #[tokio::test]
     #[cfg(feature = "store-memory")]
