@@ -64,15 +64,21 @@
     CockroachDB, memory): a failure part way leaves the session as it was and
     a rerun completes.
   - The session's lease row is replaced by a tombstone rather than deleted.
-    Every write holding a pre-erase fencing token, and every unleased write, is
-    refused with a stable "was erased" error and recreates nothing; no writer
-    can take the session over, and `derive`, `serve` and the other writer verbs
-    refuse to attach. Reusing an erased id is a deliberate operator act: delete
-    its `session_leases` row.
+    Every write to the erased session is refused with a stable "was erased"
+    error whatever fencing token it presents, unleased writes and fixture
+    seeds included, and recreates nothing; no writer can take the session
+    over, and `derive`, `serve` and the other writer verbs refuse to attach.
+    Reusing an erased id is a deliberate operator act: an UPDATE that hands
+    the row back and keeps its fencing token (statement in the CLI reference),
+    never a DELETE.
+  - Edges in other sessions that point at the erased session's concepts or
+    interactions are removed with it (counted in `edges`).
   - It never preempts a live writer. While a `serve` or writer verb holds the
     session, the erase is refused and names the holder; stop it, then erase. A
-    writer whose lease had already lapsed is fenced and winds down at its next
-    heartbeat.
+    writer whose lease had already lapsed is fenced by its first refused write
+    or its next heartbeat, whichever comes first, and winds down; a `serve`
+    proxying to the session answers the next call with the erased error and
+    exits.
   - An operator verb: the authority is access to the store, never an agent id,
     and there is no MCP tool for it. A `--confirm` that differs from
     `--session` is a usage error and erases nothing.
@@ -82,10 +88,25 @@
 - `GraphStore::erase_session` (with `store::erase`'s `EraseReport`,
   `EraseOutcome` and tombstone rule). The default implementation returns a
   `Capability` error, so a third-party adapter that does not implement it
-  fails closed instead of reporting a deletion it did not do.
+  fails closed instead of reporting a deletion it did not do. `EraseCounts`
+  and `EraseReport` are `#[non_exhaustive]`.
+- Decisions for #23: erasure is CLI-only (an MCP or portal surface waits for
+  #32's authority design), the tombstone keeps the plain session id, and the
+  `serve --ledger` file and backups are operator-owned and not scrubbed.
 
 ### Fixed
 
+- A clean lease release no longer resets a session's fencing token (single
+  writer, #1; found by the #23 review). A release deleted the
+  `session_leases` row, so the next acquire minted token 1 again, and a writer
+  whose lease had lapsed and been taken over could write over the next holder
+  once the taker closed cleanly. A release now expires the row (holder
+  `lambo:released`) and keeps its token, so tokens only go up for the life of
+  a session id, on SQLite, PostgreSQL, CockroachDB and the in-memory store. A
+  session that was ever leased therefore refuses unleased writes, as it
+  already did while an expired row was present. The documented operator
+  override for a wedged holder (`store::lease::OPERATOR_OVERRIDE`) is now the
+  matching UPDATE; never delete a lease row.
 - A `Memory::close()` cancelled while it was stopping the background write
   queue (for example by a caller's timeout) no longer leaves lane workers or
   the durable-intent replay running. Every worker is aborted before any is

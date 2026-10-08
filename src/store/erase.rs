@@ -37,8 +37,16 @@
 //! makes "a later write to an erased session id is refused and does not
 //! recreate it" true on every store, and it is what #32's implicit session
 //! creation must respect. Reusing an erased id is a deliberate operator act:
-//! delete the tombstone row (the same statement as
-//! [`crate::store::lease::OPERATOR_OVERRIDE`]).
+//! hand the row back as a released lease, keeping its fencing token, so a
+//! writer cut off before the erase stays below the next holder's token:
+//!
+//! ```sql
+//! UPDATE session_leases SET holder = 'lambo:released', expires_at = acquired_at,
+//!   endpoint = NULL WHERE session_id = '<session>' AND holder = 'lambo:erased';
+//! ```
+//!
+//! Never delete the row: that restarts the session's tokens (see
+//! `store::lease`, "The token outlives every holder").
 //!
 //! # Who may erase
 //!

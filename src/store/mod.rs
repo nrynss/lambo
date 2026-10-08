@@ -604,9 +604,11 @@ pub trait GraphStore: Send + Sync {
     /// (spec §2.2). A graceful close **releases** rather than waiting out the
     /// TTL, so the next writer takes over immediately.
     ///
-    /// Idempotent and holder-scoped: it clears the row only if `holder` still
+    /// Idempotent and holder-scoped: it expires the row only if `holder` still
     /// owns it, so a stale release (after our lease already expired and was
-    /// re-taken) can never evict the *new* holder. Default is a no-op.
+    /// re-taken) can never evict the *new* holder. It never deletes the row:
+    /// the row's fencing token must outlive every holder (#23 review H2; see
+    /// [`lease`]). Default is a no-op.
     async fn release_lease(
         &self,
         _session: &SessionId,

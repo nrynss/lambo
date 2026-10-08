@@ -31,8 +31,9 @@ Deleting the row would make the session read as *unleased*, and an unleased
 session passes the fence (`lease_permits_write(0, _)`), so a lapsed writer's
 next flush would recreate everything it held in RAM. With the tombstone:
 
-- every pre-erase token is below the tombstone's, and an unleased write
-  (`None`) is refused because the row exists;
+- every pre-erase token is below the tombstone's (this holds only because a
+  release keeps the row and its token; see "Review remediation" below), and an
+  unleased write (`None`) is refused because the row exists;
 - no acquire can take the session over (the expiry guard never fires, and
   `lambo:erased` has neither `@` nor `#`, so no `LeaseHolder::token` equals it);
 - a zombie `serve`'s heartbeat gets `Held(tombstone)`, latches its fence and
@@ -40,9 +41,10 @@ next flush would recreate everything it held in RAM. With the tombstone:
 
 The cost is one row holding the session id. That is the minimum that can
 refuse later writes, and it is #32's "implicit creation must not recreate an
-erased session" rule. Reusing an id is an operator act: delete the row
-(`OPERATOR_OVERRIDE`'s statement). No schema change was needed, so existing
-stores need no re-provision.
+erased session" rule. Reusing an id is an operator act: an UPDATE that hands
+the tombstone back as a released row and keeps `current_token` (statement in
+`cli.mdx` and the `store::erase` module docs), never a DELETE. No schema change
+was needed, so existing stores need no re-provision.
 
 **The gate.** Proceed on no row, a lapsed lease, an earlier tombstone, or the
 eraser's own lease; refuse a live lease held by anyone else, touching nothing.
@@ -81,9 +83,10 @@ tombstoned session (an `INSERT ... SELECT ... WHERE NOT EXISTS` on SQL, a check
 on Memory). A rerun would sweep such a row anyway, but the guard makes "nothing
 recreates an erased session" hold without one.
 
-**Refusal text.** The fence reads the lease holder on the refusal path only, so
-a write to an erased session gets `StaleWrite("session X was erased ...")`, and
-an ordinary stale write keeps its message byte for byte. `StaleWrite` rather
+**Refusal text.** The fence reads the lease holder with the token (since the
+review remediation; it used to read it on the refusal path only), so a write to
+an erased session gets `StaleWrite("session X was erased ...")`, and an
+ordinary stale write keeps its message byte for byte. `StaleWrite` rather
 than a new `StoreError` variant: `StoreError` is public and not
 `#[non_exhaustive]`, a new variant would break downstream matches, and every
 caller already treats `StaleWrite` as terminal (not retried, writer fenced),
@@ -168,10 +171,68 @@ typed data (the lease row's holder), never on the message.
   operator, which can carry recall queries and truncated concept text. Erasure
   does not rewrite it. Documented in `cli.mdx` and the changelog.
 
+## User decisions (2026-10-08)
+
+- Erasure stays CLI-only. The MCP and portal surface is deferred to #32's
+  authority design (decision 2), not built here.
+- The tombstone keeps the plain session id (no hashing): it is the minimum
+  that can refuse later writes, and an operator must be able to find it.
+- The `serve --ledger` file and backups are operator-owned and documented as
+  such. Erasure does not scrub them.
+
+## Review remediation (Opus review, `scratchpad/refactor/23/review-opus.md`)
+
+**H2 (pre-existing on main): a release reset the fencing token.** A release
+deleted the lease row, so the next acquire minted token 1 again and a lapsed
+writer still holding an older token passed `presented >= current` against the
+new holder. Rule now: **a `session_leases` row is never deleted and its
+`current_token` only goes up, for the life of the session id.** A release is a
+holder-scoped UPDATE to holder `lambo:released`, `expires_at` = the store
+clock, `endpoint` NULL, token kept, on all three stores; the next acquire takes
+the expired-row arm and mints `current + 1`. The marker holder (rather than
+keeping the releaser's id) makes the same identity's re-acquire a takeover too,
+because an acquire by the row's own holder is a refresh that keeps the token
+and `acquired_at`. `OPERATOR_OVERRIDE` is the matching UPDATE (`expires_at =
+acquired_at` is in the past in every dialect; guarded with `holder <>
+'lambo:erased'` so it never lifts a tombstone). Consequences: a session that
+was ever leased refuses unleased (`None`) writes forever, as it already did
+while an expired row lingered after a crash; the erase gate counts a released
+row as no lease; the proxy's dial treats one as "no holder". Tests
+(`lease::testkit::check_release_keeps_the_fencing_token`) on SQLite and Memory,
+and live pg legs (`postgres_release_keeps_the_fencing_token`, Cockroach
+conformance).
+
+**H1: the tombstone fenced by arithmetic only.** With H2 the tombstone is
+`current + 1` of a preserved row, which refuses every pre-erase token. Defense
+in depth on typed data: every fence (`store::erase::check_fence`, all stores,
+flush and canonization) refuses a tombstoned session whatever token is
+presented, the tombstone's own and higher included. On pg the holder rides the
+existing `FOR SHARE` read. The store's holder values (`lambo:released`,
+`lambo:erased`) are reserved: acquire, refresh and erase refuse a caller whose
+holder token equals one (unreachable through `LeaseHolder::token`, which always
+has `@` and `#`; tested at the function). Test: the reviewer's scenario on every
+store (`erase::testkit::check_erase_after_release_fences`).
+
+**L1:** the pg erase locks `sessions` before the lease row, the order a flush
+takes them in, so a zombie flush and an erase cannot deadlock (40P01).
+**L2:** a background flush or canonization cycle that fails on an erased
+session (confirmed by re-reading the lease row) latches the fence and the
+serve wake-up at once, so `erased()` holds and reads stop without waiting for
+the heartbeat. **L3:** a proxy whose session was erased answers the call with
+an erased reply (`-32003`) and exits with the erased error. **L4:** edges in
+other sessions incident to the erased nodes are deleted with them and counted
+in `edges` (consistent with `DeleteNode`; a live writer of the other session
+could still re-upsert one from RAM, the same residual `DeleteNode` has).
+**L5:** a fixture `seed` of an erased id is refused. **L6:** no change (the
+residual is reachable only from fixtures, as the note above says). **L7:**
+`EraseCounts` and `EraseReport` are `#[non_exhaustive]`.
+
 ## Not run here
 
 The Postgres and Cockroach live legs (`store::pg::erase::postgres_erases_a_session`,
-and `check_erase_session` inside the Cockroach conformance suite) need a live
-engine; no local Postgres was available. CI's `postgres-live` job runs only
+`postgres_erase_after_a_release_fences_every_token`,
+`store::pg::release_fencing::postgres_release_keeps_the_fencing_token`, and their
+checks inside the Cockroach conformance suite) need a live engine; no local
+Postgres was available to either the implementer or the remediator. CI's `postgres-live` job runs only
 named tests, so it needs a step for the new test (diff in the implementer's
 report; workflow files are not edited by agents).
