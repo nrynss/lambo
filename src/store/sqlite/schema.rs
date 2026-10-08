@@ -13,8 +13,8 @@ use crate::store::{
 };
 use crate::types::StoreError;
 
-/// T3.1 DDL — embedded and executed verbatim by [`SqliteStore::init_schema`],
-/// and read for its table names by [`SqliteStore::preflight_schema`] (J3 F5).
+/// T3.1 DDL — embedded and executed verbatim by [`SqliteStore::init_schema`](crate::store::GraphStore::init_schema),
+/// and read for its table names by [`SqliteStore::preflight_schema`](crate::store::GraphStore::preflight_schema) (J3 F5).
 /// Idempotent by construction (`IF NOT EXISTS` everywhere).
 pub(super) const INIT_SQL: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),

@@ -307,7 +307,7 @@ pub(super) async fn upsert_interactions(
 /// executes**, which makes the intra-batch ordering well defined rather than
 /// incidental: [`crate::store::batch::plan_flush`] treats [`Mutation::SetEmbedding`] as a
 /// barrier that drains every open bucket before it and is then emitted alone. So
-/// within one [`MutationBatch`]:
+/// within one [`MutationBatch`](crate::types::MutationBatch):
 ///
 /// * concepts submitted **after** a `SetEmbedding` are validated against the width
 ///   that `SetEmbedding` just stamped — a batch that stamps `dim` and then upserts

@@ -26,7 +26,7 @@ use crate::types::{CanonizationEvent, Edge, Interaction, Mutation, Node, Session
 /// Multi-row upsert of one planned [`FlushStep::Interactions`] chunk (L82-1).
 ///
 /// `rows` is already deduplicated on `id` and capped at
-/// [`BULK_LIMITS`]`.interactions`.
+/// [`BULK_LIMITS`](super::persistence::BULK_LIMITS)`.interactions`.
 pub(super) async fn bulk_upsert_interactions(
     tx: &mut sqlx::PgConnection,
     rows: &[&Interaction],
@@ -205,7 +205,7 @@ pub(super) async fn bulk_update_accesses(
 /// transition, or a session-column write.
 ///
 /// Every one of these can *observe* a row an upsert may have written, which is
-/// exactly why [`plan_flush`] emits them alone and in place (see
+/// exactly why [`plan_flush`](crate::store::batch::plan_flush) emits them alone and in place (see
 /// `store::batch`). The upsert arms are unreachable for the same reason, but
 /// they are handled rather than `unreachable!()`d: a planner change must not be
 /// able to turn into a panic inside a flush.

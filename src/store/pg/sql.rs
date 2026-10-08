@@ -349,7 +349,7 @@ FROM extent
 /// **The SQL text is written exactly once**, here, so two dialects cannot drift
 /// by anything except the tokens they substitute. That is the whole point of
 /// the extraction: a statement that differs by *more* than a token does not
-/// belong in this struct, and does not belong in [`PgStore`] either.
+/// belong in this struct, and does not belong in [`PgStore`](super::PgStore) either.
 pub(super) struct DialectSql {
     /// This dialect's cast to its dense-vector type, carried as a token rather
     /// than baked into a statement: it rides the concept upsert's embedding
@@ -527,7 +527,7 @@ pub(super) fn keyword_candidates_sql<D: Dialect>(n_tokens: usize) -> String {
     sql
 }
 
-/// The statement [`bulk_upsert_interactions`] runs, built but not executed.
+/// The statement [`bulk_upsert_interactions`](super::write_rows::bulk_upsert_interactions) runs, built but not executed.
 ///
 /// Separate from the execution so the generated SQL — the one part of this
 /// change no local test can reach through a cluster — is inspectable by
@@ -549,7 +549,7 @@ pub(super) fn interaction_upsert_query<'a>(
     qb
 }
 
-/// The statement [`bulk_upsert_concepts`] runs, built but not executed.
+/// The statement [`bulk_upsert_concepts`](super::write_rows::bulk_upsert_concepts) runs, built but not executed.
 pub(super) fn concept_upsert_query<'a>(
     rows: &'a [ConceptRow<'a>],
     embeddings: &'a [Option<String>],
@@ -587,7 +587,7 @@ pub(super) fn concept_upsert_query<'a>(
     qb
 }
 
-/// The statement [`bulk_upsert_edges`] runs, built but not executed.
+/// The statement [`bulk_upsert_edges`](super::write_rows::bulk_upsert_edges) runs, built but not executed.
 pub(super) fn edge_upsert_query<'a>(
     rows: &'a [&'a Edge],
 ) -> sqlx::QueryBuilder<'a, sqlx::Postgres> {
@@ -627,7 +627,7 @@ ON CONFLICT (session_id, receipt) DO UPDATE SET
     outcome_summary = EXCLUDED.outcome_summary
 "#;
 
-/// The statement [`bulk_put_write_intents`] runs, built but not executed.
+/// The statement [`bulk_put_write_intents`](super::write_rows::bulk_put_write_intents) runs, built but not executed.
 pub(super) fn put_write_intents_upsert<'a>(
     intents: &'a [&'a crate::types::WriteIntent],
     payloads: &'a [String],
@@ -661,7 +661,7 @@ pub(super) const CONSUME_WRITE_INTENT_UPDATE_SUFFIX_SQL: &str = r#") AS v(
     session_id, receipt, consumed_at, outcome_tag, outcome_summary
 ) WHERE write_intents.session_id = v.session_id AND write_intents.receipt = v.receipt"#;
 
-/// The statement [`bulk_consume_write_intents`] runs, built but not executed.
+/// The statement [`bulk_consume_write_intents`](super::write_rows::bulk_consume_write_intents) runs, built but not executed.
 pub(super) fn consume_write_intents_update<'a>(
     consumes: &'a [(
         &'a crate::types::SessionId,
@@ -701,7 +701,7 @@ pub(super) const UPDATE_ACCESSES_SUFFIX_SQL: &str = r#") AS v(
     id, session_id, access_count, last_accessed
 ) WHERE concepts.id = v.id AND concepts.session_id = v.session_id"#;
 
-/// The statement [`bulk_update_accesses`] runs, built but not executed.
+/// The statement [`bulk_update_accesses`](super::write_rows::bulk_update_accesses) runs, built but not executed.
 pub(super) fn access_update_query<'a>(
     rows: &'a [AccessUpdate<'a>],
 ) -> sqlx::QueryBuilder<'a, sqlx::Postgres> {
