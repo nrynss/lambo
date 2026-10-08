@@ -622,6 +622,69 @@ async fn an_ends_only_call_checks_the_contract_before_any_embed() {
     assert_eq!(g.embedding().unwrap().kind, "fixture", "stamp preserved");
 }
 
+#[test]
+fn context_len_is_the_length_of_the_context_text() {
+    for (content, origin) in [
+        ("user schema", Some("ingest context")),
+        ("user schema", Some("  padded  ")),
+        ("user schema", Some("   ")),
+        ("user schema", None),
+        ("", None),
+    ] {
+        assert_eq!(
+            context_len(content, origin),
+            context_text(content, origin).len(),
+            "{content:?} / {origin:?}"
+        );
+    }
+}
+
+/// The context cap is on the context actually embedded: `"{content} —
+/// {origin}"` adds 5 bytes, `"Concept: {content}"` adds 9. The check used
+/// to add 3 in both cases, so a context up to 6 bytes over the cap passed.
+/// A context of exactly the cap is embedded; one byte over is refused before
+/// any embed, in both arms.
+#[tokio::test]
+async fn the_context_cap_counts_the_real_framing_bytes() {
+    async fn run(prompt: &str, content_len: usize) -> (Result<DeriveOutcome, LamboError>, usize) {
+        let (graph, interaction) = graph_with_interaction("hybrid-context-cap", 1, 0, prompt);
+        let embedder = RecordingEmbedder::new();
+        let content = "c".repeat(content_len);
+        let out = derive(
+            graph,
+            &SpyStore::with_vector(Vec::new()),
+            &embedder,
+            &contract("fixture", 1024),
+            interaction,
+            &agent(),
+            &[(content.as_str(), ConceptType::Entity)],
+            &ParentOf::none(),
+            10,
+            SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+            None,
+        )
+        .await;
+        (out, embedder.embedded_texts().len())
+    }
+    // With an origin: content + " — " (5) + origin.
+    let at_cap = MAX_HYBRID_CONTEXT_BYTES - 5 - "ctx".len();
+    let (out, embeds) = run("ctx", at_cap).await;
+    assert_eq!(out.unwrap().embedded, 1);
+    assert_eq!(embeds, 1);
+    let (out, embeds) = run("ctx", at_cap + 1).await;
+    assert!(matches!(out, Err(LamboError::Config(_))), "{out:?}");
+    assert_eq!(embeds, 0);
+
+    // No origin (an empty prompt): "Concept: " (9) + content.
+    let at_cap = MAX_HYBRID_CONTEXT_BYTES - 9;
+    let (out, embeds) = run("", at_cap).await;
+    assert_eq!(out.unwrap().embedded, 1);
+    assert_eq!(embeds, 1);
+    let (out, embeds) = run("", at_cap + 1).await;
+    assert!(matches!(out, Err(LamboError::Config(_))), "{out:?}");
+    assert_eq!(embeds, 0);
+}
+
 #[tokio::test]
 async fn first_use_empty_candidates_still_commits_contract() {
     // Cockroach returns this safe empty shape for a missing/unstamped

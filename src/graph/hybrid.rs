@@ -322,6 +322,17 @@ fn context_text(content: &str, origin: Option<&str>) -> String {
     }
 }
 
+/// The exact byte length of [`context_text`]`(content, origin)`, without
+/// building it. The context cap is checked against this, so it must follow
+/// `context_text`'s two arms: `" — "` is 5 bytes (the dash is 3), and
+/// `"Concept: "` is 9.
+fn context_len(content: &str, origin: Option<&str>) -> usize {
+    match origin.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(origin) => content.len() + " — ".len() + origin.len(),
+        None => "Concept: ".len() + content.len(),
+    }
+}
+
 /// Build a fresh concept node for a hybrid-produced content (mirrors
 /// `derive::resolve_concept`'s `Unmatched` branch, plus an optional embedding).
 #[allow(clippy::too_many_arguments)]
@@ -609,15 +620,13 @@ async fn derive_planned(
                 }
             }
 
-            let origin_len = origin_text.as_deref().map(str::trim).map_or(0, str::len);
             let unmatched_contents = items
                 .iter()
                 .filter(|(_, _, _, matched)| matched.is_none())
                 .map(|(content, _, _, _)| *content)
                 .chain(parent_ends.iter().map(|(content, _)| *content));
             if unmatched_contents.into_iter().any(|content| {
-                content.len().saturating_add(origin_len).saturating_add(3)
-                    > MAX_HYBRID_CONTEXT_BYTES
+                context_len(content, origin_text.as_deref()) > MAX_HYBRID_CONTEXT_BYTES
             }) {
                 return Err(LamboError::Config(format!(
                     "hybrid embedding context exceeds {MAX_HYBRID_CONTEXT_BYTES} bytes"
