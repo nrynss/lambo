@@ -4,6 +4,11 @@
 
 ### Breaking
 
+- Minimum supported Rust is now 1.99 (`rust-version = "1.99"` in
+  `Cargo.toml`; there was none before). The pinned toolchain moves from 1.97.1
+  to 1.99.0, and CI and the release workflow install it directly. Building from
+  source, including `cargo install lambo`, needs Rust 1.99 or newer (#42, step
+  1; edition 2024 is a separate later step).
 - Canonical keys change for text containing some invisible codepoints (#25,
   re-landing review finding V1, which was fixed on 2026-08-15 and then lost
   the same day). Stored concepts keep the keys they were written with; nothing

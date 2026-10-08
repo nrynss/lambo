@@ -1,11 +1,11 @@
 name: ci
 
 # Third-party actions are pinned to full 40-char commit SHAs, with the human
-# version in a trailing comment. A tag (`@v4`) and a branch (`@1.97.1`) are both
+# version in a trailing comment. A tag (`@v4`) and a branch (`@1.99.0`) are both
 # mutable — whoever controls the action repo can repoint them at new code that
 # then runs with this workflow's token and secrets, including
 # `secrets.LAMBO_COCKROACH_DSN` in the cockroach-live job below. A SHA cannot be
-# repointed. Note `dtolnay/rust-toolchain@1.97.1` is a *branch*, not a tag, so it
+# repointed. Note `dtolnay/rust-toolchain@1.99.0` is a *branch*, not a tag, so it
 # was the most mutable of the three.
 # To upgrade: bump the SHA and the comment together, never the comment alone.
 #   gh api repos/<owner>/<repo>/git/ref/tags/<tag> --jq .object.sha
@@ -93,7 +93,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97.1
+        uses: dtolnay/rust-toolchain@70dec6087f2cb6bab9fbac4da23160afbe848e91 # 1.99.0
         with:
           components: rustfmt, clippy
 
@@ -256,7 +256,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97.1
+        uses: dtolnay/rust-toolchain@70dec6087f2cb6bab9fbac4da23160afbe848e91 # 1.99.0
         with:
           components: rustfmt, clippy
 
@@ -288,7 +288,7 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97.1
+      - uses: dtolnay/rust-toolchain@70dec6087f2cb6bab9fbac4da23160afbe848e91 # 1.99.0
       - name: Cache cargo
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: candle metal (compile only, no weights, no network)
@@ -323,7 +323,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97.1
+        uses: dtolnay/rust-toolchain@70dec6087f2cb6bab9fbac4da23160afbe848e91 # 1.99.0
         with:
           components: rustfmt, clippy
       - name: Cache cargo
@@ -429,7 +429,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97.1
+        uses: dtolnay/rust-toolchain@70dec6087f2cb6bab9fbac4da23160afbe848e91 # 1.99.0
         with:
           components: rustfmt, clippy
       - name: Cache cargo

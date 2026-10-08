@@ -2,6 +2,7 @@
 name = "lambo"
 version = "0.3.0"
 edition = "2021"
+rust-version = "1.99"
 license = "Apache-2.0"
 description = "Agentic graph memory for multi-agent AI operations: bipartite graph, canonization, MCP serve"
 readme = "README.md"
