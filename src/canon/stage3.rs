@@ -8,7 +8,7 @@
 //! A concept passes when **both**:
 //!
 //! 1. **Not inside the re-promotion cooldown.** `last_demotion_time` lives
-//!    on the [`Concept`] in the graph, so the **caller** reads it (with
+//!    on the [`Concept`](crate::types::Concept) in the graph, so the **caller** reads it (with
 //!    [`last_demotion_time`]) and hands it in: the predicate borrows no
 //!    graph, which is what lets the eval cycle gather its inputs under the
 //!    read guard and then query the store with no lock held (spec §6.4).
@@ -18,7 +18,7 @@
 //!    [`crate::Config::canonization_repromotion_cooldown`] (300s).
 //! 2. **`store.blast_radius(session, node, min_edge_age, now) > 5`**
 //!    (strict). The store returns [`u64`]; the comparison is against
-//!    `5u64`. [`Concept::blast_radius`] is a frozen `Option<i32>`
+//!    `5u64`. [`Concept::blast_radius`](crate::types::Concept::blast_radius) is a frozen `Option<i32>`
 //!    (CON-6) and is **not** consulted — never a silent `as i32`.
 //!
 //! **Gate order and the returned measurement (F9).** The cooldown is a field
@@ -41,7 +41,7 @@
 //! Callers that want the inflation guard pass
 //! [`crate::Config::canonization_edge_min_age`] (default 60s).
 //!
-//! Stage 3 is evidence-only: [`CanonizationStatus`] is not consulted.
+//! Stage 3 is evidence-only: [`CanonizationStatus`](crate::types::CanonizationStatus) is not consulted.
 //! Venerable is not a prerequisite (T6.4 sequences transitions).
 
 use std::time::Duration;

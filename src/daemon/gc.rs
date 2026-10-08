@@ -847,7 +847,7 @@ pub fn eviction_recency(c: &Concept, now: DateTime<Utc>, window: ChronoDuration)
 ///
 /// An Entity (1.2) faces a bar a sixth lower than a Resource (1.0). The
 /// exempt types (Logic, Constraint, Observation) never get here; their
-/// resistances still scale Solo promotion ([`crate::canon::policy`]). A
+/// resistances still scale Solo promotion ([`crate::canon::SoloScorer`]). A
 /// non-positive or non-finite
 /// resistance would invert or poison the comparison, so it falls back to the
 /// unscaled threshold (the `const fn` cannot produce one today — this is a

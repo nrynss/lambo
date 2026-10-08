@@ -51,7 +51,7 @@ pub struct Graph {
     edge_keys: HashMap<EdgeKey, NodeId>,
     out: HashMap<NodeId, HashMap<EdgeType, HashSet<NodeId>>>,
     incoming: HashMap<NodeId, HashMap<EdgeType, HashSet<NodeId>>>,
-    /// Interactions in temporal chain order (chain[i].previous_id == chain[i-1]).
+    /// Interactions in temporal chain order (`chain[i].previous_id == chain[i-1]`).
     temporal_chain: Vec<NodeId>,
     /// source_key -> canonical_key (direct lookup only, no transitivity).
     synonyms: BTreeMap<String, String>,

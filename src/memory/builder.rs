@@ -164,7 +164,7 @@ pub struct MemoryBuilder {
     /// proxying/degraded, and durable-intent completion — see
     /// `dev-diary/lambo-for-mooshik/J-multi-client.md` §J4). `None` for every
     /// writer that is not a `serve` and for a `serve` run without `--ledger`.
-    /// Set only by [`crate::mcp::serve`]; every ordinary writer keeps the
+    /// Set only by [`crate::mcp::serve()`]; every ordinary writer keeps the
     /// default.
     pub(super) ledger: Option<Arc<crate::ledger::Ledger>>,
     /// J6. The shutdown pre-arm a `serve` process wants installed the instant

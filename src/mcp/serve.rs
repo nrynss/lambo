@@ -781,7 +781,7 @@ pub async fn build_memory(
         .map_err(explain_startup_failure)
 }
 
-/// The one [`MemoryBuilder`] a serve process configures.
+/// The one [`MemoryBuilder`](crate::MemoryBuilder) a serve process configures.
 ///
 /// Split out of [`build_memory`] so J2's startup election can retry the attach
 /// against the **same** configuration: `MemoryBuilder` is `Clone` and every

@@ -149,7 +149,7 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
 }
 
 /// The backfill body: embed only the concepts handed in (already filtered to
-/// those with no vector) and append them through [`Graph::embed_missing`],
+/// those with no vector) and append them through [`Graph::embed_missing`](crate::graph::Graph::embed_missing),
 /// which leaves the session contract exactly as it found it.
 ///
 /// Same all-or-nothing discipline as [`rewrite_all`]: every embed happens
