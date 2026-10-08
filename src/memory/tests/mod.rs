@@ -1,5 +1,6 @@
 //! Unit tests for `Memory`, grouped by subject.
 
+use super::leases::ACTIVE_SESSIONS;
 use super::*;
 use crate::embed::FixtureEmbedder;
 use crate::store::MemoryStore;
