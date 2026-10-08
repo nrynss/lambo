@@ -197,6 +197,22 @@ enum Commands {
     /// Does **not** construct the embedder (ops-only path). Still validates Level B
     /// store selection so a misconfigured `kind` fails closed early.
     Provision,
+    /// Erase a whole session for account deletion: every node, edge, vector, canonization record and write intent, plus the session row with its embedding contract. A tombstone keeps the id from being written again. Safe to repeat. Refused while a live writer holds the session.
+    ///
+    /// Operator-only: the authority is access to the store, never an agent id.
+    /// Does not construct the embedder. Prints one JSON report after the store
+    /// committed; `already_absent: true` means nothing was left to remove.
+    EraseSession {
+        /// Session to erase.
+        #[arg(long, help = "Session to erase.")]
+        session: String,
+        /// The session id again, exactly, to guard against typos. Nothing is erased when it differs.
+        #[arg(
+            long,
+            help = "The session id again, exactly, to guard against typos. Nothing is erased when it differs."
+        )]
+        confirm: String,
+    },
     /// Derive concepts from the current interaction into session memory. Timestamps are stamped server-side; do not send one.
     Derive {
         /// Session this process writes (acquires the single-writer lease).
@@ -349,6 +365,7 @@ impl Commands {
             Self::Inspect { .. } => "inspect",
             Self::Stats { .. } => "stats",
             Self::Provision => "provision",
+            Self::EraseSession { .. } => "erase-session",
             Self::Derive { .. } => "derive",
             Self::RecordAction { .. } => "record-action",
             Self::Reserve { .. } => "reserve",
@@ -360,7 +377,11 @@ impl Commands {
     fn needs_embedder(&self) -> bool {
         !matches!(
             self,
-            Self::Provision | Self::Saints { .. } | Self::Inspect { .. } | Self::Stats { .. }
+            Self::Provision
+                | Self::EraseSession { .. }
+                | Self::Saints { .. }
+                | Self::Inspect { .. }
+                | Self::Stats { .. }
         )
     }
 
@@ -659,6 +680,15 @@ fn main() -> ExitCode {
             "provision",
             lambo::cli::provision::run(store, kind, dsn.as_deref()),
         ),
+        (Commands::EraseSession { session, confirm }, Resolved::StoreOnly { store, .. }) => {
+            run_async(
+                "erase-session",
+                lambo::cli::erase_session::run(
+                    store.as_ref(),
+                    lambo::cli::erase_session::Args { session, confirm },
+                ),
+            )
+        }
         (
             Commands::Derive {
                 session,
