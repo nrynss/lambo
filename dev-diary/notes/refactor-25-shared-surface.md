@@ -66,6 +66,23 @@ intermediate states that would each need temporary cross-imports.
   `9ce776e`'s message calls the gap "advisory J1-R3-3, left open"; that is
   wrong twice. J1-R3-3 is the `U+2028`/`U+2029` argument, and V1 had been
   closed, then reverted.
+
+  **The key change is one-way for stored data.** Stored concepts keep the keys
+  they were written with, and nothing re-keys them on load, so every store
+  still loads and the uniqueness check cannot newly collide. But:
+  (a) a concept stored with a Mongolian free variation selector keeps its old,
+  forked key, so a new derive of the same text computes the stripped key and
+  no longer matches it: it creates a new concept or merges into a plain-text
+  twin, and the old row is orphaned from matching. This applies to rows
+  written before 2026-08-15 and to rows written between `9686b40` and #25.
+  (b) Text containing the unassigned codepoints (`U+2065`, `U+FFF0-FFF8`,
+  `U+E0080-E00FF`, `U+E01F0-E0FFF`) still loads and renders, but resubmitting
+  it is now refused wherever a surface size-checks text (concept and action
+  content, inspect focus, recall query, agent and session ids). Measured
+  exposure: the orchestrator checked the live dogfood store read-only on
+  2026-10-08, and 0 of 3,966 concepts contain any affected codepoint, in
+  content or in keys. A re-key migration is needed only if a
+  store turns up such rows. Recorded in CHANGELOG.md under Unreleased.
 - The `Clock` doc comment was attached to `RecallPipeline`.
 
 ## Left for later phases
