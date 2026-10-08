@@ -383,12 +383,12 @@ fn detect_host() -> String {
             }
         }
     }
-    if let Ok(out) = std::process::Command::new("hostname").output() {
-        if out.status.success() {
-            let h = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !h.is_empty() {
-                return h;
-            }
+    if let Ok(out) = std::process::Command::new("hostname").output()
+        && out.status.success()
+    {
+        let h = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !h.is_empty() {
+            return h;
         }
     }
     "unknown-host".to_string()
