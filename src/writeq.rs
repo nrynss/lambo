@@ -90,7 +90,7 @@ pub use calibration::{
 };
 pub use counters::{ReplayBlockReason, WriteQueueCounters};
 pub use drain::WRITE_QUEUE_DRAIN_BUDGET;
-pub(crate) use execution::{mirror_concepts, WriteCtx};
+pub(crate) use execution::{mirror_concepts, ConsumeStamp, WriteCtx};
 pub use receipts::{
     AppliedSummary, ReceiptAnswer, ReceiptId, WriteKind, MAX_CONCURRENT_RECEIPT_WAITS,
     MAX_PIGGYBACK_RECEIPTS, MAX_RECEIPT_IDS, MAX_RETAINED_RECEIPTS, MEASURED_WORST_FLUSH_LAG_SECS,
@@ -101,7 +101,6 @@ pub use replay::EMBEDDER_SICK_THRESHOLD;
 // Crate-internal names the sibling modules reach through `super::`.
 use admission::{Job, JobPayload, Lanes};
 use calibration::{probe_embedder, ObservedRate};
-use execution::ConsumeStamp;
 use receipts::{model_safe_failure, settle_one, Entry, Receipts};
 
 // ---------------------------------------------------------------------------
