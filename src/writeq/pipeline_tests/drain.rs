@@ -343,3 +343,99 @@ async fn a_close_that_cannot_drain_defers_acked_writes_as_durable_intents() {
         "every deferred write's intent survives, unconsumed, for the final flush"
     );
 }
+
+/// Blocks its thread inside `embed` while `busy` is set (a synchronous
+/// stretch, as a large graph commit is), then yields once before answering,
+/// so an abort that landed during the stretch takes effect at that yield.
+struct BusyEmbedder {
+    busy: Arc<AtomicBool>,
+    inner: FixtureEmbedder,
+    calls: Arc<AtomicUsize>,
+    /// Stretches that have ended.
+    finished: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl Embedder for BusyEmbedder {
+    fn dimensions(&self) -> usize {
+        self.inner.dimensions()
+    }
+    async fn embed(&self, text: &str) -> Result<Vec<f32>, crate::EmbedError> {
+        if self.busy.load(Ordering::SeqCst) {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(400));
+            self.finished.fetch_add(1, Ordering::SeqCst);
+            tokio::task::yield_now().await;
+        }
+        self.inner.embed(text).await
+    }
+}
+
+/// R3-1, at the write queue: a `close()` cancelled while
+/// [`WritePipeline::abort_workers`] is joining one lane worker must not leave
+/// the **other** workers un-aborted, nor let a retried close return before
+/// the workers it could not join have stopped. `close()`'s contract is that a
+/// cancelled close strands no background task; a worker dropped un-aborted
+/// keeps applying its job into a graph the retried close may already have
+/// drained, and one dropped un-joined can still finish a synchronous stretch
+/// after it.
+///
+/// A join is only pending while its task is *running*, so both workers are
+/// held in a synchronous stretch on their own runtime threads when the abort
+/// is polled once and dropped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cancelled_abort_leaves_no_lane_worker_running() {
+    let busy = Arc::new(AtomicBool::new(false));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let finished = Arc::new(AtomicUsize::new(0));
+    let rig = Rig::hybrid(
+        "wq-cancelled-abort",
+        Arc::new(BusyEmbedder {
+            busy: busy.clone(),
+            inner: FixtureEmbedder::new(),
+            calls: calls.clone(),
+            finished: finished.clone(),
+        }),
+    );
+    until(
+        || rig.pipeline.calibration().is_some(),
+        "the probe to finish",
+    )
+    .await;
+    busy.store(true, Ordering::SeqCst);
+
+    // Two lanes, each running inside its own job's embed.
+    rig.derive(&AgentId::new("agent-a"), "alpha concept").await;
+    rig.derive(&AgentId::new("agent-b"), "beta concept").await;
+    until(
+        || calls.load(Ordering::SeqCst) >= 2,
+        "both jobs inside the embedder",
+    )
+    .await;
+
+    // Poll the abort once, then drop it: a close() cancelled mid-join.
+    {
+        let abort = rig.pipeline.abort_workers();
+        tokio::pin!(abort);
+        let polled = tokio::time::timeout(Duration::ZERO, &mut abort).await;
+        assert!(polled.is_err(), "the first join completed inside one poll");
+    }
+
+    // The retried close's abort must join what the cancelled one could not:
+    // when it returns, both stretches are over.
+    rig.pipeline.abort_workers().await;
+    assert_eq!(
+        finished.load(Ordering::SeqCst),
+        2,
+        "the retried abort_workers returned while a worker it never joined was still running"
+    );
+
+    // An aborted worker is cancelled at the yield after its stretch; a worker
+    // that was never aborted applies its job.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let concepts = rig.graph.read().concepts().count();
+    assert_eq!(
+        concepts, 0,
+        "a lane worker kept running after a cancelled abort_workers and applied its job"
+    );
+}

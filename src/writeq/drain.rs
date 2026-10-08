@@ -23,7 +23,10 @@ use std::time::Duration;
 use serde_json::json;
 use tokio::task::JoinHandle;
 
-use super::{Job, ReceiptAnswer, ReceiptId, WritePipeline};
+use parking_lot::Mutex as PlMutex;
+
+use super::{Job, Lanes, ReceiptAnswer, ReceiptId, WritePipeline};
+use crate::types::AgentId;
 
 /// How long a clean `close()` drains the queue before **deferring** the
 /// remainder (`WritePipeline::quiesce`).
@@ -115,7 +118,7 @@ impl WritePipeline {
         self.seal();
         let (handles, orphans) = {
             let mut lanes = self.lanes.lock();
-            let handles: Vec<JoinHandle<()>> = lanes.workers.drain().map(|(_, h)| h).collect();
+            let handles: Vec<(AgentId, JoinHandle<()>)> = lanes.workers.drain().collect();
             let drained: Vec<Job> = lanes
                 .queues
                 .drain()
@@ -129,10 +132,24 @@ impl WritePipeline {
             }
             (handles, orphans)
         };
-        for handle in handles {
+        // Abort every worker before joining any, and keep the handles in
+        // custody until each join returns (R3-1, as `Memory::close` does for
+        // its own tasks). A join is pending while its worker is mid-poll on
+        // another thread, and `close()` may be cancelled right there: joining
+        // one at a time used to drop the rest un-aborted, still applying jobs,
+        // and a retried close found no handle left to wait for.
+        for (_, handle) in &handles {
             handle.abort();
-            let _ = handle.await;
         }
+        let mut custody = WorkerCustody {
+            lanes: &self.lanes,
+            handles,
+        };
+        while let Some((_, handle)) = custody.handles.last_mut() {
+            let _ = handle.await;
+            custody.handles.pop();
+        }
+        drop(custody);
         // Whatever the aborted workers had in flight is now provably not
         // running, so any receipt still `Pending` names a write this process
         // will not apply — including the ones that were still queued. Every
@@ -196,6 +213,28 @@ impl WritePipeline {
         lanes.sealed = true;
         for (_, handle) in lanes.workers.drain() {
             handle.abort();
+        }
+    }
+}
+
+/// Custody of lane-worker handles while [`WritePipeline::abort_workers`] joins
+/// them: whatever is not yet joined when the future is dropped goes back to
+/// `Lanes::workers`, already aborted, so the next `abort_workers` (a retried
+/// `close()`) joins it instead of returning past a task that is still running.
+/// The twin of `memory::shutdown::HandleCustody`.
+struct WorkerCustody<'a> {
+    lanes: &'a PlMutex<Lanes>,
+    handles: Vec<(AgentId, JoinHandle<()>)>,
+}
+
+impl Drop for WorkerCustody<'_> {
+    fn drop(&mut self) {
+        if self.handles.is_empty() {
+            return;
+        }
+        let mut lanes = self.lanes.lock();
+        for (agent, handle) in self.handles.drain(..) {
+            lanes.workers.insert(agent, handle);
         }
     }
 }
