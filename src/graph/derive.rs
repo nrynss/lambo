@@ -520,11 +520,11 @@ fn resolve_concept(
             // bare `Entity` — splitting X's supporting interactions in two.
             // Scoped to this call's own writes, so a pre-existing demoted
             // Observation is still never matched and GRAPH-1 stands.
-            if let Some(&node) = call_by_key.get(&key) {
-                if written_this_call.contains(&node) {
-                    outcome.matched.push(node);
-                    return Ok(node);
-                }
+            if let Some(&node) = call_by_key.get(&key)
+                && written_this_call.contains(&node)
+            {
+                outcome.matched.push(node);
+                return Ok(node);
             }
             let recorded_key = key.clone();
             let concept = Concept {

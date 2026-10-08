@@ -28,21 +28,21 @@ impl Graph {
                     self.session_id
                 ));
             }
-            if let Node::Concept(c) = n {
-                if let Some(vector) = &c.embedding {
-                    match &self.embedding {
-                        Some(contract)
-                            if vector.len() == contract.dim
-                                && vector.iter().all(|x| x.is_finite()) => {}
-                        Some(contract) => v.push(format!(
-                            "concept {} vector invalid for embedding contract width {}",
-                            c.id, contract.dim
-                        )),
-                        None => v.push(format!(
-                            "concept {} carries a vector without an embedding contract",
-                            c.id
-                        )),
+            if let Node::Concept(c) = n
+                && let Some(vector) = &c.embedding
+            {
+                match &self.embedding {
+                    Some(contract)
+                        if vector.len() == contract.dim && vector.iter().all(|x| x.is_finite()) => {
                     }
+                    Some(contract) => v.push(format!(
+                        "concept {} vector invalid for embedding contract width {}",
+                        c.id, contract.dim
+                    )),
+                    None => v.push(format!(
+                        "concept {} carries a vector without an embedding contract",
+                        c.id
+                    )),
                 }
             }
         }
@@ -63,10 +63,10 @@ impl Graph {
             // GRAPH-2: endpoint-type matrix (spec §5) — assert_invariants is the
             // safety net; record_edge rejects the class at the write gate, this
             // arm catches any graph that got into that state another way.
-            if let (Some(s), Some(t)) = (self.nodes.get(&e.source), self.nodes.get(&e.target)) {
-                if let Some(msg) = edge_endpoint_error(e.edge_type, s, t) {
-                    v.push(format!("edge {} {msg}", e.id));
-                }
+            if let (Some(s), Some(t)) = (self.nodes.get(&e.source), self.nodes.get(&e.target))
+                && let Some(msg) = edge_endpoint_error(e.edge_type, s, t)
+            {
+                v.push(format!("edge {} {msg}", e.id));
             }
             let w = e.weight;
             if !w.is_finite() || w < 0.0 {
@@ -180,13 +180,13 @@ impl Graph {
         // DAG constraint by definition).
         let mut color: HashMap<NodeId, u8> = HashMap::new();
         for n in self.nodes.keys() {
-            if color.get(n).copied().unwrap_or(0) == 0 {
-                if let Some(back) = self.dfs_cycle(*n, &mut color) {
-                    v.push(format!(
-                        "Causal/Dependency/Hierarchical cycle detected through {back}"
-                    ));
-                    break;
-                }
+            if color.get(n).copied().unwrap_or(0) == 0
+                && let Some(back) = self.dfs_cycle(*n, &mut color)
+            {
+                v.push(format!(
+                    "Causal/Dependency/Hierarchical cycle detected through {back}"
+                ));
+                break;
             }
         }
 
