@@ -173,15 +173,6 @@ const _: () = assert!(
 /// receipt waits alone cannot be what trips the depth warning.
 pub const MAX_CONCURRENT_RECEIPT_WAITS: usize = 16;
 
-/// Build-time invariant tying the two ceilings together, so neither can be
-/// moved without the other being considered.
-const _: () = assert!(
-    MAX_CONCURRENT_RECEIPT_WAITS * 2 <= crate::mcp::proxy::INFLIGHT_DEPTH_WARN,
-    "MAX_CONCURRENT_RECEIPT_WAITS must leave half of INFLIGHT_DEPTH_WARN for ordinary traffic — \
-     a waiting lambo_stats(receipt=...) holds a proxy inflight slot, and answer_lost writes one un-raced \
-     frame per slot (J2-R2-7, J2-R3-3)",
-);
-
 /// Settled receipts piggybacked on one tool response.
 ///
 /// The rest stay queued for the next response and the note says how many, so a

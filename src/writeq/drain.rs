@@ -46,15 +46,6 @@ use super::{Job, ReceiptAnswer, ReceiptId, WritePipeline};
 /// which is the step that actually delivers durability, the majority of it.
 pub const WRITE_QUEUE_DRAIN_BUDGET: Duration = Duration::from_secs(2);
 
-/// Build-time invariant: the quiesce cannot become the reason a `close()` blows
-/// the deadline `serve` gives it.
-const _: () = assert!(
-    WRITE_QUEUE_DRAIN_BUDGET.as_secs() * 4 <= crate::mcp::serve::CLOSE_FLUSH_GRACE.as_secs(),
-    "WRITE_QUEUE_DRAIN_BUDGET must stay at or under a quarter of CLOSE_FLUSH_GRACE — the write \
-     queue quiesce runs in series BEFORE the final flush, so it is carved out of close()'s \
-     budget, not added to it",
-);
-
 /// Build-time invariant: a zero drain budget would defer every acked write at
 /// every close — safe under durable intents, but a silent behaviour cliff an
 /// edit should have to acknowledge. (The old reason here — a divide-by-zero in

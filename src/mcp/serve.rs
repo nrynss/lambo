@@ -82,6 +82,19 @@ const CLOSE_GRACE: Duration = Duration::from_secs(10);
 /// against the real budget instead of a copy of the number.
 pub(crate) const CLOSE_FLUSH_GRACE: Duration = Duration::from_secs(8);
 
+/// Build-time invariant: the write queue's close quiesce cannot become the
+/// reason a `close()` blows the deadline `serve` gives it.
+///
+/// Asserted here, on the serving side, because the dependency runs this way:
+/// the write queue is core and knows nothing about transports, while `serve`
+/// is the consumer that sizes `close()`'s budget around it (#27).
+const _: () = assert!(
+    crate::writeq::WRITE_QUEUE_DRAIN_BUDGET.as_secs() * 4 <= CLOSE_FLUSH_GRACE.as_secs(),
+    "WRITE_QUEUE_DRAIN_BUDGET must stay at or under a quarter of CLOSE_FLUSH_GRACE — the write \
+     queue quiesce runs in series BEFORE the final flush, so it is carved out of close()'s \
+     budget, not added to it",
+);
+
 /// Bound on the best-effort lease release that follows an abandoned `close()`
 /// (L82-1).
 ///
