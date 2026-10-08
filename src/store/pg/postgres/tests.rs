@@ -433,7 +433,12 @@ fn explain_vector_candidates_uses_store_forced_exact_scan() {
         env!("CARGO_MANIFEST_DIR"),
         "/src/store/pg/postgres/tests.rs"
     ));
-    let base = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/store/pg/mod.rs"));
+    // The production checked read (GraphStore::vector_candidates_checked
+    // delegates to it) lives in the family's vector-candidate module.
+    let base = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/src/store/pg/vector_candidates.rs"
+    ));
     // The comment marker is never written as one token here, so it cannot
     // match itself in the scanned text.
     let slash = concat!("/", "/");
@@ -502,8 +507,14 @@ fn explain_vector_candidates_uses_store_forced_exact_scan() {
         explain_body.contains(concat!("store", ".issue_forced_exact_scan(&muttx)")),
         "explain_vector_candidates must issue the GUC via the production helper"
     );
+    // Scoped to the production function, like the two camera-proof sites, so
+    // a call elsewhere in the module cannot satisfy it.
+    let checked_body = body(
+        &base,
+        concat!("pub(super)", "asyncfnchecked_vector_candidates("),
+    );
     assert!(
-        base.contains(concat!("self", ".issue_forced_exact_scan(&muttx)")),
+        checked_body.contains(concat!("self", ".issue_forced_exact_scan(&muttx)")),
         "vector_candidates_checked must issue the GUC via the shared helper"
     );
     // The exact lane's EXPLAIN goes through `corpus::plan`, which takes no
