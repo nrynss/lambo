@@ -1070,29 +1070,15 @@ fn with_iam_env_value<T>(
     credentials: Option<&std::path::Path>,
     build: impl FnOnce() -> T,
 ) -> T {
-    let _g = crate::test_util::env_lock();
-    let prev_iam = std::env::var_os("LAMBO_POSTGRES_IAM");
-    let prev_gcp = std::env::var_os("GCP_LAMBO_CREDENTIALS");
-    let prev_adc = std::env::var_os("GOOGLE_APPLICATION_CREDENTIALS");
-    std::env::set_var("LAMBO_POSTGRES_IAM", opt_in);
+    // The guard restores all three variables when it drops.
+    let env = crate::test_util::env_lock();
+    env.set("LAMBO_POSTGRES_IAM", opt_in);
     match credentials {
-        Some(path) => std::env::set_var("GCP_LAMBO_CREDENTIALS", path),
-        None => std::env::remove_var("GCP_LAMBO_CREDENTIALS"),
+        Some(path) => env.set("GCP_LAMBO_CREDENTIALS", path),
+        None => env.remove("GCP_LAMBO_CREDENTIALS"),
     }
-    std::env::remove_var("GOOGLE_APPLICATION_CREDENTIALS");
-    let built = build();
-    match prev_iam {
-        Some(v) => std::env::set_var("LAMBO_POSTGRES_IAM", v),
-        None => std::env::remove_var("LAMBO_POSTGRES_IAM"),
-    }
-    match prev_gcp {
-        Some(v) => std::env::set_var("GCP_LAMBO_CREDENTIALS", v),
-        None => std::env::remove_var("GCP_LAMBO_CREDENTIALS"),
-    }
-    if let Some(v) = prev_adc {
-        std::env::set_var("GOOGLE_APPLICATION_CREDENTIALS", v);
-    }
-    built
+    env.remove("GOOGLE_APPLICATION_CREDENTIALS");
+    build()
 }
 
 /// A live test's private database. Dropping it (the test finished, failed
