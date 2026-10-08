@@ -80,7 +80,9 @@
   checked vector read is an exact cosine scan of every vector it stores, so a
   session holder may answer that read from its graph (#8). `SqliteStore`
   returns `true`. A wrapper around SQLite keeps the database path unless it
-  forwards the method. Additive: existing adapters are unaffected.
+  forwards the method, which it should do only when its vector read is plain
+  delegation (a wrapper that filters, records or tiers that read must not, or
+  a holder would bypass it). Additive: existing adapters are unaffected.
 
 ### Fixed
 

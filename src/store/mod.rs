@@ -437,7 +437,11 @@ pub trait GraphStore: Send + Sync {
     /// distance arithmetic, an approximate index) must not, because the graph
     /// would rank differently. Ignored unless the adapter also advertises
     /// [`Capabilities::VECTOR_SEARCH`]: this never switches a vector leg on.
-    /// A wrapper that delegates to an exact adapter should forward it.
+    /// A wrapper should forward it only when its checked read is unmodified
+    /// delegation to an exact adapter. A wrapper that filters, augments,
+    /// records, rate-limits or tiers the vector read must leave it `false`,
+    /// or a holder would answer from its graph and silently bypass the
+    /// wrapper.
     fn exact_vector_scan(&self) -> bool {
         false
     }
