@@ -498,6 +498,17 @@ impl MemoryBuilder {
                 }
                 info.token
             }
+            // #23: the session was erased. Its lease row is the tombstone, which
+            // no acquire can take over, so this is not a writer to proxy to or
+            // wait out: refuse with the store's stable erased error, and do not
+            // report it as `Held` (that would send `serve` dialling a holder
+            // that does not exist and record a lease refusal against an erased
+            // session).
+            LeaseOutcome::Held { current, .. } if crate::store::erase::is_tombstone(&current) => {
+                return Err(LamboError::Store(
+                    crate::store::erase::erased_session_error(session.as_str()),
+                ));
+            }
             LeaseOutcome::Held { current, age } => {
                 // Fail closed, naming the current holder and its age. Reported
                 // as data (J2) so `mcp::serve` can proxy to the holder; the

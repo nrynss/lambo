@@ -26,6 +26,12 @@ impl Memory {
         if self.closed.load(Ordering::Acquire) {
             return Err(self.closed_error());
         }
+        // #23: a handle fenced by an erasure holds an in-RAM copy of deleted
+        // data. Reads are refused too, not only writes (an ordinary takeover
+        // still lets a fenced handle read, as before).
+        if self.erased() {
+            return Err(self.lease_lost_error());
+        }
         Ok(())
     }
 
