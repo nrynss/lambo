@@ -179,8 +179,7 @@ async fn a_configured_token_is_required_on_every_route() {
 /// and its gate goes through the shared check.
 #[test]
 fn the_portal_uses_the_shared_bearer_check() {
-    let src = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/cli/serve_web.rs"));
-    let prod = src.split("#[cfg(all(test").next().unwrap_or(src);
+    let prod = production_source();
     assert!(
         !prod.contains("fn tokens_match"),
         "serve_web defines its own token comparator; use crate::surface::bearer"

@@ -1,13 +1,16 @@
 //! Unit tests for the read-only web portal, grouped by subject.
 
 use super::*;
-use crate::cli::caps::ConceptKind;
+#[allow(unused_imports)]
+use super::{auth::*, dto::*, projections::*, routes::*, state::*};
+use crate::cli::caps::{ConceptKind, MAX_INSPECT_NODES};
 use crate::embed::{EmbedderConfig, EmbedderKind, FixtureEmbedder};
-use crate::store::{StoreConfig, StoreKind};
+use crate::store::{Capabilities, GraphStore, StoreConfig, StoreKind};
 use crate::surface::bearer::tokens_match;
 use crate::types::{
     AgentId, CanonizationEvent, CanonizationStatus, Concept, ConceptType, Edge, EdgeType,
-    EmbeddingContract, Interaction, Mutation, MutationBatch, Node, NodeId, Scored, SessionId,
+    EmbeddingContract, GraphSnapshot, Interaction, Mutation, MutationBatch, Node, NodeId, Scored,
+    SessionId, StoreError,
 };
 use crate::MemoryStore;
 use async_trait::async_trait;
@@ -15,6 +18,82 @@ use chrono::{DateTime, Utc};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+/// Every production source file of the portal, for the source-scan tests
+/// (`routes::the_module_registers_only_get_routes`,
+/// `routes::routes_constant_covers_every_registered_route`,
+/// `auth::the_portal_uses_the_shared_bearer_check`).
+///
+/// The scans used to read `serve_web.rs` alone. #28 split it, and a scan left
+/// pointing at one file stays green while scanning less, so the list is the
+/// scans' single input and `routes::the_source_scans_cover_every_production_file`
+/// fails when a file under `src/cli/serve_web/` is missing from it.
+const PRODUCTION_SOURCES: &[(&str, &str)] = &[
+    (
+        "serve_web.rs",
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/cli/serve_web.rs")),
+    ),
+    (
+        "serve_web/auth.rs",
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/cli/serve_web/auth.rs"
+        )),
+    ),
+    (
+        "serve_web/dto.rs",
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/cli/serve_web/dto.rs"
+        )),
+    ),
+    (
+        "serve_web/projections.rs",
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/cli/serve_web/projections.rs"
+        )),
+    ),
+    (
+        "serve_web/routes.rs",
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/cli/serve_web/routes.rs"
+        )),
+    ),
+    (
+        "serve_web/state.rs",
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/cli/serve_web/state.rs"
+        )),
+    ),
+];
+
+/// The production text of every portal source: each file up to its
+/// `#[cfg(all(test` line (only the root has one), concatenated.
+fn production_source() -> String {
+    PRODUCTION_SOURCES
+        .iter()
+        .map(|(_, src)| src.split("#[cfg(all(test").next().unwrap_or(src))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The file that holds `fn router(`. Exactly one must.
+fn router_source() -> &'static str {
+    let holders: Vec<&(&str, &str)> = PRODUCTION_SOURCES
+        .iter()
+        .filter(|(_, src)| src.contains("fn router("))
+        .collect();
+    assert_eq!(
+        holders.len(),
+        1,
+        "exactly one portal source must define fn router(, found {:?}",
+        holders.iter().map(|(name, _)| *name).collect::<Vec<_>>()
+    );
+    holders[0].1
+}
 
 mod auth;
 mod feeds;
