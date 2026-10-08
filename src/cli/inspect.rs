@@ -2,12 +2,12 @@
 //!
 //! Focus resolution and the neighbourhood projection are shared with
 //! `lambo_inspect` and the web portal and live in [`crate::surface`]
-//! ([`crate::surface::focus`], [`crate::surface::neighbourhood`]); this module
+//! (`surface::focus`, `surface::neighbourhood`); this module
 //! is the CLI adapter: argument checks, the reader load, and the mapping of
 //! the shared refusal text onto [`CliError`]. Caps: [`MAX_INSPECT_DEPTH`], [`crate::surface::limits::MAX_INSPECT_NODES`],
 //! [`crate::surface::limits::MAX_INSPECT_CANDIDATES`],
-//! [`crate::surface::focus::MAX_INSPECT_SCAN_CONCEPTS`],
-//! [`crate::surface::focus::MAX_INSPECT_BOUNDED_SCAN`].
+//! `surface::focus::MAX_INSPECT_SCAN_CONCEPTS`,
+//! `surface::focus::MAX_INSPECT_BOUNDED_SCAN`.
 
 use super::caps::{
     check_in_range_cli, check_size_cli, require_nonempty, CliError, MAX_INSPECT_DEPTH,

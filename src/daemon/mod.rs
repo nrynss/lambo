@@ -682,7 +682,7 @@ impl Daemon {
     ///
     /// Two writers maintain it. The loop keeps it equal to each cycle's fresh
     /// detector hits ([`HotList::retain_conditions`]), and recall **mutates**
-    /// it too: [`Daemon::recall_detailed`] re-validates the expanded members'
+    /// it too: `Daemon::recall_detailed` re-validates the expanded members'
     /// entries at the recall's `now` ([`HotList::revalidate_members`], T5.3 /
     /// XP-3), evicting lapsed ones and rebuilding the survivors' payloads.
     /// Both take the graph lock before this one, so consumers must never take

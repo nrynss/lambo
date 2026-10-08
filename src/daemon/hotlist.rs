@@ -312,7 +312,7 @@ impl HotList {
     /// force-inclusion, XP-3).
     ///
     /// This is recall's read-time maintenance of the hot list, run by
-    /// [`crate::daemon::Daemon::recall_detailed`] over the recall's expanded
+    /// `Daemon::recall_detailed` over the recall's expanded
     /// members before assembly: each member on the list goes through
     /// [`HotList::revalidate`], so lapsed entries are evicted here and a
     /// survivor's payload is the one its predicate just rebuilt against `now`.
