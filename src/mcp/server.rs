@@ -2360,7 +2360,7 @@ impl LamboServer {
                         ("reinforced", s.reinforced),
                         ("edges", s.edges),
                         // Applied ≠ embedded (J3-R3-1): present only for the
-                        // write kind that can embed (hybrid derive), so an
+                        // hybrid strategy (derive and record_action), so an
                         // agent can see a write that applied without its
                         // vector instead of reading `applied` as embedded.
                         ("embedded", s.embedded),
