@@ -51,6 +51,39 @@
     this is refused at the call, not on the receipt. Split the call. A store
     without vector search embeds nothing and is not limited.
 
+### Added
+
+- `lambo erase-session --session <s> --confirm <s>` erases a whole session for
+  account deletion (#23): every interaction, concept, vector, edge, synonym,
+  reservation, canonization record, durable write intent (their payloads hold
+  concept text), published flush stats row and lease refusal, plus the
+  `sessions` row with its embedding contract. It prints one JSON report after
+  the store committed: counts removed per kind, `already_absent` (nothing was
+  left to remove, as on a repeat), and the tombstone's fencing token.
+  - Safe to repeat, and one transaction on every store (SQLite, PostgreSQL,
+    CockroachDB, memory): a failure part way leaves the session as it was and
+    a rerun completes.
+  - The session's lease row is replaced by a tombstone rather than deleted.
+    Every write holding a pre-erase fencing token, and every unleased write, is
+    refused with a stable "was erased" error and recreates nothing; no writer
+    can take the session over, and `derive`, `serve` and the other writer verbs
+    refuse to attach. Reusing an erased id is a deliberate operator act: delete
+    its `session_leases` row.
+  - It never preempts a live writer. While a `serve` or writer verb holds the
+    session, the erase is refused and names the holder; stop it, then erase. A
+    writer whose lease had already lapsed is fenced and winds down at its next
+    heartbeat.
+  - An operator verb: the authority is access to the store, never an agent id,
+    and there is no MCP tool for it. A `--confirm` that differs from
+    `--session` is a usage error and erases nothing.
+  - Not reached: backups and snapshots taken before the erase, and the serve
+    call ledger file (`--ledger`), which can hold recall queries and truncated
+    concept text. The operator's retention policy governs both.
+- `GraphStore::erase_session` (with `store::erase`'s `EraseReport`,
+  `EraseOutcome` and tombstone rule). The default implementation returns a
+  `Capability` error, so a third-party adapter that does not implement it
+  fails closed instead of reporting a deletion it did not do.
+
 ### Fixed
 
 - A `Memory::close()` cancelled while it was stopping the background write

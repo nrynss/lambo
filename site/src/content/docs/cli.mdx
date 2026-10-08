@@ -325,6 +325,32 @@ sqlite schema provisioned (init_schema, idempotent)
 
 Running it again is safe. For a CockroachDB store it runs the repository's provisioning script, so run it from inside a checkout. See [Configuration](/lambo/config/).
 
+## Erase a session
+
+`lambo erase-session` erases a whole session, for example when the account it belongs to is deleted. It removes every interaction, concept, vector, edge, canonization record and pending write, and the session's embedding contract. It reads the store from your config and does not build the embedder.
+
+| Flag | Required | Default |
+|---|---|---|
+| `--session <SESSION>` | Yes | |
+| `--confirm <SESSION>` | Yes | The same id again, exactly. When it differs, nothing is erased and the command exits `2`. |
+
+```bash
+$ lambo --config lambo.toml erase-session --session user-42 --confirm user-42
+{"session":"user-42","already_absent":false,"removed":{"sessions":1,"interactions":3,"concepts":5,"vectors":5,"edges":7,"synonyms":0,"canonization_events":1,"reservations":0,"write_intents":0,"session_stats":1,"lease_refusals":0,"leases":0},"fence_token":1}
+```
+
+The report is printed only after the store has committed the deletion, so a script can treat exit `0` as done. Running it again is safe: a repeat reports `"already_absent":true`. A run that fails part way, for example on a lost connection, changes nothing, and the next run completes.
+
+It never interrupts a live writer. While a `lambo serve` or another writer holds the session, the command exits `1` and names the holder. Stop that writer first: a clean stop flushes its tail and releases the session, and the erase then removes everything, the flushed tail included.
+
+An erased id stays erased. Lambo keeps one marker row for it in `session_leases`, holding only the id, and refuses every later write to it: `derive`, `record-action` and `serve` exit with an error that says the session was erased, and nothing is recreated. A writer that was cut off before the erase cannot write either, and a running `serve` that had lost its lease stops at its next heartbeat. To use the id again, delete its row from `session_leases` by hand.
+
+<Warning>
+Erasing reaches the store only. Backups and snapshots taken before the erase still hold the session, and so does a call ledger file written by `lambo serve --ledger`, which can contain recall queries and concept text. Your backup and log retention policy governs those copies.
+</Warning>
+
+Only someone with access to the store can erase a session. There is no MCP tool for it, so an agent cannot erase memory it was asked to keep.
+
 ## Run the demo
 
 `lambo demo` runs a scripted two-agent scenario: two agents build one REST API, `user schema` earns canonical status, and the second agent's recall carries the blast-radius and conflict warnings.
