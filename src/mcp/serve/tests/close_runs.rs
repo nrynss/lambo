@@ -4,6 +4,7 @@ use crate::graph::action::Action;
 use crate::memory::Memory;
 use crate::store::{GraphStore, MemoryStore};
 use crate::types::EmbeddingContract;
+use std::future::Future;
 
 async fn mem(session: &str) -> Arc<Memory> {
     let store: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
