@@ -132,7 +132,6 @@ use std::fmt;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
 use parking_lot::Mutex as PlMutex;
 use serde_json::json;
@@ -168,6 +167,10 @@ use admission::{Job, JobPayload, Lanes};
 mod execution;
 
 use execution::ConsumeStamp;
+
+mod drain;
+
+pub use drain::WRITE_QUEUE_DRAIN_BUDGET;
 pub(crate) use execution::{mirror_concepts, WriteCtx};
 pub use receipts::{
     AppliedSummary, ReceiptAnswer, ReceiptId, WriteKind, MAX_CONCURRENT_RECEIPT_WAITS,
@@ -179,27 +182,6 @@ pub use receipts::{
 // Constants — every one of them derived, at the constant, from something else
 // in the tree or from a measurement in the phase doc.
 // ---------------------------------------------------------------------------
-
-/// How long a clean `close()` drains the queue before **deferring** the
-/// remainder (`WritePipeline::quiesce`).
-///
-/// Under J3's durable intents this stops being a durability deadline: whatever
-/// does not drain inside the budget survives as a durable intent and the next
-/// serve applies it, so this constant prices *latency at shutdown against
-/// promptness of the write*, nothing more. (Its earlier career — sizing
-/// admission through a rate projection so the queue "could not admit more than
-/// shutdown will wait for" — produced J3-R1-1, J3-R2-1, J3-R3-1 and J3-R3-2 in
-/// turn, one falsified estimator axis each; the redesign retired that role.)
-///
-/// Two seconds, and the ceiling on that choice is `close()`'s own budget:
-/// `lambo serve` wraps `Memory::close` in
-/// `crate::mcp::serve::CLOSE_FLUSH_GRACE` (8 s), out of which
-/// `SHUTDOWN_GRACE + CLOSE_GRACE ≤ SHUTDOWN_BUDGET` is sized. The quiesce runs
-/// **in series before** the existing final flush, so it is carved out of that
-/// 8 s rather than added on top — the same reasoning `LEASE_RELEASE_GRACE`
-/// used. A quarter of the window is the largest slice that leaves the flush,
-/// which is the step that actually delivers durability, the majority of it.
-pub const WRITE_QUEUE_DRAIN_BUDGET: Duration = Duration::from_secs(2);
 
 /// How many **consecutive transient** embed failures within one attach end the
 /// durable-intent replay loop, leaving the rest of the backlog durable
@@ -236,26 +218,6 @@ pub const WRITE_QUEUE_DRAIN_BUDGET: Duration = Duration::from_secs(2);
 /// bounded embeds per attach, not the whole backlog. Recorded in the design
 /// doc's as-built disposition (J3-R2R-1).
 pub const EMBEDDER_SICK_THRESHOLD: usize = 3;
-
-/// Build-time invariant: the quiesce cannot become the reason a `close()` blows
-/// the deadline `serve` gives it.
-const _: () = assert!(
-    WRITE_QUEUE_DRAIN_BUDGET.as_secs() * 4 <= crate::mcp::serve::CLOSE_FLUSH_GRACE.as_secs(),
-    "WRITE_QUEUE_DRAIN_BUDGET must stay at or under a quarter of CLOSE_FLUSH_GRACE — the write \
-     queue quiesce runs in series BEFORE the final flush, so it is carved out of close()'s \
-     budget, not added to it",
-);
-
-/// Build-time invariant: a zero drain budget would defer every acked write at
-/// every close — safe under durable intents, but a silent behaviour cliff an
-/// edit should have to acknowledge. (The old reason here — a divide-by-zero in
-/// `PROBE_CLAMP_RPS`, which used to divide by this — went away when the clamp
-/// stopped being budget-derived, J3 redesign.)
-const _: () = assert!(
-    WRITE_QUEUE_DRAIN_BUDGET.as_secs() > 0,
-    "WRITE_QUEUE_DRAIN_BUDGET must be at least one whole second — a zero budget silently turns \
-     every clean close into a full deferral",
-);
 
 // ---------------------------------------------------------------------------
 // The pipeline
@@ -408,133 +370,6 @@ impl WritePipeline {
 
     fn bound_snapshot(&self) -> usize {
         WRITE_QUEUE_MAX
-    }
-
-    /// Drain the pipeline for `close()`.
-    ///
-    /// Called **before** `close()` takes the writers gate, and that order is
-    /// forced rather than chosen: the gate's write side is held for the rest of
-    /// `close()`, so a worker that had to pass through the gate could never
-    /// finish, and a `close()` waiting for it would deadlock. The workers
-    /// therefore do not use the gate at all — this quiesce is what makes
-    /// "nothing new lands after the drain" true of them.
-    ///
-    /// Bounded by [`WRITE_QUEUE_DRAIN_BUDGET`], which is the same number
-    /// admission promised. Anything still outstanding when it runs out is
-    /// **deferred, not lost** (J3 durable intents): workers are aborted and
-    /// joined (aborting alone proves nothing — the R3-1 lesson), every
-    /// still-pending receipt is settled `intent_durable`, and the count lands
-    /// in `lambo_stats` as `write_queue_deferred`. The jobs themselves were
-    /// recorded as durable intents at admission and the close's final flush —
-    /// which runs AFTER this quiesce — persists them; the next serve of the
-    /// session applies them in order. Acked ⇒ (applied ∨ durable intent) at a
-    /// clean close, **by construction**, whatever any drain estimate said.
-    pub(crate) async fn quiesce(&self) -> usize {
-        self.seal();
-        let deadline = tokio::time::Instant::now() + WRITE_QUEUE_DRAIN_BUDGET;
-        while self.outstanding() > 0 {
-            // `enable()` before the re-check, for the reason in
-            // `WritePipeline::wait`: an un-polled `Notified` is not a
-            // registered waiter, so a settle landing here would be missed and
-            // the quiesce would burn its whole budget on an empty queue.
-            let mut notified = Box::pin(self.settled.notified());
-            notified.as_mut().enable();
-            if self.outstanding() == 0 {
-                break;
-            }
-            if tokio::time::timeout_at(deadline, notified).await.is_err() {
-                break;
-            }
-        }
-        let deferred = self.abort_workers().await;
-        if deferred > 0 {
-            tracing::warn!(
-                session = %self.ctx.session,
-                deferred,
-                "write queue: {deferred} acked write(s) did not drain within {:?} of close(); \
-                 their durable intents survive the close and the next serve of this session \
-                 applies them — receipts say intent_durable",
-                WRITE_QUEUE_DRAIN_BUDGET
-            );
-        }
-        deferred
-    }
-
-    /// Stop every worker and settle whatever is left as `intent_durable`.
-    /// Returns how many receipts this deferred to the next serve.
-    pub(crate) async fn abort_workers(&self) -> usize {
-        self.seal();
-        let (handles, orphans) = {
-            let mut lanes = self.lanes.lock();
-            let handles: Vec<JoinHandle<()>> = lanes.workers.drain().map(|(_, h)| h).collect();
-            let drained: Vec<Job> = lanes
-                .queues
-                .drain()
-                .flat_map(|(_, queue)| queue.into_iter())
-                .collect();
-            let mut orphans = Vec::with_capacity(drained.len());
-            for job in drained {
-                lanes.queued = lanes.queued.saturating_sub(1);
-                lanes.bytes = lanes.bytes.saturating_sub(job.bytes);
-                orphans.push(job.receipt);
-            }
-            (handles, orphans)
-        };
-        for handle in handles {
-            handle.abort();
-            let _ = handle.await;
-        }
-        // Whatever the aborted workers had in flight is now provably not
-        // running, so any receipt still `Pending` names a write this process
-        // will not apply — including the ones that were still queued. Every
-        // such job has a durable intent (recorded at admission, in the log the
-        // close's final flush persists), so the honest settle is
-        // `intent_durable`, not `failed`: the write is deferred to the next
-        // serve of this session, not lost.
-        let mut deferred = 0usize;
-        let now = (self.clock)();
-        {
-            let mut r = self.receipts.lock();
-            let pending: Vec<ReceiptId> = r
-                .entries
-                .iter()
-                .filter(|(_, e)| !e.answer.is_settled())
-                .map(|(id, _)| *id)
-                .collect();
-            for id in pending.iter().chain(orphans.iter()) {
-                if let Some(entry) = r.entries.get_mut(id) {
-                    if entry.settle(ReceiptAnswer::IntentRecorded, now) {
-                        let agent = entry.agent.clone();
-                        // J4 proof obligation 5: a close-deferred intent is a
-                        // lifecycle fact (admitted → deferred), measurable.
-                        if let Some(ledger) = &self.ctx.ledger {
-                            ledger.append(&crate::ledger::completion_line(
-                                &agent.to_string(),
-                                &id.to_string(),
-                                "deferred",
-                                Some(json!({ "reason": "close_drain_exceeded" })),
-                            ));
-                        }
-                        r.undelivered.entry(agent).or_default().push_back(*id);
-                        deferred += 1;
-                    }
-                }
-            }
-        }
-        if deferred > 0 {
-            self.counters
-                .deferred
-                .fetch_add(deferred as u64, Ordering::Relaxed);
-        }
-        {
-            let mut lanes = self.lanes.lock();
-            lanes.running = 0;
-            lanes.running_per_lane.clear();
-            lanes.queued = 0;
-            lanes.bytes = 0;
-        }
-        self.settled.notify_waiters();
-        deferred
     }
 
     /// Replay durable write intents left by previous processes (J3), spawned
@@ -880,19 +715,6 @@ impl WritePipeline {
     /// await (same shape as [`WritePipeline::abort_all_sync`]).
     pub(crate) fn abort_replay_sync(&self) {
         if let Some(handle) = self.replay.lock().take() {
-            handle.abort();
-        }
-    }
-
-    /// Abort the workers without awaiting them — the `Drop` path, which cannot
-    /// await. Receipts are not settled here: a dropped `Memory` never flushes
-    /// its tail either, and a process that is going away has nobody to answer.
-    pub(crate) fn abort_all_sync(&self) {
-        self.abort_probe();
-        self.abort_replay_sync();
-        let mut lanes = self.lanes.lock();
-        lanes.sealed = true;
-        for (_, handle) in lanes.workers.drain() {
             handle.abort();
         }
     }

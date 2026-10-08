@@ -4,6 +4,7 @@ use super::calibration::probe_text_at;
 use super::*;
 use crate::embed::Embedder;
 use crate::surface::limits::MAX_CONCEPTS_PER_DERIVE;
+use std::time::Duration;
 
 mod calibration;
 mod receipts;
