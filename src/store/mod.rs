@@ -678,7 +678,7 @@ pub const FALLBACK_DSN_ENV: &str = "DATABASE_URL";
 /// [`crate::RESOLVE_ENV_VARS`] is one list for every feature row: which
 /// variables a build *reads* varies with the compiled adapters, but what a
 /// hermetic harness must *clear* does not. Must equal
-/// `store::pg::LAMBO_POSTGRES_IAM_ENV`, which is what `PgStore::new` actually
+/// `store::pg::pool::LAMBO_POSTGRES_IAM_ENV`, which is what `PgStore::new` actually
 /// reads; `store::pg`'s test module asserts it under `store-postgres`.
 ///
 /// It selects a *login mode*, not a database — which is why leaving it out of
