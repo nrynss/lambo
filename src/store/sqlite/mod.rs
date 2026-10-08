@@ -330,7 +330,10 @@ const STRUCTURAL_EDGE_IN: &str = "'Dependency', 'Causal', 'Hierarchical'";
 /// T3.1 DDL — embedded and executed verbatim by [`SqliteStore::init_schema`],
 /// and read for its table names by [`SqliteStore::preflight_schema`] (J3 F5).
 /// Idempotent by construction (`IF NOT EXISTS` everywhere).
-const INIT_SQL: &str = include_str!("../../migrations/sqlite/001_init.sql");
+const INIT_SQL: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/migrations/sqlite/001_init.sql"
+));
 
 /// §4.1 interaction-span SQL (twin-shaped with Cockroach's
 /// `INTERACTION_SPAN_SQL`; `?` placeholders). The span gates on BOTH the edge
