@@ -226,6 +226,9 @@ EXIT_CODE=""
 for _ in $(seq 1 120); do
     if ! kill -0 "$SERVE_PID" 2>/dev/null; then
         wait "$SERVE_PID" && EXIT_CODE=0 || EXIT_CODE=$?
+        # Reaped: the PID may be recycled, so the exit trap must not signal it.
+        # (Left set on the TIMEOUT path so the trap still stops a hung serve.)
+        SERVE_PID=
         break
     fi
     sleep 0.1
