@@ -11,7 +11,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::ledger::Ledger;
-use crate::mcp::endpoint::SessionEndpoint;
 use crate::mcp::server::LamboServer;
 use crate::memory::Memory;
 use crate::resolve::ResolvedBackends;
@@ -35,7 +34,7 @@ use http_guards::authorize_bind;
 pub use http_guards::{
     resolve_auth_token, SecretToken, AUTH_TOKEN_ENV, DEFAULT_MAX_SESSIONS, DEFAULT_RATE_LIMIT_RPS,
 };
-use hub::serve_endpoint;
+use hub::bind_hub;
 use roles::{resolve_role, Role};
 use shutdown::holder_shutdown;
 use signals::shutdown_signal;
@@ -185,7 +184,7 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     // exactly as it did before J2. A losing serve on such a machine then refuses
     // as it did before J2 too, because a proxy needs the holder to have bound —
     // one client working instead of none.
-    let endpoint = SessionEndpoint::for_store(&opts.session, &backends.store_cfg);
+    let endpoint = hub::derive_endpoint(&opts.session, &backends.store_cfg);
 
     // J4 — the ledger opens HERE, before the acquire attempt inside
     // `resolve_role`. That is the whole of J4's first half: a serve that LOSES
@@ -475,55 +474,10 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
         None => None,
     };
 
-    // J2 — the session endpoint, bound HERE: below the arming (so a signal
-    // during it still reaches `Memory::close`) and below `LamboServer`, which it
-    // needs. This is also the first moment the unlink inside `bind` is licensed:
-    // we hold the lease, so a socket file already at this path cannot belong to
-    // a live holder.
-    //
-    // **A bind failure does not stop this process serving memory** — the same
-    // posture `Ledger::open` takes, for the same reason: reachability is a
-    // service to *other* processes, and losing it must not cost this client its
-    // memory. The consequence is stated at ERROR rather than swallowed, because
-    // the lease row now advertises an address nothing is listening on: a proxy
-    // that dials it fails honestly per call (the holder-unreachable path), which
-    // is loud but is a real degradation, so the log line names it.
-    // No endpoint: a store no second process can see, so there is no hub to be.
-    // See `SessionEndpoint::for_store`.
-    // JE2E-2: the identity of the socket file this process creates, captured
-    // the instant after the bind. It is what licenses the unlink at exit; see
-    // `SessionEndpoint::unlink_if_ours` for why the path and the lease are not
-    // licences of their own.
-    let mut bound_socket: Option<crate::mcp::endpoint::SocketIdentity> = None;
-    let hub = match endpoint
-        .as_ref()
-        .map(|ep| (ep.path().display().to_string(), ep.bind()))
-    {
-        None => None,
-        Some((path, Ok(listener))) => {
-            bound_socket = endpoint.as_ref().and_then(|ep| ep.file_identity());
-            tracing::info!(
-                endpoint = %path,
-                "lambo serve: session endpoint bound — other clients on this machine can attach \
-                 to this session through it"
-            );
-            Some(tokio::spawn(serve_endpoint(
-                listener,
-                server.clone(),
-                opts.max_sessions,
-            )))
-        }
-        Some((path, Err(e))) => {
-            tracing::error!(
-                error = %e,
-                endpoint = %path,
-                "lambo serve: the session endpoint could not be bound — this process still serves \
-                 its own client normally, but other clients on this machine CANNOT attach to this \
-                 session and their calls will fail honestly rather than reaching memory"
-            );
-            None
-        }
-    };
+    // J2 — the session endpoint, bound HERE: below the arming and below
+    // `LamboServer`, which it needs. A bind failure degrades, it does not stop
+    // this process serving memory; see `hub::bind_hub`.
+    let hub = bind_hub(endpoint.as_ref(), &server, opts.max_sessions);
 
     // Exactly once, at startup: `events()` is stateful on its first call — it
     // hands out the receiver subscribed *before* the daemon spawned, so the
@@ -581,21 +535,10 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     if let Some(poller) = refusal_poller {
         poller.abort();
     }
-    // J2. Aborted AFTER `close()` (that is where `run_and_close` returned from),
-    // deliberately: a proxy's in-flight call must not be cut off before the tail
-    // it may have just written is durable. Then the socket file goes, so the
-    // next start does not log a stale-socket warning it did not earn.
-    if let Some(hub) = hub {
-        hub.abort();
-    }
-    // JE2E-2. Licensed by the socket's own identity, not by the path and not by
-    // the lease: this process may be a FENCED ex-holder whose successor is
-    // already listening at this address, and even a clean close released the
-    // lease a few statements ago. `unlink_if_ours` removes the file only while
-    // it is still the inode this process bound.
-    if let Some(endpoint) = &endpoint {
-        endpoint.unlink_if_ours(bound_socket);
-    }
+    // J2 / JE2E-2. The accept loop stops AFTER `close()` (that is where
+    // `run_and_close` returned from), then the socket file goes, only if it is
+    // still the one this process bound; see `hub::Hub::release`.
+    hub.release(endpoint.as_ref());
     if let Some(ledger) = ledger {
         ledger.shutdown();
         tracing::info!(

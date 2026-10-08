@@ -10,9 +10,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::hub::probe_holder;
+use super::hub::{HubProxy, SessionEndpoint};
 use super::{explain_startup_failure, ServeOptions, Transport};
 use crate::ledger::Ledger;
-use crate::mcp::endpoint::SessionEndpoint;
 use crate::memory::Memory;
 use crate::store::lease;
 use crate::types::LamboError;
@@ -131,7 +131,7 @@ pub(super) enum Role {
     /// bind. Boxed for the same reason [`crate::memory::Attach`] boxes it.
     Holder(Box<Memory>),
     /// The lease is held by a reachable local holder: forward to it (J2).
-    Proxy(Box<crate::mcp::proxy::HubProxy>),
+    Proxy(Box<HubProxy>),
 }
 
 /// The one probe outcome that is strong evidence the holder is **gone** rather
@@ -178,7 +178,7 @@ pub(super) fn correct_the_refresh_claim(message: &str, outcome: &str) -> String 
 /// it is the **only** place allowed to. It runs before a single byte has been
 /// exchanged with this process's own MCP client, so winning the lease here makes
 /// this process a real holder that can actually serve. Once
-/// [`crate::mcp::proxy::HubProxy::run`] is entered the client has handshaken
+/// [`HubProxy::run`] is entered the client has handshaken
 /// with the *holder*, and a lease won after that point could not be served —
 /// the process would heartbeat a session it cannot answer, wedging every other
 /// process on the machine. `HubProxy` therefore only ever reads the row.
@@ -301,7 +301,7 @@ pub(super) async fn resolve_role(
                     &held.current.holder,
                 )
                 .await;
-                return Ok(Role::Proxy(Box::new(crate::mcp::proxy::HubProxy::new(
+                return Ok(Role::Proxy(Box::new(HubProxy::new(
                     crate::types::SessionId::new(&opts.session),
                     endpoint.clone(),
                     Arc::clone(&held.store),

@@ -7,9 +7,9 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use super::hub::SessionEndpoint;
 use super::{EarlyShutdown, ServeOptions};
 use crate::ledger::Ledger;
-use crate::mcp::endpoint::SessionEndpoint;
 use crate::memory::Memory;
 use crate::resolve::{resolve_from_config_path, ResolvedBackends};
 use crate::types::LamboError;

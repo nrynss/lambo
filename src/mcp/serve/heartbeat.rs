@@ -6,9 +6,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use super::hub::SessionEndpoint;
 use super::{ServeOptions, Transport};
 use crate::ledger::Ledger;
-use crate::mcp::endpoint::SessionEndpoint;
 use crate::mcp::server::LamboServer;
 use crate::store::lease;
 use crate::types::{DaemonEvent, LamboError};
