@@ -119,6 +119,26 @@ derive's rule that a vector minted in a call cannot drive a merge in the same
 call still holds: the call stages its writes on a private clone until commit.
 Its replan check (epoch) makes the graph source consistent with the commit.
 
+*Freshness versus durability.* Merges are staged on a clone, a merge target
+removed before commit forces a replan, and the flush drains the ordered log as
+a prefix with retained batches put back at the front (`store/flush.rs`), so a
+`Semantic` edge never lands without its unflushed target. Two residual cases
+predate #8 in kind but are now reachable through a merge into an unflushed
+target:
+
+- a dead-lettered batch (STORE-4/D5) holding the target makes the later batch
+  with the edge fail its foreign key and be dead-lettered too; the same class
+  as canonical-match reinforcement of an unflushed concept;
+- a queued derive whose receipt reported `semantic_merged = [T]` with T
+  unflushed, followed by a crash: the intent is not durably consumed and
+  replays against a different graph (T re-created with a new id by its own
+  replayed intent, or absent if T came from a synchronous derive), so the
+  client-visible outcome differs from the pre-crash receipt. Before #8 the same
+  held for `created` ids.
+
+No code change: both follow from write-behind durability, not from where the
+vectors are ranked.
+
 **`select_session_vectors` loses `_probe` and `_limit`.** An exact scan can
 use neither; the seam an index plugs into is the adapter's
 `VectorCandidateSource` implementation, which already carries both.
