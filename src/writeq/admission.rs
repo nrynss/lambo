@@ -280,11 +280,30 @@ pub(super) struct Lanes {
     pub(super) running_per_lane: HashMap<AgentId, usize>,
     /// `true` once the pipeline refuses admission (closing, or fenced).
     pub(super) sealed: bool,
+    /// `true` once [`WritePipeline::abort_workers`] has drained the queues and
+    /// aborted the workers. From then on nothing can drain: an aborted worker
+    /// never runs its `running -= 1`, so `running` stays above zero until the
+    /// joins finish and reset it, and nothing will notify `settled`. A
+    /// [`WritePipeline::quiesce`] that finds it set (a `close()` retried after
+    /// one was cancelled inside `abort_workers`) goes straight to the joins
+    /// instead of waiting out [`super::WRITE_QUEUE_DRAIN_BUDGET`]. Never
+    /// cleared: lanes stay sealed, so no new worker can make it stale.
+    pub(super) workers_aborted: bool,
 }
 
 impl Lanes {
     pub(super) fn outstanding(&self) -> usize {
         self.queued + self.running
+    }
+
+    /// What a quiesce can still wait for: [`Lanes::outstanding`], or nothing
+    /// once the workers were aborted (see [`Lanes::workers_aborted`]).
+    pub(super) fn drainable(&self) -> usize {
+        if self.workers_aborted {
+            0
+        } else {
+            self.outstanding()
+        }
     }
 
     /// Outstanding jobs **on one lane** — queued plus the one being run by that

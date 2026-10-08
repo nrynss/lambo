@@ -519,3 +519,69 @@ async fn a_cancelled_stop_replay_leaves_the_replay_joinable() {
         "an aborted replay applied its intent"
     );
 }
+
+/// A retried close after a cancelled [`WritePipeline::abort_workers`] must
+/// not spend its drain budget waiting on workers that can never settle. The
+/// cancelled call already drained the queues and aborted every worker; an
+/// aborted worker never runs its `running -= 1`, so `outstanding()` stays
+/// above zero and nothing will ever notify `settled`. The retried
+/// [`WritePipeline::quiesce`] must go straight to the joins instead of
+/// sleeping out [`WRITE_QUEUE_DRAIN_BUDGET`] first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_quiesce_after_a_cancelled_abort_does_not_wait_out_the_budget() {
+    let busy = Arc::new(AtomicBool::new(false));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let finished = Arc::new(AtomicUsize::new(0));
+    let rig = Rig::hybrid(
+        "wq-retried-quiesce",
+        Arc::new(BusyEmbedder {
+            busy: busy.clone(),
+            inner: FixtureEmbedder::new(),
+            calls: calls.clone(),
+            finished: finished.clone(),
+        }),
+    );
+    until(
+        || rig.pipeline.calibration().is_some(),
+        "the probe to finish",
+    )
+    .await;
+    busy.store(true, Ordering::SeqCst);
+
+    rig.derive(&AgentId::new("agent-a"), "alpha concept").await;
+    rig.derive(&AgentId::new("agent-b"), "beta concept").await;
+    until(
+        || calls.load(Ordering::SeqCst) >= 2,
+        "both jobs inside the embedder",
+    )
+    .await;
+
+    // A close() cancelled inside abort_workers.
+    {
+        let abort = rig.pipeline.abort_workers();
+        tokio::pin!(abort);
+        let polled = tokio::time::timeout(Duration::ZERO, &mut abort).await;
+        assert!(polled.is_err(), "the first join completed inside one poll");
+    }
+    assert!(
+        rig.pipeline.outstanding() > 0,
+        "the aborted workers' jobs still count as running, or this proves nothing"
+    );
+
+    // The retried close's quiesce: the stretches end within 400 ms, so a
+    // quiesce that goes straight to the joins returns well inside the budget.
+    let started = std::time::Instant::now();
+    let deferred = rig.pipeline.quiesce().await;
+    let took = started.elapsed();
+    assert!(
+        took < WRITE_QUEUE_DRAIN_BUDGET / 2,
+        "the retried quiesce waited {took:?} on workers that were already aborted"
+    );
+    assert_eq!(
+        finished.load(Ordering::SeqCst),
+        2,
+        "the retried quiesce returned before joining the aborted workers"
+    );
+    assert_eq!(rig.pipeline.outstanding(), 0);
+    assert_eq!(deferred, 2, "both acked jobs are deferred, not lost");
+}

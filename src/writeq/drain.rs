@@ -84,14 +84,18 @@ impl WritePipeline {
     pub(crate) async fn quiesce(&self) -> usize {
         self.seal();
         let deadline = tokio::time::Instant::now() + WRITE_QUEUE_DRAIN_BUDGET;
-        while self.outstanding() > 0 {
+        // `drainable`, not `outstanding`: after a cancelled `abort_workers`
+        // the aborted workers still count as running but will never settle,
+        // so a retried close would otherwise sleep out the whole budget
+        // before joining them.
+        while self.lanes.lock().drainable() > 0 {
             // `enable()` before the re-check, for the reason in
             // `WritePipeline::wait`: an un-polled `Notified` is not a
             // registered waiter, so a settle landing here would be missed and
             // the quiesce would burn its whole budget on an empty queue.
             let mut notified = Box::pin(self.settled.notified());
             notified.as_mut().enable();
-            if self.outstanding() == 0 {
+            if self.lanes.lock().drainable() == 0 {
                 break;
             }
             if tokio::time::timeout_at(deadline, notified).await.is_err() {
@@ -118,6 +122,10 @@ impl WritePipeline {
         self.seal();
         let (handles, orphans) = {
             let mut lanes = self.lanes.lock();
+            // Set before any await: from here on nothing can drain (the
+            // queues empty below, the workers are aborted next), so a quiesce
+            // retried after this call is cancelled must not wait for a settle.
+            lanes.workers_aborted = true;
             let handles: Vec<(AgentId, JoinHandle<()>)> = lanes.workers.drain().collect();
             let drained: Vec<Job> = lanes
                 .queues
