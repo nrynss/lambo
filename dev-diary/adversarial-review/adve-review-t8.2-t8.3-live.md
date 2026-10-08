@@ -1927,3 +1927,23 @@ range narrowed; the five blank ranges removed) were applied and reverted with
 `git checkout`; `git status` was empty after each and at the end, and the lib
 suite was re-confirmed at 647 after both reverts. This note is the only change,
 and it is staged, not committed.
+
+---
+
+# Correction (2026-10-08, refactor #25)
+
+The R3 disposition above ("V1 **FIXED**, `c95a014` (table), `aac5cd5`
+(tests)") did not hold on main. `9686b40`, the commit that added the R3 final
+verification note, also reverted both commits: its src tree is byte-identical
+to `2ac39f0`, and `git diff 9686b40 af82b77 -- src` is exactly the src diff of
+`c95a014` + `aac5cd5`. Nothing else was lost; the note is its only other
+change. The method note above says the mutations were undone with
+`git checkout` on `af82b77` and `git status` was empty, yet the committed tree
+is the pre-R3 one, so that check did not catch it.
+
+From 2026-08-15 until #25, main had none of V1: the Mongolian free variation
+selectors forked canonical keys, and the unassigned Default_Ignorable runs were
+accepted and kept in keys. #25 re-landed the table (`9ce776e`) and restored
+every `aac5cd5` test row in `surface::validate` and `graph::canonical`. The
+migration note above applies to rows written in that window too. See
+`dev-diary/notes/refactor-25-shared-surface.md`.

@@ -734,13 +734,12 @@ mod tests {
             5,
         );
         let expanded = crate::recall::expand::expand(&g, phase1.clone(), 2);
-        let mut hot = crate::daemon::hotlist::HotList::new();
         let _blended = crate::recall::assemble::assemble(
             &g,
             &expanded,
             &phase1,
-            &crate::daemon::ScoreTable::default(),
-            &mut hot,
+            &crate::types::ScoreTable::default(),
+            &std::collections::HashMap::new(),
             &query("what depends on SG-Base-VPC"),
             crate::config::RecallWeights::default(),
             ts(0),

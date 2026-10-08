@@ -2,6 +2,7 @@
 //! failure recording.
 
 use super::*;
+use crate::surface::focus::{MAX_INSPECT_BOUNDED_SCAN, MAX_INSPECT_SCAN_CONCEPTS};
 
 #[tokio::test]
 async fn inspect_finds_a_concept_and_reports_a_miss() {
