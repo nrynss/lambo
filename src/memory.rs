@@ -104,8 +104,8 @@ use leases::{register_session, spawn_lease_heartbeat};
 
 mod builder;
 
-pub(crate) use builder::STILL_REFRESHING_CLAUSE;
 pub use builder::{Attach, LeaseHeldElsewhere, MemoryBuilder};
+pub(crate) use builder::{AttachShutdown, STILL_REFRESHING_CLAUSE};
 
 mod gate;
 mod reads;

@@ -2915,6 +2915,19 @@ impl EarlyShutdown {
     }
 }
 
+/// The builder's view of the pre-arm (#27): `memory` names this trait, not
+/// the type, so the core does not depend on the serving layer. Both methods
+/// forward to the inherent ones above.
+impl crate::memory::AttachShutdown for EarlyShutdown {
+    fn arm(&self) {
+        EarlyShutdown::arm(self);
+    }
+
+    fn fired(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(EarlyShutdown::fired(self))
+    }
+}
+
 /// Ctrl-C (and SIGTERM on unix), so `close()` still runs.
 ///
 /// Registration is EAGER: the handlers are installed when this function is

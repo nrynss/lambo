@@ -21,6 +21,8 @@
 //! arm waits unboundedly. One builder builds one session; a process hosting
 //! many sessions (#32) clones the builder (cheap: `Arc`s) and attaches each.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
@@ -58,6 +60,24 @@ use crate::writeq::{WriteCtx, WritePipeline};
 /// what keeps the two ends from drifting — a reword here that left `serve`
 /// looking for the old text would silently turn the correction into a no-op.
 pub(crate) const STILL_REFRESHING_CLAUSE: &str = "is still refreshing it";
+
+/// The shutdown pre-arm a serving process hands [`MemoryBuilder::build_attach`]
+/// (J6), as the builder needs it: armed at lease acquisition, and raced
+/// against the startup load.
+///
+/// A trait so `memory` does not depend on the serving layer: `serve`
+/// implements it (`crate::mcp::serve::EarlyShutdown`), and a process hosting
+/// many sessions (#32) can hand every attach the same process-wide handle.
+pub(crate) trait AttachShutdown: Send + Sync {
+    /// Install the signal handling. Called once, from the
+    /// `LeaseOutcome::Acquired` arm and nowhere else; synchronous and
+    /// non-blocking, so it adds no `await` to the acquire it follows.
+    fn arm(&self);
+
+    /// Resolves once a shutdown has been requested, **immediately** if one
+    /// already was.
+    fn fired(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
+}
 
 /// What a session lease refusal tells the loser (J2).
 ///
@@ -157,8 +177,9 @@ pub struct MemoryBuilder {
     /// `serve` decides *what*. `None` — every CLI writer verb, every library
     /// caller, every test — installs no handler at all, which is deliberate:
     /// a library `build()` must not change the calling process's signal
-    /// disposition. See `crate::mcp::serve::EarlyShutdown`.
-    pub(super) early_shutdown: Option<crate::mcp::serve::EarlyShutdown>,
+    /// disposition. See [`AttachShutdown`]; `serve`'s implementation is
+    /// `crate::mcp::serve::EarlyShutdown`.
+    pub(super) early_shutdown: Option<Arc<dyn AttachShutdown>>,
 }
 
 impl MemoryBuilder {
@@ -320,8 +341,8 @@ impl MemoryBuilder {
     /// build that never takes the lease never installs a signal handler. That
     /// is what keeps the startup election killable, and what makes "a proxy
     /// never arms" the same statement as "a proxy never takes the lease".
-    pub(crate) fn early_shutdown(mut self, early: crate::mcp::serve::EarlyShutdown) -> Self {
-        self.early_shutdown = Some(early);
+    pub(crate) fn early_shutdown(mut self, early: impl AttachShutdown + 'static) -> Self {
+        self.early_shutdown = Some(Arc::new(early));
         self
     }
 
