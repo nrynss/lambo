@@ -92,6 +92,10 @@ pub use dialect::Dialect;
 ))]
 pub(crate) mod delete_fencing;
 
+// Postgres-only: the flush fence's lease row stays locked until commit.
+#[cfg(all(test, feature = "store-postgres"))]
+mod lease_race;
+
 // T3.2 — CockroachDB durable adapter (spec §3.2/§3.3, §4), the family's first
 // dialect. Feature: store-cockroach.
 #[cfg(feature = "store-cockroach")]

@@ -19,7 +19,7 @@ use sqlx::Row;
 
 use super::codec::backend;
 use super::pool::tx_retry;
-use super::sql::{DELETED_ROW_SESSIONS_SQL, UPSERT_SESSION_ROW_SQL};
+use super::sql::{DELETED_ROW_SESSIONS_SQL, LEASE_TOKEN_FOR_SHARE_SQL, UPSERT_SESSION_ROW_SQL};
 #[cfg(feature = "fixtures")]
 use super::sql::{UPSERT_RESERVATION_SQL, UPSERT_SYNONYM_SQL};
 use super::write_rows::{apply_canonization, apply_step};
@@ -316,14 +316,18 @@ impl<D: Dialect> PgStore<D> {
 
             // Fencing-token gate (#1): reject a stale/missing token for every
             // session the batch touches, INSIDE the same transaction as the
-            // writes (atomic with them; a takeover cannot slip between the
-            // check and the commit — on rejection `?` drops `tx`, rolling back).
-            // An unleased session (no row / current_token 0) passes — seed /
-            // fixture parity.
+            // writes (on rejection `?` drops `tx`, rolling back). The read
+            // takes `FOR SHARE` on the lease row, held to commit, so a
+            // takeover or renewal of any fenced session waits for this flush
+            // instead of committing between the check and our commit (plain
+            // reads are not enough under READ COMMITTED). Rows are locked in
+            // sorted session order so two flushes spanning the same sessions
+            // acquire in one order. An unleased session (no row / current_token
+            // 0) passes: there is no row to lock, matching seed / fixture
+            // parity.
+            fenced.sort_unstable();
             for sid in &fenced {
-                let current: Option<i64> = sqlx::query_scalar(
-                    "SELECT current_token FROM session_leases WHERE session_id = $1",
-                )
+                let current: Option<i64> = sqlx::query_scalar(LEASE_TOKEN_FOR_SHARE_SQL)
                 .bind(sid)
                 .fetch_optional(&mut *tx)
                 .await
@@ -374,14 +378,13 @@ impl<D: Dialect> PgStore<D> {
             // Fencing-token gate (#1): this durable write path HAD no lease
             // check at all — the canon task bypassed `lease_lost`. Check the
             // token inside this transaction, atomically with the write
-            // (rolls back on `?`).
-            let current: Option<i64> = sqlx::query_scalar(
-                "SELECT current_token FROM session_leases WHERE session_id = $1",
-            )
-            .bind(event.session_id.as_str())
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(backend)?;
+            // (rolls back on `?`), with the lease row share-locked to commit
+            // (see the flush gate).
+            let current: Option<i64> = sqlx::query_scalar(LEASE_TOKEN_FOR_SHARE_SQL)
+                .bind(event.session_id.as_str())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(backend)?;
             if let Some(cur) = current {
                 let cur = u64::try_from(cur).map_err(|_| {
                     StoreError::Invariant(format!(

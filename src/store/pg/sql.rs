@@ -194,6 +194,18 @@ UNION SELECT session_id FROM edges
     WHERE id = ANY($2) OR id = ANY($1) OR source = ANY($1) OR target = ANY($1)
 "#;
 
+/// The fencing gate's read of a session's lease token. `FOR SHARE` keeps the
+/// lease row locked until the surrounding transaction ends, so a takeover or
+/// renewal (`INSERT ... ON CONFLICT DO UPDATE` takes a conflicting row lock)
+/// waits for our commit instead of slipping between the check and the commit
+/// under PostgreSQL's READ COMMITTED. Share, not exclusive: concurrent flushes
+/// of one session do not serialise on each other, and the only writers of the
+/// row (acquire, renew, release) are the ones that must wait. CockroachDB runs
+/// SERIALIZABLE and already aborts the loser; the clause is accepted there and
+/// harmless, so the statement stays shared rather than dialect-specific.
+pub(super) const LEASE_TOKEN_FOR_SHARE_SQL: &str =
+    "SELECT current_token FROM session_leases WHERE session_id = $1 FOR SHARE";
+
 /// Canonization transition: update the concept (parity with MemoryStore's
 /// `CanonizationTransition` application) and append the audit row. The event insert is
 /// `ON CONFLICT (id) DO NOTHING` so a retried flush (same batch, already-committed
