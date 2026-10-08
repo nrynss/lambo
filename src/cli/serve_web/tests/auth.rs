@@ -97,8 +97,9 @@ fn bearer_header_is_parsed_strictly() {
 /// the full-scan *semantics* (every position is compared, a late-only
 /// difference is caught, exact input matches, and a length change is a
 /// refusal even when the shorter input is an exact prefix — the case a
-/// naive `zip`-style short-circuit would wrongly accept) and the fixed
-/// loop bound is a property of the code, guarded by `black_box`.
+/// naive `zip`-style short-circuit would wrongly accept). The loop count
+/// itself is pinned where the loop lives:
+/// `surface::bearer::tests::the_loop_count_follows_the_presented_length_not_the_secret`.
 #[test]
 fn tokens_match_scans_the_full_length_without_short_circuiting() {
     let token = b"s3cret".as_slice();
