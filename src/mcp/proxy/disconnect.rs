@@ -8,7 +8,6 @@ use tokio::io::AsyncWriteExt;
 use super::HubProxy;
 use crate::types::LamboError;
 
-#[allow(unused_imports)] // rustdoc links only
 use super::forwarding::request_id;
 
 /// JSON-RPC error code returned for a call the proxy could not forward.

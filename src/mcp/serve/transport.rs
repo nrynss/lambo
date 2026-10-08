@@ -21,11 +21,6 @@ use super::ServeOptions;
 use crate::mcp::server::LamboServer;
 use crate::types::LamboError;
 
-#[allow(unused_imports)] // rustdoc links only
-use super::http_guards::LiveSessions;
-#[allow(unused_imports)] // rustdoc links only
-use crate::memory::Memory;
-
 /// Run a setup step (the stdio handshake, the HTTP `bind`) but bail the moment
 /// the shutdown signal fires first (R2-a).
 ///
@@ -214,7 +209,7 @@ pub(super) async fn serve_stdio(
 /// Streamable HTTP transport, served by the axum already in the tree.
 ///
 /// The service factory clones an `Arc<Memory>` per request — it never builds a
-/// second [`Memory`].
+/// second [`Memory`](crate::memory::Memory).
 pub(super) async fn serve_http(
     server: LamboServer,
     opts: &ServeOptions,
@@ -227,7 +222,7 @@ pub(super) async fn serve_http(
     // avoid. Cloning shares the `Arc<Memory>` exactly as before.
     let factory_server = server.clone();
     // Held as its own `Arc` so the session cap can read the live count from the
-    // same manager rmcp mutates — see [`LiveSessions`].
+    // same manager rmcp mutates — see [`LiveSessions`](super::http_guards::LiveSessions).
     let sessions = Arc::new(LocalSessionManager::default());
     let service =
         StreamableHttpService::new(move || Ok(factory_server.clone()), sessions.clone(), {

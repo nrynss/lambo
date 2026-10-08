@@ -11,11 +11,6 @@ use crate::mcp::endpoint::SessionEndpoint;
 use crate::store::lease::LeaseInfo;
 use crate::types::LamboError;
 
-#[allow(unused_imports)] // rustdoc links only
-use super::disconnect::HUB_UNREACHABLE_MESSAGE;
-#[allow(unused_imports)] // rustdoc links only
-use super::framing::Framed;
-
 /// How long a connect to the holder is retried, and how long the handshake
 /// replay waits for its answer, before the endpoint is treated as dead.
 ///
@@ -84,7 +79,7 @@ pub(super) const CONNECT_RETRY: std::time::Duration = std::time::Duration::from_
 ///   blocked on the very call that triggered the dial, and a store wedged at the
 ///   pool must not turn that into a 38-second silence: past `DIAL_BUDGET` the
 ///   dial is abandoned and the call is answered with
-///   [`HUB_UNREACHABLE_MESSAGE`] — "nothing happened, retry later", which is
+///   [`HUB_UNREACHABLE_MESSAGE`](super::disconnect::HUB_UNREACHABLE_MESSAGE) — "nothing happened, retry later", which is
 ///   exactly what AGENTS.md's "never block on memory" asks for.
 ///
 /// **6s, chosen from both directions.** It sits *above* the budgets the dial's
@@ -103,7 +98,7 @@ pub(super) const CONNECT_RETRY: std::time::Duration = std::time::Duration::from_
 /// holder or to the client's stdout (J2-R3-3: six, not the two first counted) —
 /// are neither raced nor budgeted, and that is the J2-R1-8 deviation's real
 /// argument rather than an oversight: a write abandoned mid-frame delivers a
-/// torn JSON line, which this pipe may never do (see [`Framed::Torn`]). Each is
+/// torn JSON line, which this pipe may never do (see [`Framed::Torn`](super::framing::Framed::Torn)). Each is
 /// bounded by its peer draining the socket. That is a *different shape* from
 /// the store read this constant replaced — a peer that never reads is itself
 /// already wedged, whereas a row read stuck behind a flush at the pool wedged a
@@ -296,7 +291,7 @@ pub(super) enum Dialled {
     /// process derives (J2-R2-4).
     Hub(HubHalves, Vec<String>, std::path::PathBuf),
     /// No connection. Carries the operator-facing reason; the caller answers its
-    /// own client with [`HUB_UNREACHABLE_MESSAGE`].
+    /// own client with [`HUB_UNREACHABLE_MESSAGE`](super::disconnect::HUB_UNREACHABLE_MESSAGE).
     Failed(LamboError),
     /// The shutdown future completed while the dial was in flight. The caller
     /// must stop.

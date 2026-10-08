@@ -1,8 +1,7 @@
 //! Unit tests for the read-only web portal, grouped by subject.
 
 use super::*;
-#[allow(unused_imports)]
-use super::{auth::*, dto::*, projections::*, routes::*, state::*};
+use super::{auth::*, projections::*, routes::*};
 use crate::cli::caps::{ConceptKind, MAX_INSPECT_NODES};
 use crate::embed::{EmbedderConfig, EmbedderKind, FixtureEmbedder};
 use crate::store::{Capabilities, GraphStore, StoreConfig, StoreKind};

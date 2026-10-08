@@ -1,7 +1,7 @@
 //! The holder's ledger and event wiring (I1, I2, J4): the ledger
 //! configuration refusal, the `stats` heartbeat, the pre-lease `startup`
 //! line, the holder-side refusal poller and the daemon event pump. Each task
-//! is spawned by [`serve`] on the holder path and aborted there.
+//! is spawned by [`serve`](super::serve) on the holder path and aborted there.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,11 +11,6 @@ use crate::ledger::Ledger;
 use crate::mcp::server::LamboServer;
 use crate::store::lease;
 use crate::types::{DaemonEvent, LamboError};
-
-#[allow(unused_imports)] // rustdoc links only
-use super::roles::{record_refused_loser, waiting_fits};
-#[allow(unused_imports)] // rustdoc links only
-use super::serve;
 
 /// Both ledger configuration errors, refused in one place.
 ///
@@ -33,7 +28,7 @@ use super::serve;
 /// both take the same path out — and the CLI's wording is kept verbatim, since it
 /// is the message an operator has already learned to read.
 ///
-/// Split out from [`serve`] so it is testable without a store, a transport, or a
+/// Split out from [`serve`](super::serve) so it is testable without a store, a transport, or a
 /// lease, and called before any lease is taken.
 pub fn authorize_ledger(opts: &ServeOptions) -> Result<(), LamboError> {
     match (&opts.ledger, opts.ledger_heartbeat) {
@@ -93,9 +88,9 @@ pub(super) fn serve_startup_line(opts: &ServeOptions) -> serde_json::Value {
 pub(super) const REFUSAL_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 /// J4 — the holder side of a refused acquisition. Spawned only in the holder
-/// branch of [`serve`]: it polls the store for lease refusals this process
+/// branch of [`serve`](super::serve): it polls the store for lease refusals this process
 /// turned away and appends a `lease:refused_takeover` line for each it has not
-/// yet recorded. This and [`record_refused_loser`] together make "a refused
+/// yet recorded. This and [`record_refused_loser`](super::roles::record_refused_loser) together make "a refused
 /// lease acquisition appears in the ledger from both sides" true.
 ///
 /// Refusals recorded against a *previous* holder are filtered out by matching
@@ -125,7 +120,7 @@ pub(super) const REFUSAL_POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// rebuilt per poll from that instant rather than accumulated. Rows *older*
 /// than the cursor are unreachable by construction and cannot be re-logged.
 /// The bookkeeping is [`RefusalCursor`], extracted for the same reason
-/// [`waiting_fits`] was: the *claim about* it is what a review can check.
+/// [`waiting_fits`](super::roles::waiting_fits) was: the *claim about* it is what a review can check.
 pub(super) async fn record_refused_takeovers(
     store: Arc<dyn crate::store::GraphStore>,
     session: crate::types::SessionId,

@@ -8,9 +8,6 @@ use super::forwarding::{request_id, response_id};
 use super::framing::{read_frame, Framed};
 use super::HubProxy;
 
-#[allow(unused_imports)] // rustdoc links only
-use super::dialing::DIAL_BUDGET;
-
 /// How many frames the handshake replay will read before giving up on finding
 /// the `initialize` response it is waiting for.
 ///
@@ -122,7 +119,7 @@ impl Handshake {
     /// this runs". That is no longer true, and it was the premise under which the
     /// arm body's deafness had to be bounded by budgets alone (J2-R2-1): the
     /// whole dial, this replay included, is now polled *against* the shutdown
-    /// future by [`HubProxy::dial_bounded`], and capped by [`DIAL_BUDGET`]. The
+    /// future by [`HubProxy::dial_bounded`], and capped by [`DIAL_BUDGET`](super::dialing::DIAL_BUDGET). The
     /// budget here still earns its keep — it is what distinguishes "the holder
     /// did not answer the handshake" from "the dial ran out of time" in the
     /// operator's log — but it is no longer the only thing standing between a

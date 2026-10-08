@@ -15,9 +15,6 @@ use rmcp::transport::streamable_http_server::session::local::LocalSessionManager
 use super::Transport;
 use crate::types::LamboError;
 
-#[allow(unused_imports)] // rustdoc links only
-use super::EarlyShutdown;
-
 /// Environment variable holding the HTTP bearer token. **Takes precedence over
 /// `--auth-token`**: a process manager can inject the secret without it ever
 /// appearing in a command line (where `ps` and shell history would expose it).
@@ -195,7 +192,7 @@ pub(super) fn resolve_auth_token_from(
 ///
 /// ## What J6 changed: nothing here, and that is the claim
 ///
-/// J6 added a signal registration at the **acquire** — see [`EarlyShutdown`] —
+/// J6 added a signal registration at the **acquire** — see [`EarlyShutdown`](super::EarlyShutdown) —
 /// so "the arming" is no longer one point on the far side of `resolve_role`.
 /// This group is unaffected: it runs above the acquire, so it is now the
 /// **pre-arm** group as well as the pre-lease one, and every member of it still

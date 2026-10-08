@@ -7,24 +7,13 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-#[allow(unused_imports)] // rustdoc links only
-use super::build_memory;
-#[allow(unused_imports)] // rustdoc links only
-use super::roles::{resolve_role, ELECTION_BUDGET};
-#[allow(unused_imports)] // rustdoc links only
-use super::serve;
-#[allow(unused_imports)] // rustdoc links only
-use super::shutdown::{
-    close_bounded, close_bounded_until, holder_shutdown, wind_down, CLOSE_GRACE,
-};
-
 /// The signal registration armed the instant the single-writer lease is taken
 /// (J6), which **only records** that a signal arrived.
 ///
 /// # The window this closes
 ///
-/// [`shutdown_signal`] is armed at [`holder_shutdown`], the first statement
-/// after [`resolve_role`] returns. The lease, though, is taken *inside*
+/// [`shutdown_signal`] is armed at [`holder_shutdown`](super::shutdown::holder_shutdown), the first statement
+/// after [`resolve_role`](super::roles::resolve_role) returns. The lease, though, is taken *inside*
 /// `resolve_role` — inside the `build_attach` call at the top of its election
 /// loop — and everything between the two ran under the **default disposition**:
 /// a SIGTERM landing there killed the process outright, so `Memory::close`
@@ -42,11 +31,11 @@ use super::shutdown::{
 /// # Why the arming could not simply move up
 ///
 /// J2-R1-7 rejected arming above `resolve_role`, and that ruling stands: the
-/// election loop is allowed to run for the whole of [`ELECTION_BUDGET`] — 20
+/// election loop is allowed to run for the whole of [`ELECTION_BUDGET`](super::roles::ELECTION_BUDGET) — 20
 /// seconds — by design, and a registration nothing polls makes the process
 /// **SIGTERM-immune** for exactly as long as nothing polls it. Twenty seconds
 /// of unkillable wait, bought to protect a process that holds no lease and no
-/// tail, is the worse trade; see the arming comment in [`serve`].
+/// tail, is the worse trade; see the arming comment in [`serve`](super::serve).
 ///
 /// This type is armed on the **winning** branch only — from the
 /// `LeaseOutcome::Acquired` arm of `MemoryBuilder::build_attach`, and from
@@ -66,7 +55,7 @@ use super::shutdown::{
 /// freshly-taken lease through the startup-error path that was already there,
 /// and returns. Every remaining step under the guard — the daemon / flush /
 /// canonization spawns, the attach log, the write pipeline, the `Memory`
-/// construction, the return through `resolve_role` and the match in [`serve`] —
+/// construction, the return through `resolve_role` and the match in [`serve`](super::serve) —
 /// is synchronous, so there is no second place a signal can be parked across.
 /// The guard therefore covers no unbounded wait at all, which is the property
 /// that makes it a durability fix rather than an availability regression.
@@ -77,8 +66,8 @@ use super::shutdown::{
 /// [`shutdown_signal`] and does nothing else — it never blocks, holds no lock
 /// and touches no store. Two places read it, which is why it is a watch rather
 /// than the signal future itself: the startup-load race above, and
-/// [`wind_down`], which selects it alongside the fresh `shutdown_signal()` that
-/// [`holder_shutdown`] still arms exactly as it did before. `wait_for` checks
+/// [`wind_down`](super::shutdown::wind_down), which selects it alongside the fresh `shutdown_signal()` that
+/// [`holder_shutdown`](super::shutdown::holder_shutdown) still arms exactly as it did before. `wait_for` checks
 /// the current value first, so if the signal already landed in the window,
 /// `wind_down` completes on its **first poll** — the transport is cancelled
 /// before it serves a byte, `close()` runs, and the process exits 0 with the
@@ -88,7 +77,7 @@ use super::shutdown::{
 ///
 /// `tokio::signal::unix` delivers to *every* live registration for a kind, not
 /// to the first one to ask, so this one consuming a SIGTERM does not consume it
-/// for the others. In particular [`close_bounded`]'s re-arm — the operator's
+/// for the others. In particular [`close_bounded`](super::shutdown::close_bounded)'s re-arm — the operator's
 /// "press Ctrl-C again to give up on a stalled close" escape — still works, and
 /// still is not tripped by the signal that started the shutdown: a `watch`
 /// receiver created after a value was sent does replay it, but a *fresh*
@@ -117,7 +106,7 @@ impl EarlyShutdown {
     /// until [`EarlyShutdown::arm`] is called.
     ///
     /// Constructing one is free and installs nothing, which is what lets
-    /// [`serve`] hand it into the builder *before* the election runs while
+    /// [`serve`](super::serve) hand it into the builder *before* the election runs while
     /// still arming only on the winning branch.
     pub(crate) fn unarmed() -> Self {
         let (tx, signals) = tokio::sync::watch::channel(0u64);
@@ -176,7 +165,7 @@ impl EarlyShutdown {
     /// [`EarlyShutdown::arm`] installs process-wide SIGINT/SIGTERM handlers,
     /// which a unit test must not do to the whole test binary just to assert
     /// what happens *after* the record exists — the same reason
-    /// [`close_bounded_until`] takes its re-armed signal as an argument. This
+    /// [`close_bounded_until`](super::shutdown::close_bounded_until) takes its re-armed signal as an argument. This
     /// sets the watch directly, so the observer side can be driven with no
     /// handler and no real signal.
     // Gated exactly as their only consumers are: the J6 disposition tests live
@@ -200,7 +189,7 @@ impl EarlyShutdown {
 
     /// Resolve once a **second** shutdown signal has been recorded.
     ///
-    /// This is [`close_bounded`]'s escape hatch — the operator who watches a
+    /// This is [`close_bounded`](super::shutdown::close_bounded)'s escape hatch — the operator who watches a
     /// close stall and presses Ctrl-C again — and it is expressed as "the
     /// count reached two" rather than as a fresh `signal()` registration
     /// because the fresh registration got it wrong, and lost data doing so.
@@ -244,7 +233,7 @@ impl EarlyShutdown {
     /// *without* any signal — a client hangup, the `ConnectionClosed` path
     /// above — an operator's first Ctrl-C no longer abandons the close; it
     /// takes two. That is a deliberate trade and a small one, because the
-    /// close is already bounded by [`CLOSE_GRACE`], so the cost is a bounded
+    /// close is already bounded by [`CLOSE_GRACE`](super::shutdown::CLOSE_GRACE), so the cost is a bounded
     /// wait rather than a hang, and the thing bought with it is that a tail is
     /// never thrown away on a signal the operator only sent once.
     pub(crate) async fn second_signal(&self) {
@@ -258,7 +247,7 @@ impl EarlyShutdown {
     /// about signals can honestly be made. On the serve path that cannot
     /// happen for anything that closes a session — [`EarlyShutdown::arm`] runs
     /// in the acquire, and only a process that acquired has a `Memory` to
-    /// close — and on the library path ([`build_memory`]) an unarmed handle is
+    /// close — and on the library path ([`build_memory`](super::build_memory)) an unarmed handle is
     /// the whole point.
     pub(super) async fn at_least(&self, n: u64) {
         let mut rx = self.signals.clone();
@@ -296,16 +285,16 @@ impl crate::memory::AttachShutdown for EarlyShutdown {
 /// runtime immediately and buffers a signal that arrives before `recv()` is
 /// polled, so calling this before the attach log closes that window. Eagerness
 /// only makes the arming *point* effective; it does not move it. The call site
-/// in [`serve`] sits as early as it does for that reason (I-R2-1), and it
+/// in [`serve`](super::serve) sits as early as it does for that reason (I-R2-1), and it
 /// cannot move above `resolve_role`: that loop is allowed to run for the whole
-/// of [`ELECTION_BUDGET`], **20 seconds**, by design, and arming over it would
+/// of [`ELECTION_BUDGET`](super::roles::ELECTION_BUDGET), **20 seconds**, by design, and arming over it would
 /// make that wait unkillable (J2-R1-7). The figure was written here as 50
 /// seconds — the pre-J2-L2 budget — until JE2E-7; the argument holds at 20s.
-/// See the arming comment in [`serve`] for the trade written out.
+/// See the arming comment in [`serve`](super::serve) for the trade written out.
 ///
 /// # It is not the *only* registration any more (J6)
 ///
-/// This paragraph said "everything before the call site in [`serve`] — the
+/// This paragraph said "everything before the call site in [`serve`](super::serve) — the
 /// pre-lease group (the endpoint derivation, `Ledger::open` and its startup
 /// line, J4) and `resolve_role`, which takes the lease — is still unguarded".
 /// Half of that is now false, and the false half is the half that lost data:
@@ -315,7 +304,7 @@ impl crate::memory::AttachShutdown for EarlyShutdown {
 /// [`EarlyShutdown`] arms a second registration at the acquire — inside
 /// `build_attach`, in the `LeaseOutcome::Acquired` arm — for the same eager
 /// reason this function documents, and *only* records the arrival for
-/// [`wind_down`] to read. So the accurate statement is now:
+/// [`wind_down`](super::shutdown::wind_down) to read. So the accurate statement is now:
 ///
 /// * the **pre-lease group** and the **election** above the acquire are
 ///   unguarded, deliberately, and stay killable — that is J2-R1-7's ruling and
@@ -328,7 +317,7 @@ impl crate::memory::AttachShutdown for EarlyShutdown {
 /// lazily instead would re-open the window with every gate green, exactly as
 /// the `wind_down` trap below would.
 ///
-/// **The eagerness survives [`wind_down`]** (JE2E-4), and the reason is which
+/// **The eagerness survives [`wind_down`](super::shutdown::wind_down)** (JE2E-4), and the reason is which
 /// expression runs when: `serve` writes `wind_down(shutdown_signal(), …)`, so
 /// this function is *called* — and its handlers installed — while the argument
 /// is evaluated, before `wind_down`'s body has been polled at all. A future

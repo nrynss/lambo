@@ -80,14 +80,11 @@ use transport::{serve_http, serve_stdio};
 pub(crate) use shutdown::run_and_close;
 pub(crate) use signals::EarlyShutdown;
 // The crate paths the `memory` and `writeq` tests name; nothing outside a
-// test build reads them through `serve`.
-#[allow(unused_imports)]
-pub(crate) use shutdown::{close_bounded_until, CLOSE_FLUSH_GRACE};
-
-#[allow(unused_imports)] // rustdoc links only
-use crate::store::lease;
-#[allow(unused_imports)] // rustdoc links only
-use roles::ELECTION_BUDGET;
+// test build reads them through `serve`, so each is gated like its readers.
+#[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
+pub(crate) use shutdown::close_bounded_until;
+#[cfg(test)]
+pub(crate) use shutdown::CLOSE_FLUSH_GRACE;
 
 /// Which transport `lambo serve` should listen on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -174,7 +171,7 @@ impl ServeOptions {
 /// **releases**
 /// it so the next writer takes over at once. On the one exit that abandons
 /// `close()` — the `close_bounded` timeout or a second signal — the lease is
-/// *not* released and instead lapses at [`lease::LEASE_TTL`], exactly as it would
+/// *not* released and instead lapses at [`lease::LEASE_TTL`](crate::store::lease::LEASE_TTL), exactly as it would
 /// on a crash. That is why the TTL is sized to outlast `SHUTDOWN_BUDGET`: a
 /// graceful-but-slow close still holds a valid lease at the moment it releases.
 ///

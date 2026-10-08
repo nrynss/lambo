@@ -5,7 +5,7 @@
 //!
 //! # The holder's shutdown, stage by stage
 //!
-//! [`serve`] runs these in this order on every exit path of the holder branch
+//! [`serve`](super::serve) runs these in this order on every exit path of the holder branch
 //! (signal, lease loss, client disconnect, transport error). Each stage is one
 //! named step below, so stage logging (#40) attaches at one call each.
 //!
@@ -34,9 +34,6 @@ use crate::ledger::Ledger;
 use crate::memory::Memory;
 use crate::store::lease;
 use crate::types::LamboError;
-
-#[allow(unused_imports)] // rustdoc links only
-use super::serve;
 
 /// How long a transport gets to wind itself down after the shutdown signal
 /// before it is dropped and `close()` runs anyway.
@@ -168,7 +165,7 @@ const _: () = assert!(
      rather than letting it expire mid-shutdown (T8.6)",
 );
 
-/// The only shutdown future [`serve`]'s transports will accept (JE2E-R2-2).
+/// The only shutdown future [`serve`](super::serve)'s transports will accept (JE2E-R2-2).
 ///
 /// # Why a newtype instead of `impl Future`
 ///
@@ -279,7 +276,7 @@ pub(super) fn holder_shutdown(
 /// So the arm appends `kind:"lease", event:"lost", side:"holder"` naming the
 /// winner, **before** it returns and thereby cancels the transport. It survives
 /// by the existing ordering rather than by a new guarantee: the ledger is
-/// drained at the very end of [`serve`], after `run_and_close`, on the error
+/// drained at the very end of [`serve`](super::serve), after `run_and_close`, on the error
 /// path as much as the success one. [`crate::ledger::party_key`]'s fallback
 /// already files an unlisted event's other party under `counterparty`, which is
 /// what this is — a lease token, not a socket path.
@@ -322,7 +319,7 @@ pub(super) async fn wind_down(
 
 /// Run the transport future, then close the session — **on every exit path**.
 ///
-/// Split out from [`serve`] so the "close always runs" guarantee is testable
+/// Split out from [`serve`](super::serve) so the "close always runs" guarantee is testable
 /// without a real socket or handshake: the guarantee lives here, not tangled
 /// with transport construction. Whatever the transport returns — clean
 /// disconnect, forced-close `Ok`, or a transport `Err` — [`Memory::close`] runs

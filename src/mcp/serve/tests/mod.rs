@@ -1,10 +1,8 @@
 //! Unit tests for `lambo serve`, grouped by subject.
 
-#[allow(unused_imports)]
 use super::http_guards::*;
 use super::*;
-#[allow(unused_imports)]
-use super::{builder::*, heartbeat::*, hub::*, roles::*, shutdown::*, signals::*, transport::*};
+use super::{heartbeat::*, roles::*, shutdown::*, transport::*};
 use crate::store::lease;
 use crate::surface::bearer::tokens_match;
 use rmcp::service::ServerInitializeError;

@@ -10,9 +10,6 @@ use crate::resolve::ResolvedBackends;
 use crate::store::GraphStore;
 use crate::types::SessionId;
 
-#[allow(unused_imports)] // rustdoc links only
-use super::auth::authorize_bind_web;
-
 /// When this reader last saw the durable snapshot *change*.
 pub(super) struct Freshness {
     pub(super) fingerprint: u64,
@@ -23,7 +20,7 @@ pub(super) struct AppState {
     pub(super) session: SessionId,
     pub(super) backends: ResolvedBackends,
     /// True when `--bind` reaches beyond loopback. A non-loopback bind always
-    /// carries a token (see [`authorize_bind_web`]).
+    /// carries a token (see [`authorize_bind_web`](super::auth::authorize_bind_web)).
     pub(super) exposed: bool,
     /// Optional bearer token. When set, every route requires it.
     pub(super) auth: Option<AuthToken>,

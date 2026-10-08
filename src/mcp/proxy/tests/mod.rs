@@ -1,8 +1,7 @@
 //! Unit tests for the session proxy, grouped by subject.
 
 use super::*;
-#[allow(unused_imports)]
-use super::{dialing::*, disconnect::*, forwarding::*, framing::*, handshake::*};
+use super::{dialing::*, disconnect::*, framing::*, handshake::*};
 use crate::store::lease::LeaseInfo;
 use crate::store::StoreConfig;
 use chrono::Utc;

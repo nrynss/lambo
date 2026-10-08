@@ -28,9 +28,6 @@ use crate::store::StoreConfig;
 pub(super) use crate::mcp::endpoint::SessionEndpoint;
 pub(super) use crate::mcp::proxy::HubProxy;
 
-#[allow(unused_imports)] // rustdoc links only
-use crate::memory::Memory;
-
 /// The session endpoint's address for this session and store (J2), or `None`
 /// when there is none to be had: a store no second process can see, or an
 /// unusable base directory (logged at ERROR inside
@@ -163,7 +160,7 @@ pub(super) async fn probe_holder(
 
 /// Serve the session endpoint (J2) — the hub half of multi-client survivability.
 ///
-/// One MCP session per accepted connection, all against the **one** [`Memory`]
+/// One MCP session per accepted connection, all against the **one** [`Memory`](crate::memory::Memory)
 /// this process owns: `server` is cloned exactly as `serve_http`'s factory
 /// clones it, so every connection shares the same graph, the same write-behind
 /// log, the same single-writer lease and the same call ledger. Nothing here
@@ -176,7 +173,7 @@ pub(super) async fn probe_holder(
 /// proxy be a byte pipe rather than a re-implementation of the tool surface.
 ///
 /// Runs until aborted. The caller aborts it alongside the heartbeat, *after*
-/// [`Memory::close`], so a proxy's in-flight call is not cut off before the tail
+/// [`Memory::close`](crate::memory::Memory::close), so a proxy's in-flight call is not cut off before the tail
 /// it may have just written is durable.
 pub(super) async fn serve_endpoint(
     listener: tokio::net::UnixListener,

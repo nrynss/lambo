@@ -9,9 +9,6 @@ use super::dialing::HubHalves;
 use super::framing::{read_frame, Framed, MAX_FRAME_BYTES};
 use super::HubProxy;
 
-#[allow(unused_imports)] // rustdoc links only
-use super::handshake::MAX_REPLAY_FRAMES;
-
 /// The in-flight depth past which the pump says so, once (J2-R2-7).
 ///
 /// Not a cap: nothing is refused or dropped at this depth, and the list is
@@ -19,7 +16,7 @@ use super::handshake::MAX_REPLAY_FRAMES;
 /// is the number that makes that argument falsifiable — a request/response MCP
 /// client has one call outstanding and a pipelining one a handful, so 64 is two
 /// orders above the ceiling the argument claims and cannot fire on real traffic.
-/// It reuses [`MAX_REPLAY_FRAMES`]'s order of magnitude for the same reason: past
+/// It reuses [`MAX_REPLAY_FRAMES`](super::handshake::MAX_REPLAY_FRAMES)'s order of magnitude for the same reason: past
 /// it, the peer is doing something no legitimate client does.
 pub(crate) const INFLIGHT_DEPTH_WARN: usize = 64;
 
