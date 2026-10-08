@@ -75,5 +75,8 @@ pub mod action;
 // derive for MatchStrategy::Hybrid (see `hybrid.rs`). Additive: cutting the
 // feature is deleting this line + `hybrid.rs`.
 pub mod hybrid;
+// #8 — the session holder's vector candidate source: an exact scan over the
+// vectors the graph's concepts already carry (see `vector_source.rs`).
+pub(crate) mod vector_source;
 
 pub use graph::{Graph, MAX_EDGE_WEIGHT, REINFORCE_BUMP};

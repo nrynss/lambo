@@ -10,10 +10,15 @@
 //!    order is NOT consulted: the contract is "3 most recent by `created_at`"
 //!    (handoff T5.1), and a chain ordered by insertion may carry arbitrary
 //!    timestamps.
-//! 3. **Vector** — [`GraphStore::vector_candidates_checked`], only when the store
-//!    advertises [`Capabilities::VECTOR_SEARCH`](crate::store::Capabilities::VECTOR_SEARCH). The call is async I/O, so it
-//!    is gathered by [`gather`] BEFORE any graph lock is taken; [`candidates`]
-//!    itself is pure and lock-safe.
+//! 3. **Vector** — the checked candidate read of the source recall is handed
+//!    (`VectorCandidates`), only when the store advertises
+//!    [`Capabilities::VECTOR_SEARCH`](crate::store::Capabilities::VECTOR_SEARCH).
+//!    On a session holder whose store ranks by an exact scan (SQLite) that
+//!    source is the holder's own graph, ranked in RAM with no store call (#8);
+//!    otherwise it is [`GraphStore::vector_candidates_checked`]. Either way it
+//!    is gathered by `gather_from` BEFORE the pipeline's graph lock is taken
+//!    (the graph source takes and releases its own read lock, with no await);
+//!    [`candidates`] itself is pure and lock-safe.
 //!
 //! RAM-tier promise (spec §3.2): when the store lacks `VECTOR_SEARCH`,
 //! [`gather`] makes zero async store calls and logs exactly one line. The only

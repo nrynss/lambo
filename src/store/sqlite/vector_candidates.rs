@@ -17,10 +17,11 @@ use crate::types::{EmbeddingContract, NodeId, Scored, SessionId, StoreError};
 
 /// **Candidate selection** — the swappable half of the vector query path (F1).
 ///
-/// Today: every non-null `concepts.embedding` in the session, decoded. `probe` and
-/// `limit` are part of the signature although an exact scan cannot use them, so that an
-/// ANN index (see the module doc's "The scan is a seam") replaces this function's body
-/// without touching [`rank_by_cosine`], `vector_candidates_checked`, or any caller.
+/// Today: every non-null `concepts.embedding` in the session, decoded. It takes no
+/// probe and no limit: an exact scan can use neither (`rank_by_cosine` truncates after
+/// scoring), and the seam an index would plug into is the adapter's
+/// [`VectorCandidateSource`] implementation, which already carries both (#8 dropped
+/// the unused `_probe` / `_limit` parameters this function kept for that purpose).
 ///
 /// Runs on the caller's transaction: the contract read that authorised this scan and the
 /// scan itself must observe one snapshot.
@@ -33,8 +34,6 @@ use crate::types::{EmbeddingContract, NodeId, Scored, SessionId, StoreError};
 pub(super) async fn select_session_vectors(
     tx: &mut sqlx::SqliteConnection,
     session: &SessionId,
-    _probe: &[f32],
-    _limit: usize,
     dim: usize,
 ) -> Result<Vec<VectorCandidate>, StoreError> {
     let rows = sqlx::query(
@@ -190,8 +189,7 @@ impl VectorCandidateSource for SqliteStore {
             )));
         }
 
-        let candidates =
-            select_session_vectors(&mut *tx, session, embedding, limit, stored.dim).await?;
+        let candidates = select_session_vectors(&mut *tx, session, stored.dim).await?;
         tx.commit()
             .await
             .map_err(|e| db_err("commit vector candidate transaction", e))?;

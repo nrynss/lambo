@@ -51,8 +51,47 @@
     this is refused at the call, not on the receipt. Split the call. A store
     without vector search embeds nothing and is not limited.
 
+### Changed
+
+- On SQLite, the process that holds a session (`lambo serve`, or an embedded
+  `Memory`) now ranks recall's vector leg and hybrid `derive`'s semantic match
+  against the vectors its in-memory graph already holds, instead of reading,
+  decoding and re-parsing every stored vector from the database on each recall
+  and once per unmatched concept on each derive (#8). Rankings over flushed
+  data are unchanged, bit for bit: same candidates, order, scores, ties and
+  refusals. Measured on a 3,600-concept session (fixture embedder, release,
+  macOS): warm recall p50 219 ms to 4.3 ms, a one-concept derive acknowledged
+  to applied 246 ms to 14 ms, a three-concept derive 670 ms to 20 ms. No
+  memory is added: the scan borrows the vectors the graph holds.
+  - A concept is a vector candidate as soon as it is written, before the
+    write-behind flush (which can lag by minutes), so recall finds it and a
+    later `derive` can merge a near paraphrase into it. A removed concept stops
+    being a candidate at once.
+  - Readers without a live session (`lambo recall`, `lambo serve-web`) still
+    scan the database. Postgres and CockroachDB keep their database-side
+    search: they score by database distance, so their ranking would change.
+  - A derive no longer competes with the flush for SQLite's single connection
+    while it matches, and the matching scan no longer spends the derive's 30 s
+    store-I/O deadline: it runs in memory, about 0.8 µs per stored vector at
+    1,024 dimensions.
+
 ### Added
 
+- `GraphStore::exact_vector_scan()` (default `false`): an adapter declares its
+  checked vector read is an exact cosine scan of every vector it stores, so a
+  session holder may answer that read from its graph (#8). `SqliteStore`
+  returns `true`. A wrapper around SQLite keeps the database path unless it
+  forwards the method, which it should do only when its vector read is plain
+  delegation (a wrapper that filters, records or tiers that read must not, or
+  a holder would bypass it). Additive: existing adapters are unaffected.
+- `lambo serve` logs each of its seven shutdown stages when it starts and
+  when it finishes, with the elapsed time (`lambo serve: shutdown stage 3/7
+  session_close finished in 12 ms`), then `lambo serve: shutdown finished in
+  N ms`. The session close logs its ten steps the same way (`close: step
+  4/10 writers_gate started`), and a close abandoned by its timeout or a
+  second signal logs, at WARN, the step it was abandoned in. A shutdown that
+  stalls now names its stage (#40). The line formats are listed in
+  `dev-diary/notes/fix-40-shutdown-stages.md`.
 - `lambo erase-session --session <s> --confirm <s>` erases a whole session for
   account deletion (#23): every interaction, concept, vector, edge, synonym,
   reservation, canonization record, durable write intent (their payloads hold
@@ -96,6 +135,20 @@
 
 ### Fixed
 
+- A `lambo serve` shutdown is now bounded even when its own timers cannot
+  fire (#40). Every shutdown bound is a timer inside the server's async
+  runtime, and a wedged runtime (every worker thread blocked, or the thread
+  driving the server blocked) fires none of them, so the process logs
+  nothing more and waits for its supervisor's kill. The live writer's stall
+  in #40 is consistent with that (it was not reproduced). A watchdog thread
+  outside the runtime now warns when a stage outlives its own bound by more than 1 s,
+  and 20 s after the shutdown began it logs the stalled stage and aborts the
+  process. On macOS the abort leaves a crash report with every thread's stack
+  in `~/Library/Logs/DiagnosticReports/`. A healthy shutdown takes at most
+  18.5 s, so the watchdog never fires on one. **Operator action:** a
+  supervisor's kill timeout should exceed 20 s so the watchdog acts first; 30
+  s is recommended (launchd `ExitTimeOut`, whose default is 20 s; systemd
+  `TimeoutStopSec`). Pre-existing.
 - A clean lease release no longer resets a session's fencing token (single
   writer, #1; found by the #23 review). A release deleted the
   `session_leases` row, so the next acquire minted token 1 again, and a writer
