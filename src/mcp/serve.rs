@@ -4,6 +4,43 @@
 //! [`Memory`] from **one** [`ResolvedBackends`], serves it over stdio or
 //! streamable HTTP, and guarantees [`Memory::close`] runs on the way out so the
 //! final flush happens.
+//!
+//! # The lifecycle, in one place
+//!
+//! [`serve`] is the composition root and the order lives in its body; every
+//! step it calls is in a child module. In order:
+//!
+//! 1. **Pre-lease group** (creates nothing a retry could trip on, runs under
+//!    the default signal disposition): `authorize_bind`, [`authorize_ledger`],
+//!    the endpoint derivation (`hub::derive_endpoint`), `Ledger::open` and its
+//!    `startup` line, the keep-warm interval, the unarmed `EarlyShutdown`,
+//!    `serve_builder`.
+//! 2. **Election** (`roles::resolve_role`): the only lease acquire on the serve
+//!    path. A loser that can forward becomes a proxy (`HubProxy::run`, then its
+//!    ledger drains and it returns); the pre-arm is armed inside the acquire.
+//! 3. **Holder startup**, below the arming (`shutdown::holder_shutdown`):
+//!    `LamboServer`, the ledger heartbeat, the #13 keep-warm, the J4 refusal
+//!    poller, the session endpoint (`hub::bind_hub`), the event pump, the
+//!    `session attached` line.
+//! 4. **Transport** (`transport`): stdio or HTTP, each behind the T8.7 guards
+//!    (`http_guards`) where they apply, until a signal, a lease loss or the
+//!    client ends it.
+//! 5. **Shutdown**, the seven named stages in `shutdown`: transport drain,
+//!    keep-warm abort, the bounded session close, event pump, background
+//!    tasks, endpoint release, ledger close.
+//!
+//! # Modules
+//!
+//! | module | holds |
+//! |---|---|
+//! | `builder` | the one resolve ([`resolve_serve_backends`]), `serve_builder`, [`build_memory`] |
+//! | `roles` | the startup election, `Role`, the loser-side refusal record |
+//! | `hub` | every Unix-socket touch: endpoint derivation, bind, accept loop, release, the proxy probe (the #39 seam) |
+//! | `heartbeat` | ledger configuration, the heartbeat, the startup line, the holder refusal poller, the event pump |
+//! | `http_guards` | the bearer token, the bind refusal, the rate limit, the session cap, the body ceiling |
+//! | `transport` | stdio, streamable HTTP, the bounded wind-down both share |
+//! | `signals` | the eager signal registration and J6's pre-arm (`EarlyShutdown`) |
+//! | `shutdown` | the grace budgets, the shutdown future, the close, the named stages (the #40 seam) |
 
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
