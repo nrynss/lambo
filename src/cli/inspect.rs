@@ -2,12 +2,16 @@
 //!
 //! Focus resolution and the neighbourhood projection are shared with
 //! `lambo_inspect` and the web portal and live in [`crate::surface`]
-//! (`surface::focus`, `surface::neighbourhood`); this module
-//! is the CLI adapter: argument checks, the reader load, and the mapping of
-//! the shared refusal text onto [`CliError`]. Caps: [`MAX_INSPECT_DEPTH`], [`crate::surface::limits::MAX_INSPECT_NODES`],
+//! (`surface::focus`, `surface::neighbourhood`); this module is the CLI
+//! adapter: argument checks, the reader load, and the mapping of the shared
+//! refusal text onto [`CliError`]. Caps: [`MAX_INSPECT_DEPTH`],
+//! [`crate::surface::limits::MAX_INSPECT_NODES`],
 //! [`crate::surface::limits::MAX_INSPECT_CANDIDATES`],
 //! `surface::focus::MAX_INSPECT_SCAN_CONCEPTS`,
 //! `surface::focus::MAX_INSPECT_BOUNDED_SCAN`.
+//!
+//! The focus items that used to live here were crate-private and moved to
+//! `crate::surface` without aliases; every caller imports them from there.
 
 use super::caps::{
     check_in_range_cli, check_size_cli, require_nonempty, CliError, MAX_INSPECT_DEPTH,

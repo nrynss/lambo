@@ -348,9 +348,9 @@ impl Daemon {
     /// Store I/O happens in [`crate::recall::candidates::gather`] BEFORE any
     /// lock: the vector leg is async and must not run while the graph lock is
     /// held. The pipeline then runs under the documented lock order
-    /// (graph read -> hot write). The daemon's inverted index must be
-    /// installed via [`Daemon::with_index`]; without it recall returns an
-    /// empty hit list with a warning (P8 wires the owner's index).
+    /// (graph read -> index read -> hot write). The daemon's inverted index
+    /// must be installed via [`Daemon::with_index`]; without it recall returns
+    /// an empty hit list with a warning (P8 wires the owner's index).
     ///
     /// `cache` is session-scoped: spec §8's key carries no session id, so the
     /// caller owns one [`RecallCache`] per session and hands it over by
@@ -385,8 +385,8 @@ impl Daemon {
     /// at assembly/dispatch). Store I/O happens in
     /// [`crate::recall::candidates::gather`] BEFORE any lock: the vector leg
     /// is async and must not run while the graph lock is held. The pipeline
-    /// then runs under the documented lock order (graph read -> hot write).
-    /// The daemon's inverted index must be installed via
+    /// then runs under the documented lock order (graph read -> index read
+    /// -> hot write). The daemon's inverted index must be installed via
     /// [`Daemon::with_index`]; without it recall returns an empty hit list
     /// with a warning (P8 wires the owner's index).
     ///
@@ -557,9 +557,9 @@ impl Daemon {
         let now = (self.clock)();
         // T5.3 / XP-3: re-validate the expanded members' hot-list entries at
         // the SAME `now` the assembly renders with, under the guards already
-        // held (graph read, then hot write). Lapsed entries are evicted here;
-        // the survivors' freshly rebuilt payloads are what assembly
-        // force-includes and renders. Done here rather than inside
+        // held (graph read, then index read, then hot write). Lapsed entries
+        // are evicted here; the survivors' freshly rebuilt payloads are what
+        // assembly force-includes and renders. Done here rather than inside
         // `assemble` so recall reads a map and never mutates daemon state.
         let hot_payloads = hot.revalidate_members(
             &graph,

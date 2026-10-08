@@ -15,8 +15,11 @@
 //! * `neighbourhood`: the bounded `inspect` neighbourhood projection
 //!   (`render_neighbourhood`), crate-internal.
 //!
-//! `crate::cli::caps` re-exports the public items, so paths written against
-//! it before #25 still resolve.
+//! `crate::cli::caps` re-exports every public item that lived there before
+//! #25 (the limits and `check_size`), so those paths still resolve. The
+//! crate-private items that moved here (focus resolution and the
+//! neighbourhood projection from `cli::inspect`, `err_class` from
+//! `mcp::server`) moved without aliases; every in-crate caller was rewritten.
 
 pub(crate) mod error;
 pub(crate) mod focus;

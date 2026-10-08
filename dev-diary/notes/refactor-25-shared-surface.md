@@ -12,14 +12,16 @@ rules. The rules now live in `crate::surface`, which no surface owns:
 | module | holds | visibility |
 |---|---|---|
 | `surface::limits` | request caps, `clamp_cfg_default` | `pub` |
-| `surface::validate` | `check_size`, `require_nonempty`, `check_in_range` (String errors) | `pub` |
+| `surface::validate` | `check_size`, `require_nonempty`, `check_in_range`, `check_concept_count`, `check_action_targets` (String errors) | `pub` |
 | `surface::focus` | `resolve_focus`, `Focus`, scan caps, the four refusal/note builders | crate |
 | `surface::neighbourhood` | `render_neighbourhood` | crate |
 | `surface::error` | `err_class` (N4), shared by MCP `tool_err` and writeq receipts | crate |
 
 Each surface keeps only its adaptation: `cli::caps` keeps `CliError`, the clap
-`ConceptKind` and the `*_cli` wrappers and re-exports the rest (old paths
-valid); MCP maps to `bad_param`; the web portal answers with its own status.
+`ConceptKind` and the `*_cli` wrappers and re-exports the rest (its old
+public paths stay valid; the crate-private `cli::inspect` focus items and
+`mcp::server::err_class` moved without aliases, and their in-crate callers
+were rewritten); MCP maps to `bad_param`; the web portal answers with its own status.
 "Surface" is the codebase's existing word for the request boundary. Future
 session-addressing validation (#32, #4) and the resolve-or-refuse citation
 resolver (#36, #19) belong here.
@@ -36,7 +38,7 @@ rule (MCP-door-only by design, J1).
 re-validation recall used to run inside `assemble` is daemon maintenance (it
 runs detector callbacks and evicts), so it is now
 `HotList::revalidate_members`, called from `Daemon::recall_detailed` under the
-guards it already held (graph read, then hot write) with the same `now` that
+guards it already held (graph read, then index read, then hot write) with the same `now` that
 assembly renders with. `assemble` takes the payload map. The T5.3 eviction
 assertions moved to `daemon::hotlist::tests::revalidate_members_keeps_live_and_drops_lapsed`.
 
