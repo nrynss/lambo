@@ -271,6 +271,19 @@ pub(crate) async fn check_erase_session<D: Dialect>(store: &PgStore<D>) {
 pub(crate) async fn check_erase_after_release<D: Dialect>(store: &PgStore<D>) {
     let sid = SessionId::from(format!("erase-after-release-{}", Uuid::new_v4()));
     crate::store::erase::testkit::check_erase_after_release_fences(store, &sid).await;
+    // L5: a fixture seed refuses the erased id (the seed exists only with
+    // `fixtures`, which the Cockroach conformance row has).
+    #[cfg(feature = "fixtures")]
+    {
+        let err = store
+            .seed(&crate::types::GraphSnapshot {
+                session_id: sid.clone(),
+                ..Default::default()
+            })
+            .await
+            .expect_err("an erased id is not seeded");
+        assert!(err.to_string().contains("was erased"), "{err}");
+    }
     cleanup(store, &sid).await;
 
     let run = Uuid::new_v4();

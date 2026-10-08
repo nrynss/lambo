@@ -152,6 +152,22 @@ impl<D: Dialect> PgStore<D> {
                 .begin()
                 .await
                 .map_err(|e| map_write_err(e, |m| format!("begin seed transaction: {m}")))?;
+            // #23 review L5: a seed is off-lease, but it must not recreate an
+            // erased session. `FOR SHARE` waits out an erase in flight (it
+            // holds the row `FOR UPDATE`) and then sees its tombstone.
+            let holder: Option<String> = sqlx::query_scalar(
+                "SELECT holder FROM session_leases WHERE session_id = $1 FOR SHARE",
+            )
+            .bind(sid)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(backend)?;
+            if holder
+                .as_deref()
+                .is_some_and(crate::store::erase::is_erased_holder)
+            {
+                return Err(crate::store::erase::erased_session_error(sid));
+            }
             sqlx::query(&self.sql.upsert_session)
                 .bind(sid)
                 .bind(root_goal)

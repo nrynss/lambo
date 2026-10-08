@@ -175,6 +175,22 @@ impl SqliteStore {
             .begin()
             .await
             .map_err(|e| map_write_err(e, |m| format!("begin seed transaction: {m}")))?;
+        // #23 review L5: a seed is off-lease, but it must not recreate an
+        // erased session.
+        let holder: Option<String> =
+            sqlx::query_scalar("SELECT holder FROM session_leases WHERE session_id = ?1")
+                .bind(&snapshot.session_id.0)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| db_err("seed: read lease", e))?;
+        if holder
+            .as_deref()
+            .is_some_and(crate::store::erase::is_erased_holder)
+        {
+            return Err(crate::store::erase::erased_session_error(
+                &snapshot.session_id.0,
+            ));
+        }
         let root_goal = snapshot
             .root_goal
             .as_ref()

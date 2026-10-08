@@ -113,11 +113,17 @@ impl MemoryStore {
 
     /// Seed a prebuilt snapshot directly (used by `fixtures` to load committed graphs).
     #[cfg(feature = "fixtures")]
+    ///
+    /// Off-lease, like the SQL adapters' seeds, but refused for an erased
+    /// session (#23 review L5): a seed must not recreate it under the
+    /// tombstone. Lock order: `inner` before `leases`, as in `flush`.
     pub fn seed(&self, snapshot: GraphSnapshot) -> Result<(), StoreError> {
         let sid = snapshot.session_id.clone();
-        self.inner
-            .write()
-            .insert(sid.0.clone(), SessionData::new(snapshot));
+        let mut map = self.inner.write();
+        if Self::is_tombstoned(&self.leases.read(), &sid) {
+            return Err(crate::store::erase::erased_session_error(sid.as_str()));
+        }
+        map.insert(sid.0.clone(), SessionData::new(snapshot));
         Ok(())
     }
 
@@ -2557,6 +2563,27 @@ mod tests {
             sid,
             "seed() must write the snapshot even with no lease / token (fixture parity)"
         );
+    }
+
+    /// #23 review L5: a fixture seed refuses an erased session id rather
+    /// than recreating it under the tombstone.
+    #[cfg(feature = "fixtures")]
+    #[tokio::test]
+    async fn seed_refuses_an_erased_session() {
+        let store = MemoryStore::new();
+        let sid = SessionId::from("erased-then-seeded");
+        store
+            .erase_session(&sid, &crate::store::lease::testkit::holder("eraser", 1))
+            .await
+            .unwrap();
+        let err = store
+            .seed(GraphSnapshot {
+                session_id: sid.clone(),
+                ..Default::default()
+            })
+            .expect_err("an erased id is not seeded");
+        assert!(err.to_string().contains("was erased"), "{err}");
+        assert!(store.load_session(&sid).await.is_err());
     }
 
     // -- #23 session erasure ------------------------------------------------

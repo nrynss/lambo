@@ -384,3 +384,26 @@ async fn erase_removes_cross_session_edges_on_sqlite() {
     )
     .await;
 }
+
+/// #23 review L5: a fixture seed refuses an erased session id rather than
+/// recreating it under the tombstone.
+#[cfg(feature = "fixtures")]
+#[tokio::test]
+async fn seed_refuses_an_erased_session_on_sqlite() {
+    let store = test_store();
+    store.init_schema().await.unwrap();
+    let sid = SessionId::from("erased-then-seeded");
+    store
+        .erase_session(&sid, &holder("eraser", 1))
+        .await
+        .unwrap();
+    let err = store
+        .seed(&GraphSnapshot {
+            session_id: sid.clone(),
+            ..Default::default()
+        })
+        .await
+        .expect_err("an erased id is not seeded");
+    assert!(err.to_string().contains("was erased"), "{err}");
+    assert!(store.load_session(&sid).await.is_err());
+}
