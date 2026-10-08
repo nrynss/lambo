@@ -447,10 +447,10 @@ impl LamboFile {
         if let Some(p) = explicit {
             return Some(p.to_path_buf());
         }
-        if let Ok(p) = std::env::var("LAMBO_CONFIG") {
-            if !p.is_empty() {
-                return Some(PathBuf::from(p));
-            }
+        if let Ok(p) = std::env::var("LAMBO_CONFIG")
+            && !p.is_empty()
+        {
+            return Some(PathBuf::from(p));
         }
         let local = PathBuf::from("lambo.toml");
         if local.is_file() {
