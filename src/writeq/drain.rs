@@ -16,6 +16,13 @@
 //!   was recorded at admission and the final flush persists it);
 //! * `Drop` cannot await, so [`WritePipeline::abort_all_sync`] aborts without
 //!   joining and settles nothing.
+//!
+//! The quiesce logs its two waits at INFO (#40), inside `close: step 3/10
+//! queue_quiesce`: `write queue: quiesce wait ended after N ms (K job(s)
+//! still outstanding)` and `write queue: W worker(s) aborted and joined in
+//! N ms`. The join is the one wait here with no timer of its own: an aborted
+//! worker stops at its next `.await`, so a worker stuck in a synchronous
+//! stretch holds it.
 
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -83,6 +90,7 @@ impl WritePipeline {
     /// clean close, **by construction**, whatever any drain estimate said.
     pub(crate) async fn quiesce(&self) -> usize {
         self.seal();
+        let started = std::time::Instant::now();
         let deadline = tokio::time::Instant::now() + WRITE_QUEUE_DRAIN_BUDGET;
         // `drainable`, not `outstanding`: after a cancelled `abort_workers`
         // the aborted workers still count as running but will never settle,
@@ -102,6 +110,14 @@ impl WritePipeline {
                 break;
             }
         }
+        let outstanding = self.lanes.lock().drainable();
+        tracing::info!(
+            session = %self.ctx.session,
+            outstanding,
+            elapsed_ms = started.elapsed().as_millis(),
+            "write queue: quiesce wait ended after {} ms ({outstanding} job(s) still outstanding)",
+            started.elapsed().as_millis(),
+        );
         let deferred = self.abort_workers().await;
         if deferred > 0 {
             tracing::warn!(
@@ -149,6 +165,8 @@ impl WritePipeline {
         for (_, handle) in &handles {
             handle.abort();
         }
+        let workers = handles.len();
+        let joining = std::time::Instant::now();
         let mut custody = WorkerCustody {
             lanes: &self.lanes,
             handles,
@@ -158,6 +176,13 @@ impl WritePipeline {
             custody.handles.pop();
         }
         drop(custody);
+        tracing::info!(
+            session = %self.ctx.session,
+            workers,
+            elapsed_ms = joining.elapsed().as_millis(),
+            "write queue: {workers} worker(s) aborted and joined in {} ms",
+            joining.elapsed().as_millis(),
+        );
         // Whatever the aborted workers had in flight is now provably not
         // running, so any receipt still `Pending` names a write this process
         // will not apply — including the ones that were still queued. Every

@@ -297,6 +297,8 @@ Lambo writes a flush as a few batched statements rather than one per change. Eve
 Shutdown is time-bounded, so it stops rather than hanging if the store is unreachable. If it runs out of time, the writes that had not reached the store are lost. There is no on-disk journal to replay them from on the next start. Let the process finish its shutdown, and do not `kill -9` a writer you care about the tail of.
 </Warning>
 
+Under a supervisor (launchd, systemd, Kubernetes), give the server more than 20 seconds to stop before the supervisor kills it; 30 seconds is the recommendation. A healthy shutdown takes at most 18.5 seconds. If one is still running after 20 seconds, the server logs which shutdown stage it is stuck in and aborts itself, which on macOS also leaves a crash report with every thread's stack. launchd's default `ExitTimeOut` is 20 seconds, so set it explicitly. The server logs each shutdown stage as it starts and finishes (`lambo serve: shutdown stage 3/7 session_close finished in 12 ms`), so the last stage that started and did not finish is the one that stalled.
+
 ### Watch a session in a browser
 
 `lambo serve-web` opens a read-only browser window onto a session. It is a **reader**: it never takes the writer lease and exposes no mutating route, so it runs safely beside a `lambo serve` writer on the same session. Point it at the same store so it reads the same data.

@@ -84,9 +84,32 @@
   forwards the method, which it should do only when its vector read is plain
   delegation (a wrapper that filters, records or tiers that read must not, or
   a holder would bypass it). Additive: existing adapters are unaffected.
+- `lambo serve` logs each of its seven shutdown stages when it starts and
+  when it finishes, with the elapsed time (`lambo serve: shutdown stage 3/7
+  session_close finished in 12 ms`), then `lambo serve: shutdown finished in
+  N ms`. The session close logs its ten steps the same way (`close: step
+  4/10 writers_gate started`), and a close abandoned by its timeout or a
+  second signal logs, at WARN, the step it was abandoned in. A shutdown that
+  stalls now names its stage (#40). The line formats are listed in
+  `dev-diary/notes/fix-40-shutdown-stages.md`.
 
 ### Fixed
 
+- A `lambo serve` shutdown is now bounded even when its own timers cannot
+  fire (#40). Every shutdown bound is a timer inside the server's async
+  runtime, and a wedged runtime (every worker thread blocked, or the thread
+  driving the server blocked) fires none of them, so the process logs
+  nothing more and waits for its supervisor's kill. The live writer's stall
+  in #40 is consistent with that (it was not reproduced). A watchdog thread
+  outside
+  the runtime now warns when a stage outlives its own bound by more than 1 s,
+  and 20 s after the shutdown began it logs the stalled stage and aborts the
+  process. On macOS the abort leaves a crash report with every thread's stack
+  in `~/Library/Logs/DiagnosticReports/`. A healthy shutdown takes at most
+  18.5 s, so the watchdog never fires on one. **Operator action:** a
+  supervisor's kill timeout should exceed 20 s so the watchdog acts first; 30
+  s is recommended (launchd `ExitTimeOut`, whose default is 20 s; systemd
+  `TimeoutStopSec`). Pre-existing.
 - A `Memory::close()` cancelled while it was stopping the background write
   queue (for example by a caller's timeout) no longer leaves lane workers or
   the durable-intent replay running. Every worker is aborted before any is

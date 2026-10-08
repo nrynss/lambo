@@ -57,6 +57,7 @@ async fn run_and_close_stops_the_tasks_it_is_handed() {
         pump,
         &[keep_warm.abort_handle()],
         &EarlyShutdown::unarmed(),
+        &ShutdownProgress::new(),
     )
     .await;
     assert!(out.is_ok(), "{out:?}");
@@ -181,6 +182,7 @@ async fn close_runs_when_the_transport_returns_ok() {
         pump,
         &[],
         &EarlyShutdown::unarmed(),
+        &ShutdownProgress::new(),
     )
     .await;
     assert!(out.is_ok(), "clean transport exit closes cleanly: {out:?}");
@@ -197,6 +199,7 @@ async fn close_runs_even_when_the_transport_errors() {
         pump,
         &[],
         &EarlyShutdown::unarmed(),
+        &ShutdownProgress::new(),
     )
     .await;
     assert!(out.is_err(), "the transport error is surfaced: {out:?}");
@@ -237,6 +240,7 @@ async fn a_clean_close_releases_the_lease() {
         pump,
         &[],
         &EarlyShutdown::unarmed(),
+        &ShutdownProgress::new(),
     )
     .await;
     assert!(out.is_ok(), "clean close: {out:?}");
@@ -468,6 +472,7 @@ async fn losing_the_lease_winds_the_serve_down_like_a_sigterm() {
         pump,
         &[],
         &EarlyShutdown::unarmed(),
+        &ShutdownProgress::new(),
     )
     .await;
     assert!(
@@ -537,6 +542,7 @@ async fn a_fenced_holder_shutdown_cancels_a_running_transport_and_books_the_loss
         m.clone(),
         Some(Arc::clone(&ledger)),
         EarlyShutdown::unarmed(),
+        ShutdownProgress::new(),
     );
     let server = tokio::spawn(serve_http_bounded(
         listener,

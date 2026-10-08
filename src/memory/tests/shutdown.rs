@@ -117,6 +117,7 @@ async fn the_keep_warm_is_stopped_before_the_close_starts() {
             pump,
             &handles,
             &crate::mcp::serve::EarlyShutdown::unarmed(),
+            &crate::mcp::serve::ShutdownProgress::new(),
         )
         .await
     });
