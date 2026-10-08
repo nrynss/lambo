@@ -19,8 +19,8 @@ moved is called by the root or a sibling except through public methods.
 
 | module | holds | lines |
 |---|---|---|
-| `graph.rs` | module rules and layout, consts, `Graph`, `new`, the structural write path (`insert_interaction`, `insert_concept`, `upsert_edge`, `remove_node`, `remove_edge`), structural reads and neighbour queries, private helpers | 820 |
-| `graph/snapshot.rs` | `from_snapshot`, `snapshot` | 256 |
+| `graph.rs` | module rules and layout, consts, `Graph`, `new`, the structural write path (`insert_interaction`, `insert_concept`, `upsert_edge`, `remove_node`, `remove_edge`), structural reads and neighbour queries, private helpers | 842 |
+| `graph/snapshot.rs` | `from_snapshot`, `snapshot` | 279 |
 | `graph/transitions.rs` | `apply_canonization_transition`, `legal_canonization_transition`, `bump_gc_survived`, `confirm_human`, `canonization_events` | 148 |
 | `graph/embeddings.rs` | `stamp_embedding`, `replace_embedding_without_vectors`, `replace_embedding_with_operator_override`, `reembed_all`, `embed_missing`, `embedding` | 320 |
 | `graph/mutation_log.rs` | `log_len`, `epoch`, `drain_log`, `push_front_log`, the write-intent pair, `gc_mark`, `record_gc_sweep`, `exempt_from_gc_measure`, `reanchor_gc_clock`, `anchor_gc_clock` | 194 |
@@ -30,6 +30,8 @@ moved is called by the root or a sibling except through public methods.
 
 The order followed the issue table: one `refactor(graph)` commit per module.
 A final `docs(graph)` commit adds the layout section to the root's module doc.
+The line counts are at the branch head, after the three review fixes below
+(the moves alone left the root at 820 and `snapshot.rs` at 256).
 
 ## Where the accessors went
 
@@ -89,21 +91,46 @@ net cannot drift apart.
 - **Replay contract.** The "every mutation appends to the log, under the
   caller's write lock" rule is unchanged: `append_mutation` stays in the
   root, and no body changed.
-- **Gates.** Every local CI row has identical test names, statuses and
-  counts before and after. `cargo doc --no-deps` gives 0 warnings, with or
-  without `--document-private-items`, both before and after.
+- **Gates.** Through the move and docs commits, every local CI row has
+  identical test names, statuses and counts before and after. The review
+  fixes below add exactly three tests to each row that compiles the graph
+  tests, and nothing else changes. `cargo doc --no-deps` gives 0 warnings,
+  with or without `--document-private-items`, both before and after the
+  moves.
 
-## Considered and not changed
+## Write-gate gaps fixed after review
 
-`insert_concept` does not refuse a concept whose id names an existing
-*interaction*. It would overwrite the node, and the temporal chain would then
-point at a concept, which `assert_invariants` flags but the write gate does
-not. This is not a reachable defect. Every production caller (derive,
-hybrid derive, `record_action`, demote) passes either a fresh `NodeId::new()`
-or an id it has just confirmed is a `Concept`. Load goes through
-`from_snapshot`, which runs `assert_invariants`. It stays as recorded here,
-not as a behaviour change inside a mechanical refactor. If #23 (erase) or an
-import path ever accepts caller-chosen ids, add the kind check then.
+The move commits change no behaviour. Review found three latent gaps in the
+code that moved or stayed, and each is fixed in its own `fix(graph)` commit
+after the moves. Under the owner's standing rule, a real latent defect is
+fixed rather than recorded and left. An earlier draft of this note left the
+first gap as is; that call is reversed.
+
+- **`insert_concept` refuses a concept id that names an interaction.**
+  Before, it overwrote the node. The temporal chain and its Temporal edges
+  then touched a concept, and every SQL store persisted both rows
+  (interactions and concepts are separate id-keyed tables). The next
+  `from_snapshot` failed, so the session became permanently unloadable. With
+  `c.id == derives_from`, the call returned `Err`, but only after the node
+  had been overwritten and an `UpsertNode` logged: a partial mutation. The
+  check now runs right after the session check, before any node write or
+  log append, and returns the same invariant error as the sibling refusals.
+  It refuses only an *interaction* id: re-upserting an existing concept by
+  id (derive, hybrid derive, `record_action` and demote all do this) is
+  unchanged. No production caller reached the gap. Test:
+  `insert_concept_refuses_an_id_that_names_an_interaction`.
+- **`insert_interaction` names a concept-id collision.** It was already
+  refused before any mutation, but the message ("exists but is missing from
+  the temporal chain") read as internal corruption. The node kind is now
+  checked first, and the message names the caller error. Same error variant.
+  Test: `insert_interaction_refuses_an_id_that_names_a_concept`.
+- **`from_snapshot` refuses duplicate node ids.** Two concepts with one id
+  used to load last-wins, which contradicts GRAPH-7 ("the loaded graph must
+  equal the stored snapshot"). A duplicate interaction, or a concept that
+  reuses an interaction's id, was caught only later, by the chain walk or
+  an edge-endpoint check, with a message that did not name the cause. Each
+  shape is now refused up front. No store produces them today. Test:
+  `from_snapshot_rejects_duplicate_node_ids`.
 
 ## For #8
 

@@ -75,6 +75,17 @@
 - The hybrid embedding-context cap counts the real framing bytes (5 with an
   origin, 9 without, not 3), so a context can no longer exceed 16 KiB by up to
   6 bytes. Pre-existing.
+- The in-memory graph's write gate refuses a concept whose id names an
+  existing interaction, before anything is written or logged (#50). It used to
+  overwrite the interaction, and the flush then stored both rows under one id,
+  leaving a session that could no longer be loaded. No shipped caller passed
+  such an id. An interaction whose id names a concept is now refused with a
+  message that says so, instead of one that read as internal corruption.
+  Pre-existing.
+- Loading a session snapshot refuses a node id that appears twice (two
+  concepts, two interactions, or a concept reusing an interaction's id) instead
+  of keeping the last concept or failing on an unrelated-looking check (#50).
+  No store writes such a snapshot. Pre-existing.
 
 ## 0.3.0 (2026-10-07)
 
