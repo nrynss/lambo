@@ -398,6 +398,16 @@ fn detect_host() -> String {
 /// and `MemoryStore` unit tests call them directly, the Postgres family from
 /// its live legs (`store::pg::release_fencing`).
 #[cfg(test)]
+// The adapter tests that call these helpers are compiled with SQLite, the
+// in-memory store or Postgres; a Cockroach-only test build has none of them.
+#[cfg_attr(
+    not(any(
+        feature = "store-sqlite",
+        feature = "store-memory",
+        feature = "store-postgres"
+    )),
+    allow(dead_code)
+)]
 pub(crate) mod testkit {
     use std::time::Duration;
 
