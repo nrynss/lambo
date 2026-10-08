@@ -1749,6 +1749,7 @@ async fn conformance_suite() {
     check_set_root_goal_mutation_persists(&store).await;
     check_set_embedding_mutation_persists(&store).await;
     crate::store::pg::delete_fencing::check_delete_only_batch_is_fenced(&store).await;
+    crate::store::pg::release_fencing::check_release_keeps_the_token(&store).await;
     crate::store::pg::erase::check_erase_session(&store).await;
 }
 

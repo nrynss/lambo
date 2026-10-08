@@ -154,9 +154,12 @@ CREATE TABLE IF NOT EXISTS reservations (
 -- live row always carries the current holder's address.
 -- External SQL readers of a *live* holder MUST filter
 -- `WHERE expires_at > strftime('%Y-%m-%dT%H:%M:%fZ','now')` — an expired row
--- persists until the next acquire overwrites it. Operator override (force a
--- takeover from a wedged-but-heartbeating holder):
---   DELETE FROM session_leases WHERE session_id = '<session>';
+-- persists until the next acquire overwrites it. A row is never deleted: a
+-- release expires it (holder 'lambo:released') and keeps current_token, so
+-- fencing tokens only ever go up for a session id. Operator override (force a
+-- takeover from a wedged-but-heartbeating holder; store::lease::OPERATOR_OVERRIDE):
+--   UPDATE session_leases SET holder = 'lambo:released', expires_at = acquired_at,
+--     endpoint = NULL WHERE session_id = '<session>' AND holder <> 'lambo:erased';
 CREATE TABLE IF NOT EXISTS session_leases (
     session_id  TEXT PRIMARY KEY,
     holder      TEXT NOT NULL,

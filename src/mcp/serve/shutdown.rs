@@ -117,7 +117,7 @@ const _: () = assert!(
 /// Bound on the best-effort lease release that follows an abandoned `close()`
 /// (L82-1).
 ///
-/// One `DELETE ... WHERE session_id = $1 AND holder = $2` against a cluster the
+/// One `UPDATE ... WHERE session_id = $1 AND holder = $2` against a cluster the
 /// flush was just talking to. Two seconds is several round-trips' worth; if it
 /// does not land in that, the row lapses at TTL exactly as it did before this
 /// existed, and the process still exits.

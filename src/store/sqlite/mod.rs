@@ -488,7 +488,7 @@ impl GraphStore for SqliteStore {
         session: &SessionId,
         holder: &LeaseHolder,
     ) -> Result<(), StoreError> {
-        self.delete_lease_row(session, holder).await
+        self.expire_lease_row(session, holder).await
     }
 
     async fn record_lease_refusal(

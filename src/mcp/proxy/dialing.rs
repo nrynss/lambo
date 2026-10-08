@@ -455,6 +455,9 @@ impl HubProxy {
             .read_lease(&self.session)
             .await
             .map_err(LamboError::Store)?
+            // A released row (#23 review H2: a release keeps the row and its
+            // fencing token) names no holder, exactly like no row at all.
+            .filter(|row| !crate::store::lease::is_released_holder(&row.holder))
             .ok_or_else(|| {
                 LamboError::Conflict(format!(
                     "session {} has no lease holder to forward to",

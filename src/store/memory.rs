@@ -512,10 +512,16 @@ impl GraphStore for MemoryStore {
     ) -> Result<(), StoreError> {
         let token = holder.token();
         let mut leases = self.leases.write();
-        // Holder-scoped: only clear the row if it is still ours, so a stale
+        // Holder-scoped: only expire the row if it is still ours, so a stale
         // release cannot evict a writer who took over after our lease lapsed.
-        if leases.get(&session.0).map(|r| &r.holder) == Some(&token) {
-            leases.remove(&session.0);
+        // Expire, never remove: the row keeps `current_token`, so the next
+        // acquire mints above it (#23 review H2; see `store::lease`).
+        if let Some(row) = leases.get_mut(&session.0) {
+            if row.holder == token {
+                row.holder = crate::store::lease::RELEASED_HOLDER.to_string();
+                row.expires_at = Utc::now();
+                row.endpoint = None;
+            }
         }
         Ok(())
     }
@@ -1113,13 +1119,30 @@ mod tests {
         };
         assert_eq!(refreshed.endpoint.as_deref(), Some("/run/lambo/s.sock"));
 
+        // A release expires the row and keeps its token (#23 review H2); the
+        // row publishes no endpoint and is nobody's.
         store.release_lease(&sid, &hub).await.unwrap();
-        assert!(store.read_lease(&sid).await.unwrap().is_none());
+        let released = store.read_lease(&sid).await.unwrap().expect("row kept");
+        assert_eq!(released.holder, crate::store::lease::RELEASED_HOLDER);
+        assert_eq!(released.endpoint, None);
+        assert_eq!(released.token, taken.token);
         let LeaseOutcome::Acquired(taken) = store.acquire_lease(&sid, &cli, ttl).await.unwrap()
         else {
             panic!("re-acquire after release");
         };
         assert_eq!(taken.endpoint, None);
+    }
+
+    /// #23 review H2: a release keeps the fencing token, so a writer holding
+    /// a token from before the release is refused against the next holder.
+    #[tokio::test]
+    async fn a_release_keeps_the_fencing_token_on_memory() {
+        crate::store::lease::testkit::check_release_keeps_the_fencing_token(
+            &MemoryStore::new(),
+            &SessionId::from("release-keeps-token"),
+            &SessionId::from("release-zombie"),
+        )
+        .await;
     }
 
     /// T8.6: a stale release (holder no longer owns the row) must not evict the

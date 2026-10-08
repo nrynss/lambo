@@ -65,9 +65,12 @@ fi
 #
 # Operator override for a wedged-but-still-heartbeating writer that will not let
 # go of a session (T8.6 documents this manual escape; there is no auto-preempt):
-#   DELETE FROM session_leases WHERE session_id = '<session>';
-# The next writer's acquire then wins; it replays from durable state, so the
-# wedged holder's un-flushed tail is lost exactly as on any crash.
+#   UPDATE session_leases SET holder = 'lambo:released', expires_at = acquired_at,
+#     endpoint = NULL WHERE session_id = '<session>' AND holder <> 'lambo:erased';
+# The next writer's acquire then wins with a fencing token above every earlier
+# one (never DELETE the row: that restarts the token at 1 and lets a stale
+# writer through). It replays from durable state, so the wedged holder's
+# un-flushed tail is lost exactly as on any crash.
 
 run_sql() {
   local sql="$1"

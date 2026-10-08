@@ -242,16 +242,22 @@ pub enum EraseGate {
 }
 
 /// Shared by every adapter so the rule cannot drift: proceed on no row, an
-/// earlier tombstone, the eraser's own lease, or an expired lease; refuse a
-/// live lease held by anyone else.
+/// earlier tombstone, a released row, the eraser's own lease, or an expired
+/// lease; refuse a live lease held by anyone else. A released row (holder
+/// [`crate::store::lease::RELEASED_HOLDER`]) is no holder's lease, so
+/// replacing it is not counted in [`EraseCounts::leases`].
 pub fn erase_gate(prior: Option<PriorLease<'_>>, eraser: &str) -> EraseGate {
     match prior {
         None => EraseGate::Proceed {
             replaces_lease: false,
         },
-        Some(p) if is_erased_holder(p.holder) => EraseGate::Proceed {
-            replaces_lease: false,
-        },
+        Some(p)
+            if is_erased_holder(p.holder) || crate::store::lease::is_released_holder(p.holder) =>
+        {
+            EraseGate::Proceed {
+                replaces_lease: false,
+            }
+        }
         Some(p) if p.live && p.holder != eraser => EraseGate::Refuse,
         Some(_) => EraseGate::Proceed {
             replaces_lease: true,
@@ -304,6 +310,13 @@ mod tests {
             erase_gate(live(me), me),
             EraseGate::Proceed {
                 replaces_lease: true
+            }
+        );
+        // A released row is nobody's lease: proceed, and count no lease.
+        assert_eq!(
+            erase_gate(lapsed(crate::store::lease::RELEASED_HOLDER), me),
+            EraseGate::Proceed {
+                replaces_lease: false
             }
         );
         // A tombstone is live forever by construction and must not refuse the

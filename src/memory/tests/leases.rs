@@ -38,7 +38,7 @@ async fn an_abandoned_close_still_releases_the_lease() {
     );
 
     // Idempotent: `serve` may reach this after a close that already
-    // released, and a second holder-scoped DELETE is a wasted round-trip at
+    // released, and a second holder-scoped release is a wasted round-trip at
     // best and a race at worst.
     mem.release_lease_after_abandoned_close().await;
     assert_eq!(store.releases(), 1, "the release must happen at most once");
@@ -78,7 +78,7 @@ async fn an_abandoned_close_releases_the_lease_through_serve() {
 }
 
 /// The happy path must not gain a second release: `close()` already handed
-/// the lease off, and a redundant holder-scoped DELETE is a wasted
+/// the lease off, and a redundant holder-scoped release is a wasted
 /// round-trip on the way out.
 #[tokio::test(start_paused = true)]
 async fn a_close_that_finishes_releases_exactly_once_through_serve() {
