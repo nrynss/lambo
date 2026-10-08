@@ -678,10 +678,15 @@ impl Daemon {
         self.events.clone()
     }
 
-    /// Handle to the daemon-owned hot list (recall, T5.3, reads it; tests
-    /// assert maintenance here). The loop holds the graph lock while
-    /// updating it, so consumers must never take the graph lock while
-    /// holding this one.
+    /// Handle to the daemon-owned hot list (tests assert maintenance here).
+    ///
+    /// Two writers maintain it. The loop keeps it equal to each cycle's fresh
+    /// detector hits ([`HotList::retain_conditions`]), and recall **mutates**
+    /// it too: [`Daemon::recall_detailed`] re-validates the expanded members'
+    /// entries at the recall's `now` ([`HotList::revalidate_members`], T5.3 /
+    /// XP-3), evicting lapsed ones and rebuilding the survivors' payloads.
+    /// Both take the graph lock before this one, so consumers must never take
+    /// the graph lock while holding this one.
     pub fn hot_list(&self) -> Arc<RwLock<HotList>> {
         self.hot.clone()
     }
