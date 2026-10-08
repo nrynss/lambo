@@ -101,12 +101,11 @@ use parking_lot::RwLock;
 use crate::canon::stage3;
 use crate::canon::{stage2_passes, PromotionPolicy};
 use crate::daemon::events::{self, EventSender};
-use crate::daemon::ScoreTable;
 use crate::graph::Graph;
 use crate::store::GraphStore;
 use crate::types::{
-    tie_break_by_key, CanonizationEvent, CanonizationStatus, LamboError, Node, NodeId, SessionId,
-    StoreError,
+    tie_break_by_key, CanonizationEvent, CanonizationStatus, LamboError, Node, NodeId, ScoreTable,
+    SessionId, StoreError,
 };
 
 /// Round-robin cursors plus the one-cycle write path.

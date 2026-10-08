@@ -101,15 +101,15 @@ use std::collections::{HashMap, HashSet};
 use chrono::{DateTime, Utc};
 
 use crate::config::RecallWeights;
-use crate::daemon::hotlist::{HotList, HotListPayload};
-use crate::daemon::ScoreTable;
+use crate::daemon::hotlist::HotList;
 use crate::graph::reserve::active_reservation;
 use crate::graph::Graph;
 use crate::recall::detail::{Annotation, AnnotationKind, DetailedHit, DetailedRecall};
 use crate::recall::expand::ExpandedSet;
 use crate::recall::format;
 use crate::types::{
-    tie_break_by_key, CanonizationStatus, Node, NodeId, RecallHit, RecallQuery, Scored,
+    tie_break_by_key, CanonizationStatus, HotListPayload, Node, NodeId, RecallHit, RecallQuery,
+    ScoreTable, Scored,
 };
 
 /// The built-in token estimator (see [`crate::recall::format`]).

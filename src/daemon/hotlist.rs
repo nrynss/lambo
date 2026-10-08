@@ -71,7 +71,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::graph::Graph;
-use crate::types::{AgentId, NodeId};
+use crate::types::NodeId;
 
 /// Spec §9 `hot_list_max`; mirrors [`crate::config::Config::hot_list_max`]'s
 /// default (1000). `Config` drives the daemon's construction; this const is
@@ -105,40 +105,10 @@ impl Condition {
     }
 }
 
-/// Per-condition payload — what recall (T5.3) renders and what a re-validation
-/// predicate reads. The conflict payload carries everything the demo sentence
-/// needs: the agent(s) involved and how long ago the write happened
-/// ("Agent A wrote to it eleven seconds ago").
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum HotListPayload {
-    /// Conflicting multi-agent write on [`HotListEntry::node`].
-    Conflict {
-        /// Agents with edges to the node (≥2), the conflicting writers.
-        agents: Vec<AgentId>,
-        /// The agent that made the **most recent qualifying write** — the
-        /// subject of the §13 sentence "Agent A wrote to it eleven seconds
-        /// ago" (ALGO-2). Without it the renderer can only guess from
-        /// `agents`, and on the shipped fixture the naive guess (first
-        /// alphabetically) is wrong: the newest write is agent-b's.
-        writer: AgentId,
-        /// Age of `writer`'s write, in seconds, **as of the last
-        /// re-validation** — refreshed by [`HotList::revalidate`], so a
-        /// rendered value is the age at read time (XP-3).
-        seconds_ago: u64,
-    },
-    /// A high-risk modification touched the node.
-    HighRisk { reason: String },
-    /// The node drifted from any root goal.
-    Drift {
-        /// Unweighted shortest-path hop count to the nearest root goal, or
-        /// [`crate::daemon::drift::DRIFT_HOPS_NO_PATH`] when there is no path.
-        hops: u64,
-        /// The root goal node the path terminates at (nil when no path).
-        root: NodeId,
-    },
-    /// The node's session has been inactive this long, in seconds.
-    Stale { seconds_inactive: u64 },
-}
+/// Per-condition payload — recall renders it and a re-validation predicate
+/// rebuilds it. Read-side data shared with recall, so it lives in
+/// [`crate::types::HotListPayload`]; re-exported here so this path stays valid.
+pub use crate::types::HotListPayload;
 
 /// Re-validation predicate: recompute the entry's condition against the current
 /// graph **at `now`**.
@@ -396,6 +366,7 @@ impl fmt::Debug for HotList {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::AgentId;
     use uuid::Uuid;
 
     fn nid(id: u64) -> NodeId {

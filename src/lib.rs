@@ -111,7 +111,7 @@ pub use embed::BgeM3LlamaCppEmbedder;
 pub use canon::{
     CanonizationTask, EvalOutcome, EvalParams, Evaluator, PromotionPolicy, PromotionScorer,
 };
-pub use daemon::{Daemon, ScoreTable};
+pub use daemon::Daemon;
 pub use embed::{
     build_embedder, cosine, embedder_from_env, EmbedError, Embedder, EmbedderConfig, EmbedderKind,
 };
@@ -140,5 +140,5 @@ pub use types::{
     AgentId, CanonizationEvent, CanonizationStatus, Concept, ConceptType, DaemonEvent, Edge,
     EdgeType, EmbeddingContract, GraphSnapshot, Interaction, InteractionSpan, LamboError,
     MatchStrategy, Mutation, MutationBatch, Node, NodeId, RecallHit, RecallQuery, RecallResult,
-    Reservation, Scored, SessionId, StoreError, Synonym,
+    Reservation, ScoreTable, Scored, SessionId, StoreError, Synonym,
 };

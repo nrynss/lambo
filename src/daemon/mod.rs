@@ -70,18 +70,10 @@ use crate::types::{DaemonEvent, NodeId, RecallQuery, RecallResult, Scored, Sessi
 /// by [`Config::daemon_tick_interval`], which is what P8 threads in.
 pub const DAEMON_TICK_INTERVAL: Duration = Duration::from_secs(1);
 
-/// The daemon's score table — epoch of the graph state it was computed from,
-/// plus the score-descending ranked list of concept scores.
-///
-/// Daemon-owned: the rescore loop replaces it wholesale each cycle. T4.2+
-/// reads it; never mutated from outside.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct ScoreTable {
-    /// [`Graph::epoch`] the scores were computed from.
-    pub epoch: u64,
-    /// Score-descending (id-ascending tie-break) concept scores.
-    pub ranked: Vec<Scored<NodeId>>,
-}
+/// The daemon's score table. Read-side data shared with recall and
+/// canonization, so it lives in [`crate::types::ScoreTable`]; re-exported here
+/// so `daemon::ScoreTable` stays valid.
+pub use crate::types::ScoreTable;
 
 /// The daemon cycle's `now` source (T4.6 finding-1 regression seam).
 ///
