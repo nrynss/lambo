@@ -617,10 +617,12 @@ generic load failure, which is a poor way to spend ten minutes. Loopback binding
 `--auth-token` is required; binding anywhere else makes it mandatory and `serve` refuses
 to start without it, because this process is a session **writer**.
 
-The unit above sets no `ProcessType`, which launchd treats as "light resource limits"
-(CPU and I/O throttling). Issue #13 names that as a candidate for the writer's
-back-to-back latency sitting ~2.5x above a terminal-run probe; it is not yet measured.
-If you try it, use `<key>ProcessType</key><string>Interactive</string>`, not `Adaptive`:
+The unit above sets `ProcessType` to `Standard`. Keep it: without a `ProcessType`
+launchd applies "light resource limits" (CPU and I/O throttling), which can eat the
+1.5 s between the 18.5 s worst-case shutdown and the 20 s watchdog. Issue #13 also
+names throttling as a candidate for the writer's back-to-back latency sitting ~2.5x
+above a terminal-run probe; it is not yet measured. As a separate, optional
+measurement you can try `<key>ProcessType</key><string>Interactive</string>`, not `Adaptive`:
 Adaptive classifies by XPC activity, which `lambo serve` has none of, so it would most
 likely sit in Background, stricter than the default. launchd also coalesces the job's
 timers (`LegacyTimers` only helps an Interactive job), so the 10 s embedder keep-warm may
