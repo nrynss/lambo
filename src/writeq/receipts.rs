@@ -637,12 +637,12 @@ impl Receipts {
     }
 
     pub(super) fn forget(&mut self, id: &ReceiptId) {
-        if let Some(entry) = self.entries.remove(id) {
-            if let Some(q) = self.undelivered.get_mut(&entry.agent) {
-                q.retain(|x| x != id);
-                if q.is_empty() {
-                    self.undelivered.remove(&entry.agent);
-                }
+        if let Some(entry) = self.entries.remove(id)
+            && let Some(q) = self.undelivered.get_mut(&entry.agent)
+        {
+            q.retain(|x| x != id);
+            if q.is_empty() {
+                self.undelivered.remove(&entry.agent);
             }
         }
     }
@@ -691,11 +691,11 @@ pub(super) fn settle_one(
     now: DateTime<Utc>,
 ) {
     let mut r = receipts.lock();
-    if let Some(entry) = r.entries.get_mut(id) {
-        if entry.settle(answer, now) {
-            let agent = entry.agent.clone();
-            r.undelivered.entry(agent).or_default().push_back(*id);
-        }
+    if let Some(entry) = r.entries.get_mut(id)
+        && entry.settle(answer, now)
+    {
+        let agent = entry.agent.clone();
+        r.undelivered.entry(agent).or_default().push_back(*id);
     }
     r.expire(now);
 }

@@ -137,10 +137,10 @@ impl WritePipeline {
         {
             let mut map = self.restart.lock();
             for intent in &intents {
-                if let Some(o) = &intent.outcome {
-                    if o.consumed_at < stale_before {
-                        continue;
-                    }
+                if let Some(o) = &intent.outcome
+                    && o.consumed_at < stale_before
+                {
+                    continue;
                 }
                 let Ok(id) = ReceiptId::from_str(&intent.receipt) else {
                     tracing::warn!(

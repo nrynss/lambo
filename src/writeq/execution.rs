@@ -507,24 +507,24 @@ impl WritePipeline {
                         // (nothing was written by this process), and the deferred
                         // J4 seam is to re-queue with backoff or keep leaving it
                         // unconsumed for replay.
-                        if let Err(e) = &raw_outcome {
-                            if !matches!(e, LamboError::EmbedUnavailable(_)) {
-                                ctx.graph.write().consume_write_intent(
-                                    job.receipt.to_string(),
-                                    WriteIntentOutcome {
-                                        // JE2E-12: the intent row IS the durable
-                                        // half of the receipt store — a restart
-                                        // answers `failed` straight out of this
-                                        // `summary` — so what it holds must be
-                                        // what a receipt may say. The operator's
-                                        // copy is the completion line and the
-                                        // WARN below, both written from `detail`.
-                                        tag: "failed".into(),
-                                        summary: model_safe_failure(e),
-                                        consumed_at: (clock)(),
-                                    },
-                                );
-                            }
+                        if let Err(e) = &raw_outcome
+                            && !matches!(e, LamboError::EmbedUnavailable(_))
+                        {
+                            ctx.graph.write().consume_write_intent(
+                                job.receipt.to_string(),
+                                WriteIntentOutcome {
+                                    // JE2E-12: the intent row IS the durable
+                                    // half of the receipt store — a restart
+                                    // answers `failed` straight out of this
+                                    // `summary` — so what it holds must be
+                                    // what a receipt may say. The operator's
+                                    // copy is the completion line and the
+                                    // WARN below, both written from `detail`.
+                                    tag: "failed".into(),
+                                    summary: model_safe_failure(e),
+                                    consumed_at: (clock)(),
+                                },
+                            );
                         }
                     }
                     // Two strings from here on: the class for the model, the

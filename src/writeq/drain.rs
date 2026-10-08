@@ -201,22 +201,22 @@ impl WritePipeline {
                 .map(|(id, _)| *id)
                 .collect();
             for id in pending.iter().chain(orphans.iter()) {
-                if let Some(entry) = r.entries.get_mut(id) {
-                    if entry.settle(ReceiptAnswer::IntentRecorded, now) {
-                        let agent = entry.agent.clone();
-                        // J4 proof obligation 5: a close-deferred intent is a
-                        // lifecycle fact (admitted → deferred), measurable.
-                        if let Some(ledger) = &self.ctx.ledger {
-                            ledger.append(&crate::ledger::completion_line(
-                                &agent.to_string(),
-                                &id.to_string(),
-                                "deferred",
-                                Some(json!({ "reason": "close_drain_exceeded" })),
-                            ));
-                        }
-                        r.undelivered.entry(agent).or_default().push_back(*id);
-                        deferred += 1;
+                if let Some(entry) = r.entries.get_mut(id)
+                    && entry.settle(ReceiptAnswer::IntentRecorded, now)
+                {
+                    let agent = entry.agent.clone();
+                    // J4 proof obligation 5: a close-deferred intent is a
+                    // lifecycle fact (admitted → deferred), measurable.
+                    if let Some(ledger) = &self.ctx.ledger {
+                        ledger.append(&crate::ledger::completion_line(
+                            &agent.to_string(),
+                            &id.to_string(),
+                            "deferred",
+                            Some(json!({ "reason": "close_drain_exceeded" })),
+                        ));
                     }
+                    r.undelivered.entry(agent).or_default().push_back(*id);
+                    deferred += 1;
                 }
             }
         }
