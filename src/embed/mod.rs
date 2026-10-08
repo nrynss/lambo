@@ -342,57 +342,57 @@ impl EmbedderConfig {
         if let Some(k) = Self::env_kind()? {
             self.kind = k;
         }
-        if let Ok(v) = env::var("LAMBO_EMBED_DIM") {
-            if !v.is_empty() {
-                self.dim = v.parse().map_err(|e| {
-                    EmbedError::Unavailable(format!("invalid LAMBO_EMBED_DIM: {e}"))
-                })?;
-            }
+        if let Ok(v) = env::var("LAMBO_EMBED_DIM")
+            && !v.is_empty()
+        {
+            self.dim = v
+                .parse()
+                .map_err(|e| EmbedError::Unavailable(format!("invalid LAMBO_EMBED_DIM: {e}")))?;
         }
-        if let Ok(v) = env::var("LAMBO_LLAMA_EMBED_URL") {
-            if !v.is_empty() {
-                self.llama_url = Some(v);
-            }
+        if let Ok(v) = env::var("LAMBO_LLAMA_EMBED_URL")
+            && !v.is_empty()
+        {
+            self.llama_url = Some(v);
         }
-        if let Ok(v) = env::var("LAMBO_LLAMA_MODEL") {
-            if !v.is_empty() {
-                self.llama_model = Some(v);
-            }
+        if let Ok(v) = env::var("LAMBO_LLAMA_MODEL")
+            && !v.is_empty()
+        {
+            self.llama_model = Some(v);
         }
-        if let Ok(v) = env::var("LAMBO_EMBED_DEVICE") {
-            if !v.is_empty() {
-                self.device = Some(v);
-            }
+        if let Ok(v) = env::var("LAMBO_EMBED_DEVICE")
+            && !v.is_empty()
+        {
+            self.device = Some(v);
         }
-        if let Ok(v) = env::var("LAMBO_GEMINI_PROJECT") {
-            if !v.is_empty() {
-                self.gemini_project = Some(v);
-            }
+        if let Ok(v) = env::var("LAMBO_GEMINI_PROJECT")
+            && !v.is_empty()
+        {
+            self.gemini_project = Some(v);
         }
-        if let Ok(v) = env::var("LAMBO_GEMINI_LOCATION") {
-            if !v.is_empty() {
-                self.gemini_location = Some(v);
-            }
+        if let Ok(v) = env::var("LAMBO_GEMINI_LOCATION")
+            && !v.is_empty()
+        {
+            self.gemini_location = Some(v);
         }
-        if let Ok(v) = env::var("LAMBO_GEMINI_MODEL") {
-            if !v.is_empty() {
-                self.gemini_model = Some(v);
-            }
+        if let Ok(v) = env::var("LAMBO_GEMINI_MODEL")
+            && !v.is_empty()
+        {
+            self.gemini_model = Some(v);
         }
-        if let Ok(v) = env::var("LAMBO_GEMINI_CREDENTIALS") {
-            if !v.is_empty() {
-                self.gemini_credentials = Some(v.into());
-            }
+        if let Ok(v) = env::var("LAMBO_GEMINI_CREDENTIALS")
+            && !v.is_empty()
+        {
+            self.gemini_credentials = Some(v.into());
         }
-        if let Ok(v) = env::var("LAMBO_EMBED_KEEP_WARM_SECS") {
-            if !v.is_empty() {
-                self.keep_warm_secs = Some(v.parse().map_err(|e| {
-                    EmbedError::Unavailable(format!(
-                        "invalid LAMBO_EMBED_KEEP_WARM_SECS {v:?}: {e} (expected whole seconds; \
+        if let Ok(v) = env::var("LAMBO_EMBED_KEEP_WARM_SECS")
+            && !v.is_empty()
+        {
+            self.keep_warm_secs = Some(v.parse().map_err(|e| {
+                EmbedError::Unavailable(format!(
+                    "invalid LAMBO_EMBED_KEEP_WARM_SECS {v:?}: {e} (expected whole seconds; \
                          0 disables keep-warm)"
-                    ))
-                })?);
-            }
+                ))
+            })?);
         }
         Ok(self)
     }
