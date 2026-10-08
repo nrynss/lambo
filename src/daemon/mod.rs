@@ -75,11 +75,6 @@ pub const DAEMON_TICK_INTERVAL: Duration = Duration::from_secs(1);
 /// so `daemon::ScoreTable` stays valid.
 pub use crate::types::ScoreTable;
 
-/// The daemon cycle's `now` source (T4.6 finding-1 regression seam).
-///
-/// Production uses [`Utc::now`]; tests swap in a controllable clock
-/// ([`Daemon::with_clock`]) so an idle session can be aged past a detector
-/// window (e.g. staleness) without waiting on the wall clock.
 /// The epoch-stable recall pipeline artifact: phase-1 candidates plus the
 /// phase-2 expansion. Cached as a unit; assembly and rendering re-run on
 /// every call so time-sensitive output (hot-list `seconds_ago`,
@@ -96,6 +91,11 @@ pub struct RecallPipeline {
     expanded: expand::ExpandedSet,
 }
 
+/// The daemon cycle's `now` source (T4.6 finding-1 regression seam).
+///
+/// Production uses [`Utc::now`]; tests swap in a controllable clock
+/// ([`Daemon::with_clock`]) so an idle session can be aged past a detector
+/// window (e.g. staleness) without waiting on the wall clock.
 pub type Clock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 
 /// Background scorer + detector + event publisher (T4.1 skeleton, T4.6
