@@ -5,6 +5,7 @@ use crate::store::{Capabilities, GraphStore, SessionFlushStats};
 use crate::store::{LeaseHolder, LeaseOutcome};
 use crate::types::InteractionSpan;
 use crate::types::{MatchStrategy, RecallQuery};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// [`SqliteStore`] with every checked vector answer recorded, in call order.
@@ -20,10 +21,17 @@ use std::sync::{Arc, Mutex};
 /// written for, and the path readers without a graph still take. Built with
 /// [`RecordingSqlite::graph_ranked`] it forwards SQLite's `true`, so a holder
 /// ranks in its graph exactly as one over a bare `SqliteStore` does (#8), and
-/// `answers` then counts the store reads that path must not make.
+/// `vector_calls` then counts the store reads that path must not make.
+///
+/// `answers` holds only the checked reads that **succeeded**; `vector_calls`
+/// counts every entry into either vector read (the checked one and the frozen
+/// unchecked `vector_candidates`) before the inner call runs, so a call that
+/// errors — say a contract refusal that recall swallows into a keyword-only
+/// result — is still counted.
 struct RecordingSqlite {
     inner: SqliteStore,
     answers: Mutex<Vec<Vec<Scored<NodeId>>>>,
+    vector_calls: AtomicUsize,
     forward_exact_scan: bool,
 }
 
@@ -32,6 +40,7 @@ impl RecordingSqlite {
         Self {
             inner,
             answers: Mutex::new(Vec::new()),
+            vector_calls: AtomicUsize::new(0),
             forward_exact_scan: false,
         }
     }
@@ -45,6 +54,11 @@ impl RecordingSqlite {
 
     fn answers(&self) -> Vec<Vec<Scored<NodeId>>> {
         self.answers.lock().unwrap().clone()
+    }
+
+    /// Every vector read that reached the store, successful or not.
+    fn vector_calls(&self) -> usize {
+        self.vector_calls.load(Ordering::SeqCst)
     }
 }
 
@@ -82,6 +96,7 @@ impl GraphStore for RecordingSqlite {
         embedding: &[f32],
         limit: usize,
     ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+        self.vector_calls.fetch_add(1, Ordering::SeqCst);
         self.inner
             .vector_candidates(session, embedding, limit)
             .await
@@ -93,6 +108,7 @@ impl GraphStore for RecordingSqlite {
         expected_contract: &EmbeddingContract,
         limit: usize,
     ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+        self.vector_calls.fetch_add(1, Ordering::SeqCst);
         let hits = self
             .inner
             .vector_candidates_checked(session, embedding, expected_contract, limit)
@@ -286,6 +302,11 @@ async fn sqlite_vector_leg_fires_on_an_organically_derived_concept() {
 
     let answers = store.answers();
     assert_eq!(answers.len(), 2, "recall issued exactly one vector query");
+    assert_eq!(
+        store.vector_calls(),
+        2,
+        "and no other vector read reached SQLite, failed or unchecked"
+    );
     let scored = answers[1]
         .iter()
         .find(|s| s.item == organic)
@@ -465,9 +486,11 @@ async fn sqlite_holder_reads_no_vectors_from_the_store() {
         .await;
     assert_eq!(answer.tag(), "applied", "{answer:?}");
 
-    assert!(
-        store.answers().is_empty(),
-        "derive, recall and the queued derive read no vectors from SQLite: {:?}",
+    assert_eq!(
+        store.vector_calls(),
+        0,
+        "derive, recall and the queued derive made no vector call to SQLite, \
+         successful or failed, checked or unchecked: answers {:?}",
         store.answers()
     );
     reopened.close().await.unwrap();
