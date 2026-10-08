@@ -1,6 +1,7 @@
 //! Unit tests for `lambo serve`, grouped by subject.
 
 use super::*;
+use crate::surface::bearer::tokens_match;
 
 mod heartbeat;
 mod http_guards;

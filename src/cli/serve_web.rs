@@ -211,52 +211,14 @@ impl std::str::FromStr for AuthToken {
     }
 }
 
-/// Compare `presented` against `expected` without an early exit and with a
-/// loop count independent of the presented input's length.
-///
-/// Mirrors `mcp::serve`'s `tokens_match`: the accumulate-then-test shape
-/// keeps the time independent of where the first differing byte falls, and
-/// [`std::hint::black_box`] stops the optimiser from proving the accumulator
-/// can be short-circuited. The loop runs over **`expected`** (the secret,
-/// whose length is fixed per deployment) and every byte of `expected` is
-/// consumed on every call — the number of iterations depends only on the
-/// secret, never on `presented`'s length, so the input cannot leak its length
-/// through the loop count. A length change is folded into `diff` via the XOR
-/// below, so a truncated or padded `presented` is still refused.
-fn tokens_match(presented: &[u8], expected: &[u8]) -> bool {
-    if expected.is_empty() {
-        // Unreachable via `AuthToken::new`, which rejects empty tokens; a
-        // belt-and-braces guard so the `%` below cannot divide by zero.
-        return false;
-    }
-    let mut diff = (presented.len() ^ expected.len()) as u64;
-    for (i, exp_byte) in expected.iter().enumerate() {
-        let presented_byte = if presented.is_empty() {
-            0
-        } else {
-            presented[i % presented.len()]
-        };
-        diff |= u64::from(exp_byte ^ presented_byte);
-    }
-    std::hint::black_box(diff) == 0
-}
-
 /// Does an `Authorization` header carry the expected bearer token?
 ///
 /// Scheme matched case-insensitively (RFC 7235 §2.1); the credential compared
-/// byte-for-byte in constant time. Mirrors `mcp::serve::bearer_ok`.
+/// byte-for-byte in constant time. The parse and the comparison are the ones
+/// `mcp::serve` uses, from `crate::surface::bearer` (#28): this surface used
+/// to carry its own copy, which had drifted from that one.
 fn bearer_ok(header: Option<&str>, expected: &AuthToken) -> bool {
-    let Some(raw) = header else {
-        return false;
-    };
-    let raw = raw.trim();
-    let Some((scheme, credential)) = raw.split_once(' ') else {
-        return false;
-    };
-    if !scheme.eq_ignore_ascii_case("bearer") {
-        return false;
-    }
-    tokens_match(credential.trim().as_bytes(), expected.as_bytes())
+    crate::surface::bearer::bearer_ok(header, expected.as_bytes())
 }
 
 /// Resolve the effective token from the flag and the environment (env wins).

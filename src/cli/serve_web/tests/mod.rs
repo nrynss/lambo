@@ -4,6 +4,7 @@ use super::*;
 use crate::cli::caps::ConceptKind;
 use crate::embed::{EmbedderConfig, EmbedderKind, FixtureEmbedder};
 use crate::store::{StoreConfig, StoreKind};
+use crate::surface::bearer::tokens_match;
 use crate::types::{
     AgentId, CanonizationEvent, CanonizationStatus, Concept, ConceptType, Edge, EdgeType,
     EmbeddingContract, Interaction, Mutation, MutationBatch, Node, NodeId, Scored, SessionId,

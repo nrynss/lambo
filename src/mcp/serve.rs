@@ -258,51 +258,13 @@ impl std::str::FromStr for SecretToken {
     }
 }
 
-/// Compare a presented token against the expected one without an early exit.
-///
-/// The accumulate-then-test shape keeps the time taken independent of *where*
-/// the first differing byte falls, so a caller cannot recover the secret byte by
-/// byte from response timing. Two deliberate details:
-///
-/// * the loop runs over the **presented** input and indexes the expected token
-///   modulo its length, so a wrong-length guess does not return early and
-///   thereby disclose the expected length;
-/// * [`std::hint::black_box`] stops the optimiser from proving the accumulator
-///   can be short-circuited.
-///
-/// The honest caveat: the *duration* still scales with the presented length,
-/// which is attacker-controlled and reveals nothing about the secret. This is
-/// the same guarantee `subtle::ConstantTimeEq` gives on slices, reached without
-/// adding a dependency for one comparison.
-fn tokens_match(presented: &[u8], expected: &[u8]) -> bool {
-    if expected.is_empty() {
-        // Unreachable via `SecretToken::new`, which rejects empty tokens; a
-        // belt-and-braces guard so the `%` below cannot divide by zero.
-        return false;
-    }
-    let mut diff = (presented.len() ^ expected.len()) as u64;
-    for (i, byte) in presented.iter().enumerate() {
-        diff |= u64::from(byte ^ expected[i % expected.len()]);
-    }
-    std::hint::black_box(diff) == 0
-}
-
 /// Does an `Authorization` header value carry the expected bearer token?
 ///
 /// The scheme is matched case-insensitively (RFC 7235 §2.1); the credential
-/// itself is compared byte-for-byte in constant time.
+/// itself is compared byte-for-byte in constant time. The parse and the
+/// comparison are `crate::surface::bearer`'s, shared with the web portal (#28).
 fn bearer_ok(header: Option<&str>, expected: &SecretToken) -> bool {
-    let Some(raw) = header else {
-        return false;
-    };
-    let raw = raw.trim();
-    let Some((scheme, credential)) = raw.split_once(' ') else {
-        return false;
-    };
-    if !scheme.eq_ignore_ascii_case("bearer") {
-        return false;
-    }
-    tokens_match(credential.trim().as_bytes(), expected.as_bytes())
+    crate::surface::bearer::bearer_ok(header, expected.as_bytes())
 }
 
 /// Resolve the effective token from the flag and the environment.

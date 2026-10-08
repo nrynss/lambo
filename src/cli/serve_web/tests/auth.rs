@@ -89,9 +89,10 @@ fn bearer_header_is_parsed_strictly() {
     assert!(!bearer_ok(Some(""), &expected));
 }
 
-/// The comparator performs a full scan over the secret's length on every
-/// call — there is no early return on a mismatch, and the loop count does
-/// not depend on the presented input's length. Boolean results alone
+/// The comparator (`crate::surface::bearer::tokens_match`, shared with
+/// `lambo serve` since #28) performs a full scan of the presented input on
+/// every call: there is no early return on a mismatch, and the loop count
+/// does not depend on the secret's length. Boolean results alone
 /// cannot tell a short-circuited compare from a full scan, so this pins
 /// the full-scan *semantics* (every position is compared, a late-only
 /// difference is caught, exact input matches, and a length change is a
@@ -166,4 +167,26 @@ async fn a_configured_token_is_required_on_every_route() {
     assert_eq!(r.status, 200, "the correct token must serve the page");
 
     handle.abort();
+}
+
+/// #28: the portal checks bearer tokens through the comparator `lambo serve`
+/// uses (`crate::surface::bearer`), not a copy of its own.
+///
+/// The copies diverged once already: T1-P3-1's remediation rewrote only this
+/// surface's comparator, in the opposite loop direction, so its iteration
+/// count followed the secret's length. Boolean results cannot tell the two
+/// apart, so the pin is structural: no comparator is defined in the portal,
+/// and its gate goes through the shared check.
+#[test]
+fn the_portal_uses_the_shared_bearer_check() {
+    let src = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/cli/serve_web.rs"));
+    let prod = src.split("#[cfg(all(test").next().unwrap_or(src);
+    assert!(
+        !prod.contains("fn tokens_match"),
+        "serve_web defines its own token comparator; use crate::surface::bearer"
+    );
+    assert!(
+        prod.contains("crate::surface::bearer::bearer_ok"),
+        "serve_web's bearer gate must delegate to crate::surface::bearer::bearer_ok"
+    );
 }
