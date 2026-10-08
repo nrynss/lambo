@@ -591,3 +591,84 @@ async fn sqlite_holder_semantic_match_sees_an_unflushed_concept() {
         mem.close().await.unwrap();
     }
 }
+
+/// **#8 parity on a live holder.** The parity module compares SQLite with a
+/// graph loaded *from* SQLite, whose vectors have already been through the
+/// BLOB decode. A holder ranks a different graph: one whose vectors came
+/// straight from the embedder and whose keys came from the live derive,
+/// never round-tripped. This snapshots that live graph before any reload,
+/// lets `close()` flush it, and asks SQLite the same questions: the answers
+/// must match id for id and score bit for bit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn vector_graph_parity_on_a_live_holder_graph() {
+    let _quiet = crate::test_util::quiet_logs();
+    let session = "sqlite-live-parity";
+    let sid = SessionId::from(session);
+    let (_dir, path) = scratch_db();
+    let store = Arc::new(RecordingSqlite::graph_ranked(
+        SqliteStore::connect(&path).unwrap(),
+    ));
+    store.init_schema().await.unwrap();
+    let mem = open_holder(store.clone(), session).await;
+
+    let phrases = [
+        NEAR_A,
+        FAR,
+        "billing invoice export",
+        "rate limiter token bucket",
+        "postgres connection pool",
+        "retry with exponential backoff",
+        "user profile avatar upload",
+    ];
+    for phrase in phrases {
+        mem.derive(
+            &[(phrase, ConceptType::Entity)],
+            &crate::graph::derive::ParentOf::none(),
+        )
+        .await
+        .unwrap();
+    }
+    let contract = fixture_contract();
+    // The live graph, before any flush or reload.
+    let live = mem.graph().read().clone();
+    let embedded = live.concepts().filter(|c| c.embedding.is_some()).count();
+    assert!(
+        embedded >= phrases.len(),
+        "every derived concept carries a vector"
+    );
+
+    // close() drains the write-behind log; nothing reloads `live`.
+    mem.close().await.unwrap();
+
+    let fixture = FixtureEmbedder::new();
+    let mut probes = Vec::new();
+    for text in [NEAR_B, FAR, "invoice", "connection backoff", "avatar"] {
+        probes.push(fixture.embed(text).await.unwrap());
+    }
+    let bits = |hits: &[Scored<NodeId>]| -> Vec<(NodeId, u64)> {
+        hits.iter().map(|s| (s.item, s.score.to_bits())).collect()
+    };
+    for (p, probe) in probes.iter().enumerate() {
+        for limit in [1, 3, embedded, crate::store::MAX_VECTOR_CANDIDATE_LIMIT] {
+            let from_graph = crate::graph::vector_source::graph_vector_candidates(
+                &live, &sid, probe, &contract, limit,
+            )
+            .unwrap();
+            let from_store = store
+                .inner
+                .vector_candidates_checked(&sid, probe, &contract, limit)
+                .await
+                .unwrap();
+            assert_eq!(
+                from_graph.len(),
+                limit.min(embedded),
+                "probe {p} limit {limit}"
+            );
+            assert_eq!(
+                bits(&from_graph),
+                bits(&from_store),
+                "probe {p} limit {limit}: the live graph ranks bit-identically to the flushed store"
+            );
+        }
+    }
+}
