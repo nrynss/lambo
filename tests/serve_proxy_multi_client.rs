@@ -1047,10 +1047,10 @@ fn a_base_directory_too_long_for_a_socket_still_serves_its_own_client() {
         let Ok(line) = rx.recv_timeout(remaining) else {
             panic!("the serve produced no initialize response — it exited instead of degrading");
         };
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
-            if v.get("id").and_then(serde_json::Value::as_u64) == Some(1) {
-                break v;
-            }
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line)
+            && v.get("id").and_then(serde_json::Value::as_u64) == Some(1)
+        {
+            break v;
         }
     };
     assert!(
