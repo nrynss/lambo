@@ -77,8 +77,9 @@ impl<D: Dialect> PgStore<D> {
             WHERE session_leases.expires_at <= now() \
                OR session_leases.holder = excluded.holder \
             RETURNING holder, acquired_at, expires_at, current_token, endpoint";
-        let pool = &self.pool().await?;
         let token = holder.token();
+        crate::store::lease::refuse_reserved_holder(&token)?;
+        let pool = &self.pool().await?;
         let ttl_secs = ttl.as_secs_f64();
         // T86-3: wrap the acquire in `tx_retry`, exactly like every other
         // contended write in this file. sqlx does not auto-retry a SQLSTATE 40001
@@ -141,20 +142,26 @@ impl<D: Dialect> PgStore<D> {
         row.map(lease_info_from_ts).transpose()
     }
 
-    pub(super) async fn delete_lease_row(
+    pub(super) async fn expire_lease_row(
         &self,
         session: &SessionId,
         holder: &LeaseHolder,
     ) -> Result<(), StoreError> {
         let pool = &self.pool().await?;
         // Holder-scoped so a stale release cannot evict the writer that took
-        // over after our lease lapsed.
-        sqlx::query("DELETE FROM session_leases WHERE session_id = $1 AND holder = $2")
-            .bind(&session.0)
-            .bind(holder.token())
-            .execute(pool)
-            .await
-            .map_err(|e| map_write_err(e, |m| format!("release lease: {m}")))?;
+        // over after our lease lapsed. An UPDATE, not a DELETE: the row keeps
+        // `current_token`, so the next acquire mints above it (#23 review H2;
+        // see `store::lease`).
+        sqlx::query(
+            "UPDATE session_leases SET holder = $3, expires_at = now(), endpoint = NULL \
+             WHERE session_id = $1 AND holder = $2",
+        )
+        .bind(&session.0)
+        .bind(holder.token())
+        .bind(crate::store::lease::RELEASED_HOLDER)
+        .execute(pool)
+        .await
+        .map_err(|e| map_write_err(e, |m| format!("release lease: {m}")))?;
         Ok(())
     }
 
@@ -176,13 +183,18 @@ impl<D: Dialect> PgStore<D> {
         current_holder: &str,
     ) -> Result<(), StoreError> {
         let pool = &self.pool().await?;
+        // #23: never against an erased session's tombstone (see the SQLite
+        // adapter's twin).
         sqlx::query(
             "INSERT INTO lease_refusals (session_id, refused_at, refused_by, current_holder) \
-             VALUES ($1, now(), $2, $3)",
+             SELECT $1, now(), $2, $3 \
+             WHERE NOT EXISTS (SELECT 1 FROM session_leases \
+                               WHERE session_id = $1 AND holder = $4)",
         )
         .bind(&session.0)
         .bind(refused_by)
         .bind(current_holder)
+        .bind(crate::store::erase::ERASED_HOLDER)
         .execute(pool)
         .await
         .map_err(|e| map_write_err(e, |m| format!("record lease refusal: {m}")))?;

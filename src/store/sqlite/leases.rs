@@ -39,6 +39,7 @@ pub(super) async fn acquire_or_refresh(
     // the production 45s. Bound as a strftime modifier, e.g. "+45 seconds".
     let ttl_modifier = format!("+{} seconds", ttl.as_secs_f64());
     let token = holder.token();
+    crate::store::lease::refuse_reserved_holder(&token)?;
     const ACQUIRE_SQL: &str = "\
         INSERT INTO session_leases \
             (session_id, holder, acquired_at, expires_at, current_token, endpoint) \
@@ -130,19 +131,26 @@ impl SqliteStore {
         row.map(lease_info_from_text).transpose()
     }
 
-    pub(super) async fn delete_lease_row(
+    pub(super) async fn expire_lease_row(
         &self,
         session: &SessionId,
         holder: &LeaseHolder,
     ) -> Result<(), StoreError> {
         // Holder-scoped: only our own row (a stale release after our lease was
-        // stolen must not evict the new holder).
-        sqlx::query("DELETE FROM session_leases WHERE session_id = ?1 AND holder = ?2")
-            .bind(&session.0)
-            .bind(holder.token())
-            .execute(self.pool())
-            .await
-            .map_err(|e| db_err("release lease", e))?;
+        // stolen must not evict the new holder). An UPDATE, not a DELETE: the
+        // row keeps `current_token`, so the next acquire mints above it (#23
+        // review H2; see `store::lease`).
+        sqlx::query(
+            "UPDATE session_leases SET holder = ?3, \
+                 expires_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'), endpoint = NULL \
+             WHERE session_id = ?1 AND holder = ?2",
+        )
+        .bind(&session.0)
+        .bind(holder.token())
+        .bind(crate::store::lease::RELEASED_HOLDER)
+        .execute(self.pool())
+        .await
+        .map_err(|e| db_err("release lease", e))?;
         Ok(())
     }
 
@@ -164,14 +172,21 @@ impl SqliteStore {
         refused_by: &str,
         current_holder: &str,
     ) -> Result<(), StoreError> {
+        //
+        // #23: never against an erased session's tombstone. A refusal row is
+        // keyed to the session, and the erase removed them all; a writer
+        // turned away by the tombstone must not start a new set.
         sqlx::query(
             "INSERT INTO lease_refusals \
                  (session_id, refused_at, refused_by, current_holder) \
-             VALUES (?1, strftime('%Y-%m-%dT%H:%M:%fZ','now'), ?2, ?3)",
+             SELECT ?1, strftime('%Y-%m-%dT%H:%M:%fZ','now'), ?2, ?3 \
+             WHERE NOT EXISTS (SELECT 1 FROM session_leases \
+                               WHERE session_id = ?1 AND holder = ?4)",
         )
         .bind(&session.0)
         .bind(refused_by)
         .bind(current_holder)
+        .bind(crate::store::erase::ERASED_HOLDER)
         .execute(self.pool())
         .await
         .map_err(|e| db_err("record lease refusal", e))?;

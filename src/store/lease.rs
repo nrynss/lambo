@@ -25,7 +25,7 @@
 //! * **Not preemption.** A wedged-but-*alive* holder keeps its heartbeat task
 //!   running and so keeps the lease indefinitely. There is deliberately no
 //!   automatic takeover — a live heartbeat is indistinguishable from a healthy
-//!   one from the store's side. The operator override is to clear the row by
+//!   one from the store's side. The operator override is to expire the row by
 //!   hand; see [`OPERATOR_OVERRIDE`].
 //!
 //!   **A leaked handle is the same shape (T86-5, accepted residual).** The
@@ -36,7 +36,7 @@
 //!   process lifetime and the session stays wedged well past one TTL. This is an
 //!   abnormal-leak edge, not a normal path, and there is no cheap store-side
 //!   guard (a live refresh is a live refresh); the escape is the same
-//!   [`OPERATOR_OVERRIDE`] DELETE that clears any wedged-but-heartbeating holder.
+//!   [`OPERATOR_OVERRIDE`] that expires any wedged-but-heartbeating holder.
 //!
 //! ## Clock discipline (spec §6.4 / P6 review F18)
 //!
@@ -70,6 +70,17 @@
 //! Only the two durable write gates validate the token. Bulk snapshot writes
 //! (`seed()`, fixture parity) are off-lease and deliberately bypass it — see
 //! [`lease_permits_write`].
+//!
+//! ## The token outlives every holder (#23 review H2)
+//!
+//! A session's `current_token` only ever goes up, for the whole life of the
+//! session id. Nothing deletes a lease row or resets its token: a clean
+//! release *expires* the row (holder [`RELEASED_HOLDER`], `expires_at` = the
+//! store clock, `endpoint` NULL) and keeps `current_token`, and so does the
+//! [`OPERATOR_OVERRIDE`]. The next acquire therefore takes the expired-row arm
+//! and mints `current + 1`. Before this a release deleted the row, the next
+//! acquire minted 1 again, and a lapsed writer still holding an older token
+//! passed `presented >= current` against the new holder.
 
 use std::time::Duration;
 
@@ -136,19 +147,70 @@ const _: () = assert!(
 /// automated — see the module docs on why there is no auto-preemption).
 ///
 /// A hung holder whose heartbeat task is still alive keeps refreshing the lease,
-/// so no other writer can take the session until the row is cleared by hand.
-/// The manual escape is a single DELETE against the durable store, which the
+/// so no other writer can take the session until the row is expired by hand.
+/// The manual escape is a single UPDATE against the durable store, which the
 /// next `acquire_lease` then wins:
 ///
 /// ```sql
-/// DELETE FROM session_leases WHERE session_id = '<session>';
+/// UPDATE session_leases SET holder = 'lambo:released', expires_at = acquired_at,
+///   endpoint = NULL WHERE session_id = '<session>' AND holder <> 'lambo:erased';
 /// ```
 ///
-/// This is intentionally a destructive, deliberate act: it says "I have
-/// confirmed the current holder is not making progress and I am forcing a
-/// takeover." The new writer still replays from durable state, so the wedged
-/// holder's un-flushed tail is lost exactly as it would be on any crash.
-pub const OPERATOR_OVERRIDE: &str = "DELETE FROM session_leases WHERE session_id = '<session>';";
+/// An UPDATE, never a DELETE: it keeps `current_token`, so the next acquire
+/// mints a token above every one the wedged holder (or any earlier writer)
+/// still holds, and their later writes are refused (#23 review H2). Deleting
+/// the row would restart the session at token 1 and let them through.
+/// `expires_at = acquired_at` is in the past on every store and in every
+/// timestamp representation, so the statement is the same for SQLite and the
+/// Postgres family. The `holder <> 'lambo:erased'` guard keeps it from
+/// lifting an erasure tombstone (see `store::erase`).
+///
+/// This is intentionally a deliberate act: it says "I have confirmed the
+/// current holder is not making progress and I am forcing a takeover." The new
+/// writer still replays from durable state, so the wedged holder's un-flushed
+/// tail is lost exactly as it would be on any crash.
+pub const OPERATOR_OVERRIDE: &str = "UPDATE session_leases SET holder = 'lambo:released', \
+     expires_at = acquired_at, endpoint = NULL \
+     WHERE session_id = '<session>' AND holder <> 'lambo:erased';";
+
+/// The `session_leases.holder` of a released row (#23 review H2).
+///
+/// A release (and the [`OPERATOR_OVERRIDE`]) expires the row instead of
+/// deleting it, so the fencing token survives, and hands it to this holder so
+/// the next acquire is a takeover for everyone, the releasing identity
+/// included: a refresh keeps the token, a takeover mints a new one. Never
+/// equal to a live holder's token, which always carries `@` and `#`.
+pub const RELEASED_HOLDER: &str = "lambo:released";
+
+/// `true` when a lease row's holder is the released marker.
+pub fn is_released_holder(holder: &str) -> bool {
+    holder == RELEASED_HOLDER
+}
+
+/// `true` for a holder value the store writes itself and no writer may take
+/// as its identity: [`RELEASED_HOLDER`] and the erasure tombstone's
+/// [`crate::store::erase::ERASED_HOLDER`].
+pub fn is_reserved_holder(holder: &str) -> bool {
+    is_released_holder(holder) || crate::store::erase::is_erased_holder(holder)
+}
+
+/// Refuse a caller whose holder token is a reserved value (#23 review H1).
+///
+/// Every acquire, refresh and erase runs this first. A [`LeaseHolder::token`]
+/// is `agent@host#pid` and cannot equal either reserved value, so this never
+/// fires for a real caller; it is here so that holding the tombstone or the
+/// released marker can never be a writer's lease even if the token format
+/// changes, which would otherwise let a "refresh" extend a tombstone or a
+/// write fence pass as its holder.
+pub fn refuse_reserved_holder(holder: &str) -> Result<(), crate::types::StoreError> {
+    if is_reserved_holder(holder) {
+        return Err(crate::types::StoreError::Invariant(format!(
+            "lease holder {holder:?} is reserved for the store's own rows (a released lease or \
+             an erased session) and cannot take a lease or erase"
+        )));
+    }
+    Ok(())
+}
 
 /// Who holds a session lease — agent id + process id + host.
 ///
@@ -231,7 +293,8 @@ pub struct LeaseInfo {
     /// expired-lease steal), PRESERVED across a same-holder refresh. The holder
     /// must present this on every durable write; the store rejects any write
     /// whose token is below the row's current one. `0` is the "never minted"
-    /// sentinel (no lease has ever been taken on the session).
+    /// sentinel (no lease has ever been taken on the session). Never reset: a
+    /// release keeps it (see the module docs).
     pub token: u64,
     /// When this holder first took the lease (stable across its own refreshes).
     pub acquired_at: DateTime<Utc>,
@@ -331,6 +394,177 @@ fn detect_host() -> String {
     "unknown-host".to_string()
 }
 
+/// Store-agnostic lease checks every adapter runs against itself: the SQLite
+/// and `MemoryStore` unit tests call them directly, the Postgres family from
+/// its live legs (`store::pg::release_fencing`).
+#[cfg(test)]
+pub(crate) mod testkit {
+    use std::time::Duration;
+
+    use chrono::Utc;
+
+    use super::{LeaseHolder, LeaseOutcome};
+    use crate::store::GraphStore;
+    use crate::types::{
+        AgentId, Interaction, Mutation, MutationBatch, Node, NodeId, SessionId, StoreError,
+    };
+
+    pub(crate) fn holder(agent: &str, pid: u32) -> LeaseHolder {
+        LeaseHolder {
+            endpoint: None,
+            agent: AgentId::new(agent),
+            pid,
+            host: "lease-testkit".into(),
+        }
+    }
+
+    /// One interaction in `sid`: the smallest batch that creates the session.
+    pub(crate) fn interaction_batch(sid: &SessionId, text: &str) -> MutationBatch {
+        MutationBatch {
+            mutations: vec![Mutation::UpsertNode {
+                node: Node::Interaction(Interaction {
+                    id: NodeId::new(),
+                    session_id: sid.clone(),
+                    agent_id: AgentId::new("lease-testkit"),
+                    prompt_text: Some(text.into()),
+                    previous_id: None,
+                    created_at: Utc::now(),
+                    event_time: None,
+                }),
+            }],
+            ..Default::default()
+        }
+    }
+
+    async fn acquired(
+        store: &dyn GraphStore,
+        sid: &SessionId,
+        who: &LeaseHolder,
+        ttl: Duration,
+    ) -> u64 {
+        match store.acquire_lease(sid, who, ttl).await.expect("acquire") {
+            LeaseOutcome::Acquired(info) => info.token,
+            other => panic!("{who} must take {sid}: {other:?}"),
+        }
+    }
+
+    fn assert_stale(res: Result<(), StoreError>, what: &str) {
+        match res {
+            Err(StoreError::StaleWrite(_)) => {}
+            other => panic!("{what} must be refused as a stale write, got {other:?}"),
+        }
+    }
+
+    /// A release keeps the session's fencing token (H2 of the #23 review).
+    ///
+    /// Before the fix a release deleted the lease row, so the next acquire
+    /// minted token 1 again and any writer still holding an older token passed
+    /// the `presented >= current` fence against the new holder. Two shapes:
+    ///
+    /// 1. acquire (t1), release, another writer acquires (t2): a write
+    ///    presenting t1, or no token, is refused, and t2 is above t1;
+    /// 2. X takes the session and its lease lapses, Y takes it over and closes
+    ///    cleanly, Z acquires: zombie X's write is refused and Z's lands.
+    ///
+    /// `sid` and `sid2` must be fresh ids (the pg legs share a cluster).
+    pub(crate) async fn check_release_keeps_the_fencing_token(
+        store: &dyn GraphStore,
+        sid: &SessionId,
+        sid2: &SessionId,
+    ) {
+        let long = Duration::from_secs(60);
+
+        // Shape 1.
+        let a = holder("release-a", 1);
+        let b = holder("release-b", 2);
+        let t1 = acquired(store, sid, &a, long).await;
+        store
+            .flush(&interaction_batch(sid, "a's write"), Some(t1))
+            .await
+            .expect("a writes under its own lease");
+        store.release_lease(sid, &a).await.expect("release");
+        let t2 = acquired(store, sid, &b, long).await;
+        assert!(
+            t2 > t1,
+            "a token minted after a release must be above every earlier one ({t1} then {t2})"
+        );
+        assert_stale(
+            store
+                .flush(&interaction_batch(sid, "a, after release"), Some(t1))
+                .await,
+            "a write presenting the released token",
+        );
+        assert_stale(
+            store.flush(&interaction_batch(sid, "no token"), None).await,
+            "an unleased write to a session that has been leased",
+        );
+        store
+            .flush(&interaction_batch(sid, "b's write"), Some(t2))
+            .await
+            .expect("the new holder writes");
+        store.release_lease(sid, &b).await.expect("release b");
+        // The same identity coming back after its own release is a takeover
+        // too, not a refresh of the released row.
+        let t3 = acquired(store, sid, &a, long).await;
+        assert!(
+            t3 > t2,
+            "re-acquire after release must mint ({t2} then {t3})"
+        );
+        store.release_lease(sid, &a).await.expect("release a");
+        let row = store
+            .read_lease(sid)
+            .await
+            .expect("read")
+            .expect("row kept");
+        assert_eq!(row.token, t3, "a release keeps current_token");
+        assert_eq!(row.endpoint, None, "a released row publishes no endpoint");
+        assert!(row.expires_at <= Utc::now(), "a released row is expired");
+
+        // Shape 2: the zombie.
+        let x = holder("zombie-x", 3);
+        let y = holder("cli-y", 4);
+        let z = holder("next-z", 5);
+        let tx = acquired(store, sid2, &x, Duration::from_secs(1)).await;
+        store
+            .flush(&interaction_batch(sid2, "x's write"), Some(tx))
+            .await
+            .expect("x writes");
+        tokio::time::sleep(Duration::from_millis(1_300)).await;
+        let ty = acquired(store, sid2, &y, long).await;
+        store
+            .flush(&interaction_batch(sid2, "y's write"), Some(ty))
+            .await
+            .expect("y writes");
+        store
+            .release_lease(sid2, &y)
+            .await
+            .expect("y closes cleanly");
+        let tz = acquired(store, sid2, &z, long).await;
+        assert!(tz > ty && ty > tx, "tokens are monotonic: {tx} {ty} {tz}");
+        assert_stale(
+            store
+                .flush(&interaction_batch(sid2, "zombie x"), Some(tx))
+                .await,
+            "zombie x's flush after y released and z acquired",
+        );
+        store
+            .flush(&interaction_batch(sid2, "z's write"), Some(tz))
+            .await
+            .expect("z writes");
+        let snap = store.load_session(sid2).await.expect("load");
+        let texts: Vec<_> = snap
+            .interactions
+            .iter()
+            .filter_map(|i| i.prompt_text.clone())
+            .collect();
+        assert!(
+            !texts.iter().any(|t| t == "zombie x"),
+            "the zombie's write must not land: {texts:?}"
+        );
+        store.release_lease(sid2, &z).await.expect("release z");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -361,6 +595,24 @@ mod tests {
         // Stable: the same holder always produces the same token (refresh /
         // release depend on it).
         assert_eq!(h.token(), h.clone().token());
+    }
+
+    #[test]
+    fn the_reserved_holders_are_refused_and_no_real_token_is_one() {
+        for reserved in [RELEASED_HOLDER, crate::store::erase::ERASED_HOLDER] {
+            assert!(is_reserved_holder(reserved));
+            assert!(matches!(
+                refuse_reserved_holder(reserved),
+                Err(crate::types::StoreError::Invariant(_))
+            ));
+            let lookalike = LeaseHolder {
+                agent: AgentId::new(reserved),
+                pid: 0,
+                host: reserved.into(),
+                endpoint: None,
+            };
+            assert!(refuse_reserved_holder(&lookalike.token()).is_ok());
+        }
     }
 
     #[test]

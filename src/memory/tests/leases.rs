@@ -38,7 +38,7 @@ async fn an_abandoned_close_still_releases_the_lease() {
     );
 
     // Idempotent: `serve` may reach this after a close that already
-    // released, and a second holder-scoped DELETE is a wasted round-trip at
+    // released, and a second holder-scoped release is a wasted round-trip at
     // best and a race at worst.
     mem.release_lease_after_abandoned_close().await;
     assert_eq!(store.releases(), 1, "the release must happen at most once");
@@ -78,7 +78,7 @@ async fn an_abandoned_close_releases_the_lease_through_serve() {
 }
 
 /// The happy path must not gain a second release: `close()` already handed
-/// the lease off, and a redundant holder-scoped DELETE is a wasted
+/// the lease off, and a redundant holder-scoped release is a wasted
 /// round-trip on the way out.
 #[tokio::test(start_paused = true)]
 async fn a_close_that_finishes_releases_exactly_once_through_serve() {
@@ -513,4 +513,143 @@ async fn dropping_a_handle_whose_close_failed_warns_about_the_kept_tail() {
              forgotten one: {logged}"
     );
     assert!(logged.contains(&kept.to_string()), "{logged}");
+}
+
+/// #23: an erased session cannot be attached. The tombstone is reported by
+/// the store as `Held`, and the builder must turn that into the stable erased
+/// refusal, not into a held-elsewhere conflict that `serve` would try to proxy
+/// to or wait out.
+#[tokio::test]
+async fn an_erased_session_refuses_to_attach() {
+    let store = Arc::new(MemoryStore::new());
+    let eraser = LeaseHolder::for_this_process(&AgentId::new("lambo-erase-session"));
+    let outcome = store
+        .erase_session(&SessionId::new("gone"), &eraser)
+        .await
+        .unwrap();
+    assert!(matches!(outcome, crate::store::EraseOutcome::Erased(_)));
+
+    let err = Memory::builder()
+        .session("gone")
+        .agent("agent-a")
+        .flush_interval(Duration::from_secs(3_600))
+        .store(store.clone() as Arc<dyn GraphStore>)
+        .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
+        .embedding_contract(contract("fixture", 1024))
+        .build()
+        .await
+        .expect_err("an erased session must not attach");
+    assert!(
+        matches!(&err, LamboError::Store(StoreError::StaleWrite(_))),
+        "the stable erased refusal, not a held-elsewhere conflict: {err:?}"
+    );
+    assert!(err.to_string().contains("was erased"), "{err}");
+    assert!(
+        store.load_session(&SessionId::new("gone")).await.is_err(),
+        "the refused attach created nothing"
+    );
+}
+
+/// #23: a handle whose lapsed lease went to an erasure tombstone is fenced by
+/// its heartbeat like any lost lease, and then refuses reads as well as
+/// writes, with the erased error: its graph is a copy of deleted data.
+#[tokio::test]
+async fn a_handle_fenced_by_an_erase_refuses_reads_and_writes() {
+    let store = Arc::new(MemoryStore::new());
+    let session = SessionId::new("erased-under-me");
+    let mem = memory_on(store.clone(), "erased-under-me").await;
+    mem.derive(&[("user schema", ConceptType::Entity)], &ParentOf::none())
+        .await
+        .unwrap();
+    mem.recall(query("user schema")).await.unwrap();
+
+    // The heartbeat starved past the TTL; the erase takes the session over.
+    store.force_expire_lease(&session);
+    let eraser = LeaseHolder::for_this_process(&AgentId::new("lambo-erase-session"));
+    let outcome = store.erase_session(&session, &eraser).await.unwrap();
+    assert!(matches!(outcome, crate::store::EraseOutcome::Erased(_)));
+    // What the heartbeat's next refresh sees, and latches on.
+    let refreshed = store
+        .refresh_lease(
+            &session,
+            &LeaseHolder::for_this_process(&AgentId::new("agent-a")),
+            LEASE_TTL,
+        )
+        .await
+        .unwrap();
+    let LeaseOutcome::Held { current, .. } = refreshed else {
+        panic!("the tombstone refuses the refresh");
+    };
+    mem.simulate_lease_loss_to(&current.holder);
+    assert!(mem.erased());
+
+    let err = mem
+        .recall(query("user schema"))
+        .await
+        .expect_err("reads are refused once the session is erased");
+    assert!(err.to_string().contains("was erased"), "{err}");
+    let err = mem
+        .derive(&[("after", ConceptType::Entity)], &ParentOf::none())
+        .await
+        .expect_err("writes are refused");
+    assert!(err.to_string().contains("was erased"), "{err}");
+    let err = mem.close().await.expect_err("the tail is not flushed");
+    assert!(err.to_string().contains("was erased"), "{err}");
+    assert!(
+        store.load_session(&session).await.is_err(),
+        "nothing of the erased session came back"
+    );
+}
+
+/// #23 review L2: a handle whose background flush is refused because the
+/// session was erased is fenced by that refusal at once, not one heartbeat
+/// (15 s) later, so it stops answering reads from its copy of the deleted
+/// data. No `simulate_lease_loss` here: the flush task's latch is what flips
+/// `erased()`.
+#[tokio::test]
+async fn a_flush_refused_as_erased_fences_the_handle_without_the_heartbeat() {
+    let store = Arc::new(MemoryStore::new());
+    let session = SessionId::new("erased-mid-flush");
+    let mem = Memory::builder()
+        .session("erased-mid-flush")
+        .agent("agent-a")
+        .flush_interval(Duration::from_millis(50))
+        .store(store.clone() as Arc<dyn GraphStore>)
+        .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
+        .embedding_contract(contract("fixture", 1024))
+        .build()
+        .await
+        .expect("build");
+
+    // The lease lapses (a starved heartbeat) and the operator erases.
+    store.force_expire_lease(&session);
+    let eraser = LeaseHolder::for_this_process(&AgentId::new("lambo-erase-session"));
+    let outcome = store.erase_session(&session, &eraser).await.unwrap();
+    assert!(matches!(outcome, crate::store::EraseOutcome::Erased(_)));
+    assert!(!mem.erased(), "nothing has told the handle yet");
+
+    // The next write reaches the store through the flush task and is refused.
+    mem.derive(
+        &[("after the erase", ConceptType::Entity)],
+        &ParentOf::none(),
+    )
+    .await
+    .unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !mem.erased() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the refused flush must fence the handle well inside one heartbeat interval"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let err = mem
+        .recall(query("after the erase"))
+        .await
+        .expect_err("reads stop at once");
+    assert!(err.to_string().contains("was erased"), "{err}");
+    assert!(
+        store.load_session(&session).await.is_err(),
+        "nothing of the erased session came back"
+    );
 }

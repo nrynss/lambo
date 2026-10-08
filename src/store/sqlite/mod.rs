@@ -504,7 +504,7 @@ impl GraphStore for SqliteStore {
         session: &SessionId,
         holder: &LeaseHolder,
     ) -> Result<(), StoreError> {
-        self.delete_lease_row(session, holder).await
+        self.expire_lease_row(session, holder).await
     }
 
     async fn record_lease_refusal(
@@ -603,6 +603,15 @@ impl GraphStore for SqliteStore {
         now: DateTime<Utc>,
     ) -> Result<InteractionSpan, StoreError> {
         self.select_interaction_span(session, node, min_age, now)
+            .await
+    }
+
+    async fn erase_session(
+        &self,
+        session: &SessionId,
+        eraser: &LeaseHolder,
+    ) -> Result<crate::store::EraseOutcome, StoreError> {
+        self.erase(session, eraser, &crate::store::erase::no_fault)
             .await
     }
 

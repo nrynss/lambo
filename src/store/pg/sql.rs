@@ -203,8 +203,114 @@ UNION SELECT session_id FROM edges
 /// row (acquire, renew, release) are the ones that must wait. CockroachDB runs
 /// SERIALIZABLE and already aborts the loser; the clause is accepted there and
 /// harmless, so the statement stays shared rather than dialect-specific.
+///
+/// The holder comes back with the token (second column, so a scalar read of
+/// the first still sees the token) so the fence can refuse an erasure
+/// tombstone whatever token a write presents (#23 review H1).
 pub(super) const LEASE_TOKEN_FOR_SHARE_SQL: &str =
-    "SELECT current_token FROM session_leases WHERE session_id = $1 FOR SHARE";
+    "SELECT current_token, holder FROM session_leases WHERE session_id = $1 FOR SHARE";
+
+// ---------------------------------------------------------------------------
+// Session erasure (#23). The transaction is `persistence.rs`'s `erase`.
+// ---------------------------------------------------------------------------
+
+/// The erase transaction's first lock: the session's `sessions` row, taken
+/// before the lease row (#23 review L1). A flush stamps (and so row-locks)
+/// `sessions` first and reads its lease fence second; an erase that locked the
+/// lease first and deleted `sessions` last took the same two rows in the
+/// opposite order, so a zombie flush and an erase could deadlock (40P01 on
+/// Postgres, retried by `tx_retry` after `deadlock_timeout`). Taking
+/// `sessions` first gives both transactions one order. No row (a never-written
+/// session) locks nothing, and there is then no cycle to break: a flush that
+/// inserts the row concurrently blocks on the lease row instead.
+pub(super) const ERASE_SESSION_ROW_FOR_UPDATE_SQL: &str =
+    "SELECT 1 FROM sessions WHERE session_id = $1 FOR UPDATE";
+
+/// The erase transaction's lease read. `FOR UPDATE` takes the row lock every
+/// flush's `FOR SHARE` fence read conflicts with, so a flush already past its
+/// fence commits before the erase reads on, and one arriving later waits for
+/// the erase and then reads the tombstone. `live` is on the cluster clock.
+pub(super) const ERASE_LEASE_FOR_UPDATE_SQL: &str = "SELECT holder, expires_at > now() \
+     FROM session_leases WHERE session_id = $1 FOR UPDATE";
+
+/// The erasure tombstone over the session's lease row (see `store::erase`).
+/// Guarded like an acquire: it fires on no row, an expired row, an earlier
+/// tombstone (`$2`) or the eraser's own lease (`$4`), bumping the token unless
+/// the row already is a tombstone. An empty `RETURNING` means a live lease
+/// belongs to someone else. `$3` is the year-9999 expiry.
+pub(super) const ERASE_TOMBSTONE_SQL: &str = "\
+    INSERT INTO session_leases \
+        (session_id, holder, acquired_at, expires_at, current_token, endpoint) \
+    VALUES ($1, $2, now(), $3, 1, NULL) \
+    ON CONFLICT (session_id) DO UPDATE SET \
+        holder = excluded.holder, \
+        acquired_at = CASE WHEN session_leases.holder = excluded.holder \
+                           THEN session_leases.acquired_at ELSE excluded.acquired_at END, \
+        expires_at = excluded.expires_at, \
+        current_token = CASE WHEN session_leases.holder = excluded.holder \
+                             THEN session_leases.current_token \
+                             ELSE session_leases.current_token + 1 END, \
+        endpoint = NULL \
+    WHERE session_leases.expires_at <= now() \
+       OR session_leases.holder = excluded.holder \
+       OR session_leases.holder = $4 \
+    RETURNING current_token";
+
+/// Concepts of the session that carry an embedding, counted before they go.
+pub(super) const COUNT_SESSION_VECTORS_SQL: &str =
+    "SELECT COUNT(*) FROM concepts WHERE session_id = $1 AND embedding IS NOT NULL";
+
+/// Edges in **other** sessions incident to the erased session's nodes (#23
+/// review L4). Node ids are global and edges session-scoped, so an edge in
+/// session B can point at a node of session A; `DeleteNode` removes such
+/// edges with the node, and erasure does the same so no row keeps a deleted
+/// account's node id. Run with the `edges` step, before `concepts` and
+/// `interactions` go (the subqueries read them); counted in `edges`.
+pub(super) const ERASE_CROSS_SESSION_EDGES_SQL: &str = "\
+    DELETE FROM edges WHERE session_id <> $1 AND ( \
+        source IN (SELECT id FROM concepts WHERE session_id = $1) \
+     OR source IN (SELECT id FROM interactions WHERE session_id = $1) \
+     OR target IN (SELECT id FROM concepts WHERE session_id = $1) \
+     OR target IN (SELECT id FROM interactions WHERE session_id = $1))";
+
+/// Every session-keyed table erasure empties, with its DELETE, in dependency
+/// order: referencing rows first (`write_intents`, `synonyms`, `edges` and
+/// `concepts` reference `sessions`; `concepts` references `interactions`;
+/// `interactions` references itself, which one statement over the whole
+/// session satisfies, both engines checking at end of statement), `sessions`
+/// last. `session_leases` is absent on purpose: its row becomes the tombstone.
+/// `erase_covers_every_table_in_both_ddls` diffs this list against the shipped
+/// Postgres and Cockroach migrations.
+pub(super) const ERASE_STATEMENTS: &[(&str, &str)] = &[
+    (
+        "write_intents",
+        "DELETE FROM write_intents WHERE session_id = $1",
+    ),
+    (
+        "canonization_events",
+        "DELETE FROM canonization_events WHERE session_id = $1",
+    ),
+    (
+        "reservations",
+        "DELETE FROM reservations WHERE session_id = $1",
+    ),
+    ("synonyms", "DELETE FROM synonyms WHERE session_id = $1"),
+    ("edges", "DELETE FROM edges WHERE session_id = $1"),
+    ("concepts", "DELETE FROM concepts WHERE session_id = $1"),
+    (
+        "interactions",
+        "DELETE FROM interactions WHERE session_id = $1",
+    ),
+    (
+        "session_stats",
+        "DELETE FROM session_stats WHERE session_id = $1",
+    ),
+    (
+        "lease_refusals",
+        "DELETE FROM lease_refusals WHERE session_id = $1",
+    ),
+    ("sessions", "DELETE FROM sessions WHERE session_id = $1"),
+];
 
 /// Canonization transition: update the concept (parity with MemoryStore's
 /// `CanonizationTransition` application) and append the audit row. The event insert is

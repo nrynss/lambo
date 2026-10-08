@@ -320,9 +320,11 @@ impl Rig {
     }
 
     /// The documented operator override for a holder that died without
-    /// releasing (`migrations/*/001_init.sql` beside `session_leases`): a
-    /// `kill -9` leaves the lease row live for its whole TTL, and this test
-    /// cannot wait 45 s.
+    /// releasing (`store::lease::OPERATOR_OVERRIDE`, quoted beside
+    /// `session_leases` in `migrations/*/001_init.sql`): a `kill -9` leaves
+    /// the lease row live for its whole TTL, and this test cannot wait 45 s.
+    /// The shipped statement itself runs, so it is proven valid SQL here: it
+    /// expires the row and keeps its fencing token (#23 review H2).
     fn clear_lease(&self) {
         let db = self.db.clone();
         let session = self.session.0.clone();
@@ -332,8 +334,9 @@ impl Rig {
                 .connect(&format!("sqlite://{db}"))
                 .await
                 .expect("open for lease override");
-            sqlx::query("DELETE FROM session_leases WHERE session_id = ?")
-                .bind(&session)
+            let sql = lambo::store::lease::OPERATOR_OVERRIDE
+                .replace("<session>", &session.replace('\'', "''"));
+            sqlx::query(&sql)
                 .execute(&pool)
                 .await
                 .expect("operator lease override");

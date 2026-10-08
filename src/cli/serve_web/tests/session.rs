@@ -92,17 +92,34 @@ async fn h1_live_contract_changes_update_session_pulse_and_keep_recall_fail_clos
         model: Some("fixture-model-v2".into()),
         dim: 1024,
     };
+    // The live writer that changes the contract writes under its own lease:
+    // the session was leased when it was seeded, and a lease's token is never
+    // reset, so an unleased write would be refused.
+    let writer = crate::store::lease::LeaseHolder {
+        endpoint: None,
+        agent: AgentId::from("contract-writer"),
+        pid: 1,
+        host: "test".into(),
+    };
+    let sid = SessionId::new("h1-web-mismatch");
+    let crate::store::lease::LeaseOutcome::Acquired(lease) = store
+        .acquire_lease(&sid, &writer, std::time::Duration::from_secs(60))
+        .await
+        .unwrap()
+    else {
+        panic!("the writer must take the session");
+    };
     store
         .flush(
             &crate::types::MutationBatch {
                 mutation_epoch: 0,
                 gc_mark: Default::default(),
                 mutations: vec![crate::types::Mutation::SetEmbedding {
-                    session_id: SessionId::new("h1-web-mismatch"),
+                    session_id: sid.clone(),
                     embedding: Some(changed),
                 }],
             },
-            None,
+            Some(lease.token),
         )
         .await
         .unwrap();
@@ -163,14 +180,15 @@ async fn h1_live_contract_changes_update_session_pulse_and_keep_recall_fail_clos
                 mutation_epoch: 0,
                 gc_mark: Default::default(),
                 mutations: vec![crate::types::Mutation::SetEmbedding {
-                    session_id: SessionId::new("h1-web-mismatch"),
+                    session_id: sid.clone(),
                     embedding: Some(stored),
                 }],
             },
-            None,
+            Some(lease.token),
         )
         .await
         .unwrap();
+    store.release_lease(&sid, &writer).await.unwrap();
     let pulse = request(addr, "GET", "/api/pulse").await;
     let pulse: serde_json::Value = serde_json::from_str(&pulse.body).unwrap();
     assert_eq!(pulse["embedding_contract"]["status"], "compatible");

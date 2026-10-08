@@ -809,3 +809,135 @@ pub(super) async fn apply_canonization_transition(
     }
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Session erasure (#23). The transaction is `persistence.rs`'s `erase`.
+// ---------------------------------------------------------------------------
+
+/// Every session-keyed table erasure empties, with its DELETE, in dependency
+/// order: rows that reference others go first (`write_intents`, `synonyms`,
+/// `edges` and `concepts` reference `sessions`; `concepts` references
+/// `interactions`; `interactions` references itself, which one statement over
+/// the whole session satisfies), and `sessions` goes last. `session_leases`
+/// is deliberately absent: its row becomes the tombstone instead.
+///
+/// `erase_covers_every_table_in_the_ddl` diffs this list against the shipped
+/// migration, so a table added to the schema without an entry here fails a
+/// test rather than surviving an account deletion.
+pub(super) const ERASE_STATEMENTS: &[(&str, &str)] = &[
+    (
+        "write_intents",
+        "DELETE FROM write_intents WHERE session_id = ?1",
+    ),
+    (
+        "canonization_events",
+        "DELETE FROM canonization_events WHERE session_id = ?1",
+    ),
+    (
+        "reservations",
+        "DELETE FROM reservations WHERE session_id = ?1",
+    ),
+    ("synonyms", "DELETE FROM synonyms WHERE session_id = ?1"),
+    ("edges", "DELETE FROM edges WHERE session_id = ?1"),
+    ("concepts", "DELETE FROM concepts WHERE session_id = ?1"),
+    (
+        "interactions",
+        "DELETE FROM interactions WHERE session_id = ?1",
+    ),
+    (
+        "session_stats",
+        "DELETE FROM session_stats WHERE session_id = ?1",
+    ),
+    (
+        "lease_refusals",
+        "DELETE FROM lease_refusals WHERE session_id = ?1",
+    ),
+    ("sessions", "DELETE FROM sessions WHERE session_id = ?1"),
+];
+
+/// Edges in **other** sessions incident to the erased session's nodes (#23
+/// review L4). Node ids are global and edges session-scoped, so an edge in
+/// session B can point at a node of session A; `DeleteNode` removes such
+/// edges with the node, and erasure does the same so no row keeps a deleted
+/// account's node id. Run with the `edges` step, before `concepts` and
+/// `interactions` go (the subqueries read them); counted in `edges`.
+pub(super) const ERASE_CROSS_SESSION_EDGES_SQL: &str = "\
+    DELETE FROM edges WHERE session_id <> ?1 AND ( \
+        source IN (SELECT id FROM concepts WHERE session_id = ?1) \
+     OR source IN (SELECT id FROM interactions WHERE session_id = ?1) \
+     OR target IN (SELECT id FROM concepts WHERE session_id = ?1) \
+     OR target IN (SELECT id FROM interactions WHERE session_id = ?1))";
+
+/// Concepts of the session that carry an embedding, counted before they go.
+pub(super) async fn count_session_vectors(
+    tx: &mut sqlx::SqliteConnection,
+    session: &SessionId,
+) -> Result<u64, StoreError> {
+    let n: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM concepts WHERE session_id = ?1 AND embedding IS NOT NULL",
+    )
+    .bind(&session.0)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| db_err("erase_session: count vectors", e))?;
+    Ok(u64::try_from(n).unwrap_or(0))
+}
+
+/// Run one [`ERASE_STATEMENTS`] DELETE; the number of rows it removed.
+pub(super) async fn delete_session_rows(
+    tx: &mut sqlx::SqliteConnection,
+    table: &str,
+    sql: &str,
+    session: &SessionId,
+) -> Result<u64, StoreError> {
+    let done = sqlx::query(sql)
+        .bind(&session.0)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| map_write_err(e, |m| format!("erase_session: delete {table}: {m}")))?;
+    Ok(done.rows_affected())
+}
+
+/// Write the erasure tombstone over the session's lease row (see
+/// `store::erase`). Guarded exactly like an acquire: it fires on no row, an
+/// expired row, an earlier tombstone or the eraser's own lease. The token is
+/// bumped unless the row already is a tombstone. `None` means the guard was
+/// false — a live lease belongs to someone else.
+pub(super) async fn write_erase_tombstone(
+    tx: &mut sqlx::SqliteConnection,
+    session: &SessionId,
+    eraser: &str,
+) -> Result<Option<u64>, StoreError> {
+    let token: Option<i64> = sqlx::query_scalar(
+        "INSERT INTO session_leases \
+             (session_id, holder, acquired_at, expires_at, current_token, endpoint) \
+         VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%fZ','now'), ?3, 1, NULL) \
+         ON CONFLICT (session_id) DO UPDATE SET \
+             holder = excluded.holder, \
+             acquired_at = CASE WHEN session_leases.holder = excluded.holder \
+                                THEN session_leases.acquired_at ELSE excluded.acquired_at END, \
+             expires_at = excluded.expires_at, \
+             current_token = CASE WHEN session_leases.holder = excluded.holder \
+                                  THEN session_leases.current_token \
+                                  ELSE session_leases.current_token + 1 END, \
+             endpoint = NULL \
+         WHERE session_leases.expires_at <= strftime('%Y-%m-%dT%H:%M:%fZ','now') \
+            OR session_leases.holder = excluded.holder \
+            OR session_leases.holder = ?4 \
+         RETURNING current_token",
+    )
+    .bind(&session.0)
+    .bind(crate::store::erase::ERASED_HOLDER)
+    .bind(ts_to_text(crate::store::erase::tombstone_expires_at()))
+    .bind(eraser)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| map_write_err(e, |m| format!("erase_session: write tombstone: {m}")))?;
+    token
+        .map(|t| {
+            u64::try_from(t).map_err(|_| {
+                StoreError::Invariant(format!("session {session}: negative lease current_token"))
+            })
+        })
+        .transpose()
+}

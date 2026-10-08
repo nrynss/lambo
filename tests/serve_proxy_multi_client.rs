@@ -915,11 +915,16 @@ fn a_live_endpoint_with_no_lease_row_is_refused_rather_than_dialled() {
 
     // Now revoke C's licence without stopping C. Its heartbeat re-acquires every
     // LEASE_HEARTBEAT_INTERVAL (15s), and the call below is one round trip.
+    // A release expires the row and keeps its fencing token (#23 review H2):
+    // the row stays, but names no holder and publishes no endpoint.
     release_row(&db, &c_holder);
-    assert!(
-        lease_row(&db).is_none(),
-        "the row must be gone while the socket stays live"
+    let released = lease_row(&db).expect("a release keeps the row");
+    assert_eq!(
+        released.holder,
+        lambo::store::lease::RELEASED_HOLDER,
+        "the row must name no holder while the socket stays live"
     );
+    assert_eq!(released.endpoint, None);
 
     let refused = b.call(
         3,

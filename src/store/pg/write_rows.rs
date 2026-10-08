@@ -18,6 +18,7 @@ use super::sql::{
     INSERT_CANONIZATION_EVENT_SQL, QUARANTINE_LEGACY_EMBEDDINGS_SQL, SET_ROOT_GOAL_SQL,
     UPDATE_CONCEPT_STATUS_SQL,
 };
+use super::sql::{COUNT_SESSION_VECTORS_SQL, ERASE_TOMBSTONE_SQL};
 use crate::store::batch::{AccessUpdate, ConceptRow, FlushStep};
 use crate::store::map_write_err;
 use crate::store::vector::encode_vector;
@@ -479,4 +480,61 @@ pub(super) async fn apply_canonization(
         )));
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Session erasure (#23). The transaction is `persistence.rs`'s `erase`.
+// ---------------------------------------------------------------------------
+
+/// Concepts of the session that carry an embedding, counted before they go.
+pub(super) async fn count_session_vectors(
+    tx: &mut sqlx::PgConnection,
+    session: &SessionId,
+) -> Result<u64, StoreError> {
+    let n: i64 = sqlx::query_scalar(COUNT_SESSION_VECTORS_SQL)
+        .bind(session.as_str())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| map_write_err(e, |m| format!("erase_session: count vectors: {m}")))?;
+    Ok(u64::try_from(n).unwrap_or(0))
+}
+
+/// Run one [`ERASE_STATEMENTS`](super::sql::ERASE_STATEMENTS) DELETE; the
+/// number of rows it removed.
+pub(super) async fn delete_session_rows(
+    tx: &mut sqlx::PgConnection,
+    table: &str,
+    sql: &str,
+    session: &SessionId,
+) -> Result<u64, StoreError> {
+    let done = sqlx::query(sql)
+        .bind(session.as_str())
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| map_write_err(e, |m| format!("erase_session: delete {table}: {m}")))?;
+    Ok(done.rows_affected())
+}
+
+/// Write the erasure tombstone ([`ERASE_TOMBSTONE_SQL`]). `None` means the
+/// guard was false: a live lease belongs to someone else.
+pub(super) async fn write_erase_tombstone(
+    tx: &mut sqlx::PgConnection,
+    session: &SessionId,
+    eraser: &str,
+) -> Result<Option<u64>, StoreError> {
+    let token: Option<i64> = sqlx::query_scalar(ERASE_TOMBSTONE_SQL)
+        .bind(session.as_str())
+        .bind(crate::store::erase::ERASED_HOLDER)
+        .bind(crate::store::erase::tombstone_expires_at())
+        .bind(eraser)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| map_write_err(e, |m| format!("erase_session: write tombstone: {m}")))?;
+    token
+        .map(|t| {
+            u64::try_from(t).map_err(|_| {
+                StoreError::Invariant(format!("session {session}: negative lease current_token"))
+            })
+        })
+        .transpose()
 }

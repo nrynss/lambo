@@ -12,7 +12,11 @@ use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use super::lease::{lease_permits_write, LeaseHolder, LeaseInfo, LeaseOutcome};
+use super::erase::{
+    check_fence, erase_gate, is_erased_holder, tombstone_expires_at, EraseCounts, EraseGate,
+    EraseOutcome, EraseReport, PriorLease, ERASED_HOLDER,
+};
+use super::lease::{LeaseHolder, LeaseInfo, LeaseOutcome};
 use super::{validate_vector_candidate_limit, Capabilities, GraphStore, SessionFlushStats};
 use crate::types::{
     tie_break_by_key, CanonizationEvent, EdgeType, GraphSnapshot, InteractionSpan, Mutation,
@@ -109,12 +113,25 @@ impl MemoryStore {
 
     /// Seed a prebuilt snapshot directly (used by `fixtures` to load committed graphs).
     #[cfg(feature = "fixtures")]
+    ///
+    /// Off-lease, like the SQL adapters' seeds, but refused for an erased
+    /// session (#23 review L5): a seed must not recreate it under the
+    /// tombstone. Lock order: `inner` before `leases`, as in `flush`.
     pub fn seed(&self, snapshot: GraphSnapshot) -> Result<(), StoreError> {
         let sid = snapshot.session_id.clone();
-        self.inner
-            .write()
-            .insert(sid.0.clone(), SessionData::new(snapshot));
+        let mut map = self.inner.write();
+        if Self::is_tombstoned(&self.leases.read(), &sid) {
+            return Err(crate::store::erase::erased_session_error(sid.as_str()));
+        }
+        map.insert(sid.0.clone(), SessionData::new(snapshot));
         Ok(())
+    }
+
+    /// `true` when the session's lease row is the erasure tombstone (#23).
+    fn is_tombstoned(leases: &HashMap<String, LeaseRow>, session: &SessionId) -> bool {
+        leases
+            .get(&session.0)
+            .is_some_and(|row| is_erased_holder(&row.holder))
     }
 
     /// Every session a `DeleteNode` removes rows from: the session holding the
@@ -421,6 +438,7 @@ impl GraphStore for MemoryStore {
             + chrono::Duration::from_std(ttl)
                 .map_err(|e| StoreError::Backend(format!("lease ttl out of range: {e}")))?;
         let token = holder.token();
+        crate::store::lease::refuse_reserved_holder(&token)?;
         let mut leases = self.leases.write();
         match leases.get(&session.0).cloned() {
             // A live lease held by someone else — refuse, fail closed.
@@ -501,10 +519,16 @@ impl GraphStore for MemoryStore {
     ) -> Result<(), StoreError> {
         let token = holder.token();
         let mut leases = self.leases.write();
-        // Holder-scoped: only clear the row if it is still ours, so a stale
+        // Holder-scoped: only expire the row if it is still ours, so a stale
         // release cannot evict a writer who took over after our lease lapsed.
-        if leases.get(&session.0).map(|r| &r.holder) == Some(&token) {
-            leases.remove(&session.0);
+        // Expire, never remove: the row keeps `current_token`, so the next
+        // acquire mints above it (#23 review H2; see `store::lease`).
+        if let Some(row) = leases.get_mut(&session.0) {
+            if row.holder == token {
+                row.holder = crate::store::lease::RELEASED_HOLDER.to_string();
+                row.expires_at = Utc::now();
+                row.endpoint = None;
+            }
         }
         Ok(())
     }
@@ -523,6 +547,12 @@ impl GraphStore for MemoryStore {
         let cutoff = now
             - chrono::Duration::from_std(crate::store::lease::LEASE_REFUSAL_RETENTION)
                 .unwrap_or_else(|_| chrono::Duration::seconds(3600));
+        // #23: never against an erased session's tombstone. Lock order:
+        // `leases` before `refusals`, as in `erase_session`.
+        let leases = self.leases.read();
+        if Self::is_tombstoned(&leases, session) {
+            return Ok(());
+        }
         let mut refusals = self.refusals.write();
         refusals.push(crate::store::lease::LeaseRefusal {
             session: session.clone(),
@@ -554,7 +584,13 @@ impl GraphStore for MemoryStore {
         stats: &SessionFlushStats,
     ) -> Result<(), StoreError> {
         // In-memory publish: one lock, replace the whole row. Only the
-        // writer's FlushTask calls this; readers only read.
+        // writer's FlushTask calls this; readers only read. #23: suppressed
+        // for an erased session, like the SQL adapters' guarded upsert. Lock
+        // order: `leases` before `flush_stats`, as in `erase_session`.
+        let leases = self.leases.read();
+        if Self::is_tombstoned(&leases, session) {
+            return Ok(());
+        }
         self.flush_stats.write().insert(session.0.clone(), *stats);
         Ok(())
     }
@@ -614,13 +650,7 @@ impl GraphStore for MemoryStore {
             let leases = self.leases.read();
             for sid in &affected {
                 if let Some(row) = leases.get(&sid.0) {
-                    if !lease_permits_write(row.current_token, token) {
-                        return Err(StoreError::StaleWrite(format!(
-                            "session {sid}: presented token {token:?} is stale (lease token {}) — \
-                             single-writer fence (GitHub issue #1)",
-                            row.current_token,
-                        )));
-                    }
+                    check_fence(&sid.0, token, row.current_token, &row.holder)?;
                 }
             }
         }
@@ -888,6 +918,96 @@ impl GraphStore for MemoryStore {
         Ok(InteractionSpan { distinct, coverage })
     }
 
+    /// #23. One critical section under every lock the session's state lives
+    /// behind, taken in the store's one order (`inner`, then `leases`, then
+    /// `flush_stats` and `refusals`), so there is no step between the gate and
+    /// the last removal for anything to interleave with or fail at.
+    async fn erase_session(
+        &self,
+        session: &SessionId,
+        eraser: &LeaseHolder,
+    ) -> Result<EraseOutcome, StoreError> {
+        crate::store::lease::refuse_reserved_holder(&eraser.token())?;
+        let now = Utc::now();
+        let mut map = self.inner.write();
+        let mut leases = self.leases.write();
+        let prior = leases.get(&session.0).cloned();
+        let gate = erase_gate(
+            prior.as_ref().map(|row| PriorLease {
+                holder: &row.holder,
+                live: row.expires_at > now,
+            }),
+            &eraser.token(),
+        );
+        let EraseGate::Proceed { replaces_lease } = gate else {
+            let row = prior.expect("a refusal always has a live row");
+            let age = (now - row.acquired_at).to_std().unwrap_or(Duration::ZERO);
+            return Ok(EraseOutcome::Held {
+                current: row_info(&row),
+                age,
+            });
+        };
+        let tombstone = match &prior {
+            Some(row) if is_erased_holder(&row.holder) => row.clone(),
+            other => LeaseRow {
+                holder: ERASED_HOLDER.to_string(),
+                current_token: other.as_ref().map_or(0, |r| r.current_token) + 1,
+                acquired_at: now,
+                expires_at: tombstone_expires_at(),
+                endpoint: None,
+            },
+        };
+        let fence_token = tombstone.current_token;
+        leases.insert(session.0.clone(), tombstone);
+
+        let mut removed = EraseCounts {
+            leases: u64::from(replaces_lease),
+            ..Default::default()
+        };
+        if let Some(data) = map.remove(&session.0) {
+            let snap = data.snapshot;
+            removed.sessions = 1;
+            removed.interactions = snap.interactions.len() as u64;
+            removed.concepts = snap.concepts.len() as u64;
+            removed.vectors = snap
+                .concepts
+                .iter()
+                .filter(|c| c.embedding.is_some())
+                .count() as u64;
+            removed.edges = snap.edges.len() as u64;
+            removed.synonyms = snap.synonyms.len() as u64;
+            removed.canonization_events = snap.canonization_events.len() as u64;
+            removed.reservations = snap.reservations.len() as u64;
+            removed.write_intents = snap.write_intents.len() as u64;
+            // #23 review L4: another session's edges onto the erased nodes go
+            // too, as `DeleteNode` removes them (see `sessions_for_node_delete`).
+            let erased_nodes: HashSet<NodeId> = snap
+                .interactions
+                .iter()
+                .map(|i| i.id)
+                .chain(snap.concepts.iter().map(|c| c.id))
+                .collect();
+            for data in map.values_mut() {
+                let edges = &mut data.snapshot.edges;
+                let before = edges.len();
+                edges.retain(|e| {
+                    !erased_nodes.contains(&e.source) && !erased_nodes.contains(&e.target)
+                });
+                removed.edges += (before - edges.len()) as u64;
+            }
+        }
+        removed.session_stats = u64::from(self.flush_stats.write().remove(&session.0).is_some());
+        let mut refusals = self.refusals.write();
+        let kept = refusals.len();
+        refusals.retain(|r| r.session != *session);
+        removed.lease_refusals = (kept - refusals.len()) as u64;
+        Ok(EraseOutcome::Erased(EraseReport::new(
+            session.clone(),
+            removed,
+            fence_token,
+        )))
+    }
+
     async fn record_canonization(
         &self,
         event: &CanonizationEvent,
@@ -901,13 +1021,7 @@ impl GraphStore for MemoryStore {
         {
             let leases = self.leases.read();
             if let Some(row) = leases.get(&event.session_id.0) {
-                if !lease_permits_write(row.current_token, token) {
-                    return Err(StoreError::StaleWrite(format!(
-                        "session {}: presented token {token:?} is stale (lease token {}) — \
-                         single-writer fence (GitHub issue #1)",
-                        event.session_id, row.current_token,
-                    )));
-                }
+                check_fence(&event.session_id.0, token, row.current_token, &row.holder)?;
             }
         }
         let data = Self::ensure_session(&mut map, &event.session_id);
@@ -1015,13 +1129,30 @@ mod tests {
         };
         assert_eq!(refreshed.endpoint.as_deref(), Some("/run/lambo/s.sock"));
 
+        // A release expires the row and keeps its token (#23 review H2); the
+        // row publishes no endpoint and is nobody's.
         store.release_lease(&sid, &hub).await.unwrap();
-        assert!(store.read_lease(&sid).await.unwrap().is_none());
+        let released = store.read_lease(&sid).await.unwrap().expect("row kept");
+        assert_eq!(released.holder, crate::store::lease::RELEASED_HOLDER);
+        assert_eq!(released.endpoint, None);
+        assert_eq!(released.token, taken.token);
         let LeaseOutcome::Acquired(taken) = store.acquire_lease(&sid, &cli, ttl).await.unwrap()
         else {
             panic!("re-acquire after release");
         };
         assert_eq!(taken.endpoint, None);
+    }
+
+    /// #23 review H2: a release keeps the fencing token, so a writer holding
+    /// a token from before the release is refused against the next holder.
+    #[tokio::test]
+    async fn a_release_keeps_the_fencing_token_on_memory() {
+        crate::store::lease::testkit::check_release_keeps_the_fencing_token(
+            &MemoryStore::new(),
+            &SessionId::from("release-keeps-token"),
+            &SessionId::from("release-zombie"),
+        )
+        .await;
     }
 
     /// T8.6: a stale release (holder no longer owns the row) must not evict the
@@ -2432,5 +2563,260 @@ mod tests {
             sid,
             "seed() must write the snapshot even with no lease / token (fixture parity)"
         );
+    }
+
+    /// #23 review L5: a fixture seed refuses an erased session id rather
+    /// than recreating it under the tombstone.
+    #[cfg(feature = "fixtures")]
+    #[tokio::test]
+    async fn seed_refuses_an_erased_session() {
+        let store = MemoryStore::new();
+        let sid = SessionId::from("erased-then-seeded");
+        store
+            .erase_session(&sid, &crate::store::lease::testkit::holder("eraser", 1))
+            .await
+            .unwrap();
+        let err = store
+            .seed(GraphSnapshot {
+                session_id: sid.clone(),
+                ..Default::default()
+            })
+            .expect_err("an erased id is not seeded");
+        assert!(err.to_string().contains("was erased"), "{err}");
+        assert!(store.load_session(&sid).await.is_err());
+    }
+
+    // -- #23 session erasure ------------------------------------------------
+
+    mod erase {
+        use super::*;
+        use crate::store::erase::testkit::{planted_batch, planted_counts};
+        use crate::store::erase::{EraseCounts, EraseOutcome, EraseReport, ERASED_HOLDER};
+        use crate::types::{Reservation, Synonym};
+
+        const DIM: usize = 8;
+
+        /// Rows of every kind this store keeps for `sid`, by the store's own
+        /// fields. Destructured exhaustively: a new field on `MemoryStore`
+        /// stops this compiling until erasure (and this census) covers it.
+        fn census(store: &MemoryStore, sid: &SessionId) -> Vec<(&'static str, usize)> {
+            let MemoryStore {
+                inner,
+                leases,
+                flush_stats,
+                refusals,
+            } = store;
+            let inner = inner.read();
+            let snap = inner.get(&sid.0).map(|d| &d.snapshot);
+            let n = |f: fn(&GraphSnapshot) -> usize| snap.map_or(0, f);
+            vec![
+                ("sessions", usize::from(snap.is_some())),
+                ("interactions", n(|s| s.interactions.len())),
+                ("concepts", n(|s| s.concepts.len())),
+                ("edges", n(|s| s.edges.len())),
+                ("synonyms", n(|s| s.synonyms.len())),
+                ("canonization_events", n(|s| s.canonization_events.len())),
+                ("reservations", n(|s| s.reservations.len())),
+                ("write_intents", n(|s| s.write_intents.len())),
+                (
+                    "session_leases",
+                    usize::from(leases.read().contains_key(&sid.0)),
+                ),
+                (
+                    "session_stats",
+                    usize::from(flush_stats.read().contains_key(&sid.0)),
+                ),
+                (
+                    "lease_refusals",
+                    refusals.read().iter().filter(|r| r.session == *sid).count(),
+                ),
+            ]
+        }
+
+        async fn plant_everything(store: &MemoryStore, sid: &SessionId, owner: &LeaseHolder) {
+            let LeaseOutcome::Acquired(lease) = store
+                .acquire_lease(sid, owner, Duration::from_secs(60))
+                .await
+                .unwrap()
+            else {
+                panic!("acquire");
+            };
+            store
+                .flush(&planted_batch(sid, DIM), Some(lease.token))
+                .await
+                .unwrap();
+            {
+                let mut inner = store.inner.write();
+                let snap = &mut inner.get_mut(&sid.0).unwrap().snapshot;
+                snap.synonyms.push(Synonym {
+                    session_id: sid.clone(),
+                    source_key: "navy".into(),
+                    canonical_key: "blue".into(),
+                });
+                snap.reservations.push(Reservation {
+                    session_id: sid.clone(),
+                    node_id: NodeId::new(),
+                    agent_id: AgentId::from("erase-test"),
+                    expires_at: Utc::now() + chrono::Duration::hours(1),
+                });
+            }
+            store
+                .write_flush_stats(
+                    sid,
+                    &SessionFlushStats {
+                        flush_lag_ms: 5,
+                        log_depth: 1,
+                    },
+                )
+                .await
+                .unwrap();
+            store
+                .record_lease_refusal(sid, "refused@h#9", &owner.token())
+                .await
+                .unwrap();
+        }
+
+        fn erased(outcome: EraseOutcome) -> EraseReport {
+            match outcome {
+                EraseOutcome::Erased(r) => r,
+                EraseOutcome::Held { current, .. } => panic!("held by {}", current.holder),
+            }
+        }
+
+        /// #23 review L4: another session's edges onto the erased nodes go.
+        #[tokio::test]
+        async fn erase_removes_cross_session_edges_on_memory() {
+            crate::store::erase::testkit::check_erase_removes_cross_session_edges(
+                &MemoryStore::new(),
+                &SessionId::from("erased-a"),
+                &SessionId::from("kept-b"),
+            )
+            .await;
+        }
+
+        /// #23 review H1: release, then erase, then a zombie's write under
+        /// any token is refused and recreates nothing.
+        #[tokio::test]
+        async fn an_erase_after_a_release_fences_every_token_on_memory() {
+            crate::store::erase::testkit::check_erase_after_release_fences(
+                &MemoryStore::new(),
+                &SessionId::from("erase-after-release"),
+            )
+            .await;
+        }
+
+        #[tokio::test]
+        async fn erase_removes_every_kind_and_leaves_only_the_tombstone() {
+            let store = MemoryStore::new();
+            let (sid, other) = (SessionId::from("erase-me"), SessionId::from("keep-me"));
+            let eraser = holder("eraser", 1);
+            plant_everything(&store, &sid, &eraser).await;
+            plant_everything(&store, &other, &holder("other", 2)).await;
+            for (kind, n) in census(&store, &sid) {
+                assert!(n >= 1, "the fixture must plant {kind}");
+            }
+            let other_before = census(&store, &other);
+
+            let report = erased(store.erase_session(&sid, &eraser).await.unwrap());
+            assert_eq!(
+                report.removed,
+                EraseCounts {
+                    synonyms: 1,
+                    reservations: 1,
+                    session_stats: 1,
+                    lease_refusals: 1,
+                    leases: 1,
+                    ..planted_counts()
+                }
+            );
+            for (kind, n) in census(&store, &sid) {
+                assert_eq!(n, usize::from(kind == "session_leases"), "{kind}");
+            }
+            assert!(matches!(
+                store.load_session(&sid).await,
+                Err(StoreError::SessionNotFound(_))
+            ));
+            assert_eq!(census(&store, &other), other_before);
+
+            let again = erased(store.erase_session(&sid, &eraser).await.unwrap());
+            assert!(again.already_absent);
+            assert_eq!(again.fence_token, report.fence_token);
+        }
+
+        #[tokio::test]
+        async fn a_pre_erase_token_cannot_write_or_recreate_the_session() {
+            let store = MemoryStore::new();
+            let sid = SessionId::from("zombie");
+            let zombie = holder("zombie", 7);
+            let LeaseOutcome::Acquired(lease) = store
+                .acquire_lease(&sid, &zombie, Duration::from_millis(1))
+                .await
+                .unwrap()
+            else {
+                panic!("acquire");
+            };
+            store
+                .flush(&planted_batch(&sid, DIM), Some(lease.token))
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let report = erased(
+                store
+                    .erase_session(&sid, &holder("eraser", 1))
+                    .await
+                    .unwrap(),
+            );
+            assert!(report.fence_token > lease.token);
+
+            for token in [Some(lease.token), None] {
+                let err = store
+                    .flush(&planted_batch(&sid, DIM), token)
+                    .await
+                    .expect_err("refused");
+                assert!(err.to_string().contains("was erased"), "{err}");
+            }
+            let held = store
+                .acquire_lease(&sid, &holder("new", 3), Duration::from_secs(60))
+                .await
+                .unwrap();
+            assert!(
+                matches!(&held, LeaseOutcome::Held { current, .. } if current.holder == ERASED_HOLDER)
+            );
+            store
+                .write_flush_stats(
+                    &sid,
+                    &SessionFlushStats {
+                        flush_lag_ms: 1,
+                        log_depth: 1,
+                    },
+                )
+                .await
+                .unwrap();
+            store
+                .record_lease_refusal(&sid, "new@test#3", ERASED_HOLDER)
+                .await
+                .unwrap();
+            for (kind, n) in census(&store, &sid) {
+                assert_eq!(n, usize::from(kind == "session_leases"), "{kind}");
+            }
+        }
+
+        #[tokio::test]
+        async fn a_live_lease_held_by_another_writer_refuses_the_erase() {
+            let store = MemoryStore::new();
+            let sid = SessionId::from("in-use");
+            let writer = holder("serve", 4);
+            plant_everything(&store, &sid, &writer).await;
+            let before = census(&store, &sid);
+            match store
+                .erase_session(&sid, &holder("eraser", 1))
+                .await
+                .unwrap()
+            {
+                EraseOutcome::Held { current, .. } => assert_eq!(current.holder, writer.token()),
+                EraseOutcome::Erased(r) => panic!("erased under a live writer: {r:?}"),
+            }
+            assert_eq!(census(&store, &sid), before);
+        }
     }
 }

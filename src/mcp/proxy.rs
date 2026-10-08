@@ -88,7 +88,7 @@ pub use disconnect::unreachable_reply;
 pub(crate) use forwarding::INFLIGHT_DEPTH_WARN;
 
 use dialing::Dialled;
-use disconnect::client_gone;
+use disconnect::{client_gone, erased_reply};
 use forwarding::{request_id, response_id, FromHub, Step};
 use framing::{read_frame, Framed, MAX_FRAME_BYTES};
 use handshake::Handshake;
@@ -237,7 +237,7 @@ impl HubProxy {
         let (first, _no_preamble, dialled) =
             match self.dial_bounded(&handshake, shutdown.as_mut()).await {
                 Dialled::Hub(halves, before, dialled) => (halves, before, dialled),
-                Dialled::Failed(e) => return Err(e),
+                Dialled::Failed(e) | Dialled::Erased(e) => return Err(e),
                 Dialled::ShutdownRequested => {
                     // Nothing to unwind and nothing to answer: no lease, no tail, no
                     // client byte exchanged, and the stdin task below is not spawned
@@ -366,6 +366,9 @@ impl HubProxy {
         // there rather than inherited.
         let mut inflight: Vec<(u64, serde_json::Value)> = Vec::new();
         let mut inflight_warned = false;
+        // Ok on every clean exit; the erased error when the session was
+        // erased under this proxy (#23 review L3), so `serve` exits with it.
+        let mut exit: Result<(), LamboError> = Ok(());
 
         loop {
             // Shutdown first and unconditionally; the two traffic directions
@@ -448,6 +451,21 @@ impl HubProxy {
                                 "lambo serve: proxy cannot reach a session holder — failing this \
                                  call honestly"
                             ),
+                            // #23 review L3: the session is gone for good.
+                            // Answer this call with the erased error and end
+                            // the proxy; there is no holder to wait for.
+                            Dialled::Erased(e) => {
+                                tracing::error!(
+                                    error = %e,
+                                    "lambo serve: the session was erased — answering this call \
+                                     and closing the proxy"
+                                );
+                                if let Some(reply) = erased_reply(&frame) {
+                                    Self::send(&mut stdout, &reply).await.map_err(client_gone)?;
+                                }
+                                exit = Err(e);
+                                break;
+                            }
                             Dialled::ShutdownRequested => {
                                 // The frame that triggered this dial goes
                                 // unanswered, exactly as any frame in flight at a
@@ -609,7 +627,7 @@ impl HubProxy {
             }
         }
         client_reader.abort();
-        Ok(())
+        exit
     }
 }
 

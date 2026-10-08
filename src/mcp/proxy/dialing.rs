@@ -293,6 +293,13 @@ pub(super) enum Dialled {
     /// No connection. Carries the operator-facing reason; the caller answers its
     /// own client with [`HUB_UNREACHABLE_MESSAGE`](super::disconnect::HUB_UNREACHABLE_MESSAGE).
     Failed(LamboError),
+    /// The session was erased (#23 review L3): the lease row is the erasure
+    /// tombstone, so no holder will ever exist again. Carries the store's
+    /// stable erased error. The caller answers its client with
+    /// [`HUB_ERASED_MESSAGE`](super::disconnect::HUB_ERASED_MESSAGE) and
+    /// ends the proxy, instead of failing every later call with a
+    /// holder-has-no-endpoint conflict and staying up forever.
+    Erased(LamboError),
     /// The shutdown future completed while the dial was in flight. The caller
     /// must stop.
     ShutdownRequested,
@@ -421,6 +428,12 @@ impl HubProxy {
             outcome = tokio::time::timeout(DIAL_BUDGET, self.reconnect_and_replay(handshake)) => {
                 match outcome {
                     Ok(Ok((halves, before, dialled))) => Dialled::Hub(halves, before, dialled),
+                    // `dial` returns a stale-write store error only for the
+                    // tombstone (a lease read never does): typed, not a
+                    // message match.
+                    Ok(Err(e @ LamboError::Store(crate::types::StoreError::StaleWrite(_)))) => {
+                        Dialled::Erased(e)
+                    }
                     Ok(Err(e)) => Dialled::Failed(e),
                     // The unbudgeted term was the lease-row read; name it, because
                     // "the store did not answer" and "the holder did not answer"
@@ -455,12 +468,23 @@ impl HubProxy {
             .read_lease(&self.session)
             .await
             .map_err(LamboError::Store)?
+            // A released row (#23 review H2: a release keeps the row and its
+            // fencing token) names no holder, exactly like no row at all.
+            .filter(|row| !crate::store::lease::is_released_holder(&row.holder))
             .ok_or_else(|| {
                 LamboError::Conflict(format!(
                     "session {} has no lease holder to forward to",
                     self.session
                 ))
             })?;
+        // #23 review L3: an erased session has no holder and never will. Say
+        // so with the store's stable erased error, which the pump answers its
+        // client with and then exits on.
+        if crate::store::erase::is_tombstone(&row) {
+            return Err(LamboError::Store(
+                crate::store::erase::erased_session_error(self.session.as_str()),
+            ));
+        }
         let address = proxyable(&row, &self.endpoint, &self.our_host)
             .map_err(|why| LamboError::Conflict(why.explain()))?;
         dial_dir(&address)?;

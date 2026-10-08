@@ -9,6 +9,7 @@
 pub mod caps;
 pub mod demo;
 pub mod derive;
+pub mod erase_session;
 pub mod inspect;
 pub mod provision;
 pub mod re_embed;

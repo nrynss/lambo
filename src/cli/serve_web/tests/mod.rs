@@ -445,9 +445,24 @@ async fn seed(session: &str) -> Arc<MemoryStore> {
 }
 
 /// Walk a concept through the audited transition path, recording each hop
-/// exactly as the canonization task does.
+/// exactly as the canonization task does: under a lease of its own, since the
+/// session has been leased (by the derive above) and a lease's token is
+/// never reset, so an unleased write is refused.
 async fn promote(store: &Arc<MemoryStore>, session: &str, content: &str) {
     let sid = SessionId::new(session);
+    let canon = crate::store::lease::LeaseHolder {
+        endpoint: None,
+        agent: AgentId::from("canon-fixture"),
+        pid: 1,
+        host: "test".into(),
+    };
+    let crate::store::lease::LeaseOutcome::Acquired(lease) = store
+        .acquire_lease(&sid, &canon, std::time::Duration::from_secs(60))
+        .await
+        .expect("acquire")
+    else {
+        panic!("the fixture must take the released session");
+    };
     let snap = store.load_session(&sid).await.expect("snapshot");
     let node = snap
         .concepts
@@ -473,11 +488,12 @@ async fn promote(store: &Arc<MemoryStore>, session: &str, content: &str) {
                     occurred_at: Utc::now(),
                     last_demotion_time: None,
                 },
-                None,
+                Some(lease.token),
             )
             .await
             .expect("record canonization");
     }
+    store.release_lease(&sid, &canon).await.expect("release");
 }
 
 fn concept(

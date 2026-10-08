@@ -498,6 +498,17 @@ impl MemoryBuilder {
                 }
                 info.token
             }
+            // #23: the session was erased. Its lease row is the tombstone, which
+            // no acquire can take over, so this is not a writer to proxy to or
+            // wait out: refuse with the store's stable erased error, and do not
+            // report it as `Held` (that would send `serve` dialling a holder
+            // that does not exist and record a lease refusal against an erased
+            // session).
+            LeaseOutcome::Held { current, .. } if crate::store::erase::is_tombstone(&current) => {
+                return Err(LamboError::Store(
+                    crate::store::erase::erased_session_error(session.as_str()),
+                ));
+            }
             LeaseOutcome::Held { current, age } => {
                 // Fail closed, naming the current holder and its age. Reported
                 // as data (J2) so `mcp::serve` can proxy to the holder; the
@@ -681,8 +692,21 @@ impl MemoryBuilder {
         )
         .with_fence(lease_lost.clone())
         .with_token(lease_token);
+        // #23 review L2: a background write refused because the session was
+        // erased latches the fence and the wake-up at once, with the
+        // tombstone as the winner, exactly as the heartbeat would on its next
+        // beat — so `erased()` holds and reads of the deleted data stop now.
+        let erased_latch: crate::store::erase::ErasedLatch = {
+            let (fence, signal) = (lease_lost.clone(), lease_lost_signal.clone());
+            Arc::new(move || {
+                fence.store(true, std::sync::atomic::Ordering::Release);
+                signal.latch(crate::store::erase::ERASED_HOLDER);
+            })
+        };
+        let flush = flush.with_erased_latch(erased_latch.clone());
         let canon = CanonizationTask::from_daemon(graph.clone(), store.clone(), &daemon, &config)
-            .with_token(lease_token);
+            .with_token(lease_token)
+            .with_erased_latch(erased_latch);
 
         // Each `spawn` panics if called twice — each is called exactly once,
         // here, and nowhere else in this type.

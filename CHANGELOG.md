@@ -92,6 +92,46 @@
   second signal logs, at WARN, the step it was abandoned in. A shutdown that
   stalls now names its stage (#40). The line formats are listed in
   `dev-diary/notes/fix-40-shutdown-stages.md`.
+- `lambo erase-session --session <s> --confirm <s>` erases a whole session for
+  account deletion (#23): every interaction, concept, vector, edge, synonym,
+  reservation, canonization record, durable write intent (their payloads hold
+  concept text), published flush stats row and lease refusal, plus the
+  `sessions` row with its embedding contract. It prints one JSON report after
+  the store committed: counts removed per kind, `already_absent` (nothing was
+  left to remove, as on a repeat), and the tombstone's fencing token.
+  - Safe to repeat, and one transaction on every store (SQLite, PostgreSQL,
+    CockroachDB, memory): a failure part way leaves the session as it was and
+    a rerun completes.
+  - The session's lease row is replaced by a tombstone rather than deleted.
+    Every write to the erased session is refused with a stable "was erased"
+    error whatever fencing token it presents, unleased writes and fixture
+    seeds included, and recreates nothing; no writer can take the session
+    over, and `derive`, `serve` and the other writer verbs refuse to attach.
+    Reusing an erased id is a deliberate operator act: an UPDATE that hands
+    the row back and keeps its fencing token (statement in the CLI reference),
+    never a DELETE.
+  - Edges in other sessions that point at the erased session's concepts or
+    interactions are removed with it (counted in `edges`).
+  - It never preempts a live writer. While a `serve` or writer verb holds the
+    session, the erase is refused and names the holder; stop it, then erase. A
+    writer whose lease had already lapsed is fenced by its first refused write
+    or its next heartbeat, whichever comes first, and winds down; a `serve`
+    proxying to the session answers the next call with the erased error and
+    exits.
+  - An operator verb: the authority is access to the store, never an agent id,
+    and there is no MCP tool for it. A `--confirm` that differs from
+    `--session` is a usage error and erases nothing.
+  - Not reached: backups and snapshots taken before the erase, and the serve
+    call ledger file (`--ledger`), which can hold recall queries and truncated
+    concept text. The operator's retention policy governs both.
+- `GraphStore::erase_session` (with `store::erase`'s `EraseReport`,
+  `EraseOutcome` and tombstone rule). The default implementation returns a
+  `Capability` error, so a third-party adapter that does not implement it
+  fails closed instead of reporting a deletion it did not do. `EraseCounts`
+  and `EraseReport` are `#[non_exhaustive]`.
+- Decisions for #23: erasure is CLI-only (an MCP or portal surface waits for
+  #32's authority design), the tombstone keeps the plain session id, and the
+  `serve --ledger` file and backups are operator-owned and not scrubbed.
 
 ### Fixed
 
@@ -101,8 +141,7 @@
   driving the server blocked) fires none of them, so the process logs
   nothing more and waits for its supervisor's kill. The live writer's stall
   in #40 is consistent with that (it was not reproduced). A watchdog thread
-  outside
-  the runtime now warns when a stage outlives its own bound by more than 1 s,
+  outside the runtime now warns when a stage outlives its own bound by more than 1 s,
   and 20 s after the shutdown began it logs the stalled stage and aborts the
   process. On macOS the abort leaves a crash report with every thread's stack
   in `~/Library/Logs/DiagnosticReports/`. A healthy shutdown takes at most
@@ -110,6 +149,17 @@
   supervisor's kill timeout should exceed 20 s so the watchdog acts first; 30
   s is recommended (launchd `ExitTimeOut`, whose default is 20 s; systemd
   `TimeoutStopSec`). Pre-existing.
+- A clean lease release no longer resets a session's fencing token (single
+  writer, #1; found by the #23 review). A release deleted the
+  `session_leases` row, so the next acquire minted token 1 again, and a writer
+  whose lease had lapsed and been taken over could write over the next holder
+  once the taker closed cleanly. A release now expires the row (holder
+  `lambo:released`) and keeps its token, so tokens only go up for the life of
+  a session id, on SQLite, PostgreSQL, CockroachDB and the in-memory store. A
+  session that was ever leased therefore refuses unleased writes, as it
+  already did while an expired row was present. The documented operator
+  override for a wedged holder (`store::lease::OPERATOR_OVERRIDE`) is now the
+  matching UPDATE; never delete a lease row.
 - A `Memory::close()` cancelled while it was stopping the background write
   queue (for example by a caller's timeout) no longer leaves lane workers or
   the durable-intent replay running. Every worker is aborted before any is

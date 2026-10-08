@@ -587,3 +587,72 @@ async fn a_delete_batch_larger_than_one_lookup_chunk_is_still_fenced() {
     assert_eq!(rows_with_id(&store, "concepts", free_ids[449]).await, 0);
     assert_eq!(rows_with_id(&store, "concepts", fenced_node).await, 1);
 }
+
+/// #23 review H2: a release keeps the fencing token, so a writer holding a
+/// token from before the release is refused against the next holder.
+#[tokio::test]
+async fn a_release_keeps_the_fencing_token_on_sqlite() {
+    let store = test_store();
+    store.init_schema().await.unwrap();
+    crate::store::lease::testkit::check_release_keeps_the_fencing_token(
+        &store,
+        &SessionId::from("release-keeps-token"),
+        &SessionId::from("release-zombie"),
+    )
+    .await;
+}
+
+/// #23 review H2: the documented operator override is an UPDATE that keeps
+/// the fencing token (so the next acquire mints above the wedged holder's)
+/// and never lifts an erasure tombstone. Runs the shipped statement itself.
+#[tokio::test]
+async fn the_operator_override_keeps_the_token_and_spares_a_tombstone() {
+    let store = test_store();
+    store.init_schema().await.unwrap();
+    let override_for = |sid: &str| crate::store::lease::OPERATOR_OVERRIDE.replace("<session>", sid);
+    let ttl = Duration::from_secs(60);
+
+    let sid = SessionId::from("wedged");
+    let wedged = lease_holder("wedged", 1);
+    let LeaseOutcome::Acquired(w) = store.acquire_lease(&sid, &wedged, ttl).await.unwrap() else {
+        panic!("fresh acquire");
+    };
+    sqlx::query(&override_for("wedged"))
+        .execute(store.pool())
+        .await
+        .unwrap();
+    let row = store.read_lease(&sid).await.unwrap().expect("row kept");
+    assert_eq!(row.holder, crate::store::lease::RELEASED_HOLDER);
+    assert_eq!(row.token, w.token);
+    let LeaseOutcome::Acquired(next) = store
+        .acquire_lease(&sid, &lease_holder("next", 2), ttl)
+        .await
+        .unwrap()
+    else {
+        panic!("the override must let the next writer in at once");
+    };
+    assert!(next.token > w.token);
+    assert!(matches!(
+        store
+            .flush(
+                &crate::store::lease::testkit::interaction_batch(&sid, "wedged"),
+                Some(w.token)
+            )
+            .await,
+        Err(StoreError::StaleWrite(_))
+    ));
+
+    let erased = SessionId::from("erased");
+    let eraser = lease_holder("eraser", 3);
+    store.erase_session(&erased, &eraser).await.unwrap();
+    let tomb = store.read_lease(&erased).await.unwrap().expect("tombstone");
+    sqlx::query(&override_for("erased"))
+        .execute(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        store.read_lease(&erased).await.unwrap(),
+        Some(tomb),
+        "the override must not lift a tombstone"
+    );
+}

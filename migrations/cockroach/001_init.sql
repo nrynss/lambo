@@ -244,9 +244,13 @@ CREATE TABLE IF NOT EXISTS reservations (
 -- it is a path on the HOLDER's machine: `holder` carries the host, and a reader
 -- on a different host must not dial it — see `mcp::serve`'s proxy checks.
 -- A live holder's row has expires_at > now(); an expired row lingers until the
--- next acquire steals it. Operator override — force a takeover from a
--- wedged-but-still-heartbeating holder (no auto-preemption by design):
---   DELETE FROM session_leases WHERE session_id = '<session>';
+-- next acquire steals it. A row is never deleted: a release expires it (holder
+-- 'lambo:released') and keeps current_token, so fencing tokens only ever go up
+-- for a session id. Operator override — force a takeover from a
+-- wedged-but-still-heartbeating holder (no auto-preemption by design;
+-- store::lease::OPERATOR_OVERRIDE):
+--   UPDATE session_leases SET holder = 'lambo:released', expires_at = acquired_at,
+--     endpoint = NULL WHERE session_id = '<session>' AND holder <> 'lambo:erased';
 CREATE TABLE IF NOT EXISTS session_leases (
     session_id  STRING PRIMARY KEY,
     holder      STRING NOT NULL,

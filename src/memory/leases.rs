@@ -377,11 +377,31 @@ impl Memory {
         }
     }
 
+    /// `true` once this handle was fenced **by an erasure** (#23): the lease it
+    /// lost went to the erasure tombstone, not to another writer. The session's
+    /// durable rows are gone, so the in-RAM graph is a copy of deleted data;
+    /// [`Memory::ensure_open`] then refuses reads as well as writes, and `serve`
+    /// winds down on the same latch it always acts on.
+    pub(crate) fn erased(&self) -> bool {
+        self.lease_lost()
+            && self
+                .lease_lost_signal
+                .winner()
+                .is_some_and(|w| crate::store::erase::is_erased_holder(&w))
+    }
+
     /// The honest refusal a fenced handle returns (T86-2): another writer owns
     /// the session now, so this process is no longer the writer and refuses to
     /// touch the graph. A `Conflict`, the same class as the build-time
-    /// single-writer refusal.
+    /// single-writer refusal — except when the fence was an erasure (#23),
+    /// which is the store's stable erased refusal: there is no other writer to
+    /// reconcile with and no takeover to force.
     pub(super) fn lease_lost_error(&self) -> LamboError {
+        if self.erased() {
+            return LamboError::Store(crate::store::erase::erased_session_error(
+                self.session.as_str(),
+            ));
+        }
         LamboError::Conflict(format!(
             "session {} lost its single-writer lease: this process's lease expired (the store was \
              unreachable past the {}s TTL) and another writer took the session. This handle is no \
