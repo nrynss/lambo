@@ -79,10 +79,10 @@
 //! vector is 4 KB and the largest measured session held ~1,400 of them. But "n is small
 //! by construction" was a property of *session-scoped* graphs, and a single unified
 //! autobiographical session is not bounded that way. An ANN index replaces
-//! `select_session_vectors` — whose signature already takes the probe and the limit for
-//! exactly that reason, even though an exact scan ignores both — and `rank_by_cosine`
-//! keeps re-ranking the survivors exactly. No caller and no other adapter method
-//! changes.
+//! `select_session_vectors` behind this adapter's `VectorCandidateSource`
+//! implementation, which already receives the probe and the limit (the scan itself
+//! takes neither, since an exact scan can use neither), and `rank_by_cosine` keeps
+//! re-ranking the survivors exactly. No caller and no other adapter method changes.
 //!
 //! Since #26 the checked read is this adapter's implementation of the
 //! store-wide seam, `store::vector_source::VectorCandidateSource`, and the exact
