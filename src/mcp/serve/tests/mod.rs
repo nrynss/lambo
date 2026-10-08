@@ -1,5 +1,7 @@
 //! Unit tests for `lambo serve`, grouped by subject.
 
+#[allow(unused_imports)]
+use super::http_guards::*;
 use super::*;
 use crate::surface::bearer::tokens_match;
 
