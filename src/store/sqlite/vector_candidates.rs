@@ -9,7 +9,7 @@ use sqlx::Row;
 
 use super::codec::{db_err, node_id, session_embedding_from_parts};
 use super::SqliteStore;
-use crate::store::vector::decode_vector;
+use crate::store::vector::decode_vector_blob;
 use crate::store::{validate_vector_candidate_limit, GraphStore};
 use crate::types::{tie_break_by_key, EmbeddingContract, NodeId, Scored, SessionId, StoreError};
 
@@ -59,12 +59,7 @@ pub(super) async fn select_session_vectors(
         let blob: Vec<u8> = row
             .try_get(2)
             .map_err(|e| db_err("vector_candidates: concept embedding", e))?;
-        let text = std::str::from_utf8(&blob).map_err(|e| {
-            StoreError::Backend(format!(
-                "concepts.embedding for {id} is not valid UTF-8: {e}"
-            ))
-        })?;
-        let vector = decode_vector(text)?;
+        let vector = decode_vector_blob(&id, &blob)?;
         if vector.len() != dim {
             return Err(StoreError::Backend(format!(
                 "concepts.embedding for {id} decodes to {} dimensions but session {} \

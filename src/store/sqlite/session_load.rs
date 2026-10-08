@@ -13,7 +13,7 @@ use super::codec::{
     db_err, node_id, node_id_str, session_embedding_from_parts, text_to_enum, text_to_ts,
 };
 use super::SqliteStore;
-use crate::store::vector::decode_vector;
+use crate::store::vector::decode_vector_blob;
 use crate::types::{
     CanonizationEvent, Concept, Edge, GcMark, GraphSnapshot, Interaction, SessionId, StoreError,
 };
@@ -167,18 +167,9 @@ pub(super) async fn load_concepts(
         // CON-8: decode the BLOB back to the shared text form. A corrupt blob
         // (invalid UTF-8 / unparseable elements) is a backend error, not a panic.
         let embedding: Option<Vec<u8>> = row.try_get(14).map_err(|e| db_err("load concepts", e))?;
-        let embedding = match embedding {
-            Some(bytes) => {
-                let text = std::str::from_utf8(&bytes).map_err(|e| {
-                    StoreError::Backend(format!(
-                        "concepts.embedding for {} is not valid UTF-8: {e}",
-                        id
-                    ))
-                })?;
-                Some(decode_vector(text)?)
-            }
-            None => None,
-        };
+        let embedding = embedding
+            .map(|bytes| decode_vector_blob(&id, &bytes))
+            .transpose()?;
         let chunk_group_id: Option<String> =
             row.try_get(15).map_err(|e| db_err("load concepts", e))?;
         let human_confirmed: i32 = row.try_get(16).map_err(|e| db_err("load concepts", e))?;

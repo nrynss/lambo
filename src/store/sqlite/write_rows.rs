@@ -16,7 +16,7 @@ use sqlx::Row;
 use super::codec::{cutoff_text, db_err, enum_to_text, session_embedding_from_parts, ts_to_text};
 use crate::store::batch::{AccessUpdate, ConceptRow, FlushStep};
 use crate::store::map_write_err;
-use crate::store::vector::encode_vector;
+use crate::store::vector::encode_vector_blob;
 use crate::types::{
     CanonizationEvent, Edge, Interaction, Mutation, Node, NodeId, SessionId, StoreError,
 };
@@ -554,9 +554,8 @@ pub(super) fn concept_binds(r: &ConceptRow<'_>) -> Result<ConceptBinds, StoreErr
             .concept
             .embedding
             .as_ref()
-            .map(|v| encode_vector(v))
-            .transpose()?
-            .map(|s| s.into_bytes()),
+            .map(|v| encode_vector_blob(v))
+            .transpose()?,
     })
 }
 

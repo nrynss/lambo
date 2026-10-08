@@ -115,6 +115,31 @@ pub fn decode_vector(s: &str) -> Result<Vec<f32>, StoreError> {
         .collect()
 }
 
+/// SQLite's framing of the CON-8 text literal: `concepts.embedding` is a `BLOB`
+/// holding the UTF-8 bytes of [`encode_vector`]'s output.
+///
+/// The SQLite write path (`concept_binds`), session load (`load_concepts`) and
+/// the vector candidate scan (`select_session_vectors`) all go through this
+/// pair and [`decode_vector_blob`], so a change of stored representation (#8's
+/// packed `f32`) is made here, in one module, rather than at three call sites.
+#[cfg(feature = "store-sqlite")]
+pub fn encode_vector_blob(v: &[f32]) -> Result<Vec<u8>, StoreError> {
+    encode_vector(v).map(String::into_bytes)
+}
+
+/// Inverse of [`encode_vector_blob`]. `owner` names the row in the error (the
+/// concept id): a BLOB that is not UTF-8 is a corrupt row, reported as
+/// [`StoreError::Backend`], never a panic.
+#[cfg(feature = "store-sqlite")]
+pub fn decode_vector_blob(owner: &str, bytes: &[u8]) -> Result<Vec<f32>, StoreError> {
+    let text = std::str::from_utf8(bytes).map_err(|e| {
+        StoreError::Backend(format!(
+            "concepts.embedding for {owner} is not valid UTF-8: {e}"
+        ))
+    })?;
+    decode_vector(text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
