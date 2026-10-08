@@ -17,28 +17,32 @@
 //! every implementation keeps the contract check and the candidate read in one
 //! transaction, so a contract change cannot interleave with the read.
 //!
-//! #8 adds a graph-backed implementation that ranks against the vectors the
-//! in-memory graph already holds. It implements this trait without implementing
-//! `GraphStore`, and it reuses [`rank_by_cosine`] so its ranking is bit-identical
-//! to the SQLite scan's (the CON-8 text codec round-trips `f32` exactly).
+//! * `GraphVectorSource` (#8, `graph::vector_source`) — the session holder's
+//!   own graph: an exact scan over the vectors its concepts already carry,
+//!   scored by [`rank_by_cosine`]. It implements this trait without
+//!   implementing `GraphStore`, and its ranking is bit-identical to the SQLite
+//!   scan's (the CON-8 text codec round-trips `f32` exactly).
 //!
 //! **The caller side** (#27) is [`VectorCandidates`]: recall's vector leg
 //! (`recall::candidates::gather_from`) and hybrid derive's semantic match
 //! (`graph::hybrid::derive_with`) reach candidates only through the value they
 //! are handed, never by calling the store. The owners that hand it out are
-//! `Memory::vector_candidates` and `WriteCtx::vector_candidates`; #8 changes
-//! what those two return (a graph-backed variant here), and nothing else.
+//! `Memory::vector_candidates` and `WriteCtx::vector_candidates`, and both
+//! build it with [`VectorCandidates::for_holder`], the one place the choice
+//! between the store and the holder's graph is made (#8).
 //!
-//! The module compiles in every build, the Memory-only default included, so
-//! #8's graph-backed source can implement the trait and call the scorer
-//! wherever the graph runs; until it lands, builds without a SQL adapter
-//! carry both unused, hence the `dead_code` allowances.
+//! The module compiles in every build, the Memory-only default included: the
+//! graph-backed source implements the trait and calls the scorer wherever the
+//! graph runs.
 //!
 //! The stored vector codec is not part of this seam: it lives in
 //! `store/vector.rs` (`encode_vector` / `decode_vector` and SQLite's BLOB framing).
 
 use async_trait::async_trait;
+use parking_lot::RwLock;
 
+use crate::graph::vector_source::GraphVectorSource;
+use crate::graph::Graph;
 use crate::store::{Capabilities, GraphStore};
 use crate::types::{tie_break_by_key, EmbeddingContract, NodeId, Scored, SessionId, StoreError};
 
@@ -46,26 +50,61 @@ use crate::types::{tie_break_by_key, EmbeddingContract, NodeId, Scored, SessionI
 ///
 /// Recall and hybrid derive are given one of these instead of a store, and ask
 /// it two things: whether a vector leg exists at all ([`Self::available`], no
-/// I/O), and the checked candidates for a probe ([`Self::checked`]). Today the
-/// only source is the durable store, with exactly the behaviour the callers
-/// had when they called it directly: the capability bit is
-/// `Capabilities::VECTOR_SEARCH`, and the read is
-/// `GraphStore::vector_candidates_checked`, capability refusal included. #8
-/// adds a graph-backed variant (a [`VectorCandidateSource`] over the in-memory
-/// graph) and the callers do not change.
+/// I/O), and the checked candidates for a probe ([`Self::checked`]).
 ///
-/// An enum rather than a trait object so the store path stays statically
-/// dispatched.
+/// Two sources:
+///
+/// * [`Self::Store`] — the durable store's checked read, with exactly the
+///   behaviour callers had when they called it directly: the capability bit is
+///   `Capabilities::VECTOR_SEARCH`, and the read is
+///   `GraphStore::vector_candidates_checked`, capability refusal included.
+///   Readers that hold no live graph (`lambo recall`, `serve-web`) always use
+///   it, and so does a holder whose store ranks in the database.
+/// * [`Self::Graph`] — the session holder's in-memory graph (#8), chosen by
+///   [`Self::for_holder`] only when the store's own checked read is the same
+///   exact scan (`GraphStore::exact_vector_scan`), so the answer is the same
+///   and the store is not touched.
+///
+/// An enum rather than a trait object so both paths stay statically
+/// dispatched. Another candidate source (#18's Elastic tier) arrives as a
+/// store: it implements `vector_candidates_checked` through its own
+/// [`VectorCandidateSource`] and leaves `exact_vector_scan` false.
 #[derive(Clone, Copy)]
 pub(crate) enum VectorCandidates<'a> {
     /// The durable store's checked read.
     Store(&'a dyn GraphStore),
+    /// The session holder's graph, ranked in place (#8).
+    Graph(GraphVectorSource<'a>),
 }
 
 impl<'a> VectorCandidates<'a> {
-    /// The store as the source: today's behaviour.
+    /// The store as the source.
     pub(crate) fn from_store(store: &'a dyn GraphStore) -> Self {
         Self::Store(store)
+    }
+
+    /// The source a **session holder** hands its recall and hybrid derive
+    /// (#8). The one place the choice is made; `Memory::vector_candidates` and
+    /// `WriteCtx::vector_candidates` both call it, so the synchronous and the
+    /// background write paths cannot disagree.
+    ///
+    /// The holder's graph is chosen when the store both advertises
+    /// `VECTOR_SEARCH` and declares its checked read an exact scan of the
+    /// vectors it holds (`GraphStore::exact_vector_scan`). The graph holds
+    /// those same vectors (and the unflushed ones besides), so ranking them
+    /// in RAM gives the store's answer without its I/O. Otherwise the store
+    /// stays the source: a store without `VECTOR_SEARCH` keeps the vector leg
+    /// off exactly as before (the graph source is never offered as a way to
+    /// switch it on), and a store that ranks in the database keeps doing so.
+    ///
+    /// Synchronous and lock-free: it reads the store's two declarations and
+    /// never touches the graph, so a caller may hold the graph lock.
+    pub(crate) fn for_holder(store: &'a dyn GraphStore, graph: &'a RwLock<Graph>) -> Self {
+        if store.capabilities().contains(Capabilities::VECTOR_SEARCH) && store.exact_vector_scan() {
+            Self::Graph(GraphVectorSource::new(graph))
+        } else {
+            Self::Store(store)
+        }
     }
 
     /// Whether the vector leg can run at all. Synchronous and I/O-free, so a
@@ -73,6 +112,8 @@ impl<'a> VectorCandidates<'a> {
     pub(crate) fn available(&self) -> bool {
         match self {
             Self::Store(store) => store.capabilities().contains(Capabilities::VECTOR_SEARCH),
+            // Chosen only over a store that advertises VECTOR_SEARCH.
+            Self::Graph(_) => true,
         }
     }
 
@@ -91,6 +132,11 @@ impl<'a> VectorCandidates<'a> {
                     .vector_candidates_checked(session, probe, expected_contract, limit)
                     .await
             }
+            Self::Graph(graph) => {
+                graph
+                    .checked_vector_candidates(session, probe, expected_contract, limit)
+                    .await
+            }
         }
     }
 }
@@ -104,14 +150,6 @@ impl<'a> VectorCandidates<'a> {
 /// `expected_contract` is refused with [`StoreError::Invariant`]; results are
 /// ordered score descending with the issue-2 tie-break (canonical key, then id).
 #[async_trait]
-#[cfg_attr(
-    not(any(
-        feature = "store-cockroach",
-        feature = "store-postgres",
-        feature = "store-sqlite"
-    )),
-    allow(dead_code)
-)]
 pub(crate) trait VectorCandidateSource: Send + Sync {
     async fn checked_vector_candidates(
         &self,
@@ -138,7 +176,6 @@ pub(crate) type VectorCandidate = (NodeId, Vec<f32>, String);
 /// graph-backed source over the in-memory graph) scores them in place
 /// instead of copying every vector and key per call. The sort is stable, so
 /// candidates that compare equal keep their input order.
-#[cfg_attr(not(feature = "store-sqlite"), allow(dead_code))]
 pub(crate) fn rank_by_cosine<'a>(
     probe: &[f32],
     candidates: impl IntoIterator<Item = (NodeId, &'a [f32], &'a str)>,
@@ -187,14 +224,6 @@ pub(crate) fn rank_by_cosine<'a>(
 /// other half of what encoding the probe was implicitly enforcing on the pg
 /// family, and leaving it out would close half of one divergence and keep the
 /// other.
-#[cfg_attr(
-    not(any(
-        feature = "store-cockroach",
-        feature = "store-postgres",
-        feature = "store-sqlite"
-    )),
-    allow(dead_code)
-)]
 pub fn ensure_is_an_embedding(v: &[f32]) -> Result<(), StoreError> {
     if let Some(bad) = v.iter().find(|x| !x.is_finite()) {
         return Err(StoreError::Backend(format!(
@@ -222,4 +251,179 @@ pub fn ensure_is_an_embedding(v: &[f32]) -> Result<(), StoreError> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{
+        CanonizationEvent, GraphSnapshot, InteractionSpan, MutationBatch, StoreError,
+    };
+
+    /// Only the two declarations `for_holder` reads matter; every async
+    /// surface panics, so the selection is proven I/O-free as well.
+    struct Declares {
+        caps: Capabilities,
+        exact: bool,
+    }
+
+    #[async_trait]
+    impl GraphStore for Declares {
+        async fn init_schema(&self) -> Result<(), StoreError> {
+            unreachable!("selection is I/O-free")
+        }
+        fn capabilities(&self) -> Capabilities {
+            self.caps
+        }
+        fn exact_vector_scan(&self) -> bool {
+            self.exact
+        }
+        async fn flush(&self, _: &MutationBatch, _: Option<u64>) -> Result<(), StoreError> {
+            unreachable!("selection is I/O-free")
+        }
+        async fn load_session(&self, _: &SessionId) -> Result<GraphSnapshot, StoreError> {
+            unreachable!("selection is I/O-free")
+        }
+        async fn keyword_candidates(
+            &self,
+            _: &SessionId,
+            _: &[String],
+            _: usize,
+        ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+            unreachable!("selection is I/O-free")
+        }
+        async fn vector_candidates(
+            &self,
+            _: &SessionId,
+            _: &[f32],
+            _: usize,
+        ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+            unreachable!("selection is I/O-free")
+        }
+        async fn blast_radius(
+            &self,
+            _: &SessionId,
+            _: NodeId,
+            _: std::time::Duration,
+            _: chrono::DateTime<chrono::Utc>,
+        ) -> Result<u64, StoreError> {
+            unreachable!("selection is I/O-free")
+        }
+        async fn interaction_span(
+            &self,
+            _: &SessionId,
+            _: NodeId,
+            _: std::time::Duration,
+            _: chrono::DateTime<chrono::Utc>,
+        ) -> Result<InteractionSpan, StoreError> {
+            unreachable!("selection is I/O-free")
+        }
+        async fn record_canonization(
+            &self,
+            _: &CanonizationEvent,
+            _: Option<u64>,
+        ) -> Result<(), StoreError> {
+            unreachable!("selection is I/O-free")
+        }
+    }
+
+    /// #8: the holder's graph is chosen only over a vector-capable store that
+    /// declares an exact scan; everything else keeps the store, including a
+    /// store without `VECTOR_SEARCH`, whose vector leg must stay off.
+    #[test]
+    fn for_holder_picks_the_graph_only_for_an_exact_vector_store() {
+        let graph = RwLock::new(Graph::new(SessionId::from("s")));
+        for (caps, exact, want_graph, want_available) in [
+            (Capabilities::VECTOR_SEARCH, true, true, true),
+            (Capabilities::VECTOR_SEARCH, false, false, true),
+            (Capabilities::HISTORY, true, false, false),
+            (Capabilities::HISTORY, false, false, false),
+            (Capabilities::empty(), true, false, false),
+        ] {
+            let store = Declares { caps, exact };
+            let source = VectorCandidates::for_holder(&store, &graph);
+            assert_eq!(
+                matches!(source, VectorCandidates::Graph(_)),
+                want_graph,
+                "caps {caps:?} exact {exact}"
+            );
+            assert_eq!(
+                source.available(),
+                want_available,
+                "caps {caps:?} exact {exact}"
+            );
+        }
+    }
+
+    /// The trait default keeps every adapter that does not opt in on the store.
+    #[test]
+    fn exact_vector_scan_defaults_to_false() {
+        struct Plain(Declares);
+        #[async_trait]
+        impl GraphStore for Plain {
+            async fn init_schema(&self) -> Result<(), StoreError> {
+                self.0.init_schema().await
+            }
+            fn capabilities(&self) -> Capabilities {
+                self.0.capabilities()
+            }
+            async fn flush(&self, b: &MutationBatch, t: Option<u64>) -> Result<(), StoreError> {
+                self.0.flush(b, t).await
+            }
+            async fn load_session(&self, s: &SessionId) -> Result<GraphSnapshot, StoreError> {
+                self.0.load_session(s).await
+            }
+            async fn keyword_candidates(
+                &self,
+                s: &SessionId,
+                t: &[String],
+                l: usize,
+            ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+                self.0.keyword_candidates(s, t, l).await
+            }
+            async fn vector_candidates(
+                &self,
+                s: &SessionId,
+                e: &[f32],
+                l: usize,
+            ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+                self.0.vector_candidates(s, e, l).await
+            }
+            async fn blast_radius(
+                &self,
+                s: &SessionId,
+                n: NodeId,
+                a: std::time::Duration,
+                now: chrono::DateTime<chrono::Utc>,
+            ) -> Result<u64, StoreError> {
+                self.0.blast_radius(s, n, a, now).await
+            }
+            async fn interaction_span(
+                &self,
+                s: &SessionId,
+                n: NodeId,
+                a: std::time::Duration,
+                now: chrono::DateTime<chrono::Utc>,
+            ) -> Result<InteractionSpan, StoreError> {
+                self.0.interaction_span(s, n, a, now).await
+            }
+            async fn record_canonization(
+                &self,
+                e: &CanonizationEvent,
+                t: Option<u64>,
+            ) -> Result<(), StoreError> {
+                self.0.record_canonization(e, t).await
+            }
+        }
+        let plain = Plain(Declares {
+            caps: Capabilities::VECTOR_SEARCH,
+            exact: true,
+        });
+        assert!(!plain.exact_vector_scan(), "a wrapper must opt in itself");
+        let graph = RwLock::new(Graph::new(SessionId::from("s")));
+        assert!(matches!(
+            VectorCandidates::for_holder(&plain, &graph),
+            VectorCandidates::Store(_)
+        ));
+    }
 }

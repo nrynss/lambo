@@ -419,6 +419,29 @@ pub trait GraphStore: Send + Sync {
         self.vector_candidates(session, embedding, limit).await
     }
 
+    /// Whether [`Self::vector_candidates_checked`] is an **exact scan**: every
+    /// vector the session holds under its durable contract, scored by exact
+    /// cosine with the issue-2 tie-break (`store::vector_source::rank_by_cosine`),
+    /// nothing pruned and no other score (#8).
+    ///
+    /// When it is, a session **holder** answers that read from its in-memory
+    /// graph instead of calling the store: the graph holds the same vectors
+    /// (the stored codec round-trips `f32` exactly, CON-8), plus the ones not
+    /// yet flushed, so the ranking is the store's without the store's I/O
+    /// (spec §2.1, the graph is primary). Readers without a live graph keep
+    /// calling the store either way.
+    ///
+    /// Default `false`, which keeps every existing adapter, wrapper and test
+    /// double on the store path. Return `true` only when the property holds
+    /// exactly: an adapter that ranks in the database (the pg family's
+    /// distance arithmetic, an approximate index) must not, because the graph
+    /// would rank differently. Ignored unless the adapter also advertises
+    /// [`Capabilities::VECTOR_SEARCH`]: this never switches a vector leg on.
+    /// A wrapper that delegates to an exact adapter should forward it.
+    fn exact_vector_scan(&self) -> bool {
+        false
+    }
+
     /// Count of concepts that would be orphaned by removing `node` (spec §4.1).
     ///
     /// **Type split (CON-6):** this surface returns `u64`, but the frozen
