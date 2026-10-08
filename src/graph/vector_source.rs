@@ -120,11 +120,14 @@ pub(crate) fn graph_vector_candidates(
             "vector candidate lookup refused after embedding contract changed: {err}"
         ))
     })?;
+    // Word for word SQLite's refusal: the parity tests compare messages. The
+    // holder's graph carries the session contract it loaded from, and
+    // flushes to, the store.
     if probe.len() != stored.dim {
         return Err(StoreError::Invariant(format!(
             "query embedding has {} dimensions but session {} stores vectors of {} \
-             (the session's embedding contract is the authority here, not the \
-             process-wide vector_dimensions())",
+             (the session's durable embedding contract is the authority here, not \
+             the process-wide vector_dimensions())",
             probe.len(),
             session.0,
             stored.dim

@@ -6,8 +6,7 @@
 //! question of both sources: SQLite's checked read through the public
 //! `GraphStore` surface, and [`graph_vector_candidates`] over the loaded graph.
 //! Answers must be identical: the same ids in the same order with the same
-//! score **bits**, and the same error variant (and, where the message is part of
-//! the contract recall relies on, the same message).
+//! score **bits**, and the same error variant with the same message.
 //!
 //! The graph is fresher than the store by design (unflushed writes); that
 //! difference is pinned by the holder tests in `memory/tests/vector_source.rs`.
@@ -50,11 +49,14 @@ async fn assert_same_answer(
             bits(b),
             "{label}: graph ranking must be bit-identical to SQLite's (limit {limit})"
         ),
-        (Err(a), Err(b)) => assert_eq!(
-            std::mem::discriminant(a),
-            std::mem::discriminant(b),
-            "{label}: same refusal kind (store: {a}; graph: {b})"
-        ),
+        (Err(a), Err(b)) => {
+            assert_eq!(
+                std::mem::discriminant(a),
+                std::mem::discriminant(b),
+                "{label}: same refusal kind (store: {a}; graph: {b})"
+            );
+            assert_eq!(a.to_string(), b.to_string(), "{label}: same refusal message");
+        }
         _ => panic!("{label}: one source answered, the other refused: store {from_store:?} graph {from_graph:?}"),
     }
     from_store
