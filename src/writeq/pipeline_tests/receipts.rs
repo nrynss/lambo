@@ -34,6 +34,50 @@ async fn an_applied_receipt_reports_what_the_write_did() {
     assert_eq!(s.matched_count, 1);
 }
 
+/// Issue #16 §2 on the J3 asynchronous path: concepts are created at apply
+/// time, after the ack, so the receipt is the only place the caller learns
+/// what the write did. A `parent_of` end in neither `concepts` nor the graph
+/// is created there, and the receipt must count it as embedded. Before the
+/// fix this settled "2 created (1 embedded)" over a parent with no vector.
+#[tokio::test]
+async fn an_applied_receipt_counts_an_embedded_parent_of_end() {
+    let rig = Rig::hybrid_persisting("wq-parent-of-embedded", Arc::new(FixtureEmbedder::new()));
+    let agent = AgentId::new("agent-a");
+    let interaction = rig.interaction(&agent);
+    let submitted = rig
+        .pipeline
+        .submit_derive(
+            agent.clone(),
+            interaction,
+            vec![("user schema".to_string(), ConceptType::Entity)],
+            vec![("document:src.md".to_string(), "user schema".to_string())],
+        )
+        .await;
+    let settled = rig
+        .pipeline
+        .wait(&agent, submitted.receipt, RECEIPT_WAIT_MAX)
+        .await;
+    let ReceiptAnswer::Applied(s) = settled else {
+        panic!("expected applied, got {settled:?}");
+    };
+    assert_eq!(s.created_count, 2);
+    assert_eq!(
+        s.embedded,
+        Some(2),
+        "the receipt must count the parent_of end as embedded: {}",
+        s.summary
+    );
+    assert!(
+        s.summary.contains("2 created (2 embedded)"),
+        "the receipt sentence: {}",
+        s.summary
+    );
+    assert!(
+        rig.graph.read().concepts().all(|c| c.embedding.is_some()),
+        "every concept the write created carries a vector"
+    );
+}
+
 /// **§J3: expired must not read as unknown, and restart-lost must not
 /// either.** All four non-answers, each distinct, none of them "unknown".
 #[tokio::test]
