@@ -71,11 +71,26 @@ reaches `mcp::endpoint` or `mcp::proxy`: `derive_endpoint` (pre-lease),
 `probe_holder`, `bind_hub` (the former inline block, same logic and log
 lines), `Hub::release` (accept-loop abort, then `unlink_if_ours` with the
 captured identity, at the same point after the close), and re-exports of
-`SessionEndpoint` and `HubProxy` for the rest of `serve`. A #39 gate is
-therefore three files: `endpoint.rs`, `proxy.rs`, `serve/hub.rs`. Behaviour
-unchanged. The public `build_memory` signature still names
-`SessionEndpoint`; #39 decides whether that type stays compiled everywhere
-(its derivation is platform-neutral) or gets a stub.
+`SessionEndpoint` and `HubProxy` for the rest of `serve`. Behaviour
+unchanged.
+
+That makes `hub` the only serve file that *reaches* the Unix modules, not
+the only one that *names* their types. A #39 gate therefore covers:
+
+- `mcp/mod.rs`: the `pub mod endpoint` / `pub mod proxy` declarations and
+  the `pub use endpoint::SessionEndpoint` re-export;
+- `endpoint.rs`, `proxy.rs` and `serve/hub.rs` themselves;
+- the type names that still flow through `hub`'s re-exports:
+  `SessionEndpoint` in `builder.rs` (`serve_builder` and the public
+  `build_memory` signature) and `roles.rs` (`resolve_role`), and `HubProxy`
+  in `roles.rs` (`Role::Proxy`) and `serve()` (`HubProxy::run`). Either
+  `hub` supplies non-Unix stand-ins for those two types, or #39 keeps
+  `SessionEndpoint` compiled everywhere (its derivation is
+  platform-neutral) and gates only the socket operations.
+
+`heartbeat.rs` named `SessionEndpoint` only for `serve_startup_line`'s unused
+parameter; the remediation dropped it, so it no longer appears in the
+list.
 
 ## The #40 shutdown stages
 
