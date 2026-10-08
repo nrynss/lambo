@@ -217,6 +217,32 @@ the rest of the pipeline. With a real embedder the query embed (about 17 ms on
 Metal for a short query) is now the floor, which is #14's lever. The Metal rig
 re-measure #8's acceptance asks for is still owed.
 
+Run-level spread (the p50 of each of the six runs, min to max, from the same
+saved results; no new runs):
+
+| | base run p50s | head run p50s |
+|---|---|---|
+| warm recall | 207.6 to 280.1 ms | 3.9 to 4.5 ms |
+| derive to applied, 1 concept | 216.7 to 398.6 ms | 13.3 to 17.4 ms |
+| derive to applied, 3 concepts | 651.4 to 896.2 ms | 19.5 to 21.0 ms |
+
+Caveats on these numbers:
+
+- The pooled n (216, 72) pools correlated samples within a run; the run-level
+  spread above is the more honest variance.
+- The queries are gibberish and the embedder is the fixture one, so the keyword
+  leg and the query embed cost about nothing: 4.3 ms is a floor, and the ~50x
+  recall ratio is not an end-to-end claim for a real embedder.
+- One N (3,600). The per-concept scan cost (3.0 ms / 3,600, about 0.83 µs) is an
+  inference from one point, not a fitted slope.
+- Nothing was measured under concurrent writes, so lock contention between the
+  scan and the flush or derive commit is unmeasured (see Locking).
+- The micro-benchmark behind the load / select / decode / rank / graph split was
+  a throwaway harness and was not saved, so that split cannot be reproduced
+  from this branch; only its output line is kept with the run's scratch.
+- The "48 + 40 bytes per concept" transient omits the final scored `Vec`
+  (24 bytes each) before truncation; trivial.
+
 ## For #14 and #18
 
 - #14: `embed_query` and the recall cache are untouched. The vector leg is now
