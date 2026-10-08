@@ -382,6 +382,24 @@ jobs:
             2>&1 | tee postgres-access.log
           grep -q 'test store::pg::postgres::tests::access_counts_round_trip_through_the_narrow_update_and_survive_reattach ... ok' postgres-access.log
 
+      # Issue #23: session erasure on live PostgreSQL (every table erased to the
+      # tombstone, rollback and rerun on injected failure, live writer refuses,
+      # repeat is already_absent, pre-erase and unleased writes refused), the
+      # release-then-erase path where every token is refused (#23 review H1),
+      # and the release that keeps the fencing token (H2).
+      - name: Live Postgres session erasure and release fencing
+        run: |
+          set -o pipefail
+          cargo test --no-default-features --features store-postgres --lib \
+            -- --ignored --nocapture --exact \
+            store::pg::erase::postgres_erases_a_session \
+            store::pg::erase::postgres_erase_after_a_release_fences_every_token \
+            store::pg::release_fencing::postgres_release_keeps_the_fencing_token \
+            2>&1 | tee postgres-erase.log
+          grep -q 'test store::pg::erase::postgres_erases_a_session ... ok' postgres-erase.log
+          grep -q 'test store::pg::erase::postgres_erase_after_a_release_fences_every_token ... ok' postgres-erase.log
+          grep -q 'test store::pg::release_fencing::postgres_release_keeps_the_fencing_token ... ok' postgres-erase.log
+
       - name: Live Postgres H3 recall parity
         run: |
           set -o pipefail
