@@ -78,6 +78,83 @@ async fn an_applied_receipt_counts_an_embedded_parent_of_end() {
     );
 }
 
+/// `record_action` embeds the concepts it creates under the hybrid strategy
+/// (bef53e6), so its receipt must say how many, as a derive's does. It used
+/// to report `embedded: None` under a stale "never embeds by design"
+/// comment, which made an action write's vectors invisible on the one
+/// surface an agent reads after the ack.
+#[tokio::test]
+async fn an_applied_action_receipt_reports_its_embedded_count() {
+    let rig = Rig::hybrid_persisting("wq-action-embedded", Arc::new(FixtureEmbedder::new()));
+    let agent = AgentId::new("agent-a");
+    let interaction = rig.interaction(&agent);
+    let submitted = rig
+        .pipeline
+        .submit_action(
+            agent.clone(),
+            interaction,
+            "ran the migration".to_string(),
+            vec!["schema v2".to_string()],
+            Vec::new(),
+            vec!["schema v1".to_string()],
+        )
+        .await;
+    let settled = rig
+        .pipeline
+        .wait(&agent, submitted.receipt, RECEIPT_WAIT_MAX)
+        .await;
+    let ReceiptAnswer::Applied(s) = settled else {
+        panic!("expected applied, got {settled:?}");
+    };
+    assert_eq!(s.kind, WriteKind::RecordAction);
+    assert_eq!(s.created_count, 3);
+    assert_eq!(
+        s.embedded,
+        Some(3),
+        "a hybrid record_action embeds what it creates, and the receipt must \
+         say so: {}",
+        s.summary
+    );
+    assert!(
+        s.summary.contains("3 concept(s) created (3 embedded)"),
+        "the receipt sentence: {}",
+        s.summary
+    );
+    assert!(rig.graph.read().concepts().all(|c| c.embedding.is_some()));
+}
+
+/// Under `Canonical` nothing embeds, so the field stays absent rather than
+/// reading as a zero of something that was attempted.
+#[tokio::test]
+async fn a_canonical_action_receipt_has_no_embedded_count() {
+    let rig = Rig::fixture("wq-action-canonical");
+    let agent = AgentId::new("agent-a");
+    let interaction = rig.interaction(&agent);
+    let submitted = rig
+        .pipeline
+        .submit_action(
+            agent.clone(),
+            interaction,
+            "ran the migration".to_string(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .await;
+    let settled = rig
+        .pipeline
+        .wait(&agent, submitted.receipt, RECEIPT_WAIT_MAX)
+        .await;
+    let ReceiptAnswer::Applied(s) = settled else {
+        panic!("expected applied, got {settled:?}");
+    };
+    assert_eq!(s.embedded, None);
+    assert_eq!(
+        s.summary,
+        "recorded action: 1 concept(s) created, 0 edge(s)"
+    );
+}
+
 /// **§J3: expired must not read as unknown, and restart-lost must not
 /// either.** All four non-answers, each distinct, none of them "unknown".
 #[tokio::test]

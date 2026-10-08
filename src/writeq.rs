@@ -882,13 +882,13 @@ pub struct AppliedSummary {
     /// a derive wrote no edges, which is not what it means.
     pub edges: Option<usize>,
     /// Concepts persisted **with a vector** — *applied ≠ embedded* as a
-    /// first-class receipt fact (J3-R3-1). `Some` only for a hybrid-strategy
-    /// `derive`, the one write kind that can embed: a canonical-strategy derive
-    /// and a `record_action` never produce vectors by design, and an absent key
-    /// must never read as "zero of something that was attempted". When
-    /// `Some(e)` with `e < created_count`, some applied concepts carry no
-    /// embedding (capability-absent or a refused merge target) and are
-    /// unfindable by semantic recall until re-embedded.
+    /// first-class receipt fact (J3-R3-1). `Some` only under the hybrid
+    /// strategy, the one that embeds — for `derive` and, since bef53e6, for
+    /// `record_action`. A canonical-strategy write never produces vectors by
+    /// design, and an absent key must never read as "zero of something that
+    /// was attempted". When `Some(e)` with `e < created_count`, some applied
+    /// concepts carry no embedding (capability-absent or a refused merge
+    /// target) and are unfindable by semantic recall until re-embedded.
     pub embedded: Option<usize>,
 }
 
@@ -1719,12 +1719,28 @@ fn derive_sentence(
 
 /// The receipt sentence for an applied `record_action` — shared with the
 /// intent outcome for [`derive_sentence`]'s reason.
-fn action_sentence(outcome: &crate::graph::action::ActionOutcome) -> String {
-    format!(
-        "recorded action: {} concept(s) created, {} edge(s)",
-        outcome.created.len(),
-        outcome.edges
-    )
+///
+/// Under the hybrid strategy `record_action` embeds the concepts it creates
+/// (`embed_action_contents`), so its sentence carries the count exactly as
+/// [`derive_sentence`]'s does; under `Canonical` nothing embeds and the
+/// sentence is unchanged.
+fn action_sentence(
+    strategy: MatchStrategy,
+    outcome: &crate::graph::action::ActionOutcome,
+) -> String {
+    match strategy {
+        MatchStrategy::Hybrid => format!(
+            "recorded action: {} concept(s) created ({} embedded), {} edge(s)",
+            outcome.created.len(),
+            outcome.embedded,
+            outcome.edges
+        ),
+        MatchStrategy::Canonical => format!(
+            "recorded action: {} concept(s) created, {} edge(s)",
+            outcome.created.len(),
+            outcome.edges
+        ),
+    }
 }
 
 impl WriteCtx {
@@ -1894,7 +1910,7 @@ impl WriteCtx {
                             job.receipt.to_string(),
                             WriteIntentOutcome {
                                 tag: stamp.tag.into(),
-                                summary: action_sentence(&outcome),
+                                summary: action_sentence(self.match_strategy, &outcome),
                                 consumed_at: stamp.at,
                             },
                         );
@@ -1908,7 +1924,7 @@ impl WriteCtx {
                 let created = truncate_ids(&outcome.created);
                 Ok(AppliedSummary {
                     kind: WriteKind::RecordAction,
-                    summary: action_sentence(&outcome),
+                    summary: action_sentence(self.match_strategy, &outcome),
                     created,
                     matched: Vec::new(),
                     created_count: outcome.created.len(),
@@ -1916,9 +1932,13 @@ impl WriteCtx {
                     semantic_merged: None,
                     reinforced: None,
                     edges: Some(outcome.edges),
-                    // `record_action` never embeds by design — absent, not
+                    // Hybrid embeds what it creates (see the embed hop above);
+                    // Canonical never does, so the count is absent there, not
                     // zero, for the reason on the field.
-                    embedded: None,
+                    embedded: match self.match_strategy {
+                        MatchStrategy::Hybrid => Some(outcome.embedded),
+                        MatchStrategy::Canonical => None,
+                    },
                 })
             }
         }
