@@ -162,3 +162,64 @@ pub(crate) fn rank_by_cosine<'a>(
     scored.truncate(limit);
     scored
 }
+
+/// The precondition `store::vector::encode_vector` enforces, callable on its
+/// own by a source that does **not** encode the vector it is about to use.
+///
+/// # Why this is separate (B-E2E-R2-3)
+///
+/// E2E-F9 put the zero-norm refusal in the codec because that is where all
+/// three sqlx adapters meet. That covers every write path, and it covers the
+/// **query** path on the pg family only because those adapters encode the
+/// probe before binding it. SQLite never encodes its probe: it hands it to
+/// `rank_by_cosine`, and [`crate::embed::cosine`] clamps the denominator with
+/// `.max(1e-12)`, so a zero probe scored every row a plausible `0.0` and
+/// returned candidates in tie-break order. One contract-violating input, a
+/// loud refusal on Postgres and a silent meaningless ranking on SQLite, which
+/// is the exact sentence E2E-F9 was filed under.
+///
+/// So SQLite's `vector_candidates_checked` calls this at the same point in the
+/// sequence where the pg family encodes its probe: after the limit checks,
+/// before the store is read. Same input, same error, same place, all three
+/// adapters.
+///
+/// Non-finite elements are refused here too, not only zero norms: that is the
+/// other half of what encoding the probe was implicitly enforcing on the pg
+/// family, and leaving it out would close half of one divergence and keep the
+/// other.
+#[cfg_attr(
+    not(any(
+        feature = "store-cockroach",
+        feature = "store-postgres",
+        feature = "store-sqlite"
+    )),
+    allow(dead_code)
+)]
+pub fn ensure_is_an_embedding(v: &[f32]) -> Result<(), StoreError> {
+    if let Some(bad) = v.iter().find(|x| !x.is_finite()) {
+        return Err(StoreError::Backend(format!(
+            "embedding contains non-finite value {bad} (at index {:?})",
+            v.iter().position(|x| !x.is_finite())
+        )));
+    }
+    if !v.is_empty() {
+        // Accumulated in f32 on purpose: this is the arithmetic pgvector and
+        // Cockroach do, so a vector whose norm underflows to zero for them is
+        // refused here rather than becoming a NaN score there.
+        let norm_sq: f32 = v.iter().map(|x| x * x).sum();
+        // `<= 0.0 || is_nan()` rather than `!(norm_sq > 0.0)`: exactly the same
+        // set of refused values, without the negated partial-ord comparison
+        // clippy refuses under -D warnings.
+        if norm_sq <= 0.0 || norm_sq.is_nan() {
+            return Err(StoreError::Backend(format!(
+                "embedding has zero norm over {} dimensions, which violates the unit-norm \
+                 output contract of Embedder::embed. A vector with no direction has no \
+                 cosine to anything: pgvector scores it NaN against every row and \
+                 CockroachDB scores it a flat 0.5, so the same data would rank differently \
+                 on the two stores. Refusing to write or query it",
+                v.len(),
+            )));
+        }
+    }
+    Ok(())
+}
