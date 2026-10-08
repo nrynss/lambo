@@ -66,6 +66,18 @@ def settled_derive(n: int, created: int) -> dict:
     )
 
 
+def settled_action(n: int, created: int, edges: int, embedded: int | None, tail: str = "") -> dict:
+    # `(M embedded)` is in the sentence under the hybrid strategy (the
+    # default) and absent under canonical (src/writeq.rs, action_sentence).
+    count = "" if embedded is None else f" ({embedded} embedded)"
+    return call(
+        "lambo_stats",
+        "write receipts (your earlier writes, now settled):\n"
+        f"- {rid(n)}: applied — recorded action: {created} concept(s) created{count}, "
+        f"{edges} edge(s){tail}",
+    )
+
+
 class CheckDurability(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -175,6 +187,31 @@ class CheckDurability(unittest.TestCase):
         rc, out = self.run_check(led, self.store(interactions=2, concepts=4))
         self.assertEqual(rc, OK, out)
         self.assertIn("compared by count", out)
+
+    # --- record_action receipts: both sentence shapes ---
+
+    def test_hybrid_action_receipt_mid_text_is_counted(self):
+        # Hybrid (the default strategy) says "(M embedded)". A line after it
+        # means the sentence is complete, so a miss would be parser drift.
+        led = self.ledger([action_ack(1), settled_action(1, 2, 3, 2, tail="\nnext line")])
+        rc, out = self.run_check(led, self.store(interactions=1, concepts=2, edges=3))
+        self.assertEqual(rc, OK, out)
+        self.assertIn("applied record_action created / edges: 2 / 3", out)
+
+    def test_hybrid_action_receipt_as_last_line_is_counted(self):
+        # As the last line a miss would be misread as a truncated answer and
+        # silently dropped as unsettled, so assert the counts, not just rc.
+        led = self.ledger([action_ack(1), settled_action(1, 2, 3, 2)])
+        rc, out = self.run_check(led, self.store(interactions=1, concepts=2, edges=3))
+        self.assertEqual(rc, OK, out)
+        self.assertIn("applied record_action created / edges: 2 / 3", out)
+        self.assertIn("UNSETTLED (not counted below) : 0", out)
+
+    def test_canonical_action_receipt_is_counted(self):
+        led = self.ledger([action_ack(1), settled_action(1, 2, 3, None, tail="\nnext line")])
+        rc, out = self.run_check(led, self.store(interactions=1, concepts=2, edges=3))
+        self.assertEqual(rc, OK, out)
+        self.assertIn("applied record_action created / edges: 2 / 3", out)
 
     # --- bad input, and the store is never created ---
 

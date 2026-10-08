@@ -133,7 +133,13 @@ impl Rig {
 /// the embedder entirely when the store has none — and a queue test whose
 /// jobs never embed measures nothing about the drain. The same load-bearing
 /// wrapper as `the_ack_lands_before_the_embedder_is_called`'s.
-struct VectorCapable(MemoryStore);
+///
+/// The flag answers `vector_candidates_checked` with no candidates instead of
+/// the trait default's capability refusal. Off, a write embeds and then
+/// degrades to keyword-only at the candidate lookup, which is all a queue test
+/// needs; on, the vector is persisted, which is what a test of the receipt's
+/// embedded count needs.
+struct VectorCapable(MemoryStore, bool);
 
 #[async_trait::async_trait]
 impl GraphStore for VectorCapable {
@@ -174,6 +180,21 @@ impl GraphStore for VectorCapable {
         limit: usize,
     ) -> Result<Vec<crate::types::Scored<NodeId>>, crate::types::StoreError> {
         self.0.vector_candidates(session, embedding, limit).await
+    }
+    async fn vector_candidates_checked(
+        &self,
+        _session: &SessionId,
+        _embedding: &[f32],
+        _expected_contract: &EmbeddingContract,
+        _limit: usize,
+    ) -> Result<Vec<crate::types::Scored<NodeId>>, crate::types::StoreError> {
+        if self.1 {
+            Ok(Vec::new())
+        } else {
+            Err(crate::types::StoreError::Capability(
+                "VectorCapable: no checked vector lookup".into(),
+            ))
+        }
     }
     async fn blast_radius(
         &self,
@@ -231,7 +252,17 @@ impl Rig {
         let mut rig = Self::new(session, embedder);
         let ctx = Arc::get_mut(&mut rig.pipeline.ctx).expect("sole owner at build");
         ctx.match_strategy = MatchStrategy::Hybrid;
-        ctx.store = Arc::new(VectorCapable(MemoryStore::new()));
+        ctx.store = Arc::new(VectorCapable(MemoryStore::new(), false));
+        rig
+    }
+
+    /// [`Rig::hybrid`] over a store whose checked vector lookup answers (with
+    /// no candidates), so a write's vectors are persisted and counted.
+    fn hybrid_persisting(session: &str, embedder: Arc<dyn Embedder>) -> Self {
+        let mut rig = Self::new(session, embedder);
+        let ctx = Arc::get_mut(&mut rig.pipeline.ctx).expect("sole owner at build");
+        ctx.match_strategy = MatchStrategy::Hybrid;
+        ctx.store = Arc::new(VectorCapable(MemoryStore::new(), true));
         rig
     }
 }

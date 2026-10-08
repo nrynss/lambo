@@ -22,7 +22,7 @@ to settled receipts. Wording matched (see `src/mcp/server.rs` `derive_impl`,
 * receipt line     — `receipt <id>: <answer>` (ack and `lambo_stats`) and
                      `- <id>: <answer>` (settled-receipt piggyback)
 * applied answers  — `applied — derived N concept(s): C created[ (E embedded)], M matched existing`
-                     `applied — recorded action: C concept(s) created, E edge(s)`
+                     `applied — recorded action: C concept(s) created[ (M embedded)], E edge(s)`
                      and the same sentences after `applied after a restart — `
 
 Accounting (successful tool calls only, per concurrency-capture.md C3):
@@ -126,7 +126,11 @@ RECEIPT_LINE_RE = re.compile(rf"^(?:receipt |- )({RECEIPT_ID}): (.*)$", re.M)
 DERIVE_SENTENCE_RE = re.compile(
     r"^derived (\d+) concept\(s\): (\d+) created(?: \((\d+) embedded\))?, (\d+) matched existing"
 )
-ACTION_SENTENCE_RE = re.compile(r"^recorded action: (\d+) concept\(s\) created, (\d+) edge\(s\)")
+# `(M embedded)` is present under the hybrid strategy (the default) and absent
+# under canonical, for both sentences.
+ACTION_SENTENCE_RE = re.compile(
+    r"^recorded action: (\d+) concept\(s\) created(?: \((\d+) embedded\))?, (\d+) edge\(s\)"
+)
 
 # ReceiptAnswer::describe prefixes -> ReceiptAnswer::tag. Order matters:
 # "applied after a restart" before "applied".
@@ -330,7 +334,7 @@ def main() -> int:
                 unrecognised.append(f"applied action receipt {rid}: {rest[:160]!r}")
                 continue
             record_created += int(m.group(1))
-            record_edges += int(m.group(2))
+            record_edges += int(m.group(3))
 
     acked_writes = acked_derive + acked_record
     expected_interactions = acked_writes + refused_at_ack

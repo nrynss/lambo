@@ -76,12 +76,14 @@ fn hit(id: NodeId, score: f64) -> Scored<NodeId> {
 /// Store double advertising configurable capabilities and returning canned
 /// vector hits (mirrors recall's `SpyVectorStore`). A non-`Capability`
 /// backend error from `vector_candidates_checked` can be forced for the propagate
-/// case. Any async method other than `vector_candidates_checked` panics so a test
+/// case, and a capability refusal for the degrade case (the trait default of
+/// an adapter that advertises `VECTOR_SEARCH` without the checked lookup). Any async method other than `vector_candidates_checked` panics so a test
 /// cannot silently reach the store through the wrong surface.
 struct SpyStore {
     caps: Capabilities,
     hits: Vec<Scored<NodeId>>,
     backend_err: bool,
+    refuses: bool,
     vector_calls: Arc<AtomicUsize>,
 }
 
@@ -91,6 +93,7 @@ impl SpyStore {
             caps: Capabilities::VECTOR_SEARCH | Capabilities::HISTORY,
             hits,
             backend_err: false,
+            refuses: false,
             vector_calls: Arc::new(AtomicUsize::new(0)),
         }
     }
@@ -99,6 +102,7 @@ impl SpyStore {
             caps: Capabilities::HISTORY,
             hits: Vec::new(),
             backend_err: false,
+            refuses: false,
             vector_calls: Arc::new(AtomicUsize::new(0)),
         }
     }
@@ -107,7 +111,14 @@ impl SpyStore {
             caps: Capabilities::VECTOR_SEARCH | Capabilities::HISTORY,
             hits: Vec::new(),
             backend_err: true,
+            refuses: false,
             vector_calls: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+    fn refusing() -> Self {
+        Self {
+            refuses: true,
+            ..Self::with_vector(Vec::new())
         }
     }
     fn vector_calls(&self) -> usize {
@@ -160,6 +171,11 @@ impl GraphStore for SpyStore {
         self.vector_calls.fetch_add(1, Ordering::SeqCst);
         if self.backend_err {
             return Err(StoreError::Backend("boom".into()));
+        }
+        if self.refuses {
+            return Err(StoreError::Capability(
+                "SpyStore: advertises VECTOR_SEARCH without the checked lookup".into(),
+            ));
         }
         Ok(self.hits.clone())
     }

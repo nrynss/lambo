@@ -1733,6 +1733,8 @@ impl Memory {
     /// Under [`MatchStrategy::Canonical`] this is exactly
     /// [`Memory::record_action_as`]: that strategy has no vector leg, and
     /// embedding here would stamp a contract on a session that asked for none.
+    /// Under `Hybrid` on a store without `VECTOR_SEARCH` nothing is embedded
+    /// either, the same degrade hybrid `derive` makes.
     ///
     /// An embedder failure fails the call with **nothing written** (J3-R3-1's
     /// rule, see [`crate::graph::action::embed_action_contents`]).
@@ -1751,9 +1753,17 @@ impl Memory {
             let g = self.graph.read();
             crate::graph::action::validate(&g, action)?;
         }
-        // Off-lock: real model calls.
-        let embeddings =
-            crate::graph::action::embed_action_contents(self.embedder.as_ref(), action).await?;
+        // Off-lock: real model calls. Skipped when the store cannot search
+        // vectors, as hybrid `derive` skips them: the write is keyword-only.
+        let embeddings = if self
+            .store
+            .capabilities()
+            .contains(Capabilities::VECTOR_SEARCH)
+        {
+            crate::graph::action::embed_action_contents(self.embedder.as_ref(), action).await?
+        } else {
+            crate::graph::action::ActionEmbeddings::new()
+        };
         let interaction =
             self.begin_interaction_full(agent, Some(action.action.to_string()), action.event_time)?;
         let outcome = {
@@ -1796,7 +1806,8 @@ impl Memory {
     ///   pre-pass the session's `match_strategy` actually uses**, and the two
     ///   are not the same set of rules:
     ///   * `Hybrid` (the default — see `config.rs`): `hybrid::validate_limits`
-    ///     then `hybrid::validate_graph_inputs`, which is deliberately the
+    ///     then `hybrid::validate_graph_inputs` and
+    ///     `hybrid::validate_embed_budget`, which is deliberately the
     ///     **smaller** set. It omits the repeated-`Observation` and
     ///     single-`Hierarchical`-parent rejections, because hybrid's own write
     ///     path does not enforce them and validation that disagrees with the
@@ -1862,7 +1873,19 @@ impl Memory {
         {
             let g = self.graph.read();
             match self.config.match_strategy {
-                MatchStrategy::Hybrid => hybrid::validate_graph_inputs(&g, parent_of)?,
+                MatchStrategy::Hybrid => {
+                    hybrid::validate_graph_inputs(&g, parent_of)?;
+                    // The embed budget too: an over-budget call is refused
+                    // here, not after the ack as a timeout at apply.
+                    hybrid::validate_embed_budget(
+                        &g,
+                        concepts,
+                        parent_of,
+                        self.store
+                            .capabilities()
+                            .contains(Capabilities::VECTOR_SEARCH),
+                    )?;
+                }
                 MatchStrategy::Canonical => {
                     crate::graph::derive::validate(&g, concepts, parent_of)?
                 }
