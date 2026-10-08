@@ -381,3 +381,211 @@ mod tests {
         );
     }
 }
+
+/// Called by an adapter's erase transaction after each step, with the step's
+/// name (`"vectors"` or a table name). Production passes [`no_fault`]; the
+/// crash-midway tests pass one that fails at step N, which drops the
+/// transaction exactly as a crash or a lost connection would.
+pub type EraseStepHook<'a> = &'a (dyn Fn(&str) -> Result<(), StoreError> + Send + Sync);
+
+/// The production [`EraseStepHook`]: every step proceeds.
+pub fn no_fault(_step: &str) -> Result<(), StoreError> {
+    Ok(())
+}
+
+/// Shared fixtures for every adapter's erase tests: one batch that writes a
+/// row into every table a `Mutation` can reach, the counts it should produce,
+/// and fault hooks. Rows with no `Mutation` kind (synonyms, reservations) and
+/// the lease-side tables are written by each adapter's test, since that is
+/// adapter-specific.
+#[cfg(test)]
+pub(crate) mod testkit {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use chrono::Utc;
+
+    use super::EraseCounts;
+    use crate::types::{
+        AgentId, CanonizationEvent, CanonizationStatus, Concept, ConceptType, Edge, EdgeType,
+        EmbeddingContract, Interaction, Mutation, MutationBatch, Node, NodeId, SessionId,
+        StoreError, WriteIntent, WriteIntentPayload,
+    };
+
+    /// The contract the planted vectors are written under.
+    pub(crate) fn contract(dim: usize) -> EmbeddingContract {
+        EmbeddingContract {
+            kind: "fixture".into(),
+            model: Some("erase-test".into()),
+            dim,
+        }
+    }
+
+    fn concept(
+        sid: &SessionId,
+        id: NodeId,
+        origin: NodeId,
+        content: &str,
+        embedding: Option<Vec<f32>>,
+    ) -> Mutation {
+        Mutation::UpsertNode {
+            node: Node::Concept(Concept {
+                id,
+                session_id: sid.clone(),
+                content: content.into(),
+                canonical_key: content.to_lowercase(),
+                concept_type: ConceptType::Entity,
+                origin_interaction: origin,
+                origin_agent: AgentId::new("erase-test"),
+                created_at: Utc::now(),
+                access_count: 0,
+                last_accessed: None,
+                gc_survived: 0,
+                canonization_status: CanonizationStatus::None,
+                blast_radius: None,
+                last_demotion_time: None,
+                embedding,
+                human_confirmed: 0,
+                chunk_group_id: None,
+            }),
+        }
+    }
+
+    fn derives(sid: &SessionId, source: NodeId, target: NodeId) -> Mutation {
+        let ts = Utc::now();
+        Mutation::UpsertEdge {
+            edge: Edge {
+                id: NodeId::new(),
+                session_id: sid.clone(),
+                source,
+                target,
+                edge_type: EdgeType::Derives,
+                weight: 1.0,
+                reinforcements: 0,
+                created_at: ts,
+                last_reinforced: ts,
+                event_time: None,
+            },
+        }
+    }
+
+    /// A batch that writes the session row (with contract and root goal), two
+    /// chained interactions, two concepts (one carrying a `dim`-wide vector),
+    /// two edges, a canonization transition, a read access and a durable write
+    /// intent. Concept text is unique per call, so two sessions planted in one
+    /// store never collide on a canonical key.
+    pub(crate) fn planted_batch(sid: &SessionId, dim: usize) -> MutationBatch {
+        let ts = Utc::now();
+        let (i1, i2, c1, c2) = (NodeId::new(), NodeId::new(), NodeId::new(), NodeId::new());
+        let interaction = |id, previous_id| Mutation::UpsertNode {
+            node: Node::Interaction(Interaction {
+                event_time: None,
+                id,
+                session_id: sid.clone(),
+                agent_id: AgentId::new("erase-test"),
+                prompt_text: Some("personal history".into()),
+                previous_id,
+                created_at: ts,
+            }),
+        };
+        let vector: Vec<f32> = (0..dim).map(|i| ((i % 7) as f32) + 1.0).collect();
+        MutationBatch {
+            mutation_epoch: 3,
+            gc_mark: Default::default(),
+            mutations: vec![
+                Mutation::SetEmbedding {
+                    session_id: sid.clone(),
+                    embedding: Some(contract(dim)),
+                },
+                Mutation::SetRootGoal {
+                    session_id: sid.clone(),
+                    goal: Some(serde_json::json!({"goal": "dress well"})),
+                },
+                interaction(i1, None),
+                interaction(i2, Some(i1)),
+                concept(sid, c1, i1, &format!("likes linen {c1}"), Some(vector)),
+                concept(sid, c2, i2, &format!("size m {c2}"), None),
+                derives(sid, i1, c1),
+                derives(sid, i2, c2),
+                Mutation::CanonizationTransition {
+                    event: CanonizationEvent {
+                        id: NodeId::new(),
+                        session_id: sid.clone(),
+                        node_id: c1,
+                        from_status: CanonizationStatus::None,
+                        to_status: CanonizationStatus::Candidate,
+                        blast_radius: Some(1),
+                        last_demotion_time: None,
+                        occurred_at: ts,
+                    },
+                },
+                Mutation::RecordAccess {
+                    session_id: sid.clone(),
+                    id: c1,
+                    access_count: 2,
+                    last_accessed: ts,
+                },
+                Mutation::PutWriteIntent {
+                    intent: WriteIntent {
+                        session_id: sid.clone(),
+                        receipt: format!("erase-test-{c1}"),
+                        agent: AgentId::new("erase-test"),
+                        interaction: i2,
+                        lane_seq: 1,
+                        issued_ms: ts.timestamp_millis(),
+                        payload: WriteIntentPayload::Derive {
+                            concepts: vec![("prefers navy".into(), ConceptType::Entity)],
+                            pairs: vec![],
+                        },
+                        created_at: ts,
+                        outcome: None,
+                    },
+                },
+            ],
+        }
+    }
+
+    /// What erasing one [`planted_batch`] removes from the mutation-reachable
+    /// tables. An adapter test adds the rows it planted by other means.
+    pub(crate) fn planted_counts() -> EraseCounts {
+        EraseCounts {
+            sessions: 1,
+            interactions: 2,
+            concepts: 2,
+            vectors: 1,
+            edges: 2,
+            canonization_events: 1,
+            write_intents: 1,
+            ..Default::default()
+        }
+    }
+
+    /// A fault hook that fails the `n`th step it sees (0-based) and every
+    /// later one, like a connection lost mid-erase.
+    pub(crate) struct FailAt {
+        pub(crate) n: usize,
+        seen: AtomicUsize,
+    }
+
+    impl FailAt {
+        pub(crate) fn new(n: usize) -> Self {
+            Self {
+                n,
+                seen: AtomicUsize::new(0),
+            }
+        }
+
+        pub(crate) fn step(&self, step: &str) -> Result<(), StoreError> {
+            if self.seen.fetch_add(1, Ordering::SeqCst) >= self.n {
+                return Err(StoreError::Backend(format!(
+                    "injected failure after erase step {step}"
+                )));
+            }
+            Ok(())
+        }
+
+        /// How many steps ran (to bound a loop over every failure point).
+        pub(crate) fn seen(&self) -> usize {
+            self.seen.load(Ordering::SeqCst)
+        }
+    }
+}

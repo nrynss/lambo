@@ -590,6 +590,15 @@ impl GraphStore for SqliteStore {
             .await
     }
 
+    async fn erase_session(
+        &self,
+        session: &SessionId,
+        eraser: &LeaseHolder,
+    ) -> Result<crate::store::EraseOutcome, StoreError> {
+        self.erase(session, eraser, &crate::store::erase::no_fault)
+            .await
+    }
+
     async fn record_canonization(
         &self,
         event: &CanonizationEvent,

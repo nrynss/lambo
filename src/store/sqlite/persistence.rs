@@ -10,7 +10,10 @@
 //! * `record_canonization` — the canon task's immediate write, fenced the same
 //!   way inside its own transaction.
 //! * `seed` (fixtures) — the full-snapshot path.
-//! * The writer-published flush stats row (`session_stats`).
+//! * `erase` — session erasure (#23): the lease gate, the tombstone and every
+//!   session-keyed DELETE in one `IMMEDIATE` transaction.
+//! * The writer-published flush stats row (`session_stats`), suppressed for an
+//!   erased session.
 //!
 //! The statements themselves are in `write_rows.rs` and never own a
 //! transaction.
@@ -22,7 +25,11 @@ use sqlx::Row;
 #[cfg(feature = "fixtures")]
 use super::codec::enum_to_text;
 use super::codec::{db_err, ts_to_text};
-use super::write_rows::{apply_canonization_transition, apply_step};
+use super::leases::{lease_info_from_text, LeaseRowText, LEASE_ROW_SQL};
+use super::write_rows::{
+    apply_canonization_transition, apply_step, count_session_vectors, delete_session_rows,
+    write_erase_tombstone, ERASE_STATEMENTS,
+};
 #[cfg(feature = "fixtures")]
 use super::write_rows::{put_write_intent, upsert_concepts, upsert_edges, upsert_interactions};
 use super::SqliteStore;
@@ -32,7 +39,11 @@ use crate::store::batch::{
 };
 #[cfg(feature = "fixtures")]
 use crate::store::batch::{seed_concept_rows, seed_edge_rows};
-use crate::store::lease::lease_permits_write;
+use crate::store::erase::{
+    erase_gate, fence_refusal, EraseCounts, EraseGate, EraseOutcome, EraseReport, EraseStepHook,
+    PriorLease, ERASED_HOLDER,
+};
+use crate::store::lease::{lease_permits_write, LeaseHolder};
 use crate::store::{map_write_err, SessionFlushStats};
 #[cfg(feature = "fixtures")]
 use crate::types::GraphSnapshot;
@@ -293,9 +304,17 @@ impl SqliteStore {
         // contract as `flush`). Only the writer's FlushTask calls this;
         // readers only read. `updated_at` is stamped from the store clock
         // (strftime), matching the SQLite TIMESTAMPTZ-as-TEXT convention.
+        //
+        // #23: not for an erased session. A fenced writer's flush task can
+        // still publish in the window before its heartbeat sees the tombstone,
+        // and an unguarded upsert would put a `session_stats` row back after
+        // the erase. Stats carry no content, but "everything keyed to the
+        // session goes" is the contract, so the tombstone suppresses it.
         sqlx::query(
             "INSERT INTO session_stats (session_id, flush_lag_ms, log_depth, updated_at) \
-             VALUES (?1, ?2, ?3, strftime('%Y-%m-%dT%H:%M:%fZ','now')) \
+             SELECT ?1, ?2, ?3, strftime('%Y-%m-%dT%H:%M:%fZ','now') \
+             WHERE NOT EXISTS (SELECT 1 FROM session_leases \
+                               WHERE session_id = ?1 AND holder = ?4) \
              ON CONFLICT (session_id) DO UPDATE SET \
                flush_lag_ms = excluded.flush_lag_ms, \
                log_depth = excluded.log_depth, \
@@ -304,6 +323,7 @@ impl SqliteStore {
         .bind(&session.0)
         .bind(stats.flush_lag_ms as i64)
         .bind(stats.log_depth as i64)
+        .bind(ERASED_HOLDER)
         .execute(self.pool())
         .await
         .map_err(|e| db_err("write flush stats", e))?;
@@ -413,10 +433,8 @@ impl SqliteStore {
                     StoreError::Invariant(format!("session {sid}: negative lease current_token"))
                 })?;
                 if !lease_permits_write(cur, token) {
-                    return Err(StoreError::StaleWrite(format!(
-                        "session {sid}: presented token {token:?} is stale (lease token {cur}) — \
-                         single-writer fence (GitHub issue #1)"
-                    )));
+                    let holder = lease_holder(&mut *tx, sid).await?;
+                    return Err(fence_refusal(sid, token, cur, holder.as_deref()));
                 }
             }
         }
@@ -461,11 +479,13 @@ impl SqliteStore {
                 ))
             })?;
             if !lease_permits_write(cur, token) {
-                return Err(StoreError::StaleWrite(format!(
-                    "session {}: presented token {token:?} is stale (lease token {cur}) — \
-                     single-writer fence (GitHub issue #1)",
-                    event.session_id,
-                )));
+                let holder = lease_holder(&mut *tx, &event.session_id.0).await?;
+                return Err(fence_refusal(
+                    &event.session_id.0,
+                    token,
+                    cur,
+                    holder.as_deref(),
+                ));
             }
         }
         apply_canonization_transition(&mut *tx, event).await?;
@@ -476,6 +496,105 @@ impl SqliteStore {
         })?;
         Ok(())
     }
+}
+
+impl SqliteStore {
+    /// Erase every row keyed to `session` and leave the tombstone (#23; see
+    /// `store::erase`). One transaction, begun `IMMEDIATE` so the write lock
+    /// is held from the lease read on: the gate's decision, the tombstone and
+    /// the deletes cannot interleave with a flush, an acquire or a refresh
+    /// from another connection or process. A failure at any step (`hook`
+    /// included) drops the transaction and leaves the session exactly as it
+    /// was, so a rerun starts from the same state and completes.
+    pub(super) async fn erase(
+        &self,
+        session: &SessionId,
+        eraser: &LeaseHolder,
+        hook: EraseStepHook<'_>,
+    ) -> Result<EraseOutcome, StoreError> {
+        let mut tx = self
+            .pool()
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|e| map_write_err(e, |m| format!("begin erase transaction: {m}")))?;
+        let prior: Option<(String, bool)> = sqlx::query_as(
+            "SELECT holder, expires_at > strftime('%Y-%m-%dT%H:%M:%fZ','now') \
+             FROM session_leases WHERE session_id = ?1",
+        )
+        .bind(&session.0)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| db_err("erase_session: read lease", e))?;
+        let eraser_token = eraser.token();
+        let gate = erase_gate(
+            prior.as_ref().map(|(holder, live)| PriorLease {
+                holder,
+                live: *live,
+            }),
+            &eraser_token,
+        );
+        let EraseGate::Proceed { replaces_lease } = gate else {
+            return held(&mut tx, session).await;
+        };
+        // The write lock is ours, so the guard cannot disagree with the gate;
+        // if it ever did, report the holder rather than delete under it.
+        let Some(fence_token) = write_erase_tombstone(&mut tx, session, &eraser_token).await?
+        else {
+            return held(&mut tx, session).await;
+        };
+
+        let mut removed = EraseCounts {
+            vectors: count_session_vectors(&mut tx, session).await?,
+            leases: u64::from(replaces_lease),
+            ..Default::default()
+        };
+        hook("vectors")?;
+        for (table, sql) in ERASE_STATEMENTS {
+            let n = delete_session_rows(&mut tx, table, sql, session).await?;
+            removed.add_table(table, n)?;
+            hook(table)?;
+        }
+        tx.commit()
+            .await
+            .map_err(|e| map_write_err(e, |m| format!("commit erase transaction: {m}")))?;
+        Ok(EraseOutcome::Erased(EraseReport::new(
+            session.clone(),
+            removed,
+            fence_token,
+        )))
+    }
+}
+
+/// The live lease that refused an erase, read inside the erase transaction.
+/// The caller returns it; dropping the transaction rolls back nothing, since
+/// nothing was written.
+async fn held(
+    tx: &mut sqlx::SqliteConnection,
+    session: &SessionId,
+) -> Result<EraseOutcome, StoreError> {
+    let row: LeaseRowText = sqlx::query_as(LEASE_ROW_SQL)
+        .bind(&session.0)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| db_err("erase_session: read live lease", e))?;
+    let current = lease_info_from_text(row)?;
+    let age = (chrono::Utc::now() - current.acquired_at)
+        .to_std()
+        .unwrap_or(std::time::Duration::ZERO);
+    Ok(EraseOutcome::Held { current, age })
+}
+
+/// The lease row's holder, for a fence refusal's message (a tombstone says
+/// "erased"). Read only on the refusal path.
+async fn lease_holder(
+    tx: &mut sqlx::SqliteConnection,
+    session: &str,
+) -> Result<Option<String>, StoreError> {
+    sqlx::query_scalar("SELECT holder FROM session_leases WHERE session_id = ?1")
+        .bind(session)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| db_err("fence: read lease holder", e))
 }
 
 /// Ids per lookup statement. Each id is bound once and referenced by number in

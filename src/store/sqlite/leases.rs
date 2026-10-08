@@ -164,14 +164,21 @@ impl SqliteStore {
         refused_by: &str,
         current_holder: &str,
     ) -> Result<(), StoreError> {
+        //
+        // #23: never against an erased session's tombstone. A refusal row is
+        // keyed to the session, and the erase removed them all; a writer
+        // turned away by the tombstone must not start a new set.
         sqlx::query(
             "INSERT INTO lease_refusals \
                  (session_id, refused_at, refused_by, current_holder) \
-             VALUES (?1, strftime('%Y-%m-%dT%H:%M:%fZ','now'), ?2, ?3)",
+             SELECT ?1, strftime('%Y-%m-%dT%H:%M:%fZ','now'), ?2, ?3 \
+             WHERE NOT EXISTS (SELECT 1 FROM session_leases \
+                               WHERE session_id = ?1 AND holder = ?4)",
         )
         .bind(&session.0)
         .bind(refused_by)
         .bind(current_holder)
+        .bind(crate::store::erase::ERASED_HOLDER)
         .execute(self.pool())
         .await
         .map_err(|e| db_err("record lease refusal", e))?;
