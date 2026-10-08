@@ -71,8 +71,9 @@
     scan the database. Postgres and CockroachDB keep their database-side
     search: they score by database distance, so their ranking would change.
   - A derive no longer competes with the flush for SQLite's single connection
-    while it matches, and a large session can no longer push a derive past its
-    30 s deadline through the scan alone.
+    while it matches, and the matching scan no longer spends the derive's 30 s
+    store-I/O deadline: it runs in memory, about 0.8 µs per stored vector at
+    1,024 dimensions.
 
 ### Added
 

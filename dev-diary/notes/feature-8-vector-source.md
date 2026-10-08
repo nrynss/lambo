@@ -82,6 +82,25 @@ hybrid derive's gather between plan and commit). `for_holder` and `available()`
 never touch the graph, so the write paths that ask `available()` under a read
 guard are unaffected. The scan holds the read lock for ~3 ms at 3,600 concepts.
 
+*Cost and scaling.* The scan is synchronous O(N·d) work on a tokio worker
+under the graph read lock: about 0.83 µs per embedded concept at d = 1024
+(3.0 ms / 3,600; one measured N, so the slope is inferred, not fitted).
+Linear projection per call: ~30 ms at 36k concepts, ~85 ms at 100k, ~0.8 s at
+1M. Hybrid derive makes up to k separate calls, one lock window each.
+Consequences: parking_lot's task-fair lock bounds a writer's wait (flush drain,
+derive commit, `push_front_log`) to one in-flight scan and queues new readers
+behind a waiting writer, so there is no starvation but each write can be
+delayed by one scan; the worker thread is blocked for the scan (no
+`block_in_place`); and `HYBRID_IO_TIMEOUT` no longer bounds this leg, because
+`timeout_at` polls the already-ready inner future first
+(`graph/hybrid.rs:1302`), so a derive whose scan runs past its deadline
+succeeds instead of timing out. Read the CHANGELOG's deadline line as "the scan
+no longer consumes the store-I/O deadline", not as a bound on the scan. All of
+this is strictly better than before #8, which decoded ~110 ms of text on the
+worker per call. Cheap later wins if N grows: score all k derive probes in one
+pass under one read guard, and move very large scans to `block_in_place` or a
+blocking task.
+
 **Same checks, same order, same errors.** `graph_vector_candidates` applies
 SQLite's sequence: limit bound, `limit == 0` empty, probe is an embedding
 (`ensure_is_an_embedding`, moved to the always-compiled seam module so Memory-only
