@@ -21,10 +21,21 @@
 /// * [`std::hint::black_box`] stops the optimiser from proving the accumulator
 ///   can be short-circuited.
 ///
-/// The honest caveat: the *duration* still scales with the presented length,
-/// which is attacker-controlled and reveals nothing about the secret. This is
-/// the same guarantee `subtle::ConstantTimeEq` gives on slices, reached without
-/// adding a dependency for one comparison.
+/// The honest caveats:
+///
+/// * the *duration* scales with the presented length, which is
+///   attacker-controlled and reveals nothing about the secret;
+/// * the one secret-dependent operation left is the `i % expected.len()`
+///   index, a division whose divisor is the secret's length. Integer division
+///   has operand-dependent latency on some CPUs, so in theory its cost varies
+///   with that length. It is the same for every request against one secret
+///   and is not a practical leak; any wrap-around formulation (a counter
+///   compared against the length, a mask) still reads the length, so the
+///   division stays.
+///
+/// This is *stronger* on length than `subtle::ConstantTimeEq` on slices, which
+/// returns early when the lengths differ and so discloses the secret's length;
+/// here a wrong-length guess costs the same per byte as a right-length one.
 ///
 /// # Why the loop is over the presented input (#28)
 ///
