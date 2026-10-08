@@ -144,17 +144,27 @@ fn routes_constant_covers_every_registered_route() {
 
 /// #28: the source scans above read [`PRODUCTION_SOURCES`], and a portal
 /// source missing from it would be scanned by nothing. Every `.rs` file
-/// under `src/cli/serve_web/` (the `tests/` directory aside) and the root
-/// must be listed.
+/// under `src/cli/serve_web/`, at any depth (the `serve_web/tests/`
+/// directory aside), and the root must be listed. The walk recurses so a
+/// further split into a subdirectory (`serve_web/routes/graph.rs`) cannot
+/// slip past the scans.
 #[test]
 fn the_source_scans_cover_every_production_file() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/cli");
     let mut on_disk = vec!["serve_web.rs".to_string()];
-    for entry in std::fs::read_dir(root.join("serve_web")).expect("read src/cli/serve_web") {
-        let path = entry.expect("dir entry").path();
-        if path.extension().and_then(|e| e.to_str()) == Some("rs") {
-            let name = path.file_name().unwrap().to_string_lossy();
-            on_disk.push(format!("serve_web/{name}"));
+    let mut pending = vec![("serve_web".to_string(), root.join("serve_web"))];
+    while let Some((rel, dir)) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("read {rel}: {e}")) {
+            let path = entry.expect("dir entry").path();
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            let child = format!("{rel}/{name}");
+            if path.is_dir() {
+                if child != "serve_web/tests" {
+                    pending.push((child, path));
+                }
+            } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                on_disk.push(child);
+            }
         }
     }
     on_disk.sort();

@@ -27,7 +27,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 /// The scans used to read `serve_web.rs` alone. #28 split it, and a scan left
 /// pointing at one file stays green while scanning less, so the list is the
 /// scans' single input and `routes::the_source_scans_cover_every_production_file`
-/// fails when a file under `src/cli/serve_web/` is missing from it.
+/// fails when a file under `src/cli/serve_web/`, at any depth outside
+/// `tests/`, is missing from it.
 const PRODUCTION_SOURCES: &[(&str, &str)] = &[
     (
         "serve_web.rs",
