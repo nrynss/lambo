@@ -160,9 +160,13 @@ impl Hub {
     /// 3. the wait is bounded by [`ENDPOINT_RELEASE_GRACE`]; a session still
     ///    running then is aborted, with a WARN naming how many.
     ///
-    /// So when this returns no endpoint session holds the server, and none can
-    /// append to the ledger that stage 7 drains. Before #28's remediation the
-    /// sessions were detached and lived on until the runtime dropped.
+    /// So when this returns every endpoint session task has ended or been
+    /// aborted, and no new one can start. An aborted straggler's rmcp inner
+    /// task and per-call handler tasks are not joined, so they may hold the
+    /// server for a moment longer; a call still running there can append to
+    /// the ledger after stage 7 begins, where it is counted `write_failed`.
+    /// Before #28's remediation the sessions were detached and lived on until
+    /// the runtime dropped.
     ///
     /// Then the socket file goes, so the next start does not log a
     /// stale-socket warning it did not earn.
@@ -172,9 +176,9 @@ impl Hub {
     /// successor is already listening at this address, and even a clean close
     /// released the lease a few statements ago. `unlink_if_ours` removes the
     /// file only while it is still the inode this process bound.
-    pub(super) async fn release(self, endpoint: Option<&SessionEndpoint>) {
+    pub(super) async fn release(mut self, endpoint: Option<&SessionEndpoint>) {
         self.stop.send_replace(true);
-        if let Some(accept_loop) = self.accept_loop {
+        if let Some(accept_loop) = self.accept_loop.take() {
             accept_loop.abort();
             // Cancelled is the expected outcome; awaiting it only guarantees
             // the loop can no longer spawn a session.
@@ -195,6 +199,19 @@ impl Hub {
         }
         if let Some(endpoint) = endpoint {
             endpoint.unlink_if_ours(self.bound_socket);
+        }
+    }
+}
+
+/// A `Hub` dropped without [`Hub::release`] (an unwind between the bind and
+/// the release) must not leave its accept loop running detached: dropping
+/// `stop` already ends the sessions, but the loop would keep accepting into
+/// sessions that end at once. Abort it. `release` takes the handle first, so
+/// this is a no-op on the normal path.
+impl Drop for Hub {
+    fn drop(&mut self) {
+        if let Some(accept_loop) = self.accept_loop.take() {
+            accept_loop.abort();
         }
     }
 }
