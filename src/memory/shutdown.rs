@@ -719,10 +719,10 @@ impl Memory {
         // `pending`, invisible to the retry, to `Drop`'s warning and to the log
         // (R3-1). Custody keeps it re-joinable instead.
         let mut flush = HandleCustody::take(&self.flush_handle);
-        if let Some(Err(err)) = flush.join().await {
-            if !err.is_cancelled() {
-                tracing::warn!(error = %err, "flush task did not stop cleanly");
-            }
+        if let Some(Err(err)) = flush.join().await
+            && !err.is_cancelled()
+        {
+            tracing::warn!(error = %err, "flush task did not stop cleanly");
         }
         drop(flush);
         step.done();
