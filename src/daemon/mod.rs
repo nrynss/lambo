@@ -70,24 +70,11 @@ use crate::types::{DaemonEvent, NodeId, RecallQuery, RecallResult, Scored, Sessi
 /// by [`Config::daemon_tick_interval`], which is what P8 threads in.
 pub const DAEMON_TICK_INTERVAL: Duration = Duration::from_secs(1);
 
-/// The daemon's score table — epoch of the graph state it was computed from,
-/// plus the score-descending ranked list of concept scores.
-///
-/// Daemon-owned: the rescore loop replaces it wholesale each cycle. T4.2+
-/// reads it; never mutated from outside.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct ScoreTable {
-    /// [`Graph::epoch`] the scores were computed from.
-    pub epoch: u64,
-    /// Score-descending (id-ascending tie-break) concept scores.
-    pub ranked: Vec<Scored<NodeId>>,
-}
+/// The daemon's score table. Read-side data shared with recall and
+/// canonization, so it lives in [`crate::types::ScoreTable`]; re-exported here
+/// so `daemon::ScoreTable` stays valid.
+pub use crate::types::ScoreTable;
 
-/// The daemon cycle's `now` source (T4.6 finding-1 regression seam).
-///
-/// Production uses [`Utc::now`]; tests swap in a controllable clock
-/// ([`Daemon::with_clock`]) so an idle session can be aged past a detector
-/// window (e.g. staleness) without waiting on the wall clock.
 /// The epoch-stable recall pipeline artifact: phase-1 candidates plus the
 /// phase-2 expansion. Cached as a unit; assembly and rendering re-run on
 /// every call so time-sensitive output (hot-list `seconds_ago`,
@@ -104,6 +91,11 @@ pub struct RecallPipeline {
     expanded: expand::ExpandedSet,
 }
 
+/// The daemon cycle's `now` source (T4.6 finding-1 regression seam).
+///
+/// Production uses [`Utc::now`]; tests swap in a controllable clock
+/// ([`Daemon::with_clock`]) so an idle session can be aged past a detector
+/// window (e.g. staleness) without waiting on the wall clock.
 pub type Clock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 
 /// Background scorer + detector + event publisher (T4.1 skeleton, T4.6
@@ -356,9 +348,9 @@ impl Daemon {
     /// Store I/O happens in [`crate::recall::candidates::gather`] BEFORE any
     /// lock: the vector leg is async and must not run while the graph lock is
     /// held. The pipeline then runs under the documented lock order
-    /// (graph read -> hot write). The daemon's inverted index must be
-    /// installed via [`Daemon::with_index`]; without it recall returns an
-    /// empty hit list with a warning (P8 wires the owner's index).
+    /// (graph read -> index read -> hot write). The daemon's inverted index
+    /// must be installed via [`Daemon::with_index`]; without it recall returns
+    /// an empty hit list with a warning (P8 wires the owner's index).
     ///
     /// `cache` is session-scoped: spec §8's key carries no session id, so the
     /// caller owns one [`RecallCache`] per session and hands it over by
@@ -393,8 +385,8 @@ impl Daemon {
     /// at assembly/dispatch). Store I/O happens in
     /// [`crate::recall::candidates::gather`] BEFORE any lock: the vector leg
     /// is async and must not run while the graph lock is held. The pipeline
-    /// then runs under the documented lock order (graph read -> hot write).
-    /// The daemon's inverted index must be installed via
+    /// then runs under the documented lock order (graph read -> index read
+    /// -> hot write). The daemon's inverted index must be installed via
     /// [`Daemon::with_index`]; without it recall returns an empty hit list
     /// with a warning (P8 wires the owner's index).
     ///
@@ -563,12 +555,28 @@ impl Daemon {
         };
 
         let now = (self.clock)();
+        // T5.3 / XP-3: re-validate the expanded members' hot-list entries at
+        // the SAME `now` the assembly renders with, under the guards already
+        // held (graph read, then index read, then hot write). Lapsed entries
+        // are evicted here; the survivors' freshly rebuilt payloads are what
+        // assembly force-includes and renders. Done here rather than inside
+        // `assemble` so recall reads a map and never mutates daemon state.
+        let hot_payloads = hot.revalidate_members(
+            &graph,
+            pipeline
+                .expanded
+                .required
+                .iter()
+                .chain(pipeline.expanded.siblings.iter())
+                .map(|s| s.item),
+            now,
+        );
         let mut result = assemble::assemble(
             &graph,
             &pipeline.expanded,
             &pipeline.phase1,
             &scores,
-            &mut hot,
+            &hot_payloads,
             &query,
             weights,
             now,
@@ -670,10 +678,15 @@ impl Daemon {
         self.events.clone()
     }
 
-    /// Handle to the daemon-owned hot list (recall, T5.3, reads it; tests
-    /// assert maintenance here). The loop holds the graph lock while
-    /// updating it, so consumers must never take the graph lock while
-    /// holding this one.
+    /// Handle to the daemon-owned hot list (tests assert maintenance here).
+    ///
+    /// Two writers maintain it. The loop keeps it equal to each cycle's fresh
+    /// detector hits ([`HotList::retain_conditions`]), and recall **mutates**
+    /// it too: `Daemon::recall_detailed` re-validates the expanded members'
+    /// entries at the recall's `now` ([`HotList::revalidate_members`], T5.3 /
+    /// XP-3), evicting lapsed ones and rebuilding the survivors' payloads.
+    /// Both take the graph lock before this one, so consumers must never take
+    /// the graph lock while holding this one.
     pub fn hot_list(&self) -> Arc<RwLock<HotList>> {
         self.hot.clone()
     }

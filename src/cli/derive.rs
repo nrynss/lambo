@@ -1,11 +1,10 @@
 //! `lambo derive` — lease-held thin adapter over [`crate::memory::Memory::derive`].
 
-use super::caps::{
-    check_size_cli, require_nonempty, CliError, ConceptKind, MAX_CONCEPTS_PER_DERIVE,
-};
+use super::caps::{check_size_cli, require_nonempty, CliError, ConceptKind};
 use super::{close_writer, open_writer};
 use crate::graph::derive::ParentOf;
 use crate::resolve::ResolvedBackends;
+use crate::surface::validate::check_concept_count;
 use crate::types::ConceptType;
 
 /// Parsed `derive` flags.
@@ -65,11 +64,7 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
         check_size_cli("concept", raw)?;
         concepts.push(parse_concept(raw)?);
     }
-    if concepts.len() > MAX_CONCEPTS_PER_DERIVE {
-        return Err(CliError::Usage(format!(
-            "concepts must contain at most {MAX_CONCEPTS_PER_DERIVE} entries"
-        )));
-    }
+    check_concept_count(concepts.len()).map_err(CliError::Usage)?;
     for (content, _) in &concepts {
         check_size_cli("concept.content", content)?;
         require_nonempty("concept.content", content)?;

@@ -55,10 +55,11 @@ use tokio::sync::Notify;
 use crate::canon::{EvalParams, Evaluator};
 use crate::config::Config;
 use crate::daemon::events::EventSender;
-use crate::daemon::{Clock, Daemon, ScoreTable};
+use crate::daemon::{Clock, Daemon};
 use crate::graph::Graph;
 use crate::store::flush::CatchUnwindPoll;
 use crate::store::GraphStore;
+use crate::types::ScoreTable;
 
 /// State shared between the running loop and the caller's handle.
 #[derive(Debug, Default)]

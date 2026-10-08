@@ -4,6 +4,27 @@
 
 ### Breaking
 
+- Canonical keys change for text containing some invisible codepoints (#25,
+  re-landing review finding V1, which was fixed on 2026-08-15 and then lost
+  the same day). Stored concepts keep the keys they were written with; nothing
+  is re-keyed on load, so every existing store still loads and its uniqueness
+  check cannot newly collide.
+  - The Mongolian free variation selectors `U+180B`-`U+180D` and `U+180F` are
+    still accepted in content but are now stripped from canonical keys. A
+    concept already stored with one keeps its old key, so a new derive of the
+    same text no longer matches it. That derive creates a new concept, or merges
+    into an existing plain-text concept with the stripped key, and the old row
+    is left out of future matching.
+  - Text containing the unassigned `Default_Ignorable_Code_Point` codepoints
+    `U+2065`, `U+FFF0`-`U+FFF8`, `U+E0080`-`U+E00FF` and `U+E01F0`-`U+E0FFF` is
+    now refused wherever a surface size-checks text: concept and action
+    content, inspect focus, recall query, and agent and session ids.
+    Stored content holding them still loads and renders, but the same text can
+    no longer be submitted again.
+  - **Operator action:** none expected. The lambo dogfood store (3,966 concepts)
+    held none of these codepoints in content or keys when checked on
+    2026-10-08. A store that does hold them can be found by comparing each
+    stored `canonical_key` with one recomputed from its content.
 - Under the hybrid strategy (the default) an applied `record_action` receipt
   now reads `recorded action: N concept(s) created (M embedded), E edge(s)`
   and its JSON carries `embedded`, as a hybrid `derive` receipt does. Under

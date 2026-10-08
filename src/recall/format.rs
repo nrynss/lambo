@@ -72,8 +72,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::daemon::hotlist::HotListPayload;
 use crate::graph::Graph;
+use crate::types::HotListPayload;
 use crate::types::{AgentId, EdgeType, NodeId, RecallHit, Reservation};
 
 /// The structural edge types that carry dependency for Stage-3 blast radius

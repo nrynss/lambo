@@ -11,8 +11,8 @@
 //! execution's output by construction.
 
 use super::caps::{
-    check_size_cli, clamp_cfg_default, require_nonempty, CliError, MAX_MAX_TOKENS, MAX_TOP_K,
-    MAX_TRAVERSAL_DEPTH,
+    check_in_range_cli, check_size_cli, clamp_cfg_default, require_nonempty, CliError,
+    MAX_MAX_TOKENS, MAX_TOP_K, MAX_TRAVERSAL_DEPTH,
 };
 use super::load_reader_graph_with_contract;
 use crate::config::Config;
@@ -94,19 +94,9 @@ pub(crate) async fn run_detailed(
             MAX_TRAVERSAL_DEPTH,
         ),
     };
-    if top_k == 0 || top_k > MAX_TOP_K {
-        return Err(CliError::Usage(format!("top-k must be in 1..={MAX_TOP_K}")));
-    }
-    if traversal_depth > MAX_TRAVERSAL_DEPTH {
-        return Err(CliError::Usage(format!(
-            "traversal-depth must be in 0..={MAX_TRAVERSAL_DEPTH}"
-        )));
-    }
-    if max_tokens == 0 || max_tokens > MAX_MAX_TOKENS {
-        return Err(CliError::Usage(format!(
-            "max-tokens must be in 1..={MAX_MAX_TOKENS}"
-        )));
-    }
+    check_in_range_cli("top-k", top_k, 1, MAX_TOP_K)?;
+    check_in_range_cli("traversal-depth", traversal_depth, 0, MAX_TRAVERSAL_DEPTH)?;
+    check_in_range_cli("max-tokens", max_tokens, 1, MAX_MAX_TOKENS)?;
 
     let loaded = load_reader_graph_with_contract(
         backends.store.as_ref(),

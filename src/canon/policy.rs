@@ -85,9 +85,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 use crate::canon::event_time::separated_session_count;
 use crate::canon::stage1_candidates;
 use crate::canon::EvalParams;
-use crate::daemon::ScoreTable;
 use crate::graph::Graph;
-use crate::types::{CanonizationStatus, Concept, EdgeType, Node, NodeId};
+use crate::types::{CanonizationStatus, Concept, EdgeType, Node, NodeId, ScoreTable};
 
 /// Declares [`PromotionPolicy`] **and** [`PromotionPolicy::ALL`] from one list
 /// of variants, so that a variant the valid set does not name is not a thing

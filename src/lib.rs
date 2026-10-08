@@ -76,7 +76,8 @@
 //! * [`Memory`] and [`MemoryBuilder`] — the API surface.
 //! * [`types`] — the contracts every surface shares.
 //! * [`store`] and [`embed`] — the adapter traits and the shipped adapters.
-//! * [`mcp`] and [`cli`] — the two user-facing surfaces.
+//! * [`mcp`] and [`cli`] — the two user-facing surfaces, and [`surface`] — the
+//!   request limits and validation they share.
 
 pub mod canon;
 pub mod cli;
@@ -97,6 +98,7 @@ pub mod recall;
 pub mod resolve;
 
 pub mod store;
+pub mod surface;
 #[cfg(test)]
 pub mod test_util;
 pub mod types;
@@ -109,7 +111,7 @@ pub use embed::BgeM3LlamaCppEmbedder;
 pub use canon::{
     CanonizationTask, EvalOutcome, EvalParams, Evaluator, PromotionPolicy, PromotionScorer,
 };
-pub use daemon::{Daemon, ScoreTable};
+pub use daemon::Daemon;
 pub use embed::{
     build_embedder, cosine, embedder_from_env, EmbedError, Embedder, EmbedderConfig, EmbedderKind,
 };
@@ -138,5 +140,5 @@ pub use types::{
     AgentId, CanonizationEvent, CanonizationStatus, Concept, ConceptType, DaemonEvent, Edge,
     EdgeType, EmbeddingContract, GraphSnapshot, Interaction, InteractionSpan, LamboError,
     MatchStrategy, Mutation, MutationBatch, Node, NodeId, RecallHit, RecallQuery, RecallResult,
-    Reservation, Scored, SessionId, StoreError, Synonym,
+    Reservation, ScoreTable, Scored, SessionId, StoreError, Synonym,
 };

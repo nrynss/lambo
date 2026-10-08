@@ -1108,6 +1108,56 @@ pub fn tie_break_by_key(
     .then_with(|| a.0.cmp(&b.0))
 }
 
+/// The daemon's score table — epoch of the graph state it was computed from,
+/// plus the score-descending ranked list of concept scores.
+///
+/// Daemon-owned: the rescore loop replaces it wholesale each cycle. T4.2+
+/// reads it; never mutated from outside. Defined here rather than in
+/// [`crate::daemon`] because recall and canonization read it too (#25);
+/// `daemon::ScoreTable` re-exports it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ScoreTable {
+    /// [`crate::graph::Graph::epoch`] the scores were computed from.
+    pub epoch: u64,
+    /// Score-descending (id-ascending tie-break) concept scores.
+    pub ranked: Vec<Scored<NodeId>>,
+}
+
+/// Per-condition payload — what recall (T5.3) renders and what a re-validation
+/// predicate reads. The conflict payload carries everything the demo sentence
+/// needs: the agent(s) involved and how long ago the write happened
+/// ("Agent A wrote to it eleven seconds ago").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HotListPayload {
+    /// Conflicting multi-agent write on [`crate::daemon::hotlist::HotListEntry::node`].
+    Conflict {
+        /// Agents with edges to the node (≥2), the conflicting writers.
+        agents: Vec<AgentId>,
+        /// The agent that made the **most recent qualifying write** — the
+        /// subject of the §13 sentence "Agent A wrote to it eleven seconds
+        /// ago" (ALGO-2). Without it the renderer can only guess from
+        /// `agents`, and on the shipped fixture the naive guess (first
+        /// alphabetically) is wrong: the newest write is agent-b's.
+        writer: AgentId,
+        /// Age of `writer`'s write, in seconds, **as of the last
+        /// re-validation** — refreshed by [`crate::daemon::hotlist::HotList::revalidate`], so a
+        /// rendered value is the age at read time (XP-3).
+        seconds_ago: u64,
+    },
+    /// A high-risk modification touched the node.
+    HighRisk { reason: String },
+    /// The node drifted from any root goal.
+    Drift {
+        /// Unweighted shortest-path hop count to the nearest root goal, or
+        /// [`crate::daemon::drift::DRIFT_HOPS_NO_PATH`] when there is no path.
+        hops: u64,
+        /// The root goal node the path terminates at (nil when no path).
+        root: NodeId,
+    },
+    /// The node's session has been inactive this long, in seconds.
+    Stale { seconds_inactive: u64 },
+}
+
 /// Stage 2 structural evidence (spec §4.1 / §10).
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct InteractionSpan {
@@ -1606,6 +1656,26 @@ mod tests {
         assert_eq!(
             tie_break_by_key(None, &id(2), None, &id(1)),
             std::cmp::Ordering::Greater
+        );
+    }
+
+    /// #25 moved `ScoreTable` and `HotListPayload` here from the daemon; the
+    /// old public paths must keep naming the same types (a re-export, not a
+    /// copy), so this only compiles while they do.
+    #[test]
+    fn moved_read_side_types_resolve_at_their_old_paths() {
+        let table: crate::daemon::ScoreTable = ScoreTable::default();
+        let table: crate::ScoreTable = table;
+        assert_eq!(table, ScoreTable::default());
+        let payload: crate::daemon::hotlist::HotListPayload = HotListPayload::Stale {
+            seconds_inactive: 7,
+        };
+        let payload: HotListPayload = payload;
+        assert_eq!(
+            payload,
+            HotListPayload::Stale {
+                seconds_inactive: 7
+            }
         );
     }
 }
