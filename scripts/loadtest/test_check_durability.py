@@ -189,6 +189,17 @@ class CheckDurability(unittest.TestCase):
         rc, out = self.run_check(self.ledger([derive_ack(1)]), junk)
         self.assertEqual(rc, BAD_INPUT, out)
 
+    def test_ledger_line_that_is_json_but_not_an_object_is_bad_input(self):
+        db = self.store(1)
+        for text in ("null", "[]", "7", '"x"'):
+            with self.subTest(line=text):
+                ledger = self.dir / "ledger.jsonl"
+                ledger.write_text(json.dumps(derive_ack(1)) + "\n" + text + "\n", encoding="utf-8")
+                rc, out = self.run_check(ledger, db)
+                self.assertEqual(rc, BAD_INPUT, out)
+                self.assertNotIn("Traceback", out)
+                self.assertIn("not an object", out)
+
     def test_missing_ledger_is_an_error(self):
         rc, out = self.run_check(self.dir / "nope.jsonl", self.store(0))
         self.assertEqual(rc, BAD_INPUT, out)

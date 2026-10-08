@@ -72,7 +72,7 @@ Exit status (every code but 0 means "do not claim durability"):
       while the transcript does not show that GC activity was logged. Re-run
       with `--stderr` captured at `lambo::daemon::gc=debug` plus `--gc-logged`;
   6 — an input could not be read (ledger or store missing/unreadable, not a
-      lambo store, malformed ledger line). The store is opened read-only and
+      lambo store, a ledger line that is not JSON or not a JSON object). The store is opened read-only and
       is never created or modified;
   64 — command-line usage error.
 
@@ -243,6 +243,12 @@ def main() -> int:
             r = json.loads(line)
         except ValueError as e:
             print(f"error: --ledger {args.ledger} line {lineno} is not JSON: {e}", file=sys.stderr)
+            return EXIT_BAD_INPUT
+        if not isinstance(r, dict):
+            # Valid JSON that is not an object (null, [], 7, "x"): the same
+            # class of damage as a non-JSON line, so the same bad-input code.
+            print(f"error: --ledger {args.ledger} line {lineno} is JSON but not an "
+                  f"object ({type(r).__name__}), not a ledger record", file=sys.stderr)
             return EXIT_BAD_INPUT
         if r.get("kind") != "call":
             continue
