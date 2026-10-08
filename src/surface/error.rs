@@ -19,8 +19,9 @@ use crate::types::LamboError;
 /// come to have one class on the sync path and another on the async one — the
 /// drift this function exists to prevent, reintroduced one module over. It
 /// lives here rather than in `mcp::server` (#25) so the core write queue does
-/// not import the MCP surface for it; `crate::mcp::server::err_class` remains
-/// as a re-export.
+/// not import the MCP surface for it. The old `crate::mcp::server::err_class`
+/// path was crate-private and is gone since #25 split `mcp::server`: nothing
+/// used it once every caller imported this module directly.
 pub(crate) fn err_class(err: &LamboError) -> &'static str {
     match err {
         LamboError::Store(_) => "store error",
