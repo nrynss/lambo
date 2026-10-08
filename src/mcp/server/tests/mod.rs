@@ -7,6 +7,26 @@ use crate::store::{GraphStore, MemoryStore};
 use crate::types::EmbeddingContract;
 use crate::Config;
 
+// What the subject files used to reach through `use super::*` while every
+// production item sat in `server.rs`: since #25 split it into submodules they
+// are named here, so the subject files keep their single `use super::*`.
+use super::params::MAX_AGENT_ID_CHARS;
+use super::response::{conflict_err, contain_panic, redact_urls, tool_err};
+use super::stats::{gc_stats_json, gc_summary_line};
+use super::trace::{
+    recall_facts, truncate_for_ledger, truncate_to, LEDGER_CONTENT_PREFIX, LEDGER_FOCUS_PREFIX,
+    LEDGER_QUERY_PREFIX,
+};
+use crate::graph::action::Action;
+use crate::graph::derive::ParentOf;
+use crate::surface::focus::resolve_focus;
+use crate::surface::limits::{clamp_cfg_default, MAX_ACTION_TARGETS, MAX_TOP_K};
+use crate::types::{ConceptType, LamboError, NodeId};
+use chrono::{DateTime, Utc};
+use rmcp::model::ContentBlock;
+use serde_json::json;
+use std::time::Duration;
+
 mod errors;
 mod inspect;
 mod ledger;
