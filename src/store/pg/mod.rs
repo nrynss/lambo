@@ -10,11 +10,26 @@
 //!
 //! # What lives here, and what does not
 //!
-//! Here: the pool and its lazy construction, the retry wrapper, flush planning
-//! and the fencing gate, session load, the structural queries, quarantine, the
-//! statement helpers, and the single `impl GraphStore`. Statements are written
-//! **once**, in this file, either as constants (identical on every engine) or
-//! in `DialectSql` (identical except for a cast token).
+//! Here, in the family's shared base: [`PgStore`], its construction, and the
+//! single `impl GraphStore`, whose methods only delegate. The work lives in
+//! submodules:
+//!
+//! * `pool` — the lazy pool, Cloud SQL IAM rotation, connect options and
+//!   `tx_retry`.
+//! * `sql` — statement text, written **once**: constants (identical on every
+//!   engine), `DialectSql` (identical except for a cast token) and the
+//!   multi-row query builders.
+//! * `schema` — `init_schema`, preflight, the live width check.
+//! * `persistence` — **every write transaction** (`flush`,
+//!   `record_canonization`, `seed`): session stamp, fencing gate, commit, all
+//!   inside `tx_retry`.
+//! * `write_rows` — the statements those transactions run. Never begins or
+//!   commits.
+//! * `session_load` — `load_session`'s one read transaction.
+//! * `vector_candidates` — the checked vector read and DECISION D1 sizing.
+//! * `structural` — keyword candidates, `blast_radius`, `interaction_span`.
+//! * `leases` — lease rows and the refusal log.
+//! * `codec` — value and row codecs shared by all of the above.
 //!
 //! In `dialect.rs`: the §B3 table plus the B2-discovered over-merge split
 //! (post-init statements, connect-option session settings, operator-facing
@@ -58,6 +73,7 @@ mod dialect;
 mod leases;
 mod persistence;
 mod pool;
+mod schema;
 mod session_load;
 mod sql;
 mod structural;
@@ -84,16 +100,12 @@ use std::time::Duration;
 use sqlx::PgPool;
 
 use crate::store::lease::{LeaseHolder, LeaseInfo, LeaseOutcome};
-use crate::store::{
-    columns_in_ddl, tables_in_ddl, unprovisioned_column_err, unprovisioned_store_err, Capabilities,
-    GraphStore, SessionFlushStats, StoreConfig,
-};
+use crate::store::{Capabilities, GraphStore, SessionFlushStats, StoreConfig};
 use crate::types::{
     CanonizationEvent, EmbeddingContract, GraphSnapshot, InteractionSpan, MutationBatch, NodeId,
     Scored, SessionId, StoreError,
 };
 use codec::backend;
-pub(crate) use codec::parse_pgvector_format_type;
 use pool::dsn_for_rustls;
 #[cfg(feature = "store-postgres")]
 pub(crate) use pool::iam_auth_requested;
@@ -110,9 +122,11 @@ use sql::DialectSql;
 #[cfg(test)]
 #[allow(unused_imports)]
 use {
-    crate::store::batch::*, crate::store::lease::lease_permits_write, crate::store::map_write_err,
+    crate::store::batch::*, crate::store::columns_in_ddl, crate::store::lease::lease_permits_write,
+    crate::store::map_write_err, crate::store::tables_in_ddl,
+    crate::store::unprovisioned_column_err, crate::store::unprovisioned_store_err,
     crate::store::validate_vector_candidate_limit, crate::store::vector::*, crate::types::*,
-    codec::*, leases::*, persistence::*, pool::*, session_load::*, sql::*,
+    codec::*, leases::*, persistence::*, pool::*, schema::*, session_load::*, sql::*,
     sqlx::postgres::PgPoolOptions, sqlx::Row, std::future::Future, structural::*, uuid::Uuid,
     vector_candidates::*, write_rows::*,
 };
@@ -216,118 +230,16 @@ impl<D: Dialect> PgStore<D> {
     pub(crate) fn dsn(&self) -> &str {
         &self.dsn
     }
-
-    /// B4: dialects that substitute width into DDL must prove the live
-    /// column matches construction dim. Cockroach skips this: its authority
-    /// is the static file parsed at construction.
-    async fn assert_live_schema_width(&self, pool: &PgPool) -> Result<(), StoreError> {
-        let Some(sql) = D::live_schema_vector_width_sql() else {
-            return Ok(());
-        };
-        let formatted: Option<String> = sqlx::query_scalar(sql)
-            .fetch_optional(pool)
-            .await
-            .map_err(backend)?;
-        let Some(formatted) = formatted else {
-            return Err(StoreError::Backend(format!(
-                "{}: concepts.embedding is missing; store is unprovisioned \
-                 or not a vector schema",
-                D::NAME
-            )));
-        };
-        let live = parse_pgvector_format_type(&formatted).ok_or_else(|| {
-            StoreError::Backend(format!(
-                "{}: concepts.embedding type {formatted:?} is not vector(n)",
-                D::NAME
-            ))
-        })?;
-        if live != self.vector_dim {
-            return Err(StoreError::Backend(format!(
-                "{}: live schema width is vector({live}) but this process \
-                 constructed at dim {}. DDL outranks the pin for reporting; \
-                 they must match on an initialized store. Re-init at the \
-                 schema width, or migrate.",
-                D::NAME,
-                self.vector_dim
-            )));
-        }
-        Ok(())
-    }
 }
 
 #[async_trait]
 impl<D: Dialect> GraphStore for PgStore<D> {
     async fn init_schema(&self) -> Result<(), StoreError> {
-        // Multi-statement DDL via the simple protocol (raw_sql); every statement is
-        // `IF NOT EXISTS`, so this is idempotent by construction (T3.1 acceptance).
-        let pool = &self.pool().await?;
-        sqlx::raw_sql(self.ddl.as_ref())
-            .execute(pool)
-            .await
-            .map_err(backend)?;
-
-        // Post-DDL convergence ALTERs. Not folded into `init_sql`: that would
-        // turn this from raw_sql + N query() calls into one raw_sql, which is
-        // a Cockroach behaviour change B0 forbade and B2 does not make. The
-        // statements themselves are not byte-identical (STRING vs TEXT, INT
-        // vs BIGINT), so they live on the dialect.
-        for stmt in D::post_init_statements() {
-            sqlx::query(stmt).execute(pool).await.map_err(backend)?;
-        }
-        self.assert_live_schema_width(pool).await?;
-        Ok(())
+        self.apply_schema().await
     }
 
-    /// J3 F5 + J3-R2R-3. An `information_schema.tables` read in the
-    /// connection's current schema, diffed against the table names in the DDL
-    /// this build ships, then an `information_schema.columns` read per required
-    /// table, diffed against the column set the same DDL declares. Cockroach is
-    /// provisioned by `scripts/provision.sh`, not by `init_schema` on the attach
-    /// path, so the same upgrade-without-reprovision hazard applies — and here
-    /// every failed statement is also a round trip. The column half is the
-    /// Cockroach-dialect side of J3-R2R-3 (source-correct here; live-cluster
-    /// verification is the named follow-up the brief records).
     async fn preflight_schema(&self) -> Result<(), StoreError> {
-        let pool = &self.pool().await?;
-        let present: Vec<String> = sqlx::query_scalar(
-            "SELECT table_name FROM information_schema.tables \
-             WHERE table_schema = current_schema()",
-        )
-        .fetch_all(pool)
-        .await
-        .map_err(backend)?;
-        let required = tables_in_ddl(self.ddl.as_ref());
-        let missing_tables: Vec<&str> = required
-            .into_iter()
-            .filter(|t| !present.iter().any(|p| p == t))
-            .collect();
-        if !missing_tables.is_empty() {
-            return Err(unprovisioned_store_err(D::NAME, &missing_tables));
-        }
-        let mut by_table: std::collections::BTreeMap<&str, Vec<&str>> = Default::default();
-        for (table, col) in columns_in_ddl(self.ddl.as_ref()) {
-            by_table.entry(table).or_default().push(col);
-        }
-        for (table, cols) in by_table {
-            let present_cols: Vec<String> = sqlx::query_scalar(
-                "SELECT column_name FROM information_schema.columns \
-                 WHERE table_schema = current_schema() AND table_name = $1",
-            )
-            .bind(table)
-            .fetch_all(pool)
-            .await
-            .map_err(backend)?;
-            let missing: Vec<&str> = cols
-                .iter()
-                .copied()
-                .filter(|c| !present_cols.iter().any(|p| p == c))
-                .collect();
-            if !missing.is_empty() {
-                return Err(unprovisioned_column_err(D::NAME, table, &missing));
-            }
-        }
-        self.assert_live_schema_width(pool).await?;
-        Ok(())
+        self.verify_schema().await
     }
 
     fn capabilities(&self) -> Capabilities {

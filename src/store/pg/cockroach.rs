@@ -13,7 +13,8 @@
 //! authoritative: every decision it records is a decision about behaviour B0
 //! moved without altering, so it stays written where it was reviewed rather
 //! than being paraphrased into a new file. Where it says "this module", read
-//! "this adapter"; the code it describes is in `pg/mod.rs`.
+//! "this adapter"; the code it describes is the family base in `pg/` (the
+//! module map is on `pg/mod.rs`).
 //!
 //! # Design decisions (see PHASE-3-stores.md Handoff Log T3.2)
 //!
