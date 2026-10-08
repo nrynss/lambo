@@ -1152,7 +1152,7 @@ mod tests {
     ///
     /// `PgConnectOptions::from_str` is the real dial path, not a stand-in:
     /// `store::pg` reaches the network through `dsn.parse::<PgConnectOptions>()`
-    /// (`connect_options`, `src/store/pg/mod.rs`). sqlx validates no scheme at
+    /// (`connect_options`, `src/store/pg/pool.rs`). sqlx validates no scheme at
     /// all — it hands the string to the `url` crate and reads components off
     /// whatever comes back — which is the mechanism behind every row here.
     ///

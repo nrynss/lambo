@@ -151,7 +151,7 @@ UPDATE sessions SET root_goal = $2::JSONB WHERE session_id = $1
 /// attested which space they were in, so they are unreadable by construction.
 ///
 /// **Deliberate divergence from SQLite (F-R2-1), recorded here so it reads as a
-/// decision and not an oversight.** `sqlite.rs`'s `set_embedding` widened the same
+/// decision and not an oversight.** SQLite's `set_embedding` (`sqlite/write_rows.rs`) widened the same
 /// predicate to fire on any *width* change, not only over a NULL contract, because a
 /// restamp there could leave earlier vectors under a width they no longer match. That
 /// shape cannot arise on Cockroach: `concepts.embedding` is `VECTOR(1024)` in the DDL

@@ -1135,7 +1135,7 @@ pub fn build_store_with_vector_dim(
         StoreKind::Sqlite => {
             // Real gate: type only exists under this feature. The pool is
             // created lazily on first async use (build_store runs in a sync
-            // startup context; see sqlite.rs).
+            // startup context; see sqlite/mod.rs).
             #[cfg(feature = "store-sqlite")]
             {
                 // CON-3 (D2): a missing path is a hard error, mirroring
