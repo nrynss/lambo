@@ -389,6 +389,34 @@ fn with_forced_exact_scan_is_off_by_default() {
     assert!(exact.forced_exact_scan());
 }
 
+/// `line` without a trailing `//` comment. A `//` inside a string or char
+/// literal is code (a URL, a `"//"` literal) and is kept, so it cannot hide a
+/// needle later on the same line. Per line: a string spanning lines is
+/// treated as code on its continuation lines.
+fn strip_line_comment(line: &str) -> &str {
+    let b = line.as_bytes();
+    let mut in_str = false;
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'\\' if in_str => i += 1,
+            b'"' => in_str = !in_str,
+            b'\'' if !in_str => {
+                // `'\x'` / `'\''`, or `'c'`; anything else is a lifetime.
+                if b.get(i + 1) == Some(&b'\\') {
+                    i += 3;
+                } else if b.get(i + 2) == Some(&b'\'') {
+                    i += 2;
+                }
+            }
+            b'/' if !in_str && b.get(i + 1) == Some(&b'/') => return &line[..i],
+            _ => {}
+        }
+        i += 1;
+    }
+    line
+}
+
 /// B3-R1-1: the camera-proof must share the production SET LOCAL
 /// execute and must not inject the GUC as extra_set on the exact lane.
 #[test]
@@ -406,15 +434,36 @@ fn explain_vector_candidates_uses_store_forced_exact_scan() {
         "/src/store/pg/postgres/tests.rs"
     ));
     let base = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/store/pg/mod.rs"));
+    // The comment marker is never written as one token here, so it cannot
+    // match itself in the scanned text.
+    let slash = concat!("/", "/");
+    // Pin the stripper: it must cut a trailing comment but not a marker inside
+    // a string or char literal (a URL, `"\"//"`), which would hide code.
+    for (line, want) in [
+        ("code // note", "code "),
+        (
+            "let u = \"http:SS/x\"; call()",
+            "let u = \"http:SS/x\"; call()",
+        ),
+        ("let u = \"a\"; // \"b\"", "let u = \"a\"; "),
+        ("let q = '\"'; call() // c", "let q = '\"'; call() "),
+        (
+            "let s = \"esc\\\"SS\"; call()",
+            "let s = \"esc\\\"SS\"; call()",
+        ),
+    ] {
+        let (line, want) = (line.replace("SS", slash), want.replace("SS", slash));
+        assert_eq!(strip_line_comment(&line), want, "{line}");
+    }
     // Compare with line comments dropped and all whitespace removed: rustfmt
     // reflowing a call across lines (`store\n    .issue_forced_exact_scan(..)`)
     // cannot hide it, and a needle left in a comment cannot satisfy it.
+    // Stripping is per line and string-aware; `/* */` block comments and a
+    // needle inside a string literal are not handled (a contrived plant, and
+    // the strip only ever removes text, so it cannot manufacture a pass).
     let squash = |s: &str| {
         s.lines()
-            .map(|line| {
-                line.split_once(concat!("/", "/"))
-                    .map_or(line, |(code, _)| code)
-            })
+            .map(strip_line_comment)
             .flat_map(str::chars)
             .filter(|c| !c.is_whitespace())
             .collect::<String>()
