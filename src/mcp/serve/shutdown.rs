@@ -13,10 +13,10 @@
 //! |---|---|---|---|
 //! | 1 | transport drain (HTTP graceful drain, stdio cancel) | the transport future inside [`run_and_close`], ended by [`wind_down`] | [`SHUTDOWN_GRACE`] |
 //! | 2 | keep-warm abort | `stop_before_close` in [`run_and_close`], from [`HolderTasks::stop_before_close`] | instant |
-//! | 3 | session close | [`close_bounded`]: [`Memory::close`] and its own numbered stages (queue drain, writers gate, heartbeat abort and fence check, producer joins, flush join, final drain, degraded check, final flush, lease release; `src/memory/shutdown.rs`), or on abandonment the bounded lease release | [`CLOSE_GRACE`] |
+//! | 3 | session close | [`close_bounded`]: [`Memory::close`] and its own ten logged steps (`serialize`, `replay_stop`, `queue_quiesce`, `writers_gate`, `heartbeat_abort`, `producer_joins`, `flush_join`, `final_drain`, `final_flush`, `lease_release`; `src/memory/shutdown.rs`), or on abandonment the bounded lease release | [`CLOSE_GRACE`] |
 //! | 4 | event pump abort | after the close, in [`run_and_close`], so final-drain events still reach the log | instant |
 //! | 5 | background tasks | [`HolderTasks::stop`]: ledger heartbeat, keep-warm (again), refusal poller | instant |
-//! | 6 | endpoint release | `hub::Hub::release`: stop accepting, end every endpoint session (each cancels its rmcp service and waits for it), then the socket file if still ours | `hub::ENDPOINT_RELEASE_GRACE`, then the stragglers are aborted |
+//! | 6 | endpoint release | `hub::Hub::release`: stop accepting, end every endpoint session (each cancels its rmcp service and waits for it), then the socket file if still ours | `hub::ENDPOINT_RELEASE_GRACE`, then the stragglers are aborted and joined (unbounded, but milliseconds in practice; the watchdog's 1 s overrun allowance covers it) |
 //! | 7 | ledger close | [`close_ledger`] | the ledger's own shutdown bound |
 //!
 //! Stages 1 to 4 are [`run_and_close`], the seam the "close always runs"
@@ -36,6 +36,11 @@
 //!   still running past that drain, against a closed `Memory`, can still
 //!   append its line; once stage 7 has begun, the ledger counts it as
 //!   `write_failed`. Bounded and counted, never silent.
+//!
+//! Not watched: everything after `serve` returns. The watchdog is disarmed
+//! when `serve` ends, before the `Memory`, store and embedder are dropped and
+//! before the runtime shuts down, so a hang in those drops or in process exit
+//! is still unlogged and is left to the supervisor's kill.
 
 use std::future::Future;
 use std::pin::Pin;

@@ -587,6 +587,7 @@ cleanup:
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>60</integer>
   <key>ExitTimeOut</key><integer>30</integer>
+  <key>ProcessType</key><string>Standard</string>
   <key>StandardOutPath</key><string>/Users/&lt;you&gt;/lambo-dogfood/serve.log</string>
   <key>StandardErrorPath</key><string>/Users/&lt;you&gt;/lambo-dogfood/serve.log</string>
   <key>WorkingDirectory</key><string>/Users/&lt;you&gt;/lambo-dogfood</string>
@@ -594,7 +595,9 @@ cleanup:
 </plist>
 ```
 
-`ExitTimeOut` is how long launchd waits after SIGTERM before it sends SIGKILL; its
+`ProcessType Standard` keeps launchd from applying background resource limits
+(CPU throttling would eat into the 1.5 s between the 18.5 s worst case and the
+20 s watchdog). `ExitTimeOut` is how long launchd waits after SIGTERM before it sends SIGKILL; its
 default is 20 s. A healthy `lambo serve` shutdown takes at most 18.5 s (`SHUTDOWN_BUDGET`
 15 s, the endpoint release 3 s, the ledger drain 0.5 s), and at 20 s the server's own
 watchdog logs the stage it is stuck in and aborts, leaving a crash report with every

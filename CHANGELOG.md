@@ -67,8 +67,10 @@
 - A `lambo serve` shutdown is now bounded even when its own timers cannot
   fire (#40). Every shutdown bound is a timer inside the server's async
   runtime, and a wedged runtime (every worker thread blocked, or the thread
-  driving the server blocked) fires none of them, so the process logged nothing more and waited for its supervisor's
-  kill. That is what the live writer did in #40. A watchdog thread outside
+  driving the server blocked) fires none of them, so the process logs
+  nothing more and waits for its supervisor's kill. The live writer's stall
+  in #40 is consistent with that (it was not reproduced). A watchdog thread
+  outside
   the runtime now warns when a stage outlives its own bound by more than 1 s,
   and 20 s after the shutdown began it logs the stalled stage and aborts the
   process. On macOS the abort leaves a crash report with every thread's stack
