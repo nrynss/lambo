@@ -27,7 +27,7 @@ pub const MAX_RESERVE_TTL_SECS: u64 = 3600;
 pub const MAX_INSPECT_DEPTH: usize = 5;
 /// Cap on neighbours rendered by `inspect`, as a **total** across every hop.
 ///
-/// `render_neighbourhood` (`src/cli/inspect.rs`) initialises one budget from
+/// `render_neighbourhood` (`src/surface/neighbourhood.rs`) initialises one budget from
 /// this constant *before* the hop loop and decrements it as it renders, so the
 /// bound is on the whole rendered neighbourhood, not on each frontier level.
 /// (T88-H8: this doc-comment previously said "per frontier level", which the

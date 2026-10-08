@@ -33,19 +33,20 @@ use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::cli::inspect::{
-    render_neighbourhood, resolve_focus, Focus, MAX_INSPECT_BOUNDED_SCAN, MAX_INSPECT_SCAN_CONCEPTS,
-};
 use crate::graph::action::Action;
 use crate::graph::derive::ParentOf;
 use crate::ledger::Ledger;
 use crate::memory::Memory;
 use crate::recall::detail::AnnotationKind;
 use crate::store::flush::{panic_message, CatchUnwindPoll};
+use crate::surface::focus::{
+    resolve_focus, Focus, MAX_INSPECT_BOUNDED_SCAN, MAX_INSPECT_SCAN_CONCEPTS,
+};
 use crate::surface::limits::{
     clamp_cfg_default, MAX_ACTION_TARGETS, MAX_CONCEPTS_PER_DERIVE, MAX_INSPECT_CANDIDATES,
     MAX_INSPECT_DEPTH, MAX_MAX_TOKENS, MAX_RESERVE_TTL_SECS, MAX_TOP_K, MAX_TRAVERSAL_DEPTH,
 };
+use crate::surface::neighbourhood::render_neighbourhood;
 use crate::surface::validate::check_size as validate_size;
 use crate::types::{AgentId, ConceptType, LamboError, NodeId, RecallQuery, RecallResult};
 use crate::writeq::{ReceiptAnswer, ReceiptId};
