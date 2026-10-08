@@ -110,9 +110,18 @@ boundaries; the orchestrator files it.
   cancellation, so a retry could drain the log while the replay finished a
   synchronous stretch. Now `ReplayCustody` returns it to its slot.
 
-Both are the R3-1 hazard `HandleCustody` already closes for the daemon, flush
-and canonization tasks. Durability was not at risk (every job is a durable
-intent). Note for tests: tokio completes the join of an aborted *parked* task
+- (Review L3, remediation) A close retried after one cancelled inside
+  `abort_workers` ran `quiesce` first, which saw `outstanding() > 0` (an
+  aborted worker never runs its `running -= 1`; only the post-join reset
+  does) and waited the whole `WRITE_QUEUE_DRAIN_BUDGET` for a settle nobody
+  would send. `abort_workers` now sets `Lanes::workers_aborted` before its
+  first await, and `quiesce` waits on `Lanes::drainable()`, which is zero
+  once that is set. Pinned by
+  `a_quiesce_after_a_cancelled_abort_does_not_wait_out_the_budget`.
+
+The first two are the R3-1 hazard `HandleCustody` already closes for the
+daemon, flush and canonization tasks. Durability was not at risk (every job
+is a durable intent). Note for tests: tokio completes the join of an aborted *parked* task
 at once, so only a task running on another thread opens the window; the
 regression tests use a multi-thread runtime and an embedder that blocks its
 thread.
@@ -123,7 +132,9 @@ thread.
 ... `write_queue_abandoned`" (since durable intents it is deferred:
 `intent_durable`, `write_queue_deferred`); that the heartbeat is aborted
 "first (right after latching closed)" (it is aborted once close holds the
-writers gate, after the queue drain); and that it shuts down "all three tasks".
+writers gate, after the replay stop, the queue drain and the gate wait, so
+it keeps refreshing for an unbounded stretch, not "at most the drain
+budget"); and that it shuts down "all three tasks".
 `WriteQueueCounters::abandoned` claimed close-budget jobs; `quiesce` said
 admission "promised" its budget; `derive_async_as` still had the pre-J3-R3-5
 "22 to 25 ms". Each corrected line says what it used to claim.
