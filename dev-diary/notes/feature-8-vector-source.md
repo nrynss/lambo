@@ -175,7 +175,15 @@ same refusal:
 - every refusal and empty answer: limit over the bound, limit 0 with a wrong
   contract, zero-norm / NaN / infinite probes, a renamed contract (same message),
   a wrong-width probe, no contract, unknown session, contract without vectors;
-  plus a foreign session on the graph source.
+  plus a foreign session on the graph source (a deliberate non-parity: SQLite
+  would answer). Every refusal compares the rendered message as well as the
+  variant; the wrong-width message is SQLite's word for word.
+
+Those cases load the graph from SQLite, so its vectors have been through the
+BLOB decode. `vector_e2e::vector_graph_parity_on_a_live_holder_graph` covers the
+production case: a holder's live graph, vectors straight from the embedder and
+never reloaded, against SQLite after the flush, by score bits. A lossy codec
+(`{x:.5}`) turns it red while the loaded-graph cases stay green.
 
 Mutation-checked: dropping the probe check, or scoring a normalised probe,
 turns them red. The existing recall, derive, H1 cross-store and vector e2e
@@ -183,9 +191,10 @@ tests pass unchanged; the CI-grepped
 `sqlite_vector_leg_fires_on_an_organically_derived_concept` still runs the
 SQLite scan, because its recording wrapper does not forward the opt-in.
 
-Holder tests in `src/store/sqlite/tests/vector_e2e.rs`: zero store vector reads
-across a derive, a reopen, a recall whose vector leg fires and a queued derive
-through the write pipeline; the vector leg returns an unflushed concept and a
+Holder tests in `src/store/sqlite/tests/vector_e2e.rs`: zero store vector
+calls (counted on entry to the checked and the unchecked read, so a failed or
+unchecked call counts too) across a derive, a reopen, a recall whose vector leg
+fires and a queued derive through the write pipeline; the vector leg returns an unflushed concept and a
 near paraphrase merges into it, where the store path misses both. Turning the
 SQLite opt-in off turns all three red.
 
