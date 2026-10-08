@@ -447,24 +447,22 @@ pub(super) async fn close_bounded(mem: &Memory, early: &EarlyShutdown) -> Result
 /// argument lets `memory`'s tests drive the real body with
 /// `std::future::pending()` — see `an_abandoned_close_releases_the_lease_through_serve`.
 ///
-/// # J6's pre-arm is deliberately NOT wired in here
+/// # The second signal is a count on J6's pre-arm
 ///
-/// A third registration now exists in a serve process — [`EarlyShutdown`],
-/// armed at the acquire — and the question it raises is whether the escape
-/// hatch above still works, because that pre-arm's record is *latched*: once a
-/// signal sets it, it stays set for the life of the process. Feeding it into
-/// this `select!` would make the second arm ready on the first poll of every
-/// signal-initiated close, so the close it is meant to rescue would be
-/// abandoned before it had a chance to run — the tail lost by the very
-/// mechanism that exists to save it.
-///
-/// So [`close_bounded`] keeps building a **fresh** `shutdown_signal()`, and the
-/// property that makes that correct is `tokio::signal`'s: a registration
-/// created after a signal was delivered does not replay it, and a signal is
-/// delivered to *every* live registration rather than consumed by the first.
-/// The first Ctrl-C therefore starts the shutdown and does not abandon the
-/// close; a genuine second one reaches this fresh registration and does. The
-/// pre-arm can neither trip this early nor swallow the signal that should.
+/// This section said J6's pre-arm ([`EarlyShutdown`]) was "deliberately NOT
+/// wired in here" and that [`close_bounded`] "keeps building a **fresh**
+/// `shutdown_signal()`". Neither is true any more: [`close_bounded`] passes
+/// `early.second_signal()`, which resolves once the pre-arm has *counted* two
+/// signals. The fresh registration read the first signal as a second under
+/// CPU contention (its delivery reaches registrations only when the signal
+/// driver runs, so one created in that gap catches the first signal) and
+/// abandoned a close nobody asked to abandon; the count cannot be fooled by
+/// when the record is written. The full argument is on
+/// [`EarlyShutdown::second_signal`], and
+/// `one_signal_does_not_abandon_the_close_but_two_do` pins it. A latched
+/// record would still be wrong here, for the reason this section gave: it
+/// would make the escape hatch ready on the first poll of every
+/// signal-initiated close.
 pub(crate) async fn close_bounded_until(
     mem: &Memory,
     shutdown: impl Future<Output = ()>,
