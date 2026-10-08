@@ -2230,6 +2230,62 @@ mod tests {
         store.flush(&batch, Some(rb.token)).await.unwrap();
     }
 
+    /// Delete-only batches are fenced too. MemoryStore resolves a delete's
+    /// session from the stored row before the gate, which the SQL adapters
+    /// did not (they skipped deletes and so fenced nothing); this pins the
+    /// reference behaviour they now match.
+    #[tokio::test]
+    async fn a_stale_token_cannot_flush_a_delete_only_batch() {
+        let store = MemoryStore::new();
+        let sid = SessionId::from("fenced-deletes");
+        let (i1, c1) = (NodeId::new(), NodeId::new());
+        let ts = Utc::now();
+        let plant = MutationBatch {
+            mutation_epoch: 0,
+            gc_mark: Default::default(),
+            mutations: vec![plant_concept(&sid, c1, i1, "doomed", ts)],
+        };
+        store.flush(&plant, None).await.unwrap();
+
+        let ttl = Duration::from_secs(30);
+        let LeaseOutcome::Acquired(ra) = store
+            .acquire_lease(&sid, &holder("zombie", 1), ttl)
+            .await
+            .unwrap()
+        else {
+            panic!("the first holder must acquire");
+        };
+        store.force_expire_lease(&sid);
+        let LeaseOutcome::Acquired(rb) = store
+            .acquire_lease(&sid, &holder("successor", 2), ttl)
+            .await
+            .unwrap()
+        else {
+            panic!("the successor must take the lease over");
+        };
+
+        let delete = MutationBatch {
+            mutation_epoch: 1,
+            gc_mark: Default::default(),
+            mutations: vec![Mutation::DeleteNode { id: c1 }],
+        };
+        for token in [Some(ra.token), None] {
+            assert!(
+                matches!(
+                    store.flush(&delete, token).await,
+                    Err(StoreError::StaleWrite(_))
+                ),
+                "a delete-only batch under token {token:?} must be fenced"
+            );
+        }
+        let snap = store.load_session(&sid).await.unwrap();
+        assert!(snap.concepts.iter().any(|c| c.id == c1));
+
+        store.flush(&delete, Some(rb.token)).await.unwrap();
+        let snap = store.load_session(&sid).await.unwrap();
+        assert!(!snap.concepts.iter().any(|c| c.id == c1));
+    }
+
     #[tokio::test]
     async fn a_refresh_preserves_the_token_and_the_holder_still_writes() {
         let store = MemoryStore::new();
