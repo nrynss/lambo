@@ -2,9 +2,16 @@
 //! subject.
 
 use super::*;
+use crate::embed::Embedder;
 use crate::embed::FixtureEmbedder;
+use crate::graph::index::InvertedIndex;
+use crate::graph::Graph;
+use crate::store::GraphStore;
 use crate::types::Interaction;
+use crate::types::{ConceptType, EmbeddingContract, MatchStrategy, NodeId, SessionId};
 use crate::MemoryStore;
+use chrono::{DateTime, Utc};
+use parking_lot::RwLock;
 use std::sync::atomic::AtomicUsize;
 
 mod admission;
