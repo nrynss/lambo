@@ -254,17 +254,12 @@ async fn vector_beam_size_reaches_the_server_and_keeps_statement_timeout() {
     // (spec §6.4 / clippy::await_holding_lock). This is exactly why
     // `connect_options` is synchronous.
     let options = {
-        let _g = crate::test_util::env_lock();
-        let restore = env::var(VECTOR_BEAM_SIZE_ENV).ok();
-        env::set_var(VECTOR_BEAM_SIZE_ENV, "128");
+        let env = crate::test_util::env_lock();
+        env.set(VECTOR_BEAM_SIZE_ENV, "128");
         // Same normalization `CockroachStore::new` applies: sqlx + rustls
         // cannot open libpq's `sslrootcert=system`, and `connect_options`
         // is fed `self.dsn`, which is already rewritten.
         let built = CockroachStore::connect_options(&dsn_for_rustls(&dsn));
-        match restore {
-            Some(v) => env::set_var(VECTOR_BEAM_SIZE_ENV, v),
-            None => env::remove_var(VECTOR_BEAM_SIZE_ENV),
-        }
         built.unwrap()
     };
 

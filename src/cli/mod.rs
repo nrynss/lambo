@@ -981,8 +981,8 @@ mod sqlite_tests {
     }
 
     fn resolve_clean(cfg: &std::path::Path) -> ResolvedBackends {
-        let g = crate::test_util::env_lock();
-        resolve_clean_locked(cfg, &g)
+        let env = crate::test_util::env_lock();
+        resolve_clean_locked(cfg, &env)
     }
 
     /// The body of [`resolve_clean`], for a caller that already holds the env
@@ -999,10 +999,10 @@ mod sqlite_tests {
     /// section.
     fn resolve_clean_locked(
         cfg: &std::path::Path,
-        _held: &std::sync::MutexGuard<'static, ()>,
+        env: &crate::test_util::EnvGuard,
     ) -> ResolvedBackends {
         for k in ENV_KEYS {
-            std::env::remove_var(k);
+            env.remove(k);
         }
         resolve_from_config_path(Some(cfg)).expect("resolve sqlite")
     }
@@ -1050,12 +1050,11 @@ mod sqlite_tests {
         )
         .unwrap();
 
-        let g = crate::test_util::env_lock();
-        let old = std::env::var_os("LAMBO_PROMOTION_POLICY");
-        std::env::set_var("LAMBO_PROMOTION_POLICY", "Solo");
+        let env = crate::test_util::env_lock();
+        env.set("LAMBO_PROMOTION_POLICY", "Solo");
 
         assert_eq!(
-            resolve_clean_locked(&cfg, &g).config.promotion_policy,
+            resolve_clean_locked(&cfg, &env).config.promotion_policy,
             crate::canon::PromotionPolicy::Swarm,
             "a stray LAMBO_PROMOTION_POLICY in the ambient shell must not reach \
              a resolve that claims to be clean"
@@ -1065,18 +1064,14 @@ mod sqlite_tests {
         // file-set policy through, so the assertion above is about the
         // environment and not about the selector being inert here.
         assert_eq!(
-            resolve_clean_locked(&with_policy, &g)
+            resolve_clean_locked(&with_policy, &env)
                 .config
                 .promotion_policy,
             crate::canon::PromotionPolicy::Solo,
             "the file's own selector must still reach the resolved Config"
         );
 
-        match old {
-            Some(v) => std::env::set_var("LAMBO_PROMOTION_POLICY", v),
-            None => std::env::remove_var("LAMBO_PROMOTION_POLICY"),
-        }
-        drop(g);
+        drop(env);
     }
 
     #[tokio::test]
@@ -1085,9 +1080,9 @@ mod sqlite_tests {
         let session = "t83-sqlite";
 
         let store = {
-            let _g = crate::test_util::env_lock();
+            let env = crate::test_util::env_lock();
             for k in ENV_KEYS {
-                std::env::remove_var(k);
+                env.remove(k);
             }
             let file = crate::LamboFile::load_resolved(Some(&cfg)).expect("file");
             assert_eq!(file.store.kind, StoreKind::Sqlite);
