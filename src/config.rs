@@ -937,14 +937,13 @@ mod tests {
     /// rule and all nine sibling overrides.
     #[test]
     fn promotion_policy_empty_env_is_unset_and_leaves_the_file_value() {
-        let _env = crate::test_util::env_lock();
-        let old = std::env::var_os("LAMBO_PROMOTION_POLICY");
+        let env = crate::test_util::env_lock();
         let dir = scratch_config_dir("empty-env");
         let path = dir.join("lambo.toml");
         std::fs::write(&path, "promotion_policy = \"Solo\"\n").expect("config");
 
         for blank in ["", "   ", "\t"] {
-            std::env::set_var("LAMBO_PROMOTION_POLICY", blank);
+            env.set("LAMBO_PROMOTION_POLICY", blank);
             let resolved = LamboFile::load_resolved(Some(&path))
                 .unwrap_or_else(|e| panic!("blank {blank:?} must be unset, not an error: {e}"));
             assert_eq!(
@@ -958,18 +957,13 @@ mod tests {
         // `None` here, which `resolve_backends` reads as "do not touch
         // `Config::default().promotion_policy`".
         std::fs::write(&path, "[store]\nkind = \"memory\"\n").expect("config");
-        std::env::set_var("LAMBO_PROMOTION_POLICY", "");
+        env.set("LAMBO_PROMOTION_POLICY", "");
         assert_eq!(
             LamboFile::load_resolved(Some(&path))
                 .expect("blank env is unset")
                 .promotion_policy,
             None
         );
-
-        match old {
-            Some(value) => std::env::set_var("LAMBO_PROMOTION_POLICY", value),
-            None => std::env::remove_var("LAMBO_PROMOTION_POLICY"),
-        }
     }
 
     /// A scratch directory for the env-override tests, unique per process and
@@ -980,9 +974,8 @@ mod tests {
 
     #[test]
     fn promotion_policy_env_beats_file_and_unknown_value_fails_closed() {
-        let _env = crate::test_util::env_lock();
-        let old = std::env::var_os("LAMBO_PROMOTION_POLICY");
-        std::env::set_var("LAMBO_PROMOTION_POLICY", "Swarm");
+        let env = crate::test_util::env_lock();
+        env.set("LAMBO_PROMOTION_POLICY", "Swarm");
         let dir = scratch_config_dir("env-wins");
         let path = dir.join("lambo.toml");
         std::fs::write(&path, "promotion_policy = \"Solo\"\n").expect("config");
@@ -992,7 +985,7 @@ mod tests {
 
         // The env surface is the file surface's parser, so it is lenient in
         // exactly the same way and no more.
-        std::env::set_var("LAMBO_PROMOTION_POLICY", " swarm ");
+        env.set("LAMBO_PROMOTION_POLICY", " swarm ");
         assert_eq!(
             LamboFile::load_resolved(Some(&path))
                 .expect("trimmed lowercase env override")
@@ -1000,17 +993,12 @@ mod tests {
             Some(PromotionPolicy::Swarm)
         );
 
-        std::env::set_var("LAMBO_PROMOTION_POLICY", "Everywhere");
+        env.set("LAMBO_PROMOTION_POLICY", "Everywhere");
         let err = LamboFile::load_resolved(Some(&path))
             .expect_err("unknown env value must fail at startup")
             .to_string();
         for needle in ["LAMBO_PROMOTION_POLICY", "Everywhere", "Swarm", "Solo"] {
             assert!(err.contains(needle), "error must name {needle}: {err}");
-        }
-
-        match old {
-            Some(value) => std::env::set_var("LAMBO_PROMOTION_POLICY", value),
-            None => std::env::remove_var("LAMBO_PROMOTION_POLICY"),
         }
     }
 

@@ -142,7 +142,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97.1
+        uses: dtolnay/rust-toolchain@70dec6087f2cb6bab9fbac4da23160afbe848e91 # 1.99.0
         with:
           components: rustfmt, clippy
 
@@ -348,10 +348,10 @@ jobs:
 
       - name: Install Rust toolchain
         # No `toolchain:` input (v020-R1-P3-1): the committed rust-toolchain.toml
-        # (1.97.1) governs this job, matching ci.yml and the build job above.
-        # The `# 1.97.1` comment pins the dtolnay action code revision, not the
+        # (1.99.0) governs this job, matching ci.yml and the build job above.
+        # The `# 1.99.0` comment pins the dtolnay action code revision, not the
         # toolchain.
-        uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97.1
+        uses: dtolnay/rust-toolchain@70dec6087f2cb6bab9fbac4da23160afbe848e91 # 1.99.0
 
       - name: Publish to crates.io
         env:

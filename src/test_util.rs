@@ -12,12 +12,91 @@ use std::sync::{Arc, LazyLock, Mutex, MutexGuard, OnceLock};
 use parking_lot::Mutex as PlMutex;
 use tracing_subscriber::fmt::MakeWriter;
 
-/// Global mutex for any test that sets/removes process environment variables.
-pub fn env_lock() -> MutexGuard<'static, ()> {
+/// Take the process-environment lock: the only way a lib test may mutate the
+/// environment.
+///
+/// Every lib test that sets or removes a variable does it through the returned
+/// [`EnvGuard`], so mutations are serialised behind one global mutex, and each
+/// variable the guard touched is put back to its value from before the first
+/// touch when the guard drops (on the panic path too). A test that only needs
+/// a quiet environment for a read can hold the guard without mutating
+/// anything.
+pub fn env_lock() -> EnvGuard {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+    let lock = LOCK
+        .get_or_init(|| Mutex::new(()))
         .lock()
-        .unwrap_or_else(|e| e.into_inner())
+        .unwrap_or_else(|e| e.into_inner());
+    EnvGuard {
+        _lock: lock,
+        saved: std::cell::RefCell::new(Vec::new()),
+    }
+}
+
+/// Proof that the caller holds the process-environment lock, and the scope of
+/// its mutations. See [`env_lock`].
+pub struct EnvGuard {
+    _lock: MutexGuard<'static, ()>,
+    /// First-touch values, in touch order: `None` means "was unset".
+    saved: std::cell::RefCell<Vec<(std::ffi::OsString, Option<std::ffi::OsString>)>>,
+}
+
+impl EnvGuard {
+    /// Set `key` to `value` until this guard drops.
+    pub fn set(&self, key: impl AsRef<std::ffi::OsStr>, value: impl AsRef<std::ffi::OsStr>) {
+        let key = key.as_ref();
+        self.remember(key);
+        // SAFETY: see `mutate`.
+        unsafe { Self::mutate(key, Some(value.as_ref())) }
+    }
+
+    /// Unset `key` until this guard drops.
+    pub fn remove(&self, key: impl AsRef<std::ffi::OsStr>) {
+        let key = key.as_ref();
+        self.remember(key);
+        // SAFETY: see `mutate`.
+        unsafe { Self::mutate(key, None) }
+    }
+
+    fn remember(&self, key: &std::ffi::OsStr) {
+        let mut saved = self.saved.borrow_mut();
+        if !saved.iter().any(|(k, _)| k == key) {
+            saved.push((key.to_owned(), std::env::var_os(key)));
+        }
+    }
+
+    /// The single place lib tests call `set_var` / `remove_var`.
+    ///
+    /// # Safety
+    ///
+    /// Only called through `&self`, and an `EnvGuard` exists only while its
+    /// holder owns the global env mutex, so no two lib tests mutate the
+    /// environment at once and no env-reading test that also holds the lock
+    /// runs concurrently with a mutation. `std::env::var`/`var_os` readers
+    /// elsewhere are synchronised with these calls by std's own environment
+    /// lock. What the mutex cannot exclude is a thread reading the
+    /// environment through libc directly (`getenv` inside a C library) while
+    /// another test mutates it (libc may reallocate `environ` on any `setenv`).
+    /// That residual exposure is the one every `cargo test` binary that sets
+    /// a variable carries; the lock removes the test-against-test races. Callers must
+    /// hold the env mutex: only `EnvGuard` methods and its `Drop` call this.
+    unsafe fn mutate(key: &std::ffi::OsStr, value: Option<&std::ffi::OsStr>) {
+        match value {
+            Some(v) => unsafe { std::env::set_var(key, v) },
+            None => unsafe { std::env::remove_var(key) },
+        }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        // Restore in reverse touch order while the mutex is still held (the
+        // `_lock` field drops after this body runs).
+        for (key, old) in self.saved.get_mut().drain(..).rev() {
+            // SAFETY: see `mutate`; the lock is held for the whole body.
+            unsafe { Self::mutate(&key, old.as_deref()) }
+        }
+    }
 }
 
 /// Run an async cleanup to completion from a synchronous `Drop`, whatever
@@ -258,5 +337,36 @@ mod run_blocking_tests {
             flag.store(true, Ordering::SeqCst);
         });
         assert!(done.load(Ordering::SeqCst));
+    }
+}
+
+#[cfg(test)]
+mod env_guard_tests {
+    use super::env_lock;
+
+    /// Every variable an `EnvGuard` touched is back to its first-touch state
+    /// once the guard drops: a set variable that was unset is unset again,
+    /// and a removed variable that was set comes back with its old value,
+    /// however many times either was changed in between. The "was set" half
+    /// uses `CARGO_PKG_NAME`, which Cargo exports to every test binary it
+    /// runs and nothing in the crate reads at run time.
+    #[test]
+    fn restores_every_touched_variable_on_drop() {
+        const UNSET: &str = "LAMBO_TEST_ENV_GUARD_WAS_UNSET";
+        const SET: &str = "CARGO_PKG_NAME";
+        let original = std::env::var_os(SET).expect("cargo test exports CARGO_PKG_NAME");
+        {
+            let env = env_lock();
+            assert_eq!(std::env::var_os(UNSET), None);
+            env.set(UNSET, "a");
+            env.set(UNSET, "b");
+            env.remove(SET);
+            env.set(SET, "changed");
+            assert_eq!(std::env::var(UNSET).as_deref(), Ok("b"));
+            assert_eq!(std::env::var(SET).as_deref(), Ok("changed"));
+        }
+        let _env = env_lock();
+        assert_eq!(std::env::var_os(UNSET), None);
+        assert_eq!(std::env::var_os(SET), Some(original));
     }
 }

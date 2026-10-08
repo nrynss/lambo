@@ -693,16 +693,11 @@ mod tests {
     ///    the baseline. Step 2 is what makes step 3 mean something.
     #[test]
     fn resolve_env_vars_clears_every_override_it_names() {
-        let _g = crate::test_util::env_lock();
+        let env = crate::test_util::env_lock();
         let table = override_table();
-        // Restore the ambient shell afterwards. Saved from the table, so a name
-        // the list omits is still put back.
-        let saved: Vec<(&str, Option<std::ffi::OsString>)> = table
-            .iter()
-            .map(|o| o.var)
-            .chain(RESOLVE_ENV_VARS.iter().copied())
-            .map(|k| (k, std::env::var_os(k)))
-            .collect();
+        // `env` puts the ambient shell back on drop: every table name is
+        // removed in step 1 and every list name in step 3, so a name the list
+        // omits is still restored.
 
         let dir = crate::test_util::ScratchDir::new("lambo-resolve-env-vars");
         let path = dir.join("lambo.toml");
@@ -719,12 +714,12 @@ mod tests {
             std::fs::write(&path, o.file).expect("config");
             // Step 1 — a clean slate established WITHOUT consulting the list.
             for entry in &table {
-                std::env::remove_var(entry.var);
+                env.remove(entry.var);
             }
             let baseline = observe(&path);
 
             // Step 2 — the resolve must actually read this variable.
-            std::env::set_var(o.var, o.value);
+            env.set(o.var, o.value);
             let overridden = observe(&path);
             assert_ne!(
                 baseline, overridden,
@@ -736,7 +731,7 @@ mod tests {
 
             // Step 3 — and clearing the list alone must undo it.
             for k in RESOLVE_ENV_VARS {
-                std::env::remove_var(k);
+                env.remove(k);
             }
             assert_eq!(
                 baseline,
@@ -746,13 +741,6 @@ mod tests {
                  --config file the harness wrote",
                 o.var
             );
-        }
-
-        for (k, v) in saved {
-            match v {
-                Some(v) => std::env::set_var(k, v),
-                None => std::env::remove_var(k),
-            }
         }
     }
     #[test]

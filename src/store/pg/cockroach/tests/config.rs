@@ -13,31 +13,17 @@ use super::*;
 async fn cockroach_ignores_the_cloud_sql_iam_opt_in() {
     const { assert!(!CockroachDialect::SUPPORTS_CLOUD_SQL_IAM_AUTH) };
     let store = {
-        let _g = crate::test_util::env_lock();
-        let prev_iam = std::env::var_os("LAMBO_POSTGRES_IAM");
-        let prev_gcp = std::env::var_os("GCP_LAMBO_CREDENTIALS");
-        let prev_adc = std::env::var_os("GOOGLE_APPLICATION_CREDENTIALS");
-        std::env::set_var("LAMBO_POSTGRES_IAM", "1");
-        std::env::remove_var("GCP_LAMBO_CREDENTIALS");
-        std::env::remove_var("GOOGLE_APPLICATION_CREDENTIALS");
-        let store = CockroachStore::new(StoreConfig {
+        let env = crate::test_util::env_lock();
+        env.set("LAMBO_POSTGRES_IAM", "1");
+        env.remove("GCP_LAMBO_CREDENTIALS");
+        env.remove("GOOGLE_APPLICATION_CREDENTIALS");
+        CockroachStore::new(StoreConfig {
             kind: crate::store::StoreKind::Cockroach,
             dsn: Some("postgresql://u@127.0.0.1:1/lambo?sslmode=disable".into()),
             path: None,
             vector_dim: None,
         })
-        .expect("construct");
-        match prev_iam {
-            Some(v) => std::env::set_var("LAMBO_POSTGRES_IAM", v),
-            None => std::env::remove_var("LAMBO_POSTGRES_IAM"),
-        }
-        if let Some(v) = prev_gcp {
-            std::env::set_var("GCP_LAMBO_CREDENTIALS", v);
-        }
-        if let Some(v) = prev_adc {
-            std::env::set_var("GOOGLE_APPLICATION_CREDENTIALS", v);
-        }
-        store
+        .expect("construct")
     };
     store
         .pool()
@@ -61,10 +47,9 @@ fn dsn_env_named_in_errors_is_the_one_config_reads() {
 /// believes accuracy was raised when it was not.
 #[test]
 fn vector_beam_size_env_parses_and_fails_closed() {
-    let _g = crate::test_util::env_lock();
-    let restore = std::env::var(VECTOR_BEAM_SIZE_ENV).ok();
+    let env = crate::test_util::env_lock();
 
-    std::env::remove_var(VECTOR_BEAM_SIZE_ENV);
+    env.remove(VECTOR_BEAM_SIZE_ENV);
     assert_eq!(
         vector_beam_size_from_env().unwrap(),
         None,
@@ -81,30 +66,25 @@ fn vector_beam_size_env_parses_and_fails_closed() {
     );
 
     // Exported-but-blank behaves as absent (same convention as LAMBO_STORE).
-    std::env::set_var(VECTOR_BEAM_SIZE_ENV, "");
+    env.set(VECTOR_BEAM_SIZE_ENV, "");
     assert_eq!(vector_beam_size_from_env().unwrap(), None);
-    std::env::set_var(VECTOR_BEAM_SIZE_ENV, "   ");
+    env.set(VECTOR_BEAM_SIZE_ENV, "   ");
     assert_eq!(vector_beam_size_from_env().unwrap(), None);
 
-    std::env::set_var(VECTOR_BEAM_SIZE_ENV, "128");
+    env.set(VECTOR_BEAM_SIZE_ENV, "128");
     assert_eq!(vector_beam_size_from_env().unwrap(), Some(128));
     // Server-enforced bounds, verified live 2026-08-13.
-    std::env::set_var(VECTOR_BEAM_SIZE_ENV, "1");
+    env.set(VECTOR_BEAM_SIZE_ENV, "1");
     assert_eq!(vector_beam_size_from_env().unwrap(), Some(1));
-    std::env::set_var(VECTOR_BEAM_SIZE_ENV, "2048");
+    env.set(VECTOR_BEAM_SIZE_ENV, "2048");
     assert_eq!(vector_beam_size_from_env().unwrap(), Some(2048));
 
     for bad in ["0", "2049", "-1", "64.5", "many", "1e3"] {
-        std::env::set_var(VECTOR_BEAM_SIZE_ENV, bad);
+        env.set(VECTOR_BEAM_SIZE_ENV, bad);
         assert!(
             vector_beam_size_from_env().is_err(),
             "{bad:?} must be rejected at pool construction, not silently dropped"
         );
-    }
-
-    match restore {
-        Some(v) => std::env::set_var(VECTOR_BEAM_SIZE_ENV, v),
-        None => std::env::remove_var(VECTOR_BEAM_SIZE_ENV),
     }
 }
 

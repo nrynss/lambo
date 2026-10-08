@@ -1,0 +1,4 @@
+# Keep the 2021 formatting style for now: the edition 2024 switch (#42)
+# changes language semantics only. Adopting style_edition 2024 is a
+# separate, purely mechanical follow-up.
+style_edition = "2021"
