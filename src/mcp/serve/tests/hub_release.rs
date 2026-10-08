@@ -140,9 +140,19 @@ async fn release_ends_a_session_still_in_its_handshake() {
     let baseline = Arc::strong_count(&mem);
 
     let hub = bind_hub(Some(&endpoint), &server, 4);
+    // The accept loop holds its own server clone; a started session adds one
+    // more, so a count above this means the handshaking session exists.
+    let accepting = Arc::strong_count(&mem);
     let mut silent = UnixStream::connect(endpoint.path()).await.expect("dial");
-    // Let the accept loop take the connection and start its session.
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Wait until the accept loop has taken the connection and started its
+    // session, so release is certain to meet a session mid-handshake.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while Arc::strong_count(&mem) <= accepting {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the accept loop started a session for the silent client");
 
     tokio::time::timeout(
         ENDPOINT_RELEASE_GRACE + Duration::from_secs(2),
