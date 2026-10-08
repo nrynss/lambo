@@ -18,30 +18,30 @@ public item of the three modules). `pub(crate)` items nothing outside named
 
 | module | holds | lines |
 |---|---|---|
-| `mcp/serve.rs` | lifecycle map, `Transport`, `ServeOptions`, `serve()` | 572 |
+| `mcp/serve.rs` | lifecycle map, `Transport`, `ServeOptions`, `serve()` | 570 |
 | `mcp/serve/builder.rs` | `resolve_serve_backends`, `serve_builder`, `build_memory`, `explain_startup_failure` | 140 |
 | `mcp/serve/roles.rs` | election constants, `Role`, `resolve_role`, refusal-message repair, `record_refused_loser` | 410 |
-| `mcp/serve/hub.rs` | every Unix-socket touch: `derive_endpoint`, `probe_holder`, `bind_hub`/`Hub::release`, `serve_endpoint` | 225 |
-| `mcp/serve/heartbeat.rs` | `authorize_ledger`, heartbeat, startup line, refusal poller + `RefusalCursor`, `log_events` | 296 |
-| `mcp/serve/http_guards.rs` | `SecretToken`, `authorize_bind`, `RateLimiter`, session cap, body cap, `guard_request` | 428 |
-| `mcp/serve/transport.rs` | `Exit`, `run_until_shutdown`, `setup_or_shutdown`, stdio, HTTP | 318 |
-| `mcp/serve/signals.rs` | `shutdown_signal`, `shutdown_signal_counter`, `EarlyShutdown` + `AttachShutdown` impl | 470 |
-| `mcp/serve/shutdown.rs` | grace budgets + asserts, `HolderShutdown`/`wind_down`, `run_and_close`, `close_bounded*`, `HolderTasks`, `close_ledger`, the stage table | 564 |
-| `mcp/proxy.rs` | `HubProxy`, `new`, the pump `run`, interface with serve | 616 |
-| `mcp/proxy/dialing.rs` | budgets + assert, `NotProxyable`, `proxyable`, `dial_dir`, `connect`, the raced dial | 493 |
-| `mcp/proxy/handshake.rs` | `Handshake` and its replay | 220 |
-| `mcp/proxy/forwarding.rs` | request/response ids, holder reader task, framed write, in-flight warning + receipt assert | 189 |
-| `mcp/proxy/disconnect.rs` | unreachable/lost codes and messages, `answer_lost`, `client_gone` | 155 |
+| `mcp/serve/hub.rs` | every Unix-socket touch: `derive_endpoint`, `probe_holder`, `bind_hub`/`Hub::release`, `serve_endpoint` and its tracked sessions | 335 |
+| `mcp/serve/heartbeat.rs` | `authorize_ledger`, heartbeat, startup line, refusal poller + `RefusalCursor`, `log_events` | 287 |
+| `mcp/serve/http_guards.rs` | `SecretToken`, `authorize_bind`, `RateLimiter`, session cap, body cap, `guard_request` | 425 |
+| `mcp/serve/transport.rs` | `Exit`, `run_until_shutdown`, `setup_or_shutdown`, stdio, HTTP | 313 |
+| `mcp/serve/signals.rs` | `shutdown_signal`, `shutdown_signal_counter`, `EarlyShutdown` + `AttachShutdown` impl | 459 |
+| `mcp/serve/shutdown.rs` | grace budgets + asserts, `HolderShutdown`/`wind_down`, `run_and_close`, `close_bounded*`, `HolderTasks`, `close_ledger`, the stage table | 574 |
+| `mcp/proxy.rs` | `HubProxy`, `new`, the pump `run`, interface with serve | 617 |
+| `mcp/proxy/dialing.rs` | budgets + assert, `NotProxyable`, `proxyable`, `dial_dir`, `connect`, the raced dial | 488 |
+| `mcp/proxy/handshake.rs` | `Handshake` and its replay | 217 |
+| `mcp/proxy/forwarding.rs` | request/response ids, holder reader task, framed write, in-flight warning + receipt assert | 186 |
+| `mcp/proxy/disconnect.rs` | unreachable/lost codes and messages, `answer_lost`, `client_gone` | 154 |
 | `mcp/proxy/framing.rs` | `Framed`, `read_frame` | 105 |
 | `cli/serve_web.rs` | assets, `Args`, `run`, `serve_bounded`, signal registration | 361 |
 | `cli/serve_web/auth.rs` | `AuthToken`, resolution, bind refusal, bearer gate | 134 |
-| `cli/serve_web/state.rs` | `AppState`, `Freshness` | 52 |
+| `cli/serve_web/state.rs` | `AppState`, `Freshness` | 49 |
 | `cli/serve_web/dto.rs` | every response and query type | 303 |
 | `cli/serve_web/projections.rs` | hop-1 structural dependents, event feed order, stats | 248 |
 | `cli/serve_web/routes.rs` | handlers, `router`, `/api/graph` caps | 425 |
 | `mcp/endpoint.rs` | unchanged production (the #39 seam) | 830 |
 | `mcp/endpoint/tests.rs` | its former inline tests, same module path | 740 |
-| `surface/bearer.rs` | the shared bearer check (fix below) | 69 |
+| `surface/bearer.rs` | the shared bearer check (fix below) and its unit tests | 212 |
 
 Before: `serve.rs` 3,117, `proxy.rs` 1,667, `serve_web.rs` 1,469,
 `endpoint.rs` 1,571.
@@ -105,6 +105,26 @@ functions `serve()` calls in the old order. Spawn points, abort order, the
 idempotent second keep-warm abort (#13) and the ledger's close line are
 unchanged. No logging added (that is #40).
 
+**Stage 6 now does what the table says (review L2, own `fix(serve)`
+commit).** The endpoint ran each proxy connection in a detached task, and
+`Hub::release` aborted only the accept loop, so proxy sessions outlived
+stage 6 until the runtime dropped: a call in that window reached a closed
+`Memory` and could append to the ledger during stage 7. The hub now owns the
+sessions (a `JoinSet`) and `release` (now async) signals each to stop; each
+cancels its rmcp service and awaits it (rmcp drains in-flight responses for
+up to 2 s, then closes the connection), bounded by
+`hub::ENDPOINT_RELEASE_GRACE` (3 s), after which stragglers are aborted with
+a WARN. The proxy sees what a holder exit already gives it, at stage 6
+instead of at runtime drop. The wait is after the lease release and the
+final flush, outside `SHUTDOWN_BUDGET` like the ledger's 0.5 s drain, so a
+supervisor timeout (#40's `ExitTimeOut`) should cover 15 + 3 + 0.5 s. The
+residue the stage table now names: rmcp runs each tool call in a task of its
+own, which a cancelled service waits on for its drain but does not join, so
+a call still running past that can append after stage 7 begins, where the
+ledger counts it as `write_failed`. Pinned by `serve::tests::hub_release`
+(fails on the old release). No overlap with #40's stall itself: that one
+logged no `session closed` line, so it stalled at stage 3 or earlier.
+
 ## Defect fixed on the way (own commit, `36fd498`)
 
 **The portal's token comparator.** T1-P3-1 (full-stack sweep, 2026-08-16)
@@ -119,7 +139,16 @@ and messages, and results are identical for every input. This deviates from
 the remediation's chosen direction deliberately; the argument is above and in
 the module doc. Pinned by `cli::serve_web::tests::auth::the_portal_uses_the_shared_bearer_check`
 (fails on the previous tree). Boolean results cannot distinguish the two
-loops, so the pin is structural.
+loops, so that pin is structural, and on its own it did not guard the
+direction: flipping the shared loop back kept every test green (review L1).
+The remediation factored the loop into `surface::bearer::fold_diff`, which
+takes a per-iteration callback (a no-op in production), and
+`surface::bearer::tests::the_loop_count_follows_the_presented_length_not_the_secret`
+counts iterations over a grid of presented and secret lengths; flipping the
+loop fails that test and only that test. The doc also now says the check is
+stronger on length than `subtle`'s slice `ct_eq` (which returns early on a
+length mismatch) and names the one secret-dependent operation left, the
+`%` by the secret's length.
 
 Also fixed (comment-only, `42cf536`): two comments in `serve.rs` truncated
 mid-sentence by earlier edits, and `wind_down`'s whole doc block sitting on
@@ -132,9 +161,11 @@ the failure JE2E-R2-1 once recorded for `shutdown_signal`.
   routes_constant_covers_every_registered_route}` and the new bearer scan read
   `PRODUCTION_SOURCES` in `cli/serve_web/tests/mod.rs`, every portal
   production file; the router scan finds the one file holding `fn router(`.
-  `routes::the_source_scans_cover_every_production_file` (new) lists
-  `src/cli/serve_web/` at test time and fails if a file is missing from that
-  list, so the next split cannot silently narrow the scans. Checked by
+  `routes::the_source_scans_cover_every_production_file` (new) walks
+  `src/cli/serve_web/` at test time, recursively and skipping only `tests/`
+  (review L3: it first read the top level only), and fails if a file is
+  missing from that list, so the next split, into a subdirectory or not,
+  cannot silently narrow the scans. Checked by
   mutation: a POST route in `routes.rs` fails both route scans, an unlisted
   file fails the coverage test, a gate bypassing `surface::bearer` in
   `auth.rs` fails the bearer scan.

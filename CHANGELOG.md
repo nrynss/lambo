@@ -66,6 +66,14 @@
   over the configured token, so the time a check took tracked the secret's
   length; the shared one loops over the presented value, which the caller
   already knows. Which tokens are accepted is unchanged. Pre-existing.
+- A holder's shutdown now ends the sessions of clients attached through the
+  session endpoint (proxies) once the session is closed, and waits for them,
+  for up to 3 s (#28). They used to stay connected until the process exited,
+  so a call arriving after the close was refused against a closed session and
+  could still write to the call ledger as it drained. A proxy sees the same
+  dropped connection a holder exit gives it, a little earlier. A shutdown with
+  proxies attached can take up to 3 s longer, after the tail is durable and
+  the lease released, never before. Pre-existing.
 - Concepts created as `parent_of` ends are embedded (issue #16 §2). Hybrid
   `derive` created an end named only in `parent_of` with no vector, so it was
   invisible to recall's vector leg until `re-embed --missing-only` backfilled
