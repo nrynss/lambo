@@ -321,3 +321,99 @@ async fn two_connections_on_one_file_serialize_on_the_lease() {
     drop(store_a);
     drop(store_b);
 }
+
+/// Rows of `table` with this id, read straight from the store.
+async fn rows_with_id(store: &SqliteStore, table: &str, id: NodeId) -> i64 {
+    sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table} WHERE id = ?1"))
+        .bind(id.0.to_string())
+        .fetch_one(store.pool())
+        .await
+        .unwrap()
+}
+
+/// #1 fencing, delete-only batches. `DeleteNode`/`DeleteEdge` carry no
+/// session, so the fenced set used to be built from the other mutations only,
+/// and a batch of nothing but deletes (what a GC sweep drains) committed with
+/// no token check at all. This is the zombie-writer shape: the first holder's
+/// lease lapses, a second writer takes the session over (token 2), and the
+/// first one's stale token must not be able to delete the second one's rows,
+/// through either delete kind.
+#[tokio::test]
+async fn a_stale_token_cannot_flush_a_delete_only_batch() {
+    let store = test_store();
+    store.init_schema().await.unwrap();
+    let sid = SessionId::from("fenced-deletes");
+    let ts = Utc::now();
+    let (origin, concept, derives) = (NodeId::new(), NodeId::new(), NodeId::new());
+    let planted = MutationBatch {
+        mutation_epoch: 1,
+        gc_mark: Default::default(),
+        mutations: vec![
+            plant_interaction(&sid, origin, None, ts),
+            plant_concept(&sid, concept, origin, "doomed", ConceptType::Entity, ts),
+            Mutation::UpsertEdge {
+                edge: crate::types::Edge {
+                    id: derives,
+                    session_id: sid.clone(),
+                    source: origin,
+                    target: concept,
+                    edge_type: EdgeType::Derives,
+                    weight: 1.0,
+                    reinforcements: 0,
+                    created_at: ts,
+                    last_reinforced: ts,
+                    event_time: None,
+                },
+            },
+        ],
+    };
+    store.flush(&planted, None).await.unwrap();
+
+    // Holder 1 lapses; holder 2 takes over and mints token 2.
+    let ttl = Duration::from_secs(1);
+    let LeaseOutcome::Acquired(first) = store
+        .acquire_lease(&sid, &lease_holder("zombie", 1), ttl)
+        .await
+        .unwrap()
+    else {
+        panic!("the first holder must acquire");
+    };
+    tokio::time::sleep(Duration::from_millis(1_300)).await;
+    let LeaseOutcome::Acquired(second) = store
+        .acquire_lease(&sid, &lease_holder("successor", 2), ttl)
+        .await
+        .unwrap()
+    else {
+        panic!("the successor must take the lapsed lease over");
+    };
+    assert!(second.token > first.token);
+
+    let deletes = |mutations: Vec<Mutation>| MutationBatch {
+        mutation_epoch: 2,
+        gc_mark: Default::default(),
+        mutations,
+    };
+    let edge_only = deletes(vec![Mutation::DeleteEdge { id: derives }]);
+    let node_only = deletes(vec![Mutation::DeleteNode { id: concept }]);
+    for (what, batch) in [("DeleteEdge", &edge_only), ("DeleteNode", &node_only)] {
+        for token in [Some(first.token), None] {
+            let got = store.flush(batch, token).await;
+            assert!(
+                matches!(got, Err(StoreError::StaleWrite(_))),
+                "a {what}-only batch under token {token:?} must be fenced, got {got:?}"
+            );
+        }
+    }
+    assert_eq!(rows_with_id(&store, "concepts", concept).await, 1);
+    assert_eq!(rows_with_id(&store, "edges", derives).await, 1);
+
+    // The current holder's token passes, and the deletes land.
+    store.flush(&edge_only, Some(second.token)).await.unwrap();
+    store.flush(&node_only, Some(second.token)).await.unwrap();
+    assert_eq!(rows_with_id(&store, "concepts", concept).await, 0);
+    assert_eq!(rows_with_id(&store, "edges", derives).await, 0);
+
+    // A delete of a row that is already gone resolves no session: a no-op,
+    // not an error, whatever the token.
+    store.flush(&node_only, Some(first.token)).await.unwrap();
+}

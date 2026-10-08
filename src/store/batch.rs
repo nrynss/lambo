@@ -532,6 +532,27 @@ pub fn batch_session_ids(mutations: &[Mutation]) -> Vec<&str> {
     out
 }
 
+/// Ids a batch deletes, as `(node ids, edge ids)` in first-seen order.
+///
+/// [`batch_session_ids`] cannot name the session of a `DeleteNode` or
+/// `DeleteEdge`: the mutations carry only the id. The fencing gate still has
+/// to cover those rows, or a delete-only batch (a GC sweep) would commit with
+/// no token check at all. Both SQL adapters therefore resolve the owning
+/// session of each id here, inside the flush transaction and before any
+/// delete runs, and add it to the fenced set.
+pub fn batch_deleted_ids(mutations: &[Mutation]) -> (Vec<NodeId>, Vec<NodeId>) {
+    let (mut nodes, mut edges) = (Vec::new(), Vec::new());
+    let mut seen = std::collections::HashSet::new();
+    for m in mutations {
+        match m {
+            Mutation::DeleteNode { id } if seen.insert((true, *id)) => nodes.push(*id),
+            Mutation::DeleteEdge { id } if seen.insert((false, *id)) => edges.push(*id),
+            _ => {}
+        }
+    }
+    (nodes, edges)
+}
+
 /// Statement count a planned flush costs. Handy for tests and for the
 /// latency arithmetic in the module docs.
 pub fn planned_statements(mutations: &[Mutation], limits: BulkLimits) -> usize {
@@ -1238,6 +1259,27 @@ mod tests {
             },
         ];
         assert_eq!(batch_session_ids(&mutations), vec!["plan", "other"]);
+    }
+
+    /// The deletes `batch_session_ids` skips are exactly what the fencing
+    /// gate resolves to sessions in the SQL adapters, split by kind, deduped,
+    /// first-seen order. A node and an edge sharing an id stay on both lists.
+    #[test]
+    fn deleted_ids_are_split_by_kind_deduped_and_first_seen() {
+        let (n1, n2, e1) = (NodeId::new(), NodeId::new(), NodeId::new());
+        let mutations = vec![
+            Mutation::DeleteNode { id: n2 },
+            Mutation::UpsertNode {
+                node: Node::Interaction(interaction(NodeId::new(), None)),
+            },
+            Mutation::DeleteEdge { id: e1 },
+            Mutation::DeleteNode { id: n1 },
+            Mutation::DeleteNode { id: n2 },
+            Mutation::DeleteEdge { id: n1 },
+            Mutation::DeleteEdge { id: e1 },
+        ];
+        assert_eq!(batch_deleted_ids(&mutations), (vec![n2, n1], vec![e1, n1]));
+        assert_eq!(batch_deleted_ids(&[]), (vec![], vec![]));
     }
 
     // -----------------------------------------------------------------------

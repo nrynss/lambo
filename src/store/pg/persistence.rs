@@ -4,8 +4,8 @@
 //!
 //! * `flush` — one transaction per [`MutationBatch`]: the session-row upsert
 //!   that stamps the #17 mutation epoch and merges the #29 GC mark, the
-//!   fencing-token gate for every touched session, then the planned
-//!   statements, then commit. A stale token or any failed statement returns
+//!   fencing-token gate for every touched session (including the owners of
+//!   rows the batch deletes), then the planned statements, then commit. A stale token or any failed statement returns
 //!   before the commit and rolls the batch back.
 //! * `record_canonization` — the canon task's immediate write, fenced the same
 //!   way inside its own transaction.
@@ -19,7 +19,7 @@ use sqlx::Row;
 
 use super::codec::backend;
 use super::pool::tx_retry;
-use super::sql::UPSERT_SESSION_ROW_SQL;
+use super::sql::{DELETED_ROW_SESSIONS_SQL, UPSERT_SESSION_ROW_SQL};
 #[cfg(feature = "fixtures")]
 use super::sql::{UPSERT_RESERVATION_SQL, UPSERT_SYNONYM_SQL};
 use super::write_rows::{apply_canonization, apply_step};
@@ -30,8 +30,8 @@ use super::write_rows::{
 };
 use super::{Dialect, PgStore};
 use crate::store::batch::{
-    batch_session_ids, plan_flush, BulkLimits, ACCESS_COLUMNS, CONCEPT_COLUMNS, EDGE_COLUMNS,
-    INTERACTION_COLUMNS,
+    batch_deleted_ids, batch_session_ids, plan_flush, BulkLimits, ACCESS_COLUMNS, CONCEPT_COLUMNS,
+    EDGE_COLUMNS, INTERACTION_COLUMNS,
 };
 #[cfg(feature = "fixtures")]
 use crate::store::batch::{seed_concept_rows, seed_edge_rows};
@@ -284,13 +284,43 @@ impl<D: Dialect> PgStore<D> {
                     .map_err(|e| map_write_err(e, |m| format!("upsert session row: {m}")))?;
             }
 
+            // The fenced set is the stamped set plus the owning session of
+            // every row a `DeleteNode`/`DeleteEdge` will remove. Those
+            // mutations name no session, so without this a delete-only batch
+            // (a GC sweep) skipped the gate entirely and a writer that had
+            // lost its lease could delete rows in a session another writer now
+            // holds. One statement, inside this transaction and before any
+            // delete runs, and only when the batch deletes anything; a row
+            // that is already gone resolves nothing and its delete is a no-op.
+            // The stamp loop above is deliberately unchanged.
+            let mut fenced: Vec<String> = batch_session_ids(&batch.mutations)
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
+            let (deleted_nodes, deleted_edges) = batch_deleted_ids(&batch.mutations);
+            if !deleted_nodes.is_empty() || !deleted_edges.is_empty() {
+                let nodes: Vec<uuid::Uuid> = deleted_nodes.iter().map(|id| id.0).collect();
+                let edges: Vec<uuid::Uuid> = deleted_edges.iter().map(|id| id.0).collect();
+                let owners: Vec<String> = sqlx::query_scalar(DELETED_ROW_SESSIONS_SQL)
+                    .bind(&nodes)
+                    .bind(&edges)
+                    .fetch_all(&mut *tx)
+                    .await
+                    .map_err(backend)?;
+                for sid in owners {
+                    if !fenced.contains(&sid) {
+                        fenced.push(sid);
+                    }
+                }
+            }
+
             // Fencing-token gate (#1): reject a stale/missing token for every
             // session the batch touches, INSIDE the same transaction as the
             // writes (atomic with them; a takeover cannot slip between the
             // check and the commit — on rejection `?` drops `tx`, rolling back).
             // An unleased session (no row / current_token 0) passes — seed /
             // fixture parity.
-            for sid in batch_session_ids(&batch.mutations) {
+            for sid in &fenced {
                 let current: Option<i64> = sqlx::query_scalar(
                     "SELECT current_token FROM session_leases WHERE session_id = $1",
                 )

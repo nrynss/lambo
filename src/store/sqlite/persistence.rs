@@ -3,8 +3,9 @@
 //!
 //! * `flush` — one transaction per [`MutationBatch`]: the session-row stamp
 //!   (`ensure_sessions`: the #17 mutation epoch and the #29 GC mark, merged
-//!   monotonically), the fencing-token gate for every touched session, then
-//!   the planned statements, then commit. A stale token or any failed
+//!   monotonically), the fencing-token gate for every touched session
+//!   (including the owners of rows the batch deletes), then the planned
+//!   statements, then commit. A stale token or any failed
 //!   statement returns before the commit and rolls the batch back.
 //! * `record_canonization` — the canon task's immediate write, fenced the same
 //!   way inside its own transaction.
@@ -26,7 +27,8 @@ use super::write_rows::{apply_canonization_transition, apply_step};
 use super::write_rows::{put_write_intent, upsert_concepts, upsert_edges, upsert_interactions};
 use super::SqliteStore;
 use crate::store::batch::{
-    plan_flush, BulkLimits, ACCESS_COLUMNS, CONCEPT_COLUMNS, EDGE_COLUMNS, INTERACTION_COLUMNS,
+    batch_deleted_ids, plan_flush, BulkLimits, ACCESS_COLUMNS, CONCEPT_COLUMNS, EDGE_COLUMNS,
+    INTERACTION_COLUMNS,
 };
 #[cfg(feature = "fixtures")]
 use crate::store::batch::{seed_concept_rows, seed_edge_rows};
@@ -380,6 +382,17 @@ impl SqliteStore {
         self.ensure_sessions(&mut *tx, &sessions, batch.mutation_epoch, batch.gc_mark)
             .await?;
 
+        // The fenced set is the stamped set plus the owning session of every
+        // row a `DeleteNode`/`DeleteEdge` will remove. Those mutations name no
+        // session, so without this a delete-only batch (a GC sweep) skipped
+        // the gate entirely and a writer that had lost its lease could delete
+        // rows in a session another writer now holds. Resolved here, inside
+        // the transaction and before any delete runs; a row that is already
+        // gone resolves nothing and its delete is a no-op. The stamp set above
+        // is deliberately unchanged (see `ensure_sessions`).
+        let mut fenced = sessions.clone();
+        fenced.extend(deleted_row_sessions(&mut *tx, &batch.mutations).await?);
+
         // Fencing-token gate (#1): reject a stale/missing token for every
         // session the batch touches, INSIDE the same transaction as the writes
         // (atomic with them — a takeover cannot slip between the check and the
@@ -387,7 +400,7 @@ impl SqliteStore {
         // session with a lease row (current_token >= 1) must present a token
         // that is current; an unleased session has no row and passes (seed /
         // fixture parity).
-        for sid in &sessions {
+        for sid in &fenced {
             let current: Option<i64> = sqlx::query_scalar(
                 "SELECT current_token FROM session_leases WHERE session_id = ?1",
             )
@@ -463,4 +476,37 @@ impl SqliteStore {
         })?;
         Ok(())
     }
+}
+
+/// Owning sessions of the rows the batch's deletes will remove, read before
+/// any of them runs. Mirrors the delete statements exactly: a `DeleteNode`
+/// removes the interaction or concept with that id plus every edge incident
+/// to it (`write_rows::delete_node`); a `DeleteEdge` removes the edge row.
+async fn deleted_row_sessions(
+    tx: &mut sqlx::SqliteConnection,
+    mutations: &[Mutation],
+) -> Result<HashSet<String>, StoreError> {
+    let (nodes, edges) = batch_deleted_ids(mutations);
+    let mut out = HashSet::new();
+    for id in nodes {
+        let rows: Vec<String> = sqlx::query_scalar(
+            "SELECT session_id FROM interactions WHERE id = ?1 \
+             UNION SELECT session_id FROM concepts WHERE id = ?1 \
+             UNION SELECT session_id FROM edges WHERE source = ?1 OR target = ?1 OR id = ?1",
+        )
+        .bind(id.0.to_string())
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|e| db_err("flush: resolve deleted node session", e))?;
+        out.extend(rows);
+    }
+    for id in edges {
+        let rows: Vec<String> = sqlx::query_scalar("SELECT session_id FROM edges WHERE id = ?1")
+            .bind(id.0.to_string())
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|e| db_err("flush: resolve deleted edge session", e))?;
+        out.extend(rows);
+    }
+    Ok(out)
 }

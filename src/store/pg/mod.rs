@@ -81,6 +81,17 @@ mod vector_candidates;
 mod write_rows;
 pub use dialect::Dialect;
 
+// #1 fencing on delete-only batches: the shared live check (Postgres test
+// here, Cockroach leg in its conformance suite, which needs `fixtures`).
+#[cfg(all(
+    test,
+    any(
+        feature = "store-postgres",
+        all(feature = "store-cockroach", feature = "fixtures")
+    )
+))]
+pub(crate) mod delete_fencing;
+
 // T3.2 — CockroachDB durable adapter (spec §3.2/§3.3, §4), the family's first
 // dialect. Feature: store-cockroach.
 #[cfg(feature = "store-cockroach")]

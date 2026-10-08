@@ -1753,6 +1753,7 @@ async fn conformance_suite() {
     check_unstamped_vector_candidates_are_empty_until_contract_commit(&store).await;
     check_set_root_goal_mutation_persists(&store).await;
     check_set_embedding_mutation_persists(&store).await;
+    crate::store::pg::delete_fencing::check_delete_only_batch_is_fenced(&store).await;
 }
 
 /// DECISION D1 item 3 camera-proof: the global vector query must execute as

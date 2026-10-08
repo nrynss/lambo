@@ -182,6 +182,18 @@ pub(super) const DELETE_EDGE_SQL: &str = r#"
 DELETE FROM edges WHERE id = $1
 "#;
 
+/// Owning sessions of the rows a flush's deletes will remove, so the fencing
+/// gate covers a delete-only batch. `$1` is the `DeleteNode` ids, `$2` the
+/// `DeleteEdge` ids. Mirrors the delete statements above: a node delete
+/// removes the interaction or concept with that id and every edge incident to
+/// it (`DELETE_NODE_EDGES_SQL`), an edge delete removes the edge row.
+pub(super) const DELETED_ROW_SESSIONS_SQL: &str = r#"
+SELECT session_id FROM interactions WHERE id = ANY($1)
+UNION SELECT session_id FROM concepts WHERE id = ANY($1)
+UNION SELECT session_id FROM edges
+    WHERE id = ANY($2) OR id = ANY($1) OR source = ANY($1) OR target = ANY($1)
+"#;
+
 /// Canonization transition: update the concept (parity with MemoryStore's
 /// `CanonizationTransition` application) and append the audit row. The event insert is
 /// `ON CONFLICT (id) DO NOTHING` so a retried flush (same batch, already-committed
