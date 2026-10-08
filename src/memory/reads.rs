@@ -117,7 +117,7 @@ impl Memory {
     ///
     /// A read that completes after [`Memory::close`] took the ledger is not
     /// counted: the ledger is closed then and drops it (see
-    /// [`AccessLedger::close`]). "A clean close loses nothing" means nothing
+    /// [`AccessLedger::close`](crate::daemon::access::AccessLedger::close)). "A clean close loses nothing" means nothing
     /// noted before that point.
     pub(crate) fn note_accesses(&self, ids: impl IntoIterator<Item = NodeId>) {
         self.accesses.record(ids, Utc::now());

@@ -446,7 +446,7 @@ pub(super) fn rate_of(n: usize, wall: Duration) -> f64 {
 
 /// Serial write service time, as an EWMA over real writes.
 ///
-/// A lane has one consumer, so the time [`WriteCtx::run`] takes on it **is**
+/// A lane has one consumer, so the time [`WriteCtx::run`](super::WriteCtx::run) takes on it **is**
 /// serial service time — better evidence about the drain than the probe's
 /// embed-only leg, and it keeps tracking an embedder that degrades after
 /// startup rather than freezing the first reading of the session (J3-R1-2).

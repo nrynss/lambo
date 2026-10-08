@@ -336,7 +336,7 @@ impl WritePipeline {
     /// Admission is instant since the J3 redesign — the bounds are the static
     /// fairness/memory caps, so there is no calibration to await. (The old
     /// `await_calibration` blocked the first burst on the probe for up to
-    /// [`PROBE_BUDGET`] because "a provisional constant is the constant the
+    /// [`PROBE_BUDGET`](super::PROBE_BUDGET) because "a provisional constant is the constant the
     /// spec forbids"; with durability carried by durable intents, a constant
     /// is exactly what a fairness share should be, and the probe is telemetry
     /// nobody has to wait for.)

@@ -2,130 +2,62 @@
 //!
 //! # The rule
 //!
-//! A write may be acknowledged **before** it has been applied only when its
-//! result does not gate the caller's next action. `derive` and `record_action`
-//! qualify: a warm `derive` is 27 ms of which 22 to 27 ms is the embedding call
-//! (`dev-diary/lambo-for-mooshik/J-multi-client.md` §Measurements; J3-R3-5
-//! corrected this line's earlier "22 to 25 ms" misquote of that section),
-//! durability
-//! was *already* asynchronous (the write-behind log returns long before
-//! anything reaches disk), and neither outcome is something the agent branches
-//! on. **`reserve` never qualifies** — its result *is* the caller's next
-//! action, and an asynchronous reservation has two agents editing while each
-//! believes it holds the lock.
+//! A write may be acknowledged **before** it is applied only when its result
+//! does not gate the caller's next action. `derive` and `record_action`
+//! qualify (most of a warm `derive` is the embed, and durability was already
+//! asynchronous); **`reserve` never does**, because its result *is* the next
+//! action.
 //!
-//! # Shape
+//! # Shape and ownership
 //!
-//! 1. **The synchronous part stays on the call path.** Validation resolves
-//!    against the graph, and the interaction node is opened here too (see
-//!    *Ordering* below). What moves off the call path is the embedder wait, not
-//!    the round trip: the round trip is 0.31 to 0.48 ms on the rig and is not
-//!    worth removing.
-//! 2. **Embed, canonicalize and insert in the background**, through the
-//!    ordinary [`crate::graph::hybrid::derive`] /
-//!    [`crate::graph::action::record_action`] path. Dedup is therefore
-//!    unaffected: embedding still precedes insertion, so the vector is present
-//!    when matching happens.
-//! 3. **The ack carries a [`ReceiptId`]**, against which the outcome is stored.
-//!    Receipts are delivered two ways — piggybacked on that agent's next tool
-//!    response, and fetched by id — and the fetch doubles as **opt-in
-//!    synchrony**: an agent that needs its write applied waits on the receipt,
-//!    which restores read-your-writes on demand without charging every agent
-//!    for it. There is no `await` flag and no MCP notification (a notification
-//!    lands in a client log rather than in the model's context, which is the
-//!    exact failure workstream J exists to fix).
+//! The call path (`Memory::derive_async_as`, `Memory::record_action_async_as`)
+//! validates, opens the interaction, and admits the job; this module embeds,
+//! canonicalizes and inserts in the background through the ordinary
+//! [`crate::graph::hybrid::derive`] / [`crate::graph::action`] path, and stores
+//! the outcome against a [`ReceiptId`]. **Memory owns execution and receipt
+//! state; MCP owns delivery** (the piggyback and `lambo_stats(receipt=…)`).
+//! The synchronous `Memory::derive` / `record_action` surface does not go
+//! through here: the async path is additive.
 //!
-//! # Ordering
+//! # Invariants
 //!
-//! **Scope first, because the strong sentence used to come first and its
-//! retraction came nine lines later** (J3-R2-6): everything in this section is
-//! a claim about **one agent's writes sent one after another**. Two calls one
-//! agent has in flight *simultaneously* are outside it, for the reason spelled
-//! out below.
+//! * **Ordering, scoped to one agent's *sequential* writes.** The interaction
+//!   is opened on the call path, so submission order is `Temporal`-chain
+//!   order; each agent has one FIFO lane with one consumer, so a lane applies
+//!   in submission order and created/matched attribution follows it. Two
+//!   writes one agent has in flight *at once* are unordered (the chain and
+//!   lane positions are pinned in two critical sections; J3-R1-10).
+//! * **Durability by construction, not by estimate.** Every admitted job is
+//!   recorded as a durable intent (`PutWriteIntent`) in the same critical
+//!   section that queues it, so at a clean close acked ⇒ (applied ∨ durable
+//!   intent); what the close drain cannot finish is deferred, and the next
+//!   serve replays it (`replay`).
+//! * **Admission guards memory and fairness only**, with static bounds
+//!   ([`WRITE_QUEUE_MAX`], [`WRITE_QUEUE_MAX_BYTES`], [`WRITE_QUEUE_LANE_MAX`]).
+//!   The probe and the observed rate are telemetry (`calibration`).
+//! * **Own accounting.** The queue never touches
+//!   [`crate::ledger::LedgerCounters`]; a refusal never enters `accepted`, and
+//!   [`WriteQueueCounters::outstanding`] is the one expression for both the
+//!   live gauge and the shutdown count.
+//! * **Locks.** Graph write then lanes at admission (the only nesting of
+//!   those two); graph read then index write when mirroring; no graph lock
+//!   across `.await`; workers never take `Memory`'s writers gate.
 //!
-//! The interaction is opened **synchronously, on the call path**, before the
-//! job is queued. `begin_interaction_full` takes the graph write
-//! lock only briefly and never awaits, so this is cheap — and for a sequential
-//! caller it makes submission order *be* `Temporal`-chain order by
-//! construction. That is strictly stronger than ordering the drain: the chain
-//! no longer depends on drain order at all, so an out-of-order drain cannot
-//! corrupt it. Since J1 the chain is session-wide (see
-//! `Memory::begin_interaction_full`), so "one agent's writes apply in submission
-//! order" is read off the chain by filtering it on `agent_id`.
+//! # Modules
 //!
-//! Per-agent FIFO is **still** enforced in the drain, for a second reason:
-//! insertion order decides which of two identical concepts is `created` and
-//! which is `matched`, and that distinction is reported in the receipt. Each
-//! agent gets its own lane with a single consumer, so a lane drains in
-//! submission order; lanes run concurrently, because interleaving *across*
-//! agents is fine.
+//! | module | holds |
+//! |---|---|
+//! | `receipts` | `ReceiptId`, `ReceiptAnswer`, the receipt store, lookup/wait/piggyback |
+//! | `calibration` | the startup probe, the observed rate, `Calibration` (telemetry) |
+//! | `counters` | `WriteQueueCounters`, `ReplayBlockReason` |
+//! | `admission` | the bounds, `DropReason`, `Job`, the per-agent `Lanes`, `admit` |
+//! | `execution` | `WriteCtx::run`, index mirroring, the lane worker and its settle |
+//! | `drain` | `quiesce` / `abort_workers` for `close()`, `abort_all_sync` for `Drop` |
+//! | `replay` | the durable-intent replay spawned at attach |
 //!
-//! **The scope of both promises, stated once more where the mechanism is**
-//! (J3-R1-10): one agent's *sequential* submissions. The chain position is pinned
-//! by `begin_interaction_full` and the
-//! lane position by the `lanes.lock()` inside `WritePipeline::admit`, and
-//! those are two critical sections with no ordering between them across
-//! threads. So for two `lambo_derive` calls one agent has in flight *at the
-//! same time*, the chain order and the drain order can disagree — task A can
-//! open its interaction first and enqueue second. The consequence is confined
-//! to created/matched attribution between those two calls, and a caller that
-//! fires two writes concurrently has asserted no order for them to keep;
-//! closing the window would mean opening the interaction under the lane lock,
-//! which nests the graph write lock inside it. What must not happen is claiming
-//! more than that, which the first version of this section did.
-//!
-//! # Backpressure — fairness and memory, never durability (the J3 redesign)
-//!
-//! Three review rounds produced five falsified estimator axes — width, warmth,
-//! length, failure shape, concurrency scaling — every one a P1, because the
-//! durability invariant ("no acked write is silently abandoned") was **coupled
-//! to an estimator's correctness**: a clean close had a deadline and the
-//! deadline's arithmetic rested on a measured rate. The series does not
-//! converge; an estimator is wrong in as many ways as the workload has
-//! covariates (`dev-diary/lambo-for-mooshik/J3-durability-redesign.md`).
-//!
-//! **Durable intents cut the coupling.** Every accepted job is recorded as a
-//! [`crate::types::Mutation::PutWriteIntent`] at admission, so at a clean
-//! close acked ⇒ (applied ∨ durable intent) **by construction** — the next
-//! serve replays the remainder. Being wrong about the drain now costs a
-//! deferral or a refusal, never a loss.
-//!
-//! Admission therefore guards only what admission can honestly guard:
-//! **memory** (the aggregate bound [`WRITE_QUEUE_MAX`], derived from the
-//! receipt store's cap, and the byte cap [`WRITE_QUEUE_MAX_BYTES`]) and
-//! **fairness** (the per-lane bound [`WRITE_QUEUE_LANE_MAX`], one agent's
-//! share of the queue). Both are static and generous, derived at their
-//! constants from structural facts — not from a rate, because J3's five axes
-//! are what happens when a rate is asked to carry an invariant.
-//!
-//! The probe and the observed rate survive as **telemetry**: the probe still
-//! measures two input sizes and publishes the slower
-//! ([`Calibration::probe_serial_items_per_sec`]), real write service times
-//! still take over after [`OBSERVED_MIN_SAMPLES`] completed writes, and the
-//! ratio between them ([`Calibration::probe_optimism`]) remains the payload's
-//! self-diagnosing comparison (J3-R2-4). None of it sizes a bound any more.
-//! The drop policy is fixed regardless — bound, drop, log once, count in
-//! `lambo_stats`.
-//!
-//! # Accounting (the `ledger_queued_lines` lesson, re-derived)
-//!
-//! This module keeps its **own** counters and never touches
-//! [`crate::ledger::LedgerCounters`], so the ledger's
-//! `accepted − written − write_failed` keeps its exclusivity argument intact:
-//! no new class enters the ledger's `accepted`. The queue mirrors that
-//! discipline deliberately — a queue-full or byte-cap reject never enters
-//! [`WriteQueueCounters::accepted`], so
-//! `outstanding = accepted − applied − failed − deferred` is one expression
-//! serving both the live gauge and the shutdown count, and cannot drift between
-//! them. `abandoned` is a **label on a subset of `failed`**, not a fourth term:
-//! an abandoned job is settled `failed`, and counting it twice is exactly the
-//! mistake `adve-review-mooshik-I-round3.md`'s flip D maps. `deferred` **is** a
-//! term — a close-deferred job settled `intent_durable` left this process's
-//! custody without being applied or failed — and this line omitted it (J3
-//! round-1 N5). The drift was inside the section whose whole thesis is that
-//! there must be **one** expression, which is the reminder that a thesis does
-//! not enforce itself: [`WriteQueueCounters::outstanding`] is the authority and
-//! this sentence is a copy of it.
+//! The review chronology behind these rules (J3 rounds 1-3, the estimator
+//! redesign) is in `dev-diary/notes/refactor-27-writeq-memory.md` and
+//! `dev-diary/lambo-for-mooshik/J3-durability-redesign.md`.
 
 use std::collections::HashMap;
 use std::fmt;

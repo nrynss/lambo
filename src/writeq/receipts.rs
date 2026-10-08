@@ -59,7 +59,7 @@ const _: () = assert!(
 /// The worst `flush_lag` measured on this rig, in seconds (§Measurements).
 ///
 /// A constant rather than a sentence for the same reason
-/// [`MEASURED_LOCAL_EMBEDDER_RPS`] is one: it lets the relation below be a
+/// [`MEASURED_LOCAL_EMBEDDER_RPS`](super::MEASURED_LOCAL_EMBEDDER_RPS) is one: it lets the relation below be a
 /// build invariant.
 pub const MEASURED_WORST_FLUSH_LAG_SECS: u64 = 227;
 
@@ -114,14 +114,14 @@ pub const MAX_RECEIPT_IDS: usize = MAX_CONCEPTS_PER_DERIVE;
 /// deleted was still sizing both surviving bounds at compile time — structural
 /// in kind, measured in magnitude — and a future edit shrinking the receipt cap
 /// for memory reasons would have failed the build citing a rationale the branch
-/// declares retired. [`PROBE_CLAMP_RPS`] no longer derives from
-/// [`WRITE_QUEUE_MAX`], so that chain is cut and the derivation stands on its
+/// declares retired. [`PROBE_CLAMP_RPS`](super::PROBE_CLAMP_RPS) no longer derives from
+/// [`WRITE_QUEUE_MAX`](super::WRITE_QUEUE_MAX), so that chain is cut and the derivation stands on its
 /// own two feet:
 ///
 /// * **4096 is what the memory budget allows** — ≈ 31 MiB of worst-case
 ///   receipts, computed above, against a process that already holds an entire
 ///   session graph in RAM. A cost worth naming and paying.
-/// * **[`WRITE_QUEUE_MAX`] is a quarter of it**, for the eviction-safety reason
+/// * **[`WRITE_QUEUE_MAX`](super::WRITE_QUEUE_MAX) is a quarter of it**, for the eviction-safety reason
 ///   at the top of that constant: 3× headroom so settled receipts accumulating
 ///   behind the outstanding ones can never evict a running job's receipt.
 ///

@@ -88,7 +88,7 @@ impl WritePipeline {
     ///   is the same scope §Ordering already declares (one agent's sequential
     ///   submissions, within a session).
     /// * **Idempotency**: consumption rides the same commit lock as the apply
-    ///   (see [`WriteCtx::run`]), so a `kill -9` mid-replay re-replays exactly
+    ///   (see [`WriteCtx::run`](super::WriteCtx::run)), so a `kill -9` mid-replay re-replays exactly
     ///   the intents whose applies did not flush — never one whose apply did.
     /// * **Liveness before anything is consumed** (J3 round-1 N1): one embed of
     ///   [`PROBE_TEXT`] gates the loop. If it fails, the task warns and returns

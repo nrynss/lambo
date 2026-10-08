@@ -320,7 +320,9 @@ pub(super) async fn final_flush(
 }
 
 impl Memory {
-    /// Final flush + clean shutdown of all three tasks (spec §6.1).
+    /// Final flush + clean shutdown (spec §6.1): the write queue, the lease
+    /// heartbeat, and the three background tasks (daemon, flush,
+    /// canonization). The module doc lists the stages in order.
     ///
     /// Idempotent **after success**: once a close has made the tail durable
     /// every later call is `Ok(())` and does nothing.
@@ -349,12 +351,16 @@ impl Memory {
     ///
     /// ## Bounding this against the lease — caller's contract (T86-4)
     ///
-    /// `close()` aborts the lease heartbeat **first** (right after latching
-    /// `closed`), because the success paths below release the lease explicitly
-    /// and it must not keep being refreshed underneath that release. From that
-    /// moment the lease is no longer refreshed, so it stays valid only for its
-    /// **remaining TTL** — at worst one [`LEASE_HEARTBEAT_INTERVAL`] short of a
-    /// full [`LEASE_TTL`] (≈30s) if the last beat landed just before close.
+    /// `close()` aborts the lease heartbeat as soon as it holds the writers
+    /// gate (after latching `closed` and draining the write queue, and before
+    /// it stops anything else), because the success paths below release the
+    /// lease explicitly and it must not keep being refreshed underneath that
+    /// release. (This said "**first** (right after latching `closed`)", which
+    /// stopped being true when J3 put the queue drain ahead of the gate; the
+    /// drain is bounded by `WRITE_QUEUE_DRAIN_BUDGET`, so the lease is still
+    /// refreshing for at most that long into the close.) From that moment the lease is no longer refreshed, so it stays valid only for its
+    /// **remaining TTL** — at worst one [`LEASE_HEARTBEAT_INTERVAL`](crate::store::lease::LEASE_HEARTBEAT_INTERVAL) short of a
+    /// full [`LEASE_TTL`](crate::store::lease::LEASE_TTL) (≈30s) if the last beat landed just before close.
     ///
     /// This method is otherwise **unbounded**: the step-2 flush-task join and the
     /// step-4 final flush each have their own internal timeout ladders, but their
@@ -436,10 +442,15 @@ impl Memory {
     ///    `closed` is what stops new jobs, and the quiesce is what makes
     ///    "nothing new lands after the drain" true of the workers. Bounded by
     ///    [`crate::writeq::WRITE_QUEUE_DRAIN_BUDGET`]; anything still
-    ///    outstanding is abandoned (aborted **and joined**), its receipt
-    ///    settled `failed`, and counted in `lambo_stats`'
-    ///    `write_queue_abandoned`.
-    /// 1. [`FlushTask::stop`] — the loop finishes its current `cycle()` (an
+    ///    outstanding is **deferred, not lost**: workers are aborted **and
+    ///    joined**, each pending receipt is settled `intent_durable`, the count
+    ///    lands in `lambo_stats`' `write_queue_deferred`, and the next serve
+    ///    replays the durable intents. (This said "abandoned ... settled
+    ///    `failed` ... `write_queue_abandoned`", the pre-durable-intent
+    ///    behaviour; `abandoned` now counts only jobs refused after a lost
+    ///    lease.) The intent replay is stopped, aborted and joined, before the
+    ///    quiesce.
+    /// 1. [`FlushTask::stop`](crate::store::flush::FlushTask::stop) — the loop finishes its current `cycle()` (an
     ///    in-flight flush and its retry/backoff complete; a post-retry
     ///    `RETAINED_BACKOFF` hold is *not* waited out), re-appends `pending` to
     ///    the **front** of the graph log, and exits.
@@ -473,7 +484,7 @@ impl Memory {
     ///
     /// Step 0 is itself bounded now (R2-5): every store call a gated write can
     /// be parked in has a timeout — `RETRACT_IO_TIMEOUT` for `retract`'s
-    /// durable radius, [`hybrid::HYBRID_IO_TIMEOUT`] over hybrid `derive`'s
+    /// durable radius, [`hybrid::HYBRID_IO_TIMEOUT`](crate::graph::hybrid::HYBRID_IO_TIMEOUT) over hybrid `derive`'s
     /// whole embed/query phase. A caller-supplied **embedder** is the one
     /// remaining way to stretch it: `Embedder` carries no bound of its own, so
     /// an adapter that never returns still parks a permit indefinitely. An
@@ -522,7 +533,8 @@ impl Memory {
         // what stops new jobs (the enqueue path is a gated write), and this
         // quiesce is what makes "nothing new lands after the drain" true of the
         // workers. Bounded by `WRITE_QUEUE_DRAIN_BUDGET`; anything left over is
-        // abandoned with an honest receipt rather than waited for.
+        // deferred (receipt `intent_durable`, durable intent replayed by the
+        // next serve) rather than waited for.
         self.pipeline.abort_probe();
         // The intent replay is stopped — aborted AND joined — before the
         // quiesce and therefore well before the final drain: an aborted task

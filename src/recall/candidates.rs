@@ -11,7 +11,7 @@
 //!    (handoff T5.1), and a chain ordered by insertion may carry arbitrary
 //!    timestamps.
 //! 3. **Vector** — [`GraphStore::vector_candidates_checked`], only when the store
-//!    advertises [`Capabilities::VECTOR_SEARCH`]. The call is async I/O, so it
+//!    advertises [`Capabilities::VECTOR_SEARCH`](crate::store::Capabilities::VECTOR_SEARCH). The call is async I/O, so it
 //!    is gathered by [`gather`] BEFORE any graph lock is taken; [`candidates`]
 //!    itself is pure and lock-safe.
 //!
@@ -151,7 +151,7 @@ pub struct Phase1Input {
 /// Gather phase-1 store I/O BEFORE taking any graph lock.
 ///
 /// The only I/O performed is the vector leg, and only when BOTH the store
-/// advertises [`Capabilities::VECTOR_SEARCH`] and a query embedding is
+/// advertises [`Capabilities::VECTOR_SEARCH`](crate::store::Capabilities::VECTOR_SEARCH) and a query embedding is
 /// available. Every other path makes zero async store calls and logs exactly
 /// one line (RAM-tier promise, spec §3.2). A capability-present store that
 /// errors propagates [`StoreError`]: swallowing a real backend failure into

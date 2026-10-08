@@ -1,76 +1,55 @@
 //! `Memory` — the spec §6.1 library surface (T8.1).
 //!
-//! This is the assembly point: one [`Memory`] owns a session's in-RAM
-//! [`Graph`], its [`InvertedIndex`], the resolved store + embedder, and the
-//! **three** background tasks the session needs —
+//! One [`Memory`] owns a session's in-RAM [`Graph`], its [`InvertedIndex`], the
+//! resolved store and embedder, and everything that runs in the background for
+//! that session:
 //!
-//! | Task | Built by | What breaks without it |
-//! |---|---|---|
-//! | [`Daemon`] | [`Daemon::from_config`] | no scoring, no hot list, no conflict/drift/stale events |
-//! | [`FlushTask`] | [`FlushTask::new`] | nothing is ever durable |
-//! | [`CanonizationTask`] | [`CanonizationTask::from_daemon`] | **no node ever transitions** — the spec §13 demo is impossible |
+//! | Task | Started in | Stopped in `close()` | What breaks without it |
+//! |---|---|---|---|
+//! | [`Daemon`] | `build_attach` | aborted and joined | scoring, hot list, conflict/drift/stale events |
+//! | [`FlushTask`] | `build_attach` | `stop()`, joined | nothing is ever durable |
+//! | [`CanonizationTask`] | `build_attach` | aborted and joined | no node ever transitions |
+//! | lease heartbeat | `build_attach` | aborted | the lease lapses and another writer may take the session |
+//! | write pipeline (lane workers, calibration probe, intent replay) | `build_attach` | probe aborted, replay stopped, queue quiesced | acked writes are never applied |
 //!
-//! ## Lock discipline (spec §6.4, non-negotiable)
+//! ## Invariants (where each one is kept)
 //!
-//! The graph lock is **never** held across an `.await`. Every method here
-//! takes the lock, works, releases, and only then does I/O. Where a method
-//! needs both the graph and the index, it takes them in the order the daemon's
-//! GC uses — **graph → index** (`daemon::run_loop`; taking them the other way
-//! around would deadlock against a concurrent GC sync).
+//! * **The graph lock is never held across `.await`** (spec §6.4); where a
+//!   method needs the graph and the index it takes them **graph → index**,
+//!   the daemon GC's order. Writes: `writes.rs`; mirroring:
+//!   `crate::writeq::mirror_concepts`, shared with the write queue.
+//! * **The session owner mirrors every concept write into the index** (the
+//!   `src/graph/mod.rs` contract), pinned by
+//!   `tests/p2_integration.rs::inverted_index_manual_sync_contract`.
+//! * **The writers gate** (`gate.rs`): a write either lands in `close()`'s final
+//!   batch or is refused; nothing is acknowledged and lost.
+//! * **Interactions are server-stamped** from the process clock; no library
+//!   method, CLI flag or MCP argument accepts a timestamp (P6 review F18). The
+//!   clock itself is a crate-private construction seam
+//!   (`MemoryBuilder::clock`, used only by `lambo demo`).
+//! * **Single-writer custody** (`leases.rs`): lease, fence, second-writer
+//!   registry.
+//! * **Shutdown order and custody** (`shutdown.rs`): `close()` is one function
+//!   with numbered stages; a cancelled or failed close loses nothing.
+//! * **Write execution and receipt state belong to `Memory`** (through
+//!   [`WritePipeline`]); delivery to a model belongs to MCP.
 //!
-//! ## The writers gate (COH-6 clause 14)
+//! ## Modules
 //!
-//! `close()` stops the three background producers before it drains the log —
-//! but the surface's **own** writers run on caller tasks it does not own, and
-//! `derive` / `retract` cross `.await` points. Without a barrier a write that
-//! passed `ensure_open` before the latch could append to the graph log *after*
-//! the final drain: acknowledged to its caller, durable nowhere, and (for a
-//! retraction) resurrected on the next attach.
+//! | module | holds |
+//! |---|---|
+//! | `types` | `DryRun`, `ImpactReport`, `CanonicalMemory`, `MemoryStats`, `GcStats` |
+//! | `builder` | `MemoryBuilder`, `Attach`, `LeaseHeldElsewhere`, the attach order |
+//! | `leases` | lease heartbeat, `LeaseLostSignal`, the `ACTIVE_SESSIONS` registry |
+//! | `gate` | `begin_write`, `begin_write_sync`, `ensure_open` |
+//! | `writes` | metadata writes, `derive*`, `record_action*`, `demote`, `retract`, soft locks |
+//! | `reads` | `recall*`, saints, stats, events, the access ledger hooks |
+//! | `shutdown` | `close`, `Drop`, `HandleCustody`, `TailCustody`, `final_flush` |
 //!
-//! So every mutating method holds a **read permit** on `Memory::writers` for
-//! its whole body, awaits included, and re-checks `closed` after acquiring it;
-//! [`Memory::close`] latches `closed` and then takes the **write** side before
-//! it stops anything. The two orders are the only two outcomes: an in-flight
-//! write finishes and lands in the final batch, or a late write is refused with
-//! the closed error. Nothing is acknowledged and lost.
-//!
-//! Read-only methods (`recall`, `stats`, `canonical_memories`, `events`) do
-//! **not** take the gate — a long recall must not delay shutdown, and they are
-//! refused after close by `ensure_open` as before.
-//!
-//! ## Inverted-index mirroring (the contract at `src/graph/mod.rs`)
-//!
-//! The graph is index-free by design and **the session owner MUST mirror every
-//! concept write into the index**. `Memory` is that owner. Every write path
-//! here — [`Memory::derive`], [`Memory::record_action`], [`Memory::demote`] —
-//! calls `Memory::mirror_concepts` on the ids it created, and
-//! [`Memory::retract`] calls `index.remove`. GC-driven removals are mirrored by
-//! the daemon itself because [`MemoryBuilder::build`] hands it the index via
-//! [`Daemon::with_index`].
-//!
-//! A forgotten mirror is **silent** staleness — recall returns stale keyword
-//! candidates and nothing crashes. The contract is pinned by
-//! `tests/p2_integration.rs::inverted_index_manual_sync_contract`.
-//!
-//! ## Interactions are server-stamped
-//!
-//! Every write opens a fresh [`Interaction`] whose `created_at` is taken here,
-//! from the process clock — never from a caller. `derive` / `record_action` /
-//! `demote` all take their logical timestamp from the interaction node, so a
-//! caller-supplied timestamp would propagate to every concept and edge below it
-//! and backdating by 61s would neuter the whole `canonization_edge_min_age`
-//! inflation guard (P6 review F18). There is deliberately no API to pass one.
-//!
-//! **The clock behind that stamp is a crate-private seam** —
-//! `MemoryBuilder::clock`, `pub(crate)` — and that is not a hole in the rule
-//! above. The rule is about *callers*: no library method, no CLI flag and no
-//! MCP tool argument accepts a timestamp, and every one of them still gets the
-//! process clock. Swapping the clock is a decision the process makes about
-//! itself at construction, once, for every write it will ever make; it cannot
-//! be reached across the MCP boundary, cannot be set per call, and cannot
-//! backdate one interaction relative to its neighbours. `lambo demo` is the
-//! only user: it installs a monotone script clock so the OUTCOME block is
-//! reproducible run to run (see `crate::cli::demo::script_clock`).
+//! This file keeps the [`Memory`] struct, so its fields stay private to
+//! `memory`, and its plain accessors. Many sessions in one process (#32) means
+//! many `Memory` values, each built by its own `build_attach` and closed by its
+//! own `close()`; the registry and the lease are already per session.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -93,33 +72,30 @@ use crate::store::GraphStore;
 use crate::types::{AgentId, DaemonEvent, EmbeddingContract, SessionId};
 use crate::writeq::WritePipeline;
 
-mod types;
-
-pub use types::{CanonicalMemory, DryRun, GcStats, GcSweepSummary, ImpactReport, MemoryStats};
-
-mod leases;
-
-pub(crate) use leases::LeaseLostSignal;
-use leases::{register_session, spawn_lease_heartbeat};
-
 mod builder;
+mod gate;
+mod leases;
+mod reads;
+mod shutdown;
+mod types;
+mod writes;
 
 pub use builder::{Attach, LeaseHeldElsewhere, MemoryBuilder};
 pub(crate) use builder::{AttachShutdown, STILL_REFRESHING_CLAUSE};
+pub(crate) use leases::LeaseLostSignal;
+pub use types::{CanonicalMemory, DryRun, GcStats, GcSweepSummary, ImpactReport, MemoryStats};
 
-mod gate;
-mod reads;
-mod shutdown;
-mod writes;
-
+// Crate-internal names the sibling modules reach through `super::`.
+use leases::{register_session, spawn_lease_heartbeat};
 use shutdown::final_flush;
 
 // ---------------------------------------------------------------------------
 // Memory
 // ---------------------------------------------------------------------------
 
-/// An attached session: graph + index + store + embedder, three background
-/// tasks, and (since J3) the asynchronous write pipeline.
+/// An attached session: graph + index + store + embedder, the daemon, flush
+/// and canonization tasks, the lease heartbeat, and (since J3) the asynchronous
+/// write pipeline.
 ///
 /// One process owns one session (spec §2.2). Every method takes `&self`, so a
 /// `Memory` behind an `Arc` serves concurrent MCP tool calls; each call carries
@@ -266,7 +242,7 @@ pub struct Memory {
     /// back to the front of the log — can be retried (T81-5).
     close_state: tokio::sync::Mutex<bool>,
     closed: AtomicBool,
-    /// `true` while this handle holds a slot in [`ACTIVE_SESSIONS`]. A
+    /// `true` while this handle holds a slot in [`ACTIVE_SESSIONS`](leases::ACTIVE_SESSIONS). A
     /// **successful** `close()` releases it (R2-4) and clears this, so [`Drop`]
     /// does not release a second time and take a *different* handle's slot with
     /// it — the registry keys on session + agent id, which a re-attach reuses.
@@ -319,7 +295,7 @@ pub struct Memory {
     /// hold it, and because [`Memory::close`] must reach it before it takes the
     /// writers gate.
     pipeline: Arc<WritePipeline>,
-    /// Where [`Memory::begin_interaction`] takes its stamp. [`Utc::now`] unless
+    /// Where [`Memory::begin_interaction`] takes its stamp. [`Utc::now`](chrono::Utc::now) unless
     /// the *process* replaced it at construction ([`MemoryBuilder::clock`],
     /// crate-private) — never something a caller can reach or vary per write.
     clock: Clock,

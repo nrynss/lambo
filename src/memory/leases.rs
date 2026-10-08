@@ -93,7 +93,7 @@ pub(super) fn unregister_session(session: &SessionId, agent: &AgentId) {
 
 /// The serve-facing half of the single-writer fence (JE2E-4).
 ///
-/// The fence itself is the `AtomicBool` that [`FlushTask::with_fence`] and every
+/// The fence itself is the `AtomicBool` that [`FlushTask::with_fence`](crate::store::flush::FlushTask::with_fence) and every
 /// [`Memory`] write path read. It is the **safety** mechanism, it is unchanged,
 /// and it remains the authority on whether this handle still owns the session.
 /// This type carries the two things a *serve* additionally needs in order to

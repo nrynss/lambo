@@ -67,8 +67,9 @@ impl WritePipeline {
     /// therefore do not use the gate at all — this quiesce is what makes
     /// "nothing new lands after the drain" true of them.
     ///
-    /// Bounded by [`WRITE_QUEUE_DRAIN_BUDGET`], which is the same number
-    /// admission promised. Anything still outstanding when it runs out is
+    /// Bounded by [`WRITE_QUEUE_DRAIN_BUDGET`]. (This said "which is the same
+    /// number admission promised"; admission stopped promising a drain time at
+    /// the J3 redesign.) Anything still outstanding when it runs out is
     /// **deferred, not lost** (J3 durable intents): workers are aborted and
     /// joined (aborting alone proves nothing — the R3-1 lesson), every
     /// still-pending receipt is settled `intent_durable`, and the count lands

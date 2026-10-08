@@ -411,7 +411,7 @@ impl Memory {
     ///   once, this line and the queue's own enqueue are separate critical
     ///   sections and can disagree (J3-R1-10, and see `writeq`'s §Ordering).
     ///
-    /// What moves off the call path is the embedder wait — 22 to 25 ms of a
+    /// What moves off the call path is the embedder wait — 22 to 27 ms of a
     /// warm 27 ms `derive` — not the 0.4 ms round trip, which is not worth
     /// removing.
     ///
@@ -754,7 +754,7 @@ impl Memory {
     /// inherits the timestamp, and backdating by 61s would neuter the
     /// `canonization_edge_min_age` inflation guard). `self.clock` *is* that
     /// process clock: [`Utc::now`] everywhere except `lambo demo`, which pins
-    /// it at construction (see [`MemoryBuilder::clock`]).
+    /// it at construction (see [`MemoryBuilder::clock`](super::MemoryBuilder::clock)).
     ///
     /// Reading the chain tail and inserting happen under one write lock, so two
     /// concurrent writers cannot both claim the same predecessor.

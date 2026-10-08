@@ -30,8 +30,8 @@ pub enum ReplayBlockReason {
     #[default]
     None,
     /// The embedder answered transiently (or not at all) past
-    /// [`EMBEDDER_SICK_THRESHOLD`](super::EMBEDDER_SICK_THRESHOLD) — it is presumed sick. This is "wedged",
-    /// not "draining".
+    /// [`EMBEDDER_SICK_THRESHOLD`](super::EMBEDDER_SICK_THRESHOLD) — it is
+    /// presumed sick. This is "wedged", not "draining".
     Embedder,
     /// A non-embedder, session-wide fault (a store error, a lost lease, a
     /// config error) ended the loop.
@@ -49,8 +49,10 @@ pub struct WriteQueueCounters {
     pub(super) applied: AtomicU64,
     pub(super) failed: AtomicU64,
     /// A **label on a subset of `failed`**, never a fourth term in the
-    /// subtraction: jobs settled `failed` because `close()` ran out of quiesce
-    /// budget or the lease was lost.
+    /// subtraction: jobs settled `failed` because the lease was lost before they
+    /// ran. (This also named "`close()` ran out of quiesce budget"; since
+    /// durable intents such a job is settled `intent_durable` and counted in
+    /// `deferred`, not here.)
     pub(super) abandoned: AtomicU64,
     pub(super) dropped_queue_full: AtomicU64,
     pub(super) dropped_queue_bytes: AtomicU64,
