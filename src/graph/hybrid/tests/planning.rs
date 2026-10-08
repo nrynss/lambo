@@ -470,7 +470,10 @@ async fn parent_of_end_embedding_follows_the_concepts_degrade_rules() {
 /// themselves (once, with the first end's vector) and stop there.
 #[tokio::test]
 async fn parent_of_ends_stay_keyword_only_when_the_store_refuses_vectors() {
-    let pairs = [("document:src.md", "a child"), ("document:other.md", "a child")];
+    let pairs = [
+        ("document:src.md", "a child"),
+        ("document:other.md", "a child"),
+    ];
 
     // With an unmatched concept in the call.
     let (graph, interaction) =
@@ -494,7 +497,11 @@ async fn parent_of_ends_stay_keyword_only_when_the_store_refuses_vectors() {
     .unwrap();
     assert_eq!(out.created.len(), 3);
     assert_eq!(out.embedded, 0);
-    assert_eq!(store.vector_calls(), 1, "the concept's lookup saw the refusal");
+    assert_eq!(
+        store.vector_calls(),
+        1,
+        "the concept's lookup saw the refusal"
+    );
     assert_eq!(
         embedder.embedded_texts(),
         ["a child — ingest context"],
@@ -522,12 +529,20 @@ async fn parent_of_ends_stay_keyword_only_when_the_store_refuses_vectors() {
     )
     .await
     .unwrap();
-    assert_eq!(out.created.len(), 3, "both parents and the child are created");
+    assert_eq!(
+        out.created.len(),
+        3,
+        "both parents and the child are created"
+    );
     assert_eq!(
         out.embedded, 0,
         "a store that refuses vectors gets none, whatever else the call carries"
     );
-    assert_eq!(store.vector_calls(), 1, "one probe, with the first end's vector");
+    assert_eq!(
+        store.vector_calls(),
+        1,
+        "one probe, with the first end's vector"
+    );
     assert_eq!(
         embedder.embedded_texts().len(),
         1,
@@ -583,8 +598,7 @@ async fn an_oversized_parent_of_end_context_is_refused_before_any_embed() {
 /// the wrong space and only the commit-phase recheck would refuse.
 #[tokio::test]
 async fn an_ends_only_call_checks_the_contract_before_any_embed() {
-    let (graph, interaction) =
-        graph_with_interaction("hybrid-parent-swap", 1, 0, "ingest context");
+    let (graph, interaction) = graph_with_interaction("hybrid-parent-swap", 1, 0, "ingest context");
     graph
         .write()
         .stamp_embedding(contract("fixture", 1024))
