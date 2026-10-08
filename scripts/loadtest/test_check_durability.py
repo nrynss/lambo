@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -205,13 +206,39 @@ class CheckDurability(unittest.TestCase):
         self.assertEqual(rc, BAD_INPUT, out)
 
     def test_store_is_opened_read_only(self):
-        db = self.store(interactions=1)
-        db.chmod(0o444)
+        # A read/write open is detectable only by what it leaves behind: a
+        # store whose last writer died holds committed rows in the -wal file;
+        # a read/write connection recovers it and, on close, checkpoints it
+        # into the main file and deletes the -wal (a modification), while a
+        # read-only one reads through the -wal and touches nothing. (A chmod
+        # 0444 file would not discriminate: SQLite silently opens it read-only.)
+        live = self.dir / "live"
+        crashed = self.dir / "crashed"
+        live.mkdir()
+        crashed.mkdir()
+        src = self.store(interactions=1)
+        con = sqlite3.connect(src)
+        con.execute("PRAGMA journal_mode=WAL")
+        con.execute("PRAGMA wal_autocheckpoint=0")
+        con.execute("INSERT INTO interactions VALUES (?)", (SESSION,))
+        con.commit()
         try:
-            rc, out = self.run_check(self.ledger([derive_ack(1)]), db)
+            # Snapshot while the writer is still open: what a killed process
+            # leaves on disk (rows only in the -wal).
+            for name in ("store.db", "store.db-wal", "store.db-shm"):
+                shutil.copy(self.dir / name, crashed / name)
         finally:
-            db.chmod(0o644)
-        self.assertEqual(rc, OK, out)
+            con.close()
+        db = crashed / "store.db"
+        wal = crashed / "store.db-wal"
+        self.assertTrue(wal.exists() and wal.stat().st_size > 0)
+        before = db.read_bytes()
+
+        rc, out = self.run_check(self.ledger([derive_ack(2)]), db)
+
+        self.assertEqual(rc, OK, out)  # both rows were read, through the -wal
+        self.assertEqual(db.read_bytes(), before, "the checker modified the store file")
+        self.assertTrue(wal.exists(), "the checker checkpointed and removed the -wal")
 
     def test_drifted_wording_is_parser_drift(self):
         rc, out = self.run_check(
