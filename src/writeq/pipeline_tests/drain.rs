@@ -439,3 +439,83 @@ async fn a_cancelled_abort_leaves_no_lane_worker_running() {
         "a lane worker kept running after a cancelled abort_workers and applied its job"
     );
 }
+
+/// R3-1, at the intent replay: a `close()` cancelled while
+/// [`WritePipeline::stop_replay`] is joining the replay task must leave the
+/// handle where a retried close finds it, so the retry does not return while
+/// the replay is still inside a synchronous stretch that can write the graph.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cancelled_stop_replay_leaves_the_replay_joinable() {
+    let busy = Arc::new(AtomicBool::new(false));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let finished = Arc::new(AtomicUsize::new(0));
+    let rig = Rig::hybrid(
+        "wq-cancelled-stop-replay",
+        Arc::new(BusyEmbedder {
+            busy: busy.clone(),
+            inner: FixtureEmbedder::new(),
+            calls: calls.clone(),
+            finished: finished.clone(),
+        }),
+    );
+    // Let the calibration probe through first, so only the replay's own
+    // embeds (the liveness check, then the intent) are held.
+    until(
+        || rig.pipeline.calibration().is_some(),
+        "the probe to finish",
+    )
+    .await;
+    busy.store(true, Ordering::SeqCst);
+    let agent = AgentId::new("agent-a");
+    let interaction = rig.interaction(&agent);
+    let now = *rig.now.lock();
+    // A durable intent "left by a previous process": a foreign epoch.
+    let receipt = ReceiptId::new(rig.pipeline.epoch ^ 1, now, 1);
+    let intent = crate::types::WriteIntent {
+        session_id: rig.graph.read().session_id().clone(),
+        receipt: receipt.to_string(),
+        agent: agent.clone(),
+        interaction,
+        lane_seq: 1,
+        issued_ms: receipt.issued_ms(),
+        payload: crate::types::WriteIntentPayload::Derive {
+            concepts: vec![("gamma concept".into(), ConceptType::Entity)],
+            pairs: Vec::new(),
+        },
+        created_at: now,
+        outcome: None,
+    };
+    let Rig {
+        pipeline, graph, ..
+    } = rig;
+    let pipeline = Arc::new(pipeline);
+    pipeline.spawn_replay(vec![intent]);
+
+    // The liveness embed, then the intent's own embed, are both entered.
+    until(
+        || calls.load(Ordering::SeqCst) >= 2,
+        "the replay inside its intent's embed",
+    )
+    .await;
+
+    // Poll the stop once, then drop it: a close() cancelled mid-join.
+    {
+        let stop = pipeline.stop_replay();
+        tokio::pin!(stop);
+        let polled = tokio::time::timeout(Duration::ZERO, &mut stop).await;
+        assert!(polled.is_err(), "the join completed inside one poll");
+    }
+
+    pipeline.stop_replay().await;
+    assert_eq!(
+        finished.load(Ordering::SeqCst),
+        2,
+        "the retried stop_replay returned while the replay task was still running"
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        graph.read().concepts().count(),
+        0,
+        "an aborted replay applied its intent"
+    );
+}

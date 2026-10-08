@@ -21,7 +21,9 @@ use std::str::FromStr;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+use parking_lot::Mutex as PlMutex;
 use serde_json::json;
+use tokio::task::JoinHandle;
 
 use super::{
     ConsumeStamp, Job, JobPayload, ReceiptAnswer, ReceiptId, ReplayBlockReason, WritePipeline,
@@ -401,7 +403,18 @@ impl WritePipeline {
         let handle = self.replay.lock().take();
         if let Some(handle) = handle {
             handle.abort();
-            let _ = handle.await;
+            // Custody until the join returns (R3-1): a `close()` cancelled
+            // here hands the aborted handle back to its slot, so the retried
+            // close joins it rather than draining past a replay that is still
+            // inside a synchronous stretch.
+            let mut custody = ReplayCustody {
+                slot: &self.replay,
+                handle: Some(handle),
+            };
+            if let Some(handle) = custody.handle.as_mut() {
+                let _ = handle.await;
+            }
+            custody.handle = None;
         }
     }
 
@@ -410,6 +423,22 @@ impl WritePipeline {
     pub(crate) fn abort_replay_sync(&self) {
         if let Some(handle) = self.replay.lock().take() {
             handle.abort();
+        }
+    }
+}
+
+/// Custody of the replay task's handle while [`WritePipeline::stop_replay`]
+/// joins it: returned to its slot, already aborted, if the join is cancelled.
+/// The twin of `memory::shutdown::HandleCustody`.
+struct ReplayCustody<'a> {
+    slot: &'a PlMutex<Option<JoinHandle<()>>>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl Drop for ReplayCustody<'_> {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            *self.slot.lock() = Some(handle);
         }
     }
 }
