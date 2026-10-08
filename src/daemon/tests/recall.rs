@@ -336,6 +336,10 @@ async fn recall_cache_hit_rerenders_fresh_warning_lines() {
         "age refreshed on cache hit: {}",
         aged.context
     );
+    assert!(
+        daemon.hot_list().read().contains(us),
+        "a live entry stays on the hot list"
+    );
 
     // Window lapses (age 41s > 30s) -> warning line drops, still a hit.
     *clock_now.lock().unwrap() = base + chrono::Duration::seconds(30);
@@ -354,6 +358,13 @@ async fn recall_cache_hit_rerenders_fresh_warning_lines() {
         !lapsed.context.contains("wrote to it"),
         "lapsed entry's warning dropped: {}",
         lapsed.context
+    );
+    // The recall path itself evicts, through `HotList::revalidate_members`:
+    // dropping the line alone would also pass for a read that rebuilds
+    // payloads without evicting.
+    assert!(
+        !daemon.hot_list().read().contains(us),
+        "the lapsed entry must be evicted from the hot list by recall"
     );
 }
 

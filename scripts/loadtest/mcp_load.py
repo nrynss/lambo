@@ -58,7 +58,7 @@ DEFAULT_ENDPOINT = "http://127.0.0.1:17700/mcp"
 PRODUCTION_PORT = 7700
 PROTOCOL_VERSION = "2025-06-18"
 
-# Cap numbers mirrored from the server (`src/cli/caps.rs`, `src/mcp/serve.rs`)
+# Cap numbers mirrored from the server (`src/surface/limits.rs`, `src/mcp/serve.rs`)
 # so the adversarial mix targets the real bounds.
 MAX_ACTION_TARGETS = 64
 MAX_CONTENT_BYTES = 16_384

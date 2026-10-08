@@ -1,5 +1,65 @@
 # Changelog
 
+## Unreleased
+
+### Breaking
+
+- Canonical keys change for text containing some invisible codepoints (#25,
+  re-landing review finding V1, which was fixed on 2026-08-15 and then lost
+  the same day). Stored concepts keep the keys they were written with; nothing
+  is re-keyed on load, so every existing store still loads and its uniqueness
+  check cannot newly collide.
+  - The Mongolian free variation selectors `U+180B`-`U+180D` and `U+180F` are
+    still accepted in content but are now stripped from canonical keys. A
+    concept already stored with one keeps its old key, so a new derive of the
+    same text no longer matches it. That derive creates a new concept, or merges
+    into an existing plain-text concept with the stripped key, and the old row
+    is left out of future matching.
+  - Text containing the unassigned `Default_Ignorable_Code_Point` codepoints
+    `U+2065`, `U+FFF0`-`U+FFF8`, `U+E0080`-`U+E00FF` and `U+E01F0`-`U+E0FFF` is
+    now refused wherever a surface size-checks text: concept and action
+    content, inspect focus, recall query, and agent and session ids.
+    Stored content holding them still loads and renders, but the same text can
+    no longer be submitted again.
+  - **Operator action:** none expected. The lambo dogfood store (3,966 concepts)
+    held none of these codepoints in content or keys when checked on
+    2026-10-08. A store that does hold them can be found by comparing each
+    stored `canonical_key` with one recomputed from its content.
+- Under the hybrid strategy (the default) an applied `record_action` receipt
+  now reads `recorded action: N concept(s) created (M embedded), E edge(s)`
+  and its JSON carries `embedded`, as a hybrid `derive` receipt does. Under
+  `canonical` the sentence and JSON are unchanged. A client that parses the
+  sentence must accept the optional `(M embedded)`;
+  `scripts/loadtest/check_durability.py` now does.
+- Hybrid `derive` refuses more inputs, each with a `Config` error and nothing
+  written, because `parent_of` ends are now embedded (below):
+  - a `parent_of` end the call creates whose origin-framed context is over
+    16 KiB, the rule the call's own concepts already had;
+  - a call whose only new concepts are `parent_of` ends, when the session's
+    embedding contract does not match the live embedder (such a call used to
+    apply keyword-only);
+  - a call that would embed more than 256 items (`MAX_HYBRID_EMBEDS`): new
+    concepts plus the `parent_of` ends it creates. On the asynchronous MCP path
+    this is refused at the call, not on the receipt. Split the call. A store
+    without vector search embeds nothing and is not limited.
+
+### Fixed
+
+- Concepts created as `parent_of` ends are embedded (issue #16 §2). Hybrid
+  `derive` created an end named only in `parent_of` with no vector, so it was
+  invisible to recall's vector leg until `re-embed --missing-only` backfilled
+  it, and the receipt read "2 created (1 embedded)". Ends the call creates are
+  now embedded with the same context, deadline, failure rule and contract
+  stamp as its concepts, and counted in `embedded`. They are not matched
+  against existing concepts. A store that advertises vector search but refuses
+  the checked lookup leaves them keyword-only, whatever else the call carries.
+- Hybrid `record_action` no longer embeds on a store without vector search,
+  matching `derive`: nothing is embedded or stamped, and the receipt says
+  `(0 embedded)`. Pre-existing.
+- The hybrid embedding-context cap counts the real framing bytes (5 with an
+  origin, 9 without, not 3), so a context can no longer exceed 16 KiB by up to
+  6 bytes. Pre-existing.
+
 ## 0.3.0 (2026-10-07)
 
 ### Breaking

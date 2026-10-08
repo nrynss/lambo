@@ -256,6 +256,573 @@ async fn a_brand_new_parent_of_end_is_still_created_as_entity() {
     );
 }
 
+/// Issue #16 §2: a `parent_of` end that is in neither `concepts` nor the
+/// graph is created fresh, and before this fix it was created with
+/// `embedding: None` — permanently invisible to recall's vector leg, while
+/// the receipt read "2 created (1 embedded)". Both rigs accumulated these
+/// (every one an `Entity`-typed `parent_of` end) until `re-embed
+/// --missing-only` backfilled them.
+///
+/// The end must carry a vector in the session's space, the embed must use the
+/// same origin-framed context as the call's own concepts, and the outcome's
+/// `embedded` count must cover it. The merge leg stays with `concepts`: the
+/// end is embedded but never queried for candidates, so `vector_calls` stays
+/// at one (the declared concept's).
+#[tokio::test]
+async fn a_parent_of_only_end_is_embedded_and_counted() {
+    let (graph, interaction) =
+        graph_with_interaction("hybrid-parent-embed", 1, 0, "ingest context");
+    let store = SpyStore::with_vector(Vec::new());
+    let embedder = RecordingEmbedder::new();
+    let pairs = [("document:src.md", "an unrelated concept")];
+    let out = derive(
+        graph.clone(),
+        &store,
+        &embedder,
+        &contract("fixture", 1024),
+        interaction,
+        &agent(),
+        &[("an unrelated concept", ConceptType::Observation)],
+        &ParentOf::from_pairs(&pairs),
+        10,
+        SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let g = graph.read();
+    let parent = g
+        .concepts()
+        .find(|c| c.content == "document:src.md")
+        .expect("the parent end is created");
+    assert_eq!(parent.concept_type, PARENT_OF_CONCEPT_TYPE);
+    assert!(
+        parent.embedding.as_ref().is_some_and(|v| v.len() == 1024),
+        "a parent_of-only end must carry a vector (issue #16 §2)"
+    );
+    assert_eq!(out.created.len(), 2);
+    assert_eq!(
+        out.embedded, 2,
+        "the receipt's \"N created (M embedded)\" must count the parent_of end"
+    );
+    assert!(
+        embedder
+            .embedded_texts()
+            .contains(&"document:src.md — ingest context".to_string()),
+        "the end is embedded with the same origin framing as the call's concepts: {:?}",
+        embedder.embedded_texts()
+    );
+    assert_eq!(
+        store.vector_calls(),
+        1,
+        "a parent_of end is embedded, never sent through the merge leg"
+    );
+    assert_eq!(g.embedding(), Some(&contract("fixture", 1024)));
+    assert!(
+        g.concepts().all(|c| c.embedding.is_some()),
+        "every concept this call created carries a vector"
+    );
+    g.assert_invariants().unwrap();
+}
+
+/// The fix embeds only ends the call will *create*. An end that resolves to a
+/// concept already in the graph, or to one of this call's own `concepts`, is
+/// not embedded again (its vector belongs to the write that created it), and
+/// two pairs naming one new end embed it once.
+#[tokio::test]
+async fn parent_of_ends_that_resolve_to_existing_concepts_are_not_re_embedded() {
+    let (graph, interaction) =
+        graph_with_interaction("hybrid-parent-reuse", 1, 0, "ingest context");
+    let store = SpyStore::with_vector(Vec::new());
+    let embedder = RecordingEmbedder::new();
+    derive(
+        graph.clone(),
+        &store,
+        &embedder,
+        &contract("fixture", 1024),
+        interaction,
+        &agent(),
+        &[("existing parent", ConceptType::Entity)],
+        &ParentOf::none(),
+        10,
+        SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+        None,
+    )
+    .await
+    .unwrap();
+    let before = embedder.embedded_texts().len();
+
+    let pairs = [
+        ("existing parent", "declared child"),
+        ("new parent", "declared child"),
+        ("new parent", "other child"),
+    ];
+    let out = derive(
+        graph.clone(),
+        &store,
+        &embedder,
+        &contract("fixture", 1024),
+        interaction,
+        &agent(),
+        &[("declared child", ConceptType::Entity)],
+        &ParentOf::from_pairs(&pairs),
+        10,
+        SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let texts = embedder.embedded_texts()[before..].to_vec();
+    let mut subjects: Vec<&str> = texts
+        .iter()
+        .map(|t| t.split(" — ").next().unwrap())
+        .collect();
+    subjects.sort_unstable();
+    assert_eq!(
+        subjects,
+        ["declared child", "new parent", "other child"],
+        "one embed per created content; the existing parent and the declared \
+         child's second mention are not re-embedded"
+    );
+    assert_eq!(out.created.len(), 3);
+    assert_eq!(out.embedded, 3);
+    let g = graph.read();
+    assert!(g.concepts().all(|c| c.embedding.is_some()));
+    g.assert_invariants().unwrap();
+}
+
+/// The degradation rules are the `concepts` rules. Capability absent: the end
+/// stays keyword-only and nothing is embedded (byte-identical to Canonical).
+/// Embedder failure on the end: the whole write fails with nothing written,
+/// exactly as it does for a declared concept (J3-R3-1).
+#[tokio::test]
+async fn parent_of_end_embedding_follows_the_concepts_degrade_rules() {
+    let (graph, interaction) =
+        graph_with_interaction("hybrid-parent-nocap", 1, 0, "ingest context");
+    let embedder = RecordingEmbedder::new();
+    let pairs = [("document:src.md", "a child")];
+    let out = derive(
+        graph.clone(),
+        &SpyStore::without_vector(),
+        &embedder,
+        &contract("fixture", 1024),
+        interaction,
+        &agent(),
+        &[("a child", ConceptType::Entity)],
+        &ParentOf::from_pairs(&pairs),
+        10,
+        SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(embedder.embedded_texts().is_empty());
+    assert_eq!(out.embedded, 0);
+    assert!(graph.read().embedding().is_none());
+    assert!(graph.read().concepts().all(|c| c.embedding.is_none()));
+
+    /// Embeds everything except the parent_of end.
+    struct RefusesParent;
+    #[async_trait]
+    impl Embedder for RefusesParent {
+        fn dimensions(&self) -> usize {
+            1024
+        }
+        async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbedError> {
+            if text.starts_with("document:src.md") {
+                return Err(EmbedError::Unavailable("server down".into()));
+            }
+            FixtureEmbedder::new().embed(text).await
+        }
+    }
+    let (graph, interaction) = graph_with_interaction("hybrid-parent-fail", 1, 0, "ingest context");
+    let err = derive(
+        graph.clone(),
+        &SpyStore::with_vector(Vec::new()),
+        &RefusesParent,
+        &contract("fixture", 1024),
+        interaction,
+        &agent(),
+        &[("a child", ConceptType::Entity)],
+        &ParentOf::from_pairs(&pairs),
+        10,
+        SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(err, LamboError::EmbedUnavailable(_)),
+        "a failed parent_of embed fails the write like a failed concept embed: {err:?}"
+    );
+    let g = graph.read();
+    assert_eq!(g.node_count(), 1, "interaction only — nothing was written");
+    assert!(g.embedding().is_none());
+}
+
+/// A store that advertises `VECTOR_SEARCH` but refuses the checked lookup
+/// with a capability miss serves no vectors, so the ends stay keyword-only,
+/// exactly as the call's own concepts do. That must not depend on what else
+/// is in the call: with an unmatched concept, the concept's lookup sees the
+/// refusal first; in a call with no unmatched concept, the ends ask the store
+/// themselves (once, with the first end's vector) and stop there.
+#[tokio::test]
+async fn parent_of_ends_stay_keyword_only_when_the_store_refuses_vectors() {
+    let pairs = [
+        ("document:src.md", "a child"),
+        ("document:other.md", "a child"),
+    ];
+
+    // With an unmatched concept in the call.
+    let (graph, interaction) =
+        graph_with_interaction("hybrid-parent-refused", 1, 0, "ingest context");
+    let store = SpyStore::refusing();
+    let embedder = RecordingEmbedder::new();
+    let out = derive(
+        graph.clone(),
+        &store,
+        &embedder,
+        &contract("fixture", 1024),
+        interaction,
+        &agent(),
+        &[("a child", ConceptType::Entity)],
+        &ParentOf::from_pairs(&pairs),
+        10,
+        SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(out.created.len(), 3);
+    assert_eq!(out.embedded, 0);
+    assert_eq!(
+        store.vector_calls(),
+        1,
+        "the concept's lookup saw the refusal"
+    );
+    assert_eq!(
+        embedder.embedded_texts(),
+        ["a child — ingest context"],
+        "after the refusal no end is embedded"
+    );
+    assert!(graph.read().concepts().all(|c| c.embedding.is_none()));
+
+    // Ends only: no concept asked the store, so the first end does.
+    let (graph, interaction) =
+        graph_with_interaction("hybrid-parent-refused-ends", 1, 0, "ingest context");
+    let store = SpyStore::refusing();
+    let embedder = RecordingEmbedder::new();
+    let out = derive(
+        graph.clone(),
+        &store,
+        &embedder,
+        &contract("fixture", 1024),
+        interaction,
+        &agent(),
+        &[],
+        &ParentOf::from_pairs(&pairs),
+        10,
+        SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        out.created.len(),
+        3,
+        "both parents and the child are created"
+    );
+    assert_eq!(
+        out.embedded, 0,
+        "a store that refuses vectors gets none, whatever else the call carries"
+    );
+    assert_eq!(
+        store.vector_calls(),
+        1,
+        "one probe, with the first end's vector"
+    );
+    assert_eq!(
+        embedder.embedded_texts().len(),
+        1,
+        "the refusal stops the ends' embeds: {:?}",
+        embedder.embedded_texts()
+    );
+    let g = graph.read();
+    assert!(g.concepts().all(|c| c.embedding.is_none()));
+    g.assert_invariants().unwrap();
+}
+
+/// A `parent_of` end the call will create is embedded with the origin
+/// framing, so its framed context is held to `MAX_HYBRID_CONTEXT_BYTES` like
+/// a concept's. The end itself is under the per-string cap that
+/// `validate_limits` checks; only the framed context is over. The refusal is
+/// a `Config` error before any embed or store call, with nothing written.
+#[tokio::test]
+async fn an_oversized_parent_of_end_context_is_refused_before_any_embed() {
+    let (graph, interaction) =
+        graph_with_interaction("hybrid-parent-oversized", 1, 0, "ingest context");
+    let store = SpyStore::with_vector(Vec::new());
+    let embedder = RecordingEmbedder::new();
+    let long_end = "p".repeat(MAX_HYBRID_CONTEXT_BYTES);
+    let pairs = [(long_end.as_str(), "a child")];
+    let before = graph.read().snapshot();
+    let err = derive(
+        graph.clone(),
+        &store,
+        &embedder,
+        &contract("fixture", 1024),
+        interaction,
+        &agent(),
+        &[("a child", ConceptType::Entity)],
+        &ParentOf::from_pairs(&pairs),
+        10,
+        SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(&err, LamboError::Config(m) if m.contains("embedding context")),
+        "unexpected error: {err:?}"
+    );
+    assert!(embedder.embedded_texts().is_empty());
+    assert_eq!(store.vector_calls(), 0);
+    assert_eq!(graph.read().snapshot(), before, "nothing was written");
+}
+
+/// A call whose only new concepts are `parent_of` ends still embeds, so a
+/// mid-session contract swap is refused before the first embed, as it is for
+/// a call with a new concept. Without the check the ends would be embedded in
+/// the wrong space and only the commit-phase recheck would refuse.
+#[tokio::test]
+async fn an_ends_only_call_checks_the_contract_before_any_embed() {
+    let (graph, interaction) = graph_with_interaction("hybrid-parent-swap", 1, 0, "ingest context");
+    graph
+        .write()
+        .stamp_embedding(contract("fixture", 1024))
+        .unwrap();
+    let store = SpyStore::with_vector(Vec::new());
+    let embedder = RecordingEmbedder::new();
+    let pairs = [("new parent", "new child")];
+    let err = derive(
+        graph.clone(),
+        &store,
+        &embedder,
+        &contract("bedrock", 1024),
+        interaction,
+        &agent(),
+        &[],
+        &ParentOf::from_pairs(&pairs),
+        10,
+        SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(err, LamboError::Config(_)),
+        "unexpected error: {err:?}"
+    );
+    assert!(
+        embedder.embedded_texts().is_empty(),
+        "refused before any embed: {:?}",
+        embedder.embedded_texts()
+    );
+    assert_eq!(store.vector_calls(), 0);
+    let g = graph.read();
+    assert_eq!(g.node_count(), 1, "interaction only — nothing was written");
+    assert_eq!(g.embedding().unwrap().kind, "fixture", "stamp preserved");
+}
+
+#[test]
+fn context_len_is_the_length_of_the_context_text() {
+    for (content, origin) in [
+        ("user schema", Some("ingest context")),
+        ("user schema", Some("  padded  ")),
+        ("user schema", Some("   ")),
+        ("user schema", None),
+        ("", None),
+    ] {
+        assert_eq!(
+            context_len(content, origin),
+            context_text(content, origin).len(),
+            "{content:?} / {origin:?}"
+        );
+    }
+}
+
+/// The context cap is on the context actually embedded: `"{content} —
+/// {origin}"` adds 5 bytes, `"Concept: {content}"` adds 9. The check used
+/// to add 3 in both cases, so a context up to 6 bytes over the cap passed.
+/// A context of exactly the cap is embedded; one byte over is refused before
+/// any embed, in both arms.
+#[tokio::test]
+async fn the_context_cap_counts_the_real_framing_bytes() {
+    async fn run(prompt: &str, content_len: usize) -> (Result<DeriveOutcome, LamboError>, usize) {
+        let (graph, interaction) = graph_with_interaction("hybrid-context-cap", 1, 0, prompt);
+        let embedder = RecordingEmbedder::new();
+        let content = "c".repeat(content_len);
+        let out = derive(
+            graph,
+            &SpyStore::with_vector(Vec::new()),
+            &embedder,
+            &contract("fixture", 1024),
+            interaction,
+            &agent(),
+            &[(content.as_str(), ConceptType::Entity)],
+            &ParentOf::none(),
+            10,
+            SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+            None,
+        )
+        .await;
+        (out, embedder.embedded_texts().len())
+    }
+    // With an origin: content + " — " (5) + origin.
+    let at_cap = MAX_HYBRID_CONTEXT_BYTES - 5 - "ctx".len();
+    let (out, embeds) = run("ctx", at_cap).await;
+    assert_eq!(out.unwrap().embedded, 1);
+    assert_eq!(embeds, 1);
+    let (out, embeds) = run("ctx", at_cap + 1).await;
+    assert!(matches!(out, Err(LamboError::Config(_))), "{out:?}");
+    assert_eq!(embeds, 0);
+
+    // No origin (an empty prompt): "Concept: " (9) + content.
+    let at_cap = MAX_HYBRID_CONTEXT_BYTES - 9;
+    let (out, embeds) = run("", at_cap).await;
+    assert_eq!(out.unwrap().embedded, 1);
+    assert_eq!(embeds, 1);
+    let (out, embeds) = run("", at_cap + 1).await;
+    assert!(matches!(out, Err(LamboError::Config(_))), "{out:?}");
+    assert_eq!(embeds, 0);
+}
+
+/// `n` pairs, each naming two ends neither in the graph nor in the call.
+fn fresh_end_pairs(n: usize) -> Vec<(String, String)> {
+    (0..n)
+        .map(|i| (format!("parent end {i}"), format!("child end {i}")))
+        .collect()
+}
+
+/// Issue #16 §2 made `parent_of` ends embed, so a call's embeds are its
+/// unmatched concepts plus the ends it creates — up to 768 under the request
+/// limits, all inside one `HYBRID_IO_TIMEOUT`. `MAX_HYBRID_EMBEDS` keeps the
+/// old ceiling: exactly the budget applies, one over is refused with a
+/// `Config` error before any embed or store call. A store without vector
+/// search embeds nothing, so the same call is not refused there.
+#[tokio::test]
+async fn the_embed_budget_counts_concepts_and_new_parent_of_ends() {
+    let pairs = fresh_end_pairs(MAX_HYBRID_EMBEDS / 2);
+    let pair_refs: Vec<(&str, &str)> = pairs
+        .iter()
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect();
+
+    // Exactly the budget: every end is embedded.
+    let (graph, interaction) = graph_with_interaction("hybrid-budget-at", 1, 0, "bulk");
+    let embedder = RecordingEmbedder::new();
+    let out = derive(
+        graph,
+        &SpyStore::with_vector(Vec::new()),
+        &embedder,
+        &contract("fixture", 1024),
+        interaction,
+        &agent(),
+        &[],
+        &ParentOf::from_pairs(&pair_refs),
+        10,
+        SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(out.embedded, MAX_HYBRID_EMBEDS);
+    assert_eq!(embedder.embedded_texts().len(), MAX_HYBRID_EMBEDS);
+
+    // One new concept more: refused before any I/O, nothing written.
+    let (graph, interaction) = graph_with_interaction("hybrid-budget-over", 1, 0, "bulk");
+    let store = SpyStore::with_vector(Vec::new());
+    let embedder = RecordingEmbedder::new();
+    let before = graph.read().snapshot();
+    let err = derive(
+        graph.clone(),
+        &store,
+        &embedder,
+        &contract("fixture", 1024),
+        interaction,
+        &agent(),
+        &[("one more", ConceptType::Entity)],
+        &ParentOf::from_pairs(&pair_refs),
+        10,
+        SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(&err, LamboError::Config(m) if m.contains("would embed 257")),
+        "unexpected error: {err:?}"
+    );
+    assert!(embedder.embedded_texts().is_empty());
+    assert_eq!(store.vector_calls(), 0);
+    assert_eq!(graph.read().snapshot(), before, "nothing was written");
+
+    // A store without vector search embeds nothing, so nothing is refused.
+    let (graph, interaction) = graph_with_interaction("hybrid-budget-nocap", 1, 0, "bulk");
+    let out = derive(
+        graph,
+        &SpyStore::without_vector(),
+        &RecordingEmbedder::new(),
+        &contract("fixture", 1024),
+        interaction,
+        &agent(),
+        &[("one more", ConceptType::Entity)],
+        &ParentOf::from_pairs(&pair_refs),
+        10,
+        SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(out.created.len(), MAX_HYBRID_EMBEDS + 1);
+    assert_eq!(out.embedded, 0);
+}
+
+/// The J3 ack runs the same count against the graph as it is at the call:
+/// matched concepts and existing ends are free, and nothing is refused
+/// without vector search.
+#[test]
+fn validate_embed_budget_counts_only_what_the_call_would_embed() {
+    let (graph, interaction) = graph_with_interaction("hybrid-budget-ack", 1, 0, "bulk");
+    {
+        let mut g = graph.write();
+        crate::graph::derive::derive(
+            &mut g,
+            interaction,
+            &agent(),
+            &[("existing", ConceptType::Entity)],
+            &ParentOf::none(),
+            10,
+        )
+        .unwrap();
+    }
+    let pairs = fresh_end_pairs(MAX_HYBRID_EMBEDS / 2);
+    let pair_refs: Vec<(&str, &str)> = pairs
+        .iter()
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect();
+    let g = graph.read();
+    let ends = ParentOf::from_pairs(&pair_refs);
+    validate_embed_budget(&g, &[], &ends, true).unwrap();
+    validate_embed_budget(&g, &[("existing", ConceptType::Entity)], &ends, true).unwrap();
+    let err =
+        validate_embed_budget(&g, &[("one more", ConceptType::Entity)], &ends, true).unwrap_err();
+    assert!(matches!(err, LamboError::Config(_)), "{err:?}");
+    validate_embed_budget(&g, &[("one more", ConceptType::Entity)], &ends, false).unwrap();
+}
+
 #[tokio::test]
 async fn first_use_empty_candidates_still_commits_contract() {
     // Cockroach returns this safe empty shape for a missing/unstamped

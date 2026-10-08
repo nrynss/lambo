@@ -101,7 +101,6 @@ use serde::{Deserialize, Serialize};
 use super::caps::{check_size_cli, require_nonempty, CliError, MAX_INSPECT_NODES};
 use super::load_reader_graph;
 use crate::canon::{gate_progress, GateProgress, PromotionPolicy};
-use crate::cli::inspect::{resolve_focus, Focus};
 use crate::graph::Graph;
 use crate::mcp::AUTH_TOKEN_ENV;
 use crate::recall::format::blast_radii;
@@ -110,6 +109,7 @@ use crate::resolve::{
     SessionEmbeddingCompatibility,
 };
 use crate::store::{Capabilities, GraphStore, SessionFlushStats, StoreKind};
+use crate::surface::focus::{resolve_focus, Focus};
 use crate::types::{
     tie_break_by_key, CanonizationStatus, ConceptType, EdgeType, EmbeddingContract, GraphSnapshot,
     Node, NodeId, SessionId, StoreError,

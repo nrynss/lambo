@@ -41,11 +41,10 @@
 
 use std::collections::HashMap;
 
-use crate::daemon::ScoreTable;
 use crate::graph::Graph;
 #[cfg(test)]
 use crate::types::Node;
-use crate::types::{CanonizationStatus, NodeId};
+use crate::types::{CanonizationStatus, NodeId, ScoreTable};
 
 /// Stage 1 survival floor (spec §10).
 pub(super) const MIN_GC_SURVIVED: i32 = 3;

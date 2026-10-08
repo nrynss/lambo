@@ -140,7 +140,6 @@ use serde_json::json;
 use tokio::sync::{watch, Notify, Semaphore};
 use tokio::task::JoinHandle;
 
-use crate::cli::caps::{MAX_CONCEPTS_PER_DERIVE, MAX_CONTENT_BYTES};
 use crate::embed::Embedder;
 use crate::graph::action::{
     record_action_with_embeddings as graph_record_action_embedded, Action, ActionEmbeddings,
@@ -150,6 +149,7 @@ use crate::graph::hybrid;
 use crate::graph::index::InvertedIndex;
 use crate::graph::Graph;
 use crate::store::GraphStore;
+use crate::surface::limits::{MAX_CONCEPTS_PER_DERIVE, MAX_CONTENT_BYTES};
 use crate::types::{
     AgentId, ConceptType, EmbeddingContract, LamboError, MatchStrategy, Node, NodeId, SessionId,
     WriteIntent, WriteIntentOutcome, WriteIntentPayload,
@@ -882,13 +882,13 @@ pub struct AppliedSummary {
     /// a derive wrote no edges, which is not what it means.
     pub edges: Option<usize>,
     /// Concepts persisted **with a vector** — *applied ≠ embedded* as a
-    /// first-class receipt fact (J3-R3-1). `Some` only for a hybrid-strategy
-    /// `derive`, the one write kind that can embed: a canonical-strategy derive
-    /// and a `record_action` never produce vectors by design, and an absent key
-    /// must never read as "zero of something that was attempted". When
-    /// `Some(e)` with `e < created_count`, some applied concepts carry no
-    /// embedding (capability-absent or a refused merge target) and are
-    /// unfindable by semantic recall until re-embedded.
+    /// first-class receipt fact (J3-R3-1). `Some` only under the hybrid
+    /// strategy, the one that embeds — for `derive` and, since bef53e6, for
+    /// `record_action`. A canonical-strategy write never produces vectors by
+    /// design, and an absent key must never read as "zero of something that
+    /// was attempted". When `Some(e)` with `e < created_count`, some applied
+    /// concepts carry no embedding (capability-absent or a refused merge
+    /// target) and are unfindable by semantic recall until re-embedded.
     pub embedded: Option<usize>,
 }
 
@@ -937,7 +937,7 @@ pub enum ReceiptAnswer {
     /// file path has no `://`, and "no producer today" is a fact about today.
     ///
     /// So it carries what the synchronous path carries, built from the same
-    /// `crate::mcp::server::err_class` rather than a second match, and the
+    /// `crate::surface::error::err_class` rather than a second match, and the
     /// operator's copy is written at the same site twice over: the `completion`
     /// line's `error` field (operator-facing JSONL) and a `tracing::warn!`.
     /// [`ReceiptAnswer::Dropped`] is deliberately untouched — its string is
@@ -1004,7 +1004,7 @@ pub enum ReceiptAnswer {
 /// the log, never the raw error, which can carry a store URL, a store file path
 /// or a driver message. This is the same sentence `mcp::server::tool_err`
 /// produces for the synchronous path, built from the same
-/// [`crate::mcp::server::err_class`] so the two cannot drift.
+/// [`crate::surface::error::err_class`] so the two cannot drift.
 ///
 /// Every caller writes the raw error to the operator at the same site — a
 /// `completion` ledger line and a `tracing::warn!` — so nothing is lost, only
@@ -1012,7 +1012,7 @@ pub enum ReceiptAnswer {
 fn model_safe_failure(err: &LamboError) -> String {
     format!(
         "{} (the detail was logged server-side)",
-        crate::mcp::server::err_class(err)
+        crate::surface::error::err_class(err)
     )
 }
 
@@ -1719,12 +1719,28 @@ fn derive_sentence(
 
 /// The receipt sentence for an applied `record_action` — shared with the
 /// intent outcome for [`derive_sentence`]'s reason.
-fn action_sentence(outcome: &crate::graph::action::ActionOutcome) -> String {
-    format!(
-        "recorded action: {} concept(s) created, {} edge(s)",
-        outcome.created.len(),
-        outcome.edges
-    )
+///
+/// Under the hybrid strategy `record_action` embeds the concepts it creates
+/// (`embed_action_contents`), so its sentence carries the count exactly as
+/// [`derive_sentence`]'s does; under `Canonical` nothing embeds and the
+/// sentence is unchanged.
+fn action_sentence(
+    strategy: MatchStrategy,
+    outcome: &crate::graph::action::ActionOutcome,
+) -> String {
+    match strategy {
+        MatchStrategy::Hybrid => format!(
+            "recorded action: {} concept(s) created ({} embedded), {} edge(s)",
+            outcome.created.len(),
+            outcome.embedded,
+            outcome.edges
+        ),
+        MatchStrategy::Canonical => format!(
+            "recorded action: {} concept(s) created, {} edge(s)",
+            outcome.created.len(),
+            outcome.edges
+        ),
+    }
 }
 
 impl WriteCtx {
@@ -1864,13 +1880,20 @@ impl WriteCtx {
                 //
                 // Gated on the strategy for the same reason `derive` is: under
                 // `Canonical` there is no vector leg at all, and embedding here
-                // would stamp a contract on a session that asked for none.
+                // would stamp a contract on a session that asked for none. And
+                // on the store's VECTOR_SEARCH, as hybrid `derive` is: a store
+                // that cannot search vectors keeps none, so the write is
+                // keyword-only and its receipt says "(0 embedded)".
+                let vector_search = self
+                    .store
+                    .capabilities()
+                    .contains(crate::store::Capabilities::VECTOR_SEARCH);
                 let embeddings = match self.match_strategy {
-                    MatchStrategy::Hybrid => {
+                    MatchStrategy::Hybrid if vector_search => {
                         crate::graph::action::embed_action_contents(self.embedder.as_ref(), &act)
                             .await?
                     }
-                    MatchStrategy::Canonical => ActionEmbeddings::new(),
+                    MatchStrategy::Hybrid | MatchStrategy::Canonical => ActionEmbeddings::new(),
                 };
                 let outcome = {
                     let mut g = self.graph.write();
@@ -1894,7 +1917,7 @@ impl WriteCtx {
                             job.receipt.to_string(),
                             WriteIntentOutcome {
                                 tag: stamp.tag.into(),
-                                summary: action_sentence(&outcome),
+                                summary: action_sentence(self.match_strategy, &outcome),
                                 consumed_at: stamp.at,
                             },
                         );
@@ -1908,7 +1931,7 @@ impl WriteCtx {
                 let created = truncate_ids(&outcome.created);
                 Ok(AppliedSummary {
                     kind: WriteKind::RecordAction,
-                    summary: action_sentence(&outcome),
+                    summary: action_sentence(self.match_strategy, &outcome),
                     created,
                     matched: Vec::new(),
                     created_count: outcome.created.len(),
@@ -1916,9 +1939,13 @@ impl WriteCtx {
                     semantic_merged: None,
                     reinforced: None,
                     edges: Some(outcome.edges),
-                    // `record_action` never embeds by design — absent, not
+                    // Hybrid embeds what it creates (see the embed hop above);
+                    // Canonical never does, so the count is absent there, not
                     // zero, for the reason on the field.
-                    embedded: None,
+                    embedded: match self.match_strategy {
+                        MatchStrategy::Hybrid => Some(outcome.embedded),
+                        MatchStrategy::Canonical => None,
+                    },
                 })
             }
         }
@@ -3285,7 +3312,7 @@ impl WritePipeline {
                         // — so it survives on both.
                         let why = format!(
                             "replay after restart was refused ({}); nothing was written",
-                            crate::mcp::server::err_class(&LamboError::Embed(e.clone()))
+                            crate::surface::error::err_class(&LamboError::Embed(e.clone()))
                         );
                         let detail =
                             format!("replay after restart was refused ({e}); nothing was written");

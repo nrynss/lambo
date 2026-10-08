@@ -57,7 +57,7 @@ static STEMMER: LazyLock<Stemmer> = LazyLock::new(|| Stemmer::create(Algorithm::
 /// * **Concealment / reordering.** A `U+202E` RIGHT-TO-LEFT OVERRIDE in a
 ///   concept's `content` survives human review of a recall context block while
 ///   changing what the model reads. Nothing legitimate needs it, so
-///   [`crate::cli::caps::check_size`] **refuses** it at the surface.
+///   [`crate::surface::validate::check_size`] **refuses** it at the surface.
 /// * **Key forking.** An invisible codepoint that a *human cannot see* still
 ///   sits inside a token, defeats the stemmer, and yields an unrelated canonical
 ///   key. `"billing retries change"` and `"billing\u{200D} retries change"`
@@ -69,7 +69,7 @@ static STEMMER: LazyLock<Stemmer> = LazyLock::new(|| Stemmer::create(Algorithm::
 ///
 /// So this table is the **strip** set — [`normalize_tokens`] removes every
 /// codepoint in it, so no invisible character can ever fork a key — and
-/// [`crate::cli::caps`] refuses the whole table **except**
+/// [`crate::surface::validate`] refuses the whole table **except**
 /// [`TEXT_REQUIRED_INVISIBLE`]. The two rules compose: whatever a caller is
 /// allowed to store cannot affect a key, and whatever could affect a key cannot
 /// be stored. One table means the two cannot drift apart.
@@ -86,6 +86,15 @@ static STEMMER: LazyLock<Stemmer> = LazyLock::new(|| Stemmer::create(Algorithm::
 ///   `U+115F`, `U+1160`, `U+3164`, `U+FFA0` (`U+3164` HANGUL FILLER is the
 ///   canonical real-world invisible-smuggling codepoint) and `U+17B4`/`U+17B5`;
 /// * `U+2800` BRAILLE PATTERN BLANK, which occupies width but paints nothing.
+///
+/// It also covers every **unassigned** `Default_Ignorable_Code_Point`
+/// (`U+2065`, `U+FFF0–U+FFF8`, `U+E0080–U+E00FF`, `U+E01F0–U+E0FFF`): Unicode
+/// requires renderers to show nothing for them, so they meet the same
+/// invisibility criterion, and a superset survives future assignments. The
+/// Mongolian free variation selectors (`U+180B–U+180D`, `U+180F`) are listed
+/// too, as text-required (below). This is finding V1 of the t8.2-t8.3 review:
+/// fixed on 2026-08-15 (`c95a014`, `aac5cd5`), silently reverted the same day
+/// by `9686b40`, and re-landed in #25.
 ///
 /// Arabic number-formatting signs (`U+0600–U+0605`, `U+06DD`, `U+070F`,
 /// `U+0890–U+0891`, `U+08E2`) are *Cf* but deliberately **absent**: they prefix
@@ -106,25 +115,25 @@ pub const INVISIBLE_RANGES: &[(char, char)] = &[
     ('\u{061C}', '\u{061C}'),   // ARABIC LETTER MARK (bidi)
     ('\u{115F}', '\u{1160}'),   // HANGUL CHOSEONG / JUNGSEONG FILLER — blank
     ('\u{17B4}', '\u{17B5}'),   // KHMER VOWEL INHERENT AQ / AA — blank
-    ('\u{180E}', '\u{180E}'),   // MONGOLIAN VOWEL SEPARATOR
+    ('\u{180B}', '\u{180F}'),   // MONGOLIAN FREE VARIATION SELECTORS 1–4 + VOWEL SEPARATOR
     ('\u{200B}', '\u{200D}'),   // ZERO WIDTH SPACE, ZWNJ, ZWJ
     ('\u{200E}', '\u{200F}'),   // LEFT-TO-RIGHT / RIGHT-TO-LEFT MARK
     ('\u{202A}', '\u{202E}'),   // LRE, RLE, PDF, LRO, RLO — the U+202E family
-    ('\u{2060}', '\u{2064}'),   // WORD JOINER, invisible operators
-    ('\u{2066}', '\u{206F}'),   // isolates (LRI/RLI/FSI/PDI) + deprecated controls
+    ('\u{2060}', '\u{206F}'),   // WORD JOINER, invisible operators, U+2065, isolates, deprecated
     ('\u{2800}', '\u{2800}'),   // BRAILLE PATTERN BLANK
     ('\u{3164}', '\u{3164}'),   // HANGUL FILLER — the classic smuggling codepoint
     ('\u{FE00}', '\u{FE0F}'),   // VARIATION SELECTORS 1–16 (VS16 = emoji presentation)
     ('\u{FEFF}', '\u{FEFF}'),   // ZERO WIDTH NO-BREAK SPACE / BOM
     ('\u{FFA0}', '\u{FFA0}'),   // HALFWIDTH HANGUL FILLER
-    ('\u{FFF9}', '\u{FFFB}'),   // interlinear annotation
+    ('\u{FFF0}', '\u{FFFB}'),   // unassigned (Default_Ignorable) + interlinear annotation
     ('\u{110BD}', '\u{110BD}'), // KAITHI NUMBER SIGN
     ('\u{110CD}', '\u{110CD}'), // KAITHI NUMBER SIGN ABOVE
     ('\u{13430}', '\u{1343F}'), // Egyptian Hieroglyph format controls
     ('\u{1BCA0}', '\u{1BCA3}'), // shorthand format controls
     ('\u{1D173}', '\u{1D17A}'), // musical format controls
-    ('\u{E0000}', '\u{E007F}'), // TAGS block — invisible ASCII smuggling
+    ('\u{E0000}', '\u{E00FF}'), // TAGS block (invisible ASCII smuggling) + unassigned
     ('\u{E0100}', '\u{E01EF}'), // VARIATION SELECTORS SUPPLEMENT
+    ('\u{E01F0}', '\u{E0FFF}'), // unassigned (Default_Ignorable) to the end of the plane-14 block
 ];
 
 /// The subset of [`INVISIBLE_RANGES`] that legitimate text genuinely needs, and
@@ -137,6 +146,8 @@ pub const INVISIBLE_RANGES: &[(char, char)] = &[
 ///   form; `U+FE0F` is what makes `❤️` render as an emoji rather than a dingbat.
 /// * `U+034F` COMBINING GRAPHEME JOINER separates grapheme clusters in a handful
 ///   of orthographies and collation contexts.
+/// * `U+180B–U+180D` and `U+180F` MONGOLIAN FREE VARIATION SELECTORS pick a
+///   Mongolian glyph form, as the variation selectors do elsewhere.
 ///
 /// None of them can reorder or conceal a visible character — they only join,
 /// separate or restyle adjacent glyphs — so the concealment half of the threat
@@ -145,6 +156,8 @@ pub const INVISIBLE_RANGES: &[(char, char)] = &[
 /// preserved in `content` and erased from `canonical_key`.
 pub const TEXT_REQUIRED_INVISIBLE: &[(char, char)] = &[
     ('\u{034F}', '\u{034F}'),
+    ('\u{180B}', '\u{180D}'),
+    ('\u{180F}', '\u{180F}'),
     ('\u{200C}', '\u{200D}'),
     ('\u{FE00}', '\u{FE0F}'),
     ('\u{E0100}', '\u{E01EF}'),
@@ -639,6 +652,30 @@ mod tests {
             ("hangul filler", "billing\u{3164} retries change"),
             ("braille blank", "billing\u{2800} retries change"),
             ("tag character", "billing\u{E0062} retries change"),
+            // V1, the pin: the verifier's repro verbatim. A Mongolian free
+            // variation selector forked this key exactly as U+200D once did.
+            (
+                "mongolian fvs1 (allowed in content)",
+                "billing\u{180B} retries change",
+            ),
+            (
+                "mongolian fvs4 (allowed in content)",
+                "billing\u{180F} retries change",
+            ),
+            (
+                "mongolian vowel separator",
+                "billing\u{180E} retries change",
+            ),
+            ("reserved u+2065", "billing\u{2065} retries change"),
+            ("reserved specials", "billing\u{FFF0} retries change"),
+            (
+                "plane 14, reserved after TAGS",
+                "billing\u{E0080} retries change",
+            ),
+            (
+                "plane 14, reserved after the selectors supplement",
+                "billing\u{E01F0} retries change",
+            ),
         ] {
             assert_ne!(spoof, plain, "{label}: the inputs must differ byte-wise");
             assert_eq!(
@@ -669,6 +706,67 @@ mod tests {
             canonical_key("caf\u{e9} server", no_synonym),
             "CGJ must be removed before NFC runs"
         );
+    }
+
+    /// Every `Default_Ignorable_Code_Point` renders as nothing, which is the
+    /// table's own criterion, but the table skipped the unassigned ones
+    /// (`U+2065`, `U+FFF0..U+FFF8`, `U+E0080..U+E00FF`, `U+E01F0..U+E0FFF`)
+    /// and the Mongolian free variation selectors (`U+180B..U+180D`, `U+180F`)
+    /// while `9686b40` had reverted V1. The unassigned ones passed the surface
+    /// while rendering as nothing; the variation selectors are legitimate
+    /// text, but forked the key of text that renders identically. Both halves
+    /// of the policy now hold for every one: refused or text-required at the
+    /// surface, stripped from keys.
+    #[test]
+    fn default_ignorable_gaps_are_stripped_and_unassigned_ones_refused() {
+        let plain = "billing retries change";
+        let expected = canonical_key(plain, no_synonym);
+        for c in [
+            '\u{2065}',
+            '\u{FFF0}',
+            '\u{FFF8}',
+            '\u{E0080}',
+            '\u{E00FF}',
+            '\u{E01F0}',
+            '\u{E0FFF}',
+        ] {
+            assert!(
+                is_invisible(c),
+                "U+{:04X} must be in the strip set",
+                c as u32
+            );
+            assert!(
+                !is_text_required_invisible(c),
+                "unassigned U+{:04X} must be refused at the surface",
+                c as u32
+            );
+            assert_eq!(
+                canonical_key(&format!("billing{c} retries change"), no_synonym),
+                expected,
+                "U+{:04X} must not fork a key",
+                c as u32
+            );
+        }
+        for c in ['\u{180B}', '\u{180C}', '\u{180D}', '\u{180F}'] {
+            assert!(
+                is_invisible(c),
+                "U+{:04X} must be in the strip set",
+                c as u32
+            );
+            assert!(
+                is_text_required_invisible(c),
+                "Mongolian FVS U+{:04X} is text and stays allowed in content",
+                c as u32
+            );
+            assert_eq!(
+                canonical_key(&format!("billing{c} retries change"), no_synonym),
+                expected,
+                "U+{:04X} must not fork a key",
+                c as u32
+            );
+        }
+        // U+180E MONGOLIAN VOWEL SEPARATOR stays refused, as before.
+        assert!(is_invisible('\u{180E}') && !is_text_required_invisible('\u{180E}'));
     }
 
     /// The table is searched linearly and documented as ascending; an edit that

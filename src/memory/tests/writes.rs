@@ -774,3 +774,45 @@ async fn root_goal_promotes_matching_concepts_to_venerable() {
 
     mem.close().await.unwrap();
 }
+
+/// Hybrid `derive` embeds nothing when the store has no `VECTOR_SEARCH`: a
+/// store that cannot search vectors keeps none. `record_action` follows the
+/// same rule, so one keyword-only session does not report "(0 embedded)" for
+/// a derive and "(N embedded)" for an action.
+#[tokio::test]
+async fn a_hybrid_record_action_on_a_store_without_vector_search_embeds_nothing() {
+    let mem = Memory::builder()
+        .session("action-no-vector")
+        .agent("agent-a")
+        .flush_interval(Duration::from_secs(3_600))
+        .store(Arc::new(MemoryStore::new()) as Arc<dyn GraphStore>)
+        .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
+        .embedding_contract(contract("fixture", 1024))
+        .match_strategy(MatchStrategy::Hybrid)
+        .build()
+        .await
+        .expect("build");
+    let stamp_before = mem.graph.read().embedding().cloned();
+    let out = mem
+        .record_action_embedded_as(
+            &AgentId::new("agent-a"),
+            &Action {
+                event_time: None,
+                action: "ran the migration",
+                produces: &["schema v2"],
+                modifies: &[],
+                depends_on: &[],
+            },
+        )
+        .await
+        .expect("record_action");
+    assert_eq!(out.created.len(), 2);
+    assert_eq!(out.embedded, 0);
+    let g = mem.graph.read();
+    assert!(g.concepts().all(|c| c.embedding.is_none()));
+    assert_eq!(
+        g.embedding().cloned(),
+        stamp_before,
+        "the stamp is untouched"
+    );
+}

@@ -69,17 +69,20 @@
 //!
 //! ## Hot-list force-include
 //!
-//! Every expanded member that is on the caller's [`HotList`] is re-validated
-//! with [`HotList::revalidate`] **at the caller's `now`** (the same `now`
-//! used for everything else in the call: reservations, rendering). The
-//! predicate re-derives its recency window from that instant, so an entry
-//! whose window elapsed between detection and this read is dropped here
-//! (XP-3), and a surviving entry's payload has just been rebuilt against
-//! `now` — assemble renders it directly, never a cached copy. Surviving hot
-//! members are **force-included**: they stay in the hit list even beyond
-//! `top_k`, so a live conflict warning is never truncated away by rank. The
-//! per-entry re-validation is a single neighborhood walk (CONC-5), so a
-//! handful of hot nodes under the graph lock is cheap.
+//! Before assembly the caller re-validates every expanded member that is on
+//! the daemon's hot list **at the same `now` it passes here** (the `now` used
+//! for everything else in the call: reservations, rendering), through
+//! `HotList::revalidate_members` in `Daemon::recall_detailed`. The predicate
+//! re-derives its recency window from that instant, so an entry whose window
+//! elapsed between detection and this read is dropped there (XP-3), and a
+//! surviving entry's payload has just been rebuilt against `now`. Assemble
+//! takes the resulting payload map and renders it directly, never a cached
+//! copy; it does not touch the hot list itself, so recall does not depend on
+//! the daemon. Members in the map are **force-included**: they stay in the
+//! hit list even beyond `top_k`, so a live conflict warning is never
+//! truncated away by rank. The per-entry re-validation is a single
+//! neighborhood walk (CONC-5), so a handful of hot nodes under the graph lock
+//! is cheap.
 //!
 //! ## Assembly to `max_tokens`
 //!
@@ -96,20 +99,19 @@
 //! The default estimator is [`default_token_count`] (`ceil(bytes / 3.5)`);
 //! callers pass their own `Fn(&str) -> usize` to override.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 
 use crate::config::RecallWeights;
-use crate::daemon::hotlist::{HotList, HotListPayload};
-use crate::daemon::ScoreTable;
 use crate::graph::reserve::active_reservation;
 use crate::graph::Graph;
 use crate::recall::detail::{Annotation, AnnotationKind, DetailedHit, DetailedRecall};
 use crate::recall::expand::ExpandedSet;
 use crate::recall::format;
 use crate::types::{
-    tie_break_by_key, CanonizationStatus, Node, NodeId, RecallHit, RecallQuery, Scored,
+    tie_break_by_key, CanonizationStatus, HotListPayload, Node, NodeId, RecallHit, RecallQuery,
+    ScoreTable, Scored,
 };
 
 /// The built-in token estimator (see [`crate::recall::format`]).
@@ -118,18 +120,19 @@ pub use crate::recall::format::default_token_count;
 /// Score + assemble the expanded set into the final recall result.
 ///
 /// `phase1` is the phase-1 candidate list (query relevance source), `scores`
-/// the daemon's [`ScoreTable`], `hot` the daemon's hot list (mutated: entries
-/// are re-validated, refreshed, or dropped), `query` carries `top_k` /
-/// `max_tokens`, and `now` is the caller's clock — pass the same instant used
-/// for every other time-sensitive read in the recall (hot-list re-validation
-/// and reservations).
+/// the daemon's [`ScoreTable`], `hot_payloads` the hot-list payloads of the
+/// expanded members that survived re-validation (already rebuilt at `now`;
+/// every member in it is force-included), `query` carries `top_k` /
+/// `max_tokens`, and `now` is the caller's clock — pass the same instant the
+/// hot list was re-validated at, and that every other time-sensitive read in
+/// the recall uses (reservations).
 #[allow(clippy::too_many_arguments)] // pipeline deps; bundled into the recall entry at Wave D
 pub(crate) fn assemble<F>(
     graph: &Graph,
     expanded: &ExpandedSet,
     phase1: &[Scored<NodeId>],
     scores: &ScoreTable,
-    hot: &mut HotList,
+    hot_payloads: &HashMap<NodeId, Vec<HotListPayload>>,
     query: &RecallQuery,
     weights: RecallWeights,
     now: DateTime<Utc>,
@@ -219,28 +222,6 @@ where
             .then_with(|| b.score.total_cmp(&a.score))
             .then_with(|| tie_break_by_key(key(a.item), &a.item, key(b.item), &b.item))
     });
-
-    // Force-include: re-validate every hot expanded member at `now`, capture
-    // the surviving (freshly rebuilt) payloads for rendering.
-    let mut hot_payloads: HashMap<NodeId, Vec<HotListPayload>> = HashMap::new();
-    let hot_ids: HashSet<NodeId> = expanded
-        .required
-        .iter()
-        .chain(expanded.siblings.iter())
-        .map(|s| s.item)
-        .collect();
-    for &id in &hot_ids {
-        if hot.contains(id) && hot.revalidate(graph, id, now) {
-            let payloads: Vec<HotListPayload> = hot
-                .iter()
-                .filter(|e| e.node() == id)
-                .map(|e| e.payload().clone())
-                .collect();
-            if !payloads.is_empty() {
-                hot_payloads.insert(id, payloads);
-            }
-        }
-    }
 
     // top_k normal members (counted by VALID emitted hits — a graph-missing
     // member such as a stale durable-vector id must not consume a top_k slot,
@@ -389,7 +370,7 @@ mod tests {
     use chrono::TimeZone;
     use uuid::Uuid;
 
-    use crate::daemon::hotlist::{Condition, HotListEntry};
+    use crate::daemon::hotlist::{Condition, HotList, HotListEntry};
     use crate::types::{AgentId, Concept, ConceptType, Interaction, Reservation, SessionId};
 
     fn ts(minutes: i64) -> DateTime<Utc> {
@@ -457,6 +438,25 @@ mod tests {
         g
     }
 
+    /// What `Daemon::recall_detailed` hands assembly: the expanded members'
+    /// hot-list payloads, re-validated at `now` (a test-only daemon use).
+    fn revalidated(
+        hot: &mut HotList,
+        g: &Graph,
+        expanded: &ExpandedSet,
+        now: DateTime<Utc>,
+    ) -> HashMap<NodeId, Vec<HotListPayload>> {
+        hot.revalidate_members(
+            g,
+            expanded
+                .required
+                .iter()
+                .chain(expanded.siblings.iter())
+                .map(|s| s.item),
+            now,
+        )
+    }
+
     fn ids_of(result: &DetailedRecall) -> Vec<NodeId> {
         result.hits.iter().map(|h| h.node_id).collect()
     }
@@ -517,13 +517,13 @@ mod tests {
             w_query: 0.75,
         };
 
-        let mut hot = HotList::new();
+        let hot = HashMap::new();
         let result = assemble(
             &g,
             &expanded,
             &phase1,
             &scores,
-            &mut hot,
+            &hot,
             &query(10, 10_000),
             weights,
             ts(0),
@@ -610,13 +610,13 @@ mod tests {
                 Scored::new(uid(4), 0.7),
             ],
         };
-        let mut hot = HotList::new();
+        let hot = HashMap::new();
         let result = assemble(
             &g,
             &expanded,
             &[],
             &scores,
-            &mut hot,
+            &hot,
             &query(10, 10_000),
             RecallWeights {
                 w_daemon: 1.0,
@@ -659,13 +659,13 @@ mod tests {
                 Scored::new(uid(4), 0.1),
             ],
         };
-        let mut hot = HotList::new();
+        let hot = HashMap::new();
         let result = assemble(
             &g,
             &expanded,
             &[],
             &scores,
-            &mut hot,
+            &hot,
             &query(2, 10_000),
             RecallWeights {
                 w_daemon: 1.0,
@@ -703,13 +703,13 @@ mod tests {
                 Scored::new(uid(4), 0.4),
             ],
         };
-        let mut hot = HotList::new();
+        let hot = HashMap::new();
         let result = assemble(
             &g,
             &expanded,
             &[],
             &scores,
-            &mut hot,
+            &hot,
             &query(10, 10_000),
             RecallWeights {
                 w_daemon: 1.0,
@@ -746,13 +746,13 @@ mod tests {
             epoch: 0,
             ranked: vec![Scored::new(uid(2), 0.8), Scored::new(uid(1), 0.8)],
         };
-        let mut hot = HotList::new();
+        let hot = HashMap::new();
         let result = assemble(
             &g,
             &expanded,
             &[],
             &scores,
-            &mut hot,
+            &hot,
             &query(10, 10_000),
             RecallWeights::default(),
             ts(0),
@@ -777,14 +777,14 @@ mod tests {
             epoch: 0,
             ranked: vec![Scored::new(uid(1), 1.0)],
         };
-        let mut hot = HotList::new();
+        let hot = HashMap::new();
         // NaN and negative weights must not poison the final score (ALGO-10).
         let result = assemble(
             &g,
             &expanded,
             &phase1,
             &scores,
-            &mut hot,
+            &hot,
             &query(10, 10_000),
             RecallWeights {
                 w_daemon: f64::NAN,
@@ -819,7 +819,7 @@ mod tests {
             &expanded,
             &phase1,
             &scores,
-            &mut HotList::new(),
+            &HashMap::new(),
             &query(10, 10_000),
             RecallWeights::default(),
             ts(0),
@@ -918,12 +918,13 @@ mod tests {
             30,
         ));
 
+        let hot_payloads = revalidated(&mut hot, &g, &expanded, now);
         let result = assemble(
             &g,
             &expanded,
             &[],
             &scores,
-            &mut hot,
+            &hot_payloads,
             &query(1, 10_000),
             RecallWeights::default(),
             now,
@@ -942,10 +943,10 @@ mod tests {
             "force-included block rendered"
         );
         assert!(!result.context.contains("concept 2"), "lapsed entry absent");
-        // The lapsed entry was dropped from the list; the live one persists
-        // with its read-time payload.
-        assert!(hot.contains(uid(1)));
-        assert!(!hot.contains(uid(2)));
+        // That the lapsed entry also left the list, and the live one stayed
+        // with its read-time payload, is the hot list's own contract since
+        // #25 moved re-validation into the daemon:
+        // `daemon::hotlist::tests::revalidate_members_keeps_live_and_drops_lapsed`.
     }
 
     // -----------------------------------------------------------------------
@@ -973,7 +974,7 @@ mod tests {
             ],
             siblings: Vec::new(),
         };
-        let mut hot = HotList::new();
+        let hot = HashMap::new();
 
         // top_k=3: c4 is excluded from hits entirely.
         let result = assemble(
@@ -981,7 +982,7 @@ mod tests {
             &expanded,
             &[],
             &scores,
-            &mut hot,
+            &hot,
             &query(3, 10_000),
             RecallWeights::default(),
             ts(0),
@@ -1014,7 +1015,7 @@ mod tests {
             &expanded,
             &[],
             &scores,
-            &mut hot,
+            &hot,
             &query(3, 200),
             RecallWeights::default(),
             ts(0),
@@ -1047,7 +1048,7 @@ mod tests {
             ],
             siblings: Vec::new(),
         };
-        let mut hot = HotList::new();
+        let hot = HashMap::new();
 
         // token_fn = byte length; budget = exactly block 1's bytes -> only
         // the highest-scoring block survives (whole-block rule).
@@ -1065,7 +1066,7 @@ mod tests {
             &expanded,
             &[],
             &scores,
-            &mut hot,
+            &hot,
             &query(10, block1.len()),
             RecallWeights::default(),
             ts(0),
@@ -1087,13 +1088,13 @@ mod tests {
             required: vec![Scored::new(uid(1), 0.0), Scored::new(uid(2), 0.0)],
             siblings: Vec::new(),
         };
-        let mut hot = HotList::new();
+        let hot = HashMap::new();
         let result = assemble(
             &g,
             &expanded,
             &[],
             &scores,
-            &mut hot,
+            &hot,
             &query(10, 0),
             RecallWeights::default(),
             ts(0),
@@ -1118,9 +1119,9 @@ mod tests {
             ranked: vec![Scored::new(uid(1), 1.0)],
         };
         let now = ts(60);
-        let mut hot = HotList::new();
+        let hot = HashMap::new();
 
-        let mut run = |expires_at: DateTime<Utc>| {
+        let run = |expires_at: DateTime<Utc>| {
             let mut g = graph_with(1);
             g.set_reservation(Reservation {
                 session_id: sid(),
@@ -1133,7 +1134,7 @@ mod tests {
                 &expanded,
                 &[],
                 &scores,
-                &mut hot,
+                &hot,
                 &query(10, 10_000),
                 RecallWeights::default(),
                 now,
@@ -1221,12 +1222,13 @@ mod tests {
             30,
         ));
 
+        let hot_payloads = revalidated(&mut hot, &graph, &expanded, now);
         let result = assemble(
             &graph,
             &expanded,
             &phase1,
             &scores,
-            &mut hot,
+            &hot_payloads,
             &query,
             RecallWeights::default(),
             now,
@@ -1328,7 +1330,7 @@ mod tests {
             &expanded,
             &[],
             &scores,
-            &mut HotList::new(),
+            &HashMap::new(),
             &query(3, block1.len() + block2.len() + 1),
             RecallWeights::default(),
             ts(60),
@@ -1348,7 +1350,7 @@ mod tests {
             &expanded,
             &[],
             &scores,
-            &mut HotList::new(),
+            &HashMap::new(),
             &query(3, 10_000),
             RecallWeights::default(),
             ts(60),
@@ -1390,7 +1392,7 @@ mod tests {
             &expanded,
             &[],
             &scores,
-            &mut HotList::new(),
+            &HashMap::new(),
             &RecallQuery {
                 query: "irrelevant".into(),
                 top_k: 2,
@@ -1430,7 +1432,7 @@ mod tests {
             &expanded,
             &[],
             &scores,
-            &mut HotList::new(),
+            &HashMap::new(),
             &query(1, 10_000),
             RecallWeights::default(),
             ts(60),
@@ -1585,12 +1587,13 @@ mod tests {
             siblings: Vec::new(),
         };
         let now = ts(60);
+        let hot_payloads = revalidated(&mut hot, &g, &expanded, now);
         let result = assemble(
             &g,
             &expanded,
             &[],
             &scores,
-            &mut hot,
+            &hot_payloads,
             &query(10, 10_000),
             RecallWeights::default(),
             now,

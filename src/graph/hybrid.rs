@@ -64,7 +64,10 @@
 //!    through the [`GraphStore`] trait only. A capability-miss marks the concept
 //!    for the canonical fallback (logged once per session); an embed failure or
 //!    timeout fails the whole call before anything is written (J3-R3-1); a
-//!    genuine backend `StoreError` (not a `Capability` miss) propagates.
+//!    genuine backend `StoreError` (not a `Capability` miss) propagates. The
+//!    `parent_of` ends this call will create (in neither the graph nor
+//!    `concepts`) are embedded here too, under the same rules but without the
+//!    candidate lookup (issue #16 §2).
 //! 3. **Commit (write lock, sync).** Re-acquire the write lock and compare the
 //!    current epoch with the planned epoch. A concurrent daemon/MCP mutation
 //!    discards the stale gather and retries. Revalidate the embedding contract
@@ -189,9 +192,22 @@ pub const VECTOR_CANDIDATE_LIMIT: usize = 8;
 /// Hard request bounds are checked before the first await. They prevent one
 /// derive call from turning attacker-controlled input into unbounded external
 /// embed/store work while leaving normal multi-concept calls ample headroom.
+///
+/// `MAX_HYBRID_CONCEPTS`, `MAX_HYBRID_PARENT_PAIRS` and `MAX_HYBRID_WORK_ITEMS`
+/// bound the request's size (concepts plus pairs, each pair one item): the
+/// canonicalization work under the read lock. They do not bound the embeds,
+/// because each pair can name two new ends; [`MAX_HYBRID_EMBEDS`] does.
 pub const MAX_HYBRID_CONCEPTS: usize = 256;
 pub const MAX_HYBRID_PARENT_PAIRS: usize = 256;
 pub const MAX_HYBRID_WORK_ITEMS: usize = 512;
+/// The most embeds one hybrid derive may make: one per unmatched concept plus
+/// one per `parent_of` end it will create (issue #16 §2), all inside one
+/// [`HYBRID_IO_TIMEOUT`]. It keeps the ceiling the call had before ends were
+/// embedded (`MAX_HYBRID_CONCEPTS`), so embedding ends cannot push a call
+/// that fit the deadline past it. Checked at the J3 ack
+/// ([`validate_embed_budget`]) and again at plan, before any I/O; a call
+/// over it is refused with a `Config` error rather than timing out at apply.
+pub const MAX_HYBRID_EMBEDS: usize = MAX_HYBRID_CONCEPTS;
 pub const MAX_HYBRID_CONTEXT_BYTES: usize = 16 * 1024;
 pub const HYBRID_IO_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_HYBRID_REPLANS: usize = 8;
@@ -316,6 +332,17 @@ fn context_text(content: &str, origin: Option<&str>) -> String {
     match origin.map(str::trim).filter(|s| !s.is_empty()) {
         Some(origin) => format!("{content} — {origin}"),
         None => format!("Concept: {content}"),
+    }
+}
+
+/// The exact byte length of [`context_text`]`(content, origin)`, without
+/// building it. The context cap is checked against this, so it must follow
+/// `context_text`'s two arms: `" — "` is 5 bytes (the dash is 3), and
+/// `"Concept: "` is 9.
+fn context_len(content: &str, origin: Option<&str>) -> usize {
+    match origin.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(origin) => content.len() + " — ".len() + origin.len(),
+        None => "Concept: ".len() + content.len(),
     }
 }
 
@@ -508,6 +535,106 @@ pub fn validate_graph_inputs(graph: &Graph, parent_of: &ParentOf<'_>) -> Result<
     Ok(())
 }
 
+/// A call's unique concepts with their canonical key and match so far, in
+/// call order.
+type PlannedItems<'a> = Vec<(&'a str, ConceptType, String, Option<NodeId>)>;
+/// The `parent_of` ends a call will create, with their canonical key.
+type PlannedEnds<'a> = Vec<(&'a str, String)>;
+
+/// Plan a call against `g`: its unique concepts, and the `parent_of` ends it
+/// will create. Read-only; the caller holds the read lock.
+fn plan_inputs<'a>(
+    g: &Graph,
+    concepts: &[(&'a str, ConceptType)],
+    parent_of: &ParentOf<'a>,
+) -> Result<(PlannedItems<'a>, PlannedEnds<'a>), LamboError> {
+    // Step 2 — dedup by content + canonicalize. Items are the unique concepts
+    // of this call with their resolution so far (canonical match id if any).
+    let mut seen: HashSet<&str> = HashSet::with_capacity(concepts.len());
+    let mut items: PlannedItems<'a> = Vec::with_capacity(concepts.len());
+    for &(content, concept_type) in concepts {
+        if !seen.insert(content) {
+            continue;
+        }
+        let (key, matched) = match canonicalize(content, g)? {
+            CanonicalizeResult::Matched { key, node } => (key, Some(node)),
+            CanonicalizeResult::Unmatched { key } => (key, None),
+        };
+        reject_empty_key(content, &key)?;
+        items.push((content, concept_type, key, matched));
+    }
+
+    // Issue #16 §2: the `parent_of` ends this call will CREATE — not matched
+    // in the graph, and not one of this call's own `concepts` (those resolve
+    // to the item at commit) — one per canonical key, first spelling wins, as
+    // commit's re-canonicalization does. Before this they were created with
+    // `embedding: None` and stayed invisible to recall's vector leg.
+    let item_keys: HashSet<&str> = items.iter().map(|(_, _, k, _)| k.as_str()).collect();
+    let mut end_keys: HashSet<String> = HashSet::new();
+    let mut parent_ends: PlannedEnds<'a> = Vec::new();
+    for &(parent, child) in parent_of.pairs() {
+        for content in [parent, child] {
+            if let CanonicalizeResult::Unmatched { key } = canonicalize(content, g)? {
+                if !item_keys.contains(key.as_str()) && end_keys.insert(key.clone()) {
+                    parent_ends.push((content, key));
+                }
+            }
+        }
+    }
+    Ok((items, parent_ends))
+}
+
+/// Refuse a plan whose embeds exceed [`MAX_HYBRID_EMBEDS`]: one per
+/// unmatched concept and one per `parent_of` end the call will create.
+fn check_embed_budget(
+    items: &PlannedItems<'_>,
+    parent_ends: &PlannedEnds<'_>,
+) -> Result<(), LamboError> {
+    let planned = items
+        .iter()
+        .filter(|(_, _, _, matched)| matched.is_none())
+        .count()
+        + parent_ends.len();
+    if planned > MAX_HYBRID_EMBEDS {
+        return Err(LamboError::Config(format!(
+            "hybrid derive would embed {planned} new concepts and parent_of ends in one call; \
+             at most {MAX_HYBRID_EMBEDS} fit the {HYBRID_IO_TIMEOUT:?} embed deadline, so split \
+             the call"
+        )));
+    }
+    Ok(())
+}
+
+/// [`derive`](fn@derive)'s embed budget, on its own so J3's asynchronous ack
+/// path can refuse an over-budget call at call time instead of on a receipt.
+///
+/// Counts what the plan phase will embed against `graph` as it is now:
+/// unmatched concepts plus the `parent_of` ends the call will create. When
+/// the store has no vector search nothing is embedded, so nothing is
+/// refused. The plan phase runs the same check again, against the graph as
+/// it is at apply, and that check is the authoritative one.
+///
+/// The two counts can differ when the graph changes between ack and apply,
+/// and both outcomes are safe. If an earlier queued write has not applied yet
+/// and will create concepts this call's `parent_of` names, the ack counts
+/// those ends as new and may refuse a call that would have fit; a retry after
+/// that write applies succeeds. If a concept this call would match is removed
+/// in between, the ack accepts and the plan refuses, which yields a `Failed`
+/// receipt with nothing written. Nothing is ever embedded past the budget,
+/// because the plan re-checks before any I/O.
+pub fn validate_embed_budget(
+    graph: &Graph,
+    concepts: &[(&str, ConceptType)],
+    parent_of: &ParentOf<'_>,
+    vector_search: bool,
+) -> Result<(), LamboError> {
+    if !vector_search {
+        return Ok(());
+    }
+    let (items, parent_ends) = plan_inputs(graph, concepts, parent_of)?;
+    check_embed_budget(&items, &parent_ends)
+}
+
 /// [`derive`](fn@derive)'s plan/embed/write loop, after [`validate_limits`].
 #[allow(clippy::too_many_arguments)]
 async fn derive_planned(
@@ -527,6 +654,11 @@ async fn derive_planned(
     // Survives replans: the hook fires exactly once, at the commit that wins.
     let mut on_commit = on_commit;
     for _attempt in 0..MAX_HYBRID_REPLANS {
+        // The vector leg can run only when the store advertises it. Probed once,
+        // synchronously, before any I/O (mirrors the recall RAM-tier promise:
+        // zero async store calls when the capability is absent).
+        let vector_ok = store.capabilities().contains(Capabilities::VECTOR_SEARCH);
+
         // -----------------------------------------------------------------------
         // Phase 1 — plan under a brief read lock (no I/O, no await).
         // -----------------------------------------------------------------------
@@ -538,6 +670,7 @@ async fn derive_planned(
             origin_text,
             stamped,
             items,
+            parent_ends,
         ) = {
             let g = graph.read();
             let planned_epoch = g.epoch();
@@ -561,21 +694,10 @@ async fn derive_planned(
 
             validate_graph_inputs(&g, parent_of)?;
 
-            // Step 2 — dedup by content + canonicalize. Items are the unique concepts
-            // of this call with their resolution so far (canonical match id if any).
-            let mut seen: HashSet<&str> = HashSet::with_capacity(concepts.len());
-            let mut items: Vec<(&str, ConceptType, String, Option<NodeId>)> =
-                Vec::with_capacity(concepts.len());
-            for &(content, concept_type) in concepts {
-                if !seen.insert(content) {
-                    continue;
-                }
-                let (key, matched) = match canonicalize(content, &g)? {
-                    CanonicalizeResult::Matched { key, node } => (key, Some(node)),
-                    CanonicalizeResult::Unmatched { key } => (key, None),
-                };
-                reject_empty_key(content, &key)?;
-                items.push((content, concept_type, key, matched));
+            let (items, parent_ends) = plan_inputs(&g, concepts, parent_of)?;
+            // Bound the embed work before any I/O (see MAX_HYBRID_EMBEDS).
+            if vector_ok {
+                check_embed_budget(&items, &parent_ends)?;
             }
 
             if origin_text
@@ -586,11 +708,13 @@ async fn derive_planned(
                     "hybrid interaction context exceeds {MAX_HYBRID_CONTEXT_BYTES} bytes"
                 )));
             }
-            let origin_len = origin_text.as_deref().map(str::trim).map_or(0, str::len);
-            if items.iter().any(|(content, _, _, matched)| {
-                matched.is_none()
-                    && content.len().saturating_add(origin_len).saturating_add(3)
-                        > MAX_HYBRID_CONTEXT_BYTES
+            let unmatched_contents = items
+                .iter()
+                .filter(|(_, _, _, matched)| matched.is_none())
+                .map(|(content, _, _, _)| *content)
+                .chain(parent_ends.iter().map(|(content, _)| *content));
+            if unmatched_contents.into_iter().any(|content| {
+                context_len(content, origin_text.as_deref()) > MAX_HYBRID_CONTEXT_BYTES
             }) {
                 return Err(LamboError::Config(format!(
                     "hybrid embedding context exceeds {MAX_HYBRID_CONTEXT_BYTES} bytes"
@@ -605,19 +729,16 @@ async fn derive_planned(
                 origin_text,
                 stamped,
                 items,
+                parent_ends,
             )
         };
-
-        // The vector leg can run only when the store advertises it. Probed once,
-        // synchronously, before any I/O (mirrors the recall RAM-tier promise:
-        // zero async store calls when the capability is absent).
-        let vector_ok = store.capabilities().contains(Capabilities::VECTOR_SEARCH);
 
         // Mid-session contract check — refuse a kind/model/dim swap BEFORE any embed
         // ("without re-embed"). Only enforced when we are actually about to embed
         // (capability present and at least one unmatched concept). ensure_compatible
         // is a pure comparison; it never embeds.
-        let has_unmatched = items.iter().any(|(_, _, _, matched)| matched.is_none());
+        let has_unmatched =
+            items.iter().any(|(_, _, _, matched)| matched.is_none()) || !parent_ends.is_empty();
         if vector_ok && has_unmatched {
             if let Some(existing) = &stamped {
                 existing.ensure_compatible(embedding)?;
@@ -630,6 +751,15 @@ async fn derive_planned(
         // First-session fallback log for the capability-absent path (zero I/O, so
         // acceptable here); embed-failure logging happens per concept below.
         let mut attempted_embed = false;
+        // Set when the store refuses `vector_candidates_checked` with a
+        // capability miss after advertising the capability: the session then
+        // writes keyword-only for this call, `parent_of` ends included.
+        let mut store_refused_vectors = false;
+        // Whether this attempt has asked the store, through the checked
+        // lookup, whether it will serve vectors at all. Only an unmatched
+        // concept asks on its own; the `parent_of` ends below ask when no
+        // concept did.
+        let mut probed_store = false;
         let mut resolutions: Vec<Resolution> = Vec::with_capacity(items.len());
         for (content, _concept_type, key, matched) in &items {
             let res = match matched {
@@ -650,137 +780,78 @@ async fn derive_planned(
                 }
                 None => {
                     let context = context_text(content, origin_text.as_deref());
-                    match tokio::time::timeout_at(io_deadline, embedder.embed(&context)).await {
-                        // An embed failure or timeout FAILS the write — it does
-                        // not degrade it (J3-R3-1). The old arms applied the
-                        // concept with `embedding: NULL` and returned `Ok`: an
-                        // unqualified success over a concept semantic recall can
-                        // never find (the mechanism behind the dogfood store's
-                        // 92/100 unembedded concepts), and on the async path a
-                        // ~3 ms non-embed handed to the write queue's observed
-                        // rate as evidence of a fast deployment (326/361 acked
-                        // writes abandoned at a clean close, round 3). Nothing
-                        // has been written at this point — the commit phase is
-                        // strictly later — so "nothing was written" is exact.
-                        // The capability-absent arm above is untouched: that is
-                        // a declared, session-uniform configuration, not a
-                        // per-input surprise.
-                        // J3 round-1 N1: a timeout is `EmbedUnavailable`, not
-                        // `Embed`. We never got an answer, so nothing was
-                        // learned about this *input* — and the durable-intent
-                        // replay's consume/keep decision turns on exactly that
-                        // difference. The message is unchanged; only the type
-                        // carries the new fact.
-                        Err(_) => {
-                            return Err(LamboError::EmbedUnavailable(format!(
-                                "hybrid embed timed out after {HYBRID_IO_TIMEOUT:?}; nothing was \
-                                 written — the write is refused rather than applied without its \
-                                 vector (a concept stored with no embedding is unfindable by \
-                                 semantic recall)"
-                            )))
-                        }
-                        Ok(Err(e)) if e.is_transient() => {
-                            return Err(LamboError::EmbedUnavailable(format!(
-                                "the embedder could not be reached ({e}); nothing was written — \
-                                 the write is refused rather than applied without its vector (a \
-                                 concept stored with no embedding is unfindable by semantic \
-                                 recall)"
-                            )))
-                        }
-                        Ok(Err(e)) => {
-                            return Err(LamboError::Embed(format!(
-                                "the embedder refused this content ({e}); nothing was written — \
-                                 the write is refused rather than applied without its vector (a \
-                                 concept stored with no embedding is unfindable by semantic \
-                                 recall)"
-                            )))
-                        }
-                        Ok(Ok(emb)) => {
-                            // An embed only counts as "attempted" for the contract
-                            // stamp once it actually returned a vector — a failed
-                            // attempt must not bind the session to an embedding
-                            // space it produced no vector in (MINOR-2).
-                            attempted_embed = true;
-                            match tokio::time::timeout_at(
-                                io_deadline,
-                                store.vector_candidates_checked(
-                                    &session_id,
-                                    &emb,
-                                    embedding,
-                                    VECTOR_CANDIDATE_LIMIT,
-                                ),
-                            )
-                            .await
-                            {
-                                Err(_) => {
-                                    return Err(StoreError::Backend(format!(
-                                        "hybrid vector candidate lookup timed out after \
-                                         {HYBRID_IO_TIMEOUT:?}"
-                                    ))
-                                    .into())
+                    // An embed failure or timeout FAILS the write — see
+                    // `embed_or_refuse`. Nothing has been written at this
+                    // point, so "nothing was written" is exact.
+                    let emb = embed_or_refuse(embedder, &context, io_deadline).await?;
+                    // An embed only counts as "attempted" for the contract
+                    // stamp once it actually returned a vector — a failed
+                    // attempt must not bind the session to an embedding
+                    // space it produced no vector in (MINOR-2).
+                    attempted_embed = true;
+                    probed_store = true;
+                    match checked_candidates(
+                        store,
+                        &session_id,
+                        &emb,
+                        embedding,
+                        VECTOR_CANDIDATE_LIMIT,
+                        io_deadline,
+                    )
+                    .await?
+                    {
+                        Some(hits) => {
+                            // The tier tied at the highest score
+                            // at/above threshold (store results are not
+                            // guaranteed sorted). Every member is
+                            // validated as a real distinct concept at
+                            // commit, which also makes the stable
+                            // canonical-key pick.
+                            let tier = top_tier(&hits, semantic_match_threshold);
+                            if tier.is_empty() {
+                                // Below threshold: fresh concept, NO
+                                // `Semantic` edge — the merge is refused.
+                                // L82-4 (product decision 2026-08-14):
+                                // the vector it just computed IS
+                                // persisted, so organically-derived data
+                                // becomes vector-recallable; before this,
+                                // every organic concept stored NULL and
+                                // recall's vector leg was dead on real
+                                // data (0 of 13 live). The precision bias
+                                // is preserved by the refusal itself: no
+                                // `Semantic` edge means this concept is
+                                // never pulled into another concept's
+                                // recall neighbourhood, and the merge bar
+                                // is still `>= semantic_match_threshold`.
+                                // See the module doc, "Vector persistence
+                                // for fresh concepts".
+                                Resolution::Fresh {
+                                    key: key.clone(),
+                                    embedding: Some(emb),
                                 }
-                                Ok(Ok(hits)) => {
-                                    // The tier tied at the highest score
-                                    // at/above threshold (store results are not
-                                    // guaranteed sorted). Every member is
-                                    // validated as a real distinct concept at
-                                    // commit, which also makes the stable
-                                    // canonical-key pick.
-                                    let tier = top_tier(&hits, semantic_match_threshold);
-                                    if tier.is_empty() {
-                                        // Below threshold: fresh concept, NO
-                                        // `Semantic` edge — the merge is refused.
-                                        // L82-4 (product decision 2026-08-14):
-                                        // the vector it just computed IS
-                                        // persisted, so organically-derived data
-                                        // becomes vector-recallable; before this,
-                                        // every organic concept stored NULL and
-                                        // recall's vector leg was dead on real
-                                        // data (0 of 13 live). The precision bias
-                                        // is preserved by the refusal itself: no
-                                        // `Semantic` edge means this concept is
-                                        // never pulled into another concept's
-                                        // recall neighbourhood, and the merge bar
-                                        // is still `>= semantic_match_threshold`.
-                                        // See the module doc, "Vector persistence
-                                        // for fresh concepts".
-                                        Resolution::Fresh {
-                                            key: key.clone(),
-                                            embedding: Some(emb),
-                                        }
-                                    } else {
-                                        Resolution::HybridMerge {
-                                            key: key.clone(),
-                                            targets: tier.iter().map(|c| c.item).collect(),
-                                            score: tier[0].score,
-                                            embedding: emb,
-                                        }
-                                    }
+                            } else {
+                                Resolution::HybridMerge {
+                                    key: key.clone(),
+                                    targets: tier.iter().map(|c| c.item).collect(),
+                                    score: tier[0].score,
+                                    embedding: emb,
                                 }
-                                Ok(Err(StoreError::Capability(_))) => {
-                                    if note_fallback_logged(&session_id) {
-                                        tracing::warn!(
-                                            target: "lambo::hybrid",
-                                            session = %session_id,
-                                            "store refused vector_candidates (capability miss) — \
-                                             degrading to MatchStrategy::Canonical (creating \
-                                             keyword-only concept)"
-                                        );
-                                    }
-                                    // A vector exists here, but the store just
-                                    // refused to query vectors at all — so it can
-                                    // serve neither a merge nor recall's vector
-                                    // leg from it. Persisting an unqueryable
-                                    // vector buys nothing and would break the
-                                    // "capability miss == MatchStrategy::Canonical"
-                                    // promise, so this arm stays `None` (L82-4
-                                    // changes only the below-threshold arm).
-                                    Resolution::Fresh {
-                                        key: key.clone(),
-                                        embedding: None,
-                                    }
-                                }
-                                Ok(Err(e)) => return Err(e.into()),
+                            }
+                        }
+                        None => {
+                            store_refused_vectors = true;
+                            note_store_refused_vectors(&session_id);
+                            // A vector exists here, but the store just
+                            // refused to query vectors at all — so it can
+                            // serve neither a merge nor recall's vector
+                            // leg from it. Persisting an unqueryable
+                            // vector buys nothing and would break the
+                            // "capability miss == MatchStrategy::Canonical"
+                            // promise, so this arm stays `None` (L82-4
+                            // changes only the below-threshold arm).
+                            Resolution::Fresh {
+                                key: key.clone(),
+                                embedding: None,
                             }
                         }
                     }
@@ -788,7 +859,42 @@ async fn derive_planned(
             };
             resolutions.push(res);
         }
-        let _ = has_unmatched;
+
+        // Issue #16 §2: embed the `parent_of` ends this call will create, under
+        // the same rules as the call's own concepts — same origin-framed
+        // context, same deadline, same refusal on an embedder failure or
+        // timeout (J3-R3-1), and nothing at all when the store cannot serve
+        // vectors. They are embedded, not merged: a `parent_of` end is a
+        // structural label the caller named, and sending it through the merge
+        // leg would be a new matching behaviour, not this fix. Keyed by
+        // canonical key, which is what `resolve_concept` sees at commit.
+        let mut parent_vectors: HashMap<String, Vec<f32>> =
+            HashMap::with_capacity(parent_ends.len());
+        if vector_ok && !store_refused_vectors {
+            for (content, key) in &parent_ends {
+                let context = context_text(content, origin_text.as_deref());
+                let emb = embed_or_refuse(embedder, &context, io_deadline).await?;
+                attempted_embed = true;
+                // A call whose concepts all matched (or that has none) has
+                // not asked the store whether it serves vectors, so the
+                // capability-miss rule above would depend on what else is
+                // in the call. Ask once with the first end's vector (one
+                // candidate, result discarded): a refusal leaves every end
+                // keyword-only, exactly as it leaves a concept.
+                if !probed_store {
+                    probed_store = true;
+                    if checked_candidates(store, &session_id, &emb, embedding, 1, io_deadline)
+                        .await?
+                        .is_none()
+                    {
+                        // `parent_vectors` is still empty: this is the first end.
+                        note_store_refused_vectors(&session_id);
+                        break;
+                    }
+                }
+                parent_vectors.insert(key.clone(), emb);
+            }
+        }
 
         // -----------------------------------------------------------------------
         // Phase 3 — commit under a write lock (sync, no await).
@@ -1066,6 +1172,7 @@ async fn derive_planned(
                 &mut written,
                 &mut outcome,
                 &call_by_key,
+                &parent_vectors,
             )?;
             let child_node = self::resolve_concept(
                 &mut g,
@@ -1078,6 +1185,7 @@ async fn derive_planned(
                 &mut written,
                 &mut outcome,
                 &call_by_key,
+                &parent_vectors,
             )?;
             if parent_node == child_node {
                 return Err(LamboError::Store(StoreError::Invariant(format!(
@@ -1135,10 +1243,99 @@ fn pair_direction(graph: &Graph, a: NodeId, b: NodeId) -> (NodeId, NodeId) {
     }
 }
 
+/// One `vector_candidates_checked` call under the call's I/O deadline.
+///
+/// `Ok(None)` is the store's capability refusal: it advertised
+/// `VECTOR_SEARCH` but will not serve the checked lookup, and the caller
+/// degrades to keyword-only. A timeout or any other store error fails the
+/// write.
+async fn checked_candidates(
+    store: &dyn GraphStore,
+    session_id: &SessionId,
+    emb: &[f32],
+    embedding: &EmbeddingContract,
+    limit: usize,
+    io_deadline: tokio::time::Instant,
+) -> Result<Option<Vec<crate::types::Scored<NodeId>>>, LamboError> {
+    match tokio::time::timeout_at(
+        io_deadline,
+        store.vector_candidates_checked(session_id, emb, embedding, limit),
+    )
+    .await
+    {
+        Err(_) => Err(StoreError::Backend(format!(
+            "hybrid vector candidate lookup timed out after {HYBRID_IO_TIMEOUT:?}"
+        ))
+        .into()),
+        Ok(Ok(hits)) => Ok(Some(hits)),
+        Ok(Err(StoreError::Capability(_))) => Ok(None),
+        Ok(Err(e)) => Err(e.into()),
+    }
+}
+
+/// Log, once per session, that the store refused the checked vector lookup.
+fn note_store_refused_vectors(session_id: &SessionId) {
+    if note_fallback_logged(session_id) {
+        tracing::warn!(
+            target: "lambo::hybrid",
+            session = %session_id,
+            "store refused vector_candidates (capability miss) — degrading to \
+             MatchStrategy::Canonical (creating keyword-only concept)"
+        );
+    }
+}
+
+/// Embed `context`, or refuse the whole write.
+///
+/// An embed failure or timeout FAILS the write — it does not degrade it
+/// (J3-R3-1). The old arms applied the concept with `embedding: NULL` and
+/// returned `Ok`: an unqualified success over a concept semantic recall can
+/// never find (the mechanism behind the dogfood store's 92/100 unembedded
+/// concepts), and on the async path a ~3 ms non-embed handed to the write
+/// queue's observed rate as evidence of a fast deployment (326/361 acked writes
+/// abandoned at a clean close, round 3). Every caller runs in the gather phase,
+/// before the commit, so "nothing was written" is exact. The capability-absent
+/// arm is not here: that is a declared, session-uniform configuration, not a
+/// per-input surprise.
+///
+/// J3 round-1 N1: a timeout is `EmbedUnavailable`, not `Embed`. We never got an
+/// answer, so nothing was learned about this *input* — and the durable-intent
+/// replay's consume/keep decision turns on exactly that difference.
+async fn embed_or_refuse(
+    embedder: &dyn Embedder,
+    context: &str,
+    io_deadline: tokio::time::Instant,
+) -> Result<Vec<f32>, LamboError> {
+    match tokio::time::timeout_at(io_deadline, embedder.embed(context)).await {
+        Err(_) => Err(LamboError::EmbedUnavailable(format!(
+            "hybrid embed timed out after {HYBRID_IO_TIMEOUT:?}; nothing was written — the write \
+             is refused rather than applied without its vector (a concept stored with no \
+             embedding is unfindable by semantic recall)"
+        ))),
+        Ok(Err(e)) if e.is_transient() => Err(LamboError::EmbedUnavailable(format!(
+            "the embedder could not be reached ({e}); nothing was written — the write is \
+             refused rather than applied without its vector (a concept stored with no \
+             embedding is unfindable by semantic recall)"
+        ))),
+        Ok(Err(e)) => Err(LamboError::Embed(format!(
+            "the embedder refused this content ({e}); nothing was written — the write is \
+             refused rather than applied without its vector (a concept stored with no \
+             embedding is unfindable by semantic recall)"
+        ))),
+        Ok(Ok(emb)) => Ok(emb),
+    }
+}
+
 /// Mirror `derive::resolve_concept`'s canonical path for `ParentOf` contents
-/// (these never go through the hybrid step here: `ParentOf` creates/reuses
+/// (these never go through the merge leg here: `ParentOf` creates/reuses
 /// concepts with the generic `Entity` type and a Hierarchical edge, exactly as
 /// sync derive's step 6 does).
+///
+/// A content this call creates takes its vector from `parent_vectors`, keyed
+/// by canonical key and filled by the gather phase (issue #16 §2: before that,
+/// every such end was written with `embedding: None` and counted as created
+/// but never as embedded). A content that resolves to an existing concept is
+/// left as it is — its vector belongs to the write that created it.
 #[allow(clippy::too_many_arguments)]
 fn resolve_concept(
     graph: &mut Graph,
@@ -1151,6 +1348,7 @@ fn resolve_concept(
     written: &mut HashSet<NodeId>,
     outcome: &mut DeriveOutcome,
     call_by_key: &HashMap<String, NodeId>,
+    parent_vectors: &HashMap<String, Vec<f32>>,
 ) -> Result<NodeId, LamboError> {
     match canonicalize(content, graph)? {
         CanonicalizeResult::Unmatched { key } => {
@@ -1167,6 +1365,8 @@ fn resolve_concept(
                     return Ok(node);
                 }
             }
+            let embedding = parent_vectors.get(&key).cloned();
+            let embedded = embedding.is_some();
             let concept = new_concept(
                 session_id,
                 content,
@@ -1175,12 +1375,18 @@ fn resolve_concept(
                 interaction,
                 agent,
                 created_at,
-                None,
+                embedding,
             );
             let id = concept.id;
             graph.insert_concept(concept, interaction)?;
             written.insert(id);
             outcome.created.push(id);
+            if embedded {
+                // Applied ≠ embedded (J3-R3-1): the receipt's "(M embedded)"
+                // must count the ends too, or it under-reports exactly as the
+                // "2 created (1 embedded)" reproduction did.
+                outcome.embedded += 1;
+            }
             Ok(id)
         }
         CanonicalizeResult::Matched { node, .. } => {

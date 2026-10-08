@@ -34,6 +34,168 @@ async fn an_applied_receipt_reports_what_the_write_did() {
     assert_eq!(s.matched_count, 1);
 }
 
+/// Issue #16 §2 on the J3 asynchronous path: concepts are created at apply
+/// time, after the ack, so the receipt is the only place the caller learns
+/// what the write did. A `parent_of` end in neither `concepts` nor the graph
+/// is created there, and the receipt must count it as embedded. Before the
+/// fix this settled "2 created (1 embedded)" over a parent with no vector.
+#[tokio::test]
+async fn an_applied_receipt_counts_an_embedded_parent_of_end() {
+    let rig = Rig::hybrid_persisting("wq-parent-of-embedded", Arc::new(FixtureEmbedder::new()));
+    let agent = AgentId::new("agent-a");
+    let interaction = rig.interaction(&agent);
+    let submitted = rig
+        .pipeline
+        .submit_derive(
+            agent.clone(),
+            interaction,
+            vec![("user schema".to_string(), ConceptType::Entity)],
+            vec![("document:src.md".to_string(), "user schema".to_string())],
+        )
+        .await;
+    let settled = rig
+        .pipeline
+        .wait(&agent, submitted.receipt, RECEIPT_WAIT_MAX)
+        .await;
+    let ReceiptAnswer::Applied(s) = settled else {
+        panic!("expected applied, got {settled:?}");
+    };
+    assert_eq!(s.created_count, 2);
+    assert_eq!(
+        s.embedded,
+        Some(2),
+        "the receipt must count the parent_of end as embedded: {}",
+        s.summary
+    );
+    assert!(
+        s.summary.contains("2 created (2 embedded)"),
+        "the receipt sentence: {}",
+        s.summary
+    );
+    assert!(
+        rig.graph.read().concepts().all(|c| c.embedding.is_some()),
+        "every concept the write created carries a vector"
+    );
+}
+
+/// `record_action` embeds the concepts it creates under the hybrid strategy
+/// (bef53e6), so its receipt must say how many, as a derive's does. It used
+/// to report `embedded: None` under a stale "never embeds by design"
+/// comment, which made an action write's vectors invisible on the one
+/// surface an agent reads after the ack.
+#[tokio::test]
+async fn an_applied_action_receipt_reports_its_embedded_count() {
+    let rig = Rig::hybrid_persisting("wq-action-embedded", Arc::new(FixtureEmbedder::new()));
+    let agent = AgentId::new("agent-a");
+    let interaction = rig.interaction(&agent);
+    let submitted = rig
+        .pipeline
+        .submit_action(
+            agent.clone(),
+            interaction,
+            "ran the migration".to_string(),
+            vec!["schema v2".to_string()],
+            Vec::new(),
+            vec!["schema v1".to_string()],
+        )
+        .await;
+    let settled = rig
+        .pipeline
+        .wait(&agent, submitted.receipt, RECEIPT_WAIT_MAX)
+        .await;
+    let ReceiptAnswer::Applied(s) = settled else {
+        panic!("expected applied, got {settled:?}");
+    };
+    assert_eq!(s.kind, WriteKind::RecordAction);
+    assert_eq!(s.created_count, 3);
+    assert_eq!(
+        s.embedded,
+        Some(3),
+        "a hybrid record_action embeds what it creates, and the receipt must \
+         say so: {}",
+        s.summary
+    );
+    assert!(
+        s.summary.contains("3 concept(s) created (3 embedded)"),
+        "the receipt sentence: {}",
+        s.summary
+    );
+    assert!(rig.graph.read().concepts().all(|c| c.embedding.is_some()));
+}
+
+/// Hybrid `derive` embeds nothing when the store has no `VECTOR_SEARCH`, and
+/// says "(0 embedded)". A hybrid `record_action` on the same store follows
+/// the same rule: nothing embedded, no contract stamped, and a receipt that
+/// counts zero rather than vectors the store cannot search.
+#[tokio::test]
+async fn a_hybrid_action_receipt_without_vector_search_embeds_nothing() {
+    let mut rig = Rig::fixture("wq-action-no-vector");
+    Arc::get_mut(&mut rig.pipeline.ctx)
+        .expect("sole owner at build")
+        .match_strategy = MatchStrategy::Hybrid;
+    let agent = AgentId::new("agent-a");
+    let interaction = rig.interaction(&agent);
+    let submitted = rig
+        .pipeline
+        .submit_action(
+            agent.clone(),
+            interaction,
+            "ran the migration".to_string(),
+            vec!["schema v2".to_string()],
+            Vec::new(),
+            Vec::new(),
+        )
+        .await;
+    let settled = rig
+        .pipeline
+        .wait(&agent, submitted.receipt, RECEIPT_WAIT_MAX)
+        .await;
+    let ReceiptAnswer::Applied(s) = settled else {
+        panic!("expected applied, got {settled:?}");
+    };
+    assert_eq!(s.created_count, 2);
+    assert_eq!(s.embedded, Some(0), "{}", s.summary);
+    assert_eq!(
+        s.summary,
+        "recorded action: 2 concept(s) created (0 embedded), 1 edge(s)"
+    );
+    let g = rig.graph.read();
+    assert!(g.concepts().all(|c| c.embedding.is_none()));
+    assert!(g.embedding().is_none(), "no contract stamped");
+}
+
+/// Under `Canonical` nothing embeds, so the field stays absent rather than
+/// reading as a zero of something that was attempted.
+#[tokio::test]
+async fn a_canonical_action_receipt_has_no_embedded_count() {
+    let rig = Rig::fixture("wq-action-canonical");
+    let agent = AgentId::new("agent-a");
+    let interaction = rig.interaction(&agent);
+    let submitted = rig
+        .pipeline
+        .submit_action(
+            agent.clone(),
+            interaction,
+            "ran the migration".to_string(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .await;
+    let settled = rig
+        .pipeline
+        .wait(&agent, submitted.receipt, RECEIPT_WAIT_MAX)
+        .await;
+    let ReceiptAnswer::Applied(s) = settled else {
+        panic!("expected applied, got {settled:?}");
+    };
+    assert_eq!(s.embedded, None);
+    assert_eq!(
+        s.summary,
+        "recorded action: 1 concept(s) created, 0 edge(s)"
+    );
+}
+
 /// **§J3: expired must not read as unknown, and restart-lost must not
 /// either.** All four non-answers, each distinct, none of them "unknown".
 #[tokio::test]
