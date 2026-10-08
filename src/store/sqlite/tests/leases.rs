@@ -417,3 +417,104 @@ async fn a_stale_token_cannot_flush_a_delete_only_batch() {
     // not an error, whatever the token.
     store.flush(&node_only, Some(first.token)).await.unwrap();
 }
+
+/// #1 fencing, delete-only batches, cross-session edge. A node delete also
+/// removes every edge incident to the node, and edges are session-scoped while
+/// node ids are global, so the deleted node can sit in session A (whose lease
+/// the caller still holds) with an incident edge in session B (whose lease has
+/// moved on). The delete must be fenced on B's lease too; a node with no
+/// foreign edge is deleted normally, so only the incident-edge lookup can be
+/// what refuses the first batch.
+#[tokio::test]
+async fn a_node_delete_is_fenced_on_the_session_of_an_incident_edge() {
+    let store = test_store();
+    store.init_schema().await.unwrap();
+    let (a, b) = (SessionId::from("fence-a"), SessionId::from("fence-b"));
+    let ts = Utc::now();
+    let (origin_a, shared, plain, origin_b, cross) = (
+        NodeId::new(),
+        NodeId::new(),
+        NodeId::new(),
+        NodeId::new(),
+        NodeId::new(),
+    );
+    let planted = MutationBatch {
+        mutation_epoch: 1,
+        gc_mark: Default::default(),
+        mutations: vec![
+            plant_interaction(&a, origin_a, None, ts),
+            plant_concept(&a, shared, origin_a, "shared", ConceptType::Entity, ts),
+            plant_concept(&a, plain, origin_a, "plain", ConceptType::Entity, ts),
+            plant_interaction(&b, origin_b, None, ts),
+            // Session B's edge points at session A's concept.
+            Mutation::UpsertEdge {
+                edge: crate::types::Edge {
+                    id: cross,
+                    session_id: b.clone(),
+                    source: origin_b,
+                    target: shared,
+                    edge_type: EdgeType::Derives,
+                    weight: 1.0,
+                    reinforcements: 0,
+                    created_at: ts,
+                    last_reinforced: ts,
+                    event_time: None,
+                },
+            },
+        ],
+    };
+    store.flush(&planted, None).await.unwrap();
+
+    // A is held by its first holder (token 1). B lapses and is taken over, so
+    // its current token is 2 and token 1 is stale for B only.
+    let long = Duration::from_secs(60);
+    let LeaseOutcome::Acquired(held_a) = store
+        .acquire_lease(&a, &lease_holder("holder-a", 1), long)
+        .await
+        .unwrap()
+    else {
+        panic!("A must acquire");
+    };
+    let short = Duration::from_secs(1);
+    store
+        .acquire_lease(&b, &lease_holder("zombie-b", 2), short)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(1_300)).await;
+    let LeaseOutcome::Acquired(taken_b) = store
+        .acquire_lease(&b, &lease_holder("successor-b", 3), short)
+        .await
+        .unwrap()
+    else {
+        panic!("the successor must take B over");
+    };
+    assert!(taken_b.token > held_a.token);
+
+    let deletes = |mutations: Vec<Mutation>| MutationBatch {
+        mutation_epoch: 2,
+        gc_mark: Default::default(),
+        mutations,
+    };
+    // The node lives in A (token current) but its incident edge is B's.
+    let shared_only = deletes(vec![Mutation::DeleteNode { id: shared }]);
+    let got = store.flush(&shared_only, Some(held_a.token)).await;
+    assert!(
+        matches!(got, Err(StoreError::StaleWrite(_))),
+        "deleting a node whose incident edge is in a taken-over session must be fenced, got {got:?}"
+    );
+    assert_eq!(rows_with_id(&store, "concepts", shared).await, 1);
+    assert_eq!(rows_with_id(&store, "edges", cross).await, 1);
+
+    // Control: a node of A with no foreign edge is deleted under the same token.
+    let plain_only = deletes(vec![Mutation::DeleteNode { id: plain }]);
+    store.flush(&plain_only, Some(held_a.token)).await.unwrap();
+    assert_eq!(rows_with_id(&store, "concepts", plain).await, 0);
+
+    // B's current token covers both sessions (>= each lease), so it deletes.
+    store
+        .flush(&shared_only, Some(taken_b.token))
+        .await
+        .unwrap();
+    assert_eq!(rows_with_id(&store, "concepts", shared).await, 0);
+    assert_eq!(rows_with_id(&store, "edges", cross).await, 0);
+}
