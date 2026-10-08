@@ -47,7 +47,7 @@ use crate::surface::limits::{
     MAX_MAX_TOKENS, MAX_RESERVE_TTL_SECS, MAX_TOP_K, MAX_TRAVERSAL_DEPTH,
 };
 use crate::surface::neighbourhood::render_neighbourhood;
-use crate::surface::validate::check_size as validate_size;
+use crate::surface::validate::{check_in_range, check_size as validate_size, require_nonempty};
 use crate::types::{AgentId, ConceptType, LamboError, NodeId, RecallQuery, RecallResult};
 use crate::writeq::{ReceiptAnswer, ReceiptId};
 
@@ -1271,9 +1271,7 @@ impl LamboServer {
     /// `agent_id` param description, in `lambo_reserve`'s tool doc, and in the
     /// server instructions — not silently assumed.
     fn check_agent_id(&self, agent_id: &str) -> Result<(), CallToolResult> {
-        if agent_id.trim().is_empty() {
-            return Err(bad_param("agent_id must be a non-empty string"));
-        }
+        require_nonempty("agent_id", agent_id).map_err(bad_param)?;
         check_size("agent_id", agent_id)?;
         // J1-R1-1. `check_size` allows `\n` and `\t` on purpose, because both
         // are legitimate inside a concept's `content` — but this id is not
@@ -1535,8 +1533,8 @@ impl LamboServer {
             return e;
         }
         let mut warnings: Vec<String> = Vec::new();
-        if p.query.trim().is_empty() {
-            return bad_param("query must be a non-empty string");
+        if let Err(e) = require_nonempty("query", &p.query) {
+            return bad_param(e);
         }
         if let Err(e) = check_size("query", &p.query) {
             return e;
@@ -1571,16 +1569,13 @@ impl LamboServer {
                 MAX_TRAVERSAL_DEPTH,
             ),
         };
-        if top_k == 0 || top_k > MAX_TOP_K {
-            return bad_param(format!("top_k must be in 1..={MAX_TOP_K}"));
-        }
-        if traversal_depth > MAX_TRAVERSAL_DEPTH {
-            return bad_param(format!(
-                "traversal_depth must be in 0..={MAX_TRAVERSAL_DEPTH}"
-            ));
-        }
-        if max_tokens == 0 || max_tokens > MAX_MAX_TOKENS {
-            return bad_param(format!("max_tokens must be in 1..={MAX_MAX_TOKENS}"));
+        if let Err(e) = check_in_range("top_k", top_k, 1, MAX_TOP_K)
+            .and_then(|()| {
+                check_in_range("traversal_depth", traversal_depth, 0, MAX_TRAVERSAL_DEPTH)
+            })
+            .and_then(|()| check_in_range("max_tokens", max_tokens, 1, MAX_MAX_TOKENS))
+        {
+            return bad_param(e);
         }
 
         let query_text = p.query.clone();
@@ -1777,8 +1772,8 @@ impl LamboServer {
         };
         let event_time = p.event_time;
         // J1-R1-3: no warning is reachable here — see `derive_impl`.
-        if p.action.trim().is_empty() {
-            return bad_param("action must be a non-empty string");
+        if let Err(e) = require_nonempty("action", &p.action) {
+            return bad_param(e);
         }
         if let Err(e) = check_size("action", &p.action) {
             return e;
@@ -1950,8 +1945,8 @@ impl LamboServer {
         }
 
         let ttl_secs = p.ttl_seconds.unwrap_or(30);
-        if ttl_secs == 0 || ttl_secs > MAX_RESERVE_TTL_SECS {
-            return bad_param(format!("ttl_seconds must be in 1..={MAX_RESERVE_TTL_SECS}"));
+        if let Err(e) = check_in_range("ttl_seconds", ttl_secs, 1, MAX_RESERVE_TTL_SECS) {
+            return bad_param(e);
         }
         let reservation = match self
             .mem
@@ -1990,15 +1985,15 @@ impl LamboServer {
             return e;
         }
         let mut warnings: Vec<String> = Vec::new();
-        if p.focus.trim().is_empty() {
-            return bad_param("focus must be a non-empty string");
+        if let Err(e) = require_nonempty("focus", &p.focus) {
+            return bad_param(e);
         }
         if let Err(e) = check_size("focus", &p.focus) {
             return e;
         }
         let depth = p.depth.unwrap_or(2);
-        if depth > MAX_INSPECT_DEPTH {
-            return bad_param(format!("depth must be in 0..={MAX_INSPECT_DEPTH}"));
+        if let Err(e) = check_in_range("depth", depth, 0, MAX_INSPECT_DEPTH) {
+            return bad_param(e);
         }
 
         // One short read section, no `.await` inside (spec §6.4).

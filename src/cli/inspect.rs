@@ -9,7 +9,9 @@
 //! [`crate::surface::focus::MAX_INSPECT_SCAN_CONCEPTS`],
 //! [`crate::surface::focus::MAX_INSPECT_BOUNDED_SCAN`].
 
-use super::caps::{check_size_cli, require_nonempty, CliError, MAX_INSPECT_DEPTH};
+use super::caps::{
+    check_in_range_cli, check_size_cli, require_nonempty, CliError, MAX_INSPECT_DEPTH,
+};
 use super::load_reader_graph;
 use crate::store::GraphStore;
 use crate::surface::focus::{
@@ -28,11 +30,7 @@ pub async fn run(
     check_size_cli("session", session)?;
     require_nonempty("focus", focus)?;
     check_size_cli("focus", focus)?;
-    if depth > MAX_INSPECT_DEPTH {
-        return Err(CliError::Usage(format!(
-            "depth must be in 0..={MAX_INSPECT_DEPTH}"
-        )));
-    }
+    check_in_range_cli("depth", depth, 0, MAX_INSPECT_DEPTH)?;
 
     let loaded = load_reader_graph(store, session).await?;
     let g = loaded.graph.read();

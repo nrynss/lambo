@@ -112,6 +112,28 @@ pub fn check_size(field: &str, value: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Refuse an empty (after trim) required string.
+pub fn require_nonempty(field: &str, value: &str) -> Result<(), String> {
+    if value.trim().is_empty() {
+        return Err(format!("{field} must be a non-empty string"));
+    }
+    Ok(())
+}
+
+/// Refuse a numeric knob outside `lo..=hi`.
+///
+/// `field` is the surface's own spelling of the knob (`top-k` on the CLI,
+/// `top_k` over MCP); the bound and the wording are shared.
+pub fn check_in_range<T>(field: &str, value: T, lo: T, hi: T) -> Result<(), String>
+where
+    T: PartialOrd + std::fmt::Display,
+{
+    if value < lo || value > hi {
+        return Err(format!("{field} must be in {lo}..={hi}"));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,5 +277,27 @@ mod tests {
             format.contains("zero-width joiner and non-joiner are allowed"),
             "format message must name its exceptions: {format}"
         );
+    }
+
+    /// The shared wording every surface's refusal carries. Each surface passes
+    /// its own field spelling, so the CLI's `top-k` and MCP's `top_k` read
+    /// alike apart from the name.
+    #[test]
+    fn range_and_nonempty_refusals_carry_the_shared_wording() {
+        assert_eq!(
+            check_in_range("top_k", 0usize, 1, 100).unwrap_err(),
+            "top_k must be in 1..=100"
+        );
+        assert_eq!(
+            check_in_range("ttl-seconds", 3601u64, 1, 3600).unwrap_err(),
+            "ttl-seconds must be in 1..=3600"
+        );
+        check_in_range("depth", 0usize, 0, 5).unwrap();
+        check_in_range("depth", 5usize, 0, 5).unwrap();
+        assert_eq!(
+            require_nonempty("focus", " \t\n").unwrap_err(),
+            "focus must be a non-empty string"
+        );
+        require_nonempty("focus", " x ").unwrap();
     }
 }

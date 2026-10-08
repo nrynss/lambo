@@ -111,14 +111,17 @@ pub fn check_size_cli(field: &str, value: &str) -> Result<(), CliError> {
     check_size(field, value).map_err(CliError::Usage)
 }
 
-/// Refuse an empty (after trim) required string.
+/// [`crate::surface::validate::require_nonempty`] mapped to a CLI usage error.
 pub fn require_nonempty(field: &str, value: &str) -> Result<(), CliError> {
-    if value.trim().is_empty() {
-        return Err(CliError::Usage(format!(
-            "{field} must be a non-empty string"
-        )));
-    }
-    Ok(())
+    crate::surface::validate::require_nonempty(field, value).map_err(CliError::Usage)
+}
+
+/// [`crate::surface::validate::check_in_range`] mapped to a CLI usage error.
+pub fn check_in_range_cli<T>(field: &str, value: T, lo: T, hi: T) -> Result<(), CliError>
+where
+    T: PartialOrd + std::fmt::Display,
+{
+    crate::surface::validate::check_in_range(field, value, lo, hi).map_err(CliError::Usage)
 }
 
 #[cfg(test)]

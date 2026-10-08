@@ -9,7 +9,9 @@ use std::time::Duration;
 
 use uuid::Uuid;
 
-use super::caps::{check_size_cli, require_nonempty, CliError, MAX_RESERVE_TTL_SECS};
+use super::caps::{
+    check_in_range_cli, check_size_cli, require_nonempty, CliError, MAX_RESERVE_TTL_SECS,
+};
 use super::{close_writer, open_writer};
 use crate::resolve::ResolvedBackends;
 use crate::types::NodeId;
@@ -46,11 +48,7 @@ pub async fn reserve(backends: ResolvedBackends, args: ReserveArgs) -> Result<St
     let node_id = parse_node(&args.node)?;
 
     let ttl_secs = args.ttl_seconds.unwrap_or(30);
-    if ttl_secs == 0 || ttl_secs > MAX_RESERVE_TTL_SECS {
-        return Err(CliError::Usage(format!(
-            "ttl-seconds must be in 1..={MAX_RESERVE_TTL_SECS}"
-        )));
-    }
+    check_in_range_cli("ttl-seconds", ttl_secs, 1, MAX_RESERVE_TTL_SECS)?;
 
     let mem = open_writer(backends, &args.session, &args.agent).await?;
     let out = match mem.reserve(node_id, Duration::from_secs(ttl_secs)) {
