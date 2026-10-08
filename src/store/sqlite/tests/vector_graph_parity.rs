@@ -9,7 +9,7 @@
 //! score **bits**, and the same error variant with the same message.
 //!
 //! The graph is fresher than the store by design (unflushed writes); that
-//! difference is pinned by the holder tests in `memory/tests/vector_source.rs`.
+//! difference is pinned by the holder tests in `store/sqlite/tests/vector_e2e.rs`.
 //! Here both sources see one flushed state, which is the parity #8 promises.
 
 use super::*;
