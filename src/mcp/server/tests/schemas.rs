@@ -115,12 +115,11 @@ fn schema_property_paths(schema: &serde_json::Value) -> Vec<String> {
         if depth > 16 {
             return;
         }
-        if let Some(r) = node.get("$ref").and_then(|v| v.as_str()) {
-            if let Some(name) = r.strip_prefix("#/$defs/") {
-                if let Some(target) = root.get("$defs").and_then(|d| d.get(name)) {
-                    walk(target, prefix, root, depth + 1, out);
-                }
-            }
+        if let Some(r) = node.get("$ref").and_then(|v| v.as_str())
+            && let Some(name) = r.strip_prefix("#/$defs/")
+            && let Some(target) = root.get("$defs").and_then(|d| d.get(name))
+        {
+            walk(target, prefix, root, depth + 1, out);
         }
         if let Some(props) = node.get("properties").and_then(|v| v.as_object()) {
             for (k, v) in props {
@@ -136,10 +135,10 @@ fn schema_property_paths(schema: &serde_json::Value) -> Vec<String> {
         if let Some(items) = node.get("items") {
             walk(items, &format!("{prefix}[]"), root, depth + 1, out);
         }
-        if let Some(ap) = node.get("additionalProperties") {
-            if ap.is_object() {
-                walk(ap, &format!("{prefix}.*"), root, depth + 1, out);
-            }
+        if let Some(ap) = node.get("additionalProperties")
+            && ap.is_object()
+        {
+            walk(ap, &format!("{prefix}.*"), root, depth + 1, out);
         }
         for key in ["allOf", "anyOf", "oneOf"] {
             if let Some(arr) = node.get(key).and_then(|v| v.as_array()) {
