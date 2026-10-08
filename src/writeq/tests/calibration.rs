@@ -1,0 +1,338 @@
+//! Bounds and rate calibration: the probe, the observed rate and the
+//! constants.
+
+use super::*;
+
+/// **The J3 redesign's central property, pinned at the type**: the bounds
+/// are the static fairness/memory caps for EVERY source, and no rate —
+/// however fast, slow, zero or absent — can move them. Three rounds of
+/// P1s were rates moving these bounds (width, warmth, length, failure
+/// shape, concurrency scaling); this test is what makes a sixth axis
+/// structurally impossible rather than merely unlikely.
+#[test]
+fn no_rate_can_move_the_bounds() {
+    let cases = [
+        // An instant embedder (the FixtureEmbedder case).
+        Calibration::from_probe(Duration::from_nanos(1), None, Duration::from_nanos(1)),
+        // A zero wall time must not divide by zero either.
+        Calibration::from_probe(Duration::ZERO, None, Duration::ZERO),
+        // A very slow embedder.
+        Calibration::from_probe(Duration::from_secs(600), None, Duration::from_secs(600)),
+        // The phase doc's own figures.
+        Calibration::from_probe(Duration::from_millis(95), None, Duration::from_millis(64)),
+        // No measurement at all.
+        Calibration::unmeasured(),
+        // An observed rate, absurd in either direction.
+        Calibration::unmeasured().with_observed_serial(1_000_000.0),
+        Calibration::unmeasured().with_observed_serial(0.001),
+    ];
+    for c in cases {
+        assert_eq!(c.lane_bound, WRITE_QUEUE_LANE_MAX, "{c:?}");
+        assert_eq!(c.bound, WRITE_QUEUE_MAX, "{c:?}");
+    }
+
+    // The RAW rates still survive as telemetry — an operator reading
+    // items_per_sec beside the static bound is how "this deployment is
+    // slow" stays observable now that it is no longer load-bearing.
+    let fast = Calibration::from_probe(Duration::from_nanos(1), None, Duration::from_nanos(1));
+    assert!(fast.measured());
+    assert_eq!(fast.source, CalibrationSource::Probe);
+    assert!(fast.items_per_sec.expect("measured") > 0.0);
+    assert!(fast.serial_items_per_sec.expect("measured") > 0.0);
+
+    // The unmeasured fallback says so, which is what lambo_stats reports.
+    let none = Calibration::unmeasured();
+    assert!(!none.measured());
+    assert_eq!(none.source.tag(), "unmeasured");
+    assert!(none.items_per_sec.is_none() && none.serial_items_per_sec.is_none());
+    assert!(none.probe_serial_items_per_sec.is_none());
+    assert!(
+        none.probe_optimism().is_none(),
+        "there is no pair to compare when nothing measured either side"
+    );
+}
+
+/// The observed rate replaces the probe's serial figure, and only after
+/// [`OBSERVED_MIN_SAMPLES`] — the J3-R1-2 remediation.
+#[test]
+fn an_observed_rate_replaces_the_probes_serial_figure_after_enough_samples() {
+    let mut observed = ObservedRate::default();
+    for _ in 0..(OBSERVED_MIN_SAMPLES - 1) {
+        observed.sample(0.1);
+        assert!(
+            observed.items_per_sec().is_none(),
+            "the probe's figure must stand until {OBSERVED_MIN_SAMPLES} writes are in"
+        );
+    }
+    observed.sample(0.1);
+    let rate = observed.items_per_sec().expect("enough samples");
+    assert!((rate - 10.0).abs() < 0.001, "{rate}");
+
+    // The published serial figure flips to the observed one; the probe's
+    // survives beside it for the comparison (J3-R2-4). Telemetry only —
+    // the bounds do not move (no_rate_can_move_the_bounds).
+    let hot = Calibration::from_probe(Duration::from_millis(7), None, Duration::from_millis(7));
+    let corrected = hot.with_observed_serial(rate);
+    assert_eq!(corrected.source, CalibrationSource::Observed);
+    assert!(corrected.measured());
+    assert!((corrected.serial_items_per_sec.expect("observed") - rate).abs() < 0.001);
+    assert_eq!(
+        corrected.probe_serial_items_per_sec, hot.serial_items_per_sec,
+        "the probe's figure survives the takeover — the ratio is the diagnosis"
+    );
+    assert_eq!(
+        corrected.items_per_sec, hot.items_per_sec,
+        "the concurrent leg is not re-measured by observation, so it survives unchanged"
+    );
+
+    // A degrading embedder moves the average within about one probe's
+    // width of samples, in the direction that shows in probe_optimism.
+    for _ in 0..8 {
+        observed.sample(1.0);
+    }
+    let degraded = observed.items_per_sec().expect("samples");
+    assert!(degraded < 2.0, "{degraded}");
+    let optimism = hot
+        .with_observed_serial(degraded)
+        .probe_optimism()
+        .expect("both figures exist");
+    assert!(
+        optimism > 100.0,
+        "a 7 ms probe against ≈1.1 items/s real work reads two orders optimistic: {optimism}"
+    );
+
+    // An unmeasured probe still earns a measured serial figure from
+    // observation.
+    let recovered = Calibration::unmeasured().with_observed_serial(rate);
+    assert!(recovered.measured());
+    assert!(
+        recovered.probe_optimism().is_none(),
+        "no probe figure, no comparison — never an invented baseline"
+    );
+}
+
+/// The derivations in this module's constants, asserted rather than
+/// asserted-in-prose. The `const _: () = assert!` guards cover the
+/// relationships; these cover the arithmetic a reader would have to redo.
+#[test]
+fn the_constants_say_what_their_docs_say() {
+    assert_eq!(WRITE_QUEUE_MAX, MAX_RETAINED_RECEIPTS / 4);
+    assert_eq!(WRITE_QUEUE_MAX, 1024);
+    assert_eq!(MAX_RETAINED_RECEIPTS, 4096);
+    // The J3 redesign's two static bounds: a memory cap (above) and a
+    // per-agent fair share of it — 1/16, where 16 is the declared
+    // multi-caller design point the receipt-wait cap already carries.
+    assert_eq!(
+        WRITE_QUEUE_LANE_MAX,
+        WRITE_QUEUE_MAX / MAX_CONCURRENT_RECEIPT_WAITS
+    );
+    assert_eq!(WRITE_QUEUE_LANE_MAX, 64);
+    // The telemetry sanitization clamp: one full queue per second,
+    // comfortably above the fastest real embedder measured (141 items/s
+    // 4-wide) while still finite for a fixture that does no work.
+    // J3 round-1 N4: the clamp is its own number now. It happens to equal
+    // WRITE_QUEUE_MAX and must NOT be *defined* from it — that coupling put
+    // a measured embedder rate (via the const_assert beside the constant,
+    // which still guards telemetry hygiene) in the chain that sized both
+    // bounds. Asserted as a literal on purpose: writing
+    // `WRITE_QUEUE_MAX as u64` here would re-create the coupling in the test
+    // that exists to forbid it.
+    assert_eq!(PROBE_CLAMP_RPS, 1024);
+    assert_eq!(MEASURED_LOCAL_EMBEDDER_RPS, 141);
+    assert_eq!(PROBE_EMBEDS, 7);
+    assert_eq!(PROBE_EMBEDS, PROBE_WARMUP_EMBEDS + 2 + PROBE_CONCURRENCY);
+    // The representative leg is bigger than the short one, and the helper
+    // hits the size exactly — the two facts that make the pair a
+    // measurement of length rather than of two arbitrary strings.
+    assert_eq!(PROBE_TEXT_BYTES, 1024);
+    assert_eq!(PROBE_TEXT.len(), 35);
+    assert_eq!(probe_text_at(PROBE_TEXT_BYTES).len(), PROBE_TEXT_BYTES);
+    assert!(probe_text_at(PROBE_TEXT_BYTES).starts_with(PROBE_TEXT));
+    assert!(PROBE_TEXT.is_ascii());
+    assert_eq!(OBSERVED_MIN_SAMPLES, PROBE_CONCURRENCY as u64);
+    assert_eq!(OBSERVED_EWMA_WEIGHT, PROBE_CONCURRENCY as u32);
+    assert_eq!(MEASURED_WORST_FLUSH_LAG_SECS, 227);
+    assert_eq!(WRITE_QUEUE_MAX_BYTES, 16 * 1024 * 1024);
+    assert_eq!(MAX_RECEIPT_IDS, MAX_CONCEPTS_PER_DERIVE);
+    // Above the worst flush_lag measured on the rig, which is the
+    // applied-but-not-durable window a receipt has to outlive — and the
+    // window now starts at the SETTLE, which is what makes that the right
+    // comparison (J3-R1-3).
+    assert!(RECEIPT_RETENTION.as_secs() > MEASURED_WORST_FLUSH_LAG_SECS);
+    // The quiesce cannot be why a close() misses the deadline serve gives
+    // it. Duplicated from the const assert on purpose: the build guard
+    // proves the relation, this proves the numbers a reader is quoted.
+    assert_eq!(WRITE_QUEUE_DRAIN_BUDGET.as_secs(), 2);
+    assert_eq!(crate::mcp::serve::CLOSE_FLUSH_GRACE.as_secs(), 8);
+    assert_eq!(RECEIPT_WAIT_MAX.as_secs(), 4);
+    assert_eq!(MAX_CONCURRENT_RECEIPT_WAITS * 2, 32);
+    assert_eq!(crate::mcp::proxy::INFLIGHT_DEPTH_WARN, 64);
+}
+
+// -----------------------------------------------------------------------
+// probe_embedder — J3-R2-7: the function that produces the load-bearing
+// number had no test at all. These four cover its budget, its three
+// required legs, and the one optional leg J3-R2-1 added.
+// -----------------------------------------------------------------------
+
+/// An embedder scripted per call so a probe leg can be made to hang, fail
+/// or take a chosen wall time. `plan` is consulted by call index; anything
+/// past its end behaves like the last entry.
+struct ScriptedEmbedder {
+    plan: Vec<Leg>,
+    calls: AtomicU64,
+}
+
+#[derive(Clone, Copy)]
+enum Leg {
+    /// Answers after `.0` of simulated time.
+    After(Duration),
+    /// Answers after a wall time proportional to the input's length —
+    /// one millisecond per byte — which is the shape a transformer has and
+    /// the shape `PROBE_TEXT`'s old docstring denied (J3-R2-1).
+    PerByte,
+    /// Never answers.
+    Hang,
+    /// Refuses, the way this rig's llama-server refuses an input over its
+    /// configured batch (HTTP 500).
+    Refuse,
+}
+
+#[async_trait::async_trait]
+impl Embedder for ScriptedEmbedder {
+    fn dimensions(&self) -> usize {
+        8
+    }
+    async fn embed(&self, text: &str) -> Result<Vec<f32>, crate::EmbedError> {
+        let i = self.calls.fetch_add(1, Ordering::Relaxed) as usize;
+        let leg = self.plan[i.min(self.plan.len() - 1)];
+        match leg {
+            Leg::After(d) => {
+                tokio::time::sleep(d).await;
+                Ok(vec![0.0; 8])
+            }
+            Leg::PerByte => {
+                tokio::time::sleep(Duration::from_millis(text.len() as u64)).await;
+                Ok(vec![0.0; 8])
+            }
+            Leg::Hang => std::future::pending().await,
+            Leg::Refuse => Err(crate::EmbedError::Backend(format!(
+                "input of {} bytes refused",
+                text.len()
+            ))),
+        }
+    }
+}
+
+fn scripted(plan: Vec<Leg>) -> ScriptedEmbedder {
+    ScriptedEmbedder {
+        plan,
+        calls: AtomicU64::new(0),
+    }
+}
+
+/// **The probe's serial figure is the slower of its two input sizes**
+/// (J3-R2-1). Both legs embed the same words; only the length differs, so
+/// the gap between them *is* the length sensitivity, and a projection wants
+/// the conservative end of it.
+#[tokio::test(start_paused = true)]
+async fn the_probes_serial_figure_is_the_slower_of_its_two_input_sizes() {
+    let embedder = scripted(vec![Leg::PerByte]);
+    let c = probe_embedder(&embedder).await;
+    assert_eq!(c.source, CalibrationSource::Probe);
+    // 35 bytes → 35 ms → 28.57 items/s. 1024 bytes → 1024 ms → 0.977. The
+    // published rate must be the second one; before J3-R2-1 it was the
+    // first, and the first is a rate for 35-byte writes.
+    let rate = c.serial_items_per_sec.expect("measured");
+    assert!(
+        (rate - 1000.0 / PROBE_TEXT_BYTES as f64).abs() < 0.01,
+        "the representative leg must decide the rate, not the short one: {rate}"
+    );
+    assert_eq!(c.probe_serial_items_per_sec, c.serial_items_per_sec);
+    assert_eq!(
+        c.lane_bound, WRITE_QUEUE_LANE_MAX,
+        "the bound is the static fair share whatever the probe read"
+    );
+}
+
+/// **A refused representative leg costs the probe nothing but the leg**
+/// (J3-R2-1). Measured, not hypothesised: this rig's llama-server answers
+/// 1280 B and returns HTTP 500 at 1536 B, so a probe that failed outright
+/// on the larger input would land on `unmeasured` for an ordinary local
+/// setup — trading an optimistic number for no number.
+#[tokio::test(start_paused = true)]
+async fn a_refused_representative_leg_falls_back_to_the_short_one() {
+    // warm-up, short serial, then a refusal for the representative leg,
+    // then the concurrent leg answers again.
+    let embedder = scripted(vec![
+        Leg::After(Duration::from_millis(35)),
+        Leg::After(Duration::from_millis(35)),
+        Leg::Refuse,
+        Leg::After(Duration::from_millis(35)),
+    ]);
+    let c = probe_embedder(&embedder).await;
+    assert_eq!(c.source, CalibrationSource::Probe, "still measured");
+    let rate = c.serial_items_per_sec.expect("measured");
+    assert!(
+        (rate - 1000.0 / 35.0).abs() < 0.1,
+        "the short leg's own figure must stand when the larger input is refused: {rate}"
+    );
+}
+
+/// **A representative leg that HANGS cannot starve the required leg after
+/// it** — it is bounded by half the remaining budget, so the concurrent leg
+/// still has the other half and the probe still publishes a number.
+#[tokio::test(start_paused = true)]
+async fn a_hanging_representative_leg_leaves_the_concurrent_leg_its_budget() {
+    let embedder = scripted(vec![
+        Leg::After(Duration::from_millis(35)),
+        Leg::After(Duration::from_millis(35)),
+        Leg::Hang,
+        Leg::After(Duration::from_millis(35)),
+    ]);
+    let started = tokio::time::Instant::now();
+    let c = probe_embedder(&embedder).await;
+    assert_eq!(
+        c.source,
+        CalibrationSource::Probe,
+        "a hang in the OPTIONAL leg must not cost the probe its measurement"
+    );
+    assert!(
+        started.elapsed() < PROBE_BUDGET,
+        "and it must not cost the whole budget either: {:?}",
+        started.elapsed()
+    );
+}
+
+/// **`PROBE_BUDGET` bounds all [`PROBE_EMBEDS`] together, and a probe that
+/// cannot measure says so.** The docstring's claim is the strong one — one
+/// deadline, not one per leg — and nothing tested it (J3-R2-7). Asserted at
+/// each required leg in turn, since the budget has to hold at the last leg
+/// as much as at the first.
+#[tokio::test(start_paused = true)]
+async fn a_probe_that_cannot_finish_inside_its_budget_reports_no_measurement() {
+    let answer = Leg::After(Duration::from_millis(1));
+    for (leg, plan) in [
+        ("warm-up", vec![Leg::Hang]),
+        ("serial", vec![answer, Leg::Hang]),
+        ("concurrent", vec![answer, answer, answer, Leg::Hang]),
+    ] {
+        let embedder = scripted(plan);
+        let started = tokio::time::Instant::now();
+        let c = probe_embedder(&embedder).await;
+        let elapsed = started.elapsed();
+        assert_eq!(
+            c.source,
+            CalibrationSource::Unmeasured,
+            "a probe whose {leg} leg never answers must not invent a number"
+        );
+        assert!(!c.measured(), "{leg}");
+        assert_eq!(c.lane_bound, WRITE_QUEUE_LANE_MAX, "{leg}");
+        assert_eq!(c.bound, WRITE_QUEUE_MAX, "{leg}");
+        assert!(
+            elapsed <= PROBE_BUDGET + Duration::from_millis(50),
+            "the budget covers all {PROBE_EMBEDS} embeds TOGETHER, so a hang at the {leg} \
+                 leg must still end inside it: {elapsed:?}"
+        );
+    }
+}

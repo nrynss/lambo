@@ -21,7 +21,8 @@ is scripting its calls.
 |---|---|
 | `mcp_load.py` | The load driver (C1). K worker threads, each an independent streamable-HTTP MCP session, issuing a deterministic seeded mix: valid `lambo_derive` / `lambo_record_action` / `lambo_recall`, plus adversarial calls (record_action over `MAX_ACTION_TARGETS`, content with NUL and U+202E, content over `MAX_CONTENT_BYTES`, an unknown tool, malformed params). Every response — success, tool refusal, 429, 503, transport error — is recorded to a JSONL ledger. |
 | `capture_sigterm.sh` | The run harness (C2). Provisions a scratch SQLite store, starts `lambo serve` with a scratch bearer token, runs the driver, sends SIGTERM inside the burst phase, measures signal→exit wall time and exit code, captures full server stderr, then runs the durability check. |
-| `check_durability.py` | The C3 check: compares the ledger's successful-call accounting (interactions 1:1 per write call; concept/edge counts parsed from the server's own response text) against a post-exit readback of the SQLite store. Used by both families. |
+| `check_durability.py` | The C3 check: compares the ledger's accounting against a post-exit readback of the SQLite store. Interactions are 1:1 per acknowledged write call; concept/edge counts come from the write receipts the ledger saw settle as applied (J3 acks a write before applying it), and receipts never seen settled are reported as their own row. Exit codes (non-zero never means durable): 0 checked and durable; 2 shortfall; 3 the ledger's write responses are in a format it does not recognise; 4 nothing to verify (no acknowledged write in the ledger; `--allow-empty` makes that expected and exit 0); 5 concepts unverifiable (store short of settled-applied concepts, GC could explain it, and `--gc-logged` was not given); 6 unreadable input (a ledger line that is not a JSON object, or a missing `--db` is never created: the store is opened read-only); 64 usage error. Concepts are compared by count because receipts carry no concept ids, so the concept check is a lower bound (see the script header). Used by both families. |
+| `test_check_durability.py` | Stdlib `unittest` fixtures for the checker: a synthetic ledger and SQLite store exercise refused-at-ack accounting, the empty-ledger and unverifiable-concept exit codes, GC-explained shortfalls, a missing `--db` (never created) and parser drift, with no server. Run `python3 scripts/loadtest/test_check_durability.py`. |
 
 ### Model-driven harnesses (C5)
 
@@ -84,6 +85,15 @@ scripts/loadtest/capture_sigterm.sh \
     --out evidence/concurrency --workers 12 --session c-load-20260818 --delay 5
 ```
 
+The harness listens on port 17700 by default and refuses 7700 (however spelled), the port a
+live `lambo serve` writer conventionally holds, unless `--allow-production-port`
+is passed. The spawned serve gets a private `XDG_RUNTIME_DIR` (a `mktemp`
+directory removed on exit), so its session endpoint never lands in the shared
+per-user runtime dir a live writer advertises itself in.
+The harness's exit status is the durability check's (0 only when it passed; see
+the codes above), and the driver and serve are stopped and reaped on every exit
+path, including SIGTERM and SIGINT.
+
 The harness writes into `--out`: `stderr-<run>.log` (the server's full stderr,
 containing the exact `lambo serve: session closed, tail durable` line),
 `ledger-<run>.jsonl`, `durability-<run>.txt`, `run-<run>.json` (machine +
@@ -98,10 +108,15 @@ metadata records the `<SCRATCH-TOKEN>` placeholder.
 
 ```bash
 python3 scripts/loadtest/mcp_load.py \
+    --endpoint http://127.0.0.1:17700/mcp \
     --session c-load-20260818 --ledger /tmp/load-ledger.jsonl \
     --workers 12 --seed 0 \
-    --main-secs 45 --burst-secs 25 --delay-hint 5
+    --main-secs 45 --burst-secs 25
 ```
+
+`--endpoint` defaults to `http://127.0.0.1:17700/mcp`. An endpoint on port 7700
+is refused unless `--allow-production-port` is passed; the port is compared as a
+number, so `07700` is refused too and a non-numeric port is an error.
 
 Stdlib only (urllib + threads), mirroring the streamable-HTTP MCP client in
 `examples/drive_mcp_soak.py`: `initialize` → `notifications/initialized` →

@@ -26,22 +26,45 @@
 # as taking precedence over --auth-token). run-<run>.json records the
 # placeholder <SCRATCH-TOKEN>.
 #
+# Isolation from a live writer on the same machine:
+#   * the default port is 17700, never 7700 (the conventional port of a
+#     long-lived `lambo serve`, e.g. a dogfood writer). The harness refuses
+#     7700 unless --allow-production-port is passed, because taking it either
+#     fails against the live writer or keeps that writer from starting.
+#   * the spawned serve gets its own XDG_RUNTIME_DIR (a mktemp directory,
+#     mode 700, removed on exit), so its session endpoint file never lands in
+#     the shared per-user runtime dir a live writer advertises itself in.
+#   * the driver is pointed at this harness's own port explicitly.
+#
+# Exit status: 0 only when serve ran, the driver finished and the C3 durability
+# check passed (check_durability.py exit 0). A durability result of 2 (shortfall),
+# 3 (ledger format drift), 4 (nothing verified), 5 (concepts unverifiable) or 6
+# (unreadable input) is the harness's exit status too, after every artifact is
+# written; run-<run>.json records it as durability.exit_code. 1 is a harness
+# failure (serve/driver did not run as expected) and 2 from the argument
+# checks below is a usage error, before anything is started. The driver and
+# serve are stopped and reaped, and the runtime dir and token file removed, on
+# every exit path including SIGTERM and SIGINT.
+#
 # Usage:
 #   scripts/loadtest/capture_sigterm.sh [--out evidence/concurrency] [--workers 12]
 #                                       [--session c-load-20260818] [--delay 5]
-#                                       [--bin target/debug/lambo]
+#                                       [--bin target/debug/lambo] [--port 17700]
+#                                       [--allow-production-port]
 
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
 
+PRODUCTION_PORT=7700
 OUT="$REPO/evidence/concurrency"
 WORKERS=12
 SESSION="c-load-$(date +%Y%m%d)"
 DELAY=5                     # seconds after burst-start before SIGTERM
 BIN="$REPO/target/debug/lambo"
-PORT=7700
+PORT=17700
+ALLOW_PRODUCTION_PORT=0
 MAIN_SECS=45
 BURST_SECS=25
 
@@ -53,18 +76,63 @@ while [[ $# -gt 0 ]]; do
         --delay) DELAY="$2"; shift 2 ;;
         --bin) BIN="$2"; shift 2 ;;
         --port) PORT="$2"; shift 2 ;;
+        --allow-production-port) ALLOW_PRODUCTION_PORT=1; shift ;;
         --main-secs) MAIN_SECS="$2"; shift 2 ;;
         --burst-secs) BURST_SECS="$2"; shift 2 ;;
         *) echo "unknown arg: $1" >&2; exit 2 ;;
     esac
 done
 
+# Compare the port as a number: "07700", "+7700" and " 7700" all bind 7700.
+if [[ ! "$PORT" =~ ^[0-9]+$ ]]; then
+    echo "--port must be a decimal number, got '$PORT'" >&2
+    exit 2
+fi
+PORT=$((10#$PORT))
+if (( PORT < 1 || PORT > 65535 )); then
+    echo "--port $PORT is outside 1-65535" >&2
+    exit 2
+fi
+if (( PORT == PRODUCTION_PORT )) && [[ "$ALLOW_PRODUCTION_PORT" != 1 ]]; then
+    echo "refusing to run on port $PRODUCTION_PORT, the port a live lambo serve" \
+         "writer listens on; pick another --port, or pass --allow-production-port" \
+         "if this machine runs no such writer" >&2
+    exit 2
+fi
+
 RUN="$(date -u +%Y%m%d-%H%M%S)"
 mkdir -p "$OUT"
 TOKEN_FILE="$(mktemp /tmp/c-series-token.XXXXXX)"
 TOKEN="scratch-$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 printf '%s' "$TOKEN" > "$TOKEN_FILE"
-trap 'rm -f "$TOKEN_FILE"; if [[ -n "${SERVE_PID:-}" ]] && kill -0 "$SERVE_PID" 2>/dev/null; then kill -TERM "$SERVE_PID" 2>/dev/null || true; fi' EXIT
+# A private runtime dir for the spawned serve (see the isolation note above).
+# Deliberately short and under /tmp rather than $TMPDIR: serve binds a unix
+# socket at <dir>/lambo/<38-byte name>, and a socket address has ~104 bytes
+# on macOS, which a /var/folders/... TMPDIR plus a long name would overrun.
+RUNTIME_DIR="$(mktemp -d /tmp/lambo-lt.XXXXXX)"
+chmod 700 "$RUNTIME_DIR"
+SERVE_PID=
+DRIVER_PID=
+cleanup() {
+    rm -f "$TOKEN_FILE"
+    # Stop and reap the load driver first: it writes the ledger and must not
+    # outlive the harness. TERM, not INT: bash starts background jobs with
+    # SIGINT ignored, so an INT would be a no-op for it.
+    if [[ -n "${DRIVER_PID:-}" ]] && kill -0 "$DRIVER_PID" 2>/dev/null; then
+        kill -TERM "$DRIVER_PID" 2>/dev/null || true
+        wait "$DRIVER_PID" 2>/dev/null || true
+    fi
+    if [[ -n "${SERVE_PID:-}" ]] && kill -0 "$SERVE_PID" 2>/dev/null; then
+        kill -TERM "$SERVE_PID" 2>/dev/null || true
+        wait "$SERVE_PID" 2>/dev/null || true
+    fi
+    rm -rf "$RUNTIME_DIR"
+}
+trap cleanup EXIT
+# Explicit signal traps so INT and TERM run cleanup with a conventional status
+# (128+signal) rather than leaving the children behind.
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 DB="$OUT/$SESSION.db"
 CFG="$OUT/lambo.sqlite.toml"
@@ -86,13 +154,29 @@ export LAMBO_AUTH_TOKEN="$TOKEN"
 # durability comparison against concept counts needs it, so the default run
 # enables the daemon GC target's debug logs on stderr. Override with
 # RUST_LOG=... if a quieter transcript is wanted.
+GC_LOGGED_FLAG=()
+if [[ -z "${RUST_LOG:-}" ]]; then GC_LOGGED_FLAG=(--gc-logged); fi
 export RUST_LOG="${RUST_LOG:-lambo=info,lambo::daemon::gc=debug}"
 
 echo "== C2 capture: run=$RUN session=$SESSION workers=$WORKERS"
-echo "== machine: $(uname -srm) | $(lscpu 2>/dev/null | awk -F: '/Model name/{print $2}' | xargs) | $(nproc) threads"
+# Machine facts, portably: lscpu/nproc are Linux-only, sysctl is the macOS
+# equivalent, and getconf answers on both.
+cpu_model() {
+    lscpu 2>/dev/null | awk -F: '/Model name/{print $2}' | xargs ||
+        true
+    sysctl -n machdep.cpu.brand_string 2>/dev/null || true
+}
+CPU_MODEL="$(cpu_model | sed "/^[[:space:]]*$/d" | head -n 1)"
+CPU_THREADS="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo unknown)"
+case "$(uname -s)" in
+    Linux) MACHINE_NOTE="Linux box, NOT the MBP the P8 criterion names — see concurrency-capture.md" ;;
+    *) MACHINE_NOTE="$(uname -s) host — see concurrency-capture.md for which machine the P8 criterion names" ;;
+esac
+echo "== machine: $(uname -srm) | $CPU_MODEL | $CPU_THREADS threads"
 
 "$BIN" provision --config "$CFG" >/dev/null
 
+XDG_RUNTIME_DIR="$RUNTIME_DIR" \
 "$BIN" serve --config "$CFG" --session "$SESSION" --agent c-load \
     --transport http --port "$PORT" --bind 127.0.0.1 \
     > "$STDERR" 2>&1 &
@@ -111,7 +195,10 @@ echo "serve listening (port $PORT)"
 
 STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
+DRIVER_PORT_FLAG=()
+if [[ "$ALLOW_PRODUCTION_PORT" == 1 ]]; then DRIVER_PORT_FLAG=(--allow-production-port); fi
 python3 "$HERE/mcp_load.py" \
+    --endpoint "http://127.0.0.1:$PORT/mcp" ${DRIVER_PORT_FLAG[@]+"${DRIVER_PORT_FLAG[@]}"} \
     --session "$SESSION" --ledger "$LEDGER" \
     --workers "$WORKERS" --seed 0 \
     --rate 40 --burst-rate 45 --overdrive 2 --overdrive-calls 120 \
@@ -139,6 +226,9 @@ EXIT_CODE=""
 for _ in $(seq 1 120); do
     if ! kill -0 "$SERVE_PID" 2>/dev/null; then
         wait "$SERVE_PID" && EXIT_CODE=0 || EXIT_CODE=$?
+        # Reaped: the PID may be recycled, so the exit trap must not signal it.
+        # (Left set on the TIMEOUT path so the trap still stops a hung serve.)
+        SERVE_PID=
         break
     fi
     sleep 0.1
@@ -153,13 +243,18 @@ echo "signal->exit: ${SIG_TO_EXIT_MS} ms (exit code $EXIT_CODE)"
 
 # The driver finishes its phases (transport errors after the server died are
 # recorded, not fatal) — wait for it so the ledger is complete.
-wait "$DRIVER_PID" || { echo "driver failed" >&2; exit 1; }
+wait "$DRIVER_PID" || { echo "driver failed" >&2; DRIVER_PID=; exit 1; }
+DRIVER_PID=
 
-# C3 — prove the tail is durable.
+# C3 — prove the tail is durable. Its exit status is the harness's: 0 only when
+# the check ran and passed. Artifacts are written first, then the status is
+# returned, so a failing run still leaves its evidence behind.
+DUR_RC=0
 python3 "$HERE/check_durability.py" \
     --ledger "$LEDGER" --db "$DB" --session "$SESSION" \
-    --stderr "$STDERR" \
-    > "$OUT/durability-$RUN.txt" || true   # exit 2 is the honest SHORTFALL signal
+    --stderr "$STDERR" ${GC_LOGGED_FLAG[@]+"${GC_LOGGED_FLAG[@]}"} \
+    > "$OUT/durability-$RUN.txt" || DUR_RC=$?
+echo "durability check exit code: $DUR_RC (0 durable, 2 shortfall, 3 format drift, 4 nothing verified, 5 unverifiable, 6 bad input)"
 
 cat > "$OUT/run-$RUN.json" <<EOF
 {
@@ -170,9 +265,9 @@ cat > "$OUT/run-$RUN.json" <<EOF
   "machine": {
     "host": "$(hostname)",
     "os": "$(uname -srm)",
-    "cpu": "$(lscpu 2>/dev/null | awk -F: '/Model name/{print $2}' | xargs)",
-    "threads": "$(nproc)",
-    "note": "Linux box, NOT the MBP the P8 criterion names — see concurrency-capture.md"
+    "cpu": "$CPU_MODEL",
+    "threads": "$CPU_THREADS",
+    "note": "$MACHINE_NOTE"
   },
   "server": {
     "binary": "$BIN",
@@ -199,6 +294,9 @@ cat > "$OUT/run-$RUN.json" <<EOF
     "assertion_met": "$(grep -q 'lambo serve: session closed, tail durable' "$STDERR" && echo true || echo false)",
     "tail_lost_present": "$(grep -q 'tail lost on exit' "$STDERR" && echo true || echo false)"
   },
+  "durability": {
+    "exit_code": $DUR_RC
+  },
   "artifacts": {
     "stderr": "stderr-$RUN.log",
     "ledger": "ledger-$RUN.jsonl",
@@ -212,3 +310,7 @@ EOF
 
 echo "== done: $OUT"
 echo "== artifacts: $(ls "$OUT" | tr '\n' ' ')"
+if (( DUR_RC != 0 )); then
+    echo "== FAILED: durability check exited $DUR_RC; see $OUT/durability-$RUN.txt" >&2
+fi
+exit "$DUR_RC"

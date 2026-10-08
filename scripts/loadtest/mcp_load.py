@@ -48,9 +48,14 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
-DEFAULT_ENDPOINT = "http://127.0.0.1:7700/mcp"
+# Not 7700: that is the conventional port of a long-lived `lambo serve` writer
+# (e.g. a dogfood writer), and a load run must never land on one. `main`
+# refuses an endpoint on that port unless --allow-production-port is passed.
+DEFAULT_ENDPOINT = "http://127.0.0.1:17700/mcp"
+PRODUCTION_PORT = 7700
 PROTOCOL_VERSION = "2025-06-18"
 
 # Cap numbers mirrored from the server (`src/cli/caps.rs`, `src/mcp/serve.rs`)
@@ -583,7 +588,27 @@ def main() -> int:
     ap.add_argument("--burst-secs", type=float, default=20.0)
     ap.add_argument("--adversarial-fraction", type=float, default=0.2)
     ap.add_argument("--cap-probe-max", type=int, default=64)
+    ap.add_argument(
+        "--allow-production-port",
+        action="store_true",
+        help=f"permit an endpoint on port {PRODUCTION_PORT}, the port a live writer listens on",
+    )
     args = ap.parse_args()
+    try:
+        # `.port` is an int, so "07700" and "+7700" compare as 7700; a
+        # non-numeric or out-of-range port raises ValueError.
+        endpoint_port = urllib.parse.urlsplit(args.endpoint).port
+    except ValueError as e:
+        print(f"error: --endpoint {args.endpoint!r} has an invalid port: {e}", file=sys.stderr)
+        return 2
+    if endpoint_port == PRODUCTION_PORT and not args.allow_production_port:
+        print(
+            f"refusing to load-test {args.endpoint}: port {PRODUCTION_PORT} is where a live "
+            "lambo serve writer listens. Point --endpoint at a scratch serve, or pass "
+            "--allow-production-port if this machine runs no such writer.",
+            file=sys.stderr,
+        )
+        return 2
     args.token = args.token or os.environ.get("LAMBO_AUTH_TOKEN")
 
     ledger = Ledger(args.ledger)
