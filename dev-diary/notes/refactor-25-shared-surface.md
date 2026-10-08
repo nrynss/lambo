@@ -1,0 +1,66 @@
+# #25: shared request rules and the MCP tool split (decisions)
+
+Refactor 2/5. Base: #24's head `7e1644f`. Decisions and why; the commits
+carry the mechanics.
+
+## A neutral `crate::surface`, not a new CLI submodule
+
+The write queue imported `MAX_CONCEPTS_PER_DERIVE` / `MAX_CONTENT_BYTES` from
+`cli::caps`, and both writeq and MCP reached into the CLI or MCP for shared
+rules. The rules now live in `crate::surface`, which no surface owns:
+
+| module | holds | visibility |
+|---|---|---|
+| `surface::limits` | request caps, `clamp_cfg_default` | `pub` |
+| `surface::validate` | `check_size`, `require_nonempty`, `check_in_range` (String errors) | `pub` |
+| `surface::focus` | `resolve_focus`, `Focus`, scan caps, the four refusal/note builders | crate |
+| `surface::neighbourhood` | `render_neighbourhood` | crate |
+| `surface::error` | `err_class` (N4), shared by MCP `tool_err` and writeq receipts | crate |
+
+Each surface keeps only its adaptation: `cli::caps` keeps `CliError`, the clap
+`ConceptKind` and the `*_cli` wrappers and re-exports the rest (old paths
+valid); MCP maps to `bad_param`; the web portal answers with its own status.
+"Surface" is the codebase's existing word for the request boundary. Future
+session-addressing validation (#32, #4) and the resolve-or-refuse citation
+resolver (#36, #19) belong here.
+
+Not moved: the web portal's hop-1 `structural_dependents` (a web DTO, structural
+edges only; #28 owns web read projections), and MCP's single-line `agent_id`
+rule (MCP-door-only by design, J1).
+
+## Recall no longer imports the daemon
+
+`ScoreTable` and `HotListPayload` are read-side data and moved to
+`crate::types` (re-exported at `daemon::ScoreTable`,
+`daemon::hotlist::HotListPayload`, `lambo::ScoreTable`). The hot-list
+re-validation recall used to run inside `assemble` is daemon maintenance (it
+runs detector callbacks and evicts), so it is now
+`HotList::revalidate_members`, called from `Daemon::recall_detailed` under the
+guards it already held (graph read, then hot write) with the same `now` that
+assembly renders with. `assemble` takes the payload map. The T5.3 eviction
+assertions moved to `daemon::hotlist::tests::revalidate_members_keeps_live_and_drops_lapsed`.
+
+## MCP server facade
+
+`mcp/server.rs` keeps the handle, constructors, `answered` (trace, panic
+containment, receipt delivery) and the `#[tool]` / `#[tool_handler]` blocks
+together, so rmcp's macros see exactly what they saw. Parameters,
+responses/errors, trace, stats and the tool bodies (one file per tool) moved to
+`mcp/server/`. Done as one mechanical commit, verified by a sorted-line diff
+(only visibility, imports, and re-pathed doc links differ), rather than five
+intermediate states that would each need temporary cross-imports.
+
+## Defects fixed on the way (own commits)
+
+- `scripts/cloudops/_lambo.py`'s empty-session self-test had been failing since
+  #9 reshaped the `Focus::Missing` arm; it now pins to `missing_refusal`.
+- `INVISIBLE_RANGES` skipped unassigned Default_Ignorable codepoints (J1-R3-3,
+  open advisory) and the Mongolian free variation selectors (key forking).
+- The `Clock` doc comment was attached to `RecallPipeline`.
+
+## Left for later phases
+
+writeq still pins two budgets against MCP constants in `const` asserts
+(`mcp::serve::CLOSE_FLUSH_GRACE`, `mcp::proxy::INFLIGHT_DEPTH_WARN`), and
+`memory.rs` holds `mcp::serve::EarlyShutdown`. Compile-time couplings, not
+runtime calls; #27/#28 decide which side owns them.
