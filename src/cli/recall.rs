@@ -112,7 +112,12 @@ pub(crate) async fn run_detailed(
     // H3: the embed-failure line is a typed, response-global annotation
     // (`vector_degraded`) captured at its producer — never text-parsed later.
     let mut extra_annotations: Vec<Annotation> = Vec::new();
-    // The same source and embed step `Memory::recall_detailed` uses (#27).
+    // The same embed step `Memory::recall_detailed` uses (#27). The source is
+    // the store: this is a reader, and the graph-backed source (#8) is chosen
+    // only by a session holder (`VectorCandidates::for_holder`), whose graph is
+    // the freshest copy. Over the snapshot loaded above the two would rank the
+    // same; reading the store keeps the reader's vector leg on the store's own
+    // contract check, in one transaction with its candidates.
     let vectors = VectorCandidates::from_store(backends.store.as_ref());
     let embedding = match candidates::embed_query(vectors, backends.embedder.as_ref(), query).await
     {
