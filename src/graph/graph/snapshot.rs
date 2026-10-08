@@ -24,7 +24,9 @@ impl Graph {
     /// fresh sessions), and duplicate natural-key edges are rejected rather than
     /// silently merged via reinforcement (GRAPH-7 — the loaded graph must equal
     /// the stored snapshot; reinforcement is a write-path semantic, not a load
-    /// one).
+    /// one). For the same reason a node id that appears twice (two
+    /// interactions, two concepts, or a concept reusing an interaction's id) is
+    /// rejected rather than loaded last-wins.
     ///
     /// The mutation epoch **resumes** from [`GraphSnapshot::mutation_epoch`]
     /// (issue #17): the counter is durable accounting, not process state.
@@ -48,7 +50,14 @@ impl Graph {
                     i.id, i.session_id, sid
                 )));
             }
-            g.nodes.insert(i.id, Node::Interaction(i.clone()));
+            // GRAPH-7: the loaded graph must equal the snapshot, so a node id
+            // that appears twice is refused, not loaded last-wins.
+            if g.nodes.insert(i.id, Node::Interaction(i.clone())).is_some() {
+                return Err(invariant(format!(
+                    "duplicate interaction id {} in snapshot",
+                    i.id
+                )));
+            }
         }
         for c in &snap.concepts {
             if c.session_id != sid {
@@ -57,7 +66,21 @@ impl Graph {
                     c.id, c.session_id, sid
                 )));
             }
-            g.nodes.insert(c.id, Node::Concept(c.clone()));
+            match g.nodes.insert(c.id, Node::Concept(c.clone())) {
+                None => {}
+                Some(Node::Interaction(_)) => {
+                    return Err(invariant(format!(
+                        "concept {} id already names an interaction in snapshot",
+                        c.id
+                    )));
+                }
+                Some(Node::Concept(_)) => {
+                    return Err(invariant(format!(
+                        "duplicate concept id {} in snapshot",
+                        c.id
+                    )));
+                }
+            }
         }
 
         // Rebuild the temporal chain by walking `previous_id` links.
