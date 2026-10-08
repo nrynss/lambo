@@ -56,11 +56,7 @@ pub(crate) mod vector;
 
 // #26 — the vector candidate seam (#8): one narrow selection interface that the
 // SQLite scan and the pg-family queries implement, plus the shared exact scorer.
-#[cfg(any(
-    feature = "store-cockroach",
-    feature = "store-postgres",
-    feature = "store-sqlite"
-))]
+// Ungated: #8's graph-backed source implements it in Memory-only builds too.
 pub(crate) mod vector_source;
 
 // DSN spelling -> DSN identity. Store-agnostic and always compiled: both the

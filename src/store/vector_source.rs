@@ -24,14 +24,17 @@
 //! caller side of the seam (recall's vector leg and derive's semantic match
 //! reaching candidates through a source they are given) is #27's.
 //!
+//! The module compiles in every build, the Memory-only default included, so
+//! #8's graph-backed source can implement the trait and call the scorer
+//! wherever the graph runs; until it lands, builds without a SQL adapter
+//! carry both unused, hence the `dead_code` allowances.
+//!
 //! The stored vector codec is not part of this seam: it lives in
 //! `store/vector.rs` (`encode_vector` / `decode_vector` and SQLite's BLOB framing).
 
 use async_trait::async_trait;
 
-#[cfg(feature = "store-sqlite")]
-use crate::types::tie_break_by_key;
-use crate::types::{EmbeddingContract, NodeId, Scored, SessionId, StoreError};
+use crate::types::{tie_break_by_key, EmbeddingContract, NodeId, Scored, SessionId, StoreError};
 
 /// Selects and scores vector candidates for one session.
 ///
@@ -42,6 +45,14 @@ use crate::types::{EmbeddingContract, NodeId, Scored, SessionId, StoreError};
 /// `expected_contract` is refused with [`StoreError::Invariant`]; results are
 /// ordered score descending with the issue-2 tie-break (canonical key, then id).
 #[async_trait]
+#[cfg_attr(
+    not(any(
+        feature = "store-cockroach",
+        feature = "store-postgres",
+        feature = "store-sqlite"
+    )),
+    allow(dead_code)
+)]
 pub(crate) trait VectorCandidateSource: Send + Sync {
     async fn checked_vector_candidates(
         &self,
@@ -63,17 +74,22 @@ pub(crate) type VectorCandidate = (NodeId, Vec<f32>, String);
 /// runs as well as within one (MemoryStore / Cockroach parity). Stays exact
 /// whatever candidate selection becomes: an approximate index would
 /// prune the pool, never the ranking.
-#[cfg(feature = "store-sqlite")]
-pub(crate) fn rank_by_cosine(
+///
+/// Candidates are borrowed, so a source that already holds its vectors (#8's
+/// graph-backed source over the in-memory graph) scores them in place
+/// instead of copying every vector and key per call. The sort is stable, so
+/// candidates that compare equal keep their input order.
+#[cfg_attr(not(feature = "store-sqlite"), allow(dead_code))]
+pub(crate) fn rank_by_cosine<'a>(
     probe: &[f32],
-    candidates: Vec<VectorCandidate>,
+    candidates: impl IntoIterator<Item = (NodeId, &'a [f32], &'a str)>,
     limit: usize,
 ) -> Vec<Scored<NodeId>> {
-    let mut scored: Vec<(Scored<NodeId>, String)> = candidates
+    let mut scored: Vec<(Scored<NodeId>, &str)> = candidates
         .into_iter()
         .map(|(id, vector, key)| {
             (
-                Scored::new(id, f64::from(crate::embed::cosine(probe, &vector))),
+                Scored::new(id, f64::from(crate::embed::cosine(probe, vector))),
                 key,
             )
         })

@@ -195,6 +195,12 @@ impl VectorCandidateSource for SqliteStore {
         tx.commit()
             .await
             .map_err(|e| db_err("commit vector candidate transaction", e))?;
-        Ok(rank_by_cosine(embedding, candidates, limit))
+        Ok(rank_by_cosine(
+            embedding,
+            candidates
+                .iter()
+                .map(|(id, vector, key)| (*id, vector.as_slice(), key.as_str())),
+            limit,
+        ))
     }
 }
