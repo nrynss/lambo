@@ -397,6 +397,99 @@ fn bounded_subset(g: &Graph) -> Vec<&crate::types::Concept> {
         .collect()
 }
 
+// ---------------------------------------------------------------------------
+// The caller-facing text of a resolution, shared by `lambo inspect` and
+// `lambo_inspect` so the two cannot word the same outcome differently. Each
+// surface adds only its own framing (MCP prefixes refusals with the tool
+// name; the CLI maps them to an exit code).
+// ---------------------------------------------------------------------------
+
+/// The note a [`Focus::Fuzzy`] resolution carries. A fuzzy resolution is
+/// stated, never silent, and a bounded one names the bound, so the caller
+/// knows what was not scanned.
+pub(crate) fn fuzzy_note(focus: &str, matched: &str, bounded: Option<&BoundedScan>) -> String {
+    match bounded {
+        None => format!("resolved '{focus}' → '{matched}' (substring match, single candidate)"),
+        Some(b) => format!(
+            "resolved '{focus}' → '{matched}' (substring match within the bounded scan of {} \
+             concepts; this graph is past the {}-concept full-scan cap, so concepts \
+             outside the subset were not scanned)",
+            b.scanned, MAX_INSPECT_SCAN_CONCEPTS
+        ),
+    }
+}
+
+/// The refusal for a [`Focus::Ambiguous`] resolution: refuse rather than pick,
+/// and name at most [`MAX_INSPECT_CANDIDATES`] candidates with their node ids.
+pub(crate) fn ambiguous_refusal(
+    focus: &str,
+    candidates: &[FocusCandidate],
+    bounded: Option<&BoundedScan>,
+) -> String {
+    let mut msg = match bounded {
+        None => format!(
+            "'{focus}' matches {} concepts — name one exactly, or pass its node_id:",
+            candidates.len()
+        ),
+        Some(b) => format!(
+            "'{focus}' matches {} concepts within the bounded scan of {} concepts (this \
+             graph is past the {}-concept full-scan cap); name one exactly, or pass \
+             its node_id:",
+            candidates.len(),
+            b.scanned,
+            MAX_INSPECT_SCAN_CONCEPTS
+        ),
+    };
+    for c in candidates.iter().take(MAX_INSPECT_CANDIDATES) {
+        msg.push_str(&format!("\n  {} [{}]", c.content, c.id.0));
+    }
+    if candidates.len() > MAX_INSPECT_CANDIDATES {
+        msg.push_str(&format!(
+            "\n  … and {} more",
+            candidates.len() - MAX_INSPECT_CANDIDATES
+        ));
+    }
+    msg
+}
+
+/// The refusal for a [`Focus::Oversized`] resolution: the bounded subset was
+/// scanned and matched nothing. Its suggestions were ranked within the subset
+/// only (issue #9), so the text says so.
+pub(crate) fn oversized_refusal(cap: usize, near: &[FocusCandidate]) -> String {
+    let mut msg = format!(
+        "this session's graph has more than {cap} concepts; the fuzzy pass scanned only \
+         the bounded subset (the {MAX_INSPECT_BOUNDED_SCAN} most recently created plus \
+         the {MAX_INSPECT_BOUNDED_SCAN} highest blast-radius concepts) and matched \
+         nothing; pass a node_id or an exact concept instead"
+    );
+    if !near.is_empty() {
+        msg.push_str(
+            "\nnearest within the bounded subset (suggestions, not matches; \
+             pass a node_id or name one exactly):",
+        );
+        for c in near.iter().take(MAX_INSPECT_CANDIDATES) {
+            msg.push_str(&format!("\n  {} [{}]", c.content, c.id.0));
+        }
+    }
+    msg
+}
+
+/// The refusal for a [`Focus::Missing`] resolution, with its near-match
+/// suggestions announced as suggestions, never a silent match (issue #9).
+///
+/// `scripts/cloudops/_lambo.py` pins its `EMPTY_SESSION_ERR` sentinel to this
+/// function's text; reword the leading phrase there too.
+pub(crate) fn missing_refusal(focus: &str, session: &str, near: &[FocusCandidate]) -> String {
+    let mut msg = format!("no concept matching '{focus}' in session '{session}'");
+    if !near.is_empty() {
+        msg.push_str("\nsuggestions (not matches; pass a node_id or name one exactly):");
+        for c in near.iter().take(MAX_INSPECT_CANDIDATES) {
+            msg.push_str(&format!("\n  {} [{}]", c.content, c.id.0));
+        }
+    }
+    msg
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::TimeZone;

@@ -40,11 +40,11 @@ use crate::memory::Memory;
 use crate::recall::detail::AnnotationKind;
 use crate::store::flush::{panic_message, CatchUnwindPoll};
 use crate::surface::focus::{
-    resolve_focus, Focus, MAX_INSPECT_BOUNDED_SCAN, MAX_INSPECT_SCAN_CONCEPTS,
+    ambiguous_refusal, fuzzy_note, missing_refusal, oversized_refusal, resolve_focus, Focus,
 };
 use crate::surface::limits::{
-    clamp_cfg_default, MAX_ACTION_TARGETS, MAX_CONCEPTS_PER_DERIVE, MAX_INSPECT_CANDIDATES,
-    MAX_INSPECT_DEPTH, MAX_MAX_TOKENS, MAX_RESERVE_TTL_SECS, MAX_TOP_K, MAX_TRAVERSAL_DEPTH,
+    clamp_cfg_default, MAX_ACTION_TARGETS, MAX_CONCEPTS_PER_DERIVE, MAX_INSPECT_DEPTH,
+    MAX_MAX_TOKENS, MAX_RESERVE_TTL_SECS, MAX_TOP_K, MAX_TRAVERSAL_DEPTH,
 };
 use crate::surface::neighbourhood::render_neighbourhood;
 use crate::surface::validate::check_size as validate_size;
@@ -2016,22 +2016,7 @@ impl LamboServer {
                     // is exactly the line a model reads straight past. A
                     // bounded one also names the bound (issue #9), so the
                     // caller knows what was not scanned.
-                    let note = match bounded {
-                        None => format!(
-                            "resolved '{}' → '{}' (substring match, single candidate)",
-                            p.focus.trim(),
-                            content
-                        ),
-                        Some(b) => format!(
-                            "resolved '{}' → '{}' (substring match within the bounded scan \
-                             of {} concepts; this graph is past the {}-concept full-scan cap, \
-                             so concepts outside the subset were not scanned)",
-                            p.focus.trim(),
-                            content,
-                            b.scanned,
-                            MAX_INSPECT_SCAN_CONCEPTS
-                        ),
-                    };
+                    let note = fuzzy_note(p.focus.trim(), &content, bounded.as_ref());
                     Ok((id, Some(note), render_neighbourhood(&g, id, depth)))
                 }
                 other => Err(other),
@@ -2047,32 +2032,10 @@ impl LamboServer {
                 // Refuse rather than pick (R1/T82-7): an arbitrary pick fed a
                 // node_id the caller never named into `lambo_reserve` and into
                 // edits, and the pick changed between calls.
-                let mut msg = match bounded {
-                    None => format!(
-                        "lambo_inspect: '{}' matches {} concepts — name one exactly, or pass \
-                         its node_id:",
-                        p.focus.trim(),
-                        candidates.len()
-                    ),
-                    Some(b) => format!(
-                        "lambo_inspect: '{}' matches {} concepts within the bounded scan of {} \
-                         concepts (this graph is past the {}-concept full-scan cap); name one \
-                         exactly, or pass its node_id:",
-                        p.focus.trim(),
-                        candidates.len(),
-                        b.scanned,
-                        MAX_INSPECT_SCAN_CONCEPTS
-                    ),
-                };
-                for c in candidates.iter().take(MAX_INSPECT_CANDIDATES) {
-                    msg.push_str(&format!("\n  {} [{}]", c.content, c.id.0));
-                }
-                if candidates.len() > MAX_INSPECT_CANDIDATES {
-                    msg.push_str(&format!(
-                        "\n  … and {} more",
-                        candidates.len() - MAX_INSPECT_CANDIDATES
-                    ));
-                }
+                let msg = format!(
+                    "lambo_inspect: {}",
+                    ambiguous_refusal(p.focus.trim(), &candidates, bounded.as_ref())
+                );
                 // Issue #9: every inspect failure names its mode and its focus
                 // in the ledger facts BEFORE the error returns, so telemetry
                 // can classify the refusal without reprobing.
@@ -2098,22 +2061,7 @@ impl LamboServer {
                         "focus": focus_for_ledger(&p.focus),
                     })
                 });
-                let mut msg = format!(
-                    "lambo_inspect: this session's graph has more than {cap} concepts; the \
-                     fuzzy pass scanned only the bounded subset (the \
-                     {MAX_INSPECT_BOUNDED_SCAN} most recently created plus the \
-                     {MAX_INSPECT_BOUNDED_SCAN} highest blast-radius concepts) and matched \
-                     nothing; pass a node_id or an exact concept instead"
-                );
-                if !near.is_empty() {
-                    msg.push_str(
-                        "\nnearest within the bounded subset (suggestions, not matches; \
-                         pass a node_id or name one exactly):",
-                    );
-                    for c in near.iter().take(MAX_INSPECT_CANDIDATES) {
-                        msg.push_str(&format!("\n  {} [{}]", c.content, c.id.0));
-                    }
-                }
+                let msg = format!("lambo_inspect: {}", oversized_refusal(cap, &near));
                 return CallToolResult::error(vec![ContentBlock::text(msg)]);
             }
             Err(Focus::Missing { near }) => {
@@ -2121,19 +2069,10 @@ impl LamboServer {
                 // of 78 dogfood-rig inspects failed. Do what Ambiguous does:
                 // refuse, explain, and offer the closest concepts with their
                 // node ids, announced as suggestions.
-                let mut msg = format!(
-                    "lambo_inspect: no concept matching '{}' in session '{}'",
-                    p.focus,
-                    self.mem.session().0
+                let msg = format!(
+                    "lambo_inspect: {}",
+                    missing_refusal(&p.focus, &self.mem.session().0, &near)
                 );
-                if !near.is_empty() {
-                    msg.push_str(
-                        "\nsuggestions (not matches; pass a node_id or name one exactly):",
-                    );
-                    for c in near.iter().take(MAX_INSPECT_CANDIDATES) {
-                        msg.push_str(&format!("\n  {} [{}]", c.content, c.id.0));
-                    }
-                }
                 note_facts(|| {
                     json!({
                         "failure": "missing",
