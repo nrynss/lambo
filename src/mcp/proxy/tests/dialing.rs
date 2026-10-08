@@ -206,6 +206,7 @@ async fn a_shutdown_during_the_proxys_first_dial_exits_cleanly() {
     );
 }
 
+#[cfg(feature = "store-memory")]
 /// A proxy for `session` over a real `MemoryStore`.
 fn proxy_onto(store: Arc<crate::store::MemoryStore>, session: &str) -> HubProxy {
     HubProxy::new(
@@ -218,6 +219,7 @@ fn proxy_onto(store: Arc<crate::store::MemoryStore>, session: &str) -> HubProxy 
     )
 }
 
+#[cfg(feature = "store-memory")]
 /// #23 review L3: a proxy whose session was erased gets the store's stable
 /// erased error from its dial — typed as `Dialled::Erased`, so the pump
 /// answers with the erased reply and exits — not a holder-has-no-endpoint
@@ -260,6 +262,7 @@ async fn a_dial_onto_an_erased_session_reports_the_erasure() {
     );
 }
 
+#[cfg(feature = "store-memory")]
 /// #23 review H2: a released lease row (kept, with its fencing token) names
 /// no holder, so the dial reports "no lease holder" exactly as for no row,
 /// rather than a CLI-writer explanation naming the released marker.
