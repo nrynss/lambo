@@ -1181,6 +1181,7 @@ async fn resolve_role(
         // Not proxyable *yet*. The two live cases are a CLI verb holding the
         // lease for one command and a holder that died without releasing; both
         // resolve inside one TTL, the first by finishing and the second by
+        // lapsing.
         if Instant::now() >= deadline {
             record_refused_loser(
                 ledger,
@@ -1606,7 +1607,8 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
             // (`HubProxy::new`), which now books its own `proxying` /
             // `proxying_stopped` lines on it — a proxy is alive and can write,
             // which is the whole of §J2's J4 handoff. What it still does not do
-            // is spawn a heartbeat, bind a socket or build a
+            // is spawn a heartbeat, bind a socket or build a `LamboServer`. It
+            // is a pipe.
             let outcome = proxy.run(shutdown_signal()).await;
             tracing::info!("lambo serve: proxy closed (no lease was ever taken by this process)");
             // J4: the ledger this process opened pre-lease was used by the
@@ -2472,6 +2474,61 @@ async fn serve_http_bounded(
     }
 }
 
+/// The only shutdown future [`serve`]'s transports will accept (JE2E-R2-2).
+///
+/// # Why a newtype instead of `impl Future`
+///
+/// The ruling's entire behaviour lives in one expression — which future `serve`
+/// hands to the transport — and round 2 demonstrated that **severing it passed
+/// the whole suite**: replacing [`wind_down`]'s result with a bare
+/// `shutdown_signal()` left 1016 tests green while every fenced holder went back
+/// to living forever. Two tests pinned `wind_down` and the fenced close in
+/// isolation; nothing pinned that `serve` composes them.
+///
+/// A test is the weaker answer to that, because it pins one spelling of a line
+/// that a refactor is free to re-spell. So the transports take
+/// `Pin<&mut HolderShutdown>` rather than a generic, and this type has exactly
+/// one constructor — [`holder_shutdown`], which always wraps `wind_down`. The
+/// severing mutation is now a **type error**, and any future re-plumbing of
+/// `serve`'s shutdown still has to produce one of these, which still runs the
+/// fence race. Closed by construction rather than by vigilance.
+///
+/// The box costs one allocation per serve process, at startup, for a future
+/// that is polled until the process ends. `wind_down` is an `async fn` and so
+/// has no nameable type; boxing is what lets the *type* be the guarantee.
+pub(crate) struct HolderShutdown(Pin<Box<dyn Future<Output = ()> + Send>>);
+
+impl Future for HolderShutdown {
+    type Output = ();
+
+    fn poll(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        self.0.as_mut().poll(cx)
+    }
+}
+
+/// Build this holder's wind-down future — **the only way to get a
+/// [`HolderShutdown`]** (JE2E-R2-2).
+///
+/// `shutdown_signal()` is evaluated here, as an argument, so its eager handler
+/// registration happens at this call and not at the first poll; see that
+/// function for why that matters and what a lazier spelling would re-open.
+///
+/// `early` is J6's pre-arm — the registration installed back at the acquire —
+/// and it is passed in **alongside** the fresh `shutdown_signal()`, not in
+/// place of it. A signal that landed in the window between the two arming
+/// points is recorded only by `early`; one that lands after is seen by both.
+/// See [`EarlyShutdown`].
+fn holder_shutdown(
+    mem: Arc<Memory>,
+    ledger: Option<Arc<Ledger>>,
+    early: EarlyShutdown,
+) -> HolderShutdown {
+    HolderShutdown(Box::pin(wind_down(shutdown_signal(), early, mem, ledger)))
+}
+
 /// What ends a holder's transport: a signal, **or** losing the single-writer
 /// lease (JE2E-4; operator ruling, 2026-08-22).
 ///
@@ -2532,61 +2589,6 @@ async fn serve_http_bounded(
 /// path as much as the success one. [`crate::ledger::party_key`]'s fallback
 /// already files an unlisted event's other party under `counterparty`, which is
 /// what this is — a lease token, not a socket path.
-/// The only shutdown future [`serve`]'s transports will accept (JE2E-R2-2).
-///
-/// # Why a newtype instead of `impl Future`
-///
-/// The ruling's entire behaviour lives in one expression — which future `serve`
-/// hands to the transport — and round 2 demonstrated that **severing it passed
-/// the whole suite**: replacing [`wind_down`]'s result with a bare
-/// `shutdown_signal()` left 1016 tests green while every fenced holder went back
-/// to living forever. Two tests pinned `wind_down` and the fenced close in
-/// isolation; nothing pinned that `serve` composes them.
-///
-/// A test is the weaker answer to that, because it pins one spelling of a line
-/// that a refactor is free to re-spell. So the transports take
-/// `Pin<&mut HolderShutdown>` rather than a generic, and this type has exactly
-/// one constructor — [`holder_shutdown`], which always wraps `wind_down`. The
-/// severing mutation is now a **type error**, and any future re-plumbing of
-/// `serve`'s shutdown still has to produce one of these, which still runs the
-/// fence race. Closed by construction rather than by vigilance.
-///
-/// The box costs one allocation per serve process, at startup, for a future
-/// that is polled until the process ends. `wind_down` is an `async fn` and so
-/// has no nameable type; boxing is what lets the *type* be the guarantee.
-pub(crate) struct HolderShutdown(Pin<Box<dyn Future<Output = ()> + Send>>);
-
-impl Future for HolderShutdown {
-    type Output = ();
-
-    fn poll(
-        mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Self::Output> {
-        self.0.as_mut().poll(cx)
-    }
-}
-
-/// Build this holder's wind-down future — **the only way to get a
-/// [`HolderShutdown`]** (JE2E-R2-2).
-///
-/// `shutdown_signal()` is evaluated here, as an argument, so its eager handler
-/// registration happens at this call and not at the first poll; see that
-/// function for why that matters and what a lazier spelling would re-open.
-///
-/// `early` is J6's pre-arm — the registration installed back at the acquire —
-/// and it is passed in **alongside** the fresh `shutdown_signal()`, not in
-/// place of it. A signal that landed in the window between the two arming
-/// points is recorded only by `early`; one that lands after is seen by both.
-/// See [`EarlyShutdown`].
-fn holder_shutdown(
-    mem: Arc<Memory>,
-    ledger: Option<Arc<Ledger>>,
-    early: EarlyShutdown,
-) -> HolderShutdown {
-    HolderShutdown(Box::pin(wind_down(shutdown_signal(), early, mem, ledger)))
-}
-
 async fn wind_down(
     signal: impl std::future::Future<Output = ()>,
     early: EarlyShutdown,
