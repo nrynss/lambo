@@ -73,6 +73,27 @@ fn an_empty_auth_token_is_refused() {
     assert!(AuthToken::new("s3cret").is_ok());
 }
 
+/// #4 PR 2: a token longer than the shared presented-credential cap could
+/// never match (the scan refuses a longer header first), so it is refused at
+/// construction, naming the bound and not the value. The cap itself is fine.
+#[test]
+fn an_auth_token_over_the_presented_cap_is_refused() {
+    let max = crate::surface::bearer::MAX_BEARER_CREDENTIAL_BYTES;
+    let at_cap = "k".repeat(max);
+    let token = AuthToken::new(at_cap.as_str()).expect("the cap itself");
+    let authority = portal_authority(Some(token), &[SessionId::new("t4-cap")]);
+    assert!(
+        authority
+            .authenticate(Some(&format!("Bearer {at_cap}")))
+            .is_some(),
+        "a token at the cap authenticates"
+    );
+    let over = "k".repeat(max + 1);
+    let err = AuthToken::new(over.as_str()).expect_err("over the cap");
+    assert!(err.contains(&max.to_string()), "{err}");
+    assert!(!err.contains(&over), "the value is never quoted");
+}
+
 /// A set `LAMBO_AUTH_TOKEN` that is not valid UTF-8 is a usage error
 /// naming the variable, never the value, and never read as unset (which
 /// fell back to the flag or to an unauthenticated loopback window). The

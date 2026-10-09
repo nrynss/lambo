@@ -43,7 +43,15 @@ pub(super) struct Authenticated(pub(super) Arc<SessionGrant>);
 pub struct AuthToken(String);
 
 impl AuthToken {
-    /// Reject empty and whitespace-only tokens (fail closed, not silently).
+    /// Reject empty and whitespace-only tokens (fail closed, not silently),
+    /// and one longer than any request may present.
+    ///
+    /// The portal authenticates through `SessionAuthority`, which refuses a
+    /// presented credential over
+    /// [`MAX_BEARER_CREDENTIAL_BYTES`](crate::surface::bearer::MAX_BEARER_CREDENTIAL_BYTES)
+    /// before the scan (#32 PR 5 review L2), so a longer configured token
+    /// could never be matched: every request would be 401. Refused here, as
+    /// `lambo serve` refuses one, naming the bound and never the value.
     pub(super) fn new(raw: impl Into<String>) -> Result<Self, String> {
         let raw = raw.into();
         if raw.trim().is_empty() {
@@ -52,6 +60,12 @@ impl AuthToken {
                  run unauthenticated on loopback"
                     .into(),
             );
+        }
+        let max = crate::surface::bearer::MAX_BEARER_CREDENTIAL_BYTES;
+        if raw.len() > max {
+            return Err(format!(
+                "auth token is longer than {max} bytes, which no request may present"
+            ));
         }
         Ok(Self(raw))
     }
