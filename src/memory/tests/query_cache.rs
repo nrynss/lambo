@@ -356,8 +356,19 @@ async fn a_failed_embed_is_not_cached() {
             "{source:?}: the failure was not cached"
         );
         assert!(healed.legs.get(&near).and_then(|l| l.vector).is_some());
-        mem.recall_detailed(q).await.unwrap();
+        mem.recall_detailed(q.clone()).await.unwrap();
         assert_eq!(embedder.calls(), calls + 2, "{source:?}: the success was");
+        // An outage after the vector was cached: the hit never reaches the
+        // embedder, so the recall keeps its vector leg and has no warning.
+        embedder.fail_remaining.store(1, Ordering::SeqCst);
+        let through_outage = mem.recall_detailed(q).await.unwrap();
+        assert_eq!(embedder.calls(), calls + 2);
+        assert!(
+            through_outage.warnings.is_empty(),
+            "{:?}",
+            through_outage.warnings
+        );
+        assert_eq!(answer(&through_outage), answer(&healed), "{source:?}");
         mem.close().await.unwrap();
     }
 }
