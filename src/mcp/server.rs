@@ -229,7 +229,10 @@ impl LamboServer {
                        as the input is validated and ordered — the write is applied in the \
                        background and the ack carries a receipt id. The outcome is \
                        piggybacked on your next tool response; to wait for it, call \
-                       lambo_stats with that receipt and a wait_ms."
+                       lambo_stats with that receipt and a wait_ms. On a store with vector \
+                       search each concept is embedded with the whole call's text, so a \
+                       concept sent alone may be at most 8189 bytes; a longer call is \
+                       refused before the ack, naming the part that is too long."
     )]
     async fn lambo_derive(&self, Parameters(p): Parameters<DeriveParams>) -> CallToolResult {
         let agent_id = p.agent_id.clone();

@@ -377,6 +377,86 @@ fn context_len(content: &str, origin: Option<&str>) -> usize {
     }
 }
 
+/// The longest concept a hybrid derive can embed when it is the call's only
+/// concept (8,189 bytes): the call's text is then the concept itself, so the
+/// concept is framed with itself (`"{concept} — {concept}"`) and that must
+/// fit [`MAX_HYBRID_CONTEXT_BYTES`]. Every other concept in the call only
+/// lengthens the call's text, so no concept of any call embeds past this.
+pub const MAX_SINGLE_CONCEPT_CONTEXT_BYTES: usize = (MAX_HYBRID_CONTEXT_BYTES - " — ".len()) / 2;
+
+/// Refuse, before a write is accepted, a hybrid derive whose embedding
+/// context would exceed [`MAX_HYBRID_CONTEXT_BYTES`] at apply (#74).
+///
+/// The same arithmetic as the apply-time checks in `derive_planned`, which
+/// stay as defence in depth: the call's text is [`derive_prompt`] over
+/// `concepts` (the interaction prompt every `Memory` derive path opens), and
+/// each embedded item's text is [`context_len`] of it framed with that text.
+///
+/// Matching is not known at acceptance, so this is conservative: it checks
+/// every concept and every `parent_of` end, where apply embeds only the
+/// unmatched concepts and the ends it will create. A call whose over-long
+/// concept or end would have matched an existing concept is refused too;
+/// splitting or shortening it always fits. `supplied` names an image item's
+/// content, which is never embedded (its vector arrived with it) and is not
+/// checked, as at apply.
+///
+/// Call it only when the derive will embed (`Hybrid` on a store with vector
+/// search); nothing is embedded otherwise and nothing is refused at apply.
+/// The message names the limit and which part is too long, never the text.
+pub fn check_embed_context(
+    concepts: &[(&str, ConceptType)],
+    parent_of: &ParentOf<'_>,
+    supplied: Option<&str>,
+) -> Result<(), String> {
+    let origin = derive_prompt(concepts.iter().map(|(content, _)| *content));
+    if origin.len() > MAX_HYBRID_CONTEXT_BYTES {
+        return Err(format!(
+            "the call's text (its concepts joined by \"; \") is {} bytes; a hybrid derive \
+             embeds every new concept with it, so it may be at most {MAX_HYBRID_CONTEXT_BYTES} \
+             bytes: split the call",
+            origin.len()
+        ));
+    }
+    let embedded = |content: &str| supplied != Some(content);
+    let framed = |part: String, len: usize| {
+        format!(
+            "{part} framed with the call's text for embedding (the text, \" — \", then the \
+             call's concepts joined by \"; \") is {len} bytes; at most \
+             {MAX_HYBRID_CONTEXT_BYTES} bytes fit, so a concept sent alone may be at most \
+             {MAX_SINGLE_CONCEPT_CONTEXT_BYTES} bytes: shorten it or split the call"
+        )
+    };
+    for (i, (content, _)) in concepts.iter().enumerate() {
+        let len = context_len(content, Some(&origin));
+        if embedded(content) && len > MAX_HYBRID_CONTEXT_BYTES {
+            return Err(framed(format!("concepts[{i}]"), len));
+        }
+    }
+    for (i, (parent, child)) in parent_of.pairs().iter().enumerate() {
+        for (end, content) in [("parent", parent), ("child", child)] {
+            let len = context_len(content, Some(&origin));
+            if embedded(content) && len > MAX_HYBRID_CONTEXT_BYTES {
+                return Err(framed(format!("parent_of[{i}].{end}"), len));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// [`check_embed_context`] for the library's `Memory` calls: a no-op when
+/// the derive will not embed, else its refusal as a `Config` error.
+pub fn validate_embed_context(
+    concepts: &[(&str, ConceptType)],
+    parent_of: &ParentOf<'_>,
+    supplied: Option<&str>,
+    embeds: bool,
+) -> Result<(), LamboError> {
+    if !embeds {
+        return Ok(());
+    }
+    check_embed_context(concepts, parent_of, supplied).map_err(LamboError::Config)
+}
+
 /// Build a fresh concept node for a hybrid-produced content (mirrors
 /// `derive::resolve_concept`'s `Unmatched` branch, plus an optional embedding).
 #[allow(clippy::too_many_arguments)]

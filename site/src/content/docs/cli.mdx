@@ -472,10 +472,13 @@ The command line enforces the same limits as the MCP tools.
 | `derive-image --image` file | 2 MiB, 4096 pixels a side |
 | `derive-image --vector-json` file | 1 MiB, 4096 values |
 | `derive-image --caption` | 16,384 bytes with its ` [image:<id>]` suffix |
+| `derive` embedding text, on a store with vector search | 16,384 bytes for each new concept or `--parent-of` end framed with the call's text, so 8,189 for a concept sent alone (see below) |
 | `--traversal-depth` and `--depth` | 5 |
 | `--max-tokens` | 100,000 |
 | `--ttl-seconds` | 3600 |
 | Neighbours rendered by `inspect` | 200 |
+
+**The embedding-text limit.** On a store with vector search (and the default `hybrid` matching), `derive` embeds every concept and every `--parent-of` end it might create as the item's text, ` — `, then the call's text: all of the call's concepts joined by `; `. That framed text, and the call's text alone, must each fit in 16,384 bytes, so a concept sent alone may be at most 8,189 bytes, and less in a larger call. For `derive-image` only the `--parent-of` ends are framed, with the caption and its suffix. A call over the limit is a usage error naming the part that is too long, before anything is written. A store without vector search embeds nothing and takes any string up to 16 KB.
 
 `inspect` renders at most 200 neighbours in total across every hop, not 200 per hop.
 

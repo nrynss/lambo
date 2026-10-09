@@ -3,6 +3,7 @@
 use super::caps::{check_size_cli, require_nonempty, CliError, ConceptKind};
 use super::{close_writer, open_writer};
 use crate::graph::derive::ParentOf;
+use crate::graph::hybrid;
 use crate::resolve::ResolvedBackends;
 use crate::surface::validate::{check_concept_count, check_no_image_suffix};
 use crate::types::ConceptType;
@@ -92,6 +93,13 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
     } else {
         ParentOf::from_pairs(&pair_refs)
     };
+    // #74: a usage error naming the limit, before the write, on a session
+    // that embeds (the core refuses it too, as a runtime error).
+    if mem.derive_embeds()
+        && let Err(msg) = hybrid::check_embed_context(&refs, &parent_of, None)
+    {
+        return close_writer(mem, Err(CliError::Usage(msg))).await;
+    }
     let out = match mem.derive(&refs, &parent_of).await {
         Ok(outcome) => {
             let summary = format!(

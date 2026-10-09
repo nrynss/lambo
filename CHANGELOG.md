@@ -148,6 +148,16 @@
 
 ### Changed
 
+- A hybrid derive whose embedding text would exceed 16 KiB is refused when
+  it is called, not on its receipt (#74): each new concept and `parent_of`
+  end is embedded framed with the whole call's text, so on a store with
+  vector search a concept sent alone may be at most 8,189 bytes.
+  `lambo_derive` and `lambo_derive_image` refuse it as a bad parameter,
+  `lambo derive` and `derive-image` as a usage error, and `Memory`'s derive
+  calls with `LamboError::Config`, each naming the part that is too long.
+  The check runs before matching is known, so an over-long concept that
+  would have matched is refused too. The `lambo_derive` tool description
+  states the limit.
 - `lambo_derive`, `lambo_record_action`'s `action`, `lambo derive`
   (`--content`, `--concept`) and `lambo record-action --action` refuse text
   holding a token that reads exactly `[image:<id>]` (a valid image id) once

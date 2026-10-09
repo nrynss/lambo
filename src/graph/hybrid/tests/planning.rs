@@ -1102,3 +1102,129 @@ async fn the_context_cap_applies_only_when_the_call_embeds() {
     );
     assert_eq!(embeds, 0);
 }
+
+/// #74: the acceptance-time check holds one concept, alone, to the limit its
+/// self-framing (`"{c} — {c}"`) gives it, at and one byte over, and names
+/// the limit and the part, never the text.
+#[test]
+fn check_embed_context_holds_a_lone_concept_to_its_framed_limit() {
+    assert_eq!(MAX_SINGLE_CONCEPT_CONTEXT_BYTES, 8_189);
+    let at = "c".repeat(MAX_SINGLE_CONCEPT_CONTEXT_BYTES);
+    check_embed_context(
+        &[(at.as_str(), ConceptType::Entity)],
+        &ParentOf::none(),
+        None,
+    )
+    .unwrap();
+    let over = "c".repeat(MAX_SINGLE_CONCEPT_CONTEXT_BYTES + 1);
+    let msg = check_embed_context(
+        &[(over.as_str(), ConceptType::Entity)],
+        &ParentOf::none(),
+        None,
+    )
+    .unwrap_err();
+    assert!(msg.contains("concepts[0]"), "{msg}");
+    assert!(msg.contains("16385 bytes"), "{msg}");
+    assert!(msg.contains("at most 16384 bytes"), "{msg}");
+    assert!(msg.contains("at most 8189 bytes"), "{msg}");
+    assert!(!msg.contains("cccc"), "never quotes the content: {msg}");
+}
+
+/// #74: in a multi-concept call each concept is framed with the whole call's
+/// text; the check names the concept that overflows.
+#[test]
+fn check_embed_context_frames_each_concept_with_the_whole_call() {
+    // b's framed text: b + " — " (5) + a + "; " (2) + b = 2*8138 + 5 + x + 2.
+    let b = "b".repeat(8_138);
+    let fits = "a".repeat(101);
+    let call = [
+        (fits.as_str(), ConceptType::Entity),
+        (b.as_str(), ConceptType::Logic),
+    ];
+    check_embed_context(&call, &ParentOf::none(), None).unwrap();
+    let over = "a".repeat(102);
+    let call = [
+        (over.as_str(), ConceptType::Entity),
+        (b.as_str(), ConceptType::Logic),
+    ];
+    let msg = check_embed_context(&call, &ParentOf::none(), None).unwrap_err();
+    assert!(
+        msg.contains("concepts[1]") && msg.contains("16385 bytes"),
+        "{msg}"
+    );
+}
+
+/// #74: a call whose text alone is over the limit is refused as the whole
+/// call, before any one concept is blamed.
+#[test]
+fn check_embed_context_names_the_whole_call_when_its_text_is_over() {
+    let parts: Vec<String> = (0..3).map(|i| format!("{i}").repeat(5_461)).collect();
+    // 3 * 5461 + 2 * "; " = 16387.
+    let call: Vec<(&str, ConceptType)> = parts
+        .iter()
+        .map(|p| (p.as_str(), ConceptType::Entity))
+        .collect();
+    let msg = check_embed_context(&call, &ParentOf::none(), None).unwrap_err();
+    assert!(
+        msg.contains("the call's text") && msg.contains("16387 bytes"),
+        "{msg}"
+    );
+    assert!(msg.contains("split the call"), "{msg}");
+}
+
+/// #74: a `parent_of` end that could be created is framed with the call's
+/// text too; a supplied (image) item is never framed, as at apply.
+#[test]
+fn check_embed_context_checks_parent_ends_and_skips_a_supplied_item() {
+    // end + " — " (5) + "c" (the call's text) = 16384 at the limit.
+    let at = "e".repeat(MAX_HYBRID_CONTEXT_BYTES - 6);
+    let pairs = [("c", at.as_str())];
+    let concepts = [("c", ConceptType::Entity)];
+    check_embed_context(&concepts, &ParentOf::from_pairs(&pairs), None).unwrap();
+    let over = "e".repeat(MAX_HYBRID_CONTEXT_BYTES - 5);
+    let pairs = [(over.as_str(), "c")];
+    let msg = check_embed_context(&concepts, &ParentOf::from_pairs(&pairs), None).unwrap_err();
+    assert!(msg.contains("parent_of[0].parent"), "{msg}");
+
+    let image = "i".repeat(MAX_HYBRID_CONTEXT_BYTES);
+    let concepts = [(image.as_str(), ConceptType::Resource)];
+    check_embed_context(&concepts, &ParentOf::none(), Some(&image)).unwrap();
+    assert!(check_embed_context(&concepts, &ParentOf::none(), None).is_err());
+}
+
+/// #74: the acceptance check and the apply check agree at the boundary: a
+/// lone concept the check accepts is embedded by `derive`, and the first one
+/// it refuses, apply refuses too.
+#[tokio::test]
+async fn check_embed_context_agrees_with_the_apply_time_check() {
+    for len in [
+        MAX_SINGLE_CONCEPT_CONTEXT_BYTES,
+        MAX_SINGLE_CONCEPT_CONTEXT_BYTES + 1,
+    ] {
+        let content = "c".repeat(len);
+        let concepts = [(content.as_str(), ConceptType::Entity)];
+        let early = check_embed_context(&concepts, &ParentOf::none(), None);
+        let (graph, interaction) =
+            graph_with_interaction("hybrid-74-agree", 1, 0, &derive_prompt([content.as_str()]));
+        let embedder = RecordingEmbedder::new();
+        let out = derive(
+            graph,
+            &SpyStore::with_vector(Vec::new()),
+            &embedder,
+            &contract("fixture", 1024),
+            interaction,
+            &agent(),
+            &concepts,
+            &ParentOf::none(),
+            10,
+            SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+            None,
+        )
+        .await;
+        assert_eq!(
+            early.is_ok(),
+            out.is_ok(),
+            "len {len}: {early:?} vs {out:?}"
+        );
+    }
+}

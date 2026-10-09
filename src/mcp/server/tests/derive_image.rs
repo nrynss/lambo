@@ -576,3 +576,62 @@ fn the_params_debug_redacts_the_payload() {
         }
     }
 }
+
+/// #74: over the wire, a derive whose embedding context would overflow at
+/// apply is a bad parameter naming the limit and the part, never an opaque
+/// configuration error on the receipt; at the limit it is acked and applied.
+#[tokio::test]
+async fn an_over_long_embedding_context_is_a_bad_param_at_the_ack() {
+    use crate::graph::hybrid::{MAX_HYBRID_CONTEXT_BYTES, MAX_SINGLE_CONCEPT_CONTEXT_BYTES};
+    let s = image_server("mcp-74-context", Config::default()).await;
+    let derive = |content: String| {
+        json!({
+            "agent_id": "agent-a",
+            "concepts": [{"content": content, "concept_type": "entity"}],
+        })
+    };
+    let before = s.mem.stats().node_count;
+    let out = call_raw(
+        &s,
+        "lambo_derive",
+        derive("o".repeat(MAX_SINGLE_CONCEPT_CONTEXT_BYTES + 1)),
+    )
+    .await;
+    assert_eq!(out.is_error, Some(true), "{out:?}");
+    assert!(out.structured_content.is_none(), "no receipt: {out:?}");
+    let text = text_of(&out);
+    assert!(text.contains("concepts[0]"), "{text}");
+    assert!(text.contains("at most 8189 bytes"), "{text}");
+    assert!(!text.contains("configuration error"), "{text}");
+    assert!(!text.contains("oooo"), "never quotes the content: {text}");
+    assert_eq!(s.mem.stats().node_count, before, "nothing was written");
+    let ack = call(
+        &s,
+        "lambo_derive",
+        derive("a".repeat(MAX_SINGLE_CONCEPT_CONTEXT_BYTES)),
+    )
+    .await;
+    let receipt = settled_receipt(&s, &ack).await;
+    assert_eq!(receipt["state"], json!("applied"), "{receipt}");
+
+    // A caption with a new parent_of end: "wardrobe" (8) + " — " (5) +
+    // caption + " [image:r17]" (12).
+    let at_len = MAX_HYBRID_CONTEXT_BYTES - 8 - 5 - 12;
+    let with_end = |caption: String, id: &str| {
+        let mut args = image_args(&caption, id, "x");
+        args["parent_of"] = json!([{"parent": "wardrobe", "child": "shelf"}]);
+        args
+    };
+    let text = refused(&s, with_end("c".repeat(at_len + 1), "r18")).await;
+    assert!(text.contains("parent_of[0].parent"), "{text}");
+    assert!(!text.contains("configuration error"), "{text}");
+    let ack = call(
+        &s,
+        "lambo_derive_image",
+        with_end("c".repeat(at_len), "r17"),
+    )
+    .await;
+    let receipt = settled_receipt(&s, &ack).await;
+    assert_eq!(receipt["state"], json!("applied"), "{receipt}");
+    s.mem.close().await.expect("close");
+}
