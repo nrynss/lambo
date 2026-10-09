@@ -59,6 +59,12 @@ pub fn authorize_ledger(opts: &ServeOptions) -> Result<(), LamboError> {
 /// across an await (spec §6.4) — it takes the graph read lock, counts, and
 /// releases before this function's next `tick()`.
 pub(super) async fn heartbeat_loop(server: LamboServer, ledger: Arc<Ledger>, every: Duration) {
+    heartbeat_ticks(every, || ledger.append(&server.heartbeat_line())).await;
+}
+
+/// The heartbeat's cadence: run `beat` at once, then every `every`, until
+/// aborted. [`heartbeat_loop`] beats one session.
+pub(super) async fn heartbeat_ticks(every: Duration, mut beat: impl FnMut()) {
     let mut ticker = tokio::time::interval(every);
     // Skip missed ticks rather than firing a burst to catch up: a heartbeat
     // backlog after a stall would be a pile of near-identical lines stamped
@@ -66,7 +72,7 @@ pub(super) async fn heartbeat_loop(server: LamboServer, ledger: Arc<Ledger>, eve
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         ticker.tick().await;
-        ledger.append(&server.heartbeat_line());
+        beat();
     }
 }
 
@@ -128,29 +134,39 @@ pub(super) async fn record_refused_takeovers(
     my_token: String,
     ledger: Arc<Ledger>,
 ) {
-    let mut cursor = RefusalCursor::starting_at(
-        chrono::Utc::now()
-            - chrono::Duration::from_std(lease::LEASE_TTL)
-                .unwrap_or_else(|_| chrono::Duration::seconds(0)),
-    );
+    let mut cursor = RefusalCursor::starting_now();
     loop {
         tokio::time::sleep(REFUSAL_POLL_INTERVAL).await;
-        match store.pending_lease_refusals(&session, cursor.since()).await {
-            Ok(refusals) => {
-                for r in cursor.take_new(refusals, &my_token) {
-                    ledger.append(&crate::ledger::lease_line(
-                        "refused_takeover",
-                        "holder",
-                        &session.to_string(),
-                        &agent.to_string(),
-                        &r.refused_by,
-                        Some(serde_json::json!({ "at": r.at.to_rfc3339() })),
-                    ));
-                }
+        poll_refused_takeovers(&store, &session, &agent, &my_token, &ledger, &mut cursor).await;
+    }
+}
+
+/// One poll of [`record_refused_takeovers`]: append a `refused_takeover`
+/// line for each refusal this holder turned away that `cursor` has not yet
+/// seen. A store error drops this poll; the next one retries.
+pub(super) async fn poll_refused_takeovers(
+    store: &Arc<dyn crate::store::GraphStore>,
+    session: &crate::types::SessionId,
+    agent: &crate::types::AgentId,
+    my_token: &str,
+    ledger: &Ledger,
+    cursor: &mut RefusalCursor,
+) {
+    match store.pending_lease_refusals(session, cursor.since()).await {
+        Ok(refusals) => {
+            for r in cursor.take_new(refusals, my_token) {
+                ledger.append(&crate::ledger::lease_line(
+                    "refused_takeover",
+                    "holder",
+                    &session.to_string(),
+                    &agent.to_string(),
+                    &r.refused_by,
+                    Some(serde_json::json!({ "at": r.at.to_rfc3339() })),
+                ));
             }
-            Err(_) => {
-                // A seed / store blip; the next poll retries.
-            }
+        }
+        Err(_) => {
+            // A seed / store blip; the next poll retries.
         }
     }
 }
@@ -219,6 +235,16 @@ impl RefusalCursor {
             cursor,
             seen: Default::default(),
         }
+    }
+
+    /// A cursor for a poller starting now: its first read reaches back one
+    /// [`lease::LEASE_TTL`], so no refusal at the acquire boundary is missed.
+    pub(super) fn starting_now() -> Self {
+        Self::starting_at(
+            chrono::Utc::now()
+                - chrono::Duration::from_std(lease::LEASE_TTL)
+                    .unwrap_or_else(|_| chrono::Duration::seconds(0)),
+        )
     }
 
     pub(super) fn overlap() -> chrono::Duration {

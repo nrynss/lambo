@@ -339,16 +339,7 @@ pub(super) async fn wind_down(
         // through the earlier registration.
         () = early.fired() => {}
         winner = mem.lease_lost_latched() => {
-            if let Some(ledger) = &ledger {
-                ledger.append(&crate::ledger::lease_line(
-                    "lost",
-                    "holder",
-                    &mem.session().to_string(),
-                    &mem.agent().to_string(),
-                    &winner,
-                    None,
-                ));
-            }
+            book_lease_loss(&mem, ledger.as_ref(), &winner);
             tracing::warn!(
                 session = %mem.session(),
                 holder = %winner,
@@ -358,6 +349,23 @@ pub(super) async fn wind_down(
                  could not flush is discarded, exactly as a crash would discard it",
             );
         }
+    }
+}
+
+/// The `kind:"lease", event:"lost", side:"holder"` line a holder books when
+/// its lease fence latches, naming the `winner` (JE2E-R2-4). Shared by
+/// [`wind_down`] and the per-session lease-loss watcher of a multi-session
+/// serve, so both leave the same artifact.
+pub(super) fn book_lease_loss(mem: &Memory, ledger: Option<&Arc<Ledger>>, winner: &str) {
+    if let Some(ledger) = ledger {
+        ledger.append(&crate::ledger::lease_line(
+            "lost",
+            "holder",
+            &mem.session().to_string(),
+            &mem.agent().to_string(),
+            winner,
+            None,
+        ));
     }
 }
 
@@ -434,16 +442,29 @@ pub(super) async fn run_and_close_sessions(
     early: &EarlyShutdown,
     progress: &ShutdownProgress,
 ) -> Result<(), LamboError> {
-    // Stage 1: the transport winds down (bounded inside the transport).
-    let outcome = transport.await;
-    progress.end(Stage::TransportDrain);
-    // Stage 2: tasks nothing needs during the close.
-    progress.run(Stage::KeepWarmAbort, stop_before_close);
+    // Stages 1 and 2.
+    let outcome = stop_transport(transport, stop_before_close, progress).await;
     // Stages 3 and 4.
     let closed = close_sessions(sessions, early, progress).await;
 
     outcome?;
     closed.report()
+}
+
+/// Stages 1 and 2, the process-wide half of the close: the transport winds
+/// down (bounded inside the transport), then the tasks nothing needs during
+/// the close are stopped. Returns the transport's outcome.
+pub(super) async fn stop_transport(
+    transport: impl Future<Output = Result<(), LamboError>>,
+    stop_before_close: impl FnOnce(),
+    progress: &ShutdownProgress,
+) -> Result<(), LamboError> {
+    // Stage 1: the transport winds down (bounded inside the transport).
+    let outcome = transport.await;
+    progress.end(Stage::TransportDrain);
+    // Stage 2: tasks nothing needs during the close.
+    progress.run(Stage::KeepWarmAbort, stop_before_close);
+    outcome
 }
 
 /// Stages 3 and 4 over a set of sessions: close every session concurrently,
