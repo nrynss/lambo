@@ -639,3 +639,31 @@ fn token_env_must_be_a_conventional_variable_name() {
         }
     }
 }
+
+/// #32 PR 4: `sessions`, `default_session` and `max_attached` are enforced,
+/// so a table with only those raises no notice; every key still parsed but
+/// not enforced is named (never its value).
+#[test]
+fn only_unenforced_keys_raise_the_notice() {
+    let enforced =
+        parse("[serve]\nsessions = [\"a\", \"b\"]\ndefault_session = \"b\"\nmax_attached = 4\n")
+            .expect("parse");
+    assert!(enforced.serve.unenforced_keys().is_empty());
+
+    let rest = parse(
+        "[serve]\nsessions = [\"a\"]\nattach_concurrency = 1\nidle_detach_secs = 60\n\
+         per_session_rps = 5\n\n[[serve.projects]]\npath = \"/p\"\nsession = \"a\"\n\n\
+         [[serve.credential]]\nname = \"agents\"\ntoken_env = \"LAMBO_T32_KEYS\"\nsessions = [\"a\"]\n",
+    )
+    .expect("parse");
+    assert_eq!(
+        rest.serve.unenforced_keys(),
+        vec![
+            "[[serve.credential]]",
+            "[[serve.projects]]",
+            "attach_concurrency",
+            "idle_detach_secs",
+            "per_session_rps",
+        ]
+    );
+}
