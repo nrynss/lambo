@@ -429,6 +429,10 @@ impl ViewCache {
 
     /// Whether `session` has a view held right now (tests).
     #[cfg(test)]
+    #[cfg_attr(
+        not(all(feature = "store-memory", feature = "embed-fixture")),
+        allow(dead_code)
+    )]
     pub(super) fn is_loaded(&self, session: &SessionId) -> bool {
         self.slots
             .get(session)

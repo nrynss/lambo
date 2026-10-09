@@ -82,7 +82,16 @@ const PRODUCTION_SOURCES: &[(&str, &str)] = &[
 fn production_source() -> String {
     PRODUCTION_SOURCES
         .iter()
-        .map(|(_, src)| src.split("#[cfg(all(test").next().unwrap_or(src))
+        .map(|(name, src)| {
+            // A `#[cfg(all(test` anywhere else would cut that file's scan
+            // short at that line, silently (#4 PR 1 nearly did).
+            assert!(
+                *name == "serve_web.rs" || !src.contains("#[cfg(all(test"),
+                "{name}: only serve_web.rs may carry `#[cfg(all(test`; the scans \
+                 stop reading a file there"
+            );
+            src.split("#[cfg(all(test").next().unwrap_or(src)
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -438,6 +447,15 @@ fn web_ttl_zero() -> crate::config::WebConfig {
         view_ttl_ms: Some(0),
         ..Default::default()
     }
+}
+
+/// The feed of a raw snapshot at `since`: the portal's ordering and paging
+/// over the store's own snapshot, which the view's feed must equal.
+fn events_from(snap: &GraphSnapshot, since: usize) -> super::dto::EventsPayload {
+    slice_events(
+        &ordered_events(snap.concepts.iter(), &snap.canonization_events),
+        since,
+    )
 }
 
 /// A session with real content: two concepts in a hierarchy, an action, and

@@ -13,8 +13,6 @@ use super::views::{SessionView, ViewCounts};
 use crate::cli::caps::{CliError, MAX_INSPECT_NODES};
 use crate::graph::Graph;
 use crate::store::SessionFlushStats;
-#[cfg(test)]
-use crate::types::GraphSnapshot;
 use crate::types::{
     tie_break_by_key, CanonizationEvent, CanonizationStatus, Concept, EdgeType, Node, NodeId,
 };
@@ -86,26 +84,19 @@ pub(super) fn status_str(s: CanonizationStatus) -> &'static str {
     }
 }
 
-/// Canonization events at or after `since`, in a total order that depends
-/// neither on which adapter produced them nor on which ids a run minted:
-/// same-instant events are routine (one eval cycle stamps the cycle's `now`
-/// on every event it emits — a Stage-3 batch or a multi-demotion cycle), and
-/// they order by the moved concept's canonical key, then the event id
-/// (issue #2, remediation round 3 — the bare event id was run-minted, which
-/// made `seq` and the cursor built on it per-run arbitrary). The id residual
-/// remains only for events whose node is absent from this snapshot.
-#[cfg(test)]
-pub(super) fn events_from(snap: &GraphSnapshot, since: usize) -> EventsPayload {
-    slice_events(
-        &ordered_events(snap.concepts.iter(), &snap.canonization_events),
-        since,
-    )
-}
-
-/// The whole ordered feed, `seq` from 0, for `events` naming `concepts`.
-/// [`events_from`] over a snapshot, and the same order over a loaded graph
-/// (which keeps every concept and canonization event of the snapshot it was
-/// built from), so the feed does not need a second load.
+/// The whole ordered canonization feed, `seq` from 0, for `events` naming
+/// `concepts`: a total order that depends neither on which adapter produced
+/// them nor on which ids a run minted. Same-instant events are routine (one
+/// eval cycle stamps the cycle's `now` on every event it emits — a Stage-3
+/// batch or a multi-demotion cycle), and they order by the moved concept's
+/// canonical key, then the event id (issue #2, remediation round 3 — the bare
+/// event id was run-minted, which made `seq` and the cursor built on it
+/// per-run arbitrary). The id residual remains only for events whose node is
+/// absent from `concepts`.
+///
+/// The portal builds it from a loaded graph, which keeps every concept and
+/// canonization event of the snapshot it was built from, so the feed needs no
+/// second load (#4 PR 1). [`slice_events`] pages it at the poll cursor.
 pub(super) fn ordered_events<'a>(
     concepts: impl Iterator<Item = &'a Concept>,
     events: &[CanonizationEvent],
