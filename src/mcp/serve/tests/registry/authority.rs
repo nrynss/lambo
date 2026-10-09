@@ -534,6 +534,130 @@ async fn a_credential_at_its_share_does_not_lock_out_another() {
     initialize_as(addr, path, Some(&scoped)).await;
 }
 
+/// One raw exchange whose head is given as bytes (a header value that is
+/// not UTF-8), the date line dropped.
+async fn raw_exchange(addr: SocketAddr, request: &[u8]) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
+    stream.write_all(request).await.expect("write");
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).await.expect("read");
+    String::from_utf8_lossy(&raw).into_owned()
+}
+
+/// An `initialize` POST on `path` as `authorization`, with `extra` header
+/// bytes (each line ending in CRLF).
+fn initialize_head(path: &str, authorization: &str, extra: &[u8]) -> Vec<u8> {
+    let mut head = format!(
+        "POST {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
+         Authorization: {authorization}\r\nAccept: application/json, text/event-stream\r\n\
+         Content-Type: application/json\r\nContent-Length: {}\r\n",
+        INITIALIZE.len()
+    )
+    .into_bytes();
+    head.extend_from_slice(extra);
+    head.extend_from_slice(b"\r\n");
+    head.extend_from_slice(INITIALIZE.as_bytes());
+    head
+}
+
+/// #32 PR 5 review S1 through the real registry and rmcp: an `initialize`
+/// whose `Mcp-Session-Id` rmcp cannot read (byte 0xFF) makes rmcp mint an
+/// MCP session, and that session is now the caller's: it counts toward
+/// `scoped`'s share of 2, so after one more ordinary `initialize` the next
+/// is refused. At the share, an `initialize` carrying `Last-Event-ID` (which
+/// rmcp ignores on a POST) is refused too.
+///
+/// Mutation: test the header for presence in the guard or in
+/// `serve_live` (the old reading) and the third `initialize` is a 200.
+#[tokio::test]
+async fn an_initialize_with_an_id_rmcp_cannot_read_is_counted_and_attributed() {
+    let wire = wire().await;
+    let addr = wire.addr;
+    let path = "/mcp/s/auth-live";
+    let scoped = bearer("scoped");
+    let reply = raw_exchange(
+        addr,
+        &initialize_head(path, &scoped, b"Mcp-Session-Id: \xff\r\n"),
+    )
+    .await;
+    assert!(reply.starts_with("HTTP/1.1 200 OK\r\n"), "{reply}");
+    assert!(
+        reply.to_ascii_lowercase().contains("mcp-session-id: "),
+        "rmcp minted an MCP session: {reply}"
+    );
+
+    initialize_as(addr, path, Some(&scoped)).await;
+    let refused = http_as(addr, "POST", path, Some(&scoped), None, INITIALIZE).await;
+    assert_eq!(refused.status, 503, "{}", refused.body);
+    assert!(refused.body.contains("2/2 of 8"), "{}", refused.body);
+
+    for extra in [
+        &b"Last-Event-ID: 1\r\n"[..],
+        &b"Mcp-Session-Id: \xff\r\n"[..],
+    ] {
+        let reply = raw_exchange(addr, &initialize_head(path, &scoped, extra)).await;
+        assert!(
+            reply.starts_with("HTTP/1.1 503 Service Unavailable\r\n"),
+            "{reply}"
+        );
+        assert!(reply.contains("2/2 of 8"), "{reply}");
+    }
+    // Another credential still opens one.
+    initialize_as(addr, path, Some(&bearer("ops"))).await;
+}
+
+/// #32 PR 5 review S1: the opener is recorded even when the request that
+/// minted the MCP session is dropped (a client disconnect drops axum's
+/// handler future) after rmcp created the session and before the response
+/// was written. `serve_live` is polled once, which on this current-thread
+/// runtime gets rmcp as far as minting the session and waiting on its
+/// worker, and then dropped.
+///
+/// Mutation: record the opener inline after `handle` (not on its own task)
+/// and the session stays live but owned by no one.
+#[tokio::test]
+async fn an_mcp_session_whose_initialize_was_dropped_is_still_attributed() {
+    use std::future::Future;
+    let wire = wire().await;
+    let crate::mcp::serve::registry::Lookup::Live(session) = wire._registry.lookup(LIVE) else {
+        panic!("{LIVE} is attached");
+    };
+    let grant = credential("scoped", &[LIVE], None, false).grant;
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri("/mcp/s/auth-live")
+        .header("Host", "localhost")
+        .header(MCP_POST[0].0, MCP_POST[0].1)
+        .header(MCP_POST[1].0, MCP_POST[1].1)
+        .body(axum::body::Body::from(INITIALIZE))
+        .expect("request");
+    {
+        let mut call = Box::pin(crate::mcp::serve::transport::serve_live(
+            &session, &grant, req,
+        ));
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(
+            call.as_mut().poll(&mut cx).is_pending(),
+            "the initialize must still be in flight when the client goes"
+        );
+        // The client disconnects: axum drops the handler's future.
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let live = session.live_mcp_sessions().await;
+        let owned = session.live_mcp_sessions_opened_by("scoped").await;
+        if live == 1 && owned == 1 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the minted MCP session must be attributed: {live} live, {owned} owned by scoped"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 /// #32 PR 5 review I6: a ledgered call line names the configured
 /// credential the call arrived as (`credential`, its name, never a token),
 /// and a call as the legacy `default` writes the line it always wrote, with

@@ -513,16 +513,40 @@ impl HttpGuard {
 /// keeps the tool-layer caps + the rate limit as its bound.
 pub(super) const MAX_HTTP_BODY_BYTES: u64 = 4 * 1024 * 1024; // 4 MiB
 
+/// The MCP-session id header of streamable HTTP.
+pub(super) const MCP_SESSION_ID: &str = "mcp-session-id";
+
+/// The MCP-session id `headers` name, read **exactly** as rmcp 3.1.2 reads
+/// it (`StreamableHttpService::handle_post`, `handle_get`, `handle_delete`:
+/// `headers.get(HEADER_SESSION_ID).and_then(|v| v.to_str().ok())`): the
+/// first such header, and only when it is visible ASCII. A header that is
+/// present but not readable that way names no session to rmcp, so it names
+/// none here either.
+///
+/// The one reading of the header (#32 PR 5 review S1). The session cap
+/// ([`opens_a_new_session`]) and the MCP-session binding
+/// (`transport::serve_live`) both use it, so "this request opens a new
+/// MCP session" means what rmcp will do with it, in both places. Reading
+/// the header any other way (present at all, the last value, lossily) lets
+/// a request the guard counts as "inside a session" mint one in rmcp,
+/// uncounted and unattributed.
+pub(super) fn usable_session_id(headers: &axum::http::HeaderMap) -> Option<&str> {
+    headers.get(MCP_SESSION_ID).and_then(|v| v.to_str().ok())
+}
+
 /// Is this the request that would mint a **new** MCP session?
 ///
 /// Streamable HTTP assigns the session id in the `initialize` response, so the
-/// one request that arrives without an `Mcp-Session-Id` — and can create state —
-/// is that POST. Everything else either carries the header or is a GET/DELETE
-/// against an existing session, and must not be counted against the cap.
+/// one request that arrives without a usable `Mcp-Session-Id`
+/// ([`usable_session_id`]) — and can create state — is that POST. Everything
+/// else either names a session or is a GET/DELETE, and must not be counted
+/// against the cap.
+///
+/// `Last-Event-ID` plays no part: rmcp reads it only on a GET (resuming a
+/// stream), never on a POST, so a POST carrying it with no usable session id
+/// mints a session like any other (#32 PR 5 review S1).
 pub(super) fn opens_a_new_session(req: &axum::extract::Request) -> bool {
-    req.method() == axum::http::Method::POST
-        && req.headers().get("Mcp-Session-Id").is_none()
-        && req.headers().get("Last-Event-ID").is_none()
+    req.method() == axum::http::Method::POST && usable_session_id(req.headers()).is_none()
 }
 
 /// How the cap refusal tells a client to free an MCP session, for a request

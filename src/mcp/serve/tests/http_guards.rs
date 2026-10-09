@@ -196,6 +196,115 @@ fn only_a_sessionless_post_opens_a_new_session() {
     )));
 }
 
+/// #32 PR 5 review S1: "opens a new MCP session" is read the way rmcp
+/// 3.1.2 reads the request. rmcp mints a session for a POST whose
+/// `Mcp-Session-Id` is absent *or* not visible ASCII (`to_str` fails), and
+/// it never reads `Last-Event-ID` on a POST. Mutation: restore the
+/// `Last-Event-ID` exemption, or test the header for presence, and this
+/// fails.
+#[test]
+fn a_session_id_rmcp_cannot_read_and_last_event_id_still_open_a_session() {
+    let unreadable = axum::http::HeaderValue::from_bytes(b"\xff").expect("obs-text is a value");
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert("Mcp-Session-Id", unreadable.clone());
+    assert_eq!(usable_session_id(&headers), None, "rmcp reads it as absent");
+    headers.insert(
+        "Mcp-Session-Id",
+        axum::http::HeaderValue::from_static("abc"),
+    );
+    assert_eq!(usable_session_id(&headers), Some("abc"));
+
+    let req = |method: axum::http::Method, headers: &[(&str, axum::http::HeaderValue)]| {
+        let mut b = axum::http::Request::builder().method(method).uri("/mcp");
+        for (name, value) in headers {
+            b = b.header(*name, value.clone());
+        }
+        b.body(axum::body::Body::empty()).expect("request")
+    };
+    let last_event = axum::http::HeaderValue::from_static("1");
+    assert!(
+        opens_a_new_session(&req(
+            axum::http::Method::POST,
+            &[("Last-Event-ID", last_event.clone())]
+        )),
+        "rmcp ignores Last-Event-ID on a POST and mints a session"
+    );
+    assert!(
+        opens_a_new_session(&req(
+            axum::http::Method::POST,
+            &[("Mcp-Session-Id", unreadable)]
+        )),
+        "an id rmcp cannot read names no session: rmcp mints one"
+    );
+    assert!(
+        !opens_a_new_session(&req(
+            axum::http::Method::GET,
+            &[("Last-Event-ID", last_event)]
+        )),
+        "a GET resumes a stream, it does not mint a session"
+    );
+}
+
+/// The `initialize` heads S1 is about: a session id rmcp reads as absent
+/// (byte 0xFF), and a `Last-Event-ID` with no session id.
+fn s1_openers(auth: Option<&str>) -> Vec<Vec<u8>> {
+    let auth = auth
+        .map(|a| format!("Authorization: {a}\r\n"))
+        .unwrap_or_default();
+    let head = |extra: &[u8]| {
+        let mut h = format!("POST /mcp HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n{auth}")
+            .into_bytes();
+        h.extend_from_slice(extra);
+        h.extend_from_slice(b"Connection: close\r\n\r\n");
+        h
+    };
+    vec![
+        head(b"Mcp-Session-Id: \xff\r\n"),
+        head(b"Last-Event-ID: 1\r\n"),
+    ]
+}
+
+/// #32 PR 5 review S1 on the request path: both openers are counted
+/// against the process-wide cap and refused at it, before the service.
+/// Before the fix neither was counted and both reached the service, where
+/// rmcp minted a session past `--max-sessions`.
+#[tokio::test]
+async fn an_initialize_rmcp_would_mint_is_refused_at_the_cap() {
+    let (addr, reached) = spawn_guarded(guard_with(None, 32, 32, 0)).await;
+    for head in s1_openers(None) {
+        let (status, body) = request_bytes(addr, &head).await;
+        assert_eq!(status, 503, "{}: {body}", String::from_utf8_lossy(&head));
+        assert!(body.contains("32/32"), "{body}");
+    }
+    assert_eq!(reached.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+/// #32 PR 5 review S1: the same two openers count against the calling
+/// credential's share and are refused at it, while another credential
+/// still opens one.
+#[tokio::test]
+async fn an_initialize_rmcp_would_mint_is_refused_at_the_share() {
+    let guard = HttpGuard::new(
+        credentials_authority(&["tenant", "operator"]),
+        32,
+        Arc::new(FakeOpeners(vec![("tenant", 16)])),
+        0,
+    );
+    let (addr, reached) = spawn_guarded(guard).await;
+    let tenant = format!("Bearer {}", fake_token("tenant"));
+    for head in s1_openers(Some(&tenant)) {
+        let (status, body) = request_bytes(addr, &head).await;
+        assert_eq!(status, 503, "{body}");
+        assert!(body.contains("16/16 of 32"), "{body}");
+    }
+    assert_eq!(reached.load(std::sync::atomic::Ordering::SeqCst), 0);
+    let operator = format!("Bearer {}", fake_token("operator"));
+    for head in s1_openers(Some(&operator)) {
+        let (status, body) = request_bytes(addr, &head).await;
+        assert_eq!(status, 200, "{body}");
+    }
+}
+
 /// A fixed live-session count, so the cap is testable without standing up
 /// real MCP sessions.
 struct FakeSessions(usize);
@@ -250,9 +359,15 @@ async fn spawn_guarded(guard: HttpGuard) -> (SocketAddr, Arc<std::sync::atomic::
 
 /// Fire one request and return `(status_code, body_ish)`.
 async fn request(addr: SocketAddr, head: &str) -> (u16, String) {
+    request_bytes(addr, head.as_bytes()).await
+}
+
+/// [`request`] for a head that is not UTF-8 (a header byte `to_str`
+/// refuses).
+async fn request_bytes(addr: SocketAddr, head: &[u8]) -> (u16, String) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut sock = tokio::net::TcpStream::connect(addr).await.expect("connect");
-    sock.write_all(head.as_bytes()).await.expect("write");
+    sock.write_all(head).await.expect("write");
     let mut raw = Vec::new();
     // The marker route and every refusal close or complete promptly; the
     // timeout keeps a regression from hanging the suite.

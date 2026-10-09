@@ -14,7 +14,9 @@ use rmcp::transport::io::stdio;
 use rmcp::ServiceExt;
 
 use super::authority::{authorize_default, Authenticated, ServeAuthority};
-use super::http_guards::{guard_request, HttpGuard};
+use super::http_guards::{
+    guard_request, opens_a_new_session, usable_session_id, HttpGuard, MCP_SESSION_ID,
+};
 use super::registry::{Lookup, SessionRegistry};
 use super::session::AttachedSession;
 use super::shutdown::{HolderShutdown, SHUTDOWN_GRACE};
@@ -426,9 +428,6 @@ async fn serve_session(
     }
 }
 
-/// The MCP-session id header of streamable HTTP.
-const MCP_SESSION_ID: &str = "mcp-session-id";
-
 /// What a request naming another credential's MCP session carries to rmcp
 /// instead of that id: a value rmcp never mints (its ids are UUIDv4
 /// strings), so rmcp answers it exactly as it answers any id it does not
@@ -448,20 +447,17 @@ const NO_SUCH_MCP_SESSION: &str = "lambo-no-such-mcp-session";
 /// construction (404 `Session not found` for `POST` and `GET`, rmcp's 202
 /// for a `DELETE` of a session it does not hold), so the caller cannot
 /// tell a foreign MCP session from an expired one.
-async fn serve_live(
-    session: &AttachedSession,
+pub(super) async fn serve_live(
+    session: &Arc<AttachedSession>,
     grant: &SessionGrant,
     mut req: axum::extract::Request,
 ) -> axum::response::Response {
-    use axum::response::IntoResponse;
-    // A value that is not visible ASCII names no MCP session rmcp could
-    // have minted; rmcp reads such a header as absent, and so does this.
-    let named = req
-        .headers()
-        .get(MCP_SESSION_ID)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string);
-    let opens = req.headers().get(MCP_SESSION_ID).is_none();
+    // The id as rmcp will read it, and the same "opens a new MCP session"
+    // the session cap applied to this request (#32 PR 5 review S1): a
+    // header that is not visible ASCII names no MCP session to rmcp, which
+    // then mints one, so it names none here and the POST is an opener.
+    let opens = opens_a_new_session(&req);
+    let named = usable_session_id(req.headers()).map(str::to_string);
     let mut owned = None;
     if let Some(mcp_id) = named {
         if session.opened_by(&mcp_id, grant.name()) {
@@ -474,23 +470,51 @@ async fn serve_live(
         }
     }
     let deletes = req.method() == axum::http::Method::DELETE;
-    let response = session.http.handle(req).await;
-    if opens
-        && let Some(minted) = response
-            .headers()
-            .get(MCP_SESSION_ID)
-            .and_then(|v| v.to_str().ok())
-    {
-        // Recorded before the response (and so the id) reaches the caller.
-        session.record_opener(minted, grant.name()).await;
-    }
+    let response = if opens {
+        open_and_attribute(session, grant, req).await
+    } else {
+        session.http.handle(req).await.map(axum::body::Body::new)
+    };
     if deletes
         && response.status().is_success()
         && let Some(mcp_id) = owned
     {
         session.forget_opener(&mcp_id);
     }
-    response.map(axum::body::Body::new).into_response()
+    response
+}
+
+/// rmcp's answer to a request that may mint an MCP session, with `grant`
+/// recorded as the opener of the id it mints.
+///
+/// Run on its own task (#32 PR 5 review S1) so the bookkeeping cannot be
+/// cancelled: axum drops a handler's future when the client disconnects,
+/// and if that happened after rmcp minted the session but before the
+/// opener was recorded, the session would count toward the process cap
+/// and toward no credential's share. The spawned task runs to the end
+/// whether or not anyone still awaits it. The opener is recorded before
+/// the response (and so the id) reaches the caller.
+async fn open_and_attribute(
+    session: &Arc<AttachedSession>,
+    grant: &SessionGrant,
+    req: axum::extract::Request,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let session = Arc::clone(session);
+    let opener = grant.name().to_string();
+    let task = tokio::spawn(async move {
+        let response = session.http.handle(req).await;
+        if let Some(minted) = usable_session_id(response.headers()) {
+            session.record_opener(minted, &opener).await;
+        }
+        response.map(axum::body::Body::new)
+    });
+    match task.await {
+        Ok(response) => response,
+        Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+        // Never aborted; only a runtime shutting down cancels it.
+        Err(_) => axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    }
 }
 
 /// `axum::serve` with a **bounded** graceful shutdown (R1/T82-2).
