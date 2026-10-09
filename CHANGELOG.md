@@ -4,6 +4,13 @@
 
 ### Breaking
 
+- `EmbedError` gains a variant, `Unsupported` (#22): an embedder refusing a
+  kind of input it cannot embed at all, such as an image sent to a text-only
+  model. `is_transient()` classes it as permanent. `EmbedError` is also now
+  `#[non_exhaustive]`, so library code that matches it outside this crate
+  needs a wildcard arm (or can call `is_transient()`), and later variants
+  will not break it again. Code that implements `Embedder` is unaffected (see
+  Added). The new `ImageMime` enum is `#[non_exhaustive]` from the start.
 - `LamboFile` gains a public `serve: ServeConfig` field (#32). Code that
   builds a `LamboFile` with a struct literal must add
   `serve: Default::default()`; code that parses one is unaffected.
@@ -160,6 +167,26 @@
 
 ### Added
 
+- `Embedder` gains three methods with defaults, so every existing adapter
+  compiles and behaves unchanged (#22, first part):
+  - `embed_query`: the recall query role. It defaults to `embed`, and recall
+    now embeds its query through it. Every shipped adapter (BGE-M3, candle,
+    Gemini, the fixture) keeps the default, so recall answers exactly as
+    before; an asymmetric model can now give queries their own prompt.
+  - `modalities`: what the adapter embeds, `Modalities::TEXT` by default.
+  - `embed_image`: embeds an `ImageInput` into the same space; by default it
+    refuses with `EmbedError::Unsupported`.
+  A wrapper that delegates to another embedder should forward all three, and
+  `as_any`; one that implements only `embed` inherits the defaults.
+- `lambo::surface::image::validate` (#22): the image rule every surface will
+  share, and the only constructor of `ImageInput`. The declared type must be
+  exactly `image/png`, `image/jpeg` or `image/webp`; the bytes must be
+  non-empty, at most 2 MiB (`MAX_IMAGE_BYTES`), and carry the magic bytes of
+  the declared type (a mismatch is refused, never corrected); and the header
+  must declare each side between 1 and 4096 px (`MAX_IMAGE_SIDE_PX`), read
+  from the PNG, JPEG or WebP header without decoding pixels. Refusals never
+  quote the bytes or the declared type. Nothing calls it yet: images reach
+  no CLI verb or MCP tool in this release.
 - An optional `[serve]` table in `lambo.toml` for multi-session serving
   (#32, first part): pinned `sessions`, `default_session`, `max_attached`,
   `attach_concurrency`, `idle_detach_secs`, `per_session_rps`, a

@@ -15,6 +15,8 @@ mod candle;
 mod fixture;
 #[cfg(feature = "embed-gemini")]
 pub(crate) mod gemini;
+#[cfg(test)]
+mod trait_tests;
 
 pub use math::cosine;
 
@@ -33,12 +35,46 @@ use std::env;
 use std::str::FromStr;
 use thiserror::Error;
 
+/// Why an [`Embedder`] call failed. [`EmbedError::is_transient`] is the
+/// classification callers act on.
+///
+/// `#[non_exhaustive]` (#22 review L1): #22 already adds `Unsupported`, and
+/// later adapters may need another variant; that must not be a second
+/// breaking change for downstream matchers. Match with a wildcard arm, or ask
+/// [`EmbedError::is_transient`].
+///
+/// ```compile_fail,E0004
+/// // Outside the crate an exhaustive match without a wildcard does not compile.
+/// fn class(e: &lambo::EmbedError) -> u8 {
+///     match e {
+///         lambo::EmbedError::Unavailable(_) => 0,
+///         lambo::EmbedError::Backend(_) => 1,
+///         lambo::EmbedError::Unsupported(_) => 2,
+///     }
+/// }
+/// ```
+///
+/// ```
+/// fn class(e: &lambo::EmbedError) -> u8 {
+///     match e {
+///         lambo::EmbedError::Unavailable(_) => 0,
+///         _ => 1,
+///     }
+/// }
+/// ```
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum EmbedError {
     #[error("embedder unavailable: {0}")]
     Unavailable(String),
     #[error("backend: {0}")]
     Backend(String),
+    /// The embedder cannot embed this kind of input at all (#22): for example
+    /// an image sent to a text-only adapter. Permanent for this deployment,
+    /// so [`Self::is_transient`] is `false`. The message names the input kind,
+    /// never any of its bytes.
+    #[error("unsupported input: {0}")]
+    Unsupported(String),
 }
 
 impl EmbedError {
@@ -83,11 +119,147 @@ impl EmbedError {
     /// [`crate::writeq::EMBEDDER_SICK_THRESHOLD`] consecutive transients the loop
     /// stops and leaves the remaining backlog durable. So a misclassification
     /// costs at most that threshold of intents, never the backlog.
+    ///
+    /// * [`Self::Unsupported`] — **permanent for this deployment** (#22). The
+    ///   adapter cannot embed this kind of input (an image on a text-only
+    ///   model); no retry against the same deployment can change that.
     pub fn is_transient(&self) -> bool {
         match self {
             Self::Unavailable(_) => true,
-            Self::Backend(_) => false,
+            Self::Backend(_) | Self::Unsupported(_) => false,
         }
+    }
+}
+
+bitflags::bitflags! {
+    /// The kinds of input an [`Embedder`] can embed (#22). Every adapter embeds
+    /// [`Modalities::TEXT`]; an adapter that also embeds images into the same
+    /// space reports [`Modalities::IMAGE`] too.
+    ///
+    /// A `bitflags` 2 type, like [`crate::store::Capabilities`], so `bitflags`
+    /// was already part of the public API before #22 and this adds no new
+    /// public dependency. Use the associated constants and the set operators
+    /// (`contains`, `|`); a new kind of input is a new constant, which is not
+    /// a breaking change.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct Modalities: u8 {
+        /// Text, through [`Embedder::embed`] and [`Embedder::embed_query`].
+        const TEXT = 1;
+        /// Images, through [`Embedder::embed_image`].
+        const IMAGE = 2;
+    }
+}
+
+/// The image formats Lambo accepts (#22): PNG, JPEG and WebP, nothing else.
+///
+/// `#[non_exhaustive]` (#22 review L1): a later format must not break a
+/// downstream exhaustive match. Match with a wildcard arm, or use
+/// [`ImageMime::as_str`].
+///
+/// ```compile_fail,E0004
+/// // Outside the crate an exhaustive match without a wildcard does not compile.
+/// fn ext(m: lambo::embed::ImageMime) -> &'static str {
+///     match m {
+///         lambo::embed::ImageMime::Png => "png",
+///         lambo::embed::ImageMime::Jpeg => "jpg",
+///         lambo::embed::ImageMime::Webp => "webp",
+///     }
+/// }
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ImageMime {
+    Png,
+    Jpeg,
+    Webp,
+}
+
+impl ImageMime {
+    /// The MIME type string: `image/png`, `image/jpeg` or `image/webp`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Png => "image/png",
+            Self::Jpeg => "image/jpeg",
+            Self::Webp => "image/webp",
+        }
+    }
+
+    /// Parse a declared MIME type. Exact and case-sensitive on purpose: the
+    /// allowlist is three literal strings, with no parameters and no aliases
+    /// (`image/jpg` is refused), so there is nothing to guess.
+    pub fn from_mime(mime: &str) -> Option<Self> {
+        match mime {
+            "image/png" => Some(Self::Png),
+            "image/jpeg" => Some(Self::Jpeg),
+            "image/webp" => Some(Self::Webp),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for ImageMime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// A validated image, ready for [`Embedder::embed_image`] (#22).
+///
+/// Only `crate::surface::image::validate` constructs one, so an adapter can
+/// rely on all of: the bytes are non-empty and at most
+/// `crate::surface::image::MAX_IMAGE_BYTES`; their magic bytes match
+/// [`Self::mime`]; the header's width and height are each between 1 and
+/// `crate::surface::image::MAX_IMAGE_SIDE_PX` (for an extended WebP, the
+/// canvas and its image chunk agree and it is not animated); and
+/// [`Self::sha256`] is the digest of exactly [`Self::bytes`]. It borrows the
+/// bytes; nothing here copies or keeps them.
+///
+/// **Only the header is validated; the pixels are not decoded.** A PNG with
+/// no image data, a JPEG with no scan, or a corrupt bitstream all pass. An
+/// adapter that decodes must therefore expect a decode to fail, and must
+/// return [`EmbedError::Backend`] when it does, never panic.
+#[derive(Clone, Copy)]
+pub struct ImageInput<'a> {
+    bytes: &'a [u8],
+    mime: ImageMime,
+    sha256: [u8; 32],
+}
+
+impl<'a> ImageInput<'a> {
+    /// Crate-private: the validator is the only constructor, which is what
+    /// makes the guarantees on the type hold.
+    pub(crate) fn from_validated(bytes: &'a [u8], mime: ImageMime, sha256: [u8; 32]) -> Self {
+        Self {
+            bytes,
+            mime,
+            sha256,
+        }
+    }
+
+    /// The image bytes, exactly as supplied.
+    pub fn bytes(&self) -> &'a [u8] {
+        self.bytes
+    }
+
+    /// The format, declared by the caller and confirmed by the magic bytes.
+    pub fn mime(&self) -> ImageMime {
+        self.mime
+    }
+
+    /// SHA-256 of [`Self::bytes`].
+    pub fn sha256(&self) -> [u8; 32] {
+        self.sha256
+    }
+}
+
+/// Never prints the bytes: an image is user content, and a `{:?}` in a log
+/// line or an error must not leak it.
+impl std::fmt::Debug for ImageInput<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ImageInput")
+            .field("len", &self.bytes.len())
+            .field("mime", &self.mime)
+            .finish_non_exhaustive()
     }
 }
 
@@ -99,6 +271,22 @@ impl EmbedError {
 /// blank string reaching an embedder is a caller bug; every backend must fail it the
 /// same way rather than return a vector (an empty-input vector would silently poison
 /// hybrid ranking on a degraded path).
+///
+/// **Roles and modalities (#22).** [`Self::embed`] is the *document* role:
+/// derive, record_action, re-embed, the write-queue probes and replay all use
+/// it. [`Self::embed_query`] is the *query* role, used by recall alone, and
+/// [`Self::embed_image`] embeds an image into the same space. Both have
+/// defaults (delegate to `embed`; refuse with [`EmbedError::Unsupported`]), so
+/// a text-only, symmetric adapter implements `dimensions` and `embed` and
+/// nothing else.
+///
+/// **A wrapper must forward every method.** An embedder that wraps another
+/// (to count, gate, fail or log calls) and implements only `embed` silently
+/// inherits the *defaults* for the rest: a query would be embedded in the
+/// document role, an image refused, and the inner adapter's identity hidden
+/// from the registry, whatever the inner adapter does. So a delegating
+/// embedder forwards [`Self::embed_query`], [`Self::embed_image`],
+/// [`Self::modalities`] and [`Self::as_any`] to its inner embedder as well.
 #[async_trait]
 pub trait Embedder: Send + Sync {
     /// Embedding dimensionality this backend emits.
@@ -131,6 +319,37 @@ pub trait Embedder: Send + Sync {
     /// (and rejects a zero-norm vector), and `FixtureEmbedder` emits unit vectors by
     /// construction. `A-gemini-embedder.md` instructs the next one to.
     async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbedError>;
+
+    /// Embed a recall **query** (#22). Same input and output contract as
+    /// [`Self::embed`].
+    ///
+    /// The default is `embed`: for a symmetric model (BGE-M3, candle, Gemini,
+    /// the fixture) a query and a document are embedded the same way. An
+    /// adapter whose model is asymmetric (EmbeddingGemma 2's task prompts)
+    /// overrides it. A change of query prompt is a change of embedding space,
+    /// so such an adapter names its prompt profile in its
+    /// [`crate::types::EmbeddingContract`]'s `model`.
+    async fn embed_query(&self, text: &str) -> Result<Vec<f32>, EmbedError> {
+        self.embed(text).await
+    }
+
+    /// The kinds of input this adapter embeds. Default: text only.
+    fn modalities(&self) -> Modalities {
+        Modalities::TEXT
+    }
+
+    /// Embed an image into the **same space** as [`Self::embed`] (#22).
+    ///
+    /// Same output contract: an L2-normalized vector of width
+    /// [`Self::dimensions`]. An adapter that overrides this also reports
+    /// [`Modalities::IMAGE`] from [`Self::modalities`]. The default refuses
+    /// with [`EmbedError::Unsupported`].
+    async fn embed_image(&self, image: ImageInput<'_>) -> Result<Vec<f32>, EmbedError> {
+        let _ = image;
+        Err(EmbedError::Unsupported(
+            "this embedder does not embed images".into(),
+        ))
+    }
 
     /// Optional downcast hook so the registry can ask a concrete adapter for
     /// identity data (K2 task 3: the candle adapter stamps its artifact

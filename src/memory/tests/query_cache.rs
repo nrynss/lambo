@@ -66,6 +66,34 @@ impl Embedder for CountingEmbedder {
         self.inner.dimensions()
     }
     async fn embed(&self, text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
+        self.embed_as(text, crate::test_util::TextRole::Document)
+            .await
+    }
+    async fn embed_query(&self, text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
+        self.embed_as(text, crate::test_util::TextRole::Query).await
+    }
+    fn modalities(&self) -> crate::embed::Modalities {
+        self.inner.modalities()
+    }
+    async fn embed_image(
+        &self,
+        image: crate::embed::ImageInput<'_>,
+    ) -> Result<Vec<f32>, crate::embed::EmbedError> {
+        self.inner.embed_image(image).await
+    }
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        self.inner.as_any()
+    }
+}
+
+impl CountingEmbedder {
+    /// The `embed` behaviour above, in either text role (#22: a wrapper
+    /// forwards the role, so its inner embedder sees what the caller asked).
+    async fn embed_as(
+        &self,
+        text: &str,
+        role: crate::test_util::TextRole,
+    ) -> Result<Vec<f32>, crate::embed::EmbedError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.texts.lock().push(text.to_owned());
         let fail = self
@@ -80,12 +108,12 @@ impl Embedder for CountingEmbedder {
             ));
         }
         if self.poison == Some(text) {
-            let mut bad = self.inner.embed(text).await?;
+            let mut bad = role.embed(&self.inner, text).await?;
             bad.truncate(bad.len() / 2);
             bad[0] = f32::NAN;
             return Ok(bad);
         }
-        self.inner.embed(text).await
+        role.embed(&self.inner, text).await
     }
 }
 
@@ -550,6 +578,106 @@ async fn a_bad_query_vector_is_not_cached() {
             "{source:?}: each recall embeds again"
         );
         assert!(mem.query_embeddings.lock().is_empty(), "{source:?}");
+        mem.close().await.unwrap();
+    }
+}
+
+/// #22: an asymmetric embedder. Its query role embeds a prefixed text, so a
+/// query and a document of the same words get different vectors; each role
+/// records the texts it was asked for.
+#[derive(Debug)]
+struct QueryPrefixed {
+    inner: ContextTolerantEmbedder,
+    documents: parking_lot::Mutex<Vec<String>>,
+    queries: parking_lot::Mutex<Vec<String>>,
+}
+
+const QUERY_ROLE_PREFIX: &str = "query role: ";
+
+#[async_trait]
+impl Embedder for QueryPrefixed {
+    fn dimensions(&self) -> usize {
+        self.inner.dimensions()
+    }
+    async fn embed(&self, text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
+        self.documents.lock().push(text.to_owned());
+        self.inner.embed(text).await
+    }
+    async fn embed_query(&self, text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
+        self.queries.lock().push(text.to_owned());
+        self.inner
+            .embed(&format!("{QUERY_ROLE_PREFIX}{text}"))
+            .await
+    }
+    fn modalities(&self) -> crate::embed::Modalities {
+        self.inner.modalities()
+    }
+    async fn embed_image(
+        &self,
+        image: crate::embed::ImageInput<'_>,
+    ) -> Result<Vec<f32>, crate::embed::EmbedError> {
+        self.inner.embed_image(image).await
+    }
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        self.inner.as_any()
+    }
+}
+
+/// **#22 PR 1.** Recall embeds its query through `embed_query`, and the
+/// query-embedding cache holds that query-role vector: a hit serves exactly
+/// what a miss embeds, never a document-role vector of the same text.
+#[tokio::test]
+async fn recall_caches_the_query_role_vector() {
+    for source in SOURCES {
+        let embedder = Arc::new(QueryPrefixed {
+            inner: ContextTolerantEmbedder(FixtureEmbedder::new()),
+            documents: Default::default(),
+            queries: Default::default(),
+        });
+        let mem = Memory::builder()
+            .session("q22-query-role")
+            .agent("agent-a")
+            .flush_interval(Duration::from_millis(10))
+            .match_strategy(MatchStrategy::Hybrid)
+            .store(vector_store(source) as Arc<dyn GraphStore>)
+            .embedder(embedder.clone() as Arc<dyn Embedder>)
+            .embedding_contract(contract("fixture", 1024))
+            .build()
+            .await
+            .expect("build");
+        mem.derive(
+            &[("billing ledger", ConceptType::Entity)],
+            &ParentOf::none(),
+        )
+        .await
+        .unwrap();
+        flushed(&mem).await;
+        let query = crate::embed::NEAR_B;
+        let q = recall_query(query, 5, 1);
+
+        mem.recall_detailed(q.clone()).await.unwrap();
+        mem.recall_detailed(q).await.unwrap();
+
+        let queries = embedder.queries.lock().clone();
+        assert_eq!(
+            queries,
+            vec![query.to_owned()],
+            "{source:?}: one query embed"
+        );
+        assert!(
+            !embedder.documents.lock().iter().any(|t| t == query),
+            "{source:?}: the query never went through the document role"
+        );
+        let expected = FixtureEmbedder::new()
+            .embed(&format!("{QUERY_ROLE_PREFIX}{query}"))
+            .await
+            .unwrap();
+        let cached = mem
+            .query_embeddings
+            .lock()
+            .get(query, &contract("fixture", 1024))
+            .expect("the query vector is cached");
+        assert_eq!(&*cached, expected.as_slice(), "{source:?}");
         mem.close().await.unwrap();
     }
 }
