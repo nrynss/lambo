@@ -182,8 +182,11 @@ jobs:
                 2>&1 | tee vector-run.log
               grep -q 'test store::sqlite::tests::vector_e2e::sqlite_vector_leg_fires_on_an_organically_derived_concept ... ok' vector-run.log
               grep -qE 'test result: ok\. [0-9]+ passed; 0 failed; 0 ignored' vector-run.log
+              # Not `grep -q`: it exits at the first match, and the test binary,
+              # still writing the rest of the list, dies of a broken pipe that
+              # `pipefail` turns into a failure once enough tests sort after it.
               cargo test --features store-sqlite,fixtures --lib -- --list \
-                | grep -q 'store::sqlite::tests::vector_e2e::sqlite_vector_leg_fires_on_an_organically_derived_concept'
+                | grep 'store::sqlite::tests::vector_e2e::sqlite_vector_leg_fires_on_an_organically_derived_concept' > /dev/null
           # No adapters at all.
           - name: minimal
             command: cargo check --no-default-features
