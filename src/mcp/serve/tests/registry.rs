@@ -148,12 +148,7 @@ fn guarded_app(
     authority: Arc<ServeAuthority>,
     max_sessions: usize,
 ) -> axum::Router {
-    let guard = HttpGuard {
-        authority: Arc::clone(&authority),
-        max_sessions,
-        live: registry.clone(),
-        rate: None,
-    };
+    let guard = HttpGuard::new(Arc::clone(&authority), max_sessions, registry.clone(), 0);
     crate::mcp::serve::transport::http_app(registry, authority, guard)
 }
 

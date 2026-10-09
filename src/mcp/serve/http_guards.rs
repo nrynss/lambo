@@ -229,7 +229,8 @@ pub(super) fn authorize_bind(
 /// its own POST, so a request-rate bound *is* a call-rate bound plus a few
 /// cheap handshake requests. The wider net is the cheaper and safer cut.
 ///
-/// The limit is **global**, not per-connection: per-connection state would be
+/// The limit is **per credential** (#32 PR 5 review M2, see
+/// [`CredentialRates`]), not per connection: per-connection state would be
 /// trivially defeated by opening more connections, which is exactly the abuse
 /// shape the session cap and this bound exist to bound together.
 pub(crate) struct RateLimiter {
@@ -274,10 +275,80 @@ impl RateLimiter {
             false
         }
     }
+}
 
-    pub(super) fn try_acquire(&self) -> bool {
-        self.try_acquire_at(Instant::now())
+/// One request-rate bucket per credential (#32 PR 5 review M2).
+///
+/// Before credentials the serve had one caller, so one global bucket was one
+/// caller's bucket. With several, a global bucket let one credential (a
+/// lower-trust tenant on its own prefix, say) spend everyone's budget and
+/// turn the operator's requests into 429s. Each credential now draws from
+/// its own bucket at `--rate-limit-rps` (burst 2x), keyed by the grant's
+/// name, so no credential can starve another. A serve with one credential
+/// (the dogfood rig's legacy `default`, or the implicit `local`) has exactly
+/// one bucket at that rate, which is the limit it always had. The process
+/// as a whole is bounded at `--rate-limit-rps` times the number of
+/// credentials, which the operator configures.
+///
+/// Buckets are made on a credential's first request. The names are the
+/// configured set (a request reaches this only once authenticated), so the
+/// map is bounded by it.
+pub(crate) struct CredentialRates {
+    rps: u32,
+    buckets: parking_lot::Mutex<std::collections::HashMap<String, Arc<RateLimiter>>>,
+}
+
+impl CredentialRates {
+    /// `None` when `rps == 0`, the documented way to disable the limit.
+    pub(super) fn new(rps: u32) -> Option<Self> {
+        (rps != 0).then(|| Self {
+            rps,
+            buckets: parking_lot::Mutex::new(std::collections::HashMap::new()),
+        })
     }
+
+    /// Take one token from `credential`'s bucket if it has one. `now` is a
+    /// parameter so the tests drive the refill deterministically.
+    pub(super) fn try_acquire_at(&self, credential: &str, now: Instant) -> bool {
+        // The map's lock only finds the bucket; the bucket's own lock takes
+        // the token, after the map's is released.
+        let bucket = {
+            let mut buckets = self.buckets.lock();
+            match buckets.get(credential) {
+                Some(bucket) => Arc::clone(bucket),
+                None => match RateLimiter::new(self.rps, now) {
+                    Some(bucket) => {
+                        let bucket = Arc::new(bucket);
+                        buckets.insert(credential.to_string(), Arc::clone(&bucket));
+                        bucket
+                    }
+                    None => return true,
+                },
+            }
+        };
+        bucket.try_acquire_at(now)
+    }
+
+    pub(super) fn try_acquire(&self, credential: &str) -> bool {
+        self.try_acquire_at(credential, Instant::now())
+    }
+}
+
+/// Each credential's share of `--max-sessions` (#32 PR 5 review M2): the
+/// cap divided evenly among the credentials a request can arrive as,
+/// rounded down, and at least 1.
+///
+/// Rounded down so the shares never add up to more than the cap: every
+/// credential can always open its share, whatever the others hold, which is
+/// the guarantee that one credential cannot lock the others (the operator's
+/// included) out. With one credential the share is the whole cap, so a
+/// one-credential serve behaves exactly as before. An idle credential's
+/// share is not lent out; an operator who needs more per credential raises
+/// `--max-sessions`. With more credentials than the cap, each gets 1 and the
+/// process-wide cap still applies first, so the guarantee then fails
+/// gracefully rather than refusing the start.
+pub(super) fn credential_share(max_sessions: usize, credentials: usize) -> usize {
+    (max_sessions / credentials.max(1)).max(1)
 }
 
 /// How many MCP sessions are live right now.
@@ -288,6 +359,13 @@ impl RateLimiter {
 #[async_trait::async_trait]
 pub(crate) trait LiveSessions: Send + Sync + 'static {
     async fn live(&self) -> usize;
+
+    /// How many of them `credential` opened (#32 PR 5 review M2). The
+    /// default counts every live one, the conservative answer for a source
+    /// that does not know who opened what.
+    async fn live_opened_by(&self, _credential: &str) -> usize {
+        self.live().await
+    }
 }
 
 #[async_trait::async_trait]
@@ -305,9 +383,35 @@ impl LiveSessions for LocalSessionManager {
 pub(crate) struct HttpGuard {
     /// Who may call at all, and as which credential (#32 PR 5).
     pub(super) authority: Arc<ServeAuthority>,
+    /// The process-wide MCP-session cap (`--max-sessions`).
     pub(super) max_sessions: usize,
+    /// Each credential's share of [`Self::max_sessions`]
+    /// ([`credential_share`]).
+    pub(super) credential_sessions: usize,
     pub(super) live: Arc<dyn LiveSessions>,
-    pub(super) rate: Option<Arc<RateLimiter>>,
+    /// Each credential's request-rate bucket; `None` when disabled.
+    pub(super) rate: Option<Arc<CredentialRates>>,
+}
+
+impl HttpGuard {
+    /// The guard for `authority`, with `--max-sessions` and
+    /// `--rate-limit-rps` divided among its credentials as
+    /// [`credential_share`] and [`CredentialRates`] say.
+    pub(super) fn new(
+        authority: Arc<ServeAuthority>,
+        max_sessions: usize,
+        live: Arc<dyn LiveSessions>,
+        rate_limit_rps: u32,
+    ) -> Self {
+        let credential_sessions = credential_share(max_sessions, authority.credential_count());
+        Self {
+            authority,
+            max_sessions,
+            credential_sessions,
+            live,
+            rate: CredentialRates::new(rate_limit_rps).map(Arc::new),
+        }
+    }
 }
 
 /// Ceiling on the size of a single HTTP request body (T82-16 remainder).
@@ -358,7 +462,8 @@ fn how_to_close(path: &str) -> String {
         .to_string()
 }
 
-/// Auth, then rate, then the session cap — in that order, deliberately.
+/// Auth, then rate, then the session cap (the process's, then the
+/// credential's share) — in that order, deliberately.
 ///
 /// Authentication runs **first and alone**: an unauthenticated caller must not
 /// be able to consume rate-limit budget or read the live-session count (a 503
@@ -400,11 +505,12 @@ pub(super) async fn guard_request(
         )
             .into_response();
     };
+    let credential = Arc::clone(&grant);
     let mut req = req;
     req.extensions_mut().insert(Authenticated(grant));
 
     if let Some(rate) = &guard.rate
-        && !rate.try_acquire()
+        && !rate.try_acquire(credential.name())
     {
         tracing::warn!("mcp http: request refused by the rate limit");
         return (
@@ -435,6 +541,36 @@ pub(super) async fn guard_request(
                 ),
             )
                 .into_response();
+        }
+        // This credential's share (#32 PR 5 review M2). Counted only when
+        // it is smaller than the cap: with one credential it is the cap,
+        // and the check above already decided.
+        if guard.credential_sessions < guard.max_sessions {
+            let mine = guard.live.live_opened_by(credential.name()).await;
+            if mine >= guard.credential_sessions {
+                tracing::warn!(
+                    credential = credential.name(),
+                    live = mine,
+                    share = guard.credential_sessions,
+                    max = guard.max_sessions,
+                    "mcp http: refusing a new session — the credential is at its share of the \
+                     concurrent-session cap"
+                );
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    [(axum::http::header::RETRY_AFTER, "5")],
+                    format!(
+                        "this credential is at its share of the concurrent-session cap ({mine}/\
+                         {share} of {max} sessions): this server will not open another for it. \
+                         Close an idle session ({close}), or restart with a higher \
+                         --max-sessions.\n",
+                        share = guard.credential_sessions,
+                        max = guard.max_sessions,
+                        close = how_to_close(req.uri().path()),
+                    ),
+                )
+                    .into_response();
+            }
         }
     }
 

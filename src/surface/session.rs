@@ -542,6 +542,13 @@ impl<T: BearerSecret> SessionAuthority<T> {
         self.implicit.is_none()
     }
 
+    /// How many credentials a request can arrive as: the configured ones,
+    /// or 1 for an implicit grant (#32 PR 5 review M2: each one's share of
+    /// the serve's bounds). Never 0.
+    pub(crate) fn credential_count(&self) -> usize {
+        self.credentials.len().max(1)
+    }
+
     /// The configured credentials' names, in order (for the startup log;
     /// never a secret). Empty under an implicit grant.
     pub(crate) fn credential_names(&self) -> Vec<&str> {

@@ -54,11 +54,13 @@ enum Commands {
         #[arg(long, value_name = "TOKEN")]
         auth_token: Option<lambo::mcp::SecretToken>,
         /// Maximum concurrently live MCP sessions on the HTTP transport;
-        /// further `initialize` requests are refused with 503.
+        /// further `initialize` requests are refused with 503. With several
+        /// credentials each may hold an even share (this divided by their
+        /// number, rounded down, at least 1).
         #[arg(long, default_value_t = lambo::mcp::DEFAULT_MAX_SESSIONS)]
         max_sessions: usize,
-        /// Sustained HTTP request/second ceiling (burst allowance is 2x). Set
-        /// 0 to disable the limit.
+        /// Sustained HTTP request/second ceiling per credential (burst
+        /// allowance is 2x). Set 0 to disable the limit.
         #[arg(long, default_value_t = lambo::mcp::DEFAULT_RATE_LIMIT_RPS)]
         rate_limit_rps: u32,
         /// DANGEROUS: attach despite a same-width stored/configured model-id mismatch.

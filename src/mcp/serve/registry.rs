@@ -834,13 +834,23 @@ async fn watch_lease(
 }
 
 /// The process-wide MCP-session cap counts every attached session's MCP
-/// sessions (design §3.6): one `--max-sessions` for the whole process.
+/// sessions (design §3.6): one `--max-sessions` for the whole process. Each
+/// credential's share of it counts the MCP sessions that credential opened,
+/// across every attached session (#32 PR 5 review M2).
 #[async_trait::async_trait]
 impl super::http_guards::LiveSessions for SessionRegistry {
     async fn live(&self) -> usize {
         let mut total = 0;
         for session in self.attached() {
             total += session.live_mcp_sessions().await;
+        }
+        total
+    }
+
+    async fn live_opened_by(&self, credential: &str) -> usize {
+        let mut total = 0;
+        for session in self.attached() {
+            total += session.live_mcp_sessions_opened_by(credential).await;
         }
         total
     }

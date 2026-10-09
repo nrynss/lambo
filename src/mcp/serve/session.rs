@@ -261,6 +261,17 @@ impl AttachedSession {
         owners.insert(mcp_id.to_string(), Arc::from(credential));
     }
 
+    /// How many of this session's live MCP sessions `credential` opened
+    /// (#32 PR 5 review M2: its share of the session cap).
+    pub(super) async fn live_mcp_sessions_opened_by(&self, credential: &str) -> usize {
+        let live = self.mcp_sessions.sessions.read().await;
+        self.owners
+            .lock()
+            .iter()
+            .filter(|(id, owner)| &***owner == credential && live.contains_key(id.as_str()))
+            .count()
+    }
+
     /// Forget the MCP session `mcp_id` (its opener closed it).
     pub(super) fn forget_opener(&self, mcp_id: &str) {
         self.owners.lock().remove(mcp_id);

@@ -7,14 +7,14 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use rmcp::service::ServerInitializeError;
 use rmcp::transport::io::stdio;
 use rmcp::ServiceExt;
 
 use super::authority::{authorize_default, Authenticated, ServeAuthority};
-use super::http_guards::{guard_request, HttpGuard, RateLimiter};
+use super::http_guards::{guard_request, HttpGuard};
 use super::registry::{Lookup, SessionRegistry};
 use super::session::AttachedSession;
 use super::shutdown::{HolderShutdown, SHUTDOWN_GRACE};
@@ -228,12 +228,14 @@ pub(super) async fn serve_http(
     // The session cap counts every attached session's MCP sessions: one
     // `--max-sessions` for the process (#32 design §3.6), read from the
     // managers rmcp mutates — see [`LiveSessions`](super::http_guards::LiveSessions).
-    let guard = HttpGuard {
-        authority: Arc::clone(&authority),
-        max_sessions: opts.max_sessions,
-        live: registry.clone(),
-        rate: RateLimiter::new(opts.rate_limit_rps, Instant::now()).map(Arc::new),
-    };
+    // Each credential gets its own rate bucket and an even share of the cap
+    // (#32 PR 5 review M2).
+    let guard = HttpGuard::new(
+        Arc::clone(&authority),
+        opts.max_sessions,
+        registry.clone(),
+        opts.rate_limit_rps,
+    );
     // T8.7 posture, logged once at startup so an operator can see what this
     // process is actually enforcing. No token is ever logged: only whether
     // one is required and the credentials' names (#32 PR 5).
@@ -241,7 +243,8 @@ pub(super) async fn serve_http(
         auth_required = authority.requires_bearer(),
         credentials = %authority.credential_names().join(", "),
         max_sessions = guard.max_sessions,
-        rate_limit_rps = opts.rate_limit_rps,
+        max_sessions_per_credential = guard.credential_sessions,
+        rate_limit_rps_per_credential = opts.rate_limit_rps,
         "mcp http: request guard armed"
     );
 

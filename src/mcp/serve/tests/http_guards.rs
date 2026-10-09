@@ -208,12 +208,12 @@ impl LiveSessions for FakeSessions {
 }
 
 fn guard_with(auth: Option<&str>, max_sessions: usize, live: usize, rps: u32) -> HttpGuard {
-    HttpGuard {
-        authority: legacy_authority(auth.map(|t| SecretToken::new(t).expect("valid"))),
+    HttpGuard::new(
+        legacy_authority(auth.map(|t| SecretToken::new(t).expect("valid"))),
         max_sessions,
-        live: Arc::new(FakeSessions(live)),
-        rate: RateLimiter::new(rps, Instant::now()).map(Arc::new),
-    }
+        Arc::new(FakeSessions(live)),
+        rps,
+    )
 }
 
 /// Stand the guard up in front of a marker route on a real socket.
@@ -450,4 +450,161 @@ async fn auth_is_checked_before_the_rate_limit_and_the_cap() {
         "the authenticated caller reaches the cap check with budget intact \
              (503, not 429): {body}"
     );
+}
+
+// -----------------------------------------------------------------------
+// #32 PR 5 review M2: fairness between credentials
+// -----------------------------------------------------------------------
+
+/// A fake token for credential `name`, built at runtime so no
+/// token-shaped literal sits in the source.
+fn fake_token(name: &str) -> String {
+    ["fake", name, "guard", "value"].join("-")
+}
+
+/// A loopback HTTP serve's credential set: one configured credential per
+/// name, each over every pinned session.
+fn credentials_authority(names: &[&str]) -> Arc<ServeAuthority> {
+    use crate::surface::session::{SessionCapabilities, SessionGrant, SessionScope};
+    let mut opts = ServeOptions::new("lambo-test", "agent-test");
+    opts.transport = Transport::Http;
+    opts.credentials = names
+        .iter()
+        .map(|name| crate::config::ServeCredential {
+            grant: SessionGrant::new(
+                *name,
+                SessionScope::pinned(),
+                SessionCapabilities::default(),
+            ),
+            token: SecretToken::new(fake_token(name)).expect("non-empty"),
+        })
+        .collect();
+    authority_for(&opts)
+}
+
+/// Live MCP sessions per credential.
+struct FakeOpeners(Vec<(&'static str, usize)>);
+
+#[async_trait::async_trait]
+impl LiveSessions for FakeOpeners {
+    async fn live(&self) -> usize {
+        self.0.iter().map(|(_, n)| n).sum()
+    }
+
+    async fn live_opened_by(&self, credential: &str) -> usize {
+        self.0
+            .iter()
+            .filter(|(name, _)| *name == credential)
+            .map(|(_, n)| n)
+            .sum()
+    }
+}
+
+/// The share: the cap divided evenly, rounded down so the shares fit
+/// inside it, never 0, and the whole cap for one credential (so a
+/// one-credential serve is unchanged).
+#[test]
+fn each_credential_gets_an_even_share_of_the_session_cap() {
+    for (max, credentials, share) in [
+        (32, 1, 32),
+        (32, 2, 16),
+        (32, 3, 10),
+        (8, 4, 2),
+        (2, 3, 1),
+        (0, 1, 1),
+    ] {
+        assert_eq!(
+            credential_share(max, credentials),
+            share,
+            "{max} over {credentials}"
+        );
+        if share > 1 {
+            assert!(share * credentials <= max, "{max} over {credentials}");
+        }
+    }
+    assert_eq!(credential_share(32, 0), 32, "an implicit grant is one");
+}
+
+/// Each credential draws on its own bucket: draining one leaves every
+/// other full, and the drained one refills on its own clock.
+#[test]
+fn each_credential_has_its_own_rate_bucket() {
+    assert!(CredentialRates::new(0).is_none(), "0 disables the limit");
+    let rates = CredentialRates::new(1).expect("enabled");
+    let t0 = Instant::now();
+    // 1 rps => capacity 2.
+    assert!(rates.try_acquire_at("tenant", t0));
+    assert!(rates.try_acquire_at("tenant", t0));
+    assert!(!rates.try_acquire_at("tenant", t0), "tenant is dry");
+    assert!(rates.try_acquire_at("operator", t0), "operator is not");
+    assert!(rates.try_acquire_at("operator", t0));
+    assert!(
+        rates.try_acquire_at("tenant", t0 + Duration::from_secs(1)),
+        "tenant refills"
+    );
+}
+
+/// On the request path: one credential flooding past its bucket gets 429,
+/// and another credential's next request is still served.
+#[tokio::test]
+async fn one_credential_flooding_does_not_rate_limit_another() {
+    let guard = HttpGuard::new(
+        credentials_authority(&["tenant", "operator"]),
+        32,
+        Arc::new(FakeSessions(0)),
+        1,
+    );
+    let (addr, _) = spawn_guarded(guard).await;
+    let tenant = format!("Bearer {}", fake_token("tenant"));
+    let operator = format!("Bearer {}", fake_token("operator"));
+    let mut refused = false;
+    for _ in 0..4 {
+        let (status, _) = request(addr, &post(Some(&tenant), Some("s"))).await;
+        refused |= status == 429;
+    }
+    assert!(refused, "the tenant's flood is refused");
+    let (status, body) = request(addr, &post(Some(&operator), Some("s"))).await;
+    assert_eq!(status, 200, "the operator is still served: {body}");
+}
+
+/// On the request path: a credential at its share of the session cap gets
+/// a 503 naming the share, while another credential, and the first one's
+/// existing MCP sessions, are still served. Mutation: drop the share check
+/// and the tenant's 17th `initialize` reaches the service.
+#[tokio::test]
+async fn a_credential_at_its_share_of_the_session_cap_is_refused_alone() {
+    let guard = HttpGuard::new(
+        credentials_authority(&["tenant", "operator"]),
+        32,
+        Arc::new(FakeOpeners(vec![("tenant", 16), ("operator", 1)])),
+        0,
+    );
+    assert_eq!(guard.credential_sessions, 16);
+    let (addr, reached) = spawn_guarded(guard).await;
+    let tenant = format!("Bearer {}", fake_token("tenant"));
+    let operator = format!("Bearer {}", fake_token("operator"));
+
+    let (status, body) = request(addr, &post(Some(&tenant), None)).await;
+    assert_eq!(status, 503, "the tenant is at its share: {body}");
+    assert!(
+        body.contains("16/16 of 32"),
+        "say what the share is: {body}"
+    );
+    assert!(body.contains("--max-sessions"), "{body}");
+    assert_eq!(reached.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    let (status, _) = request(addr, &post(Some(&tenant), Some("existing"))).await;
+    assert_eq!(status, 200, "the tenant's open sessions keep working");
+    let (status, body) = request(addr, &post(Some(&operator), None)).await;
+    assert_eq!(status, 200, "the operator still opens one: {body}");
+}
+
+/// One credential (the legacy `default`, the dogfood rig's) has the whole
+/// cap and one bucket: exactly the limits a single-token serve always had.
+#[test]
+fn one_credential_keeps_the_whole_cap() {
+    let guard = guard_with(Some("s3cret"), 32, 0, 50);
+    assert_eq!(guard.credential_sessions, 32);
+    let local = guard_with(None, 32, 0, 50);
+    assert_eq!(local.credential_sessions, 32);
 }

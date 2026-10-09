@@ -321,13 +321,18 @@ const MCP_POST: [(&str, &str); 2] = [
 async fn a_credentialed_serve_answers_a_non_loopback_host() {
     let wire = wire().await;
     let addr = wire.addr;
-    for host in ["10.0.0.5:7700", "lambo.internal", "localhost"] {
+    // Two credentials, so no one of them reaches its share of the cap.
+    for (host, who) in [
+        ("10.0.0.5:7700", "scoped"),
+        ("lambo.internal", "ops"),
+        ("localhost", "scoped"),
+    ] {
         let reply = on_the_wire_with(
             addr,
             "POST",
             "/mcp/s/auth-live",
             host,
-            Some(&bearer("scoped")),
+            Some(&bearer(who)),
             &MCP_POST,
             INITIALIZE,
         )
@@ -454,4 +459,29 @@ async fn an_mcp_session_answers_only_the_credential_that_opened_it() {
     .await;
     assert_eq!(reply.status, 200, "{}", reply.body);
     assert!(reply.message().get("result").is_some(), "{}", reply.body);
+}
+
+/// #32 PR 5 review M2 through the real registry: four credentials share a
+/// cap of 8, so each may hold 2 MCP sessions, counted across every attached
+/// session by the credential that opened them. `scoped` at its share is
+/// refused while `ops` still opens one, and closing one of `scoped`'s gives
+/// it room again.
+#[tokio::test]
+async fn a_credential_at_its_share_does_not_lock_out_another() {
+    let wire = wire().await;
+    let addr = wire.addr;
+    let path = "/mcp/s/auth-live";
+    let scoped = bearer("scoped");
+    let (first, _) = initialize_as(addr, path, Some(&scoped)).await;
+    // Through `/mcp`, the same Lambo session: still `scoped`'s count.
+    initialize_as(addr, "/mcp", Some(&scoped)).await;
+    let refused = http_as(addr, "POST", path, Some(&scoped), None, INITIALIZE).await;
+    assert_eq!(refused.status, 503, "{}", refused.body);
+    assert!(refused.body.contains("2/2 of 8"), "{}", refused.body);
+
+    initialize_as(addr, path, Some(&bearer("ops"))).await;
+
+    let closed = http_as(addr, "DELETE", path, Some(&scoped), Some(&first), "").await;
+    assert!(closed.status < 300, "{} {}", closed.status, closed.body);
+    initialize_as(addr, path, Some(&scoped)).await;
 }
