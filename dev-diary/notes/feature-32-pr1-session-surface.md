@@ -68,6 +68,18 @@ credential is never ambiguous. Two credentials with one `token_env`, or whose
 variables resolve to the same token, are refused: a request presenting it
 could not be attributed.
 
+**`token_env` is never echoed unless it is a safe name** (review M1). It is
+the key a token is most likely to be pasted into. It must be
+`[A-Z_][A-Z0-9_]*`, at most 64 bytes, and must not look like a token (an AWS
+key id, or a 20-plus character run of letters and digits with no `_`); a
+lower-case value is refused because tokens are mixed or lower case and
+variable names conventionally are not. A refused value is never quoted
+("(value not shown)"). Refusing at parse time means a token-shaped value can
+never reach the duplicate check or PR 5's "environment variable X is not set"
+path; those messages also go through `shown_env` as a second line. `[serve]`
+is new, so tightening the rule from `[A-Za-z_][A-Za-z0-9_]*` breaks nothing
+deployed.
+
 **`[serve]` is not serialized when empty**, so `toml::to_string` of a
 `LamboFile` without it is still readable by a binary that predates it.
 

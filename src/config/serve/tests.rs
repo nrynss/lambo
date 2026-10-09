@@ -532,3 +532,110 @@ fn the_example_files_serve_block_parses_when_uncommented() {
     // And the shipped example, commented, leaves `[serve]` empty.
     assert!(parse(raw).expect("example").serve.is_empty());
 }
+
+/// Values an operator might paste into `token_env` when they mean the token
+/// itself. All fake; each carries the `xyzzy` marker so a leak is easy to
+/// spot. The known-prefix ones are split with `concat!` so the source never
+/// holds a contiguous token-shaped literal.
+const TOKEN_SHAPED_TOKEN_ENVS: [&str; 6] = [
+    "tok-xyzzy-not-a-real-value",
+    concat!("gh", "p_", "xyzzyNotARealValue0000"),
+    "xyzzy_fake_lower_case",
+    "XYZZY0FAKE1NOT2REAL3",
+    concat!("AK", "IA", "XYZZY000FAKE0000"),
+    concat!("sk", "-", "xyzzy-fake"),
+];
+
+/// #32 PR 1 review M1: a token pasted into `token_env` never reaches an error
+/// message, on any of the paths that name the variable: the name check, the
+/// duplicate check, and the three resolve failures (not set, not UTF-8,
+/// empty). It is refused at parse time, so it cannot get as far as PR 5's
+/// resolve call.
+#[test]
+fn a_token_pasted_into_token_env_is_never_echoed() {
+    for shaped in TOKEN_SHAPED_TOKEN_ENVS {
+        let one = credential(&format!(
+            "name = \"a\"\ntoken_env = \"{shaped}\"\nsessions = [\"a\"]"
+        ));
+        let err = refused(&one);
+        assert!(
+            err.contains("token_env") && err.contains("value not shown"),
+            "{err}"
+        );
+        assert!(
+            !err.contains("xyzzy") && !err.contains("XYZZY"),
+            "leaked: {err}"
+        );
+
+        let two = format!(
+            "{one}{}",
+            credential(&format!(
+                "name = \"b\"\ntoken_env = \"{shaped}\"\nsessions = [\"b\"]"
+            ))
+        );
+        let err = refused(&two);
+        assert!(
+            !err.contains("xyzzy") && !err.contains("XYZZY"),
+            "leaked: {err}"
+        );
+
+        // The resolve paths, on a table that skipped `from_toml_str`.
+        let raw: LamboFile = toml::from_str(&one).expect("raw parse");
+        #[cfg(unix)]
+        let not_utf8 = {
+            use std::os::unix::ffi::OsStringExt;
+            Some(OsString::from_vec(vec![0x66, 0xff, 0x66]))
+        };
+        #[cfg(not(unix))]
+        let not_utf8 = Some(OsString::from(""));
+        for value in [
+            None,
+            not_utf8,
+            Some(OsString::from("")),
+            Some(OsString::from(" ")),
+        ] {
+            let err = raw
+                .serve
+                .resolve_credentials_with(|_| value.clone())
+                .unwrap_err()
+                .to_string();
+            assert!(
+                !err.contains("xyzzy") && !err.contains("XYZZY"),
+                "leaked: {err}"
+            );
+        }
+    }
+}
+
+/// The name rule is the conventional one: upper case, digits and `_`, not
+/// starting with a digit, at most 64 bytes. A lower-case name is refused (it
+/// is far more likely a pasted token than a real variable), without echoing.
+#[test]
+fn token_env_must_be_a_conventional_variable_name() {
+    for good in ["A", "_A", "LAMBO_AGENTS_TOKEN", "TOKEN_2"] {
+        parse(&credential(&format!(
+            "name = \"a\"\ntoken_env = \"{good}\"\nsessions = [\"a\"]"
+        )))
+        .unwrap_or_else(|e| panic!("{good}: {e}"));
+    }
+    let long = format!("A{}", "_".repeat(64));
+    for bad in [
+        "lower_case",
+        "Mixed_Case",
+        "1BAD",
+        "HAS-DASH",
+        "",
+        long.as_str(),
+    ] {
+        let err = refused(&credential(&format!(
+            "name = \"a\"\ntoken_env = \"{bad}\"\nsessions = [\"a\"]"
+        )));
+        assert!(
+            err.contains("not an environment variable name") && err.contains("value not shown"),
+            "{bad:?}: {err}"
+        );
+        if !bad.is_empty() {
+            assert!(!err.contains(bad), "{bad:?} echoed: {err}");
+        }
+    }
+}

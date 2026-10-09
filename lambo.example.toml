@@ -174,7 +174,9 @@ url = "http://127.0.0.1:8080"
 # under any credential's prefix) and/or `session_prefix` (ids that start with
 # it and are longer). Flags: create (may attach a session that does not exist
 # yet), erase, admin. The names "default" and "local" are reserved, and
-# token_env may not be LAMBO_AUTH_TOKEN.
+# token_env may not be LAMBO_AUTH_TOKEN. token_env must be an upper-case
+# variable name ([A-Z_][A-Z0-9_]*, at most 64 bytes); a value that looks like
+# a token is refused without being quoted.
 #
 # --- [serve] example begins ---
 # [serve]

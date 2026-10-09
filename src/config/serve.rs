@@ -46,6 +46,12 @@
 //! not quote its source line either; see `LamboFile::from_toml_str`.) Token values are read from the
 //! environment at runtime by [`ServeConfig::resolve_credentials`] into
 //! [`SecretToken`], whose `Debug` redacts.
+//!
+//! `token_env` itself is where a token is most likely to be pasted by
+//! mistake, so it must be a conventional upper-case variable name and must
+//! not look like a token (see `looks_like_a_token`). A value that fails either
+//! check is refused without being quoted, and every later message that names
+//! the variable goes through `shown_env`.
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
@@ -134,7 +140,8 @@ pub struct CredentialConfig {
     /// A name for logs and refusals. Never the secret.
     #[serde(default)]
     pub name: String,
-    /// The environment variable holding the bearer token.
+    /// The environment variable holding the bearer token: `[A-Z_][A-Z0-9_]*`,
+    /// at most 64 bytes, and not token-shaped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_env: Option<String>,
     /// An inline `token` key, refused by [`ServeConfig::validate`]. Present
@@ -204,13 +211,53 @@ fn addressed(field: &str, value: &str) -> Result<AddressedSessionId, LamboError>
     })
 }
 
-/// Is `name` a portable environment variable name (`[A-Za-z_][A-Za-z0-9_]*`)?
-fn is_env_name(name: &str) -> bool {
+/// The longest `token_env` accepted. Real variable names are short; a long
+/// value is far more likely a pasted token.
+const MAX_TOKEN_ENV_LEN: usize = 64;
+
+/// Shown in place of a `token_env` value that may be a secret.
+const VALUE_NOT_SHOWN: &str = "(value not shown)";
+
+/// Is `name` a conventional environment variable name: `[A-Z_][A-Z0-9_]*`,
+/// at most [`MAX_TOKEN_ENV_LEN`] bytes? Lower case is refused on purpose:
+/// tokens are usually mixed or lower case, variable names upper case.
+fn is_conventional_env_name(name: &str) -> bool {
     let mut bytes = name.bytes();
-    bytes
-        .next()
-        .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
-        && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    name.len() <= MAX_TOKEN_ENV_LEN
+        && bytes
+            .next()
+            .is_some_and(|b| b.is_ascii_uppercase() || b == b'_')
+        && bytes.all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+}
+
+/// Does a value that passes [`is_conventional_env_name`] still look like a
+/// token? An AWS access key id (`AKIA`/`ASIA` plus 16 characters), or any
+/// 20-plus character run of letters and digits with no `_`, reads as random
+/// rather than as a name.
+fn looks_like_a_token(name: &str) -> bool {
+    let aws_key_id = name.len() == 20 && (name.starts_with("AKIA") || name.starts_with("ASIA"));
+    let random_run = name.len() >= 20
+        && !name.contains('_')
+        && name.bytes().any(|b| b.is_ascii_digit())
+        && name.bytes().any(|b| b.is_ascii_uppercase());
+    aws_key_id || random_run
+}
+
+/// Is `token_env` safe to quote in a message? Only a value that validation
+/// accepts is: anything else may be the token itself.
+fn is_quotable_env(name: &str) -> bool {
+    is_conventional_env_name(name) && !looks_like_a_token(name)
+}
+
+/// `token_env` for a message: the name when it is quotable, otherwise
+/// [`VALUE_NOT_SHOWN`]. Validation already refuses unquotable values; this is
+/// the second line, so a message can never become the leak.
+fn shown_env(name: &str) -> &str {
+    if is_quotable_env(name) {
+        name
+    } else {
+        VALUE_NOT_SHOWN
+    }
 }
 
 impl ServeConfig {
@@ -308,8 +355,9 @@ impl ServeConfig {
                 && !envs.insert(env.as_str())
             {
                 return Err(serve_err(format!(
-                    "two [[serve.credential]] entries read token_env {env:?}; each credential \
-                     needs its own token, or a request could not be attributed to one"
+                    "two [[serve.credential]] entries read token_env {}; each credential \
+                     needs its own token, or a request could not be attributed to one",
+                    shown_env(env)
                 )));
             }
         }
@@ -350,21 +398,22 @@ impl ServeConfig {
         for cred in &self.credentials {
             // `validate` guarantees `token_env` is present.
             let env = cred.token_env.as_deref().unwrap_or_default();
+            let shown = shown_env(env);
             let raw = lookup(env).ok_or_else(|| {
                 serve_err(format!(
-                    "credential {:?}: environment variable {env} is not set",
+                    "credential {:?}: environment variable {shown} is not set",
                     cred.name
                 ))
             })?;
             let raw = raw.into_string().map_err(|_| {
                 serve_err(format!(
-                    "credential {:?}: environment variable {env} is not valid UTF-8",
+                    "credential {:?}: environment variable {shown} is not valid UTF-8",
                     cred.name
                 ))
             })?;
             let token = SecretToken::new(raw).map_err(|_| {
                 serve_err(format!(
-                    "credential {:?}: environment variable {env} is empty",
+                    "credential {:?}: environment variable {shown} is empty",
                     cred.name
                 ))
             })?;
@@ -418,16 +467,26 @@ impl CredentialConfig {
                  token)"
             )));
         };
-        if !is_env_name(env) {
+        if !is_conventional_env_name(env) {
             return Err(serve_err(format!(
-                "credential {name:?}: token_env {env:?} is not an environment variable name \
-                 ([A-Za-z_][A-Za-z0-9_]*)"
+                "credential {name:?}: token_env is not an environment variable name \
+                 {VALUE_NOT_SHOWN}: it must be [A-Z_][A-Z0-9_]*, at most {MAX_TOKEN_ENV_LEN} \
+                 bytes. Put the token in an environment variable and set token_env to that \
+                 variable's name"
+            )));
+        }
+        if looks_like_a_token(env) {
+            return Err(serve_err(format!(
+                "credential {name:?}: token_env looks like a token rather than the name of \
+                 the environment variable holding one {VALUE_NOT_SHOWN}. Put the token in an \
+                 environment variable and set token_env to that variable's name"
             )));
         }
         if env == crate::mcp::AUTH_TOKEN_ENV {
             return Err(serve_err(format!(
-                "credential {name:?}: token_env may not be {env}, which is the legacy \
-                 --auth-token variable (it becomes the credential named \"default\")"
+                "credential {name:?}: token_env may not be {}, which is the legacy \
+                 --auth-token variable (it becomes the credential named \"default\")",
+                crate::mcp::AUTH_TOKEN_ENV
             )));
         }
         let mut seen = BTreeSet::new();
