@@ -163,14 +163,27 @@ fn no_session_from_anywhere_is_the_missing_flag_usage_error() {
     assert!(!fx.ledger.exists(), "refused before the serve started");
 }
 
+/// The cwd map is a stdio serve's only. An HTTP serve pins sessions (#32
+/// PR 4): from `--session` and `[serve] sessions`, never from
+/// `[[serve.projects]]`, and `default_session` only picks `/mcp` among the
+/// pinned. MAP pins nothing, so even in a mapped directory an HTTP serve
+/// without `--session` gets PR 4's refusal (exit 2, before anything starts),
+/// not the stdio hint and not the mapped session.
 #[test]
-fn an_http_serve_still_needs_the_session_flag() {
+fn an_http_serve_does_not_take_its_session_from_the_cwd_map() {
     let fx = fixture("lambo-i32h-http", MAP);
     let cwd = mkdir(&fx.dir, "work/lambo");
     let out = run_serve(&fx, &cwd, &["--transport", "http", "--port", "0"]);
     let err = stderr(&out);
     assert_eq!(out.status.code(), Some(2), "{err}");
-    assert!(err.contains("--session <SESSION>"), "{err}");
+    assert!(
+        err.contains("--session <SESSION> is required, or name the sessions to serve in lambo.toml [serve] sessions"),
+        "PR 4's pinning refusal: {err}"
+    );
+    assert!(
+        !err.contains("without --session, a stdio serve uses"),
+        "not the stdio hint: {err}"
+    );
     assert!(!fx.ledger.exists(), "refused before the serve started");
 }
 
