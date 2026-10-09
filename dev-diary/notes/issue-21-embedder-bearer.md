@@ -13,9 +13,12 @@ Decisions made while implementing #21, for whoever touches `[embedder]` next.
    most 64 bytes, not token-shaped; a refused value is never quoted. An inline
    `api_key` is parsed only to be refused, with its value discarded during
    deserialization (`InlineApiKey`), so `Debug` and `Serialize` cannot carry it.
-   The helpers live in `src/embed/api_key.rs` and duplicate the ones #32 puts
-   in `src/config/serve.rs`, because #32 had not landed when #21 was written.
-   Fold them into one module once both are on main.
+   #21 was written before #32 landed, so it first carried its own copy of the
+   rule. After merging main the two copies were folded into
+   `src/config/secret_env.rs` (a leaf module under `config`, since both keys
+   are `lambo.toml` rules and `config` already depends on `embed`); `token_env`
+   and `api_key_env` both call `secret_env::check` and `secret_env::shown`, and
+   each keeps its own message wording through `SecretEnvRefusal::message`.
 3. **Checked twice.** `EmbedderConfig::overlay_env` refuses a bad name or an
    inline key on the file path, before any later message could quote it;
    `build_embedder` checks again for configs built in code, and is where the
@@ -29,9 +32,11 @@ Decisions made while implementing #21, for whoever touches `[embedder]` next.
 6. **`check_health` stays llama.cpp-only** and sends no `Authorization` header.
    Do not wire it into `doctor` or startup for this kind.
 
-Known gap, not fixed here: on main, `LamboFile::from_toml_str` formats the TOML
-error with `{e}`, which quotes the offending source line. A token pasted under
-a misspelled key (`api_kye = "..."`) would be echoed. #32 PR 1 (commits
-"never echo a token pasted into token_env" and "keep values out of kind and
-wrong-type errors") replaces that formatting for every table, `[embedder]`
-included, so it is not duplicated here.
+7. **An error body never carries the token.** The adapter quotes a non-2xx
+   body into its error; a gateway that echoes the presented key would leak it
+   there, so every occurrence of the token is replaced before quoting.
+
+The gap this note used to record (a parse error quoting the source line, so a
+token pasted under a misspelled key was echoed) is closed by #32 PR 1's
+`LamboFile::from_toml_str` redaction, now merged into this branch; it covers
+`[embedder]` like every other table.
