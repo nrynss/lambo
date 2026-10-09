@@ -2708,3 +2708,73 @@ async fn an_image_on_a_holder_over_the_tier_is_indexed_and_never_absorbs_text() 
     assert_eq!(doc.content, "render 17 [image:r17]");
     assert_eq!(doc.embedding, FixtureEmbedder::new().embed_sync(NEAR_B));
 }
+
+/// #22 PR 6 on a holder over the tier (#18): a recall by image or by a
+/// client vector reaches its vector leg through the index, like a text
+/// recall, and the Dresscode path holds: the look dismissed for Onam is
+/// the top vector-leg hit and the top hit. No store contract changed.
+#[cfg(feature = "embed-fixture")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_recall_by_image_or_vector_over_the_tier_reads_the_index() {
+    use crate::embed::{Embedder, FixtureEmbedder};
+    use crate::memory::Memory;
+    use crate::recall::query_vector::QueryBy;
+    use crate::test_util::dresscode::{
+        assert_dismissed_is_the_top_vector_hit, client_query_vector, derive_wardrobe,
+        imageless_text, similar_query_png,
+    };
+    use crate::types::MatchStrategy;
+    let _quiet = crate::test_util::quiet_logs();
+    let dim = FixtureEmbedder::new().dimensions();
+    let (primary, fake) = (memory_primary(), Arc::new(FakeIndex::new()));
+    let contract = EmbeddingContract {
+        kind: "fixture".into(),
+        model: None,
+        dim,
+    };
+    let store: Arc<dyn GraphStore> = Arc::new(
+        TieredStore::new(
+            Box::new(Shared::new(primary.clone())),
+            Box::new(fake.clone()),
+            Some(dim),
+        )
+        .with_repair_backoff(Duration::ZERO),
+    );
+    let mem = Memory::builder()
+        .session("tier-recall-by")
+        .agent("agent-a")
+        .flush_interval(Duration::from_millis(10))
+        .match_strategy(MatchStrategy::Hybrid)
+        .store(store)
+        .embedder(Arc::new(LabelEmbedder(FixtureEmbedder::new())) as Arc<dyn Embedder>)
+        .embedding_contract(contract.clone())
+        .build()
+        .await
+        .expect("build");
+    let wardrobe = derive_wardrobe(&mem).await;
+    let sid = SessionId::new("tier-recall-by");
+    wait_until("the looks are mirrored", || {
+        let live = fake.live(&sid);
+        [wardrobe.dismissed, wardrobe.kept, wardrobe.other]
+            .iter()
+            .all(|id| live.contains_key(&id.0.to_string()))
+    })
+    .await;
+    mem.settle_daemon().await;
+
+    let knn = || fake.knn_calls.load(std::sync::atomic::Ordering::SeqCst);
+    let png = similar_query_png();
+    for by in [
+        QueryBy::Image(crate::surface::image::validate(&png, "image/png").unwrap()),
+        QueryBy::Vector {
+            values: client_query_vector(),
+            declared: contract.clone(),
+        },
+    ] {
+        let before = knn();
+        let detailed = mem.recall_by_detailed(imageless_text(5), by).await.unwrap();
+        assert!(knn() > before, "the vector leg read the index");
+        assert_dismissed_is_the_top_vector_hit(&detailed, &wardrobe);
+    }
+    mem.close().await.unwrap();
+}
