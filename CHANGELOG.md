@@ -81,7 +81,8 @@
   waits run at once, of which one `agent_id` holds at most 8: a wait over
   either cap answers at once with the receipt's current state. A wait also
   answers once the session closes, so a wait on a `pending_replay` receipt
-  no longer outlives the server's shutdown.
+  no longer outlives the server's shutdown; a wait on a write the close
+  defers answers `intent_durable`, not `pending`.
 - `flush_lag_ms` (in `lambo_stats`, the heartbeat and the stats a reader
   process reads from the store) is now the time since the store last held
   every write, not the time since the last successful flush (#16 §3). An
@@ -94,7 +95,9 @@
   reader process reads is now republished between flushes when it has
   drifted (at most every 5 s); it used to change only when a flush was
   attempted, so it never showed an idle writer's lag and froze through the
-  10 s pause after a failed flush.
+  10 s pause after a failed flush. A degraded session stops republishing
+  it. A batch the store rejects outright resets the lag although it never
+  landed; `dead_lettered` is what counts it.
 
 - On SQLite, the process that holds a session (`lambo serve`, or an embedded
   `Memory`) now ranks recall's vector leg and hybrid `derive`'s semantic match
