@@ -681,6 +681,12 @@
 - An MCP session id answered any credential that presented it; it now
   answers only the credential that opened it, and another gets rmcp's
   unknown-session answer (#32, fifth part).
+- `lambo_stats` and the ledger's stats heartbeat no longer under-report a writer's not-yet-durable mutations. The flush task
+  drained the graph's log into its pending batch and updated its depth only
+  after releasing the graph lock, so `log_depth + flush_depth` could read 0
+  for a session that was still dirty. The depth is now published under the
+  same write lock as the drain, and `Memory::stats` reads both under the graph
+  lock. Observability only: nothing was ever lost.
 - The ledger's applied `completion` lines (`applied` and
   `applied_after_restart`) now carry `semantic_merged`, `reinforced`, `edges`
   and `embedded` beside `created_count` / `matched_count` (#12), so the
