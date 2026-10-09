@@ -146,3 +146,51 @@ the notice drops its "authenticates only with --auth-token" clause.
 - PR 7: route the admin surface through `SessionAuthority::authorize` with
   `SessionNeed::Erase` / `Admin`; scope is checked before capability, so a
   missing capability is the same 404.
+
+## Review remediation (2026-10-09)
+
+The Opus review of PR 5 (M1, M2, L1-L5, I1-I6) was remediated on the same
+branch, one commit per finding.
+
+- **M1, Host.** Each session's streamable-HTTP service takes a `HostCheck`
+  (`session.rs`). The implicit `local` credential and stdio keep rmcp's
+  loopback allow-list (DNS-rebinding protection); a serve whose authority
+  `requires_bearer()` disables it. The design has no allowed-hosts list
+  (§6, §7), so none was added: the bearer token is the protection, since a
+  rebound page cannot present one.
+- **M2, fairness.** §3.6 keeps `max_sessions` process-wide and gives no
+  per-credential numbers, so these were chosen: one rate bucket per
+  credential at `--rate-limit-rps` (`CredentialRates`), and a per-credential
+  share of the cap, `max(1, floor(max_sessions / credentials))`, checked
+  after the process cap. Rounding down keeps the shares inside the cap, so
+  every credential, the operator's included, can always open its share.
+  Idle shares are not lent: an operator who needs more raises
+  `--max-sessions`. One credential means the whole cap and one bucket at the
+  old rate, so the rig and every single-token serve are unchanged.
+  `LiveSessions::live_opened_by` counts by opener, using L1's map.
+- **L1, MCP-session binding.** `AttachedSession.owners` maps each MCP
+  session id to the credential whose `initialize` minted it (pruned against
+  rmcp's map on every insert). `transport::serve_live` replaces a foreign id
+  with a value rmcp never mints before rmcp sees the request, so the answer
+  is rmcp's own unknown-id answer, byte for byte by construction.
+- **L2.** A presented credential over 4 KiB is refused before the scan;
+  `SecretToken` refuses a longer token; the 401 WARN is throttled to once
+  per 10 s with a `held_back` count.
+- **L3.** `SecretToken::new` refuses surrounding whitespace and bytes outside
+  0x20-0x7E (an inner space is presentable and stays allowed). `--auth-token`
+  has its own clap parser so the usage error never repeats the value.
+- **L4.** `--bind` and `--auth-token` help name `[[serve.credential]]`.
+- **L5.** The zero-store-calls window exempts only the live session's own
+  `refresh_lease`, and probes `/mcp`, a JSON-RPC body and a live MCP session
+  id.
+- **I1** doc wording on `match_any`; **I2** two `Authorization` headers are
+  401 (chosen over reading the first: a proxy that keeps the last would
+  disagree about the caller); **I3/I5** startup warnings
+  (`authority::startup_warnings`); **I4** the per-user Unix socket is the
+  same-user boundary, documented; **I6** an additive `credential` field (the
+  name) on ledger `call` lines for configured credentials only, through a
+  hand-written `call_tool` that scopes the name around the macro's dispatch.
+
+Not done: the web portal (`serve-web`) keeps its single-token `bearer_ok`
+without the 4 KiB cap; it compares one secret, so the multiplier L2 is about
+does not exist there.

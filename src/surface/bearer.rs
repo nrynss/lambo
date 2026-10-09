@@ -119,8 +119,11 @@ pub(crate) fn bearer_ok(header: Option<&str>, expected: &[u8]) -> bool {
 /// was: each comparison is [`tokens_match`] (constant in the secret), every
 /// entry is compared whether or not an earlier one matched, and the winning
 /// index is folded in with a mask rather than a branch. The time taken
-/// therefore depends on the number of credentials and the presented length,
-/// both of which the caller already knows or controls.
+/// therefore depends on the presented length, which the caller controls,
+/// and on the number of credentials (#32 PR 5 review I1). That number is
+/// measurable from outside, through the per-byte slope, and is not a
+/// secret: it is configuration, and it says nothing about any token or
+/// about which credential a guess came near.
 ///
 /// At most one entry can match when the tokens are distinct, which the
 /// credential resolver guarantees; were two equal, the last would win.

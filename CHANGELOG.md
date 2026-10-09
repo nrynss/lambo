@@ -61,6 +61,14 @@
   `credentials: Vec<ServeCredential>` field; code that builds `ServeOptions`
   with a struct literal must add `credentials: Vec::new()` (`ServeOptions::new`
   fills it).
+- With several credentials, `--rate-limit-rps` applies per credential and
+  each credential may hold at most `--max-sessions` divided by the number of
+  credentials (rounded down, at least 1) MCP sessions (#32, fifth part). A
+  serve with one credential (a legacy token alone, or none on loopback)
+  keeps its old limits. A configured or legacy token with surrounding
+  whitespace, a byte outside printable ASCII or more than 4096 bytes now
+  refuses the start (exit 2); a request with two `Authorization` headers
+  gets `401`.
 - Minimum supported Rust is now 1.99 (`rust-version = "1.99"` in
   `Cargo.toml`; there was none before), and the crate moves from edition 2021
   to edition 2024. The pinned toolchain moves from 1.97.1 to 1.99.0, and CI and
@@ -154,6 +162,14 @@
 - `LAMBO_AUTH_TOKEN` is now read, and an empty one refused (exit 2), before
   `lambo serve` builds its backends, so the refusal no longer waits for a
   model to load.
+- `lambo serve` warns at startup when `LAMBO_AUTH_TOKEN` (or
+  `--auth-token`) is set beside `[[serve.credential]]`, and for a credential
+  naming sessions the serve does not pin or reaching none (#32, fifth part).
+  A refused bearer token is logged at WARN once per 10 seconds, with a
+  count of those held back, and at DEBUG otherwise.
+- With `--ledger`, a `call` line made through a configured credential
+  carries `credential`, its name (#32, fifth part). Additive; lines for the
+  legacy `default`, the implicit `local` and stdio are unchanged.
 - Every `serve --ledger` line now carries `session` (#32). `startup` and
   `lease` lines always did; `call`, `completion` and `stats` lines gain it so
   one ledger file can hold several sessions later. Additive: `v` stays `1`
@@ -524,6 +540,14 @@
 
 ### Fixed
 
+- A `lambo serve` with a token bound beyond loopback answered `403` to every
+  MCP request, because rmcp's default `Host` allow-list admits only
+  `localhost`, `127.0.0.1` and `::1` (#32, fifth part). A serve that requires
+  a token now accepts any `Host`; a loopback serve with no credential keeps
+  the allow-list as DNS-rebinding protection.
+- An MCP session id answered any credential that presented it; it now
+  answers only the credential that opened it, and another gets rmcp's
+  unknown-session answer (#32, fifth part).
 - The ledger's applied `completion` lines (`applied` and
   `applied_after_restart`) now carry `semantic_merged`, `reinforced`, `edges`
   and `embedded` beside `created_count` / `matched_count` (#12), so the

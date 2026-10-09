@@ -268,7 +268,17 @@ Once any credential is configured, the implicit `local` credential is gone, so a
 
 The presented token is compared with every configured token in constant time, so response timing does not say which credential a guess nearly matched. A request without a valid token gets `401`, whatever it asked for. A request with a valid token for a session outside that credential's reach gets the same empty `404` as an unknown session or an unrouted path, whether that session exists, is held by another writer, is being detached or failed, and the serve consults no store to answer it. Only inside its reach can a caller see a `503`. `/mcp` serves the default session to a credential that reaches it.
 
-This release serves pinned sessions only: a session inside a credential's `session_prefix` that is not pinned gets the `404`, even with `create = true`.
+This release serves pinned sessions only: a session inside a credential's `session_prefix` that is not pinned gets the `404`, even with `create = true`. `lambo serve` logs a warning at startup for a credential that names sessions it does not pin, or reaches none of them, and for `LAMBO_AUTH_TOKEN` (or `--auth-token`) set beside `[[serve.credential]]`: that token stays the `default` credential, reaching every pinned session, until you unset it.
+
+A token must be printable ASCII with no leading or trailing whitespace, and at most 4096 bytes. A token that breaks this (a trailing newline from an env file, say) refuses the start with exit 2, naming the credential and never quoting the token. A presented token over 4096 bytes, or a request carrying two `Authorization` headers, gets the ordinary `401`.
+
+Further rules once credentials are in play:
+
+- **Host.** A loopback serve with no credential refuses a request whose `Host` is not `localhost`, `127.0.0.1` or `::1`, as protection against DNS rebinding. A serve that requires a token accepts any `Host`, because a rebound page cannot present a token it does not know, and a serve bound beyond loopback is reached under its own address or name.
+- **Fair shares.** `--rate-limit-rps` applies per credential: each has its own bucket, so one credential's flood never rate-limits another. `--max-sessions` caps the MCP sessions of the whole process, and each credential may hold at most an even share of it, `--max-sessions` divided by the number of credentials, rounded down and at least 1. The shares fit inside the cap, so no credential can lock the others (the operator's included) out. With one credential the share is the whole cap.
+- **MCP sessions belong to their opener.** An MCP session id answers only the credential whose `initialize` opened it. Another credential naming it, even one that reaches the same session, gets exactly what an unknown or expired id gets.
+- **Attribution.** With `--ledger`, each `call` line made through a configured credential carries `credential`, that credential's name. Calls as `default` or `local` carry no such field.
+- **What a token does not guard.** The credential count is not secret: response timing scales with it. A stdio `lambo serve --session <name>` run by the same OS user forwards to the HTTP serve's per-session Unix socket (a directory only that user can enter) and reaches that session whatever the credentials say. Credentials guard the network; the OS user is the boundary on the machine.
 
 ## Environment variables
 
