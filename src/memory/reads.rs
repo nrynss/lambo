@@ -126,8 +126,10 @@ impl Memory {
     /// instead of the query text's embedding (#22 PR 6, design 7 and 12).
     ///
     /// `query.query` is optional here: an empty text means "no text", so
-    /// the keyword leg finds nothing and the recent leg runs as it always
-    /// does; a non-empty text still feeds the keyword leg. A structural
+    /// the keyword leg finds nothing and the recent leg is skipped (recent
+    /// items say nothing about the image, and their flat score would
+    /// outrank true matches); a non-empty text feeds the keyword leg and
+    /// keeps the recent leg, as a text recall's blend. A structural
     /// phrasing is not dispatched to traversal (see
     /// `Daemon::recall_by_vector_with`). The vector is
     /// [`query_vector::resolve`]'s: an image embedded with

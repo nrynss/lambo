@@ -109,7 +109,7 @@ auth middleware [Entity] (score 0.25, id 71b0e4c2)
 migrations/003.sql [Resource] (score 0.25, id 9d44f8b1)
 ```
 
-**Recall by image or by vector.** With `--image` or `--query-vector-json`, the vector leg searches by that image's or vector's embedding instead of the query text's, with the same rules as `lambo_recall`'s `image` and `query_vector`. `--query` is then optional and still matches words through the keyword leg. The files are read under the same size caps as `derive-image`'s and are never printed, stored or cached. A store without vector search is refused rather than answered keyword-only, since the vector leg is the point.
+**Recall by image or by vector.** With `--image` or `--query-vector-json`, the vector leg searches by that image's or vector's embedding instead of the query text's, with the same rules as `lambo_recall`'s `image` and `query_vector`. `--query` is then optional and still matches words through the keyword leg; without it, recent interactions are left out, as for `lambo_recall`. The files are read under the same size caps as `derive-image`'s and are never printed, stored or cached. A store without vector search, or a vector search that fails, is an error rather than a keyword-only answer, since the vector leg is the point.
 
 ```bash
 $ lambo recall --session dresscode --image ./photos/today.png --top-k 3

@@ -283,13 +283,17 @@
   `Embedder::embed_image`, no prompt) or `query_vector` (values and the
   contract they are in), at most one; with either, `query` is optional and
   still feeds the keyword leg, and the vector leg searches by the image or
-  vector. The same checks as `lambo_derive_image`: base64 capped before it
+  vector. With no text the recent-interactions leg is skipped: its flat
+  0.35 was calibrated on text and would rank whatever was derived last
+  above a true image match scoring lower; with text it runs as for any
+  recall. The same checks as `lambo_derive_image`: base64 capped before it
   is decoded, MIME matched to the magic bytes, a client vector accepted
   only with `[embedder] accept_client_vectors = true` and only in exactly
   the session's contract, refused with no echo. Not cached (the #14 query
   cache holds text queries only), never logged; the ledger line gains only
-  `by: "image" | "vector"`. A store without vector search, or an image the
-  embedder cannot embed, is refused rather than answered keyword-only, and
+  `by: "image" | "vector"`. A store without vector search, an image the
+  embedder cannot embed, or a failed vector read is an error rather than an
+  answer without the vector leg, and
   a structural phrasing beside an image is not dispatched to traversal.
   Library: `Memory::recall_by` with `recall::query_vector::QueryBy`;
   `surface::image::check_submitted_vector_as`; CLI `lambo recall --image

@@ -111,6 +111,17 @@ impl Route {
     fn vector_required(self) -> bool {
         self == Route::ByVector
     }
+
+    /// Whether phase 1 runs the recent leg for `text`: always on a text
+    /// recall, and on a recall by vector only beside text (see
+    /// [`candidates::RecentLeg`]).
+    fn recent_leg(self, text: &str) -> candidates::RecentLeg {
+        if self == Route::ByVector && text.trim().is_empty() {
+            candidates::RecentLeg::Skip
+        } else {
+            candidates::RecentLeg::Run
+        }
+    }
 }
 
 /// The daemon cycle's `now` source (T4.6 finding-1 regression seam).
@@ -487,8 +498,10 @@ impl Daemon {
     /// (optional) text is **not** dispatched to traversal, because that
     /// path skips the vector leg and would silently drop the image the
     /// caller asked about. The keyword leg reads the text as usual (an
-    /// empty text finds nothing), the recent leg is unchanged, and the
-    /// vector leg searches with `embedding`. Nothing is cached: a
+    /// empty text finds nothing), the recent leg runs only beside text
+    /// (with no text its flat score would outrank true image matches, see
+    /// [`candidates::RecentLeg`]), and the vector leg searches with
+    /// `embedding`. Nothing is cached: a
     /// vector-dependent pipeline never is (P1-2), and the caller passes a
     /// cache of its own for the signature's sake.
     ///
@@ -663,11 +676,17 @@ impl Daemon {
                               query: &RecallQuery| {
             // P2-6: without an index, the independently gathered recent and
             // vector legs still yield candidates (only lexical lookup is lost).
+            let recent = route.recent_leg(&query.query);
             let (phase1, legs) = match index {
-                Some(index) => {
-                    candidates::candidates_with_legs(graph, index, input, &query.query, query.top_k)
-                }
-                None => candidates::candidates_without_keyword_with_legs(graph, input),
+                Some(index) => candidates::candidates_with_legs_as(
+                    graph,
+                    index,
+                    input,
+                    &query.query,
+                    query.top_k,
+                    recent,
+                ),
+                None => candidates::candidates_without_keyword_with_legs_as(graph, input, recent),
             };
             let expanded = expand::expand(graph, phase1.clone(), query.traversal_depth);
             RecallPipeline {

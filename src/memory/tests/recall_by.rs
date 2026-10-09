@@ -6,8 +6,8 @@ use super::writes::{ContextTolerantEmbedder, VectorSearchStore};
 use super::*;
 use crate::recall::query_vector::QueryBy;
 use crate::test_util::dresscode::{
-    assert_dismissed_is_the_top_vector_hit, client_query_vector, derive_wardrobe, imageless_text,
-    similar_query_png, DISMISSED_LABEL,
+    assert_dismissed_is_the_top_vector_hit, assert_graded_order, client_query_vector,
+    derive_graded_looks, derive_wardrobe, imageless_text, similar_query_png, DISMISSED_LABEL,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -297,4 +297,43 @@ async fn a_failed_vector_read_on_a_text_recall_says_the_leg_was_skipped() {
         .iter()
         .any(|w| w.contains("vector leg skipped")));
     mem.close().await.unwrap();
+}
+
+/// Graded similarity (M2): looks at cosines 0.8, 0.5 and 0.3 to a client
+/// query vector rank in that order on the vector leg (each at its cosine)
+/// and overall, ahead of two unrelated looks derived last. With the recent
+/// leg running, those two would join at `RECENT_SCORE` (0.35) and outrank
+/// the 0.3 look; with no text the recent leg is skipped. On both holder
+/// sources. With text beside the vector, the recent leg runs as in a text
+/// recall.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn graded_similarity_ranks_by_cosine_not_recency() {
+    for source in SOURCES {
+        let store = vector_store(source);
+        let mem = open(store.clone(), "q22-recall-by-graded").await;
+        let looks = derive_graded_looks(&mem).await;
+        flushed(&mem).await;
+        mem.settle_daemon().await;
+        let detailed = mem
+            .recall_by_detailed(imageless_text(5), vector_query(looks.query.clone()))
+            .await
+            .unwrap();
+        assert_graded_order(&detailed, &looks);
+
+        let mut with_text = imageless_text(5);
+        with_text.query = "unrelated look".into();
+        let detailed = mem
+            .recall_by_detailed(with_text, vector_query(looks.query.clone()))
+            .await
+            .unwrap();
+        assert!(
+            looks
+                .unrelated
+                .iter()
+                .all(|id| detailed.legs.get(id).is_some_and(|l| l.recent.is_some())),
+            "{source:?}: beside text the recent leg runs: {:?}",
+            detailed.legs
+        );
+        mem.close().await.unwrap();
+    }
 }

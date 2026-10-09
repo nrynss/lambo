@@ -301,3 +301,51 @@ async fn recall_by_image_and_by_vector_find_the_dismissed_look() {
         );
     }
 }
+
+/// Graded similarity on SQLite (M2): the holder ranks looks at cosines 0.8,
+/// 0.5 and 0.3 to a client vector in that order, ahead of two unrelated
+/// looks derived last (no recent leg without text), and so does the
+/// lease-free reader over SQLite's own checked scan.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn graded_similarity_ranks_by_cosine_not_recency_on_sqlite() {
+    use crate::recall::query_vector::QueryBy;
+    use crate::test_util::dresscode::{assert_graded_order, derive_graded_looks, imageless_text};
+
+    let _quiet = crate::test_util::quiet_logs();
+    let (_dir, path) = scratch_db();
+    let store = Arc::new(SqliteStore::connect(&path).unwrap());
+    store.init_schema().await.unwrap();
+    let session = "sqlite-recall-by-graded";
+    let mem = open(store.clone(), session).await;
+    let looks = derive_graded_looks(&mem).await;
+    mem.settle_daemon().await;
+    let detailed = mem
+        .recall_by_detailed(
+            imageless_text(5),
+            QueryBy::Vector {
+                values: looks.query.clone(),
+                declared: contract(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_graded_order(&detailed, &looks);
+    mem.close().await.unwrap();
+
+    // Reopened: the vector leg is SQLite's checked scan of the reloaded
+    // vectors, the daemon's scores rebuilt from the store.
+    let reopened = open(store.clone(), session).await;
+    reopened.settle_daemon().await;
+    let detailed = reopened
+        .recall_by_detailed(
+            imageless_text(5),
+            QueryBy::Vector {
+                values: looks.query.clone(),
+                declared: contract(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_graded_order(&detailed, &looks);
+    reopened.close().await.unwrap();
+}

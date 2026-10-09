@@ -2778,3 +2778,73 @@ async fn a_recall_by_image_or_vector_over_the_tier_reads_the_index() {
     }
     mem.close().await.unwrap();
 }
+
+/// Graded similarity over the tier (M2): #18's index answers a non-trivial
+/// order, looks at cosines 0.8, 0.5 and 0.3 to a client vector, best
+/// first, and no recent leg lets the two unrelated looks derived last
+/// outrank the 0.3 one.
+#[cfg(feature = "embed-fixture")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn graded_similarity_over_the_tier_ranks_by_cosine_not_recency() {
+    use crate::embed::{Embedder, FixtureEmbedder};
+    use crate::memory::Memory;
+    use crate::recall::query_vector::QueryBy;
+    use crate::test_util::dresscode::{assert_graded_order, derive_graded_looks, imageless_text};
+    use crate::types::MatchStrategy;
+    let _quiet = crate::test_util::quiet_logs();
+    let dim = FixtureEmbedder::new().dimensions();
+    let (primary, fake) = (memory_primary(), Arc::new(FakeIndex::new()));
+    let contract = EmbeddingContract {
+        kind: "fixture".into(),
+        model: None,
+        dim,
+    };
+    let store: Arc<dyn GraphStore> = Arc::new(
+        TieredStore::new(
+            Box::new(Shared::new(primary.clone())),
+            Box::new(fake.clone()),
+            Some(dim),
+        )
+        .with_repair_backoff(Duration::ZERO),
+    );
+    let mem = Memory::builder()
+        .session("tier-recall-by-graded")
+        .agent("agent-a")
+        .flush_interval(Duration::from_millis(10))
+        .match_strategy(MatchStrategy::Hybrid)
+        .store(store)
+        .embedder(Arc::new(LabelEmbedder(FixtureEmbedder::new())) as Arc<dyn Embedder>)
+        .embedding_contract(contract.clone())
+        .build()
+        .await
+        .expect("build");
+    let looks = derive_graded_looks(&mem).await;
+    let sid = SessionId::new("tier-recall-by-graded");
+    wait_until("the looks are mirrored", || {
+        let live = fake.live(&sid);
+        looks
+            .graded
+            .iter()
+            .chain(&looks.unrelated)
+            .all(|id| live.contains_key(&id.0.to_string()))
+    })
+    .await;
+    mem.settle_daemon().await;
+    let before = fake.knn_calls.load(std::sync::atomic::Ordering::SeqCst);
+    let detailed = mem
+        .recall_by_detailed(
+            imageless_text(5),
+            QueryBy::Vector {
+                values: looks.query.clone(),
+                declared: contract,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        fake.knn_calls.load(std::sync::atomic::Ordering::SeqCst) > before,
+        "the vector leg read the index"
+    );
+    assert_graded_order(&detailed, &looks);
+    mem.close().await.unwrap();
+}

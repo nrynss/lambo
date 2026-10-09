@@ -35,11 +35,28 @@ the orchestrator and consistent with design 7: the image is the query, the
 words are an optional extra.
 
 **What the legs do with no text.** The keyword leg searches the empty
-token set and finds nothing. The recent leg is unchanged
-(`RECENT_SCORE` for recent interactions' members), as for every recall.
-The vector leg searches by the image's or vector's embedding. With text
-beside the image, the keyword leg reads the words as usual and max-merge
+token set and finds nothing. **The recent leg is skipped** (orchestrator
+decision after review M2; `candidates::RecentLeg::Skip`, chosen by the
+daemon's `Route::ByVector` when the text is blank). The vector leg
+searches by the image's or vector's embedding. With text beside the
+image, all three legs run exactly as in a text recall: the keyword leg
+reads the words, the recent leg joins at `RECENT_SCORE`, max-merge
 applies.
+
+Why skip it. The recent leg gives the last three interactions' members a
+flat `RECENT_SCORE = 0.35`, calibrated against BGE-M3 *text* cosines
+(lowest true hit 0.399). With no text it carries no relevance to the
+image at all, and design 7.3's evidence is that image and cross-modal
+cosines can sit below 0.35 (the EG2 cosines; PR 5's live evidence shows
+fresh relevant images scoring low). So in Dresscode, right after a user
+derives a few looks, any true match below 0.35 would rank under whatever
+was derived last. Pinned by `graded_similarity_ranks_by_cosine_not_recency`
+(below): looks at cosines 0.8, 0.5 and 0.3 to a client vector, then two
+unrelated looks derived last. Before the change the 0.3 look did not
+even make the top 5 (the three recent members at 0.35 pushed it out);
+after it, the three rank 0.8 > 0.5 > 0.3, each at its cosine within 1e-3,
+on the holder graph, the store's checked read, SQLite (holder and
+reload) and the tier.
 
 **No structural dispatch.** `Daemon::recall_by_vector_with` runs the
 blended pipeline even when the text is a structural phrasing ("what depends
@@ -57,10 +74,20 @@ cache is never even locked. Pinned by
 `memory::tests::recall_by::a_similar_image_and_a_client_vector_find_the_dismissed_look`
 (both caches empty afterwards, on both holder sources).
 
-**An image embed failure fails the recall.** A text recall whose embed
-fails degrades to keyword + recent with a warning. A recall by image does
-not: the caller asked what is near this image, and a keyword-only answer
-would answer a different question. The same classes as an image derive:
+**An image embed failure fails the recall, and so does a failed vector
+read.** A text recall whose embed fails degrades to keyword + recent with
+a warning. A recall by image does not: the caller asked what is near this
+image, and a keyword-only answer would answer a different question. The
+same holds for the store's vector read (review M1): `recall_routed` takes
+a `Route`, and `Route::ByVector` makes the vector leg required, so a
+backend error, a timeout, a tier whose durable fallback also failed, or
+an embedding-contract race is returned as `LamboError::Store` (MCP: the
+bare class `store error`) instead of an answer from the other legs, which
+with no text was just the recent leg. Pinned by
+`a_failed_vector_read_fails_a_recall_by_image_or_vector`. The text
+route's own silent drop of the leg now says so (`vector_degraded`
+annotation and the same line in `warnings`,
+`a_failed_vector_read_on_a_text_recall_says_the_leg_was_skipped`). The same classes as an image derive:
 `EmbedUnavailable` (timeout, unreachable), `Embed` (refused, or an unusable
 vector), `Config` (no image modality). A store without `VECTOR_SEARCH` is a
 `Config` error in the core and a named `configuration error` on the wire,
