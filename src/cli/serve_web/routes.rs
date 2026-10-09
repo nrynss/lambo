@@ -199,23 +199,26 @@ pub(super) async fn api_recall(
         Ok(request) => request,
         Err(e) => return fail(e),
     };
-    // Bound concurrent recalls process-wide (design 5.3). Held until the
-    // response is built.
+    // The view first, then the permit: a slow load is bounded by the load
+    // semaphore and must not hold a recall permit while it runs, or a few
+    // recalls waiting on one slow session would answer every other recall
+    // 503. The 503 still comes after the session was resolved (design 5.3).
+    let view = match state.view().await {
+        Ok(view) => view,
+        Err(e) => return fail(e),
+    };
+    // Bound concurrent recalls process-wide (embed and pipeline work).
+    // Held until the response is built.
     let Some(_permit) = state.views.recall_permit().await else {
         return recall_busy();
     };
-    let result = match state.view().await {
-        Ok(view) => {
-            super::recall::run_detailed_on(
-                &state.backends,
-                &view.reader,
-                &request,
-                state.views.queries(&state.session),
-            )
-            .await
-        }
-        Err(e) => Err(e),
-    };
+    let result = super::recall::run_detailed_on(
+        &state.backends,
+        &view.reader,
+        &request,
+        state.views.queries(&state.session),
+    )
+    .await;
 
     match result {
         Ok(cli) => json(

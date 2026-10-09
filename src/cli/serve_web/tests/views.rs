@@ -892,6 +892,39 @@ async fn a_saturated_recall_bound_answers_503_with_retry_after() {
     handle.abort();
 }
 
+/// A recall waiting on a slow load holds no recall permit (review L5): the
+/// load is bounded by the load semaphore, and the permit covers embed and
+/// pipeline work only. With one permit and the session's load parked, the
+/// permit stays free for another recall until the load finishes.
+#[tokio::test]
+async fn a_recall_waiting_on_a_slow_load_holds_no_recall_permit() {
+    let counting = LoadCounting::new(seed("t4-slow").await);
+    counting.park("t4-slow");
+    let (state, addr, handle) = serve_counting(
+        &counting,
+        "t4-slow",
+        &crate::config::WebConfig {
+            recall_concurrency: Some(1),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let slow =
+        tokio::spawn(async move { request(addr, "GET", "/api/recall?q=user%20schema").await });
+    until_queued(&state, 1).await;
+    let permit = tokio::time::timeout(Duration::from_millis(500), state.views.recall_permit())
+        .await
+        .expect("the one recall permit is free while the load is parked")
+        .expect("a permit");
+    drop(permit);
+
+    counting.release("t4-slow", 1);
+    let r = answered(slow).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    handle.abort();
+}
+
 /// [`FixtureEmbedder`] counting query-role embeds.
 struct CountingEmbedder {
     inner: FixtureEmbedder,

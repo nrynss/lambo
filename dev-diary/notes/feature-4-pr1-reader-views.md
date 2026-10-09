@@ -84,11 +84,16 @@ startup (a test pins it, with zero loads). Every view load preflights again,
 as `load_reader_graph` always has. The H1 mismatch warning moves to the first
 load that sees a mismatch, once per session, naming the session.
 
-**Recall order: validate, permit, view, run.** `RecallRequest::validate` holds
+**Recall order: validate, view, permit, run.** `RecallRequest::validate` holds
 every usage refusal, so a bad query is a 400 with no permit wait and no store
 call (the existing `recall_endpoint_rejects_a_missing_query_without_touching_the_store`
 still passes). The permit (2 s wait, then 503 + `Retry-After: 1` + `no-store`)
-is taken before the view so the bound covers the load a recall may trigger.
+is taken after the view. The first draft took it before, "so the bound covers
+the load a recall may trigger"; review L5 showed that a slow load then holds a
+recall permit for its whole wait (up to 30 s on Postgres), so a few recalls on
+one slow session answer every other session's recall 503. Loads are already
+bounded by the load semaphore, and design 5.3 bounds recalls for embed and
+pipeline work, so the permit now covers only that.
 `run_detailed_on` asserts the embedding contract on the view it is given, the
 same assert and message as `load_reader_graph_with_contract`; `lambo recall`
 now loads without a contract and asserts in `run_detailed_on`, same order and
