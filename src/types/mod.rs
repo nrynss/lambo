@@ -864,8 +864,10 @@ pub const DERIVE_IMAGE_PAYLOAD_LIKE: &str = r#"{"kind":"derive_image",%"#;
 /// under the commit lock, and against the live contract again on replay,
 /// where a mismatch settles the intent `failed`.
 ///
-/// Unknown keys are refused on decode, like [`EmbeddingSource`].
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// Unknown keys are refused on decode, like [`EmbeddingSource`]. Its `Debug`
+/// never prints the vector (user data, design section 4.5), so neither does
+/// that of a [`WriteIntentPayload`] or [`WriteIntent`] carrying it.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SuppliedVector {
     /// The concept content the vector belongs to: the caption with its
@@ -878,6 +880,18 @@ pub struct SuppliedVector {
     /// Where the vector came from; persisted as the concept's
     /// [`Concept::embedding_source`].
     pub source: EmbeddingSource,
+}
+
+impl std::fmt::Debug for SuppliedVector {
+    /// The vector's length, never its values, as `ImagePayload`'s `Debug`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SuppliedVector")
+            .field("content", &self.content)
+            .field("len", &self.vector.len())
+            .field("contract", &self.contract)
+            .field("source", &self.source)
+            .finish()
+    }
 }
 
 impl SuppliedVector {
@@ -1648,6 +1662,39 @@ pub enum LamboError {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    /// #22 review L5: `{:?}` of a supplied vector, or of an intent carrying
+    /// one, shows its length and never a component.
+    #[test]
+    fn a_supplied_vector_debug_never_prints_the_vector() {
+        let supplied = SuppliedVector {
+            content: "red [image:a1]".into(),
+            vector: vec![0.123_456_7, -0.987_654_3],
+            contract: EmbeddingContract {
+                kind: "fixture".into(),
+                model: None,
+                dim: 2,
+            },
+            source: EmbeddingSource {
+                modality: SourceModality::Image,
+                origin: VectorOrigin::Client,
+                sha256: None,
+                mime: None,
+            },
+        };
+        let payload = WriteIntentPayload::DeriveImage {
+            concepts: vec![],
+            pairs: vec![],
+            supplied: supplied.clone(),
+        };
+        for shown in [format!("{supplied:?}"), format!("{payload:#?}")] {
+            assert!(shown.contains("len: 2"), "{shown}");
+            assert!(
+                !shown.contains("0.123") && !shown.contains("987"),
+                "{shown}"
+            );
+        }
+    }
 
     /// #22 review L1: the SQL adapters' consume matches a stored image
     /// payload with [`DERIVE_IMAGE_PAYLOAD_LIKE`] and writes
