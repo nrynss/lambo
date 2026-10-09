@@ -341,8 +341,9 @@ async fn graded_similarity_ranks_by_cosine_not_recency() {
 /// Review L5: the E2E-6 contract-race annotation says the results are
 /// "keyword-only", which is true of a text recall and was false of a recall
 /// by image with no text (its answer was the recent leg). A recall by image
-/// or vector never carries it: the race fails the recall (M1), as a bare
-/// `store error` on the wire. A text recall still carries the pinned line.
+/// or vector never carries it: the race fails the recall (M1), and on the
+/// wire it says to re-check the contract and retry (review Low 1), with no
+/// detail from the refusal. A text recall still carries the pinned line.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_contract_race_fails_a_recall_by_image_and_annotates_only_text() {
     let store = vector_store(Source::Store);
@@ -361,10 +362,13 @@ async fn a_contract_race_fails_a_recall_by_image_and_annotates_only_text() {
         matches!(&err, LamboError::Store(StoreError::Invariant(m)) if m.contains("embedding contract changed")),
         "{err:?}"
     );
-    assert_eq!(
-        crate::surface::error::model_safe_message(&err),
-        "store error (the detail was logged server-side)"
+    let shown = crate::surface::error::model_safe_message(&err);
+    assert!(
+        shown.starts_with("store error: ") && shown.contains("re-check") && shown.contains("retry"),
+        "{shown}"
     );
+    assert!(!shown.contains("q22-recall-by-contract-race"), "{shown}");
+    assert_ne!(shown, "store error (the detail was logged server-side)");
 
     let text = mem
         .recall_detailed(RecallQuery {

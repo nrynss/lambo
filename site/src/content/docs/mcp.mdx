@@ -137,6 +137,7 @@ Errors come back as normal tool results with `isError` set to `true` and a short
 | A lock another agent holds | Who holds the node and until when, and that nothing was reserved or released. |
 | The server losing its single-writer lease | The class `conflict` and a note that the detail was logged. The holder and expiry are shown only for a lock another agent holds; the lease's own state is not model-facing. |
 | A store or embedding failure | The class of failure, such as `store error`, and a note that the detail was logged. |
+| A vector read refused because the session's embedding contract changed mid-query, or the vector width differs | `store error`, and that you should re-check the session's embedding contract (`lambo_stats`) and retry. Nothing from the refusal is shown. Most often seen on `lambo_recall` with `image` or `query_vector`, which fails rather than answer from the other legs. |
 | An image whose caption and `image_id` a text concept already holds | `image id taken`, your `image_id`, and the fix: choose another image id. On `lambo_derive_image` this arrives on the receipt. |
 | A call this server is not configured for | `configuration error` and the setting to change, such as `[embedder] accept_client_vectors = true`. Only `lambo_derive_image`, and `lambo_recall` with `image` or `query_vector`, answer this way. |
 | A handler fault | An internal error, with a note that the call had no effect beyond anything already written. |

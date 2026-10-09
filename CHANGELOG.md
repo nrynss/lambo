@@ -121,6 +121,15 @@
 
 ### Changed
 
+- A tool call that fails because a vector read refused its probe (the
+  session's embedding contract changed mid-query, or the vector width
+  differs) now tells the caller to re-check the session's embedding
+  contract (`lambo_stats`) and retry, instead of a bare `store error (the
+  detail was logged server-side)` (#22 PR 6 review). The text is fixed and
+  echoes nothing from the refusal; the class, and the ledger's
+  `error_kind`, stay `store error`. A recall by image or query vector is
+  where this is usually seen, since it fails rather than degrade.
+
 - `lambo_recall`'s published schema changes additively (#22 PR 6): two
   optional properties, `image` and `query_vector`, and `query` is no longer
   in `required` (it gains `"default": ""` and a description saying it is

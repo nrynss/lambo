@@ -1609,6 +1609,23 @@ impl StoreError {
     pub fn is_retryable(&self) -> bool {
         !matches!(self, StoreError::Constraint(_) | StoreError::StaleWrite(_))
     }
+
+    /// Whether this is a checked vector read refusing its probe because the
+    /// session's embedding space is not the caller's: the durable contract
+    /// changed under the read (the E2E-6 race), or the probe's width is not
+    /// the session's.
+    ///
+    /// Every store and the holder's graph source word these two refusals
+    /// alike (the parity tests compare them), so the prefixes identify them.
+    /// Used only to word a model-facing message: neither refusal carries a
+    /// detail N4 hides, and both are fixed by re-reading the contract and
+    /// retrying, which a bare "store error" does not say (#22 PR 6 review
+    /// Low 1). The class stays `store error`.
+    pub fn is_embedding_contract_refusal(&self) -> bool {
+        matches!(self, StoreError::Invariant(m)
+            if m.starts_with("vector candidate lookup refused after embedding contract changed")
+                || m.starts_with("query embedding has "))
+    }
 }
 
 /// Any failure from the Lambo API.
