@@ -236,6 +236,7 @@ async fn concept_embedding_roundtrips_flush_and_load() {
                     last_demotion_time: None,
                     embedding: Some(emb.clone()),
                     human_confirmed: 0,
+                    embedding_source: None,
                     chunk_group_id: None,
                 }),
             },
@@ -418,6 +419,7 @@ async fn seed_load_preserves_embedding_contract() {
                 last_demotion_time: None,
                 embedding: Some(vec![0.1, 0.2, 0.3]),
                 human_confirmed: 0,
+                embedding_source: None,
                 chunk_group_id: None,
             }],
             embedding: Some(contract.clone()),
@@ -1648,6 +1650,7 @@ async fn human_confirmed_survives_the_flush_load_round_trip() {
             last_demotion_time: None,
             embedding: None,
             human_confirmed: confirmed,
+            embedding_source: None,
             chunk_group_id: None,
         }),
     };

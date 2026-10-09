@@ -423,6 +423,7 @@ mod tests {
                 last_demotion_time: None,
                 embedding: emb,
                 human_confirmed: 0,
+                embedding_source: None,
                 chunk_group_id: None,
             }),
         };

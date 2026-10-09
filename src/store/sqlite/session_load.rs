@@ -191,6 +191,7 @@ pub(super) async fn load_concepts(
             embedding,
             chunk_group_id,
             human_confirmed,
+            embedding_source: None,
         });
     }
     Ok(out)

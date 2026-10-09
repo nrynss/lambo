@@ -411,6 +411,7 @@ fn plant_concept_full(
             embedding,
             chunk_group_id,
             human_confirmed: 0,
+            embedding_source: None,
         }),
     }
 }
@@ -1960,6 +1961,7 @@ async fn access_counts_round_trip_through_the_narrow_update_on_cockroach() {
         last_demotion_time: None,
         embedding: None,
         human_confirmed: 0,
+        embedding_source: None,
         chunk_group_id: None,
     };
     let access = |n: i32, at: i64| Mutation::RecordAccess {

@@ -222,6 +222,7 @@ pub(super) fn row_to_concept(row: &PgRow) -> Result<Concept, StoreError> {
         last_demotion_time: row.try_get("last_demotion_time").map_err(backend)?,
         embedding: embedding.as_deref().map(decode_vector).transpose()?,
         human_confirmed: human_confirmed as i32,
+        embedding_source: None,
         chunk_group_id: row.try_get("chunk_group_id").map_err(backend)?,
     })
 }

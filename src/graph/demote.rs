@@ -151,6 +151,7 @@ pub fn demote(
             last_demotion_time: Some(interaction_created_at),
             embedding: None,
             human_confirmed: 0,
+            embedding_source: None,
             chunk_group_id: Some(chunk_group_id.to_string()),
         };
         let id = concept.id;
@@ -236,6 +237,7 @@ mod tests {
             last_demotion_time: None,
             embedding: None,
             human_confirmed: 0,
+            embedding_source: None,
             chunk_group_id: None,
         }
     }
