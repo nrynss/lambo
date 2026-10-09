@@ -147,10 +147,35 @@ Darwin's realpath returns the on-disk spelling (the test skips itself on a
 case-sensitive volume); relative `HOME`; HOME unset end to end; an ambiguous
 map exiting 1 end to end.
 
-## For PR 4 (merge notes)
+## Merged with PR 4 (2244134)
 
-- `main.rs`'s serve arm now unwraps `session: Option<String>`; when PR 4 makes
-  `--session` repeatable for HTTP, `select_serve_session`'s `Transport::Http`
-  arm is the place that changes.
-- `SERVE_UNENFORCED_NOTICE` and `has_unenforced_keys` will need PR 4/5's
-  narrowing on top of this one.
+PR 4 landed first, so this branch merged `origin/main` (merge commit, not a
+rebase) and reconciled the two in separate commits:
+
+- **`--session` is PR 4's `Vec<String>`.** PR 4's `serve_preflight` reads
+  `lambo.toml` once and hands the file to the backend resolve. Its
+  `stdio_session`, the function PR 4 left for this PR, now takes the parsed
+  `[serve]` table: exactly one `--session` is used as given (no cwd read, no
+  log line, PR 4's path unchanged), more than one is PR 4's exit-2 refusal,
+  none runs `select_stdio_session` (exit 2 with the hint, exit 1 for an
+  ambiguous map). The chosen name goes to `pin_sessions` as the one stdio
+  session. PR 4's note placed stdio selection in `pin_sessions`' stdio arm;
+  it lives in the preflight instead because it needs the process cwd and
+  `$HOME` and logs to the operator, which a library-facing pinning function
+  should not, and its `[]` arm stays as the refusal for library callers.
+- **HTTP is PR 4's pinning.** This PR's HTTP refusal
+  (`select_serve_session`, `session_required`) is gone, as is its own
+  earlier `lambo.toml` read: a serve reads the file once.
+- **Notice.** PR 4's keyed `unenforced_keys(stdio)` stays; a stdio serve no
+  longer names `default_session` or `[[serve.projects]]`, an HTTP serve
+  still names `[[serve.projects]]` (never read over HTTP; review L3).
+  `has_unenforced_keys` is removed.
+- **Tests.** `an_http_serve_still_needs_the_session_flag` passed after the
+  merge only by accident (PR 4's different refusal also contains
+  `--session <SESSION>`); it is now
+  `an_http_serve_does_not_take_its_session_from_the_cwd_map` and asserts PR
+  4's text. `only_selection_keys_count_as_enforced` and PR 4's
+  `only_unenforced_keys_raise_the_notice` assert the merged rule on both
+  transports; `serve_table_unenforced` gains a stdio selection-only case.
+- **Found on main:** PR 4's repeatable `serve --session` row had landed in the
+  `lambo recall` flag table of cli.mdx; restored recall's row.
