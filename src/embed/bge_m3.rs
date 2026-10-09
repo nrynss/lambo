@@ -285,13 +285,18 @@ impl BgeM3LlamaCppEmbedder {
     /// OpenAI-compatible endpoint (Workers AI, an API-keyed gateway). Without
     /// this call no `Authorization` header is sent.
     ///
-    /// The header value is marked sensitive and never appears in `Debug` output
-    /// or in any error or log line this adapter writes. A token that is not a
-    /// valid header value is refused without quoting it.
+    /// The header value is marked sensitive. `Debug` shows only that a token
+    /// is set, and no message this adapter writes is built from the token
+    /// itself. A non-2xx body is quoted into the error with every detectable
+    /// echo of the token replaced: any run of 8 or more consecutive bytes of
+    /// it, raw, JSON-escaped or percent-encoded (see `scrub`). A shorter,
+    /// case-changed or otherwise re-encoded echo is not detected. A token
+    /// that is not a valid header value is refused without quoting it.
     ///
     /// Refused unless the base URL is `https`, or `http` to a loopback host
-    /// ([`check_bearer_transport`]): a token is never sent in clear text over
-    /// a network.
+    /// (`check_bearer_transport`). Redirects are never followed, and plain
+    /// `http` to loopback ignores proxy environment variables, so the token
+    /// goes only to the configured endpoint.
     pub fn with_bearer_token(mut self, token: &str) -> Result<Self, EmbedError> {
         check_bearer_transport(&self.base_url)?;
         let mut value = HeaderValue::from_str(&format!("Bearer {token}")).map_err(|_| {

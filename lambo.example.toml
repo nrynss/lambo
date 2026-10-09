@@ -85,7 +85,9 @@ url = "http://127.0.0.1:8080"
 # startup and sends `Authorization: Bearer <token>`; an unset or empty variable
 # is a hard startup error naming it, never a request without a key. Without
 # api_key_env no Authorization header is sent. LAMBO_EMBED_API_KEY_ENV
-# overrides the name. Workers AI's bge-m3 and a local GGUF can differ
+# overrides the name. It may not name LAMBO_AUTH_TOKEN, a [[serve.credential]]
+# token_env, a store DSN variable or a Google credentials variable. Redirects
+# are not followed, and `url` may not carry a query. Workers AI's bge-m3 and a local GGUF can differ
 # numerically, so they are different embedding contracts: start a fresh session
 # or `lambo re-embed`, never mix the two in one session.
 # api_key_env = "CLOUDFLARE_API_TOKEN"
