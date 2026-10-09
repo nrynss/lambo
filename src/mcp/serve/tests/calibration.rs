@@ -5,11 +5,58 @@ use crate::types::EmbeddingContract;
 use crate::writeq::EmbedderCalibration;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// The fixture embedder, counting every embed, optionally slowed.
+/// What a test sees of its embedder: the embed count, and a gate that
+/// holds every embed after the first until released (P3-5: a probe is
+/// "still running" by construction, not by outrunning a delay).
+#[derive(Clone)]
+struct Probe {
+    calls: Arc<AtomicUsize>,
+    gate: Option<Arc<tokio::sync::Semaphore>>,
+}
+
+impl Probe {
+    fn ungated() -> Self {
+        Self {
+            calls: Arc::new(AtomicUsize::new(0)),
+            gate: None,
+        }
+    }
+
+    fn gated() -> Self {
+        Self {
+            calls: Arc::new(AtomicUsize::new(0)),
+            gate: Some(Arc::new(tokio::sync::Semaphore::new(1))),
+        }
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+
+    /// Open the gate for good (a closed semaphore's `acquire` fails at once).
+    fn release(&self) {
+        if let Some(gate) = &self.gate {
+            gate.close();
+        }
+    }
+
+    /// Wait until the probe's second embed is parked on the gate.
+    async fn parked(&self) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while self.calls() < 2 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the probe never reached the gate"
+            );
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    }
+}
+
+/// The fixture embedder, counting every embed and honouring the gate.
 struct Counting {
     inner: FixtureEmbedder,
-    delay: Duration,
-    calls: Arc<AtomicUsize>,
+    probe: Probe,
 }
 
 #[async_trait::async_trait]
@@ -18,19 +65,22 @@ impl Embedder for Counting {
         self.inner.dimensions()
     }
     async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbedError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        tokio::time::sleep(self.delay).await;
+        self.probe.calls.fetch_add(1, Ordering::SeqCst);
+        if let Some(gate) = &self.probe.gate
+            && let Ok(permit) = gate.acquire().await
+        {
+            permit.forget();
+        }
         self.inner.embed(text).await
     }
 }
 
-fn backends(delay: Duration, calls: &Arc<AtomicUsize>) -> ResolvedBackends {
+fn backends(probe: &Probe) -> ResolvedBackends {
     ResolvedBackends {
         store: Box::new(MemoryStore::new()),
         embedder: Box::new(Counting {
             inner: FixtureEmbedder::new(),
-            delay,
-            calls: Arc::clone(calls),
+            probe: probe.clone(),
         }),
         store_cfg: StoreConfig {
             kind: Default::default(),
@@ -68,11 +118,11 @@ async fn probe_landed(mem: &Memory) {
 /// probe between them.
 #[tokio::test]
 async fn sessions_from_the_serve_builder_share_one_probe() {
-    let calls = Arc::new(AtomicUsize::new(0));
+    let probe = Probe::ungated();
     let calibration = EmbedderCalibration::new();
     let template = serve_builder(
         &ServeOptions::new("serve-cal-a", "agent-a"),
-        backends(Duration::ZERO, &calls),
+        backends(&probe),
         None,
         None,
         EarlyShutdown::unarmed(),
@@ -80,7 +130,7 @@ async fn sessions_from_the_serve_builder_share_one_probe() {
     );
     let a = template.clone().build().await.expect("a attaches");
     probe_landed(&a).await;
-    let probed = calls.load(Ordering::SeqCst);
+    let probed = probe.calls();
     assert_eq!(probed, crate::writeq::PROBE_EMBEDS);
 
     let b = template
@@ -90,7 +140,7 @@ async fn sessions_from_the_serve_builder_share_one_probe() {
         .expect("b attaches");
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(
-        calls.load(Ordering::SeqCst),
+        probe.calls(),
         probed,
         "the second session fires no probe embed"
     );
@@ -105,11 +155,11 @@ async fn sessions_from_the_serve_builder_share_one_probe() {
 /// running when the transport stops does not run across the close.
 #[tokio::test]
 async fn stage_two_aborts_the_shared_probe() {
-    let calls = Arc::new(AtomicUsize::new(0));
+    let probe = Probe::gated();
     let calibration = EmbedderCalibration::new();
     let mem = serve_builder(
         &ServeOptions::new("serve-cal-stage-2", "agent-a"),
-        backends(Duration::from_millis(50), &calls),
+        backends(&probe),
         None,
         None,
         EarlyShutdown::unarmed(),
@@ -119,10 +169,7 @@ async fn stage_two_aborts_the_shared_probe() {
     .await
     .expect("attach");
     let mem = Arc::new(mem);
-    assert!(
-        mem.pipeline().calibration().is_none(),
-        "the probe must still be running for this test to mean anything"
-    );
+    probe.parked().await;
     let handles = calibration.abort_handles();
     assert_eq!(handles.len(), 1, "one probe to abort");
     let out = run_and_close(
@@ -135,10 +182,9 @@ async fn stage_two_aborts_the_shared_probe() {
     )
     .await;
     assert!(out.is_ok(), "{out:?}");
+    let at_close = probe.calls();
+    probe.release();
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let after = calls.load(Ordering::SeqCst);
-    tokio::time::sleep(Duration::from_millis(150)).await;
-    assert_eq!(calls.load(Ordering::SeqCst), after, "the probe stopped");
-    assert!(after < crate::writeq::PROBE_EMBEDS, "it was cut short");
+    assert_eq!(probe.calls(), at_close, "the probe stopped");
     assert!(mem.pipeline().calibration().is_none());
 }
