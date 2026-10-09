@@ -21,7 +21,15 @@ use chrono::{DateTime, Utc};
 
 /// `Arc<MemoryStore>` as a `GraphStore`, so the serve under test and the
 /// test's other writer share one store, as two processes share a database.
-struct Shared(Arc<MemoryStore>);
+/// While the flag is set, every `load_session` parks forever: a store that
+/// stalls under an attach that has already taken its lease.
+struct Shared(Arc<MemoryStore>, Arc<std::sync::atomic::AtomicBool>);
+
+impl Shared {
+    fn over(store: &Arc<MemoryStore>) -> Box<dyn GraphStore> {
+        Box::new(Self(Arc::clone(store), Default::default()))
+    }
+}
 
 #[async_trait::async_trait]
 impl GraphStore for Shared {
@@ -41,6 +49,9 @@ impl GraphStore for Shared {
         self.0.flush(batch, token).await
     }
     async fn load_session(&self, session: &SessionId) -> Result<GraphSnapshot, StoreError> {
+        if self.1.load(std::sync::atomic::Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
         self.0.load_session(session).await
     }
     async fn keyword_candidates(
@@ -198,7 +209,7 @@ impl PinnedServe {
             registry: Some(tx),
         };
         let opts = pinned_opts(sessions, tweak);
-        let backends = backends_over(Box::new(Shared(Arc::clone(store))), fast_config(1_000));
+        let backends = backends_over(Shared::over(store), fast_config(1_000));
         let task = tokio::spawn(serve_pinned_with(opts, backends, seams));
         let registry = tokio::time::timeout(Duration::from_secs(20), rx)
             .await
@@ -466,7 +477,7 @@ async fn a_pinned_session_that_cannot_attach_refuses_the_start_and_releases_the_
         .expect("erase b");
 
     let opts = pinned_opts(&["fail-a", "fail-b", "fail-c"], |_| {});
-    let backends = backends_over(Box::new(Shared(Arc::clone(&store))), fast_config(1_000));
+    let backends = backends_over(Shared::over(&store), fast_config(1_000));
     let err = tokio::time::timeout(
         Duration::from_secs(20),
         serve_pinned_with(opts, backends, PinnedSeams::default()),
@@ -587,4 +598,60 @@ async fn the_serve_s_404_is_byte_identical_on_the_wire() {
     }
 
     serve.stop().await.expect("a clean shutdown");
+}
+
+/// #32 review L8: the shutdown does not wait on a background attach. The
+/// retry of a session held elsewhere takes the lease and then stalls in its
+/// store load. J6's pre-arm, which that load is raced against, records no
+/// signal here, as when every session was held at startup (nothing armed
+/// it) or the shutdown did not start with a signal. Taking the close set
+/// abandons the attach at once and releases the lease it took, rather than
+/// waiting for the load while stage 3 holds the shutdown, then letting the
+/// lease lapse.
+#[tokio::test]
+async fn the_shutdown_abandons_a_background_attach_and_releases_its_lease() {
+    let store = Arc::new(MemoryStore::new());
+    let stall = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let registry = new_registry(
+        &["l8-a", "l8-b"],
+        backends_over(
+            Box::new(Shared(Arc::clone(&store), Arc::clone(&stall))),
+            fast_config(1_000),
+        ),
+        32,
+    );
+    attach_or_hold(&registry, "l8-a").await;
+    let b = SessionId::new("l8-b");
+    store
+        .acquire_lease(&b, &other_writer(), LEASE_TTL)
+        .await
+        .expect("the other writer takes b");
+    attach_or_hold(&registry, "l8-b").await;
+    registry.mark_started();
+    registry.spawn_retry_loop();
+
+    // b's next attach takes the lease and stalls in its load.
+    stall.store(true, std::sync::atomic::Ordering::SeqCst);
+    store
+        .release_lease(&b, &other_writer())
+        .await
+        .expect("the other writer releases b");
+    let deadline = Instant::now() + PINNED_RETRY * 3;
+    while lease(&store, "l8-b").await.holder != serve_token() {
+        assert!(Instant::now() < deadline, "the retry never took b's lease");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let set = tokio::time::timeout(Duration::from_secs(5), registry.close_set())
+        .await
+        .expect("the shutdown does not wait on a stalled background attach");
+    assert_eq!(set.len(), 1, "only a was attached");
+    assert_eq!(
+        lease(&store, "l8-b").await.holder,
+        crate::store::lease::RELEASED_HOLDER,
+        "the abandoned attach's lease is released, not left to lapse"
+    );
+    for session in set {
+        session.mem.close().await.expect("close a");
+    }
 }

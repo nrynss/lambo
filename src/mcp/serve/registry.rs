@@ -32,7 +32,6 @@
 //! and [`SessionRegistry::stop_tasks`]).
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
@@ -40,7 +39,7 @@ use super::builder::explain_startup_failure;
 use super::hub::{derive_endpoint, SessionEndpoint};
 use super::roles::{record_refused_loser, ELECTION_RETRY};
 use super::session::{session_server, AttachedSession};
-use super::shutdown::{book_lease_loss, close_sessions, SHUTDOWN_GRACE};
+use super::shutdown::{book_lease_loss, close_sessions, LEASE_RELEASE_GRACE, SHUTDOWN_GRACE};
 use super::signals::EarlyShutdown;
 use super::stages::{ShutdownProgress, Stage};
 use crate::ledger::Ledger;
@@ -173,8 +172,8 @@ pub(super) struct SessionRegistry {
     attacher: Option<SessionAttacher>,
     slots: parking_lot::Mutex<HashMap<String, Slot>>,
     /// Set when the process shutdown takes the attached set: no attach
-    /// starts after it.
-    closing: AtomicBool,
+    /// starts after it, and one in flight is abandoned (#32 review L8).
+    closing: tokio::sync::watch::Sender<bool>,
     /// Held across a background attach and its admission, and taken by the
     /// shutdown before it snapshots the set, so an attach in flight is
     /// either in the set or never starts.
@@ -208,7 +207,7 @@ impl SessionRegistry {
             policy,
             attacher,
             slots: parking_lot::Mutex::new(HashMap::new()),
-            closing: AtomicBool::new(false),
+            closing: tokio::sync::watch::channel(false).0,
             attach_lock: tokio::sync::Mutex::new(()),
             started: tokio::sync::watch::channel(false).0,
             early,
@@ -444,14 +443,29 @@ impl SessionRegistry {
     /// [`Slot::Failed`] (#32 review L1).
     async fn retry(self: &Arc<Self>, id: &str) {
         let _attaching = self.attach_lock.lock().await;
-        if self.closing.load(Ordering::SeqCst) || self.awaiting_previous(id) {
+        if self.is_closing() || self.awaiting_previous(id) {
             return;
         }
         let warned = matches!(
             self.slots.lock().get(id),
             Some(Slot::HeldElsewhere { warned: true, .. })
         );
-        let (next, warned) = match self.acquire(id).await {
+        // The whole attach observes the shutdown (#32 review L8): the
+        // preflight, the acquire and the store round trips are not raced
+        // against J6's pre-arm, and a serve whose sessions were all held at
+        // startup has not armed it at all. Abandoned, it may hold the lease
+        // it took, so that is released before the shutdown's close set is
+        // taken; the attach lock is held until then.
+        let attempt = tokio::select! {
+            biased;
+            () = self.closed() => None,
+            attempt = self.acquire(id) => Some(attempt),
+        };
+        let Some(attempt) = attempt else {
+            self.release_abandoned(id).await;
+            return;
+        };
+        let (next, warned) = match attempt {
             Ok(Acquired::Attached(mem, endpoint)) => {
                 let session = self.admit(mem, endpoint);
                 tracing::info!(
@@ -506,6 +520,56 @@ impl SessionRegistry {
                 warned,
             },
         );
+    }
+
+    /// Whether the process shutdown has taken the attached set.
+    fn is_closing(&self) -> bool {
+        *self.closing.borrow()
+    }
+
+    /// Resolve once the process shutdown has taken the attached set.
+    async fn closed(&self) {
+        let mut rx = self.closing.subscribe();
+        // `self` holds the sender, so this cannot fail while it is awaited.
+        let _ = rx.wait_for(|closing| *closing).await;
+    }
+
+    /// Release the lease a background attach of `id` may have taken before
+    /// the shutdown abandoned it (#32 review L8). Holder-scoped, so a lease
+    /// the attach never took, or another writer holds, is left alone;
+    /// bounded by `LEASE_RELEASE_GRACE`, past which the row lapses at TTL.
+    async fn release_abandoned(&self, id: &str) {
+        let Some(attacher) = &self.attacher else {
+            return;
+        };
+        let Some(store) = attacher.template.shared_store() else {
+            return;
+        };
+        let holder = crate::store::lease::LeaseHolder::for_this_process(
+            &crate::types::AgentId::new(&attacher.agent),
+        );
+        let session = crate::types::SessionId::new(id);
+        match tokio::time::timeout(LEASE_RELEASE_GRACE, store.release_lease(&session, &holder))
+            .await
+        {
+            Ok(Ok(())) => tracing::info!(
+                session = %id,
+                "lambo serve: a background attach was abandoned at shutdown; its lease, if it \
+                 took one, is released"
+            ),
+            Ok(Err(e)) => tracing::warn!(
+                session = %id,
+                error = %e,
+                "lambo serve: a background attach was abandoned at shutdown and its lease could \
+                 not be released; it will lapse at TTL"
+            ),
+            Err(_) => tracing::warn!(
+                session = %id,
+                grace_secs = LEASE_RELEASE_GRACE.as_secs(),
+                "lambo serve: a background attach was abandoned at shutdown and releasing its \
+                 lease timed out; it will lapse at TTL"
+            ),
+        }
     }
 
     /// Detach session `id` in the background (design §3.4); the process
@@ -594,7 +658,7 @@ impl SessionRegistry {
     /// live sessions leave their slots, so the set's handles are the last
     /// the registry gives out.
     pub(super) async fn close_set(&self) -> Vec<Arc<AttachedSession>> {
-        self.closing.store(true, Ordering::SeqCst);
+        self.closing.send_replace(true);
         let _no_attach_in_flight = self.attach_lock.lock().await;
         let mut slots = self.slots.lock();
         self.order
@@ -653,7 +717,7 @@ async fn retry_loop(registry: Weak<SessionRegistry>) {
         let Some(registry) = registry.upgrade() else {
             return;
         };
-        if registry.closing.load(Ordering::SeqCst) {
+        if registry.is_closing() {
             return;
         }
         for id in registry.due() {
