@@ -110,6 +110,11 @@
   `accept_client_vectors: bool` (#22 PR 4). Code that builds either with a
   struct literal must add it (or use `..Default::default()`); both default to
   `false`, and `lambo.toml` files are unaffected.
+- `EmbedderKind` gains a variant, `EmbeddingGemma2` (#22 PR 5), so library
+  code that matches it exhaustively needs the new arm. `EmbedderConfig`
+  gains a public field, `images: Option<bool>`; code that builds one with a
+  struct literal must add `images: None` (or use `..Default::default()`).
+  `lambo.toml` files are unaffected.
 
 ### Changed
 
@@ -264,6 +269,30 @@
 
 ### Added
 
+- EmbeddingGemma 2 embedder over llama.cpp (#22 PR 5): `[embedder] kind =
+  "embeddinggemma2"` (aliases `embeddinggemma-2`, `eg2`), feature
+  `embed-eg2`. One `llama-server` (b11452 or later) embeds text and, when
+  started with `--mmproj`, images into one space, so `lambo_derive_image`
+  can send the image itself. Lambo adds the model card's task prefixes
+  (documents `title: none | text: `, recall queries `task: search result |
+  query: `, images none), truncates to `dim` (768, 512, 256 or 128) and
+  re-normalizes. The contract `model` is the weights artifact plus the
+  prompt profile, by default
+  `ggml-org/embeddinggemma-2-GGUF@bfcd2987/Q8_0;prompts=lambo-eg2-v1`, since
+  `llama-server` ignores the request's model name. The profile fixes the
+  image budget at 280 tokens: start the server with `--image-min-tokens 280
+  --image-max-tokens 280 --batch-size 8192 --ubatch-size 8192` (at the
+  default ubatch of 512 the server silently caps the budget to 256), and an
+  image embedded at any other budget is refused. Before its first embed the
+  adapter asks `/props` which file the server loaded and whether it has
+  vision, and refuses a file that is not EmbeddingGemma 2, another
+  quantization than the artifact names, or images on a server without a
+  vision projector. An image sent to such a server anyway is a permanent
+  configuration error naming `--mmproj`, and an image the server cannot
+  decode a content refusal, not the transient error their HTTP 500 used to
+  mean. `[embedder] images = false` (default on) makes it text-only.
+  `api_key_env` works with this kind as with `bge_m3`. See
+  `lambo.example.toml` for the full server command line.
 - MCP tool `lambo_derive_image` (#22 PR 4): one image concept per call, a
   caption plus either the image (`image`: mime and base64, embedded by the
   server on the call path) or a client-computed vector (`vector`: values and
