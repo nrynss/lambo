@@ -212,6 +212,31 @@ impl LamboServer {
                 "write_queue_probe_serial_items_per_sec".into(),
                 json!(calibration.and_then(|c| c.probe_serial_items_per_sec)),
             );
+            // #11. The ratio the server already logs once at the takeover,
+            // published so a rig can watch it without the log: how many times
+            // faster the probe read than the rate now in force. `null` until
+            // observation has taken over from a probe that landed.
+            obj.insert(
+                "write_queue_probe_optimism".into(),
+                json!(calibration.and_then(|c| c.probe_optimism())),
+            );
+            // #11. Admission-to-settle latency of the last
+            // APPLY_LATENCY_WINDOW applied writes, in whole milliseconds:
+            // what a caller waiting on a receipt experiences, so a rig can
+            // check its derive latency against the published wait_ms maximum
+            // without joining the ledger. `null` before the first applied
+            // write.
+            let latency = queue.apply_latency();
+            obj.insert(
+                "write_queue_apply_samples".into(),
+                json!(latency.map_or(0, |l| l.samples)),
+            );
+            let ms = |pick: fn(&crate::writeq::ApplyLatencySummary) -> std::time::Duration| {
+                json!(latency.as_ref().map(|l| pick(l).as_millis() as u64))
+            };
+            obj.insert("write_queue_apply_ms_p50".into(), ms(|l| l.p50));
+            obj.insert("write_queue_apply_ms_p90".into(), ms(|l| l.p90));
+            obj.insert("write_queue_apply_ms_max".into(), ms(|l| l.max));
             obj.insert("write_queue_outstanding".into(), json!(c.outstanding()));
             obj.insert("write_queue_accepted".into(), json!(c.accepted()));
             obj.insert("write_queue_applied".into(), json!(c.applied()));

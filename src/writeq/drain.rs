@@ -231,6 +231,9 @@ impl WritePipeline {
             lanes.running_per_lane.clear();
             lanes.queued = 0;
             lanes.bytes = 0;
+            // After the settle block above, never before it: a wait that sees
+            // this has nothing left to wait for from this close.
+            lanes.settled_at_close = true;
         }
         self.settled.notify_waiters();
         deferred

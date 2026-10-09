@@ -404,6 +404,7 @@ impl WritePipeline {
         let settled = self.settled.clone();
         let clock = self.clock.clone();
         let observed = self.observed.clone();
+        let apply_latency = self.apply_latency.clone();
         tokio::spawn(async move {
             loop {
                 let job = {
@@ -546,6 +547,7 @@ impl WritePipeline {
                 let answer = match outcome {
                     Ok(summary) => {
                         counters.applied.fetch_add(1, Ordering::Relaxed);
+                        apply_latency.lock().record(job.admitted.elapsed());
                         // J4 proof obligation 5: a closed acked write's applied
                         // lifecycle is measurable — carry the metric-2 fact set,
                         // which is exactly what a durable-intent replay hid.

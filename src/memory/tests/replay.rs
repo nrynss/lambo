@@ -7,7 +7,7 @@ use super::*;
 /// `MemoryStore` behind a `VECTOR_SEARCH` face whose candidate reads
 /// succeed (empty), so hybrid's below-threshold arm actually persists its
 /// vectors — the *embedding column* is what the J3 assertions read.
-struct VectorSearchable(Arc<MemoryStore>);
+pub(super) struct VectorSearchable(pub(super) Arc<MemoryStore>);
 
 #[async_trait]
 impl GraphStore for VectorSearchable {
@@ -717,4 +717,68 @@ async fn an_over_budget_derive_is_refused_at_the_ack() {
         .expect("exactly the budget is admitted");
     assert!(!submitted.dropped());
     mem.close().await.expect("close");
+}
+
+/// **A wait on a replay-owed receipt ends when the session closes** (#11
+/// review P3-2).
+///
+/// A close settles every receipt this process holds (`intent_durable`) and
+/// wakes the waiters, so those waits end with it. A `pending_replay` id is not
+/// one of them: it is owed to a replay the close stops, so nothing settles it,
+/// and its wait kept looping against a closed session until its own budget
+/// ran out, up to 34 s after the close since #11. The wait now answers once
+/// the pipeline is sealed and its workers are gone, because nothing in this
+/// process can settle the id after that.
+#[tokio::test]
+async fn a_wait_on_a_replay_owed_receipt_ends_when_the_session_closes() {
+    let inner = Arc::new(MemoryStore::new());
+    let agent = AgentId::new("agent-a");
+    let receipt = defer_one_intent(&inner, "intent-wait-close", &agent).await;
+
+    // Session 2 cannot replay (the embedder is down), so the id stays owed.
+    let mem2 = Memory::builder()
+        .session("intent-wait-close")
+        .agent("agent-a")
+        .flush_interval(Duration::from_secs(3_600))
+        .store(Arc::new(VectorSearchable(inner.clone())) as Arc<dyn GraphStore>)
+        .embedder(Arc::new(DeadEmbedder) as Arc<dyn Embedder>)
+        .embedding_contract(contract("fixture", 1024))
+        .match_strategy(MatchStrategy::Hybrid)
+        .build()
+        .await
+        .expect("build session 2");
+    assert_eq!(
+        mem2.pipeline().lookup(&agent, receipt).tag(),
+        "pending_replay"
+    );
+
+    let wait = mem2
+        .pipeline()
+        .wait(&agent, receipt, crate::writeq::RECEIPT_WAIT_MAX);
+    let close = async {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        mem2.close().await.expect("clean close");
+    };
+    let (answer, ()) =
+        tokio::time::timeout(Duration::from_secs(10), async { tokio::join!(wait, close) })
+            .await
+            .expect("the wait must end with the close, not run out its RECEIPT_WAIT_MAX");
+    assert_eq!(
+        answer.tag(),
+        "pending_replay",
+        "the honest answer: the next serve owes the replay"
+    );
+
+    // And a wait that starts after the close answers at once.
+    let started = std::time::Instant::now();
+    let after = mem2
+        .pipeline()
+        .wait(&agent, receipt, crate::writeq::RECEIPT_WAIT_MAX)
+        .await;
+    assert_eq!(after.tag(), "pending_replay");
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        started.elapsed()
+    );
 }
