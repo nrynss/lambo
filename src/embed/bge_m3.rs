@@ -6,12 +6,20 @@
 //! cosine similarity (see `notes/embeddings-portable.md`).
 //!
 //! This backend is selected when `LAMBO_EMBEDDER=bge_m3` (the default).
+//!
+//! Nothing here is llama.cpp-specific except [`BgeM3LlamaCppEmbedder::check_health`]:
+//! with an optional bearer token ([`BgeM3LlamaCppEmbedder::with_bearer_token`],
+//! configured as `[embedder] api_key_env`) the same adapter reaches hosted
+//! OpenAI-compatible endpoints such as Cloudflare Workers AI (issue #21).
 
 use async_trait::async_trait;
+use reqwest::header::{HeaderValue, AUTHORIZATION};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 use super::{EmbedError, Embedder};
+
+mod scrub;
 
 /// OpenAI-compatible embeddings request body (`model` is omitted when empty so it hits
 /// a llama.cpp server's default model).
@@ -68,6 +76,10 @@ pub(crate) fn classify_status(code: u16) -> EmbedStatusClass {
         400 | 413 | 415 | 422 => EmbedStatusClass::Content,
         // A statement about the deployment — an operator must act.
         401 | 403 | 404 => EmbedStatusClass::PermanentConfig,
+        // A redirect: the client never follows one (issue #21, see
+        // `build_client`), so the configured URL is not the endpoint. Only an
+        // operator can fix that, exactly like a 404.
+        300..=399 => EmbedStatusClass::PermanentConfig,
         // The server was momentarily unwilling for reasons that do not
         // mention the input (`500` is a loaded llama.cpp fast-failing a burst;
         // `503` is "no slot available" / loading the model).
@@ -80,23 +92,143 @@ pub(crate) fn classify_status(code: u16) -> EmbedStatusClass {
 }
 
 /// BGE-M3 embeddings via a local llama.cpp server over HTTP.
-#[derive(Debug, Clone)]
+///
+/// `Debug` is written by hand so the bearer token can never be printed.
+#[derive(Clone)]
 pub struct BgeM3LlamaCppEmbedder {
     client: reqwest::Client,
     /// Full embed endpoint URL, e.g. `http://127.0.0.1:8080/v1/embeddings`.
     url: String,
     /// Base URL for `/health`, e.g. `http://127.0.0.1:8080`.
     base_url: String,
+    /// [`Self::url`] as printed in logs, errors and `Debug`: scheme, host,
+    /// port and path only, never userinfo or a query ([`url_for_log`]).
+    log_url: String,
     /// Model id sent in the request (empty => server default).
     model: String,
     /// Expected embedding dimensionality (must match server output and store schema).
     dim: usize,
+    /// `Authorization: Bearer <token>` for a hosted endpoint, marked sensitive.
+    /// `None` sends no `Authorization` header at all (issue #21).
+    authorization: Option<HeaderValue>,
 }
 
-fn build_client(connect: Duration, request: Duration) -> Result<reqwest::Client, EmbedError> {
-    reqwest::Client::builder()
+impl std::fmt::Debug for BgeM3LlamaCppEmbedder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BgeM3LlamaCppEmbedder")
+            .field("url", &self.log_url)
+            .field("model", &self.model)
+            .field("dim", &self.dim)
+            .field(
+                "authorization",
+                &self
+                    .authorization
+                    .as_ref()
+                    .map(|_| "Bearer (value not shown)"),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+/// May a bearer token be sent to `base_url`? Only over `https`, or over plain
+/// `http` to a loopback host (`localhost`, `127.0.0.0/8`, `::1`), where the
+/// token never leaves the machine (a local server). Anything else would put
+/// the token on the wire in clear text, so it is refused before the token is
+/// read or sent (issue #21). The refusal names the endpoint's host and scheme,
+/// never the full URL (it may carry userinfo) and never the token.
+pub(crate) fn check_bearer_transport(base_url: &str) -> Result<(), EmbedError> {
+    let url = reqwest::Url::parse(base_url).map_err(|_| {
+        EmbedError::Unavailable(
+            "the embedder URL is not a valid URL (value not shown); a bearer token is sent only \
+             over https, or over http to a loopback host"
+                .into(),
+        )
+    })?;
+    if url.scheme() == "https" {
+        return Ok(());
+    }
+    if url.scheme() == "http" && is_loopback_host(&url) {
+        return Ok(());
+    }
+    Err(EmbedError::Unavailable(format!(
+        "refusing to send the embedder API token to {} over {}: a bearer token is sent only over \
+         https, or over http to a loopback host (localhost, 127.0.0.0/8, ::1). Use an https \
+         URL for this endpoint, or remove api_key_env",
+        url.host_str().unwrap_or("(no host)"),
+        url.scheme()
+    )))
+}
+
+/// Is `url`'s host loopback: `localhost`, `127.0.0.0/8`, `::1` or an
+/// IPv4-mapped `127.0.0.0/8`? `url` has already normalised the host: IPv4 to
+/// a dotted quad (`127.1`, `2130706433` and `0x7f.1` are `127.0.0.1`), IPv6
+/// in brackets, domains lower-cased. The name `localhost` is trusted without
+/// resolving it.
+fn is_loopback_host(url: &reqwest::Url) -> bool {
+    url.host_str().is_some_and(|host| {
+        match host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<std::net::IpAddr>()
+        {
+            Ok(std::net::IpAddr::V4(a)) => a.is_loopback(),
+            Ok(std::net::IpAddr::V6(a)) => {
+                a.is_loopback() || a.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback())
+            }
+            Err(_) => host == "localhost" || host == "localhost.",
+        }
+    })
+}
+
+/// Should the client for `base_url` ignore the `HTTP_PROXY` / `HTTPS_PROXY` /
+/// `ALL_PROXY` environment? Yes for plain `http` to a loopback host: a proxy
+/// would carry the request, and any bearer token on it, off the machine in
+/// clear text, which is exactly what [`check_bearer_transport`] allows
+/// loopback http on the promise of never doing (issue #21). `https` keeps the
+/// environment's proxies: the proxy only tunnels (`CONNECT`), TLS runs end to
+/// end, and a hosted endpoint behind a corporate egress proxy is reachable
+/// only through it. Plain `http` to any other host never carries a token
+/// (refused) and keeps its old behaviour.
+fn bypasses_env_proxy(base_url: &str) -> bool {
+    reqwest::Url::parse(base_url).is_ok_and(|url| url.scheme() == "http" && is_loopback_host(&url))
+}
+
+/// `url` for a log line, an error or `Debug`: scheme, host, port and path.
+/// Userinfo and the query are dropped, since either may carry a credential
+/// (issue #21); an unparseable URL is not shown at all.
+fn url_for_log(url: &str) -> String {
+    match reqwest::Url::parse(url) {
+        Ok(u) => {
+            let host = u.host_str().unwrap_or("");
+            match u.port() {
+                Some(port) => format!("{}://{host}:{port}{}", u.scheme(), u.path()),
+                None => format!("{}://{host}{}", u.scheme(), u.path()),
+            }
+        }
+        Err(_) => "(unparseable URL, not shown)".to_string(),
+    }
+}
+
+/// The HTTP client for `base_url`.
+///
+/// Redirects are never followed (`Policy::none`): an embeddings POST has no
+/// legitimate redirect, and reqwest keeps `Authorization` on a same-host,
+/// same-port redirect even when it downgrades `https` to `http`, so following
+/// one could resend the token in clear text (issue #21). A 3xx is answered
+/// as a permanent configuration error instead (see [`classify_status`]).
+fn build_client(
+    base_url: &str,
+    connect: Duration,
+    request: Duration,
+) -> Result<reqwest::Client, EmbedError> {
+    let mut builder = reqwest::Client::builder()
         .connect_timeout(connect)
         .timeout(request)
+        .redirect(reqwest::redirect::Policy::none());
+    if bypasses_env_proxy(base_url) {
+        builder = builder.no_proxy();
+    }
+    builder
         .build()
         .map_err(|e| EmbedError::Unavailable(format!("failed to build HTTP client: {e}")))
 }
@@ -125,13 +257,56 @@ impl BgeM3LlamaCppEmbedder {
         if dim == 0 {
             return Err(EmbedError::Unavailable("embedder dim must be > 0".into()));
         }
+        // `v1/embeddings` is appended as text, so a query or fragment would
+        // swallow it (`...?k=v/v1/embeddings` POSTs to the base path). Refused
+        // without quoting: a query may carry a key.
+        if let Ok(parsed) = reqwest::Url::parse(&base_url)
+            && (parsed.query().is_some() || parsed.fragment().is_some())
+        {
+            return Err(EmbedError::Unavailable(format!(
+                "the embedder URL for {} carries a query or fragment (not shown); give the \
+                 base URL only (the v1/embeddings path is appended to it)",
+                url_for_log(&base_url)
+            )));
+        }
+        let url = format!("{base_url}/v1/embeddings");
         Ok(Self {
-            client: build_client(DEFAULT_CONNECT_TIMEOUT, DEFAULT_REQUEST_TIMEOUT)?,
-            url: format!("{base_url}/v1/embeddings"),
+            client: build_client(&base_url, DEFAULT_CONNECT_TIMEOUT, DEFAULT_REQUEST_TIMEOUT)?,
+            log_url: url_for_log(&url),
+            url,
             base_url,
             model: model.into(),
             dim,
+            authorization: None,
         })
+    }
+
+    /// Send `Authorization: Bearer <token>` on every embed request, for a hosted
+    /// OpenAI-compatible endpoint (Workers AI, an API-keyed gateway). Without
+    /// this call no `Authorization` header is sent.
+    ///
+    /// The header value is marked sensitive. `Debug` shows only that a token
+    /// is set, and no message this adapter writes is built from the token
+    /// itself. A non-2xx body is quoted into the error with every detectable
+    /// echo of the token replaced: any run of 8 or more consecutive bytes of
+    /// it, raw, JSON-escaped or percent-encoded (see `scrub`). A shorter,
+    /// case-changed or otherwise re-encoded echo is not detected. A token
+    /// that is not a valid header value is refused without quoting it.
+    ///
+    /// Refused unless the base URL is `https`, or `http` to a loopback host
+    /// (`check_bearer_transport`). Redirects are never followed, and plain
+    /// `http` to loopback ignores proxy environment variables, so the token
+    /// goes only to the configured endpoint.
+    pub fn with_bearer_token(mut self, token: &str) -> Result<Self, EmbedError> {
+        check_bearer_transport(&self.base_url)?;
+        let mut value = HeaderValue::from_str(&format!("Bearer {token}")).map_err(|_| {
+            EmbedError::Unavailable(
+                "the embedder API token is not a valid HTTP header value (value not shown)".into(),
+            )
+        })?;
+        value.set_sensitive(true);
+        self.authorization = Some(value);
+        Ok(self)
     }
 
     /// Override connect/request timeouts (most users can rely on the defaults).
@@ -140,11 +315,52 @@ impl BgeM3LlamaCppEmbedder {
         connect: Duration,
         request: Duration,
     ) -> Result<Self, EmbedError> {
-        self.client = build_client(connect, request)?;
+        self.client = build_client(&self.base_url, connect, request)?;
         Ok(self)
     }
 
+    /// `body`, cut and with every detectable echo of the bearer token replaced
+    /// ([`scrub::quotable_body`], whose doc lists exactly what is caught),
+    /// before it is quoted into an error. A gateway may echo the key it
+    /// refused, and these errors reach logs and MCP receipts (issue #21).
+    fn without_token(&self, body: &str, truncated: bool) -> String {
+        scrub::quotable_body(body, self.bearer_token(), truncated)
+    }
+
+    /// The bearer token this adapter sends, if any.
+    fn bearer_token(&self) -> Option<&str> {
+        self.authorization
+            .as_ref()
+            .and_then(|auth| auth.as_bytes().strip_prefix(b"Bearer "))
+            .and_then(|token| std::str::from_utf8(token).ok())
+    }
+
+    /// At most [`scrub::read_cap`] bytes of an error body, and whether more
+    /// was left unread. The rest is never downloaded: only that much is ever
+    /// quoted or scanned, and a hostile or broken endpoint can send any
+    /// amount. A read error ends the body where it stopped.
+    async fn capped_error_body(&self, mut resp: reqwest::Response) -> (String, bool) {
+        let cap = scrub::read_cap(self.bearer_token().map_or(0, str::len));
+        let mut body = Vec::new();
+        let mut truncated = false;
+        while let Ok(Some(chunk)) = resp.chunk().await {
+            let room = cap - body.len();
+            if chunk.len() > room {
+                body.extend_from_slice(&chunk[..room]);
+                truncated = true;
+                break;
+            }
+            body.extend_from_slice(&chunk);
+        }
+        (String::from_utf8_lossy(&body).into_owned(), truncated)
+    }
+
     /// Report the server health without embedding anything.
+    ///
+    /// **llama.cpp only.** It calls llama.cpp's `/health`, which hosted
+    /// OpenAI-compatible endpoints (Workers AI, Ollama) do not serve, and it
+    /// sends no `Authorization` header. Do not wire it into `doctor` or startup
+    /// for this kind; today only tests call it (issue #21).
     pub async fn check_health(&self) -> Result<(), EmbedError> {
         let resp = self
             .client
@@ -152,7 +368,13 @@ impl BgeM3LlamaCppEmbedder {
             .timeout(HEALTH_TIMEOUT)
             .send()
             .await
-            .map_err(|e| EmbedError::Unavailable(format!("llama.cpp health check failed: {e}")))?;
+            .map_err(|e| {
+                EmbedError::Unavailable(format!(
+                    "llama.cpp health check failed at {}: {}",
+                    url_for_log(&self.base_url),
+                    e.without_url()
+                ))
+            })?;
         if !resp.status().is_success() {
             let status = resp.status();
             return Err(EmbedError::Backend(format!(
@@ -184,21 +406,49 @@ impl BgeM3LlamaCppEmbedder {
             model: model.to_string(),
             input: text.to_string(),
         };
-        let resp = self
-            .client
-            .post(&self.url)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| EmbedError::Unavailable(format!("llama.cpp unreachable: {e}")))?;
+        let mut req = self.client.post(&self.url).json(&body);
+        if let Some(auth) = &self.authorization {
+            req = req.header(AUTHORIZATION, auth.clone());
+        }
+        let resp = req.send().await.map_err(|e| {
+            EmbedError::Unavailable(format!(
+                "llama.cpp unreachable at {}: {}",
+                self.log_url,
+                e.without_url()
+            ))
+        })?;
         let status = resp.status();
         if status.is_success() {
-            return resp.json().await.map_err(|e| {
-                EmbedError::Backend(format!("llama.cpp returned unparseable JSON: {e}"))
+            let bytes = resp.bytes().await.map_err(|e| {
+                EmbedError::Backend(format!(
+                    "llama.cpp response body could not be read: {}",
+                    e.without_url()
+                ))
+            })?;
+            // The parse error's own text quotes body content (`invalid type:
+            // string "..."`), which an echoing endpoint could fill with the
+            // token: name only its class and position (issue #21).
+            return serde_json::from_slice(&bytes).map_err(|e| {
+                EmbedError::Backend(format!(
+                    "llama.cpp returned unparseable JSON ({:?} error at line {}, column {}; \
+                     body not shown)",
+                    e.classify(),
+                    e.line(),
+                    e.column()
+                ))
             });
         }
-        let text_body = resp.text().await.unwrap_or_default();
         let code = status.as_u16();
+        let text_body = if status.is_redirection() {
+            // Neither the body nor `Location` is quoted: a redirect target
+            // can carry a signed URL or a key in its query (issue #21).
+            "(redirect not followed; the redirect target is not shown. Point the embedder URL \
+             at the endpoint itself)"
+                .to_string()
+        } else {
+            let (body, truncated) = self.capped_error_body(resp).await;
+            self.without_token(&body, truncated)
+        };
         match classify_status(code) {
             EmbedStatusClass::Transient => Err(EmbedError::Unavailable(format!(
                 "llama.cpp is momentarily unwilling ({status}) for model {model:?}: {text_body}"
@@ -208,7 +458,7 @@ impl BgeM3LlamaCppEmbedder {
                 // as transient (the write stays durable) and log the status so
                 // the gap in OUR table is on the record (J3-R2R-1 property 2).
                 tracing::warn!(
-                    url = %self.url,
+                    url = %self.log_url,
                     model = %model,
                     status = %status,
                     "llama.cpp answered with status {status}, which the J3-R2R-1 rule table \
@@ -221,7 +471,7 @@ impl BgeM3LlamaCppEmbedder {
             }
             EmbedStatusClass::Content => {
                 tracing::error!(
-                    url = %self.url,
+                    url = %self.log_url,
                     model = %model,
                     status = %status,
                     "llama.cpp refused this content ({status}); not retrying (CON-2)"
@@ -235,7 +485,7 @@ impl BgeM3LlamaCppEmbedder {
                 // write is failed (the class is permanent for the deployment,
                 // so retrying cannot help) AND an operator is told loudly.
                 tracing::error!(
-                    url = %self.url,
+                    url = %self.log_url,
                     model = %model,
                     status = %status,
                     "llama.cpp answered {status} — a PERMANENT configuration error (URL, model \
@@ -396,13 +646,13 @@ mod tests {
             assert_eq!(classify_status(code), Content, "status {code}");
         }
         // permanent-config — an operator must act
-        for code in [401, 403, 404] {
+        // (3xx since issue #21: redirects are never followed, so the
+        // configured URL is wrong)
+        for code in [401, 403, 404, 300, 301, 302, 303, 307, 308, 399] {
             assert_eq!(classify_status(code), PermanentConfig, "status {code}");
         }
-        // unclassified — unnamed 4xx/3xx/1xx fall here, conservatively
-        for code in [
-            406, 409, 410, 411, 412, 414, 416, 418, 421, 300, 302, 101, 199,
-        ] {
+        // unclassified — unnamed 4xx/1xx fall here, conservatively
+        for code in [406, 409, 410, 411, 412, 414, 416, 418, 421, 101, 199] {
             assert_eq!(classify_status(code), Unclassified, "status {code}");
         }
         // No status OUTSIDE the four named content codes may be labeled Content
@@ -559,6 +809,422 @@ mod tests {
             .with_timeouts(Duration::from_secs(1), Duration::from_secs(2))
             .unwrap();
         assert_eq!(e.dimensions(), 1024);
+    }
+
+    /// A fake token: only ever sent to a local mock server.
+    const FAKE_TOKEN: &str = "fake-xyzzy-embed-token";
+
+    fn has_authorization(r: &httpmock::prelude::HttpMockRequest) -> bool {
+        r.headers
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+    }
+
+    /// Issue #21: with a token, every embed request carries
+    /// `Authorization: Bearer <token>`.
+    #[tokio::test]
+    async fn sends_bearer_token_when_configured() {
+        let server = MockServer::start();
+        let authed = server.mock(|when, then| {
+            when.method(POST)
+                .path("/v1/embeddings")
+                .header("authorization", format!("Bearer {FAKE_TOKEN}"));
+            then.status(200).json_body(ok_response());
+        });
+        let e = BgeM3LlamaCppEmbedder::new(server.base_url(), "@cf/baai/bge-m3", 1024)
+            .unwrap()
+            .with_bearer_token(FAKE_TOKEN)
+            .unwrap();
+        e.embed("user schema").await.unwrap();
+        authed.assert();
+    }
+
+    /// Issue #21: without a token no `Authorization` header is sent at all,
+    /// so a local llama.cpp server sees exactly the request it saw before.
+    #[tokio::test]
+    async fn sends_no_authorization_header_by_default() {
+        let server = MockServer::start();
+        let with_auth = server.mock(|when, then| {
+            when.method(POST)
+                .path("/v1/embeddings")
+                .matches(has_authorization);
+            then.status(500).body("an Authorization header was sent");
+        });
+        let without = server.mock(|when, then| {
+            when.method(POST).path("/v1/embeddings");
+            then.status(200).json_body(ok_response());
+        });
+        let e = BgeM3LlamaCppEmbedder::new(server.base_url(), "", 1024).unwrap();
+        e.embed("user schema").await.unwrap();
+        with_auth.assert_hits(0);
+        without.assert();
+    }
+
+    /// Issue #21: the token never appears in `Debug` output.
+    ///
+    /// Mutation: derive `Debug` again -> red (the derive drops the redaction
+    /// marker; drop `set_sensitive` as well and the header prints the token).
+    #[test]
+    fn debug_never_shows_the_token() {
+        let e = BgeM3LlamaCppEmbedder::new("http://127.0.0.1:9", "", 1024)
+            .unwrap()
+            .with_bearer_token(FAKE_TOKEN)
+            .unwrap();
+        let shown = format!("{e:?}");
+        assert!(!shown.contains(FAKE_TOKEN), "{shown}");
+        assert!(shown.contains("value not shown"), "{shown}");
+        let plain = BgeM3LlamaCppEmbedder::new("http://127.0.0.1:9", "", 1024).unwrap();
+        assert!(format!("{plain:?}").contains("authorization: None"));
+    }
+
+    /// Issue #21: a token that is not a valid header value is refused at
+    /// construction without being quoted.
+    #[test]
+    fn rejects_a_token_that_is_not_a_header_value() {
+        let bad = "fake-xyzzy\nsecond-line";
+        let err = BgeM3LlamaCppEmbedder::new("http://127.0.0.1:9", "", 1024)
+            .unwrap()
+            .with_bearer_token(bad)
+            .unwrap_err();
+        assert!(matches!(err, EmbedError::Unavailable(_)), "{err:?}");
+        assert!(!err.to_string().contains("fake-xyzzy"), "{err}");
+    }
+
+    /// Issue #21: a bearer token is never sent in clear text over a network.
+    /// Plain `http` to a non-loopback host is refused, naming the host but
+    /// neither the token nor any userinfo in the URL.
+    ///
+    /// Mutation: drop the `check_bearer_transport` call -> red.
+    #[test]
+    fn a_token_is_refused_over_plain_http_to_a_remote_host() {
+        for (url, host) in [
+            ("http://api.example.com", "api.example.com"),
+            ("http://10.0.0.5:8080/", "10.0.0.5"),
+            ("http://[2001:db8::1]:8080", "[2001:db8::1]"),
+            ("http://localhost.example.com", "localhost.example.com"),
+            ("http://128.0.0.1", "128.0.0.1"),
+            (
+                "http://someone:fake-xyzzy-userinfo@example.com",
+                "example.com",
+            ),
+            ("ftp://example.com", "example.com"),
+            // Review L1: unspecified addresses are not loopback.
+            ("http://0.0.0.0:8080", "0.0.0.0"),
+            ("http://[::]:8080", "[::]"),
+            // `localhost` as userinfo: the host is evil.com.
+            ("http://localhost@evil.com", "evil.com"),
+            ("http://localhost:8080@evil.com", "evil.com"),
+            // The scheme is case-insensitive; the host still decides.
+            ("HTTP://api.example.com", "api.example.com"),
+        ] {
+            let err = BgeM3LlamaCppEmbedder::new(url, "", 1024)
+                .unwrap()
+                .with_bearer_token(FAKE_TOKEN)
+                .expect_err(&format!("{url}: a token over plain http must be refused"));
+            assert!(matches!(err, EmbedError::Unavailable(_)), "{err:?}");
+            let msg = err.to_string();
+            assert!(msg.contains(host) && msg.contains("https"), "{msg}");
+            assert!(!msg.contains(FAKE_TOKEN), "{msg}");
+            assert!(!msg.contains("fake-xyzzy-userinfo"), "{msg}");
+        }
+        // Without a token the transport is not this check's business.
+        BgeM3LlamaCppEmbedder::new("http://api.example.com", "", 1024).unwrap();
+    }
+
+    /// Issue #21: loopback over plain http (a local server) and any https
+    /// endpoint still take a token.
+    #[test]
+    fn a_token_is_allowed_over_https_and_over_http_to_loopback() {
+        for url in [
+            "http://localhost:8080",
+            "http://LOCALHOST:8080",
+            "http://127.0.0.1:9",
+            "http://127.1.2.3",
+            "http://[::1]:8080",
+            "http://[::ffff:127.0.0.1]:8080",
+            // Review L1: shorthand, decimal, hex and octal IPv4 forms of
+            // 127.0.0.1 normalise to it and are loopback.
+            "http://127.1",
+            "http://2130706433:8080",
+            "http://0x7f.1",
+            "http://0x7f000001",
+            "http://0177.0.0.1",
+            "http://localhost.:8080",
+            // Userinfo does not change the host.
+            "http://user@127.0.0.1:8080",
+            // Upper-case scheme and host.
+            "HTTP://LOCALHOST:8080",
+            "HTTPS://API.EXAMPLE.COM",
+            "https://api.cloudflare.com/client/v4/accounts/x/ai",
+            "https://10.0.0.5",
+        ] {
+            BgeM3LlamaCppEmbedder::new(url, "", 1024)
+                .unwrap()
+                .with_bearer_token(FAKE_TOKEN)
+                .unwrap_or_else(|e| panic!("{url}: {e}"));
+        }
+    }
+
+    /// Issue #21 review M2: URL userinfo (and a query) is never printed: not
+    /// by `Debug`, not in a transport error. Only scheme, host, port and path
+    /// are shown.
+    ///
+    /// Mutation: print `self.url` in `Debug` or `{e}` in the send error -> red.
+    #[tokio::test]
+    async fn url_userinfo_is_never_printed() {
+        let e = BgeM3LlamaCppEmbedder::new(
+            "http://someone:fake-xyzzy-userinfo@127.0.0.1:9/base",
+            "",
+            1024,
+        )
+        .unwrap();
+        let shown = format!("{e:?}");
+        assert!(
+            shown.contains("\"http://127.0.0.1:9/base/v1/embeddings\""),
+            "{shown}"
+        );
+        {
+            let url = "http://someone:fake-xyzzy-userinfo@127.0.0.1:9/base";
+            let e = BgeM3LlamaCppEmbedder::new(url, "", 1024).unwrap();
+            let shown = format!("{e:?}");
+            assert!(!shown.contains("fake-xyzzy"), "{shown}");
+            let err = e.embed("anything").await.unwrap_err();
+            assert!(matches!(err, EmbedError::Unavailable(_)), "{err:?}");
+            let msg = err.to_string();
+            assert!(msg.contains("llama.cpp unreachable"), "{msg}");
+            assert!(!msg.contains("fake-xyzzy"), "{msg}");
+            let err = e.check_health().await.unwrap_err().to_string();
+            assert!(!err.contains("fake-xyzzy"), "{err}");
+        }
+    }
+
+    /// A base URL with a query or fragment is refused: the appended
+    /// `v1/embeddings` would land inside it and the request would go to the
+    /// base path. The query is not quoted (it may carry a key).
+    ///
+    /// Mutation: drop the query/fragment check in `new` -> red.
+    #[test]
+    fn a_base_url_with_a_query_or_fragment_is_refused() {
+        for url in [
+            "http://127.0.0.1:9/base?key=fake-xyzzy-query",
+            "https://gw.example.com/ai#fake-xyzzy-fragment",
+        ] {
+            let err = BgeM3LlamaCppEmbedder::new(url, "", 1024).unwrap_err();
+            assert!(matches!(err, EmbedError::Unavailable(_)), "{err:?}");
+            let msg = err.to_string();
+            assert!(msg.contains("query or fragment"), "{msg}");
+            assert!(!msg.contains("fake-xyzzy"), "{msg}");
+        }
+    }
+
+    /// Issue #21 review M2: a 2xx body that does not parse is not quoted
+    /// into the error (a hostile or echoing endpoint could put the token in
+    /// it); the error names the parse failure's class and position only.
+    #[tokio::test]
+    async fn an_unparseable_success_body_is_not_quoted() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST).path("/v1/embeddings");
+            then.status(200)
+                .json_body(serde_json::json!({ "data": FAKE_TOKEN }));
+        });
+        let e = BgeM3LlamaCppEmbedder::new(server.base_url(), "", 1024)
+            .unwrap()
+            .with_bearer_token(FAKE_TOKEN)
+            .unwrap();
+        let err = e.embed("anything").await.unwrap_err();
+        assert!(matches!(err, EmbedError::Backend(_)), "{err:?}");
+        let msg = err.to_string();
+        assert!(msg.contains("unparseable JSON"), "{msg}");
+        assert!(msg.contains("line 1"), "{msg}");
+        assert!(!msg.contains("xyzzy"), "{msg}");
+        assert!(!msg.contains(&server.base_url()), "{msg}");
+    }
+
+    /// Issue #21 review M1: a redirect is never followed. reqwest's default
+    /// policy keeps `Authorization` on a same-host, same-port redirect (even
+    /// an https-to-http downgrade), so following one could resend the token
+    /// in clear text. The 3xx is a permanent configuration error naming the
+    /// status, and the redirect target is not quoted.
+    ///
+    /// Mutation: drop `.redirect(Policy::none())` from `build_client` -> red
+    /// (the target is hit, with the token).
+    #[tokio::test]
+    async fn a_redirect_is_not_followed_and_does_not_resend_the_token() {
+        for code in [301u16, 302, 307, 308] {
+            let server = MockServer::start();
+            let target = server.mock(|when, then| {
+                when.path("/elsewhere/v1/embeddings");
+                then.status(200).json_body(ok_response());
+            });
+            server.mock(|when, then| {
+                when.method(POST).path("/v1/embeddings");
+                then.status(code)
+                    .header("location", server.url("/elsewhere/v1/embeddings"))
+                    .body(format!("moved to {}", server.url("/elsewhere")));
+            });
+            let e = BgeM3LlamaCppEmbedder::new(server.base_url(), "", 1024)
+                .unwrap()
+                .with_bearer_token(FAKE_TOKEN)
+                .unwrap();
+            let err = e.embed("anything").await.unwrap_err();
+            target.assert_hits(0);
+            assert!(matches!(err, EmbedError::Backend(_)), "{code}: {err:?}");
+            let msg = err.to_string();
+            assert!(msg.contains(&code.to_string()), "{code}: {msg}");
+            assert!(msg.contains("permanent configuration error"), "{msg}");
+            assert!(!msg.contains("elsewhere"), "{code}: {msg}");
+            assert!(!msg.contains(FAKE_TOKEN), "{code}: {msg}");
+        }
+    }
+
+    /// Issue #21 review M1: plain http to loopback ignores the proxy
+    /// environment (a proxy would carry a loopback token off the machine);
+    /// https and plain http elsewhere keep it.
+    ///
+    /// Mutation: make `bypasses_env_proxy` always false -> red.
+    #[test]
+    fn only_plain_http_to_loopback_ignores_env_proxies() {
+        for url in [
+            "http://127.0.0.1:8080",
+            "http://localhost:8080",
+            "HTTP://LOCALHOST",
+            "http://[::1]:8080",
+            "http://127.1",
+        ] {
+            assert!(bypasses_env_proxy(url), "{url}");
+        }
+        for url in [
+            "https://127.0.0.1:8443",
+            "https://api.cloudflare.com",
+            "http://10.0.0.5:8080",
+            "http://api.example.com",
+            "not a url",
+        ] {
+            assert!(!bypasses_env_proxy(url), "{url}");
+        }
+    }
+
+    /// Issue #21, classification unchanged: a rejected token (401/403) is the
+    /// permanent `Backend` an operator must fix, and the error does not carry
+    /// the token.
+    #[tokio::test]
+    async fn rejected_token_is_a_permanent_backend_error() {
+        for code in [401u16, 403] {
+            let server = MockServer::start();
+            server.mock(|when, then| {
+                when.method(POST).path("/v1/embeddings");
+                then.status(code).body("authentication error");
+            });
+            let e = BgeM3LlamaCppEmbedder::new(server.base_url(), "", 1024)
+                .unwrap()
+                .with_bearer_token(FAKE_TOKEN)
+                .unwrap();
+            let err = e.embed("anything").await.unwrap_err();
+            assert!(matches!(err, EmbedError::Backend(_)), "{code}: {err:?}");
+            assert!(!err.to_string().contains(FAKE_TOKEN), "{err}");
+        }
+    }
+
+    /// Issue #21 self-review: a gateway that echoes the presented key in its
+    /// error body (some do, to say which key was refused) must not carry the
+    /// token into the error, which reaches logs and MCP receipts. Covers one
+    /// status from every class that quotes the body, and a raw, a JSON-quoted
+    /// and a masked (prefix and suffix) echo; `scrub`'s own tests cover the
+    /// other forms.
+    ///
+    /// Mutation: quote the raw body again, or replace only the exact token
+    /// (review M2) -> red.
+    #[tokio::test]
+    async fn an_error_body_echoing_the_token_never_carries_it() {
+        for code in [401u16, 400, 429, 418] {
+            let server = MockServer::start();
+            server.mock(|when, then| {
+                when.method(POST).path("/v1/embeddings");
+                // Raw, JSON-quoted, and masked down to a prefix and a suffix.
+                then.status(code).body(format!(
+                    "invalid key: Bearer {FAKE_TOKEN} {} ({}...{})",
+                    serde_json::json!({ "key": FAKE_TOKEN }),
+                    &FAKE_TOKEN[..10],
+                    &FAKE_TOKEN[FAKE_TOKEN.len() - 10..]
+                ));
+            });
+            let e = BgeM3LlamaCppEmbedder::new(server.base_url(), "", 1024)
+                .unwrap()
+                .with_bearer_token(FAKE_TOKEN)
+                .unwrap();
+            let err = e.embed("anything").await.unwrap_err().to_string();
+            assert!(!err.contains(FAKE_TOKEN), "{code}: {err}");
+            assert!(!err.contains(&FAKE_TOKEN[..10]), "{code}: {err}");
+            assert!(
+                !err.contains(&FAKE_TOKEN[FAKE_TOKEN.len() - 10..]),
+                "{code}: {err}"
+            );
+            assert!(
+                err.contains("invalid key"),
+                "{code}: the rest of the body is kept: {err}"
+            );
+        }
+    }
+
+    /// Issue #21 review: an error body is downloaded only up to what is
+    /// ever quoted or scanned, so a huge body is never read whole, and the
+    /// error says the rest was not shown.
+    ///
+    /// Mutation: read the body with `text()` again -> red (the error then
+    /// counts the bytes it read past the cut).
+    #[tokio::test]
+    async fn a_huge_error_body_is_read_only_up_to_the_cap() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST).path("/v1/embeddings");
+            then.status(400).body("x".repeat(1 << 20));
+        });
+        let e = BgeM3LlamaCppEmbedder::new(server.base_url(), "", 1024)
+            .unwrap()
+            .with_bearer_token(FAKE_TOKEN)
+            .unwrap();
+        let err = e.embed("anything").await.unwrap_err().to_string();
+        assert!(
+            err.ends_with("(rest of the body not shown)"),
+            "{}",
+            &err[err.len() - 80..]
+        );
+        assert!(
+            err.len() < scrub::QUOTED_BODY_MAX + 512,
+            "{} bytes",
+            err.len()
+        );
+    }
+
+    /// Live test against Cloudflare Workers AI's OpenAI-compatible endpoint
+    /// (issue #21). `#[ignore]`d, and additionally skipped unless both
+    /// `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` are set, so CI's
+    /// `-- --ignored` never reaches the network without credentials.
+    #[tokio::test]
+    #[ignore]
+    async fn live_workers_ai_bge_m3() {
+        let var = |k: &str| std::env::var(k).ok().filter(|s| !s.trim().is_empty());
+        let (Some(account), Some(token)) =
+            (var("CLOUDFLARE_ACCOUNT_ID"), var("CLOUDFLARE_API_TOKEN"))
+        else {
+            eprintln!(
+                "SKIP live_workers_ai_bge_m3: CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN \
+                 must both be set"
+            );
+            return;
+        };
+        let url = format!("https://api.cloudflare.com/client/v4/accounts/{account}/ai");
+        let e = BgeM3LlamaCppEmbedder::new(url, "@cf/baai/bge-m3", 1024)
+            .unwrap()
+            .with_bearer_token(token.trim())
+            .unwrap();
+        let v = e.embed("register user").await.unwrap();
+        assert_eq!(v.len(), 1024);
+        let n = unit_magnitude(&v);
+        assert!((n - 1.0).abs() < 1e-4, "L2 norm {n} should be ~1");
     }
 
     /// Live smoke test against a running llama.cpp server

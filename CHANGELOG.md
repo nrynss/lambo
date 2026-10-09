@@ -216,6 +216,52 @@
   Together they show whether a deployment's derives fit the `wait_ms`
   maximum without joining the call ledger. Additive keys; nothing else in
   the payload changes.
+- The `bge_m3` embedder can send a bearer token, so it reaches hosted
+  OpenAI-compatible embeddings endpoints such as Cloudflare Workers AI (#21).
+  - `[embedder] api_key_env` names the environment variable holding the token
+    (overridden by `LAMBO_EMBED_API_KEY_ENV`, which also holds a name). The
+    token never goes in `lambo.toml`: an inline `api_key` is refused, and so is
+    an `api_key_env` that is not an upper-case variable name or looks like a
+    token, without quoting the value.
+  - `api_key_env` may not name `LAMBO_AUTH_TOKEN` or any
+    `[[serve.credential]]` `token_env`, which hold `lambo serve`'s own
+    credentials, so the embeddings endpoint is not sent serve's token. The
+    `LAMBO_AUTH_TOKEN` rule is the one `token_env` already had, now shared in
+    one place. Neither `api_key_env` nor `token_env` may name a variable
+    lambo reads its own credentials from: `LAMBO_COCKROACH_DSN`,
+    `LAMBO_POSTGRES_DSN`, `DATABASE_URL`, `GCP_LAMBO_CREDENTIALS`,
+    `GOOGLE_APPLICATION_CREDENTIALS` or `LAMBO_GEMINI_CREDENTIALS`.
+  - The variable is read at startup. Unset or empty is a hard error naming it,
+    never a request without a key. With a token, every embed request carries
+    `Authorization: Bearer <token>`; without `api_key_env` no `Authorization`
+    header is sent, so local `llama-server` setups see no change. `Debug`
+    output shows only that a token is set. When an error body is quoted into
+    an error, every run of 8 or more consecutive characters of the token is
+    replaced, in its raw, JSON-escaped and percent-encoded forms; a shorter,
+    case-changed or otherwise re-encoded echo is not detected. A quoted body
+    is cut at 8 KiB, and a `2xx` body that does not parse is not quoted at
+    all. Logs and errors print the embedder URL as scheme, host, port and
+    path, never userinfo or a query. A `401` or `403` stays a permanent
+    configuration error.
+  - Redirects are never followed: a `3xx` is a permanent configuration
+    error naming the status, not the redirect target, so the token is never
+    resent to another URL. Plain `http` to a loopback host ignores
+    `HTTP_PROXY` and friends, so a loopback token never reaches a proxy;
+    `https` still honours them (the proxy only tunnels TLS). A base URL with
+    a query or fragment is refused, since the embeddings path is appended to
+    it.
+  - A token is sent only over `https`, or over plain `http` to a loopback
+    host (`localhost`, `127.0.0.0/8`, `::1`). `api_key_env` with a plain
+    `http` URL to any other host is refused at startup, naming the host,
+    before the variable is read. Configs without `api_key_env` are
+    unaffected.
+  - `api_key_env` with any kind other than `bge_m3` is refused.
+  - `kind = "openai"` is an alias of `bge_m3`. It still reports and stamps
+    `bge_m3`, so no existing session's embedding contract changes. Set `model`
+    to the hosted id (for example `@cf/baai/bge-m3`): a hosted model is a
+    different embedding contract from a local GGUF of the same model.
+  - `lambo.example.toml` and the configuration reference document the Workers
+    AI setup. The adapter's `check_health` remains llama.cpp-only.
 - An optional Elasticsearch recall tier (#18, feature `recall-elastic`): a
   top-level `[recall]` section in `lambo.toml` wraps the configured store in a
   `TieredStore`. The store stays the source of truth and keeps leases, fencing,

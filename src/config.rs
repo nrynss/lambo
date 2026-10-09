@@ -13,10 +13,10 @@ use crate::embed::{EmbedError, EmbedderConfig};
 use crate::store::StoreConfig;
 use crate::types::{LamboError, MatchStrategy};
 
+pub(crate) mod secret_env;
 mod serve;
 /// An environment variable name for an error message, or `(value not shown)`
 /// when it may be a pasted secret (shared by `[serve]` and `[recall]`).
-pub(crate) use serve::shown_env;
 pub use serve::{
     CredentialConfig, InlineToken, ProjectConfig, ServeConfig, ServeCredential,
     DEFAULT_ATTACH_CONCURRENCY, DEFAULT_IDLE_DETACH_SECS, DEFAULT_MAX_ATTACHED,
@@ -559,7 +559,31 @@ impl LamboFile {
     pub fn from_toml_str(s: &str) -> Result<Self, LamboError> {
         let file: Self = toml::from_str(s).map_err(|e| toml_error(s, &e))?;
         file.serve.validate()?;
+        file.check_api_key_env_is_not_a_serve_credential()?;
         Ok(file)
+    }
+
+    /// Refuse an `[embedder] api_key_env` that is also a `[[serve.credential]]`
+    /// `token_env`: the embeddings endpoint would be handed serve's own token.
+    /// Run on the file and again after the environment overlay, since
+    /// `LAMBO_EMBED_API_KEY_ENV` can name the variable too. The rule is
+    /// [`secret_env::check_not_a_serve_credential`].
+    fn check_api_key_env_is_not_a_serve_credential(&self) -> Result<(), LamboError> {
+        let Some(name) = self.embedder.api_key_env.as_deref() else {
+            return Ok(());
+        };
+        let credentials = self
+            .serve
+            .credentials
+            .iter()
+            .filter_map(|c| Some((c.name.as_str(), c.token_env.as_deref()?)));
+        secret_env::check_not_a_serve_credential(
+            name,
+            "embedder.api_key_env",
+            "api_key_env",
+            credentials,
+        )
+        .map_err(LamboError::Config)
     }
 
     /// Load from a path.
@@ -604,6 +628,7 @@ impl LamboFile {
             .embedder
             .overlay_env()
             .map_err(|e: EmbedError| LamboError::Config(e.to_string()))?;
+        file.check_api_key_env_is_not_a_serve_credential()?;
         // Non-empty env wins; an empty value is UNSET and leaves the file
         // value alone — the same rule `StoreConfig::overlay_env` and
         // `EmbedderConfig::overlay_env` apply to all nine of their variables,
@@ -1319,6 +1344,40 @@ mod tests {
         for needle in ["LAMBO_PROMOTION_POLICY", "Everywhere", "Swarm", "Solo"] {
             assert!(err.contains(needle), "error must name {needle}: {err}");
         }
+    }
+
+    /// `[embedder] api_key_env` may not name a `[[serve.credential]]`
+    /// variable, from the file or from `LAMBO_EMBED_API_KEY_ENV`: the
+    /// embeddings endpoint would be sent serve's own token.
+    ///
+    /// Mutation: drop either `check_api_key_env_is_not_a_serve_credential`
+    /// call -> red.
+    #[test]
+    fn api_key_env_may_not_name_a_serve_credentials_variable() {
+        const SERVE_VAR: &str = "LAMBO_TEST_ISSUE21_SERVE_TOKEN";
+        let serve = format!(
+            "[[serve.credential]]\nname = \"ops\"\ntoken_env = \"{SERVE_VAR}\"\n\
+             sessions = [\"a\"]\n"
+        );
+        let shared = format!("[embedder]\napi_key_env = \"{SERVE_VAR}\"\n{serve}");
+        let err = LamboFile::from_toml_str(&shared)
+            .expect_err("a shared variable must be refused")
+            .to_string();
+        for needle in ["embedder.api_key_env", SERVE_VAR, "\"ops\""] {
+            assert!(err.contains(needle), "error must name {needle}: {err}");
+        }
+        let own = format!("[embedder]\napi_key_env = \"CLOUDFLARE_API_TOKEN\"\n{serve}");
+        LamboFile::from_toml_str(&own).expect("a variable of its own is accepted");
+
+        let env = crate::test_util::env_lock();
+        let dir = scratch_config_dir("api-key-env-shared");
+        let path = dir.join("lambo.toml");
+        std::fs::write(&path, &serve).expect("config");
+        env.set(crate::embed::api_key::API_KEY_ENV_OVERRIDE, SERVE_VAR);
+        let err = LamboFile::load_resolved(Some(&path))
+            .expect_err("the env override must be refused too")
+            .to_string();
+        assert!(err.contains(SERVE_VAR) && err.contains("\"ops\""), "{err}");
     }
 
     #[test]

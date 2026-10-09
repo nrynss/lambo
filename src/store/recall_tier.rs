@@ -112,7 +112,7 @@ impl SecretRef {
             // `token_env` rule).
             _ => Err(StoreError::Backend(format!(
                 "recall.api_key names environment variable {} but it is unset or empty",
-                crate::config::shown_env(&self.env)
+                crate::config::secret_env::shown(&self.env)
             ))),
         }
     }

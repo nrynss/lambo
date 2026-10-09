@@ -107,6 +107,10 @@ pub const RESOLVE_ENV_VARS: &[&str] = &[
     "LAMBO_EMBED_DIM",
     "LAMBO_LLAMA_EMBED_URL",
     "LAMBO_LLAMA_MODEL",
+    // Issue #21: a variable *name* (`embedder.api_key_env`). The variable it
+    // names is chosen by the file, so it cannot be listed here; a harness that
+    // clears this one and writes no `api_key_env` sends no token.
+    crate::embed::api_key::API_KEY_ENV_OVERRIDE,
     "LAMBO_EMBED_DEVICE",
     "LAMBO_GEMINI_PROJECT",
     "LAMBO_GEMINI_LOCATION",
@@ -563,6 +567,15 @@ mod tests {
                 file: MEMORY,
                 resolved: Some(|p| format!("{:?}", load(p).embedder.llama_model)),
             },
+            Override {
+                // Issue #21: overrides the variable *name* `embedder.api_key_env`.
+                // Read unconditionally by `overlay_env`, whatever the kind; only
+                // `build_embedder` refuses it for a kind other than `bge_m3`.
+                var: crate::embed::api_key::API_KEY_ENV_OVERRIDE,
+                value: "SENTINEL_EMBED_TOKEN_VAR",
+                file: MEMORY,
+                resolved: Some(|p| format!("{:?}", load(p).embedder.api_key_env)),
+            },
             // From here to `LAMBO_EMBED_KEEP_WARM_SECS` inclusive, every name
             // is read unconditionally by `EmbedderConfig::overlay_env`,
             // whatever `embedder.kind` says, so a fixture-embedder test picks
@@ -762,6 +775,77 @@ mod tests {
                 o.var
             );
         }
+    }
+
+    /// Issue #21 end to end through the single resolve site: `api_key_env`
+    /// naming an unset variable fails the resolve (naming the variable), a set
+    /// one puts `Authorization: Bearer` on the wire, and no `api_key_env` sends
+    /// no header. The contract stamps `kind = bge_m3` and the configured model,
+    /// so a hosted session differs from a local one by model, not by kind.
+    #[cfg(feature = "embed-bge")]
+    #[tokio::test]
+    async fn api_key_env_resolves_at_resolve_time_and_reaches_the_wire() {
+        use httpmock::prelude::*;
+        const VAR: &str = "LAMBO_TEST_ISSUE21_RESOLVE_TOKEN";
+        const FAKE: &str = "fake-xyzzy-resolve-token";
+        let env = crate::test_util::env_lock();
+        for k in RESOLVE_ENV_VARS {
+            env.remove(k);
+        }
+        env.remove(VAR);
+
+        let server = MockServer::start();
+        let authed = server.mock(|when, then| {
+            when.method(POST)
+                .path("/v1/embeddings")
+                .header("authorization", format!("Bearer {FAKE}"));
+            then.status(200)
+                .json_body(serde_json::json!({ "data": [{ "embedding": vec![2.0f32; 1024] }] }));
+        });
+        let unauthed = server.mock(|when, then| {
+            when.method(POST).path("/v1/embeddings");
+            then.status(401).body("missing token");
+        });
+
+        let dir = crate::test_util::ScratchDir::new("lambo-issue21-resolve");
+        let keyed = dir.join("keyed.toml");
+        std::fs::write(
+            &keyed,
+            format!(
+                "[store]\nkind = \"memory\"\n[embedder]\nkind = \"bge_m3\"\nurl = \"{}\"\n\
+                 model = \"@cf/baai/bge-m3\"\napi_key_env = \"{VAR}\"\n",
+                server.base_url()
+            ),
+        )
+        .unwrap();
+
+        let Err(err) = resolve_from_config_path(Some(&keyed)) else {
+            panic!("an unset api_key_env variable must fail the resolve");
+        };
+        let msg = err.to_string();
+        assert!(msg.contains(VAR) && msg.contains("not set"), "{msg}");
+
+        env.set(VAR, FAKE);
+        let resolved = resolve_from_config_path(Some(&keyed)).expect("resolve with token");
+        assert_eq!(resolved.embedding.kind, "bge_m3");
+        assert_eq!(resolved.embedding.model.as_deref(), Some("@cf/baai/bge-m3"));
+        resolved.embedder.embed("user schema").await.unwrap();
+        authed.assert_hits(1);
+
+        let plain = dir.join("plain.toml");
+        std::fs::write(
+            &plain,
+            format!(
+                "[store]\nkind = \"memory\"\n[embedder]\nkind = \"bge_m3\"\nurl = \"{}\"\n",
+                server.base_url()
+            ),
+        )
+        .unwrap();
+        let resolved = resolve_from_config_path(Some(&plain)).expect("resolve without token");
+        let err = resolved.embedder.embed("user schema").await.unwrap_err();
+        assert!(err.to_string().contains("401"), "{err}");
+        authed.assert_hits(1);
+        unauthed.assert_hits(1);
     }
     #[test]
     fn vector_compat_none_store_accepts_any_positive_dim() {
