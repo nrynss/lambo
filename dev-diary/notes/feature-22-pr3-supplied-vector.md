@@ -209,9 +209,10 @@ for the ranking-parity measurement of design 7.3.
 - **Query cache (#14).** Filled only from recall's `embed_query`; an image
   derive, sync or queued, leaves it empty
   (`an_image_derive_never_touches_the_query_embedding_cache`).
-- **Erase (#23).** No code change (design 4.5). The shared testkit's planted
-  intent is now an unconsumed `DeriveImage`, so every adapter's census covers
-  a vector-carrying intent row (counts unchanged), and
+- **Erase (#23).** No code change (design 4.5). The shared testkit plants
+  two intents, a plain `Derive` and an unconsumed `DeriveImage` with a
+  non-integer unit vector, so every adapter's census covers both kinds of
+  intent row (`write_intents: 2`, review L6), and
   `erase_leaves_nothing_of_a_derived_image` erases a SQLite session whose
   image concepts came from real image derives.
 
