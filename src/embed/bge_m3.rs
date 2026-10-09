@@ -109,8 +109,30 @@ pub(crate) struct StatusVerdict {
 /// image call, whose `500` can be a permanent deployment fault).
 pub(crate) type StatusRule = fn(u16, &str) -> StatusVerdict;
 
-/// The J3 table, as a [`StatusRule`]: the body is not consulted.
-pub(crate) fn default_status_rule(code: u16, _body: &str) -> StatusVerdict {
+/// The body `llama-server` (checked on b11517) sends with `500` for a
+/// non-causal input (an embedding) longer than its physical batch:
+/// `input (N tokens) is too large to process. increase the physical batch
+/// size (current batch size: M)`.
+const UBATCH_TOO_SMALL: &str = "too large to process. increase the physical batch size";
+
+/// Appended to the error for an input longer than the server's ubatch.
+const UBATCH_HINT: &str = " (this input is longer than the llama-server's physical batch, which \
+    an embedding must fit in whole: raise it, e.g. --batch-size 8192 --ubatch-size 8192, to embed \
+    inputs this long)";
+
+/// The J3 table, as a [`StatusRule`], with one body-named exception: a `500`
+/// whose body says the input is too large for the physical batch is a fact
+/// about this input on this deployment, not a busy server, so it is
+/// `Content` (settled as failed, with a `--ubatch-size` hint) instead of
+/// transient. Retrying it can never succeed, and before this rule it was
+/// retried forever. Every other body is ignored.
+pub(crate) fn default_status_rule(code: u16, body: &str) -> StatusVerdict {
+    if code == 500 && body.contains(UBATCH_TOO_SMALL) {
+        return StatusVerdict {
+            class: EmbedStatusClass::Content,
+            hint: Some(UBATCH_HINT),
+        };
+    }
     StatusVerdict {
         class: classify_status(code),
         hint: None,
@@ -700,6 +722,44 @@ mod tests {
         let err = e.embed("anything").await.unwrap_err();
         assert!(matches!(err, EmbedError::Unavailable(_)), "{err:?}");
         assert!(err.to_string().contains("500"));
+    }
+
+    /// A `500` whose body is llama-server's "increase the physical batch
+    /// size" (b11517's exact text) is a content refusal with a ubatch hint,
+    /// not a transient: the same input can never fit the same server, so
+    /// retrying it would loop forever. A `500` with any other body stays
+    /// transient.
+    ///
+    /// Mutation: drop the body check in `default_status_rule` -> red.
+    #[tokio::test]
+    async fn a_500_for_an_input_over_the_ubatch_is_a_content_refusal() {
+        const BODY: &str = r#"{"error":{"code":500,"message":"input (3002 tokens) is too large to process. increase the physical batch size (current batch size: 512)","type":"server_error"}}"#;
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST).path("/v1/embeddings");
+            then.status(500).body(BODY);
+        });
+        let e = BgeM3LlamaCppEmbedder::new(server.base_url(), "", 1024).unwrap();
+        let err = e.embed("a long concept").await.unwrap_err();
+        assert!(matches!(err, EmbedError::Backend(_)), "{err:?}");
+        assert!(!err.is_transient(), "{err:?}");
+        let msg = err.to_string();
+        assert!(msg.contains("refused this content"), "{msg}");
+        assert!(msg.contains("--ubatch-size"), "{msg}");
+
+        assert_eq!(
+            default_status_rule(500, BODY).class,
+            EmbedStatusClass::Content
+        );
+        assert_eq!(
+            default_status_rule(500, "internal error").class,
+            EmbedStatusClass::Transient
+        );
+        // Only a 500 carries this meaning.
+        assert_eq!(
+            default_status_rule(503, BODY).class,
+            EmbedStatusClass::Transient
+        );
     }
 
     /// J3-R2R-1 algorithm unit test: the rule table itself, exhaustive and
