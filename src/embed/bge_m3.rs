@@ -74,6 +74,10 @@ pub(crate) fn classify_status(code: u16) -> EmbedStatusClass {
         400 | 413 | 415 | 422 => EmbedStatusClass::Content,
         // A statement about the deployment — an operator must act.
         401 | 403 | 404 => EmbedStatusClass::PermanentConfig,
+        // A redirect: the client never follows one (issue #21, see
+        // `build_client`), so the configured URL is not the endpoint. Only an
+        // operator can fix that, exactly like a 404.
+        300..=399 => EmbedStatusClass::PermanentConfig,
         // The server was momentarily unwilling for reasons that do not
         // mention the input (`500` is a loaded llama.cpp fast-failing a burst;
         // `503` is "no slot available" / loading the model).
@@ -138,22 +142,7 @@ pub(crate) fn check_bearer_transport(base_url: &str) -> Result<(), EmbedError> {
     if url.scheme() == "https" {
         return Ok(());
     }
-    // `url` normalises the host: IPv4 to dotted quad (`127.1` is
-    // `127.0.0.1`), IPv6 in brackets, domains lower-cased.
-    let loopback = url.host_str().is_some_and(|host| {
-        match host
-            .trim_start_matches('[')
-            .trim_end_matches(']')
-            .parse::<std::net::IpAddr>()
-        {
-            Ok(std::net::IpAddr::V4(a)) => a.is_loopback(),
-            Ok(std::net::IpAddr::V6(a)) => {
-                a.is_loopback() || a.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback())
-            }
-            Err(_) => host == "localhost" || host == "localhost.",
-        }
-    });
-    if url.scheme() == "http" && loopback {
+    if url.scheme() == "http" && is_loopback_host(&url) {
         return Ok(());
     }
     Err(EmbedError::Unavailable(format!(
@@ -165,10 +154,60 @@ pub(crate) fn check_bearer_transport(base_url: &str) -> Result<(), EmbedError> {
     )))
 }
 
-fn build_client(connect: Duration, request: Duration) -> Result<reqwest::Client, EmbedError> {
-    reqwest::Client::builder()
+/// Is `url`'s host loopback: `localhost`, `127.0.0.0/8`, `::1` or an
+/// IPv4-mapped `127.0.0.0/8`? `url` has already normalised the host: IPv4 to
+/// a dotted quad (`127.1`, `2130706433` and `0x7f.1` are `127.0.0.1`), IPv6
+/// in brackets, domains lower-cased. The name `localhost` is trusted without
+/// resolving it.
+fn is_loopback_host(url: &reqwest::Url) -> bool {
+    url.host_str().is_some_and(|host| {
+        match host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<std::net::IpAddr>()
+        {
+            Ok(std::net::IpAddr::V4(a)) => a.is_loopback(),
+            Ok(std::net::IpAddr::V6(a)) => {
+                a.is_loopback() || a.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback())
+            }
+            Err(_) => host == "localhost" || host == "localhost.",
+        }
+    })
+}
+
+/// Should the client for `base_url` ignore the `HTTP_PROXY` / `HTTPS_PROXY` /
+/// `ALL_PROXY` environment? Yes for plain `http` to a loopback host: a proxy
+/// would carry the request, and any bearer token on it, off the machine in
+/// clear text, which is exactly what [`check_bearer_transport`] allows
+/// loopback http on the promise of never doing (issue #21). `https` keeps the
+/// environment's proxies: the proxy only tunnels (`CONNECT`), TLS runs end to
+/// end, and a hosted endpoint behind a corporate egress proxy is reachable
+/// only through it. Plain `http` to any other host never carries a token
+/// (refused) and keeps its old behaviour.
+fn bypasses_env_proxy(base_url: &str) -> bool {
+    reqwest::Url::parse(base_url).is_ok_and(|url| url.scheme() == "http" && is_loopback_host(&url))
+}
+
+/// The HTTP client for `base_url`.
+///
+/// Redirects are never followed (`Policy::none`): an embeddings POST has no
+/// legitimate redirect, and reqwest keeps `Authorization` on a same-host,
+/// same-port redirect even when it downgrades `https` to `http`, so following
+/// one could resend the token in clear text (issue #21). A 3xx is answered
+/// as a permanent configuration error instead (see [`classify_status`]).
+fn build_client(
+    base_url: &str,
+    connect: Duration,
+    request: Duration,
+) -> Result<reqwest::Client, EmbedError> {
+    let mut builder = reqwest::Client::builder()
         .connect_timeout(connect)
         .timeout(request)
+        .redirect(reqwest::redirect::Policy::none());
+    if bypasses_env_proxy(base_url) {
+        builder = builder.no_proxy();
+    }
+    builder
         .build()
         .map_err(|e| EmbedError::Unavailable(format!("failed to build HTTP client: {e}")))
 }
@@ -198,7 +237,7 @@ impl BgeM3LlamaCppEmbedder {
             return Err(EmbedError::Unavailable("embedder dim must be > 0".into()));
         }
         Ok(Self {
-            client: build_client(DEFAULT_CONNECT_TIMEOUT, DEFAULT_REQUEST_TIMEOUT)?,
+            client: build_client(&base_url, DEFAULT_CONNECT_TIMEOUT, DEFAULT_REQUEST_TIMEOUT)?,
             url: format!("{base_url}/v1/embeddings"),
             base_url,
             model: model.into(),
@@ -236,7 +275,7 @@ impl BgeM3LlamaCppEmbedder {
         connect: Duration,
         request: Duration,
     ) -> Result<Self, EmbedError> {
-        self.client = build_client(connect, request)?;
+        self.client = build_client(&self.base_url, connect, request)?;
         Ok(self)
     }
 
@@ -315,8 +354,16 @@ impl BgeM3LlamaCppEmbedder {
                 EmbedError::Backend(format!("llama.cpp returned unparseable JSON: {e}"))
             });
         }
-        let text_body = self.without_token(resp.text().await.unwrap_or_default());
         let code = status.as_u16();
+        let text_body = if status.is_redirection() {
+            // Neither the body nor `Location` is quoted: a redirect target
+            // can carry a signed URL or a key in its query (issue #21).
+            "(redirect not followed; the redirect target is not shown. Point the embedder URL \
+             at the endpoint itself)"
+                .to_string()
+        } else {
+            self.without_token(resp.text().await.unwrap_or_default())
+        };
         match classify_status(code) {
             EmbedStatusClass::Transient => Err(EmbedError::Unavailable(format!(
                 "llama.cpp is momentarily unwilling ({status}) for model {model:?}: {text_body}"
@@ -514,13 +561,13 @@ mod tests {
             assert_eq!(classify_status(code), Content, "status {code}");
         }
         // permanent-config — an operator must act
-        for code in [401, 403, 404] {
+        // (3xx since issue #21: redirects are never followed, so the
+        // configured URL is wrong)
+        for code in [401, 403, 404, 300, 301, 302, 303, 307, 308, 399] {
             assert_eq!(classify_status(code), PermanentConfig, "status {code}");
         }
-        // unclassified — unnamed 4xx/3xx/1xx fall here, conservatively
-        for code in [
-            406, 409, 410, 411, 412, 414, 416, 418, 421, 300, 302, 101, 199,
-        ] {
+        // unclassified — unnamed 4xx/1xx fall here, conservatively
+        for code in [406, 409, 410, 411, 412, 414, 416, 418, 421, 101, 199] {
             assert_eq!(classify_status(code), Unclassified, "status {code}");
         }
         // No status OUTSIDE the four named content codes may be labeled Content
@@ -811,6 +858,70 @@ mod tests {
                 .unwrap()
                 .with_bearer_token(FAKE_TOKEN)
                 .unwrap_or_else(|e| panic!("{url}: {e}"));
+        }
+    }
+
+    /// Issue #21 review M1: a redirect is never followed. reqwest's default
+    /// policy keeps `Authorization` on a same-host, same-port redirect (even
+    /// an https-to-http downgrade), so following one could resend the token
+    /// in clear text. The 3xx is a permanent configuration error naming the
+    /// status, and the redirect target is not quoted.
+    ///
+    /// Mutation: drop `.redirect(Policy::none())` from `build_client` -> red
+    /// (the target is hit, with the token).
+    #[tokio::test]
+    async fn a_redirect_is_not_followed_and_does_not_resend_the_token() {
+        for code in [301u16, 302, 307, 308] {
+            let server = MockServer::start();
+            let target = server.mock(|when, then| {
+                when.path("/elsewhere/v1/embeddings");
+                then.status(200).json_body(ok_response());
+            });
+            server.mock(|when, then| {
+                when.method(POST).path("/v1/embeddings");
+                then.status(code)
+                    .header("location", server.url("/elsewhere/v1/embeddings"))
+                    .body(format!("moved to {}", server.url("/elsewhere")));
+            });
+            let e = BgeM3LlamaCppEmbedder::new(server.base_url(), "", 1024)
+                .unwrap()
+                .with_bearer_token(FAKE_TOKEN)
+                .unwrap();
+            let err = e.embed("anything").await.unwrap_err();
+            target.assert_hits(0);
+            assert!(matches!(err, EmbedError::Backend(_)), "{code}: {err:?}");
+            let msg = err.to_string();
+            assert!(msg.contains(&code.to_string()), "{code}: {msg}");
+            assert!(msg.contains("permanent configuration error"), "{msg}");
+            assert!(!msg.contains("elsewhere"), "{code}: {msg}");
+            assert!(!msg.contains(FAKE_TOKEN), "{code}: {msg}");
+        }
+    }
+
+    /// Issue #21 review M1: plain http to loopback ignores the proxy
+    /// environment (a proxy would carry a loopback token off the machine);
+    /// https and plain http elsewhere keep it.
+    ///
+    /// Mutation: make `bypasses_env_proxy` always false -> red.
+    #[test]
+    fn only_plain_http_to_loopback_ignores_env_proxies() {
+        for url in [
+            "http://127.0.0.1:8080",
+            "http://localhost:8080",
+            "HTTP://LOCALHOST",
+            "http://[::1]:8080",
+            "http://127.1",
+        ] {
+            assert!(bypasses_env_proxy(url), "{url}");
+        }
+        for url in [
+            "https://127.0.0.1:8443",
+            "https://api.cloudflare.com",
+            "http://10.0.0.5:8080",
+            "http://api.example.com",
+            "not a url",
+        ] {
+            assert!(!bypasses_env_proxy(url), "{url}");
         }
     }
 
