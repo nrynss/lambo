@@ -48,9 +48,21 @@ use crate::store::StoreConfig;
 use crate::types::LamboError;
 
 /// How often a pinned session held by another writer is tried again
-/// (design §3.2: `ELECTION_RETRY × 5`). There is no election wait on this
-/// path: a request for the session gets 503 in the meantime.
-pub(super) const PINNED_RETRY: Duration = Duration::from_secs(ELECTION_RETRY.as_secs() * 5);
+/// (design §3.2: `ELECTION_RETRY × 5`, never under a second). There is no
+/// election wait on this path: a request for the session gets 503 in the
+/// meantime.
+///
+/// Multiplied as a `Duration`, not through `as_secs()`, so a sub-second
+/// `ELECTION_RETRY` cannot truncate it to zero and spin the retry loop; the
+/// floor holds whatever `ELECTION_RETRY` becomes (#32 review nit).
+pub(super) const PINNED_RETRY: Duration = {
+    let five = ELECTION_RETRY.saturating_mul(5);
+    if five.as_millis() < 1_000 {
+        Duration::from_secs(1)
+    } else {
+        five
+    }
+};
 
 /// How the registry answers a session's lost lease (design §4.2, decision 8).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

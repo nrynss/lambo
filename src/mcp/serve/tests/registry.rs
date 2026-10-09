@@ -523,6 +523,13 @@ async fn the_mcp_session_cap_is_process_wide() {
     }
 }
 
+/// The pinned retry is `ELECTION_RETRY × 5` and never under a second.
+#[test]
+fn the_pinned_retry_is_five_election_retries_and_at_least_a_second() {
+    assert_eq!(PINNED_RETRY, ELECTION_RETRY * 5);
+    assert!(PINNED_RETRY >= Duration::from_secs(1));
+}
+
 /// The policy is derived from the pinned count, in one place.
 #[test]
 fn one_pinned_session_exits_on_lease_loss_and_more_detach() {
