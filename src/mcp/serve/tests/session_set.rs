@@ -122,6 +122,52 @@ mod closes {
         assert_eq!(count("shutdown stage 4/7 event_pump_abort started"), 1);
         assert_eq!(count("lambo serve: session closed, tail durable"), 2);
     }
+
+    /// #32 review M1: stages 3 and 4 stand on their own, for a detach (design
+    /// §3.4). `close_sessions` closes the session and aborts its pump, and
+    /// logs neither stage 1 nor stage 2: those are the process's.
+    #[tokio::test]
+    async fn close_sessions_runs_only_the_per_session_stages() {
+        let (logs, _guard) = capture_logs(tracing::Level::INFO);
+        let store: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+        let a = mem(&store, "serve-detach-only").await;
+        let pump = tokio::spawn(std::future::pending::<()>());
+        let set = [SessionClose {
+            mem: &a,
+            event_pump: &pump,
+        }];
+        let progress = ShutdownProgress::for_session("serve-detach-only");
+        let out = close_sessions(&set, &EarlyShutdown::unarmed(), &progress)
+            .await
+            .report();
+        assert!(out.is_ok(), "{out:?}");
+        assert!(is_closed(&a), "the session is closed");
+        let joined = tokio::time::timeout(Duration::from_secs(5), pump)
+            .await
+            .expect("an aborted pump ends");
+        assert!(joined.unwrap_err().is_cancelled());
+
+        let lines: Vec<String> = logs.lines().iter().map(|l| plain(l)).collect();
+        let stages: Vec<&String> = lines
+            .iter()
+            .filter(|l| l.contains("lambo serve: shutdown stage "))
+            .collect();
+        assert_eq!(stages.len(), 4, "{stages:?}");
+        for (line, needle) in stages.iter().zip([
+            "shutdown stage 3/7 session_close started",
+            "shutdown stage 3/7 session_close finished in ",
+            "shutdown stage 4/7 event_pump_abort started",
+            "shutdown stage 4/7 event_pump_abort finished in ",
+        ]) {
+            assert!(line.contains(needle), "{line}");
+            assert!(line.contains("session=serve-detach-only"), "{line}");
+        }
+        let closed: Vec<&String> = lines
+            .iter()
+            .filter(|l| l.contains("lambo serve: session closed, tail durable"))
+            .collect();
+        assert_eq!(closed.len(), 1, "{lines:?}");
+    }
 }
 
 /// `line` without its ANSI colour sequences, so a field reads `key=value`.

@@ -13,8 +13,8 @@
 //! |---|---|---|---|
 //! | 1 | transport drain (HTTP graceful drain, stdio cancel) | the transport future inside [`run_and_close_sessions`], ended by [`wind_down`] | [`SHUTDOWN_GRACE`] |
 //! | 2 | keep-warm abort | `stop_before_close` in [`run_and_close_sessions`], from [`ProcessTasks::stop_before_close`](super::process::ProcessTasks::stop_before_close) | instant |
-//! | 3 | session close | [`close_bounded`]: [`Memory::close`] and its own ten logged steps (`serialize`, `replay_stop`, `queue_quiesce`, `writers_gate`, `heartbeat_abort`, `producer_joins`, `flush_join`, `final_drain`, `final_flush`, `lease_release`; `src/memory/shutdown.rs`), or on abandonment the bounded lease release | [`CLOSE_GRACE`] |
-//! | 4 | event pump abort | after the close, in [`run_and_close_sessions`], so final-drain events still reach the log | instant |
+//! | 3 | session close | [`close_sessions`], each through [`close_bounded`]: [`Memory::close`] and its own ten logged steps (`serialize`, `replay_stop`, `queue_quiesce`, `writers_gate`, `heartbeat_abort`, `producer_joins`, `flush_join`, `final_drain`, `final_flush`, `lease_release`; `src/memory/shutdown.rs`), or on abandonment the bounded lease release | [`CLOSE_GRACE`] |
+//! | 4 | event pump abort | after the close, in [`close_sessions`], so final-drain events still reach the log | instant |
 //! | 5 | background tasks | [`ProcessTasks::stop`](super::process::ProcessTasks::stop): ledger heartbeat, keep-warm (again), refusal poller | instant |
 //! | 6 | endpoint release | `hub::Hub::release` per session (`session::AttachedSession::release_endpoint`): stop accepting, end every endpoint session (each cancels its rmcp service and waits for it), then the socket file if still ours | `hub::ENDPOINT_RELEASE_GRACE`, then the stragglers are aborted and joined (unbounded, but milliseconds in practice; the watchdog's 1 s overrun allowance covers it) |
 //! | 7 | ledger close | [`close_ledger`] | the ledger's own shutdown bound |
@@ -410,14 +410,12 @@ pub(super) struct SessionClose<'a> {
 }
 
 /// `run_and_close` over every attached session (#32 design §3.5): stages
-/// 1 and 2 are process-wide and run once; stage 3 closes every session
-/// concurrently, so one [`CLOSE_GRACE`] covers them all; stage 4 aborts every
-/// event pump.
+/// 1 and 2 are process-wide and run once, then [`close_sessions`] runs
+/// stages 3 and 4 over the set.
 ///
-/// The result is the transport's error if it failed (the closes still ran),
-/// else the first session's close error, else `Ok`. Each session's outcome
-/// is logged, in set order, after stage 4 — for a set of one exactly the line
-/// a single-session serve has always logged.
+/// The result is the transport's error if it failed (the closes still ran,
+/// and their outcomes are not logged, as before the set), else the first
+/// session's close error, else `Ok`; see [`SessionCloses::report`].
 pub(super) async fn run_and_close_sessions(
     sessions: &[SessionClose<'_>],
     transport: impl Future<Output = Result<(), LamboError>>,
@@ -434,6 +432,29 @@ pub(super) async fn run_and_close_sessions(
             task.abort();
         }
     });
+    // Stages 3 and 4.
+    let closed = close_sessions(sessions, early, progress).await;
+
+    outcome?;
+    closed.report()
+}
+
+/// Stages 3 and 4 over a set of sessions: close every session concurrently,
+/// so one [`CLOSE_GRACE`] covers them all, then abort every event pump.
+///
+/// The per-session half of the shutdown, with nothing process-wide in it: no
+/// transport and no keep-warm. [`run_and_close_sessions`] calls it after
+/// stages 1 and 2; #32 PR 4's detach (design §3.4) calls it on its own, for a
+/// set of one, under [`ShutdownProgress::for_session`].
+///
+/// The outcomes come back unlogged, in set order. The caller logs them with
+/// [`SessionCloses::report`], or does not when something else already
+/// decided the result (a transport error, in [`run_and_close_sessions`]).
+pub(super) async fn close_sessions(
+    sessions: &[SessionClose<'_>],
+    early: &EarlyShutdown,
+    progress: &ShutdownProgress,
+) -> SessionCloses {
     // Stage 3: the session closes, concurrently.
     progress.begin(Stage::SessionClose);
     let closed = join_all(
@@ -450,21 +471,35 @@ pub(super) async fn run_and_close_sessions(
             session.event_pump.abort();
         }
     });
+    SessionCloses { outcomes: closed }
+}
 
-    outcome?;
-    let mut failed = None;
-    for closed in closed {
-        match closed {
-            Err(e) => {
-                tracing::error!(error = %e, "lambo serve: final flush failed — tail lost on exit, not durable (no on-disk WAL)");
-                failed.get_or_insert(e);
+/// Each session's close outcome from [`close_sessions`], in set order, not
+/// yet logged.
+#[must_use = "an unreported close outcome is a tail loss nobody logged"]
+pub(super) struct SessionCloses {
+    outcomes: Vec<Result<(), LamboError>>,
+}
+
+impl SessionCloses {
+    /// Log each session's outcome, in set order, and fold them: the first
+    /// close error, else `Ok`. For a set of one this is exactly the line a
+    /// single-session serve has always logged.
+    pub(super) fn report(self) -> Result<(), LamboError> {
+        let mut failed = None;
+        for closed in self.outcomes {
+            match closed {
+                Err(e) => {
+                    tracing::error!(error = %e, "lambo serve: final flush failed — tail lost on exit, not durable (no on-disk WAL)");
+                    failed.get_or_insert(e);
+                }
+                Ok(()) => tracing::info!("lambo serve: session closed, tail durable"),
             }
-            Ok(()) => tracing::info!("lambo serve: session closed, tail durable"),
         }
-    }
-    match failed {
-        Some(e) => Err(e),
-        None => Ok(()),
+        match failed {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
     }
 }
 
