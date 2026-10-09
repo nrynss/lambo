@@ -19,12 +19,16 @@
 //!   sessions (1 on SQLite, whose pool is one connection).
 //! * **LRU.** At most `max_loaded_sessions` views are held; the least
 //!   recently used is dropped beyond that. A request already holding it keeps
-//!   its `Arc`. Eviction drops the view only: the slot's freshness tracker
-//!   stays, so a reloaded session does not report "just changed".
+//!   its `Arc`. Eviction drops the view only: the slot's freshness tracker and
+//!   query-embedding cache stay, so a reloaded session does not report "just
+//!   changed" and does not re-embed a repeated query.
 //! * **Recall concurrency.** A second semaphore bounds simultaneous recalls
 //!   (embed and pipeline work). A recall that waits [`RECALL_PERMIT_WAIT`]
 //!   for a permit is answered 503 with `Retry-After: 1`, after the session
 //!   was resolved, so it is no oracle (design 5.3).
+//! * **Query embeddings (#14).** Each slot keeps its own query-embedding
+//!   LRU (128 entries or 1 MiB), so a repeated recall query skips the embed.
+//!   One per session, never process-wide (design 5.4).
 //! * **Failure is not cached.** A failed load is answered to the requests
 //!   that joined it, and the next request retries, behind the semaphore.
 //! * **No background task.** Nothing refreshes a session nobody is viewing.
@@ -46,6 +50,7 @@ use super::projections::{ordered_events, slice_events};
 use crate::cli::caps::CliError;
 use crate::cli::{load_reader_graph, LoadedReader};
 use crate::config::WebConfig;
+use crate::recall::query_cache::QueryEmbeddingCache;
 use crate::store::{GraphStore, StoreKind};
 use crate::types::{CanonizationStatus, EmbeddingContract, SessionId};
 
@@ -218,6 +223,11 @@ struct Slot {
     /// LRU stamp from [`ViewCache::tick`].
     last_used: AtomicU64,
     freshness: Mutex<Freshness>,
+    /// #14's query-embedding LRU, ONE PER SESSION: a text-keyed cache shared
+    /// across sessions is a cross-tenant timing oracle (#32 decision 13). An
+    /// empty one allocates nothing, so a served session nobody recalls on
+    /// costs nothing here.
+    queries: Mutex<QueryEmbeddingCache>,
 }
 
 impl Slot {
@@ -230,6 +240,7 @@ impl Slot {
                 fingerprint: 0,
                 observed_at: std::time::Instant::now(),
             }),
+            queries: Mutex::new(QueryEmbeddingCache::new()),
         }
     }
 }
@@ -400,6 +411,11 @@ impl ViewCache {
             f.observed_at = std::time::Instant::now();
         }
         f.observed_at.elapsed()
+    }
+
+    /// `session`'s query-embedding cache (#14), one per session.
+    pub(super) fn queries(&self, session: &SessionId) -> Option<&Mutex<QueryEmbeddingCache>> {
+        self.slots.get(session).map(|slot| &slot.queries)
     }
 
     /// A recall permit, or `None` when every one stayed taken for

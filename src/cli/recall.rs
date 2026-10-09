@@ -10,6 +10,10 @@
 //! serialized from. The CLI string and the HTTP `context` are the same
 //! execution's output by construction.
 
+use std::sync::Arc;
+
+use parking_lot::Mutex;
+
 use super::caps::{
     check_in_range_cli, check_size_cli, clamp_cfg_default, require_nonempty, CliError,
     MAX_MAX_TOKENS, MAX_TOP_K, MAX_TRAVERSAL_DEPTH,
@@ -20,6 +24,7 @@ use crate::daemon::{Daemon, RecallPipeline};
 use crate::recall::cache::RecallCache;
 use crate::recall::candidates;
 use crate::recall::detail::{Annotation, AnnotationKind, DetailedHit, DetailedRecall};
+use crate::recall::query_cache::{embed_query_cached, QueryEmbeddingCache};
 use crate::resolve::{assert_session_embedding_compatible, ResolvedBackends};
 use crate::store::vector_source::VectorCandidates;
 use crate::types::RecallQuery;
@@ -69,7 +74,8 @@ pub(crate) async fn run_detailed(
 ) -> Result<CliRecall, CliError> {
     let request = RecallRequest::validate(session, query, top_k, max_tokens, traversal_depth)?;
     let loaded = load_reader_graph(backends.store.as_ref(), session).await?;
-    run_detailed_on(backends, &loaded, &request).await
+    // One recall per process: nothing to reuse, so no query cache.
+    run_detailed_on(backends, &loaded, &request, None).await
 }
 
 /// A recall's arguments, validated and with the defaults applied: every
@@ -137,10 +143,14 @@ impl RecallRequest {
 /// Fail-closed on the embedding contract of THIS load: a session whose
 /// stored contract disagrees with the live embedder is refused here with the
 /// same message `load_reader_graph_with_contract` gives, whoever loaded it.
+///
+/// `queries` is the session's query-embedding cache (#14) when the caller
+/// keeps one (the portal, one per session); `None` embeds directly.
 pub(crate) async fn run_detailed_on(
     backends: &ResolvedBackends,
     loaded: &LoadedReader,
     request: &RecallRequest,
+    queries: Option<&Mutex<QueryEmbeddingCache>>,
 ) -> Result<CliRecall, CliError> {
     // Scoped so the read guard never reaches an await.
     let compatible = {
@@ -169,8 +179,22 @@ pub(crate) async fn run_detailed_on(
     // vector leg consistent with assembly and drop the second vector parse
     // (a follow-up in dev-diary/notes/feature-8-vector-source.md).
     let vectors = VectorCandidates::from_store(backends.store.as_ref());
-    let embedding = match candidates::embed_query(vectors, backends.embedder.as_ref(), query).await
-    {
+    let embedded = match queries {
+        Some(cache) => {
+            embed_query_cached(
+                cache,
+                vectors,
+                backends.embedder.as_ref(),
+                &backends.embedding,
+                query,
+            )
+            .await
+        }
+        None => candidates::embed_query(vectors, backends.embedder.as_ref(), query)
+            .await
+            .map(|vector| vector.map(Arc::from)),
+    };
+    let embedding: Option<Arc<[f32]>> = match embedded {
         Ok(vector) => vector,
         Err(text) => {
             extra_annotations.push(Annotation::new(AnnotationKind::VectorDegraded, text));

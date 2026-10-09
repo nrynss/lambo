@@ -685,3 +685,72 @@ async fn a_saturated_recall_bound_answers_503_with_retry_after() {
     assert_eq!(ok.status, 200, "{}", ok.body);
     handle.abort();
 }
+
+/// [`FixtureEmbedder`] counting query-role embeds.
+struct CountingEmbedder {
+    inner: FixtureEmbedder,
+    queries: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl crate::embed::Embedder for CountingEmbedder {
+    fn dimensions(&self) -> usize {
+        self.inner.dimensions()
+    }
+    async fn embed(&self, text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
+        self.inner.embed(text).await
+    }
+    async fn embed_query(&self, text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
+        self.queries.fetch_add(1, Ordering::SeqCst);
+        self.inner.embed_query(text).await
+    }
+}
+
+/// #14 on the portal: a repeated recall query is served from the session's
+/// query-embedding cache, with the same answer.
+#[tokio::test]
+async fn a_repeated_recall_query_embeds_once() {
+    let store = seed("t4-qcache").await;
+    let embeds = Arc::new(AtomicUsize::new(0));
+    let mut backends = backends_with_store(Box::new(VectorSearch(Shared(store))));
+    backends.embedder = Box::new(CountingEmbedder {
+        inner: FixtureEmbedder::new(),
+        queries: embeds.clone(),
+    });
+    let (addr, handle) = spawn(state_from_backends(backends, "t4-qcache", None)).await;
+
+    let first = get_json(addr, "/api/recall?q=user%20schema").await;
+    assert_eq!(embeds.load(Ordering::SeqCst), 1, "the first recall embeds");
+    let second = get_json(addr, "/api/recall?q=user%20schema").await;
+    assert_eq!(
+        embeds.load(Ordering::SeqCst),
+        1,
+        "a repeated query is served from the session's query cache"
+    );
+    assert_eq!(first["context"], second["context"]);
+    get_json(addr, "/api/recall?q=auth%20middleware").await;
+    assert_eq!(embeds.load(Ordering::SeqCst), 2, "a new query embeds");
+    handle.abort();
+}
+
+/// The query-embedding cache is per session, never process-wide (#32
+/// decision 13): two served sessions never share one.
+#[test]
+fn each_session_has_its_own_query_cache() {
+    let (a, b) = (SessionId::new("t4-qa"), SessionId::new("t4-qb"));
+    let cache = crate::cli::serve_web::views::ViewCache::new([a.clone(), b.clone()], bounds(4));
+    let (qa, qb) = (cache.queries(&a).unwrap(), cache.queries(&b).unwrap());
+    assert!(!std::ptr::eq(qa, qb), "one query cache per session");
+    let contract = EmbeddingContract {
+        kind: "fixture".into(),
+        model: None,
+        dim: 4,
+    };
+    qa.lock()
+        .insert("shared text", &contract, vec![1.0; 4].into());
+    assert!(
+        qb.lock().get("shared text", &contract).is_none(),
+        "a query embedded for one session is not visible to another"
+    );
+    assert!(cache.queries(&SessionId::new("t4-unserved")).is_none());
+}

@@ -205,7 +205,15 @@ pub(super) async fn api_recall(
         return recall_busy();
     };
     let result = match state.view().await {
-        Ok(view) => super::recall::run_detailed_on(&state.backends, &view.reader, &request).await,
+        Ok(view) => {
+            super::recall::run_detailed_on(
+                &state.backends,
+                &view.reader,
+                &request,
+                state.views.queries(&state.session),
+            )
+            .await
+        }
         Err(e) => Err(e),
     };
 
