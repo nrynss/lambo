@@ -364,6 +364,9 @@ enum Commands {
         /// Backfill only: embed the concepts that have NO vector, leave every existing vector and the session contract untouched. This is the repair path for a session that accumulated NULL vectors inside its own current space, which the default migration refuses to touch.
         #[arg(long)]
         missing_only: bool,
+        /// Full migration only: null the vector of every image concept instead of refusing on it. An image vector cannot be recomputed from its caption; each image concept keeps its caption and source, and deriving the same image again under the new embedder restores its vector.
+        #[arg(long)]
+        drop_image_vectors: bool,
     },
 }
 
@@ -931,6 +934,7 @@ fn main() -> ExitCode {
                 agent,
                 allow_embedding_mismatch: _,
                 missing_only,
+                drop_image_vectors,
             },
             Resolved::Full(backends),
         ) => run_async(
@@ -945,6 +949,7 @@ fn main() -> ExitCode {
                     // below still lands on ResolvedBackends and is ignored.
                     allow_embedding_mismatch,
                     missing_only,
+                    drop_image_vectors,
                 },
             ),
         ),

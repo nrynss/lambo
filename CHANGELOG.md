@@ -15,6 +15,22 @@
   it by name until then, as it did for `human_confirmed`. Provisioning only
   adds the column; existing rows read `NULL`, meaning embedded from their
   own content.
+- `WriteKind` and `WriteIntentPayload` each gain a `DeriveImage` variant
+  (#22), so library code that matches either exhaustively needs the new arm.
+  An unapplied image intent is unreadable to an older build, which fails to
+  load the session rather than replay it without its vector (design risk R5:
+  a downgrade is loud). A settled image intent (applied or failed) keeps
+  only its outcome: the store overwrites its payload with an empty text
+  derive, so its vector does not outlive it and an older build loads it.
+  `Graph::reembed_all` now leaves
+  image concepts out of its coverage rule and refuses while one carries a
+  vector; `Graph::reembed_all_dropping_image_vectors` is the variant that
+  nulls them.
+- `ReplayBlockReason` gains a variant, `ImageConfig` (#22), and the
+  `write_queue_replay_blocked` stat a value, `"image_config"`: a durable
+  image intent replayed by a process whose strategy is not `hybrid` or
+  whose store has no vector search stops the replay with that reason and a
+  log line saying what to change, rather than the generic `"other"`.
 - `EmbedError` gains a variant, `Unsupported` (#22): an embedder refusing a
   kind of input it cannot embed at all, such as an image sent to a text-only
   model. `is_transient()` classes it as permanent. `EmbedError` is also now
@@ -226,11 +242,41 @@
   it alone, and erasing a session erases it with the concept row. When an
   embedding contract change quarantines a session's vectors, the sources
   are kept: the concept stays marked as image-sourced with no vector, so
-  a later re-embed cannot give it a vector of its caption. `lambo
-  re-embed` (both modes) refuses a session in which any concept has a
-  source, before any write, until it learns to handle supplied vectors. A stored
+  a later re-embed cannot give it a vector of its caption. A stored
   value this build cannot read fails the load rather than reading as
-  unset. Nothing writes it yet: image derives arrive in a later release.
+  unset. Image derives (below) write it.
+- Image concepts in the library API (#22, third part):
+  `Memory::derive_image_as` and `Memory::derive_image_async_as` take a
+  `graph::image::ImageDerive` (caption, type, optional image id, the image
+  bytes or a client-computed vector with its declared contract, `parent_of`,
+  event time) and derive one concept whose vector is the image's, not the
+  caption's. Its content is `"{caption} [image:{id}]"`, the id being 1 to 64
+  characters of `[a-z0-9]` or, by default, 16 hex characters of the image's
+  (or the vector's) sha256, so the same image derives onto one concept and
+  two images with one caption stay two. Image bytes are embedded on the call
+  path and never stored, queued or written to a durable intent: the queue and
+  its replay carry the vector. A submitted vector must declare exactly the
+  live embedding contract and have its width, finite values and a non-zero
+  norm; the server renormalizes it. An image derive needs the `hybrid`
+  strategy and a store with vector search, refuses an `observation` type,
+  never semantic-merges, and no text concept ever merges into an image; an
+  image derive whose caption and id a text concept already holds is refused
+  rather than left without a vector. A text query reaches image concepts
+  through the ordinary vector leg. A durable image intent replayed under a different live contract settles
+  `failed`. Its receipt kind is `lambo_derive_image`; the MCP tool and CLI
+  verb arrive in a later release.
+- `lambo re-embed` handles image concepts (#22): a full migration refuses
+  while an image concept still carries a vector (it cannot be recomputed
+  from a caption), unless `--drop-image-vectors`, which nulls those vectors
+  in the same transaction as the migration, keeps each image concept and its
+  source, and reports the count; deriving the same image again restores the
+  vector. `--missing-only` and the full migration never give an image concept
+  a vector of its caption, and report the image concepts they skipped. This
+  replaces the blanket refusal of any session holding an image source.
+- `FixtureEmbedder` embeds images (#22): a PNG carrying a `lambo-label`
+  text chunk embeds exactly as a text query for that label, and any other
+  image as a vector seeded from its digest. `png_with_label` builds such a
+  PNG in code for tests.
 - `lambo::surface::image::validate` (#22): the image rule every surface will
   share, and the only constructor of `ImageInput`. The declared type must be
   exactly `image/png`, `image/jpeg` or `image/webp`; the bytes must be

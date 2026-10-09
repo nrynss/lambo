@@ -1712,6 +1712,32 @@ async fn embedding_source_survives_the_flush_load_round_trip() {
     .await;
 }
 
+/// #22 review L1: a settled image intent keeps no vector, through the shared
+/// check every adapter runs, and no trace of it is left in the raw payload
+/// column either.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_settled_image_intent_keeps_no_vector() {
+    let store = test_store();
+    store.init_schema().await.unwrap();
+    let sid = SessionId::from("settled-image-intent");
+    crate::store::embedding_source_testkit::check_a_settled_image_intent_keeps_no_vector(
+        &store, &sid, 4, None,
+    )
+    .await;
+    let payloads: Vec<String> =
+        sqlx::query_scalar("SELECT payload FROM write_intents WHERE session_id = ?")
+            .bind(sid.as_str())
+            .fetch_all(store.pool())
+            .await
+            .unwrap();
+    let with_vector = payloads.iter().filter(|p| p.contains("\"vector\"")).count();
+    assert_eq!(
+        (payloads.len(), with_vector),
+        (3, 0),
+        "three intents, none of the settled ones carries a vector: {payloads:?}"
+    );
+}
+
 /// #22 PR 2: a stored `embedding_source` this build cannot read fails the
 /// load by concept id. Reading it as `None` instead would make an image
 /// concept look text-embedded, and a re-embed would then replace its image
@@ -1815,4 +1841,64 @@ async fn a_width_restamp_nulls_the_vector_and_keeps_its_source() {
         .expect("still there");
     assert_eq!(after.embedding, None, "the width restamp quarantined it");
     assert_eq!(after.embedding_source, source, "and kept its source");
+}
+
+/// #22 PR 3: an unconsumed image derive's durable intent carries its
+/// vector, contract and source through SQLite bit for bit, so a replay
+/// applies exactly the vector that was acked (or refuses it).
+///
+/// Review L6: the vector is a real one, with non-integer components, so the
+/// `f32` decimal round trip through the JSON payload column is what is
+/// tested (an integer-valued vector is exact in JSON whatever the
+/// formatting). With the fixture embedder compiled in it is the fixture's
+/// own vector for a label; otherwise the erase testkit's unit vector.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_image_derive_intent_survives_the_flush_load_round_trip() {
+    use crate::types::WriteIntentPayload;
+
+    let store = test_store();
+    store.init_schema().await.unwrap();
+    let sid = SessionId::from("image-intent");
+    #[cfg(feature = "embed-fixture")]
+    let real = crate::embed::FixtureEmbedder::new().embed_sync("red silk saree");
+    #[cfg(not(feature = "embed-fixture"))]
+    let real = crate::store::erase::testkit::unit_vector(1024);
+    assert!(
+        real.iter().any(|x| x.fract() != 0.0),
+        "the vector has non-integer components"
+    );
+    let mut batch = crate::store::erase::testkit::planted_batch(&sid, 8);
+    let mut planted = None;
+    for m in &mut batch.mutations {
+        if let Mutation::PutWriteIntent { intent } = m
+            && let WriteIntentPayload::DeriveImage { supplied, .. } = &mut intent.payload
+        {
+            supplied.vector = real.clone();
+            supplied.contract.dim = real.len();
+            planted = Some(intent.clone());
+        }
+    }
+    let planted = planted.expect("the batch plants an image intent");
+    store.flush(&batch, None).await.unwrap();
+    let loaded = store.load_session(&sid).await.unwrap();
+    let intent = loaded
+        .write_intents
+        .iter()
+        .find(|i| i.receipt == planted.receipt)
+        .unwrap_or_else(|| panic!("the image intent: {:?}", loaded.write_intents));
+    // The payload exactly (timestamps are stored at millisecond precision).
+    assert_eq!(intent.payload, planted.payload);
+    let WriteIntentPayload::DeriveImage { supplied, .. } = &intent.payload else {
+        unreachable!("compared equal above");
+    };
+    assert!(
+        supplied
+            .vector
+            .iter()
+            .zip(&real)
+            .all(|(a, b)| a.to_bits() == b.to_bits()),
+        "every component bit for bit"
+    );
+    assert_eq!(intent.outcome, None);
+    assert_eq!(loaded.write_intents.len(), 2, "and the plain derive intent");
 }

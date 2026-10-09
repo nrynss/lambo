@@ -175,7 +175,8 @@ pub(super) async fn put_write_intent(
     tx: &mut sqlx::SqliteConnection,
     intent: &crate::types::WriteIntent,
 ) -> Result<(), StoreError> {
-    let payload = serde_json::to_string(&intent.payload)
+    let payload = intent
+        .stored_payload()
         .map_err(|e| StoreError::Backend(format!("serialize write intent payload: {e}")))?;
     sqlx::query(
         "INSERT INTO write_intents \
@@ -214,6 +215,10 @@ pub(super) async fn put_write_intent(
 /// than [`crate::types::WRITE_INTENT_RETENTION`] — clocked by the mutation's
 /// own `consumed_at`, so the adapter needs no clock. Consuming an absent
 /// receipt is a no-op (the put may already be purged; replay is idempotent).
+///
+/// A settled image intent's payload is overwritten with
+/// [`crate::types::SETTLED_IMAGE_INTENT_PAYLOAD`] in the same statement, so
+/// its vector does not outlive the consume (#22 review L1).
 pub(super) async fn consume_write_intent(
     tx: &mut sqlx::SqliteConnection,
     session_id: &SessionId,
@@ -221,12 +226,15 @@ pub(super) async fn consume_write_intent(
     outcome: &crate::types::WriteIntentOutcome,
 ) -> Result<(), StoreError> {
     sqlx::query(
-        "UPDATE write_intents SET consumed_at = ?, outcome_tag = ?, outcome_summary = ? \
+        "UPDATE write_intents SET consumed_at = ?, outcome_tag = ?, outcome_summary = ?, \
+             payload = CASE WHEN payload LIKE ? THEN ? ELSE payload END \
          WHERE session_id = ? AND receipt = ?",
     )
     .bind(ts_to_text(outcome.consumed_at))
     .bind(&outcome.tag)
     .bind(&outcome.summary)
+    .bind(crate::types::DERIVE_IMAGE_PAYLOAD_LIKE)
+    .bind(crate::types::SETTLED_IMAGE_INTENT_PAYLOAD)
     .bind(session_id.as_str())
     .bind(receipt)
     .execute(&mut *tx)

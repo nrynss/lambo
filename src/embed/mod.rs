@@ -26,7 +26,10 @@ pub use bge_m3::BgeM3LlamaCppEmbedder;
 #[cfg(feature = "embed-candle")]
 pub use candle::CandleEmbedder;
 #[cfg(feature = "embed-fixture")]
-pub use fixture::{near_far_contract, FixtureEmbedder, FAR, NEAR_A, NEAR_B, NEAR_PAIR};
+pub use fixture::{
+    near_far_contract, png_with_label, FixtureEmbedder, FAR, IMAGE_LABEL_KEYWORD, NEAR_A, NEAR_B,
+    NEAR_PAIR,
+};
 #[cfg(feature = "embed-gemini")]
 pub use gemini::GeminiEmbedder;
 
