@@ -82,6 +82,7 @@ mod fake;
 mod tests;
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -176,7 +177,15 @@ pub(crate) struct TierStatus {
 }
 
 /// A durable store with a recall index beside it. See the module docs.
+///
+/// A handle on shared [`Tier`] state, so work the tier runs off the caller's
+/// path can hold the state it needs.
 pub(crate) struct TieredStore {
+    tier: Arc<Tier>,
+}
+
+/// The tier's state and policy, shared by the store handle.
+pub(crate) struct Tier {
     primary: Box<dyn GraphStore>,
     recall: Box<dyn RecallIndex>,
     /// The process's configured embedder width, reported when the primary
@@ -186,6 +195,14 @@ pub(crate) struct TieredStore {
     repair_backoff: Duration,
 }
 
+impl std::ops::Deref for TieredStore {
+    type Target = Tier;
+
+    fn deref(&self) -> &Tier {
+        &self.tier
+    }
+}
+
 impl TieredStore {
     pub(crate) fn new(
         primary: Box<dyn GraphStore>,
@@ -193,20 +210,30 @@ impl TieredStore {
         vector_dim: Option<usize>,
     ) -> Self {
         Self {
-            primary,
-            recall,
-            vector_dim,
-            sessions: Mutex::new(HashMap::new()),
-            repair_backoff: REPAIR_BACKOFF,
+            tier: Arc::new(Tier {
+                primary,
+                recall,
+                vector_dim,
+                sessions: Mutex::new(HashMap::new()),
+                repair_backoff: REPAIR_BACKOFF,
+            }),
         }
+    }
+
+    /// Mutate the tier's settings before the store is shared.
+    #[cfg(all(test, feature = "store-memory"))]
+    fn tier_mut(&mut self) -> &mut Tier {
+        Arc::get_mut(&mut self.tier).expect("configured before the store is shared")
     }
 
     #[cfg(all(test, feature = "store-memory"))]
     pub(crate) fn with_repair_backoff(mut self, backoff: Duration) -> Self {
-        self.repair_backoff = backoff;
+        self.tier_mut().repair_backoff = backoff;
         self
     }
+}
 
+impl Tier {
     /// The tier's view of `session`.
     #[cfg(all(test, feature = "store-memory"))]
     pub(crate) fn tier_status(&self, session: &SessionId) -> TierStatus {
@@ -1044,7 +1071,7 @@ impl GraphStore for TieredStore {
     }
 }
 
-impl TieredStore {
+impl Tier {
     /// Remember whether this store holds the session's lease, and under which
     /// token: only a holder repairs the index.
     fn note_lease(&self, session: &SessionId, outcome: &LeaseOutcome) {
