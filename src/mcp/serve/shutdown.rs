@@ -1,29 +1,34 @@
 //! Shutdown coordination for a holder: the grace budgets and the build-time
 //! relations between them, the one shutdown future the transports accept
 //! ([`HolderShutdown`], always [`wind_down`]), and the close that runs on
-//! every exit path ([`run_and_close`], [`close_bounded`]).
+//! every exit path ([`run_and_close_sessions`], [`close_bounded`]).
 //!
 //! # The holder's shutdown, stage by stage
 //!
-//! [`serve`](super::serve) runs these in this order on every exit path of the holder branch
-//! (signal, lease loss, client disconnect, transport error). Each stage is one
-//! named step below, so stage logging (#40) attaches at one call each.
+//! [`serve`](super::serve) runs these in this order on every exit path of
+//! the holder branch (signal, lease loss, client disconnect, transport
+//! error). Each stage is one named step below, so stage logging (#40)
+//! attaches at one call each.
 //!
 //! | # | stage | step | bound |
 //! |---|---|---|---|
-//! | 1 | transport drain (HTTP graceful drain, stdio cancel) | the transport future inside [`run_and_close`], ended by [`wind_down`] | [`SHUTDOWN_GRACE`] |
-//! | 2 | keep-warm abort | `stop_before_close` in [`run_and_close`], from [`HolderTasks::stop_before_close`] | instant |
-//! | 3 | session close | [`close_bounded`]: [`Memory::close`] and its own ten logged steps (`serialize`, `replay_stop`, `queue_quiesce`, `writers_gate`, `heartbeat_abort`, `producer_joins`, `flush_join`, `final_drain`, `final_flush`, `lease_release`; `src/memory/shutdown.rs`), or on abandonment the bounded lease release | [`CLOSE_GRACE`] |
-//! | 4 | event pump abort | after the close, in [`run_and_close`], so final-drain events still reach the log | instant |
-//! | 5 | background tasks | [`HolderTasks::stop`]: ledger heartbeat, keep-warm (again), refusal poller | instant |
-//! | 6 | endpoint release | `hub::Hub::release`: stop accepting, end every endpoint session (each cancels its rmcp service and waits for it), then the socket file if still ours | `hub::ENDPOINT_RELEASE_GRACE`, then the stragglers are aborted and joined (unbounded, but milliseconds in practice; the watchdog's 1 s overrun allowance covers it) |
+//! | 1 | transport drain (HTTP graceful drain, stdio cancel) | the transport future inside [`run_and_close_sessions`], ended by [`wind_down`] | [`SHUTDOWN_GRACE`] |
+//! | 2 | keep-warm abort | `stop_before_close` in [`run_and_close_sessions`], from [`ProcessTasks::stop_before_close`](super::process::ProcessTasks::stop_before_close) | instant |
+//! | 3 | session close | [`close_sessions`], each through [`close_bounded`]: [`Memory::close`] and its own ten logged steps (`serialize`, `replay_stop`, `queue_quiesce`, `writers_gate`, `heartbeat_abort`, `producer_joins`, `flush_join`, `final_drain`, `final_flush`, `lease_release`; `src/memory/shutdown.rs`), or on abandonment the bounded lease release | [`CLOSE_GRACE`] |
+//! | 4 | event pump abort | after the close, in [`close_sessions`], so final-drain events still reach the log | instant |
+//! | 5 | background tasks | [`ProcessTasks::stop`](super::process::ProcessTasks::stop): ledger heartbeat, keep-warm (again), refusal poller | instant |
+//! | 6 | endpoint release | `hub::Hub::release` per session (`session::AttachedSession::release_endpoint`): stop accepting, end every endpoint session (each cancels its rmcp service and waits for it), then the socket file if still ours | `hub::ENDPOINT_RELEASE_GRACE`, then the stragglers are aborted and joined (unbounded, but milliseconds in practice; the watchdog's 1 s overrun allowance covers it) |
 //! | 7 | ledger close | [`close_ledger`] | the ledger's own shutdown bound |
 //!
-//! Stages 1 to 4 are [`run_and_close`], the seam the "close always runs"
-//! tests drive. Every stage logs a `started` and a `finished in N ms` line
-//! through [`ShutdownProgress`] (#40; the line format is in
-//! [`super::stages`]), so a shutdown that stalls names its stage. The order
-//! is load-bearing:
+//! Stages 1 to 4 are [`run_and_close_sessions`] (its one-session form,
+//! `run_and_close`, is the seam the "close always runs" tests drive), whose
+//! per-session half, stages 3 and 4, is [`close_sessions`]. Stages 3, 4 and
+//! 6 run for every attached session, concurrently for 3 and 6, so one bound
+//! covers the set (#32 design §3.5); a single-session serve's set has one
+//! member and logs exactly the lines it always has. Every stage logs a
+//! `started` and a `finished in N ms` line through [`ShutdownProgress`]
+//! (#40; the line format is in [`super::stages`]), so a shutdown that stalls
+//! names its stage. The order is load-bearing:
 //!
 //! * the tail is durable (or honestly lost) before any proxy connection is
 //!   cut, in stage 6. Until then an endpoint session stays connected; a call
@@ -51,8 +56,9 @@ use super::signals::{shutdown_signal, EarlyShutdown};
 use super::stages::{ShutdownProgress, Stage};
 use crate::ledger::Ledger;
 use crate::memory::Memory;
+use crate::store::flush::CatchUnwindPoll;
 use crate::store::lease;
-use crate::types::LamboError;
+use crate::types::{LamboError, SessionId};
 
 /// How long a transport gets to wind itself down after the shutdown signal
 /// before it is dropped and `close()` runs anyway.
@@ -291,7 +297,7 @@ pub(super) fn holder_shutdown(
 /// the same address, and these two findings compose here), and the ledger is
 /// drained last with its `startup` / `lease` / `completion` lines intact. The
 /// ordering at `serve`'s tail is what makes that true and it is not changed by
-/// this: the drain runs after `run_and_close` returns, on the error path as much
+/// this: the drain runs after `run_and_close_sessions` returns, on the error path as much
 /// as the success one.
 ///
 /// The exit is therefore non-zero — `close`'s fenced branch returns its refusal
@@ -314,7 +320,7 @@ pub(super) fn holder_shutdown(
 /// So the arm appends `kind:"lease", event:"lost", side:"holder"` naming the
 /// winner, **before** it returns and thereby cancels the transport. It survives
 /// by the existing ordering rather than by a new guarantee: the ledger is
-/// drained at the very end of [`serve`](super::serve), after `run_and_close`, on the error
+/// drained at the very end of [`serve`](super::serve), after `run_and_close_sessions`, on the error
 /// path as much as the success one. [`crate::ledger::party_key`]'s fallback
 /// already files an unlisted event's other party under `counterparty`, which is
 /// what this is — a lease token, not a socket path.
@@ -377,10 +383,45 @@ pub(super) async fn wind_down(
 /// Each stage is logged on `progress` (#40). Stage 1 was started by the
 /// shutdown future when it resolved; a transport that ended on its own
 /// (client hangup, transport error) gets both of its lines here.
+///
+/// One session: this is [`run_and_close_sessions`] over a set of one, which
+/// is exactly what a single-session `serve` runs (#32 PR 2). Since that
+/// split `serve` calls the set form itself, so this is the tests' seam,
+/// gated like its readers (`serve`'s close and stage tests and
+/// `memory::tests::shutdown`).
+#[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
 pub(crate) async fn run_and_close(
     mem: Arc<Memory>,
     transport: impl Future<Output = Result<(), LamboError>>,
     event_pump: tokio::task::JoinHandle<()>,
+    stop_before_close: &[tokio::task::AbortHandle],
+    early: &EarlyShutdown,
+    progress: &ShutdownProgress,
+) -> Result<(), LamboError> {
+    let session = SessionClose {
+        mem: &mem,
+        event_pump: &event_pump,
+    };
+    run_and_close_sessions(&[session], transport, stop_before_close, early, progress).await
+}
+
+/// What stages 3 and 4 need of one attached session: its memory, to close,
+/// and its event pump, to abort after the close.
+pub(super) struct SessionClose<'a> {
+    pub(super) mem: &'a Memory,
+    pub(super) event_pump: &'a tokio::task::JoinHandle<()>,
+}
+
+/// `run_and_close` over every attached session (#32 design §3.5): stages
+/// 1 and 2 are process-wide and run once, then [`close_sessions`] runs
+/// stages 3 and 4 over the set.
+///
+/// The result is the transport's error if it failed (the closes still ran,
+/// and their outcomes are not logged, as before the set), else the first
+/// session's close error, else `Ok`; see [`SessionCloses::report`].
+pub(super) async fn run_and_close_sessions(
+    sessions: &[SessionClose<'_>],
+    transport: impl Future<Output = Result<(), LamboError>>,
     stop_before_close: &[tokio::task::AbortHandle],
     early: &EarlyShutdown,
     progress: &ShutdownProgress,
@@ -394,24 +435,194 @@ pub(crate) async fn run_and_close(
             task.abort();
         }
     });
-    // Stage 3: the session close.
-    progress.begin(Stage::SessionClose);
-    let closed = close_bounded(&mem, early).await;
-    progress.end(Stage::SessionClose);
-    // Stage 4: the event pump, after the close.
-    progress.run(Stage::EventPumpAbort, || event_pump.abort());
+    // Stages 3 and 4.
+    let closed = close_sessions(sessions, early, progress).await;
 
-    match (outcome, closed) {
-        (Err(e), _) => Err(e),
-        (Ok(()), Err(e)) => {
-            tracing::error!(error = %e, "lambo serve: final flush failed — tail lost on exit, not durable (no on-disk WAL)");
-            Err(e)
-        }
-        (Ok(()), Ok(())) => {
-            tracing::info!("lambo serve: session closed, tail durable");
-            Ok(())
+    outcome?;
+    closed.report()
+}
+
+/// Stages 3 and 4 over a set of sessions: close every session concurrently,
+/// so one [`CLOSE_GRACE`] covers them all, then abort every event pump.
+///
+/// The per-session half of the shutdown, with nothing process-wide in it: no
+/// transport and no keep-warm. [`run_and_close_sessions`] calls it after
+/// stages 1 and 2; #32 PR 4's detach (design §3.4) calls it on its own, for a
+/// set of one, under [`ShutdownProgress::for_session`].
+///
+/// The outcomes come back unlogged, in set order. The caller logs them with
+/// [`SessionCloses::report`], or does not when something else already
+/// decided the result (a transport error, in [`run_and_close_sessions`]).
+pub(super) async fn close_sessions(
+    sessions: &[SessionClose<'_>],
+    early: &EarlyShutdown,
+    progress: &ShutdownProgress,
+) -> SessionCloses {
+    // Stage 3: the session closes, concurrently.
+    progress.begin(Stage::SessionClose);
+    let results = join_all_catching(
+        sessions
+            .iter()
+            .map(|session| close_bounded(session.mem, early))
+            .collect(),
+    )
+    .await;
+    // A member that panicked has no outcome to report. Its siblings' do: log
+    // them, each naming its session, before the panic resumes (#32 review
+    // L2), or a sibling's lost tail would go unlogged with it.
+    let mut panicked = None;
+    let mut closed = Vec::with_capacity(results.len());
+    for (session, result) in sessions.iter().zip(results) {
+        match result {
+            Ok(outcome) => closed.push((session.mem.session().clone(), outcome)),
+            Err(payload) => {
+                panicked.get_or_insert(payload);
+            }
         }
     }
+    if let Some(payload) = panicked {
+        let _ = SessionCloses {
+            outcomes: closed,
+            named: true,
+        }
+        .report();
+        std::panic::resume_unwind(payload);
+    }
+    progress.end(Stage::SessionClose);
+    // Stage 4: the event pumps, after the close.
+    progress.run(Stage::EventPumpAbort, || {
+        for session in sessions {
+            session.event_pump.abort();
+        }
+    });
+    SessionCloses {
+        named: closed.len() > 1,
+        outcomes: closed,
+    }
+}
+
+/// The line an operator acts on when a session's tail did not reach the
+/// store.
+const TAIL_LOST: &str =
+    "lambo serve: final flush failed — tail lost on exit, not durable (no on-disk WAL)";
+
+/// Each session's close outcome from [`close_sessions`], with the session
+/// it is about, in set order, not yet logged.
+#[must_use = "an unreported close outcome is a tail loss nobody logged"]
+pub(super) struct SessionCloses {
+    outcomes: Vec<(SessionId, Result<(), LamboError>)>,
+    /// Whether each line names its session: the set had more than one
+    /// member.
+    named: bool,
+}
+
+impl SessionCloses {
+    /// Log each session's outcome, in set order, and fold them: the first
+    /// close error, else `Ok`.
+    ///
+    /// For a set of one this is exactly the line a single-session serve has
+    /// always logged, with no `session` field. With more than one, each line
+    /// names its `session`: "tail lost" is the line an operator acts on, and
+    /// N unattributed copies of it would not say whose tail.
+    pub(super) fn report(self) -> Result<(), LamboError> {
+        let named = self.named;
+        let mut failed = None;
+        for (session, closed) in self.outcomes {
+            match closed {
+                Err(e) => {
+                    if named {
+                        tracing::error!(session = %session, error = %e, "{TAIL_LOST}");
+                    } else {
+                        tracing::error!(error = %e, "{TAIL_LOST}");
+                    }
+                    failed.get_or_insert(e);
+                }
+                Ok(()) if named => tracing::info!(
+                    session = %session,
+                    "lambo serve: session closed, tail durable"
+                ),
+                Ok(()) => tracing::info!("lambo serve: session closed, tail durable"),
+            }
+        }
+        match failed {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+}
+
+/// Drive `futures` to completion concurrently and return their outputs in
+/// order, like `futures::future::join_all` (not a dependency here).
+///
+/// On the calling task, not spawned: nothing has to be `'static`, and every
+/// line the futures log reaches the caller's subscriber, in the caller's
+/// span. A set of one is polled exactly as an `.await` on it would be.
+///
+/// **A member's panic does not cancel the others** (#32 review L3). The
+/// panic is caught at that member's poll, the member is dropped (as the
+/// unwind would have dropped it), and the rest run to completion. Only then
+/// is the first panic resumed, so it still reaches the caller. Without this,
+/// one session whose close panicked would drop every sibling's close
+/// mid-flight: their tails lost and their leases held until `LEASE_TTL`.
+/// For a set of one nothing changes: the panic propagates from the same
+/// poll.
+pub(super) async fn join_all<F: Future>(futures: Vec<F>) -> Vec<F::Output> {
+    let mut outputs = Vec::with_capacity(futures.len());
+    let mut panicked = None;
+    for result in join_all_catching(futures).await {
+        match result {
+            Ok(output) => outputs.push(output),
+            Err(payload) => {
+                panicked.get_or_insert(payload);
+            }
+        }
+    }
+    if let Some(payload) = panicked {
+        std::panic::resume_unwind(payload);
+    }
+    outputs
+}
+
+/// A panic payload caught at a member's poll.
+pub(super) type Panic = Box<dyn std::any::Any + Send>;
+
+/// [`join_all`] without the resume: each member's output, or the panic it
+/// raised, in input order, once every member is done. For a caller that has
+/// something to do with the siblings' outputs before the panic resumes
+/// ([`close_sessions`] logs their close outcomes).
+pub(super) async fn join_all_catching<F: Future>(futures: Vec<F>) -> Vec<Result<F::Output, Panic>> {
+    let mut futures: Vec<Option<Pin<Box<CatchUnwindPoll<F>>>>> = futures
+        .into_iter()
+        .map(|future| Some(Box::pin(CatchUnwindPoll(future))))
+        .collect();
+    let mut outputs: Vec<Option<Result<F::Output, Panic>>> = futures.iter().map(|_| None).collect();
+    std::future::poll_fn(|cx| {
+        let mut pending = false;
+        for (slot, output) in futures.iter_mut().zip(outputs.iter_mut()) {
+            let Some(future) = slot.as_mut() else {
+                continue;
+            };
+            match future.as_mut().poll(cx) {
+                // A panicked member is dropped at once, as the unwind would
+                // have dropped it, and never polled again.
+                std::task::Poll::Ready(result) => {
+                    *output = Some(result);
+                    *slot = None;
+                }
+                std::task::Poll::Pending => pending = true,
+            }
+        }
+        if pending {
+            std::task::Poll::Pending
+        } else {
+            std::task::Poll::Ready(())
+        }
+    })
+    .await;
+    outputs
+        .into_iter()
+        .map(|output| output.expect("join_all returns only once every future is ready"))
+        .collect()
 }
 
 /// [`Memory::close`], bounded two ways (R2-b).
@@ -538,54 +749,6 @@ pub(super) async fn release_lease_bounded(mem: &Memory) {
              abandoned close; the row will lapse at LEASE_TTL instead, and until then this \
              session refuses new writers"
         );
-    }
-}
-
-/// The holder's background tasks: spawned beside the transport on the holder
-/// path, stopped after the close (stage 5), except the keep-warm, which is
-/// also stopped before it (stage 2).
-pub(super) struct HolderTasks {
-    /// I2 heartbeat, when `--ledger-heartbeat` is set.
-    pub(super) heartbeat: Option<tokio::task::JoinHandle<()>>,
-    /// Issue #13 embedder keep-warm, when the backends ask for one.
-    pub(super) keep_warm: Option<tokio::task::JoinHandle<()>>,
-    /// J4 holder-side refusal poller, when a ledger is attached.
-    pub(super) refusal_poller: Option<tokio::task::JoinHandle<()>>,
-}
-
-impl HolderTasks {
-    /// Stage 2's handles: the keep-warm, which stops when the transport does,
-    /// before the close and its final drain (issue #13); see
-    /// [`run_and_close`].
-    pub(super) fn stop_before_close(&self) -> Vec<tokio::task::AbortHandle> {
-        self.keep_warm
-            .iter()
-            .map(tokio::task::JoinHandle::abort_handle)
-            .collect()
-    }
-
-    /// Stage 5: stop every background task, after `close()`.
-    ///
-    /// After the close, deliberately: the tail's durability is the
-    /// load-bearing guarantee and the ledger is not allowed to be in front of
-    /// it. The heartbeat is stopped first so it cannot enqueue a line into a
-    /// ledger that is draining (stage 7, which is bounded: a writer stuck on a
-    /// hung filesystem is abandoned, never allowed to hold process exit).
-    pub(super) fn stop(self) {
-        if let Some(heartbeat) = self.heartbeat {
-            heartbeat.abort();
-        }
-        // Issue #13. Already aborted inside `run_and_close`, before the close;
-        // repeated here (idempotent) so this exit path aborts it without
-        // relying on that. Nothing to drain: a touch writes nothing.
-        if let Some(task) = self.keep_warm {
-            task.abort();
-        }
-        // J4. The refusal-recorder task is stopped before the ledger drains, so
-        // it cannot enqueue a line into a closing ledger.
-        if let Some(poller) = self.refusal_poller {
-            poller.abort();
-        }
     }
 }
 
