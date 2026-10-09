@@ -51,7 +51,10 @@
 //! the durable snapshot at a fresh version, then deletes every session
 //! document older than that version (deleted nodes, an older contract's
 //! index), then writes the marker. Readers never write to the index; a reader
-//! that finds the marker behind serves from the primary.
+//! that finds the marker behind serves from the primary and checks again at
+//! most once per [`REPAIR_BACKOFF`], so it returns to the index once the
+//! holder's mirror or repair lands (#18 review F1). A holder that reads a
+//! stale session asks for a repair, within the same backoff.
 //!
 //! A repair runs as a background task, one at a time per session, off the
 //! flush loop and the attach path (#18 review M1): requests while one runs
@@ -658,11 +661,15 @@ impl Tier {
         }
         match (marker, held) {
             (Marker::Behind, Some(_)) => self.request_repair(session),
-            (marker, _) => self.with_state(session, |st| {
+            (marker, held) => self.with_state(session, |st| {
                 // A repair in flight owns the state until it finishes.
                 if !st.repairing {
                     st.sync = marker.sync();
-                    if marker == Marker::Ahead {
+                    // Re-checked by a later read, never repaired here: an
+                    // ahead marker, or one behind that only a holder can
+                    // fix (#18 review F1: the holder's mirror usually lands
+                    // within seconds of its commit).
+                    if marker == Marker::Ahead || (marker == Marker::Behind && held.is_none()) {
                         st.next_check = Some(Instant::now() + self.repair_backoff);
                     }
                 }
@@ -1094,17 +1101,41 @@ impl Tier {
         }
     }
 
-    /// Establish the session's state for a read that arrives before any load
-    /// through this store (a reader that never loaded the session).
+    /// Establish or re-establish the session's state for a read.
     ///
-    /// A check that cannot settle it (the index or the primary unreachable)
-    /// is not repeated by the next read: the session stays `Unknown`, reads
-    /// fall back, and the next check waits out the repair backoff.
+    /// An `Unknown` session (never loaded here, or a check that could not
+    /// settle it) is checked against the durable store. So is a `Stale` one
+    /// this store does not hold (#18 review F1): a reader cannot repair, but
+    /// the holder's mirror or repair lands, and a reader that never looked
+    /// again would serve the fallback until restart. A `Stale` session this
+    /// store holds is repaired instead, when its backoff allows.
+    ///
+    /// A check that does not end in sync is not repeated by the next read:
+    /// reads fall back and the next check waits out the repair backoff, so
+    /// a reader costs at most one durable load per session per backoff.
     async fn sync_for_read(self: &Arc<Self>, session: &SessionId) -> TierSync {
-        let (sync, due) = self.with_state(session, |st| {
-            (st.sync, st.next_check.is_none_or(|at| Instant::now() >= at))
+        let (sync, held, repairing, due) = self.with_state(session, |st| {
+            (
+                st.sync,
+                st.held,
+                st.repairing,
+                st.next_check.is_none_or(|at| Instant::now() >= at),
+            )
         });
-        if sync != TierSync::Unknown || !due {
+        let recheck = match sync {
+            TierSync::InSync => false,
+            TierSync::Unknown => true,
+            TierSync::Stale if held.is_some() => {
+                // A read brings no new batch: never queue a rerun behind a
+                // repair that is already running.
+                if !repairing {
+                    self.repair_if_due(session);
+                }
+                false
+            }
+            TierSync::Stale => true,
+        };
+        if !recheck || !due {
             return sync;
         }
         match self.primary.load_session(session).await {
@@ -1113,7 +1144,7 @@ impl Tier {
             Err(_) => {}
         }
         self.with_state(session, |st| {
-            if st.sync == TierSync::Unknown {
+            if st.sync != TierSync::InSync {
                 st.next_check = Some(Instant::now() + self.repair_backoff);
             }
             st.sync

@@ -1194,6 +1194,107 @@ async fn a_marker_behind_the_durable_epoch_is_caught_at_the_next_load() {
     assert_eq!(fake.marker(&sid), Some(2));
 }
 
+/// F1: a reader loads the session after the holder's flush committed but
+/// before its mirror landed, so it sees the marker behind. That is the same
+/// race as a marker ahead, from the other side: once the mirror lands, the
+/// reader's next read re-checks and serves from the index again.
+#[tokio::test]
+async fn a_reader_that_saw_the_marker_behind_returns_once_the_mirror_lands() {
+    let (primary, fake) = (memory_primary(), Arc::new(FakeIndex::new()));
+    let writer = tier(&primary, &fake);
+    let sid = SessionId::new("behind-race");
+    let token = attach(&writer, &sid, &holder("w")).await;
+    let (s, b) = seed_batch(&sid, 1);
+    writer.flush(&b, Some(token)).await.unwrap();
+
+    let reader = tier(&primary, &fake);
+    let knn = || fake.knn_calls.load(std::sync::atomic::Ordering::SeqCst);
+    fake.delay_bulk_ms
+        .store(300, std::sync::atomic::Ordering::SeqCst);
+    let (c4, e2) = one_more(&sid, &s, 2);
+    let reader_side = async {
+        // The holder's commit is durable; its mirror is still in flight.
+        while primary.load_session(&sid).await.unwrap().mutation_epoch < 2 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        reader.load_session(&sid).await.unwrap();
+        assert_eq!(reader.tier_status(&sid).sync, TierSync::Stale);
+        reader
+            .vector_candidates_checked(&sid, &PROBE, &contract(), 10)
+            .await
+            .unwrap();
+        assert_eq!(knn(), 0, "a marker behind is not trusted");
+    };
+    let (flushed, ()) = tokio::join!(writer.flush(&e2, Some(token)), reader_side);
+    flushed.unwrap();
+    assert_eq!(fake.marker(&sid), Some(2), "the holder's mirror landed");
+
+    let got = reader
+        .vector_candidates_checked(&sid, &[0.0, 0.0, 1.0, 0.0], &contract(), 10)
+        .await
+        .unwrap();
+    assert_eq!(knn(), 1, "the reader never went back to the index");
+    assert_eq!(got.first().map(|h| h.item), Some(c4));
+    assert_eq!(reader.tier_status(&sid).sync, TierSync::InSync);
+}
+
+/// F1: the re-check is bounded. A reader that keeps finding the marker
+/// behind costs one durable load per session per backoff, not one per read.
+#[tokio::test]
+async fn a_reader_rechecks_a_stale_session_at_most_once_per_backoff() {
+    let (primary, fake) = (memory_primary(), Arc::new(FakeIndex::new()));
+    let writer = tier(&primary, &fake);
+    let sid = SessionId::new("behind-backoff");
+    let w = holder("w");
+    let token = attach(&writer, &sid, &w).await;
+    let (s, b) = seed_batch(&sid, 1);
+    writer.flush(&b, Some(token)).await.unwrap();
+    let (_, e2) = one_more(&sid, &s, 2);
+    primary.flush(&e2, Some(token)).await.unwrap();
+    writer.release_lease(&sid, &w).await.unwrap();
+
+    let loads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let reader = TieredStore::new(
+        Box::new(CountingLoads(Shared::new(primary.clone()), loads.clone())),
+        Box::new(fake.clone()),
+        Some(4),
+    );
+    reader.load_session(&sid).await.unwrap();
+    for _ in 0..3 {
+        reader
+            .vector_candidates_checked(&sid, &PROBE, &contract(), 10)
+            .await
+            .unwrap();
+    }
+    assert_eq!(loads.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(reader.tier_status(&sid).sync, TierSync::Stale);
+}
+
+/// F1, the holder's side: a holder whose session went stale and that does
+/// not flush again still gets its index back. A read asks for the repair.
+#[tokio::test]
+async fn a_holder_read_of_a_stale_session_asks_for_a_repair() {
+    let (primary, fake) = (memory_primary(), Arc::new(FakeIndex::new()));
+    let store = tier(&primary, &fake);
+    let sid = SessionId::new("idle-holder");
+    let token = attach(&store, &sid, &holder("w")).await;
+    let s = stale_after_an_outage(&store, &fake, &sid, token).await;
+    let knn = || fake.knn_calls.load(std::sync::atomic::Ordering::SeqCst);
+    store
+        .vector_candidates_checked(&sid, &PROBE, &contract(), 10)
+        .await
+        .unwrap();
+    assert_eq!(knn(), 0, "served from the primary while stale");
+    settle(&store).await;
+    assert_eq!(store.tier_status(&sid).sync, TierSync::InSync);
+    let got = store
+        .vector_candidates_checked(&sid, &PROBE, &contract(), 10)
+        .await
+        .unwrap();
+    assert_eq!(knn(), 1);
+    assert_eq!(got.first().map(|h| h.item), Some(s.c1));
+}
+
 /// M4: the holder's process loads an older snapshot (e1) while its own flush
 /// has already committed and mirrored e2, so the marker is *ahead* of the
 /// load. That is not staleness: repairing from the older snapshot would
