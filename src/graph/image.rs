@@ -190,6 +190,39 @@ pub fn image_content(caption: &str, image_id: &str) -> String {
     format!("{} {IMAGE_SUFFIX_OPEN}{image_id}]", caption.trim())
 }
 
+/// Refuse, before the image is embedded or the write accepted, an image
+/// derive whose `parent_of` ends would exceed the hybrid embedding-context
+/// limit at apply (#74): [`crate::graph::hybrid::check_embed_context`] with
+/// the image concept as the call's one concept and supplied item.
+///
+/// The image's own text is never embedded, so only its `parent_of` ends are
+/// held to the limit, each framed with the whole image content (caption plus
+/// suffix). With no `image_id` the default id is not known before the embed,
+/// so a placeholder of its fixed length ([`DEFAULT_IMAGE_ID_HEX`]) stands in:
+/// every length is exact, and only an end that names this very image by its
+/// default id is checked where apply would not embed it.
+pub fn check_embed_context(
+    caption: &str,
+    image_id: Option<&str>,
+    concept_type: ConceptType,
+    parent_of: &[(&str, &str)],
+) -> Result<(), String> {
+    use crate::graph::derive::ParentOf;
+    let placeholder = "0".repeat(DEFAULT_IMAGE_ID_HEX);
+    let content = image_content(caption, image_id.unwrap_or(&placeholder));
+    // A content over the cap (the uniform per-string cap, the same 16 KiB)
+    // is refused by that cap with the caption's own limit named; this check
+    // is about the ends, so it leaves that refusal to it.
+    if parent_of.is_empty() || content.len() > crate::graph::hybrid::MAX_HYBRID_CONTEXT_BYTES {
+        return Ok(());
+    }
+    crate::graph::hybrid::check_embed_context(
+        &[(content.as_str(), concept_type)],
+        &ParentOf::from_pairs(parent_of),
+        Some(&content),
+    )
+}
+
 /// The image id in an image concept's content (`"{caption} [image:{id}]"`),
 /// or `None` when the content does not end in a suffix with a valid id.
 pub fn image_id_of(content: &str) -> Option<&str> {

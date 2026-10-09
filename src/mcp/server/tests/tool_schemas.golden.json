@@ -1,6 +1,6 @@
 {
   "lambo_derive": {
-    "description": "Derive concepts from the current interaction into session memory. created_at is stamped server-side. event_time is optional RFC3339 historical about-time, such as a commit or document date; omit it for a live fact, which is about now. Returns as soon as the input is validated and ordered — the write is applied in the background and the ack carries a receipt id. The outcome is piggybacked on your next tool response; to wait for it, call lambo_stats with that receipt and a wait_ms.",
+    "description": "Derive concepts from the current interaction into session memory. created_at is stamped server-side. event_time is optional RFC3339 historical about-time, such as a commit or document date; omit it for a live fact, which is about now. Returns as soon as the input is validated and ordered — the write is applied in the background and the ack carries a receipt id. The outcome is piggybacked on your next tool response; to wait for it, call lambo_stats with that receipt and a wait_ms. On a store with vector search each concept is embedded with the whole call's text, so a concept sent alone may be at most 8189 bytes; a longer call is refused before the ack, naming the part that is too long.",
     "inputSchema": {
       "$defs": {
         "WireConcept": {

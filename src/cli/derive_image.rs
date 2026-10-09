@@ -179,6 +179,18 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
         .iter()
         .map(|(p, c)| (p.as_str(), c.as_str()))
         .collect();
+    // #74: a parent_of end too long to embed framed with the image content
+    // is a usage error naming the limit, before the image embed.
+    if mem.derive_embeds()
+        && let Err(msg) = image::check_embed_context(
+            &args.caption,
+            args.image_id.as_deref(),
+            concept_type,
+            &pair_refs,
+        )
+    {
+        return close_writer(mem, Err(CliError::Usage(msg))).await;
+    }
     let derive = ImageDerive {
         caption: &args.caption,
         concept_type,
