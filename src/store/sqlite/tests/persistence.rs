@@ -1816,3 +1816,34 @@ async fn a_width_restamp_nulls_the_vector_and_keeps_its_source() {
     assert_eq!(after.embedding, None, "the width restamp quarantined it");
     assert_eq!(after.embedding_source, source, "and kept its source");
 }
+
+/// #22 PR 3: an unconsumed image derive's durable intent carries its
+/// vector, contract and source through SQLite bit for bit, so a replay
+/// applies exactly the vector that was acked (or refuses it).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_image_derive_intent_survives_the_flush_load_round_trip() {
+    let store = test_store();
+    store.init_schema().await.unwrap();
+    let sid = SessionId::from("image-intent");
+    let batch = crate::store::erase::testkit::planted_batch(&sid, 8);
+    let planted = batch
+        .mutations
+        .iter()
+        .find_map(|m| match m {
+            Mutation::PutWriteIntent { intent } => Some(intent.clone()),
+            _ => None,
+        })
+        .expect("the batch plants an intent");
+    assert!(matches!(
+        planted.payload,
+        crate::types::WriteIntentPayload::DeriveImage { .. }
+    ));
+    store.flush(&batch, None).await.unwrap();
+    let loaded = store.load_session(&sid).await.unwrap();
+    let [intent] = loaded.write_intents.as_slice() else {
+        panic!("one intent: {:?}", loaded.write_intents);
+    };
+    // The payload exactly (timestamps are stored at millisecond precision).
+    assert_eq!(intent.payload, planted.payload);
+    assert_eq!(intent.outcome, None);
+}
