@@ -17,7 +17,7 @@ use super::*;
 use crate::embed::FixtureEmbedder;
 use crate::mcp::serve::pinned::check_pinned;
 use crate::mcp::serve::registry::{
-    Acquired, LeaseLossPolicy, SessionAttacher, SessionRegistry, PINNED_RETRY,
+    is_transient, Acquired, LeaseLossPolicy, SessionAttacher, SessionRegistry, PINNED_RETRY,
 };
 use crate::mcp::serve::transport::session_router;
 use crate::store::{GraphStore, MemoryStore, StoreConfig};
@@ -923,3 +923,25 @@ async fn a_pinned_session_that_can_no_longer_attach_is_not_retried() {
 
 /// The real multi-session serve, in-process (#32 review M1/M2).
 mod pinned_serve;
+
+/// Sonnet review L-C: which background-attach errors keep a pinned session
+/// retrying (the store or the embedder could not be reached) and which mark
+/// it `Failed` (the same answer on every retry).
+#[test]
+fn only_unreachable_store_or_embedder_errors_are_retried() {
+    use crate::types::StoreError;
+    for transient in [
+        LamboError::Store(StoreError::Backend("connection refused".into())),
+        LamboError::Store(StoreError::Other(anyhow::anyhow!("pool timed out"))),
+        LamboError::EmbedUnavailable("llama-server is down".into()),
+    ] {
+        assert!(is_transient(&transient), "{transient:?}");
+    }
+    for permanent in [
+        LamboError::Store(StoreError::Invariant("erased".into())),
+        LamboError::Store(StoreError::SessionNotFound("s".into())),
+        LamboError::Config("contract mismatch".into()),
+    ] {
+        assert!(!is_transient(&permanent), "{permanent:?}");
+    }
+}
