@@ -587,6 +587,7 @@ async fn a_failing_schema_preflight_still_fails_startup() {
         backends_with_store(Box::new(NoSchema(counting.clone()))),
         Args {
             session: "t4-preflight".into(),
+            sessions: Vec::new(),
             port: 0,
             bind: Ipv4Addr::LOCALHOST.into(),
             auth_token: None,

@@ -624,6 +624,13 @@ impl<T: BearerSecret> SessionAuthority<T> {
             Err(SessionRefusal::new(RefusalReason::OutOfScope))
         }
     }
+
+    /// Is `id` one of this set's pinned sessions? A prefix scope covers ids
+    /// by shape alone; a surface that serves only what it pins (the portal's
+    /// allowlist, #4 design 4.2) checks this after [`Self::authorize`].
+    pub(crate) fn is_pinned(&self, id: &AddressedSessionId) -> bool {
+        self.hosted.is_pinned(id)
+    }
 }
 
 #[cfg(test)]

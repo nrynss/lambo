@@ -21,6 +21,7 @@ use crate::cli::caps::CliError;
 use crate::mcp::AUTH_TOKEN_ENV;
 use crate::surface::session::{
     parse_addressed, BearerSecret, HostedSessions, SessionAuthority, SessionGrant,
+    LOCAL_CREDENTIAL_NAME,
 };
 use crate::types::SessionId;
 
@@ -164,6 +165,17 @@ pub(super) fn authorize_bind_web(bind: IpAddr, token: Option<&AuthToken>) -> Res
          'Authorization: Bearer <token>' on every request, or bind 127.0.0.1 and reach it \
          through a tunnel or an authenticating proxy."
     )))
+}
+
+/// The name of the portal's one credential, for the startup log: the
+/// configured token's (`default`) or the implicit loopback one (`local`).
+/// Never a secret.
+pub(super) fn credential_label(authority: &PortalAuthority) -> &str {
+    authority
+        .credential_names()
+        .first()
+        .copied()
+        .unwrap_or(LOCAL_CREDENTIAL_NAME)
 }
 
 /// Step 1 of the fixed order (design 3.3): resolve the request's bearer

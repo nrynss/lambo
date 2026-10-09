@@ -100,12 +100,16 @@ enum Commands {
     /// Loopback is unauthenticated by default; a non-loopback bind requires a
     /// bearer token (LAMBO_AUTH_TOKEN or --auth-token) and fails closed without one.
     ServeWeb {
-        /// Session to open a read-only window onto (reader process; does not take the writer lease).
+        /// Session to open a read-only window onto (reader process; does not
+        /// take the writer lease). Repeatable, beside lambo.toml [web]
+        /// sessions: each served session is read at /s/<session>/, and the
+        /// first is also served at /. With more than one, every name must be
+        /// 1 to 128 bytes of [A-Za-z0-9._:-].
         #[arg(
             long,
-            help = "Session to open a read-only window onto (reader process; does not take the writer lease)."
+            help = "Session to open a read-only window onto (reader process; does not take the writer lease). Repeatable, beside lambo.toml [web] sessions: each is served at /s/<session>/, the first also at /."
         )]
-        session: String,
+        session: Vec<String>,
         /// HTTP port to listen on.
         #[arg(long, default_value_t = 7710, help = "HTTP port to listen on.")]
         port: u16,
@@ -915,12 +919,22 @@ fn main() -> ExitCode {
         _ => None,
     };
     // `serve-web` takes `[web]` (#4) from the same single read of
-    // `lambo.toml` that builds its backends, as `serve` takes `[serve]`.
+    // `lambo.toml` that builds its backends, as `serve` takes `[serve]`. Its
+    // served sessions are planned here, before any backend or model is
+    // built, so an empty or bad set is exit 2 at once (#4 PR 2).
     let mut web = lambo::config::WebConfig::default();
+    let mut served_web = None;
     let loaded = match &cmd {
-        Commands::ServeWeb { .. } => match LamboFile::load_resolved(config) {
+        Commands::ServeWeb { session, .. } => match LamboFile::load_resolved(config) {
             Ok(file) => {
                 web = file.web.clone();
+                match lambo::cli::serve_web::plan_sessions(session, &web) {
+                    Ok(plan) => served_web = Some(plan),
+                    Err(e) => {
+                        eprintln!("lambo serve-web: {e}");
+                        return ExitCode::from(e.exit_code());
+                    }
+                }
                 Some(file)
             }
             Err(e) => {
@@ -1038,7 +1052,7 @@ fn main() -> ExitCode {
         // the single `ResolvedBackends` from `resolve_for_command` above.
         (
             Commands::ServeWeb {
-                session,
+                session: _,
                 port,
                 bind,
                 auth_token,
@@ -1049,7 +1063,12 @@ fn main() -> ExitCode {
             lambo::cli::serve_web::run(
                 *backends,
                 lambo::cli::serve_web::Args {
-                    session,
+                    // Planned before the backends, above.
+                    session: served_web
+                        .as_ref()
+                        .map(|p| p.default.clone())
+                        .unwrap_or_default(),
+                    sessions: served_web.map(|p| p.sessions).unwrap_or_default(),
                     port,
                     bind,
                     auth_token,

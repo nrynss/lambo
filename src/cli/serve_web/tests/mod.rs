@@ -124,6 +124,7 @@ mod graph;
 mod inspect;
 mod recall;
 mod routes;
+mod routing;
 mod session;
 mod shutdown;
 mod views;
