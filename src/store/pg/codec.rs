@@ -192,6 +192,18 @@ pub(super) fn row_to_interaction(row: &PgRow) -> Result<Interaction, StoreError>
     })
 }
 
+/// Decode a concept row's `embedding_source` column (#22). SQL `NULL` is
+/// `None`; a value this build cannot read is an invariant error naming the
+/// concept, never `None` (see `EmbeddingSource::from_column`). Split out of
+/// [`row_to_concept`] so the refusal is tested without a live engine.
+pub(super) fn decode_embedding_source(
+    raw: Option<String>,
+    concept: &str,
+) -> Result<Option<EmbeddingSource>, StoreError> {
+    raw.map(|raw| EmbeddingSource::from_column(&raw, concept))
+        .transpose()
+}
+
 pub(super) fn row_to_concept(row: &PgRow) -> Result<Concept, StoreError> {
     let id: String = row.try_get("id").map_err(backend)?;
     let origin: String = row.try_get("origin_interaction").map_err(backend)?;
@@ -201,12 +213,8 @@ pub(super) fn row_to_concept(row: &PgRow) -> Result<Concept, StoreError> {
     let gc_survived: i64 = row.try_get("gc_survived").map_err(backend)?;
     let blast_radius: Option<i64> = row.try_get("blast_radius").map_err(backend)?;
     let human_confirmed: i64 = row.try_get("human_confirmed").map_err(backend)?;
-    // #22: an unreadable value is an invariant error, never `None` (see
-    // `EmbeddingSource::from_column`).
-    let embedding_source: Option<String> = row.try_get("embedding_source").map_err(backend)?;
-    let embedding_source = embedding_source
-        .map(|raw| EmbeddingSource::from_column(&raw, &id))
-        .transpose()?;
+    let embedding_source =
+        decode_embedding_source(row.try_get("embedding_source").map_err(backend)?, &id)?;
     Ok(Concept {
         id: parse_node_id(&id)?,
         session_id: SessionId(row.try_get("session_id").map_err(backend)?),
@@ -289,4 +297,32 @@ pub(super) fn row_to_canonization_event(row: &PgRow) -> Result<CanonizationEvent
         last_demotion_time: row.try_get("last_demotion_time").map_err(backend)?,
         occurred_at: row.try_get("occurred_at").map_err(backend)?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #22 review M1: the Postgres-family decode of `concepts.embedding_source`
+    /// runs offline here, so the refusal of an unreadable value is covered in
+    /// every CI row that builds the family, not only on a live engine.
+    #[test]
+    fn decode_embedding_source_reads_null_and_values_and_refuses_the_rest() {
+        assert_eq!(decode_embedding_source(None, "c1").unwrap(), None);
+        let stored = r#"{"modality":"image","origin":"client"}"#;
+        assert_eq!(
+            decode_embedding_source(Some(stored.into()), "c1").unwrap(),
+            Some(EmbeddingSource::from_column(stored, "c1").unwrap())
+        );
+        for raw in [
+            r#"{"modality":"audio","origin":"client"}"#,
+            r#"{"modality":"image"}"#,
+            "not json",
+        ] {
+            let err = decode_embedding_source(Some(raw.into()), "c-corrupt").expect_err(raw);
+            assert!(matches!(err, StoreError::Invariant(_)), "{raw}: {err:?}");
+            assert!(err.to_string().contains("embedding_source"), "{err}");
+            assert!(err.to_string().contains("concept c-corrupt"), "{err}");
+        }
+    }
 }

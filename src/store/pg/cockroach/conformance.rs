@@ -962,7 +962,8 @@ async fn check_chunk_group_id_survives_flush_load(store: &CockroachStore) {
 }
 
 /// #22 PR 2: a concept's `embedding_source` survives flush→load on
-/// Cockroach, through the same shared check every adapter runs. The
+/// Cockroach, through the same shared check every adapter runs, and an
+/// unreadable stored value fails the load with an `Invariant`. The
 /// `cockroach-live` CI job is disabled (`if: false`, 2026-10-06), so this
 /// runs only when the suite is run by hand against a cluster.
 async fn check_embedding_source_survives_flush_load(store: &CockroachStore) {
@@ -972,6 +973,11 @@ async fn check_embedding_source_survives_flush_load(store: &CockroachStore) {
         .expect("cockroach stores carry vectors");
     crate::store::embedding_source_testkit::check_embedding_source_round_trip(
         store, &sid, dim, None,
+    )
+    .await;
+    // Review M1: a value this build cannot read fails the load.
+    crate::store::pg::embedding_source_live::check_unreadable_embedding_source_fails_the_load(
+        store, &sid,
     )
     .await;
 }
