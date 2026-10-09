@@ -19,7 +19,7 @@ pub mod dresscode;
 #[cfg(feature = "store-memory")]
 mod vector_searchable;
 #[cfg(feature = "store-memory")]
-pub use vector_searchable::VectorSearchable;
+pub use vector_searchable::{GraphRanked, VectorSearchable};
 
 /// The text role a delegating test embedder forwards (#22).
 ///

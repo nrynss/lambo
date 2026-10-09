@@ -533,6 +533,14 @@ async fn every_session_of_one_serve_lists_the_same_tools() {
             in_a.keys()
         );
         assert_eq!(in_a.len(), if image_listed { 8 } else { 7 }, "{label}");
+        // #22 PR 6: `lambo_recall` publishes `image` and `query_vector` in
+        // every deployment (a deployment that cannot serve one refuses it
+        // by name), so its schema is the same everywhere too.
+        let recall = &in_a["lambo_recall"]["inputSchema"]["properties"];
+        assert!(
+            recall.get("image").is_some() && recall.get("query_vector").is_some(),
+            "{label}: {recall}"
+        );
         for session in registry.close_set().await {
             session.mem.close().await.expect("close");
         }
