@@ -609,8 +609,9 @@ pub(crate) mod testkit {
     /// A batch that writes the session row (with contract and root goal), two
     /// chained interactions, two concepts (one carrying a `dim`-wide vector
     /// and its #22 `embedding_source`), two edges, a canonization transition,
-    /// a read access and a durable write intent. Concept text is unique per call, so two sessions planted in one
-    /// store never collide on a canonical key.
+    /// a read access and a durable write intent. Concept text is unique per
+    /// call, so two sessions planted in one store never collide on a
+    /// canonical key.
     pub(crate) fn planted_batch(sid: &SessionId, dim: usize) -> MutationBatch {
         let ts = Utc::now();
         let (i1, i2, c1, c2) = (NodeId::new(), NodeId::new(), NodeId::new(), NodeId::new());
