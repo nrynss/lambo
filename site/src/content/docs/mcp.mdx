@@ -138,7 +138,7 @@ Errors come back as normal tool results with `isError` set to `true` and a short
 | The server losing its single-writer lease | The class `conflict` and a note that the detail was logged. The holder and expiry are shown only for a lock another agent holds; the lease's own state is not model-facing. |
 | A store or embedding failure | The class of failure, such as `store error`, and a note that the detail was logged. |
 | An image whose caption and `image_id` a text concept already holds | `image id taken`, your `image_id`, and the fix: choose another image id. On `lambo_derive_image` this arrives on the receipt. |
-| A call this server is not configured for | `configuration error` and the setting to change, such as `[embedder] accept_client_vectors = true`. Only `lambo_derive_image` answers this way. |
+| A call this server is not configured for | `configuration error` and the setting to change, such as `[embedder] accept_client_vectors = true`. Only `lambo_derive_image`, and `lambo_recall` with `image` or `query_vector`, answer this way. |
 | A handler fault | An internal error, with a note that the call had no effect beyond anything already written. |
 
 ## Tools
@@ -162,10 +162,12 @@ Recall still works without a vector leg. You get matches on the words you use ra
 | Argument | Type | Required | Range or default |
 |---|---|---|---|
 | `agent_id` | string | Yes | |
-| `query` | string | Yes | Up to 16 KB. |
+| `query` | string | Yes, unless `image` or `query_vector` is sent | Up to 16 KB. Beside an image or a vector it is optional, and blank text counts as none. |
 | `top_k` | integer | No | `1` to `100`. Defaults to the configured value, which is `5`. |
 | `max_tokens` | integer | No | `1` to `100,000`. Defaults to the configured value, which is `500`. |
 | `traversal_depth` | integer | No | `0` to `5`. Defaults to the configured value, which is `2`. |
+| `image` | `{mime, data}` | No; at most one of `image`, `query_vector` | Recall what is close to this image. The same shape and limits as `lambo_derive_image`'s `image`. Needs an embedder that embeds images. |
+| `query_vector` | `{values, contract}` | No; at most one of `image`, `query_vector` | Recall what is close to a vector you computed. The same shape and checks as `lambo_derive_image`'s `vector`. Accepted only when the operator enabled client vectors. |
 
 ```json
 {"name": "lambo_recall", "arguments": {"agent_id": "agent-a", "query": "stdio wire check"}}
@@ -179,6 +181,17 @@ Recall still works without a vector leg. You get matches on the words you use ra
              "is_canonical": false, "blast_radius": null}],
    "warnings": []},
  "isError": false}
+```
+
+**Recall by image or by vector.** With `image` or `query_vector`, the vector leg searches by that image's or vector's embedding instead of the text's, so "this outfit is close to the one you dismissed for Onam" is a recall by the photo of this outfit. The server embeds an image with no prompt, the way it embeds an image it stores, and normalizes a client vector to unit length after checking that its contract is exactly the session's `embedding_contract`, as `lambo_derive_image` does. Text sent beside it still matches words through the keyword leg. With no text the keyword leg finds nothing, and recent interactions are included as for any recall. A structural question such as "what depends on X" is answered by the blended recall here, not by graph traversal, since traversal would ignore the image.
+
+* The vector leg is the point, so a store without vector search, an embedder that cannot embed images (for `image`), or client vectors turned off (for `query_vector`) is refused with a `configuration error` naming what is missing. An image the embedder fails on is an error, not a keyword-only answer.
+* Nothing is kept. The image and the vector are not stored and not cached (a text query's embedding is cached per session, an image's is not), and the `--ledger` line says only `by: "image"` or `by: "vector"`. Refusals never repeat what you sent.
+* These two fields are in `lambo_recall`'s schema on every server, whatever its embedder, so every session one server holds lists the same `lambo_recall`.
+
+```json
+{"name": "lambo_recall", "arguments": {"agent_id": "dresscode",
+  "image": {"mime": "image/png", "data": "iVBORw0KGgo..."}}}
 ```
 
 ### lambo_derive

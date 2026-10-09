@@ -4,6 +4,11 @@
 
 ### Breaking
 
+- `RecallParams` (the `lambo_recall` parameters, re-exported from
+  `lambo::mcp::server`) gains two public fields, `image: Option<WireImage>`
+  and `query_vector: Option<WireQueryVector>` (#22 PR 6), so code that
+  builds it with a struct literal must add `image: None, query_vector:
+  None`. Deserializing it is unaffected.
 - `Concept` gains a public field, `embedding_source: Option<EmbeddingSource>`
   (#22). Code that builds a `Concept` with a struct literal must add
   `embedding_source: None`; code that reads or deserializes one is
@@ -113,6 +118,14 @@
 
 ### Changed
 
+- `lambo_recall`'s published schema changes additively (#22 PR 6): two
+  optional properties, `image` and `query_vector`, and `query` is no longer
+  in `required` (it gains `"default": ""` and a description saying it is
+  required unless an image or a query vector is sent; the server still
+  refuses a call with none of the three). The tool-list golden is updated
+  for `lambo_recall` only; the other seven schemas are byte-identical.
+  `lambo recall --query` is likewise optional beside `--image` or
+  `--query-vector-json`.
 - A hybrid derive whose embedding text would exceed 16 KiB is refused when
   it is called, not on its receipt (#74): each new concept and `parent_of`
   end is embedded framed with the whole call's text, so on a store with
@@ -264,6 +277,26 @@
 
 ### Added
 
+- Recall by image or by a client query vector (#22 PR 6, the Dresscode
+  "close to the one you dismissed" path). `lambo_recall` takes an optional
+  `image` (mime and base64, embedded by the server with
+  `Embedder::embed_image`, no prompt) or `query_vector` (values and the
+  contract they are in), at most one; with either, `query` is optional and
+  still feeds the keyword leg, and the vector leg searches by the image or
+  vector. The same checks as `lambo_derive_image`: base64 capped before it
+  is decoded, MIME matched to the magic bytes, a client vector accepted
+  only with `[embedder] accept_client_vectors = true` and only in exactly
+  the session's contract, refused with no echo. Not cached (the #14 query
+  cache holds text queries only), never logged; the ledger line gains only
+  `by: "image" | "vector"`. A store without vector search, or an image the
+  embedder cannot embed, is refused rather than answered keyword-only, and
+  a structural phrasing beside an image is not dispatched to traversal.
+  Library: `Memory::recall_by` with `recall::query_vector::QueryBy`;
+  `surface::image::check_submitted_vector_as`; CLI `lambo recall --image
+  PATH [--mime M] | --query-vector-json PATH`, under derive-image's file
+  caps. Works over every vector source (#8's holder graph, the store's
+  checked read on SQLite, Postgres and Cockroach, and #18's tier); no store
+  contract changed.
 - MCP tool `lambo_derive_image` (#22 PR 4): one image concept per call, a
   caption plus either the image (`image`: mime and base64, embedded by the
   server on the call path) or a client-computed vector (`vector`: values and
