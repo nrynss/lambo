@@ -17,6 +17,9 @@
 //! * `focus`: `inspect` focus resolution (`resolve_focus`), crate-internal.
 //! * `neighbourhood`: the bounded `inspect` neighbourhood projection
 //!   (`render_neighbourhood`), crate-internal.
+//! * [`session`]: session addressing (`parse_addressed`), the in-memory
+//!   authorization types and the uniform 404, shared by `serve`'s
+//!   `/mcp/s/{session}` routing (#32) and the web portal's `/s/{session}` (#4).
 //!
 //! `crate::cli::caps` re-exports every public item that lived there before
 //! #25 (the limits and `check_size`), so those paths still resolve. The
@@ -29,4 +32,5 @@ pub(crate) mod error;
 pub(crate) mod focus;
 pub mod limits;
 pub(crate) mod neighbourhood;
+pub mod session;
 pub mod validate;

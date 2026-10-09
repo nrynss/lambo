@@ -228,9 +228,13 @@ impl FromStr for EmbedderKind {
             "gemini" | "vertex" => Ok(Self::Gemini),
             "bedrock" | "titan" => Ok(Self::Bedrock),
             "fixture" | "fake" => Ok(Self::Fixture),
-            other => Err(EmbedError::Unavailable(format!(
-                "unknown embedder kind {other:?} (expected bge_m3 | candle | gemini | bedrock | fixture)"
-            ))),
+            // Never echo the value: a key or DSN pasted under `kind` would
+            // reach the startup log.
+            _ => Err(EmbedError::Unavailable(
+                "unknown embedder kind (value not shown; expected bge_m3 | candle | gemini | \
+                 bedrock | fixture)"
+                    .into(),
+            )),
         }
     }
 }

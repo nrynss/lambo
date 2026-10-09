@@ -13,6 +13,13 @@ use crate::embed::{EmbedError, EmbedderConfig};
 use crate::store::StoreConfig;
 use crate::types::{LamboError, MatchStrategy};
 
+mod serve;
+pub use serve::{
+    CredentialConfig, InlineToken, ProjectConfig, ServeConfig, ServeCredential,
+    DEFAULT_ATTACH_CONCURRENCY, DEFAULT_IDLE_DETACH_SECS, DEFAULT_MAX_ATTACHED,
+    EVERY_HOSTED_SESSION, RESERVED_CREDENTIAL_NAMES, SERVE_UNENFORCED_NOTICE,
+};
+
 /// Scoring weights for daemon composite (spec §9): recency / frequency / session_activity / density.
 ///
 /// Every field is a public `f64` and this struct deserializes from `lambo.toml`
@@ -426,12 +433,124 @@ pub struct LamboFile {
         deserialize_with = "crate::canon::deserialize_promotion_policy"
     )]
     pub promotion_policy: Option<PromotionPolicy>,
+    /// Multi-session serving (`[serve]`, #32). Parsed and validated only:
+    /// nothing reads it at runtime until #32's later PRs, so an absent table
+    /// and a present one serve exactly as before. Not serialized when empty,
+    /// so a file written from a [`LamboFile`] without `[serve]` stays readable
+    /// by a binary that predates it. See [`ServeConfig`].
+    #[serde(default, skip_serializing_if = "ServeConfig::is_empty")]
+    pub serve: ServeConfig,
+}
+
+/// A `lambo.toml` parse error, with its position and **without** the source
+/// line.
+///
+/// `toml::de::Error`'s `Display` quotes the offending line, and the line can
+/// hold a secret: a misspelled key beside a DSN with a password, or a token
+/// under a typo of `token_env`. The message and the position are what an
+/// operator needs to find the problem; the text is already in their file.
+fn toml_error(src: &str, err: &toml::de::Error) -> LamboError {
+    let message = redact_quoted_values(err.message().trim_end());
+    let position = err.span().map(|span| {
+        let before = src.get(..span.start).unwrap_or_default();
+        let line = before.matches('\n').count() + 1;
+        let column = before.rsplit('\n').next().unwrap_or("").chars().count() + 1;
+        format!(" (line {line}, column {column})")
+    });
+    LamboError::Config(format!(
+        "lambo.toml: {message}{}",
+        position.unwrap_or_default()
+    ))
+}
+
+/// serde's messages quote a wrong-typed or unknown value (`invalid type:
+/// string "...", expected usize`, `unknown variant `...``), and that value can
+/// be a secret pasted under the wrong key. Replace each such value with
+/// `(value not shown)`; field names (`unknown field `dssn``) stay, since the
+/// operator needs them and they are the file's own keys.
+fn redact_quoted_values(message: &str) -> String {
+    const HIDDEN: &str = "(value not shown)";
+    let mut out = String::with_capacity(message.len());
+    let mut rest = message;
+    loop {
+        let string_at = rest.find("string \"");
+        let variant_at = rest.find("unknown variant `");
+        let (at, prefix, close) = match (string_at, variant_at) {
+            (Some(s), Some(v)) if v < s => (v, "unknown variant ", '`'),
+            (Some(s), _) => (s, "string ", '"'),
+            (None, Some(v)) => (v, "unknown variant ", '`'),
+            (None, None) => break,
+        };
+        out.push_str(&rest[..at]);
+        out.push_str(prefix);
+        out.push_str(HIDDEN);
+        // Skip the opening delimiter, then up to the matching close. A
+        // string is rendered with `Debug`, so `\"` inside it is escaped.
+        let body = &rest[at + prefix.len() + 1..];
+        let mut escaped = false;
+        let end = body.char_indices().find_map(|(i, c)| {
+            let hit = c == close && !escaped;
+            escaped = close == '"' && c == '\\' && !escaped;
+            hit.then_some(i + c.len_utf8())
+        });
+        // An unterminated value: hide the remainder rather than guess.
+        rest = end.map_or("", |e| &body[e..]);
+    }
+    out.push_str(rest);
+    // Numbers are values too (`invalid type: integer `12345``), and a key is
+    // shown only while it looks like a key: a quoted key such as
+    // `"postgres://u:pw@h" = 1` reaches `unknown field` verbatim.
+    let out = redact_backticked(&out, "integer `", |_| false);
+    let out = redact_backticked(&out, "float `", |_| false);
+    let out = redact_backticked(&out, "unknown field `", is_bare_key);
+    redact_backticked(&out, "duplicate key `", is_bare_key)
+}
+
+/// A key short and plain enough to be a config key rather than a pasted value.
+fn is_bare_key(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= 40
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// Replace the backtick-quoted text after each `prefix` (which ends with the
+/// opening backtick) with `(value not shown)` unless `keep` accepts it.
+fn redact_backticked(message: &str, prefix: &str, keep: fn(&str) -> bool) -> String {
+    let mut out = String::with_capacity(message.len());
+    let mut rest = message;
+    while let Some(at) = rest.find(prefix) {
+        let body = &rest[at + prefix.len()..];
+        let (value, after) = match body.find('`') {
+            Some(close) => (&body[..close], &body[close + 1..]),
+            None => (body, ""),
+        };
+        out.push_str(&rest[..at + prefix.len()]);
+        if keep(value) {
+            out.push_str(value);
+            out.push('`');
+        } else {
+            // Drop the opening backtick as well, matching the string form.
+            out.pop();
+            out.push_str("(value not shown)");
+        }
+        rest = after;
+    }
+    out.push_str(rest);
+    out
 }
 
 impl LamboFile {
     /// Parse TOML text.
+    ///
+    /// Also runs [`ServeConfig::validate`], so a malformed `[serve]` table
+    /// fails closed at the file boundary for every command, like an unknown
+    /// key does.
     pub fn from_toml_str(s: &str) -> Result<Self, LamboError> {
-        toml::from_str(s).map_err(|e| LamboError::Config(format!("lambo.toml: {e}")))
+        let file: Self = toml::from_str(s).map_err(|e| toml_error(s, &e))?;
+        file.serve.validate()?;
+        Ok(file)
     }
 
     /// Load from a path.
@@ -859,6 +978,147 @@ mod tests {
         assert!(LamboFile::from_toml_str("[embedder]\nkind = \"\"\n").is_err());
     }
 
+    /// A `lambo.toml` parse error must not quote the offending source line.
+    ///
+    /// The `toml` crate's `Display` renders the line under the error, so a
+    /// misspelled key next to a secret (a DSN with a password in it, or a
+    /// bearer token under a typo of `token_env`) printed the secret into the
+    /// startup error, and from there into a launchd or systemd log. The
+    /// refusal keeps the parser's message and a line and column, and drops the
+    /// source text.
+    ///
+    /// Mutation: format the error with `{e}` again → red.
+    #[test]
+    fn a_parse_error_names_the_line_but_never_quotes_it() {
+        for (toml, needles) in [
+            (
+                "[store]\nkind = \"cockroach\"\ndssn = \"postgresql://u:fake-xyzzy@h/db\"\n",
+                &["unknown field `dssn`", "line 3"][..],
+            ),
+            (
+                "[[serve.credential]]\nname = \"agents\"\ntokn = \"fake-xyzzy\"\n",
+                &["unknown field `tokn`", "line 3"][..],
+            ),
+            (
+                "[store]\npath = \"fake-xyzzy\nkind = \"memory\"\n",
+                &["line 2"][..],
+            ),
+        ] {
+            let err = LamboFile::from_toml_str(toml).unwrap_err().to_string();
+            assert!(!err.contains("xyzzy"), "the source line leaked: {err}");
+            assert!(err.contains("lambo.toml: "), "{err}");
+            for needle in needles {
+                assert!(err.contains(needle), "{toml:?} must name {needle:?}: {err}");
+            }
+        }
+    }
+
+    /// A value under an enum-typed or number-typed key is never quoted back
+    /// (#32 PR 1 review L1). A DSN or token pasted under `[store] kind`,
+    /// `[embedder] kind`, `promotion_policy` or a numeric key reached the
+    /// startup error through the kind parsers' "unknown ... kind {value}" and
+    /// serde's `invalid type: string "..."`. The refusal lists what is
+    /// accepted instead.
+    ///
+    /// Mutation: echo `{other:?}` in `StoreKind::from_str` again → red.
+    #[test]
+    fn a_value_under_a_typed_key_is_never_quoted() {
+        let dsn = "postgresql://u:fake-xyzzy@h/db";
+        for (toml, needle) in [
+            (format!("[store]\nkind = \"{dsn}\"\n"), "sqlite"),
+            (format!("[store]\nkind = \"  {dsn}  \"\n"), "memory"),
+            (format!("[embedder]\nkind = \"{dsn}\"\n"), "fixture"),
+            (format!("promotion_policy = \"{dsn}\"\n"), "Swarm"),
+            (format!("[embedder]\ndim = \"{dsn}\"\n"), "invalid type"),
+            (
+                format!("[daemon]\ngc_interval = \"{dsn}\"\n"),
+                "invalid type",
+            ),
+            (
+                format!("[serve]\nmax_attached = \"{dsn}\"\n"),
+                "invalid type",
+            ),
+        ] {
+            let err = LamboFile::from_toml_str(&toml).unwrap_err().to_string();
+            assert!(!err.contains("xyzzy"), "the value leaked: {err}");
+            assert!(err.contains(needle), "{toml:?} must name {needle:?}: {err}");
+            assert!(err.contains("line "), "{err}");
+        }
+        // The parsers themselves, which the environment overlay also calls.
+        let store = dsn.parse::<StoreKind>().unwrap_err().to_string();
+        assert!(
+            !store.contains("xyzzy") && store.contains("postgres"),
+            "{store}"
+        );
+        let embed = dsn.parse::<EmbedderKind>().unwrap_err().to_string();
+        assert!(
+            !embed.contains("xyzzy") && embed.contains("bge_m3"),
+            "{embed}"
+        );
+        let policy = dsn.parse::<PromotionPolicy>().unwrap_err();
+        assert!(
+            !policy.contains("xyzzy") && policy.contains("Solo"),
+            "{policy}"
+        );
+    }
+
+    /// The redaction keeps field names and hides only values, including one
+    /// whose `Debug` rendering holds an escaped quote.
+    #[test]
+    fn redact_quoted_values_hides_values_and_keeps_field_names() {
+        assert_eq!(
+            redact_quoted_values(r#"invalid type: string "a\"b-xyzzy", expected usize"#),
+            "invalid type: string (value not shown), expected usize"
+        );
+        assert_eq!(
+            redact_quoted_values("unknown variant `xyzzy`, expected one of `a`, `b`"),
+            "unknown variant (value not shown), expected one of `a`, `b`"
+        );
+        assert_eq!(
+            redact_quoted_values("unknown field `dssn`, expected `kind`"),
+            "unknown field `dssn`, expected `kind`"
+        );
+        assert_eq!(
+            redact_quoted_values(r#"string "xyzzy" then string "xyzzy" end"#),
+            "string (value not shown) then string (value not shown) end"
+        );
+        assert_eq!(
+            redact_quoted_values(r#"invalid value: string "unterminated-xyzzy"#),
+            "invalid value: string (value not shown)"
+        );
+        assert_eq!(
+            redact_quoted_values("invalid type: integer `48151623`, expected a string"),
+            "invalid type: integer (value not shown), expected a string"
+        );
+        assert_eq!(
+            redact_quoted_values("invalid type: float `4.815`, expected usize"),
+            "invalid type: float (value not shown), expected usize"
+        );
+        assert_eq!(
+            redact_quoted_values("unknown field `postgres://u:xyzzy@h/db`, expected `kind`"),
+            "unknown field (value not shown), expected `kind`"
+        );
+        assert_eq!(
+            redact_quoted_values("duplicate key `token-xyzzy.secret`"),
+            "duplicate key (value not shown)"
+        );
+    }
+
+    /// A DSN pasted as a quoted key never reaches the error; a plain typo
+    /// still does, since the operator needs it.
+    #[test]
+    fn a_quoted_key_holding_a_secret_is_never_echoed() {
+        let err = LamboFile::from_toml_str("[store]\n\"postgres://u:xyzzy@h/db\" = 1\n")
+            .unwrap_err()
+            .to_string();
+        assert!(!err.contains("xyzzy"), "{err}");
+        assert!(err.contains("(value not shown)"), "{err}");
+        let err = LamboFile::from_toml_str("[store]\nknd = \"memory\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("knd"), "{err}");
+    }
+
     #[test]
     fn lambo_file_rejects_unknown_keys() {
         assert!(
@@ -1042,6 +1302,7 @@ kind = "fake"
             },
             daemon: Default::default(),
             promotion_policy: Some(PromotionPolicy::Solo),
+            serve: Default::default(),
         };
         let s = toml::to_string(&f).unwrap();
         let back: LamboFile = toml::from_str(&s).unwrap();
