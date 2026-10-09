@@ -127,7 +127,7 @@ impl ProcessTasks {
         if let Some(task) = &self.keep_warm {
             task.abort();
         }
-        self.calibration.abort();
+        self.calibration.shutdown();
     }
 
     /// Stage 5: stop every background task, after `close()`.
@@ -155,6 +155,6 @@ impl ProcessTasks {
         // #32 PR 3. Already aborted at stage 2; repeated here (idempotent),
         // like the keep-warm. Dropping `self` drops this clone; the probe's
         // last holders are the calibration in `serve` and the sessions.
-        self.calibration.abort();
+        self.calibration.shutdown();
     }
 }

@@ -885,6 +885,9 @@ pub(super) async fn futures_join_all<F: std::future::Future>(futures: Vec<F>) ->
 pub(crate) struct EmbedderProbe {
     rx: watch::Receiver<Option<Calibration>>,
     task: PlMutex<Option<JoinHandle<()>>>,
+    /// When the probe stopped: it published, or it was aborted. A re-probe's
+    /// backoff counts from here, not from the start (#32 PR 3 review L2).
+    ended_at: Arc<PlMutex<Option<tokio::time::Instant>>>,
 }
 
 impl EmbedderProbe {
@@ -893,6 +896,8 @@ impl EmbedderProbe {
     /// Spawned rather than awaited, for the reason on [`WritePipeline::spawn`].
     pub(crate) fn spawn(embedder: Arc<dyn Embedder>, scope: ProbeScope) -> Self {
         let (tx, rx) = watch::channel(None);
+        let ended_at = Arc::new(PlMutex::new(None));
+        let ended = Arc::clone(&ended_at);
         let task = tokio::spawn(async move {
             let (calibration, miss) = probe_embedder_explained(embedder.as_ref()).await;
             match (calibration.measured(), calibration.items_per_sec) {
@@ -957,10 +962,23 @@ impl EmbedderProbe {
             // A closed receiver means every reader went away first; there is
             // nothing to report to and nothing to fix.
             let _ = tx.send(Some(calibration));
+            ended.lock().get_or_insert_with(tokio::time::Instant::now);
         });
         Self {
             rx,
             task: PlMutex::new(Some(task)),
+            ended_at,
+        }
+    }
+
+    /// A probe that never runs and never publishes: what a calibration hands
+    /// out after its owner shut it down (#32 PR 3 review L1).
+    fn stopped() -> Self {
+        let (_tx, rx) = watch::channel(None);
+        Self {
+            rx,
+            task: PlMutex::new(None),
+            ended_at: Arc::new(PlMutex::new(Some(tokio::time::Instant::now()))),
         }
     }
 
@@ -973,7 +991,24 @@ impl EmbedderProbe {
     pub(crate) fn abort(&self) {
         if let Some(handle) = self.task.lock().take() {
             handle.abort();
+            self.ended_at
+                .lock()
+                .get_or_insert_with(tokio::time::Instant::now);
         }
+    }
+
+    /// How long ago the probe stopped, if it has. A task that ended without
+    /// recording it (a panic) counts as having just stopped.
+    fn ended_for(&self) -> Option<Duration> {
+        if !self.ended() {
+            return None;
+        }
+        let mut ended_at = self.ended_at.lock();
+        Some(
+            ended_at
+                .get_or_insert_with(tokio::time::Instant::now)
+                .elapsed(),
+        )
     }
 
     /// Whether the probe has stopped: it finished (and published), or it was
@@ -1127,7 +1162,7 @@ pub const PROBE_RETRY_BACKOFF: Duration = Duration::from_secs(60);
 /// for an embedder has ended without a measurement (it failed, or was
 /// aborted before it finished), the next build over that embedder spawns a
 /// new one, provided [`PROBE_RETRY_BACKOFF`] has passed since the last one
-/// started. Every session reading the embedder's probe sees the new figure
+/// ended. Every session reading the embedder's probe sees the new figure
 /// when it lands, and the last published figure until then. A measured
 /// probe is never repeated.
 ///
@@ -1162,6 +1197,8 @@ impl fmt::Debug for EmbedderCalibration {
 
 struct CalibrationProbes {
     probes: PlMutex<Vec<SharedProbe>>,
+    /// Set by [`EmbedderCalibration::shutdown`]: no probe starts after it.
+    closed: std::sync::atomic::AtomicBool,
     /// [`PROBE_RETRY_BACKOFF`]; a test shortens it.
     retry_backoff: Duration,
 }
@@ -1170,6 +1207,7 @@ impl Default for CalibrationProbes {
     fn default() -> Self {
         Self {
             probes: PlMutex::default(),
+            closed: std::sync::atomic::AtomicBool::new(false),
             retry_backoff: PROBE_RETRY_BACKOFF,
         }
     }
@@ -1190,8 +1228,6 @@ pub(crate) struct ProbeSlot {
 
 struct SlotState {
     probe: EmbedderProbe,
-    /// When `probe` was spawned, for [`PROBE_RETRY_BACKOFF`].
-    started: tokio::time::Instant,
     /// The last figure an earlier probe published (an unmeasured one: a
     /// measured probe is never replaced), read while a re-probe runs.
     previous: Option<Calibration>,
@@ -1202,7 +1238,6 @@ impl ProbeSlot {
         Self {
             state: PlMutex::new(SlotState {
                 probe: spawn_process_probe(embedder, session),
-                started: tokio::time::Instant::now(),
                 previous: None,
             }),
         }
@@ -1219,14 +1254,23 @@ impl ProbeSlot {
         self.state.lock().probe.abort();
     }
 
+    /// A slot whose probe never runs, for a calibration already shut down.
+    fn stopped() -> Self {
+        Self {
+            state: PlMutex::new(SlotState {
+                probe: EmbedderProbe::stopped(),
+                previous: None,
+            }),
+        }
+    }
+
     /// Replace the probe with a new one if it ended without a measurement
-    /// and the backoff has passed since it started.
+    /// and the backoff has passed since it ended.
     fn reprobe_if_due(&self, embedder: &Arc<dyn Embedder>, session: &SessionId, backoff: Duration) {
         let mut state = self.state.lock();
         let published = state.probe.current();
-        if !state.probe.ended()
-            || published.is_some_and(|c| c.measured())
-            || state.started.elapsed() < backoff
+        if published.is_some_and(|c| c.measured())
+            || state.probe.ended_for().is_none_or(|ended| ended < backoff)
         {
             return;
         }
@@ -1240,7 +1284,6 @@ impl ProbeSlot {
         );
         state.previous = published.or(state.previous);
         state.probe = spawn_process_probe(embedder, session);
-        state.started = tokio::time::Instant::now();
     }
 }
 
@@ -1275,6 +1318,7 @@ impl EmbedderCalibration {
         Self {
             inner: Arc::new(CalibrationProbes {
                 probes: PlMutex::default(),
+                closed: std::sync::atomic::AtomicBool::new(false),
                 retry_backoff: backoff,
             }),
         }
@@ -1289,6 +1333,7 @@ impl EmbedderCalibration {
         session: &SessionId,
     ) -> Arc<ProbeSlot> {
         let mut probes = self.inner.probes.lock();
+        let closed = self.inner.closed.load(std::sync::atomic::Ordering::Acquire);
         // An entry whose embedder is gone can never be asked for again (no
         // `Arc` to it exists), and its probe task, which held the embedder,
         // has ended. Dropping it lets the address be reused by a new
@@ -1298,12 +1343,20 @@ impl EmbedderCalibration {
             .iter()
             .find(|shared| std::ptr::addr_eq(shared.embedder.as_ptr(), Arc::as_ptr(embedder)))
         {
-            shared
-                .slot
-                .reprobe_if_due(embedder, session, self.inner.retry_backoff);
+            if !closed {
+                shared
+                    .slot
+                    .reprobe_if_due(embedder, session, self.inner.retry_backoff);
+            }
             return Arc::clone(&shared.slot);
         }
-        let slot = Arc::new(ProbeSlot::spawn(embedder, session));
+        // After a shutdown, an attach still in flight gets a slot that never
+        // probes: nothing would stop a probe started now.
+        let slot = Arc::new(if closed {
+            ProbeSlot::stopped()
+        } else {
+            ProbeSlot::spawn(embedder, session)
+        });
         probes.push(SharedProbe {
             embedder: Arc::downgrade(embedder),
             slot: Arc::clone(&slot),
@@ -1315,10 +1368,27 @@ impl EmbedderCalibration {
     /// reads an aborted probe that had not published reads `None` (or the
     /// figure an earlier probe published), as a pipeline whose own probe was
     /// aborted always has. The next build over the embedder probes it again
-    /// once [`PROBE_RETRY_BACKOFF`] has passed since the aborted probe
-    /// started.
+    /// once [`PROBE_RETRY_BACKOFF`] has passed since the abort.
     pub fn abort(&self) {
         for shared in self.inner.probes.lock().iter() {
+            shared.slot.abort();
+        }
+    }
+
+    /// Abort every probe and start no more: a later build gets the last
+    /// published figure (or none) and never spawns or re-spawns a probe.
+    /// `lambo serve` calls this at shutdown (stages 2 and 5), so an attach
+    /// still in flight when the transport stops cannot start a probe that
+    /// outlives the session closes (#32 PR 3 review L1). Unlike
+    /// [`Self::abort`], it is final.
+    pub(crate) fn shutdown(&self) {
+        // Under the probes lock, so no `probe_for` sees the old flag after
+        // the aborts below.
+        let probes = self.inner.probes.lock();
+        self.inner
+            .closed
+            .store(true, std::sync::atomic::Ordering::Release);
+        for shared in probes.iter() {
             shared.slot.abort();
         }
     }

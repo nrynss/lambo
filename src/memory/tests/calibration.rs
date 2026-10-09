@@ -471,3 +471,71 @@ async fn an_aborted_shared_probe_is_reprobed_once_by_the_next_attaches() {
         mem.close().await.expect("close");
     }
 }
+
+/// Review L1: `shutdown` (what `lambo serve` calls at stages 2 and 5) is
+/// final, unlike `abort`. An attach still in flight afterwards starts no
+/// probe: not a re-probe of the aborted one, and not a first probe of a new
+/// embedder.
+#[tokio::test]
+async fn a_shut_down_calibration_starts_no_probe() {
+    let counting = CountingEmbedder::gated();
+    let embedder: Arc<dyn Embedder> = counting.clone();
+    let calibration = EmbedderCalibration::with_retry_backoff(Duration::ZERO);
+
+    let a = open("cal-shut-a", Arc::clone(&embedder), Some(&calibration)).await;
+    counting.parked().await;
+    calibration.shutdown();
+    let at_shutdown = counting.calls();
+    counting.release();
+
+    let b = open("cal-shut-b", Arc::clone(&embedder), Some(&calibration)).await;
+    let other = CountingEmbedder::new();
+    let c = open("cal-shut-c", other.clone(), Some(&calibration)).await;
+    settle().await;
+    assert_eq!(
+        counting.calls(),
+        at_shutdown,
+        "the aborted probe was re-run"
+    );
+    assert_eq!(other.calls(), 0, "a new embedder was probed after shutdown");
+    assert!(c.pipeline().calibration().is_none());
+    for mem in [a, b, c] {
+        mem.close().await.expect("close");
+    }
+}
+
+/// Review L2: the re-probe backoff counts from when the last probe ended,
+/// not from when it started, so a probe that ran longer than the backoff
+/// before failing is not re-run the moment it ends.
+#[tokio::test]
+async fn the_reprobe_backoff_counts_from_the_probes_end() {
+    let backoff = Duration::from_millis(300);
+    let counting = CountingEmbedder::gated();
+    let embedder: Arc<dyn Embedder> = counting.clone();
+    let calibration = EmbedderCalibration::with_retry_backoff(backoff);
+
+    let a = open("cal-end-a", Arc::clone(&embedder), Some(&calibration)).await;
+    counting.parked().await;
+    // Held past the backoff, then failed: the probe ends unmeasured now.
+    tokio::time::sleep(backoff * 2).await;
+    counting.fail(true);
+    counting.release();
+    probe_landed(&a).await;
+    let at_end = counting.calls();
+
+    let b = open("cal-end-b", Arc::clone(&embedder), Some(&calibration)).await;
+    settle().await;
+    assert_eq!(
+        counting.calls(),
+        at_end,
+        "re-probed inside the backoff from its end"
+    );
+
+    tokio::time::sleep(backoff).await;
+    counting.fail(false);
+    let c = open("cal-end-c", Arc::clone(&embedder), Some(&calibration)).await;
+    measured(&c).await;
+    for mem in [a, b, c] {
+        mem.close().await.expect("close");
+    }
+}
