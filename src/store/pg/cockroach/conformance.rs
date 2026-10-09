@@ -980,6 +980,24 @@ async fn check_embedding_source_survives_flush_load(store: &CockroachStore) {
         store, &sid,
     )
     .await;
+    crate::store::embedding_source_testkit::check_a_malformed_digest_is_refused_on_write(
+        store, &sid, dim, None,
+    )
+    .await;
+    // Leave only the erase tombstone behind (#23), as the Postgres live test
+    // does: erase never decodes concept rows, so the corrupted one goes too.
+    store
+        .erase_session(
+            &sid,
+            &crate::store::lease::LeaseHolder {
+                endpoint: None,
+                agent: AgentId::new("conformance-esrc"),
+                pid: 1,
+                host: "test".into(),
+            },
+        )
+        .await
+        .expect("erase the test session");
 }
 
 async fn check_embedding_contract_read_and_flush_immunity(store: &CockroachStore) {
