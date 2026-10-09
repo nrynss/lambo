@@ -248,3 +248,54 @@ each.
   `413` now comes before the cap's `503`. Releasing the reservation while
   rmcp reads the body was not possible: rmcp reads it inside `handle`,
   past the point the reservation must already be held.
+
+## Third review remediation, L1-L3, N2, N3 (2026-10-09)
+
+A third (Sonnet) security review of the second round found it clean at
+Medium and above and left three Lows and three notes. Each fix is its own
+commit with its test.
+
+- **L1, only an opener's body is buffered.** The second round's guard read
+  the body of every authenticated request before routing, so a request the
+  router refuses (an unknown path, a session out of scope or not hosted) or
+  one inside an MCP session held up to 4 MiB and its connection for up to
+  30 s. Only a request that opens an MCP session (`opens_a_new_session`)
+  needs its body read before the cap reserves, so only it is buffered now.
+  Every other request keeps the declared-length `413` and streams to rmcp
+  after routing, as before the second round.
+- **L2, a sessionless call holds no opening.** Every POST without a usable
+  session id took a reservation, including a per-request-protocol
+  `tools/call` or `server/discover` that rmcp answers directly and that
+  mints nothing, for the whole call; parallel stateless calls from one
+  credential reached its share and got `503`. The guard now classifies an
+  opener's buffered body with `can_mint_a_session`, which is rmcp's own
+  reading, `serde_json::from_slice::<ClientJsonRpcMessage>` (what rmcp's
+  `expect_json` calls), on the very bytes rmcp is handed: rmcp 3.1.2
+  mints for a sessionless POST only when the message is an `initialize`
+  request, so only that reserves. A body that does not parse still
+  reserves: a disagreement can only over-count, the safe side for S1/S4.
+  Rejected: releasing the reservation when rmcp returns without having
+  called `create_session` (the call still holds it for its duration).
+- **L3, `Connection: close` on the read's `413` and `400`.** Like the `408`,
+  they answer with the rest of the body unread.
+- **N3, the disconnect cancel behind the guard.** `serve_live`'s body is now
+  `transport::serve_owned`, generic over the MCP server, so a test serves a
+  probe through `guard_request` and `serve_owned` and asserts the
+  disconnect still cancels the call (`AttachedSession` is fixed to
+  `LamboServer`, whose tools ignore cancellation).
+- **N2, rmcp facts the code rests on.** The attribution's atomicity (no
+  await between the local manager's insert and its return, `create_session`
+  awaited inline in `handle_post`), "only an `initialize` mints", the
+  reading of `Mcp-Session-Id` and the 4 MiB ceiling are rmcp 3.1.2 facts;
+  `Cargo.toml` asks for `3.1.2` with a caret, so `Cargo.lock` is what pins
+  it today. `rmcp_still_mints_through_create_session_with_the_same_ceiling`
+  (in `mcp/serve/tests/transport.rs`) fails loudly, naming what to re-check,
+  if an upgrade mints outside `create_session`, keeps sessions elsewhere,
+  or moves the default ceiling. An exact `=3.1.2` pin would make the
+  upgrade a deliberate act; it is a dependency change and needs the
+  owner's approval, so it is not made here.
+- **N1, left as is.** For an opener the guard now reads the body before
+  rmcp's Host (DNS-rebinding) and `Accept` checks run. The bound is L1's
+  (an authenticated caller, one body of at most 4 MiB within 30 s, and
+  now only for a session-opening POST); repeating rmcp's Host check in the
+  guard would be a second copy that could drift from rmcp's.
