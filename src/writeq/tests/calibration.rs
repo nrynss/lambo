@@ -52,6 +52,47 @@ fn no_rate_can_move_the_bounds() {
     );
 }
 
+/// **A reported rate never exceeds [`PROBE_CLAMP_RPS`]** (#11). The clamp's
+/// own docstring says `rate_of` and `ObservedRate::items_per_sec` reach for
+/// it "when a wall time reads zero or absurd", so that a clamped reading
+/// always means "this measurement is not real". Both only handled exactly
+/// zero: a `FixtureEmbedder` probe measured in microseconds published
+/// ~200 000 items/s in `lambo_stats`, a number no deployment produced.
+#[test]
+fn a_reported_rate_never_exceeds_the_sanitization_clamp() {
+    let clamp = PROBE_CLAMP_RPS as f64;
+    for wall in [
+        Duration::ZERO,
+        Duration::from_nanos(1),
+        Duration::from_micros(5),
+        Duration::from_micros(900),
+    ] {
+        let rate = crate::writeq::calibration::rate_of(1, wall);
+        assert!(rate <= clamp, "rate_of(1, {wall:?}) = {rate}");
+        let c = Calibration::from_probe(wall, Some(wall), wall);
+        assert!(c.serial_items_per_sec.expect("measured") <= clamp, "{c:?}");
+        assert!(c.items_per_sec.expect("measured") <= clamp, "{c:?}");
+    }
+    // A real reading below the clamp is untouched.
+    let real = crate::writeq::calibration::rate_of(1, Duration::from_millis(100));
+    assert!((real - 10.0).abs() < 1e-9, "{real}");
+
+    let mut observed = ObservedRate::default();
+    for _ in 0..OBSERVED_MIN_SAMPLES {
+        observed.sample(0.000_005);
+    }
+    let rate = observed.items_per_sec().expect("enough samples");
+    assert!(rate <= clamp, "observed {rate}");
+    assert!(
+        Calibration::unmeasured()
+            .with_observed_serial(1_000_000.0)
+            .serial_items_per_sec
+            .expect("observed")
+            <= clamp,
+        "an observed figure handed in from outside is sanitized too"
+    );
+}
+
 /// The observed rate replaces the probe's serial figure, and only after
 /// [`OBSERVED_MIN_SAMPLES`] — the J3-R1-2 remediation.
 #[test]

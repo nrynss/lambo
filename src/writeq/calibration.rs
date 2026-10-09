@@ -375,7 +375,7 @@ impl Calibration {
     /// them is the diagnosis.
     pub fn with_observed_serial(&self, serial_items_per_sec: f64) -> Self {
         Self::from_rates(
-            Some(serial_items_per_sec),
+            Some(sanitize_rate(serial_items_per_sec)),
             self.items_per_sec,
             self.probe_serial_items_per_sec,
             CalibrationSource::Observed,
@@ -440,7 +440,25 @@ pub(super) fn rate_of(n: usize, wall: Duration) -> f64 {
     if secs <= 0.0 {
         PROBE_CLAMP_RPS as f64
     } else {
-        n as f64 / secs
+        sanitize_rate(n as f64 / secs)
+    }
+}
+
+/// Clamp a reported rate to [`PROBE_CLAMP_RPS`], the one place every rate
+/// source passes through (#11).
+///
+/// The clamp's docstring promised this for a wall time that reads "zero or
+/// absurd", but only exactly zero was handled, so a fixture probe timed in
+/// microseconds published ~200 000 items/s. Clamping keeps the contract that a
+/// clamped reading means "this measurement is not real": the build guard keeps
+/// the clamp three times above any real embedder measured, so no genuine
+/// reading is touched. A non-finite rate is clamped as well rather than
+/// published as infinity or NaN.
+pub(super) fn sanitize_rate(rate: f64) -> f64 {
+    if rate.is_finite() {
+        rate.min(PROBE_CLAMP_RPS as f64)
+    } else {
+        PROBE_CLAMP_RPS as f64
     }
 }
 
@@ -480,7 +498,7 @@ impl ObservedRate {
             // A fixture-fast deployment. The clamp is what handles it.
             return Some(PROBE_CLAMP_RPS as f64);
         }
-        Some(1.0 / self.mean_secs)
+        Some(sanitize_rate(1.0 / self.mean_secs))
     }
 }
 
