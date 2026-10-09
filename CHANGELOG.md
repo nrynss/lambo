@@ -131,8 +131,8 @@
   - `modalities`: what the adapter embeds, `Modalities::TEXT` by default.
   - `embed_image`: embeds an `ImageInput` into the same space; by default it
     refuses with `EmbedError::Unsupported`.
-  A wrapper that delegates to another embedder should forward all three; one
-  that implements only `embed` inherits the defaults.
+  A wrapper that delegates to another embedder should forward all three, and
+  `as_any`; one that implements only `embed` inherits the defaults.
 - `lambo::surface::image::validate` (#22): the image rule every surface will
   share, and the only constructor of `ImageInput`. The declared type must be
   exactly `image/png`, `image/jpeg` or `image/webp`; the bytes must be

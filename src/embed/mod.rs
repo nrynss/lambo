@@ -283,9 +283,10 @@ impl std::fmt::Debug for ImageInput<'_> {
 /// **A wrapper must forward every method.** An embedder that wraps another
 /// (to count, gate, fail or log calls) and implements only `embed` silently
 /// inherits the *defaults* for the rest: a query would be embedded in the
-/// document role and an image refused, whatever the inner adapter does. So a
-/// delegating embedder forwards [`Self::embed_query`], [`Self::embed_image`]
-/// and [`Self::modalities`] to its inner embedder as well.
+/// document role, an image refused, and the inner adapter's identity hidden
+/// from the registry, whatever the inner adapter does. So a delegating
+/// embedder forwards [`Self::embed_query`], [`Self::embed_image`],
+/// [`Self::modalities`] and [`Self::as_any`] to its inner embedder as well.
 #[async_trait]
 pub trait Embedder: Send + Sync {
     /// Embedding dimensionality this backend emits.
