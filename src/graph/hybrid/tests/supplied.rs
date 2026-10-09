@@ -444,6 +444,17 @@ async fn a_supplied_vector_that_does_not_fit_the_live_contract_is_refused() {
             ..good.clone()
         },
     ));
+    // Review L5: the call path normalizes every supplied vector, so one that
+    // is not unit at apply (planted, or damaged in its intent) is refused.
+    for (what, scale) in [("not unit", 2.0_f32), ("not quite unit", 1.001)] {
+        cases.push((
+            what,
+            SuppliedVector {
+                vector: good.vector.iter().map(|x| x * scale).collect(),
+                ..good.clone()
+            },
+        ));
+    }
 
     for (what, bad) in cases {
         let (graph, iid) = graph_with_interaction("supplied-refused", 1, 0, "outfits");

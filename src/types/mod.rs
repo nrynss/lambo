@@ -897,20 +897,43 @@ impl std::fmt::Debug for SuppliedVector {
 impl SuppliedVector {
     /// Refuse a supplied vector that cannot be written under `live`: a
     /// declared contract that is not exactly `live`, a width other than
-    /// `live.dim`, a non-finite component, or a zero (or overflowing) norm.
+    /// `live.dim`, a non-finite component, a zero (or overflowing) norm, or a
+    /// norm more than [`SUPPLIED_UNIT_NORM_TOLERANCE`] from 1.
     ///
-    /// The call path runs this before the ack (as a `Config` error), and the
-    /// apply runs it again, so a durable intent replayed under a changed live
-    /// contract, or one whose stored vector was damaged, is refused rather
-    /// than written. The message names both contracts and never quotes the
-    /// vector.
+    /// The call path checks the raw vector's values with the same rules
+    /// except the last and then normalizes it, so every `SuppliedVector` it
+    /// builds is unit. The apply runs this, so a durable intent replayed
+    /// under a changed live contract, or one whose stored vector was damaged
+    /// or planted un-normalized, is refused rather than written as is
+    /// (#22 review L5). The message names both contracts and never quotes
+    /// the vector.
     pub fn check(&self, live: &EmbeddingContract) -> Result<(), String> {
-        check_supplied_values(&self.vector, &self.contract, live)
+        check_supplied_values(&self.vector, &self.contract, live)?;
+        let norm = self
+            .vector
+            .iter()
+            .map(|x| f64::from(*x) * f64::from(*x))
+            .sum::<f64>()
+            .sqrt();
+        if (norm - 1.0).abs() > SUPPLIED_UNIT_NORM_TOLERANCE {
+            return Err(format!(
+                "supplied vector is not unit length (L2 norm {norm:.6}); the call path \
+                 normalizes every supplied vector, so this one was not built by it"
+            ));
+        }
+        Ok(())
     }
 }
 
-/// [`SuppliedVector::check`] on its parts, for the call path, which checks a
-/// submitted vector before it builds the [`SuppliedVector`].
+/// How far from 1 a [`SuppliedVector`]'s L2 norm (computed in `f64`) may be
+/// at apply. Ten times the call path's own "already unit" tolerance
+/// (`graph::image::normalize`), so every vector the call path produced,
+/// renormalized in `f64` and stored as `f32`, passes with room to spare.
+pub const SUPPLIED_UNIT_NORM_TOLERANCE: f64 = 1e-5;
+
+/// [`SuppliedVector::check`] on its parts (all but the unit-norm rule), for
+/// the call path, which checks a submitted vector before it normalizes it
+/// and builds the [`SuppliedVector`].
 pub(crate) fn check_supplied_values(
     values: &[f32],
     declared: &EmbeddingContract,

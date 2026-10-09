@@ -34,7 +34,9 @@ no candidate lookup: `Fresh` with the vector and source, or `CanonicalMatch`.
 **Order of the apply-time checks, and their classes.** `derive_with` runs
 `SuppliedVector::check(live)` first and maps a refusal to
 `LamboError::Embed`: a vector declared under another contract, of the wrong
-width, non-finite or zero-norm is a fact about *this input*, so the J3
+width, non-finite, zero-norm or (review L5) more than
+`SUPPLIED_UNIT_NORM_TOLERANCE` (1e-5) from unit norm is a fact about *this
+input*, so the J3
 replay consumes the intent `failed` and moves on (design 3.3 point 3). Only
 then the `VECTOR_SEARCH` precondition (`Config`) and the one-concept shape
 (`Invariant`). The stamped-session check under the commit lock
