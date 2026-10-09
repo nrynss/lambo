@@ -281,7 +281,8 @@
   `max_loaded_sessions` (4), `load_concurrency` (2, 1 to 1024, always 1 on
   SQLite) and `recall_concurrency` (4, 1 to 1024) bound the read-only
   window's views. Unknown keys and out-of-range values are refused when the
-  file is read, naming the key and never the value. An older binary refuses a file with `[web]`.
+  file is read, naming the key and never the value. An older binary refuses
+  a file with `[web]`.
 - `lambo serve-web` answers a recall that waits 2 s for one of the
   `recall_concurrency` slots with `503`, `Retry-After: 1` and `no-store`
   (#4 PR 1), and keeps a per-session query-embedding cache (#14's, 128

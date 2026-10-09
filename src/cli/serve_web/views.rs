@@ -14,7 +14,9 @@
 //! * **Single-flight.** Concurrent requests for one stale session share one
 //!   load: they queue on the slot's gate, and a request that arrived before
 //!   a load finished takes that load's outcome (view or error) instead of
-//!   loading again. With a TTL of 0 that is still one load per burst.
+//!   loading again, unless that view was evicted meanwhile by another
+//!   session's load, in which case it loads once more under the gate
+//!   (review L1). With a TTL of 0 that is still one load per burst.
 //! * **Load concurrency.** A semaphore bounds simultaneous loads across
 //!   sessions (1 on SQLite, whose pool is one connection).
 //! * **LRU.** At most `max_loaded_sessions` views are held; the least

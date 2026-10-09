@@ -75,8 +75,10 @@ query-embedding cache live on the slot, so a reloaded session does not report
 its `Arc`, so the LRU count is not the whole bound: views held by requests in
 flight are outside it. A recall holds its view across the embed (possibly
 remote) and the pipeline, so roughly `max_loaded_sessions + load_concurrency +
-recall_concurrency` views can be alive at once, plus any a structural route is
-briefly serializing. Still count-bounded, not byte-bounded.
+recall_concurrency` views can be alive at once, plus the views held by
+recalls waiting (up to 2 s) for a permit, since a recall takes its view
+before its permit (review L5), and any a structural route is briefly
+serializing. Still count-bounded, not byte-bounded.
 
 **Counts are taken once per view.** `/api/stats` and the pulse used to walk
 every concept on every poll; the view stores `nodes/edges/concepts/canonical`.
