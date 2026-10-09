@@ -10,7 +10,7 @@
 //! | [`FlushTask`] | `build_attach` | `stop()`, joined | nothing is ever durable |
 //! | [`CanonizationTask`] | `build_attach` | aborted and joined | no node ever transitions |
 //! | lease heartbeat | `build_attach` | aborted | the lease lapses and another writer may take the session |
-//! | write pipeline (lane workers, calibration probe, intent replay) | `build_attach` | probe aborted, replay stopped, queue quiesced | acked writes are never applied |
+//! | write pipeline (lane workers, calibration probe, intent replay) | `build_attach` | own probe aborted (a shared one is its `EmbedderCalibration`'s to abort), replay stopped, queue quiesced | acked writes are never applied |
 //!
 //! ## Invariants (where each one is kept)
 //!

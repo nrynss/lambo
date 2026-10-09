@@ -119,7 +119,7 @@ impl Rig {
             ledger,
         };
         Rig {
-            pipeline: WritePipeline::spawn(ctx, clock),
+            pipeline: WritePipeline::spawn(ctx, clock, None),
             graph,
             now,
         }

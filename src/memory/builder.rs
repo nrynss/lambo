@@ -48,7 +48,7 @@ use crate::store::lease::{LeaseHolder, LeaseOutcome, LEASE_TTL};
 use crate::store::load::load_session_async;
 use crate::store::GraphStore;
 use crate::types::{AgentId, EmbeddingContract, LamboError, MatchStrategy, SessionId, StoreError};
-use crate::writeq::{WriteCtx, WritePipeline};
+use crate::writeq::{EmbedderCalibration, WriteCtx, WritePipeline};
 
 /// The clause [`Attach::Held`]'s message uses for a holder that still looks
 /// live — named, not inlined, because `mcp::serve` has to be able to *correct*
@@ -181,6 +181,10 @@ pub struct MemoryBuilder {
     /// disposition. See [`AttachShutdown`]; `serve`'s implementation is
     /// `crate::mcp::serve::EarlyShutdown`.
     pub(super) early_shutdown: Option<Arc<dyn AttachShutdown>>,
+    /// #32 PR 3. The process-wide write-queue calibration this session's
+    /// pipeline reads its probe from. `None` (the default) spawns a probe of
+    /// the pipeline's own, as every session did before.
+    pub(super) calibration: Option<EmbedderCalibration>,
 }
 
 impl MemoryBuilder {
@@ -344,6 +348,23 @@ impl MemoryBuilder {
     /// never arms" the same statement as "a proxy never takes the lease".
     pub(crate) fn early_shutdown(mut self, early: impl AttachShutdown + 'static) -> Self {
         self.early_shutdown = Some(Arc::new(early));
+        self
+    }
+
+    /// Share the write queue's embedder calibration probe with every other
+    /// session in this process (#32 PR 3, design decision 14).
+    ///
+    /// The probe measures the embedder, so builders over one shared embedder
+    /// that are handed clones of one [`EmbedderCalibration`] probe it once:
+    /// the first build spawns the probe and every later one fires no probe
+    /// embed. Each session's observed rate stays its own. The calibration's
+    /// owner aborts the probe ([`EmbedderCalibration::abort`]); a session's
+    /// close does not, since other sessions read it.
+    ///
+    /// Unset, each build spawns a probe of its own, aborted at its close,
+    /// which is what a single-session library caller wants.
+    pub fn calibration(mut self, calibration: EmbedderCalibration) -> Self {
+        self.calibration = Some(calibration);
         self
     }
 
@@ -744,8 +765,9 @@ impl MemoryBuilder {
         // J3's background write pipeline. Built here, with `Arc` clones of the
         // shared state its workers need and deliberately NOT a handle on the
         // `Memory` being constructed — see `WriteCtx`. `spawn` also starts the
-        // calibration probe that measures this deployment's embedder; it is
-        // spawned rather than awaited, so it costs this startup nothing.
+        // calibration probe that measures this deployment's embedder, unless a
+        // shared calibration already has one for it (#32 PR 3); it is spawned
+        // rather than awaited, so it costs this startup nothing.
         let pipeline = Arc::new(WritePipeline::spawn(
             WriteCtx {
                 session: session.clone(),
@@ -763,6 +785,7 @@ impl MemoryBuilder {
                 ledger: self.ledger.map(|l| l.for_session(&session.0)),
             },
             clock.clone(),
+            self.calibration.as_ref(),
         ));
 
         // J3 durable intents: replay whatever a previous process acked and

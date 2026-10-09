@@ -88,10 +88,10 @@ pub use admission::{
 #[cfg(test)]
 pub(crate) use calibration::{probe_write_concepts, probe_write_contexts};
 pub use calibration::{
-    Calibration, CalibrationSource, MEASURED_LOCAL_EMBEDDER_RPS, OBSERVED_EWMA_WEIGHT,
-    OBSERVED_MIN_SAMPLES, PROBE_BUDGET, PROBE_CLAMP_RPS, PROBE_CONCEPT_BYTES, PROBE_CONCURRENCY,
-    PROBE_EMBEDS, PROBE_TEXT, PROBE_TEXT_BYTES, PROBE_WARMUP_BUDGET, PROBE_WARMUP_EMBEDS,
-    PROBE_WRITE_CONCEPTS,
+    Calibration, CalibrationSource, EmbedderCalibration, MEASURED_LOCAL_EMBEDDER_RPS,
+    OBSERVED_EWMA_WEIGHT, OBSERVED_MIN_SAMPLES, PROBE_BUDGET, PROBE_CLAMP_RPS, PROBE_CONCEPT_BYTES,
+    PROBE_CONCURRENCY, PROBE_EMBEDS, PROBE_TEXT, PROBE_TEXT_BYTES, PROBE_WARMUP_BUDGET,
+    PROBE_WARMUP_EMBEDS, PROBE_WRITE_CONCEPTS,
 };
 pub use counters::{
     ApplyLatencySummary, ReplayBlockReason, WriteQueueCounters, APPLY_LATENCY_WINDOW,
@@ -107,7 +107,7 @@ pub use replay::EMBEDDER_SICK_THRESHOLD;
 
 // Crate-internal names the sibling modules reach through `super::`.
 use admission::{Job, JobPayload, Lanes};
-use calibration::{EmbedderProbe, ObservedRate};
+use calibration::{ObservedRate, PipelineProbe};
 use counters::ApplyLatency;
 use receipts::{model_safe_failure, settle_one, Entry, Receipts};
 
@@ -142,10 +142,11 @@ pub struct WritePipeline {
     /// slot (see [`MAX_RECEIPT_WAITS_PER_AGENT`]). An agent's entry goes when
     /// its last wait ends.
     waits_per_agent: Arc<PlMutex<HashMap<AgentId, usize>>>,
-    /// The startup calibration probe of this pipeline's embedder (telemetry).
-    /// Its own type so #32 PR 3 can share one probe per embedder across every
-    /// pipeline in the process (`EmbedderCalibration`, design decision 14).
-    probe: EmbedderProbe,
+    /// The startup calibration probe of this pipeline's embedder (telemetry):
+    /// its own, or the process-wide one of an [`EmbedderCalibration`] shared
+    /// by every pipeline over the same embedder (#32 PR 3, design decision
+    /// 14).
+    probe: PipelineProbe,
     /// Service time observed on real writes, which **replaces** the probe's
     /// serial figure once [`OBSERVED_MIN_SAMPLES`] have been seen (J3-R1-2).
     observed: Arc<PlMutex<ObservedRate>>,
@@ -202,8 +203,16 @@ impl WritePipeline {
     /// estimator demotion made false). It is still bounded by [`PROBE_BUDGET`]
     /// and still always publishes something, for the same reason it survives at
     /// all: the probe/observed pair is the divergence telemetry.
-    pub(crate) fn spawn(ctx: WriteCtx, clock: crate::daemon::Clock) -> Self {
-        let probe = EmbedderProbe::spawn(ctx.embedder.clone(), ctx.session.clone());
+    ///
+    /// With a `calibration` the probe is that calibration's one for this
+    /// embedder, spawned only if no pipeline in the process has spawned it
+    /// yet (#32 PR 3); without one the pipeline spawns and owns its own.
+    pub(crate) fn spawn(
+        ctx: WriteCtx,
+        clock: crate::daemon::Clock,
+        calibration: Option<&EmbedderCalibration>,
+    ) -> Self {
+        let probe = PipelineProbe::new(&ctx.embedder, &ctx.session, calibration);
         Self {
             ctx: Arc::new(ctx),
             lanes: Arc::new(PlMutex::new(Lanes::default())),

@@ -30,6 +30,7 @@ use std::time::Duration;
 
 mod access;
 mod attach;
+mod calibration;
 mod leases;
 mod query_cache;
 mod reads;

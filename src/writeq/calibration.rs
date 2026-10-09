@@ -8,11 +8,14 @@
 //! observed ([`Calibration::probe_optimism`]).
 //!
 //! The probe is spawned at construction ([`WritePipeline::spawn`]) and never
-//! awaited by anything; it is aborted at close and on `Drop`.
+//! awaited by anything. It measures the **embedder**, so a process that
+//! shares one embedder between sessions shares one probe through an
+//! [`EmbedderCalibration`] (#32 PR 3); a pipeline built without one spawns
+//! and owns its own, aborted at its close and on `Drop`, as before.
 
 use std::fmt;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use parking_lot::Mutex as PlMutex;
@@ -870,24 +873,25 @@ pub(super) async fn futures_join_all<F: std::future::Future>(futures: Vec<F>) ->
 }
 
 /// The startup calibration probe of one embedder: spawned once, read by
-/// whoever holds it, aborted when its holder goes away.
+/// whoever holds it, aborted by its owner.
 ///
 /// Its own type rather than two fields on [`WritePipeline`] so the probe can
 /// be shared (#32 design decision 14): the probe measures the **embedder**,
 /// which a process may share between many sessions' pipelines, while the
-/// observed rate measures one pipeline's own writes. #32 PR 3
-/// (`EmbedderCalibration`) holds one of these per embedder and hands every
-/// pipeline a shared reference; until then each pipeline spawns its own.
+/// observed rate measures one pipeline's own writes. Its owner is either one
+/// pipeline (no [`EmbedderCalibration`] given: [`PipelineProbe::Owned`]) or a
+/// process-wide [`EmbedderCalibration`] that hands every pipeline using the
+/// same embedder an `Arc` of it ([`PipelineProbe::Shared`]).
 pub(crate) struct EmbedderProbe {
     rx: watch::Receiver<Option<Calibration>>,
     task: PlMutex<Option<JoinHandle<()>>>,
 }
 
 impl EmbedderProbe {
-    /// Spawn the probe against `embedder`. `session` labels the log lines.
+    /// Spawn the probe against `embedder`. `scope` labels the log lines.
     ///
     /// Spawned rather than awaited, for the reason on [`WritePipeline::spawn`].
-    pub(crate) fn spawn(embedder: Arc<dyn Embedder>, session: SessionId) -> Self {
+    pub(crate) fn spawn(embedder: Arc<dyn Embedder>, scope: ProbeScope) -> Self {
         let (tx, rx) = watch::channel(None);
         let task = tokio::spawn(async move {
             let (calibration, miss) = probe_embedder_explained(embedder.as_ref()).await;
@@ -900,7 +904,7 @@ impl EmbedderProbe {
                 // deleted. Provenance first now, rates second, and neither line
                 // claims a bound was measured.
                 (true, Some(rate)) => tracing::info!(
-                    session = %session,
+                    scope = %scope,
                     items_per_sec = rate,
                     serial_items_per_sec = calibration.serial_items_per_sec,
                     bound = calibration.bound,
@@ -916,7 +920,7 @@ impl EmbedderProbe {
                 // #11 review P2-2: the serial legs landed and the concurrent
                 // one ran out of budget.
                 (true, None) => tracing::info!(
-                    session = %session,
+                    scope = %scope,
                     serial_items_per_sec = calibration.serial_items_per_sec,
                     concurrency = PROBE_CONCURRENCY,
                     "write queue: bounds are static (lane {}, queue {}) and no rate moves them; \
@@ -933,20 +937,21 @@ impl EmbedderProbe {
                 // #11 review P3-6: name what actually failed, and which
                 // budget ran out when one did.
                 (false, _) => tracing::warn!(
-                    session = %session,
+                    scope = %scope,
                     bound = calibration.bound,
-                    "write queue: the embedder could not be probed: {}. There is no rate \
-                     telemetry this session and lambo_stats reports write_queue_measured=false. \
+                    "write queue: the embedder could not be probed: {}. There is no probe rate \
+                     telemetry for {} and lambo_stats reports write_queue_measured=false. \
                      The bounds are unaffected — they are static (lane {}, queue {}) and never \
                      came from the probe. Note what a failed probe DOES suggest: with \
                      match_strategy=hybrid (the default) an embedder that cannot answer will \
                      also fail every derive it cannot answer",
                     miss.map_or_else(|| "no reason recorded".to_string(), |m| m.to_string()),
+                    scope.telemetry_owner(),
                     WRITE_QUEUE_LANE_MAX,
                     WRITE_QUEUE_MAX
                 ),
             }
-            // A closed receiver means the session went away first; there is
+            // A closed receiver means every reader went away first; there is
             // nothing to report to and nothing to fix.
             let _ = tx.send(Some(calibration));
         });
@@ -966,6 +971,203 @@ impl EmbedderProbe {
         if let Some(handle) = self.task.lock().take() {
             handle.abort();
         }
+    }
+}
+
+/// Whose probe a probe is, for its log lines (#32 PR 3).
+///
+/// A pipeline's own probe names its session, as it always has. A shared
+/// probe measures an embedder every session in the process may be using, so
+/// naming the session whose attach happened to spawn it would misattribute
+/// it.
+#[derive(Clone, Debug)]
+pub(crate) enum ProbeScope {
+    /// The probe of one pipeline built without an [`EmbedderCalibration`].
+    Session(SessionId),
+    /// The probe of a process-wide [`EmbedderCalibration`].
+    Process,
+}
+
+impl ProbeScope {
+    /// Who goes without probe telemetry when the probe fails.
+    fn telemetry_owner(&self) -> String {
+        match self {
+            Self::Session(session) => format!("session {session}"),
+            Self::Process => "any session using this embedder in this process".to_string(),
+        }
+    }
+}
+
+impl fmt::Display for ProbeScope {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Session(session) => write!(f, "session {session}"),
+            Self::Process => f.write_str("process"),
+        }
+    }
+}
+
+/// A pipeline's probe: its own, or a process-wide one it only reads.
+pub(crate) enum PipelineProbe {
+    /// Spawned for this pipeline alone (no [`EmbedderCalibration`] given) and
+    /// aborted at its close and on `Drop`: a probe outliving its only reader
+    /// is an embed nobody will read.
+    Owned(EmbedderProbe),
+    /// Shared through `calibration`, which owns it. Never aborted by the
+    /// pipeline, since one session closing must not abort a probe other
+    /// sessions read. Holding `_calibration` keeps the owner alive (its last
+    /// drop aborts the probe) while any pipeline may still read the probe.
+    Shared {
+        _calibration: EmbedderCalibration,
+        probe: Arc<EmbedderProbe>,
+    },
+}
+
+impl PipelineProbe {
+    /// The probe for a pipeline over `embedder`: `calibration`'s shared one
+    /// for that embedder (spawning it on first use), or a new one of the
+    /// pipeline's own when there is no calibration.
+    pub(crate) fn new(
+        embedder: &Arc<dyn Embedder>,
+        session: &SessionId,
+        calibration: Option<&EmbedderCalibration>,
+    ) -> Self {
+        match calibration {
+            Some(calibration) => Self::Shared {
+                probe: calibration.probe_for(embedder),
+                _calibration: calibration.clone(),
+            },
+            None => Self::Owned(EmbedderProbe::spawn(
+                Arc::clone(embedder),
+                ProbeScope::Session(session.clone()),
+            )),
+        }
+    }
+
+    /// The probe's calibration, or `None` until it has published.
+    pub(crate) fn current(&self) -> Option<Calibration> {
+        match self {
+            Self::Owned(probe) => probe.current(),
+            Self::Shared { probe, .. } => probe.current(),
+        }
+    }
+
+    /// Abort the probe if this pipeline owns it; a shared probe is left to
+    /// its [`EmbedderCalibration`].
+    pub(crate) fn abort_if_owned(&self) {
+        match self {
+            Self::Owned(probe) => probe.abort(),
+            // The owner aborts it: `EmbedderCalibration::abort`, or the drop
+            // of its last clone.
+            Self::Shared { .. } => {}
+        }
+    }
+}
+
+/// The write queue's calibration probe, once per embedder for the whole
+/// process (#32 PR 3, design decision 14).
+///
+/// The probe measures the embedder, not a session: N sessions attached to
+/// one shared embedder would otherwise each fire [`PROBE_EMBEDS`] forwards
+/// at the same model, at every attach, to learn the same number. Give every
+/// [`MemoryBuilder`](crate::MemoryBuilder) in the process a clone of one of
+/// these ([`MemoryBuilder::calibration`](crate::MemoryBuilder::calibration))
+/// and the first pipeline built over an embedder spawns that embedder's
+/// probe; every later one reads the same probe and fires no probe embed.
+/// The **observed** rate and the apply-latency window stay per pipeline:
+/// they measure that session's own writes.
+///
+/// Keyed by embedder identity (the `Arc`'s allocation), so a calibration
+/// handed builders over two different embedders keeps one probe for each
+/// rather than reporting one embedder's figure for the other. The key is
+/// held weakly: a calibration never keeps an embedder (or its model) alive.
+/// Probes are spawned lazily, at the first pipeline build, so a process that
+/// never builds one (a proxying `serve`) never probes.
+///
+/// **The owner aborts.** [`EmbedderCalibration::abort`] aborts every probe
+/// still running; `lambo serve` calls it when its transport stops, before
+/// any session closes, beside the keep-warm. When the last clone (the
+/// owner's and every pipeline's) is dropped the probes are aborted too.
+/// Without a calibration a builder keeps today's behaviour: each pipeline
+/// spawns, owns and aborts its own probe.
+#[derive(Clone, Default)]
+pub struct EmbedderCalibration {
+    inner: Arc<CalibrationProbes>,
+}
+
+impl fmt::Debug for EmbedderCalibration {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EmbedderCalibration")
+            .field("probes", &self.inner.probes.lock().len())
+            .finish()
+    }
+}
+
+#[derive(Default)]
+struct CalibrationProbes {
+    probes: PlMutex<Vec<SharedProbe>>,
+}
+
+/// One embedder's probe. `embedder` is the key, held weakly; the probe task
+/// holds the embedder strongly only while it runs.
+struct SharedProbe {
+    embedder: Weak<dyn Embedder>,
+    probe: Arc<EmbedderProbe>,
+}
+
+impl Drop for CalibrationProbes {
+    fn drop(&mut self) {
+        for shared in self.probes.get_mut().iter() {
+            shared.probe.abort();
+        }
+    }
+}
+
+impl EmbedderCalibration {
+    /// A calibration with no probe yet; the first pipeline built over an
+    /// embedder spawns that embedder's.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// `embedder`'s probe, spawned on first use.
+    pub(crate) fn probe_for(&self, embedder: &Arc<dyn Embedder>) -> Arc<EmbedderProbe> {
+        let mut probes = self.inner.probes.lock();
+        // An entry whose embedder is gone can never be asked for again (no
+        // `Arc` to it exists), and its probe task, which held the embedder,
+        // has ended. Dropping it lets the address be reused by a new
+        // embedder without being mistaken for the old one.
+        probes.retain(|shared| shared.embedder.strong_count() > 0);
+        if let Some(shared) = probes
+            .iter()
+            .find(|shared| std::ptr::addr_eq(shared.embedder.as_ptr(), Arc::as_ptr(embedder)))
+        {
+            return Arc::clone(&shared.probe);
+        }
+        let probe = Arc::new(EmbedderProbe::spawn(
+            Arc::clone(embedder),
+            ProbeScope::Process,
+        ));
+        probes.push(SharedProbe {
+            embedder: Arc::downgrade(embedder),
+            probe: Arc::clone(&probe),
+        });
+        probe
+    }
+
+    /// Abort every probe still running. Idempotent. A pipeline that later
+    /// reads an aborted probe that had not published reads `None`, as a
+    /// pipeline whose own probe was aborted always has.
+    pub fn abort(&self) {
+        for shared in self.inner.probes.lock().iter() {
+            shared.probe.abort();
+        }
+    }
+
+    /// Probes this calibration has spawned and still holds.
+    #[cfg(test)]
+    pub(crate) fn probes(&self) -> usize {
+        self.inner.probes.lock().len()
     }
 }
 
@@ -1021,9 +1223,12 @@ impl WritePipeline {
         );
     }
 
-    /// Abort the calibration probe. Called from `Memory`'s `Drop` and from
-    /// `close()`: a probe outliving its session is an embed nobody will read.
+    /// Abort the calibration probe if this pipeline owns it. Called from
+    /// `Memory`'s `Drop` and from `close()`: a probe outliving its only
+    /// session is an embed nobody will read. A probe shared through an
+    /// [`EmbedderCalibration`] is left running for the other sessions that
+    /// read it; its owner aborts it (#32 PR 3).
     pub(crate) fn abort_probe(&self) {
-        self.probe.abort();
+        self.probe.abort_if_owned();
     }
 }

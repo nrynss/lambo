@@ -425,3 +425,115 @@ async fn k2_stats_payload_reports_embedding_coverage() {
     );
     s.mem.close().await.expect("close");
 }
+
+/// #32 PR 3: a session whose probe comes from a process-wide
+/// [`EmbedderCalibration`](crate::writeq::EmbedderCalibration) reports the
+/// same `lambo_stats` probe fields a session with its own probe does, and a
+/// second session sharing the calibration reports the **same probe** but
+/// its **own** observed figures.
+#[tokio::test]
+async fn a_shared_calibration_keeps_the_probe_fields_and_per_session_observations() {
+    let calibration = crate::writeq::EmbedderCalibration::new();
+    let embedder: Arc<dyn Embedder> = Arc::new(FixtureEmbedder::new());
+    let open = |session: &'static str| {
+        let calibration = calibration.clone();
+        let embedder = Arc::clone(&embedder);
+        async move {
+            let mem = Memory::builder()
+                .session(session)
+                .agent("agent-a")
+                .flush_interval(Duration::from_secs(3_600))
+                .store(Arc::new(MemoryStore::new()) as Arc<dyn GraphStore>)
+                .embedder(embedder)
+                .embedding_contract(EmbeddingContract {
+                    kind: "fixture".into(),
+                    model: None,
+                    dim: 1024,
+                })
+                .calibration(calibration)
+                .build()
+                .await
+                .expect("build");
+            LamboServer::new(Arc::new(mem))
+        }
+    };
+    let probe_landed = |s: &LamboServer| s.mem.pipeline().calibration().is_some();
+    let stats = |s: LamboServer| async move {
+        call_raw(&s, "lambo_stats", json!({"agent_id": "agent-a"}))
+            .await
+            .structured_content
+            .expect("payload")
+    };
+
+    let a = open("mcp-shared-cal-a").await;
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !probe_landed(&a) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the probe never landed"
+        );
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    let b = open("mcp-shared-cal-b").await;
+    assert!(
+        probe_landed(&b),
+        "the second session reads the probe the first one spawned"
+    );
+    for (s, writes) in [(&a, 2), (&b, 1)] {
+        for i in 0..writes {
+            call(
+                s,
+                "lambo_derive",
+                json!({
+                    "agent_id": "agent-a",
+                    "concepts": [{"content": format!("shared probe write {i}"), "concept_type": "logic"}],
+                }),
+            )
+            .await;
+        }
+    }
+    let pa = stats(a.clone()).await;
+    let pb = stats(b.clone()).await;
+
+    // The single-session assertions of
+    // `the_stats_payload_reports_the_measured_bound_and_the_drop_count`,
+    // unchanged for a shared probe.
+    for p in [&pa, &pb] {
+        assert_eq!(p["write_queue_measured"], json!(true), "{p}");
+        assert_eq!(p["write_queue_bound_source"], json!("probe"), "{p}");
+        assert_eq!(
+            p["write_queue_lane_bound"],
+            json!(crate::writeq::WRITE_QUEUE_LANE_MAX),
+            "{p}"
+        );
+        assert_eq!(
+            p["write_queue_bound"],
+            json!(crate::writeq::WRITE_QUEUE_MAX),
+            "{p}"
+        );
+        assert!(
+            p["write_queue_serial_items_per_sec"].as_f64().unwrap() > 0.0,
+            "{p}"
+        );
+        assert_eq!(
+            p["write_queue_probe_serial_items_per_sec"], p["write_queue_serial_items_per_sec"],
+            "{p}"
+        );
+        assert_eq!(p["write_queue_probe_optimism"], json!(null), "{p}");
+    }
+    // One probe: both sessions publish its figures.
+    for key in [
+        "write_queue_items_per_sec",
+        "write_queue_probe_serial_items_per_sec",
+    ] {
+        assert_eq!(pa[key], pb[key], "{key}: {pa} vs {pb}");
+    }
+    // Per session: each counts and times only its own writes.
+    assert_eq!(pa["write_queue_applied"], json!(2), "{pa}");
+    assert_eq!(pb["write_queue_applied"], json!(1), "{pb}");
+    assert_eq!(pa["write_queue_apply_samples"], json!(2), "{pa}");
+    assert_eq!(pb["write_queue_apply_samples"], json!(1), "{pb}");
+
+    a.mem.close().await.expect("close a");
+    b.mem.close().await.expect("close b");
+}
