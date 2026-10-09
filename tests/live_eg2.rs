@@ -68,10 +68,15 @@ fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
 /// An 8-bit RGB PNG of `side` x `side`, deflate "stored" blocks (no
 /// compression), so it decodes anywhere without an encoder crate.
 fn png(side: u32, pixel: impl Fn(u32, u32) -> [u8; 3]) -> Vec<u8> {
+    png_wh(side, side, pixel)
+}
+
+/// [`png`] for a `width` x `height` image.
+fn png_wh(width: u32, height: u32, pixel: impl Fn(u32, u32) -> [u8; 3]) -> Vec<u8> {
     let mut raw = Vec::new();
-    for y in 0..side {
+    for y in 0..height {
         raw.push(0); // filter: none
-        for x in 0..side {
+        for x in 0..width {
             raw.extend_from_slice(&pixel(x, y));
         }
     }
@@ -87,8 +92,8 @@ fn png(side: u32, pixel: impl Fn(u32, u32) -> [u8; 3]) -> Vec<u8> {
     z.extend_from_slice(&adler32(&raw).to_be_bytes());
     let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
     let mut ihdr = Vec::new();
-    ihdr.extend_from_slice(&side.to_be_bytes());
-    ihdr.extend_from_slice(&side.to_be_bytes());
+    ihdr.extend_from_slice(&width.to_be_bytes());
+    ihdr.extend_from_slice(&height.to_be_bytes());
     ihdr.extend_from_slice(&[8, 2, 0, 0, 0]);
     chunk(&mut out, b"IHDR", &ihdr);
     chunk(&mut out, b"IDAT", &z);
@@ -259,6 +264,18 @@ async fn live_eg2_text_and_image() {
     assert!(
         size > 0.9999,
         "size invariance needs --image-min-tokens 280 --image-max-tokens 280 (got {size})"
+    );
+
+    // A large image is embedded too: at the 280 budget b11517 reports fewer
+    // prompt tokens for it (250) than for a small one (293), which a
+    // window starting at 280 refused. Its vector is near the small render's
+    // but not equal: the budget fixes the area, not the token count.
+    let red_wide = png_wh(2000, 330, |_, _| [255, 0, 0]);
+    let red_wide_v = image(&e, &red_wide).await.unwrap();
+    assert_unit(&red_wide_v, 768, "red 2000x330px");
+    println!(
+        "cos(red 64px, red 2000x330px) = {:.6}",
+        cosine(&images[0].1, &red_wide_v)
     );
 
     // Cross-modal: each image ranks its own caption first, and red is closer

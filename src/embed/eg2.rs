@@ -16,9 +16,10 @@
 //! - **A fixed 280-token image budget.** The operator starts `llama-server`
 //!   with `--image-min-tokens 280 --image-max-tokens 280`; the budget changes
 //!   the vectors, and only a fixed one makes them independent of the image's
-//!   pixel size. The server does not report its budget, so the adapter reads
-//!   the token count of each image response and refuses one outside the
-//!   budget (see [`EG2_IMAGE_TOKENS`]).
+//!   pixel size (exactly up to 768 px a side on b11517; larger renders come
+//!   out close but not equal). The server does not report its budget, so for
+//!   a server `/props` verified the adapter embeds a reference image and
+//!   requires its known token count ([`EG2_REFERENCE_IMAGE_TOKENS`]).
 //! - **MRL**: the server returns the native 768 dimensions; the adapter
 //!   checks them, truncates to `dim` (768, 512, 256 or 128) and then
 //!   L2-normalizes.
@@ -85,12 +86,36 @@ pub const EG2_MRL_DIMS: [usize; 4] = [768, 512, 256, 128];
 /// --image-max-tokens 280`.
 pub const EG2_IMAGE_TOKENS: u64 = 280;
 
-/// Tokens an image request may carry beyond [`EG2_IMAGE_TOKENS`]: BOS, EOS and
-/// the image's start and end markers. b11517 reports 293 for every image at
-/// the fixed budget; a count outside `280..=280 + slack` means the server is
-/// not running the profile's budget (its default sizes images at 85 to 125
-/// tokens, and a `--ubatch-size` under the budget caps it at 256).
-const EG2_IMAGE_FRAMING_SLACK: u64 = 32;
+/// Lambo's reference image: a 1x1 RGBA PNG, base64.
+const REFERENCE_IMAGE_PNG: &str =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+
+/// The prompt tokens b11517 reports for [`REFERENCE_IMAGE_PNG`] at the
+/// profile's budget.
+///
+/// The budget bounds an image's area in patches, not its token count, so the
+/// count of an arbitrary image says little about the budget: at the
+/// profile's 280, b11517 reports 236 to 540 prompt tokens across 100 sizes
+/// and shapes (293 for a square up to 768 px, 260 for one of 800 px or more,
+/// 268 for 1100x600, 250 for 2000x330, 540 for 16x4096), and the counts of
+/// a capped (256) or the dynamic default budget overlap that range. One
+/// fixed image tells them apart. Before the first image it embeds for a server `/props`
+/// verified (and again every [`EG2_PROPS_RECHECK_INTERVAL`]), the adapter
+/// embeds the reference image and requires this count within
+/// [`REFERENCE_TOKENS_TOLERANCE`]. Measured on b11517 for the same image:
+/// 260 when a 512 ubatch caps the budget to 256, 85 at the dynamic default,
+/// 328 at a budget of 300.
+pub const EG2_REFERENCE_IMAGE_TOKENS: u64 = 293;
+
+/// How far a build's framing may move the reference count: well inside the
+/// 33 tokens between the profile (293) and the nearest other budget measured
+/// (260 capped, 328 at 300).
+const REFERENCE_TOKENS_TOLERANCE: u64 = 8;
+
+/// The flags the image budget needs, quoted in every budget refusal.
+const BUDGET_FLAGS_HINT: &str = "Restart it with --image-min-tokens 280 --image-max-tokens 280, \
+    and with a ubatch that holds a whole image (llama-server otherwise caps the budget to fit its \
+    default 512; e.g. --batch-size 8192 --ubatch-size 8192)";
 
 /// The document-role prefix (`embed`), from the model card.
 pub const EG2_DOCUMENT_PREFIX: &str = "title: none | text: ";
@@ -421,6 +446,9 @@ struct CheckState {
     failed_probes: u32,
     /// No `/props` check before this, after one that could not run.
     retry_at: Option<Instant>,
+    /// When the reference image last showed the profile's budget; trusted
+    /// for [`EG2_PROPS_RECHECK_INTERVAL`] like a kept answer.
+    budget_checked_at: Option<Instant>,
 }
 
 /// EmbeddingGemma 2 (text and image) over `llama-server`. Build it from
@@ -653,7 +681,44 @@ impl EmbeddingGemma2Embedder {
     /// loading server is what a restart looks like, and a restarted server
     /// may hold another model.
     fn forget_kept(&self) {
-        self.state().kept = None;
+        let mut state = self.state();
+        state.kept = None;
+        state.budget_checked_at = None;
+    }
+
+    /// For a server `/props` verified: embed the reference image and require
+    /// [`EG2_REFERENCE_IMAGE_TOKENS`], the one count that tells the
+    /// profile's budget from a capped or default one. Kept for
+    /// [`Self::recheck_after`]; a failure is not kept.
+    async fn ensure_image_budget(&self) -> Result<(), EmbedError> {
+        if self
+            .state()
+            .budget_checked_at
+            .is_some_and(|at| at.elapsed() < self.recheck_after)
+        {
+            return Ok(());
+        }
+        let body = image_request(&self.model, "image/png", REFERENCE_IMAGE_PNG);
+        let parsed = self.post(&body, image_status_rule).await?;
+        let want = EG2_REFERENCE_IMAGE_TOKENS - REFERENCE_TOKENS_TOLERANCE
+            ..=EG2_REFERENCE_IMAGE_TOKENS + REFERENCE_TOKENS_TOLERANCE;
+        match parsed.usage.and_then(|u| u.prompt_tokens) {
+            Some(tokens) if !want.contains(&tokens) => {
+                let message = format!(
+                    "the llama-server at {} embedded Lambo's reference image as {tokens} tokens, \
+                     but at profile {EG2_PROMPT_PROFILE}'s image budget of {EG2_IMAGE_TOKENS} \
+                     b11517 embeds it as {EG2_REFERENCE_IMAGE_TOKENS}, so the server's images \
+                     would be in another space; image embeds are refused. {BUDGET_FLAGS_HINT}",
+                    self.http.log_base_url()
+                );
+                self.log_failure_once(&message);
+                Err(EmbedError::Backend(message))
+            }
+            _ => {
+                self.state().budget_checked_at = Some(Instant::now());
+                Ok(())
+            }
+        }
     }
 
     /// Logged once for each run of `/props` checks that could not run.
@@ -841,6 +906,21 @@ impl EmbeddingGemma2Embedder {
     }
 }
 
+/// One input item whose content is the image alone, as a base64 data URI.
+fn image_request<'a>(model: &'a str, mime: &str, base64: &str) -> ImageRequest<'a> {
+    ImageRequest {
+        model,
+        input: [ImageItem {
+            content: [ImagePart {
+                kind: "image_url",
+                image_url: ImageUrl {
+                    url: format!("data:{mime};base64,{base64}"),
+                },
+            }],
+        }],
+    }
+}
+
 fn first_embedding(data: Vec<EmbedData>) -> Result<Vec<f32>, EmbedError> {
     data.into_iter()
         .next()
@@ -883,37 +963,14 @@ impl Embedder for EmbeddingGemma2Embedder {
                     .into(),
             ));
         }
-        self.ensure_server(true).await?;
-        let data_uri = format!(
-            "data:{};base64,{}",
-            image.mime().as_str(),
-            base64::engine::general_purpose::STANDARD.encode(image.bytes())
-        );
-        let body = ImageRequest {
-            model: &self.model,
-            input: [ImageItem {
-                content: [ImagePart {
-                    kind: "image_url",
-                    image_url: ImageUrl { url: data_uri },
-                }],
-            }],
-        };
-        let parsed = self.post(&body, image_status_rule).await?;
-        if let Some(tokens) = parsed.usage.as_ref().and_then(|u| u.prompt_tokens)
-            && !(EG2_IMAGE_TOKENS..=EG2_IMAGE_TOKENS + EG2_IMAGE_FRAMING_SLACK).contains(&tokens)
-        {
-            let message = format!(
-                "the llama-server at {} embedded this image as {tokens} tokens, but profile \
-                 {EG2_PROMPT_PROFILE} fixes the image budget at {EG2_IMAGE_TOKENS} soft tokens \
-                 (293 tokens with framing on b11517), so its vector would be in another space. \
-                 Restart it with --image-min-tokens 280 --image-max-tokens 280, and with a \
-                 ubatch that holds a whole image (llama-server otherwise caps the budget to fit \
-                 its default 512; e.g. --batch-size 8192 --ubatch-size 8192)",
-                self.http.log_base_url()
-            );
-            self.log_failure_once(&message);
-            return Err(EmbedError::Backend(message));
+        if let Eg2ServerCheck::Verified { .. } = self.ensure_server(true).await? {
+            self.ensure_image_budget().await?;
         }
+        let encoded = base64::engine::general_purpose::STANDARD.encode(image.bytes());
+        let body = image_request(&self.model, image.mime().as_str(), &encoded);
+        // The image's own token count is not judged: it varies with the
+        // image's size and shape (see EG2_REFERENCE_IMAGE_TOKENS).
+        let parsed = self.post(&body, image_status_rule).await?;
         truncate_and_normalize(first_embedding(parsed.data)?, self.dim)
     }
 

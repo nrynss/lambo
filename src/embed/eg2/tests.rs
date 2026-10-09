@@ -18,6 +18,14 @@ fn png_1x1() -> Vec<u8> {
         .unwrap()
 }
 
+/// A 2x1 RGB PNG, a different image from [`png_1x1`] (Lambo's reference
+/// image), so a mock can tell the two requests apart.
+fn png_2x1() -> Vec<u8> {
+    base64::engine::general_purpose::STANDARD
+        .decode("iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAIAAAB7QOjdAAAADUlEQVR4nGP4zwAE/wEHAAH/4iOeWQAAAABJRU5ErkJggg==")
+        .unwrap()
+}
+
 /// A native-width vector that is not unit norm and not uniform, so a test can
 /// see both the truncation and the normalization.
 fn native() -> Vec<f32> {
@@ -296,13 +304,16 @@ async fn status_classes_with_the_image_500_refined() {
     }
 }
 
-/// The image token budget is read from each response: a count below 280 (the
-/// server's dynamic default, or a budget capped by a small ubatch) or far
-/// above it is refused as a permanent configuration error naming the flags;
-/// b11517's 293 passes, and a response without `usage` is not judged.
+/// An image response's own token count is not judged: at the profile's
+/// budget b11517 reports anything from 236 to 540 depending on the image's
+/// size and shape (260 for a square of 800 px or more, 250 for 2000x330,
+/// 540 for 16x4096), so a window refused ordinary photos. The budget is
+/// checked with the reference image instead.
+///
+/// Mutation: the old 280..=312 window -> red.
 #[tokio::test]
-async fn an_image_outside_the_280_token_budget_is_refused() {
-    async fn with_tokens(tokens: Option<u64>) -> Result<Vec<f32>, EmbedError> {
+async fn an_image_is_not_judged_by_its_own_token_count() {
+    for tokens in [Some(236), Some(250), Some(260), Some(293), Some(540), None] {
         let server = MockServer::start();
         server.mock(|when, then| {
             when.method(POST).path("/v1/embeddings");
@@ -310,19 +321,71 @@ async fn an_image_outside_the_280_token_budget_is_refused() {
         });
         let png = png_1x1();
         let input = crate::surface::image::validate(&png, "image/png").unwrap();
-        embedder(&server).embed_image(input).await
-    }
-    for tokens in [85, 125, 269, 279, 313, 1120] {
-        let err = with_tokens(Some(tokens)).await.unwrap_err();
-        assert!(matches!(err, EmbedError::Backend(_)), "{tokens}: {err:?}");
-        let msg = err.to_string();
         assert!(
-            msg.contains(&format!("as {tokens} tokens")) && msg.contains("--image-min-tokens 280"),
-            "{msg}"
+            embedder(&server).embed_image(input).await.is_ok(),
+            "{tokens:?}"
         );
     }
-    for tokens in [Some(280), Some(293), Some(312), None] {
-        assert!(with_tokens(tokens).await.is_ok(), "{tokens:?}");
+}
+
+/// For a server `/props` verified, the first image embed is preceded by
+/// Lambo's reference image, whose count tells the profile's budget (293 on
+/// b11517) from a ubatch-capped one (260) or the dynamic default (85),
+/// although both of those counts can also come from a correct server for
+/// other images. A wrong count refuses the image before it is sent; a right
+/// one is kept for the recheck interval, so the next image sends no
+/// reference.
+///
+/// Mutation: skip `ensure_image_budget` -> red.
+#[tokio::test]
+async fn a_verified_server_is_checked_with_the_reference_image() {
+    for (reference_tokens, accepted) in [
+        (293, true),
+        (288, true),
+        (301, true),
+        (260, false),
+        (85, false),
+        (328, false),
+    ] {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(GET).path("/props");
+            then.status(200)
+                .json_body(props("embeddinggemma-2-Q8_0.gguf", "Q8_0", true));
+        });
+        let reference = server.mock(|when, then| {
+            when.method(POST)
+                .path("/v1/embeddings")
+                .body(image_body(&png_1x1()));
+            then.status(200)
+                .json_body(ok_body(&native(), Some(reference_tokens)));
+        });
+        let png = png_2x1();
+        let image = server.mock(|when, then| {
+            when.method(POST)
+                .path("/v1/embeddings")
+                .body(image_body(&png));
+            then.status(200).json_body(ok_body(&native(), Some(260)));
+        });
+        let e = embedder(&server);
+        for _ in 0..2 {
+            let input = crate::surface::image::validate(&png, "image/png").unwrap();
+            let result = e.embed_image(input).await;
+            assert_eq!(result.is_ok(), accepted, "{reference_tokens}: {result:?}");
+            if let Err(err) = result {
+                assert!(matches!(err, EmbedError::Backend(_)), "{err:?}");
+                let msg = err.to_string();
+                assert!(msg.contains("reference image"), "{msg}");
+                assert!(msg.contains("--ubatch-size 8192"), "{msg}");
+            }
+        }
+        if accepted {
+            reference.assert_hits(1);
+            image.assert_hits(2);
+        } else {
+            reference.assert_hits(2);
+            image.assert_hits(0);
+        }
     }
 }
 
@@ -475,7 +538,8 @@ async fn a_server_without_vision_refuses_images_but_embeds_text() {
     });
     let input = crate::surface::image::validate(&png, "image/png").unwrap();
     e.embed_image(input).await.unwrap();
-    image_post.assert_hits(1);
+    // The reference image, then the image itself.
+    image_post.assert_hits(2);
 }
 
 /// A server that does not answer `/props` with a model (a 404 from a hosted

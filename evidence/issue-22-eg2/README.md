@@ -54,7 +54,8 @@ LAMBO_EG2_URL=http://127.0.0.1:8191 LAMBO_EG2_TEXT_ONLY_URL=http://127.0.0.1:819
    it, yet its vectors sit off the profile (cosine 0.9989 to the same image on the 280
    server). `/props` does not report the budget. So the adapter reads
    `usage.prompt_tokens` on every image response and refuses a count outside 280 to
-   312 (b11517 reports 293 at the fixed budget), and the documented command line adds
+   312 (b11517 reports 293 at the fixed budget; superseded, see 4), and the documented
+   command line adds
    `--ctx-size 8192 --batch-size 8192 --ubatch-size 8192`. The large ubatch also lets a
    text input of up to 8K tokens fit the one ubatch a non-causal model needs.
 2. **Two image faults arrive as HTTP 500.** "provide the mmproj" (no projector) and
@@ -66,6 +67,22 @@ LAMBO_EG2_URL=http://127.0.0.1:8191 LAMBO_EG2_TEXT_ONLY_URL=http://127.0.0.1:819
    Mac, in this run and in the eval's own 280-budget server log. The amendment's 95 to
    160 ms was measured at llama.cpp's dynamic budget (85 to 125 tokens). Text stays
    at about 7 ms warm.
+
+4. **An image's token count does not show the budget** (review remediation, same
+   build, [image-token-counts.txt](image-token-counts.txt)). The 293 above holds only
+   for small, squarish images. At the 280 budget b11517 reports 236 to 540 prompt
+   tokens across 100 sizes and shapes: 260 for a square of 800 px or more, 268 for
+   1100x600, 250 for 2000x330, 540 for 16x4096. The 280 to 312 window therefore
+   refused ordinary photos on a correctly started server (the live test's 2000x330
+   image failed with "as 250 tokens"), and the counts of a capped or default budget
+   overlap the range, so no window can be right. The adapter now checks the budget
+   with a fixed reference image (1x1 PNG): 293 at the profile's budget, 260 when a 512
+   ubatch caps it, 85 at the dynamic default, 328 at a budget of 300. It embeds it
+   before the first image for a server `/props` verified, and again every 60 s, and
+   refuses image embeds unless the count is 293 within 8. An image's own count is not
+   judged. The same file shows that renders of one picture at different sizes are not
+   one vector: a solid square is identical up to 768 px and at 0.9989 from 896 px
+   (exactly the capped server's offset), and a checkerboard drifts to 0.97 to 0.99.
 
 ## Design 7.3: ranking parity (measured, not adjusted)
 
