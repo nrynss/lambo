@@ -104,7 +104,17 @@ pub struct SecretRef {
 
 impl SecretRef {
     /// Read the referenced value. Never logged.
+    ///
+    /// The name must pass the rule `token_env` and `api_key_env` share
+    /// (#21, #32): a variable name, not a pasted key, and none of lambo's own
+    /// credential variables (`LAMBO_AUTH_TOKEN`, a store DSN, the Google
+    /// credentials), which would hand that secret to the index.
     pub fn resolve(&self) -> Result<String, StoreError> {
+        if let Err(refusal) = crate::config::secret_env::check(&self.env) {
+            return Err(StoreError::Backend(
+                refusal.message("recall.api_key.env", "recall.api_key.env"),
+            ));
+        }
         match std::env::var(&self.env) {
             Ok(v) if !v.trim().is_empty() => Ok(v),
             // The name is quoted only while it reads as a variable name: a
@@ -310,6 +320,25 @@ mod tests {
         } else {
             let err = built.err().expect("uncompiled tier is refused").to_string();
             assert!(err.contains("--features recall-elastic"), "{err}");
+        }
+    }
+
+    /// #21's shared rule: `api_key.env` may not name one of lambo's own
+    /// credential variables, which would send that secret to the index, nor
+    /// a pasted key. Refused before the variable is read, never quoted.
+    #[test]
+    fn a_recall_key_may_not_name_lambos_own_credentials() {
+        for name in [
+            "LAMBO_AUTH_TOKEN",
+            "DATABASE_URL",
+            "sk-xyzzy-0123456789abcdef",
+        ] {
+            let err = SecretRef { env: name.into() }
+                .resolve()
+                .expect_err(name)
+                .to_string();
+            assert!(err.contains("recall.api_key.env"), "{name}: {err}");
+            assert!(!err.contains("xyzzy"), "{name}: {err}");
         }
     }
 }
