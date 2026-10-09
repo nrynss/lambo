@@ -16,7 +16,9 @@
 use super::*;
 use crate::embed::FixtureEmbedder;
 use crate::mcp::serve::pinned::check_pinned;
-use crate::mcp::serve::registry::{Acquired, LeaseLossPolicy, SessionAttacher, SessionRegistry};
+use crate::mcp::serve::registry::{
+    Acquired, LeaseLossPolicy, SessionAttacher, SessionRegistry, PINNED_RETRY,
+};
 use crate::mcp::serve::transport::session_router;
 use crate::store::{GraphStore, MemoryStore, StoreConfig};
 use crate::types::EmbeddingContract;
@@ -61,6 +63,31 @@ async fn pinned_registry(
     backends: ResolvedBackends,
     max_sessions: usize,
 ) -> Arc<SessionRegistry> {
+    let registry = new_registry(sessions, backends, max_sessions);
+    for id in sessions {
+        attach_or_hold(&registry, id).await;
+    }
+    registry.mark_started();
+    registry
+}
+
+/// Acquire pinned session `id`: admit it, or mark it held elsewhere.
+async fn attach_or_hold(registry: &Arc<SessionRegistry>, id: &str) {
+    match registry.acquire(id).await.expect("acquire") {
+        Acquired::Attached(mem, endpoint) => {
+            registry.admit(mem, endpoint);
+        }
+        Acquired::Held(held) => registry.mark_held(id, &held).await,
+    }
+}
+
+/// A `DetachSession` (or, for one, `ExitProcess`) registry over `backends`
+/// hosting `sessions`, nothing attached yet.
+fn new_registry(
+    sessions: &[&str],
+    backends: ResolvedBackends,
+    max_sessions: usize,
+) -> Arc<SessionRegistry> {
     let opts = ServeOptions::new(sessions[0], "agent-a");
     let early = EarlyShutdown::unarmed();
     let store_cfg = backends.store_cfg.clone();
@@ -72,7 +99,7 @@ async fn pinned_registry(
         early.clone(),
         Some(crate::writeq::EmbedderCalibration::new()),
     );
-    let registry = SessionRegistry::new(
+    SessionRegistry::new(
         sessions.iter().map(|s| s.to_string()).collect(),
         Some(sessions[0].to_string()),
         LeaseLossPolicy::for_pinned(sessions.len()),
@@ -84,17 +111,7 @@ async fn pinned_registry(
             agent: "agent-a".into(),
         }),
         early,
-    );
-    for id in sessions {
-        match registry.acquire(id).await.expect("acquire") {
-            Acquired::Attached(mem, endpoint) => {
-                registry.admit(mem, endpoint);
-            }
-            Acquired::Held(held) => registry.mark_held(id, &held).await,
-        }
-    }
-    registry.mark_started();
-    registry
+    )
 }
 
 /// Serve `registry` behind the real guards on a loopback port.
@@ -755,5 +772,54 @@ async fn sixteen_dirty_sqlite_sessions_close_inside_the_shutdown_budget() {
                 .await
                 .expect("load");
         assert!(!loaded.graph.is_empty(), "{id}: tail not durable");
+    }
+}
+
+/// A pinned session another writer holds at startup is served as 503 and
+/// taken back in the background once that writer releases it (design §3.2:
+/// no election wait on the startup or request path).
+#[tokio::test]
+async fn a_pinned_session_held_elsewhere_is_re_elected_in_the_background() {
+    let registry = new_registry(
+        &["reg-held-a", "reg-held-b"],
+        backends_over(Box::new(MemoryStore::new()), fast_config(1_000)),
+        32,
+    );
+    attach_or_hold(&registry, "reg-held-a").await;
+    // Another writer takes b on the same store before the registry tries.
+    let other = crate::memory::Memory::builder()
+        .session("reg-held-b")
+        .agent("another-writer")
+        .flush_interval(Duration::from_secs(3_600))
+        .store(Arc::clone(registry.attached()[0].mem.store()))
+        .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn crate::embed::Embedder>)
+        .embedding_contract(EmbeddingContract {
+            kind: "fixture".into(),
+            model: None,
+            dim: 1024,
+        })
+        .build()
+        .await
+        .expect("the other writer attaches");
+    attach_or_hold(&registry, "reg-held-b").await;
+    registry.mark_started();
+    registry.spawn_retry_loop();
+    let addr = serve_router(&registry, 32).await;
+
+    assert_eq!(registry.attached().len(), 1, "only a attached");
+    let held = http(addr, "POST", "/mcp/s/reg-held-b", None, "{}").await;
+    assert_eq!(held.status, 503, "{}", held.body);
+    assert!(held.header("retry-after").is_some(), "{}", held.head);
+
+    other.close().await.expect("the other writer releases b");
+    let deadline = Instant::now() + PINNED_RETRY * 3;
+    while registry.attached().len() < 2 {
+        assert!(Instant::now() < deadline, "b was never re-elected");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    initialize(addr, "/mcp/s/reg-held-b").await;
+
+    for session in registry.close_set().await {
+        session.mem.close().await.expect("close");
     }
 }
