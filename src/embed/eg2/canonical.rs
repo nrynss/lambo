@@ -67,8 +67,9 @@
 //! [`MAX_DECODE_PIXELS`] in all (the validator already enforces the side, so
 //! this is a second line against a decompression bomb), and the decoder runs
 //! under the same limits plus [`MAX_DECODE_ALLOC`] bytes. The input is at
-//! most `crate::surface::image::MAX_IMAGE_BYTES`. A decode failure is an
-//! error (permanent for this input), never a panic.
+//! most `crate::surface::image::MAX_IMAGE_BYTES`. A decode failure is
+//! [`EmbedError::Unreadable`] (permanent for this input, and no backend was
+//! asked), never a panic.
 //!
 //! What is stored about an image (its id, its SHA-256, its MIME type) keeps
 //! describing the bytes the client sent; only the embed request carries the
@@ -160,8 +161,8 @@ fn check_dimensions(width: u32, height: u32) -> Result<(), EmbedError> {
         || height > MAX_IMAGE_SIDE_PX
         || u64::from(width) * u64::from(height) > MAX_DECODE_PIXELS
     {
-        return Err(EmbedError::Backend(format!(
-            "the image declares {width}x{height} px; EmbeddingGemma 2 decodes at most \
+        return Err(EmbedError::Unreadable(format!(
+            "this image declares {width}x{height} px; Lambo reads images of 1 to \
              {MAX_IMAGE_SIDE_PX} px a side"
         )));
     }
@@ -172,7 +173,7 @@ fn check_dimensions(width: u32, height: u32) -> Result<(), EmbedError> {
 /// decoder's reason, never image bytes.
 fn decode_error(mime: ImageMime, e: &image::ImageError) -> EmbedError {
     let reason: String = e.to_string().chars().take(200).collect();
-    EmbedError::Backend(format!("could not decode this {mime} image: {reason}"))
+    EmbedError::Unreadable(format!("could not decode this {mime} image: {reason}"))
 }
 
 /// The canonical size for an image of `width` x `height`: the longer side
@@ -217,7 +218,7 @@ pub(crate) fn to_canonical_png(bytes: &[u8], mime: ImageMime) -> Result<Vec<u8>,
     // A bitstream that decodes to a size other than its header's is refused
     // rather than trusted.
     if (decoded.width(), decoded.height()) != (width, height) {
-        return Err(EmbedError::Backend(format!(
+        return Err(EmbedError::Unreadable(format!(
             "this {mime} image decodes to {}x{} px but its header declares {width}x{height}",
             decoded.width(),
             decoded.height()

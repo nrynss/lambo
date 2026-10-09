@@ -196,7 +196,7 @@ async fn an_undecodable_large_image_never_reaches_the_server() {
     let input = crate::surface::image::validate(&png, "image/png").unwrap();
     let err = embedder(&server).embed_image(input).await.unwrap_err();
     assert!(
-        matches!(&err, EmbedError::Backend(m) if m.contains("could not decode")),
+        matches!(&err, EmbedError::Unreadable(m) if m.contains("could not decode")),
         "{err:?}"
     );
     assert!(!err.is_transient());

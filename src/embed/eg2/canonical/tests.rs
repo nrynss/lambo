@@ -330,7 +330,7 @@ fn a_bomb_header_is_refused_before_decoding() {
             "validate refuses it too"
         );
         let err = to_canonical_png(&bomb, ImageMime::Png).unwrap_err();
-        let EmbedError::Backend(msg) = &err else {
+        let EmbedError::Unreadable(msg) = &err else {
             panic!("{err:?}");
         };
         // u32::MAX is not a legal PNG width, so the header parser refuses
@@ -349,7 +349,7 @@ fn a_bomb_header_is_refused_before_decoding() {
     let liar = png_declaring(4096, 4096);
     assert!(matches!(
         to_canonical_png(&liar, ImageMime::Png).unwrap_err(),
-        EmbedError::Backend(m) if m.contains("could not decode")
+        EmbedError::Unreadable(m) if m.contains("could not decode")
     ));
 }
 
@@ -373,7 +373,7 @@ fn a_truncated_large_image_is_a_backend_error() {
     png.truncate(png.len() / 2);
     let err = canonical_of(&png, "image/png").unwrap_err();
     assert!(
-        matches!(&err, EmbedError::Backend(m) if m.starts_with("could not decode this image/png image")),
+        matches!(&err, EmbedError::Unreadable(m) if m.starts_with("could not decode this image/png image")),
         "{err:?}"
     );
     let mut jpg = jpeg(1000, 1000);

@@ -88,6 +88,13 @@ pub enum EmbedError {
     /// never any of its bytes.
     #[error("unsupported input: {0}")]
     Unsupported(String),
+    /// Lambo itself could not read this input before any backend saw it
+    /// (22g): an image whose header or data does not decode, or whose
+    /// declared size is out of bounds. Permanent for this input, so
+    /// [`Self::is_transient`] is `false`. The message names the format and
+    /// the reason, never any of the bytes.
+    #[error("unreadable input: {0}")]
+    Unreadable(String),
 }
 
 impl EmbedError {
@@ -137,10 +144,13 @@ impl EmbedError {
     /// * [`Self::Unsupported`] — **permanent for this deployment** (#22). The
     ///   adapter cannot embed this kind of input (an image on a text-only
     ///   model); no retry against the same deployment can change that.
+    /// * [`Self::Unreadable`] — **permanent for this input** (22g). Lambo
+    ///   could not read the input itself (an image that does not decode), so
+    ///   no backend was asked and no retry can change that.
     pub fn is_transient(&self) -> bool {
         match self {
             Self::Unavailable(_) => true,
-            Self::Backend(_) | Self::Unsupported(_) => false,
+            Self::Backend(_) | Self::Unsupported(_) | Self::Unreadable(_) => false,
         }
     }
 }

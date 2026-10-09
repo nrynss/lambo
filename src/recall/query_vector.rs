@@ -108,6 +108,11 @@ pub(crate) async fn resolve(
                             "the configured embedder does not embed images ({e})"
                         )));
                     }
+                    Ok(Err(EmbedError::Unreadable(e))) => {
+                        return Err(LamboError::Embed(format!(
+                            "Lambo could not read the query image ({e})"
+                        )));
+                    }
                     Ok(Err(e)) if e.is_transient() => {
                         return Err(LamboError::EmbedUnavailable(format!(
                             "the embedder could not be reached for the query image ({e})"
