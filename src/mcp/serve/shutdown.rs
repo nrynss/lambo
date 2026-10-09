@@ -13,7 +13,7 @@
 //! | # | stage | step | bound |
 //! |---|---|---|---|
 //! | 1 | transport drain (HTTP graceful drain, stdio cancel) | the transport future inside [`run_and_close_sessions`], ended by [`wind_down`] | [`SHUTDOWN_GRACE`] |
-//! | 2 | keep-warm abort | `stop_before_close` in [`run_and_close_sessions`], from [`ProcessTasks::stop_before_close`](super::process::ProcessTasks::stop_before_close) and the process's write-queue calibration probe ([`EmbedderCalibration`](crate::writeq::EmbedderCalibration), #32 PR 3) | instant |
+//! | 2 | keep-warm abort | `stop_before_close` in [`run_and_close_sessions`], from [`ProcessTasks::stop_before_close`](super::process::ProcessTasks::stop_before_close): the keep-warm and the process's write-queue calibration probe ([`EmbedderCalibration`](crate::writeq::EmbedderCalibration), #32 PR 3) | instant |
 //! | 3 | session close | [`close_sessions`], each through [`close_bounded`]: [`Memory::close`] and its own ten logged steps (`serialize`, `replay_stop`, `queue_quiesce`, `writers_gate`, `heartbeat_abort`, `producer_joins`, `flush_join`, `final_drain`, `final_flush`, `lease_release`; `src/memory/shutdown.rs`), or on abandonment the bounded lease release | [`CLOSE_GRACE`] |
 //! | 4 | event pump abort | after the close, in [`close_sessions`], so final-drain events still reach the log | instant |
 //! | 5 | background tasks | [`ProcessTasks::stop`](super::process::ProcessTasks::stop): ledger heartbeat, keep-warm (again), refusal poller; the calibration probe (again) | instant |

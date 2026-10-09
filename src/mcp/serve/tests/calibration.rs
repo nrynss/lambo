@@ -150,16 +150,24 @@ async fn sessions_from_the_serve_builder_share_one_probe() {
     b.close().await.expect("close b");
 }
 
-/// Stage 2 aborts the shared probe (serve hands `run_and_close` the
-/// calibration's abort handles beside the keep-warm's), so a probe still
-/// running when the transport stops does not run across the close.
-#[tokio::test]
-async fn stage_two_aborts_the_shared_probe() {
-    let probe = Probe::gated();
-    let calibration = EmbedderCalibration::new();
+/// The process tasks `serve` builds its stage-2 and stage-5 abort lists
+/// from, holding the process's calibration and no task of their own (the
+/// keep-warm, heartbeat and poller have their own tests).
+fn process_tasks(calibration: &EmbedderCalibration) -> ProcessTasks {
+    ProcessTasks {
+        heartbeat: None,
+        keep_warm: None,
+        refusal_poller: None,
+        calibration: calibration.clone(),
+    }
+}
+
+/// A session over `probe`'s embedder, built from the serve builder with the
+/// process's calibration.
+async fn attach(session: &str, probe: &Probe, calibration: &EmbedderCalibration) -> Arc<Memory> {
     let mem = serve_builder(
-        &ServeOptions::new("serve-cal-stage-2", "agent-a"),
-        backends(&probe),
+        &ServeOptions::new(session, "agent-a"),
+        backends(probe),
         None,
         None,
         EarlyShutdown::unarmed(),
@@ -168,10 +176,22 @@ async fn stage_two_aborts_the_shared_probe() {
     .build()
     .await
     .expect("attach");
-    let mem = Arc::new(mem);
+    Arc::new(mem)
+}
+
+/// Stage 2 aborts the shared probe, so a probe still running when the
+/// transport stops does not run across the close. The list is
+/// [`ProcessTasks::stop_before_close`], the one `serve` hands
+/// `run_and_close_sessions` (review P3-1: dropping the calibration from it
+/// fails this test).
+#[tokio::test]
+async fn stage_two_aborts_the_shared_probe() {
+    let probe = Probe::gated();
+    let calibration = EmbedderCalibration::new();
+    let tasks = process_tasks(&calibration);
+    let mem = attach("serve-cal-stage-2", &probe, &calibration).await;
     probe.parked().await;
-    let handles = calibration.abort_handles();
-    assert_eq!(handles.len(), 1, "one probe to abort");
+    let handles = tasks.stop_before_close();
     let out = run_and_close(
         Arc::clone(&mem),
         async { Ok(()) },
@@ -185,6 +205,24 @@ async fn stage_two_aborts_the_shared_probe() {
     let at_close = probe.calls();
     probe.release();
     tokio::time::sleep(Duration::from_millis(100)).await;
-    assert_eq!(probe.calls(), at_close, "the probe stopped");
+    assert_eq!(probe.calls(), at_close, "the probe stopped at stage 2");
     assert!(mem.pipeline().calibration().is_none());
+}
+
+/// Stage 5 ([`ProcessTasks::stop`]) aborts the shared probe too, on any
+/// path that reaches it with the probe still running.
+#[tokio::test]
+async fn stage_five_aborts_the_shared_probe() {
+    let probe = Probe::gated();
+    let calibration = EmbedderCalibration::new();
+    let tasks = process_tasks(&calibration);
+    let mem = attach("serve-cal-stage-5", &probe, &calibration).await;
+    probe.parked().await;
+    tasks.stop();
+    let at_stop = probe.calls();
+    probe.release();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(probe.calls(), at_stop, "the probe stopped at stage 5");
+    assert!(mem.pipeline().calibration().is_none());
+    mem.close().await.expect("close");
 }

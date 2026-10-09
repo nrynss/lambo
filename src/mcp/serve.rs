@@ -499,7 +499,14 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     let server = session_server(&mem, &ledger);
     // Stopped after the close (and the keep-warm before it); see
     // `process::ProcessTasks` and the stage table in `shutdown`.
-    let tasks = ProcessTasks::spawn(&server, &mem, &ledger, opts.ledger_heartbeat, keep_warm);
+    let tasks = ProcessTasks::spawn(
+        &server,
+        &mem,
+        &ledger,
+        opts.ledger_heartbeat,
+        keep_warm,
+        &calibration,
+    );
     // `mem` stays held here as well, so the last handle still drops when
     // `serve` returns, after the watchdog is disarmed (the stage table's
     // "not watched" note), not when the set is taken apart at stage 6.
@@ -527,21 +534,17 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     // The holder's shutdown, in the order `shutdown`'s stage table names.
     // Stages 1-4: transport drain, keep-warm abort (issue #13), the bounded
     // session closes, the event pumps.
-    // The calibration probe (#32 PR 3) stops there too: it is the process's
-    // to abort now that no session's close does, and an embed it still has in
-    // flight would only compete with the final drains, as a keep-warm touch
-    // would. Instant, so stage 2 stays instant.
-    let mut stop_before_close = tasks.stop_before_close();
-    stop_before_close.extend(calibration.abort_handles());
+    // The calibration probe (#32 PR 3) stops there too, through `tasks`: it
+    // is the process's to abort now that no session's close does, and an
+    // embed it still has in flight would only compete with the final drains,
+    // as a keep-warm touch would. Instant, so stage 2 stays instant.
+    let stop_before_close = tasks.stop_before_close();
     let closing: Vec<_> = sessions.iter().map(AttachedSession::closing).collect();
     let outcome =
         run_and_close_sessions(&closing, transport, &stop_before_close, &early, &progress).await;
-    // Stage 5: heartbeat, keep-warm (again), refusal poller.
-    progress.run(Stage::BackgroundTasks, || {
-        tasks.stop();
-        // Idempotent, like the keep-warm's second abort in `tasks.stop`.
-        calibration.abort();
-    });
+    // Stage 5: heartbeat, keep-warm (again), refusal poller, calibration
+    // probe (again).
+    progress.run(Stage::BackgroundTasks, || tasks.stop());
     // Stage 6: every session's endpoint, after the closes; see
     // `AttachedSession::release_endpoint`.
     progress.begin(Stage::EndpointRelease);
