@@ -370,9 +370,9 @@ APPLIED_STATES = ("applied", "applied_after_restart")
 #: The name each metric-2 fact carries on a `completion` line. The completion
 #: reports true post-write counts, so `created` is `created_count` there.
 #:
-#: **`semantic_merged` and `reinforced` are deliberately absent.** The
-#: completion line carries the created/matched pair and no more, so for an
-#: async-acked write those two are genuinely unavailable rather than zero —
+#: **`semantic_merged` and `reinforced` are deliberately absent.** Completion
+#: lines written before #12 carry the created/matched pair and no more, so for
+#: an async-acked write those two may be genuinely unavailable rather than zero —
 #: which is why `dedup_rate.py` reports them as a separate, honestly-labelled
 #: figure instead of folding a join-recovered zero into them.
 COMPLETION_FACTS = {"created": "created_count", "matched": "matched_count"}
