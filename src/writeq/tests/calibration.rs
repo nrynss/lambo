@@ -220,6 +220,8 @@ fn the_constants_say_what_their_docs_say() {
         crate::graph::hybrid::HYBRID_IO_TIMEOUT + 2 * WRITE_QUEUE_DRAIN_BUDGET
     );
     assert_eq!(MAX_CONCURRENT_RECEIPT_WAITS * 2, 32);
+    // #11 review P3-1: one agent's share of the wait slots.
+    assert_eq!(MAX_RECEIPT_WAITS_PER_AGENT, 8);
     assert_eq!(crate::mcp::proxy::INFLIGHT_DEPTH_WARN, 64);
 }
 

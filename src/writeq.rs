@@ -96,8 +96,8 @@ pub use drain::WRITE_QUEUE_DRAIN_BUDGET;
 pub(crate) use execution::{mirror_concepts, ConsumeStamp, WriteCtx};
 pub use receipts::{
     AppliedSummary, ReceiptAnswer, ReceiptId, WriteKind, MAX_CONCURRENT_RECEIPT_WAITS,
-    MAX_PIGGYBACK_RECEIPTS, MAX_RECEIPT_IDS, MAX_RETAINED_RECEIPTS, MEASURED_WORST_FLUSH_LAG_SECS,
-    RECEIPT_RETENTION, RECEIPT_WAIT_MAX,
+    MAX_PIGGYBACK_RECEIPTS, MAX_RECEIPT_IDS, MAX_RECEIPT_WAITS_PER_AGENT, MAX_RETAINED_RECEIPTS,
+    MEASURED_WORST_FLUSH_LAG_SECS, RECEIPT_RETENTION, RECEIPT_WAIT_MAX,
 };
 pub use replay::EMBEDDER_SICK_THRESHOLD;
 
@@ -134,6 +134,10 @@ pub struct WritePipeline {
     /// Fair-share cap on concurrent receipt waits (see
     /// [`MAX_CONCURRENT_RECEIPT_WAITS`]).
     wait_slots: Arc<Semaphore>,
+    /// Receipt waits each agent holds now, so one agent cannot take every
+    /// slot (see [`MAX_RECEIPT_WAITS_PER_AGENT`]). An agent's entry goes when
+    /// its last wait ends.
+    waits_per_agent: Arc<PlMutex<HashMap<AgentId, usize>>>,
     /// The startup calibration probe of this pipeline's embedder (telemetry).
     /// Its own type so #32 PR 3 can share one probe per embedder across every
     /// pipeline in the process (`EmbedderCalibration`, design decision 14).
@@ -203,6 +207,7 @@ impl WritePipeline {
             counters: Arc::new(WriteQueueCounters::default()),
             settled: Arc::new(Notify::new()),
             wait_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_RECEIPT_WAITS)),
+            waits_per_agent: Arc::new(PlMutex::new(HashMap::new())),
             observed: Arc::new(PlMutex::new(ObservedRate::default())),
             apply_latency: Arc::new(PlMutex::new(ApplyLatency::default())),
             probe,

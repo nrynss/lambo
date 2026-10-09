@@ -197,6 +197,61 @@ const _: () = assert!(
 /// receipt waits alone cannot be what trips the depth warning.
 pub const MAX_CONCURRENT_RECEIPT_WAITS: usize = 16;
 
+/// Receipt waits one agent may hold at once: half of
+/// [`MAX_CONCURRENT_RECEIPT_WAITS`] (#11 review P3-1).
+///
+/// The slots are shared by every agent on the pipeline, and a wait over the
+/// cap answers at once instead of waiting. With no share, one agent issuing
+/// sixteen waits on a slow write turned every other agent's wait into an
+/// immediate `pending` for as long as [`RECEIPT_WAIT_MAX`], which #11 raised
+/// from 4 s to 34 s. Half, not less, because one `agent_id` is often several
+/// clients: the dogfood protocol names an agent by its model, so parallel
+/// subagents of one model share an id, and an 8-wide fan-out of waits on one
+/// id is ordinary traffic (`i1_a_days_worth_of_concurrent_lines_all_parse`
+/// drives exactly that). Half is still the property the finding asks for:
+/// whatever one agent does, every other agent keeps eight slots. A wait over
+/// the share is answered the way a wait over the global cap is: at once, with
+/// the receipt's current state. `agent_id` is caller-asserted, so this is
+/// fairness between well-behaved agents, not a defence against one that
+/// varies its id; the global cap is what bounds the population either way.
+pub const MAX_RECEIPT_WAITS_PER_AGENT: usize = MAX_CONCURRENT_RECEIPT_WAITS / 2;
+
+const _: () = assert!(
+    MAX_RECEIPT_WAITS_PER_AGENT >= 1 && MAX_RECEIPT_WAITS_PER_AGENT < MAX_CONCURRENT_RECEIPT_WAITS,
+    "an agent's share of the receipt-wait slots must allow a wait and leave room for others",
+);
+
+/// One agent's claim on its [`MAX_RECEIPT_WAITS_PER_AGENT`] share, released
+/// when the wait ends however it ends (including a cancelled call).
+struct AgentWaitShare<'a> {
+    waits: &'a PlMutex<HashMap<AgentId, usize>>,
+    agent: &'a AgentId,
+}
+
+impl<'a> AgentWaitShare<'a> {
+    fn claim(waits: &'a PlMutex<HashMap<AgentId, usize>>, agent: &'a AgentId) -> Option<Self> {
+        let mut held = waits.lock();
+        let count = held.entry(agent.clone()).or_insert(0);
+        if *count >= MAX_RECEIPT_WAITS_PER_AGENT {
+            return None;
+        }
+        *count += 1;
+        Some(Self { waits, agent })
+    }
+}
+
+impl Drop for AgentWaitShare<'_> {
+    fn drop(&mut self) {
+        let mut held = self.waits.lock();
+        if let Some(count) = held.get_mut(self.agent) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                held.remove(self.agent);
+            }
+        }
+    }
+}
+
 /// Settled receipts piggybacked on one tool response.
 ///
 /// The rest stay queued for the next response and the note says how many, so a
@@ -774,13 +829,25 @@ impl WritePipeline {
     /// Wait for a receipt to settle — the opt-in synchrony surface.
     ///
     /// `budget` is clamped to [`RECEIPT_WAIT_MAX`], and concurrent waits are
-    /// capped ([`MAX_CONCURRENT_RECEIPT_WAITS`]); both bounds exist because a
+    /// capped ([`MAX_CONCURRENT_RECEIPT_WAITS`], of which one agent holds at
+    /// most [`MAX_RECEIPT_WAITS_PER_AGENT`]); the bounds exist because a
     /// waiting call occupies a proxy in-flight slot for its whole duration.
     /// A wait that runs out returns [`ReceiptAnswer::Pending`] for a receipt
     /// this process holds, or [`ReceiptAnswer::PendingReplay`] for a replay-owed
     /// id — either is honest, and neither is a failure.
     pub async fn wait(&self, agent: &AgentId, id: ReceiptId, budget: Duration) -> ReceiptAnswer {
         let budget = budget.min(RECEIPT_WAIT_MAX);
+        // The agent's share first (#11 review P3-1), so an agent at its share
+        // never takes a global slot another agent could have had.
+        let Some(_share) = AgentWaitShare::claim(&self.waits_per_agent, agent) else {
+            tracing::debug!(
+                session = %self.ctx.session,
+                agent = %agent,
+                "write queue: this agent already holds {MAX_RECEIPT_WAITS_PER_AGENT} receipt \
+                 waits; answering without waiting"
+            );
+            return self.lookup(agent, id);
+        };
         let _slot = match self.wait_slots.clone().try_acquire_owned() {
             Ok(slot) => slot,
             // Refusing the *wait* is not refusing the answer: the current
