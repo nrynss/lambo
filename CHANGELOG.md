@@ -72,7 +72,6 @@
   `lease` lines always did; `call`, `completion` and `stats` lines gain it so
   one ledger file can hold several sessions later. Additive: `v` stays `1`
   and no existing key changes.
-
 - On SQLite, the process that holds a session (`lambo serve`, or an embedded
   `Memory`) now ranks recall's vector leg and hybrid `derive`'s semantic match
   against the vectors its in-memory graph already holds, instead of reading,
@@ -118,7 +117,6 @@
   `--session` keeps its looser rule.
 - `Ledger::for_session`, a handle onto the same ledger that stamps `session`
   on its lines.
-
 - `GraphStore::exact_vector_scan()` (default `false`): an adapter declares its
   checked vector read is an exact cosine scan of every vector it stores, so a
   session holder may answer that read from its graph (#8). `SqliteStore`
