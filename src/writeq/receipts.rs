@@ -378,7 +378,7 @@ impl FromStr for ReceiptId {
 pub enum WriteKind {
     Derive,
     /// An image derive (#22): a derive whose one concept's vector was
-    /// supplied. Its tool, `lambo_derive_image`, arrives with #22 PR 4.
+    /// supplied, acked by `lambo_derive_image`.
     DeriveImage,
     RecordAction,
 }
