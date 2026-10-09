@@ -349,8 +349,23 @@ impl BgeM3LlamaCppEmbedder {
             .map_err(|e| EmbedError::Unavailable(format!("llama.cpp unreachable: {e}")))?;
         let status = resp.status();
         if status.is_success() {
-            return resp.json().await.map_err(|e| {
-                EmbedError::Backend(format!("llama.cpp returned unparseable JSON: {e}"))
+            let bytes = resp.bytes().await.map_err(|e| {
+                EmbedError::Backend(format!(
+                    "llama.cpp response body could not be read: {}",
+                    e.without_url()
+                ))
+            })?;
+            // The parse error's own text quotes body content (`invalid type:
+            // string "..."`), which an echoing endpoint could fill with the
+            // token: name only its class and position (issue #21).
+            return serde_json::from_slice(&bytes).map_err(|e| {
+                EmbedError::Backend(format!(
+                    "llama.cpp returned unparseable JSON ({:?} error at line {}, column {}; \
+                     body not shown)",
+                    e.classify(),
+                    e.line(),
+                    e.column()
+                ))
             });
         }
         let code = status.as_u16();
@@ -858,6 +873,30 @@ mod tests {
                 .with_bearer_token(FAKE_TOKEN)
                 .unwrap_or_else(|e| panic!("{url}: {e}"));
         }
+    }
+
+    /// Issue #21 review M2: a 2xx body that does not parse is not quoted
+    /// into the error (a hostile or echoing endpoint could put the token in
+    /// it); the error names the parse failure's class and position only.
+    #[tokio::test]
+    async fn an_unparseable_success_body_is_not_quoted() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST).path("/v1/embeddings");
+            then.status(200)
+                .json_body(serde_json::json!({ "data": FAKE_TOKEN }));
+        });
+        let e = BgeM3LlamaCppEmbedder::new(server.base_url(), "", 1024)
+            .unwrap()
+            .with_bearer_token(FAKE_TOKEN)
+            .unwrap();
+        let err = e.embed("anything").await.unwrap_err();
+        assert!(matches!(err, EmbedError::Backend(_)), "{err:?}");
+        let msg = err.to_string();
+        assert!(msg.contains("unparseable JSON"), "{msg}");
+        assert!(msg.contains("line 1"), "{msg}");
+        assert!(!msg.contains("xyzzy"), "{msg}");
+        assert!(!msg.contains(&server.base_url()), "{msg}");
     }
 
     /// Issue #21 review M1: a redirect is never followed. reqwest's default
