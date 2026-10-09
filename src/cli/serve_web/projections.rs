@@ -7,17 +7,14 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::dto::{
-    EmbeddingStatus, EventsPayload, InspectDependent, StatsRead, WebEvent, WebStats, WRITER_ONLY,
-};
+use super::dto::{EventsPayload, InspectDependent, StatsRead, WebEvent, WebStats, WRITER_ONLY};
 use super::state::AppState;
+use super::views::{SessionView, ViewCounts};
 use crate::cli::caps::{CliError, MAX_INSPECT_NODES};
-use crate::cli::load_reader_graph;
 use crate::graph::Graph;
-use crate::store::{GraphStore, SessionFlushStats};
+use crate::store::SessionFlushStats;
 use crate::types::{
-    tie_break_by_key, CanonizationStatus, EdgeType, GraphSnapshot, Node, NodeId, SessionId,
-    StoreError,
+    tie_break_by_key, CanonizationEvent, CanonizationStatus, Concept, EdgeType, Node, NodeId,
 };
 
 /// The structural edge types the page may show. Mirrors
@@ -78,22 +75,6 @@ pub(super) fn structural_rank(ty: EdgeType) -> u8 {
     }
 }
 
-/// Raw snapshot for the event tail. A missing session is a first use — an
-/// empty session, not an error (same rule as `store::load::load_session_async`).
-pub(super) async fn load_snapshot(
-    store: &dyn GraphStore,
-    session: &SessionId,
-) -> Result<GraphSnapshot, CliError> {
-    match store.load_session(session).await {
-        Ok(snap) => Ok(snap),
-        Err(StoreError::SessionNotFound(_)) => Ok(GraphSnapshot {
-            session_id: session.clone(),
-            ..GraphSnapshot::default()
-        }),
-        Err(e) => Err(CliError::Runtime(e.to_string())),
-    }
-}
-
 pub(super) fn status_str(s: CanonizationStatus) -> &'static str {
     match s {
         CanonizationStatus::None => "None",
@@ -103,28 +84,31 @@ pub(super) fn status_str(s: CanonizationStatus) -> &'static str {
     }
 }
 
-/// Canonization events at or after `since`, in a total order that depends
-/// neither on which adapter produced them nor on which ids a run minted:
-/// same-instant events are routine (one eval cycle stamps the cycle's `now`
-/// on every event it emits — a Stage-3 batch or a multi-demotion cycle), and
-/// they order by the moved concept's canonical key, then the event id
-/// (issue #2, remediation round 3 — the bare event id was run-minted, which
-/// made `seq` and the cursor built on it per-run arbitrary). The id residual
-/// remains only for events whose node is absent from this snapshot.
-pub(super) fn events_from(snap: &GraphSnapshot, since: usize) -> EventsPayload {
-    let content: HashMap<NodeId, &str> = snap
-        .concepts
-        .iter()
-        .map(|c| (c.id, c.content.as_str()))
-        .collect();
-    let key_of: HashMap<NodeId, &str> = snap
-        .concepts
-        .iter()
-        .map(|c| (c.id, c.canonical_key.as_str()))
-        .collect();
+/// The whole ordered canonization feed, `seq` from 0, for `events` naming
+/// `concepts`: a total order that depends neither on which adapter produced
+/// them nor on which ids a run minted. Same-instant events are routine (one
+/// eval cycle stamps the cycle's `now` on every event it emits — a Stage-3
+/// batch or a multi-demotion cycle), and they order by the moved concept's
+/// canonical key, then the event id (issue #2, remediation round 3 — the bare
+/// event id was run-minted, which made `seq` and the cursor built on it
+/// per-run arbitrary). The id residual remains only for events whose node is
+/// absent from `concepts`.
+///
+/// The portal builds it from a loaded graph, which keeps every concept and
+/// canonization event of the snapshot it was built from, so the feed needs no
+/// second load (#4 PR 1). [`slice_events`] pages it at the poll cursor.
+pub(super) fn ordered_events<'a>(
+    concepts: impl Iterator<Item = &'a Concept>,
+    events: &[CanonizationEvent],
+) -> Vec<WebEvent> {
+    let mut content: HashMap<NodeId, &str> = HashMap::new();
+    let mut key_of: HashMap<NodeId, &str> = HashMap::new();
+    for c in concepts {
+        content.insert(c.id, c.content.as_str());
+        key_of.insert(c.id, c.canonical_key.as_str());
+    }
 
-    let mut ordered: Vec<&crate::types::CanonizationEvent> =
-        snap.canonization_events.iter().collect();
+    let mut ordered: Vec<&CanonizationEvent> = events.iter().collect();
     // SQLite orders by (occurred_at, id) on load and MemoryStore by insertion;
     // sorting here makes `seq` mean the same thing on every backend, which is
     // what lets the page use it as a cursor. The lookup only runs on exact
@@ -140,13 +124,11 @@ pub(super) fn events_from(snap: &GraphSnapshot, since: usize) -> EventsPayload {
         })
     });
 
-    let total = ordered.len();
-    let start = since.min(total);
-    let events = ordered[start..]
+    ordered
         .iter()
         .enumerate()
-        .map(|(offset, ev)| WebEvent {
-            seq: start + offset,
+        .map(|(seq, ev)| WebEvent {
+            seq,
             occurred_at: ev.occurred_at.to_rfc3339(),
             node_id: ev.node_id.0.to_string(),
             content: content.get(&ev.node_id).map(|s| (*s).to_string()),
@@ -154,28 +136,32 @@ pub(super) fn events_from(snap: &GraphSnapshot, since: usize) -> EventsPayload {
             to_status: status_str(ev.to_status),
             blast_radius: ev.blast_radius,
         })
-        .collect();
+        .collect()
+}
 
+/// The page of an ordered feed at or after the cursor `since`.
+pub(super) fn slice_events(all: &[WebEvent], since: usize) -> EventsPayload {
+    let total = all.len();
+    let start = since.min(total);
     EventsPayload {
         total,
         since: start,
-        events,
+        events: all[start..].to_vec(),
     }
 }
 
 pub(super) fn stats_from(
     state: &AppState,
-    g: &Graph,
-    event_total: usize,
+    view: &SessionView,
     flush: Option<SessionFlushStats>,
 ) -> WebStats {
-    let concepts = g.concepts().count();
-    let canonical = g
-        .concepts()
-        .filter(|c| c.canonization_status == CanonizationStatus::Canonical)
-        .count();
-    let nodes = g.node_count();
-    let edges = g.edge_count();
+    let ViewCounts {
+        nodes,
+        edges,
+        concepts,
+        canonical,
+    } = view.counts;
+    let event_total = view.event_total();
 
     let mut fingerprint = 0u64;
     for part in [nodes, edges, concepts, canonical, event_total] {
@@ -208,15 +194,17 @@ pub(super) fn stats_from(
     }
 }
 
-pub(super) async fn read_stats(
+/// The event feed and the stats, from the session's current view (one load
+/// per TTL, #4 PR 1).
+///
+/// The view carries the counts, the embedding contract and the feed; only the
+/// writer-published flush stats are read per request, so `flush_lag_ms` is as
+/// fresh as before (design section 7, #16).
+pub(super) async fn read_feed_and_stats(
     state: &AppState,
-    event_total: usize,
-) -> Result<StatsRead, CliError> {
-    let loaded = load_reader_graph(state.store(), state.session.as_str()).await?;
-    let embedding_status = {
-        let g = loaded.graph.read();
-        EmbeddingStatus::inspect(g.embedding(), &state.backends.embedding)
-    };
+    since: usize,
+) -> Result<(EventsPayload, StatsRead), CliError> {
+    let view = state.view().await?;
     // T85-3: fetch the writer-published flush stats from the shared store when
     // available. A read failure degrades to `n/a` (None) rather than failing
     // the whole stats endpoint — the session/counts payload is the load-bearing
@@ -231,18 +219,11 @@ pub(super) async fn read_stats(
             None
         }
     };
-    // Scoped so the (`!Send`) read guard provably never spans an await.
-    let stats = {
-        let g = loaded.graph.read();
-        stats_from(state, &g, event_total, flush)
-    };
-    Ok(StatsRead {
-        stats,
-        embedding_status,
-    })
-}
-
-pub(super) async fn read_events(state: &AppState, since: usize) -> Result<EventsPayload, CliError> {
-    let snap = load_snapshot(state.store(), &state.session).await?;
-    Ok(events_from(&snap, since))
+    Ok((
+        view.events_since(since),
+        StatsRead {
+            stats: stats_from(state, &view, flush),
+            embedding_status: view.embedding.clone(),
+        },
+    ))
 }

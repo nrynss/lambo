@@ -11,16 +11,7 @@ async fn session_info_never_leaks_the_dsn_path_or_embedder_url() {
     backends.store_cfg.dsn = Some("postgresql://demo:hunter2@crdb.internal:26257/lambo".into());
     backends.store_cfg.path = Some("/var/lib/lambo/private.sqlite".into());
     backends.embedder_cfg.llama_url = Some("http://embed.internal:8080".into());
-    let state = Arc::new(AppState {
-        session: SessionId::new("t85-secrets"),
-        backends,
-        exposed: false,
-        auth: None,
-        freshness: Mutex::new(Freshness {
-            fingerprint: 0,
-            observed_at: Instant::now(),
-        }),
-    });
+    let state = state_from_backends(backends, "t85-secrets", None);
     let (addr, handle) = spawn(state).await;
 
     let raw = request(addr, "GET", "/api/session").await;
@@ -70,16 +61,8 @@ async fn h1_live_contract_changes_update_session_pulse_and_keep_recall_fail_clos
     let mut backends = backends_on(store.clone());
     backends.embedding.model = Some("fixture-model-v1".into());
     backends.embedder_cfg.llama_model = backends.embedding.model.clone();
-    let state = Arc::new(AppState {
-        session: SessionId::new("h1-web-mismatch"),
-        backends,
-        exposed: false,
-        auth: None,
-        freshness: Mutex::new(Freshness {
-            fingerprint: 0,
-            observed_at: Instant::now(),
-        }),
-    });
+    // TTL 0: the contract is changed between requests (#4 PR 1).
+    let state = state_with_web(backends, "h1-web-mismatch", None, &web_ttl_zero());
     let (addr, handle) = spawn(state).await;
 
     let raw = request(addr, "GET", "/api/session").await;

@@ -7,7 +7,7 @@ Lambo reads a `lambo.toml` file. It looks for the file in this order: the `--con
 
 ## What lambo.toml contains
 
-The file has `[store]`, `[embedder]` and `[daemon]` sections, an optional `[serve]` section for [multi-session serving](#multi-session-serving), plus a small number of top-level process settings. It chooses which compiled backends this process runs, the cadence the background work runs at, and the canonization policy the serving verbs run them under.
+The file has `[store]`, `[embedder]` and `[daemon]` sections, an optional `[serve]` section for [multi-session serving](#multi-session-serving), an optional `[web]` section for [the read-only window's views](#read-only-window-views), plus a small number of top-level process settings. It chooses which compiled backends this process runs, the cadence the background work runs at, and the canonization policy the serving verbs run them under.
 
 ```toml
 # Top-level keys must come BEFORE the first [table] header, or TOML scopes them
@@ -293,6 +293,29 @@ A leading `~` in `path` expands to `$HOME` (`~user` is refused). The working dir
 
 The map is read from the `lambo.toml` the serve loads: `--config`, then `LAMBO_CONFIG`, then `./lambo.toml` in the working directory. So a single global map used by every project needs the client to pass `--config` or set `LAMBO_CONFIG`; otherwise each serve reads its project's own `./lambo.toml`, if any, whose `default_session` or `[[serve.projects]]` then chooses the session, just as it already chooses the store. See [Serve a session](/cli#serve-a-session).
 
+## Read-only window views
+
+`[web]` bounds how `lambo serve-web` reads its session. It is optional: omit it and the defaults below apply.
+
+The window reads the store through a **view**: one load of the session that every request and every open tab shares until it is older than `view_ttl_ms`. The next request after that reloads it, and requests that arrive while a load is running wait for that one load instead of starting their own. A failed load is not kept: the requests waiting on it get the error, and the next request tries again. So the store sees about one load per `view_ttl_ms` however many tabs are open, and the page shows durable state up to `view_ttl_ms` older than the store. The writer-published flush lag is still read on every poll.
+
+```toml
+[web]
+view_ttl_ms = 1500
+max_loaded_sessions = 4
+load_concurrency = 2
+recall_concurrency = 4
+```
+
+| Key | Default | What it sets |
+|---|---|---|
+| `view_ttl_ms` | `1500` | Milliseconds a view is reused, the page's poll interval. `0` reloads on every request, still one load for requests that arrive together. At most `60000`. |
+| `max_loaded_sessions` | `4` | Views kept in memory at once. The least recently used is dropped beyond it. At least 1. |
+| `load_concurrency` | `2` | Session loads that may run at once. 1 to 1024. Always `1` on SQLite. |
+| `recall_concurrency` | `4` | Recalls that may run at once. A recall that waits 2 seconds for a slot gets `503` with `Retry-After: 1`. 1 to 1024. |
+
+An unknown key or an out-of-range value is refused when the file is read, so it stops every command, like any other invalid key. The refusal names the key and its bound, never the value. At startup `lambo serve-web` prints the bounds it runs with. It checks the store's schema at startup and loads the session on the first request that needs it. See [Watch a session in a browser](/cli#watch-a-session-in-a-browser).
+
 ## Environment variables
 
 Every variable below overrides the matching file key. An empty value counts as unset, so an empty placeholder in a `.env` file leaves the file value alone.
@@ -357,7 +380,7 @@ A request whose declared `Content-Length` exceeds `4 MiB` is refused with `413` 
 
 ### The read-only window
 
-`lambo serve-web` opens a read-only browser window onto a session on port `7710` and never takes the writer lease, so it runs safely beside the `lambo serve` writer. It shares the same auth posture: loopback is unauthenticated by default, and a non-loopback bind requires `LAMBO_AUTH_TOKEN` or `--auth-token` and fails closed without one. See [Command line](/cli).
+`lambo serve-web` opens a read-only browser window onto a session on port `7710` and never takes the writer lease, so it runs safely beside the `lambo serve` writer. It shares the same auth posture: loopback is unauthenticated by default, and a non-loopback bind requires `LAMBO_AUTH_TOKEN` or `--auth-token` and fails closed without one. It reads through a short-lived per-session view bounded by [`[web]`](#read-only-window-views). See [Command line](/cli).
 
 ## Provisioning a durable store
 
