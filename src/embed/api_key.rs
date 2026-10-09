@@ -190,4 +190,19 @@ mod tests {
         let err = resolve(FAKE_TOKEN).unwrap_err().to_string();
         assert!(!err.contains(FAKE_TOKEN), "{err}");
     }
+
+    /// Review L2: `api_key_env` may not name a variable lambo reads its own
+    /// credentials from (a store DSN, say): its value would be sent to the
+    /// embeddings endpoint as a bearer token.
+    #[test]
+    fn api_key_env_may_not_name_lambos_own_credential_variables() {
+        for name in [
+            "DATABASE_URL",
+            "LAMBO_POSTGRES_DSN",
+            "LAMBO_GEMINI_CREDENTIALS",
+        ] {
+            let err = validate(Some(name), None).unwrap_err().to_string();
+            assert!(err.contains(name) && err.contains("api_key_env"), "{err}");
+        }
+    }
 }

@@ -586,6 +586,16 @@ fn build_gemini_embedder(cfg: &EmbedderConfig) -> Result<Box<dyn Embedder>, Embe
 /// **Dim is not validated against Cockroach here.** Call
 /// [`crate::resolve::resolve_backends`] (or `check_vector_compatibility`) so the
 /// *store's* `vector_dimensions()` is the authority.
+///
+/// **`api_key_env` checks.** The name rule (`crate::config::secret_env::check`)
+/// runs here too, so a config built in code still cannot name
+/// `LAMBO_AUTH_TOKEN`, a store DSN variable or a Google credentials variable.
+/// The overlap with `[[serve.credential]] token_env` is *not* checked here:
+/// it needs the `[serve]` table, which an `EmbedderConfig` does not carry. It
+/// runs in `LamboFile::from_toml_str` and `LamboFile::load_resolved`, so the
+/// CLI and every config-file path get it; a library caller that builds an
+/// `EmbedderConfig` by hand and also runs `lambo serve` credentials must keep
+/// the two variables apart itself.
 pub fn build_embedder(cfg: EmbedderConfig) -> Result<Box<dyn Embedder>, EmbedError> {
     if cfg.dim == 0 {
         return Err(EmbedError::Unavailable("embedder dim must be > 0".into()));
