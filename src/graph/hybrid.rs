@@ -899,9 +899,13 @@ async fn derive_planned(
                     "hybrid interaction context exceeds {MAX_HYBRID_CONTEXT_BYTES} bytes"
                 )));
             }
+            // A supplied (image) item's text is never embedded: its vector
+            // arrived with it. Its content may fill the whole per-string cap
+            // (a caption plus its suffix), so framing it would refuse an
+            // image derive the surface accepted (#22 PR 4 review M2).
             let unmatched_contents = items
                 .iter()
-                .filter(|(_, _, _, matched)| matched.is_none())
+                .filter(|(content, _, _, matched)| matched.is_none() && !is_supplied(content))
                 .map(|(content, _, _, _)| *content)
                 .chain(parent_ends.iter().map(|(content, _)| *content));
             if unmatched_contents.into_iter().any(|content| {

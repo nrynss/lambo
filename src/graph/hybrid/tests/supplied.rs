@@ -681,3 +681,53 @@ async fn an_image_derive_parent_of_end_is_text_embedded_and_links_to_the_image()
         .is_some());
     g.assert_invariants().unwrap();
 }
+
+/// #22 PR 4 review M2: a supplied item's text is never embedded, so the
+/// framed-context cap, which bounds what an embedder is sent, does not
+/// apply to it. An image content at the per-string cap is written; a text
+/// item of the same size in the same position is still refused.
+#[tokio::test]
+async fn the_context_cap_does_not_apply_to_a_supplied_item() {
+    let sess = "supplied-context-cap";
+    let content = format!(
+        "{} [image:r17]",
+        "c".repeat(crate::surface::limits::MAX_CONTENT_BYTES - " [image:r17]".len())
+    );
+    assert_eq!(content.len(), crate::surface::limits::MAX_CONTENT_BYTES);
+    let (graph, iid) = graph_with_interaction(sess, 1, 0, &content);
+    let store = SpyStore::with_vector(Vec::new());
+    let embedder = RecordingEmbedder::new();
+    let image = supplied(&content, "red silk saree");
+    let out = run(
+        &graph,
+        &store,
+        &embedder,
+        &live(),
+        iid,
+        &[(content.as_str(), ConceptType::Resource)],
+        &ParentOf::none(),
+        Some(&image),
+    )
+    .await
+    .expect("an image content at the cap is written");
+    assert_eq!(out.created.len(), 1);
+    assert!(embedder.embedded_texts().is_empty(), "nothing was embedded");
+
+    let (graph, iid) = graph_with_interaction("supplied-context-cap-text", 1, 0, &content);
+    let err = run(
+        &graph,
+        &store,
+        &embedder,
+        &live(),
+        iid,
+        &[(content.as_str(), ConceptType::Resource)],
+        &ParentOf::none(),
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(&err, LamboError::Config(m) if m.contains("embedding context")),
+        "{err:?}"
+    );
+}
