@@ -361,7 +361,8 @@ pub struct DeriveImageParams {
     /// Your id for this image: 1 to 64 lowercase letters and digits. The
     /// concept's content is the caption plus `[image:<image_id>]`; the same
     /// caption and id derived again is the same concept. Omit it for an id
-    /// made from the image's digest.
+    /// made from a digest of what you send: the image's bytes, or the
+    /// normalized vector.
     #[schemars(length(max = 64), regex(pattern = r"^[a-z0-9]{1,64}$"))]
     pub image_id: Option<String>,
     /// The image itself, for this server to embed. Send exactly one of

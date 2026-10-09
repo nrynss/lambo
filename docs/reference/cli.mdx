@@ -219,7 +219,7 @@ Stores one image as a concept, from a local image file or from a vector file you
 | `--agent <AGENT>` | Yes | |
 | `--caption <CAPTION>` | Yes | What the image is, in words. May not contain an image suffix (`[image:<id>]`) of its own. With the ` [image:<id>]` suffix it must fit in 16,384 bytes: at most 16,375 bytes less the id's length (16,359 with the default id). |
 | `--kind <KIND>` | Yes | One of `entity`, `logic`, `constraint`, `resource`. An image cannot be an `observation`. |
-| `--image-id <ID>` | No | Your id for the image: 1 to 64 lowercase letters and digits. Without it, an id is made from the image's digest. |
+| `--image-id <ID>` | No | Your id for the image: 1 to 64 lowercase letters and digits. Without it, an id is made from a digest of the image file's bytes, or of the normalized vector with `--vector-json`. |
 | `--image <PATH>` | One of `--image`, `--vector-json` | A PNG, JPEG or WebP file, at most 2 MiB and 4096 pixels a side, for the configured embedder to embed. It needs an embedder that embeds images. |
 | `--mime <MIME>` | No | With `--image`: `image/png`, `image/jpeg` or `image/webp`. Without it the type is read from the file; a `--mime` that disagrees with the file is refused. |
 | `--vector-json <PATH>` | One of `--image`, `--vector-json` | A JSON file `{"values": [...], "contract": {"kind", "model", "dim"}}` holding a vector computed in this session's embedding space. Needs `[embedder] accept_client_vectors = true` (see [Configuration](/config)). The contract must equal the session's exactly. |

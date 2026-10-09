@@ -245,7 +245,7 @@
           "description": "The image itself, for this server to embed. Send exactly one of\n`image` and `vector`."
         },
         "image_id": {
-          "description": "Your id for this image: 1 to 64 lowercase letters and digits. The\nconcept's content is the caption plus `[image:<image_id>]`; the same\ncaption and id derived again is the same concept. Omit it for an id\nmade from the image's digest.",
+          "description": "Your id for this image: 1 to 64 lowercase letters and digits. The\nconcept's content is the caption plus `[image:<image_id>]`; the same\ncaption and id derived again is the same concept. Omit it for an id\nmade from a digest of what you send: the image's bytes, or the\nnormalized vector.",
           "maxLength": 64,
           "pattern": "^[a-z0-9]{1,64}$",
           "type": [
