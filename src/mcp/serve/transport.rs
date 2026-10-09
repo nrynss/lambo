@@ -7,17 +7,24 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use rmcp::service::ServerInitializeError;
 use rmcp::transport::io::stdio;
 use rmcp::ServiceExt;
 
-use super::http_guards::{guard_request, HttpGuard, RateLimiter};
+use super::authority::{authorize_default, Authenticated, ServeAuthority};
+use super::http_guards::{
+    guard_request, usable_session_id, HttpGuard, OpeningReservation, MCP_SESSION_ID,
+};
 use super::registry::{Lookup, SessionRegistry};
+use super::session::AttachedSession;
 use super::shutdown::{HolderShutdown, SHUTDOWN_GRACE};
 use super::ServeOptions;
 use crate::mcp::server::LamboServer;
+use crate::surface::session::{
+    not_found_response, RefusalReason, SessionGrant, SessionNeed, SessionRefusal,
+};
 use crate::types::LamboError;
 
 /// Run a setup step (the stdio handshake, the HTTP `bind`) but bail the moment
@@ -211,34 +218,40 @@ pub(super) async fn serve_stdio(
 /// (`session::AttachedSession::http`), which shares the session's one
 /// `LamboServer` clone per request — it never builds a second
 /// [`Memory`](crate::memory::Memory). The router ([`session_router`]) picks
-/// the session from the path; the guards run first, on every route.
+/// the session from the path; the guards run first, on every route, and the
+/// credential set (`authority`, #32 PR 5) decides which sessions a request
+/// may reach.
 pub(super) async fn serve_http(
     registry: Arc<SessionRegistry>,
+    authority: Arc<ServeAuthority>,
     opts: &ServeOptions,
     mut shutdown: Pin<&mut HolderShutdown>,
 ) -> Result<(), LamboError> {
     // The session cap counts every attached session's MCP sessions: one
     // `--max-sessions` for the process (#32 design §3.6), read from the
     // managers rmcp mutates — see [`LiveSessions`](super::http_guards::LiveSessions).
-    let guard = HttpGuard {
-        auth: opts.auth_token.clone(),
-        max_sessions: opts.max_sessions,
-        live: registry.clone(),
-        rate: RateLimiter::new(opts.rate_limit_rps, Instant::now()).map(Arc::new),
-    };
+    // Each credential gets its own rate bucket and an even share of the cap
+    // (#32 PR 5 review M2).
+    let guard = HttpGuard::new(
+        Arc::clone(&authority),
+        opts.max_sessions,
+        registry.clone(),
+        opts.rate_limit_rps,
+    );
     // T8.7 posture, logged once at startup so an operator can see what this
-    // process is actually enforcing. The token itself is never logged — only
-    // whether one is required.
+    // process is actually enforcing. No token is ever logged: only whether
+    // one is required and the credentials' names (#32 PR 5).
     tracing::info!(
-        auth_required = guard.auth.is_some(),
+        auth_required = authority.requires_bearer(),
+        credentials = %authority.credential_names().join(", "),
         max_sessions = guard.max_sessions,
-        rate_limit_rps = opts.rate_limit_rps,
+        max_sessions_per_credential = guard.credential_sessions,
+        rate_limit_rps_per_credential = opts.rate_limit_rps,
         "mcp http: request guard armed"
     );
 
     let hosted = registry.hosted().to_vec();
-    let app =
-        session_router(registry).layer(axum::middleware::from_fn_with_state(guard, guard_request));
+    let app = http_app(registry, authority, guard);
     let addr = SocketAddr::new(opts.bind, opts.port);
     // Race `bind` against the shutdown signal too (R2-a): the ~5 ms bind window
     // is small but non-zero, and a signal in it must still reach `close()`.
@@ -268,6 +281,28 @@ pub(super) async fn serve_http(
     serve_http_bounded(listener, app, shutdown, SHUTDOWN_GRACE).await
 }
 
+/// The serve's whole HTTP app: [`session_router`] behind the guards, every
+/// guard on `.layer` (so an unrouted path passes through them too and a
+/// refused session stays indistinguishable from it). `serve_http` serves
+/// exactly this; the tests serve it too, so they exercise the same
+/// composition.
+pub(super) fn http_app(
+    registry: Arc<SessionRegistry>,
+    authority: Arc<ServeAuthority>,
+    guard: HttpGuard,
+) -> axum::Router {
+    session_router(registry, authority)
+        .layer(axum::middleware::from_fn_with_state(guard, guard_request))
+}
+
+/// What the session routes need: the sessions, and the credential set that
+/// decides which of them a request may reach.
+#[derive(Clone)]
+struct Routes {
+    registry: Arc<SessionRegistry>,
+    authority: Arc<ServeAuthority>,
+}
+
 /// The MCP routes (#32 PR 4, design §2.1), without the guards:
 ///
 /// | route | serves |
@@ -278,30 +313,70 @@ pub(super) async fn serve_http(
 /// Both answer every method, so a refused id is the uniform 404 whatever
 /// the method (PR 1's wire claim: a refused session and an unrouted path
 /// are indistinguishable). Every other path is axum's own 404.
-pub(super) fn session_router(registry: Arc<SessionRegistry>) -> axum::Router {
+///
+/// Each route runs §6.2's steps 2 and 3 (#32 PR 5) **before** the registry
+/// is consulted, in memory: the id's shape, then the request's grant (set
+/// by the guard as [`Authenticated`]) against it. A refusal there is the
+/// uniform 404 whatever state the session is in, so only a caller inside a
+/// session's scope can learn that it is held, detaching or failed (503).
+pub(super) fn session_router(
+    registry: Arc<SessionRegistry>,
+    authority: Arc<ServeAuthority>,
+) -> axum::Router {
     axum::Router::new()
         .route("/mcp", axum::routing::any(default_session))
         .route("/mcp/s/{session}", axum::routing::any(addressed_session))
-        .with_state(registry)
+        .with_state(Routes {
+            registry,
+            authority,
+        })
 }
 
 /// The route prefix an addressed session id follows.
 const ADDRESSED_PREFIX: &str = "/mcp/s/";
 
+/// The grant the guard resolved for `req`. A request without one never
+/// passed the guard, and is refused.
+fn granted(req: &axum::extract::Request) -> Option<Arc<SessionGrant>> {
+    req.extensions()
+        .get::<Authenticated>()
+        .map(|Authenticated(grant)| Arc::clone(grant))
+}
+
+/// The uniform 404 for `refusal`, logged for the operator by reason and
+/// credential name, never by the probed id.
+fn refused(grant: Option<&SessionGrant>, refusal: SessionRefusal) -> axum::response::Response {
+    tracing::debug!(
+        credential = grant.map_or("(none)", SessionGrant::name),
+        reason = %refusal,
+        "mcp http: refused a session request"
+    );
+    refusal.not_found_response()
+}
+
 async fn default_session(
-    axum::extract::State(registry): axum::extract::State<Arc<SessionRegistry>>,
+    axum::extract::State(routes): axum::extract::State<Routes>,
     req: axum::extract::Request,
 ) -> axum::response::Response {
-    match registry.default_session().map(str::to_string) {
-        Some(id) => serve_session(&registry, &id, req).await,
-        None => crate::surface::session::not_found_response(),
+    let Some(grant) = granted(&req) else {
+        return refused(None, SessionRefusal::new(RefusalReason::OutOfScope));
+    };
+    let Some(id) = routes.registry.default_session().map(str::to_string) else {
+        return not_found_response();
+    };
+    match authorize_default(&routes.authority, &grant, &id) {
+        Ok(()) => serve_session(&routes.registry, &id, &grant, req).await,
+        Err(refusal) => refused(Some(&grant), refusal),
     }
 }
 
 async fn addressed_session(
-    axum::extract::State(registry): axum::extract::State<Arc<SessionRegistry>>,
+    axum::extract::State(routes): axum::extract::State<Routes>,
     req: axum::extract::Request,
 ) -> axum::response::Response {
+    let Some(grant) = granted(&req) else {
+        return refused(None, SessionRefusal::new(RefusalReason::OutOfScope));
+    };
     // The raw path segment, not axum's percent-decoded `Path`: an addressed
     // id is never percent-decoded (#32 decision 16), so `%2E` is refused by
     // the charset rather than read as a dot.
@@ -311,29 +386,24 @@ async fn addressed_session(
         .strip_prefix(ADDRESSED_PREFIX)
         .unwrap_or_default()
         .to_string();
-    match crate::surface::session::parse_addressed(&raw) {
-        Ok(id) => serve_session(&registry, id.as_str(), req).await,
-        Err(refusal) => {
-            tracing::debug!(reason = %refusal, "mcp http: refused an addressed session id");
-            refusal.not_found_response()
-        }
+    match routes.authority.authorize(&grant, &raw, SessionNeed::Use) {
+        Ok(id) => serve_session(&routes.registry, id.as_str(), &grant, req).await,
+        Err(refusal) => refused(Some(&grant), refusal),
     }
 }
 
-/// Hand `req` to session `id`'s own MCP service, or refuse it.
+/// Hand `req` to session `id`'s own MCP service, or refuse it. Reached only
+/// once `grant` is authorized for `id`, so every answer here is one the
+/// caller is entitled to (§6.2: inside scope the answers can differ).
 async fn serve_session(
     registry: &SessionRegistry,
     id: &str,
+    grant: &SessionGrant,
     req: axum::extract::Request,
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
     match registry.lookup(id) {
-        Lookup::Live(session) => session
-            .http
-            .handle(req)
-            .await
-            .map(axum::body::Body::new)
-            .into_response(),
+        Lookup::Live(session) => serve_live(&session, grant, req).await,
         Lookup::Unavailable { retry_after } => (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
             [(
@@ -351,8 +421,117 @@ async fn serve_session(
              serve log)\n",
         )
             .into_response(),
-        Lookup::NotHosted => crate::surface::session::not_found_response(),
+        // In scope but absent. Pinned sessions only until #32 PR 6, so even
+        // a credential with `create` gets the 404: nothing attaches on
+        // demand yet.
+        Lookup::NotHosted => refused(Some(grant), SessionRefusal::new(RefusalReason::Absent)),
     }
+}
+
+/// What a request naming another credential's MCP session carries to rmcp
+/// instead of that id: a value rmcp never mints (its ids are UUIDv4
+/// strings), so rmcp answers it exactly as it answers any id it does not
+/// know.
+const NO_SUCH_MCP_SESSION: &str = "lambo-no-such-mcp-session";
+
+/// Hand `req` to a live session's MCP service, binding MCP sessions to the
+/// credential that opened them (#32 PR 5 review L1).
+///
+/// rmcp's MCP-session ids carry no owner, so before this a credential that
+/// learned another's id (a log, a shared proxy, a client bug) could post
+/// into that MCP session, read its server-initiated stream or `DELETE` it.
+/// Now an MCP session rmcp mints is recorded as opened by `grant`'s
+/// credential (at the mint, see [`serve_attributed`]), and a request naming
+/// an id another credential opened has the id replaced by
+/// [`NO_SUCH_MCP_SESSION`] before rmcp sees it. The answer is therefore
+/// rmcp's own answer to an unknown id, byte for byte and by construction
+/// (404 `Session not found` for `POST` and `GET`, rmcp's 202 for a
+/// `DELETE` of a session it does not hold), so the caller cannot tell a
+/// foreign MCP session from an expired one.
+pub(super) async fn serve_live(
+    session: &Arc<AttachedSession>,
+    grant: &SessionGrant,
+    req: axum::extract::Request,
+) -> axum::response::Response {
+    serve_owned(&session.http, &session.openers, grant.name(), req).await
+}
+
+/// [`serve_live`] over an MCP service and its openers, as `credential`:
+/// the whole of it, generic over the MCP server so a test can serve a
+/// probe through the very code the serve runs (#32 PR 5 third review N3).
+pub(super) async fn serve_owned<S>(
+    http: &rmcp::transport::streamable_http_server::StreamableHttpService<
+        S,
+        super::openers::AttributingSessions,
+    >,
+    openers: &super::openers::Openers,
+    credential: &str,
+    mut req: axum::extract::Request,
+) -> axum::response::Response
+where
+    S: rmcp::ServerHandler + Send + 'static,
+{
+    // The cap's reservation for this opener (#32 PR 5 review S4), out of
+    // the request before rmcp keeps its parts. Held to the end of this
+    // call: an MCP session rmcp mints is attributed before that, so it is
+    // never missing from both the reservations and its opener's count. A
+    // drop of this future (the client gone) drops it too, after any mint.
+    let reservation = req.extensions_mut().remove::<OpeningReservation>();
+    // The id as rmcp will read it (#32 PR 5 review S1): a header that is
+    // not visible ASCII names no MCP session to rmcp, so it names none
+    // here either.
+    let named = usable_session_id(req.headers()).map(str::to_string);
+    let mut owned = None;
+    if let Some(mcp_id) = named {
+        if openers.opened_by(&mcp_id, credential) {
+            owned = Some(mcp_id);
+        } else {
+            req.headers_mut().insert(
+                MCP_SESSION_ID,
+                axum::http::HeaderValue::from_static(NO_SUCH_MCP_SESSION),
+            );
+        }
+    }
+    let deletes = req.method() == axum::http::Method::DELETE;
+    let response = serve_attributed(http, credential, req).await;
+    drop(reservation);
+    if deletes
+        && response.status().is_success()
+        && let Some(mcp_id) = owned
+    {
+        openers.forget(&mcp_id);
+    }
+    response
+}
+
+/// rmcp's answer to `req`, handled **inline** as `credential`: an MCP
+/// session rmcp mints while handling it is recorded as opened by
+/// `credential` at the mint, inside rmcp's own call (see
+/// `super::openers`), so the binding exists before the id-bearing response
+/// does, and no drop of this future can leave a minted session
+/// unattributed (#32 PR 5 review S1).
+///
+/// Inline, not on a task of its own (#32 PR 5 second review, L1): axum
+/// drops a handler's future when its client disconnects, and for a
+/// sessionless request rmcp answers directly (a per-request-protocol call
+/// or `server/discover`) that drop is what cancels the call (rmcp's
+/// `serve_negotiated_request_directly` arms a drop guard on the request's
+/// cancellation token). A spawned `handle` outlived the client, and the
+/// call ran on unobserved.
+pub(super) async fn serve_attributed<S>(
+    http: &rmcp::transport::streamable_http_server::StreamableHttpService<
+        S,
+        super::openers::AttributingSessions,
+    >,
+    credential: &str,
+    req: axum::extract::Request,
+) -> axum::response::Response
+where
+    S: rmcp::ServerHandler + Send + 'static,
+{
+    super::openers::as_credential(credential, http.handle(req))
+        .await
+        .map(axum::body::Body::new)
 }
 
 /// `axum::serve` with a **bounded** graceful shutdown (R1/T82-2).

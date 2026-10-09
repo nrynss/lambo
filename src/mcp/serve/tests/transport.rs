@@ -289,3 +289,248 @@ fn an_unrelated_startup_failure_is_passed_through() {
         "an unrelated failure must not be relabelled as a provisioning problem: {out}"
     );
 }
+
+/// A server whose one tool runs until its request is cancelled: the probe
+/// for "a client disconnect cancels the call".
+#[derive(Clone)]
+struct CancelProbe {
+    started: Arc<tokio::sync::Notify>,
+    cancelled: Arc<tokio::sync::Notify>,
+}
+
+impl rmcp::ServerHandler for CancelProbe {
+    fn get_info(&self) -> rmcp::model::ServerInfo {
+        rmcp::model::ServerInfo::new(
+            rmcp::model::ServerCapabilities::builder()
+                .enable_tools()
+                .build(),
+        )
+    }
+
+    async fn call_tool(
+        &self,
+        _request: rmcp::model::CallToolRequestParams,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::CallToolResponse, rmcp::ErrorData> {
+        self.started.notify_one();
+        tokio::select! {
+            () = context.ct.cancelled() => self.cancelled.notify_one(),
+            () = tokio::time::sleep(Duration::from_secs(30)) => {}
+        }
+        Ok(rmcp::model::CallToolResult::success(vec![]).into())
+    }
+}
+
+/// A sessionless `tools/call` carrying its protocol version per request (the
+/// 2026-07-28 shape), which rmcp answers directly, without an MCP session.
+const PER_REQUEST_CALL: &str = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"wait","arguments":{},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#;
+
+/// #32 PR 5 second review L1: a client that disconnects from a sessionless
+/// request rmcp answers directly (`serve_negotiated_request_directly`)
+/// cancels the call, as rmcp does on its own (rmcp #857). The request goes
+/// through `serve_attributed`, the path every serve request takes, on a
+/// real socket so the disconnect is axum dropping the handler's future.
+///
+/// Mutation: run `handle` on a spawned task (the first S1 fix) and the
+/// call is never cancelled.
+#[tokio::test]
+async fn a_disconnected_sessionless_request_is_cancelled() {
+    use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
+    use rmcp::transport::streamable_http_server::{
+        StreamableHttpServerConfig, StreamableHttpService,
+    };
+    use tokio::io::AsyncWriteExt;
+
+    let probe = CancelProbe {
+        started: Arc::new(tokio::sync::Notify::new()),
+        cancelled: Arc::new(tokio::sync::Notify::new()),
+    };
+    let (started, cancelled) = (probe.started.clone(), probe.cancelled.clone());
+    let http = StreamableHttpService::new(
+        move || Ok(probe.clone()),
+        Arc::new(crate::mcp::serve::openers::AttributingSessions::new(
+            Arc::new(LocalSessionManager::default()),
+            Arc::new(crate::mcp::serve::openers::Openers::default()),
+        )),
+        StreamableHttpServerConfig::default(),
+    );
+    let app = axum::Router::new().route(
+        "/mcp",
+        axum::routing::any(move |req: axum::extract::Request| {
+            let http = http.clone();
+            async move {
+                crate::mcp::serve::transport::serve_attributed(&http, "scoped", req).await
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let mut client = tokio::net::TcpStream::connect(addr).await.expect("connect");
+    let head = format!(
+        "POST /mcp HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n\
+         Accept: application/json, text/event-stream\r\nMCP-Protocol-Version: 2026-07-28\r\n\
+         Mcp-Method: tools/call\r\nMcp-Name: wait\r\nContent-Length: {}\r\n\r\n{PER_REQUEST_CALL}",
+        PER_REQUEST_CALL.len()
+    );
+    client.write_all(head.as_bytes()).await.expect("write");
+    tokio::time::timeout(Duration::from_secs(5), started.notified())
+        .await
+        .expect("the call starts");
+
+    // The client goes away mid-call.
+    drop(client);
+    tokio::time::timeout(Duration::from_secs(10), cancelled.notified())
+        .await
+        .expect("a disconnect cancels a sessionless call");
+}
+
+/// #32 PR 5 third review N3: the disconnect cancel holds through the real
+/// composition, not only `serve_attributed` alone: the serve's guard
+/// (`guard_request`, which buffers this sessionless POST's body and
+/// classifies it) in front of `serve_owned`, the body of `serve_live`,
+/// with the guard counting the very session manager rmcp mints through.
+///
+/// Mutation: run `next.run` in the guard, or `handle` in `serve_owned`, on
+/// a spawned task and the call is never cancelled.
+#[tokio::test]
+async fn a_disconnected_sessionless_request_is_cancelled_behind_the_guard() {
+    use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
+    use rmcp::transport::streamable_http_server::{
+        StreamableHttpServerConfig, StreamableHttpService,
+    };
+    use tokio::io::AsyncWriteExt;
+
+    let probe = CancelProbe {
+        started: Arc::new(tokio::sync::Notify::new()),
+        cancelled: Arc::new(tokio::sync::Notify::new()),
+    };
+    let (started, cancelled) = (probe.started.clone(), probe.cancelled.clone());
+    let sessions = Arc::new(LocalSessionManager::default());
+    let openers = Arc::new(crate::mcp::serve::openers::Openers::default());
+    let http = StreamableHttpService::new(
+        move || Ok(probe.clone()),
+        Arc::new(crate::mcp::serve::openers::AttributingSessions::new(
+            Arc::clone(&sessions),
+            Arc::clone(&openers),
+        )),
+        StreamableHttpServerConfig::default(),
+    );
+    let guard = HttpGuard::new(legacy_authority(None), 32, sessions, 0);
+    let app = axum::Router::new()
+        .route(
+            "/mcp",
+            axum::routing::any(move |req: axum::extract::Request| {
+                let (http, openers) = (http.clone(), Arc::clone(&openers));
+                async move {
+                    crate::mcp::serve::transport::serve_owned(&http, &openers, "local", req).await
+                }
+            }),
+        )
+        .layer(axum::middleware::from_fn_with_state(guard, guard_request));
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let mut client = tokio::net::TcpStream::connect(addr).await.expect("connect");
+    let head = format!(
+        "POST /mcp HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n\
+         Accept: application/json, text/event-stream\r\nMCP-Protocol-Version: 2026-07-28\r\n\
+         Mcp-Method: tools/call\r\nMcp-Name: wait\r\nContent-Length: {}\r\n\r\n{PER_REQUEST_CALL}",
+        PER_REQUEST_CALL.len()
+    );
+    client.write_all(head.as_bytes()).await.expect("write");
+    tokio::time::timeout(Duration::from_secs(5), started.notified())
+        .await
+        .expect("the call passes the guard and starts");
+
+    // The client goes away mid-call.
+    drop(client);
+    tokio::time::timeout(Duration::from_secs(10), cancelled.notified())
+        .await
+        .expect("a disconnect cancels a sessionless call behind the guard");
+}
+
+/// An `initialize` rmcp mints an MCP session for.
+const INITIALIZE: &str = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"rmcp-pin","version":"1"}}}"#;
+
+/// #32 PR 5 third review N2: the guarantees of `openers` and the guard
+/// rest on facts about rmcp 3.1.2 that its caret requirement in
+/// `Cargo.toml` does not pin, so this test fails loudly on an upgrade that
+/// breaks them rather than letting MCP sessions go unattributed or the
+/// body ceilings drift apart:
+///
+/// * rmcp mints an MCP session through `SessionManager::create_session`,
+///   inline in the request's task (so `AttributingSessions` sees every
+///   mint, under the request's `as_credential` scope), and the id it puts
+///   in the local manager's map is the id it answers with;
+/// * the guard's [`MAX_HTTP_BODY_BYTES`] is rmcp's own default ceiling
+///   (rmcp's constant is crate-private, so the guard repeats it).
+///
+/// If this fails after an rmcp upgrade, re-check `openers`' module docs
+/// (atomicity of the mint and the binding, the inline `create_session`),
+/// `http_guards::can_mint_a_session` (only an `initialize` mints) and
+/// `http_guards::usable_session_id` before changing the assertions.
+#[tokio::test]
+async fn rmcp_still_mints_through_create_session_with_the_same_ceiling() {
+    use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
+    use rmcp::transport::streamable_http_server::{
+        StreamableHttpServerConfig, StreamableHttpService,
+    };
+
+    let probe = CancelProbe {
+        started: Arc::new(tokio::sync::Notify::new()),
+        cancelled: Arc::new(tokio::sync::Notify::new()),
+    };
+    let sessions = Arc::new(LocalSessionManager::default());
+    let openers = Arc::new(crate::mcp::serve::openers::Openers::default());
+    let http = StreamableHttpService::new(
+        move || Ok(probe.clone()),
+        Arc::new(crate::mcp::serve::openers::AttributingSessions::new(
+            Arc::clone(&sessions),
+            Arc::clone(&openers),
+        )),
+        StreamableHttpServerConfig::default(),
+    );
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri("/mcp")
+        .header("Host", "localhost")
+        .header("Accept", "application/json, text/event-stream")
+        .header("Content-Type", "application/json")
+        .body(axum::body::Body::from(INITIALIZE))
+        .expect("request");
+    let response = crate::mcp::serve::transport::serve_attributed(&http, "scoped", req).await;
+    assert_eq!(response.status(), 200, "rmcp answers the initialize");
+    let id = response
+        .headers()
+        .get("mcp-session-id")
+        .and_then(|v| v.to_str().ok())
+        .expect("rmcp minted an MCP session and named it")
+        .to_string();
+    assert!(
+        sessions.sessions.read().await.contains_key(id.as_str()),
+        "rmcp no longer keeps its MCP sessions in LocalSessionManager::sessions: the session \
+         cap counts that map"
+    );
+    assert!(
+        openers.opened_by(&id, "scoped"),
+        "rmcp minted MCP session {id} without AttributingSessions::create_session seeing it \
+         under the request's credential: MCP sessions would go unattributed. Re-check \
+         mcp/serve/openers.rs against this rmcp before upgrading"
+    );
+    assert_eq!(
+        u64::try_from(StreamableHttpServerConfig::default().max_request_body_bytes).expect("fits"),
+        MAX_HTTP_BODY_BYTES,
+        "rmcp's default body ceiling moved: the guard's must match it"
+    );
+}

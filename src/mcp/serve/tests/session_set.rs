@@ -618,7 +618,13 @@ mod endpoints {
         let endpoint = SessionEndpoint::resolve_in(&dir.join("run"), session, &store_cfg)
             .expect("endpoint fits");
         let server = LamboServer::new(Arc::clone(&mem));
-        let attached = AttachedSession::attach(mem, server, Some(endpoint.clone()), 4);
+        let attached = AttachedSession::attach(
+            mem,
+            server,
+            Some(endpoint.clone()),
+            4,
+            crate::mcp::serve::session::HostCheck::Loopback,
+        );
         assert!(endpoint.path().exists(), "{session}: the endpoint is bound");
         (Arc::new(attached), endpoint)
     }

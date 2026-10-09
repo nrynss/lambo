@@ -3,6 +3,11 @@
 //! once, at startup, without quoting any value from the table; a serve
 //! without one says nothing.
 //!
+//! #32 PR 5: `[[serve.credential]]` is enforced (over HTTP; a stdio serve
+//! authenticates nobody), so it no longer raises the notice, and a stdio
+//! serve does not read the credentials' variables: the one here is unset
+//! and the serve still starts.
+//!
 //! Gated on `store-sqlite,embed-fixture` like the other serve integration
 //! tests; run with `--features store-sqlite,embed-fixture`.
 #![cfg(all(feature = "store-sqlite", feature = "embed-fixture", unix))]
@@ -46,6 +51,8 @@ fn serve_stderr(serve_table: &str) -> String {
         common::lambo_command()
             .env(common::RUNTIME_DIR_VAR, runtime.path())
             .env_remove("RUST_LOG")
+            // Unset: a stdio serve must not need an HTTP credential's token.
+            .env_remove(CRED_ENV)
             .args([
                 "--config",
                 cfg.to_str().unwrap(),
@@ -71,7 +78,8 @@ fn serve_stderr(serve_table: &str) -> String {
 #[test]
 fn a_serve_table_is_reported_as_not_yet_enforced_without_its_values() {
     let stderr = serve_stderr(&format!(
-        "[serve]\nsessions = [\"{PINNED}\"]\n\n[[serve.credential]]\nname = \"{CRED_NAME}\"\n\
+        "[serve]\nsessions = [\"{PINNED}\"]\nper_session_rps = 5\n\n\
+         [[serve.credential]]\nname = \"{CRED_NAME}\"\n\
          token_env = \"{CRED_ENV}\"\nsessions = [\"{PINNED}\"]\n"
     ));
     assert_eq!(
@@ -84,6 +92,13 @@ fn a_serve_table_is_reported_as_not_yet_enforced_without_its_values() {
         .find(|l| l.contains(NOTICE))
         .expect("notice line");
     assert!(line.contains("WARN"), "a warning: {line}");
+    // A stdio serve: `[[serve.projects]]` is enforced there since #32 PR 8,
+    // so an on-demand bound is the key still named.
+    assert!(line.contains("per_session_rps"), "names the key: {line}");
+    assert!(
+        !line.contains("[[serve.credential]]"),
+        "credentials are enforced since #32 PR 5: {line}"
+    );
     for value in [PINNED, CRED_NAME, CRED_ENV] {
         assert!(!line.contains(value), "{value} quoted: {line}");
     }
