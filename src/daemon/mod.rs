@@ -602,14 +602,21 @@ impl Daemon {
                     // CLI-side embed-failure annotation (that path has no
                     // query embedding, so `gather` returns early and never
                     // reaches the store), so the two never duplicate.
-                    if matches!(&err, StoreError::Invariant(msg) if msg.contains("embedding contract changed"))
+                    //
+                    // Any other failure of the vector read (a backend error,
+                    // a timeout, a tier whose durable fallback failed too)
+                    // drops the same leg, so it says so the same way; its
+                    // text names no detail (that can carry a store URL or a
+                    // driver string), the log above has it.
+                    let text = if matches!(&err, StoreError::Invariant(msg) if msg.contains("embedding contract changed"))
                     {
-                        vector_leg_refused.push(Annotation::new(
-                            AnnotationKind::VectorDegraded,
-                            "recall: vector leg refused because the embedding contract changed \
-                             mid-query; results are keyword-only",
-                        ));
-                    }
+                        "recall: vector leg refused because the embedding contract changed \
+                         mid-query; results are keyword-only"
+                    } else {
+                        "recall: the store's vector read failed (detail logged); vector leg \
+                         skipped, results are keyword-only"
+                    };
+                    vector_leg_refused.push(Annotation::new(AnnotationKind::VectorDegraded, text));
                     candidates::Phase1Input::default()
                 }
             }
@@ -736,6 +743,15 @@ impl Daemon {
         // other response annotation on this path is `traversal`, which is
         // produced by a dispatched structural query that skips `gather`
         // entirely — the two never coexist.
+        //
+        // The same line also goes to `warnings`, which is what `Memory::recall`
+        // and `lambo_recall` hand a caller (as the query-embed failure's line
+        // is): without it a library or MCP caller saw a recall that had
+        // silently dropped its vector leg. The CLI renderer skips a warning an
+        // annotation already rendered, so the header shows it once.
+        result
+            .warnings
+            .extend(vector_leg_refused.iter().map(|a| a.text.clone()));
         result.response_annotations.extend(vector_leg_refused);
         Ok(result)
     }

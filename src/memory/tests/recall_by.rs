@@ -234,3 +234,67 @@ async fn a_failed_vector_read_fails_a_recall_by_image_or_vector() {
     }
     mem.close().await.unwrap();
 }
+
+/// The text recall's twin of M1 (pre-existing): a failed vector read still
+/// degrades a text recall to its keyword and recent legs, but no longer
+/// silently. The result carries a `vector_degraded` annotation and the same
+/// line as a warning (what `Memory::recall` and `lambo_recall` hand the
+/// caller), and the line names no backend detail.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_vector_read_on_a_text_recall_says_the_leg_was_skipped() {
+    let store = vector_store(Source::Store);
+    let mem = open(store.clone(), "q22-recall-text-read-fails").await;
+    let wardrobe = derive_wardrobe(&mem).await;
+    flushed(&mem).await;
+    mem.settle_daemon().await;
+    store.fail_vector_reads();
+
+    let detailed = mem
+        .recall_detailed(RecallQuery {
+            query: "look dismissed for Onam".into(),
+            top_k: 5,
+            max_tokens: 2_000,
+            traversal_depth: 1,
+        })
+        .await
+        .expect("a text recall degrades, it does not fail");
+    assert!(
+        detailed
+            .hits
+            .iter()
+            .any(|h| h.node_id == wardrobe.dismissed),
+        "the keyword leg still answers: {:?}",
+        detailed.hits
+    );
+    assert!(
+        detailed.legs.values().all(|l| l.vector.is_none()),
+        "no vector leg: {:?}",
+        detailed.legs
+    );
+    let degraded: Vec<_> = detailed
+        .response_annotations
+        .iter()
+        .filter(|a| a.kind == crate::recall::detail::AnnotationKind::VectorDegraded)
+        .collect();
+    assert_eq!(degraded.len(), 1, "{:?}", detailed.response_annotations);
+    assert!(
+        degraded[0].text.contains("vector leg skipped"),
+        "{degraded:?}"
+    );
+    assert!(
+        detailed.warnings.contains(&degraded[0].text),
+        "the caller's warnings carry it: {:?}",
+        detailed.warnings
+    );
+    assert!(
+        detailed.warnings.iter().all(|w| !w.contains("db.internal")),
+        "no backend detail: {:?}",
+        detailed.warnings
+    );
+    let projected: crate::types::RecallResult = detailed.into();
+    assert!(projected
+        .warnings
+        .iter()
+        .any(|w| w.contains("vector leg skipped")));
+    mem.close().await.unwrap();
+}

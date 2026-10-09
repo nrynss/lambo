@@ -602,6 +602,15 @@
 
 ### Fixed
 
+- A text recall whose vector read fails (a backend error, a timeout, a tier
+  whose durable fallback failed too) still answers from its keyword and
+  recent legs, but no longer silently: the result carries a
+  `vector_degraded` annotation and the same line in `warnings`, so
+  `Memory::recall`, `lambo_recall` and `lambo recall` all say the vector leg
+  was skipped. The line names no backend detail (that is logged). The
+  embedding-contract race's `vector_degraded` line (E2E-6) now reaches
+  `warnings` too, where before only the CLI and the portal showed it.
+
 - The ledger's applied `completion` lines (`applied` and
   `applied_after_restart`) now carry `semantic_merged`, `reinforced`, `edges`
   and `embedded` beside `created_count` / `matched_count` (#12), so the
