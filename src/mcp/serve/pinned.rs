@@ -32,9 +32,23 @@ pub struct PinnedSessions {
 ///   else), and the union must fit `max_attached`, which `[serve]`'s own
 ///   validation could only check for its own list (PR 1 review).
 ///
-/// The strict addressed-id charset is checked by `serve` itself once more
-/// than one session is pinned (see `check_pinned`).
+/// The result then meets `serve`'s own rules (`check_pinned`: with more
+/// than one session, every name is addressable by URL), so the CLI refuses
+/// a bad name here, before any backend or model is built, rather than in
+/// `serve` after them (#32 review L3). `serve` keeps its own call for
+/// library callers that build `ServeOptions` by hand.
 pub fn pin_sessions(
+    cli: &[String],
+    cfg: &ServeConfig,
+    transport: Transport,
+) -> Result<PinnedSessions, LamboError> {
+    let pinned = plan_sessions(cli, cfg, transport)?;
+    check_pinned(&pinned.default, &pinned.sessions, transport)?;
+    Ok(pinned)
+}
+
+/// [`pin_sessions`] before `serve`'s rules are applied.
+fn plan_sessions(
     cli: &[String],
     cfg: &ServeConfig,
     transport: Transport,

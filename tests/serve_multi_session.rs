@@ -435,3 +435,54 @@ fn stdio_session_count_is_refused_before_any_backend() {
     let one = run(&["i32-a"]);
     assert_ne!(one.status.code(), Some(2), "{one:?}");
 }
+
+/// #32 review L3: over HTTP, a pinned name that cannot be addressed by URL
+/// is a usage error (exit 2) refused before any backend is built, like the
+/// stdio session count above. One loosely named session keeps
+/// `--session`'s looser rule on either transport and gets as far as the
+/// backends.
+#[test]
+fn http_session_names_are_refused_before_any_backend() {
+    let dir = ScratchDir::new("lambo-i32-http-usage");
+    let cfg = dir.join("lambo.toml");
+    let missing = dir.join("no-such-dir").join("x.sqlite");
+    std::fs::write(
+        &cfg,
+        format!(
+            "[store]\nkind = \"sqlite\"\npath = \"{}\"\n\n[embedder]\nkind = \"fixture\"\ndim = 1024\n",
+            missing.display()
+        ),
+    )
+    .expect("write config");
+    let runtime = RuntimeDir::new();
+    let run = |transport: &str, sessions: &[&str]| {
+        let mut cmd = common::lambo_command();
+        cmd.env(RUNTIME_DIR_VAR, runtime.path())
+            .args([
+                "--config",
+                cfg.to_str().unwrap(),
+                "serve",
+                "--transport",
+                transport,
+                "--port",
+                "0",
+            ])
+            .stdin(Stdio::null());
+        for s in sessions {
+            cmd.args(["--session", s]);
+        }
+        cmd.output().expect("run serve")
+    };
+
+    let bad = run("http", &["i32 a", "i32-b"]);
+    assert_eq!(bad.status.code(), Some(2), "{bad:?}");
+    let stderr = String::from_utf8_lossy(&bad.stderr);
+    assert!(stderr.contains("cannot be addressed by URL"), "{stderr}");
+    assert!(!stderr.contains("failed to build backends"), "{stderr}");
+
+    // The controls: one loose name gets as far as the backends, which fail.
+    for transport in ["http", "stdio"] {
+        let one = run(transport, &["i32 a"]);
+        assert_ne!(one.status.code(), Some(2), "{transport}: {one:?}");
+    }
+}

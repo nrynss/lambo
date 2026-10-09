@@ -521,16 +521,19 @@ fn serve_preflight(
             return Err(ExitCode::FAILURE);
         }
     };
-    let pinned = match transport {
-        Transport::Stdio => stdio_session(session)?,
-        // The ordered union of `--session` and `[serve] sessions`.
-        Transport::Http => match lambo::mcp::pin_sessions(session, &file.serve, transport) {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("lambo serve: {e}");
-                return Err(ExitCode::from(2));
-            }
-        },
+    if transport == Transport::Stdio {
+        stdio_session(session)?;
+    }
+    // Stdio: the one `--session`. HTTP: the ordered union of `--session`
+    // and `[serve] sessions`. Either way checked against `serve`'s own
+    // rules (every name addressable by URL once more than one is pinned),
+    // here, before any backend is built (#32 review L3).
+    let pinned = match lambo::mcp::pin_sessions(session, &file.serve, transport) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("lambo serve: {e}");
+            return Err(ExitCode::from(2));
+        }
     };
     // `[serve]`: the keys this serve does not enforce yet are named once
     // (#32 PR 1 review L3); never a value.
@@ -548,12 +551,9 @@ fn serve_preflight(
 /// when the flag was required; more than one is a usage error too. #32 PR 8
 /// replaces this with its resolver (`[[serve.projects]]`, then
 /// `default_session`).
-fn stdio_session(session: &[String]) -> Result<PinnedSessions, ExitCode> {
+fn stdio_session(session: &[String]) -> Result<(), ExitCode> {
     match session {
-        [one] => Ok(PinnedSessions {
-            default: one.clone(),
-            sessions: vec![one.clone()],
-        }),
+        [_] => Ok(()),
         [] => {
             let mut cli = Cli::command();
             cli.build();

@@ -690,6 +690,21 @@ fn the_pinned_plan_follows_the_cli_and_the_serve_table() {
     assert!(err.contains("max_attached"), "{err}");
 }
 
+/// #32 review L3: the CLI's plan meets `serve`'s own rules, so a name that
+/// cannot be addressed by URL is refused before any backend is built. A
+/// single session, on either transport, keeps `--session`'s looser rule.
+#[test]
+fn the_pinned_plan_refuses_an_unaddressable_name_up_front() {
+    let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    let none = crate::config::ServeConfig::default();
+    let err = pin_sessions(&s(&["ok", "has space"]), &none, Transport::Http)
+        .expect_err("two need the strict charset")
+        .to_string();
+    assert!(err.contains("cannot be addressed by URL"), "{err}");
+    pin_sessions(&s(&["has space"]), &none, Transport::Http).expect("one loose name, HTTP");
+    pin_sessions(&s(&["has space"]), &none, Transport::Stdio).expect("one loose name, stdio");
+}
+
 /// `serve`'s own check: one loosely named session is fine; with two, each
 /// must be addressable; stdio pins one; the default must be pinned.
 #[test]
