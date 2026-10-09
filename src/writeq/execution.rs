@@ -563,10 +563,7 @@ impl WritePipeline {
                                 &job.agent.to_string(),
                                 &job.receipt.to_string(),
                                 "applied",
-                                Some(json!({
-                                    "created_count": summary.created_count,
-                                    "matched_count": summary.matched_count,
-                                })),
+                                Some(serde_json::Value::Object(summary.ledger_facts())),
                             ));
                         }
                         ReceiptAnswer::Applied(summary)
