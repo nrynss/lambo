@@ -630,6 +630,13 @@
   naming `--ubatch-size`. llama-server answers it with HTTP 500 ("increase
   the physical batch size"), which Lambo read as a busy server, so such a
   concept was retried forever.
+- The `embeddinggemma2` embedder no longer drops its `/props` and image
+  budget checks on a 503 "busy" (each retried image cost an extra `/props`
+  GET and reference embed); only no answer at all or a 503 "Loading model"
+  reads as a restart. A server that refuses Lambo's reference image is
+  reported as a server problem, not a decode failure of the user's image.
+  `/props` strings (file name, `model_ftype`) in messages and logs are cut
+  to 128 printable ASCII characters.
 - `lambo serve-web`'s `/api/pulse`, polled every 1.5 s by every open tab,
   loaded the whole session twice: once for the event feed and again for the
   counts (#4 PR 1). `/api/stats` did the same. Each now costs one load (and
