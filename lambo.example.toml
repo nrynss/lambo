@@ -167,6 +167,10 @@ url = "http://127.0.0.1:8080"
 # until the index is repaired (by the session's writer at its next load or
 # flush, or by `lambo recall-index backfill --session <s>` with no writer).
 # Search lags a flush by up to the index refresh interval (1 s by default).
+# Repairs run in the background; unleased (seed) writes are not mirrored.
+# Vector indices use float HNSW and hits are re-scored with exact cosine.
+# index_prefix must not contain "-v-" or end in "-v"; url must carry no
+# credentials, query string or fragment; timeout_ms must be above zero.
 #
 # A top-level table, not [store.recall]. A binary built without the feature
 # refuses this section by name. The API key is by reference only: name the

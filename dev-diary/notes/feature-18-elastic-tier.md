@@ -134,9 +134,13 @@ counts as success. Within a batch only the last operation per node id is
 written, because the batch shares one version and an equal version is refused.
 A counter that would wrap, or a token too large to shift into a positive i64,
 refuses the mirror and marks the session stale. Unleased writes (`token =
-None`, seed and fixture paths) use the engine's own versioning: a counter that
-restarted with the process would otherwise sit below versions it wrote earlier,
-and those writes would be silently refused.
+None`, seed and fixture paths) are **not mirrored** (review L4, superseding the
+first cut, which mirrored them with the engine's internal versioning: that
+bumps an externally versioned document to `V + 1`, exactly the next leased
+write's `(T << 32) | (c + 1)`, whose 409 then counted as success). The session
+goes stale and the next holder load or a backfill repairs it, so the index
+only ever sees leased, externally versioned writes plus delete-by-query
+tombstones.
 
 Delete tombstones keep their version for `index.gc_deletes` (60 s by default).
 A late write from a fenced-out holder older than that could resurrect a deleted
@@ -168,7 +172,8 @@ session repairs at its next load. Never wrong, occasionally redundant.
 **Who repairs.** Only a process holding the session's lease writes to the
 index: at load (`Memory` acquires the lease before it loads), on a flush while
 the session is stale (at most once a minute while the index stays down, since a
-repair reads the whole durable session), and `lambo recall-index backfill`,
+repair reads the whole durable session), both as a background task (review
+M1, below), and `lambo recall-index backfill`,
 which takes the lease itself and is refused while a live writer holds it.
 Readers never write: a reader that finds the marker behind serves from the
 primary. A repair indexes every stored vector at a fresh version, then deletes
@@ -185,8 +190,9 @@ logs every failure on `lambo::recall_tier` at warn.
 
 **Erase (#23).** `erase_session` runs the durable erase first. Only when it
 committed (`Erased`) does the tier delete the session's documents from every
-data index and its marker, and if that fails it returns an error naming the
-rerun: the deletion fan-out must not mark the account done while its vectors
+data index (refresh first, retry conflicts, then confirm with a refreshed
+count of zero: review H1) and its marker, and if that fails it returns an
+error naming the rerun: the deletion fan-out must not mark the account done while its vectors
 are searchable. A rerun is idempotent: the durable erase reports
 `already_absent` and the index cleanup is retried. `Held` touches nothing. An
 erased session cannot be written again (the tombstone fences every token), so
@@ -201,8 +207,11 @@ already session-filtered.
 
 No Elasticsearch runs locally and none was started. `src/store/tiered/tests.rs`
 drives `TieredStore` over `MemoryStore` (and SQLite under `store-sqlite`) and an
-in-process fake that applies the engine's external-version rules and exact
-kNN, with switchable faults. `src/store/tiered/elastic.rs` tests the wire
+in-process fake that applies the engine's external-version rules, its
+near-real-time search (writes invisible to search, count and delete-by-query
+until a refresh), delete-by-query's version conflicts, and optionally int8
+quantized scoring, with switchable faults, delays and a delete gate (the
+review's L6). `src/store/tiered/elastic.rs` tests the wire
 format against `httpmock` (an existing dev-dependency): NDJSON bulk bodies at
 external versions, conflicts and absent deletes as success, a rejected item as
 failure, the kNN body and the `(1 + cos) / 2` score mapping, a missing index as
@@ -219,3 +228,61 @@ Docker-gated integration suite against a real cluster is not written: no
 Elasticsearch is available here and starting one was out of bounds. Recall
 latency against the graph source, which the issue wants in the PR, needs a real
 cluster and is not measured.
+
+## Review remediation (2026-10-09)
+
+The Opus review (`scratchpad/refactor/18/review-opus.md`) found one High and
+five Medium issues. Each fix is its own commit with a test that is red
+without it (against the previous commit, or with the fix mutated out).
+
+- **H1, erase could report success with vectors still searchable.**
+  Delete-by-query deletes from the last-refresh snapshot and its
+  `refresh=true` refreshes after, so a flush mirrored with `refresh=false`
+  inside the last refresh interval survived an erase; `conflicts=proceed`
+  skipped rewritten documents silently. Every delete-by-query (erase, repair
+  sweep, unattributed deletes by id) now refreshes first and retries while
+  the engine reports version conflicts (three passes, then an error). Erase
+  then refreshes and counts the session's documents, and drops the marker and
+  reports done only on zero. The index seam gained `refresh` and
+  `count_session_docs`, and deletes return the engine's `version_conflicts`.
+- **M1, repair inline with no overall bound.** Repairs run as a background
+  task, single-flight per session (requests during a run collapse into one
+  rerun; a failure stops reruns and starts the backoff). Bounds: a flush waits
+  at most 15 s for its mirror, a repair pass at most 10 min, releasing a lease
+  gives an in-flight repair 10 s, and refresh, delete-by-query and count get a
+  300 s request budget instead of `timeout_ms`.
+- **M2, no read circuit breaker.** One breaker per tier: 3 consecutive failed
+  or timed-out reads (5 s deadline, connecting included) send every vector
+  read to the durable store for 30 s; then one read probes, and a success
+  closes it.
+- **M3, engine scores are not exact cosine.** The tier fetches `limit + 16`
+  hits with their stored vectors and re-ranks them with `rank_by_cosine`, so
+  the engine only picks the pool, as `vector_source.rs` promises. The mapping
+  pins `index_options: { type: "hnsw" }` (8.14+ would default to `int8_hnsw`,
+  9.1+ to `bbq_hnsw` at 384+ dims). A hit returned without its vector (a
+  cluster that excludes vectors from `_source`, not verified
+  against a 9.2 cluster here) keeps the engine's score, unquantized under the pinned
+  mapping. The remaining divergence is the approximate pool: HNSW can miss a
+  near neighbour an exact scan finds. Documented next to the refresh lag.
+- **M4, a marker ahead of the load was repaired from.** The marker is
+  compared three ways. Behind: a holder repairs. Ahead: re-load and
+  re-check, never repair; still ahead, the session stays `Unknown`. A repair
+  always loads its own snapshot under the single-flight guard.
+- **M5, CI never runs the tier's tests.** Workflows are off limits to this
+  branch; the proposed row is in `issue-updates.md`.
+- **M6, hybrid derive against a lagging index.** See "Hybrid derive on a
+  holder ranks in its graph" above.
+- **L1** marker `_id` = hex SHA-256 of the session id, the id stored in the
+  document. **L2** index prefixes containing `-v-` or ending in `-v` are
+  refused, so `{p}-v-*` matches `{q}-v-{hash}` only for `p == q`. **L3**
+  `recall.url` with a query string or fragment, and `timeout_ms = 0`, are
+  refused. **L4** unleased writes are not mirrored (above). **L5** per-session
+  state is dropped on lease release and bounded at 4096 sessions, evicting
+  least recently used entries the store neither holds nor repairs. **L6** the
+  fake models refresh lag, conflicts and quantization, and each fix carries
+  mutation evidence (logs under `scratchpad/refactor/18/remed/`).
+
+Still not done: the Docker-gated suite against a real cluster and the recall
+latency figure (no Elasticsearch here). `gc_deletes` tombstone expiry is
+still not modelled; the resurrection window it allows is the one accepted
+under "Versioning".

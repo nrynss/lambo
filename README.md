@@ -181,10 +181,12 @@ rather than a build decision. Building your own with a narrower feature list is 
 store (`--features recall-elastic`). The store stays the source of truth for everything
 transactional: leases, fencing, canonization and graph queries. Each committed flush is
 copied to the index, which then serves the vector part of recall, so sessions too large to
-scan in memory still rank quickly. Two accepted divergences: a flush becomes searchable up
-to one index refresh (1 s by default) after it commits, and the contract check and the index
-query are two reads rather than one transaction, so a model switch between them yields
-stale-but-same-space results rather than an error. When the index is down or behind, recall
+scan in memory still rank quickly. Accepted divergences: a flush becomes searchable up to
+one index refresh (1 s by default) after it commits; the index's HNSW search picks which
+concepts are scored (they are then re-scored with exact cosine), so it can miss a near
+neighbour an exact scan would find; and the contract check and the index query are two reads
+rather than one transaction, so a model switch between them yields stale-but-same-space
+results rather than an error. When the index is down or behind, recall
 ranks in the store instead and the session's writer repairs the index. See
 [`lambo.example.toml`](lambo.example.toml) and
 [`dev-diary/notes/feature-18-elastic-tier.md`](dev-diary/notes/feature-18-elastic-tier.md).

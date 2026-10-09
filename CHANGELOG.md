@@ -89,9 +89,20 @@
   repairs the index at its next load or flush. A per-session sync marker in the
   index makes a crash between commit and mirror visible at the next load.
   `erase-session` also removes the session from the index and does not report
-  success until it has. The API key is by reference only
-  (`api_key = { env = "NAME" }`). A build without the feature refuses a
-  `[recall]` section by name. See `dev-diary/notes/feature-18-elastic-tier.md`.
+  success until a refreshed count finds nothing of it. The API key is by
+  reference only (`api_key = { env = "NAME" }`). A build without the feature
+  refuses a `[recall]` section by name. See
+  `dev-diary/notes/feature-18-elastic-tier.md`.
+  Hardened in review: every delete-by-query refreshes first and retries
+  version conflicts; hits are re-scored with exact cosine from their stored
+  vectors (16 extra fetched) and indices pin float `hnsw`; repairs run in the
+  background, one per session, with deadlines (mirror 15 s, repair 10 min,
+  delete-by-query 300 s); reads skip the index for 30 s after 3 failed or slow
+  reads; a marker ahead of a load is re-checked, never repaired from; the
+  marker `_id` is the SHA-256 of the session id; unleased writes are not
+  mirrored; per-session state is evicted on release and bounded; index
+  prefixes containing `-v-` or ending in `-v`, URL query strings or fragments,
+  and `timeout_ms = 0` are refused.
 - `lambo recall-index backfill --session <s>`: rebuild one session's recall
   index from the store under the session's lease (#18).
 - `GraphStore::backfill_recall_index()` (default `Ok(None)`): the hook the
