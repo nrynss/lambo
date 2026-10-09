@@ -75,6 +75,9 @@ pub mod action;
 // derive for MatchStrategy::Hybrid (see `hybrid.rs`). Additive: cutting the
 // feature is deleting this line + `hybrid.rs`.
 pub mod hybrid;
+// #22 — image concepts: the image derive request and the pure rules that make
+// it one concept with a supplied vector (see `image.rs`).
+pub mod image;
 // #8 — the session holder's vector candidate source: an exact scan over the
 // vectors the graph's concepts already carry (see `vector_source.rs`).
 pub(crate) mod vector_source;

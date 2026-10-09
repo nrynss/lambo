@@ -377,6 +377,9 @@ impl FromStr for ReceiptId {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WriteKind {
     Derive,
+    /// An image derive (#22): a derive whose one concept's vector was
+    /// supplied. Its tool, `lambo_derive_image`, arrives with #22 PR 4.
+    DeriveImage,
     RecordAction,
 }
 
@@ -385,6 +388,7 @@ impl WriteKind {
     pub fn tool(self) -> &'static str {
         match self {
             WriteKind::Derive => "lambo_derive",
+            WriteKind::DeriveImage => "lambo_derive_image",
             WriteKind::RecordAction => "lambo_record_action",
         }
     }

@@ -1,7 +1,8 @@
 //! #22 PR 2: one check, run by every adapter, that a concept's
 //! `embedding_source` survives flush and load, is cleared by an upsert that
 //! clears it, and is left alone by the narrow read-access update (#30) and by
-//! the embedding quarantine (which nulls the vector only).
+//! the embedding quarantine (which nulls the vector only). #22 PR 3 adds a
+//! second: a settled image write intent keeps no vector.
 //!
 //! The SQLite and in-memory adapters run it in CI, Postgres in a live
 //! `#[ignore]` test, and Cockroach inside its live conformance suite.
@@ -324,4 +325,160 @@ pub(crate) async fn check_a_malformed_digest_is_refused_on_write(
         loaded.map_or(true, |s| s.concepts.iter().all(|c| c.id != id)),
         "the refused concept was written"
     );
+}
+
+/// #22 review L1: a **settled** image intent keeps no vector in the store.
+///
+/// In `sid` (any session this check may write to), put an unconsumed
+/// `DeriveImage` intent and an unconsumed text `Derive` intent, check both
+/// load back exactly (the image's vector is owed a replay), then consume
+/// both and check the image intent loads with
+/// [`WriteIntentPayload::settled`]'s payload and its outcome while the text
+/// intent's payload is untouched. A settled image intent put directly (a
+/// snapshot save or a replayed put of a settled row) is stored settled too.
+pub(crate) async fn check_a_settled_image_intent_keeps_no_vector(
+    store: &dyn GraphStore,
+    sid: &SessionId,
+    dim: usize,
+    token: Option<u64>,
+) {
+    use crate::types::{SuppliedVector, WriteIntent, WriteIntentOutcome, WriteIntentPayload};
+
+    let ts = Utc::now();
+    let interaction = NodeId::new();
+    let contract = EmbeddingContract {
+        kind: "fixture".into(),
+        model: Some("embedding-source-test".into()),
+        dim,
+    };
+    let content = format!("outfit for pongal [image:{}]", interaction.0.simple());
+    let image_payload = WriteIntentPayload::DeriveImage {
+        concepts: vec![(content.clone(), ConceptType::Resource)],
+        pairs: vec![],
+        supplied: SuppliedVector {
+            content,
+            vector: (0..dim).map(|i| (i % 3) as f32 + 0.5).collect(),
+            contract: contract.clone(),
+            source: server_source(),
+        },
+    };
+    let text_payload = WriteIntentPayload::Derive {
+        concepts: vec![("prefers silk".into(), ConceptType::Entity)],
+        pairs: vec![],
+    };
+    let intent = |receipt: &str, payload: &WriteIntentPayload, outcome| WriteIntent {
+        session_id: sid.clone(),
+        receipt: format!("{receipt}-{}", interaction.0.simple()),
+        agent: AgentId::new("embedding-source-test"),
+        interaction,
+        lane_seq: 1,
+        issued_ms: ts.timestamp_millis(),
+        payload: payload.clone(),
+        created_at: ts,
+        outcome,
+    };
+    let outcome = |tag: &str| WriteIntentOutcome {
+        tag: tag.into(),
+        summary: format!("{tag} for the settled-intent check"),
+        consumed_at: Utc::now(),
+    };
+    let image = intent("settle-image", &image_payload, None);
+    let text = intent("settle-text", &text_payload, None);
+    let failed = intent("settle-failed", &image_payload, Some(outcome("failed")));
+    let stored = |receipt: &str| {
+        let receipt = receipt.to_string();
+        async move {
+            store
+                .load_session(sid)
+                .await
+                .expect("load")
+                .write_intents
+                .into_iter()
+                .find(|i| i.receipt == receipt)
+                .unwrap_or_else(|| panic!("intent {receipt} is stored"))
+        }
+    };
+
+    flush(
+        store,
+        vec![
+            Mutation::SetEmbedding {
+                session_id: sid.clone(),
+                embedding: Some(contract.clone()),
+            },
+            Mutation::UpsertNode {
+                node: Node::Interaction(Interaction {
+                    id: interaction,
+                    session_id: sid.clone(),
+                    agent_id: AgentId::new("embedding-source-test"),
+                    prompt_text: None,
+                    previous_id: None,
+                    created_at: ts,
+                    event_time: None,
+                }),
+            },
+            Mutation::PutWriteIntent {
+                intent: image.clone(),
+            },
+            Mutation::PutWriteIntent {
+                intent: text.clone(),
+            },
+            Mutation::PutWriteIntent {
+                intent: failed.clone(),
+            },
+        ],
+        token,
+    )
+    .await;
+    assert_eq!(
+        stored(&image.receipt).await.payload,
+        image_payload,
+        "an unconsumed image intent keeps its vector: the replay owes it"
+    );
+    let settled_failed = stored(&failed.receipt).await;
+    assert_eq!(
+        settled_failed.payload,
+        image_payload.settled().expect("an image payload settles"),
+        "a settled image intent put directly is stored without its vector"
+    );
+    assert_eq!(settled_failed.outcome.map(|o| o.tag), Some("failed".into()));
+
+    let applied = outcome("applied");
+    flush(
+        store,
+        vec![
+            Mutation::ConsumeWriteIntent {
+                session_id: sid.clone(),
+                receipt: image.receipt.clone(),
+                outcome: applied.clone(),
+            },
+            Mutation::ConsumeWriteIntent {
+                session_id: sid.clone(),
+                receipt: text.receipt.clone(),
+                outcome: applied.clone(),
+            },
+        ],
+        token,
+    )
+    .await;
+    let consumed = stored(&image.receipt).await;
+    assert_eq!(
+        consumed.payload,
+        WriteIntentPayload::Derive {
+            concepts: vec![],
+            pairs: vec![],
+        },
+        "a consumed image intent drops its vector (and loads in a build without DeriveImage)"
+    );
+    assert_eq!(
+        consumed.outcome.as_ref().map(|o| o.summary.as_str()),
+        Some(applied.summary.as_str()),
+        "the receipt still answers from the outcome"
+    );
+    let consumed_text = stored(&text.receipt).await;
+    assert_eq!(
+        consumed_text.payload, text_payload,
+        "text payloads are kept"
+    );
+    assert!(consumed_text.outcome.is_some());
 }

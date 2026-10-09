@@ -370,3 +370,97 @@ fn k2_reembed_all_on_an_empty_graph_stamps_the_contract_alone() {
         }] if c == &target
     ));
 }
+
+/// #22 design Q19 at the graph: an image concept's vector is never replaced
+/// by a text vector. `reembed_all` refuses while one remains, the dropping
+/// variant nulls it (keeping the source) in the same ordered batch, and a
+/// backfill refuses to give a vectorless image concept a caption vector.
+#[test]
+fn re_embed_and_backfill_never_give_an_image_concept_a_text_vector() {
+    let (mut g, interaction, _) = small_graph();
+    let old = crate::types::EmbeddingContract {
+        kind: "bge_m3".into(),
+        model: Some("v1".into()),
+        dim: 4,
+    };
+    let new = crate::types::EmbeddingContract {
+        kind: "candle".into(),
+        ..old.clone()
+    };
+    g.stamp_embedding(old.clone()).unwrap();
+    let source = crate::types::EmbeddingSource {
+        modality: crate::types::SourceModality::Image,
+        origin: crate::types::VectorOrigin::Server,
+        sha256: None,
+        mime: None,
+    };
+    let mut image = concept(200, interaction, "render 17 [image:r17]");
+    image.embedding = Some(vec![1.0, 0.0, 0.0, 0.0]);
+    image.embedding_source = Some(source.clone());
+    let image_id = image.id;
+    g.insert_concept(image, interaction).unwrap();
+    let texts: Vec<NodeId> = g
+        .concepts()
+        .filter(|c| c.embedding_source.is_none())
+        .map(|c| c.id)
+        .collect();
+    g.drain_log();
+    let text_updates = || -> Vec<(NodeId, Vec<f32>)> {
+        texts
+            .iter()
+            .map(|id| (*id, vec![0.0, 1.0, 0.0, 0.0]))
+            .collect()
+    };
+
+    let before = g.snapshot();
+    let err = g.reembed_all(text_updates(), new.clone()).unwrap_err();
+    assert!(err.to_string().contains("1 image vector(s)"), "{err}");
+    let mut with_image = text_updates();
+    with_image.push((image_id, vec![0.0, 0.0, 1.0, 0.0]));
+    assert!(
+        g.reembed_all_dropping_image_vectors(with_image, new.clone())
+            .is_err(),
+        "an update may never target an image concept"
+    );
+    assert_eq!(g.snapshot(), before, "refusals leave the graph untouched");
+    assert!(g.drain_log().is_empty());
+
+    assert_eq!(
+        g.reembed_all_dropping_image_vectors(text_updates(), new.clone())
+            .unwrap(),
+        1
+    );
+    let Some(Node::Concept(image)) = g.node(image_id) else {
+        panic!("still a concept");
+    };
+    assert_eq!(image.embedding, None);
+    assert_eq!(image.embedding_source, Some(source));
+    let batch = g.drain_log();
+    assert!(
+        matches!(batch.mutations.last(), Some(Mutation::SetEmbedding { .. })),
+        "the contract swap is last"
+    );
+    assert_eq!(
+        batch
+            .mutations
+            .iter()
+            .filter(|m| matches!(m, Mutation::UpsertNode { .. }))
+            .count(),
+        texts.len() + 1
+    );
+
+    // A second migration: the image has no vector, so nothing blocks it.
+    let newer = crate::types::EmbeddingContract {
+        kind: "gemini".into(),
+        ..new.clone()
+    };
+    g.reembed_all(text_updates(), newer.clone()).unwrap();
+    g.drain_log();
+
+    // The backfill refuses the vectorless image concept.
+    let err = g
+        .embed_missing(vec![(image_id, vec![0.0, 0.0, 1.0, 0.0])], &newer)
+        .unwrap_err();
+    assert!(err.to_string().contains("image concept"), "{err}");
+    assert!(g.drain_log().is_empty());
+}

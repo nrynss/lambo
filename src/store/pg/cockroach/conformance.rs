@@ -975,6 +975,11 @@ async fn check_embedding_source_survives_flush_load(store: &CockroachStore) {
         store, &sid, dim, None,
     )
     .await;
+    // #22 review L1, before the corruption below makes the session unloadable.
+    crate::store::embedding_source_testkit::check_a_settled_image_intent_keeps_no_vector(
+        store, &sid, dim, None,
+    )
+    .await;
     // Review M1: a value this build cannot read fails the load.
     crate::store::pg::embedding_source_live::check_unreadable_embedding_source_fails_the_load(
         store, &sid,

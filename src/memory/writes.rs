@@ -231,6 +231,8 @@ impl Memory {
                     parent_of,
                     self.config.max_cooccurrence_per_derive,
                     self.config.semantic_match_threshold,
+                    // A text derive supplies no vector (#22).
+                    None,
                     // The synchronous path has no durable intent to consume —
                     // the caller holds the outcome directly (J3).
                     None,

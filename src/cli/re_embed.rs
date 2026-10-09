@@ -19,6 +19,19 @@
 //!
 //! This is the migration path; it deliberately REFUSES
 //! `--allow-embedding-mismatch`, which relabels vectors without rewriting them.
+//!
+//! # Image concepts (#22, design Q19)
+//!
+//! An image concept's vector (`embedding_source` set) is not a function of
+//! its text, so re-embed never embeds its caption:
+//!
+//! * a full migration **refuses** while any image concept still carries a
+//!   vector, because that vector would stay in the old space; with
+//!   `--drop-image-vectors` it nulls them in the same batch (keeping each
+//!   source, so the concept stays an image concept whose vector is missing)
+//!   and reports the count. Re-deriving the same image under the new
+//!   embedder restores the vector.
+//! * `--missing-only` skips image concepts and reports how many it skipped.
 
 use std::sync::Arc;
 
@@ -46,6 +59,11 @@ pub struct Args {
     /// dogfood session was found in on 2026-09-01, with 555 of 946 concepts
     /// unembedded and `re-embed` refusing by design.
     pub missing_only: bool,
+    /// Full migration only: null the vector of every image concept (#22)
+    /// instead of refusing on it. An image vector cannot be recomputed from
+    /// its caption; the image concept stays, findable by its caption, until
+    /// the image is derived again under the new embedder.
+    pub drop_image_vectors: bool,
 }
 
 /// Run the K2 re-embed migration for one session.
@@ -59,6 +77,13 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
             "--missing-only and --allow-embedding-mismatch are contradictory: the backfill \
              writes vectors into the space the session already declares, so there is no \
              mismatch for the override to permit."
+                .to_string(),
+        ));
+    }
+    if args.missing_only && args.drop_image_vectors {
+        return Err(CliError::Usage(
+            "--missing-only and --drop-image-vectors are contradictory: the backfill never \
+             touches an existing vector, and it already skips image concepts."
                 .to_string(),
         ));
     }
@@ -98,51 +123,60 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
     // Snapshot concept ids + contents under the graph READ lock, sorted by id
     // for deterministic embed order, then DROP the lock: the embed calls below
     // are real model inference and must never run under any lock.
-    let (concepts, supplied): (Vec<(NodeId, String)>, usize) = {
+    //
+    // #22: only TEXT concepts (no `embedding_source`) are embedded from
+    // their content. Image concepts are counted, never embedded: one that
+    // still carries a vector blocks a full migration unless
+    // --drop-image-vectors, and one whose vector is missing is skipped by
+    // both modes (re-deriving the image restores it).
+    let (concepts, images, total) = {
         let g = mem.graph().read();
-        // #22 review L2: a concept whose vector was supplied (an image) has
-        // an `embedding_source`. Embedding its content would replace that
-        // vector with a vector of its caption and leave the image source on
-        // it. Until `--drop-image-vectors` lands (#22 PR 3), refuse instead.
-        let supplied = g
-            .concepts()
-            .filter(|c| c.embedding_source.is_some())
-            .count();
-        let mut snapshot: Vec<(NodeId, String)> = g
-            .concepts()
-            .filter(|c| !args.missing_only || c.embedding.is_none())
-            .map(|c| (c.id, c.content.clone()))
-            .collect();
+        let mut images = ImageCounts::default();
+        let mut snapshot: Vec<(NodeId, String)> = Vec::new();
+        for c in g.concepts() {
+            match (&c.embedding_source, &c.embedding) {
+                (Some(_), Some(_)) => images.with_vector += 1,
+                (Some(_), None) => images.without_vector += 1,
+                (None, embedding) => {
+                    if !args.missing_only || embedding.is_none() {
+                        snapshot.push((c.id, c.content.clone()));
+                    }
+                }
+            }
+        }
         snapshot.sort_by_key(|(id, _)| id.0);
-        (snapshot, supplied)
+        (snapshot, images, g.concepts().count())
     };
 
     // Every path below — success or any mid-run abort — funnels into
     // close_writer at the end of this function (K2-R1-6): a failed migration
     // must release the writer lease immediately, not hold it to TTL.
-    let out = if supplied > 0 {
+    let out = if !args.missing_only && images.with_vector > 0 && !args.drop_image_vectors {
+        let n = images.with_vector;
         Err(CliError::Runtime(format!(
-            "session '{}': {supplied} concept{} carr{} a supplied vector \
-             (embedding_source, e.g. an image), and this build of re-embed cannot \
-             rewrite it without replacing it with a vector of the concept's caption. \
-             Refused; nothing was written. Upgrade to a build whose re-embed handles \
-             supplied vectors (--drop-image-vectors).",
+            "session '{}': {n} image concept{} still carr{} an image vector, which re-embed \
+             cannot recompute from a caption: rewriting the session's space would leave \
+             {} in the old one. Refused; nothing was written. Rerun with \
+             --drop-image-vectors to null them (the image concepts stay, findable by \
+             caption, and deriving the same image again under the new embedder restores \
+             each vector), or keep the current embedder.",
             args.session,
-            if supplied == 1 { "" } else { "s" },
-            if supplied == 1 { "ies" } else { "y" },
+            if n == 1 { "" } else { "s" },
+            if n == 1 { "ies" } else { "y" },
+            if n == 1 { "it" } else { "them" },
         )))
-    } else if concepts.is_empty() {
-        Ok(if args.missing_only {
-            format!(
-                "session '{}': every concept already carries a vector; nothing to backfill",
-                args.session
-            )
-        } else {
-            format!(
-                "session '{}' has no concepts; nothing to re-embed",
-                args.session
-            )
-        })
+    } else if total == 0 {
+        Ok(format!(
+            "session '{}' has no concepts; nothing to re-embed",
+            args.session
+        ))
+    } else if args.missing_only && concepts.is_empty() {
+        Ok(format!(
+            "session '{}': every text concept already carries a vector; nothing to \
+             backfill{}",
+            args.session,
+            images.skipped_note()
+        ))
     } else if args.missing_only {
         backfill_missing(
             &mem,
@@ -153,6 +187,7 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
             &concepts,
         )
         .await
+        .map(|out| out + &images.skipped_note())
     } else {
         rewrite_all(
             &mem,
@@ -161,10 +196,35 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
             &embedder,
             &live_contract,
             &concepts,
+            args.drop_image_vectors,
         )
         .await
+        .map(|out| out + &images.skipped_note())
     };
     close_writer(mem, out).await
+}
+
+/// The image concepts (#22) a re-embed found, which it never embeds.
+#[derive(Default)]
+struct ImageCounts {
+    /// Image concepts that carry a vector.
+    with_vector: usize,
+    /// Image concepts whose vector is missing (quarantined or dropped).
+    without_vector: usize,
+}
+
+impl ImageCounts {
+    /// The report line for the image concepts left without a vector, or
+    /// nothing when there are none.
+    fn skipped_note(&self) -> String {
+        match self.without_vector {
+            0 => String::new(),
+            n => format!(
+                "\nskipped {n} image concept(s) whose vector is missing: an image vector is \
+                 never recomputed from a caption; derive the image again to restore it"
+            ),
+        }
+    }
 }
 
 /// The backfill body: embed only the concepts handed in (already filtered to
@@ -229,6 +289,7 @@ async fn rewrite_all(
     embedder: &Arc<dyn Embedder>,
     live_contract: &EmbeddingContract,
     concepts: &[(NodeId, String)],
+    drop_image_vectors: bool,
 ) -> Result<String, CliError> {
     let mut updates: Vec<(NodeId, Vec<f32>)> = Vec::with_capacity(concepts.len());
     for (id, content) in concepts {
@@ -248,24 +309,39 @@ async fn rewrite_all(
     // the lease token before releasing the lease. The write lock makes the
     // append sequence atomic against the flush task's drain_log, so no
     // partial batch can ever be flushed between the two coverages.
-    let total = concepts.len();
+    let rewritten = concepts.len();
     debug_assert_eq!(mem.session().as_str(), session);
-    let (before, after) = {
+    let (before, after, total, dropped) = {
         let mut g = mem.graph().write();
+        let total = g.concepts().count();
         let before = g.concepts().filter(|c| c.embedding.is_some()).count();
-        g.reembed_all(updates, live_contract.clone())
-            .map_err(CliError::from)?;
+        let dropped = if drop_image_vectors {
+            g.reembed_all_dropping_image_vectors(updates, live_contract.clone())
+                .map_err(CliError::from)?
+        } else {
+            g.reembed_all(updates, live_contract.clone())
+                .map_err(CliError::from)?;
+            0
+        };
         let after = g.concepts().filter(|c| c.embedding.is_some()).count();
-        (before, after)
+        (before, after, total, dropped)
+    };
+    let dropped_line = if drop_image_vectors {
+        format!(
+            "\ndropped {dropped} image vector(s) (--drop-image-vectors): those image concepts \
+             keep their caption and source; derive each image again to restore its vector"
+        )
+    } else {
+        String::new()
     };
 
     Ok(format!(
-        "re-embedded session '{session}' as agent '{agent}': {total} concept(s) rewritten into \
-         the live space\n\
+        "re-embedded session '{session}' as agent '{agent}': {rewritten} concept(s) rewritten \
+         into the live space\n\
          coverage: embedded {before}/{total} -> {after}/{total}\n\
          contract now: kind={} model={} dim={}\n\
          the vector rewrite and contract swap flush as ONE transaction with this \
-         writer's lease release",
+         writer's lease release{dropped_line}",
         live_contract.kind,
         live_contract.model.as_deref().unwrap_or("<unset>"),
         live_contract.dim,
@@ -422,6 +498,17 @@ mod tests {
         store: &Arc<MemoryStore>,
         source: Option<crate::types::EmbeddingSource>,
     ) {
+        seed_session_with_sources(store, source, None).await;
+    }
+
+    /// [`seed_damaged_session`], with `vectored` and `unvectored` as the
+    /// `embedding_source` of its vectored and its NULL-vector concept (#22:
+    /// a sourced NULL-vector concept is an image whose vector is missing).
+    async fn seed_session_with_sources(
+        store: &Arc<MemoryStore>,
+        source: Option<crate::types::EmbeddingSource>,
+        unvectored: Option<crate::types::EmbeddingSource>,
+    ) {
         let sid = SessionId::from(SESSION);
         let seeder = LeaseHolder::for_this_process(&AgentId::from("seeder"));
         let LeaseOutcome::Acquired(info) = store
@@ -507,7 +594,7 @@ mod tests {
                 set_contract,
                 concept(c1, "user schema", Some(vec![0.25_f32; 1024]), source),
                 derives_edge(c1),
-                concept(c2, "auth middleware", None, None),
+                concept(c2, "auth middleware", None, unvectored),
                 derives_edge(c2),
             ],
         };
@@ -546,6 +633,7 @@ mod tests {
                 agent: AGENT.into(),
                 allow_embedding_mismatch: false,
                 missing_only: false,
+                drop_image_vectors: false,
             },
         )
         .await
@@ -558,52 +646,153 @@ mod tests {
         assert_eq!(widths, vec![Some(1024), Some(1024)]);
     }
 
-    /// #22 review L2: until `re-embed` learns `--drop-image-vectors` (PR 3),
-    /// it must not touch a session holding a supplied vector. Re-embedding
-    /// would replace an image vector with a vector of its caption and leave
-    /// the image source on it, a silent mislabel. Both modes refuse, before
-    /// any write, and the lease is released.
-    #[tokio::test]
-    async fn re_embed_refuses_a_session_with_an_embedding_source() {
-        let source = crate::types::EmbeddingSource {
+    fn image_source() -> crate::types::EmbeddingSource {
+        crate::types::EmbeddingSource {
             modality: crate::types::SourceModality::Image,
             origin: crate::types::VectorOrigin::Client,
             sha256: None,
             mime: None,
-        };
-        for missing_only in [false, true] {
+        }
+    }
+
+    /// Every durable concept as (content, vector width, has a source).
+    async fn durable_concepts(store: &Arc<MemoryStore>) -> Vec<(String, Option<usize>, bool)> {
+        let snap = store.load_session(&SessionId::from(SESSION)).await.unwrap();
+        let mut out: Vec<_> = snap
+            .concepts
+            .iter()
+            .map(|c| {
+                (
+                    c.content.clone(),
+                    c.embedding.as_ref().map(Vec::len),
+                    c.embedding_source.is_some(),
+                )
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    fn args(missing_only: bool, drop_image_vectors: bool) -> Args {
+        Args {
+            session: SESSION.into(),
+            agent: AGENT.into(),
+            allow_embedding_mismatch: false,
+            missing_only,
+            drop_image_vectors,
+        }
+    }
+
+    async fn lease_is_free(store: &Arc<MemoryStore>) -> bool {
+        let probe = LeaseHolder::for_this_process(&AgentId::from("probe"));
+        matches!(
+            store
+                .acquire_lease(&SessionId::from(SESSION), &probe, Duration::from_secs(5))
+                .await
+                .unwrap(),
+            LeaseOutcome::Acquired(_)
+        )
+    }
+
+    /// #22 design Q19: a full migration must not leave an image vector in
+    /// the old space, and cannot recompute one from a caption, so it refuses
+    /// before any embed or write, releases the lease, and names the flag.
+    #[tokio::test]
+    async fn re_embed_refuses_image_vectors_unless_told_to_drop_them() {
+        let store = Arc::new(MemoryStore::new());
+        seed_session_with_source(&store, Some(image_source())).await;
+        let before = durable_state(&store).await;
+        let err = run(
+            backends_on(store.clone(), "fixture", "fixture-model"),
+            args(false, false),
+        )
+        .await
+        .expect_err("image vectors block a migration");
+        assert!(matches!(err, CliError::Runtime(_)), "{err}");
+        let msg = err.to_string();
+        assert!(msg.contains("1 image concept still carries"), "{msg}");
+        assert!(msg.contains("--drop-image-vectors"), "{msg}");
+        assert!(msg.contains("nothing was written"), "{msg}");
+        assert_eq!(durable_state(&store).await, before, "no writes");
+        assert!(
+            lease_is_free(&store).await,
+            "the refusal released the lease"
+        );
+    }
+
+    /// With `--drop-image-vectors` the migration nulls the image vectors in
+    /// the same batch (keeping each source), rewrites every text concept,
+    /// swaps the contract, and reports the count.
+    #[tokio::test]
+    async fn re_embed_drop_image_vectors_nulls_them_and_reports_the_count() {
+        let store = Arc::new(MemoryStore::new());
+        seed_session_with_source(&store, Some(image_source())).await;
+        let out = run(
+            backends_on(store.clone(), "fixture", "fixture-model"),
+            args(false, true),
+        )
+        .await
+        .expect("re-embed");
+        assert!(out.contains("1 concept(s) rewritten"), "{out}");
+        assert!(out.contains("dropped 1 image vector(s)"), "{out}");
+        assert!(out.contains("coverage: embedded 1/2 -> 1/2"), "{out}");
+        let (kind, _) = durable_state(&store).await;
+        assert_eq!(kind.as_deref(), Some("fixture"), "contract migrated");
+        assert_eq!(
+            durable_concepts(&store).await,
+            vec![
+                ("auth middleware".into(), Some(1024), false),
+                ("user schema".into(), None, true),
+            ],
+            "the text concept is embedded; the image keeps its source, not a caption vector"
+        );
+    }
+
+    /// `--missing-only` fills text concepts only and says how many image
+    /// concepts it skipped; a full migration likewise leaves an image concept
+    /// whose vector is already missing alone.
+    #[tokio::test]
+    async fn re_embed_never_gives_an_image_concept_a_caption_vector() {
+        for missing_only in [true, false] {
             let store = Arc::new(MemoryStore::new());
-            seed_session_with_source(&store, Some(source.clone())).await;
-            let before = durable_state(&store).await;
-            let err = run(
-                backends_on(store.clone(), "fixture", "fixture-model"),
-                Args {
-                    session: SESSION.into(),
-                    agent: AGENT.into(),
-                    allow_embedding_mismatch: false,
-                    missing_only,
-                },
+            // The vectored concept is text; the NULL one is an image whose
+            // vector is missing.
+            seed_session_with_sources(&store, None, Some(image_source())).await;
+            let out = run(
+                backends_on(
+                    store.clone(),
+                    if missing_only { "legacy" } else { "fixture" },
+                    if missing_only { "v1" } else { "fixture-model" },
+                ),
+                args(missing_only, false),
             )
             .await
-            .expect_err("a session with a supplied vector is refused");
-            assert!(matches!(err, CliError::Runtime(_)), "{err}");
-            let msg = err.to_string();
-            assert!(msg.contains("1 concept"), "{msg}");
-            assert!(msg.contains("embedding_source"), "{msg}");
-            assert!(msg.contains("nothing was written"), "{msg}");
-            assert_eq!(durable_state(&store).await, before, "no writes");
-            let probe = LeaseHolder::for_this_process(&AgentId::from("probe"));
+            .expect("re-embed");
             assert!(
-                matches!(
-                    store
-                        .acquire_lease(&SessionId::from(SESSION), &probe, Duration::from_secs(5))
-                        .await
-                        .unwrap(),
-                    LeaseOutcome::Acquired(_)
-                ),
-                "the refusal released the lease"
+                out.contains("skipped 1 image concept(s) whose vector is missing"),
+                "{missing_only}: {out}"
+            );
+            let concepts = durable_concepts(&store).await;
+            assert!(
+                concepts.contains(&("auth middleware".into(), None, true)),
+                "{missing_only}: the image stays without a vector: {concepts:?}"
+            );
+            assert!(
+                concepts.contains(&("user schema".into(), Some(1024), false)),
+                "{missing_only}: {concepts:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn re_embed_refuses_missing_only_with_drop_image_vectors() {
+        let err = run(
+            backends_on(Arc::new(MemoryStore::new()), "fixture", "m"),
+            args(true, true),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, CliError::Usage(_)), "{err}");
     }
 
     #[tokio::test]
@@ -615,6 +804,7 @@ mod tests {
                 agent: AGENT.into(),
                 allow_embedding_mismatch: true,
                 missing_only: false,
+                drop_image_vectors: false,
             },
         )
         .await
@@ -636,6 +826,7 @@ mod tests {
                 agent: AGENT.into(),
                 allow_embedding_mismatch: false,
                 missing_only: false,
+                drop_image_vectors: false,
             },
         )
         .await
@@ -666,6 +857,7 @@ mod tests {
                 agent: AGENT.into(),
                 allow_embedding_mismatch: false,
                 missing_only: false,
+                drop_image_vectors: false,
             },
         )
         .await
@@ -703,6 +895,7 @@ mod tests {
                 agent: AGENT.into(),
                 allow_embedding_mismatch: false,
                 missing_only: false,
+                drop_image_vectors: false,
             },
         )
         .await

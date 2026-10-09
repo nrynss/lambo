@@ -166,6 +166,12 @@
 //! fresh-persisted — it would exclude every organic concept and leave the merge
 //! leg permanently inert, a strictly larger product change than L82-4 asks for.
 //! The threshold, not the provenance of the vector, is the precision instrument.
+//!
+//! One provenance rule does exist since #22, and it is about modality, not
+//! freshness: `concepts.embedding_source` marks a supplied (image) vector,
+//! and a text item's merge tier drops those candidates, so a text claim is
+//! never absorbed into a picture. An image item never takes the merge leg at
+//! all (see `derive_with`).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -184,7 +190,8 @@ use crate::store::vector_source::VectorCandidates;
 use crate::store::GraphStore;
 use crate::types::{
     tie_break_by_key, AgentId, CanonizationStatus, Concept, ConceptType, Edge, EdgeType,
-    EmbeddingContract, LamboError, Node, NodeId, SessionId, StoreError,
+    EmbeddingContract, EmbeddingSource, LamboError, Node, NodeId, SessionId, StoreError,
+    SuppliedVector,
 };
 
 /// Default merge threshold (spec §7.1 step 6). Configurable per call
@@ -287,9 +294,13 @@ enum Resolution {
     /// (L82-4). It is `None` on every arm where no vector exists (or none can
     /// ever be queried): a vector is never invented, and the absent-capability
     /// path stays byte-identical to `MatchStrategy::Canonical`.
+    ///
+    /// `source` is `Some` only for the image item of an image derive (#22):
+    /// its vector was supplied, not embedded from its content.
     Fresh {
         key: String,
         embedding: Option<Vec<f32>>,
+        source: Option<EmbeddingSource>,
     },
     /// `Unmatched` with a vector hit at/above threshold: create the concept and
     /// a decaying `Semantic` edge to the matched concept. `targets` is the
@@ -378,6 +389,7 @@ fn new_concept(
     agent: &AgentId,
     created_at: DateTime<Utc>,
     embedding: Option<Vec<f32>>,
+    embedding_source: Option<EmbeddingSource>,
 ) -> Concept {
     Concept {
         id: NodeId::new(),
@@ -396,7 +408,7 @@ fn new_concept(
         last_demotion_time: None,
         embedding,
         human_confirmed: 0,
-        embedding_source: None,
+        embedding_source,
         chunk_group_id: None,
     }
 }
@@ -460,6 +472,7 @@ pub async fn derive(
         parent_of,
         max_cooccurrence_per_derive,
         semantic_match_threshold,
+        None,
         on_commit,
     )
     .await
@@ -467,8 +480,35 @@ pub async fn derive(
 
 /// [`derive`](fn@derive), reaching vector candidates through the source the
 /// caller was given (#27's caller-side seam) instead of a store. `Memory` and
-/// the write queue call this; with `VectorCandidates::Store` it is exactly
-/// `derive`.
+/// the write queue call this; with `VectorCandidates::Store` and no
+/// `supplied` vector it is exactly `derive`.
+///
+/// # A supplied vector (#22, an image derive)
+///
+/// With `supplied`, the concept whose content is `supplied.content` (the
+/// image item) takes `supplied.vector` instead of an embed:
+///
+/// * It **never takes the semantic-merge leg** (design section 4.4): it is
+///   either a canonical match (the same image id and caption) or a fresh
+///   concept carrying the supplied vector and its `embedding_source`. No
+///   `embed` and no candidate lookup is made for it.
+/// * A canonical match on an image concept keeps it as it is, with one
+///   exception: an image concept whose vector is missing (a quarantine or
+///   `re-embed --drop-image-vectors` nulled it and kept its source) takes the
+///   supplied vector, so re-deriving the same image repairs it.
+/// * A canonical match on a **text** concept (a text write that produced the
+///   same key first) is refused with [`LamboError::Embed`] under the commit
+///   lock: the image would otherwise have no vector while the call reported
+///   success.
+/// * Every **text** item's merge tier excludes image-sourced candidates, in
+///   every derive: a text claim is never absorbed into a picture.
+/// * The vector is checked against the live contract first
+///   ([`SuppliedVector::check`]); a refusal is [`LamboError::Embed`], so a
+///   durable intent replayed under a changed live contract settles `failed`.
+///   Under the commit lock the session stamp must equal the supplied
+///   contract.
+/// * The store must advertise `VECTOR_SEARCH`: an image concept no vector
+///   leg can find is refused with [`LamboError::Config`].
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn derive_with(
     graph: Arc<RwLock<Graph>>,
@@ -481,9 +521,13 @@ pub(crate) async fn derive_with(
     parent_of: &ParentOf<'_>,
     max_cooccurrence_per_derive: usize,
     semantic_match_threshold: f64,
+    supplied: Option<&SuppliedVector>,
     on_commit: Option<CommitHook>,
 ) -> Result<DeriveOutcome, LamboError> {
     validate_limits(concepts, parent_of, semantic_match_threshold)?;
+    if let Some(supplied) = supplied {
+        check_supplied(supplied, embedding, concepts, vectors.available())?;
+    }
 
     // Writers outside hybrid (daemon maintenance, future MCP tasks) need not
     // share a mutex with this function. Epoch validation makes their mutations
@@ -501,9 +545,87 @@ pub(crate) async fn derive_with(
         max_cooccurrence_per_derive,
         semantic_match_threshold,
         io_deadline,
+        supplied,
         on_commit,
     )
     .await
+}
+
+/// The apply-time checks on a supplied vector (see [`derive_with`]).
+///
+/// Order matters for replay: the contract and the vector are checked first,
+/// as [`LamboError::Embed`], because a mismatch is a fact about this input
+/// (a durable intent written under another live contract is never
+/// applicable here, so it settles `failed` rather than blocking the replay).
+/// The capability and shape checks after it are configuration or caller
+/// errors.
+fn check_supplied(
+    supplied: &SuppliedVector,
+    embedding: &EmbeddingContract,
+    concepts: &[(&str, ConceptType)],
+    vector_search: bool,
+) -> Result<(), LamboError> {
+    supplied
+        .check(embedding)
+        .map_err(|e| LamboError::Embed(format!("{e}; nothing was written")))?;
+    if !vector_search {
+        return Err(LamboError::Config(
+            "an image derive needs a store with vector search (VECTOR_SEARCH): an image \
+             concept is found only through its vector, so it is refused rather than written \
+             where no vector leg can reach it"
+                .into(),
+        ));
+    }
+    match concepts {
+        [(content, _)] if *content == supplied.content => Ok(()),
+        _ => Err(LamboError::Store(StoreError::Invariant(
+            "image derive: the call must carry exactly one concept, the one the supplied \
+             vector belongs to"
+                .into(),
+        ))),
+    }
+}
+
+/// What a canonically matched image item does to the concept it matched,
+/// decided under the commit lock (see [`derive_with`]).
+///
+/// * No match (the image item is fresh): `None`.
+/// * An image concept whose vector is missing: `Some`, the repair target.
+/// * An image concept that already has a vector: `None`, the first vector
+///   is kept.
+/// * A **text** concept (no `embedding_source`): refused with
+///   [`LamboError::Embed`]. Any text write can produce the image's canonical
+///   key (a derive, an action's resources, a `parent_of` end; case and token
+///   order fold together), and keeping the text concept would leave the
+///   image with no vector while the call reported success. `Embed`, because
+///   it is a fact about this input, so a replayed intent settles `failed`
+///   rather than blocking the replay.
+fn supplied_match_repair<'s>(
+    graph: &Graph,
+    items: &[(&str, ConceptType, String, Option<NodeId>)],
+    resolutions: &[Resolution],
+    supplied: &'s SuppliedVector,
+) -> Result<Option<(NodeId, &'s SuppliedVector)>, LamboError> {
+    let Some(node) =
+        items
+            .iter()
+            .zip(resolutions.iter())
+            .find_map(|((content, ..), res)| match res {
+                Resolution::CanonicalMatch { node } if *content == supplied.content => Some(*node),
+                _ => None,
+            })
+    else {
+        return Ok(None);
+    };
+    match graph.node(node) {
+        Some(Node::Concept(c)) if c.embedding_source.is_none() => Err(LamboError::Embed(format!(
+            "image derive: a text concept ({node}) already holds this image's caption and id, so \
+             the image would have no vector; derive the image with another image id. The \
+             image concept was not written"
+        ))),
+        Some(Node::Concept(c)) if c.embedding.is_none() => Ok(Some((node, supplied))),
+        _ => Ok(None),
+    }
 }
 
 /// [`derive`](fn@derive)'s size and range checks, on their own so J3's
@@ -643,7 +765,7 @@ fn plan_inputs<'a>(
 /// Refuse a plan whose embeds exceed [`MAX_HYBRID_EMBEDS`]: one per
 /// unmatched concept and one per `parent_of` end the call will create.
 fn check_embed_budget(
-    items: &PlannedItems<'_>,
+    items: &[(&str, ConceptType, String, Option<NodeId>)],
     parent_ends: &PlannedEnds<'_>,
 ) -> Result<(), LamboError> {
     let planned = items
@@ -705,8 +827,11 @@ async fn derive_planned(
     max_cooccurrence_per_derive: usize,
     semantic_match_threshold: f64,
     io_deadline: tokio::time::Instant,
+    supplied: Option<&SuppliedVector>,
     on_commit: Option<CommitHook>,
 ) -> Result<DeriveOutcome, LamboError> {
+    let is_supplied =
+        |content: &str| supplied.is_some_and(|supplied| supplied.content.as_str() == content);
     // Survives replans: the hook fires exactly once, at the commit that wins.
     let mut on_commit = on_commit;
     for _attempt in 0..MAX_HYBRID_REPLANS {
@@ -727,6 +852,7 @@ async fn derive_planned(
             stamped,
             items,
             parent_ends,
+            image_nodes,
         ) = {
             let g = graph.read();
             let planned_epoch = g.epoch();
@@ -777,6 +903,22 @@ async fn derive_planned(
                 )));
             }
 
+            // #22: the image-sourced concepts a text item may not merge into
+            // (design section 4.4), read under this lock. A concept written
+            // after this read moves the epoch, so the commit replans.
+            let text_will_rank = vector_ok
+                && items
+                    .iter()
+                    .any(|(content, _, _, matched)| matched.is_none() && !is_supplied(content));
+            let image_nodes: HashSet<NodeId> = if text_will_rank {
+                g.concepts()
+                    .filter(|c| c.embedding_source.is_some())
+                    .map(|c| c.id)
+                    .collect()
+            } else {
+                HashSet::new()
+            };
+
             (
                 planned_epoch,
                 session_id,
@@ -786,6 +928,7 @@ async fn derive_planned(
                 stamped,
                 items,
                 parent_ends,
+                image_nodes,
             )
         };
 
@@ -821,6 +964,16 @@ async fn derive_planned(
         for (content, _concept_type, key, matched) in &items {
             let res = match matched {
                 Some(node) => Resolution::CanonicalMatch { node: *node },
+                // #22: the image item takes its supplied vector. No embed, no
+                // candidate lookup, no merge (design section 4.4).
+                None if let Some(supplied) = supplied.filter(|s| s.content == *content) => {
+                    attempted_embed = true;
+                    Resolution::Fresh {
+                        key: key.clone(),
+                        embedding: Some(supplied.vector.clone()),
+                        source: Some(supplied.source.clone()),
+                    }
+                }
                 None if !vector_ok => {
                     if note_fallback_logged(&session_id) {
                         tracing::warn!(
@@ -833,6 +986,7 @@ async fn derive_planned(
                     Resolution::Fresh {
                         key: key.clone(),
                         embedding: None,
+                        source: None,
                     }
                 }
                 None => {
@@ -857,7 +1011,10 @@ async fn derive_planned(
                     )
                     .await?
                     {
-                        Some(hits) => {
+                        Some(mut hits) => {
+                            // #22: a text item never merges into an image
+                            // concept (design section 4.4).
+                            hits.retain(|hit| !image_nodes.contains(&hit.item));
                             // The tier tied at the highest score
                             // at/above threshold (store results are not
                             // guaranteed sorted). Every member is
@@ -885,6 +1042,7 @@ async fn derive_planned(
                                 Resolution::Fresh {
                                     key: key.clone(),
                                     embedding: Some(emb),
+                                    source: None,
                                 }
                             } else {
                                 Resolution::HybridMerge {
@@ -909,6 +1067,7 @@ async fn derive_planned(
                             Resolution::Fresh {
                                 key: key.clone(),
                                 embedding: None,
+                                source: None,
                             }
                         }
                     }
@@ -960,10 +1119,30 @@ async fn derive_planned(
         if guard.epoch() != planned_epoch {
             continue;
         }
+        // #22: a canonically matched image item repairs an image concept whose
+        // vector is missing (see `derive_with`); that writes a vector too.
+        let repair = match supplied {
+            Some(supplied) => supplied_match_repair(&guard, &items, &resolutions, supplied)?,
+            None => None,
+        };
+        let attempted_embed = attempted_embed || repair.is_some();
         if attempted_embed && let Some(existing) = guard.embedding() {
             // Revalidate under the commit lock. Two first writers can both plan
             // against `None`; only the winner may stamp its vector space.
             existing.ensure_compatible(embedding)?;
+            // #22 design section 3.3 (2): the session's space must be the one
+            // the supplied vector was declared in, not only the live one.
+            //
+            // Defence in depth, not a reachable refusal today:
+            // `check_supplied` already requires `supplied.contract ==
+            // embedding`, so this cannot fail where the line above passed,
+            // and a rival first writer moves the epoch, so the replan's
+            // plan-time check refuses it before this lock is taken. It stays
+            // so that the commit itself states the invariant it writes
+            // under, independent of how the call path checked the vector.
+            if let Some(supplied) = supplied {
+                existing.ensure_compatible(&supplied.contract)?;
+            }
         }
 
         // Stage every graph mutation on a private clone. Any invariant failure in
@@ -1044,13 +1223,25 @@ async fn derive_planned(
                         {
                             outcome.reinforced += 1;
                         }
+                        let mut existing = existing;
+                        if let Some((target, supplied)) = repair
+                            && target == *node
+                        {
+                            existing.embedding = Some(supplied.vector.clone());
+                            existing.embedding_source = Some(supplied.source.clone());
+                            outcome.embedded += 1;
+                        }
                         g.insert_concept(existing, interaction)?;
                         written.insert(*node);
                         outcome.matched.push(*node);
                         this_node = *node;
                     }
                 }
-                Resolution::Fresh { key, embedding } => {
+                Resolution::Fresh {
+                    key,
+                    embedding,
+                    source,
+                } => {
                     let concept = new_concept(
                         &session_id,
                         content,
@@ -1060,6 +1251,7 @@ async fn derive_planned(
                         agent,
                         interaction_created_at,
                         embedding.clone(),
+                        source.clone(),
                     );
                     let id = concept.id;
                     g.insert_concept(concept, interaction)?;
@@ -1107,6 +1299,7 @@ async fn derive_planned(
                         agent,
                         interaction_created_at,
                         embedding,
+                        None,
                     );
                     let id = concept.id;
                     g.insert_concept(concept, interaction)?;
@@ -1431,6 +1624,7 @@ fn resolve_concept(
                 agent,
                 created_at,
                 embedding,
+                None,
             );
             let id = concept.id;
             graph.insert_concept(concept, interaction)?;
