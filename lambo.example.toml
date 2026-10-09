@@ -53,7 +53,7 @@ kind = "memory"
 # vector_dim = 1024
 
 [embedder]
-# bge_m3 | gemini | candle | bedrock | fixture
+# bge_m3 | gemini | candle | bedrock | fixture | embeddinggemma2
 # (`openai` is an alias of bge_m3: the same OpenAI-compatible adapter, still
 # reported and stamped as bge_m3)
 kind = "bge_m3"
@@ -91,6 +91,34 @@ url = "http://127.0.0.1:8080"
 # numerically, so they are different embedding contracts: start a fresh session
 # or `lambo re-embed`, never mix the two in one session.
 # api_key_env = "CLOUDFLARE_API_TOKEN"
+#
+# EmbeddingGemma 2, text AND images in one space (#22, kind = "embeddinggemma2",
+# feature embed-eg2), served by llama.cpp's llama-server, build b11452 or later
+# (older builds refuse the model: "unknown model architecture: 'gemma-embedding2'").
+# Weights: the Q8_0 GGUF and the vision projector from ggml-org/embeddinggemma-2-GGUF
+# (revision bfcd2987), downloaded outside this repo. Start the server with exactly
+# these flags; the image budget and the ubatch are part of the embedding space:
+#
+#   llama-server --host 127.0.0.1 --port 8191 \
+#     -m embeddinggemma-2-Q8_0.gguf \
+#     --mmproj mmproj-embeddinggemma-2-Q8_0.gguf \
+#     --embeddings --pooling mean \
+#     --image-min-tokens 280 --image-max-tokens 280 \
+#     --ctx-size 8192 --batch-size 8192 --ubatch-size 8192
+#
+# The ubatch flags matter: at llama-server's default ubatch of 512 the image budget
+# is silently capped to 256 tokens, which is another space (Lambo refuses those
+# images). Leave out --mmproj for a text-only server and set images = false.
+#   kind = "embeddinggemma2"
+#   url = "http://127.0.0.1:8191"
+#   dim = 768        # 768 | 512 | 256 | 128 (Matryoshka); the 1024 default is refused
+# The contract model is this artifact plus ";prompts=lambo-eg2-v1" (the task prefixes,
+# the 280-token image budget, truncate-then-normalize). llama-server ignores the model
+# name, so name the weights it runs; a different artifact is a different contract.
+# Before the first embed Lambo checks llama-server's /props (loaded file name,
+# quantization, vision) against it and refuses a mismatch.
+#   model = "ggml-org/embeddinggemma-2-GGUF@bfcd2987/Q8_0"   # the default
+#   images = true    # false: text only, never send an image (server without --mmproj)
 #
 # In-crate candle BGE-M3 (kind = "candle", feature embed-candle): embeds locally, no
 # llama.cpp server. Weights fetch from hf-hub on first use and cache under the

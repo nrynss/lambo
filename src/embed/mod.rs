@@ -1,6 +1,7 @@
 //! Embedder trait, Level B factory, and optional adapter modules (P1 / P7).
 //!
-//! Packaging: Cargo features gate adapters (`embed-bge`, `embed-candle`, `embed-fixture`, `embed-bedrock`);
+//! Packaging: Cargo features gate adapters (`embed-bge`, `embed-candle`, `embed-fixture`,
+//! `embed-bedrock`, `embed-gemini`, `embed-eg2`);
 //! `lambo.toml` / env select among compiled kinds. See
 //! `dev-diary/notes/level-b-pluggability.md`.
 
@@ -12,6 +13,8 @@ mod math;
 mod bge_m3;
 #[cfg(feature = "embed-candle")]
 mod candle;
+#[cfg(feature = "embed-eg2")]
+pub(crate) mod eg2;
 #[cfg(feature = "embed-fixture")]
 mod fixture;
 #[cfg(feature = "embed-gemini")]
@@ -25,6 +28,12 @@ pub use math::cosine;
 pub use bge_m3::BgeM3LlamaCppEmbedder;
 #[cfg(feature = "embed-candle")]
 pub use candle::CandleEmbedder;
+#[cfg(feature = "embed-eg2")]
+pub use eg2::{
+    Eg2ServerCheck, EmbeddingGemma2Embedder, EG2_DEFAULT_MODEL, EG2_DOCUMENT_PREFIX,
+    EG2_IMAGE_TOKENS, EG2_MRL_DIMS, EG2_NATIVE_DIM, EG2_PROMPT_PROFILE, EG2_PROPS_RECHECK_INTERVAL,
+    EG2_QUERY_PREFIX, EG2_REFERENCE_IMAGE_TOKENS,
+};
 #[cfg(feature = "embed-fixture")]
 pub use fixture::{
     near_far_contract, png_with_label, FixtureEmbedder, FAR, IMAGE_LABEL_KEYWORD, NEAR_A, NEAR_B,
@@ -383,6 +392,10 @@ pub enum EmbedderKind {
     Bedrock,
     /// Deterministic offline embedder. Feature: `embed-fixture`.
     Fixture,
+    /// EmbeddingGemma 2, text and images in one space, served by llama.cpp's
+    /// `llama-server` (#22 PR 5). Feature: `embed-eg2`.
+    #[serde(rename = "embeddinggemma2")]
+    EmbeddingGemma2,
 }
 
 impl<'de> Deserialize<'de> for EmbedderKind {
@@ -402,6 +415,7 @@ impl EmbedderKind {
             Self::Gemini => "embed-gemini",
             Self::Bedrock => "embed-bedrock",
             Self::Fixture => "embed-fixture",
+            Self::EmbeddingGemma2 => "embed-eg2",
         }
     }
 
@@ -415,6 +429,7 @@ impl EmbedderKind {
             Self::Gemini => cfg!(feature = "embed-gemini"),
             Self::Bedrock => cfg!(feature = "embed-bedrock"),
             Self::Fixture => cfg!(feature = "embed-fixture"),
+            Self::EmbeddingGemma2 => cfg!(feature = "embed-eg2"),
         }
     }
 
@@ -425,6 +440,7 @@ impl EmbedderKind {
             Self::Candle => cfg!(feature = "embed-candle"),
             Self::Fixture => cfg!(feature = "embed-fixture"),
             Self::Gemini => cfg!(feature = "embed-gemini"),
+            Self::EmbeddingGemma2 => cfg!(feature = "embed-eg2"),
             // T7.1 not implemented yet.
             Self::Bedrock => false,
         }
@@ -438,7 +454,8 @@ impl FromStr for EmbedderKind {
         let t = s.trim();
         if t.is_empty() {
             return Err(EmbedError::Unavailable(
-                "empty embedder kind (expected bge_m3 | candle | gemini | bedrock | fixture)"
+                "empty embedder kind (expected bge_m3 | candle | gemini | bedrock | fixture | \
+                 embeddinggemma2)"
                     .into(),
             ));
         }
@@ -451,11 +468,12 @@ impl FromStr for EmbedderKind {
             "gemini" | "vertex" => Ok(Self::Gemini),
             "bedrock" | "titan" => Ok(Self::Bedrock),
             "fixture" | "fake" => Ok(Self::Fixture),
+            "embeddinggemma2" | "embeddinggemma-2" | "eg2" => Ok(Self::EmbeddingGemma2),
             // Never echo the value: a key or DSN pasted under `kind` would
             // reach the startup log.
             _ => Err(EmbedError::Unavailable(
                 "unknown embedder kind (value not shown; expected bge_m3 | candle | gemini | \
-                 bedrock | fixture)"
+                 bedrock | fixture | embeddinggemma2)"
                     .into(),
             )),
         }
@@ -470,6 +488,7 @@ impl std::fmt::Display for EmbedderKind {
             Self::Gemini => write!(f, "gemini"),
             Self::Bedrock => write!(f, "bedrock"),
             Self::Fixture => write!(f, "fixture"),
+            Self::EmbeddingGemma2 => write!(f, "embeddinggemma2"),
         }
     }
 }
@@ -556,6 +575,14 @@ pub struct EmbedderConfig {
     /// contract. `LAMBO_ACCEPT_CLIENT_VECTORS` (`true`/`false`) overrides it.
     #[serde(default)]
     pub accept_client_vectors: bool,
+    /// Whether the EmbeddingGemma 2 adapter embeds images (#22 PR 5).
+    /// Absent means `true`. `false` reports text only and never sends an
+    /// image: the setup for a `llama-server` started without `--mmproj`, or
+    /// for client-computed image vectors. Not part of the embedding contract
+    /// (it changes what is embedded, not the space). `embeddinggemma2` only;
+    /// any other kind refuses it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub images: Option<bool>,
 }
 
 impl Default for EmbedderConfig {
@@ -579,6 +606,7 @@ impl Default for EmbedderConfig {
             gemini_credentials: None,
             keep_warm_secs: None,
             accept_client_vectors: false,
+            images: None,
         }
     }
 }
@@ -751,6 +779,24 @@ pub fn gemini_identity(_embedder: &dyn Embedder) -> Option<String> {
     None
 }
 
+/// The contract `model` the EmbeddingGemma 2 adapter stamps (#22 PR 5): the
+/// configured weights artifact and the prompt profile, e.g.
+/// `ggml-org/embeddinggemma-2-GGUF@bfcd2987/Q8_0;prompts=lambo-eg2-v1`. `None`
+/// when the embedder is not that adapter.
+#[cfg(feature = "embed-eg2")]
+pub fn eg2_identity(embedder: &dyn Embedder) -> Option<String> {
+    embedder
+        .as_any()
+        .and_then(|a| a.downcast_ref::<eg2::EmbeddingGemma2Embedder>())
+        .map(|e| e.model_identity().to_string())
+}
+
+/// Same as [`eg2_identity`] on builds without the `embed-eg2` feature.
+#[cfg(not(feature = "embed-eg2"))]
+pub fn eg2_identity(_embedder: &dyn Embedder) -> Option<String> {
+    None
+}
+
 fn missing_feature(kind: EmbedderKind) -> EmbedError {
     EmbedError::Unavailable(format!(
         "embedder kind `{kind}` is not compiled into this binary; rebuild with \
@@ -855,15 +901,25 @@ pub fn build_embedder(cfg: EmbedderConfig) -> Result<Box<dyn Embedder>, EmbedErr
     // built in code reaches here without it.
     api_key::validate(cfg.api_key_env.as_deref(), cfg.api_key)?;
     if let Some(name) = cfg.api_key_env.as_deref()
-        && cfg.kind != EmbedderKind::BgeM3
+        && !matches!(
+            cfg.kind,
+            EmbedderKind::BgeM3 | EmbedderKind::EmbeddingGemma2
+        )
     {
         // A credential key the selected adapter would ignore is refused rather
         // than silently dropped: an operator who configured one expects it used.
         return Err(EmbedError::Unavailable(format!(
-            "embedder.api_key_env ({}) applies only to kind `bge_m3` (alias `openai`), but kind \
-             is `{}`; \
-             remove api_key_env or change the kind",
+            "embedder.api_key_env ({}) applies only to kinds `bge_m3` (alias `openai`) and \
+             `embeddinggemma2`, but kind is `{}`; remove api_key_env or change the kind",
             crate::config::secret_env::shown(name),
+            cfg.kind
+        )));
+    }
+    // Same rule for the image switch (#22 PR 5): no other adapter reads it.
+    if cfg.images.is_some() && cfg.kind != EmbedderKind::EmbeddingGemma2 {
+        return Err(EmbedError::Unavailable(format!(
+            "embedder.images applies only to kind `embeddinggemma2`, but kind is `{}`; remove \
+             images or change the kind",
             cfg.kind
         )));
     }
@@ -934,6 +990,16 @@ pub fn build_embedder(cfg: EmbedderConfig) -> Result<Box<dyn Embedder>, EmbedErr
             #[cfg(not(feature = "embed-gemini"))]
             {
                 Err(missing_feature(EmbedderKind::Gemini))
+            }
+        }
+        EmbedderKind::EmbeddingGemma2 => {
+            #[cfg(feature = "embed-eg2")]
+            {
+                Ok(Box::new(eg2::build(&cfg)?))
+            }
+            #[cfg(not(feature = "embed-eg2"))]
+            {
+                Err(missing_feature(EmbedderKind::EmbeddingGemma2))
             }
         }
         EmbedderKind::Bedrock => {
@@ -1390,6 +1456,10 @@ mod tests {
         assert_eq!(w.kind, EmbedderKind::Candle);
         let w: Wrap = toml::from_str(r#"kind = "openai""#).unwrap();
         assert_eq!(w.kind, EmbedderKind::BgeM3);
+        for alias in ["embeddinggemma2", " EmbeddingGemma-2 ", "eg2"] {
+            let w: Wrap = toml::from_str(&format!("kind = {alias:?}")).unwrap();
+            assert_eq!(w.kind, EmbedderKind::EmbeddingGemma2, "{alias}");
+        }
     }
 
     #[test]
@@ -1697,6 +1767,7 @@ mod tests {
         assert_eq!(EmbedderKind::Fixture.feature_name(), "embed-fixture");
         assert_eq!(EmbedderKind::Gemini.feature_name(), "embed-gemini");
         assert_eq!(EmbedderKind::Bedrock.feature_name(), "embed-bedrock");
+        assert_eq!(EmbedderKind::EmbeddingGemma2.feature_name(), "embed-eg2");
     }
 
     #[test]

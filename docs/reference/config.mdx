@@ -123,11 +123,12 @@ Erasing a session also removes it from the index, and reports success only once 
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
-| `kind` | string | `bge_m3` | `bge_m3` (an OpenAI-compatible embeddings API: local `llama-server` or a hosted endpoint), `candle` (in-process BGE-M3), `gemini` (Vertex AI), or `fixture` (tests). `openai` is an alias of `bge_m3`. `bedrock` parses but is not implemented, so it fails at startup. |
-| `dim` | integer | `1024` | The width you expect the embedder to emit. |
-| `url` | string | none | The `llama-server` base URL, used when `kind` is `bge_m3`. Also accepted as `llama_url`. |
-| `model` | string | none | The model id sent to `llama-server`. Empty means the server's own default. Also accepted as `llama_model`. |
-| `api_key_env` | string | none | The name of the environment variable that holds a bearer token, for a hosted OpenAI-compatible endpoint. Used when `kind` is `bge_m3`; any other kind refuses it. See [Hosted endpoints](#hosted-endpoints). |
+| `kind` | string | `bge_m3` | `bge_m3` (an OpenAI-compatible embeddings API: local `llama-server` or a hosted endpoint), `candle` (in-process BGE-M3), `gemini` (Vertex AI), `embeddinggemma2` (EmbeddingGemma 2 text and images through `llama-server`, see [EmbeddingGemma 2](#embeddinggemma-2)), or `fixture` (tests). `openai` is an alias of `bge_m3`. `bedrock` parses but is not implemented, so it fails at startup. |
+| `dim` | integer | `1024` | The width you expect the embedder to emit. For `embeddinggemma2` it must be `768`, `512`, `256` or `128`, so set it: the default `1024` is refused. |
+| `url` | string | none | The `llama-server` base URL, used when `kind` is `bge_m3` or `embeddinggemma2`. Also accepted as `llama_url`. |
+| `model` | string | none | The model id sent to `llama-server`. Empty means the server's own default. For `embeddinggemma2` it names the weights artifact and defaults to `ggml-org/embeddinggemma-2-GGUF@bfcd2987/Q8_0`. Also accepted as `llama_model`. |
+| `api_key_env` | string | none | The name of the environment variable that holds a bearer token, for a hosted OpenAI-compatible endpoint. Used when `kind` is `bge_m3` or `embeddinggemma2`; any other kind refuses it. See [Hosted endpoints](#hosted-endpoints). |
+| `images` | bool | `true` | Whether `embeddinggemma2` embeds images. `false` makes it text-only: it never sends an image, and `lambo_derive_image` takes only client vectors. Any other kind refuses the key. |
 | `keep_warm_secs` | integer | auto | Seconds between `lambo serve` keep-warm touches. Omitted means auto: every 10 seconds for the in-process candle embedder on a Metal device, off for everything else. `0` turns it off; any other value applies to every kind. For `gemini`, each touch is a billed Vertex AI embedding request and keeps nothing local warm, so leave it off there. On a battery-powered laptop the default wakes the GPU every 10 seconds (about 0.2% GPU duty); set `keep_warm_secs = 0` to opt out. |
 | `accept_client_vectors` | bool | `false` | Accept an image vector a client computed (`lambo_derive_image` with `vector`, `lambo derive-image --vector-json`). Off by default: such a call is refused and the refusal names this key. Lambo checks that the vector's declared contract (kind, model, dim) is exactly the session's and that the vector has the right width and a real direction, but it cannot check that the vector came from that model, so turning this on trusts the client's label. One setting for the whole process: every session a `lambo serve` holds gets the same value. |
 
@@ -163,6 +164,34 @@ api_key_env = "CLOUDFLARE_API_TOKEN"
 - A `401` or `403` from the endpoint fails the write as a configuration error, the same as a wrong URL.
 
 The same model behind a different server is a different embedding contract, because the two can differ numerically. Set `model` to the hosted id (as above) so a hosted session's contract differs from a local one, and start a fresh session or run `lambo re-embed` rather than mixing the two.
+
+### EmbeddingGemma 2
+
+`kind = "embeddinggemma2"` embeds text and images into one space with Google's EmbeddingGemma 2, served by llama.cpp's `llama-server`. It needs llama.cpp build b11452 or later; older builds refuse the model with `unknown model architecture: 'gemma-embedding2'`. Download the Q8_0 GGUF and its vision projector from `ggml-org/embeddinggemma-2-GGUF` and start the server like this:
+
+```bash
+llama-server --host 127.0.0.1 --port 8191 \
+  -m embeddinggemma-2-Q8_0.gguf \
+  --mmproj mmproj-embeddinggemma-2-Q8_0.gguf \
+  --embeddings --pooling mean \
+  --image-min-tokens 280 --image-max-tokens 280 \
+  --ctx-size 8192 --batch-size 8192 --ubatch-size 8192
+```
+
+```toml
+[embedder]
+kind = "embeddinggemma2"
+url = "http://127.0.0.1:8191"
+dim = 768
+```
+
+- Lambo adds the model card's task prefixes itself: a stored concept is embedded as `title: none | text: ...`, a recall query as `task: search result | query: ...`, and an image with no prefix. A server, or a client computing vectors, that uses other prefixes is in a different space.
+- `dim` can be `768`, `512`, `256` or `128`. Lambo takes the first `dim` of the 768 values and re-normalizes them.
+- The session's contract records the weights and the prompt profile, for example `ggml-org/embeddinggemma-2-GGUF@bfcd2987/Q8_0;prompts=lambo-eg2-v1`, because `llama-server` ignores the model name in a request. Set `model` to the artifact your server actually runs. A different artifact or profile is a different contract: start a fresh session or run `lambo re-embed`.
+- The profile fixes the image budget at 280 tokens. The two image flags set it, and the batch flags let a whole image fit: at the server's default ubatch of 512 the budget is silently cut to 256 tokens, a different space. The budget bounds an image's area, so an image's token count still depends on its size and shape (on b11517, 293 for a square up to 768 px, 260 for a larger one, anywhere from 236 to 540 for other shapes), and renders of one picture at different sizes embed close to each other but not identically. Because no single image's count shows the budget, Lambo checks it with a reference image of its own: before the first image it embeds for a server that passed the `/props` check, and again every 60 seconds, it embeds a 1x1 picture and refuses image embeds, naming the flags, unless the server reports the 293 tokens b11517 reports at the 280 budget (within 8). A response to it without a token count refuses image embeds too, since `llama-server` always sends one. A server that does not answer `/props` gets no reference check, so its image budget, like the `--pooling mean` setting of any server (which `/props` does not report), rests on your word; the log says so once.
+- Before its first embed, Lambo asks the server's `/props` which file it loaded, its quantization and whether it has a vision projector. It refuses to embed with a file whose name does not mention EmbeddingGemma 2 or a quantization other than the one `model` names (llama.cpp's own names are matched to the file names' tokens, so `Q4_K - Medium` is `Q4_K_M` and `all F32` is `F32`), and refuses images when the server has no vision projector. A server that does not answer `/props` (a hosted endpoint, Ollama) is used without the check, and the log says so once. If `/props` cannot be reached or answers with a server error, the log says so once and Lambo asks again after a wait that doubles from 1 second up to 30 seconds, not on every embed. Until a server has passed the check once, text and images embedded in that window (at most about 30 seconds per failed check, typically at startup) go to it unchecked, with no reference image check, the same as a server without `/props`; they are stamped with the configured contract, so if the server could be the wrong one, keep Lambo's writes stopped until the log shows the check passed. The answer is asked again every 60 seconds and right after an embed request gets no answer at all (connection refused or reset) or a 503 "Loading model", so a server restarted with another model or quantization is refused before Lambo writes more vectors under the old contract. Any other 503 (a busy server) is retried without asking again. If the server refuses Lambo's reference image itself, the error names the reference image check as a server or configuration problem, not a fault in your image. Once a server has passed the check, embeds wait (and are retried) while `/props` cannot be reached, and a server that stops answering `/props` is refused: restart Lambo if you replaced it on purpose.
+- Some of these checks rest on facts measured on llama.cpp b11517 and may change with the build: the 293-token count of the reference image, and the text of the HTTP 500 for an input larger than the physical batch ("increase the physical batch size"), which Lambo settles as a failed input naming `--ubatch-size`. After upgrading llama.cpp, re-measure them (`evidence/issue-22-eg2/` records how): a build that frames images differently refuses every image with a message naming b11517 and the flags (set `images = false` meanwhile), and a build that rewords the 500 makes an oversized input a retried server error again.
+- An image sent to a server started without `--mmproj` fails as a configuration error naming `--mmproj`, not as a retryable server error. Without `--mmproj`, set `images = false`.
 
 <Warning>
 Do not switch embedder models in the middle of a session without re-embedding, because vectors from different models are not comparable. The kind, the model, and the width together form the session's embedding contract.
@@ -352,6 +381,7 @@ Cargo features decide which stores and embedders exist in your binary, and `lamb
 | `recall-elastic` | The Elasticsearch recall tier (`[recall]`). Released binaries include it. |
 | `embed-fixture` | The deterministic fixture embedder. |
 | `embed-bge` | BGE-M3 embeddings through `llama-server`. |
+| `embed-eg2` | EmbeddingGemma 2 text and image embeddings through `llama-server` (`kind = "embeddinggemma2"`). Builds on `embed-bge`. Released binaries include it. |
 | `embed-bedrock` | Reserved for Amazon Titan embeddings through Bedrock. Not implemented yet. |
 | `fixtures` | Committed fixture graphs, which also enables `store-memory`. |
 | `demo` | A convenience profile covering the memory and CockroachDB stores, both local embedders, and the fixtures. |

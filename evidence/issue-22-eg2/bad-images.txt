@@ -1,0 +1,4 @@
+# image request bodies sent straight to llama-server b11517 (8191, with --mmproj): a 1x1 WebP, a PNG with only a header, and non-image bytes labelled PNG
+webp1x1 200 768 {'prompt_tokens': 293, 'total_tokens': 293}
+png_header_only 500 b'{"error":{"code":500,"message":"Failed to load image or audio file","type":"server_error"}}'
+garbage_as_png 500 b'{"error":{"code":500,"message":"Failed to load image or audio file","type":"server_error"}}'

@@ -1,0 +1,11 @@
+# llama-server started with --image-min-tokens 280 --image-max-tokens 280 but the default --ubatch-size (512):
+0.00.793.685 W srv    load_model: cap image_max_tokens (original=280) to 256 (n_ubatch = 512) because the model processes the prompt in one ubatch
+0.00.793.686 W srv    load_model: increase n_ubatch (-ub) to increase vision token budget
+
+# raw probe (python urllib, <EVAL>/red.png is 64 px, red512.png 512 px), against that server (8192) and the profile server (8191):
+ubatch-512 server: red64 tokens=260 red512 tokens=260 cos(red64,red512)=1.000000
+cos(red64 @ ubatch-512 server, red64 @ profile server)=0.998918
+
+# lambo's live test pointed at the capped server: the adapter refuses the first image
+thread 'live_eg2_text_and_image' (21789270) panicked at tests/live_eg2.rs:249:40:
+called `Result::unwrap()` on an `Err` value: Backend("the llama-server at http://127.0.0.1:8192/ embedded this image as 260 tokens, but profile lambo-eg2-v1 fixes the image budget at 280 soft tokens (293 tokens with framing on b11517), so its vector would be in another space. Restart it with --image-min-tokens 280 --image-max-tokens 280, and with a ubatch that holds a whole image (llama-server otherwise caps the budget to fit its default 512; e.g. --batch-size 8192 --ubatch-size 8192)")

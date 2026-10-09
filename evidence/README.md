@@ -20,6 +20,12 @@ have contained one, it is replaced by a named placeholder such as `<CLUSTER_ID>`
 | [`mcp-client-stdio/`](mcp-client-stdio/) | Claude Code completing the MCP handshake against `lambo serve --transport stdio`, all seven tools driven over the real wire with requests and responses both captured, the HTTP transport serving `initialize`, and the four fail-closed config cases. |
 | [`mcp-client-interop/`](mcp-client-interop/) | Two further clients. Cursor Agent CLI: handshake, 7-of-7 tool discovery, and a model-driven `derive → record_action → recall → stats` run. Claude Code **and** Cursor: model-driven calls against the **managed CockroachDB MCP server**, both returning the canonization walk the demo page documents. With OMP below, three independent clients agree on every field. Also holds the re-check of Cursor's two approval gotchas, which found the per-call gate is specific to `-p` print mode. |
 
+## Embeddings
+
+| Path | What it shows |
+|---|---|
+| [`issue-22-eg2/`](issue-22-eg2/) | EmbeddingGemma 2 on llama.cpp b11517 (#22 PR 5): the live test passing for text and images, the no-projector refusal, what `/props` reports, the default-ubatch cap on the image budget that the adapter refuses, and the design 7.3 ranking-parity table. |
+
 ## CockroachDB
 
 | Path | What it shows |
