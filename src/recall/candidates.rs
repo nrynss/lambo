@@ -212,8 +212,10 @@ pub(crate) async fn gather_from(
 /// otherwise the embed would be wasted latency, since the leg would be skipped
 /// anyway. `Ok(None)` means "no vector leg", `Err` carries the warning line a
 /// failed embed degrades to (the read continues on the keyword and recent
-/// legs). Every recall caller embeds through here, so #14 can move the recall
-/// cache check ahead of this call in one place.
+/// legs). Every recall caller embeds through here; a session holder goes
+/// through [`super::query_cache::embed_query_cached`] first, which serves a
+/// repeated query from the session's query-embedding cache (#14). `lambo
+/// recall` embeds directly: one recall per process has nothing to reuse.
 pub(crate) async fn embed_query(
     vectors: VectorCandidates<'_>,
     embedder: &dyn crate::embed::Embedder,

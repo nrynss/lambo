@@ -66,6 +66,7 @@ use crate::embed::Embedder;
 use crate::graph::index::InvertedIndex;
 use crate::graph::Graph;
 use crate::recall::cache::RecallCache;
+use crate::recall::query_cache::QueryEmbeddingCache;
 use crate::store::flush::FlushTask;
 use crate::store::lease::LeaseHolder;
 use crate::store::GraphStore;
@@ -216,6 +217,14 @@ pub struct Memory {
     /// graph lock — holding it across an await is fine and only serializes
     /// concurrent recalls on this handle.
     recall_cache: tokio::sync::Mutex<RecallCache<RecallPipeline>>,
+    /// Session-scoped LRU of recall query embeddings (#14). Keyed by the
+    /// exact query text and checked against the embedding contract, with no
+    /// epoch: a query vector does not depend on the graph, so a write
+    /// between two identical recalls does not cost the second its embed.
+    /// Per session by design (#32 decision 13: a process-wide cache keyed by
+    /// text is a cross-user timing oracle). A `parking_lot` mutex held only
+    /// for a lookup or an insert, never across the embed's `.await`.
+    query_embeddings: PlMutex<QueryEmbeddingCache>,
     /// Read accesses noted by [`Memory::recall`] and the MCP inspect focus,
     /// not yet applied to the graph (issue #30). Shared with the daemon, whose
     /// cycle applies them; [`Memory::close`] applies the remainder in the

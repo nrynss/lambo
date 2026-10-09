@@ -932,3 +932,80 @@ async fn i2_heartbeat_lines_carry_the_stats_payload_the_version_and_the_sha() {
     ledger.shutdown();
     s.mem.close().await.expect("close");
 }
+
+/// #32 decision 15: a server's call lines name its session, so one ledger
+/// file can carry several sessions once a serve hosts more than one.
+///
+/// Mutation: drop the session scoping in `LamboServer::with_ledger` → red.
+#[tokio::test]
+async fn i32_every_call_line_names_the_servers_session() {
+    let dir = ledger_dir("i32-session");
+    let path = dir.join("calls.jsonl");
+    let s = server_with_ledger("i32-ledger-session", &path).await;
+    let ledger = Arc::clone(s.ledger().expect("ledger attached"));
+    call(&s, "lambo_stats", json!({"agent_id": "agent-a"})).await;
+    call(
+        &s,
+        "lambo_recall",
+        json!({"agent_id": "agent-a", "query": "session"}),
+    )
+    .await;
+    let lines = read_ledger(&ledger, 2);
+    assert_eq!(lines.len(), 2);
+    for line in &lines {
+        assert_eq!(line["kind"], json!("call"), "{line}");
+        assert_eq!(line["session"], json!("i32-ledger-session"), "{line}");
+    }
+    ledger.shutdown();
+    s.mem.close().await.expect("close");
+}
+
+/// #32 decision 15, the write side: a `Memory` built with a ledger books its
+/// `completion` lines under its own session, even when the handle it was given
+/// is unscoped (a library caller that is not `serve`).
+///
+/// Mutation: pass `self.ledger` to the write pipeline unscoped in
+/// `MemoryBuilder::build` → red.
+#[tokio::test]
+async fn i32_completion_lines_name_the_memorys_session() {
+    let dir = ledger_dir("i32-completion");
+    let path = dir.join("calls.jsonl");
+    let ledger = Ledger::open(&path);
+    let store: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+    let mem = Memory::builder()
+        .session("i32-completion-session")
+        .agent("agent-a")
+        .flush_interval(Duration::from_secs(3_600))
+        .store(store)
+        .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
+        .embedding_contract(EmbeddingContract {
+            kind: "fixture".into(),
+            model: None,
+            dim: 1024,
+        })
+        .ledger(Some(Arc::clone(&ledger)))
+        .build()
+        .await
+        .expect("build");
+    // No `with_ledger`: only the write pipeline appends to this file.
+    let s = LamboServer::new(Arc::new(mem));
+    let receipt = receipt_payload(
+        &s,
+        "agent-a",
+        json!([{"content": "completion lines name their session", "concept_type": "logic"}]),
+    )
+    .await;
+    assert_eq!(receipt["state"], json!("applied"), "{receipt}");
+    let lines = read_ledger(&ledger, 1);
+    let completion = lines
+        .iter()
+        .find(|l| l["kind"] == json!("completion"))
+        .unwrap_or_else(|| panic!("a completion line: {lines:?}"));
+    assert_eq!(
+        completion["session"],
+        json!("i32-completion-session"),
+        "{completion}"
+    );
+    ledger.shutdown();
+    s.mem.close().await.expect("close");
+}

@@ -4,6 +4,9 @@
 
 ### Breaking
 
+- `LamboFile` gains a public `serve: ServeConfig` field (#32). Code that
+  builds a `LamboFile` with a struct literal must add
+  `serve: Default::default()`; code that parses one is unaffected.
 - Minimum supported Rust is now 1.99 (`rust-version = "1.99"` in
   `Cargo.toml`; there was none before), and the crate moves from edition 2021
   to edition 2024. The pinned toolchain moves from 1.97.1 to 1.99.0, and CI and
@@ -53,6 +56,22 @@
 
 ### Changed
 
+- `lambo.toml` parse errors no longer quote the offending line. They give
+  the parser's message and a line and column instead, so a misspelled key
+  next to a secret (a DSN with a password, say) no longer prints the secret
+  into a startup log. A script that matched the old `TOML parse error at
+  line N` text must match `(line N, column M)` instead.
+- An unknown `[store] kind` or `[embedder] kind` (in `lambo.toml` or
+  `LAMBO_STORE` / `LAMBO_EMBEDDER`) no longer quotes the value: the error
+  lists the accepted kinds with `(value not shown)`. A wrong-typed or unknown
+  enum value in `lambo.toml` reads `string (value not shown)` or
+  `unknown variant (value not shown)`, and an unknown `promotion_policy` is
+  quoted only when it is a short word. A DSN or token pasted under the wrong
+  key no longer reaches a startup log.
+- Every `serve --ledger` line now carries `session` (#32). `startup` and
+  `lease` lines always did; `call`, `completion` and `stats` lines gain it so
+  one ledger file can hold several sessions later. Additive: `v` stays `1`
+  and no existing key changes.
 - The write queue's startup probe now times a representative write instead
   of one embed (#11), so `write_queue_probe_serial_items_per_sec` and
   `write_queue_items_per_sec` read in writes per second, the unit
@@ -98,7 +117,6 @@
   10 s pause after a failed flush. A degraded session stops republishing
   it. A batch the store rejects outright resets the lag although it never
   landed; `dead_lettered` is what counts it.
-
 - On SQLite, the process that holds a session (`lambo serve`, or an embedded
   `Memory`) now ranks recall's vector leg and hybrid `derive`'s semantic match
   against the vectors its in-memory graph already holds, instead of reading,
@@ -120,9 +138,49 @@
     while it matches, and the matching scan no longer spends the derive's 30 s
     store-I/O deadline: it runs in memory, about 0.8 µs per stored vector at
     1,024 dimensions.
+- A session holder (`lambo serve`, or an embedded `Memory`) now keeps the
+  query vectors of its recent recalls, so a repeated recall of the same text
+  no longer calls the embedder (#14). The vector depends only on the text and
+  the embedder, not on the graph, so a write between two identical recalls
+  still reuses it; the recall itself runs in full every time, so results are
+  unchanged. Measured with candle BGE-M3 on Metal over a 3,600-concept SQLite
+  session (release, macOS): a repeated warm recall p50 22.3 ms to 4.1 ms, and
+  the same recall with a derive applied between each pair 21.5 ms to 3.6 ms.
+  A novel query still pays its embed (21.9 ms to 21.8 ms).
+  - The cache belongs to one session and is never shared across sessions in a
+    process, so reply timing cannot reveal another session's queries.
+  - Bounded at 128 entries and 1 MiB per session (about 560 KiB for short
+    queries at 1,024 dimensions), least recently used first out. A failed
+    embed is not cached. A closed or erased session refuses the recall before
+    the cache is consulted.
+  - A vector already cached is reused while the embedder is unavailable, so a
+    repeated query keeps its vector leg through an embedder outage instead of
+    degrading to keyword-only with the `vector_degraded` warning.
+  - `lambo recall` (one recall per process) is unchanged.
 
 ### Added
 
+- An optional `[serve]` table in `lambo.toml` for multi-session serving
+  (#32, first part): pinned `sessions`, `default_session`, `max_attached`,
+  `attach_concurrency`, `idle_detach_secs`, `per_session_rps`, a
+  `[[serve.projects]]` cwd map and `[[serve.credential]]` entries that name
+  the environment variable holding their token. It is parsed and validated
+  only; nothing reads it at runtime yet, so a serve with or without it
+  behaves as before, and `lambo serve` logs one warning at startup when the
+  table is present (`[serve] is parsed but not yet enforced in this
+  release`). `token_env` must be an upper-case variable name and must not
+  look like a token; a value that fails is refused without being quoted. A
+  malformed table, a session name that cannot be
+  addressed by URL, an inline token, or more pinned sessions than
+  `max_attached` stops every command. An older binary refuses a file that
+  has `[serve]` (unknown key).
+- `lambo::surface::session`: session-id validation for ids taken from a
+  request (`parse_addressed`: `[A-Za-z0-9._:-]`, 1 to 128 bytes, no leading
+  `.`, no percent-decoding), the in-memory authorization types the coming
+  multi-session routes and the web portal share, and their one uniform 404.
+  `--session` keeps its looser rule.
+- `Ledger::for_session`, a handle onto the same ledger that stamps `session`
+  on its lines.
 - `lambo_stats` reports `write_queue_probe_optimism` (the startup probe's
   rate divided by the observed one, `null` until your writes have been
   observed) and `write_queue_apply_samples` with

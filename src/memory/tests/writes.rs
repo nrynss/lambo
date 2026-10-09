@@ -11,21 +11,36 @@ use super::*;
 /// organically-derived data — with no live cluster. Every answer it gives
 /// is recorded so a test can prove the vector leg *fired* rather than
 /// inferring it from a rank.
-struct VectorSearchStore {
+///
+/// Built with [`VectorSearchStore::graph_ranked`] it also declares its
+/// checked read an exact scan, so a holder ranks in its own graph instead
+/// (#8's `VectorCandidates::Graph`); the #14 query-cache tests run on both.
+pub(super) struct VectorSearchStore {
     inner: Arc<dyn GraphStore>,
     answers: PlMutex<Vec<Vec<Scored<NodeId>>>>,
+    exact_scan: bool,
 }
 
 impl VectorSearchStore {
-    fn new(inner: Arc<dyn GraphStore>) -> Self {
+    pub(super) fn new(inner: Arc<dyn GraphStore>) -> Self {
         Self {
             inner,
             answers: PlMutex::new(Vec::new()),
+            exact_scan: false,
+        }
+    }
+
+    /// The same store, declaring `exact_vector_scan`, so a holder ranks its
+    /// graph's vectors and never calls the checked read.
+    pub(super) fn graph_ranked(inner: Arc<dyn GraphStore>) -> Self {
+        Self {
+            exact_scan: true,
+            ..Self::new(inner)
         }
     }
 
     /// Every `vector_candidates` answer, in call order.
-    fn answers(&self) -> Vec<Vec<Scored<NodeId>>> {
+    pub(super) fn answers(&self) -> Vec<Vec<Scored<NodeId>>> {
         self.answers.lock().clone()
     }
 }
@@ -40,6 +55,9 @@ impl GraphStore for VectorSearchStore {
     }
     fn vector_dimensions(&self) -> Option<usize> {
         Some(1024)
+    }
+    fn exact_vector_scan(&self) -> bool {
+        self.exact_scan
     }
     async fn flush(&self, batch: &MutationBatch, token: Option<u64>) -> Result<(), StoreError> {
         self.inner.flush(batch, token).await
@@ -194,7 +212,7 @@ impl GraphStore for VectorSearchStore {
 /// label before delegating — behaviour BGE-M3 has for free and a hash
 /// fixture cannot. Nothing else about the embedding path is altered.
 #[derive(Debug)]
-struct ContextTolerantEmbedder(FixtureEmbedder);
+pub(super) struct ContextTolerantEmbedder(pub(super) FixtureEmbedder);
 
 #[async_trait]
 impl Embedder for ContextTolerantEmbedder {

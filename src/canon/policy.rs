@@ -256,8 +256,19 @@ impl FromStr for PromotionPolicy {
             .into_iter()
             .find(|policy| policy.as_str().to_ascii_lowercase() == lowered)
             .ok_or_else(|| {
+                // A short word is quoted back so the typo is visible; anything
+                // else (a DSN or token pasted under the wrong key) is not,
+                // because the message reaches the startup log.
+                let shown = if t.len() <= 24
+                    && t.chars()
+                        .all(|c| c.is_ascii_alphanumeric() || " _-".contains(c))
+                {
+                    format!("{t:?}")
+                } else {
+                    "(value not shown)".to_string()
+                };
                 format!(
-                    "unknown promotion policy {t:?} (expected {})",
+                    "unknown promotion policy {shown} (expected {})",
                     Self::expected()
                 )
             })
