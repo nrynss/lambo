@@ -335,3 +335,155 @@ async fn a_detached_session_s_handle_is_gone_before_it_is_attached_again() {
 
     serve.stop().await.expect("a clean shutdown");
 }
+
+/// The HTTP address the serve bound, from its listening line.
+async fn bound_addr(logs: &crate::test_util::CapturedLogs) -> SocketAddr {
+    let mut found = None;
+    until(Duration::from_secs(10), "the listening line", || {
+        found = logs
+            .lines()
+            .iter()
+            .filter(|l| l.contains("listening on /mcp"))
+            .find_map(|l| {
+                let at = l.find("127.0.0.1:")?;
+                let rest = &l[at..];
+                let end = rest
+                    .char_indices()
+                    .skip("127.0.0.1:".len())
+                    .find(|(_, c)| !c.is_ascii_digit())
+                    .map_or(rest.len(), |(i, _)| i);
+                rest[..end].parse().ok()
+            });
+        found.is_some()
+    })
+    .await;
+    found.expect("a bound address")
+}
+
+/// M2: design §4.2's whole cycle through the real multi-session serve and
+/// its HTTP router. A session loses its lease to another writer, is
+/// detached (503 with `Retry-After`, its MCP sessions gone) while the other
+/// session serves on through the same MCP session it already had; the
+/// other writer releases; the background retry takes the session back with
+/// a new fencing token and it serves again. No false `SecondSessionWriter`
+/// line, and the shutdown releases both leases, keeping their tokens.
+#[tokio::test]
+async fn a_lost_lease_is_detached_re_elected_and_served_again_end_to_end() {
+    let (logs, _guard) = crate::test_util::capture_logs(tracing::Level::INFO);
+    let store = Arc::new(MemoryStore::new());
+    let serve = PinnedServe::start(&store, &["e2e-a", "e2e-b"], |_| {}).await;
+    let addr = bound_addr(&logs).await;
+
+    let (a, _) = initialize(addr, "/mcp/s/e2e-a").await;
+    let (b, _) = initialize(addr, "/mcp/s/e2e-b").await;
+    let first = lease(&store, "e2e-a").await.token;
+    let b_token = lease(&store, "e2e-b").await.token;
+
+    let theirs = take_over(&serve, &store, "e2e-a").await;
+    assert_eq!(theirs, first + 1);
+    until(Duration::from_secs(10), "a's detach", || {
+        logs.lines()
+            .iter()
+            .any(|l| l.contains("session detach finished") && l.contains("e2e-a"))
+    })
+    .await;
+
+    // a: 503 with Retry-After, for a new client and for its old MCP session.
+    for sid in [None, Some(a.as_str())] {
+        let refused = http(
+            addr,
+            "POST",
+            "/mcp/s/e2e-a",
+            sid,
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/list"}"#,
+        )
+        .await;
+        assert_eq!(refused.status, 503, "{}", refused.body);
+        assert!(refused.header("retry-after").is_some(), "{}", refused.head);
+    }
+    // b: unaffected, on the MCP session it opened before the loss.
+    derive(addr, "/mcp/s/e2e-b", &b, &[MARKER_B]).await;
+    assert_eq!(stats(addr, "/mcp/s/e2e-b", &b).await["concept_count"], 1);
+
+    store
+        .release_lease(&SessionId::new("e2e-a"), &other_writer())
+        .await
+        .expect("the other writer releases a");
+    until(PINNED_RETRY * 3, "a's re-election", || {
+        serve.attached("e2e-a").is_some()
+    })
+    .await;
+    let ours = lease(&store, "e2e-a").await;
+    assert_eq!(ours.holder, serve_token());
+    assert_eq!(ours.token, theirs + 1, "a fresh fencing token");
+
+    // a serves again, through a new MCP session.
+    let (a2, init) = initialize(addr, "/mcp/s/e2e-a").await;
+    assert!(
+        init["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("session 'e2e-a'"),
+        "{init}"
+    );
+    derive(addr, "/mcp/s/e2e-a", &a2, &[MARKER_A]).await;
+    assert_eq!(stats(addr, "/mcp/s/e2e-a", &a2).await["session"], "e2e-a");
+    assert_eq!(
+        lease(&store, "e2e-b").await.token,
+        b_token,
+        "b was never re-elected"
+    );
+    assert!(
+        !logs.lines().iter().any(|l| l.contains("SecondSessionWriter")),
+        "a false second-writer report: {:?}",
+        logs.lines()
+    );
+
+    serve.stop().await.expect("a clean shutdown");
+    for (id, token) in [("e2e-a", ours.token), ("e2e-b", b_token)] {
+        let row = lease(&store, id).await;
+        assert_eq!(row.holder, crate::store::lease::RELEASED_HOLDER, "{id}");
+        assert_eq!(row.token, token, "{id}: the token is kept");
+    }
+}
+
+/// M2: `serve_pinned`'s startup failure branch. A pinned session that
+/// cannot be attached (here: erased, a tombstone no acquire takes) refuses
+/// the start, after closing the sessions already acquired, so their leases
+/// are released rather than left to lapse.
+#[tokio::test]
+async fn a_pinned_session_that_cannot_attach_refuses_the_start_and_releases_the_rest() {
+    let store = Arc::new(MemoryStore::new());
+    let operator = LeaseHolder::for_this_process(&AgentId::new("operator"));
+    store
+        .erase_session(&SessionId::new("fail-b"), &operator)
+        .await
+        .expect("erase b");
+
+    let opts = pinned_opts(&["fail-a", "fail-b", "fail-c"], |_| {});
+    let backends = backends_over(Box::new(Shared(Arc::clone(&store))), fast_config(1_000));
+    let err = tokio::time::timeout(
+        Duration::from_secs(20),
+        serve_pinned_with(opts, backends, PinnedSeams::default()),
+    )
+    .await
+    .expect("the refusal is prompt")
+    .expect_err("an erased pinned session refuses the start")
+    .to_string();
+    assert!(err.contains("erased"), "{err}");
+
+    let a = lease(&store, "fail-a").await;
+    assert_eq!(
+        a.holder,
+        crate::store::lease::RELEASED_HOLDER,
+        "the session acquired first is released"
+    );
+    assert!(
+        store
+            .read_lease(&SessionId::new("fail-c"))
+            .await
+            .expect("read")
+            .is_none(),
+        "nothing after the failure is attempted"
+    );
+}
