@@ -600,6 +600,30 @@ impl<T: BearerSecret> SessionAuthority<T> {
     ) -> Result<AddressedSessionId, SessionRefusal> {
         authorize_addressed(raw, grant, need, &self.hosted)
     }
+
+    /// May `grant` use the surface's default session `default` (what an
+    /// unscoped route serves: serve's `/mcp`, the portal's aliases)?
+    ///
+    /// A default whose name passes the strict charset is authorized exactly
+    /// as its addressed route would be. One that does not (a one-session
+    /// surface keeps `--session`'s looser rule, and such a session is
+    /// reachable only through the unscoped route) can be covered by no exact
+    /// name or prefix, so only a scope over every pinned session reaches it:
+    /// `"*"`, and the `default` and `local` grants.
+    pub(crate) fn authorize_default(
+        &self,
+        grant: &SessionGrant,
+        default: &str,
+    ) -> Result<(), SessionRefusal> {
+        if parse_addressed(default).is_ok() {
+            return self.authorize(grant, default, SessionNeed::Use).map(|_| ());
+        }
+        if grant.scope().covers_every_pinned() {
+            Ok(())
+        } else {
+            Err(SessionRefusal::new(RefusalReason::OutOfScope))
+        }
+    }
 }
 
 #[cfg(test)]
