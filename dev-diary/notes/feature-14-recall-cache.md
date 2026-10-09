@@ -90,11 +90,15 @@ still taken afterwards, unchanged.
 **Bounded memory.** 128 entries and 1 MiB per session, whichever binds first,
 least recently used out (a monotonic tick, the same scheme as `RecallCache`).
 Each entry is charged its query bytes, `4 * dim` for the vector, the
-contract's `kind` and `model` strings, and a fixed 160 bytes for the map slot
-and headers. At 1,024 dimensions a short query costs about 4.2 KiB, so the
-entry cap binds at about 540 KiB per session; a 16 KiB query (the MCP argument
-cap) costs about 20 KiB, so about 50 of those fit in the 1 MiB budget. An entry
-larger than the whole budget is not cached. The bounds are module constants,
+contract's `kind` and `model` strings, and a fixed 256 bytes for the map slot
+and headers (raised from 160 after review: a full 128-entry table measures
+about 226 B per entry plus 16 B per `Arc` header). At 1,024 dimensions a short
+query costs about 4.4 KiB, so the entry cap binds at about 560 KiB per session;
+a 16 KiB query (about the MCP tools' published `maxLength`, which is a schema
+hint in characters, not an enforced byte cap) costs about 20 KiB, so about 50
+of those fit in the 1 MiB budget. An entry larger than the whole budget is not
+cached. Only a vector exactly `dim` wide, all finite and non-zero, is cached;
+anything else is used for its one recall and dropped. The bounds are module constants,
 not config: no knob was asked for, and `[serve]` config parsing is #32's.
 
 **`mutation_epoch` stays in the recall-cache key** (acceptance 3). The pipeline

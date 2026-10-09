@@ -85,7 +85,7 @@
   A novel query still pays its embed (21.9 ms to 21.8 ms).
   - The cache belongs to one session and is never shared across sessions in a
     process, so reply timing cannot reveal another session's queries.
-  - Bounded at 128 entries and 1 MiB per session (about 540 KiB for short
+  - Bounded at 128 entries and 1 MiB per session (about 560 KiB for short
     queries at 1,024 dimensions), least recently used first out. A failed
     embed is not cached. A closed or erased session refuses the recall before
     the cache is consulted.

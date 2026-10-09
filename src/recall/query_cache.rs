@@ -37,16 +37,21 @@ use crate::types::EmbeddingContract;
 pub const QUERY_CACHE_MAX_ENTRIES: usize = 128;
 
 /// Most bytes one session's entries are charged in total (1 MiB). At
-/// BGE-M3's 1,024 dimensions a short query costs about 4.2 KiB, so the entry
-/// cap binds first (128 entries, about 540 KiB); long queries hit this
-/// budget instead (a 16 KiB query, the MCP argument cap, costs about 20 KiB,
-/// so about 50 of them fit).
+/// BGE-M3's 1,024 dimensions a short query costs about 4.4 KiB, so the entry
+/// cap binds first (128 entries, about 560 KiB); long queries hit this
+/// budget instead (a 16 KiB query, about the MCP tools' published
+/// `maxLength`, costs about 20 KiB, so about 50 of them fit). That
+/// `maxLength` is a schema hint in characters, not an enforced byte cap; a
+/// longer query is simply charged more, and one over the whole budget is
+/// not cached.
 pub const QUERY_CACHE_MAX_BYTES: usize = 1024 * 1024;
 
 /// Fixed charge per entry for the hash-map slot, the `String`, `Arc<[f32]>`
-/// and contract headers, and the tick. An upper estimate, not an exact
-/// allocator figure.
-pub const ENTRY_OVERHEAD_BYTES: usize = 160;
+/// and contract headers, and the tick. Measured on rustc 1.99, a full
+/// 128-entry table costs about 226 B per entry (a 112 B slot in 256
+/// buckets) plus 16 B per `Arc` header; 256 covers that with allocator
+/// rounding to spare. An estimate, not an exact allocator figure.
+pub const ENTRY_OVERHEAD_BYTES: usize = 256;
 
 struct Entry {
     contract: EmbeddingContract,
