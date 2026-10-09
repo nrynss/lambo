@@ -106,11 +106,18 @@ async fn at_most_one_of_image_or_query_vector_and_text_otherwise() {
         refused(&s, both).await,
         "send at most one of image or query_vector"
     );
-    // Neither: the text is required, as before.
-    let text = refused(&s, json!({"agent_id": "agent-a"})).await;
-    assert!(text.contains("query"), "{text}");
-    let text = refused(&s, json!({"agent_id": "agent-a", "query": "  "})).await;
-    assert!(text.contains("query"), "{text}");
+    // Neither: the text is required, as before, and the refusal names the
+    // two alternatives (a missing `query` is this tool error now, not
+    // serde's "missing field").
+    for args in [
+        json!({"agent_id": "agent-a"}),
+        json!({"agent_id": "agent-a", "query": "  "}),
+    ] {
+        assert_eq!(
+            refused(&s, args).await,
+            "query must be a non-empty string (or send image or query_vector)"
+        );
+    }
     s.mem.close().await.expect("close");
 }
 

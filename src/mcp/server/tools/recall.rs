@@ -44,7 +44,8 @@ impl LamboServer {
         if by_kind.is_none()
             && let Err(e) = require_nonempty("query", &p.query)
         {
-            return bad_param(e);
+            // The text is optional only beside the other two, so name them.
+            return bad_param(format!("{e} (or send image or query_vector)"));
         }
         if let Err(e) = check_size("query", &p.query) {
             return e;

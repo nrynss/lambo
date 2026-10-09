@@ -125,7 +125,10 @@
   refuses a call with none of the three). The tool-list golden is updated
   for `lambo_recall` only; the other seven schemas are byte-identical.
   `lambo recall --query` is likewise optional beside `--image` or
-  `--query-vector-json`.
+  `--query-vector-json`. A `lambo_recall` call with no `query` (and neither
+  of the two) now gets a tool error (`isError`), `query must be a
+  non-empty string (or send image or query_vector)`, where before serde
+  refused it as a JSON-RPC invalid-params error (`missing field query`).
 - A hybrid derive whose embedding text would exceed 16 KiB is refused when
   it is called, not on its receipt (#74): each new concept and `parent_of`
   end is embedded framed with the whole call's text, so on a store with
