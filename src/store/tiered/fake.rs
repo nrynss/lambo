@@ -370,6 +370,7 @@ impl RecallIndex for FakeIndex {
                 id: NodeId(uuid::Uuid::parse_str(&d.node_id).expect("uuid")),
                 cosine: self.score(probe, &d.embedding),
                 canonical_key: d.canonical_key.clone(),
+                embedding: Some(d.embedding.clone()),
             })
             .collect();
         hits.sort_by(|a, b| b.cosine.total_cmp(&a.cosine));

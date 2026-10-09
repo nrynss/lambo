@@ -88,10 +88,10 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
 
-use self::index::{DocOp, RecallIndex, SyncMarker};
+use self::index::{DocOp, KnnHit, RecallIndex, SyncMarker};
 use self::project::{index_doc, mirror_version, project, sole_session};
 use crate::store::lease::{LeaseHolder, LeaseInfo, LeaseOutcome, LeaseRefusal, LEASE_TTL};
-use crate::store::vector_source::{ensure_is_an_embedding, VectorCandidateSource};
+use crate::store::vector_source::{ensure_is_an_embedding, rank_by_cosine, VectorCandidateSource};
 use crate::store::{
     validate_vector_candidate_limit, Capabilities, EraseOutcome, GraphStore, RecallBackfillReport,
     SessionFlushStats,
@@ -108,6 +108,10 @@ pub(crate) const REPAIR_BACKOFF: Duration = Duration::from_secs(60);
 
 /// Documents per bulk request during a repair.
 const REPAIR_CHUNK: usize = 500;
+
+/// Extra neighbours fetched beyond `limit`, so the exact re-rank decides the
+/// last places rather than the engine's approximate order (M3).
+pub(crate) const KNN_OVERFETCH: usize = 16;
 
 /// Delete-by-query passes before a sweep gives up on documents that keep
 /// being rewritten under it (version conflicts).
@@ -680,9 +684,10 @@ impl VectorCandidateSource for TieredStore {
         // Only the expected contract's index is queried: whatever happened to
         // the durable contract since the check, these vectors are in the
         // caller's space.
+        let fetch = limit.saturating_add(KNN_OVERFETCH);
         let hits = match self
             .recall
-            .knn(expected_contract, session, probe, limit)
+            .knn(expected_contract, session, probe, fetch)
             .await
         {
             Ok(hits) => hits,
@@ -697,18 +702,59 @@ impl VectorCandidateSource for TieredStore {
                     .await;
             }
         };
-        let mut ranked: Vec<(Scored<NodeId>, String)> = hits
-            .into_iter()
-            .map(|h| (Scored::new(h.id, h.cosine), h.canonical_key))
-            .collect();
-        ranked.sort_by(|(a, a_key), (b, b_key)| {
-            b.score
-                .total_cmp(&a.score)
-                .then_with(|| tie_break_by_key(Some(a_key), &a.item, Some(b_key), &b.item))
-        });
-        ranked.truncate(limit);
-        Ok(ranked.into_iter().map(|(s, _)| s).collect())
+        Ok(rerank(probe, &hits, limit))
     }
+}
+
+/// Rank the index's hits exactly (#18 review M3).
+///
+/// The engine only chooses the pool: its scores may come from quantized
+/// vectors and are `f32` whatever the mapping, so each hit is re-scored from
+/// its stored vector with [`rank_by_cosine`], the scorer every exact source
+/// uses (same cosine, same issue-2 tie-break). A hit whose vector did not
+/// come back, or came back at another width, keeps the engine's score.
+fn rerank(probe: &[f32], hits: &[KnnHit], limit: usize) -> Vec<Scored<NodeId>> {
+    let exact = |h: &KnnHit| {
+        h.embedding
+            .as_deref()
+            .filter(|e| e.len() == probe.len())
+            .is_some()
+    };
+    if hits.iter().all(exact) {
+        return rank_by_cosine(
+            probe,
+            hits.iter().map(|h| {
+                (
+                    h.id,
+                    h.embedding.as_deref().unwrap_or_default(),
+                    h.canonical_key.as_str(),
+                )
+            }),
+            limit,
+        );
+    }
+    tracing::debug!(
+        target: "lambo::recall_tier",
+        "recall index returned hits without their stored vectors; ranking those by the \
+         engine's score"
+    );
+    let mut ranked: Vec<(Scored<NodeId>, &str)> = hits
+        .iter()
+        .map(|h| {
+            let score = match h.embedding.as_deref().filter(|e| e.len() == probe.len()) {
+                Some(e) => f64::from(crate::embed::cosine(probe, e)),
+                None => h.cosine,
+            };
+            (Scored::new(h.id, score), h.canonical_key.as_str())
+        })
+        .collect();
+    ranked.sort_by(|(a, a_key), (b, b_key)| {
+        b.score
+            .total_cmp(&a.score)
+            .then_with(|| tie_break_by_key(Some(a_key), &a.item, Some(b_key), &b.item))
+    });
+    ranked.truncate(limit);
+    ranked.into_iter().map(|(s, _)| s).collect()
 }
 
 #[async_trait]

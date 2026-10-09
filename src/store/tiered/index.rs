@@ -73,10 +73,14 @@ impl DocOp {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct KnnHit {
     pub id: NodeId,
-    /// Cosine similarity in `[-1, 1]`, the scale every other vector source
-    /// returns (`rank_by_cosine`).
+    /// The engine's score mapped to cosine in `[-1, 1]`. Approximate when
+    /// the engine scores quantized vectors, and an `f32` either way: the
+    /// tier ranks by it only for a hit that came back without its vector.
     pub cosine: f64,
     pub canonical_key: String,
+    /// The stored vector, from `_source`, so the tier can score the hit
+    /// exactly (`rank_by_cosine`).
+    pub embedding: Option<Vec<f32>>,
 }
 
 /// What one delete-by-query did. The engine deletes only what its search

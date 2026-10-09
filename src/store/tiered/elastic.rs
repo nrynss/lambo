@@ -257,6 +257,15 @@ impl ElasticRecall {
     }
 }
 
+/// The stored vector from a hit's `_source`, when the engine returned one
+/// (a cluster that excludes vectors from `_source` returns none).
+fn stored_vector(v: &Value) -> Option<Vec<f32>> {
+    v.as_array()?
+        .iter()
+        .map(|x| x.as_f64().map(|f| f as f32))
+        .collect()
+}
+
 enum Body {
     Json(Value),
     NdJson(String),
@@ -315,7 +324,11 @@ impl RecallIndex for ElasticRecall {
                             "type": "dense_vector",
                             "dims": contract.dim,
                             "index": true,
-                            "similarity": "cosine"
+                            "similarity": "cosine",
+                            // Pinned (#18 review M3): plain float HNSW. Left
+                            // unset, 8.14+ defaults to int8_hnsw and 9.1+ to
+                            // bbq_hnsw at 384+ dims, both quantized.
+                            "index_options": { "type": "hnsw" }
                         }
                     }
                 }
@@ -451,7 +464,8 @@ impl RecallIndex for ElasticRecall {
                 "filter": Self::session_filter(session)
             },
             "size": k,
-            "_source": ["canonical_key"]
+            // The stored vector rides along so the tier re-ranks exactly.
+            "_source": ["canonical_key", "embedding"]
         });
         let (status, resp) = self
             .send("knn search", Method::POST, url, Some(Body::Json(body)))
@@ -483,6 +497,7 @@ impl RecallIndex for ElasticRecall {
                         .as_str()
                         .unwrap_or_default()
                         .to_owned(),
+                    embedding: stored_vector(&h["_source"]["embedding"]),
                 })
             })
             .collect()
@@ -739,14 +754,15 @@ mod tests {
                                 "num_candidates": 100,
                                 "filter": { "term": { "session_id": "s" } }
                             },
-                            "size": 3
+                            "size": 3,
+                            "_source": ["canonical_key", "embedding"]
                         })
                         .to_string(),
                     );
                 then.status(200).json_body(json!({
                     "hits": { "hits": [
                         { "_id": hit.0.to_string(), "_score": 0.75,
-                          "_source": { "canonical_key": "key" } }
+                          "_source": { "canonical_key": "key", "embedding": [0.5, 0.25] } }
                     ] }
                 }));
             })
@@ -760,6 +776,11 @@ mod tests {
         assert_eq!(hits[0].id, hit);
         assert!((hits[0].cosine - 0.5).abs() < 1e-12, "(1 + cos) / 2 = 0.75");
         assert_eq!(hits[0].canonical_key, "key");
+        assert_eq!(
+            hits[0].embedding,
+            Some(vec![0.5, 0.25]),
+            "the stored vector"
+        );
     }
 
     #[tokio::test]
@@ -937,7 +958,8 @@ mod tests {
                 when.method(PUT).path(format!("/{name}")).json_body_partial(
                     json!({ "mappings": { "properties": {
                         "embedding": { "type": "dense_vector", "dims": 2,
-                                       "index": true, "similarity": "cosine" },
+                                       "index": true, "similarity": "cosine",
+                                       "index_options": { "type": "hnsw" } },
                         "session_id": { "type": "keyword" }
                     } } })
                     .to_string(),

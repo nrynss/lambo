@@ -357,6 +357,43 @@ async fn a_committed_flush_is_mirrored_and_the_index_serves_the_vector_leg() {
     assert_eq!(fake.knn_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
+/// M3: a hit that came back without its stored vector (a cluster that
+/// excludes vectors from `_source`) keeps the engine's score; the others are
+/// re-scored exactly, and the limit applies after the re-rank.
+#[test]
+fn rerank_scores_exactly_and_falls_back_to_the_engine_score_per_hit() {
+    use super::index::KnnHit;
+    let (a, b, c) = (NodeId::new(), NodeId::new(), NodeId::new());
+    let probe = [1.0f32, 0.0];
+    let hits = vec![
+        // The engine over-rates `a`; its vector says 0.6.
+        KnnHit {
+            id: a,
+            cosine: 0.99,
+            canonical_key: "a".into(),
+            embedding: Some(vec![0.6, 0.8]),
+        },
+        KnnHit {
+            id: b,
+            cosine: 0.7,
+            canonical_key: "b".into(),
+            embedding: None,
+        },
+        KnnHit {
+            id: c,
+            cosine: 0.1,
+            canonical_key: "c".into(),
+            embedding: Some(vec![0.8, 0.6]),
+        },
+    ];
+    let got = super::rerank(&probe, &hits, 2);
+    assert_eq!(ids(&got), vec![c, b]);
+    assert!((got[0].score - 0.8).abs() < 1e-6);
+    assert_eq!(got[1].score, 0.7);
+    let all_exact: Vec<KnnHit> = hits.into_iter().filter(|h| h.id != b).collect();
+    assert_eq!(ids(&super::rerank(&probe, &all_exact, 5)), vec![c, a]);
+}
+
 /// #8: a holder over the tier must reach the index, so the tier never
 /// declares an exact scan; and it always offers the vector leg, with a width.
 #[tokio::test]
@@ -1402,6 +1439,96 @@ mod sqlite_parity {
             );
         }
         assert!(fake.knn_calls.load(std::sync::atomic::Ordering::SeqCst) > 0);
+    }
+
+    /// M3: an engine that scores approximately (int8 quantization, an f32
+    /// `_score`) only prunes the pool. The tier re-ranks what it returns with
+    /// the stored vectors, so ranks and scores are the exact scan's, bit for
+    /// bit, and near-ties at the limit resolve by the issue-2 tie-break.
+    #[tokio::test]
+    async fn index_scores_are_exact_against_an_approximate_engine() {
+        let primary = sqlite_primary().await;
+        let fake = Arc::new(FakeIndex::new().quantized());
+        let store = tier(&primary, &fake);
+        let sid = SessionId::new("approx");
+        let token = attach(&store, &sid, &holder("w")).await;
+        let origin = NodeId::new();
+        let mut muts = spread(&sid, origin);
+        // Two near-ties the quantizer can reorder.
+        for (i, v) in [[0.95f32, 0.31, 0.02, 0.0], [0.95, 0.31, 0.0, 0.02]]
+            .iter()
+            .enumerate()
+        {
+            let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+            muts.push(upsert(concept(
+                &sid,
+                NodeId::new(),
+                origin,
+                &format!("tie{i}"),
+                Some(v.iter().map(|x| x / norm).collect()),
+            )));
+        }
+        store.flush(&batch(1, muts), Some(token)).await.unwrap();
+        for limit in [1, 3, 5, 8] {
+            let from_index = store
+                .vector_candidates_checked(&sid, &PROBE, &contract(), limit)
+                .await
+                .unwrap();
+            let exact = primary
+                .vector_candidates_checked(&sid, &PROBE, &contract(), limit)
+                .await
+                .unwrap();
+            assert_eq!(ids(&from_index), ids(&exact), "limit {limit}");
+            for (a, b) in from_index.iter().zip(&exact) {
+                assert_eq!(a.score.to_bits(), b.score.to_bits(), "limit {limit}");
+            }
+        }
+        assert!(fake.knn_calls.load(std::sync::atomic::Ordering::SeqCst) > 0);
+    }
+
+    /// M3: two vectors the quantizer orders the wrong way round. Asked for
+    /// one, the engine alone would return the wrong one; the over-fetch
+    /// hands both to the exact re-rank, which picks the right one.
+    #[tokio::test]
+    async fn the_overfetch_lets_the_exact_rank_decide_the_boundary() {
+        let primary = sqlite_primary().await;
+        let fake = Arc::new(FakeIndex::new().quantized());
+        let store = tier(&primary, &fake);
+        let sid = SessionId::new("boundary");
+        let token = attach(&store, &sid, &holder("w")).await;
+        let origin = NodeId::new();
+        let mut muts = vec![
+            set_contract(&sid, Some(contract())),
+            interaction(&sid, origin),
+        ];
+        for (key, v) in [
+            ("exact-winner", [0.9715f32, 0.2356, 0.0222, 0.0135]),
+            ("engine-winner", [0.974, 0.2228, 0.0403, 0.0006]),
+        ] {
+            let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+            muts.push(upsert(concept(
+                &sid,
+                NodeId::new(),
+                origin,
+                key,
+                Some(v.iter().map(|x| x / norm).collect()),
+            )));
+        }
+        store.flush(&batch(1, muts), Some(token)).await.unwrap();
+        let engine_alone = fake.knn(&contract(), &sid, &PROBE, 1).await.unwrap();
+        assert_eq!(
+            engine_alone[0].canonical_key, "engine-winner",
+            "precondition: the approximate engine misorders the pair"
+        );
+        let got = store
+            .vector_candidates_checked(&sid, &PROBE, &contract(), 1)
+            .await
+            .unwrap();
+        let exact = primary
+            .vector_candidates_checked(&sid, &PROBE, &contract(), 1)
+            .await
+            .unwrap();
+        assert_eq!(ids(&got), ids(&exact));
     }
 
     /// Index down, or the session stale: the answer is the primary's own.
