@@ -88,6 +88,35 @@ The in-memory store is scoped to one process. Many agents can share it through a
 
 The kind you choose must be compiled into your binary. If it is not, Lambo fails at startup and names the feature to rebuild with. See [Installation](/installation).
 
+## Recall tier
+
+`[recall]` adds an Elasticsearch index beside the store that serves the vector part of recall. It is optional, and it is not a store kind: the `[store]` you chose stays the source of truth, and leases, fencing, canonization and graph queries never touch Elasticsearch. Each flush the store commits is copied to the index, and recall asks the index for the nearest concepts instead of scanning vectors in the store.
+
+```toml
+[recall]
+kind = "elastic"
+url = "https://my-cluster.es.example.com"
+api_key = { env = "LAMBO_ES_API_KEY" }
+index_prefix = "lambo"
+```
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `kind` | string | none | `elastic`. Required. |
+| `url` | string | none | The cluster's base URL, `http://` or `https://`. A URL that carries a user name or password is refused. |
+| `api_key` | table | none | `{ env = "NAME" }`: the environment variable that holds the API key. The key itself is never accepted in the file. Omit it for a cluster with security off. |
+| `index_prefix` | string | `lambo` | Lowercase letters, digits, `-`, `_` and `.`. Vectors go to `<prefix>-v-<hash>`, one index per embedding model, and a small `<prefix>-meta` index keeps one sync marker per session. |
+| `refresh` | string | `"false"` | When a write becomes searchable: `"false"` leaves it to the index refresh interval (1 second by default), `"wait_for"` waits on every write and is for tests. |
+| `timeout_ms` | integer | `5000` | Per-request timeout. |
+
+`[recall]` is a top-level table, not part of `[store]`. It needs the `recall-elastic` feature; a binary built without it refuses the section and names the feature rather than ignoring it. Lambo creates each index with its mapping the first time it writes to it.
+
+**Staleness.** A concept becomes searchable in the index up to one refresh interval after its flush, so the vector part of recall can miss a concept written in the last second or so. The keyword and recent parts of recall still find it. This is an accepted difference from a store that ranks vectors itself.
+
+**When the index is unavailable.** A failed copy never fails the flush, because the store already has the data. The session is marked stale, and until the index is repaired recall ranks vectors in the store instead (SQLite, PostgreSQL and CockroachDB do this themselves; the in-memory store has no vector search, so recall uses only its keyword and recent parts). A failed query does the same for that one recall. The writer holding the session repairs its index when it next opens the session and after a later flush, and `lambo recall-index backfill` repairs it when no writer is running. See [Command line](/cli#rebuild-the-recall-index).
+
+Erasing a session also removes it from the index. See [Command line](/cli#rebuild-the-recall-index).
+
 ## Embedder
 
 `[embedder]` selects how text is turned into vectors.
@@ -176,6 +205,7 @@ Cargo features decide which stores and embedders exist in your binary, and `lamb
 | `store-sqlite` | The SQLite store. |
 | `store-cockroach` | The CockroachDB store. |
 | `store-postgres` | The PostgreSQL + pgvector store. Fail-closed until B2 lands schema init. |
+| `recall-elastic` | The Elasticsearch recall tier (`[recall]`). Released binaries include it. |
 | `embed-fixture` | The deterministic fixture embedder. |
 | `embed-bge` | BGE-M3 embeddings through `llama-server`. |
 | `embed-bedrock` | Reserved for Amazon Titan embeddings through Bedrock. Not implemented yet. |

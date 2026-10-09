@@ -77,6 +77,25 @@
 
 ### Added
 
+- An optional Elasticsearch recall tier (#18, feature `recall-elastic`): a
+  top-level `[recall]` section in `lambo.toml` wraps the configured store in a
+  `TieredStore`. The store stays the source of truth and keeps leases, fencing,
+  canonization and graph queries; each committed flush is mirrored to a
+  per-embedding-contract index at an external version built from the fencing
+  token and a per-session flush counter, and the index serves the vector leg of
+  recall. A mirror failure never fails a flush: the session is marked stale,
+  vector recall falls back to the store's own read (or to the keyword and
+  recent legs when the store has no vector search), and the lease holder
+  repairs the index at its next load or flush. A per-session sync marker in the
+  index makes a crash between commit and mirror visible at the next load.
+  `erase-session` also removes the session from the index and does not report
+  success until it has. The API key is by reference only
+  (`api_key = { env = "NAME" }`). A build without the feature refuses a
+  `[recall]` section by name. See `dev-diary/notes/feature-18-elastic-tier.md`.
+- `lambo recall-index backfill --session <s>`: rebuild one session's recall
+  index from the store under the session's lease (#18).
+- `GraphStore::backfill_recall_index()` (default `Ok(None)`): the hook the
+  backfill verb calls; only a store with a recall tier overrides it. Additive.
 - `GraphStore::exact_vector_scan()` (default `false`): an adapter declares its
   checked vector read is an exact cosine scan of every vector it stores, so a
   session holder may answer that read from its graph (#8). `SqliteStore`

@@ -41,6 +41,7 @@ demo with `store-cockroach` + `embed-bge`, and leaves Bedrock optional until aut
 | `embed-candle` | `CandleEmbedder` (in-crate BGE-M3 via candle-transformers) + `tokenizers` | no until K2 ships a build |
 | `embed-candle-metal` / `-accelerate` / `-cuda` | accelerator backends for candle (layer features implying `embed-candle`) | opt-in at build time |
 | `embed-bedrock` | Bedrock Titan (T7.1) + AWS SDK | no until authorized |
+| `recall-elastic` | `TieredStore` + Elasticsearch recall tier over the existing `reqwest` (#18); selected by `[recall]`, not by `store.kind` | no (in `ship`) |
 | `fixtures` | T1.4 JSON loader (implies `store-memory`) | **yes** |
 
 **Default feature set:**
@@ -102,6 +103,7 @@ LamboFile::load_resolved(path?)
 resolve_backends(file)          // src/resolve.rs
         │
         ├─ build_store(store_cfg)       → Box<dyn GraphStore>
+        ├─ wrap_with_recall_tier(store, [recall])  → TieredStore or the store unchanged (#18)
         ├─ build_embedder(embed_cfg)    → Box<dyn Embedder>
         ├─ check_vector_compatibility(store.vector_dimensions(), embedder.dimensions())
         └─ EmbeddingContract { kind, model, dim }

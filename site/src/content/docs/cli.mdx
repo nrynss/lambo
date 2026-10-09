@@ -366,10 +366,25 @@ WHERE session_id = 'user-42' AND holder = 'lambo:erased';
 Never delete the row. Deleting it starts the session's fencing tokens again, so a writer that was cut off before the erase could write its copy of the erased data into the reused session.
 
 <Warning>
-Erasing reaches the store only. Backups and snapshots taken before the erase still hold the session, and so does a call ledger file written by `lambo serve --ledger`, which can contain recall queries and concept text. Your backup and log retention policy governs those copies.
+Erasing reaches the store, and the recall index when one is configured: the command reports success only after the index has dropped the session too, and a run that could not reach the index exits `1` and is safe to repeat. Backups and snapshots taken before the erase still hold the session, and so does a call ledger file written by `lambo serve --ledger`, which can contain recall queries and concept text. Your backup and log retention policy governs those copies.
 </Warning>
 
 Only someone with access to the store can erase a session. There is no MCP tool for it, so an agent cannot erase memory it was asked to keep.
+
+## Rebuild the recall index
+
+`lambo recall-index backfill` rebuilds one session's recall index from the store, when your config has a [recall tier](/lambo/config/#recall-tier). It copies every stored concept vector to the index, removes index entries the store no longer has, such as deleted concepts or vectors from an earlier embedding model, and marks the session as in sync. It reads the store from your config and does not build the embedder.
+
+| Flag | Required | Default |
+|---|---|---|
+| `--session <SESSION>` | Yes | |
+
+```bash
+$ lambo --config lambo.toml recall-index backfill --session user-42
+{"session":"user-42","indexed":5,"index":"lambo-v-3f2a9c1e5b7d4a60","mutation_epoch":41}
+```
+
+It takes the session's writer lease while it runs, so it exits `1` and names the holder while a `lambo serve` or another writer holds the session. You rarely need it then: the writer repairs its own index when it opens the session and after a flush that follows an outage. Use the command after an index outage with no writer running, or to fill the index for a session written before the tier was configured. With no `[recall]` section it exits `2` and changes nothing. Running it again is safe.
 
 ## Run the demo
 

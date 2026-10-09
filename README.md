@@ -177,6 +177,18 @@ rather than a build decision. Building your own with a narrower feature list is 
 [Installation](https://nrynss.github.io/lambo/installation/). The design of record is
 [`dev-diary/notes/level-b-pluggability.md`](dev-diary/notes/level-b-pluggability.md).
 
+**Recall tier (optional).** A `[recall]` section puts an Elasticsearch index beside the
+store (`--features recall-elastic`). The store stays the source of truth for everything
+transactional: leases, fencing, canonization and graph queries. Each committed flush is
+copied to the index, which then serves the vector part of recall, so sessions too large to
+scan in memory still rank quickly. Two accepted divergences: a flush becomes searchable up
+to one index refresh (1 s by default) after it commits, and the contract check and the index
+query are two reads rather than one transaction, so a model switch between them yields
+stale-but-same-space results rather than an error. When the index is down or behind, recall
+ranks in the store instead and the session's writer repairs the index. See
+[`lambo.example.toml`](lambo.example.toml) and
+[`dev-diary/notes/feature-18-elastic-tier.md`](dev-diary/notes/feature-18-elastic-tier.md).
+
 **Do not switch embedder models mid-session without re-embedding.** Vectors from different
 models are not comparable. Session identity is the `EmbeddingContract` of kind, model, and
 dimension.
