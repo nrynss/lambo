@@ -91,7 +91,11 @@ annotation and the same line in `warnings`,
 `EmbedUnavailable` (timeout, unreachable), `Embed` (refused, or an unusable
 vector), `Config` (no image modality). A store without `VECTOR_SEARCH` is a
 `Config` error in the core and a named `configuration error` on the wire,
-checked before decoding anything; the CLI refuses it before any I/O.
+checked before decoding anything. The CLI's `run_by` checks the store's
+vector search and, for `--image`, the embedder's `IMAGE` modality before
+it reads any file or loads the store (review L4; before that fix the file
+was read first and the modality was checked only after the snapshot
+load).
 
 **Images embed with no prompt.** `Embedder::embed_image`, as an image
 derive does (design 3.2's `lambo-eg2-v1` profile prefixes text only), so a
@@ -137,7 +141,9 @@ derive-image's caps (2 MiB, 1 MiB), sharing `read_capped` and
 `VectorFile::parse` (a malformed file is reported by line and column
 only). `--query` becomes `required_unless_present_any`. `run` and
 `run_detailed`, and so `/api/recall`, are unchanged. The reader's vector
-leg is the store's checked read, as for text.
+leg is the store's checked read, as for text. A missing `query` (with
+neither payload) is refused `query must be a non-empty string (or send
+image or query_vector)` on MCP (review L1).
 
 **Every vector source, no store change.** The holder's graph (#8,
 `VectorCandidates::Graph`), the store's checked read (SQLite's scan,
@@ -164,12 +170,14 @@ exact scan, so an MCP test's holder ranks in its graph without a flush
 | test | runs in |
 |---|---|
 | `recall::query_vector::tests::*` (4) | rows with `embed-fixture` |
-| `memory::tests::recall_by::*` (3) | `store-memory` + `embed-fixture` |
-| `mcp::server::tests::recall_image::*` (8) | same |
+| `memory::tests::recall_by::*` (7: + failed vector read on image/vector and on text, contract race, graded similarity) | `store-memory` + `embed-fixture` |
+| `mcp::server::tests::recall_image::*` (9: + `recall_params_build_from_default`) | same |
 | `mcp::server::tests::schemas::the_recall_schema_publishes_the_image_and_vector_caps` | same |
 | `cli::recall::by_tests::the_flags_files_and_opt_in_are_checked_before_any_recall` | same |
 | `store::sqlite::tests::image_e2e::recall_by_image_and_by_vector_find_the_dismissed_look` | `store-sqlite` + `embed-fixture` |
+| `store::sqlite::tests::image_e2e::graded_similarity_ranks_by_cosine_not_recency_on_sqlite` | same |
 | `store::tiered::tests::a_recall_by_image_or_vector_over_the_tier_reads_the_index` | `recall-elastic` + `store-memory` + `embed-fixture` |
+| `store::tiered::tests::graded_similarity_over_the_tier_ranks_by_cosine_not_recency` | same |
 | `tests::recall_query_is_optional_only_beside_an_image_or_a_vector` (bin) | every row |
 
 Changed tests: the golden, the F18 property set and the maxima table cover
@@ -183,7 +191,19 @@ changed.
 - Caching image queries (design 7.2: if ever, namespaced and per session).
 - Per-modality score calibration (design 7.3, PR 5's evidence).
 - Per-credential client vectors (#32 PR 5).
-- `[embedder] accept_client_vectors`'s rustdoc in `src/embed/mod.rs` and
-  its comment in `lambo.example.toml` still name only the derive paths;
-  they sit in the embedder config PR 5 is editing, so they are left for
-  that merge (the reference docs already name the recall paths).
+- (Done in review remediation: `[embedder] accept_client_vectors`'s
+  rustdoc and its `lambo.example.toml` comment now name the recall paths.
+  PR 5 does not edit those lines.)
+
+## Follow-up (review L3, inherited, both image tools)
+
+The size caps on `query_vector.values` (`MAX_VECTOR_VALUES`) and on
+`image.data` (`MAX_IMAGE_B64_LEN`) run before anything is *decoded or
+embedded*, exactly as on `lambo_derive_image` (PR 4), but not before
+*allocation* over MCP: rmcp parses the whole JSON-RPC frame and serde
+allocates the `Vec<f32>` / base64 `String` first, and stdio has no frame
+cap. Not new in this PR and deliberately not changed here (the stdio
+framing is shared by every tool). One follow-up for both
+`lambo_derive_image` and `lambo_recall`: a frame cap on the stdio reader,
+or a capped `deserialize_with` for `values` and `data`. The CLI is
+already correct (`read_capped`'s `take(cap + 1)`).
