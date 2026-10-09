@@ -172,10 +172,16 @@ impl ShutdownProgress {
             first
         };
         self.shared.changed.notify_all();
-        if first {
-            if let Some(spec) = self.shared.watch.lock().take() {
-                watchdog::start(Arc::clone(&self.shared), spec, now);
-            }
+        // Take the spec in its own statement so the `watch` guard is released
+        // before the watchdog thread is spawned. Chaining `lock().take()` into
+        // the `if` would hold that guard across `watchdog::start` (#48).
+        let spec = if first {
+            self.shared.watch.lock().take()
+        } else {
+            None
+        };
+        if let Some(spec) = spec {
+            watchdog::start(Arc::clone(&self.shared), spec, now);
         }
         tracing::info!(
             stage = stage.number(),

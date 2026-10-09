@@ -324,10 +324,10 @@ impl<D: Dialect> PgStore<D> {
             *guard = Some(IamAuth { source, live: None });
         }
         let state = guard.as_mut().expect("initialised directly above");
-        if let Some((pool, expires_at)) = &state.live {
-            if std::time::Instant::now() < *expires_at {
-                return Ok(pool.clone());
-            }
+        if let Some((pool, expires_at)) = &state.live
+            && std::time::Instant::now() < *expires_at
+        {
+            return Ok(pool.clone());
         }
         let (token, expires_at) = state
             .source

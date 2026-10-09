@@ -90,15 +90,15 @@ impl Graph {
                 break;
             }
             self.access_dirty.remove(&id);
-            if let Some(Node::Concept(c)) = self.nodes.get(&id) {
-                if let Some(last_accessed) = c.last_accessed {
-                    out.push(Mutation::RecordAccess {
-                        session_id: c.session_id.clone(),
-                        id,
-                        access_count: c.access_count,
-                        last_accessed,
-                    });
-                }
+            if let Some(Node::Concept(c)) = self.nodes.get(&id)
+                && let Some(last_accessed) = c.last_accessed
+            {
+                out.push(Mutation::RecordAccess {
+                    session_id: c.session_id.clone(),
+                    id,
+                    access_count: c.access_count,
+                    last_accessed,
+                });
             }
         }
         out

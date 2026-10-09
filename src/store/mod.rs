@@ -212,13 +212,12 @@ pub fn columns_in_ddl(ddl: &str) -> Vec<(&str, &str)> {
                 .split(|c: char| c.is_whitespace() || c == ';')
                 .next()
                 .unwrap_or("");
-            if !col.is_empty() {
-                if let Some(table) = trimmed
+            if !col.is_empty()
+                && let Some(table) = trimmed
                     .strip_prefix("ALTER TABLE ")
                     .and_then(|t| t.split_whitespace().next())
-                {
-                    out.push((table, col));
-                }
+            {
+                out.push((table, col));
             }
         }
     }
@@ -1080,10 +1079,10 @@ impl StoreConfig {
             }
             self.dsn = Some(env_dsn);
         }
-        if let Ok(v) = env::var("LAMBO_SQLITE_PATH") {
-            if !v.is_empty() {
-                self.path = Some(v);
-            }
+        if let Ok(v) = env::var("LAMBO_SQLITE_PATH")
+            && !v.is_empty()
+        {
+            self.path = Some(v);
         }
         Ok(self)
     }

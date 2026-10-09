@@ -420,10 +420,10 @@ impl Graph {
         if let Some(by_type) = self.out.get(&id) {
             for (ty, targets) in by_type {
                 for &tgt in targets {
-                    if let Some(&eid) = self.edge_keys.get(&(id, tgt, *ty)) {
-                        if seen.insert(eid) {
-                            incident.push(eid);
-                        }
+                    if let Some(&eid) = self.edge_keys.get(&(id, tgt, *ty))
+                        && seen.insert(eid)
+                    {
+                        incident.push(eid);
                     }
                 }
             }
@@ -431,10 +431,10 @@ impl Graph {
         if let Some(by_type) = self.incoming.get(&id) {
             for (ty, sources) in by_type {
                 for &src in sources {
-                    if let Some(&eid) = self.edge_keys.get(&(src, id, *ty)) {
-                        if seen.insert(eid) {
-                            incident.push(eid);
-                        }
+                    if let Some(&eid) = self.edge_keys.get(&(src, id, *ty))
+                        && seen.insert(eid)
+                    {
+                        incident.push(eid);
                     }
                 }
             }

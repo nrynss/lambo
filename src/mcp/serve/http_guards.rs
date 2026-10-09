@@ -367,16 +367,16 @@ pub(super) async fn guard_request(
         }
     }
 
-    if let Some(rate) = &guard.rate {
-        if !rate.try_acquire() {
-            tracing::warn!("mcp http: request refused by the rate limit");
-            return (
-                StatusCode::TOO_MANY_REQUESTS,
-                [(axum::http::header::RETRY_AFTER, "1")],
-                "rate limit exceeded: slow down and retry\n",
-            )
-                .into_response();
-        }
+    if let Some(rate) = &guard.rate
+        && !rate.try_acquire()
+    {
+        tracing::warn!("mcp http: request refused by the rate limit");
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [(axum::http::header::RETRY_AFTER, "1")],
+            "rate limit exceeded: slow down and retry\n",
+        )
+            .into_response();
     }
 
     if opens_a_new_session(&req) {
@@ -404,21 +404,20 @@ pub(super) async fn guard_request(
     // T8.7 body-size ceiling — checked before the body is streamed to rmcp.
     // A declared body over the cap is refused up front: parse and validation
     // never see it, so amplification through an oversized body is bounded.
-    if let Some(cl) = req.headers().get(axum::http::header::CONTENT_LENGTH) {
-        if let Some(len) = cl.to_str().ok().and_then(|s| s.parse::<u64>().ok()) {
-            if len > MAX_HTTP_BODY_BYTES {
-                tracing::warn!(
-                    len,
-                    max = MAX_HTTP_BODY_BYTES,
-                    "mcp http: refusing an oversized request body"
-                );
-                return (
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    format!("request body too large (limit {MAX_HTTP_BODY_BYTES} bytes)\n"),
-                )
-                    .into_response();
-            }
-        }
+    if let Some(cl) = req.headers().get(axum::http::header::CONTENT_LENGTH)
+        && let Some(len) = cl.to_str().ok().and_then(|s| s.parse::<u64>().ok())
+        && len > MAX_HTTP_BODY_BYTES
+    {
+        tracing::warn!(
+            len,
+            max = MAX_HTTP_BODY_BYTES,
+            "mcp http: refusing an oversized request body"
+        );
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!("request body too large (limit {MAX_HTTP_BODY_BYTES} bytes)\n"),
+        )
+            .into_response();
     }
 
     next.run(req).await

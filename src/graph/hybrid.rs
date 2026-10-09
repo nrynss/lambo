@@ -616,10 +616,11 @@ fn plan_inputs<'a>(
     let mut parent_ends: PlannedEnds<'a> = Vec::new();
     for &(parent, child) in parent_of.pairs() {
         for content in [parent, child] {
-            if let CanonicalizeResult::Unmatched { key } = canonicalize(content, g)? {
-                if !item_keys.contains(key.as_str()) && end_keys.insert(key.clone()) {
-                    parent_ends.push((content, key));
-                }
+            if let CanonicalizeResult::Unmatched { key } = canonicalize(content, g)?
+                && !item_keys.contains(key.as_str())
+                && end_keys.insert(key.clone())
+            {
+                parent_ends.push((content, key));
             }
         }
     }
@@ -781,10 +782,11 @@ async fn derive_planned(
         // is a pure comparison; it never embeds.
         let has_unmatched =
             items.iter().any(|(_, _, _, matched)| matched.is_none()) || !parent_ends.is_empty();
-        if vector_ok && has_unmatched {
-            if let Some(existing) = &stamped {
-                existing.ensure_compatible(embedding)?;
-            }
+        if vector_ok
+            && has_unmatched
+            && let Some(existing) = &stamped
+        {
+            existing.ensure_compatible(embedding)?;
         }
 
         // -----------------------------------------------------------------------
@@ -945,12 +947,10 @@ async fn derive_planned(
         if guard.epoch() != planned_epoch {
             continue;
         }
-        if attempted_embed {
-            if let Some(existing) = guard.embedding() {
-                // Revalidate under the commit lock. Two first writers can both plan
-                // against `None`; only the winner may stamp its vector space.
-                existing.ensure_compatible(embedding)?;
-            }
+        if attempted_embed && let Some(existing) = guard.embedding() {
+            // Revalidate under the commit lock. Two first writers can both plan
+            // against `None`; only the winner may stamp its vector space.
+            existing.ensure_compatible(embedding)?;
         }
 
         // Stage every graph mutation on a private clone. Any invariant failure in
@@ -998,15 +998,15 @@ async fn derive_planned(
             // (hard error + partial write). Epoch validation means any external
             // writer would have forced a re-plan, so the only newly Matched node
             // here is one written earlier in THIS staged call.
-            if let CanonicalizeResult::Matched { node, .. } = canonicalize(content, &g)? {
-                if written.contains(&node) {
-                    outcome.matched.push(node);
-                    if !call_nodes.contains(&node) {
-                        call_nodes.push(node);
-                    }
-                    call_by_key.entry(_key.clone()).or_insert(node);
-                    continue;
+            if let CanonicalizeResult::Matched { node, .. } = canonicalize(content, &g)?
+                && written.contains(&node)
+            {
+                outcome.matched.push(node);
+                if !call_nodes.contains(&node) {
+                    call_nodes.push(node);
                 }
+                call_by_key.entry(_key.clone()).or_insert(node);
+                continue;
             }
             let this_node: NodeId;
             match res {
@@ -1401,11 +1401,11 @@ fn resolve_concept(
             // call's own index before creating. Scoped to `call_by_key`, so a
             // pre-existing *demoted* Observation from an earlier interaction
             // is still never matched and GRAPH-1 stands.
-            if let Some(&node) = call_by_key.get(&key) {
-                if written.contains(&node) {
-                    outcome.matched.push(node);
-                    return Ok(node);
-                }
+            if let Some(&node) = call_by_key.get(&key)
+                && written.contains(&node)
+            {
+                outcome.matched.push(node);
+                return Ok(node);
             }
             let embedding = parent_vectors.get(&key).cloned();
             let embedded = embedding.is_some();

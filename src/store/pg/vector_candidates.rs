@@ -151,10 +151,10 @@ impl<D: Dialect> PgStore<D> {
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     ) -> Result<(), StoreError> {
-        if self.force_exact_scan {
-            if let Some(sql) = D::forced_exact_scan_sql() {
-                sqlx::query(sql).execute(&mut **tx).await.map_err(backend)?;
-            }
+        if self.force_exact_scan
+            && let Some(sql) = D::forced_exact_scan_sql()
+        {
+            sqlx::query(sql).execute(&mut **tx).await.map_err(backend)?;
         }
         Ok(())
     }

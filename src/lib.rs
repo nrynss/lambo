@@ -79,13 +79,6 @@
 //! * [`mcp`] and [`cli`] — the two user-facing surfaces, and [`surface`] — the
 //!   request limits and validation they share.
 
-// Edition 2024 (#42): clippy's `collapsible_if` now asks for let-chains
-// (`if let A = a && cond`). Rewriting existing nested `if let`s is a separate,
-// opportunistic change, so the lint is allowed while that backlog exists; new
-// code should use let-chains anyway. Remove this allow once the backlog is
-// cleared (#48).
-#![allow(clippy::collapsible_if)]
-
 pub mod canon;
 pub mod cli;
 pub mod config;

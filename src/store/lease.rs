@@ -383,12 +383,12 @@ fn detect_host() -> String {
             }
         }
     }
-    if let Ok(out) = std::process::Command::new("hostname").output() {
-        if out.status.success() {
-            let h = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !h.is_empty() {
-                return h;
-            }
+    if let Ok(out) = std::process::Command::new("hostname").output()
+        && out.status.success()
+    {
+        let h = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !h.is_empty() {
+            return h;
         }
     }
     "unknown-host".to_string()
@@ -398,6 +398,16 @@ fn detect_host() -> String {
 /// and `MemoryStore` unit tests call them directly, the Postgres family from
 /// its live legs (`store::pg::release_fencing`).
 #[cfg(test)]
+// The adapter tests that call these helpers are compiled with SQLite, the
+// in-memory store or Postgres; a Cockroach-only test build has none of them.
+#[cfg_attr(
+    not(any(
+        feature = "store-sqlite",
+        feature = "store-memory",
+        feature = "store-postgres"
+    )),
+    allow(dead_code)
+)]
 pub(crate) mod testkit {
     use std::time::Duration;
 

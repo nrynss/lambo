@@ -515,6 +515,16 @@ pub fn no_fault(_step: &str) -> Result<(), StoreError> {
 /// the lease-side tables are written by each adapter's test, since that is
 /// adapter-specific.
 #[cfg(test)]
+// The adapter tests that call these helpers are compiled with SQLite, the
+// in-memory store or Postgres; a Cockroach-only test build has none of them.
+#[cfg_attr(
+    not(any(
+        feature = "store-sqlite",
+        feature = "store-memory",
+        feature = "store-postgres"
+    )),
+    allow(dead_code)
+)]
 pub(crate) mod testkit {
     #[cfg(any(
         feature = "store-sqlite",

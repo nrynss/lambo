@@ -1528,10 +1528,10 @@ fn is_short_id_at(bytes: &[u8], i: usize) -> bool {
     {
         return false;
     }
-    if let Some(prev) = i.checked_sub(1).and_then(|p| bytes.get(p)) {
-        if prev.is_ascii_alphanumeric() {
-            return false;
-        }
+    if let Some(prev) = i.checked_sub(1).and_then(|p| bytes.get(p))
+        && prev.is_ascii_alphanumeric()
+    {
+        return false;
     }
     let hex_at = i + 3;
     for k in 0..crate::recall::format::SHORT_ID_CHARS {

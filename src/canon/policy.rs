@@ -433,10 +433,10 @@ pub fn supporting_interaction_times(graph: &Graph, c: &Concept) -> Vec<DateTime<
             },
             _ => None,
         };
-        if let Some(id) = writer {
-            if let Some(Node::Interaction(i)) = graph.node(id) {
-                times.push(i.about_time());
-            }
+        if let Some(id) = writer
+            && let Some(Node::Interaction(i)) = graph.node(id)
+        {
+            times.push(i.about_time());
         }
     }
     times.sort();

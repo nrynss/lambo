@@ -523,12 +523,12 @@ impl GraphStore for MemoryStore {
         // release cannot evict a writer who took over after our lease lapsed.
         // Expire, never remove: the row keeps `current_token`, so the next
         // acquire mints above it (#23 review H2; see `store::lease`).
-        if let Some(row) = leases.get_mut(&session.0) {
-            if row.holder == token {
-                row.holder = crate::store::lease::RELEASED_HOLDER.to_string();
-                row.expires_at = Utc::now();
-                row.endpoint = None;
-            }
+        if let Some(row) = leases.get_mut(&session.0)
+            && row.holder == token
+        {
+            row.holder = crate::store::lease::RELEASED_HOLDER.to_string();
+            row.expires_at = Utc::now();
+            row.endpoint = None;
         }
         Ok(())
     }
