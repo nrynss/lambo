@@ -250,10 +250,20 @@ pub struct StatsParams {
 //
 // `mime` is a `String` with a published enum rather than a serde enum: a
 // serde enum's unknown-variant error is built inside rmcp's extractor and
-// quotes the caller's string back (see the byte-echo note above), and a
-// client could put its whole base64 payload in that slot. As a `String`
-// the value reaches `surface::image::validate`, whose refusal never quotes
-// it.
+// quotes the caller's string back (see the byte-echo note above). As a
+// `String` the value reaches `surface::image::validate`, whose refusal never
+// quotes it.
+//
+// That closes one slot, not the class (review L3). Every refusal *our* code
+// builds for this tool names the field and the rule and never quotes a
+// value, but serde's type and variant errors, built inside rmcp's
+// extractor before any Lambo code runs, still quote what the caller sent
+// in a wrongly typed slot: `concept_type: "<anything>"` (unknown variant),
+// `image: "<base64>"` or `vector: "<text>"` (invalid type: string), a
+// string in `vector.values` or `contract.dim`. The echo goes back only to
+// the caller that sent it, so nothing crosses sessions or reaches the
+// ledger; it is the same known residual as the byte-echo note above, with
+// the same revisit trigger (an rmcp extraction-error hook).
 //
 // `image.data`, `image_id` and `caption` publish their own `maxLength` (the
 // base64 form of the 2 MiB byte cap, 64, and `surface::image::

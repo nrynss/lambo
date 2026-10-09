@@ -4,10 +4,13 @@
 //!
 //! **Nothing of the image leaves this call.** The bytes are decoded, checked
 //! and embedded here and dropped when the call returns; what is queued, made
-//! durable and replayed is the vector (`Memory::derive_image_async_as`). No
-//! message, ledger line or receipt quotes the base64, the bytes or a vector
-//! component: refusals name the field and the rule, and the ledger line
-//! carries only which payload kind was sent.
+//! durable and replayed is the vector (`Memory::derive_image_as`'s async
+//! twin). No message this code builds, ledger line or receipt quotes the
+//! base64, the bytes or a vector component: refusals name the field and the
+//! rule, and the ledger line carries only which payload kind was sent. The
+//! one residual is rmcp's own parameter extraction, which can quote a value
+//! sent in a wrongly typed slot back to that caller (see the internal notes
+//! in `params.rs`).
 
 use rmcp::model::{CallToolResult, ContentBlock};
 use serde_json::json;
