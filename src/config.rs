@@ -13,7 +13,10 @@ use crate::embed::{EmbedError, EmbedderConfig};
 use crate::store::StoreConfig;
 use crate::types::{LamboError, MatchStrategy};
 
+pub(crate) mod secret_env;
 mod serve;
+/// An environment variable name for an error message, or `(value not shown)`
+/// when it may be a pasted secret (shared by `[serve]` and `[recall]`).
 pub use serve::{
     CredentialConfig, InlineToken, ProjectConfig, ServeConfig, ServeCredential,
     DEFAULT_ATTACH_CONCURRENCY, DEFAULT_IDLE_DETACH_SECS, DEFAULT_MAX_ATTACHED,
@@ -433,6 +436,12 @@ pub struct LamboFile {
         deserialize_with = "crate::canon::deserialize_promotion_policy"
     )]
     pub promotion_policy: Option<PromotionPolicy>,
+    /// `[recall]`: an optional recall tier beside the durable store (#18).
+    /// `None` (no section) keeps the store exactly as `[store]` builds it. A
+    /// section naming a tier this binary was not built with is refused at
+    /// resolve, never ignored (see `store::recall_tier`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recall: Option<crate::store::RecallConfig>,
     /// Multi-session serving (`[serve]`, #32). Parsed and validated only:
     /// nothing reads it at runtime until #32's later PRs, so an absent table
     /// and a present one serve exactly as before. Not serialized when empty,
@@ -550,7 +559,31 @@ impl LamboFile {
     pub fn from_toml_str(s: &str) -> Result<Self, LamboError> {
         let file: Self = toml::from_str(s).map_err(|e| toml_error(s, &e))?;
         file.serve.validate()?;
+        file.check_api_key_env_is_not_a_serve_credential()?;
         Ok(file)
+    }
+
+    /// Refuse an `[embedder] api_key_env` that is also a `[[serve.credential]]`
+    /// `token_env`: the embeddings endpoint would be handed serve's own token.
+    /// Run on the file and again after the environment overlay, since
+    /// `LAMBO_EMBED_API_KEY_ENV` can name the variable too. The rule is
+    /// [`secret_env::check_not_a_serve_credential`].
+    fn check_api_key_env_is_not_a_serve_credential(&self) -> Result<(), LamboError> {
+        let Some(name) = self.embedder.api_key_env.as_deref() else {
+            return Ok(());
+        };
+        let credentials = self
+            .serve
+            .credentials
+            .iter()
+            .filter_map(|c| Some((c.name.as_str(), c.token_env.as_deref()?)));
+        secret_env::check_not_a_serve_credential(
+            name,
+            "embedder.api_key_env",
+            "api_key_env",
+            credentials,
+        )
+        .map_err(LamboError::Config)
     }
 
     /// Load from a path.
@@ -595,6 +628,7 @@ impl LamboFile {
             .embedder
             .overlay_env()
             .map_err(|e: EmbedError| LamboError::Config(e.to_string()))?;
+        file.check_api_key_env_is_not_a_serve_credential()?;
         // Non-empty env wins; an empty value is UNSET and leaves the file
         // value alone — the same rule `StoreConfig::overlay_env` and
         // `EmbedderConfig::overlay_env` apply to all nine of their variables,
@@ -842,6 +876,31 @@ mod tests {
             f.embedder.llama_url.as_deref(),
             Some("http://127.0.0.1:8080")
         );
+    }
+
+    /// #18: the example's commented `[recall]` block is a working section
+    /// once uncommented, and leaving it commented keeps the tier off.
+    #[test]
+    fn lambo_file_example_recall_block_parses_when_uncommented() {
+        let raw = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/lambo.example.toml"));
+        assert_eq!(LamboFile::from_toml_str(raw).unwrap().recall, None);
+        let start = raw
+            .find("# [recall]")
+            .expect("the example documents [recall]");
+        // The block ends at the first blank line: other commented examples
+        // (`[serve]`, #32) follow it in the file.
+        let block: String = raw[start..]
+            .lines()
+            .take_while(|l| !l.trim().is_empty())
+            .map(|l| l.strip_prefix("# ").unwrap_or(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let f = LamboFile::from_toml_str(&block).unwrap();
+        let recall = f.recall.expect("uncommented block selects the tier");
+        assert_eq!(recall.kind, crate::store::RecallKind::Elastic);
+        assert_eq!(recall.api_key.unwrap().env, "LAMBO_ES_API_KEY");
+        assert_eq!(recall.index_prefix, "lambo");
+        assert_eq!(recall.timeout_ms, Some(5000));
     }
 
     #[test]
@@ -1119,6 +1178,31 @@ mod tests {
         assert!(err.contains("knd"), "{err}");
     }
 
+    /// #18 under #32's redaction rules: a `[recall]` section is parsed by the
+    /// same `from_toml_str`, so a URL with userinfo pasted under any key, or
+    /// as the wrong type, never reaches the parse error.
+    #[test]
+    fn a_secret_looking_recall_url_never_reaches_a_parse_error() {
+        const URL: &str = "https://elastic:xyzzy@es.example.com";
+        let cases = [
+            format!("[recall]\nkind = \"elastic\"\nurl = \"{URL}\"\ntimeout_ms = \"{URL}\"\n"),
+            format!("[recall]\nkind = \"{URL}\"\nurl = \"{URL}\"\n"),
+            format!("[recall]\nkind = \"elastic\"\nulr = \"{URL}\"\n"),
+            format!("[recall]\nkind = \"elastic\"\n\"{URL}\" = 1\n"),
+            format!("[recall]\nkind = \"elastic\"\nurl = \"{URL}\"\nurl = \"{URL}\"\n"),
+            format!("[recall]\nkind = \"elastic\"\nurl = \"{URL}\"\napi_key = \"{URL}\"\n"),
+            format!("[recall]\nkind = \"elastic\"\nurl = \"{URL}\"\nrefresh = \"{URL}\"\n"),
+            format!("[recall]\nkind = \"elastic\"\nurl = \"{URL}\"\napi_key = {{ env = \"A\", x = \"{URL}\" }}\n"),
+        ];
+        for toml in &cases {
+            let err = LamboFile::from_toml_str(toml).expect_err(toml).to_string();
+            assert!(!err.contains("xyzzy"), "{toml}: {err}");
+        }
+        // A plain typo is still named, since the operator needs it.
+        let err = LamboFile::from_toml_str(&cases[2]).unwrap_err().to_string();
+        assert!(err.contains("ulr"), "{err}");
+    }
+
     #[test]
     fn lambo_file_rejects_unknown_keys() {
         assert!(
@@ -1262,6 +1346,40 @@ mod tests {
         }
     }
 
+    /// `[embedder] api_key_env` may not name a `[[serve.credential]]`
+    /// variable, from the file or from `LAMBO_EMBED_API_KEY_ENV`: the
+    /// embeddings endpoint would be sent serve's own token.
+    ///
+    /// Mutation: drop either `check_api_key_env_is_not_a_serve_credential`
+    /// call -> red.
+    #[test]
+    fn api_key_env_may_not_name_a_serve_credentials_variable() {
+        const SERVE_VAR: &str = "LAMBO_TEST_ISSUE21_SERVE_TOKEN";
+        let serve = format!(
+            "[[serve.credential]]\nname = \"ops\"\ntoken_env = \"{SERVE_VAR}\"\n\
+             sessions = [\"a\"]\n"
+        );
+        let shared = format!("[embedder]\napi_key_env = \"{SERVE_VAR}\"\n{serve}");
+        let err = LamboFile::from_toml_str(&shared)
+            .expect_err("a shared variable must be refused")
+            .to_string();
+        for needle in ["embedder.api_key_env", SERVE_VAR, "\"ops\""] {
+            assert!(err.contains(needle), "error must name {needle}: {err}");
+        }
+        let own = format!("[embedder]\napi_key_env = \"CLOUDFLARE_API_TOKEN\"\n{serve}");
+        LamboFile::from_toml_str(&own).expect("a variable of its own is accepted");
+
+        let env = crate::test_util::env_lock();
+        let dir = scratch_config_dir("api-key-env-shared");
+        let path = dir.join("lambo.toml");
+        std::fs::write(&path, &serve).expect("config");
+        env.set(crate::embed::api_key::API_KEY_ENV_OVERRIDE, SERVE_VAR);
+        let err = LamboFile::load_resolved(Some(&path))
+            .expect_err("the env override must be refused too")
+            .to_string();
+        assert!(err.contains(SERVE_VAR) && err.contains("\"ops\""), "{err}");
+    }
+
     #[test]
     fn lambo_file_store_aliases() {
         let f = LamboFile::from_toml_str(
@@ -1302,6 +1420,7 @@ kind = "fake"
             },
             daemon: Default::default(),
             promotion_policy: Some(PromotionPolicy::Solo),
+            recall: None,
             serve: Default::default(),
         };
         let s = toml::to_string(&f).unwrap();

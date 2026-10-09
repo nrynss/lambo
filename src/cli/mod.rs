@@ -14,6 +14,7 @@ pub mod inspect;
 pub mod provision;
 pub mod re_embed;
 pub mod recall;
+pub mod recall_index;
 pub mod record_action;
 pub mod reserve;
 pub mod saints;

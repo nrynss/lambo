@@ -241,6 +241,89 @@
   Together they show whether a deployment's derives fit the `wait_ms`
   maximum without joining the call ledger. Additive keys; nothing else in
   the payload changes.
+- The `bge_m3` embedder can send a bearer token, so it reaches hosted
+  OpenAI-compatible embeddings endpoints such as Cloudflare Workers AI (#21).
+  - `[embedder] api_key_env` names the environment variable holding the token
+    (overridden by `LAMBO_EMBED_API_KEY_ENV`, which also holds a name). The
+    token never goes in `lambo.toml`: an inline `api_key` is refused, and so is
+    an `api_key_env` that is not an upper-case variable name or looks like a
+    token, without quoting the value.
+  - `api_key_env` may not name `LAMBO_AUTH_TOKEN` or any
+    `[[serve.credential]]` `token_env`, which hold `lambo serve`'s own
+    credentials, so the embeddings endpoint is not sent serve's token. The
+    `LAMBO_AUTH_TOKEN` rule is the one `token_env` already had, now shared in
+    one place. Neither `api_key_env` nor `token_env` may name a variable
+    lambo reads its own credentials from: `LAMBO_COCKROACH_DSN`,
+    `LAMBO_POSTGRES_DSN`, `DATABASE_URL`, `GCP_LAMBO_CREDENTIALS`,
+    `GOOGLE_APPLICATION_CREDENTIALS` or `LAMBO_GEMINI_CREDENTIALS`.
+  - The variable is read at startup. Unset or empty is a hard error naming it,
+    never a request without a key. With a token, every embed request carries
+    `Authorization: Bearer <token>`; without `api_key_env` no `Authorization`
+    header is sent, so local `llama-server` setups see no change. `Debug`
+    output shows only that a token is set. When an error body is quoted into
+    an error, every run of 8 or more consecutive characters of the token is
+    replaced, in its raw, JSON-escaped and percent-encoded forms; a shorter,
+    case-changed or otherwise re-encoded echo is not detected. A quoted body
+    is cut at 8 KiB, and a `2xx` body that does not parse is not quoted at
+    all. Logs and errors print the embedder URL as scheme, host, port and
+    path, never userinfo or a query. A `401` or `403` stays a permanent
+    configuration error.
+  - Redirects are never followed: a `3xx` is a permanent configuration
+    error naming the status, not the redirect target, so the token is never
+    resent to another URL. Plain `http` to a loopback host ignores
+    `HTTP_PROXY` and friends, so a loopback token never reaches a proxy;
+    `https` still honours them (the proxy only tunnels TLS). A base URL with
+    a query or fragment is refused, since the embeddings path is appended to
+    it.
+  - A token is sent only over `https`, or over plain `http` to a loopback
+    host (`localhost`, `127.0.0.0/8`, `::1`). `api_key_env` with a plain
+    `http` URL to any other host is refused at startup, naming the host,
+    before the variable is read. Configs without `api_key_env` are
+    unaffected.
+  - `api_key_env` with any kind other than `bge_m3` is refused.
+  - `kind = "openai"` is an alias of `bge_m3`. It still reports and stamps
+    `bge_m3`, so no existing session's embedding contract changes. Set `model`
+    to the hosted id (for example `@cf/baai/bge-m3`): a hosted model is a
+    different embedding contract from a local GGUF of the same model.
+  - `lambo.example.toml` and the configuration reference document the Workers
+    AI setup. The adapter's `check_health` remains llama.cpp-only.
+- An optional Elasticsearch recall tier (#18, feature `recall-elastic`): a
+  top-level `[recall]` section in `lambo.toml` wraps the configured store in a
+  `TieredStore`. The store stays the source of truth and keeps leases, fencing,
+  canonization and graph queries; each committed flush is mirrored to a
+  per-embedding-contract index at an external version built from the fencing
+  token and a per-session flush counter, and the index serves the vector leg of
+  recall. A mirror failure never fails a flush: the session is marked stale,
+  vector recall falls back to the store's own read (or to the keyword and
+  recent legs when the store has no vector search), and the lease holder
+  repairs the index at its next load or flush. A per-session sync marker in the
+  index makes a crash between commit and mirror visible at the next load.
+  `erase-session` also removes the session from the index and does not report
+  success until a refreshed count finds nothing of it. The API key is by
+  reference only (`api_key = { env = "NAME" }`). A build without the feature
+  refuses a `[recall]` section by name. See
+  `dev-diary/notes/feature-18-elastic-tier.md`.
+  Hardened in review: every delete-by-query refreshes first and retries
+  version conflicts; hits are re-scored with exact cosine from their stored
+  vectors (16 extra fetched) and indices pin float `hnsw`; repairs run in the
+  background, one per session, with deadlines (mirror 15 s, repair 10 min,
+  delete-by-query 300 s); reads skip the index for 30 s after 3 failed or slow
+  reads; a marker ahead of a load is re-checked, never repaired from; the
+  marker `_id` is the SHA-256 of the session id; unleased writes are not
+  mirrored; per-session state is evicted on release and bounded; index
+  prefixes containing `-v-` or ending in `-v`, URL query strings or fragments,
+  and `timeout_ms = 0` are refused. Errors follow the `[serve]` redaction
+  rules: an unknown `kind` is not quoted, and `api_key.env` is quoted only
+  while it reads as a variable name.
+- `lambo recall-index backfill --session <s>`: rebuild one session's recall
+  index from the store under the session's lease (#18).
+- `GraphStore::holder_derives_from_graph()` (default `false`): a store whose
+  checked vector read is a lagging tier declares that a session holder's
+  hybrid derive should rank its semantic-merge candidates in its in-memory
+  graph while recall keeps reading the store (#18 review M6, amending #8's
+  single constructor). `TieredStore` declares it. Additive.
+- `GraphStore::backfill_recall_index()` (default `Ok(None)`): the hook the
+  backfill verb calls; only a store with a recall tier overrides it. Additive.
 - `GraphStore::exact_vector_scan()` (default `false`): an adapter declares its
   checked vector read is an exact cosine scan of every vector it stores, so a
   session holder may answer that read from its graph (#8). `SqliteStore`

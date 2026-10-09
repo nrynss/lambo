@@ -82,9 +82,16 @@ pub mod erase;
 // `embedding_source`, run by every adapter's tests.
 #[cfg(test)]
 pub(crate) mod embedding_source_testkit;
+// #18 — the recall tier: `[recall]` config and its registry arm. Always
+// compiled, so a build without the tier refuses the section by name.
+pub mod recall_tier;
+// #18 — `TieredStore`: the durable store plus an Elasticsearch recall index.
+#[cfg(feature = "recall-elastic")]
+pub(crate) mod tiered;
 
 pub use erase::{EraseCounts, EraseOutcome, EraseReport};
 pub use lease::{LeaseHolder, LeaseInfo, LeaseOutcome};
+pub use recall_tier::{RecallBackfillReport, RecallConfig, RecallKind, RecallRefresh, SecretRef};
 
 use async_trait::async_trait;
 use bitflags::bitflags;
@@ -456,6 +463,25 @@ pub trait GraphStore: Send + Sync {
         false
     }
 
+    /// Whether a session **holder**'s hybrid derive should take its semantic
+    /// merge candidates from its in-memory graph even though
+    /// [`Self::exact_vector_scan`] is false (#18, amending #8).
+    ///
+    /// Derive's dedupe decision has to see what was written seconds ago: two
+    /// agents (or one, twice) deriving the same fact in quick succession must
+    /// merge, not produce paraphrased near-duplicates. A store whose checked
+    /// read is a **lagging tier** (the Elasticsearch recall index: unflushed
+    /// concepts, the last refresh interval, everything while the tier is
+    /// stale) cannot promise that, so it returns `true` and the holder's
+    /// derive ranks in its graph: exact, and fresh up to the write being
+    /// made. Recall keeps asking the store ([`Self::exact_vector_scan`]
+    /// governs that). Default `false`: on the SQL adapters derive and recall
+    /// keep choosing their source together, exactly as before. Ignored unless
+    /// the store also advertises [`Capabilities::VECTOR_SEARCH`].
+    fn holder_derives_from_graph(&self) -> bool {
+        false
+    }
+
     /// Count of concepts that would be orphaned by removing `node` (spec §4.1).
     ///
     /// **Type split (CON-6):** this surface returns `u64`, but the frozen
@@ -535,6 +561,25 @@ pub trait GraphStore: Send + Sync {
         Err(StoreError::Capability(
             "this store does not implement erase_session".into(),
         ))
+    }
+
+    /// Rebuild the session's **recall index** from this store's durable state
+    /// (#18, `lambo recall-index backfill`).
+    ///
+    /// Only a store with a recall tier (`TieredStore`, `[recall]` in
+    /// `lambo.toml`) has an index to rebuild; it takes the session's lease as
+    /// `holder` for the duration (refusing while a live writer holds it),
+    /// re-indexes every stored vector, drops index documents the durable
+    /// snapshot no longer contains, and returns what it wrote.
+    ///
+    /// Default `Ok(None)`: no recall tier, nothing to rebuild. The caller
+    /// reports that rather than claiming a rebuild happened.
+    async fn backfill_recall_index(
+        &self,
+        _session: &SessionId,
+        _holder: &LeaseHolder,
+    ) -> Result<Option<RecallBackfillReport>, StoreError> {
+        Ok(None)
     }
 
     // -----------------------------------------------------------------------

@@ -125,6 +125,12 @@ embed-bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime"]
 # A3: Vertex Gemini embedder (gemini-embedding-001) via service-account OAuth.
 embed-gemini = ["dep:reqwest", "dep:jsonwebtoken"]
 
+# Recall tiers (#18): an index beside the durable store that serves recall's
+# vector leg. Not a store kind; selected by `[recall]` in lambo.toml.
+# Elasticsearch over plain HTTP on the reqwest this crate already carries:
+# no new crate, Cargo.lock unchanged.
+recall-elastic = ["dep:reqwest"]
+
 # Committed fixture graphs for tests / fixture-ok parallel tracks (T1.4).
 # Test-only: deliberately NOT in `default` (v020-R1-P3-3) — `cargo install
 # lambo` must not pull test scaffolding. CI enables it explicitly where the
@@ -152,6 +158,7 @@ ship = [
     "embed-bge",
     "embed-fixture",
     "embed-gemini",
+    "recall-elastic",
 ]
 
 # Convenience: hackathon / ship profile (store adapters as they land).

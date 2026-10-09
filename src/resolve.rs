@@ -4,6 +4,7 @@
 //! than calling `build_store` + `build_embedder` separately and re-checking.
 
 use crate::embed::{build_embedder, Embedder, EmbedderConfig, EmbedderKind};
+use crate::store::recall_tier::wrap_with_recall_tier;
 use crate::store::{
     build_store, build_store_with_vector_dim, Capabilities, GraphStore, StoreConfig,
 };
@@ -106,6 +107,10 @@ pub const RESOLVE_ENV_VARS: &[&str] = &[
     "LAMBO_EMBED_DIM",
     "LAMBO_LLAMA_EMBED_URL",
     "LAMBO_LLAMA_MODEL",
+    // Issue #21: a variable *name* (`embedder.api_key_env`). The variable it
+    // names is chosen by the file, so it cannot be listed here; a harness that
+    // clears this one and writes no `api_key_env` sends no token.
+    crate::embed::api_key::API_KEY_ENV_OVERRIDE,
     "LAMBO_EMBED_DEVICE",
     "LAMBO_GEMINI_PROJECT",
     "LAMBO_GEMINI_LOCATION",
@@ -241,6 +246,7 @@ pub fn resolve_backends(file: LamboFile) -> Result<ResolvedBackends, LamboError>
     let embedder_cfg = file.embedder;
     let daemon_cfg = file.daemon;
     let promotion_policy = file.promotion_policy;
+    let recall_cfg = file.recall;
     // Fail closed at the file boundary: every file-driven command rejects a
     // degenerate cadence here, uniformly and BEFORE any store/embedder build
     // (an embedder build may load a model, so we reject the file first).
@@ -265,6 +271,15 @@ pub fn resolve_backends(file: LamboFile) -> Result<ResolvedBackends, LamboError>
     let store =
         build_store_with_vector_dim(store_cfg.clone(), Some(embedder_cfg.dim).filter(|d| *d > 0))
             .map_err(|e| LamboError::Config(e.to_string()))?;
+    // #18: the recall tier wraps whatever primary was just built, here and
+    // nowhere else (Level B single construction site). No `[recall]` returns
+    // the primary untouched; an uncompiled tier is refused, never skipped.
+    let store = wrap_with_recall_tier(
+        store,
+        recall_cfg.as_ref(),
+        Some(embedder_cfg.dim).filter(|d| *d > 0),
+    )
+    .map_err(|e| LamboError::Config(e.to_string()))?;
     let embedder =
         build_embedder(embedder_cfg.clone()).map_err(|e| LamboError::Config(e.to_string()))?;
     check_vector_search_contract(store.as_ref(), store_cfg.kind)?;
@@ -347,7 +362,16 @@ pub fn resolve_store_only(
     explicit: Option<&std::path::Path>,
 ) -> Result<Box<dyn GraphStore>, LamboError> {
     let file = LamboFile::load_resolved(explicit)?;
-    build_store(file.store).map_err(|e| LamboError::Config(e.to_string()))
+    let store = build_store(file.store).map_err(|e| LamboError::Config(e.to_string()))?;
+    // #18: store-only verbs (provision, erase-session, recall-index backfill,
+    // the readers) see the same tiered store a writer does, so an erase reaches
+    // the recall index and a backfill has one to rebuild.
+    wrap_with_recall_tier(
+        store,
+        file.recall.as_ref(),
+        Some(file.embedder.dim).filter(|d| *d > 0),
+    )
+    .map_err(|e| LamboError::Config(e.to_string()))
 }
 
 /// Refuse to use an embedder that disagrees with the session's stamped contract.
@@ -542,6 +566,15 @@ mod tests {
                 value: "sentinel-model",
                 file: MEMORY,
                 resolved: Some(|p| format!("{:?}", load(p).embedder.llama_model)),
+            },
+            Override {
+                // Issue #21: overrides the variable *name* `embedder.api_key_env`.
+                // Read unconditionally by `overlay_env`, whatever the kind; only
+                // `build_embedder` refuses it for a kind other than `bge_m3`.
+                var: crate::embed::api_key::API_KEY_ENV_OVERRIDE,
+                value: "SENTINEL_EMBED_TOKEN_VAR",
+                file: MEMORY,
+                resolved: Some(|p| format!("{:?}", load(p).embedder.api_key_env)),
             },
             // From here to `LAMBO_EMBED_KEEP_WARM_SECS` inclusive, every name
             // is read unconditionally by `EmbedderConfig::overlay_env`,
@@ -743,6 +776,77 @@ mod tests {
             );
         }
     }
+
+    /// Issue #21 end to end through the single resolve site: `api_key_env`
+    /// naming an unset variable fails the resolve (naming the variable), a set
+    /// one puts `Authorization: Bearer` on the wire, and no `api_key_env` sends
+    /// no header. The contract stamps `kind = bge_m3` and the configured model,
+    /// so a hosted session differs from a local one by model, not by kind.
+    #[cfg(feature = "embed-bge")]
+    #[tokio::test]
+    async fn api_key_env_resolves_at_resolve_time_and_reaches_the_wire() {
+        use httpmock::prelude::*;
+        const VAR: &str = "LAMBO_TEST_ISSUE21_RESOLVE_TOKEN";
+        const FAKE: &str = "fake-xyzzy-resolve-token";
+        let env = crate::test_util::env_lock();
+        for k in RESOLVE_ENV_VARS {
+            env.remove(k);
+        }
+        env.remove(VAR);
+
+        let server = MockServer::start();
+        let authed = server.mock(|when, then| {
+            when.method(POST)
+                .path("/v1/embeddings")
+                .header("authorization", format!("Bearer {FAKE}"));
+            then.status(200)
+                .json_body(serde_json::json!({ "data": [{ "embedding": vec![2.0f32; 1024] }] }));
+        });
+        let unauthed = server.mock(|when, then| {
+            when.method(POST).path("/v1/embeddings");
+            then.status(401).body("missing token");
+        });
+
+        let dir = crate::test_util::ScratchDir::new("lambo-issue21-resolve");
+        let keyed = dir.join("keyed.toml");
+        std::fs::write(
+            &keyed,
+            format!(
+                "[store]\nkind = \"memory\"\n[embedder]\nkind = \"bge_m3\"\nurl = \"{}\"\n\
+                 model = \"@cf/baai/bge-m3\"\napi_key_env = \"{VAR}\"\n",
+                server.base_url()
+            ),
+        )
+        .unwrap();
+
+        let Err(err) = resolve_from_config_path(Some(&keyed)) else {
+            panic!("an unset api_key_env variable must fail the resolve");
+        };
+        let msg = err.to_string();
+        assert!(msg.contains(VAR) && msg.contains("not set"), "{msg}");
+
+        env.set(VAR, FAKE);
+        let resolved = resolve_from_config_path(Some(&keyed)).expect("resolve with token");
+        assert_eq!(resolved.embedding.kind, "bge_m3");
+        assert_eq!(resolved.embedding.model.as_deref(), Some("@cf/baai/bge-m3"));
+        resolved.embedder.embed("user schema").await.unwrap();
+        authed.assert_hits(1);
+
+        let plain = dir.join("plain.toml");
+        std::fs::write(
+            &plain,
+            format!(
+                "[store]\nkind = \"memory\"\n[embedder]\nkind = \"bge_m3\"\nurl = \"{}\"\n",
+                server.base_url()
+            ),
+        )
+        .unwrap();
+        let resolved = resolve_from_config_path(Some(&plain)).expect("resolve without token");
+        let err = resolved.embedder.embed("user schema").await.unwrap_err();
+        assert!(err.to_string().contains("401"), "{err}");
+        authed.assert_hits(1);
+        unauthed.assert_hits(1);
+    }
     #[test]
     fn vector_compat_none_store_accepts_any_positive_dim() {
         check_vector_compatibility(None, 512).unwrap();
@@ -779,6 +883,62 @@ mod tests {
         );
     }
 
+    /// #18, Level B: `[recall]` is wrapped around the primary at the single
+    /// construction site when the tier is compiled in, and refused by feature
+    /// name when it is not. Nothing here touches the network.
+    /// #18 under #32's redaction rules: a `[recall]` URL with userinfo parses
+    /// (it is a well-formed string), and the refusal at resolve, whether the
+    /// tier is compiled in or not, never quotes it. Nor does the unset-key
+    /// error quote an `api_key.env` that reads as a pasted key.
+    #[test]
+    #[cfg(all(feature = "store-memory", feature = "embed-fixture"))]
+    fn a_secret_looking_recall_url_never_reaches_a_validation_error() {
+        let base = "[store]\nkind = \"memory\"\n[embedder]\nkind = \"fixture\"\n[recall]\n\
+                    kind = \"elastic\"\n";
+        for tail in [
+            "url = \"https://elastic:xyzzy@es.example.com\"\n",
+            "url = \"https://es.example.com/?api_key=xyzzy\"\n",
+            "url = \"https://es.example.com\"\napi_key = { env = \"sk-xyzzy-0123456789abcdef\" }\n",
+        ] {
+            let toml = format!("{base}{tail}");
+            let file = LamboFile::from_toml_str(&toml).expect("well-formed TOML parses");
+            let err = resolve_backends(file)
+                .err()
+                .unwrap_or_else(|| panic!("{tail}: must be refused"))
+                .to_string();
+            assert!(!err.contains("xyzzy"), "{tail}: {err}");
+        }
+    }
+
+    #[test]
+    #[cfg(all(feature = "store-memory", feature = "embed-fixture"))]
+    fn a_recall_section_is_wrapped_at_resolve_or_refused_by_feature() {
+        let toml = "[store]\nkind = \"memory\"\n[embedder]\nkind = \"fixture\"\n\
+                    [recall]\nkind = \"elastic\"\nurl = \"http://127.0.0.1:1\"\n";
+        let resolved = resolve_backends(LamboFile::from_toml_str(toml).unwrap());
+        if crate::store::RecallKind::Elastic.is_compiled() {
+            let r = resolved.expect("a compiled tier resolves");
+            assert!(r.store.capabilities().contains(Capabilities::VECTOR_SEARCH));
+            assert_eq!(r.store.vector_dimensions(), Some(1024));
+            assert!(
+                !r.store.exact_vector_scan(),
+                "#8: the tier is not an exact scan"
+            );
+        } else {
+            let err = resolved
+                .err()
+                .expect("an uncompiled tier is refused")
+                .to_string();
+            assert!(err.contains("--features recall-elastic"), "{err}");
+        }
+        let plain = "[store]\nkind = \"memory\"\n[embedder]\nkind = \"fixture\"\n";
+        let r = resolve_backends(LamboFile::from_toml_str(plain).unwrap()).unwrap();
+        assert!(
+            !r.store.capabilities().contains(Capabilities::VECTOR_SEARCH),
+            "no [recall], no tier"
+        );
+    }
+
     #[test]
     #[cfg(all(feature = "store-memory", feature = "embed-fixture"))]
     fn resolve_memory_plus_fixture_any_configured_dim() {
@@ -802,6 +962,7 @@ mod tests {
             },
             daemon: Default::default(),
             promotion_policy: Some(crate::canon::PromotionPolicy::Solo),
+            recall: None,
             serve: Default::default(),
         };
         let r = resolve_backends(file).unwrap();
@@ -852,6 +1013,7 @@ mod tests {
             },
             daemon: Default::default(),
             promotion_policy: None,
+            recall: None,
             serve: Default::default(),
         };
         let r = resolve_backends(file).unwrap();
@@ -895,6 +1057,7 @@ mod tests {
             },
             daemon: Default::default(),
             promotion_policy: None,
+            recall: None,
             serve: Default::default(),
         };
 
