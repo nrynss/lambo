@@ -509,6 +509,14 @@ async fn the_mcp_session_cap_is_process_wide() {
         "{}",
         refused.body
     );
+    // #32 review L4: it names the route the session is closed on.
+    assert!(
+        refused
+            .body
+            .contains("HTTP DELETE /mcp/s/reg-cap-b with its Mcp-Session-Id"),
+        "{}",
+        refused.body
+    );
 
     for session in registry.close_set().await {
         session.mem.close().await.expect("close");
