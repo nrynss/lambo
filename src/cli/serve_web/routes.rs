@@ -21,6 +21,7 @@ use super::projections::{
     is_structural, read_feed_and_stats, status_str, structural_dependents, structural_rank,
 };
 use super::state::AppState;
+use super::views::RECALL_PERMIT_WAIT;
 use super::{APP_CSS, APP_JS, INDEX_HTML, POLL_INTERVAL};
 use crate::canon::gate_progress;
 use crate::cli::caps::CliError;
@@ -47,6 +48,26 @@ pub(super) fn asset(content_type: &'static str, body: &'static str) -> Response 
 /// JSON with `no-store`: session memory must never be served from a cache.
 pub(super) fn json<T: Serialize>(status: StatusCode, body: T) -> Response {
     (status, [(header::CACHE_CONTROL, "no-store")], Json(body)).into_response()
+}
+
+/// The answer to a recall that found every [`ViewBounds::recall_concurrency`]
+/// permit taken for [`RECALL_PERMIT_WAIT`]: 503, `Retry-After: 1`, no-store.
+///
+/// [`ViewBounds::recall_concurrency`]: super::views::ViewBounds::recall_concurrency
+pub(super) fn recall_busy() -> Response {
+    let mut response = json(
+        StatusCode::SERVICE_UNAVAILABLE,
+        serde_json::json!({
+            "error": format!(
+                "recall: every recall slot stayed busy for {} s; retry shortly",
+                RECALL_PERMIT_WAIT.as_secs()
+            )
+        }),
+    );
+    response
+        .headers_mut()
+        .insert(header::RETRY_AFTER, header::HeaderValue::from_static("1"));
+    response
 }
 
 pub(super) fn fail(err: CliError) -> Response {
@@ -177,6 +198,11 @@ pub(super) async fn api_recall(
     ) {
         Ok(request) => request,
         Err(e) => return fail(e),
+    };
+    // Bound concurrent recalls process-wide (design 5.3). Held until the
+    // response is built.
+    let Some(_permit) = state.views.recall_permit().await else {
+        return recall_busy();
     };
     let result = match state.view().await {
         Ok(view) => super::recall::run_detailed_on(&state.backends, &view.reader, &request).await,

@@ -274,10 +274,11 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
     let bounds = state.views.bounds();
     println!(
         "lambo serve-web: session views — refreshed after {} ms, at most {} loaded, {} load(s) \
-         at a time",
+         and {} recall(s) at a time",
         bounds.ttl.as_millis(),
         bounds.max_loaded_sessions,
         bounds.load_concurrency,
+        bounds.recall_concurrency,
     );
     // A non-loopback bind always carries a token (`authorize_bind_web`), so
     // the two branches below are exhaustive: token configured, or loopback.

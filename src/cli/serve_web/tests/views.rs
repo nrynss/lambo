@@ -528,6 +528,7 @@ fn bounds(max_loaded_sessions: usize) -> crate::cli::serve_web::views::ViewBound
         ttl: Duration::from_secs(60),
         max_loaded_sessions,
         load_concurrency: 2,
+        recall_concurrency: 4,
     }
 }
 
@@ -643,5 +644,44 @@ async fn recall_on_a_view_matches_the_cli_recall_byte_for_byte() {
         page["response_annotations"],
         serde_json::to_value(&cli.response_annotations).unwrap()
     );
+    handle.abort();
+}
+
+/// At `recall_concurrency` recalls in flight, the next recall waits two
+/// seconds for a permit and then gets 503 with `Retry-After: 1` and
+/// `no-store`; once a permit is free, recall answers again.
+#[tokio::test]
+async fn a_saturated_recall_bound_answers_503_with_retry_after() {
+    let store = seed("t4-busy").await;
+    let state = state_with_web(
+        backends_on(store),
+        "t4-busy",
+        None,
+        &crate::config::WebConfig {
+            recall_concurrency: Some(1),
+            ..Default::default()
+        },
+    );
+    let (addr, handle) = spawn(state.clone()).await;
+
+    let held = state.views.recall_permit().await.expect("the one permit");
+    let started = std::time::Instant::now();
+    let busy = request(addr, "GET", "/api/recall?q=user%20schema").await;
+    assert_eq!(busy.status, 503, "{}", busy.body);
+    assert!(
+        started.elapsed() >= Duration::from_millis(1_900),
+        "the request waits for a permit before refusing"
+    );
+    let headers = busy.headers.to_lowercase();
+    assert!(headers.contains("retry-after: 1"), "{headers}");
+    assert!(headers.contains("cache-control: no-store"), "{headers}");
+    assert!(busy.body.contains("retry shortly"), "{}", busy.body);
+    // A bad query is still refused first, without waiting for a permit.
+    let bad = request(addr, "GET", "/api/recall?q=").await;
+    assert_eq!(bad.status, 400, "{}", bad.body);
+
+    drop(held);
+    let ok = request(addr, "GET", "/api/recall?q=user%20schema").await;
+    assert_eq!(ok.status, 200, "{}", ok.body);
     handle.abort();
 }

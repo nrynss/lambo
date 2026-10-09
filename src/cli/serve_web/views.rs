@@ -21,6 +21,10 @@
 //!   recently used is dropped beyond that. A request already holding it keeps
 //!   its `Arc`. Eviction drops the view only: the slot's freshness tracker
 //!   stays, so a reloaded session does not report "just changed".
+//! * **Recall concurrency.** A second semaphore bounds simultaneous recalls
+//!   (embed and pipeline work). A recall that waits [`RECALL_PERMIT_WAIT`]
+//!   for a permit is answered 503 with `Retry-After: 1`, after the session
+//!   was resolved, so it is no oracle (design 5.3).
 //! * **Failure is not cached.** A failed load is answered to the requests
 //!   that joined it, and the next request retries, behind the semaphore.
 //! * **No background task.** Nothing refreshes a session nobody is viewing.
@@ -34,7 +38,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::Mutex;
-use tokio::sync::{Mutex as AsyncMutex, Semaphore};
+use tokio::sync::{Mutex as AsyncMutex, Semaphore, SemaphorePermit};
 use tokio::time::Instant;
 
 use super::dto::{EmbeddingStatus, EventsPayload, WebEvent};
@@ -45,12 +49,18 @@ use crate::config::WebConfig;
 use crate::store::{GraphStore, StoreKind};
 use crate::types::{CanonizationStatus, EmbeddingContract, SessionId};
 
+/// How long a recall waits for a [`ViewBounds::recall_concurrency`] permit
+/// before the portal answers 503 (design 5.3).
+pub(super) const RECALL_PERMIT_WAIT: Duration = Duration::from_secs(2);
+
 /// The cache's bounds, defaults applied and the SQLite rule enforced.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct ViewBounds {
     pub(super) ttl: Duration,
     pub(super) max_loaded_sessions: usize,
     pub(super) load_concurrency: usize,
+    /// Simultaneous recalls, process-wide (embed and pipeline work).
+    pub(super) recall_concurrency: usize,
 }
 
 impl ViewBounds {
@@ -66,6 +76,7 @@ impl ViewBounds {
             } else {
                 web.load_concurrency()
             },
+            recall_concurrency: web.recall_concurrency(),
         }
     }
 }
@@ -228,6 +239,7 @@ pub(super) struct ViewCache {
     bounds: ViewBounds,
     slots: HashMap<SessionId, Slot>,
     loads: Semaphore,
+    recalls: Semaphore,
     tick: AtomicU64,
 }
 
@@ -238,6 +250,7 @@ impl ViewCache {
         Self {
             slots: sessions.into_iter().map(|s| (s, Slot::new())).collect(),
             loads: Semaphore::new(bounds.load_concurrency),
+            recalls: Semaphore::new(bounds.recall_concurrency),
             tick: AtomicU64::new(0),
             bounds,
         }
@@ -387,6 +400,15 @@ impl ViewCache {
             f.observed_at = std::time::Instant::now();
         }
         f.observed_at.elapsed()
+    }
+
+    /// A recall permit, or `None` when every one stayed taken for
+    /// [`RECALL_PERMIT_WAIT`] (the caller answers 503).
+    pub(super) async fn recall_permit(&self) -> Option<SemaphorePermit<'_>> {
+        tokio::time::timeout(RECALL_PERMIT_WAIT, self.recalls.acquire())
+            .await
+            .ok()?
+            .ok()
     }
 
     /// Whether `session` has a view held right now (tests).
