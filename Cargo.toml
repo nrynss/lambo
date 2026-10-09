@@ -128,6 +128,11 @@ embed-bge = ["dep:reqwest"]
 embed-bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime"]
 # A3: Vertex Gemini embedder (gemini-embedding-001) via service-account OAuth.
 embed-gemini = ["dep:reqwest", "dep:jsonwebtoken"]
+# #22 PR 5: EmbeddingGemma 2 (text and image) over llama.cpp's llama-server.
+# A thin layer on the bge_m3 OpenAI-compatible HTTP client (#21: bearer,
+# transport rule, error-body scrub), so it builds on `embed-bge`; no new
+# crate, Cargo.lock unchanged. Joins `ship` once its live test passes.
+embed-eg2 = ["embed-bge"]
 
 # Recall tiers (#18): an index beside the durable store that serves recall's
 # vector leg. Not a store kind; selected by `[recall]` in lambo.toml.
