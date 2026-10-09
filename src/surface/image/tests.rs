@@ -613,6 +613,26 @@ fn base64_refusals_never_quote_the_input() {
             "image.data is not valid base64 (standard alphabet, padded)"
         );
     }
+
+    // Review L5: the two common real-world shapes get a hint naming the
+    // shape, and are refused, not repaired. Neither hint quotes the input.
+    let long = base64::engine::general_purpose::STANDARD.encode(png.repeat(16));
+    let wrapped: String = long
+        .as_bytes()
+        .chunks(76)
+        .map(|c| std::str::from_utf8(c).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(wrapped.contains('\n'), "premise: wrapped");
+    for text in [wrapped.clone(), wrapped.replace('\n', "\r\n")] {
+        let err = decode_base64(&text).unwrap_err();
+        assert!(err.contains("no line breaks"), "{err}");
+        assert!(!err.contains(&long[..16]), "{err}");
+    }
+    let uri = format!("data:image/png;base64,{text}");
+    let err = decode_base64(&uri).unwrap_err();
+    assert!(err.contains("without a data: URI prefix"), "{err}");
+    assert!(!err.contains(&text[..8]), "{err}");
 }
 
 fn contract(kind: &str, model: Option<&str>, dim: usize) -> crate::types::EmbeddingContract {

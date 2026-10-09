@@ -106,6 +106,28 @@ pub fn check_caption_fits(caption: &str, image_id: Option<&str>) -> Result<(), S
     Ok(())
 }
 
+/// The refusal for text that is not standard padded base64, with a hint for
+/// the two shapes real clients most often send: a `data:` URI (copied from a
+/// browser or an `<img src>`) and line-wrapped output (GNU `base64` wraps at
+/// 76 columns). Both are refused rather than repaired, as the schema says
+/// one exact form; the hint names the shape, never the input.
+fn base64_refusal(data: &str) -> String {
+    const BASE: &str = "image.data is not valid base64 (standard alphabet, padded)";
+    if data.trim_start().starts_with("data:") {
+        format!(
+            "{BASE}: send the base64 text alone, without a data: URI prefix such as \
+             \"data:image/png;base64,\""
+        )
+    } else if data.contains(['\n', '\r']) {
+        format!(
+            "{BASE}: send it on one line, with no line breaks (GNU base64 wraps at 76 \
+             columns unless given -w0)"
+        )
+    } else {
+        BASE.to_owned()
+    }
+}
+
 /// Decode an image's base64 text (standard alphabet, padded), refusing text
 /// longer than [`MAX_IMAGE_B64_LEN`] before decoding any of it.
 ///
@@ -121,7 +143,7 @@ pub fn decode_base64(data: &str) -> Result<Vec<u8>, String> {
     }
     base64::engine::general_purpose::STANDARD
         .decode(data)
-        .map_err(|_| "image.data is not valid base64 (standard alphabet, padded)".to_owned())
+        .map_err(|_| base64_refusal(data))
 }
 
 /// Check a client-computed vector against the live contract before anything

@@ -134,7 +134,7 @@
           "description": "One image, inline.",
           "properties": {
             "data": {
-              "description": "The image bytes in base64 (standard alphabet, padded). At most 2 MiB\ndecoded, and at most 4096 pixels a side.",
+              "description": "The image bytes in base64 (standard alphabet, padded), on one line,\nwith no `data:` prefix. At most 2 MiB decoded, and at most 4096 pixels\na side.",
               "maxLength": 2796204,
               "type": "string"
             },

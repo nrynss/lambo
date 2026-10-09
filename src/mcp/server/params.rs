@@ -305,8 +305,9 @@ pub struct WireImage {
     /// `image/jpeg` or `image/webp`.
     #[schemars(extend("enum" = ["image/png", "image/jpeg", "image/webp"]))]
     pub mime: String,
-    /// The image bytes in base64 (standard alphabet, padded). At most 2 MiB
-    /// decoded, and at most 4096 pixels a side.
+    /// The image bytes in base64 (standard alphabet, padded), on one line,
+    /// with no `data:` prefix. At most 2 MiB decoded, and at most 4096 pixels
+    /// a side.
     #[schemars(length(max = 2_796_204))]
     pub data: String,
 }
