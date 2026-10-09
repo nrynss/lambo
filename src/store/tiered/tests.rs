@@ -925,6 +925,46 @@ async fn a_repair_past_its_deadline_marks_the_session_stale() {
     fake.release_deletes();
 }
 
+/// F5: a repair task that panics does not wedge the session. Its
+/// single-flight flag is cleared, the session is marked stale, and the next
+/// request starts a fresh repair that lands; the entry stays evictable.
+#[tokio::test]
+async fn a_panicking_repair_does_not_wedge_the_session() {
+    let (primary, fake) = (memory_primary(), Arc::new(FakeIndex::new()));
+    let store = tier(&primary, &fake);
+    let sid = SessionId::new("panicking-repair");
+    let w = holder("w");
+    let token = attach(&store, &sid, &w).await;
+    let s = stale_after_an_outage(&store, &fake, &sid, token).await;
+    fake.panic_next_bulk
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let (_, e2) = one_more(&sid, &s, 2);
+    store.flush(&e2, Some(token)).await.unwrap();
+    settle(&store).await;
+    assert!(
+        !store.with_state(&sid, |st| st.repairing),
+        "a panicked repair left the session marked as repairing"
+    );
+    let status = store.tier_status(&sid);
+    assert_eq!(status.sync, TierSync::Stale);
+    assert!(
+        status
+            .last_error
+            .as_deref()
+            .is_some_and(|e| e.contains("panicked")),
+        "{status:?}"
+    );
+
+    let (c3, e3) = one_more(&sid, &s, 3);
+    store.flush(&e3, Some(token)).await.unwrap();
+    settle(&store).await;
+    assert_eq!(store.tier_status(&sid).sync, TierSync::InSync);
+    assert!(fake.live(&sid).contains_key(&c3.0.to_string()));
+    assert_eq!(fake.marker(&sid), Some(3));
+    store.release_lease(&sid, &w).await.unwrap();
+    assert!(!store.tracked_sessions().contains(&sid), "never evicted");
+}
+
 /// M1: releasing the lease gives an in-flight repair a grace period, then
 /// abandons it rather than holding the release (and `close`) hostage.
 #[tokio::test]

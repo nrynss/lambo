@@ -36,6 +36,9 @@
 //!
 //! **Latency.** `delay_*` stall a call (a slow cluster); `hold_deletes` parks
 //! every delete-by-query until released (a long-running delete).
+//!
+//! **Bugs.** `panic_next_bulk` panics inside the next bulk call, to show a
+//! panicking repair task does not wedge its session.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -81,6 +84,8 @@ pub(crate) struct FakeIndex {
     pub delay_knn_ms: AtomicU64,
     /// Parks every delete-by-query until a permit is added.
     pub delete_gate: Mutex<Option<std::sync::Arc<tokio::sync::Semaphore>>>,
+    /// The next bulk call panics (a bug inside a repair task).
+    pub panic_next_bulk: AtomicBool,
     pub knn_calls: AtomicUsize,
     pub bulk_calls: AtomicUsize,
     pub delete_calls: AtomicUsize,
@@ -305,6 +310,10 @@ impl RecallIndex for FakeIndex {
     async fn bulk(&self, ops: &[DocOp]) -> Result<(), StoreError> {
         self.check_up()?;
         Self::stall(&self.delay_bulk_ms).await;
+        assert!(
+            !self.panic_next_bulk.swap(false, Ordering::SeqCst),
+            "fake index: injected panic in bulk"
+        );
         self.bulk_calls.fetch_add(1, Ordering::SeqCst);
         for op in ops {
             let index = self.index_name(op.contract());

@@ -259,6 +259,35 @@ impl Marker {
     }
 }
 
+/// Held by a running repair task; dropping it ends the session's repair
+/// (#18 review F5). A panicking repair also marks the session stale and
+/// starts the backoff, as a failed one does.
+struct RepairRunning<'a> {
+    tier: &'a Tier,
+    session: &'a SessionId,
+    /// The run ended normally and already cleared `repairing` itself.
+    ended: bool,
+}
+
+impl Drop for RepairRunning<'_> {
+    fn drop(&mut self) {
+        if self.ended {
+            return;
+        }
+        if std::thread::panicking() {
+            self.tier
+                .mark_stale(self.session, "repair failed: the repair task panicked");
+            self.tier.with_state(self.session, |st| {
+                st.next_repair = Some(Instant::now() + self.tier.repair_backoff);
+            });
+        }
+        self.tier.with_state(self.session, |st| {
+            st.repairing = false;
+            st.repair_again = false;
+        });
+    }
+}
+
 /// The read-side circuit breaker (M2). One per tier: every session's reads
 /// go to the same cluster, so a cluster that is down or blackholed for one
 /// is down for all.
@@ -674,6 +703,15 @@ impl Tier {
     }
 
     async fn run_repairs(&self, session: &SessionId) {
+        // Clears `repairing` however the task ends: normally, aborted by a
+        // release, or by a panic (#18 review F5). Without it a panic leaves
+        // the flag set for good: no later repair starts (requests only queue
+        // a rerun) and the entry is never evicted.
+        let mut running = RepairRunning {
+            tier: self,
+            session,
+            ended: false,
+        };
         // Stops once the lease is gone.
         while let Some(token) = self.with_state(session, |st| st.held) {
             let result =
@@ -691,15 +729,25 @@ impl Tier {
                 self.with_state(session, |st| {
                     st.next_repair = Some(Instant::now() + self.repair_backoff);
                     st.repair_again = false;
+                    st.repairing = false;
                 });
-                break;
+                running.ended = true;
+                return;
             }
-            let again = self.with_state(session, |st| std::mem::take(&mut st.repair_again));
+            // Taking the rerun request and ending the run happen under one
+            // lock, so a request cannot slip in between and be dropped.
+            let again = self.with_state(session, |st| {
+                let again = std::mem::take(&mut st.repair_again);
+                if !again {
+                    st.repairing = false;
+                }
+                again
+            });
             if !again {
-                break;
+                running.ended = true;
+                return;
             }
         }
-        self.with_state(session, |st| st.repairing = false);
     }
 
     async fn repair_once(&self, session: &SessionId, token: u64) -> Result<(), StoreError> {
