@@ -63,13 +63,12 @@ pub(super) async fn add_column(
 ) -> Result<(), StoreError> {
     match sqlx::query(alter_ddl).execute(pool).await {
         Ok(_) => Ok(()),
-        Err(e) => {
-            if column_present(pool, table, column).await? {
-                Ok(())
-            } else {
-                Err(db_err(&format!("init_schema: add {table}.{column}"), e))
-            }
-        }
+        // A concurrent provision may have added it first; anything else, or a
+        // re-check that itself fails, reports the ALTER's own error.
+        Err(e) => match column_present(pool, table, column).await {
+            Ok(true) => Ok(()),
+            Ok(false) | Err(_) => Err(db_err(&format!("init_schema: add {table}.{column}"), e)),
+        },
     }
 }
 
