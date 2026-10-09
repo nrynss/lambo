@@ -310,8 +310,8 @@ async fn a_re_derived_image_repairs_its_missing_vector() {
 
 /// Review M1: any text write can produce an image's canonical key (case and
 /// token order fold together). An image derive that canonical-matches a
-/// TEXT concept, with or without a text vector, is refused as `Embed` (so a
-/// replayed intent settles `failed`) instead of succeeding with no vector,
+/// TEXT concept, with or without a text vector, is refused as
+/// `ImageIdTaken` (so a replayed intent settles `failed`) instead of succeeding with no vector,
 /// and the text concept is left exactly as it was.
 #[tokio::test]
 async fn an_image_derive_that_matches_a_text_concept_is_refused() {
@@ -347,7 +347,7 @@ async fn an_image_derive_that_matches_a_text_concept_is_refused() {
         .await
         .unwrap_err();
         assert!(
-            matches!(&err, LamboError::Embed(m) if m.contains("text concept")),
+            matches!(&err, LamboError::ImageIdTaken(id) if id == "r17"),
             "{err:?}"
         );
         assert_eq!(graph.read().epoch(), before, "nothing was written");
@@ -392,7 +392,10 @@ async fn a_text_derive_that_squats_an_image_key_makes_the_image_derive_refuse() 
     )
     .await
     .unwrap_err();
-    assert!(matches!(err, LamboError::Embed(_)), "{err:?}");
+    assert!(
+        matches!(&err, LamboError::ImageIdTaken(id) if id == "r17"),
+        "{err:?}"
+    );
     let g = graph.read();
     assert!(
         g.concepts().all(|c| c.embedding_source.is_none()),

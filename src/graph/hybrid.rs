@@ -594,12 +594,12 @@ fn check_supplied(
 /// * An image concept that already has a vector: `None`, the first vector
 ///   is kept.
 /// * A **text** concept (no `embedding_source`): refused with
-///   [`LamboError::Embed`]. Any text write can produce the image's canonical
+///   [`LamboError::ImageIdTaken`]. Any text write can produce the image's canonical
 ///   key (a derive, an action's resources, a `parent_of` end; case and token
 ///   order fold together), and keeping the text concept would leave the
-///   image with no vector while the call reported success. `Embed`, because
-///   it is a fact about this input, so a replayed intent settles `failed`
-///   rather than blocking the replay.
+///   image with no vector while the call reported success. A fact about
+///   this input, like `Embed`, so a replayed intent settles `failed` rather
+///   than blocking the replay.
 fn supplied_match_repair<'s>(
     graph: &Graph,
     items: &[(&str, ConceptType, String, Option<NodeId>)],
@@ -618,11 +618,20 @@ fn supplied_match_repair<'s>(
         return Ok(None);
     };
     match graph.node(node) {
-        Some(Node::Concept(c)) if c.embedding_source.is_none() => Err(LamboError::Embed(format!(
-            "image derive: a text concept ({node}) already holds this image's caption and id, so \
-             the image would have no vector; derive the image with another image id. The \
-             image concept was not written"
-        ))),
+        Some(Node::Concept(c)) if c.embedding_source.is_none() => {
+            // The node id is the operator's; the caller is told only its own
+            // image id (`LamboError::ImageIdTaken`).
+            tracing::info!(
+                target: "lambo::image",
+                text_concept = %node,
+                "image derive refused: a text concept already holds the image's canonical key"
+            );
+            Err(LamboError::ImageIdTaken(
+                crate::graph::image::image_id_of(&supplied.content)
+                    .unwrap_or_default()
+                    .to_owned(),
+            ))
+        }
         Some(Node::Concept(c)) if c.embedding.is_none() => Ok(Some((node, supplied))),
         _ => Ok(None),
     }

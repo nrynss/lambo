@@ -160,6 +160,13 @@ pub fn image_content(caption: &str, image_id: &str) -> String {
     format!("{} {IMAGE_SUFFIX_OPEN}{image_id}]", caption.trim())
 }
 
+/// The image id in an image concept's content (`"{caption} [image:{id}]"`),
+/// or `None` when the content does not end in a suffix with a valid id.
+pub fn image_id_of(content: &str) -> Option<&str> {
+    let (_, rest) = content.strip_suffix(']')?.rsplit_once(IMAGE_SUFFIX_OPEN)?;
+    validate_image_id(rest).ok().map(|()| rest)
+}
+
 /// Lowercase hex.
 pub(crate) fn hex(bytes: &[u8]) -> String {
     use std::fmt::Write;

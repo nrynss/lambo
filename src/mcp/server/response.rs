@@ -9,7 +9,7 @@ use rmcp::model::{CallToolResult, ContentBlock};
 use super::params::breaks_one_line;
 use super::trace::note_error;
 use crate::store::flush::{panic_message, CatchUnwindPoll};
-use crate::surface::error::err_class;
+use crate::surface::error::{err_class, model_safe_message};
 use crate::types::LamboError;
 use crate::writeq::{ReceiptAnswer, ReceiptId};
 
@@ -35,8 +35,8 @@ pub(super) fn tool_err(what: &str, err: LamboError) -> CallToolResult {
     // I1: the same class the caller is told, in the ledger's `error_kind`.
     note_error(err_class(&err));
     CallToolResult::error(vec![ContentBlock::text(format!(
-        "{what}: {} (the detail was logged server-side)",
-        err_class(&err)
+        "{what}: {}",
+        model_safe_message(&err)
     ))])
 }
 
