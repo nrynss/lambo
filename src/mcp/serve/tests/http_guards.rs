@@ -1044,3 +1044,85 @@ async fn only_an_opener_has_its_body_read_by_the_guard() {
     );
     assert_eq!(reached.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
+
+// -----------------------------------------------------------------------
+// #32 PR 5 third review L2: a sessionless call holds no opening
+// -----------------------------------------------------------------------
+
+/// An `initialize` rmcp mints an MCP session for.
+const INITIALIZE_BODY: &str = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"guard-test","version":"1"}}}"#;
+
+/// A sessionless `tools/call` carrying its protocol version per request,
+/// which rmcp answers directly, without an MCP session.
+const PER_REQUEST_CALL_BODY: &str = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"lambo_stats","arguments":{},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#;
+
+/// A sessionless POST to `/mcp` as `auth`, carrying `body`.
+fn post_body(auth: &str, body: &str) -> String {
+    format!(
+        "POST /mcp HTTP/1.1\r\nHost: localhost\r\nAuthorization: {auth}\r\n\
+         Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+/// The guard reserves a slot of the cap only for a body rmcp can mint an
+/// MCP session for (an `initialize` request), read with rmcp's own
+/// deserializer; a body that does not parse is counted (the safe side).
+#[test]
+fn only_an_initialize_body_can_mint_a_session() {
+    assert!(can_mint_a_session(INITIALIZE_BODY.as_bytes()));
+    assert!(!can_mint_a_session(PER_REQUEST_CALL_BODY.as_bytes()));
+    assert!(!can_mint_a_session(
+        br#"{"jsonrpc":"2.0","id":3,"method":"server/discover","params":{}}"#
+    ));
+    assert!(!can_mint_a_session(
+        br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#
+    ));
+    assert!(!can_mint_a_session(
+        br#"{"jsonrpc":"2.0","id":4,"result":{}}"#
+    ));
+    // Not JSON-RPC rmcp can read: counted, never let through uncounted.
+    assert!(can_mint_a_session(b""));
+    assert!(can_mint_a_session(b"{\"jsonrpc\""));
+}
+
+/// #32 PR 5 third review L2: parallel sessionless calls from one credential
+/// hold no opening while they run, so with one slot of its share left the
+/// credential can have many in flight and still open an MCP session. Each
+/// call is held at the service (it is still running) while the next ones
+/// and the `initialize` arrive.
+///
+/// Mutation: reserve for every session-opening request (drop the
+/// `can_mint_a_session` check) and the second call is a 503 at the share.
+#[tokio::test]
+async fn parallel_sessionless_calls_are_not_refused_at_the_share() {
+    let guard = HttpGuard::new(
+        credentials_authority(&["tenant", "operator"]),
+        32,
+        Arc::new(FakeOpeners(vec![("tenant", 15)])),
+        0,
+    );
+    let (addr, reached, release) = spawn_holding(guard).await;
+    let tenant = format!("Bearer {}", fake_token("tenant"));
+
+    let mut calls = Vec::new();
+    for n in 1..=4 {
+        let head = post_body(&tenant, PER_REQUEST_CALL_BODY);
+        calls.push(tokio::spawn(async move { request(addr, &head).await }));
+        until_reached(&reached, n).await;
+    }
+    // The tenant's last slot is still free for an `initialize`.
+    let head = post_body(&tenant, INITIALIZE_BODY);
+    let opener = tokio::spawn(async move { request(addr, &head).await });
+    until_reached(&reached, 5).await;
+    // ...and that one does hold it.
+    let (status, body) = request(addr, &post_body(&tenant, INITIALIZE_BODY)).await;
+    assert_eq!(status, 503, "the opener holds the last slot: {body}");
+
+    release.notify_waiters();
+    for call in calls {
+        let (status, body) = call.await.expect("call");
+        assert_eq!(status, 200, "{body}");
+    }
+    assert_eq!(opener.await.expect("opener").0, 200);
+}

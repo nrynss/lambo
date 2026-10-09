@@ -692,6 +692,39 @@ pub(super) fn opens_a_new_session(req: &axum::extract::Request) -> bool {
     req.method() == axum::http::Method::POST && usable_session_id(req.headers()).is_none()
 }
 
+/// Can rmcp mint an MCP session for a session-opening request
+/// ([`opens_a_new_session`]) whose whole body is `body`? (#32 PR 5 third
+/// review L2.)
+///
+/// rmcp 3.1.2 (`StreamableHttpService::handle_post`) mints a session for a
+/// POST with no usable session id only when the body is a JSON-RPC
+/// *request* whose method is `initialize`: a sessionless `server/discover`
+/// or per-request-protocol call (`tools/call` carrying its protocol
+/// version) is answered directly, without a session, and anything else
+/// without an id is refused. So only an `initialize` needs a reservation
+/// of the cap; a sessionless call, which can run for as long as its tool
+/// does, must not hold one, or a client making parallel stateless calls
+/// is refused at its share although it opens nothing.
+///
+/// The body is classified with **exactly rmcp's own reading of it**:
+/// `serde_json::from_slice::<ClientJsonRpcMessage>`, the call rmcp's
+/// `expect_json` makes, on the very bytes rmcp is then handed, so the two
+/// cannot disagree about what the message is. The answer leans one way
+/// only: a body that does not parse counts as one that can mint (rmcp
+/// refuses it, so the reservation is brief), so a disagreement could only
+/// over-count, the safe direction for the cap, never let a session in
+/// uncounted.
+pub(super) fn can_mint_a_session(body: &[u8]) -> bool {
+    use rmcp::model::{ClientJsonRpcMessage, ClientRequest};
+    match serde_json::from_slice::<ClientJsonRpcMessage>(body) {
+        Ok(ClientJsonRpcMessage::Request(req)) => {
+            matches!(req.request, ClientRequest::InitializeRequest(_))
+        }
+        Ok(_) => false,
+        Err(_) => true,
+    }
+}
+
 /// How the cap refusal tells a client to free an MCP session, for a request
 /// on `path` (#32 review L4): an MCP session is closed on the route it was
 /// opened at, `/mcp` for the default session or `/mcp/s/{session}`. At
@@ -719,9 +752,11 @@ fn how_to_close(path: &str) -> String {
 
 /// Auth, then rate, then the declared body size; then, for a request that
 /// would open an MCP session ([`opens_a_new_session`]) and only for it, the
-/// whole body within [`REQUEST_BODY_TIMEOUT`] and the session cap (the
-/// process's, then the credential's share) — in that order, deliberately.
-/// Every other request goes on to the router with its body unread.
+/// whole body within [`REQUEST_BODY_TIMEOUT`], and, when rmcp can mint a
+/// session for that body ([`can_mint_a_session`]: an `initialize`), the
+/// session cap (the process's, then the credential's share) — in that
+/// order, deliberately. Every other request goes on to the router with its
+/// body unread.
 ///
 /// Authentication runs **first and alone**: an unauthenticated caller must not
 /// be able to consume rate-limit budget or read the live-session count (a 503
@@ -879,6 +914,14 @@ pub(super) async fn guard_request(
                 .into_response();
         }
     };
+    // A sessionless call rmcp answers without a session (a per-request
+    // `tools/call`, `server/discover`) holds no reservation for its
+    // duration (#32 PR 5 third review L2): only a body rmcp can mint a
+    // session for goes on to the cap.
+    if !can_mint_a_session(&body) {
+        let req = axum::extract::Request::from_parts(parts, axum::body::Body::from(body));
+        return next.run(req).await;
+    }
     let mut req = axum::extract::Request::from_parts(parts, axum::body::Body::from(body));
 
     // Reserve first, then read the live count (see `Openings`).
