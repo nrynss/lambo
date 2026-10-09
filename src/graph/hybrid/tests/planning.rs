@@ -431,10 +431,35 @@ async fn parent_of_end_embedding_follows_the_concepts_degrade_rules() {
             1024
         }
         async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbedError> {
+            self.embed_as(text, crate::test_util::TextRole::Document)
+                .await
+        }
+        async fn embed_query(&self, text: &str) -> Result<Vec<f32>, EmbedError> {
+            self.embed_as(text, crate::test_util::TextRole::Query).await
+        }
+        fn modalities(&self) -> crate::embed::Modalities {
+            FixtureEmbedder::new().modalities()
+        }
+        async fn embed_image(
+            &self,
+            image: crate::embed::ImageInput<'_>,
+        ) -> Result<Vec<f32>, EmbedError> {
+            FixtureEmbedder::new().embed_image(image).await
+        }
+    }
+
+    impl RefusesParent {
+        /// The `embed` behaviour above, in either text role (#22: a wrapper
+        /// forwards the role, so its inner embedder sees what the caller asked).
+        async fn embed_as(
+            &self,
+            text: &str,
+            role: crate::test_util::TextRole,
+        ) -> Result<Vec<f32>, EmbedError> {
             if text.starts_with("document:src.md") {
                 return Err(EmbedError::Unavailable("server down".into()));
             }
-            FixtureEmbedder::new().embed(text).await
+            role.embed(&FixtureEmbedder::new(), text).await
         }
     }
     let (graph, interaction) = graph_with_interaction("hybrid-parent-fail", 1, 0, "ingest context");

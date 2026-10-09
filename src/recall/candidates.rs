@@ -216,6 +216,11 @@ pub(crate) async fn gather_from(
 /// through [`super::query_cache::embed_query_cached`] first, which serves a
 /// repeated query from the session's query-embedding cache (#14). `lambo
 /// recall` embeds directly: one recall per process has nothing to reuse.
+///
+/// The embed is [`crate::embed::Embedder::embed_query`], the query role
+/// (#22), not `embed`, the document role. Every symmetric adapter answers
+/// the two identically, so for them nothing changes; an asymmetric one
+/// (EmbeddingGemma 2's task prompts) gets its query prompt here and only here.
 pub(crate) async fn embed_query(
     vectors: VectorCandidates<'_>,
     embedder: &dyn crate::embed::Embedder,
@@ -224,7 +229,7 @@ pub(crate) async fn embed_query(
     if !vectors.available() {
         return Ok(None);
     }
-    match embedder.embed(query).await {
+    match embedder.embed_query(query).await {
         Ok(vector) => Ok(Some(vector)),
         Err(err) => Err(format!(
             "recall: query embedding failed ({err}); vector leg skipped"
@@ -1263,5 +1268,68 @@ mod tests {
                 "there is no index to ask, so the keyword leg is never set: {l:?}"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // #22: recall embeds its query in the query role
+    // -----------------------------------------------------------------------
+
+    /// An asymmetric embedder: the document and query roles answer different
+    /// vectors for the same text, and each role counts its calls.
+    #[derive(Default)]
+    struct TwoRoles {
+        documents: AtomicUsize,
+        queries: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::embed::Embedder for TwoRoles {
+        fn dimensions(&self) -> usize {
+            2
+        }
+        async fn embed(&self, _text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
+            self.documents.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![1.0, 0.0])
+        }
+        async fn embed_query(&self, _text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
+            self.queries.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![0.0, 1.0])
+        }
+    }
+
+    #[tokio::test]
+    async fn the_recall_query_is_embedded_in_the_query_role() {
+        let store = SpyVectorStore::with_vector(Vec::new());
+        let embedder = TwoRoles::default();
+        let vector = embed_query(
+            VectorCandidates::from_store(&store),
+            &embedder,
+            "user schema",
+        )
+        .await
+        .unwrap();
+        assert_eq!(vector, Some(vec![0.0, 1.0]), "the query role's vector");
+        assert_eq!(embedder.queries.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            embedder.documents.load(Ordering::SeqCst),
+            0,
+            "recall never embeds its query in the document role"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_vector_leg_means_no_query_embed_in_either_role() {
+        let store = SpyVectorStore::without_vector();
+        let embedder = TwoRoles::default();
+        let vector = embed_query(
+            VectorCandidates::from_store(&store),
+            &embedder,
+            "user schema",
+        )
+        .await
+        .unwrap();
+        assert_eq!(vector, None);
+        assert_eq!(embedder.queries.load(Ordering::SeqCst), 0);
+        assert_eq!(embedder.documents.load(Ordering::SeqCst), 0);
     }
 }
