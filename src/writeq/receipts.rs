@@ -170,8 +170,8 @@ pub const MAX_RETAINED_RECEIPTS: usize = 4096;
 /// process holds: `quiesce` drains, then `abort_workers` settles what is
 /// left `intent_durable` and wakes every waiter, so those waits return with
 /// it. A `pending_replay` id, owed to a replay the close stops, is not
-/// settled; its wait returns once the pipeline is sealed and its workers are
-/// aborted (#11 review P3-2). Nothing in shutdown joins a waiting call either:
+/// settled; its wait returns once the pipeline is sealed and the close has
+/// settled what its aborted workers left (#11 review P3-2, round 2 F1). Nothing in shutdown joins a waiting call either:
 /// `serve`'s final stage cancels the MCP services without awaiting their
 /// tool tasks.
 pub const RECEIPT_WAIT_MAX: Duration =
@@ -896,13 +896,16 @@ impl WritePipeline {
                 return answer;
             }
             // Closed (#11 review P3-2): once the lanes are sealed and the
-            // workers aborted, nothing in this process can settle the id.
-            // The close already settled every receipt it held and woke this
-            // loop; a `pending_replay` id is owed to a replay the close
-            // stopped, so without this its wait ran on against a closed
-            // session to its own deadline.
+            // close has settled every receipt it held, nothing in this
+            // process can settle the id. A `pending_replay` id is owed to a
+            // replay the close stopped, so without this its wait ran on
+            // against a closed session to its own deadline. Keyed on the
+            // close's settle, not on the workers being marked aborted (a
+            // whole join earlier), and answered with a fresh lookup, so a
+            // settle that landed after the one above is not reported stale
+            // (#11 review round 2, F1).
             if self.closed_to_settles() {
-                return answer;
+                return self.lookup(agent, id);
             }
             if tokio::time::timeout_at(deadline, notified).await.is_err() {
                 return self.lookup(agent, id);
@@ -911,11 +914,12 @@ impl WritePipeline {
     }
 
     /// `true` once nothing in this process can settle another receipt: the
-    /// lanes are sealed and [`WritePipeline::abort_workers`] has drained and
-    /// aborted the workers. The replay loop stops at the seal as well.
+    /// lanes are sealed and [`WritePipeline::abort_workers`] has joined the
+    /// workers **and settled** what they left. The replay loop stops at the
+    /// seal as well.
     fn closed_to_settles(&self) -> bool {
         let lanes = self.lanes.lock();
-        lanes.sealed && lanes.workers_aborted
+        lanes.sealed && lanes.settled_at_close
     }
 
     /// Take one receipt out of the piggyback queue because it has just been
