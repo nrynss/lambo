@@ -1712,6 +1712,32 @@ async fn embedding_source_survives_the_flush_load_round_trip() {
     .await;
 }
 
+/// #22 review L1: a settled image intent keeps no vector, through the shared
+/// check every adapter runs, and no trace of it is left in the raw payload
+/// column either.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_settled_image_intent_keeps_no_vector() {
+    let store = test_store();
+    store.init_schema().await.unwrap();
+    let sid = SessionId::from("settled-image-intent");
+    crate::store::embedding_source_testkit::check_a_settled_image_intent_keeps_no_vector(
+        &store, &sid, 4, None,
+    )
+    .await;
+    let payloads: Vec<String> =
+        sqlx::query_scalar("SELECT payload FROM write_intents WHERE session_id = ?")
+            .bind(sid.as_str())
+            .fetch_all(store.pool())
+            .await
+            .unwrap();
+    let with_vector = payloads.iter().filter(|p| p.contains("\"vector\"")).count();
+    assert_eq!(
+        (payloads.len(), with_vector),
+        (3, 0),
+        "three intents, none of the settled ones carries a vector: {payloads:?}"
+    );
+}
+
 /// #22 PR 2: a stored `embedding_source` this build cannot read fails the
 /// load by concept id. Reading it as `None` instead would make an image
 /// concept look text-embedded, and a re-embed would then replace its image

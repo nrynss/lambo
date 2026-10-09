@@ -17,10 +17,12 @@
   own content.
 - `WriteKind` and `WriteIntentPayload` each gain a `DeriveImage` variant
   (#22), so library code that matches either exhaustively needs the new arm.
-  A stored image intent (unapplied, or applied and still inside the receipt
-  retention window) is unreadable to an older build, which fails to load the
-  session rather than replay it without its vector (design risk R5: a
-  downgrade is loud). `Graph::reembed_all` now leaves
+  An unapplied image intent is unreadable to an older build, which fails to
+  load the session rather than replay it without its vector (design risk R5:
+  a downgrade is loud). A settled image intent (applied or failed) keeps
+  only its outcome: the store overwrites its payload with an empty text
+  derive, so its vector does not outlive it and an older build loads it.
+  `Graph::reembed_all` now leaves
   image concepts out of its coverage rule and refuses while one carries a
   vector; `Graph::reembed_all_dropping_image_vectors` is the variant that
   nulls them.

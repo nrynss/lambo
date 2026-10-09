@@ -111,7 +111,7 @@ pub(super) async fn bulk_put_write_intents(
     let payloads: Vec<String> = intents
         .iter()
         .map(|i| {
-            serde_json::to_string(&i.payload)
+            i.stored_payload()
                 .map_err(|e| backend(format!("serialize write intent payload: {e}")))
         })
         .collect::<Result<_, _>>()?;
@@ -345,7 +345,8 @@ pub(super) async fn put_write_intent(
     tx: &mut sqlx::PgConnection,
     intent: &crate::types::WriteIntent,
 ) -> Result<(), StoreError> {
-    let payload = serde_json::to_string(&intent.payload)
+    let payload = intent
+        .stored_payload()
         .map_err(|e| backend(format!("serialize write intent payload: {e}")))?;
     sqlx::query(
         "INSERT INTO write_intents \
@@ -383,7 +384,9 @@ pub(super) async fn put_write_intent(
 /// Mark one intent consumed with its outcome, then purge consumed rows older
 /// than [`crate::types::WRITE_INTENT_RETENTION`] — clocked by the mutation's
 /// own `consumed_at`. Consuming an absent receipt is a no-op (idempotent
-/// replay, same as the canonization dedupe).
+/// replay, same as the canonization dedupe). A settled image intent's payload
+/// is overwritten with [`crate::types::SETTLED_IMAGE_INTENT_PAYLOAD`] in the
+/// same statement (#22 review L1).
 pub(super) async fn consume_write_intent(
     tx: &mut sqlx::PgConnection,
     session_id: &SessionId,
@@ -391,7 +394,9 @@ pub(super) async fn consume_write_intent(
     outcome: &crate::types::WriteIntentOutcome,
 ) -> Result<(), StoreError> {
     sqlx::query(
-        "UPDATE write_intents SET consumed_at = $1, outcome_tag = $2, outcome_summary = $3 \
+        "UPDATE write_intents SET consumed_at = $1, outcome_tag = $2, outcome_summary = $3, \
+             payload = CASE WHEN payload LIKE CAST($6 AS TEXT) THEN CAST($7 AS TEXT) \
+                 ELSE payload END \
          WHERE session_id = $4 AND receipt = $5",
     )
     .bind(outcome.consumed_at)
@@ -399,6 +404,8 @@ pub(super) async fn consume_write_intent(
     .bind(&outcome.summary)
     .bind(session_id.as_str())
     .bind(receipt)
+    .bind(crate::types::DERIVE_IMAGE_PAYLOAD_LIKE)
+    .bind(crate::types::SETTLED_IMAGE_INTENT_PAYLOAD)
     .execute(&mut *tx)
     .await
     .map_err(|e| map_write_err(e, |m| format!("consume write intent: {m}")))?;

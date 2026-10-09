@@ -777,7 +777,8 @@ pub enum WriteIntentPayload {
     /// than embedded from its text.
     ///
     /// Its own variant, not a defaulted field on [`Self::Derive`] (design
-    /// Q18): a build that predates it fails to decode the intent and says so,
+    /// Q18): a build that predates it fails to decode an unconsumed intent and
+    /// says so (a settled one is stored as [`WriteIntentPayload::settled`]),
     /// where a defaulted field would let it drop the vector silently and
     /// embed the caption in its place. The intent carries the **vector**,
     /// never image bytes, so a replay needs no image and nothing about the
@@ -803,6 +804,54 @@ pub enum WriteIntentPayload {
         depends_on: Vec<String>,
     },
 }
+
+impl WriteIntentPayload {
+    /// The payload a **settled** (consumed: applied or failed) intent keeps
+    /// in the store (#22 review L1).
+    ///
+    /// Nothing reads a settled intent's payload: the replay seeds its receipt
+    /// answer from the outcome alone and replays only unconsumed rows. So a
+    /// settled [`Self::DeriveImage`] drops its vector, the one piece of user
+    /// data in a payload that outlives what it produced, and becomes the empty
+    /// [`Self::Derive`], [`SETTLED_IMAGE_INTENT_PAYLOAD`]. That way an
+    /// `re-embed --drop-image-vectors` leaves no old-space vector behind in a
+    /// retained intent row, and a build that predates `DeriveImage` can still
+    /// load a session whose image intents are all settled (design R5: only an
+    /// *unconsumed* image intent stops an older build). Text payloads are kept
+    /// as they are.
+    pub fn settled(&self) -> Option<WriteIntentPayload> {
+        match self {
+            Self::DeriveImage { .. } => Some(Self::Derive {
+                concepts: Vec::new(),
+                pairs: Vec::new(),
+            }),
+            Self::Derive { .. } | Self::Action { .. } => None,
+        }
+    }
+}
+
+impl WriteIntent {
+    /// The serialized payload an adapter writes for this intent: the
+    /// [`WriteIntentPayload::settled`] form when the intent already carries an
+    /// outcome (a snapshot save or a replayed put of a settled row), the
+    /// payload as acked otherwise.
+    pub fn stored_payload(&self) -> Result<String, serde_json::Error> {
+        match (&self.outcome, self.payload.settled()) {
+            (Some(_), Some(settled)) => serde_json::to_string(&settled),
+            _ => serde_json::to_string(&self.payload),
+        }
+    }
+}
+
+/// [`WriteIntentPayload::settled`]'s form of an image intent, serialized: what
+/// the SQL adapters' consume writes over a settled `DeriveImage` payload.
+pub const SETTLED_IMAGE_INTENT_PAYLOAD: &str = r#"{"kind":"derive","concepts":[],"pairs":[]}"#;
+
+/// A SQL `LIKE` pattern that matches a stored `DeriveImage` payload and no
+/// other: the serialized enum leads with its tag. (`_` is a `LIKE` wildcard
+/// for one character, which can only widen the match to tags that do not
+/// exist.)
+pub const DERIVE_IMAGE_PAYLOAD_LIKE: &str = r#"{"kind":"derive_image",%"#;
 
 /// A vector supplied for one concept instead of being embedded from its text
 /// (#22, design sections 3.3 and 5.1): an image embedding the server computed
@@ -1599,6 +1648,61 @@ pub enum LamboError {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    /// #22 review L1: the SQL adapters' consume matches a stored image
+    /// payload with [`DERIVE_IMAGE_PAYLOAD_LIKE`] and writes
+    /// [`SETTLED_IMAGE_INTENT_PAYLOAD`] over it, both as constants. Pin them
+    /// to what serde actually writes and reads.
+    #[test]
+    fn the_settled_image_payload_constants_match_the_serialized_forms() {
+        let image = WriteIntentPayload::DeriveImage {
+            concepts: vec![("red [image:a1]".into(), ConceptType::Resource)],
+            pairs: vec![],
+            supplied: SuppliedVector {
+                content: "red [image:a1]".into(),
+                vector: vec![0.6, 0.8],
+                contract: EmbeddingContract {
+                    kind: "fixture".into(),
+                    model: None,
+                    dim: 2,
+                },
+                source: EmbeddingSource {
+                    modality: SourceModality::Image,
+                    origin: VectorOrigin::Client,
+                    sha256: None,
+                    mime: None,
+                },
+            },
+        };
+        let like_prefix = DERIVE_IMAGE_PAYLOAD_LIKE.trim_end_matches('%');
+        assert!(serde_json::to_string(&image)
+            .unwrap()
+            .starts_with(like_prefix));
+        for text in [
+            WriteIntentPayload::Derive {
+                concepts: vec![("x".into(), ConceptType::Entity)],
+                pairs: vec![],
+            },
+            WriteIntentPayload::Action {
+                action: "a".into(),
+                produces: vec![],
+                modifies: vec![],
+                depends_on: vec![],
+            },
+        ] {
+            assert!(!serde_json::to_string(&text)
+                .unwrap()
+                .starts_with(like_prefix));
+            assert_eq!(text.settled(), None, "text payloads are kept");
+        }
+        let settled = image.settled().expect("an image payload settles");
+        assert_eq!(
+            serde_json::to_string(&settled).unwrap(),
+            SETTLED_IMAGE_INTENT_PAYLOAD
+        );
+        let back: WriteIntentPayload = serde_json::from_str(SETTLED_IMAGE_INTENT_PAYLOAD).unwrap();
+        assert_eq!(back, settled);
+    }
 
     #[test]
     fn concept_type_json_roundtrip() {

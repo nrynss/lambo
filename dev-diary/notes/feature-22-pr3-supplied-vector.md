@@ -127,6 +127,30 @@ reports `lambo_derive_image`, and the receipt reads
 A `parent_of` pair whose child is the image concept resolves to it and counts
 it matched, as for text.
 
+**A settled image intent keeps no vector** (review L1). A consumed row is
+retained for the receipt window and purged only lazily, by a later consume
+in the same session, so an idle session kept an applied or failed image
+intent, vector and all, indefinitely: an older build could not load the
+session though nothing was owed (contradicting design R5, which says only an
+*unconsumed* intent stops a downgrade), an old-space vector outlived
+`re-embed --drop-image-vectors`, and a `failed` intent kept the vector it was
+refused for. Nothing reads a settled row's payload (the replay answers its
+receipt from the outcome and replays only unconsumed rows), so every adapter
+now overwrites a settled `DeriveImage` payload with
+`WriteIntentPayload::settled()`, the empty `Derive`
+(`SETTLED_IMAGE_INTENT_PAYLOAD`): SQLite and the Postgres family in the
+consume `UPDATE` itself (`payload LIKE DERIVE_IMAGE_PAYLOAD_LIKE`, so no
+read and no new mutation field), and on any put of a row that already
+carries an outcome (snapshot saves); the in-memory adapter on both too. The
+outcome tag and summary, agent, interaction and timestamps stay for
+diagnostics. Text payloads are unchanged. Purging settled rows instead would
+have cost the image receipt its `applied_after_restart` answer. No stored
+data needs migrating: no build that wrote image intents has shipped. The
+shared check `embedding_source_testkit::check_a_settled_image_intent_keeps_no_vector`
+runs on SQLite and Memory in CI, on Postgres inside the existing
+`postgres_round_trips_the_embedding_source` live test (no CI change), and in
+the Cockroach conformance suite; the Postgres-family SQL is not run locally.
+
 **`re-embed` (Q19)** replaces PR 2's blanket refusal (decision `c4bf7dcd`):
 
 - a full migration refuses while any image concept still carries a vector,

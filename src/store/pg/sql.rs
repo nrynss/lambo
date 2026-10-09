@@ -789,9 +789,20 @@ pub(super) fn put_write_intents_upsert<'a>(
 
 // `sqlx::QueryBuilder::push_values` emits the `VALUES` keyword itself, so the
 // prefix ends after `FROM (` and the suffix begins after the closing paren.
+//
+// #22 review L1: a settled image intent's payload is overwritten with
+// `types::SETTLED_IMAGE_INTENT_PAYLOAD` in the same statement, so its vector
+// does not outlive the consume. The pattern and the replacement are bound
+// between the two halves of this prefix, before the VALUES rows.
 pub(super) const CONSUME_WRITE_INTENT_UPDATE_PREFIX_SQL: &str = r#"
 UPDATE write_intents SET
-    consumed_at = v.consumed_at, outcome_tag = v.outcome_tag, outcome_summary = v.outcome_summary
+    consumed_at = v.consumed_at, outcome_tag = v.outcome_tag, outcome_summary = v.outcome_summary,
+    payload = CASE WHEN write_intents.payload LIKE CAST("#;
+
+pub(super) const CONSUME_WRITE_INTENT_UPDATE_PAYLOAD_SQL: &str = r#" AS TEXT) THEN CAST("#;
+
+pub(super) const CONSUME_WRITE_INTENT_UPDATE_VALUES_SQL: &str = r#" AS TEXT)
+        ELSE write_intents.payload END
     FROM ("#;
 
 pub(super) const CONSUME_WRITE_INTENT_UPDATE_SUFFIX_SQL: &str = r#") AS v(
@@ -807,6 +818,10 @@ pub(super) fn consume_write_intents_update<'a>(
     )],
 ) -> sqlx::QueryBuilder<'a, sqlx::Postgres> {
     let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new(CONSUME_WRITE_INTENT_UPDATE_PREFIX_SQL);
+    qb.push_bind(crate::types::DERIVE_IMAGE_PAYLOAD_LIKE)
+        .push(CONSUME_WRITE_INTENT_UPDATE_PAYLOAD_SQL)
+        .push_bind(crate::types::SETTLED_IMAGE_INTENT_PAYLOAD)
+        .push(CONSUME_WRITE_INTENT_UPDATE_VALUES_SQL);
     qb.push_values(consumes.iter(), |mut b, (sid, receipt, outcome)| {
         b.push_bind(sid.0.as_str())
             .push_bind(receipt)
