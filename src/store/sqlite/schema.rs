@@ -24,13 +24,21 @@ pub(super) const INIT_SQL: &str = include_str!(concat!(
 /// Idempotent post-T3.1 column convergence: SQLite has no
 /// `ADD COLUMN IF NOT EXISTS`, so check `pragma_table_info` first and ALTER
 /// only when the column is absent. Safe to call on every `init_schema` (fresh
-/// databases already carry the columns from the DDL — no-op).
+/// databases already carry the columns from the DDL — no-op), and on two
+/// connections at once (see [`add_column`]).
 pub(super) async fn ensure_column(
     pool: &SqlitePool,
     table: &str,
     column: &str,
     alter_ddl: &str,
 ) -> Result<(), StoreError> {
+    if !column_present(pool, table, column).await? {
+        add_column(pool, table, column, alter_ddl).await?;
+    }
+    Ok(())
+}
+
+async fn column_present(pool: &SqlitePool, table: &str, column: &str) -> Result<bool, StoreError> {
     let present: Option<String> =
         sqlx::query_scalar("SELECT name FROM pragma_table_info(?) WHERE name = ?")
             .bind(table)
@@ -38,13 +46,31 @@ pub(super) async fn ensure_column(
             .fetch_optional(pool)
             .await
             .map_err(|e| db_err(&format!("init_schema: inspect {table}.{column}"), e))?;
-    if present.is_none() {
-        sqlx::query(alter_ddl)
-            .execute(pool)
-            .await
-            .map_err(|e| db_err(&format!("init_schema: add {table}.{column}"), e))?;
+    Ok(present.is_some())
+}
+
+/// Run `alter_ddl` to add `table.column`, which [`ensure_column`] saw
+/// missing. Check-then-ALTER races: two `lambo provision` runs on one file
+/// can both see the column missing, and the second ALTER then fails with
+/// "duplicate column name" (#22 review L3). So a failed ALTER re-checks, and
+/// if the column now exists the goal is met and this returns `Ok`. Any other
+/// failure is returned as it was.
+pub(super) async fn add_column(
+    pool: &SqlitePool,
+    table: &str,
+    column: &str,
+    alter_ddl: &str,
+) -> Result<(), StoreError> {
+    match sqlx::query(alter_ddl).execute(pool).await {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            if column_present(pool, table, column).await? {
+                Ok(())
+            } else {
+                Err(db_err(&format!("init_schema: add {table}.{column}"), e))
+            }
+        }
     }
-    Ok(())
 }
 
 impl SqliteStore {

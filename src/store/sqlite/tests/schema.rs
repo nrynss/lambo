@@ -572,3 +572,52 @@ async fn init_schema_converges_a_pre_22_store_without_embedding_source() {
     )
     .await;
 }
+
+/// #22 review L3: `ensure_column` is check-then-ALTER, so two `provision`
+/// runs on one file can both see a column missing and both ALTER. The
+/// loser's ALTER fails with "duplicate column name"; it must re-check and
+/// succeed, since the column it wanted now exists. This replays the loser's
+/// half deterministically: the column is present when the ALTER runs.
+#[tokio::test]
+async fn a_lost_add_column_race_converges_instead_of_failing() {
+    let store = test_store();
+    store.init_schema().await.unwrap();
+    crate::store::sqlite::schema::add_column(
+        store.pool(),
+        "concepts",
+        "embedding_source",
+        "ALTER TABLE concepts ADD COLUMN embedding_source TEXT",
+    )
+    .await
+    .expect("the column another provision added is what this one wanted");
+    // A genuinely failing ALTER still fails.
+    let err = crate::store::sqlite::schema::add_column(
+        store.pool(),
+        "concepts",
+        "no_such_column",
+        "ALTER TABLE no_such_table ADD COLUMN no_such_column TEXT",
+    )
+    .await
+    .expect_err("an ALTER that fails and leaves the column absent is an error");
+    assert!(err.to_string().contains("no_such_column"), "{err}");
+}
+
+/// #22 review L3, end to end: two connections on one file provision a
+/// pre-#22 store at once. Both must succeed and the store must converge.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_provisions_on_one_file_both_succeed() {
+    let (_dir, path) = scratch_db();
+    let a = SqliteStore::connect(&path).unwrap();
+    let b = SqliteStore::connect(&path).unwrap();
+    a.init_schema().await.unwrap();
+    for round in 0..10 {
+        sqlx::query("ALTER TABLE concepts DROP COLUMN embedding_source")
+            .execute(a.pool())
+            .await
+            .unwrap();
+        let (ra, rb) = tokio::join!(a.init_schema(), b.init_schema());
+        ra.unwrap_or_else(|e| panic!("round {round}: provision a: {e}"));
+        rb.unwrap_or_else(|e| panic!("round {round}: provision b: {e}"));
+        a.preflight_schema().await.expect("converged");
+    }
+}
