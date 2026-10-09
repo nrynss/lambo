@@ -88,7 +88,35 @@
     this is refused at the call, not on the receipt. Split the call. A store
     without vector search embeds nothing and is not limited.
 
+- `LamboError` gains a variant, `ImageIdTaken(String)` (#22 PR 4): an
+  image derive refused because a text concept already holds the image's
+  caption and id. It replaces the `Embed` refusal PR 3 used for that case, so
+  library code that matches `LamboError` exhaustively needs the new arm. Its
+  only field is the caller's image id, and every surface shows it with the
+  fix (choose another image id); the ledger's `error_kind` for it is
+  `"image id taken"`.
+- `Config` and `EmbedderConfig` each gain a public field,
+  `accept_client_vectors: bool` (#22 PR 4). Code that builds either with a
+  struct literal must add it (or use `..Default::default()`); both default to
+  `false`, and `lambo.toml` files are unaffected.
+
 ### Changed
+
+- `lambo_derive`, `lambo_record_action`'s `action`, `lambo derive`
+  (`--content`, `--concept`) and `lambo record-action --action` refuse text
+  containing `[image:`, raw or in any spelling that canonicalizes to it
+  (#22 PR 4). Only `lambo_derive_image` builds that suffix; a text concept
+  holding it could take an image's identity before the image is derived.
+  References (`parent_of` ends; `produces`, `modifies`, `depends_on`) still
+  accept it, since naming an image concept's content is how a text write
+  links to it.
+- A write that fails because its image id is taken now says so, with the
+  fix and the caller's image id, on the tool error, on the receipt and after
+  a replay, instead of "embedding error (the detail was logged
+  server-side)" (#22 PR 4). Every other failure reads as before.
+- `lambo_stats` (and the I2 heartbeat payload) gains `embedding_contract`
+  and `embedding_modalities`, and its text summary an `embedding:` line
+  (#22 PR 4). Additive.
 
 - The write queue's probe log lines (`write queue: bounds are static ...`
   and `the embedder could not be probed`) gain a `scope` field, `session`
@@ -201,6 +229,25 @@
   - `lambo recall` (one recall per process) is unchanged.
 
 ### Added
+
+- MCP tool `lambo_derive_image` (#22 PR 4): one image concept per call, a
+  caption plus either the image (`image`: mime and base64, embedded by the
+  server on the call path) or a client-computed vector (`vector`: values and
+  the embedding contract they are in). Acked with a receipt like
+  `lambo_derive`; only the vector is queued, made durable or replayed. It is
+  listed only when the server's embedder embeds images or client vectors are
+  enabled, so a text-only deployment still lists exactly the seven tools,
+  with byte-identical schemas (pinned by a golden). Base64 is capped at
+  2,796,204 characters before it is decoded, also on stdio. A client vector
+  must declare exactly the session's contract (AC4); a refusal names the
+  differing fields and never echoes the vector, the declared strings or the
+  image.
+- `lambo derive-image` (#22 PR 4): the CLI twin, from `--image PATH`
+  (`--mime` defaults to the file's type) or `--vector-json PATH`.
+- `[embedder] accept_client_vectors` (default `false`) and its overlay
+  `LAMBO_ACCEPT_CLIENT_VECTORS` (#22 PR 4): whether this process accepts
+  client-computed image vectors. One setting for every session a server
+  holds; a call with a vector while it is off is refused naming the key.
 
 - `Embedder` gains three methods with defaults, so every existing adapter
   compiles and behaves unchanged (#22, first part):
