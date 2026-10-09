@@ -60,10 +60,22 @@ tier test both fail.
 is an image concept whose vector is missing (a quarantine or
 `--drop-image-vectors` nulled it and kept its source), the match writes the
 supplied vector and source and counts it embedded. A match on a concept that
-has a vector keeps it (first image wins, design 4.2 dedup). A match on a
-*text* concept that happens to carry the same content is left alone and the
-receipt says `0 embedded`. This makes `--drop-image-vectors` recoverable:
-derive the same image again under the new embedder.
+has a vector keeps it (first image wins, design 4.2 dedup). This makes
+`--drop-image-vectors` recoverable: derive the same image again under the
+new embedder.
+
+**A canonical match on a text concept refuses the image derive** (review
+M1, replacing this PR's first rule that left the text concept alone and
+reported `0 embedded`). Any text write can produce an image's canonical key
+first: `lambo_derive "render 17 [image:r17]"`, an action's resources, a
+`parent_of` end, and case and token order fold together. Keeping the text
+concept would leave the image with no vector while the call reported
+success, and the image would never be found. The refusal is decided under
+the commit lock (`supplied_match_repair`) as `LamboError::Embed`: it is a
+fact about this input, so a replayed intent settles `failed` instead of
+blocking the replay. The message tells the caller to choose another image
+id. Refusing a `[image:` token in text-derive content at the surface is a
+wire change, left to PR 4.
 
 **Image ids are `[a-z0-9]{1,64}`, not `[a-z0-9_-]`** (design R8, resolved,
 deviating from section 4.2). `canonical::normalize_tokens` splits on `-` and
@@ -171,7 +183,7 @@ measured in PR 5.
 |---|---|
 | `embed::fixture::tests::{png_with_label_is_a_valid_png_whose_label_the_fixture_reads, the_fixture_embeds_images_and_advertises_it, an_unlabelled_image_gets_a_digest_seeded_vector_far_from_text, a_lying_label_length_reads_nothing_and_never_panics}` | every row with `embed-fixture` |
 | `embed::trait_tests::the_fixture_embeds_images_and_keeps_the_query_default` (replaces PR 1's `the_fixture_keeps_every_default`) | same |
-| `graph::hybrid::tests::supplied::*` (9: no merge, text excludes images, dedupe, repair, AC4 at apply, stamped session, the first-writer race, preconditions and shape, `parent_of`) | same |
+| `graph::hybrid::tests::supplied::*` (11: no merge, text excludes images, dedupe, repair, a text concept holding the key refuses the image (two), AC4 at apply, stamped session, the first-writer race, preconditions and shape, `parent_of`) | same |
 | `graph::image::tests::*` (6) | every row |
 | `memory::tests::image::*` (9; the two replay tests need `fixtures`) | rows with `store-memory` + `embed-fixture` |
 | `cli::re_embed::tests::{re_embed_refuses_image_vectors_unless_told_to_drop_them, re_embed_drop_image_vectors_nulls_them_and_reports_the_count, re_embed_never_gives_an_image_concept_a_caption_vector, re_embed_refuses_missing_only_with_drop_image_vectors}` (replace PR 2's `re_embed_refuses_a_session_with_an_embedding_source`) | same |

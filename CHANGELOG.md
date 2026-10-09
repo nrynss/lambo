@@ -224,9 +224,10 @@
   live embedding contract and have its width, finite values and a non-zero
   norm; the server renormalizes it. An image derive needs the `hybrid`
   strategy and a store with vector search, refuses an `observation` type,
-  never semantic-merges, and no text concept ever merges into an image. A
-  text query reaches image concepts through the ordinary vector leg. A
-  durable image intent replayed under a different live contract settles
+  never semantic-merges, and no text concept ever merges into an image; an
+  image derive whose caption and id a text concept already holds is refused
+  rather than left without a vector. A text query reaches image concepts
+  through the ordinary vector leg. A durable image intent replayed under a different live contract settles
   `failed`. Its receipt kind is `lambo_derive_image`; the MCP tool and CLI
   verb arrive in a later release.
 - `lambo re-embed` handles image concepts (#22): a full migration refuses

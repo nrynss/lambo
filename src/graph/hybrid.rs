@@ -492,10 +492,14 @@ pub async fn derive(
 ///   either a canonical match (the same image id and caption) or a fresh
 ///   concept carrying the supplied vector and its `embedding_source`. No
 ///   `embed` and no candidate lookup is made for it.
-/// * A canonical match keeps the existing concept as it is, with one
+/// * A canonical match on an image concept keeps it as it is, with one
 ///   exception: an image concept whose vector is missing (a quarantine or
 ///   `re-embed --drop-image-vectors` nulled it and kept its source) takes the
 ///   supplied vector, so re-deriving the same image repairs it.
+/// * A canonical match on a **text** concept (a text write that produced the
+///   same key first) is refused with [`LamboError::Embed`] under the commit
+///   lock: the image would otherwise have no vector while the call reported
+///   success.
 /// * Every **text** item's merge tier excludes image-sourced candidates, in
 ///   every derive: a text claim is never absorbed into a picture.
 /// * The vector is checked against the live contract first
@@ -579,6 +583,48 @@ fn check_supplied(
              vector belongs to"
                 .into(),
         ))),
+    }
+}
+
+/// What a canonically matched image item does to the concept it matched,
+/// decided under the commit lock (see [`derive_with`]).
+///
+/// * No match (the image item is fresh): `None`.
+/// * An image concept whose vector is missing: `Some`, the repair target.
+/// * An image concept that already has a vector: `None`, the first vector
+///   is kept.
+/// * A **text** concept (no `embedding_source`): refused with
+///   [`LamboError::Embed`]. Any text write can produce the image's canonical
+///   key (a derive, an action's resources, a `parent_of` end; case and token
+///   order fold together), and keeping the text concept would leave the
+///   image with no vector while the call reported success. `Embed`, because
+///   it is a fact about this input, so a replayed intent settles `failed`
+///   rather than blocking the replay.
+fn supplied_match_repair<'s>(
+    graph: &Graph,
+    items: &[(&str, ConceptType, String, Option<NodeId>)],
+    resolutions: &[Resolution],
+    supplied: &'s SuppliedVector,
+) -> Result<Option<(NodeId, &'s SuppliedVector)>, LamboError> {
+    let Some(node) =
+        items
+            .iter()
+            .zip(resolutions.iter())
+            .find_map(|((content, ..), res)| match res {
+                Resolution::CanonicalMatch { node } if *content == supplied.content => Some(*node),
+                _ => None,
+            })
+    else {
+        return Ok(None);
+    };
+    match graph.node(node) {
+        Some(Node::Concept(c)) if c.embedding_source.is_none() => Err(LamboError::Embed(format!(
+            "image derive: a text concept ({node}) already holds this image's caption and id, so \
+             the image would have no vector; derive the image with another image id. The \
+             image concept was not written"
+        ))),
+        Some(Node::Concept(c)) if c.embedding.is_none() => Ok(Some((node, supplied))),
+        _ => Ok(None),
     }
 }
 
@@ -719,7 +765,7 @@ fn plan_inputs<'a>(
 /// Refuse a plan whose embeds exceed [`MAX_HYBRID_EMBEDS`]: one per
 /// unmatched concept and one per `parent_of` end the call will create.
 fn check_embed_budget(
-    items: &PlannedItems<'_>,
+    items: &[(&str, ConceptType, String, Option<NodeId>)],
     parent_ends: &PlannedEnds<'_>,
 ) -> Result<(), LamboError> {
     let planned = items
@@ -1075,25 +1121,10 @@ async fn derive_planned(
         }
         // #22: a canonically matched image item repairs an image concept whose
         // vector is missing (see `derive_with`); that writes a vector too.
-        let repair = supplied.and_then(|supplied| {
-            items
-                .iter()
-                .zip(resolutions.iter())
-                .find_map(|((content, ..), res)| match res {
-                    Resolution::CanonicalMatch { node } if *content == supplied.content => {
-                        Some(*node)
-                    }
-                    _ => None,
-                })
-                .filter(|node| {
-                    matches!(
-                        guard.node(*node),
-                        Some(Node::Concept(c))
-                            if c.embedding.is_none() && c.embedding_source.is_some()
-                    )
-                })
-                .map(|node| (node, supplied))
-        });
+        let repair = match supplied {
+            Some(supplied) => supplied_match_repair(&guard, &items, &resolutions, supplied)?,
+            None => None,
+        };
         let attempted_embed = attempted_embed || repair.is_some();
         if attempted_embed && let Some(existing) = guard.embedding() {
             // Revalidate under the commit lock. Two first writers can both plan

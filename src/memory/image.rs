@@ -41,7 +41,9 @@ impl Memory {
     /// [`ImagePayload::Vector`] is taken as submitted once its declared
     /// contract equals the live one. The concept never semantic-merges, and no
     /// text concept merges into it; the same caption and id derived again
-    /// matches it (design section 4.4).
+    /// matches it (design section 4.4). If a text concept already holds the
+    /// same caption and id (its canonical key), the derive is refused with
+    /// [`LamboError::Embed`]: derive the image under another id.
     ///
     /// Refused with [`LamboError::Config`] before anything is written: a
     /// strategy other than `Hybrid`, a store without vector search, an

@@ -303,19 +303,87 @@ async fn a_re_derived_image_repairs_its_missing_vector() {
         Some(Node::Concept(c)) if c.embedding.as_ref() == Some(&image.vector)
     ));
 
-    // A TEXT concept that happens to carry the same content is left as it
-    // is: only an image concept missing its vector is repaired.
-    let sess = "supplied-no-text-repair";
+    // A TEXT concept that holds the same content is never repaired: the
+    // image derive is refused instead (review M1), see
+    // `an_image_derive_that_matches_a_text_concept_is_refused`.
+}
+
+/// Review M1: any text write can produce an image's canonical key (case and
+/// token order fold together). An image derive that canonical-matches a
+/// TEXT concept, with or without a text vector, is refused as `Embed` (so a
+/// replayed intent settles `failed`) instead of succeeding with no vector,
+/// and the text concept is left exactly as it was.
+#[tokio::test]
+async fn an_image_derive_that_matches_a_text_concept_is_refused() {
+    let image = supplied("render 17 [image:r17]", "red silk saree");
+    for (n, text_vector) in [(1, None), (2, Some(vec![0.0; 1024]))] {
+        let sess = format!("supplied-text-squat-{n}");
+        let (graph, iid) = graph_with_interaction(&sess, 1, 0, "outfits");
+        graph.write().stamp_embedding(live()).unwrap();
+        // Another spelling of the same key: upper case, tokens reordered.
+        let mut text = vectored(
+            &sess,
+            1,
+            "[IMAGE:R17] Render 17",
+            iid,
+            vec![0.0; 1024],
+            None,
+        );
+        text.embedding = text_vector.clone();
+        let id = text.id;
+        graph.write().insert_concept(text, iid).unwrap();
+        let before = graph.read().epoch();
+
+        let err = run(
+            &graph,
+            &SpyStore::with_vector(Vec::new()),
+            &RecordingEmbedder::new(),
+            &live(),
+            iid,
+            &[(image.content.as_str(), ConceptType::Resource)],
+            &ParentOf::none(),
+            Some(&image),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(&err, LamboError::Embed(m) if m.contains("text concept")),
+            "{err:?}"
+        );
+        assert_eq!(graph.read().epoch(), before, "nothing was written");
+        assert!(matches!(
+            graph.read().node(id),
+            Some(Node::Concept(c)) if c.embedding == text_vector && c.embedding_source.is_none()
+        ));
+    }
+}
+
+/// Review M1, the squat path end to end: a plain text derive writes the
+/// image's key first, and the later image derive is refused.
+#[tokio::test]
+async fn a_text_derive_that_squats_an_image_key_makes_the_image_derive_refuse() {
+    let sess = "supplied-text-first";
     let (graph, iid) = graph_with_interaction(sess, 1, 0, "outfits");
-    graph.write().stamp_embedding(live()).unwrap();
-    let mut text = vectored(sess, 1, "render 17 [image:r17]", iid, vec![0.0; 1024], None);
-    text.embedding = None;
-    let id = text.id;
-    graph.write().insert_concept(text, iid).unwrap();
-    let out = run(
+    let embedder = RecordingEmbedder::new();
+    let store = SpyStore::with_vector(Vec::new());
+    run(
         &graph,
-        &SpyStore::with_vector(Vec::new()),
-        &RecordingEmbedder::new(),
+        &store,
+        &embedder,
+        &live(),
+        iid,
+        &[("Render 17 [IMAGE:r17]", ConceptType::Entity)],
+        &ParentOf::none(),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let image = supplied("render 17 [image:r17]", "red silk saree");
+    let err = run(
+        &graph,
+        &store,
+        &embedder,
         &live(),
         iid,
         &[(image.content.as_str(), ConceptType::Resource)],
@@ -323,12 +391,13 @@ async fn a_re_derived_image_repairs_its_missing_vector() {
         Some(&image),
     )
     .await
-    .unwrap();
-    assert_eq!((out.matched, out.embedded), (vec![id], 0));
-    assert!(matches!(
-        graph.read().node(id),
-        Some(Node::Concept(c)) if c.embedding.is_none() && c.embedding_source.is_none()
-    ));
+    .unwrap_err();
+    assert!(matches!(err, LamboError::Embed(_)), "{err:?}");
+    let g = graph.read();
+    assert!(
+        g.concepts().all(|c| c.embedding_source.is_none()),
+        "no image concept was written"
+    );
 }
 
 /// AC4 at apply: a supplied vector that does not fit the live contract is an
