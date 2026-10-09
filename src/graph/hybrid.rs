@@ -166,6 +166,12 @@
 //! fresh-persisted — it would exclude every organic concept and leave the merge
 //! leg permanently inert, a strictly larger product change than L82-4 asks for.
 //! The threshold, not the provenance of the vector, is the precision instrument.
+//!
+//! One provenance rule does exist since #22, and it is about modality, not
+//! freshness: `concepts.embedding_source` marks a supplied (image) vector,
+//! and a text item's merge tier drops those candidates, so a text claim is
+//! never absorbed into a picture. An image item never takes the merge leg at
+//! all (see `derive_with`).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock, Mutex};
