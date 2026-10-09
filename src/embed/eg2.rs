@@ -275,6 +275,24 @@ pub(crate) fn image_status_rule(code: u16, body: &str) -> StatusVerdict {
     default_status_rule(code, body)
 }
 
+/// The rule for Lambo's own reference image ([`REFERENCE_IMAGE_PNG`]): as
+/// [`image_status_rule`], except that a server that cannot decode the fixed
+/// 1x1 PNG is a server or configuration fault (`PermanentConfig`), never a
+/// fact about the user's image (review L2).
+fn reference_status_rule(code: u16, body: &str) -> StatusVerdict {
+    if code == 500 && body.contains("Failed to load image") {
+        return StatusVerdict {
+            class: EmbedStatusClass::PermanentConfig,
+            hint: Some(REFERENCE_DECODE_HINT),
+        };
+    }
+    image_status_rule(code, body)
+}
+
+const REFERENCE_DECODE_HINT: &str = " (the server could not decode Lambo's fixed 1x1 reference \
+     PNG, so its image decoder or --mmproj is broken; this is not about the image being \
+     embedded)";
+
 /// llama.cpp's quantization names (`llama_ftype_name`, which `/props`
 /// reports as `model_ftype`; the table as of b11517), each with the token
 /// GGUF file names and Hugging Face repos use for it, which is what a
@@ -705,7 +723,21 @@ impl EmbeddingGemma2Embedder {
             return Ok(());
         }
         let body = image_request(&self.model, "image/png", REFERENCE_IMAGE_PNG);
-        let parsed = self.post(&body, image_status_rule).await?;
+        // A refusal of the reference image is a server or configuration
+        // problem, whatever class it has: say so rather than let it read as
+        // a fault in the user's image. A transient failure stays transient.
+        let parsed = self
+            .post(&body, reference_status_rule)
+            .await
+            .map_err(|err| match err {
+                EmbedError::Backend(m) => EmbedError::Backend(format!(
+                    "Lambo's reference image check (a fixed 1x1 PNG embedded before images, to \
+                     check the image budget) failed at the llama-server at {}, a server or \
+                     configuration problem, not a fault in the image being embedded: {m}",
+                    self.http.log_base_url()
+                )),
+                other => other,
+            })?;
         let want = EG2_REFERENCE_IMAGE_TOKENS - REFERENCE_TOKENS_TOLERANCE
             ..=EG2_REFERENCE_IMAGE_TOKENS + REFERENCE_TOKENS_TOLERANCE;
         match parsed.usage.and_then(|u| u.prompt_tokens) {

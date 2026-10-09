@@ -736,6 +736,53 @@ async fn an_unavailable_embed_forces_a_recheck() {
     post.assert_hits(0);
 }
 
+/// A server whose decoder refuses Lambo's 1x1 reference PNG is reported as a
+/// server or configuration problem naming the reference check, never as a
+/// decode failure of the user's image, which is not sent (review L2).
+///
+/// Mutation: post the reference with `image_status_rule` and no wrapping ->
+/// red (the message blames "this image").
+#[tokio::test]
+async fn a_refused_reference_image_is_a_server_problem() {
+    for (status, body) in [
+        (500, "Failed to load image or audio file"),
+        (400, "bad request"),
+    ] {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(GET).path("/props");
+            then.status(200)
+                .json_body(props("embeddinggemma-2-Q8_0.gguf", "Q8_0", true));
+        });
+        let reference = server.mock(|when, then| {
+            when.method(POST)
+                .path("/v1/embeddings")
+                .body(image_body(&png_1x1()));
+            then.status(status).body(body);
+        });
+        let png = png_2x1();
+        let image = server.mock(|when, then| {
+            when.method(POST)
+                .path("/v1/embeddings")
+                .body(image_body(&png));
+            then.status(200).json_body(ok_body(&native(), Some(260)));
+        });
+        let e = embedder(&server);
+        let input = crate::surface::image::validate(&png, "image/png").unwrap();
+        let err = e.embed_image(input).await.unwrap_err();
+        assert!(matches!(err, EmbedError::Backend(_)), "{status}: {err:?}");
+        let msg = err.to_string();
+        assert!(msg.contains("reference image check"), "{msg}");
+        assert!(
+            msg.contains("not a fault in the image being embedded"),
+            "{msg}"
+        );
+        assert!(!msg.contains("could not decode this image"), "{msg}");
+        reference.assert_hits(1);
+        image.assert_hits(0);
+    }
+}
+
 /// A 503 "busy" from the verified server is transient but keeps the checks:
 /// the retried image costs no extra `/props` GET and no extra reference
 /// image embed (review L1). Only a request that got no HTTP answer, or
