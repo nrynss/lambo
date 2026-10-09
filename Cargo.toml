@@ -89,6 +89,11 @@ sqlx = { version = "0.8", optional = true, default-features = false, features = 
 aws-config = { version = "1", optional = true, features = ["credentials-login"] }
 aws-sdk-bedrockruntime = { version = "1", optional = true }
 jsonwebtoken = { version = "9", optional = true }
+# #22 follow-up (22g): EG2 canonicalizes an image whose longer side exceeds
+# 768 px (decode, Catmull-Rom downscale, lossless PNG) so its vector does not
+# depend on the submitted size. Only the three accepted formats; no rayon, no
+# other codecs. Optional, pulled in by `embed-eg2` only.
+image = { version = "0.25.10", optional = true, default-features = false, features = ["png", "jpeg", "webp"] }
 
 [features]
 default = ["store-memory", "embed-bge", "embed-fixture"]
@@ -130,9 +135,9 @@ embed-bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime"]
 embed-gemini = ["dep:reqwest", "dep:jsonwebtoken"]
 # #22 PR 5: EmbeddingGemma 2 (text and image) over llama.cpp's llama-server.
 # A thin layer on the bge_m3 OpenAI-compatible HTTP client (#21: bearer,
-# transport rule, error-body scrub), so it builds on `embed-bge`; no new
-# crate, Cargo.lock unchanged. Joins `ship` once its live test passes.
-embed-eg2 = ["embed-bge"]
+# transport rule, error-body scrub), so it builds on `embed-bge`. `image`
+# (22g) canonicalizes images above 768 px before they are sent.
+embed-eg2 = ["embed-bge", "dep:image"]
 
 # Recall tiers (#18): an index beside the durable store that serves recall's
 # vector leg. Not a store kind; selected by `[recall]` in lambo.toml.
