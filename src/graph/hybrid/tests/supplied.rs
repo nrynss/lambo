@@ -498,10 +498,16 @@ async fn a_session_stamped_in_another_space_refuses_the_image() {
     assert_eq!(graph.read().concepts().count(), 0);
 }
 
-/// The race the commit-lock check exists for: an image derive plans against
-/// an unstamped session, and while it awaits (here, the embed of a
-/// `parent_of` end it will create) a text derive under another space
+/// A first writer in another space racing an image derive: the image derive
+/// plans against an unstamped session, and while it awaits (here, the embed
+/// of a `parent_of` end it will create) a text derive under another space
 /// commits first. The image derive must not write into that space.
+///
+/// Where it is refused: the rival's commit moves the graph epoch, so the
+/// image derive's commit-lock epoch check sends it back to plan, and the
+/// plan-time `ensure_compatible(embedding)` against the now-stamped session
+/// refuses it. The commit-lock contract checks are defence in depth behind
+/// that (see the comment there) and are not what this test reaches.
 #[tokio::test]
 async fn an_image_derive_racing_a_first_writer_in_another_space_writes_nothing() {
     let (graph, iid) = graph_with_interaction("supplied-race", 1, 0, "outfits");

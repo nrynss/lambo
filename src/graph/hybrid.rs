@@ -1132,6 +1132,14 @@ async fn derive_planned(
             existing.ensure_compatible(embedding)?;
             // #22 design section 3.3 (2): the session's space must be the one
             // the supplied vector was declared in, not only the live one.
+            //
+            // Defence in depth, not a reachable refusal today:
+            // `check_supplied` already requires `supplied.contract ==
+            // embedding`, so this cannot fail where the line above passed,
+            // and a rival first writer moves the epoch, so the replan's
+            // plan-time check refuses it before this lock is taken. It stays
+            // so that the commit itself states the invariant it writes
+            // under, independent of how the call path checked the vector.
             if let Some(supplied) = supplied {
                 existing.ensure_compatible(&supplied.contract)?;
             }
