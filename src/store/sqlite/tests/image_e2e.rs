@@ -67,16 +67,21 @@ fn image<'a>(png: &'a [u8]) -> ImageDerive<'a> {
     }
 }
 
-/// The image concept is recalled for the text query, found by the vector
-/// leg (at the label's own vector) and not by the keyword leg, and no other
-/// candidate's query evidence comes near it.
+/// The image concept is the top hit for the text query (design section 9
+/// step 3), found by the vector leg (at the label's own vector) and not by
+/// the keyword leg, and no other candidate's query evidence comes near it.
 ///
-/// Why not "the top hit" (design section 9 step 3): the final score mixes
-/// the query legs with the daemon's structural score table (`RecallWeights`,
-/// 0.5 each), and a concept derived moments ago is not in that table until
-/// the daemon's next cycle, so the final rank of any fresh concept, text or
-/// image, races the daemon. Which leg found it, and how strongly, does not.
+/// The final score mixes the query legs with the daemon's structural score
+/// table (`RecallWeights`, 0.5 each), and a concept derived moments ago is
+/// not in that table until the daemon's next cycle, so the rank of any fresh
+/// concept, text or image, races the daemon. The check therefore waits for
+/// the daemon to score the current epoch first (`Memory::settle_daemon`),
+/// which makes "the top hit" deterministic. Before that cycle the image
+/// scores 0.5 (a perfect vector match, no daemon score) against older noise
+/// at about 0.533: a cold-start ranking question recorded for PR 5's parity
+/// measurement (design 7.3), not a defect of this PR.
 async fn assert_recalled_by_the_vector_leg(mem: &Memory, image: NodeId) {
+    mem.settle_daemon().await;
     let detailed = mem
         .recall_detailed(RecallQuery {
             query: QUERY.into(),
@@ -86,9 +91,10 @@ async fn assert_recalled_by_the_vector_leg(mem: &Memory, image: NodeId) {
         })
         .await
         .unwrap();
-    assert!(
-        detailed.hits.iter().any(|h| h.node_id == image),
-        "the image concept is recalled: {:?}",
+    assert_eq!(
+        detailed.hits.first().map(|h| h.node_id),
+        Some(image),
+        "the image concept is the top hit: {:?}",
         detailed.hits
     );
     let legs = detailed

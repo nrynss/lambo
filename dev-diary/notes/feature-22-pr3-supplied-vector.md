@@ -170,16 +170,24 @@ The graph enforces the same: `reembed_all` covers text concepts only,
 refuses an image vector left behind and any update aimed at an image
 concept; `embed_missing` refuses an image concept.
 
-**AC3 asserts the leg, not the final rank.** Design section 9 says "the image
-concept is the top hit". The final score is `0.5 * daemon + 0.5 * query`, and
-a concept derived moments ago is not in the daemon's score table until its
-next cycle, so the rank of any fresh concept, text or image, races the
-daemon (the async run lost to two older noise concepts at 0.533 vs 0.5). The
-tests assert what recall's provenance shows deterministically: the image is
-recalled, its vector leg is about 1, it has no keyword leg, and no other
-candidate's best leg reaches 0.5. SQLite's own checked scan ranks it first,
-and so does a reload. This is the ranking-parity question of design 7.3,
-measured in PR 5.
+**AC3 asserts the top hit after a daemon cycle** (review L2, replacing
+"the leg, not the final rank"). Design section 9 says "the image concept is
+the top hit". The final score is `0.5 * daemon + 0.5 * query`, and a concept
+derived moments ago is not in the daemon's score table until its next cycle,
+so the rank of any fresh concept, text or image, races the daemon (one
+earlier async run lost to two older noise concepts at 0.533 vs 0.5). The
+check now waits for the daemon to score the current epoch
+(`Memory::settle_daemon`, whose test gate widens to SQLite) and then asserts
+the image is `hits[0]`, along with the leg facts it already asserted: the
+image's vector leg is about 1, it has no keyword leg, and no other
+candidate's best leg reaches 0.5. It holds synchronously, through the write
+queue, and after a reload; SQLite's own checked scan ranks it first too.
+
+**Open for PR 5 (with R2 / Q15):** the cold-start rank. Before the daemon's
+next cycle a perfect vector match scores 0.5 and loses to unrelated, older,
+daemon-scored concepts (about 0.533). That is spec section 8 behaviour for
+any fresh concept, not an image defect, but it is a demo-quality question
+for the ranking-parity measurement of design 7.3.
 
 ## Through #18's tier, #14's cache and #23's erase
 
