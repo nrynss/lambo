@@ -606,6 +606,17 @@ impl GraphStore for MemoryStore {
         if batch.mutations.is_empty() {
             return Ok(());
         }
+        // #22: the same write-side refusal the SQL adapters apply, before
+        // anything of the batch is applied.
+        for m in &batch.mutations {
+            if let Mutation::UpsertNode {
+                node: Node::Concept(c),
+            } = m
+                && let Some(source) = &c.embedding_source
+            {
+                source.check_writable(c.id)?;
+            }
+        }
         let mut map = self.inner.write();
         // STORE-6: apply the batch to a WORKING COPY of the affected sessions
         // and commit by swapping on FULL success — a mid-batch error must
@@ -1241,6 +1252,19 @@ mod tests {
         crate::store::embedding_source_testkit::check_embedding_source_round_trip(
             &MemoryStore::new(),
             &SessionId::from("embedding-source"),
+            4,
+            None,
+        )
+        .await;
+    }
+
+    /// #22 review round 2, L1: a malformed digest is refused at the flush,
+    /// as on the SQL adapters.
+    #[tokio::test]
+    async fn a_malformed_embedding_source_digest_is_refused_on_write() {
+        crate::store::embedding_source_testkit::check_a_malformed_digest_is_refused_on_write(
+            &MemoryStore::new(),
+            &SessionId::from("embedding-source-bad-digest"),
             4,
             None,
         )
