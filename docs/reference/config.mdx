@@ -206,7 +206,7 @@ GC also sweeps on time. When `gc_max_interval_secs` has passed since a session's
 
 `[serve]` configures one `lambo serve` process that holds several sessions. It is optional: omit it and `lambo serve` behaves exactly as it always has.
 
-In this release the table is **parsed and validated only**. Nothing reads it at runtime yet; routing by `/mcp/s/{session}`, the credentials and the bounds arrive in later releases. A malformed table is still refused when the file is read, so it stops every command, like an unknown key. `lambo serve` logs one warning at startup when the table is not empty (`[serve] is parsed but not yet enforced in this release`), naming no value from it.
+In this release only `default_session` and `[[serve.projects]]` are read at runtime, and only to choose the session of a `stdio` serve started without `--session` ([below](#choosing-a-stdio-serves-session)). The rest of the table is **parsed and validated only**; routing by `/mcp/s/{session}`, the credentials and the bounds arrive in later releases. A malformed table is still refused when the file is read, so it stops every command, like an unknown key. `lambo serve` logs one warning at startup when the table sets anything beyond those two keys (`[serve] is parsed but not yet enforced in this release`), naming no value from it.
 
 ```toml
 [serve]
@@ -237,17 +237,27 @@ erase = true
 | Key | Default | What it sets |
 |---|---|---|
 | `sessions` | none | Pinned sessions, attached at startup and never idle-detached. |
-| `default_session` | none | The session `/mcp` and a stdio serve without `--session` use. |
+| `default_session` | none | The session a stdio serve without `--session` uses when no `[[serve.projects]]` entry covers its working directory. `/mcp` will use it too once multi-session HTTP lands. |
 | `max_attached` | `16` | Cap on attached sessions, pinned plus on-demand. At least 1, and at least the number of pinned sessions. |
 | `attach_concurrency` | `2` | Sessions that may attach at once. At least 1. |
 | `idle_detach_secs` | `900` | Seconds an on-demand session may sit idle before it is detached. At least 1. |
 | `per_session_rps` | `--rate-limit-rps` | Request rate for each session. `0` turns the per-session limit off. |
-| `[[serve.projects]]` | none | `path` and `session`: a stdio serve started under `path` uses `session`. |
+| `[[serve.projects]]` | none | `path` and `session`: a stdio serve started without `--session` under `path` uses `session`. `path` must be absolute or start with `~/`. |
 | `[[serve.credential]]` | none | A bearer credential and the sessions it may reach (below). |
 
 Every session named in `[serve]` must be addressable by URL: 1 to 128 bytes of `A-Z`, `a-z`, `0-9`, `.`, `_`, `:` and `-`, not starting with `.`. A name outside that rule is refused here, but you can still serve it on its own with `lambo serve --session <name>`, which keeps its looser rule.
 
 A credential never holds its token. `token_env` names the environment variable that does, and the token will be read from it when the server starts (#32 PR 5; nothing reads it in this release). An inline `token = "..."` is refused, and the refusal does not quote it. A credential reaches the sessions in `sessions` (exact names, or `"*"` for every pinned session plus every session under any credential's prefix) and those under `session_prefix` (ids that start with the prefix and are longer than it). It may carry `create` (attach a session that does not exist yet), `erase` and `admin`. The names `default` and `local` are reserved, and `token_env` may not be `LAMBO_AUTH_TOKEN`. `token_env` must be a conventional variable name (`[A-Z_][A-Z0-9_]*`, at most 64 bytes) and must not look like a token (an AWS key id, or a 20-plus character run of letters and digits with no `_`), because it is the key a token is most likely to be pasted into by mistake. A value that fails is refused without being quoted.
+
+### Choosing a stdio serve's session
+
+A `stdio` serve given `--session` uses it and reads none of this. Without `--session` it picks, in order:
+
+1. The `[[serve.projects]]` entry whose `path` contains the serve's working directory. When several do, the longest path wins. Paths are compared whole directory by whole directory, so `~/work/lambo` covers `~/work/lambo/src` but not `~/work/lambo-wt`.
+2. `default_session`.
+3. Nothing: the serve refuses with the usual missing `--session` error and exit code 2, before it builds any backend.
+
+A leading `~` in `path` expands to `$HOME` (`~user` is refused). The working directory and every entry are resolved to real paths first, following symlinks, `.` and `..`, so a project entered through a symlink uses the entry for the directory the link points to. An entry whose directory does not exist never matches. If the working directory itself cannot be resolved (for example, it was deleted), the map is skipped and `default_session` applies. Two entries that resolve to the same directory but name different sessions are refused rather than picked by file order, and so is a `~` entry when `HOME` is unset. The serve logs which entry it used, by its configured `path`. Neither that line nor any refusal quotes the working directory. See [Serve a session](/cli#serve-a-session).
 
 ## Environment variables
 

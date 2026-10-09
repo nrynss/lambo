@@ -74,6 +74,11 @@
 
 ### Changed
 
+- A `[[serve.projects]]` `path` must now be absolute or start with `~/` (or
+  be `~`); a relative path or `~user` is refused when `lambo.toml` is read,
+  naming the entry (#32). The `[serve] is parsed but not yet enforced`
+  warning no longer appears for a `[serve]` table that sets only
+  `default_session` and `[[serve.projects]]`, which are now read.
 - The write queue's probe log lines (`write queue: bounds are static ...`
   and `the embedder could not be probed`) gain a `scope` field, `session`
   or `process`, beside the `session=<id>` they already carried (#32).
@@ -234,6 +239,22 @@
   addressed by URL, an inline token, or more pinned sessions than
   `max_attached` stops every command. An older binary refuses a file that
   has `[serve]` (unknown key).
+- A stdio `lambo serve` no longer needs `--session` when `lambo.toml`
+  names one (#32, eighth part): it uses the `[[serve.projects]]` entry whose
+  `path` contains its working directory (the longest such path wins), then
+  `[serve] default_session`, and otherwise refuses with the same missing
+  `--session` error and exit code 2 as before, now before any backend is
+  built. The working directory and each entry are compared as real paths
+  (`~` expanded, symlinks, `.` and `..` resolved, whole components only);
+  an entry that does not exist never matches, a working directory that
+  cannot be resolved falls back to `default_session`, and two entries for
+  one directory naming different sessions are refused. `--session` always
+  wins, and `--transport http` still requires it. The serve logs which
+  entry it used by its configured path; nothing quotes the working
+  directory. Library: `ServeConfig::select_stdio_session` (and `_with`, with
+  the working directory and home injected), `SelectedSession`,
+  `SessionSource`, `SessionSelectionError`, `SESSION_REQUIRED` and
+  `ServeConfig::has_unenforced_keys`.
 - `lambo::writeq::EmbedderCalibration` and `MemoryBuilder::calibration`
   (#32, third part): the write queue's startup calibration probe once per
   embedder for the whole process. Builders over one shared embedder that are

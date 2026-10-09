@@ -259,7 +259,7 @@ reservations are advisory and RAM-local: this reservation ends when this process
 
 | Flag | Required | Default |
 |---|---|---|
-| `--session <SESSION>` | Yes | |
+| `--session <SESSION>` | Yes for `http`; see below for `stdio` | Always wins when given. |
 | `--agent <AGENT>` | No | `lambo-serve` |
 | `--transport <TRANSPORT>` | No | `stdio`, or `http` |
 | `--port <PORT>` | No | `7700`, used when the transport is `http`. |
@@ -272,6 +272,12 @@ reservations are advisory and RAM-local: this reservation ends when this process
 
 ```bash
 lambo serve --config lambo.toml --session demo --agent agent-a
+```
+
+Over `stdio`, `--session` can be left out when `lambo.toml` names the session instead (see [Multi-session serving](/lambo/config/#multi-session-serving)). The serve then uses the `[[serve.projects]]` entry whose `path` contains its working directory, picking the longest such path, and otherwise `[serve] default_session`. If neither applies it refuses with the usual missing `--session` error (exit code 2) before building any backend. This lets one global client config (one command line for every project) land each project in its own session, because MCP clients start a stdio server in the project directory. `--session` still wins whenever it is given, and an `http` serve still needs it.
+
+```bash
+cd ~/Documents/work/lambo && lambo serve --config ~/lambo.toml   # session from [[serve.projects]]
 ```
 
 See [MCP tools](/lambo/mcp/) for the tools it exposes.
