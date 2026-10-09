@@ -459,3 +459,78 @@ async fn a_disconnected_sessionless_request_is_cancelled_behind_the_guard() {
         .await
         .expect("a disconnect cancels a sessionless call behind the guard");
 }
+
+/// An `initialize` rmcp mints an MCP session for.
+const INITIALIZE: &str = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"rmcp-pin","version":"1"}}}"#;
+
+/// #32 PR 5 third review N2: the guarantees of `openers` and the guard
+/// rest on facts about rmcp 3.1.2 that its caret requirement in
+/// `Cargo.toml` does not pin, so this test fails loudly on an upgrade that
+/// breaks them rather than letting MCP sessions go unattributed or the
+/// body ceilings drift apart:
+///
+/// * rmcp mints an MCP session through `SessionManager::create_session`,
+///   inline in the request's task (so `AttributingSessions` sees every
+///   mint, under the request's `as_credential` scope), and the id it puts
+///   in the local manager's map is the id it answers with;
+/// * the guard's [`MAX_HTTP_BODY_BYTES`] is rmcp's own default ceiling
+///   (rmcp's constant is crate-private, so the guard repeats it).
+///
+/// If this fails after an rmcp upgrade, re-check `openers`' module docs
+/// (atomicity of the mint and the binding, the inline `create_session`),
+/// `http_guards::can_mint_a_session` (only an `initialize` mints) and
+/// `http_guards::usable_session_id` before changing the assertions.
+#[tokio::test]
+async fn rmcp_still_mints_through_create_session_with_the_same_ceiling() {
+    use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
+    use rmcp::transport::streamable_http_server::{
+        StreamableHttpServerConfig, StreamableHttpService,
+    };
+
+    let probe = CancelProbe {
+        started: Arc::new(tokio::sync::Notify::new()),
+        cancelled: Arc::new(tokio::sync::Notify::new()),
+    };
+    let sessions = Arc::new(LocalSessionManager::default());
+    let openers = Arc::new(crate::mcp::serve::openers::Openers::default());
+    let http = StreamableHttpService::new(
+        move || Ok(probe.clone()),
+        Arc::new(crate::mcp::serve::openers::AttributingSessions::new(
+            Arc::clone(&sessions),
+            Arc::clone(&openers),
+        )),
+        StreamableHttpServerConfig::default(),
+    );
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri("/mcp")
+        .header("Host", "localhost")
+        .header("Accept", "application/json, text/event-stream")
+        .header("Content-Type", "application/json")
+        .body(axum::body::Body::from(INITIALIZE))
+        .expect("request");
+    let response = crate::mcp::serve::transport::serve_attributed(&http, "scoped", req).await;
+    assert_eq!(response.status(), 200, "rmcp answers the initialize");
+    let id = response
+        .headers()
+        .get("mcp-session-id")
+        .and_then(|v| v.to_str().ok())
+        .expect("rmcp minted an MCP session and named it")
+        .to_string();
+    assert!(
+        sessions.sessions.read().await.contains_key(id.as_str()),
+        "rmcp no longer keeps its MCP sessions in LocalSessionManager::sessions: the session \
+         cap counts that map"
+    );
+    assert!(
+        openers.opened_by(&id, "scoped"),
+        "rmcp minted MCP session {id} without AttributingSessions::create_session seeing it \
+         under the request's credential: MCP sessions would go unattributed. Re-check \
+         mcp/serve/openers.rs against this rmcp before upgrading"
+    );
+    assert_eq!(
+        u64::try_from(StreamableHttpServerConfig::default().max_request_body_bytes).expect("fits"),
+        MAX_HTTP_BODY_BYTES,
+        "rmcp's default body ceiling moved: the guard's must match it"
+    );
+}
