@@ -147,8 +147,9 @@
     never a request without a key. With a token, every embed request carries
     `Authorization: Bearer <token>`; without `api_key_env` no `Authorization`
     header is sent, so local `llama-server` setups see no change. The token
-    never appears in `Debug` output, errors or logs. A `401` or `403` stays a
-    permanent configuration error.
+    never appears in `Debug` output, errors or logs, even when the endpoint
+    echoes it in an error body (it is replaced before the body is quoted). A
+    `401` or `403` stays a permanent configuration error.
   - `api_key_env` with any kind other than `bge_m3` is refused.
   - `kind = "openai"` is an alias of `bge_m3`. It still reports and stamps
     `bge_m3`, so no existing session's embedding contract changes. Set `model`

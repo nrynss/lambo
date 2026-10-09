@@ -191,6 +191,22 @@ impl BgeM3LlamaCppEmbedder {
         Ok(self)
     }
 
+    /// `body` with every occurrence of the bearer token replaced, before it is
+    /// quoted into an error. A gateway may echo the key it refused, and these
+    /// errors reach logs and MCP receipts (issue #21).
+    fn without_token(&self, body: String) -> String {
+        if let Some(auth) = &self.authorization
+            && let Some(token) = auth.as_bytes().strip_prefix(b"Bearer ")
+            && let Ok(token) = std::str::from_utf8(token)
+            && !token.is_empty()
+            && body.contains(token)
+        {
+            body.replace(token, "(token not shown)")
+        } else {
+            body
+        }
+    }
+
     /// Report the server health without embedding anything.
     ///
     /// **llama.cpp only.** It calls llama.cpp's `/health`, which hosted
@@ -250,7 +266,7 @@ impl BgeM3LlamaCppEmbedder {
                 EmbedError::Backend(format!("llama.cpp returned unparseable JSON: {e}"))
             });
         }
-        let text_body = resp.text().await.unwrap_or_default();
+        let text_body = self.without_token(resp.text().await.unwrap_or_default());
         let code = status.as_u16();
         match classify_status(code) {
             EmbedStatusClass::Transient => Err(EmbedError::Unavailable(format!(
@@ -713,6 +729,34 @@ mod tests {
             let err = e.embed("anything").await.unwrap_err();
             assert!(matches!(err, EmbedError::Backend(_)), "{code}: {err:?}");
             assert!(!err.to_string().contains(FAKE_TOKEN), "{err}");
+        }
+    }
+
+    /// Issue #21 self-review: a gateway that echoes the presented key in its
+    /// error body (some do, to say which key was refused) must not carry the
+    /// token into the error, which reaches logs and MCP receipts. Covers one
+    /// status from every class that quotes the body.
+    ///
+    /// Mutation: quote the raw body again -> red.
+    #[tokio::test]
+    async fn an_error_body_echoing_the_token_never_carries_it() {
+        for code in [401u16, 400, 429, 418] {
+            let server = MockServer::start();
+            server.mock(|when, then| {
+                when.method(POST).path("/v1/embeddings");
+                then.status(code)
+                    .body(format!("invalid key: Bearer {FAKE_TOKEN} ({FAKE_TOKEN})"));
+            });
+            let e = BgeM3LlamaCppEmbedder::new(server.base_url(), "", 1024)
+                .unwrap()
+                .with_bearer_token(FAKE_TOKEN)
+                .unwrap();
+            let err = e.embed("anything").await.unwrap_err().to_string();
+            assert!(!err.contains(FAKE_TOKEN), "{code}: {err}");
+            assert!(
+                err.contains("invalid key"),
+                "{code}: the rest of the body is kept: {err}"
+            );
         }
     }
 
