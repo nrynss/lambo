@@ -137,6 +137,10 @@ struct SessionTier {
     mirror_failures: u64,
     last_error: Option<String>,
     next_repair: Option<Instant>,
+    /// When a read may next re-check an `Unknown` session (a check reads the
+    /// whole durable session, so an unreachable index must not cost one per
+    /// recall).
+    next_check: Option<Instant>,
 }
 
 /// The tier's view of one session, for tests. Production reports the same
@@ -414,10 +418,10 @@ impl TieredStore {
             Ok(Some(session)) => self.mirror_session(&session, batch, token).await,
             Ok(None) => self.mirror_unnamed(batch, token).await,
             Err(_) => {
-                // The graph drains one session per batch; a hand-built batch
-                // over several is mirrored per session, without the deletes
-                // (which name no session), so each session goes stale and is
-                // repaired rather than trusted.
+                // The graph drains one session per batch. A hand-built batch
+                // over several cannot be attributed (its deletes name no
+                // session), so it is not mirrored: each session it names goes
+                // stale and is repaired rather than trusted.
                 for sid in crate::store::batch::batch_session_ids(&batch.mutations) {
                     let session = SessionId::new(sid);
                     self.mark_stale(
@@ -559,17 +563,28 @@ impl TieredStore {
 
     /// Establish the session's state for a read that arrives before any load
     /// through this store (a reader that never loaded the session).
+    ///
+    /// A check that cannot settle it (the index or the primary unreachable)
+    /// is not repeated by the next read: the session stays `Unknown`, reads
+    /// fall back, and the next check waits out the repair backoff.
     async fn sync_for_read(&self, session: &SessionId) -> TierSync {
-        let sync = self.with_state(session, |st| st.sync);
-        if sync != TierSync::Unknown {
+        let (sync, due) = self.with_state(session, |st| {
+            (st.sync, st.next_check.is_none_or(|at| Instant::now() >= at))
+        });
+        if sync != TierSync::Unknown || !due {
             return sync;
         }
         match self.primary.load_session(session).await {
             Ok(snap) => self.settle_after_load(session, Some(&snap)).await,
             Err(StoreError::SessionNotFound(_)) => self.settle_after_load(session, None).await,
-            Err(_) => return TierSync::Unknown,
+            Err(_) => {}
         }
-        self.with_state(session, |st| st.sync)
+        self.with_state(session, |st| {
+            if st.sync == TierSync::Unknown {
+                st.next_check = Some(Instant::now() + self.repair_backoff);
+            }
+            st.sync
+        })
     }
 }
 

@@ -771,6 +771,100 @@ async fn an_unreachable_index_at_load_is_never_trusted() {
     assert_eq!(fake.knn_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
 
+/// Counts durable loads, to see what a read costs while the index is down.
+struct CountingLoads(Shared, Arc<std::sync::atomic::AtomicUsize>);
+
+#[async_trait]
+impl GraphStore for CountingLoads {
+    async fn init_schema(&self) -> Result<(), StoreError> {
+        self.0.init_schema().await
+    }
+    fn capabilities(&self) -> Capabilities {
+        self.0.capabilities()
+    }
+    async fn flush(&self, b: &MutationBatch, t: Option<u64>) -> Result<(), StoreError> {
+        self.0.flush(b, t).await
+    }
+    async fn load_session(&self, s: &SessionId) -> Result<GraphSnapshot, StoreError> {
+        self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.0.load_session(s).await
+    }
+    async fn keyword_candidates(
+        &self,
+        s: &SessionId,
+        t: &[String],
+        l: usize,
+    ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+        self.0.keyword_candidates(s, t, l).await
+    }
+    async fn vector_candidates(
+        &self,
+        s: &SessionId,
+        e: &[f32],
+        l: usize,
+    ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+        self.0.vector_candidates(s, e, l).await
+    }
+    async fn blast_radius(
+        &self,
+        s: &SessionId,
+        n: NodeId,
+        a: Duration,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<u64, StoreError> {
+        self.0.blast_radius(s, n, a, now).await
+    }
+    async fn interaction_span(
+        &self,
+        s: &SessionId,
+        n: NodeId,
+        a: Duration,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<InteractionSpan, StoreError> {
+        self.0.interaction_span(s, n, a, now).await
+    }
+    async fn record_canonization(
+        &self,
+        e: &CanonizationEvent,
+        t: Option<u64>,
+    ) -> Result<(), StoreError> {
+        self.0.record_canonization(e, t).await
+    }
+}
+
+/// A reader that cannot reach the index serves from the primary without
+/// re-reading the whole durable session on every recall to re-check.
+#[tokio::test]
+async fn an_unreachable_index_is_not_rechecked_on_every_read() {
+    let (primary, fake) = (memory_primary(), Arc::new(FakeIndex::new()));
+    let seed = tier(&primary, &fake);
+    let sid = SessionId::new("recheck");
+    let w = holder("w");
+    let token = attach(&seed, &sid, &w).await;
+    let (_, b) = seed_batch(&sid, 1);
+    seed.flush(&b, Some(token)).await.unwrap();
+    seed.release_lease(&sid, &w).await.unwrap();
+
+    fake.set_down(true);
+    let loads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let reader = TieredStore::new(
+        Box::new(CountingLoads(Shared(primary.clone()), loads.clone())),
+        Box::new(fake.clone()),
+        Some(4),
+    );
+    for _ in 0..3 {
+        reader
+            .vector_candidates_checked(&sid, &PROBE, &contract(), 10)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        loads.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "one durable load to check, then the backoff holds"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Deletes
 // ---------------------------------------------------------------------------
