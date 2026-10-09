@@ -919,3 +919,92 @@ async fn two_authorization_headers_are_the_ordinary_401() {
     assert_eq!(status, 200, "{body}");
     assert_eq!(reached.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
+
+// -----------------------------------------------------------------------
+// #32 PR 5 second review L2: a slow body holds no session slot
+// -----------------------------------------------------------------------
+
+/// An `initialize` whose head declares `declared` body bytes; the caller
+/// writes the body (or not).
+fn initialize_head(declared: usize) -> String {
+    format!(
+        "POST /mcp HTTP/1.1\r\nHost: localhost\r\nContent-Length: {declared}\r\n\
+         Connection: close\r\n\r\n"
+    )
+}
+
+/// #32 PR 5 second review L2: a client dribbling its body holds no slot
+/// of the session cap while it does (the guard reads the whole body before
+/// it reserves), so with one slot left another `initialize` still gets it;
+/// and a body that has not arrived within the guard's body timeout is
+/// refused with 408, never reaching the service.
+///
+/// Mutation: reserve before reading the body and the second `initialize`
+/// is refused at the cap; drop the timeout and the dribbler never gets an
+/// answer.
+#[tokio::test]
+async fn a_dribbled_body_holds_no_slot_and_times_out() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut guard = guard_with(None, 32, 31, 0);
+    guard.body_timeout = Duration::from_secs(2);
+    let (addr, reached) = spawn_guarded(guard).await;
+
+    let mut slow = tokio::net::TcpStream::connect(addr).await.expect("connect");
+    slow.write_all(initialize_head(64).as_bytes())
+        .await
+        .expect("write head");
+    slow.write_all(b"{\"jsonrpc\"")
+        .await
+        .expect("write a little");
+    // Let the guard start reading the body.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let (status, body) = request(addr, &post(None, None)).await;
+    assert_eq!(status, 200, "the last slot is free: {body}");
+    assert_eq!(reached.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    let started = Instant::now();
+    let mut raw = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(10), slow.read_to_end(&mut raw)).await;
+    let reply = String::from_utf8_lossy(&raw);
+    assert!(
+        reply.starts_with("HTTP/1.1 408 Request Timeout\r\n"),
+        "the dribbler is refused: {reply:?}"
+    );
+    assert!(reply.contains("did not arrive within 2 s"), "{reply}");
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert_eq!(
+        reached.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "a body that never arrived never reaches the service"
+    );
+}
+
+/// The guard's read holds a chunked body (no `Content-Length` to refuse up
+/// front) to [`MAX_HTTP_BODY_BYTES`] too.
+#[tokio::test]
+async fn an_oversized_chunked_body_is_refused_before_the_service() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (addr, reached) = spawn_guarded(guard_with(None, 32, 0, 0)).await;
+    let mut sock = tokio::net::TcpStream::connect(addr).await.expect("connect");
+    sock.write_all(
+        b"POST /mcp HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\
+          Connection: close\r\n\r\n",
+    )
+    .await
+    .expect("write head");
+    let len = usize::try_from(MAX_HTTP_BODY_BYTES).expect("fits") + 1;
+    let mut chunk = format!("{len:x}\r\n").into_bytes();
+    chunk.resize(chunk.len() + len, b' ');
+    chunk.extend_from_slice(b"\r\n0\r\n\r\n");
+    // The server may answer and close before it has read it all.
+    let _ = sock.write_all(&chunk).await;
+    let mut raw = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(10), sock.read_to_end(&mut raw)).await;
+    let reply = String::from_utf8_lossy(&raw);
+    assert!(
+        reply.starts_with("HTTP/1.1 413 Payload Too Large\r\n"),
+        "{reply:?}"
+    );
+    assert_eq!(reached.load(std::sync::atomic::Ordering::SeqCst), 0);
+}

@@ -199,7 +199,8 @@ does not exist there.
 
 ## Second review remediation, L1 and L2 (2026-10-09)
 
-The Sonnet security review of the S1-S4 fixes left two Lows.
+The Sonnet security review of the S1-S4 fixes left two Lows, one commit
+each.
 
 - **L1, attribution at the mint; `handle` inline again.** S1 ran rmcp's
   whole `handle` on a spawned task so a client disconnect could not leave a
@@ -229,3 +230,21 @@ The Sonnet security review of the S1-S4 fixes left two Lows.
   Caveat: lambo's own tools do not watch `RequestContext::ct`, so the
   cancel ends rmcp's per-request loop and signals the token, but a lambo
   tool already running still finishes. That was so before S1 as well.
+- **L2, the body is read before the cap reserves, within 30 s.** S4's
+  reservation was taken in the guard, before rmcp read the body, so a
+  client dribbling the body of a sessionless POST held a slot of the cap
+  (and of its share) for as long as it liked; the serve had no request
+  timeout at all. Of the two fixes the review offered, both halves were
+  taken, because one alone does not close it: `guard_request` now reads the
+  whole body itself (`read_body`, to `MAX_HTTP_BODY_BYTES`) **before** the
+  cap check, so a body still arriving holds no slot, and does so within
+  `REQUEST_BODY_TIMEOUT` (30 s, `408` with `Connection: close` after), so
+  it holds its connection for a bounded time. 30 s: MCP bodies are a few
+  KiB, the serve had no other request timeout to match, and it is the
+  same order as the serve's other operator-facing waits. rmcp reads the
+  whole body before acting anyway, so buffering it in the guard costs no
+  more; it also holds a chunked body to the 4 MiB the declared-length
+  check applies (`413`, as rmcp answered it before). The declared-length
+  `413` now comes before the cap's `503`. Releasing the reservation while
+  rmcp reads the body was not possible: rmcp reads it inside `handle`,
+  past the point the reservation must already be held.

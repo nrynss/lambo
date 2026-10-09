@@ -355,7 +355,7 @@ The HTTP transport mints one MCP session per `initialize` and refuses to exceed 
 
 ### Request body limit
 
-A request whose declared `Content-Length` exceeds `4 MiB` is refused with `413` before its body is parsed. A chunked request with no `Content-Length` keeps the per-string and per-call caps plus the rate limit as its bound.
+A request whose declared `Content-Length` exceeds `4 MiB` is refused with `413` before its body is parsed, and so is a body that turns out longer as it arrives (a chunked one included). The whole body must arrive within 30 s of the serve starting to read it, or the request is refused with `408`; a body still arriving holds no slot of the session cap.
 
 ### The read-only window
 

@@ -491,6 +491,9 @@ pub(crate) struct HttpGuard {
     /// Session-opening requests admitted but not yet counted by
     /// [`Self::live`] (#32 PR 5 review S4).
     pub(super) openings: Arc<Openings>,
+    /// How long a request's body may take to arrive
+    /// ([`REQUEST_BODY_TIMEOUT`]; the tests shorten it).
+    pub(super) body_timeout: Duration,
 }
 
 impl HttpGuard {
@@ -512,6 +515,7 @@ impl HttpGuard {
             rate: CredentialRates::new(rate_limit_rps).map(Arc::new),
             refusals: Arc::new(RefusalLog::new(REFUSAL_WARN_WINDOW)),
             openings: Arc::new(Openings::default()),
+            body_timeout: REQUEST_BODY_TIMEOUT,
         }
     }
 }
@@ -608,9 +612,48 @@ pub(crate) struct OpeningReservation {
 /// *count* — but the transport itself imposed no ceiling, so a body padded with
 /// rejected or oversized fields still incurred parse + validation cost before
 /// the tool layer refused it. This caps the *declared* body of a request before
-/// any of it is parsed. A body that arrives without `Content-Length` (chunked)
-/// keeps the tool-layer caps + the rate limit as its bound.
+/// any of it is parsed, and the guard's read of the body (#32 PR 5 second
+/// review L2) caps what actually arrives, so a chunked body is held to it too.
 pub(super) const MAX_HTTP_BODY_BYTES: u64 = 4 * 1024 * 1024; // 4 MiB
+
+/// How long [`guard_request`] waits for the whole body of a request,
+/// counted from when it starts reading it (#32 PR 5 second review L2).
+///
+/// The guard reads the body before the session cap reserves a slot, so a
+/// client that dribbles its body holds no slot while it does; this bounds
+/// how long it holds its connection. 30 s is far beyond any honest client:
+/// MCP bodies are a few KiB and capped at [`MAX_HTTP_BODY_BYTES`]. A body
+/// not complete by then is refused with `408 Request Timeout`. The serve
+/// had no request timeout of any kind before this one.
+pub(super) const REQUEST_BODY_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Why [`read_body`] gave up.
+enum BodyRead {
+    /// More than [`MAX_HTTP_BODY_BYTES`] arrived (a chunked body, or one
+    /// longer than its `Content-Length` said).
+    TooLarge,
+    /// The client's stream failed (it went away mid-body).
+    Failed,
+}
+
+/// The whole of `body`, at most [`MAX_HTTP_BODY_BYTES`] of it. Trailers
+/// are dropped: rmcp reads only the data.
+async fn read_body(body: axum::body::Body) -> Result<axum::body::Bytes, BodyRead> {
+    use axum::body::HttpBody;
+    let mut body = std::pin::pin!(body);
+    let mut collected = Vec::new();
+    while let Some(frame) = std::future::poll_fn(|cx| body.as_mut().poll_frame(cx)).await {
+        let frame = frame.map_err(|_| BodyRead::Failed)?;
+        if let Ok(data) = frame.into_data() {
+            let room = MAX_HTTP_BODY_BYTES.saturating_sub(collected.len() as u64);
+            if data.len() as u64 > room {
+                return Err(BodyRead::TooLarge);
+            }
+            collected.extend_from_slice(&data);
+        }
+    }
+    Ok(axum::body::Bytes::from(collected))
+}
 
 /// The MCP-session id header of streamable HTTP.
 pub(super) const MCP_SESSION_ID: &str = "mcp-session-id";
@@ -673,7 +716,8 @@ fn how_to_close(path: &str) -> String {
         .to_string()
 }
 
-/// Auth, then rate, then the session cap (the process's, then the
+/// Auth, then rate, then the body (its size, then the whole of it within
+/// [`REQUEST_BODY_TIMEOUT`]), then the session cap (the process's, then the
 /// credential's share) — in that order, deliberately.
 ///
 /// Authentication runs **first and alone**: an unauthenticated caller must not
@@ -687,8 +731,8 @@ fn how_to_close(path: &str) -> String {
 /// configured one) and attaches its grant to the request as
 /// [`Authenticated`]; the router checks that grant's scope before it looks
 /// a session up. Nothing here depends on the addressed session, so every
-/// answer from this guard (401, 429, the cap's 503, 413) is the same for
-/// every session id.
+/// answer from this guard (401, 429, 413, 408, the cap's 503) is the same
+/// for every session id.
 pub(super) async fn guard_request(
     axum::extract::State(guard): axum::extract::State<HttpGuard>,
     req: axum::extract::Request,
@@ -760,6 +804,70 @@ pub(super) async fn guard_request(
             .into_response();
     }
 
+    // T8.7 body-size ceiling — checked before the body is streamed to rmcp.
+    // A declared body over the cap is refused up front: parse and validation
+    // never see it, so amplification through an oversized body is bounded.
+    if let Some(cl) = req.headers().get(axum::http::header::CONTENT_LENGTH)
+        && let Some(len) = cl.to_str().ok().and_then(|s| s.parse::<u64>().ok())
+        && len > MAX_HTTP_BODY_BYTES
+    {
+        tracing::warn!(
+            len,
+            max = MAX_HTTP_BODY_BYTES,
+            "mcp http: refusing an oversized request body"
+        );
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!("request body too large (limit {MAX_HTTP_BODY_BYTES} bytes)\n"),
+        )
+            .into_response();
+    }
+
+    // The whole body, read here within `body_timeout` (#32 PR 5 second
+    // review L2) and before the cap reserves anything: a client that
+    // dribbles its body holds no slot of the session cap while it does,
+    // and holds its connection for at most the timeout. rmcp reads the
+    // whole body before it acts anyway (and to the same 4 MiB), so
+    // buffering it here costs nothing rmcp would not spend.
+    let (parts, body) = req.into_parts();
+    let body = match tokio::time::timeout(guard.body_timeout, read_body(body)).await {
+        Ok(Ok(body)) => body,
+        Ok(Err(BodyRead::TooLarge)) => {
+            tracing::warn!(
+                max = MAX_HTTP_BODY_BYTES,
+                "mcp http: refusing an oversized request body"
+            );
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!("request body too large (limit {MAX_HTTP_BODY_BYTES} bytes)\n"),
+            )
+                .into_response();
+        }
+        Ok(Err(BodyRead::Failed)) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                "the request body could not be read\n",
+            )
+                .into_response();
+        }
+        Err(_) => {
+            tracing::warn!(
+                timeout_secs = guard.body_timeout.as_secs_f64(),
+                "mcp http: refusing a request whose body did not arrive in time"
+            );
+            return (
+                StatusCode::REQUEST_TIMEOUT,
+                [(axum::http::header::CONNECTION, "close")],
+                format!(
+                    "the request body did not arrive within {} s\n",
+                    guard.body_timeout.as_secs()
+                ),
+            )
+                .into_response();
+        }
+    };
+    let mut req = axum::extract::Request::from_parts(parts, axum::body::Body::from(body));
+
     if opens_a_new_session(&req) {
         // Reserve first, then read the live count (see `Openings`).
         let (opening, opening_total, opening_mine) = guard.openings.reserve(credential.name());
@@ -816,25 +924,6 @@ pub(super) async fn guard_request(
         req.extensions_mut().insert(OpeningReservation {
             _opening: Arc::new(opening),
         });
-    }
-
-    // T8.7 body-size ceiling — checked before the body is streamed to rmcp.
-    // A declared body over the cap is refused up front: parse and validation
-    // never see it, so amplification through an oversized body is bounded.
-    if let Some(cl) = req.headers().get(axum::http::header::CONTENT_LENGTH)
-        && let Some(len) = cl.to_str().ok().and_then(|s| s.parse::<u64>().ok())
-        && len > MAX_HTTP_BODY_BYTES
-    {
-        tracing::warn!(
-            len,
-            max = MAX_HTTP_BODY_BYTES,
-            "mcp http: refusing an oversized request body"
-        );
-        return (
-            StatusCode::PAYLOAD_TOO_LARGE,
-            format!("request body too large (limit {MAX_HTTP_BODY_BYTES} bytes)\n"),
-        )
-            .into_response();
     }
 
     next.run(req).await
