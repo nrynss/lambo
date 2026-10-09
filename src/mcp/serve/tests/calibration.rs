@@ -180,7 +180,7 @@ async fn attach(session: &str, probe: &Probe, calibration: &EmbedderCalibration)
 }
 
 /// Stage 2 aborts the shared probe, so a probe still running when the
-/// transport stops does not run across the close. The list is
+/// transport stops does not run across the close. The hook is
 /// [`ProcessTasks::stop_before_close`], the one `serve` hands
 /// `run_and_close_sessions` (review P3-1: dropping the calibration from it
 /// fails this test).
@@ -191,12 +191,14 @@ async fn stage_two_aborts_the_shared_probe() {
     let tasks = process_tasks(&calibration);
     let mem = attach("serve-cal-stage-2", &probe, &calibration).await;
     probe.parked().await;
-    let handles = tasks.stop_before_close();
-    let out = run_and_close(
-        Arc::clone(&mem),
+    let pump = tokio::spawn(async {});
+    let out = run_and_close_sessions(
+        &[SessionClose {
+            mem: &mem,
+            event_pump: &pump,
+        }],
         async { Ok(()) },
-        tokio::spawn(async {}),
-        &handles,
+        || tasks.stop_before_close(),
         &EarlyShutdown::unarmed(),
         &ShutdownProgress::new(),
     )
@@ -207,6 +209,51 @@ async fn stage_two_aborts_the_shared_probe() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(probe.calls(), at_close, "the probe stopped at stage 2");
     assert!(mem.pipeline().calibration().is_none());
+}
+
+/// Review P3-2: stage 2 asks the calibration for its probes when it runs,
+/// not before the transport starts. A session that attaches **during** the
+/// transport (#32 PR 4's lazy attach) spawns a probe the old pre-transport
+/// handle list never saw; stage 2 must still stop it before the closes.
+#[tokio::test]
+async fn stage_two_aborts_a_probe_spawned_while_the_transport_runs() {
+    let calibration = EmbedderCalibration::new();
+    let tasks = process_tasks(&calibration);
+    // The session serving from the start, over an embedder already probed.
+    let first = Probe::ungated();
+    let mem = attach("serve-cal-early", &first, &calibration).await;
+    probe_landed(&mem).await;
+
+    // The transport attaches a second session over another embedder, whose
+    // probe is held at the gate when the transport stops.
+    let late = Probe::gated();
+    let attached = std::sync::Mutex::new(None);
+    let transport = async {
+        let mem = attach("serve-cal-late", &late, &calibration).await;
+        late.parked().await;
+        *attached.lock().unwrap() = Some(mem);
+        Ok(())
+    };
+    let pump = tokio::spawn(async {});
+    let out = run_and_close_sessions(
+        &[SessionClose {
+            mem: &mem,
+            event_pump: &pump,
+        }],
+        transport,
+        || tasks.stop_before_close(),
+        &EarlyShutdown::unarmed(),
+        &ShutdownProgress::new(),
+    )
+    .await;
+    assert!(out.is_ok(), "{out:?}");
+    let at_close = late.calls();
+    late.release();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(late.calls(), at_close, "the late probe stopped at stage 2");
+    let late_mem = attached.lock().unwrap().take().expect("attached");
+    assert!(late_mem.pipeline().calibration().is_none());
+    late_mem.close().await.expect("close the late session");
 }
 
 /// Stage 5 ([`ProcessTasks::stop`]) aborts the shared probe too, on any

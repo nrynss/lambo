@@ -375,7 +375,9 @@ pub(super) async fn wind_down(
 ///
 /// `stop_before_close` is the opposite case: tasks nothing needs during the
 /// close, aborted the moment the transport returns and before `close()`
-/// starts. Today that is the issue-13 embedder keep-warm and the process's
+/// starts. [`run_and_close_sessions`] takes it as a hook run at that moment
+/// rather than a list taken before the transport, so a task the transport
+/// started (a probe spawned by an attach while serving) is stopped too. Today that is the issue-13 embedder keep-warm and the process's
 /// write-queue calibration probe (#32 PR 3): once no client can call, a touch
 /// or a probe embed only competes with the final drain (and on a slow remote
 /// embedder could keep a request in flight across it). Aborting is idempotent,
@@ -403,6 +405,11 @@ pub(crate) async fn run_and_close(
         mem: &mem,
         event_pump: &event_pump,
     };
+    let stop_before_close = || {
+        for task in stop_before_close {
+            task.abort();
+        }
+    };
     run_and_close_sessions(&[session], transport, stop_before_close, early, progress).await
 }
 
@@ -423,7 +430,7 @@ pub(super) struct SessionClose<'a> {
 pub(super) async fn run_and_close_sessions(
     sessions: &[SessionClose<'_>],
     transport: impl Future<Output = Result<(), LamboError>>,
-    stop_before_close: &[tokio::task::AbortHandle],
+    stop_before_close: impl FnOnce(),
     early: &EarlyShutdown,
     progress: &ShutdownProgress,
 ) -> Result<(), LamboError> {
@@ -431,11 +438,7 @@ pub(super) async fn run_and_close_sessions(
     let outcome = transport.await;
     progress.end(Stage::TransportDrain);
     // Stage 2: tasks nothing needs during the close.
-    progress.run(Stage::KeepWarmAbort, || {
-        for task in stop_before_close {
-            task.abort();
-        }
-    });
+    progress.run(Stage::KeepWarmAbort, stop_before_close);
     // Stages 3 and 4.
     let closed = close_sessions(sessions, early, progress).await;
 

@@ -113,17 +113,21 @@ impl ProcessTasks {
         }
     }
 
-    /// Stage 2's handles: the keep-warm, which stops when the transport does,
+    /// Stage 2: abort the keep-warm, which stops when the transport does,
     /// before the close and its final drain (issue #13), and the write-queue
     /// calibration probe (#32 PR 3), which no session's close aborts and
     /// whose embeds would only compete with the final drains; see
     /// [`run_and_close_sessions`](super::shutdown::run_and_close_sessions).
-    pub(super) fn stop_before_close(&self) -> Vec<tokio::task::AbortHandle> {
-        self.keep_warm
-            .iter()
-            .map(tokio::task::JoinHandle::abort_handle)
-            .chain(self.calibration.abort_handles())
-            .collect()
+    ///
+    /// Called **at** stage 2, not before the transport runs: the calibration
+    /// is asked for its probes then (`EmbedderCalibration::abort`), so a
+    /// probe spawned by an attach during the transport (#32 PR 4's lazy
+    /// attaches) is stopped here too, not only at stage 5 (review P3-2).
+    pub(super) fn stop_before_close(&self) {
+        if let Some(task) = &self.keep_warm {
+            task.abort();
+        }
+        self.calibration.abort();
     }
 
     /// Stage 5: stop every background task, after `close()`.

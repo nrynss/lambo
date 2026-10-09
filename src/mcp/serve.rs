@@ -538,10 +538,15 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     // is the process's to abort now that no session's close does, and an
     // embed it still has in flight would only compete with the final drains,
     // as a keep-warm touch would. Instant, so stage 2 stays instant.
-    let stop_before_close = tasks.stop_before_close();
     let closing: Vec<_> = sessions.iter().map(AttachedSession::closing).collect();
-    let outcome =
-        run_and_close_sessions(&closing, transport, &stop_before_close, &early, &progress).await;
+    let outcome = run_and_close_sessions(
+        &closing,
+        transport,
+        || tasks.stop_before_close(),
+        &early,
+        &progress,
+    )
+    .await;
     // Stage 5: heartbeat, keep-warm (again), refusal poller, calibration
     // probe (again).
     progress.run(Stage::BackgroundTasks, || tasks.stop());

@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use parking_lot::Mutex as PlMutex;
 use tokio::sync::watch;
-use tokio::task::{AbortHandle, JoinHandle};
+use tokio::task::JoinHandle;
 
 use super::{WritePipeline, WRITE_QUEUE_LANE_MAX, WRITE_QUEUE_MAX};
 use crate::embed::Embedder;
@@ -975,11 +975,6 @@ impl EmbedderProbe {
             handle.abort();
         }
     }
-
-    /// A handle that aborts the probe, or `None` once it has been aborted.
-    fn abort_handle(&self) -> Option<AbortHandle> {
-        self.task.lock().as_ref().map(JoinHandle::abort_handle)
-    }
 }
 
 /// Whose probe a probe is, for its log lines (#32 PR 3).
@@ -1188,18 +1183,6 @@ impl EmbedderCalibration {
         for shared in self.inner.probes.lock().iter() {
             shared.probe.abort();
         }
-    }
-
-    /// Handles that abort this calibration's probes (aborting one that has
-    /// finished or was aborted already is a no-op), for a shutdown stage that
-    /// aborts a list of tasks (`lambo serve`'s stage 2).
-    pub(crate) fn abort_handles(&self) -> Vec<AbortHandle> {
-        self.inner
-            .probes
-            .lock()
-            .iter()
-            .filter_map(|shared| shared.probe.abort_handle())
-            .collect()
     }
 
     /// Probes this calibration has spawned and still holds. Its readers
