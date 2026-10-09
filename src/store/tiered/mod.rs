@@ -1568,6 +1568,13 @@ impl GraphStore for TieredStore {
     ) -> Result<EraseOutcome, StoreError> {
         let outcome = self.primary.erase_session(session, eraser).await?;
         if let EraseOutcome::Erased(_) = &outcome {
+            // A repair this store runs for the session would rebuild what
+            // the sweep below removes (#18 review F6). It is told the lease
+            // is gone (its next fence check fails, F2) and awaited, so no
+            // request of it is still in flight when the sweep runs; one that
+            // does not stop within the grace is abandoned and the erase
+            // reports failure, to be rerun.
+            self.stop_repair_for_erase(session).await?;
             let cleaned = async {
                 let mut left = 0;
                 for _ in 0..ERASE_ATTEMPTS {
@@ -1591,6 +1598,8 @@ impl GraphStore for TieredStore {
                      durable erase is idempotent and the recall index cleanup is retried"
                 )));
             }
+            // Nothing runs for the session any more: drop its state even if
+            // it was held here (a lapsed lease the eraser took over).
             self.sessions.lock().remove(session);
         }
         Ok(outcome)
@@ -1729,6 +1738,35 @@ impl GraphStore for TieredStore {
 }
 
 impl Tier {
+    /// End this store's repair of an erased session before its documents
+    /// are swept: clear the held lease (so the repair's next fence check
+    /// stops it, and no new pass starts), then wait up to the release grace
+    /// for the task to finish.
+    async fn stop_repair_for_erase(&self, session: &SessionId) -> Result<(), StoreError> {
+        let task = self.with_state(session, |st| {
+            st.held = None;
+            st.repair_again = false;
+            st.repair_task.take()
+        });
+        let Some(mut task) = task else {
+            return Ok(());
+        };
+        if tokio::time::timeout(self.release_grace, &mut task)
+            .await
+            .is_ok()
+        {
+            return Ok(());
+        }
+        task.abort();
+        Err(StoreError::Backend(format!(
+            "session {session} was erased from the durable store, but a recall index repair \
+             of it did not stop within {}s and was abandoned; a request of it may still land. \
+             Run erase-session again: the durable erase is idempotent and the recall index \
+             cleanup is retried",
+            self.release_grace.as_secs_f64()
+        )))
+    }
+
     /// Remember whether this store holds the session's lease, and under which
     /// token: only a holder repairs the index.
     fn note_lease(&self, session: &SessionId, outcome: &LeaseOutcome) {

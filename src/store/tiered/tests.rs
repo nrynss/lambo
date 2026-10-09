@@ -1070,6 +1070,52 @@ async fn a_repair_that_lost_its_lease_stops_writing() {
     assert_eq!(store.with_state(&sid, |st| st.held), None);
 }
 
+/// F6: an erase through the store that is running a repair of the session
+/// (its lease lapsed, so the erase may proceed) stops that repair and waits
+/// for it before sweeping. Nothing the repair had in flight survives the
+/// erase, and its state does not come back.
+#[tokio::test]
+async fn erase_stops_this_stores_repair_before_it_sweeps() {
+    let (primary, fake) = (memory_primary(), Arc::new(FakeIndex::new()));
+    let store = tier(&primary, &fake).with_repair_chunk(1);
+    let sid = SessionId::new("erase-mid-repair");
+    let token = match store
+        .acquire_lease(&sid, &holder("w"), Duration::from_millis(150))
+        .await
+        .unwrap()
+    {
+        LeaseOutcome::Acquired(info) => info.token,
+        LeaseOutcome::Held { .. } => panic!("held"),
+    };
+    let _ = store.load_session(&sid).await;
+    let s = stale_after_an_outage(&store, &fake, &sid, token).await;
+    fake.delay_bulk_ms
+        .store(400, std::sync::atomic::Ordering::SeqCst);
+    let (_, e2) = one_more(&sid, &s, 2);
+    store.flush(&e2, Some(token)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let erased = store
+        .erase_session(&sid, &holder("lambo-erase-session"))
+        .await
+        .unwrap();
+    assert!(matches!(erased, EraseOutcome::Erased(_)));
+    settle(&store).await;
+    // Past the slow chunk, whether or not anything still tracks its task.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    fake.refresh_now();
+    assert!(
+        fake.live(&sid).is_empty(),
+        "the repair re-inserted documents after the erase: {:?}",
+        fake.live(&sid).keys()
+    );
+    assert_eq!(fake.marker(&sid), None);
+    assert!(
+        !store.tracked_sessions().contains(&sid),
+        "the repair re-created the erased session's state"
+    );
+}
+
 /// F2, the mirror side: a flush the primary accepted is not mirrored once
 /// this store has recorded the lease as lost (a refused heartbeat between
 /// the commit and the mirror); the session goes stale instead.
