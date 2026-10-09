@@ -180,8 +180,16 @@ fn the_constants_say_what_their_docs_say() {
     // that exists to forbid it.
     assert_eq!(PROBE_CLAMP_RPS, 1024);
     assert_eq!(MEASURED_LOCAL_EMBEDDER_RPS, 141);
-    assert_eq!(PROBE_EMBEDS, 7);
-    assert_eq!(PROBE_EMBEDS, PROBE_WARMUP_EMBEDS + 2 + PROBE_CONCURRENCY);
+    // #11: warm-up, short, then 1 + PROBE_CONCURRENCY representative writes
+    // of PROBE_WRITE_CONCEPTS embeds each.
+    assert_eq!(PROBE_EMBEDS, 12);
+    assert_eq!(
+        PROBE_EMBEDS,
+        PROBE_WARMUP_EMBEDS + 1 + (1 + PROBE_CONCURRENCY) * PROBE_WRITE_CONCEPTS
+    );
+    assert_eq!(PROBE_WRITE_CONCEPTS, 2);
+    assert_eq!(PROBE_CONCEPT_BYTES, 339);
+    assert_eq!(PROBE_WARMUP_BUDGET, crate::graph::hybrid::HYBRID_IO_TIMEOUT);
     // The representative leg is bigger than the short one, and the helper
     // hits the size exactly — the two facts that make the pair a
     // measurement of length rather than of two arbitrary strings.
@@ -281,13 +289,16 @@ async fn the_probes_serial_figure_is_the_slower_of_its_two_input_sizes() {
     let embedder = scripted(vec![Leg::PerByte]);
     let c = probe_embedder(&embedder).await;
     assert_eq!(c.source, CalibrationSource::Probe);
-    // 35 bytes → 35 ms → 28.57 items/s. 1024 bytes → 1024 ms → 0.977. The
+    // 35 bytes → 35 ms → 28.57 items/s. The representative write embeds
+    // PROBE_WRITE_CONCEPTS contexts of just under PROBE_TEXT_BYTES each, so
+    // about 2 s → ~0.49 writes/s (#11: a write, not one embed). The
     // published rate must be the second one; before J3-R2-1 it was the
     // first, and the first is a rate for 35-byte writes.
+    let write_bytes: usize = probe_write_contexts().iter().map(String::len).sum();
     let rate = c.serial_items_per_sec.expect("measured");
     assert!(
-        (rate - 1000.0 / PROBE_TEXT_BYTES as f64).abs() < 0.01,
-        "the representative leg must decide the rate, not the short one: {rate}"
+        (rate - 1000.0 / write_bytes as f64).abs() < 0.01,
+        "the representative write must decide the rate, not the short leg: {rate}"
     );
     assert_eq!(c.probe_serial_items_per_sec, c.serial_items_per_sec);
     assert_eq!(
@@ -356,7 +367,12 @@ async fn a_probe_that_cannot_finish_inside_its_budget_reports_no_measurement() {
     for (leg, plan) in [
         ("warm-up", vec![Leg::Hang]),
         ("serial", vec![answer, Leg::Hang]),
-        ("concurrent", vec![answer, answer, answer, Leg::Hang]),
+        ("concurrent", {
+            // warm-up, short, then the whole representative write answers.
+            let mut plan = vec![answer; 2 + PROBE_WRITE_CONCEPTS];
+            plan.push(Leg::Hang);
+            plan
+        }),
     ] {
         let embedder = scripted(plan);
         let started = tokio::time::Instant::now();
@@ -407,4 +423,75 @@ async fn a_cold_warm_up_does_not_cost_the_probe_its_measurement() {
         "a slow model load is what the warm-up exists to absorb: {c:?}"
     );
     assert!(c.serial_items_per_sec.is_some(), "{c:?}");
+}
+
+/// An embedder that records every text it is asked to embed.
+struct RecordingEmbedder {
+    texts: parking_lot::Mutex<Vec<String>>,
+}
+
+#[async_trait::async_trait]
+impl Embedder for RecordingEmbedder {
+    fn dimensions(&self) -> usize {
+        8
+    }
+    async fn embed(&self, text: &str) -> Result<Vec<f32>, crate::EmbedError> {
+        self.texts.lock().push(text.to_string());
+        Ok(vec![0.0; 8])
+    }
+}
+
+/// **The probe times a representative WRITE, in the derive path's own
+/// framing** (#11).
+///
+/// The observed rate is one lane job per sample — a whole derive, which
+/// embeds every new concept framed with the call's whole prompt
+/// (`hybrid::context_text` over `hybrid::derive_prompt`). The probe used to
+/// time one bare 1 KiB embed, so `probe_optimism` divided an embed rate by a
+/// write rate: 4.1x on the M3 Pro bench with a real BGE-M3, before any real
+/// divergence. The representative leg now embeds exactly what a
+/// [`PROBE_WRITE_CONCEPTS`]-concept derive embeds, every context within
+/// [`PROBE_TEXT_BYTES`] so the embedder input ceiling that sized that
+/// constant still holds.
+#[tokio::test(start_paused = true)]
+async fn the_probe_times_a_representative_write_in_the_derive_paths_own_framing() {
+    let embedder = RecordingEmbedder {
+        texts: parking_lot::Mutex::new(Vec::new()),
+    };
+    let c = probe_embedder(&embedder).await;
+    assert_eq!(c.source, CalibrationSource::Probe);
+
+    let contexts = probe_write_contexts();
+    assert_eq!(contexts.len(), PROBE_WRITE_CONCEPTS);
+    let concept = probe_text_at(PROBE_CONCEPT_BYTES);
+    let prompt = crate::graph::hybrid::derive_prompt(vec![concept.as_str(); PROBE_WRITE_CONCEPTS]);
+    for context in &contexts {
+        assert_eq!(
+            context,
+            &crate::graph::hybrid::context_text(&concept, Some(&prompt)),
+            "the probe must embed what a derive of this shape embeds"
+        );
+        assert!(
+            context.len() <= PROBE_TEXT_BYTES,
+            "every input stays within the input-ceiling bound: {}",
+            context.len()
+        );
+        assert!(
+            context.len() + PROBE_WRITE_CONCEPTS + 1 > PROBE_TEXT_BYTES,
+            "and the concepts are as large as that bound allows: {}",
+            context.len()
+        );
+    }
+
+    let texts = embedder.texts.lock().clone();
+    assert_eq!(texts.len(), PROBE_EMBEDS, "{texts:?}");
+    // warm-up and the short leg, then one representative write, then
+    // PROBE_CONCURRENCY of them at once.
+    assert_eq!(texts[0], PROBE_TEXT);
+    assert_eq!(texts[1], PROBE_TEXT);
+    let writes = &texts[2..];
+    assert_eq!(writes.len(), (1 + PROBE_CONCURRENCY) * PROBE_WRITE_CONCEPTS);
+    for text in writes {
+        assert!(contexts.contains(text), "{text:?}");
+    }
 }
