@@ -73,6 +73,16 @@ interval after a flush); the keyword and recent legs are in RAM and still find
 those concepts. If dogfooding shows the gap matters, the follow-up is an
 explicit `[recall]` knob that names the threshold, not an implicit one.
 
+The same choice reaches hybrid derive, because `VectorCandidates::for_holder`
+is one rule for both callers (#8). On a holder over `TieredStore(sqlite)`,
+derive's semantic match asks the index instead of the graph, so a concept
+derived in the last flush interval plus one refresh is not a semantic-merge
+candidate, exactly as on the pg family today. Exact canonical-key matches are
+unaffected (they are resolved in the graph). Splitting the rule so derive
+keeps the graph while recall uses the index is possible but reopens #8's
+"one constructor, two callers" decision, so it is left as an open question
+rather than done here.
+
 **Index per contract.** `{prefix}-v-{hash}`, where the hash is the first 8
 bytes of SHA-256 over `kind`, `model` and `dim` with separators that keep
 `model = None` and `model = ""` apart. A checked read compares the expected
