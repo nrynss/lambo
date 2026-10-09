@@ -507,3 +507,28 @@ fn a_serve_table_changes_nothing_the_backends_resolve() {
     assert_eq!(a.store_cfg, b.store_cfg);
     assert_eq!(a.embedder_cfg, b.embedder_cfg);
 }
+
+/// The commented `[serve]` block in `lambo.example.toml`, uncommented, is a
+/// valid file: the documented example cannot drift from what parses.
+#[test]
+fn the_example_files_serve_block_parses_when_uncommented() {
+    let raw = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/lambo.example.toml"));
+    let begin = raw
+        .find("# --- [serve] example begins ---")
+        .expect("begin marker");
+    let end = raw
+        .find("# --- [serve] example ends ---")
+        .expect("end marker");
+    let block: String = raw[begin..end]
+        .lines()
+        .skip(1)
+        .map(|l| l.strip_prefix("# ").unwrap_or(l.trim_start_matches('#')))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let f = parse(&block).unwrap_or_else(|e| panic!("example [serve] must parse: {e}"));
+    assert_eq!(f.serve.sessions.len(), 3);
+    assert_eq!(f.serve.credentials.len(), 3);
+    assert_eq!(f.serve.projects.len(), 1);
+    // And the shipped example, commented, leaves `[serve]` empty.
+    assert!(parse(raw).expect("example").serve.is_empty());
+}
