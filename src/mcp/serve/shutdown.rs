@@ -528,16 +528,39 @@ impl SessionCloses {
 /// On the calling task, not spawned: nothing has to be `'static`, and every
 /// line the futures log reaches the caller's subscriber, in the caller's
 /// span. A set of one is polled exactly as an `.await` on it would be.
+///
+/// **A member's panic does not cancel the others** (#32 review L3). The
+/// panic is caught at that member's poll, the member is dropped (as the
+/// unwind would have dropped it), and the rest run to completion. Only then
+/// is the first panic resumed, so it still reaches the caller. Without this,
+/// one session whose close panicked would drop every sibling's close
+/// mid-flight: their tails lost and their leases held until `LEASE_TTL`.
+/// For a set of one nothing changes: the panic propagates from the same
+/// poll.
 pub(super) async fn join_all<F: Future>(futures: Vec<F>) -> Vec<F::Output> {
-    let mut futures: Vec<Pin<Box<F>>> = futures.into_iter().map(Box::pin).collect();
+    let mut futures: Vec<Option<Pin<Box<F>>>> = futures
+        .into_iter()
+        .map(|future| Some(Box::pin(future)))
+        .collect();
     let mut outputs: Vec<Option<F::Output>> = futures.iter().map(|_| None).collect();
+    let mut panicked: Option<Box<dyn std::any::Any + Send>> = None;
     std::future::poll_fn(|cx| {
         let mut pending = false;
-        for (future, output) in futures.iter_mut().zip(outputs.iter_mut()) {
-            if output.is_none() {
-                match future.as_mut().poll(cx) {
-                    std::task::Poll::Ready(value) => *output = Some(value),
-                    std::task::Poll::Pending => pending = true,
+        for (slot, output) in futures.iter_mut().zip(outputs.iter_mut()) {
+            let Some(future) = slot.as_mut() else {
+                continue;
+            };
+            let polled =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| future.as_mut().poll(cx)));
+            match polled {
+                Ok(std::task::Poll::Ready(value)) => {
+                    *output = Some(value);
+                    *slot = None;
+                }
+                Ok(std::task::Poll::Pending) => pending = true,
+                Err(payload) => {
+                    *slot = None;
+                    panicked.get_or_insert(payload);
                 }
             }
         }
@@ -548,6 +571,9 @@ pub(super) async fn join_all<F: Future>(futures: Vec<F>) -> Vec<F::Output> {
         }
     })
     .await;
+    if let Some(payload) = panicked {
+        std::panic::resume_unwind(payload);
+    }
     outputs
         .into_iter()
         .map(|output| output.expect("join_all returns only once every future is ready"))

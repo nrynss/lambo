@@ -34,6 +34,39 @@ async fn join_all_runs_the_set_concurrently() {
     assert_eq!(started.elapsed(), Duration::from_millis(100));
 }
 
+/// #32 review L3: one member's panic does not cancel the others. The
+/// sibling, still pending when the panic lands, runs to completion, and only
+/// then does the panic reach the caller.
+#[tokio::test(start_paused = true)]
+async fn a_panicking_member_does_not_cancel_its_siblings() {
+    let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let sibling = {
+        let finished = Arc::clone(&finished);
+        async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            finished.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    };
+    let panicking = async {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        panic!("a member's close panicked");
+    };
+    let futures: Vec<std::pin::Pin<Box<dyn Future<Output = ()> + Send>>> =
+        vec![Box::pin(panicking), Box::pin(sibling)];
+    let joined = tokio::spawn(join_all(futures)).await;
+    let err = joined.expect_err("the panic still reaches the caller");
+    assert!(err.is_panic(), "{err:?}");
+    let payload = err.into_panic();
+    assert_eq!(
+        payload.downcast_ref::<&str>().copied(),
+        Some("a member's close panicked")
+    );
+    assert!(
+        finished.load(std::sync::atomic::Ordering::SeqCst),
+        "the sibling ran to completion before the panic was resumed"
+    );
+}
+
 /// An empty set is done at once.
 #[tokio::test]
 async fn join_all_of_nothing_is_empty() {
