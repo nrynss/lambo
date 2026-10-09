@@ -9,10 +9,17 @@
 //! |---|---|---|
 //! | `Memory` (graph, daemon, flush, lease and its heartbeat, write pipeline) | [`AttachedSession::mem`] | stage 3, `close_bounded` |
 //! | the MCP server handle | [`AttachedSession::server`] | with the transport (stage 1) |
+//! | its streamable-HTTP service and MCP-session manager | [`AttachedSession::http`], [`AttachedSession::mcp_sessions`] | with the transport (stage 1), or a detach's stage 1 |
 //! | the event pump | [`SessionTasks::event_pump`] | stage 4 |
+//! | the lease-loss watcher (multi-session serves only) | [`SessionTasks::lease_watcher`] | stage 5 |
 //! | the session endpoint (J2, the #39 seam) | [`AttachedSession::hub`] | stage 6, [`AttachedSession::release_endpoint`] |
 
 use std::sync::Arc;
+use std::time::Duration;
+
+use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
+use rmcp::transport::streamable_http_server::session::SessionManager;
+use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 
 use super::heartbeat::log_events;
 use super::hub::{bind_hub, Hub, SessionEndpoint};
@@ -59,6 +66,15 @@ pub(super) struct AttachedSession {
     pub(super) mem: Arc<Memory>,
     /// The MCP server over [`Self::mem`]. The transport serves a clone.
     pub(super) server: LamboServer,
+    /// This session's streamable-HTTP service (#32 PR 4). One per session,
+    /// because rmcp's service neither reads the request path nor lets its
+    /// factory see the request: the router picks the session, then hands
+    /// the request to that session's service. An `Mcp-Session-Id` minted
+    /// here is unknown to every other session's manager.
+    pub(super) http: StreamableHttpService<LamboServer, LocalSessionManager>,
+    /// The MCP sessions [`Self::http`] has minted: read by the process-wide
+    /// session cap, and ended one by one by a detach's stage 1.
+    pub(super) mcp_sessions: Arc<LocalSessionManager>,
     /// The session endpoint (J2): the accept loop and its connections.
     ///
     /// In a lock and an `Option` so stage 6 can take it through a shared
@@ -82,6 +98,30 @@ pub(super) struct SessionTasks {
     /// The daemon-event logger; aborted at stage 4, after the close, so the
     /// final drain's events still reach the log (R1/T82-17).
     pub(super) event_pump: tokio::task::JoinHandle<()>,
+    /// The lease-loss watcher of a multi-session serve (#32 design §4.2,
+    /// `DetachSession`), set once the session is in the registry; aborted
+    /// at stage 5. A one-session serve has none: its fence ends the whole
+    /// process through `wind_down`, as it always has.
+    pub(super) lease_watcher: parking_lot::Mutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+impl SessionTasks {
+    /// Stage 5 for this session: stop its lease-loss watcher, if any.
+    pub(super) fn stop(&self) {
+        if let Some(watcher) = self.lease_watcher.lock().take() {
+            watcher.abort();
+        }
+    }
+}
+
+/// The streamable-HTTP configuration every session's service uses: the SDK
+/// default with a 15 s SSE keep-alive.
+fn http_config() -> StreamableHttpServerConfig {
+    // `#[non_exhaustive]` — mutate the SDK default rather than
+    // constructing, so a new field cannot silently break the build.
+    let mut cfg = StreamableHttpServerConfig::default();
+    cfg.sse_keep_alive = Some(Duration::from_secs(15));
+    cfg
 }
 
 impl AttachedSession {
@@ -104,12 +144,64 @@ impl AttachedSession {
 
         let event_pump = spawn_event_pump(&mem);
 
+        // CLONED, not rebuilt (I1): every request handler must share the one
+        // call ledger, and `LamboServer::new` per request would also rebuild
+        // the whole `ToolRouter` — every tool's JSON schema included — on
+        // every request. Cloning shares the `Arc<Memory>`. Building the
+        // service spawns nothing; a stdio serve never routes to it.
+        let factory_server = server.clone();
+        let mcp_sessions = Arc::new(LocalSessionManager::default());
+        let http = StreamableHttpService::new(
+            move || Ok(factory_server.clone()),
+            Arc::clone(&mcp_sessions),
+            http_config(),
+        );
+
         Self {
             mem,
             server,
+            http,
+            mcp_sessions,
             hub: tokio::sync::Mutex::new(Some(hub)),
             endpoint,
-            tasks: SessionTasks { event_pump },
+            tasks: SessionTasks {
+                event_pump,
+                lease_watcher: parking_lot::Mutex::new(None),
+            },
+        }
+    }
+
+    /// The session's id.
+    pub(super) fn id(&self) -> &crate::types::SessionId {
+        self.mem.session()
+    }
+
+    /// How many MCP sessions this session's HTTP service holds open.
+    pub(super) async fn live_mcp_sessions(&self) -> usize {
+        self.mcp_sessions.sessions.read().await.len()
+    }
+
+    /// A detach's stage 1 (#32 design §3.4): end every MCP session this
+    /// session's HTTP service minted, each through rmcp's own
+    /// `close_session`. A client that calls again gets rmcp's unknown-session
+    /// answer and re-initializes once the session is back.
+    pub(super) async fn close_mcp_sessions(&self) {
+        let ids: Vec<_> = self
+            .mcp_sessions
+            .sessions
+            .read()
+            .await
+            .keys()
+            .cloned()
+            .collect();
+        for id in ids {
+            if let Err(e) = self.mcp_sessions.close_session(&id).await {
+                tracing::warn!(
+                    session = %self.mem.session(),
+                    error = %e,
+                    "lambo serve: could not close an MCP session during a detach"
+                );
+            }
         }
     }
 

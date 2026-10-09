@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use super::{ServeOptions, Transport};
 use crate::ledger::Ledger;
+#[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
 use crate::mcp::server::LamboServer;
 use crate::store::lease;
 use crate::types::{DaemonEvent, LamboError};
@@ -58,6 +59,12 @@ pub fn authorize_ledger(opts: &ServeOptions) -> Result<(), LamboError> {
 /// Runs until aborted. `Memory::stats()` is synchronous and holds no lock
 /// across an await (spec §6.4) — it takes the graph read lock, counts, and
 /// releases before this function's next `tick()`.
+///
+/// One session's heartbeat, the shape `serve` ran before #32 PR 4 made the
+/// heartbeat one process task over every attached session
+/// (`process::ProcessTasks::spawn`); kept as the seam the heartbeat test
+/// drives, gated like it.
+#[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
 pub(super) async fn heartbeat_loop(server: LamboServer, ledger: Arc<Ledger>, every: Duration) {
     heartbeat_ticks(every, || ledger.append(&server.heartbeat_line())).await;
 }
@@ -93,8 +100,9 @@ pub(super) fn serve_startup_line(opts: &ServeOptions) -> serde_json::Value {
 /// How often the holder's refusal-recorder task re-checks the store.
 pub(super) const REFUSAL_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
-/// J4 — the holder side of a refused acquisition. Spawned only in the holder
-/// branch of [`serve`](super::serve): it polls the store for lease refusals this process
+/// J4 — the holder side of a refused acquisition, one poll of it. The
+/// process's poller (`process::ProcessTasks`, spawned only in the holder
+/// branch of [`serve`](super::serve)) runs it once per attached session per round: it polls the store for lease refusals this process
 /// turned away and appends a `lease:refused_takeover` line for each it has not
 /// yet recorded. This and [`record_refused_loser`](super::roles::record_refused_loser) together make "a refused
 /// lease acquisition appears in the ledger from both sides" true.
@@ -127,23 +135,8 @@ pub(super) const REFUSAL_POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// than the cursor are unreachable by construction and cannot be re-logged.
 /// The bookkeeping is [`RefusalCursor`], extracted for the same reason
 /// [`waiting_fits`](super::roles::waiting_fits) was: the *claim about* it is what a review can check.
-pub(super) async fn record_refused_takeovers(
-    store: Arc<dyn crate::store::GraphStore>,
-    session: crate::types::SessionId,
-    agent: crate::types::AgentId,
-    my_token: String,
-    ledger: Arc<Ledger>,
-) {
-    let mut cursor = RefusalCursor::starting_now();
-    loop {
-        tokio::time::sleep(REFUSAL_POLL_INTERVAL).await;
-        poll_refused_takeovers(&store, &session, &agent, &my_token, &ledger, &mut cursor).await;
-    }
-}
-
-/// One poll of [`record_refused_takeovers`]: append a `refused_takeover`
-/// line for each refusal this holder turned away that `cursor` has not yet
-/// seen. A store error drops this poll; the next one retries.
+///
+/// A store error drops this poll; the next one retries.
 pub(super) async fn poll_refused_takeovers(
     store: &Arc<dyn crate::store::GraphStore>,
     session: &crate::types::SessionId,

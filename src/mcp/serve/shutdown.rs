@@ -217,6 +217,15 @@ const _: () = assert!(
 /// `serve`'s shutdown still has to produce one of these, which still runs the
 /// fence race. Closed by construction rather than by vigilance.
 ///
+/// **Two constructors since #32 PR 4**, one per lease-loss policy: a
+/// one-session serve gets [`holder_shutdown`] (the fence race, unchanged), a
+/// serve holding several pinned sessions gets [`registry_shutdown`], whose
+/// fence handling is per session (a lost lease detaches that session rather
+/// than ending the process for all of them). `serve` chooses by
+/// `LeaseLossPolicy`, derived in one place; the severing mutation on the
+/// one-session path is still a type error, and pinned by
+/// `serve_feeds_the_fence_into_the_transports_shutdown`.
+///
 /// The box costs one allocation per serve process, at startup, for a future
 /// that is polled until the process ends. `wind_down` is an `async fn` and so
 /// has no nameable type; boxing is what lets the *type* be the guarantee.
@@ -260,6 +269,34 @@ pub(super) fn holder_shutdown(
     let signal = shutdown_signal();
     HolderShutdown(Box::pin(async move {
         wind_down(signal, early, mem, ledger).await;
+        progress.begin(Stage::TransportDrain);
+    }))
+}
+
+/// The wind-down of a serve holding several pinned sessions (#32 PR 4,
+/// [`LeaseLossPolicy::DetachSession`](super::registry::LeaseLossPolicy)) —
+/// **the only other way to get a [`HolderShutdown`]**.
+///
+/// The same two signal arms as [`wind_down`] (the fresh registration, made
+/// eagerly here, and J6's pre-arm), and **no fence arm**: under
+/// `DetachSession` a session that loses its lease is detached by its own
+/// watcher (`registry::watch_lease`), and the process and its other sessions
+/// keep serving (design §4.2). `serve` picks between this and
+/// [`holder_shutdown`] by the registry's policy, which is derived in one
+/// place (`LeaseLossPolicy::for_pinned`); a one-session serve always gets
+/// [`holder_shutdown`], so JE2E-4's exit on a lost lease is unchanged.
+pub(super) fn registry_shutdown(
+    early: EarlyShutdown,
+    progress: ShutdownProgress,
+) -> HolderShutdown {
+    // Evaluated here, outside the `async` block, so the registration stays
+    // eager (see `shutdown_signal`).
+    let signal = shutdown_signal();
+    HolderShutdown(Box::pin(async move {
+        tokio::select! {
+            () = signal => {}
+            () = early.fired() => {}
+        }
         progress.begin(Stage::TransportDrain);
     }))
 }
@@ -435,6 +472,7 @@ pub(super) struct SessionClose<'a> {
 /// The result is the transport's error if it failed (the closes still ran,
 /// and their outcomes are not logged, as before the set), else the first
 /// session's close error, else `Ok`; see [`SessionCloses::report`].
+#[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
 pub(super) async fn run_and_close_sessions(
     sessions: &[SessionClose<'_>],
     transport: impl Future<Output = Result<(), LamboError>>,
@@ -542,6 +580,14 @@ pub(super) struct SessionCloses {
 }
 
 impl SessionCloses {
+    /// Name the session on every outcome line, even in a set of one: a
+    /// registry detach (#32 PR 4) runs in a process serving other
+    /// sessions, where an unattributed "tail lost" would not say whose.
+    pub(super) fn named(mut self) -> Self {
+        self.named = true;
+        self
+    }
+
     /// Log each session's outcome, in set order, and fold them: the first
     /// close error, else `Ok`.
     ///
