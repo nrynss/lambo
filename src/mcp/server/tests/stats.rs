@@ -230,6 +230,11 @@ async fn the_stats_payload_reports_the_measured_bound_and_the_drop_count() {
         "write_queue_items_per_sec",
         "write_queue_serial_items_per_sec",
         "write_queue_probe_serial_items_per_sec",
+        "write_queue_probe_optimism",
+        "write_queue_apply_samples",
+        "write_queue_apply_ms_p50",
+        "write_queue_apply_ms_p90",
+        "write_queue_apply_ms_max",
         "write_queue_outstanding",
         "write_queue_accepted",
         "write_queue_applied",
@@ -276,6 +281,15 @@ async fn the_stats_payload_reports_the_measured_bound_and_the_drop_count() {
     // and that divergence is the diagnosis J3-R2-4 asked for.
     assert_eq!(
         p["write_queue_probe_serial_items_per_sec"], p["write_queue_serial_items_per_sec"],
+        "{p}"
+    );
+    // #11: no observed rate yet, so no ratio; one applied write, so the
+    // apply-latency window has one sample and every percentile is it.
+    assert_eq!(p["write_queue_probe_optimism"], json!(null), "{p}");
+    assert_eq!(p["write_queue_apply_samples"], json!(1), "{p}");
+    assert!(p["write_queue_apply_ms_p50"].as_u64().is_some(), "{p}");
+    assert_eq!(
+        p["write_queue_apply_ms_p50"], p["write_queue_apply_ms_max"],
         "{p}"
     );
     assert_eq!(p["write_queue_dropped_closed"], json!(0), "{p}");

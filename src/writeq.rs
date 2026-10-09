@@ -89,7 +89,9 @@ pub use calibration::{
     PROBE_EMBEDS, PROBE_TEXT, PROBE_TEXT_BYTES, PROBE_WARMUP_BUDGET, PROBE_WARMUP_EMBEDS,
     PROBE_WRITE_CONCEPTS,
 };
-pub use counters::{ReplayBlockReason, WriteQueueCounters};
+pub use counters::{
+    ApplyLatencySummary, ReplayBlockReason, WriteQueueCounters, APPLY_LATENCY_WINDOW,
+};
 pub use drain::WRITE_QUEUE_DRAIN_BUDGET;
 pub(crate) use execution::{mirror_concepts, ConsumeStamp, WriteCtx};
 pub use receipts::{
@@ -102,6 +104,7 @@ pub use replay::EMBEDDER_SICK_THRESHOLD;
 // Crate-internal names the sibling modules reach through `super::`.
 use admission::{Job, JobPayload, Lanes};
 use calibration::{EmbedderProbe, ObservedRate};
+use counters::ApplyLatency;
 use receipts::{model_safe_failure, settle_one, Entry, Receipts};
 
 // ---------------------------------------------------------------------------
@@ -138,6 +141,8 @@ pub struct WritePipeline {
     /// Service time observed on real writes, which **replaces** the probe's
     /// serial figure once [`OBSERVED_MIN_SAMPLES`] have been seen (J3-R1-2).
     observed: Arc<PlMutex<ObservedRate>>,
+    /// Admission-to-settle latency of recent applied writes (#11).
+    apply_latency: Arc<PlMutex<ApplyLatency>>,
     /// Cross-restart receipt answers (J3 durable intents): receipts issued by
     /// **previous** processes whose fate this process knows — from the loaded
     /// intent records at attach (unconsumed → `Pending`; consumed → the stored
@@ -199,6 +204,7 @@ impl WritePipeline {
             settled: Arc::new(Notify::new()),
             wait_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_RECEIPT_WAITS)),
             observed: Arc::new(PlMutex::new(ObservedRate::default())),
+            apply_latency: Arc::new(PlMutex::new(ApplyLatency::default())),
             probe,
             restart: PlMutex::new(HashMap::new()),
             replay: PlMutex::new(None),
@@ -213,6 +219,12 @@ impl WritePipeline {
     /// Queue counters, for `lambo_stats`.
     pub fn counters(&self) -> &Arc<WriteQueueCounters> {
         &self.counters
+    }
+
+    /// Percentiles of recent applied writes' admission-to-settle latency, or
+    /// `None` before the first (#11).
+    pub fn apply_latency(&self) -> Option<ApplyLatencySummary> {
+        self.apply_latency.lock().summary()
     }
 
     fn bound_snapshot(&self) -> usize {

@@ -466,3 +466,37 @@ async fn a_receipt_wait_outlasts_one_write_at_the_head_of_its_lane() {
         "a wait clamped to RECEIPT_WAIT_MAX must cover the write's own I/O bound: {answer:?}"
     );
 }
+
+/// **Apply latency is admission to settle, applied writes only** (#11): the
+/// queueing behind earlier writes counts, because a receipt waiter waits for
+/// it too, and a failure is not recorded.
+#[tokio::test(start_paused = true)]
+async fn apply_latency_counts_the_queue_wait_and_only_applied_writes() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let rig = Rig::hybrid(
+        "wq-apply-latency",
+        Arc::new(SlowEmbedder {
+            delay: Duration::from_millis(100),
+            inner: FixtureEmbedder::new(),
+            calls: calls.clone(),
+        }),
+    );
+    let agent = AgentId::new("agent-a");
+    assert!(rig.pipeline.apply_latency().is_none());
+    // Two writes back to back on one lane: the second waits for the first.
+    let first = rig.derive(&agent, "first queued write").await;
+    let second = rig.derive(&agent, "second queued write").await;
+    // A fast failure (stopword-only content is refused before any embed).
+    let failed = rig.derive(&agent, "the and of a").await;
+    for r in [first.receipt, second.receipt, failed.receipt] {
+        rig.pipeline.wait(&agent, r, RECEIPT_WAIT_MAX).await;
+    }
+    assert_eq!(rig.pipeline.counters().failed(), 1);
+    let s = rig.pipeline.apply_latency().expect("two applied writes");
+    assert_eq!(s.samples, 2, "the failure is not a latency sample: {s:?}");
+    assert!(
+        s.max >= Duration::from_millis(200),
+        "the second write waited behind the first: {s:?}"
+    );
+    assert!(s.p50 >= Duration::from_millis(100), "{s:?}");
+}

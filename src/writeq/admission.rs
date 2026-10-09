@@ -172,6 +172,8 @@ pub(super) struct Job {
     pub(super) interaction: NodeId,
     pub(super) bytes: usize,
     pub(super) payload: JobPayload,
+    /// When the job was admitted, for the apply-latency window (#11).
+    pub(super) admitted: tokio::time::Instant,
 }
 
 #[derive(Debug)]
@@ -428,6 +430,7 @@ impl WritePipeline {
                         interaction,
                         bytes,
                         payload,
+                        admitted: tokio::time::Instant::now(),
                     });
                 if !lanes.workers.contains_key(&agent) {
                     let handle = self.spawn_worker(agent.clone());
