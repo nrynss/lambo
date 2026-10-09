@@ -145,7 +145,7 @@ impl Hub {
     /// Stop accepting, end every endpoint session, then remove the socket file
     /// if it is still ours.
     ///
-    /// Runs AFTER `close()` (the caller runs this once `run_and_close` has
+    /// Runs AFTER `close()` (the caller runs this once `run_and_close_sessions` has
     /// returned), deliberately: a proxy's in-flight call must not be cut off
     /// before the tail it may have just written is durable.
     ///

@@ -43,7 +43,7 @@ pub(crate) enum Stage {
     SessionClose,
     /// 4: the event pump is aborted, after the close.
     EventPumpAbort,
-    /// 5: `HolderTasks::stop`.
+    /// 5: `ProcessTasks::stop`.
     BackgroundTasks,
     /// 6: `Hub::release`.
     EndpointRelease,
@@ -108,8 +108,10 @@ pub(super) struct Shared {
 /// The holder's shutdown progress: which stage is running and since when.
 ///
 /// One per serve process, shared between the shutdown future (which starts
-/// stage 1), [`super::shutdown::run_and_close`] (stages 1 to 4) and
-/// [`super::serve`] (stages 5 to 7). Cloning shares the record.
+/// stage 1), [`super::shutdown::run_and_close_sessions`] (stages 1 to 4) and
+/// [`super::serve`] (stages 5 to 7). Cloning shares the record. A session
+/// detach (#32 PR 4) takes a record of its own,
+/// [`ShutdownProgress::for_session`].
 ///
 /// The lock is a `parking_lot` mutex held for one statement at a time and
 /// never across an `.await`; logging happens after it is released.
@@ -119,6 +121,10 @@ pub(super) struct Shared {
 #[derive(Clone, Default)]
 pub(crate) struct ShutdownProgress {
     shared: Arc<Shared>,
+    /// Set by [`ShutdownProgress::for_session`]: the one session these stages
+    /// are about, logged as a `session` field on every line. `None` for the
+    /// process's own shutdown, whose lines carry no `session`.
+    session: Option<Arc<str>>,
 }
 
 impl ShutdownProgress {
@@ -144,6 +150,27 @@ impl ShutdownProgress {
     /// [`watchdog::SHUTDOWN_WATCHDOG`] and aborts the process.
     pub(crate) fn with_production_watchdog() -> Self {
         Self::watched(watchdog::production())
+    }
+
+    /// A record for one session's own stages (#32 design §3.4): a detach that
+    /// takes one session down while the process keeps serving the others.
+    /// Every line it logs carries a `session` field. The stage lines read as
+    /// the process's do; the summary says `session detach finished`, not
+    /// `shutdown finished`, because the process is not shutting down.
+    /// It never starts a watchdog: the watchdog bounds the whole process's
+    /// shutdown, not a session's (see `super::watchdog`).
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "#32 PR 4's registry detach is the first production caller"
+        )
+    )]
+    pub(crate) fn for_session(session: &str) -> Self {
+        Self {
+            shared: Arc::default(),
+            session: Some(Arc::from(session)),
+        }
     }
 
     /// A guard that disarms the watchdog when it drops, so a `serve` that
@@ -183,14 +210,25 @@ impl ShutdownProgress {
         if let Some(spec) = spec {
             watchdog::start(Arc::clone(&self.shared), spec, now);
         }
-        tracing::info!(
-            stage = stage.number(),
-            stage_name = stage.name(),
-            "lambo serve: shutdown stage {}/{} {} started",
-            stage.number(),
-            Stage::COUNT,
-            stage.name(),
-        );
+        match &self.session {
+            None => tracing::info!(
+                stage = stage.number(),
+                stage_name = stage.name(),
+                "lambo serve: shutdown stage {}/{} {} started",
+                stage.number(),
+                Stage::COUNT,
+                stage.name(),
+            ),
+            Some(session) => tracing::info!(
+                session = %session,
+                stage = stage.number(),
+                stage_name = stage.name(),
+                "lambo serve: shutdown stage {}/{} {} started",
+                stage.number(),
+                Stage::COUNT,
+                stage.name(),
+            ),
+        }
     }
 
     /// Finish `stage`: log its elapsed time. A stage that was never begun is
@@ -213,15 +251,27 @@ impl ShutdownProgress {
         let elapsed_ms = started.elapsed().as_millis();
         self.shared.state.lock().current = None;
         self.shared.changed.notify_all();
-        tracing::info!(
-            stage = stage.number(),
-            stage_name = stage.name(),
-            elapsed_ms,
-            "lambo serve: shutdown stage {}/{} {} finished in {elapsed_ms} ms",
-            stage.number(),
-            Stage::COUNT,
-            stage.name(),
-        );
+        match &self.session {
+            None => tracing::info!(
+                stage = stage.number(),
+                stage_name = stage.name(),
+                elapsed_ms,
+                "lambo serve: shutdown stage {}/{} {} finished in {elapsed_ms} ms",
+                stage.number(),
+                Stage::COUNT,
+                stage.name(),
+            ),
+            Some(session) => tracing::info!(
+                session = %session,
+                stage = stage.number(),
+                stage_name = stage.name(),
+                elapsed_ms,
+                "lambo serve: shutdown stage {}/{} {} finished in {elapsed_ms} ms",
+                stage.number(),
+                Stage::COUNT,
+                stage.name(),
+            ),
+        }
     }
 
     /// Run a synchronous stage between its two lines.
@@ -239,10 +289,20 @@ impl ShutdownProgress {
         let began = self.shared.state.lock().began;
         if let Some(began) = began {
             let elapsed_ms = began.elapsed().as_millis();
-            tracing::info!(
-                elapsed_ms,
-                "lambo serve: shutdown finished in {elapsed_ms} ms"
-            );
+            match &self.session {
+                None => tracing::info!(
+                    elapsed_ms,
+                    "lambo serve: shutdown finished in {elapsed_ms} ms"
+                ),
+                // A detach takes one session down while the process keeps
+                // serving, so its summary must not read as the process's
+                // shutdown. Its stage lines keep the shared text.
+                Some(session) => tracing::info!(
+                    session = %session,
+                    elapsed_ms,
+                    "lambo serve: session detach finished in {elapsed_ms} ms"
+                ),
+            }
         }
     }
 }
