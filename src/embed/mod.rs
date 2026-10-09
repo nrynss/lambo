@@ -4,6 +4,7 @@
 //! `lambo.toml` / env select among compiled kinds. See
 //! `dev-diary/notes/level-b-pluggability.md`.
 
+pub mod api_key;
 pub mod keep_warm;
 mod math;
 
@@ -259,6 +260,16 @@ pub struct EmbedderConfig {
     /// Model id sent to llama.cpp (empty => server default).
     #[serde(default, alias = "model")]
     pub llama_model: Option<String>,
+    /// Name of the environment variable holding a bearer token for a hosted
+    /// OpenAI-compatible endpoint (issue #21), e.g. `CLOUDFLARE_API_TOKEN`.
+    /// A variable *name*, never the token: see [`api_key`]. `bge_m3` only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key_env: Option<String>,
+    /// An inline `api_key = "..."`, accepted by the parser only so resolve can
+    /// refuse it with a pointer at `api_key_env`. The value is discarded while
+    /// parsing ([`api_key::InlineApiKey`]) and this field is never serialized.
+    #[serde(default, skip_serializing)]
+    pub api_key: Option<api_key::InlineApiKey>,
     /// candle device selection: `auto` | `cpu` | `metal` | `cuda` (K2).
     ///
     /// `auto` (default) resolves Metal on Apple silicon, CUDA elsewhere, and
@@ -308,6 +319,8 @@ impl Default for EmbedderConfig {
             dim: 1024,
             llama_url: None,
             llama_model: None,
+            api_key_env: None,
+            api_key: None,
             device: None,
             repo: None,
             revision: None,
@@ -359,6 +372,11 @@ impl EmbedderConfig {
         {
             self.llama_model = Some(v);
         }
+        if let Ok(v) = env::var(api_key::API_KEY_ENV_OVERRIDE)
+            && !v.is_empty()
+        {
+            self.api_key_env = Some(v);
+        }
         if let Ok(v) = env::var("LAMBO_EMBED_DEVICE")
             && !v.is_empty()
         {
@@ -394,6 +412,9 @@ impl EmbedderConfig {
                 ))
             })?);
         }
+        // Refuse a pasted token while the file is being resolved, before any
+        // later message could quote `api_key_env` (issue #21).
+        api_key::validate(self.api_key_env.as_deref(), self.api_key)?;
         Ok(self)
     }
 }
@@ -559,6 +580,21 @@ fn build_gemini_embedder(cfg: &EmbedderConfig) -> Result<Box<dyn Embedder>, Embe
 pub fn build_embedder(cfg: EmbedderConfig) -> Result<Box<dyn Embedder>, EmbedError> {
     if cfg.dim == 0 {
         return Err(EmbedError::Unavailable("embedder dim must be > 0".into()));
+    }
+    // Issue #21: `overlay_env` already refused these on the file path; a config
+    // built in code reaches here without it.
+    api_key::validate(cfg.api_key_env.as_deref(), cfg.api_key)?;
+    if let Some(name) = cfg.api_key_env.as_deref()
+        && cfg.kind != EmbedderKind::BgeM3
+    {
+        // A credential key the selected adapter would ignore is refused rather
+        // than silently dropped: an operator who configured one expects it used.
+        return Err(EmbedError::Unavailable(format!(
+            "embedder.api_key_env ({}) applies only to kind `bge_m3`, but kind is `{}`; \
+             remove api_key_env or change the kind",
+            api_key::shown_env(name),
+            cfg.kind
+        )));
     }
     // Pre-check for a clear rebuild hint (see comment above).
     if !cfg.kind.is_compiled() {
@@ -854,6 +890,96 @@ mod tests {
         let err = base.overlay_env().unwrap_err().to_string();
         assert!(err.contains("LAMBO_EMBED_KEEP_WARM_SECS"), "{err}");
         env.remove("LAMBO_EMBED_KEEP_WARM_SECS");
+    }
+
+    /// Issue #21: `api_key_env` is a real `[embedder]` key holding a variable
+    /// name, absent by default, and never serialized when absent.
+    #[test]
+    fn api_key_env_toml_key() {
+        let cfg: EmbedderConfig =
+            toml::from_str("kind = \"bge_m3\"\napi_key_env = \"CLOUDFLARE_API_TOKEN\"\n").unwrap();
+        assert_eq!(cfg.api_key_env.as_deref(), Some("CLOUDFLARE_API_TOKEN"));
+        assert_eq!(cfg.api_key, None);
+        let back: EmbedderConfig = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(back, cfg);
+
+        let cfg: EmbedderConfig = toml::from_str("").unwrap();
+        assert_eq!(cfg.api_key_env, None);
+        assert!(!toml::to_string(&cfg).unwrap().contains("api_key"));
+        // Still deny_unknown_fields: a typo of the key is refused.
+        assert!(toml::from_str::<EmbedderConfig>("api_key_envv = \"X\"\n").is_err());
+    }
+
+    /// Issue #21: `LAMBO_EMBED_API_KEY_ENV` overlays the file's variable name
+    /// with the usual rules, and a token-shaped value is refused at overlay
+    /// without being quoted.
+    #[test]
+    fn api_key_env_overlay() {
+        let env = crate::test_util::env_lock();
+        env.remove(api_key::API_KEY_ENV_OVERRIDE);
+        let base = EmbedderConfig {
+            api_key_env: Some("FROM_FILE".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            base.clone().overlay_env().unwrap().api_key_env.as_deref(),
+            Some("FROM_FILE")
+        );
+        env.set(api_key::API_KEY_ENV_OVERRIDE, "FROM_ENV");
+        assert_eq!(
+            base.clone().overlay_env().unwrap().api_key_env.as_deref(),
+            Some("FROM_ENV")
+        );
+        env.set(api_key::API_KEY_ENV_OVERRIDE, "");
+        assert_eq!(
+            base.clone().overlay_env().unwrap().api_key_env.as_deref(),
+            Some("FROM_FILE")
+        );
+        env.set(api_key::API_KEY_ENV_OVERRIDE, "fake-xyzzy-not-a-name");
+        let err = base.overlay_env().unwrap_err().to_string();
+        assert!(!err.contains("fake-xyzzy"), "{err}");
+        assert!(err.contains("api_key_env"), "{err}");
+        env.remove(api_key::API_KEY_ENV_OVERRIDE);
+    }
+
+    /// Issue #21: an inline `api_key` in the file is refused at overlay (the
+    /// file-resolve path) and at build (a config made in code), naming
+    /// `api_key_env` as the fix.
+    #[test]
+    fn inline_api_key_is_refused_at_resolve() {
+        let env = crate::test_util::env_lock();
+        env.remove(api_key::API_KEY_ENV_OVERRIDE);
+        let cfg: EmbedderConfig = toml::from_str("api_key = \"fake-xyzzy\"\n").unwrap();
+        let err = cfg.clone().overlay_env().unwrap_err().to_string();
+        assert!(err.contains("api_key_env"), "{err}");
+        let Err(err) = build_embedder(cfg) else {
+            panic!("an inline api_key must not build");
+        };
+        assert!(err.to_string().contains("api_key_env"), "{err}");
+    }
+
+    /// Issue #21: `api_key_env` with a kind that would ignore it is refused,
+    /// not silently dropped.
+    #[test]
+    fn api_key_env_is_refused_for_other_kinds() {
+        for kind in [
+            EmbedderKind::Fixture,
+            EmbedderKind::Candle,
+            EmbedderKind::Gemini,
+        ] {
+            let Err(err) = build_embedder(EmbedderConfig {
+                kind,
+                api_key_env: Some("CLOUDFLARE_API_TOKEN".into()),
+                ..Default::default()
+            }) else {
+                panic!("{kind}: api_key_env must be refused");
+            };
+            let msg = err.to_string();
+            assert!(
+                msg.contains("api_key_env") && msg.contains("bge_m3"),
+                "{msg}"
+            );
+        }
     }
 
     /// Issue #13: auto keep-warm is off for every non-candle adapter — the

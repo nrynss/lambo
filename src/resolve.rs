@@ -106,6 +106,10 @@ pub const RESOLVE_ENV_VARS: &[&str] = &[
     "LAMBO_EMBED_DIM",
     "LAMBO_LLAMA_EMBED_URL",
     "LAMBO_LLAMA_MODEL",
+    // Issue #21: a variable *name* (`embedder.api_key_env`). The variable it
+    // names is chosen by the file, so it cannot be listed here; a harness that
+    // clears this one and writes no `api_key_env` sends no token.
+    crate::embed::api_key::API_KEY_ENV_OVERRIDE,
     "LAMBO_EMBED_DEVICE",
     "LAMBO_GEMINI_PROJECT",
     "LAMBO_GEMINI_LOCATION",
@@ -542,6 +546,15 @@ mod tests {
                 value: "sentinel-model",
                 file: MEMORY,
                 resolved: Some(|p| format!("{:?}", load(p).embedder.llama_model)),
+            },
+            Override {
+                // Issue #21: overrides the variable *name* `embedder.api_key_env`.
+                // Read unconditionally by `overlay_env`, whatever the kind; only
+                // `build_embedder` refuses it for a kind other than `bge_m3`.
+                var: crate::embed::api_key::API_KEY_ENV_OVERRIDE,
+                value: "SENTINEL_EMBED_TOKEN_VAR",
+                file: MEMORY,
+                resolved: Some(|p| format!("{:?}", load(p).embedder.api_key_env)),
             },
             // From here to `LAMBO_EMBED_KEEP_WARM_SECS` inclusive, every name
             // is read unconditionally by `EmbedderConfig::overlay_env`,
