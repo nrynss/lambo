@@ -10,7 +10,9 @@ use crate::mcp::server::params::{check_size, DeriveParams, RecordActionParams};
 use crate::mcp::server::response::{bad_param, redact_urls, tool_err};
 use crate::mcp::server::trace::note_facts;
 use crate::mcp::server::LamboServer;
-use crate::surface::validate::{check_action_targets, check_concept_count, require_nonempty};
+use crate::surface::validate::{
+    check_action_targets, check_concept_count, check_no_image_suffix, require_nonempty,
+};
 use crate::types::ConceptType;
 
 impl LamboServer {
@@ -41,6 +43,10 @@ impl LamboServer {
         for c in &p.concepts {
             if let Err(e) = check_size("concept.content", &c.content) {
                 return e;
+            }
+            // #22 PR 4: only lambo_derive_image builds an image suffix.
+            if let Err(msg) = check_no_image_suffix("concept.content", &c.content) {
+                return bad_param(msg);
             }
         }
 
@@ -157,6 +163,10 @@ impl LamboServer {
         }
         if let Err(e) = check_size("action", &p.action) {
             return e;
+        }
+        // #22 PR 4: the action is its own Resource concept's content.
+        if let Err(msg) = check_no_image_suffix("action", &p.action) {
+            return bad_param(msg);
         }
         let produces: Vec<String> = p
             .produces

@@ -555,6 +555,55 @@ mod tests {
         assert!(!err.to_string().contains('\u{0001}'), "{err}");
     }
 
+    /// #22 PR 4: the image suffix is refused in a derived concept's text and
+    /// in an action, as over MCP, and nothing is written.
+    #[tokio::test]
+    async fn cli_refuses_an_image_suffix_in_concept_text_like_mcp() {
+        let store = Arc::new(MemoryStore::new());
+        for (content, concept) in [
+            ("render 17 [image:r17]", vec![]),
+            (
+                "render 17",
+                vec!["Render 17 [IMAGE:r17]:entity".to_string()],
+            ),
+        ] {
+            let err = crate::cli::derive::run(
+                backends_on(store.clone()),
+                crate::cli::derive::Args {
+                    session: "cli-image-suffix".into(),
+                    agent: "agent-a".into(),
+                    content: content.into(),
+                    kind: ConceptKind::Entity,
+                    parent_of: vec![],
+                    concept,
+                },
+            )
+            .await
+            .unwrap_err();
+            assert!(matches!(err, CliError::Usage(_)), "{err}");
+            assert!(err.to_string().contains("only lambo_derive_image"), "{err}");
+        }
+        let err = crate::cli::record_action::run(
+            backends_on(store.clone()),
+            crate::cli::record_action::Args {
+                session: "cli-image-suffix".into(),
+                agent: "agent-a".into(),
+                action: "dismissed [image:r17]".into(),
+                produces: vec![],
+                modifies: vec![],
+                depends_on: vec![],
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, CliError::Usage(_)), "{err}");
+        assert!(store
+            .load_session(&SessionId::new("cli-image-suffix"))
+            .await
+            .map(|s| s.concepts.is_empty())
+            .unwrap_or(true));
+    }
+
     /// #25: the two count-cap refusals come from one builder each
     /// (`surface::validate::check_concept_count` / `check_action_targets`), so
     /// the CLI's usage error and MCP's tool error carry the same bytes.
