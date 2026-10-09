@@ -18,7 +18,8 @@ use super::dto::{
     RecallParams, RecallResponse, SessionInfo, SinceParams,
 };
 use super::projections::{
-    is_structural, read_events, read_stats, status_str, structural_dependents, structural_rank,
+    is_structural, read_events, read_feed_and_stats, status_str, structural_dependents,
+    structural_rank,
 };
 use super::state::AppState;
 use super::{APP_CSS, APP_JS, INDEX_HTML, POLL_INTERVAL};
@@ -123,12 +124,8 @@ pub(super) async fn api_events(
 
 pub(super) async fn api_stats(State(state): State<Arc<AppState>>) -> Response {
     // `usize::MAX` asks for the count without the rows.
-    let total = match read_events(&state, usize::MAX).await {
-        Ok(p) => p.total,
-        Err(e) => return fail(e),
-    };
-    match read_stats(&state, total).await {
-        Ok(read) => json(StatusCode::OK, read.stats),
+    match read_feed_and_stats(&state, usize::MAX).await {
+        Ok((_, read)) => json(StatusCode::OK, read.stats),
         Err(e) => fail(e),
     }
 }
@@ -138,12 +135,8 @@ pub(super) async fn api_pulse(
     State(state): State<Arc<AppState>>,
     Query(params): Query<SinceParams>,
 ) -> Response {
-    let events = match read_events(&state, params.since.unwrap_or(0)).await {
-        Ok(p) => p,
-        Err(e) => return fail(e),
-    };
-    match read_stats(&state, events.total).await {
-        Ok(read) => {
+    match read_feed_and_stats(&state, params.since.unwrap_or(0)).await {
+        Ok((events, read)) => {
             let vector_search = state
                 .store()
                 .capabilities()

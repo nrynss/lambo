@@ -220,14 +220,24 @@ pub(super) fn stats_from(
     }
 }
 
-pub(super) async fn read_stats(
+/// The event feed and the stats from ONE session load (#4 PR 1).
+///
+/// The reader graph carries the counts, the embedding contract and, since a
+/// loaded graph keeps every canonization event of its snapshot, the feed.
+/// `/api/pulse` used to load the raw snapshot for the feed and then the whole
+/// session again for the counts: two full loads per poll per tab, and two
+/// snapshots that could disagree if a writer flushed in between.
+pub(super) async fn read_feed_and_stats(
     state: &AppState,
-    event_total: usize,
-) -> Result<StatsRead, CliError> {
+    since: usize,
+) -> Result<(EventsPayload, StatsRead), CliError> {
     let loaded = load_reader_graph(state.store(), state.session.as_str()).await?;
-    let embedding_status = {
+    let (feed, embedding_status) = {
         let g = loaded.graph.read();
-        EmbeddingStatus::inspect(g.embedding(), &state.backends.embedding)
+        (
+            ordered_events(g.concepts(), g.canonization_events()),
+            EmbeddingStatus::inspect(g.embedding(), &state.backends.embedding),
+        )
     };
     // T85-3: fetch the writer-published flush stats from the shared store when
     // available. A read failure degrades to `n/a` (None) rather than failing
@@ -246,12 +256,15 @@ pub(super) async fn read_stats(
     // Scoped so the (`!Send`) read guard provably never spans an await.
     let stats = {
         let g = loaded.graph.read();
-        stats_from(state, &g, event_total, flush)
+        stats_from(state, &g, feed.len(), flush)
     };
-    Ok(StatsRead {
-        stats,
-        embedding_status,
-    })
+    Ok((
+        slice_events(&feed, since),
+        StatsRead {
+            stats,
+            embedding_status,
+        },
+    ))
 }
 
 pub(super) async fn read_events(state: &AppState, since: usize) -> Result<EventsPayload, CliError> {

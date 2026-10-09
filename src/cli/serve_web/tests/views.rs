@@ -188,17 +188,18 @@ async fn loads_per_route(session: &str) -> Vec<(&'static str, usize)> {
     out
 }
 
-/// What each route costs in full session loads today. `/api/pulse`, the
-/// route every open tab polls every 1.5 s, loads the whole session twice:
-/// once for the event tail and once more for the counts.
+/// What each route costs in full session loads. `/api/pulse`, the route
+/// every open tab polls every 1.5 s, used to load the whole session twice
+/// (once for the event tail, once more for the counts); `/api/stats` too.
+/// One load now carries both.
 #[tokio::test]
 async fn each_data_route_costs_the_measured_number_of_session_loads() {
     let loads = loads_per_route("t4-loads").await;
     assert_eq!(
         loads,
         vec![
-            ("/api/pulse", 2),
-            ("/api/stats", 2),
+            ("/api/pulse", 1),
+            ("/api/stats", 1),
             ("/api/events", 1),
             ("/api/session", 1),
             ("/api/graph", 1),
