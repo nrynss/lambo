@@ -1029,7 +1029,7 @@ async fn a_repair_that_lost_its_lease_stops_writing() {
     let store = tier(&primary, &fake).with_repair_chunk(1);
     let sid = SessionId::new("stalled-holder");
     let token = match store
-        .acquire_lease(&sid, &holder("w"), Duration::from_millis(150))
+        .acquire_lease(&sid, &holder("w"), Duration::from_millis(600))
         .await
         .unwrap()
     {
@@ -1042,10 +1042,10 @@ async fn a_repair_that_lost_its_lease_stops_writing() {
 
     // The repair's first chunk is slow; the lease lapses under it.
     fake.delay_bulk_ms
-        .store(400, std::sync::atomic::Ordering::SeqCst);
+        .store(1_600, std::sync::atomic::Ordering::SeqCst);
     let (_, e2) = one_more(&sid, &s, 2);
     store.flush(&e2, Some(token)).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
     let eraser = tier(&primary, &fake);
     let erased = eraser
         .erase_session(&sid, &holder("lambo-erase-session"))
@@ -1080,7 +1080,7 @@ async fn erase_stops_this_stores_repair_before_it_sweeps() {
     let store = tier(&primary, &fake).with_repair_chunk(1);
     let sid = SessionId::new("erase-mid-repair");
     let token = match store
-        .acquire_lease(&sid, &holder("w"), Duration::from_millis(150))
+        .acquire_lease(&sid, &holder("w"), Duration::from_millis(600))
         .await
         .unwrap()
     {
@@ -1090,10 +1090,10 @@ async fn erase_stops_this_stores_repair_before_it_sweeps() {
     let _ = store.load_session(&sid).await;
     let s = stale_after_an_outage(&store, &fake, &sid, token).await;
     fake.delay_bulk_ms
-        .store(400, std::sync::atomic::Ordering::SeqCst);
+        .store(1_600, std::sync::atomic::Ordering::SeqCst);
     let (_, e2) = one_more(&sid, &s, 2);
     store.flush(&e2, Some(token)).await.unwrap();
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
 
     let erased = store
         .erase_session(&sid, &holder("lambo-erase-session"))
@@ -1102,7 +1102,7 @@ async fn erase_stops_this_stores_repair_before_it_sweeps() {
     assert!(matches!(erased, EraseOutcome::Erased(_)));
     settle(&store).await;
     // Past the slow chunk, whether or not anything still tracks its task.
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    tokio::time::sleep(Duration::from_millis(1_600)).await;
     fake.refresh_now();
     assert!(
         fake.live(&sid).is_empty(),
