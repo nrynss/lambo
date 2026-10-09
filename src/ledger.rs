@@ -62,6 +62,7 @@
 //! repo** (`~/lambo-dogfood/`), reaches `evidence/` only through the curated
 //! export path, and never carries Endor-internal content.
 
+use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -213,6 +214,15 @@ impl LedgerCounters {
             .saturating_sub(self.written())
             .saturating_sub(self.dropped_write_failed())
     }
+
+    /// Count every line still queued as failed, for a writer abandoned at
+    /// shutdown, once no sender remains (so the count is settled), and
+    /// return how many that was.
+    fn abandon_queued(&self) -> u64 {
+        let abandoned = self.queued();
+        self.write_failed.fetch_add(abandoned, Ordering::Relaxed);
+        abandoned
+    }
 }
 
 /// How a batch reaches durable storage.
@@ -224,6 +234,18 @@ impl LedgerCounters {
 /// lets a test park the writer on demand and prove backpressure drops rather
 /// than blocking the caller.
 type BatchSink = Arc<dyn Fn(&Path, &[u8]) -> std::io::Result<()> + Send + Sync>;
+
+/// One line on its way to the writer thread, with the counters of the
+/// session it was appended for, so the writer can count it there too.
+#[derive(Debug)]
+struct Queued {
+    bytes: Vec<u8>,
+    scope: Option<Arc<LedgerCounters>>,
+}
+
+/// Each session's own counters, keyed by session, shared by every handle
+/// onto one ledger.
+type ScopeCounters = Arc<parking_lot::Mutex<HashMap<Arc<str>, Arc<LedgerCounters>>>>;
 
 /// A handle onto the append-only call ledger.
 ///
@@ -239,6 +261,11 @@ type BatchSink = Arc<dyn Fn(&Path, &[u8]) -> std::io::Result<()> + Send + Sync>;
 /// session it is about; a serve scopes its handle to its session, and each
 /// attached session will get its own scoped handle (#32 PR 4). The field is
 /// additive: no existing key changes, and [`LINE_VERSION`] does not move.
+///
+/// Every line is counted twice: in the file's counters
+/// ([`Ledger::counters`]) and, when it was appended through a scoped
+/// handle, in that session's own ([`Ledger::session_counters`]), which is
+/// what `lambo_stats` and the heartbeat report (#32 PR 4 review L5).
 #[derive(Debug)]
 pub struct Ledger {
     path: PathBuf,
@@ -246,8 +273,12 @@ pub struct Ledger {
     /// the last sender drops, so shutdown must be able to drop this one.
     /// Shared by every scoped handle, so a shutdown through any of them closes
     /// the one writer.
-    tx: Arc<parking_lot::Mutex<Option<SyncSender<Vec<u8>>>>>,
+    tx: Arc<parking_lot::Mutex<Option<SyncSender<Queued>>>>,
     counters: Arc<LedgerCounters>,
+    /// Every session's counters, shared by every handle onto this file.
+    scopes: ScopeCounters,
+    /// This handle's session's counters, when it is scoped.
+    scope: Option<Arc<LedgerCounters>>,
     /// Joined by [`Ledger::shutdown`], bounded by [`SHUTDOWN_DRAIN`]. Shared
     /// like `tx`.
     writer: Arc<parking_lot::Mutex<Option<std::thread::JoinHandle<()>>>>,
@@ -328,7 +359,7 @@ impl Ledger {
         let path = path.into();
         let counters = Arc::new(LedgerCounters::default());
 
-        let (tx, rx) = sync_channel::<Vec<u8>>(CHANNEL_CAPACITY);
+        let (tx, rx) = sync_channel::<Queued>(CHANNEL_CAPACITY);
         let writer = std::thread::Builder::new()
             .name("lambo-ledger".to_string())
             .spawn({
@@ -356,6 +387,8 @@ impl Ledger {
             path,
             tx: Arc::new(parking_lot::Mutex::new(Some(tx))),
             counters,
+            scopes: ScopeCounters::default(),
+            scope: None,
             writer: Arc::new(parking_lot::Mutex::new(writer)),
             session: None,
         })
@@ -364,14 +397,19 @@ impl Ledger {
     /// A handle onto this ledger that stamps `session` on every line it
     /// appends (#32 decision 15). Shares the file, the writer thread and the
     /// counters with `self`; a line that already names a `session` keeps its
-    /// own. Scoping a scoped handle replaces the scope.
+    /// own. Scoping a scoped handle replaces the scope. Every handle scoped
+    /// to one session shares that session's counters.
     pub fn for_session(&self, session: &str) -> Arc<Self> {
+        let session: Arc<str> = Arc::from(session);
+        let scope = Arc::clone(self.scopes.lock().entry(Arc::clone(&session)).or_default());
         Arc::new(Self {
             path: self.path.clone(),
             tx: Arc::clone(&self.tx),
             counters: Arc::clone(&self.counters),
+            scopes: Arc::clone(&self.scopes),
+            scope: Some(scope),
             writer: Arc::clone(&self.writer),
-            session: Some(Arc::from(session)),
+            session: Some(session),
         })
     }
 
@@ -385,9 +423,30 @@ impl Ledger {
         &self.path
     }
 
-    /// Written / dropped counts, for `lambo_stats` and the heartbeat.
+    /// Written / dropped counts for the whole file, every session's lines
+    /// and the unscoped ones together.
     pub fn counters(&self) -> &Arc<LedgerCounters> {
         &self.counters
+    }
+
+    /// Written / dropped counts for this handle's session only, for
+    /// `lambo_stats` and the heartbeat (#32 PR 4 review L5): with several
+    /// sessions on one file, the file's counters would put the same numbers
+    /// in every session's line, so a kit summing them would count each line
+    /// once per session, and one session's stats would show the others'
+    /// call volume. An unscoped handle reports the file's. A serve with one
+    /// session appends every line through handles scoped to it, so its
+    /// numbers are the file's, as before.
+    pub fn session_counters(&self) -> &Arc<LedgerCounters> {
+        self.scope.as_ref().unwrap_or(&self.counters)
+    }
+
+    /// Count on the file's counters and on this handle's session's.
+    fn count(&self, bump: impl Fn(&LedgerCounters)) {
+        bump(&self.counters);
+        if let Some(scope) = &self.scope {
+            bump(scope);
+        }
     }
 
     /// Append one line. **Never blocks, never fails, never awaits.**
@@ -421,7 +480,9 @@ impl Ledger {
                     error = %err,
                     "ledger: line could not be serialized; dropped"
                 );
-                self.counters.write_failed.fetch_add(1, Ordering::Relaxed);
+                self.count(|c| {
+                    c.write_failed.fetch_add(1, Ordering::Relaxed);
+                });
                 return;
             }
         };
@@ -443,24 +504,30 @@ impl Ledger {
         let guard = self.tx.lock();
         let Some(tx) = guard.as_ref() else {
             // Post-shutdown call. Counted, not silent.
-            self.counters.write_failed.fetch_add(1, Ordering::Relaxed);
+            self.count(|c| {
+                c.write_failed.fetch_add(1, Ordering::Relaxed);
+            });
             return;
         };
-        match tx.try_send(bytes) {
-            Ok(()) => {
-                self.counters.accepted.fetch_add(1, Ordering::Relaxed);
-            }
+        let queued = Queued {
+            bytes,
+            scope: self.scope.clone(),
+        };
+        match tx.try_send(queued) {
+            Ok(()) => self.count(|c| {
+                c.accepted.fetch_add(1, Ordering::Relaxed);
+            }),
             // The writer is behind. This is the failure table's first row and
             // the one a stalled filesystem produces; counted on its own so an
             // operator (and a test) can tell it from a broken path.
-            Err(TrySendError::Full(_)) => {
-                self.counters.channel_full.fetch_add(1, Ordering::Relaxed);
-            }
+            Err(TrySendError::Full(_)) => self.count(|c| {
+                c.channel_full.fetch_add(1, Ordering::Relaxed);
+            }),
             // The writer thread is gone (it panicked, or the OS refused to
             // spawn it). Not backpressure — the line had nowhere to go.
-            Err(TrySendError::Disconnected(_)) => {
-                self.counters.write_failed.fetch_add(1, Ordering::Relaxed);
-            }
+            Err(TrySendError::Disconnected(_)) => self.count(|c| {
+                c.write_failed.fetch_add(1, Ordering::Relaxed);
+            }),
         }
     }
 
@@ -483,16 +550,12 @@ impl Ledger {
         while !handle.is_finished() {
             if Instant::now() >= deadline {
                 // No sender remains, so `accepted` can no longer move: the
-                // arithmetic below is a settled count, not a sample.
-                let abandoned = self
-                    .counters
-                    .accepted
-                    .load(Ordering::Relaxed)
-                    .saturating_sub(self.counters.written())
-                    .saturating_sub(self.counters.dropped_write_failed());
-                self.counters
-                    .write_failed
-                    .fetch_add(abandoned, Ordering::Relaxed);
+                // arithmetic below is a settled count, not a sample. Each
+                // session's counters settle the same way.
+                let abandoned = self.counters.abandon_queued();
+                for scope in self.scopes.lock().values() {
+                    scope.abandon_queued();
+                }
                 tracing::warn!(
                     target: "lambo::ledger",
                     abandoned,
@@ -531,7 +594,7 @@ fn open_for_append(path: &Path) -> std::io::Result<std::fs::File> {
 /// and nothing else, which is exactly the failure the OS-thread design exists to
 /// absorb. On the runtime's main task the same call wedged `serve` between the
 /// lease and the SIGTERM handler.
-fn writer_loop(path: &Path, rx: Receiver<Vec<u8>>, counters: &LedgerCounters, sink: &BatchSink) {
+fn writer_loop(path: &Path, rx: Receiver<Queued>, counters: &LedgerCounters, sink: &BatchSink) {
     // One WARN for the whole run, however many writes fail (I1: "logs its own
     // failure once"). A recovered write re-arms it, so an operator who fixes the
     // path and breaks it again is told twice — which is information, not noise.
@@ -551,26 +614,33 @@ fn writer_loop(path: &Path, rx: Receiver<Vec<u8>>, counters: &LedgerCounters, si
     }
 
     while let Ok(first) = rx.recv() {
-        let mut batch = first;
-        let mut lines = 1u64;
+        let mut batch = first.bytes;
+        let mut scopes = vec![first.scope];
         // Drain whatever else is already queued into the same write.
         while batch.len() < MAX_BATCH_BYTES {
             match rx.try_recv() {
                 Ok(next) => {
-                    batch.extend_from_slice(&next);
-                    lines += 1;
+                    batch.extend_from_slice(&next.bytes);
+                    scopes.push(next.scope);
                 }
                 Err(_) => break,
             }
         }
+        let lines = scopes.len() as u64;
 
         match sink(path, &batch) {
             Ok(()) => {
                 counters.written.fetch_add(lines, Ordering::Relaxed);
+                for scope in scopes.iter().flatten() {
+                    scope.written.fetch_add(1, Ordering::Relaxed);
+                }
                 warned.store(false, Ordering::Relaxed);
             }
             Err(err) => {
                 counters.write_failed.fetch_add(lines, Ordering::Relaxed);
+                for scope in scopes.iter().flatten() {
+                    scope.write_failed.fetch_add(1, Ordering::Relaxed);
+                }
                 if !warned.swap(true, Ordering::Relaxed) {
                     tracing::warn!(
                         target: "lambo::ledger",
@@ -1274,6 +1344,41 @@ mod tests {
         ledger.shutdown();
         // Shutdown through one handle closes the shared writer for all.
         scoped.append(&call_line("lambo_recall", "agent-a", "ok", None, 1, None));
+        assert_eq!(ledger.counters().dropped_write_failed(), 1);
+    }
+
+    /// #32 PR 4 review L5: each session's counters count only the lines
+    /// appended through handles scoped to it; the file's counters count
+    /// every line. Handles scoped to one session share its counters, and a
+    /// drop is counted on the session that appended it.
+    #[test]
+    fn each_session_counts_only_its_own_lines() {
+        let dir = temp_dir("per-session");
+        let ledger = Ledger::open(dir.join("l.jsonl"));
+        let a = ledger.for_session("a");
+        let again = ledger.for_session("a");
+        let b = ledger.for_session("b");
+        assert!(Arc::ptr_eq(a.session_counters(), again.session_counters()));
+        assert!(Arc::ptr_eq(ledger.session_counters(), ledger.counters()));
+        for i in 0..3 {
+            a.append(&json!({"n": i}));
+        }
+        again.append(&json!({"n": 3}));
+        b.append(&json!({"n": 4}));
+        ledger.append(&json!({"n": 5}));
+        assert!(
+            until(Duration::from_secs(5), || ledger.counters().written() == 6),
+            "written {}",
+            ledger.counters().written()
+        );
+        assert_eq!(a.session_counters().written(), 4);
+        assert_eq!(b.session_counters().written(), 1);
+        assert_eq!(a.counters().written(), 6, "a scoped handle's file counters");
+
+        ledger.shutdown();
+        b.append(&json!({"n": 6}));
+        assert_eq!(b.session_counters().dropped_write_failed(), 1);
+        assert_eq!(a.session_counters().dropped(), 0);
         assert_eq!(ledger.counters().dropped_write_failed(), 1);
     }
 

@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_util::on_the_wire;
 
 fn id(raw: &str) -> AddressedSessionId {
     parse_addressed(raw).unwrap_or_else(|e| panic!("{raw:?} must parse: {e}"))
@@ -344,25 +345,6 @@ async fn serve_on_loopback(app: axum::Router) -> std::net::SocketAddr {
         axum::serve(listener, app).await.expect("serve");
     });
     addr
-}
-
-/// One raw HTTP/1.1 exchange: the full response as sent, minus the `date`
-/// header (the only field that varies between two requests).
-async fn on_the_wire(addr: std::net::SocketAddr, method: &str, path: &str) -> String {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let mut stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
-    let request = format!(
-        "{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
-    );
-    stream.write_all(request.as_bytes()).await.expect("write");
-    let mut raw = Vec::new();
-    stream.read_to_end(&mut raw).await.expect("read");
-    String::from_utf8(raw)
-        .expect("utf-8 response")
-        .split("\r\n")
-        .filter(|line| !line.to_ascii_lowercase().starts_with("date:"))
-        .collect::<Vec<_>>()
-        .join("\r\n")
 }
 
 /// A response header every response through the layer carries, standing in

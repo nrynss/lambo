@@ -5,10 +5,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::heartbeat::{heartbeat_loop, record_refused_takeovers};
+use super::heartbeat::{
+    heartbeat_ticks, poll_refused_takeovers, RefusalCursor, REFUSAL_POLL_INTERVAL,
+};
+use super::registry::SessionRegistry;
+use crate::embed::Embedder;
 use crate::ledger::Ledger;
-use crate::mcp::server::LamboServer;
-use crate::memory::Memory;
+use crate::types::AgentId;
 use crate::writeq::EmbedderCalibration;
 
 /// The holder's process-wide background tasks: spawned beside the transport
@@ -36,14 +39,23 @@ pub(super) struct ProcessTasks {
 
 impl ProcessTasks {
     /// Spawn the holder's process-wide tasks, below the arming (see
-    /// [`serve`](super::serve)): the I2 ledger heartbeat over `server`, the #13
-    /// keep-warm over the session's embedder, and the J4 refusal poller.
+    /// [`serve`](super::serve)): the I2 ledger heartbeat and the J4 refusal
+    /// poller, each one task over every session in `registry` (#32 PR 4),
+    /// and the #13 keep-warm over the process's one `embedder`, taken from
+    /// the resolved backends rather than from a session, so it does not
+    /// depend on which session attached first or outlive none of them.
+    ///
+    /// Spawned before the sessions' own parts, which keeps the startup's log
+    /// order; the heartbeat and the poller wait for
+    /// [`SessionRegistry::mark_started`] before their first round, so the
+    /// heartbeat's immediate first line still covers every startup session.
     pub(super) fn spawn(
-        server: &LamboServer,
-        mem: &Arc<Memory>,
+        registry: &Arc<SessionRegistry>,
         ledger: &Option<Arc<Ledger>>,
         heartbeat_every: Option<Duration>,
         keep_warm: Option<Duration>,
+        embedder: &Arc<dyn Embedder>,
+        agent: &AgentId,
         calibration: &EmbedderCalibration,
     ) -> Self {
         let heartbeat = match (ledger, heartbeat_every) {
@@ -55,9 +67,8 @@ impl ProcessTasks {
                     git_sha = crate::ledger::GIT_SHA,
                     "lambo serve: call ledger open, heartbeat armed"
                 );
-                Some(tokio::spawn(heartbeat_loop(
-                    server.clone(),
-                    Arc::clone(ledger),
+                Some(tokio::spawn(registry_heartbeat(
+                    Arc::clone(registry),
                     every,
                 )))
             }
@@ -83,7 +94,7 @@ impl ProcessTasks {
                 "lambo serve: embedder keep-warm armed"
             );
             tokio::spawn(crate::embed::keep_warm::keep_warm_loop(
-                Arc::clone(mem.embedder()),
+                Arc::clone(embedder),
                 every,
             ))
         });
@@ -91,20 +102,14 @@ impl ProcessTasks {
         // line when the store reports a refusal this process turned away. Spawned
         // only when a ledger is attached, and only on the holder path (the proxy
         // branch returned above). Aborted at close like the heartbeat.
-        let refusal_poller = match ledger {
-            Some(ledger) => {
-                let holder_token =
-                    crate::store::lease::LeaseHolder::for_this_process(mem.agent()).token();
-                Some(tokio::spawn(record_refused_takeovers(
-                    mem.store().clone(),
-                    mem.session().clone(),
-                    mem.agent().clone(),
-                    holder_token,
-                    Arc::clone(ledger),
-                )))
-            }
-            None => None,
-        };
+        let refusal_poller = ledger.as_ref().map(|_| {
+            let holder_token = crate::store::lease::LeaseHolder::for_this_process(agent).token();
+            tokio::spawn(registry_refusal_poller(
+                Arc::clone(registry),
+                agent.clone(),
+                holder_token,
+            ))
+        });
         Self {
             heartbeat,
             keep_warm: keep_warm_task,
@@ -157,5 +162,66 @@ impl ProcessTasks {
         // like the keep-warm. Dropping `self` drops this clone; the probe's
         // last holders are the calibration in `serve` and the sessions.
         self.calibration.shutdown();
+    }
+}
+
+/// The I2 heartbeat over every attached session: each beat appends one
+/// `stats` line per session, in pinned order, to that session's own ledger
+/// handle (so each line names its session). A one-session serve writes
+/// exactly the line it always has.
+async fn registry_heartbeat(registry: Arc<SessionRegistry>, every: Duration) {
+    registry.started().await;
+    heartbeat_ticks(every, || {
+        for session in registry.attached() {
+            if let Some(ledger) = session.server.ledger() {
+                ledger.append(&session.server.heartbeat_line());
+            }
+        }
+    })
+    .await;
+}
+
+/// How long the refusal poller sleeps between rounds over `attached`
+/// sessions (design §3.6): `max(REFUSAL_POLL_INTERVAL, 100 ms × attached)`,
+/// so the store load stays flat as the set grows. One session polls every
+/// 500 ms, as before.
+pub(super) fn refusal_poll_interval(attached: usize) -> Duration {
+    let per_session = Duration::from_millis(100).saturating_mul(attached as u32);
+    REFUSAL_POLL_INTERVAL.max(per_session)
+}
+
+/// The J4 holder-side refusal poller over every attached session: one task,
+/// one cursor per session, each round polling each attached session once.
+///
+/// A cursor outlives a detach (#32 review L2): it is dropped only when its
+/// session is no longer hosted, so a session that is detached and attached
+/// again resumes where it stopped. A fresh cursor reaches back one
+/// `LEASE_TTL`, and the holder token it filters by is this process's,
+/// unchanged across the re-attach, so it would book again every refusal
+/// already booked in that window.
+async fn registry_refusal_poller(registry: Arc<SessionRegistry>, agent: AgentId, my_token: String) {
+    registry.started().await;
+    let mut cursors: std::collections::HashMap<String, RefusalCursor> = Default::default();
+    loop {
+        tokio::time::sleep(refusal_poll_interval(registry.attached().len())).await;
+        let attached = registry.attached();
+        cursors.retain(|id, _| registry.hosted().iter().any(|hosted| hosted == id));
+        for session in attached {
+            let Some(ledger) = session.server.ledger() else {
+                continue;
+            };
+            let cursor = cursors
+                .entry(session.id().to_string())
+                .or_insert_with(RefusalCursor::starting_now);
+            poll_refused_takeovers(
+                session.mem.store(),
+                session.id(),
+                &agent,
+                &my_token,
+                ledger,
+                cursor,
+            )
+            .await;
+        }
     }
 }

@@ -442,3 +442,25 @@ mod text_role_tests {
         );
     }
 }
+
+/// One raw HTTP/1.1 exchange: the full response as sent, minus the `date`
+/// header (the only field that varies between two requests). The byte-level
+/// comparison behind the uniform-404 claim (#32 PR 1 review L2), shared by
+/// `surface::session`'s router test and the serve's own router (#32 PR 4
+/// review L7).
+pub async fn on_the_wire(addr: std::net::SocketAddr, method: &str, path: &str) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
+    let request = format!(
+        "{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+    );
+    stream.write_all(request.as_bytes()).await.expect("write");
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).await.expect("read");
+    String::from_utf8(raw)
+        .expect("utf-8 response")
+        .split("\r\n")
+        .filter(|line| !line.to_ascii_lowercase().starts_with("date:"))
+        .collect::<Vec<_>>()
+        .join("\r\n")
+}

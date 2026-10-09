@@ -330,6 +330,31 @@ pub(super) fn opens_a_new_session(req: &axum::extract::Request) -> bool {
         && req.headers().get("Last-Event-ID").is_none()
 }
 
+/// How the cap refusal tells a client to free an MCP session, for a request
+/// on `path` (#32 review L4): an MCP session is closed on the route it was
+/// opened at, `/mcp` for the default session or `/mcp/s/{session}`. At
+/// `/mcp` the text is the one a single-session serve has always sent. The
+/// path is echoed only when it is one of those routes, never as the caller
+/// spelled anything else.
+fn how_to_close(path: &str) -> String {
+    const AT_MCP: &str = "HTTP DELETE /mcp with its Mcp-Session-Id";
+    if path == "/mcp" {
+        return AT_MCP.to_string();
+    }
+    if let Some(raw) = path.strip_prefix("/mcp/s/")
+        && let Ok(id) = crate::surface::session::parse_addressed(raw)
+    {
+        return format!(
+            "HTTP DELETE /mcp/s/{} with its Mcp-Session-Id; a session opened on another route \
+             is closed on that route",
+            id.as_str()
+        );
+    }
+    "HTTP DELETE, with its Mcp-Session-Id, on the route it was opened at: /mcp or \
+     /mcp/s/<session>"
+        .to_string()
+}
+
 /// Auth, then rate, then the session cap — in that order, deliberately.
 ///
 /// Authentication runs **first and alone**: an unauthenticated caller must not
@@ -392,9 +417,10 @@ pub(super) async fn guard_request(
                 [(axum::http::header::RETRY_AFTER, "5")],
                 format!(
                     "at the concurrent-session cap ({live}/{max} sessions live): this server \
-                     will not open another. Close an idle session (HTTP DELETE /mcp with its \
-                     Mcp-Session-Id), or restart with a higher --max-sessions.\n",
-                    max = guard.max_sessions
+                     will not open another. Close an idle session ({close}), or restart with a \
+                     higher --max-sessions.\n",
+                    max = guard.max_sessions,
+                    close = how_to_close(req.uri().path()),
                 ),
             )
                 .into_response();

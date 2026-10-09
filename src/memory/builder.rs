@@ -375,6 +375,26 @@ impl MemoryBuilder {
         self
     }
 
+    /// The embedder this builder will hand every session it builds, once
+    /// [`MemoryBuilder::embedder`] or [`MemoryBuilder::backends`] set one.
+    ///
+    /// For `serve`'s process-wide tasks (#32 PR 4): the #13 keep-warm
+    /// touches the one shared embedder, so it takes it from the template
+    /// builder rather than from whichever session attached first.
+    pub(crate) fn shared_embedder(&self) -> Option<Arc<dyn Embedder>> {
+        self.embedder.clone()
+    }
+
+    /// The store this builder will hand every session it builds, once
+    /// [`MemoryBuilder::store`] or [`MemoryBuilder::backends`] set one.
+    ///
+    /// For `serve`'s session registry (#32 PR 4 review L8): a background
+    /// attach abandoned at shutdown releases the lease it may have taken
+    /// through the same store.
+    pub(crate) fn shared_store(&self) -> Option<Arc<dyn GraphStore>> {
+        self.store.clone()
+    }
+
     /// Base [`Config`] for every knob the named setters do not cover.
     ///
     /// Order-independent: `match_strategy` / `flush_interval` /

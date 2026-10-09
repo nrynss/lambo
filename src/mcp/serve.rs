@@ -1,9 +1,11 @@
 //! `lambo serve` — process lifecycle for the MCP server.
 //!
-//! One process owns one session (spec §2.2). This module builds **one**
-//! [`Memory`] from **one** [`ResolvedBackends`], serves it over stdio or
-//! streamable HTTP, and guarantees [`Memory::close`] runs on the way out so the
-//! final flush happens.
+//! Each session has exactly one owning process; a process may own many
+//! sessions (spec §2.2 as amended by #32's design, decision 18). This module
+//! builds every [`Memory`] it serves from **one** [`ResolvedBackends`], serves
+//! them over stdio (one session) or streamable HTTP (one or more pinned
+//! sessions, routed by path), and guarantees [`Memory::close`] runs on the
+//! way out so every final flush happens.
 //!
 //! # The lifecycle, in one place
 //!
@@ -31,7 +33,13 @@
 //!    keep-warm abort, the bounded session close, event pump, background
 //!    tasks, endpoint release, ledger close. Each logs when it starts and
 //!    finishes (`stages`, #40). Stages 3, 4 and 6 run over the attached set
-//!    of sessions, which is one session here.
+//!    of sessions (`registry::SessionRegistry`).
+//!
+//! With more than one pinned session (HTTP only, #32 PR 4) steps 2 and 3
+//! differ: there is no election, each pinned session is acquired from the
+//! one template builder (`registry::SessionRegistry::acquire`), a session
+//! held elsewhere is retried in the background, and a lost lease detaches
+//! that session instead of ending the process (`registry::LeaseLossPolicy`).
 //!
 //! # Process part and session part (#32)
 //!
@@ -41,8 +49,9 @@
 //! `process::ProcessTasks`) is kept apart from what each session it holds
 //! has (`session::AttachedSession`: the `Memory` with its lease and
 //! heartbeat, the `LamboServer`, the endpoint `Hub`, `session::SessionTasks`).
-//! A single-session serve builds one of the latter, so multi-session serving
-//! (#32 PR 4) adds sessions without re-plumbing the process.
+//! A single-session serve builds one of the latter; a multi-session serve
+//! (#32 PR 4) builds one per pinned session and holds them in a
+//! `registry::SessionRegistry`.
 //!
 //! # Modules
 //!
@@ -50,12 +59,14 @@
 //! |---|---|
 //! | `builder` | the one resolve ([`resolve_serve_backends`]), `serve_builder`, [`build_memory`] |
 //! | `roles` | the startup election, `Role`, the loser-side refusal record |
+//! | `pinned` | which sessions a serve pins ([`pin_sessions`]) and `serve`'s own check of them |
+//! | `registry` | the attached sessions (`SessionRegistry`): slots, the pinned attach, the detach, the routing lookup, the lease-loss policy |
 //! | `process` | the process-wide background tasks (`ProcessTasks`) |
 //! | `session` | the per-session part (`AttachedSession`, `SessionTasks`) |
 //! | `hub` | every Unix-socket touch: endpoint derivation, bind, accept loop, release, the proxy probe (the #39 seam) |
 //! | `heartbeat` | ledger configuration, the heartbeat, the startup line, the holder refusal poller, the event pump |
 //! | `http_guards` | the bearer token, the bind refusal, the rate limit, the session cap, the body ceiling |
-//! | `transport` | stdio, streamable HTTP, the bounded wind-down both share |
+//! | `transport` | stdio, streamable HTTP and its `/mcp` + `/mcp/s/{session}` router, the bounded wind-down both share |
 //! | `signals` | the eager signal registration and J6's pre-arm (`EarlyShutdown`) |
 //! | `shutdown` | the grace budgets, the shutdown future, the close, the named stages (the #40 seam) |
 //! | `stages` | the stage record and its `started` / `finished` log lines (#40) |
@@ -76,7 +87,9 @@ mod builder;
 mod heartbeat;
 mod http_guards;
 mod hub;
+mod pinned;
 mod process;
+mod registry;
 mod roles;
 mod session;
 mod shutdown;
@@ -87,6 +100,7 @@ mod watchdog;
 
 pub use builder::{build_memory, resolve_serve_backends};
 pub use heartbeat::authorize_ledger;
+pub use pinned::{pin_sessions, PinnedSessions};
 
 use builder::{explain_startup_failure, serve_builder};
 use heartbeat::serve_startup_line;
@@ -94,10 +108,15 @@ use http_guards::authorize_bind;
 pub use http_guards::{
     resolve_auth_token, SecretToken, AUTH_TOKEN_ENV, DEFAULT_MAX_SESSIONS, DEFAULT_RATE_LIMIT_RPS,
 };
+use pinned::check_pinned;
 use process::ProcessTasks;
+use registry::{Acquired, LeaseLossPolicy, SessionAttacher, SessionRegistry};
 use roles::{resolve_role, Role};
 use session::{session_server, AttachedSession};
-use shutdown::{close_ledger, holder_shutdown, join_all, run_and_close_sessions};
+use shutdown::{
+    close_bounded, close_ledger, close_sessions, holder_shutdown, join_all, registry_shutdown,
+    stop_transport, CLOSE_GRACE,
+};
 use signals::shutdown_signal;
 use stages::Stage;
 use transport::{serve_http, serve_stdio};
@@ -145,8 +164,15 @@ impl std::str::FromStr for Transport {
 /// Everything `serve` needs that is not in `lambo.toml`.
 #[derive(Clone, Debug)]
 pub struct ServeOptions {
-    /// Session this process owns.
+    /// The default session: the one a stdio serve owns and `/mcp` serves.
+    /// Must be one of [`ServeOptions::sessions`].
     pub session: String,
+    /// Every session this process pins, in order (#32 PR 4): attached at
+    /// startup and held until it exits. [`ServeOptions::new`] pins
+    /// `session` alone; [`pin_sessions`] builds both fields from the
+    /// command line and `[serve]`. More than one needs `Transport::Http`, and
+    /// each is then served at `/mcp/s/{session}`.
+    pub sessions: Vec<String>,
     /// Agent identity this process writes as. See the attribution note on
     /// [`LamboServer`](crate::mcp::server::LamboServer) — `Memory` binds one
     /// agent per session handle.
@@ -175,8 +201,10 @@ pub struct ServeOptions {
 
 impl ServeOptions {
     pub fn new(session: impl Into<String>, agent: impl Into<String>) -> Self {
+        let session = session.into();
         Self {
-            session: session.into(),
+            sessions: vec![session.clone()],
+            session,
             agent: agent.into(),
             transport: Transport::Stdio,
             port: 7700,
@@ -238,6 +266,11 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     authorize_bind(opts.transport, opts.bind, opts.auth_token.as_ref())?;
     // Same argument as the bind check: refuse before any lease is taken.
     authorize_ledger(&opts)?;
+    // #32 PR 4: the pinned sessions, refused before any lease too.
+    check_pinned(&opts.session, &opts.sessions, opts.transport)?;
+    if LeaseLossPolicy::for_pinned(opts.sessions.len()) == LeaseLossPolicy::DetachSession {
+        return serve_pinned(opts, backends).await;
+    }
     // J2, and it belongs in this pre-lease group for the same reason the two
     // above do: it creates nothing and binds nothing (its one filesystem access
     // is a read-only `canonicalize` of the store path, which is what makes the
@@ -298,6 +331,11 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
         early.clone(),
         Some(calibration.clone()),
     );
+    // #32 PR 4 (review L1): the process's one embedder, for the keep-warm,
+    // taken from the backends rather than from the session. Dropped on
+    // every branch that does not hold the session, so a proxy still keeps
+    // no model (`resolve_role`'s argument).
+    let embedder = builder.shared_embedder();
     // Moved, not lent: see `resolve_role` — a proxy must not keep the model.
     let role = resolve_role(&opts, builder, endpoint.as_ref(), &ledger).await;
     let mem: Arc<Memory> = match role {
@@ -315,6 +353,7 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
         }
         Ok(Role::Holder(mem)) => Arc::from(mem),
         Ok(Role::Proxy(proxy)) => {
+            drop(embedder);
             // **The proxy branch is deliberately NOT armed for durability, and
             // this is the design decision the J0 review asked for by name.**
             //
@@ -493,24 +532,38 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     let shutdown = holder_shutdown(mem.clone(), ledger.clone(), early.clone(), progress.clone());
     tokio::pin!(shutdown);
 
+    // #32 PR 4: a registry of one, under the lease-loss policy a single
+    // session has always had (the fence above ends the process).
+    let registry = SessionRegistry::new(
+        vec![opts.session.clone()],
+        Some(opts.session.clone()),
+        LeaseLossPolicy::ExitProcess,
+        None,
+        early.clone(),
+    );
     // The holder startup, below the arming, in the order it has always run:
     // the session's server, the process-wide tasks (which read it), then the
     // rest of the session (its endpoint and event pump).
     let server = session_server(&mem, &ledger);
     // Stopped after the close (and the keep-warm before it); see
     // `process::ProcessTasks` and the stage table in `shutdown`.
+    let embedder = embedder.unwrap_or_else(|| Arc::clone(mem.embedder()));
     let tasks = ProcessTasks::spawn(
-        &server,
-        &mem,
+        &registry,
         &ledger,
         opts.ledger_heartbeat,
         keep_warm,
+        &embedder,
+        mem.agent(),
         &calibration,
     );
+    drop(embedder);
     // `mem` stays held here as well, so the last handle still drops when
     // `serve` returns, after the watchdog is disarmed (the stage table's
     // "not watched" note), not when the set is taken apart at stage 6.
     let session = AttachedSession::attach(Arc::clone(&mem), server, endpoint, opts.max_sessions);
+    registry.insert_live(Arc::new(session));
+    registry.mark_started();
 
     tracing::info!(
         session = %opts.session,
@@ -519,54 +572,244 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
         "lambo serve: session attached"
     );
 
-    // #32: the attached set the per-session stages run over. One session in
-    // a single-session serve; PR 4's registry holds many, and the transport
-    // then routes to each. Here the transport serves the one session.
-    let sessions = [session];
-    let server = sessions[0].server.clone();
+    let stdio_server = registry.attached()[0].server.clone();
     let transport = async {
         match opts.transport {
-            Transport::Stdio => serve_stdio(server, shutdown.as_mut()).await,
-            Transport::Http => serve_http(server, &opts, shutdown.as_mut()).await,
+            Transport::Stdio => serve_stdio(stdio_server, shutdown.as_mut()).await,
+            Transport::Http => serve_http(registry.clone(), &opts, shutdown.as_mut()).await,
         }
     };
+    close_holder(&registry, transport, tasks, &early, &progress, ledger).await
+}
 
-    // The holder's shutdown, in the order `shutdown`'s stage table names.
-    // Stages 1-4: transport drain, keep-warm abort (issue #13), the bounded
-    // session closes, the event pumps.
-    // The calibration probe (#32 PR 3) stops there too, through `tasks`: it
-    // is the process's to abort now that no session's close does, and an
-    // embed it still has in flight would only compete with the final drains,
-    // as a keep-warm touch would. Instant, so stage 2 stays instant.
-    let closing: Vec<_> = sessions.iter().map(AttachedSession::closing).collect();
-    let outcome = run_and_close_sessions(
-        &closing,
-        transport,
-        || tasks.stop_before_close(),
-        &early,
-        &progress,
-    )
-    .await;
+/// `serve` for more than one pinned session (#32 PR 4): HTTP only, under
+/// [`LeaseLossPolicy::DetachSession`].
+///
+/// The same pre-lease group, arming, process tasks, transport and shutdown
+/// stages as a one-session serve; what differs is the attach. There is no
+/// election: each pinned session is acquired, in order, from the one
+/// `serve_builder` template (so every session shares the embedder, the
+/// store and the write-queue calibration), and a session another writer
+/// holds is not waited for but served as 503 and retried in the background
+/// (design §3.2). Any other attach failure refuses the start, after closing
+/// (and so releasing) the sessions already acquired.
+///
+/// The arming argument is `serve`'s, unchanged: J6's pre-arm arms at the
+/// first acquire and every later load races it; the shutdown future is
+/// registered once the pinned acquires are done, before any session part is
+/// built.
+async fn serve_pinned(opts: ServeOptions, backends: ResolvedBackends) -> Result<(), LamboError> {
+    serve_pinned_with(opts, backends, PinnedSeams::default()).await
+}
+
+/// What a test hands [`serve_pinned_with`] so it can drive the real
+/// multi-session serve in-process. `serve` passes the default: a fresh
+/// unarmed pre-arm and nobody to tell.
+#[derive(Default)]
+struct PinnedSeams {
+    /// The J6 pre-arm the serve uses. A test keeps a clone and records a
+    /// signal on it (`EarlyShutdown::simulate_signal`) to shut the serve
+    /// down without sending the test process a real one.
+    early: Option<EarlyShutdown>,
+    /// Sent the registry once the startup sessions are in and the retry
+    /// loop is running.
+    registry: Option<tokio::sync::oneshot::Sender<Arc<SessionRegistry>>>,
+}
+
+/// [`serve_pinned`]'s body, with its test seams (see [`PinnedSeams`]).
+async fn serve_pinned_with(
+    opts: ServeOptions,
+    backends: ResolvedBackends,
+    seams: PinnedSeams,
+) -> Result<(), LamboError> {
+    // The ledger is the process's, opened pre-lease (J4); each session's
+    // lines go through `ledger.for_session(id)`, and each session gets its
+    // own `startup` line.
+    let ledger = opts.ledger.as_ref().map(|path| Ledger::open(path.clone()));
+    if let Some(ledger) = &ledger {
+        for id in &opts.sessions {
+            ledger.append(&crate::ledger::startup_line(id, &opts.agent, "http"));
+        }
+    }
+    let keep_warm = backends.keep_warm_interval();
+    let calibration = EmbedderCalibration::new();
+    let early = seams.early.unwrap_or_else(EarlyShutdown::unarmed);
+    let store_cfg = backends.store_cfg.clone();
+    // The template every session is cloned from: no endpoint (each session
+    // derives its own), the unscoped ledger (each session scopes its own).
+    let template = serve_builder(
+        &opts,
+        backends,
+        None,
+        ledger.clone(),
+        early.clone(),
+        Some(calibration.clone()),
+    );
+    let embedder = template.shared_embedder().ok_or_else(|| {
+        LamboError::Config("serve: the resolved backends carry no embedder".into())
+    })?;
+    let registry = SessionRegistry::new(
+        opts.sessions.clone(),
+        Some(opts.session.clone()),
+        LeaseLossPolicy::DetachSession,
+        Some(SessionAttacher {
+            template,
+            store_cfg,
+            ledger: ledger.clone(),
+            max_sessions: opts.max_sessions,
+            agent: opts.agent.clone(),
+        }),
+        early.clone(),
+    );
+
+    // The pinned acquires, in order. The registry is the only long-lived
+    // owner of each handle once it is admitted (#32 review M1): a detach
+    // drops its session's handle, and the shutdown's close set drops the
+    // rest after the watchdog is disarmed (`close_holder`).
+    let mut acquired: Vec<(Arc<Memory>, Option<hub::SessionEndpoint>)> = Vec::new();
+    for id in &opts.sessions {
+        match registry.acquire(id).await {
+            Ok(Acquired::Attached(mem, endpoint)) => acquired.push((mem, endpoint)),
+            Ok(Acquired::Held(held)) => registry.mark_held(id, &held).await,
+            Err(e) => {
+                // Fail closed, but release what this start already took:
+                // a refused start must not hold leases until they lapse.
+                for (mem, _) in &acquired {
+                    if let Err(close) = close_bounded(mem, &early).await {
+                        tracing::error!(
+                            session = %mem.session(),
+                            error = %close,
+                            "lambo serve: closing a session after a failed start"
+                        );
+                    }
+                }
+                tracing::error!(
+                    session = %id,
+                    error = %e,
+                    "lambo serve: a pinned session could not be attached; refusing to start"
+                );
+                close_ledger(ledger);
+                return Err(e);
+            }
+        }
+    }
+
+    let progress = ShutdownProgress::with_production_watchdog();
+    let _disarm = progress.disarm_on_drop();
+    let shutdown = registry_shutdown(early.clone(), progress.clone());
+    tokio::pin!(shutdown);
+
+    let agent = crate::types::AgentId::new(&opts.agent);
+    let tasks = ProcessTasks::spawn(
+        &registry,
+        &ledger,
+        opts.ledger_heartbeat,
+        keep_warm,
+        &embedder,
+        &agent,
+        &calibration,
+    );
+    drop(embedder);
+    for (mem, endpoint) in acquired {
+        let session = registry.admit(mem, endpoint);
+        tracing::info!(
+            session = %session.id(),
+            agent = %opts.agent,
+            transport = ?opts.transport,
+            "lambo serve: session attached"
+        );
+    }
+    registry.mark_started();
+    registry.spawn_retry_loop();
+    tracing::info!(
+        sessions = ?opts.sessions,
+        default = %opts.session,
+        "lambo serve: serving {} pinned sessions",
+        opts.sessions.len()
+    );
+    if let Some(tx) = seams.registry {
+        let _ = tx.send(Arc::clone(&registry));
+    }
+
+    let transport = serve_http(registry.clone(), &opts, shutdown.as_mut());
+    close_holder(&registry, transport, tasks, &early, &progress, ledger).await
+}
+
+/// The holder's shutdown, in the order `shutdown`'s stage table names, over
+/// whatever the registry holds when the transport ends.
+///
+/// Stages 1-2: the transport drains, then the keep-warm and the calibration
+/// probe stop (#13, #32 PR 3). Stage 3: the registry's attached set is taken
+/// (no attach starts after it, and one in flight is abandoned) and closed
+/// concurrently, beside any detach still in flight, which is waited for no
+/// longer than `CLOSE_GRACE`; stage 4 aborts the event pumps. The transport's error
+/// wins, else the first close error (`SessionCloses::report`). Stage 5: the
+/// process tasks, the registry's retry loop and each session's watcher.
+/// Stage 6: every session's endpoint. Stage 7: the ledger.
+async fn close_holder(
+    registry: &Arc<SessionRegistry>,
+    transport: impl std::future::Future<Output = Result<(), LamboError>>,
+    tasks: ProcessTasks,
+    early: &EarlyShutdown,
+    progress: &ShutdownProgress,
+    ledger: Option<Arc<Ledger>>,
+) -> Result<(), LamboError> {
+    let outcome = stop_transport(transport, || tasks.stop_before_close(), progress).await;
+    let sessions = registry.close_set().await;
+    let closing: Vec<_> = sessions.iter().map(|s| s.closing()).collect();
+    // A detach still in flight is waited for beside the closes, and for no
+    // longer than they may take (#32 review L9), so stage 3 keeps its
+    // CLOSE_GRACE bound with any number of detaches and the shutdown stays
+    // inside `watchdog::EXIT_BUDGET`, as a one-session serve's does. A detach
+    // that began just before the signal could otherwise run its own stage 1
+    // (SHUTDOWN_GRACE), close (CLOSE_GRACE) and endpoint release in series
+    // past the watchdog. One left behind is abandoned with the process: in
+    // PR 4 a detach is a lost lease, whose fenced close has nothing to flush
+    // or release.
+    let detaches = async {
+        if tokio::time::timeout(CLOSE_GRACE, registry.join_detaches())
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                grace_secs = CLOSE_GRACE.as_secs(),
+                "lambo serve: a session detach did not finish within the close budget; leaving \
+                 it to the process exit"
+            );
+        }
+    };
+    let (closed, ()) = tokio::join!(close_sessions(&closing, early, progress), detaches);
+    drop(closing);
+    let outcome = match outcome {
+        Err(e) => Err(e),
+        Ok(()) => closed.report(),
+    };
     // Stage 5: heartbeat, keep-warm (again), refusal poller, calibration
-    // probe (again).
-    progress.run(Stage::BackgroundTasks, || tasks.stop());
+    // probe (again); the registry's retry loop and lease watchers.
+    progress.run(Stage::BackgroundTasks, || {
+        tasks.stop();
+        registry.stop_tasks(&sessions);
+    });
     // Stage 6: every session's endpoint, after the closes; see
     // `AttachedSession::release_endpoint`.
     progress.begin(Stage::EndpointRelease);
     join_all(
         sessions
             .iter()
-            .map(AttachedSession::release_endpoint)
+            .map(|session| session.release_endpoint())
             .collect(),
     )
     .await;
-    // The set's handles (each session's server and `Memory` clone) drop
-    // here, where they always have: at the end of stage 6.
-    drop(sessions);
     progress.end(Stage::EndpointRelease);
     // Stage 7: the call ledger drains last.
     progress.run(Stage::LedgerClose, || close_ledger(ledger));
     progress.complete();
+    // The set's handles (each session's server and `Memory`) drop after the
+    // watchdog is disarmed (`complete`), as the stage table's "not watched"
+    // note says. For a multi-session serve these are the last owners (#32
+    // review M1); a one-session serve also holds its `Memory` until it
+    // returns.
+    drop(sessions);
 
     outcome
 }

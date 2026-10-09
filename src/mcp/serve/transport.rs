@@ -11,11 +11,10 @@ use std::time::{Duration, Instant};
 
 use rmcp::service::ServerInitializeError;
 use rmcp::transport::io::stdio;
-use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
-use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use rmcp::ServiceExt;
 
 use super::http_guards::{guard_request, HttpGuard, RateLimiter};
+use super::registry::{Lookup, SessionRegistry};
 use super::shutdown::{HolderShutdown, SHUTDOWN_GRACE};
 use super::ServeOptions;
 use crate::mcp::server::LamboServer;
@@ -208,35 +207,23 @@ pub(super) async fn serve_stdio(
 
 /// Streamable HTTP transport, served by the axum already in the tree.
 ///
-/// The service factory clones an `Arc<Memory>` per request — it never builds a
-/// second [`Memory`](crate::memory::Memory).
+/// Each attached session has its own `StreamableHttpService`
+/// (`session::AttachedSession::http`), which shares the session's one
+/// `LamboServer` clone per request — it never builds a second
+/// [`Memory`](crate::memory::Memory). The router ([`session_router`]) picks
+/// the session from the path; the guards run first, on every route.
 pub(super) async fn serve_http(
-    server: LamboServer,
+    registry: Arc<SessionRegistry>,
     opts: &ServeOptions,
     mut shutdown: Pin<&mut HolderShutdown>,
 ) -> Result<(), LamboError> {
-    // CLONED, not rebuilt (I1): every request handler must share the one call
-    // ledger, and `LamboServer::new` per request would also rebuild the whole
-    // `ToolRouter` — every tool's JSON schema included — on every request,
-    // which is the cost `#[tool_handler(router = self.tool_router)]` exists to
-    // avoid. Cloning shares the `Arc<Memory>` exactly as before.
-    let factory_server = server.clone();
-    // Held as its own `Arc` so the session cap can read the live count from the
-    // same manager rmcp mutates — see [`LiveSessions`](super::http_guards::LiveSessions).
-    let sessions = Arc::new(LocalSessionManager::default());
-    let service =
-        StreamableHttpService::new(move || Ok(factory_server.clone()), sessions.clone(), {
-            // `#[non_exhaustive]` — mutate the SDK default rather than
-            // constructing, so a new field cannot silently break the build.
-            let mut cfg = StreamableHttpServerConfig::default();
-            cfg.sse_keep_alive = Some(Duration::from_secs(15));
-            cfg
-        });
-
+    // The session cap counts every attached session's MCP sessions: one
+    // `--max-sessions` for the process (#32 design §3.6), read from the
+    // managers rmcp mutates — see [`LiveSessions`](super::http_guards::LiveSessions).
     let guard = HttpGuard {
         auth: opts.auth_token.clone(),
         max_sessions: opts.max_sessions,
-        live: sessions,
+        live: registry.clone(),
         rate: RateLimiter::new(opts.rate_limit_rps, Instant::now()).map(Arc::new),
     };
     // T8.7 posture, logged once at startup so an operator can see what this
@@ -249,9 +236,9 @@ pub(super) async fn serve_http(
         "mcp http: request guard armed"
     );
 
-    let app = axum::Router::new()
-        .nest_service("/mcp", service)
-        .layer(axum::middleware::from_fn_with_state(guard, guard_request));
+    let hosted = registry.hosted().to_vec();
+    let app =
+        session_router(registry).layer(axum::middleware::from_fn_with_state(guard, guard_request));
     let addr = SocketAddr::new(opts.bind, opts.port);
     // Race `bind` against the shutdown signal too (R2-a): the ~5 ms bind window
     // is small but non-zero, and a signal in it must still reach `close()`.
@@ -265,9 +252,107 @@ pub(super) async fn serve_http(
                 return Ok(());
             }
         };
+    // The bound address, not the requested one: they differ only for
+    // `--port 0`, where the kernel picks the port and this line is the only
+    // place it is named.
+    let addr = listener.local_addr().unwrap_or(addr);
     tracing::info!(%addr, "mcp http: listening on /mcp");
+    if hosted.len() > 1 {
+        tracing::info!(
+            %addr,
+            sessions = ?hosted,
+            "mcp http: serving each pinned session at /mcp/s/{{session}}"
+        );
+    }
 
     serve_http_bounded(listener, app, shutdown, SHUTDOWN_GRACE).await
+}
+
+/// The MCP routes (#32 PR 4, design §2.1), without the guards:
+///
+/// | route | serves |
+/// |---|---|
+/// | `/mcp` | the default session (the first `--session`, else `[serve] default_session`, else the first pinned) |
+/// | `/mcp/s/{session}` | that session |
+///
+/// Both answer every method, so a refused id is the uniform 404 whatever
+/// the method (PR 1's wire claim: a refused session and an unrouted path
+/// are indistinguishable). Every other path is axum's own 404.
+pub(super) fn session_router(registry: Arc<SessionRegistry>) -> axum::Router {
+    axum::Router::new()
+        .route("/mcp", axum::routing::any(default_session))
+        .route("/mcp/s/{session}", axum::routing::any(addressed_session))
+        .with_state(registry)
+}
+
+/// The route prefix an addressed session id follows.
+const ADDRESSED_PREFIX: &str = "/mcp/s/";
+
+async fn default_session(
+    axum::extract::State(registry): axum::extract::State<Arc<SessionRegistry>>,
+    req: axum::extract::Request,
+) -> axum::response::Response {
+    match registry.default_session().map(str::to_string) {
+        Some(id) => serve_session(&registry, &id, req).await,
+        None => crate::surface::session::not_found_response(),
+    }
+}
+
+async fn addressed_session(
+    axum::extract::State(registry): axum::extract::State<Arc<SessionRegistry>>,
+    req: axum::extract::Request,
+) -> axum::response::Response {
+    // The raw path segment, not axum's percent-decoded `Path`: an addressed
+    // id is never percent-decoded (#32 decision 16), so `%2E` is refused by
+    // the charset rather than read as a dot.
+    let raw = req
+        .uri()
+        .path()
+        .strip_prefix(ADDRESSED_PREFIX)
+        .unwrap_or_default()
+        .to_string();
+    match crate::surface::session::parse_addressed(&raw) {
+        Ok(id) => serve_session(&registry, id.as_str(), req).await,
+        Err(refusal) => {
+            tracing::debug!(reason = %refusal, "mcp http: refused an addressed session id");
+            refusal.not_found_response()
+        }
+    }
+}
+
+/// Hand `req` to session `id`'s own MCP service, or refuse it.
+async fn serve_session(
+    registry: &SessionRegistry,
+    id: &str,
+    req: axum::extract::Request,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    match registry.lookup(id) {
+        Lookup::Live(session) => session
+            .http
+            .handle(req)
+            .await
+            .map(axum::body::Body::new)
+            .into_response(),
+        Lookup::Unavailable { retry_after } => (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            [(
+                axum::http::header::RETRY_AFTER,
+                retry_after.as_secs().max(1).to_string(),
+            )],
+            "this session is not available on this server right now: retry later\n",
+        )
+            .into_response(),
+        // Hosted, so not the uniform 404; no `Retry-After`, because a retry
+        // gets the same answer until an operator acts (#32 review L1).
+        Lookup::Failed => (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "this session could not be attached on this server: an operator must act (see the \
+             serve log)\n",
+        )
+            .into_response(),
+        Lookup::NotHosted => crate::surface::session::not_found_response(),
+    }
 }
 
 /// `axum::serve` with a **bounded** graceful shutdown (R1/T82-2).
