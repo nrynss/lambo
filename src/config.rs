@@ -862,8 +862,11 @@ mod tests {
         let start = raw
             .find("# [recall]")
             .expect("the example documents [recall]");
+        // The block ends at the first blank line: other commented examples
+        // (`[serve]`, #32) follow it in the file.
         let block: String = raw[start..]
             .lines()
+            .take_while(|l| !l.trim().is_empty())
             .map(|l| l.strip_prefix("# ").unwrap_or(l))
             .collect::<Vec<_>>()
             .join("\n");
