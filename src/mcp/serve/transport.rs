@@ -16,6 +16,7 @@ use rmcp::ServiceExt;
 use super::authority::{authorize_default, Authenticated, ServeAuthority};
 use super::http_guards::{guard_request, HttpGuard, RateLimiter};
 use super::registry::{Lookup, SessionRegistry};
+use super::session::AttachedSession;
 use super::shutdown::{HolderShutdown, SHUTDOWN_GRACE};
 use super::ServeOptions;
 use crate::mcp::server::LamboServer;
@@ -397,12 +398,7 @@ async fn serve_session(
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
     match registry.lookup(id) {
-        Lookup::Live(session) => session
-            .http
-            .handle(req)
-            .await
-            .map(axum::body::Body::new)
-            .into_response(),
+        Lookup::Live(session) => serve_live(&session, grant, req).await,
         Lookup::Unavailable { retry_after } => (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
             [(
@@ -425,6 +421,73 @@ async fn serve_session(
         // demand yet.
         Lookup::NotHosted => refused(Some(grant), SessionRefusal::new(RefusalReason::Absent)),
     }
+}
+
+/// The MCP-session id header of streamable HTTP.
+const MCP_SESSION_ID: &str = "mcp-session-id";
+
+/// What a request naming another credential's MCP session carries to rmcp
+/// instead of that id: a value rmcp never mints (its ids are UUIDv4
+/// strings), so rmcp answers it exactly as it answers any id it does not
+/// know.
+const NO_SUCH_MCP_SESSION: &str = "lambo-no-such-mcp-session";
+
+/// Hand `req` to a live session's MCP service, binding MCP sessions to the
+/// credential that opened them (#32 PR 5 review L1).
+///
+/// rmcp's MCP-session ids carry no owner, so before this a credential that
+/// learned another's id (a log, a shared proxy, a client bug) could post
+/// into that MCP session, read its server-initiated stream or `DELETE` it.
+/// Now an `initialize` records `grant` as the opener of the id rmcp mints,
+/// and a request naming an id another credential opened has the id
+/// replaced by [`NO_SUCH_MCP_SESSION`] before rmcp sees it. The answer is
+/// therefore rmcp's own answer to an unknown id, byte for byte and by
+/// construction (404 `Session not found` for `POST` and `GET`, rmcp's 202
+/// for a `DELETE` of a session it does not hold), so the caller cannot
+/// tell a foreign MCP session from an expired one.
+async fn serve_live(
+    session: &AttachedSession,
+    grant: &SessionGrant,
+    mut req: axum::extract::Request,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    // A value that is not visible ASCII names no MCP session rmcp could
+    // have minted; rmcp reads such a header as absent, and so does this.
+    let named = req
+        .headers()
+        .get(MCP_SESSION_ID)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let opens = req.headers().get(MCP_SESSION_ID).is_none();
+    let mut owned = None;
+    if let Some(mcp_id) = named {
+        if session.opened_by(&mcp_id, grant.name()) {
+            owned = Some(mcp_id);
+        } else {
+            req.headers_mut().insert(
+                MCP_SESSION_ID,
+                axum::http::HeaderValue::from_static(NO_SUCH_MCP_SESSION),
+            );
+        }
+    }
+    let deletes = req.method() == axum::http::Method::DELETE;
+    let response = session.http.handle(req).await;
+    if opens
+        && let Some(minted) = response
+            .headers()
+            .get(MCP_SESSION_ID)
+            .and_then(|v| v.to_str().ok())
+    {
+        // Recorded before the response (and so the id) reaches the caller.
+        session.record_opener(minted, grant.name()).await;
+    }
+    if deletes
+        && response.status().is_success()
+        && let Some(mcp_id) = owned
+    {
+        session.forget_opener(&mcp_id);
+    }
+    response.map(axum::body::Body::new).into_response()
 }
 
 /// `axum::serve` with a **bounded** graceful shutdown (R1/T82-2).

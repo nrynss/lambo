@@ -386,3 +386,72 @@ async fn the_implicit_local_serve_still_refuses_a_foreign_host() {
         );
     }
 }
+
+/// One raw exchange on `path` presenting `authorization` and naming the MCP
+/// session `mcp_id`.
+async fn naming_mcp_session(
+    addr: SocketAddr,
+    method: &str,
+    path: &str,
+    authorization: &str,
+    mcp_id: &str,
+    body: &str,
+) -> String {
+    on_the_wire_with(
+        addr,
+        method,
+        path,
+        "localhost",
+        Some(authorization),
+        &[MCP_POST[0], MCP_POST[1], ("Mcp-Session-Id", mcp_id)],
+        body,
+    )
+    .await
+}
+
+/// A `tools/call` the MCP-session tests send.
+const STATS_CALL: &str = r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"lambo_stats","arguments":{"agent_id":"auth-test"}}}"#;
+
+/// #32 PR 5 review L1: an MCP session is bound to the credential that
+/// opened it. `ops` is in scope for `auth-live` too, but naming the MCP
+/// session `scoped` opened gets exactly what naming an id rmcp never minted
+/// gets, on every method, so a foreign MCP session is indistinguishable
+/// from an expired one, and the `DELETE` closes nothing: `scoped` keeps
+/// calling on it afterwards.
+///
+/// Mutation: hand the request to rmcp with the foreign id unchanged and
+/// `ops`'s `POST` is a 200 with a result.
+#[tokio::test]
+async fn an_mcp_session_answers_only_the_credential_that_opened_it() {
+    let wire = wire().await;
+    let addr = wire.addr;
+    let path = "/mcp/s/auth-live";
+    let (mine, _) = initialize_as(addr, path, Some(&bearer("scoped"))).await;
+    // Never minted: rmcp's ids are UUIDv4 strings, this is version 4 too.
+    let unknown = "00000000-0000-4000-8000-000000000000";
+    let ops = bearer("ops");
+    for (method, body) in [("POST", STATS_CALL), ("GET", ""), ("DELETE", "")] {
+        let foreign = naming_mcp_session(addr, method, path, &ops, &mine, body).await;
+        let expired = naming_mcp_session(addr, method, path, &ops, unknown, body).await;
+        assert_eq!(foreign, expired, "{method}: a foreign MCP session id");
+        if method != "DELETE" {
+            assert!(
+                foreign.starts_with("HTTP/1.1 404 Not Found\r\n"),
+                "{method}: {foreign}"
+            );
+        }
+    }
+    // The opener still holds its MCP session: the foreign DELETE closed
+    // nothing.
+    let reply = http_as(
+        addr,
+        "POST",
+        path,
+        Some(&bearer("scoped")),
+        Some(&mine),
+        STATS_CALL,
+    )
+    .await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert!(reply.message().get("result").is_some(), "{}", reply.body);
+}

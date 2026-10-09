@@ -14,6 +14,7 @@
 //! | the lease-loss watcher (multi-session serves only) | [`SessionTasks::lease_watcher`] | stage 5 |
 //! | the session endpoint (J2, the #39 seam) | [`AttachedSession::hub`] | stage 6, [`AttachedSession::release_endpoint`] |
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -75,6 +76,17 @@ pub(super) struct AttachedSession {
     /// The MCP sessions [`Self::http`] has minted: read by the process-wide
     /// session cap, and ended one by one by a detach's stage 1.
     pub(super) mcp_sessions: Arc<LocalSessionManager>,
+    /// Which credential opened each of [`Self::mcp_sessions`]' MCP
+    /// sessions, by `Mcp-Session-Id` (#32 PR 5 review L1). A request that
+    /// names an MCP session another credential opened is answered as rmcp
+    /// answers an id it does not know (see `transport::serve_live`).
+    ///
+    /// rmcp's own map is the authority on which MCP sessions are live: an
+    /// entry here whose id rmcp has dropped (an idle timeout, a closed
+    /// worker, a detach) names nothing, and is pruned whenever an entry is
+    /// added, so the map stays bounded by the live count plus the sessions
+    /// that ended since the last `initialize`.
+    owners: parking_lot::Mutex<HashMap<String, Arc<str>>>,
     /// The session endpoint (J2): the accept loop and its connections.
     ///
     /// In a lock and an `Option` so stage 6 can take it through a shared
@@ -202,6 +214,7 @@ impl AttachedSession {
             server,
             http,
             mcp_sessions,
+            owners: parking_lot::Mutex::new(HashMap::new()),
             hub: tokio::sync::Mutex::new(Some(hub)),
             endpoint,
             tasks: SessionTasks {
@@ -219,6 +232,38 @@ impl AttachedSession {
     /// How many MCP sessions this session's HTTP service holds open.
     pub(super) async fn live_mcp_sessions(&self) -> usize {
         self.mcp_sessions.sessions.read().await.len()
+    }
+
+    /// Did `credential` open the MCP session `mcp_id`? `false` for an id
+    /// no credential opened here.
+    pub(super) fn opened_by(&self, mcp_id: &str, credential: &str) -> bool {
+        self.owners
+            .lock()
+            .get(mcp_id)
+            .is_some_and(|owner| &**owner == credential)
+    }
+
+    /// Record that `credential` opened the MCP session `mcp_id`, pruning
+    /// the entries whose MCP session rmcp no longer holds.
+    pub(super) async fn record_opener(&self, mcp_id: &str, credential: &str) {
+        // rmcp's map first, then ours: never hold the sync lock across the
+        // await.
+        let live: std::collections::HashSet<String> = self
+            .mcp_sessions
+            .sessions
+            .read()
+            .await
+            .keys()
+            .map(|id| id.to_string())
+            .collect();
+        let mut owners = self.owners.lock();
+        owners.retain(|id, _| live.contains(id));
+        owners.insert(mcp_id.to_string(), Arc::from(credential));
+    }
+
+    /// Forget the MCP session `mcp_id` (its opener closed it).
+    pub(super) fn forget_opener(&self, mcp_id: &str) {
+        self.owners.lock().remove(mcp_id);
     }
 
     /// A detach's stage 1 (#32 design §3.4): end every MCP session this
