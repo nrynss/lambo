@@ -357,6 +357,29 @@ async fn the_canonical_strategy_refuses_by_name() {
     s.mem.close().await.expect("close");
 }
 
+/// Review M3: over a store without vector search the tool is still listed
+/// (design 6.1 lists on the embedder and the client-vector key), and the
+/// refusal names the missing capability instead of a bare class.
+#[tokio::test]
+async fn a_store_without_vector_search_refuses_by_name() {
+    let s = server_with_parts(
+        "mcp-image-no-vectors",
+        Arc::new(MemoryStore::new()),
+        Arc::new(FixtureEmbedder::new()),
+        fixture_contract(),
+        Config::default(),
+    )
+    .await;
+    assert!(
+        tools(&s).iter().any(|t| t.name == "lambo_derive_image"),
+        "listed: the embedder embeds images"
+    );
+    let text = refused(&s, image_args("render 17", "r17", "x")).await;
+    assert!(text.contains("VECTOR_SEARCH"), "{text}");
+    assert!(!text.contains("logged server-side"), "{text}");
+    s.mem.close().await.expect("close");
+}
+
 /// The PR 3 carry-over: when a text write has already taken the image's key
 /// (here a reference in an action, which the door allows), the image derive's
 /// receipt says what happened and how to fix it, naming only the caller's id.

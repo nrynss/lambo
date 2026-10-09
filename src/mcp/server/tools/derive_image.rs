@@ -88,6 +88,21 @@ impl LamboServer {
                  only through its vector",
             );
         }
+        // The core refuses this too, but as a `LamboError::Config`, which
+        // `tool_err` turns into a bare class (review M3). The tool stays
+        // listed on such a store: design 6.1 lists it on the embedder's
+        // modality and the client-vector key only, as `match_strategy` is
+        // not a listing input either, and a listed tool whose refusal names
+        // the missing capability tells the operator what to change where an
+        // absent tool says nothing.
+        if !self.mem.derive_vector_candidates().available() {
+            return config_refusal(
+                TOOL,
+                "an image derive needs a store with vector search (VECTOR_SEARCH): an image \
+                 concept is found only through its vector, and this server's store does not \
+                 search vectors",
+            );
+        }
 
         // The decoded bytes must outlive the borrow `ImagePayload::Bytes`
         // holds, so they live here.

@@ -229,7 +229,7 @@ A write refused for backpressure answers the same shape with `receipt_state` of 
 
 Store one image as a concept. You send a caption and either the image itself, which the server embeds, or a vector you computed for it. The concept's content is the caption plus `[image:<image_id>]`, and its vector is the image's, so a text recall such as "red silk saree" finds it through the vector leg. The image bytes are never stored: Lambo keeps the caption, the vector, and where the vector came from.
 
-**Listed only where it can work.** A server lists this tool when its embedder embeds images, or when the operator set `[embedder] accept_client_vectors = true` (see [Configuration](/lambo/config/)). Both are settings of the whole server process, so every session one server holds lists the same tools. A server with a text-only embedder (BGE-M3, candle, Gemini) and client vectors off lists exactly the seven tools above, unchanged.
+**Listed only where it can work.** A server lists this tool when its embedder embeds images, or when the operator set `[embedder] accept_client_vectors = true` (see [Configuration](/lambo/config/)). Both are settings of the whole server process, so every session one server holds lists the same tools. A server with a text-only embedder (BGE-M3, candle, Gemini) and client vectors off lists exactly the seven tools above, unchanged. A listed tool still needs `match_strategy = "hybrid"` and a store with vector search; without either, every call is refused with a `configuration error` that names what is missing.
 
 **It returns before the write is applied**, with a receipt, exactly as `lambo_derive` does. The image is checked and embedded before the ack, so a bad image is refused on the call itself rather than on the receipt.
 
