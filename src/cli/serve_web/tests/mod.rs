@@ -68,6 +68,13 @@ const PRODUCTION_SOURCES: &[(&str, &str)] = &[
             "/src/cli/serve_web/state.rs"
         )),
     ),
+    (
+        "serve_web/views.rs",
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/cli/serve_web/views.rs"
+        )),
+    ),
 ];
 
 /// The production text of every portal source: each file up to its
@@ -75,7 +82,16 @@ const PRODUCTION_SOURCES: &[(&str, &str)] = &[
 fn production_source() -> String {
     PRODUCTION_SOURCES
         .iter()
-        .map(|(_, src)| src.split("#[cfg(all(test").next().unwrap_or(src))
+        .map(|(name, src)| {
+            // A `#[cfg(all(test` anywhere else would cut that file's scan
+            // short at that line, silently (#4 PR 1 nearly did).
+            assert!(
+                *name == "serve_web.rs" || !src.contains("#[cfg(all(test"),
+                "{name}: only serve_web.rs may carry `#[cfg(all(test`; the scans \
+                 stop reading a file there"
+            );
+            src.split("#[cfg(all(test").next().unwrap_or(src)
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -103,6 +119,7 @@ mod recall;
 mod routes;
 mod session;
 mod shutdown;
+mod views;
 
 /// Every path `router` answers. The read-only method sweep iterates this,
 /// and `routes_constant_covers_every_registered_route` proves it is not
@@ -396,16 +413,49 @@ fn state_from_backends(
     session: &str,
     auth: Option<AuthToken>,
 ) -> Arc<AppState> {
-    Arc::new(AppState {
-        session: SessionId::new(session),
+    state_with_web(
         backends,
-        exposed: auth.is_some(),
+        session,
         auth,
-        freshness: Mutex::new(Freshness {
-            fingerprint: 0,
-            observed_at: Instant::now(),
-        }),
-    })
+        &crate::config::WebConfig::default(),
+    )
+}
+
+/// [`state_from_backends`] with explicit `[web]` bounds.
+fn state_with_web(
+    backends: ResolvedBackends,
+    session: &str,
+    auth: Option<AuthToken>,
+    web: &crate::config::WebConfig,
+) -> Arc<AppState> {
+    let exposed = auth.is_some();
+    Arc::new(AppState::new(
+        SessionId::new(session),
+        backends,
+        exposed,
+        auth,
+        web,
+    ))
+}
+
+/// `[web] view_ttl_ms = 0`: every request after a write sees it. For the
+/// tests that write between two requests and assert the second sees the
+/// write, a property of the store read, not of the view TTL (which
+/// `views::a_write_is_served_after_the_ttl_and_not_before` pins).
+fn web_ttl_zero() -> crate::config::WebConfig {
+    crate::config::WebConfig {
+        view_ttl_ms: Some(0),
+        ..Default::default()
+    }
+}
+
+/// The feed of a raw snapshot at `since`: the portal's ordering and paging
+/// over the store's own snapshot, which the view's feed must equal.
+fn events_from(snap: &GraphSnapshot, since: usize) -> super::dto::EventsPayload {
+    slice_events(
+        &ordered_events(snap.concepts.iter(), &snap.canonization_events),
+        since,
+    )
 }
 
 /// A session with real content: two concepts in a hierarchy, an action, and

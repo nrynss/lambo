@@ -113,6 +113,19 @@
 
 ### Changed
 
+- `lambo serve-web` reads its session through a shared per-session view
+  (#4 PR 1). Every request and every open tab reads one load of the session
+  until it is older than `[web] view_ttl_ms` (1.5 s by default, the page's
+  poll interval), so the store sees about one load per 1.5 s however many
+  tabs are open, and concurrent requests for a stale view share one load.
+  The page can show durable state up to that long before a fresh store read
+  would; the writer-published flush lag is still read on every poll.
+  Startup checks the store schema and no longer loads the session: a store
+  error other than an unprovisioned schema now shows on the first request
+  rather than at startup, and the embedding-mismatch warning is printed at
+  the session's first load, naming the session. Routes, payloads, status
+  codes and `no-store` are otherwise unchanged; `/api/recall` validates its
+  arguments before touching the store, as before.
 - A hybrid derive whose embedding text would exceed 16 KiB is refused when
   it is called, not on its receipt (#74): each new concept and `parent_of`
   end is embedded framed with the whole call's text, so on a store with
@@ -263,6 +276,17 @@
   - `lambo recall` (one recall per process) is unchanged.
 
 ### Added
+
+- `[web]` in `lambo.toml` (#4 PR 1): `view_ttl_ms` (1500, 0 to 60000),
+  `max_loaded_sessions` (4), `load_concurrency` (2, 1 to 1024, always 1 on
+  SQLite) and `recall_concurrency` (4, 1 to 1024) bound the read-only
+  window's views. Unknown keys and out-of-range values are refused when the
+  file is read, naming the key and never the value. An older binary refuses
+  a file with `[web]`.
+- `lambo serve-web` answers a recall that waits 2 s for one of the
+  `recall_concurrency` slots with `503`, `Retry-After: 1` and `no-store`
+  (#4 PR 1), and keeps a per-session query-embedding cache (#14's, 128
+  entries or 1 MiB), so a repeated recall query skips the embed.
 
 - MCP tool `lambo_derive_image` (#22 PR 4): one image concept per call, a
   caption plus either the image (`image`: mime and base64, embedded by the
@@ -569,6 +593,11 @@
 
 ### Fixed
 
+- `lambo serve-web`'s `/api/pulse`, polled every 1.5 s by every open tab,
+  loaded the whole session twice: once for the event feed and again for the
+  counts (#4 PR 1). `/api/stats` did the same. Each now costs one load (and
+  with the shared view, none inside the TTL), and the feed and the counts in
+  one response always come from the same snapshot.
 - `lambo_stats` and the ledger's stats heartbeat no longer under-report a writer's not-yet-durable mutations. The flush task
   drained the graph's log into its pending batch and updated its depth only
   after releasing the graph lock, so `log_depth + flush_depth` could read 0
