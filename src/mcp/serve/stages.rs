@@ -108,8 +108,10 @@ pub(super) struct Shared {
 /// The holder's shutdown progress: which stage is running and since when.
 ///
 /// One per serve process, shared between the shutdown future (which starts
-/// stage 1), [`super::shutdown::run_and_close`] (stages 1 to 4) and
-/// [`super::serve`] (stages 5 to 7). Cloning shares the record.
+/// stage 1), [`super::shutdown::run_and_close_sessions`] (stages 1 to 4) and
+/// [`super::serve`] (stages 5 to 7). Cloning shares the record. A session
+/// detach (#32 PR 4) takes a record of its own,
+/// [`ShutdownProgress::for_session`].
 ///
 /// The lock is a `parking_lot` mutex held for one statement at a time and
 /// never across an `.await`; logging happens after it is released.

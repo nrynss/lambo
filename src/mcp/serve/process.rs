@@ -69,7 +69,7 @@ impl ProcessTasks {
         // one full interval out, so startup gains no forward. Holder path only: a
         // proxy holds no embedder (it is released when `resolve_role` returns).
         // Aborted when the transport returns, before the close (see
-        // `run_and_close`), and again beside the heartbeat after it.
+        // `run_and_close_sessions`), and again beside the heartbeat after it.
         let keep_warm_task = keep_warm.map(|every| {
             tracing::info!(
                 interval_secs = every.as_secs(),
@@ -107,7 +107,7 @@ impl ProcessTasks {
 
     /// Stage 2's handles: the keep-warm, which stops when the transport does,
     /// before the close and its final drain (issue #13); see
-    /// [`run_and_close`](super::shutdown::run_and_close).
+    /// [`run_and_close_sessions`](super::shutdown::run_and_close_sessions).
     pub(super) fn stop_before_close(&self) -> Vec<tokio::task::AbortHandle> {
         self.keep_warm
             .iter()
@@ -126,7 +126,7 @@ impl ProcessTasks {
         if let Some(heartbeat) = self.heartbeat {
             heartbeat.abort();
         }
-        // Issue #13. Already aborted inside `run_and_close`, before the close;
+        // Issue #13. Already aborted inside `run_and_close_sessions`, before the close;
         // repeated here (idempotent) so this exit path aborts it without
         // relying on that. Nothing to drain: a touch writes nothing.
         if let Some(task) = self.keep_warm {

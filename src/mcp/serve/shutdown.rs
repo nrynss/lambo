@@ -294,7 +294,7 @@ pub(super) fn holder_shutdown(
 /// the same address, and these two findings compose here), and the ledger is
 /// drained last with its `startup` / `lease` / `completion` lines intact. The
 /// ordering at `serve`'s tail is what makes that true and it is not changed by
-/// this: the drain runs after `run_and_close` returns, on the error path as much
+/// this: the drain runs after `run_and_close_sessions` returns, on the error path as much
 /// as the success one.
 ///
 /// The exit is therefore non-zero — `close`'s fenced branch returns its refusal
@@ -317,7 +317,7 @@ pub(super) fn holder_shutdown(
 /// So the arm appends `kind:"lease", event:"lost", side:"holder"` naming the
 /// winner, **before** it returns and thereby cancels the transport. It survives
 /// by the existing ordering rather than by a new guarantee: the ledger is
-/// drained at the very end of [`serve`](super::serve), after `run_and_close`, on the error
+/// drained at the very end of [`serve`](super::serve), after `run_and_close_sessions`, on the error
 /// path as much as the success one. [`crate::ledger::party_key`]'s fallback
 /// already files an unlisted event's other party under `counterparty`, which is
 /// what this is — a lease token, not a socket path.
@@ -409,7 +409,7 @@ pub(super) struct SessionClose<'a> {
     pub(super) event_pump: &'a tokio::task::JoinHandle<()>,
 }
 
-/// [`run_and_close`] over every attached session (#32 design §3.5): stages
+/// `run_and_close` over every attached session (#32 design §3.5): stages
 /// 1 and 2 are process-wide and run once; stage 3 closes every session
 /// concurrently, so one [`CLOSE_GRACE`] covers them all; stage 4 aborts every
 /// event pump.

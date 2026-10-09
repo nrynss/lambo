@@ -475,7 +475,7 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     // "was that a SECOND Ctrl-C?" escape hatch. Both readers must see one
     // count, which is exactly why `EarlyShutdown` is `Clone` over shared state.
     // #40: the shutdown's stage record, shared by the shutdown future (which
-    // starts stage 1), `run_and_close` (stages 1 to 4) and the tail below.
+    // starts stage 1), `run_and_close_sessions` (stages 1 to 4) and the tail below.
     // Its first stage starts the watchdog, an OS thread that aborts the
     // process if the shutdown outlives every one of its own timers; the
     // guard stands it down on every way out of this function.
