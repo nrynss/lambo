@@ -25,8 +25,12 @@ enum Commands {
     /// Run the MCP server for a session (primary artifact).
     Serve {
         /// Session id this process owns (single-writer model, spec §2.2).
+        /// Repeatable with --transport http: every session given is pinned
+        /// (attached at startup) and served at /mcp/s/<session>, beside
+        /// lambo.toml [serve] sessions; the first is the default, served at
+        /// /mcp. A stdio serve takes exactly one.
         #[arg(long)]
-        session: String,
+        session: Vec<String>,
         /// Agent identity this process writes as.
         #[arg(long, default_value = "lambo-serve")]
         agent: String,
@@ -557,16 +561,27 @@ fn main() -> ExitCode {
             // `--transport stdio`, stdout is the JSON-RPC channel and one stray
             // line on it corrupts the framing.
             lambo::mcp::init_tracing();
-            // `[serve]` parses but nothing enforces it yet (#32 PR 1 review
-            // L3); say so once. The file already loaded in
-            // `resolve_for_command`, so this re-read cannot newly fail, and a
-            // failure would only skip the notice.
-            if let Ok(file) = LamboFile::load_resolved(config) {
-                file.serve.warn_if_unenforced();
-            }
+            // `[serve]`: its pinned sessions are read below (#32 PR 4); the
+            // parts not yet enforced are named once (#32 PR 1 review L3). The
+            // file already loaded in `resolve_for_command`, so this re-read
+            // cannot newly fail; a failure would serve the `--session` values
+            // alone, which is what a serve without `[serve]` does.
+            let serve_table = LamboFile::load_resolved(config)
+                .map(|file| file.serve)
+                .unwrap_or_default();
+            serve_table.warn_if_unenforced();
 
             let transport = match transport.parse::<Transport>() {
                 Ok(t) => t,
+                Err(e) => {
+                    eprintln!("lambo serve: {e}");
+                    return ExitCode::from(2);
+                }
+            };
+            // #32 PR 4: the ordered union of `--session` and `[serve]
+            // sessions` (HTTP), or the one `--session` (stdio).
+            let pinned = match lambo::mcp::pin_sessions(&session, &serve_table, transport) {
+                Ok(p) => p,
                 Err(e) => {
                     eprintln!("lambo serve: {e}");
                     return ExitCode::from(2);
@@ -591,7 +606,8 @@ fn main() -> ExitCode {
             // the one `Err` arm at the end of this block rather than with two
             // different exit codes for the same class of mistake.
             let opts = ServeOptions {
-                session,
+                session: pinned.default,
+                sessions: pinned.sessions,
                 agent,
                 transport,
                 port,

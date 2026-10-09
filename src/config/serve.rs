@@ -1,10 +1,13 @@
 //! `[serve]` in `lambo.toml`: multi-session serving (#32 PR 1).
 //!
-//! This PR parses and validates the table and resolves credential tokens from
-//! the environment. **Nothing reads it at runtime yet**: a `lambo serve` with
-//! or without a `[serve]` table behaves exactly as it did before. PR 4 builds
-//! the session registry from `sessions` / `default_session`, PR 5 enforces
-//! `[[serve.credential]]`, PR 6 the bounds, PR 8 the `[[serve.projects]]` cwd
+//! PR 1 parsed and validated the table and resolves credential tokens from
+//! the environment. Since PR 4 an HTTP `lambo serve` pins `sessions` (beside
+//! its `--session` values), serves `default_session` at `/mcp` and enforces
+//! `max_attached` on the union (`crate::mcp::pin_sessions`). The rest is
+//! parsed and validated but **not enforced yet**, and a serve says so once
+//! ([`ServeConfig::warn_if_unenforced`]): PR 5 enforces
+//! `[[serve.credential]]`, PR 6 the on-demand bounds (`attach_concurrency`,
+//! `idle_detach_secs`, `per_session_rps`), PR 8 the `[[serve.projects]]` cwd
 //! map. See the approved design, issue #32, sections 6.1 and 7.1.
 //!
 //! ```toml
@@ -213,21 +216,47 @@ fn addressed(field: &str, value: &str) -> Result<AddressedSessionId, LamboError>
     })
 }
 
-/// What `lambo serve` logs once at startup when the file has a non-empty
-/// `[serve]` table: until #32's later PRs nothing reads it, and an operator who
-/// configured credentials must not think scoping is active. It quotes no value
-/// from the table.
+/// What `lambo serve` logs once at startup when the file sets a `[serve]`
+/// key this release does not enforce yet (credentials, the cwd map, the
+/// on-demand bounds): an operator who configured credentials must not think
+/// scoping is active. Followed by the key names that are set
+/// ([`ServeConfig::unenforced_keys`]); it quotes no value from the table.
 pub const SERVE_UNENFORCED_NOTICE: &str = "lambo.toml [serve] is parsed but not yet enforced \
-     in this release: its sessions, credentials and limits have no effect yet (#32), and this \
-     serve still authenticates only with --auth-token / LAMBO_AUTH_TOKEN";
+     for some keys in this release; they have no effect yet (#32), and this serve still \
+     authenticates only with --auth-token / LAMBO_AUTH_TOKEN";
 
 impl ServeConfig {
-    /// Log [`SERVE_UNENFORCED_NOTICE`] once if this table is not empty.
-    /// `lambo serve` calls it at startup; it never quotes a value.
+    /// Log [`SERVE_UNENFORCED_NOTICE`] once, naming the keys, if this table
+    /// sets any key [`ServeConfig::unenforced_keys`] lists. `lambo serve`
+    /// calls it at startup; it never quotes a value. `sessions`,
+    /// `default_session` and `max_attached` are enforced (#32 PR 4) and
+    /// alone raise no notice.
     pub fn warn_if_unenforced(&self) {
-        if !self.is_empty() {
-            tracing::warn!("{SERVE_UNENFORCED_NOTICE}");
+        let keys = self.unenforced_keys();
+        if !keys.is_empty() {
+            tracing::warn!(keys = %keys.join(", "), "{SERVE_UNENFORCED_NOTICE}");
         }
+    }
+
+    /// The keys this table sets that no `lambo serve` enforces yet, by name.
+    pub fn unenforced_keys(&self) -> Vec<&'static str> {
+        let mut keys = Vec::new();
+        if !self.credentials.is_empty() {
+            keys.push("[[serve.credential]]");
+        }
+        if !self.projects.is_empty() {
+            keys.push("[[serve.projects]]");
+        }
+        if self.attach_concurrency.is_some() {
+            keys.push("attach_concurrency");
+        }
+        if self.idle_detach_secs.is_some() {
+            keys.push("idle_detach_secs");
+        }
+        if self.per_session_rps.is_some() {
+            keys.push("per_session_rps");
+        }
+        keys
     }
 
     /// Is this the empty table (equivalently: no `[serve]` in the file)?
