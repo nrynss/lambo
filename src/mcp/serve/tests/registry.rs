@@ -100,6 +100,17 @@ fn new_registry_with(
     max_sessions: usize,
     host_check: HostCheck,
 ) -> Arc<SessionRegistry> {
+    new_registry_ledgered(sessions, backends, max_sessions, host_check, None)
+}
+
+/// [`new_registry_with`] whose sessions append to `ledger`.
+fn new_registry_ledgered(
+    sessions: &[&str],
+    backends: ResolvedBackends,
+    max_sessions: usize,
+    host_check: HostCheck,
+    ledger: Option<Arc<crate::ledger::Ledger>>,
+) -> Arc<SessionRegistry> {
     let opts = ServeOptions::new(sessions[0], "agent-a");
     let early = EarlyShutdown::unarmed();
     let store_cfg = backends.store_cfg.clone();
@@ -118,7 +129,7 @@ fn new_registry_with(
         Some(SessionAttacher {
             template,
             store_cfg,
-            ledger: None,
+            ledger,
             max_sessions,
             host_check,
             agent: "agent-a".into(),

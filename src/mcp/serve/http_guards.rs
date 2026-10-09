@@ -613,6 +613,16 @@ pub(super) async fn guard_request(
     };
     let credential = Arc::clone(&grant);
     let mut req = req;
+    // A configured credential's name, for the call ledger (#32 PR 5 review
+    // I6); the legacy `default` and the implicit `local` leave no mark.
+    if credential.name() != crate::surface::session::LEGACY_CREDENTIAL_NAME
+        && credential.name() != crate::surface::session::LOCAL_CREDENTIAL_NAME
+    {
+        req.extensions_mut()
+            .insert(crate::mcp::server::CallCredential(Arc::from(
+                credential.name(),
+            )));
+    }
     req.extensions_mut().insert(Authenticated(grant));
 
     if let Some(rate) = &guard.rate

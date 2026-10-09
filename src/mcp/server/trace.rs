@@ -4,6 +4,7 @@
 //! line per call when a ledger is attached.
 
 use std::future::Future;
+use std::sync::Arc;
 use std::time::Instant;
 
 use rmcp::model::CallToolResult;
@@ -39,6 +40,33 @@ tokio::task_local! {
     /// Established by [`LamboServer::observed`] for the duration of one tool
     /// call, and only when a ledger is listening.
     static TRACE: std::cell::RefCell<CallTrace>;
+
+    /// The configured credential the current tool call arrived as, set by
+    /// `call_tool` for the whole call (#32 PR 5 review I6).
+    static CALLER: Option<Arc<str>>;
+}
+
+/// The configured `[[serve.credential]]` an HTTP request authenticated as,
+/// by name, never by token (#32 PR 5 review I6). The serve's guard puts it
+/// in the request's extensions, rmcp hands the request parts to the tool
+/// call, and a ledgered call line carries it as `credential`.
+///
+/// Set only for a configured credential: the legacy `default` and the
+/// implicit `local` leave no mark, so a serve that uses only those (a
+/// one-session serve, the dogfood rig) writes byte-for-byte the lines it
+/// always wrote, and a line without the field means one of those two (or
+/// stdio).
+#[derive(Clone, Debug)]
+pub(crate) struct CallCredential(pub(crate) Arc<str>);
+
+/// Run one tool call with `caller` as its credential.
+pub(super) async fn with_caller<F: Future>(caller: Option<Arc<str>>, call: F) -> F::Output {
+    CALLER.scope(caller, call).await
+}
+
+/// The current call's configured credential, if any.
+fn caller() -> Option<Arc<str>> {
+    CALLER.try_with(Clone::clone).ok().flatten()
 }
 
 /// The I1 `lambo_recall` payload facts: the query, the top-k hits with **final
@@ -325,7 +353,7 @@ impl LamboServer {
                     (true, _) => "error",
                     (false, _) => "ok",
                 };
-                ledger.append(&crate::ledger::call_line(
+                let mut line = crate::ledger::call_line(
                     tool,
                     &agent_id,
                     outcome,
@@ -339,7 +367,15 @@ impl LamboServer {
                     },
                     duration_us,
                     facts,
-                ));
+                );
+                // Additive, and only for a configured credential (see
+                // `CallCredential`).
+                if let Some(credential) = caller()
+                    && let Some(obj) = line.as_object_mut()
+                {
+                    obj.insert("credential".into(), json!(&*credential));
+                }
+                ledger.append(&line);
                 out
             })
             .await

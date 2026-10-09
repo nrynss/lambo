@@ -533,3 +533,53 @@ async fn a_credential_at_its_share_does_not_lock_out_another() {
     assert!(closed.status < 300, "{} {}", closed.status, closed.body);
     initialize_as(addr, path, Some(&scoped)).await;
 }
+
+/// #32 PR 5 review I6: a ledgered call line names the configured
+/// credential the call arrived as (`credential`, its name, never a token),
+/// and a call as the legacy `default` writes the line it always wrote, with
+/// no such field.
+#[tokio::test]
+async fn a_call_line_names_its_configured_credential_and_default_none() {
+    let dir = crate::test_util::ScratchDir::new("lambo-pr5-ledger");
+    let path = dir.join("calls.jsonl");
+    let ledger = crate::ledger::Ledger::open(path.clone());
+
+    let mut opts = ServeOptions::new(LIVE, "agent-a");
+    opts.sessions = vec![LIVE.to_string()];
+    opts.transport = Transport::Http;
+    opts.auth_token = Some(SecretToken::new(token("legacy")).expect("non-empty"));
+    opts.credentials = vec![credential("scoped", &[LIVE], None, false)];
+    let authority = authority_for(&opts);
+    let registry = new_registry_ledgered(
+        &[LIVE],
+        backends_over(Box::new(MemoryStore::new()), fast_config(1_000)),
+        8,
+        HostCheck::for_authority(Some(&authority)),
+        Some(Arc::clone(&ledger)),
+    );
+    attach_or_hold(&registry, LIVE).await;
+    registry.mark_started();
+    let addr = serve_app(guarded_app(Arc::clone(&registry), authority, 8)).await;
+
+    for who in ["scoped", "legacy"] {
+        let auth = bearer(who);
+        let (mcp_id, _) = initialize_as(addr, "/mcp", Some(&auth)).await;
+        let reply = http_as(addr, "POST", "/mcp", Some(&auth), Some(&mcp_id), STATS_CALL).await;
+        assert_eq!(reply.status, 200, "{who}: {}", reply.body);
+    }
+    ledger.shutdown();
+
+    let text = std::fs::read_to_string(&path).expect("the ledger");
+    let calls: Vec<serde_json::Value> = text
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("a JSON line"))
+        .filter(|l: &serde_json::Value| l["kind"] == "call")
+        .collect();
+    assert_eq!(calls.len(), 2, "{text}");
+    assert_eq!(calls[0]["credential"], "scoped", "{text}");
+    assert!(calls[1].get("credential").is_none(), "{text}");
+    assert!(
+        !text.contains("fake-"),
+        "a token reached the ledger: {text}"
+    );
+}
