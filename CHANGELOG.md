@@ -195,7 +195,10 @@
   (`image`), which side computed the vector (`server` or `client`), the MIME
   type when known and, for a server-embedded image, the hex sha256 of the
   bytes; never the bytes. Every store round-trips it, a read access leaves
-  it alone, and erasing a session erases it with the concept row. A stored
+  it alone, and erasing a session erases it with the concept row. When an
+  embedding contract change quarantines a session's vectors, the sources
+  are kept: the concept stays marked as image-sourced with no vector, so
+  a later re-embed cannot give it a vector of its caption. A stored
   value this build cannot read fails the load rather than reading as
   unset. Nothing writes it yet: image derives arrive in a later release.
 - `lambo::surface::image::validate` (#22): the image rule every surface will

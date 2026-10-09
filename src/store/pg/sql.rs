@@ -78,7 +78,9 @@ ON CONFLICT (id) DO UPDATE SET
 /// `human_confirmed` (C2 solo-score input) is the 17th, bound as an INT count;
 /// `embedding_source` (#22 supplied-vector provenance, compact JSON) is the
 /// 18th, bound as nullable text. It is in the `DO UPDATE SET` list because it
-/// describes `embedding`, which is too.
+/// describes `embedding`, which is too: a whole-record upsert that sets a
+/// concept's source to `None` clears it. The embedding quarantine
+/// ([`QUARANTINE_LEGACY_EMBEDDINGS_SQL`]) is not an upsert and keeps it.
 ///
 /// **R2-1 — canonization columns are insert-only here.**
 /// `canonization_status` / `blast_radius` / `last_demotion_time` are in the
@@ -166,6 +168,13 @@ UPDATE sessions SET root_goal = $2::JSONB WHERE session_id = $1
 /// `BLOB` has no such authority, which is why only it needs the wider rule. Widen this
 /// statement too if Cockroach's width ever becomes configurable per deployment (B2's
 /// Postgres split is where that would land).
+///
+/// **The quarantine nulls `embedding` only; `embedding_source` is kept** (#22
+/// review L1, decided). A quarantined image concept is still an image
+/// concept: keeping its source stops a later `re-embed --missing-only` from
+/// giving it a vector of its caption. A concept can therefore load with a
+/// source and no vector, and PR 3's re-embed treats that as "image vector
+/// missing", not as a text concept.
 pub(super) const QUARANTINE_LEGACY_EMBEDDINGS_SQL: &str = r#"
 UPDATE concepts SET embedding = NULL
 WHERE session_id = $1 AND EXISTS (

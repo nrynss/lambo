@@ -498,8 +498,9 @@ fn human_confirmed_rides_the_concept_upsert_and_select_shape() {
 /// #22 PR 2 (no live cluster: SQL text is the contract). A supplied
 /// vector's provenance must ride the whole statement path on Cockroach:
 /// bound as the LAST (18th) concept column, carried by `DO UPDATE SET`
-/// with the vector it describes (so nulling an image vector also clears
-/// its source), and read back by name. The sqlite adapter reads it
+/// with the vector it describes (so an upsert that clears the source clears
+/// the column; the embedding quarantine, which is not an upsert, keeps it),
+/// and read back by name. The sqlite adapter reads it
 /// positionally (`try_get(17)`), so an order regression shows there.
 #[test]
 fn embedding_source_rides_the_concept_upsert_and_select_shape() {

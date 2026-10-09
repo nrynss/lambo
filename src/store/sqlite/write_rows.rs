@@ -698,6 +698,10 @@ pub(super) async fn set_root_goal(
 /// reason is honest rather than structural: this worktree has no Cockroach DSN, so
 /// a change to that statement could not be executed, and an unrun SQL edit is
 /// worse than a documented asymmetry.)
+///
+/// Like the pg family's quarantine, this nulls `embedding` only and keeps
+/// `embedding_source` (#22 review L1): a quarantined image concept stays an
+/// image concept, so a later re-embed cannot give it a caption vector.
 pub(super) async fn set_embedding(
     tx: &mut sqlx::SqliteConnection,
     session: &SessionId,

@@ -1740,3 +1740,65 @@ async fn an_unreadable_embedding_source_fails_the_load() {
     assert!(matches!(err, StoreError::Invariant(_)), "{err:?}");
     assert!(err.to_string().contains("embedding_source"), "{err}");
 }
+
+/// #22 review L1 (decided): SQLite also quarantines on a width restamp, and
+/// like the first-stamp quarantine the shared check covers, it nulls the
+/// vector and keeps the source, so the concept stays an image concept.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_width_restamp_nulls_the_vector_and_keeps_its_source() {
+    let store = test_store();
+    store.init_schema().await.unwrap();
+    let sid = SessionId::from("embedding-source-width");
+    crate::store::embedding_source_testkit::check_embedding_source_round_trip(
+        &store, &sid, 4, None,
+    )
+    .await;
+    let sourced = |snap: &GraphSnapshot| {
+        snap.concepts
+            .iter()
+            .find(|c| c.embedding_source.is_some())
+            .cloned()
+            .expect("the shared check leaves a sourced concept")
+    };
+    let mut concept = sourced(&store.load_session(&sid).await.unwrap());
+    let source = concept.embedding_source.clone();
+    concept.embedding = Some(vec![1.0, 2.0, 3.0, 4.0]);
+    let contract = |dim| EmbeddingContract {
+        kind: "fixture".into(),
+        model: Some("embedding-source-test".into()),
+        dim,
+    };
+    let batch = |mutations| MutationBatch {
+        mutations,
+        ..Default::default()
+    };
+    store
+        .flush(
+            &batch(vec![Mutation::UpsertNode {
+                node: crate::types::Node::Concept(concept.clone()),
+            }]),
+            None,
+        )
+        .await
+        .unwrap();
+    let restamped = sourced(&store.load_session(&sid).await.unwrap());
+    assert!(restamped.embedding.is_some(), "the 4-wide vector landed");
+    store
+        .flush(
+            &batch(vec![Mutation::SetEmbedding {
+                session_id: sid.clone(),
+                embedding: Some(contract(5)),
+            }]),
+            None,
+        )
+        .await
+        .unwrap();
+    let loaded = store.load_session(&sid).await.unwrap();
+    let after = loaded
+        .concepts
+        .iter()
+        .find(|c| c.id == concept.id)
+        .expect("still there");
+    assert_eq!(after.embedding, None, "the width restamp quarantined it");
+    assert_eq!(after.embedding_source, source, "and kept its source");
+}

@@ -38,9 +38,20 @@ MIME string (`"image/png"`), with `From` conversions both ways to
 
 **The column rides the conflict update.** It describes `embedding`, which the
 whole-record upsert already rewrites, so an upsert that nulls an image vector
-(PR 3's `re-embed --drop-image-vectors`) also clears its source. The #30 narrow
-`RecordAccess` update writes two columns and never touches it. The shared check
-proves both on every adapter.
+*and* sets its source to `None` (PR 3's `re-embed --drop-image-vectors`)
+clears the column. The #30 narrow `RecordAccess` update writes two columns and
+never touches it. The shared check proves both on every adapter.
+
+**The embedding quarantine keeps the source** (review L1, decided). The
+quarantine (`UPDATE concepts SET embedding = NULL`, run on a first contract
+stamp on every adapter and on a width restamp on SQLite; the Memory adapter's
+`SetEmbedding` matches) nulls the vector only. A quarantined image concept is
+still an image concept, and keeping its source stops a later
+`re-embed --missing-only` from giving it a vector of its caption. So a concept
+can load with `embedding_source = Some(..)` and `embedding = None`; PR 3 must
+treat that as "image vector missing", never as a text concept. The shared
+check restamps the contract and asserts the vectors are gone and the sources
+kept, on every adapter; a SQLite test covers the width restamp.
 
 **SQLite concept chunk 58 to 55.** 58 × 18 = 1044 breaches the conservative
 999-bind ceiling the R1-4 const-assert guards; 55 × 18 = 990. The pg family's

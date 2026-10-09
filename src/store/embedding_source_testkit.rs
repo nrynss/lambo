@@ -1,6 +1,7 @@
 //! #22 PR 2: one check, run by every adapter, that a concept's
 //! `embedding_source` survives flush and load, is cleared by an upsert that
-//! clears it, and is left alone by the narrow read-access update (#30).
+//! clears it, and is left alone by the narrow read-access update (#30) and by
+//! the embedding quarantine (which nulls the vector only).
 //!
 //! The SQLite and in-memory adapters run it in CI, Postgres in a live
 //! `#[ignore]` test, and Cockroach inside its live conformance suite.
@@ -108,7 +109,8 @@ async fn loaded(store: &dyn GraphStore, sid: &SessionId, id: NodeId) -> Concept 
 /// Plant three concepts in `sid` (a fresh id): a server-embedded image, a
 /// client-submitted vector, and a plain text concept. Check that each
 /// `embedding_source` loads back exactly, that a `RecordAccess` leaves it
-/// alone, and that an upsert which nulls the vector and its source (what
+/// alone, that the embedding quarantine nulls the vectors but keeps the
+/// sources, and that an upsert which nulls the vector and its source (what
 /// `re-embed --drop-image-vectors` will write, #22 PR 3) clears it. `dim` is
 /// the store's vector width; `token` is the flush fencing token, if the
 /// store wants one.
@@ -213,6 +215,42 @@ pub(crate) async fn check_embedding_source_round_trip(
         Some(client_source()),
         "a read access must not touch the source"
     );
+
+    // #22 decision (review L1): the embedding quarantine nulls vectors but
+    // KEEPS their source. A concept whose image vector was quarantined is
+    // still an image concept: a later `re-embed --missing-only` (PR 3) must
+    // not hand it a vector of its caption. Clearing the contract and
+    // restamping it is the quarantine every adapter runs (the first-stamp
+    // legacy upgrade); SQLite also runs it on a width restamp, checked in
+    // its own tests.
+    let contract = EmbeddingContract {
+        kind: "fixture".into(),
+        model: Some("embedding-source-test".into()),
+        dim,
+    };
+    for embedding in [None, Some(contract)] {
+        flush(
+            store,
+            vec![Mutation::SetEmbedding {
+                session_id: sid.clone(),
+                embedding,
+            }],
+            token,
+        )
+        .await;
+    }
+    for (id, source) in [
+        (server, Some(server_source())),
+        (client, Some(client_source())),
+        (text, None),
+    ] {
+        let quarantined = loaded(store, sid, id).await;
+        assert_eq!(quarantined.embedding, None, "the restamp quarantined {id}");
+        assert_eq!(
+            quarantined.embedding_source, source,
+            "the quarantine keeps the source of {id}"
+        );
+    }
 
     // A whole-record upsert carries the column in its conflict update.
     let mut dropped = server_c.clone();
