@@ -14,6 +14,7 @@
 
 use async_trait::async_trait;
 use reqwest::header::{HeaderValue, AUTHORIZATION};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -88,6 +89,31 @@ pub(crate) fn classify_status(code: u16) -> EmbedStatusClass {
         code if (500..=599).contains(&code) => EmbedStatusClass::Transient,
         // Everything else: no rule, so conservatively transient AND logged.
         _ => EmbedStatusClass::Unclassified,
+    }
+}
+
+/// What a status rule decided about one non-success response (#22 PR 5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StatusVerdict {
+    pub(crate) class: EmbedStatusClass,
+    /// Operator guidance appended to the error, for a response whose body
+    /// names a known deployment or content fault.
+    pub(crate) hint: Option<&'static str>,
+}
+
+/// A status rule: the status code and the (scrubbed, capped) error body in,
+/// the class out. The class is still decided at the site that read the
+/// response and carried out as an [`EmbedError`] variant (J1-R2-2); a rule
+/// only lets an adapter that knows its server's bodies refine the table for
+/// a request shape the table was not written for (the EmbeddingGemma 2
+/// image call, whose `500` can be a permanent deployment fault).
+pub(crate) type StatusRule = fn(u16, &str) -> StatusVerdict;
+
+/// The J3 table, as a [`StatusRule`]: the body is not consulted.
+pub(crate) fn default_status_rule(code: u16, _body: &str) -> StatusVerdict {
+    StatusVerdict {
+        class: classify_status(code),
+        hint: None,
     }
 }
 
@@ -406,7 +432,28 @@ impl BgeM3LlamaCppEmbedder {
             model: model.to_string(),
             input: text.to_string(),
         };
-        let mut req = self.client.post(&self.url).json(&body);
+        self.post_json(&body, model, default_status_rule).await
+    }
+
+    /// POST `body` as JSON to the embeddings endpoint and parse a success
+    /// response as `R`; the transport half of [`Self::request_embedding`],
+    /// shared with the EmbeddingGemma 2 layer (#22 PR 5), which sends its own
+    /// request shapes over this client. Everything #21 promises holds here:
+    /// the bearer header, no redirects, the capped and scrubbed error body,
+    /// URLs printed without userinfo or query. `model` only labels messages.
+    /// `rule` classifies a non-success status (normally
+    /// [`default_status_rule`]).
+    pub(crate) async fn post_json<B, R>(
+        &self,
+        body: &B,
+        model: &str,
+        rule: StatusRule,
+    ) -> Result<R, EmbedError>
+    where
+        B: Serialize + ?Sized,
+        R: DeserializeOwned,
+    {
+        let mut req = self.client.post(&self.url).json(body);
         if let Some(auth) = &self.authorization {
             req = req.header(AUTHORIZATION, auth.clone());
         }
@@ -449,9 +496,11 @@ impl BgeM3LlamaCppEmbedder {
             let (body, truncated) = self.capped_error_body(resp).await;
             self.without_token(&body, truncated)
         };
-        match classify_status(code) {
+        let verdict = rule(code, &text_body);
+        let hint = verdict.hint.unwrap_or("");
+        match verdict.class {
             EmbedStatusClass::Transient => Err(EmbedError::Unavailable(format!(
-                "llama.cpp is momentarily unwilling ({status}) for model {model:?}: {text_body}"
+                "llama.cpp is momentarily unwilling ({status}) for model {model:?}: {text_body}{hint}"
             ))),
             EmbedStatusClass::Unclassified => {
                 // The table does not name this status. Conservative: treat it
@@ -466,7 +515,7 @@ impl BgeM3LlamaCppEmbedder {
                 );
                 Err(EmbedError::Unavailable(format!(
                     "llama.cpp answered {status} (unclassified by the J3 status rule table) for \
-                     model {model:?}: {text_body}"
+                     model {model:?}: {text_body}{hint}"
                 )))
             }
             EmbedStatusClass::Content => {
@@ -477,7 +526,8 @@ impl BgeM3LlamaCppEmbedder {
                     "llama.cpp refused this content ({status}); not retrying (CON-2)"
                 );
                 Err(EmbedError::Backend(format!(
-                    "llama.cpp refused this content with {status} for model {model:?}: {text_body}"
+                    "llama.cpp refused this content with {status} for model {model:?}: \
+                     {text_body}{hint}"
                 )))
             }
             EmbedStatusClass::PermanentConfig => {
@@ -494,7 +544,7 @@ impl BgeM3LlamaCppEmbedder {
                 );
                 Err(EmbedError::Backend(format!(
                     "llama.cpp answered {status} (permanent configuration error) for model \
-                     {model:?}: {text_body}"
+                     {model:?}: {text_body}{hint}"
                 )))
             }
         }
