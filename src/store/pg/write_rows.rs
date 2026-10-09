@@ -60,6 +60,9 @@ pub(super) async fn bulk_upsert_concepts(
     }
     let mut embeddings: Vec<Option<String>> = Vec::with_capacity(rows.len());
     for r in rows {
+        if let Some(source) = &r.concept.embedding_source {
+            source.check_writable(r.concept.id)?;
+        }
         embeddings.push(match &r.concept.embedding {
             Some(v) => Some(encode_vector(v)?),
             None => None,

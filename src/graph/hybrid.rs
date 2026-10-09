@@ -396,6 +396,7 @@ fn new_concept(
         last_demotion_time: None,
         embedding,
         human_confirmed: 0,
+        embedding_source: None,
         chunk_group_id: None,
     }
 }

@@ -4,6 +4,17 @@
 
 ### Breaking
 
+- `Concept` gains a public field, `embedding_source: Option<EmbeddingSource>`
+  (#22). Code that builds a `Concept` with a struct literal must add
+  `embedding_source: None`; code that reads or deserializes one is
+  unaffected (the field is serde-defaulted and omitted when `None`, so
+  fixture JSON and every output that prints a concept are unchanged).
+- Stores gain a nullable `concepts.embedding_source` column (#22). An
+  existing SQLite, Postgres or Cockroach store must be re-provisioned with
+  `lambo provision` before this build attaches: the column preflight refuses
+  it by name until then, as it did for `human_confirmed`. Provisioning only
+  adds the column; existing rows read `NULL`, meaning embedded from their
+  own content.
 - `EmbedError` gains a variant, `Unsupported` (#22): an embedder refusing a
   kind of input it cannot embed at all, such as an image sent to a text-only
   model. `is_transient()` classes it as permanent. `EmbedError` is also now
@@ -186,6 +197,20 @@
     refuses with `EmbedError::Unsupported`.
   A wrapper that delegates to another embedder should forward all three, and
   `as_any`; one that implements only `embed` inherits the defaults.
+- `EmbeddingSource` (#22): where a concept's vector came from when it is not
+  an embedding of its own content, persisted per concept in the new
+  `concepts.embedding_source` column as compact JSON. It holds the modality
+  (`image`), which side computed the vector (`server` or `client`), the MIME
+  type when known and, for a server-embedded image, the hex sha256 of the
+  bytes; never the bytes. Every store round-trips it, a read access leaves
+  it alone, and erasing a session erases it with the concept row. When an
+  embedding contract change quarantines a session's vectors, the sources
+  are kept: the concept stays marked as image-sourced with no vector, so
+  a later re-embed cannot give it a vector of its caption. `lambo
+  re-embed` (both modes) refuses a session in which any concept has a
+  source, before any write, until it learns to handle supplied vectors. A stored
+  value this build cannot read fails the load rather than reading as
+  unset. Nothing writes it yet: image derives arrive in a later release.
 - `lambo::surface::image::validate` (#22): the image rule every surface will
   share, and the only constructor of `ImageInput`. The declared type must be
   exactly `image/png`, `image/jpeg` or `image/webp`; the bytes must be

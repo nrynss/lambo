@@ -430,7 +430,7 @@ pub(super) async fn upsert_concepts(
              id, session_id, content, canonical_key, concept_type, origin_interaction, \
              origin_agent, created_at, access_count, last_accessed, gc_survived, \
              canonization_status, blast_radius, last_demotion_time, embedding, \
-             chunk_group_id, human_confirmed) ",
+             chunk_group_id, human_confirmed, embedding_source) ",
     );
     qb.push_values(rows.iter().zip(encoded.iter()), |mut b, (r, enc)| {
         let c = r.concept;
@@ -450,7 +450,8 @@ pub(super) async fn upsert_concepts(
             .push_bind(r.canonization.last_demotion_time.map(ts_to_text))
             .push_bind(enc.embedding.clone())
             .push_bind(c.chunk_group_id.clone())
-            .push_bind(c.human_confirmed);
+            .push_bind(c.human_confirmed)
+            .push_bind(enc.embedding_source.clone());
     });
     // Conflict target is the `id` PRIMARY KEY. The partial unique index
     // (session_id, canonical_key) WHERE concept_type <> 'Observation' is NOT a
@@ -479,7 +480,8 @@ pub(super) async fn upsert_concepts(
              gc_survived = excluded.gc_survived, \
              embedding = excluded.embedding, \
              chunk_group_id = excluded.chunk_group_id, \
-             human_confirmed = excluded.human_confirmed",
+             human_confirmed = excluded.human_confirmed, \
+             embedding_source = excluded.embedding_source",
     );
     qb.build()
         .execute(&mut *tx)
@@ -544,6 +546,10 @@ pub(super) struct ConceptBinds {
     /// codec), stored in the BLOB column; never NULL for a present vector, NULL
     /// otherwise.
     embedding: Option<Vec<u8>>,
+    /// #22: the supplied vector's provenance as compact JSON, NULL for a
+    /// concept embedded from its own text. Rides with `embedding` on every
+    /// upsert, since it describes that vector.
+    embedding_source: Option<String>,
 }
 
 pub(super) fn concept_binds(r: &ConceptRow<'_>) -> Result<ConceptBinds, StoreError> {
@@ -555,6 +561,15 @@ pub(super) fn concept_binds(r: &ConceptRow<'_>) -> Result<ConceptBinds, StoreErr
             .embedding
             .as_ref()
             .map(|v| encode_vector_blob(v))
+            .transpose()?,
+        embedding_source: r
+            .concept
+            .embedding_source
+            .as_ref()
+            .map(|s| {
+                s.check_writable(r.concept.id)?;
+                Ok::<_, StoreError>(s.to_column())
+            })
             .transpose()?,
     })
 }
@@ -686,6 +701,10 @@ pub(super) async fn set_root_goal(
 /// reason is honest rather than structural: this worktree has no Cockroach DSN, so
 /// a change to that statement could not be executed, and an unrun SQL edit is
 /// worse than a documented asymmetry.)
+///
+/// Like the pg family's quarantine, this nulls `embedding` only and keeps
+/// `embedding_source` (#22 review L1): a quarantined image concept stays an
+/// image concept, so a later re-embed cannot give it a caption vector.
 pub(super) async fn set_embedding(
     tx: &mut sqlx::SqliteConnection,
     session: &SessionId,

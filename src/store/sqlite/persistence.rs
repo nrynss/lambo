@@ -62,9 +62,11 @@ use crate::types::{CanonizationEvent, GcMark, Mutation, MutationBatch, SessionId
 pub(super) const BULK_LIMITS: BulkLimits = BulkLimits {
     interactions: 100,
     // C2 added a 17th concept column (`human_confirmed`); 60 × 17 = 1020
-    // breaches the conservative 999-variable ceiling, so the chunk drops to 58
-    // (58 × 17 = 986) to keep the R1-4 assert honest on pre-3.32 SQLite.
-    concepts: 58,
+    // breaches the conservative 999-variable ceiling, so the chunk dropped to
+    // 58 (58 × 17 = 986). #22 added an 18th (`embedding_source`): 58 × 18 =
+    // 1044 breaches it again, so the chunk is 55 (55 × 18 = 990) to keep the
+    // R1-4 assert honest on pre-3.32 SQLite.
+    concepts: 55,
     edges: 99,
     // Issue #30: 4 binds per row; 240 × 4 = 960.
     accesses: 240,
@@ -75,7 +77,7 @@ pub(super) const BULK_LIMITS: BulkLimits = BulkLimits {
 pub(super) const SQLITE_MAX_VARIABLE_NUMBER: usize = 999;
 
 // R1-4: the arithmetic in the doc comment above is prose, and prose does not
-// fail a build. Raising `concepts` past the 58-row chunk (see `BULK_LIMITS`)
+// fail a build. Raising `concepts` past the 55-row chunk (see `BULK_LIMITS`)
 // passes the whole local suite against a modern bundled SQLite and only breaks
 // on an old one, in production. These turn that into a compile error.
 const _: () = assert!(

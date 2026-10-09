@@ -78,6 +78,10 @@ pub mod flush;
 pub mod lease;
 // #23 — session erasure: report, tombstone and the shared lease gate.
 pub mod erase;
+// #22 PR 2 — the shared flush/load round-trip check for a concept's
+// `embedding_source`, run by every adapter's tests.
+#[cfg(test)]
+pub(crate) mod embedding_source_testkit;
 // #18 — the recall tier: `[recall]` config and its registry arm. Always
 // compiled, so a build without the tier refuses the section by name.
 pub mod recall_tier;

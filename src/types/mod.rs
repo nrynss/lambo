@@ -374,6 +374,163 @@ pub struct Concept {
     /// existing fixture JSON loads unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chunk_group_id: Option<String>,
+    /// Where [`Self::embedding`] came from when it is **not** a function of
+    /// [`Self::content`] (#22). `None` means the vector, if any, was embedded
+    /// from this concept's own content text, which is every concept a text
+    /// write path makes.
+    ///
+    /// `Some` marks a supplied vector (an image embedding today). Re-embed and
+    /// the merge rules read it so they never replace an image vector with a
+    /// vector of its caption. It holds provenance only, never image bytes.
+    /// Serde-defaulted and skipped when `None`, so existing fixture JSON and
+    /// every wire shape that serializes a concept are unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding_source: Option<EmbeddingSource>,
+}
+
+/// Provenance of a concept's supplied vector (#22, design §4.3).
+///
+/// Persisted as compact JSON in the nullable `concepts.embedding_source`
+/// column. It never carries image bytes or base64: only the modality, which
+/// side computed the vector, the MIME type when known and, for a vector the
+/// server computed from bytes it saw, the hex sha256 of those bytes. All of it
+/// lives on the concept row, so erasing the session erases it.
+///
+/// Unknown keys are refused on decode, so a value written by a newer build
+/// fails loudly here instead of being dropped by the next upsert.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EmbeddingSource {
+    /// What the vector was computed from.
+    pub modality: SourceModality,
+    /// Which side computed the vector.
+    pub origin: VectorOrigin,
+    /// Lowercase hex sha256 of the bytes the server embedded. `None` for a
+    /// client-submitted vector, where the server never saw the bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    /// The source's MIME type, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime: Option<ImageMimeWire>,
+}
+
+/// The modality of a supplied vector's source. Image is the only one today.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceModality {
+    /// An image embedding.
+    Image,
+}
+
+/// Which side computed a supplied vector.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VectorOrigin {
+    /// The server embedded bytes it was sent.
+    Server,
+    /// A client computed the vector and submitted it.
+    Client,
+}
+
+/// The persisted spelling of [`crate::embed::ImageMime`]: the MIME string
+/// itself, so the stored JSON reads `"image/png"`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ImageMimeWire {
+    /// `image/png`.
+    #[serde(rename = "image/png")]
+    Png,
+    /// `image/jpeg`.
+    #[serde(rename = "image/jpeg")]
+    Jpeg,
+    /// `image/webp`.
+    #[serde(rename = "image/webp")]
+    Webp,
+}
+
+impl From<crate::embed::ImageMime> for ImageMimeWire {
+    fn from(mime: crate::embed::ImageMime) -> Self {
+        use crate::embed::ImageMime;
+        match mime {
+            ImageMime::Png => Self::Png,
+            ImageMime::Jpeg => Self::Jpeg,
+            ImageMime::Webp => Self::Webp,
+        }
+    }
+}
+
+impl From<ImageMimeWire> for crate::embed::ImageMime {
+    fn from(mime: ImageMimeWire) -> Self {
+        match mime {
+            ImageMimeWire::Png => Self::Png,
+            ImageMimeWire::Jpeg => Self::Jpeg,
+            ImageMimeWire::Webp => Self::Webp,
+        }
+    }
+}
+
+impl EmbeddingSource {
+    /// Refuse to persist a source whose sha256 is not 64 lowercase hex
+    /// characters. [`Self::from_column`] refuses one on load, so writing it
+    /// would make the whole session unloadable; refusing the write keeps the
+    /// bad value out of the store. Every store's concept write calls this
+    /// before [`Self::to_column`].
+    pub fn check_writable(&self, concept: impl fmt::Display) -> Result<(), StoreError> {
+        match &self.sha256 {
+            Some(digest) if !is_lowercase_sha256_hex(digest) => {
+                Err(StoreError::Invariant(format!(
+                    "concept {concept}: refusing to store an embedding_source whose sha256 is not \
+                 64 lowercase hex characters ({} bytes)",
+                    digest.len()
+                )))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// The compact JSON a store persists in `concepts.embedding_source`.
+    pub fn to_column(&self) -> String {
+        // A struct of strings and unit enums cannot fail to serialize.
+        serde_json::to_string(self).expect("EmbeddingSource serializes")
+    }
+
+    /// Decode a stored `concepts.embedding_source` value. A value that does
+    /// not parse is an error, never `None`: reading it as `None` would let a
+    /// re-embed overwrite the supplied vector with a vector of the caption.
+    /// `concept` names the row in the error, which also names the way out
+    /// (upgrade, or `lambo erase-session`; #22 review L4).
+    pub fn from_column(raw: &str, concept: impl fmt::Display) -> Result<Self, StoreError> {
+        let source: Self = serde_json::from_str(raw).map_err(|e| {
+            StoreError::Invariant(format!(
+                "concept {concept}: concepts.embedding_source does not decode ({e}). \
+                 A newer Lambo build probably wrote it: upgrade to that build or later \
+                 to load this session, or discard the session with \
+                 `lambo erase-session`, which does not need to load it"
+            ))
+        })?;
+        // Review I1: the digest is held to its documented form on the way in,
+        // so nothing downstream sees a sha256 that is not one.
+        if let Some(digest) = &source.sha256
+            && !is_lowercase_sha256_hex(digest)
+        {
+            return Err(StoreError::Invariant(format!(
+                "concept {concept}: concepts.embedding_source has a malformed sha256 \
+                 (expected 64 lowercase hex characters, got {} bytes). Lambo never writes \
+                 a malformed one, so the row was changed outside Lambo: repair it, or \
+                 discard the session with `lambo erase-session`",
+                digest.len()
+            )));
+        }
+        Ok(source)
+    }
+}
+
+/// 64 lowercase hex characters: the only form [`EmbeddingSource::sha256`]
+/// takes.
+fn is_lowercase_sha256_hex(digest: &str) -> bool {
+    digest.len() == 64
+        && digest
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// Either kind of graph node.
@@ -1387,6 +1544,7 @@ mod tests {
             last_demotion_time: None,
             embedding: None,
             human_confirmed: 0,
+            embedding_source: None,
             chunk_group_id: None,
         };
         let node = Node::Concept(c.clone());
@@ -1677,5 +1835,153 @@ mod tests {
                 seconds_inactive: 7
             }
         );
+    }
+
+    /// #22 PR 2: the column value is compact JSON with a pinned spelling, it
+    /// round-trips, and the digest and MIME are omitted when absent.
+    #[test]
+    fn embedding_source_column_spelling_is_pinned_and_round_trips() {
+        let server = EmbeddingSource {
+            modality: SourceModality::Image,
+            origin: VectorOrigin::Server,
+            sha256: Some("ab".repeat(32)),
+            mime: Some(ImageMimeWire::Png),
+        };
+        let raw = server.to_column();
+        assert_eq!(
+            raw,
+            format!(
+                r#"{{"modality":"image","origin":"server","sha256":"{}","mime":"image/png"}}"#,
+                "ab".repeat(32)
+            )
+        );
+        assert_eq!(EmbeddingSource::from_column(&raw, "c1").unwrap(), server);
+
+        let client = EmbeddingSource {
+            modality: SourceModality::Image,
+            origin: VectorOrigin::Client,
+            sha256: None,
+            mime: None,
+        };
+        assert_eq!(
+            client.to_column(),
+            r#"{"modality":"image","origin":"client"}"#
+        );
+        assert_eq!(
+            EmbeddingSource::from_column(&client.to_column(), "c2").unwrap(),
+            client
+        );
+    }
+
+    /// A stored value this build cannot read is an invariant error, never a
+    /// silent `None`: `None` would let a re-embed replace the supplied vector
+    /// with a vector of the caption. Unknown keys and unknown variants (a
+    /// newer build's value) are refused the same way.
+    #[test]
+    fn embedding_source_refuses_a_value_it_cannot_read() {
+        for raw in [
+            "",
+            "not json",
+            r#"{"modality":"image"}"#,
+            r#"{"modality":"audio","origin":"server"}"#,
+            r#"{"modality":"image","origin":"server","mime":"image/gif"}"#,
+            r#"{"modality":"image","origin":"client","frame":3}"#,
+        ] {
+            let err = EmbeddingSource::from_column(raw, "c3").expect_err(raw);
+            assert!(matches!(err, StoreError::Invariant(_)), "{raw}: {err:?}");
+            assert!(err.to_string().contains("embedding_source"), "{err}");
+            assert!(err.to_string().contains("concept c3"), "{err}");
+            // Review L4: the refusal says how to get the session back.
+            assert!(err.to_string().contains("upgrade"), "{err}");
+            assert!(err.to_string().contains("lambo erase-session"), "{err}");
+        }
+    }
+
+    /// Review I1: the stored digest is decoded as strictly as the rest of the
+    /// value. Anything but 64 lowercase hex characters is refused like an
+    /// unreadable value; a well-formed one loads.
+    #[test]
+    fn embedding_source_refuses_a_malformed_sha256() {
+        let raw = |digest: &str| {
+            format!(r#"{{"modality":"image","origin":"server","sha256":"{digest}"}}"#)
+        };
+        let good = "0123456789abcdef".repeat(4);
+        assert_eq!(
+            EmbeddingSource::from_column(&raw(&good), "c4")
+                .unwrap()
+                .sha256
+                .as_deref(),
+            Some(good.as_str())
+        );
+        for digest in [
+            String::new(),
+            "ab".repeat(31),
+            "ab".repeat(33),
+            "AB".repeat(32),
+            "zz".repeat(32),
+            format!("{}é", "a".repeat(62)),
+        ] {
+            let err = EmbeddingSource::from_column(&raw(&digest), "c4").expect_err(&digest);
+            assert!(matches!(err, StoreError::Invariant(_)), "{digest}: {err:?}");
+            assert!(err.to_string().contains("concept c4"), "{err}");
+            assert!(err.to_string().contains("sha256"), "{err}");
+        }
+    }
+
+    /// Fixture JSON has no `embedding_source` key: it loads as `None`, and a
+    /// `None` concept serializes without the key, so every golden that
+    /// carries a concept is byte-identical. A `Some` survives the node JSON.
+    #[test]
+    fn concept_embedding_source_is_serde_default_and_skipped_when_none() {
+        let ts = Utc.with_ymd_and_hms(2026, 10, 9, 12, 0, 0).unwrap();
+        let mut c = Concept {
+            id: NodeId::new(),
+            session_id: SessionId::from("s1"),
+            content: "outfit for onam [image:abc]".into(),
+            canonical_key: "abc image onam outfit".into(),
+            concept_type: ConceptType::Entity,
+            origin_interaction: NodeId::new(),
+            origin_agent: AgentId::from("agent-A"),
+            created_at: ts,
+            access_count: 0,
+            last_accessed: None,
+            gc_survived: 0,
+            canonization_status: CanonizationStatus::None,
+            blast_radius: None,
+            last_demotion_time: None,
+            embedding: Some(vec![0.6, 0.8]),
+            human_confirmed: 0,
+            embedding_source: None,
+            chunk_group_id: None,
+        };
+        let json = serde_json::to_value(&c).unwrap();
+        assert!(json.get("embedding_source").is_none(), "{json}");
+        let mut legacy = json.clone();
+        legacy.as_object_mut().unwrap().remove("embedding_source");
+        let back: Concept = serde_json::from_value(legacy).unwrap();
+        assert_eq!(back.embedding_source, None);
+
+        c.embedding_source = Some(EmbeddingSource {
+            modality: SourceModality::Image,
+            origin: VectorOrigin::Client,
+            sha256: None,
+            mime: Some(ImageMimeWire::Webp),
+        });
+        let node = Node::Concept(c);
+        let back: Node = serde_json::from_str(&serde_json::to_string(&node).unwrap()).unwrap();
+        assert_eq!(back, node);
+    }
+
+    #[test]
+    fn image_mime_wire_converts_both_ways() {
+        use crate::embed::ImageMime;
+        for mime in [ImageMime::Png, ImageMime::Jpeg, ImageMime::Webp] {
+            let wire = ImageMimeWire::from(mime);
+            assert_eq!(ImageMime::from(wire), mime);
+            assert_eq!(
+                serde_json::to_value(wire).unwrap(),
+                serde_json::Value::from(mime.as_str())
+            );
+        }
     }
 }

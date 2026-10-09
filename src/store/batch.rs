@@ -96,9 +96,9 @@ use crate::types::{
 /// column lists they are meant to bound. `cockroach::upsert_placeholder_shapes_match_structs`
 /// pins them against the real generated SQL.
 pub const INTERACTION_COLUMNS: usize = 7;
-/// See [`INTERACTION_COLUMNS`]. Includes `embedding`, `chunk_group_id` and
-/// `human_confirmed` (C2).
-pub const CONCEPT_COLUMNS: usize = 17;
+/// See [`INTERACTION_COLUMNS`]. Includes `embedding`, `chunk_group_id`,
+/// `human_confirmed` (C2) and `embedding_source` (#22).
+pub const CONCEPT_COLUMNS: usize = 18;
 /// See [`INTERACTION_COLUMNS`].
 pub const EDGE_COLUMNS: usize = 10;
 /// See [`INTERACTION_COLUMNS`]: `id`, `session_id`, `access_count`,
@@ -630,6 +630,7 @@ mod tests {
             last_demotion_time: None,
             embedding: None,
             human_confirmed: 0,
+            embedding_source: None,
             chunk_group_id: None,
         }
     }

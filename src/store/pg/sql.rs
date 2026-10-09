@@ -13,7 +13,7 @@
 use super::codec::{canonization_status_sql, concept_type_sql, edge_type_sql};
 use super::Dialect;
 use crate::store::batch::{AccessUpdate, ConceptRow};
-use crate::types::{Edge, Interaction};
+use crate::types::{Edge, EmbeddingSource, Interaction};
 
 /// Session row anchor + durable mutation-counter stamp (issue #17): `flush`
 /// upserts a bare row per new session (created_at defaults to `now()`),
@@ -72,10 +72,15 @@ ON CONFLICT (id) DO UPDATE SET
     event_time = EXCLUDED.event_time
 "#;
 
-/// 17 columns; `embedding` is bound as text and cast server-side with the
+/// 18 columns; `embedding` is bound as text and cast server-side with the
 /// dialect's `VECTOR_CAST` (`$15::VECTOR` on Cockroach);
 /// `chunk_group_id` (T2.5 sibling co-retrieval key) is the 16th, bound nullable;
-/// `human_confirmed` (C2 solo-score input) is the 17th, bound as an INT count.
+/// `human_confirmed` (C2 solo-score input) is the 17th, bound as an INT count;
+/// `embedding_source` (#22 supplied-vector provenance, compact JSON) is the
+/// 18th, bound as nullable text. It is in the `DO UPDATE SET` list because it
+/// describes `embedding`, which is too: a whole-record upsert that sets a
+/// concept's source to `None` clears it. The embedding quarantine
+/// ([`QUARANTINE_LEGACY_EMBEDDINGS_SQL`]) is not an upsert and keeps it.
 ///
 /// **R2-1 — canonization columns are insert-only here.**
 /// `canonization_status` / `blast_radius` / `last_demotion_time` are in the
@@ -92,7 +97,7 @@ INSERT INTO concepts (
     id, session_id, content, canonical_key, concept_type,
     origin_interaction, origin_agent, created_at, access_count, last_accessed,
     gc_survived, canonization_status, blast_radius, last_demotion_time, embedding,
-    chunk_group_id, human_confirmed
+    chunk_group_id, human_confirmed, embedding_source
 ) "#;
 
 pub(super) const ON_CONFLICT_CONCEPT_SQL: &str = r#"
@@ -109,7 +114,8 @@ ON CONFLICT (id) DO UPDATE SET
     gc_survived = EXCLUDED.gc_survived,
     embedding = EXCLUDED.embedding,
     chunk_group_id = EXCLUDED.chunk_group_id,
-    human_confirmed = EXCLUDED.human_confirmed
+    human_confirmed = EXCLUDED.human_confirmed,
+    embedding_source = EXCLUDED.embedding_source
 "#;
 
 /// Natural-key conflict target `(source, target, edge_type)` matches the graph tier's
@@ -162,6 +168,13 @@ UPDATE sessions SET root_goal = $2::JSONB WHERE session_id = $1
 /// `BLOB` has no such authority, which is why only it needs the wider rule. Widen this
 /// statement too if Cockroach's width ever becomes configurable per deployment (B2's
 /// Postgres split is where that would land).
+///
+/// **The quarantine nulls `embedding` only; `embedding_source` is kept** (#22
+/// review L1, decided). A quarantined image concept is still an image
+/// concept: keeping its source stops a later `re-embed --missing-only` from
+/// giving it a vector of its caption. A concept can therefore load with a
+/// source and no vector, and PR 3's re-embed treats that as "image vector
+/// missing", not as a text concept.
 pub(super) const QUARANTINE_LEGACY_EMBEDDINGS_SQL: &str = r#"
 UPDATE concepts SET embedding = NULL
 WHERE session_id = $1 AND EXISTS (
@@ -585,7 +598,8 @@ ORDER BY created_at, id
 SELECT id{s} AS id, session_id, content, canonical_key, concept_type,
        origin_interaction{s} AS origin_interaction, origin_agent, created_at,
        access_count, last_accessed, gc_survived, canonization_status, blast_radius,
-       last_demotion_time, embedding{s} AS embedding, chunk_group_id, human_confirmed
+       last_demotion_time, embedding{s} AS embedding, chunk_group_id, human_confirmed,
+       embedding_source
 FROM concepts
 WHERE session_id = $1
 ORDER BY id
@@ -698,7 +712,12 @@ pub(super) fn concept_upsert_query<'a>(
                 // placeholder, not with the separator.
                 .push_unseparated(vector_cast)
                 .push_bind(c.chunk_group_id.as_deref())
-                .push_bind(c.human_confirmed);
+                .push_bind(c.human_confirmed)
+                // Owned: `to_column` encodes and cannot fail, so it can run
+                // inside this closure, unlike the vector encode. The digest
+                // was checked before the query was built
+                // (`EmbeddingSource::check_writable`).
+                .push_bind(c.embedding_source.as_ref().map(EmbeddingSource::to_column));
         },
     );
     qb.push(ON_CONFLICT_CONCEPT_SQL);
