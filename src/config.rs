@@ -497,6 +497,47 @@ fn redact_quoted_values(message: &str) -> String {
         rest = end.map_or("", |e| &body[e..]);
     }
     out.push_str(rest);
+    // Numbers are values too (`invalid type: integer `12345``), and a key is
+    // shown only while it looks like a key: a quoted key such as
+    // `"postgres://u:pw@h" = 1` reaches `unknown field` verbatim.
+    let out = redact_backticked(&out, "integer `", |_| false);
+    let out = redact_backticked(&out, "float `", |_| false);
+    let out = redact_backticked(&out, "unknown field `", is_bare_key);
+    redact_backticked(&out, "duplicate key `", is_bare_key)
+}
+
+/// A key short and plain enough to be a config key rather than a pasted value.
+fn is_bare_key(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= 40
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// Replace the backtick-quoted text after each `prefix` (which ends with the
+/// opening backtick) with `(value not shown)` unless `keep` accepts it.
+fn redact_backticked(message: &str, prefix: &str, keep: fn(&str) -> bool) -> String {
+    let mut out = String::with_capacity(message.len());
+    let mut rest = message;
+    while let Some(at) = rest.find(prefix) {
+        let body = &rest[at + prefix.len()..];
+        let (value, after) = match body.find('`') {
+            Some(close) => (&body[..close], &body[close + 1..]),
+            None => (body, ""),
+        };
+        out.push_str(&rest[..at + prefix.len()]);
+        if keep(value) {
+            out.push_str(value);
+            out.push('`');
+        } else {
+            // Drop the opening backtick as well, matching the string form.
+            out.pop();
+            out.push_str("(value not shown)");
+        }
+        rest = after;
+    }
+    out.push_str(rest);
     out
 }
 
@@ -1045,6 +1086,37 @@ mod tests {
             redact_quoted_values(r#"invalid value: string "unterminated-xyzzy"#),
             "invalid value: string (value not shown)"
         );
+        assert_eq!(
+            redact_quoted_values("invalid type: integer `48151623`, expected a string"),
+            "invalid type: integer (value not shown), expected a string"
+        );
+        assert_eq!(
+            redact_quoted_values("invalid type: float `4.815`, expected usize"),
+            "invalid type: float (value not shown), expected usize"
+        );
+        assert_eq!(
+            redact_quoted_values("unknown field `postgres://u:xyzzy@h/db`, expected `kind`"),
+            "unknown field (value not shown), expected `kind`"
+        );
+        assert_eq!(
+            redact_quoted_values("duplicate key `token-xyzzy.secret`"),
+            "duplicate key (value not shown)"
+        );
+    }
+
+    /// A DSN pasted as a quoted key never reaches the error; a plain typo
+    /// still does, since the operator needs it.
+    #[test]
+    fn a_quoted_key_holding_a_secret_is_never_echoed() {
+        let err = LamboFile::from_toml_str("[store]\n\"postgres://u:xyzzy@h/db\" = 1\n")
+            .unwrap_err()
+            .to_string();
+        assert!(!err.contains("xyzzy"), "{err}");
+        assert!(err.contains("(value not shown)"), "{err}");
+        let err = LamboFile::from_toml_str("[store]\nknd = \"memory\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("knd"), "{err}");
     }
 
     #[test]

@@ -35,7 +35,7 @@ $ lambo --config lambo.toml provision
 lambo provision: failed to resolve store: config: lambo.toml: unknown field `default_top_k`, expected one of `store`, `embedder`, `daemon`, `promotion_policy`, `serve` (line 1, column 1)
 ```
 
-The refusal names the line and column but never quotes the line itself, so a misspelled key next to a secret (a DSN with a password in it, say) does not print the secret into your logs. A value under the wrong key is not quoted back either: an unknown `[store] kind` or `[embedder] kind` lists the accepted kinds with `(value not shown)`, and a wrong-typed value reads `invalid type: string (value not shown), expected ...`. An unknown `promotion_policy` is quoted only when it is a short word, so a typo stays visible.
+The refusal names the line and column but never quotes the line itself, so a misspelled key next to a secret (a DSN with a password in it, say) does not print the secret into your logs. A value under the wrong key is not quoted back either: an unknown `[store] kind` or `[embedder] kind` lists the accepted kinds with `(value not shown)`, a wrong-typed value reads `invalid type: string (value not shown), expected ...` (numbers are hidden the same way), and an unknown key is named only while it looks like a key (letters, digits, `_` and `-`, up to 40 characters), so a DSN pasted as a quoted key is not printed. An unknown `promotion_policy` is quoted only when it is a short word, so a typo stays visible.
 
 ## Promotion policy
 
