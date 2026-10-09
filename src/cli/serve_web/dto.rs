@@ -94,7 +94,7 @@ impl EmbeddingStatus {
 }
 
 /// One canonization transition, as the writer durably recorded it.
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub(super) struct WebEvent {
     /// Position in the session's ordered event list — the poll cursor.
     pub(super) seq: usize,

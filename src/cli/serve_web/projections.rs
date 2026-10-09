@@ -16,8 +16,8 @@ use crate::cli::load_reader_graph;
 use crate::graph::Graph;
 use crate::store::{GraphStore, SessionFlushStats};
 use crate::types::{
-    tie_break_by_key, CanonizationStatus, EdgeType, GraphSnapshot, Node, NodeId, SessionId,
-    StoreError,
+    tie_break_by_key, CanonizationEvent, CanonizationStatus, Concept, EdgeType, GraphSnapshot,
+    Node, NodeId, SessionId, StoreError,
 };
 
 /// The structural edge types the page may show. Mirrors
@@ -112,19 +112,28 @@ pub(super) fn status_str(s: CanonizationStatus) -> &'static str {
 /// made `seq` and the cursor built on it per-run arbitrary). The id residual
 /// remains only for events whose node is absent from this snapshot.
 pub(super) fn events_from(snap: &GraphSnapshot, since: usize) -> EventsPayload {
-    let content: HashMap<NodeId, &str> = snap
-        .concepts
-        .iter()
-        .map(|c| (c.id, c.content.as_str()))
-        .collect();
-    let key_of: HashMap<NodeId, &str> = snap
-        .concepts
-        .iter()
-        .map(|c| (c.id, c.canonical_key.as_str()))
-        .collect();
+    slice_events(
+        &ordered_events(snap.concepts.iter(), &snap.canonization_events),
+        since,
+    )
+}
 
-    let mut ordered: Vec<&crate::types::CanonizationEvent> =
-        snap.canonization_events.iter().collect();
+/// The whole ordered feed, `seq` from 0, for `events` naming `concepts`.
+/// [`events_from`] over a snapshot, and the same order over a loaded graph
+/// (which keeps every concept and canonization event of the snapshot it was
+/// built from), so the feed does not need a second load.
+pub(super) fn ordered_events<'a>(
+    concepts: impl Iterator<Item = &'a Concept>,
+    events: &[CanonizationEvent],
+) -> Vec<WebEvent> {
+    let mut content: HashMap<NodeId, &str> = HashMap::new();
+    let mut key_of: HashMap<NodeId, &str> = HashMap::new();
+    for c in concepts {
+        content.insert(c.id, c.content.as_str());
+        key_of.insert(c.id, c.canonical_key.as_str());
+    }
+
+    let mut ordered: Vec<&CanonizationEvent> = events.iter().collect();
     // SQLite orders by (occurred_at, id) on load and MemoryStore by insertion;
     // sorting here makes `seq` mean the same thing on every backend, which is
     // what lets the page use it as a cursor. The lookup only runs on exact
@@ -140,13 +149,11 @@ pub(super) fn events_from(snap: &GraphSnapshot, since: usize) -> EventsPayload {
         })
     });
 
-    let total = ordered.len();
-    let start = since.min(total);
-    let events = ordered[start..]
+    ordered
         .iter()
         .enumerate()
-        .map(|(offset, ev)| WebEvent {
-            seq: start + offset,
+        .map(|(seq, ev)| WebEvent {
+            seq,
             occurred_at: ev.occurred_at.to_rfc3339(),
             node_id: ev.node_id.0.to_string(),
             content: content.get(&ev.node_id).map(|s| (*s).to_string()),
@@ -154,12 +161,17 @@ pub(super) fn events_from(snap: &GraphSnapshot, since: usize) -> EventsPayload {
             to_status: status_str(ev.to_status),
             blast_radius: ev.blast_radius,
         })
-        .collect();
+        .collect()
+}
 
+/// The page of an ordered feed at or after the cursor `since`.
+pub(super) fn slice_events(all: &[WebEvent], since: usize) -> EventsPayload {
+    let total = all.len();
+    let start = since.min(total);
     EventsPayload {
         total,
         since: start,
-        events,
+        events: all[start..].to_vec(),
     }
 }
 
