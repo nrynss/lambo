@@ -352,6 +352,7 @@ async fn pad_graph_past_inspect_cap(s: &LamboServer, count: usize) {
             last_demotion_time: None,
             embedding: None,
             human_confirmed: 0,
+            embedding_source: None,
             chunk_group_id: None,
         };
         g.insert_concept(c, origin).unwrap();

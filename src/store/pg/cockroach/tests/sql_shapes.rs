@@ -39,6 +39,7 @@ fn test_concept(origin: NodeId, content: &str) -> Concept {
         last_demotion_time: None,
         embedding: None,
         human_confirmed: 0,
+        embedding_source: None,
         chunk_group_id: None,
     }
 }
@@ -109,6 +110,10 @@ fn concept_sql_for(n: usize) -> String {
 /// candidate SELECTs now also fetch `canonical_key`, so the Rust side can
 /// order exact score ties stably across runs. Their `PRE_*` bodies carry
 /// that one added column; everything else stays parser-faithful.
+///
+/// Second deliberate exception (#22 PR 2, re-pinned by hand): the concept
+/// SELECT also reads `embedding_source`, on its own line after
+/// `human_confirmed`.
 #[test]
 fn b0_composed_sql_is_byte_identical_to_the_pre_carve_constants() {
     const PRE_VECTOR_CANDIDATES_SQL: &str = r#"
@@ -176,7 +181,8 @@ ORDER BY created_at, id
 SELECT id::STRING AS id, session_id, content, canonical_key, concept_type,
        origin_interaction::STRING AS origin_interaction, origin_agent, created_at,
        access_count, last_accessed, gc_survived, canonization_status, blast_radius,
-       last_demotion_time, embedding::STRING AS embedding, chunk_group_id, human_confirmed
+       last_demotion_time, embedding::STRING AS embedding, chunk_group_id, human_confirmed,
+       embedding_source
 FROM concepts
 WHERE session_id = $1
 ORDER BY id
@@ -319,8 +325,8 @@ fn upsert_placeholder_shapes_match_structs() {
     assert!(UPDATE_CONCEPT_STATUS_SQL.contains("COALESCE($5, last_demotion_time)"));
     assert!(INSERT_CANONIZATION_EVENT_SQL.contains("last_demotion_time"));
     // The vector column carries the ::VECTOR cast; chunk_group_id (T2.5) is
-    // the 16th, nullable; human_confirmed (C2) closes the list as the 17th
-    // — all included in the conflict UPDATE.
+    // the 16th, nullable; human_confirmed (C2) is the 17th; embedding_source
+    // (#22) closes the list as the 18th — all included in the conflict UPDATE.
     let concept_sql = concept_sql_for(1);
     assert!(concept_sql.contains("$15::VECTOR"), "{concept_sql}");
     assert!(concept_sql.contains("embedding = EXCLUDED.embedding"));
@@ -328,6 +334,10 @@ fn upsert_placeholder_shapes_match_structs() {
     assert!(
         concept_sql.contains("human_confirmed"),
         "the C2 count rides the upsert: {concept_sql}"
+    );
+    assert!(
+        concept_sql.contains("embedding_source = EXCLUDED.embedding_source"),
+        "the #22 provenance rides the upsert: {concept_sql}"
     );
     // Edge conflict targets the natural key; id is replaceable on conflict.
     assert!(edge_upsert_query(&[&e])
@@ -357,19 +367,19 @@ fn the_access_update_is_shared_and_cast_free() {
 /// and the generated SQL is the half of that change no test on this machine
 /// can put in front of a cluster — so it is asserted directly.
 ///
-/// Three rows must produce 48 placeholders in three `VALUES` tuples, carry
-/// the `::VECTOR` cast on *each* row's embedding placeholder (the cast is
-/// part of the value expression, not the statement), and end in exactly one
-/// `ON CONFLICT` clause.
+/// Three rows must produce 54 placeholders (3 x `CONCEPT_COLUMNS`) in three
+/// `VALUES` tuples, carry the `::VECTOR` cast on *each* row's embedding
+/// placeholder (the cast is part of the value expression, not the
+/// statement), and end in exactly one `ON CONFLICT` clause.
 #[test]
 fn sql_shape_is_a_multi_row_upsert() {
     let sql = concept_sql_for(3);
     assert_eq!(
         placeholder_max(&sql),
-        51,
-        "3 rows x 17 columns, numbered across the whole statement: {sql}"
+        54,
+        "3 rows x 18 columns, numbered across the whole statement: {sql}"
     );
-    for n in [15, 32, 49] {
+    for n in [15, 33, 51] {
         assert!(
             sql.contains(&format!("${n}::VECTOR")),
             "every row's embedding placeholder needs its own cast, missing ${n}: {sql}"
@@ -450,8 +460,8 @@ fn event_time_rides_the_upsert_and_select_shape() {
 
 /// C2 (no live cluster: SQL text is the contract). `human_confirmed` —
 /// the solo score's persisted input — must ride the whole statement path:
-/// bound as the LAST concept column (a bind drifting onto
-/// `chunk_group_id`'s slot changes the placeholder count), carried by
+/// bound as the 17th concept column, right after `chunk_group_id` (a bind
+/// drifting onto another slot changes the placeholder count), carried by
 /// `DO UPDATE SET` so a whole-record replace cannot reset a confirmed
 /// concept to never-confirmed, and read back by name in the SELECT. The
 /// sqlite adapter reads this column positionally (`try_get(16)`) — that is
@@ -467,10 +477,10 @@ fn human_confirmed_rides_the_concept_upsert_and_select_shape() {
     )
     .sql()
     .to_string();
-    assert_eq!(placeholder_max(&sql), 17, "1 row x 17 columns: {sql}");
+    assert_eq!(placeholder_max(&sql), 18, "1 row x 18 columns: {sql}");
     assert!(
         sql.contains("chunk_group_id, human_confirmed"),
-        "human_confirmed closes the INSERT column list: {sql}"
+        "human_confirmed follows chunk_group_id in the INSERT column list: {sql}"
     );
     let (_, on_conflict) = sql
         .split_once("ON CONFLICT")
@@ -482,6 +492,51 @@ fn human_confirmed_rides_the_concept_upsert_and_select_shape() {
     assert!(
         crdb_sql().select_concepts.contains("human_confirmed"),
         "load must read human_confirmed back by name"
+    );
+}
+
+/// #22 PR 2 (no live cluster: SQL text is the contract). A supplied
+/// vector's provenance must ride the whole statement path on Cockroach:
+/// bound as the LAST (18th) concept column, carried by `DO UPDATE SET`
+/// with the vector it describes (so an upsert that clears the source clears
+/// the column; the embedding quarantine, which is not an upsert, keeps it),
+/// and read back by name. The sqlite adapter reads it
+/// positionally (`try_get(17)`), so an order regression shows there.
+#[test]
+fn embedding_source_rides_the_concept_upsert_and_select_shape() {
+    let mut c = test_concept(NodeId::new(), "outfit for onam [image:abc]");
+    c.embedding_source = Some(crate::types::EmbeddingSource {
+        modality: crate::types::SourceModality::Image,
+        origin: crate::types::VectorOrigin::Client,
+        sha256: None,
+        mime: None,
+    });
+    let sql = concept_upsert_query(
+        &[crate::store::batch::ConceptRow::new(&c)],
+        &[None],
+        CockroachDialect::VECTOR_CAST,
+    )
+    .sql()
+    .to_string();
+    assert_eq!(placeholder_max(&sql), CONCEPT_COLUMNS, "{sql}");
+    assert!(
+        sql.contains("human_confirmed, embedding_source\n)"),
+        "embedding_source closes the INSERT column list: {sql}"
+    );
+    assert!(
+        sql.contains(&format!("${CONCEPT_COLUMNS})")),
+        "its value is the last bind of the row: {sql}"
+    );
+    let (_, on_conflict) = sql
+        .split_once("ON CONFLICT")
+        .expect("the upsert has a conflict clause");
+    assert!(
+        on_conflict.contains("embedding_source = EXCLUDED.embedding_source"),
+        "conflict update must carry the provenance with the vector: {sql}"
+    );
+    assert!(
+        crdb_sql().select_concepts.contains("embedding_source"),
+        "load must read embedding_source back by name"
     );
 }
 

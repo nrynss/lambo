@@ -411,6 +411,7 @@ fn plant_concept_full(
             embedding,
             chunk_group_id,
             human_confirmed: 0,
+            embedding_source: None,
         }),
     }
 }
@@ -958,6 +959,45 @@ async fn check_chunk_group_id_survives_flush_load(store: &CockroachStore) {
         plain_row.chunk_group_id, None,
         "NULL chunk_group_id stays None"
     );
+}
+
+/// #22 PR 2: a concept's `embedding_source` survives flush→load on
+/// Cockroach, through the same shared check every adapter runs, and an
+/// unreadable stored value fails the load with an `Invariant`. The
+/// `cockroach-live` CI job is disabled (`if: false`, 2026-10-06), so this
+/// runs only when the suite is run by hand against a cluster.
+async fn check_embedding_source_survives_flush_load(store: &CockroachStore) {
+    let sid = SessionId::from(format!("conformance-esrc-{}", Uuid::new_v4()));
+    let dim = store
+        .vector_dimensions()
+        .expect("cockroach stores carry vectors");
+    crate::store::embedding_source_testkit::check_embedding_source_round_trip(
+        store, &sid, dim, None,
+    )
+    .await;
+    // Review M1: a value this build cannot read fails the load.
+    crate::store::pg::embedding_source_live::check_unreadable_embedding_source_fails_the_load(
+        store, &sid,
+    )
+    .await;
+    crate::store::embedding_source_testkit::check_a_malformed_digest_is_refused_on_write(
+        store, &sid, dim, None,
+    )
+    .await;
+    // Leave only the erase tombstone behind (#23), as the Postgres live test
+    // does: erase never decodes concept rows, so the corrupted one goes too.
+    store
+        .erase_session(
+            &sid,
+            &crate::store::lease::LeaseHolder {
+                endpoint: None,
+                agent: AgentId::new("conformance-esrc"),
+                pid: 1,
+                host: "test".into(),
+            },
+        )
+        .await
+        .expect("erase the test session");
 }
 
 async fn check_embedding_contract_read_and_flush_immunity(store: &CockroachStore) {
@@ -1737,6 +1777,7 @@ async fn conformance_suite() {
     check_keyword_mixed_case_ranks_like_memory_store(&store).await;
     check_legal_demote_flush_partial_index(&store).await;
     check_chunk_group_id_survives_flush_load(&store).await;
+    check_embedding_source_survives_flush_load(&store).await;
     check_embedding_contract_read_and_flush_immunity(&store).await;
     check_seed_load_full_snapshot_roundtrip(&store).await;
     check_structural_queries_agree_with_memory_store(&store).await;
@@ -1960,6 +2001,7 @@ async fn access_counts_round_trip_through_the_narrow_update_on_cockroach() {
         last_demotion_time: None,
         embedding: None,
         human_confirmed: 0,
+        embedding_source: None,
         chunk_group_id: None,
     };
     let access = |n: i32, at: i64| Mutation::RecordAccess {

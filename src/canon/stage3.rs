@@ -183,6 +183,7 @@ mod tests {
             last_demotion_time: last_demotion,
             embedding: None,
             human_confirmed: 0,
+            embedding_source: None,
             chunk_group_id: None,
         }
     }

@@ -291,6 +291,7 @@ pub fn record_action_with_embeddings(
             last_demotion_time: None,
             embedding: vector,
             human_confirmed: 0,
+            embedding_source: None,
             chunk_group_id: None,
         };
         graph.insert_concept(concept, interaction)?;
@@ -598,6 +599,7 @@ mod tests {
             last_demotion_time: None,
             embedding: None,
             human_confirmed: 0,
+            embedding_source: None,
             chunk_group_id: None,
         }
     }

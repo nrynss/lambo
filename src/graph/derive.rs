@@ -544,6 +544,7 @@ fn resolve_concept(
                 last_demotion_time: None,
                 embedding: None,
                 human_confirmed: 0,
+                embedding_source: None,
                 chunk_group_id: None,
             };
             let id = concept.id;
@@ -789,6 +790,7 @@ mod tests {
             last_demotion_time: None,
             embedding: None,
             human_confirmed: 0,
+            embedding_source: None,
             chunk_group_id: None,
         }
     }

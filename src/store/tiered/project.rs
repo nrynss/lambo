@@ -236,6 +236,7 @@ mod tests {
                 embedding,
                 human_confirmed: 0,
                 chunk_group_id: None,
+                embedding_source: None,
             }),
         }
     }

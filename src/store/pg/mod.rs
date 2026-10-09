@@ -117,6 +117,16 @@ pub(crate) mod release_fencing;
 // Postgres-only: the flush fence's lease row stays locked until commit.
 #[cfg(all(test, feature = "store-postgres"))]
 mod lease_race;
+// #22 PR 2: a concept's embedding_source on the live family (Postgres test
+// here, Cockroach leg in its conformance suite).
+#[cfg(all(
+    test,
+    any(
+        feature = "store-postgres",
+        all(feature = "store-cockroach", feature = "fixtures")
+    )
+))]
+pub(crate) mod embedding_source_live;
 
 // T3.2 — CockroachDB durable adapter (spec §3.2/§3.3, §4), the family's first
 // dialect. Feature: store-cockroach.

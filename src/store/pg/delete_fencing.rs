@@ -84,6 +84,7 @@ pub(crate) async fn check_delete_only_batch_is_fenced<D: Dialect>(store: &PgStor
                     last_demotion_time: None,
                     embedding: None,
                     human_confirmed: 0,
+                    embedding_source: None,
                     chunk_group_id: None,
                 }),
             },
@@ -230,6 +231,7 @@ async fn check_incident_edge_is_fenced<D: Dialect>(store: &PgStore<D>) {
             last_demotion_time: None,
             embedding: None,
             human_confirmed: 0,
+            embedding_source: None,
             chunk_group_id: None,
         }),
     };

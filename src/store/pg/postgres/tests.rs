@@ -49,6 +49,7 @@ fn access_columns_ride_the_concept_upsert_and_the_load() {
         last_demotion_time: None,
         embedding: None,
         human_confirmed: 0,
+        embedding_source: None,
         chunk_group_id: None,
     };
     let rows = [crate::store::batch::ConceptRow::new(&c)];
@@ -1382,6 +1383,7 @@ async fn canonization_cycle_makes_the_stage2_hop_on_postgres() {
         last_demotion_time: None,
         embedding: None,
         human_confirmed: 0,
+        embedding_source: None,
         chunk_group_id: None,
     };
 
@@ -1616,6 +1618,7 @@ async fn interaction_span_coverage_decodes_on_both_arms() {
                 last_demotion_time: None,
                 embedding: None,
                 human_confirmed: 0,
+                embedding_source: None,
                 chunk_group_id: None,
             }),
         });
@@ -1643,6 +1646,7 @@ async fn interaction_span_coverage_decodes_on_both_arms() {
                 last_demotion_time: None,
                 embedding: None,
                 human_confirmed: 0,
+                embedding_source: None,
                 chunk_group_id: None,
             }),
         });
@@ -1757,6 +1761,7 @@ async fn fencing_refuses_stale_write_and_upserts_replay() {
                     last_demotion_time: None,
                     embedding: None,
                     human_confirmed: 0,
+                    embedding_source: None,
                     chunk_group_id: None,
                 }),
             },
@@ -1871,6 +1876,7 @@ async fn access_counts_round_trip_through_the_narrow_update_and_survive_reattach
         last_demotion_time: None,
         embedding: Some(probe.clone()),
         human_confirmed: 0,
+        embedding_source: None,
         chunk_group_id: None,
     };
     store

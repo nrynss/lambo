@@ -381,6 +381,7 @@ fn semantic_edge_decays() {
             last_demotion_time: None,
             embedding: None,
             human_confirmed: 0,
+            embedding_source: None,
             chunk_group_id: None,
         },
         i,
@@ -404,6 +405,7 @@ fn semantic_edge_decays() {
             last_demotion_time: None,
             embedding: None,
             human_confirmed: 0,
+            embedding_source: None,
             chunk_group_id: None,
         },
         i,
@@ -617,6 +619,7 @@ fn preseeded_concept(sess: &str, id: Uuid, key: &str, owner: NodeId) -> Concept 
         last_demotion_time: None,
         embedding: None,
         human_confirmed: 0,
+        embedding_source: None,
         chunk_group_id: None,
     }
 }

@@ -74,6 +74,7 @@ fn concept(id: u64, origin: u64, content: &str, ty: ConceptType) -> Concept {
         last_demotion_time: None,
         embedding: None,
         human_confirmed: 0,
+        embedding_source: None,
         chunk_group_id: None,
     }
 }

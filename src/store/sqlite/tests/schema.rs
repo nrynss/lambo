@@ -209,6 +209,7 @@ async fn init_schema_converges_preexisting_database() {
                     last_demotion_time: None,
                     embedding: None,
                     human_confirmed: 0,
+                    embedding_source: None,
                     chunk_group_id: Some("legacy-chunk".into()),
                 }),
             },
@@ -359,6 +360,7 @@ async fn init_schema_converges_pre_d_event_time_and_human_confirmed() {
                     last_demotion_time: None,
                     embedding: None,
                     human_confirmed: 3,
+                    embedding_source: None,
                     chunk_group_id: None,
                 }),
             },
@@ -492,4 +494,130 @@ async fn partial_unique_demote_duplicates_pass_but_entity_duplicates_fail() {
     );
     let snap = store.load_session(&sid).await.unwrap();
     assert_eq!(snap.concepts.len(), 3, "failed flush must not persist rows");
+}
+
+/// #22 PR 2 upgrade path: a store provisioned before `embedding_source`
+/// (every table present, that one column absent) is refused by the column
+/// preflight by name, and `init_schema` (what `lambo provision` runs)
+/// converges it with the guarded ALTER; a second init is a no-op and the
+/// column then round-trips. Existing rows read NULL, i.e. text-embedded.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn init_schema_converges_a_pre_22_store_without_embedding_source() {
+    let store = test_store();
+    store.init_schema().await.unwrap();
+    assert!(
+        super::columns_in_ddl(INIT_SQL).contains(&("concepts", "embedding_source")),
+        "the column preflight must require the new column"
+    );
+    let sid = SessionId::from("pre-22");
+    let (i1, c1) = (NodeId::new(), NodeId::new());
+    let ts = Utc::now();
+    store
+        .flush(
+            &MutationBatch {
+                mutations: vec![
+                    Mutation::UpsertNode {
+                        node: NodeKind::Interaction(Interaction {
+                            event_time: None,
+                            id: i1,
+                            session_id: sid.clone(),
+                            agent_id: AgentId::from("a"),
+                            prompt_text: None,
+                            previous_id: None,
+                            created_at: ts,
+                        }),
+                    },
+                    plant_concept(&sid, c1, i1, "written before 22", ConceptType::Entity, ts),
+                ],
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    // The pre-#22 shape: the column is gone, the row stays.
+    sqlx::query("ALTER TABLE concepts DROP COLUMN embedding_source")
+        .execute(store.pool())
+        .await
+        .unwrap();
+    let err = store
+        .preflight_schema()
+        .await
+        .expect_err("a pre-#22 store must not attach")
+        .to_string();
+    assert!(err.contains("embedding_source"), "names the column: {err}");
+    assert!(err.contains("lambo provision"), "actionable: {err}");
+
+    store.init_schema().await.unwrap();
+    store.init_schema().await.unwrap();
+    store
+        .preflight_schema()
+        .await
+        .expect("a converged store passes the preflight");
+    let old = store.load_session(&sid).await.unwrap();
+    assert_eq!(
+        old.concepts
+            .iter()
+            .find(|c| c.id == c1)
+            .unwrap()
+            .embedding_source,
+        None,
+        "a pre-#22 row reads as embedded from its content"
+    );
+    crate::store::embedding_source_testkit::check_embedding_source_round_trip(
+        &store,
+        &SessionId::from("pre-22-after"),
+        4,
+        None,
+    )
+    .await;
+}
+
+/// #22 review L3: `ensure_column` is check-then-ALTER, so two `provision`
+/// runs on one file can both see a column missing and both ALTER. The
+/// loser's ALTER fails with "duplicate column name"; it must re-check and
+/// succeed, since the column it wanted now exists. This replays the loser's
+/// half deterministically: the column is present when the ALTER runs.
+#[tokio::test]
+async fn a_lost_add_column_race_converges_instead_of_failing() {
+    let store = test_store();
+    store.init_schema().await.unwrap();
+    crate::store::sqlite::schema::add_column(
+        store.pool(),
+        "concepts",
+        "embedding_source",
+        "ALTER TABLE concepts ADD COLUMN embedding_source TEXT",
+    )
+    .await
+    .expect("the column another provision added is what this one wanted");
+    // A genuinely failing ALTER still fails.
+    let err = crate::store::sqlite::schema::add_column(
+        store.pool(),
+        "concepts",
+        "no_such_column",
+        "ALTER TABLE no_such_table ADD COLUMN no_such_column TEXT",
+    )
+    .await
+    .expect_err("an ALTER that fails and leaves the column absent is an error");
+    assert!(err.to_string().contains("no_such_column"), "{err}");
+}
+
+/// #22 review L3, end to end: two connections on one file provision a
+/// pre-#22 store at once. Both must succeed and the store must converge.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_provisions_on_one_file_both_succeed() {
+    let (_dir, path) = scratch_db();
+    let a = SqliteStore::connect(&path).unwrap();
+    let b = SqliteStore::connect(&path).unwrap();
+    a.init_schema().await.unwrap();
+    for round in 0..10 {
+        sqlx::query("ALTER TABLE concepts DROP COLUMN embedding_source")
+            .execute(a.pool())
+            .await
+            .unwrap();
+        let (ra, rb) = tokio::join!(a.init_schema(), b.init_schema());
+        ra.unwrap_or_else(|e| panic!("round {round}: provision a: {e}"));
+        rb.unwrap_or_else(|e| panic!("round {round}: provision b: {e}"));
+        a.preflight_schema().await.expect("converged");
+    }
 }

@@ -236,6 +236,7 @@ async fn concept_embedding_roundtrips_flush_and_load() {
                     last_demotion_time: None,
                     embedding: Some(emb.clone()),
                     human_confirmed: 0,
+                    embedding_source: None,
                     chunk_group_id: None,
                 }),
             },
@@ -418,6 +419,7 @@ async fn seed_load_preserves_embedding_contract() {
                 last_demotion_time: None,
                 embedding: Some(vec![0.1, 0.2, 0.3]),
                 human_confirmed: 0,
+                embedding_source: None,
                 chunk_group_id: None,
             }],
             embedding: Some(contract.clone()),
@@ -1648,6 +1650,7 @@ async fn human_confirmed_survives_the_flush_load_round_trip() {
             last_demotion_time: None,
             embedding: None,
             human_confirmed: confirmed,
+            embedding_source: None,
             chunk_group_id: None,
         }),
     };
@@ -1691,4 +1694,125 @@ async fn human_confirmed_survives_the_flush_load_round_trip() {
         .find(|c| c.id == c_plain)
         .expect("plain concept loaded");
     assert_eq!(plain.human_confirmed, 0);
+}
+
+/// #22 PR 2: a concept's `embedding_source` survives flush→load on the real
+/// adapter, a read access leaves it alone, and an upsert that clears it
+/// clears the column. The shared check is the one every adapter runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn embedding_source_survives_the_flush_load_round_trip() {
+    let store = test_store();
+    store.init_schema().await.unwrap();
+    crate::store::embedding_source_testkit::check_embedding_source_round_trip(
+        &store,
+        &SessionId::from("embedding-source"),
+        4,
+        None,
+    )
+    .await;
+}
+
+/// #22 PR 2: a stored `embedding_source` this build cannot read fails the
+/// load by concept id. Reading it as `None` instead would make an image
+/// concept look text-embedded, and a re-embed would then replace its image
+/// vector with a vector of its caption.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unreadable_embedding_source_fails_the_load() {
+    let store = test_store();
+    store.init_schema().await.unwrap();
+    let sid = SessionId::from("embedding-source-corrupt");
+    crate::store::embedding_source_testkit::check_embedding_source_round_trip(
+        &store, &sid, 4, None,
+    )
+    .await;
+    sqlx::query(
+        "UPDATE concepts SET embedding_source = '{\"modality\":\"audio\",\"origin\":\"client\"}' \
+         WHERE session_id = ? AND embedding_source IS NOT NULL",
+    )
+    .bind(sid.as_str())
+    .execute(store.pool())
+    .await
+    .unwrap();
+    let err = store
+        .load_session(&sid)
+        .await
+        .expect_err("an unreadable source must not load as None");
+    assert!(matches!(err, StoreError::Invariant(_)), "{err:?}");
+    assert!(err.to_string().contains("embedding_source"), "{err}");
+}
+
+/// #22 review round 2, L1: a malformed digest is refused at the flush.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_malformed_embedding_source_digest_is_refused_on_write() {
+    let store = test_store();
+    store.init_schema().await.unwrap();
+    crate::store::embedding_source_testkit::check_a_malformed_digest_is_refused_on_write(
+        &store,
+        &SessionId::from("embedding-source-bad-digest"),
+        4,
+        None,
+    )
+    .await;
+}
+
+/// #22 review L1 (decided): SQLite also quarantines on a width restamp, and
+/// like the first-stamp quarantine the shared check covers, it nulls the
+/// vector and keeps the source, so the concept stays an image concept.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_width_restamp_nulls_the_vector_and_keeps_its_source() {
+    let store = test_store();
+    store.init_schema().await.unwrap();
+    let sid = SessionId::from("embedding-source-width");
+    crate::store::embedding_source_testkit::check_embedding_source_round_trip(
+        &store, &sid, 4, None,
+    )
+    .await;
+    let sourced = |snap: &GraphSnapshot| {
+        snap.concepts
+            .iter()
+            .find(|c| c.embedding_source.is_some())
+            .cloned()
+            .expect("the shared check leaves a sourced concept")
+    };
+    let mut concept = sourced(&store.load_session(&sid).await.unwrap());
+    let source = concept.embedding_source.clone();
+    concept.embedding = Some(vec![1.0, 2.0, 3.0, 4.0]);
+    let contract = |dim| EmbeddingContract {
+        kind: "fixture".into(),
+        model: Some("embedding-source-test".into()),
+        dim,
+    };
+    let batch = |mutations| MutationBatch {
+        mutations,
+        ..Default::default()
+    };
+    store
+        .flush(
+            &batch(vec![Mutation::UpsertNode {
+                node: crate::types::Node::Concept(concept.clone()),
+            }]),
+            None,
+        )
+        .await
+        .unwrap();
+    let restamped = sourced(&store.load_session(&sid).await.unwrap());
+    assert!(restamped.embedding.is_some(), "the 4-wide vector landed");
+    store
+        .flush(
+            &batch(vec![Mutation::SetEmbedding {
+                session_id: sid.clone(),
+                embedding: Some(contract(5)),
+            }]),
+            None,
+        )
+        .await
+        .unwrap();
+    let loaded = store.load_session(&sid).await.unwrap();
+    let after = loaded
+        .concepts
+        .iter()
+        .find(|c| c.id == concept.id)
+        .expect("still there");
+    assert_eq!(after.embedding, None, "the width restamp quarantined it");
+    assert_eq!(after.embedding_source, source, "and kept its source");
 }
