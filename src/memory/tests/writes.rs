@@ -19,8 +19,9 @@ pub(super) struct VectorSearchStore {
     inner: Arc<dyn GraphStore>,
     answers: PlMutex<Vec<Vec<Scored<NodeId>>>>,
     exact_scan: bool,
-    /// When set, the checked read fails as a backend would (#22 PR 6, M1).
-    fail_reads: std::sync::atomic::AtomicBool,
+    /// When non-zero, the checked read fails (#22 PR 6): 1 as a backend
+    /// would, 2 as the E2E-6 embedding-contract race does.
+    fail_reads: std::sync::atomic::AtomicU8,
 }
 
 impl VectorSearchStore {
@@ -29,7 +30,7 @@ impl VectorSearchStore {
             inner,
             answers: PlMutex::new(Vec::new()),
             exact_scan: false,
-            fail_reads: std::sync::atomic::AtomicBool::new(false),
+            fail_reads: std::sync::atomic::AtomicU8::new(0),
         }
     }
 
@@ -46,7 +47,14 @@ impl VectorSearchStore {
     /// a timed-out or unreachable backend would.
     pub(super) fn fail_vector_reads(&self) {
         self.fail_reads
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+            .store(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Make every later checked read refuse as the durable embedding
+    /// contract changing mid-query does (E2E-6's `Invariant`).
+    pub(super) fn race_the_contract(&self) {
+        self.fail_reads
+            .store(2, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Every `vector_candidates` answer, in call order.
@@ -99,10 +107,18 @@ impl GraphStore for VectorSearchStore {
         limit: usize,
     ) -> Result<Vec<Scored<NodeId>>, StoreError> {
         crate::store::validate_vector_candidate_limit(limit)?;
-        if self.fail_reads.load(std::sync::atomic::Ordering::SeqCst) {
-            return Err(StoreError::Backend(
-                "vector read failed: backend db.internal:5432 timed out".into(),
-            ));
+        match self.fail_reads.load(std::sync::atomic::Ordering::SeqCst) {
+            0 => {}
+            1 => {
+                return Err(StoreError::Backend(
+                    "vector read failed: backend db.internal:5432 timed out".into(),
+                ));
+            }
+            _ => {
+                return Err(StoreError::Invariant(
+                    "vector candidate lookup refused after embedding contract changed".into(),
+                ));
+            }
         }
         // A session with nothing flushed yet is an EMPTY candidate pool, not
         // an error — the shape Cockroach returns for an unstamped session

@@ -337,3 +337,50 @@ async fn graded_similarity_ranks_by_cosine_not_recency() {
         mem.close().await.unwrap();
     }
 }
+
+/// Review L5: the E2E-6 contract-race annotation says the results are
+/// "keyword-only", which is true of a text recall and was false of a recall
+/// by image with no text (its answer was the recent leg). A recall by image
+/// or vector never carries it: the race fails the recall (M1), as a bare
+/// `store error` on the wire. A text recall still carries the pinned line.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_contract_race_fails_a_recall_by_image_and_annotates_only_text() {
+    let store = vector_store(Source::Store);
+    let mem = open(store.clone(), "q22-recall-by-contract-race").await;
+    derive_wardrobe(&mem).await;
+    flushed(&mem).await;
+    mem.settle_daemon().await;
+    store.race_the_contract();
+
+    let png = similar_query_png();
+    let err = mem
+        .recall_by_detailed(imageless_text(5), image_query(&png))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, LamboError::Store(StoreError::Invariant(m)) if m.contains("embedding contract changed")),
+        "{err:?}"
+    );
+    assert_eq!(
+        crate::surface::error::model_safe_message(&err),
+        "store error (the detail was logged server-side)"
+    );
+
+    let text = mem
+        .recall_detailed(RecallQuery {
+            query: "look dismissed for Onam".into(),
+            top_k: 5,
+            max_tokens: 2_000,
+            traversal_depth: 1,
+        })
+        .await
+        .unwrap();
+    assert!(
+        text.warnings
+            .iter()
+            .any(|w| w.contains("embedding contract changed") && w.contains("keyword-only")),
+        "{:?}",
+        text.warnings
+    );
+    mem.close().await.unwrap();
+}
