@@ -670,4 +670,57 @@ mod endpoints {
             session.mem.close().await.expect("close");
         }
     }
+
+    /// #32 review L1: a second release racing the first waits for it, so
+    /// neither caller returns while the socket is still there.
+    #[tokio::test]
+    async fn a_racing_second_release_returns_only_once_the_endpoint_is_gone() {
+        let dir = crate::test_util::ScratchDir::short("sr");
+        let (a, endpoint) = attached(&dir, "serve-set-race").await;
+        let first = a.release_endpoint();
+        let second = async {
+            a.release_endpoint().await;
+            endpoint.path().exists()
+        };
+        let ((), survived) =
+            tokio::time::timeout(ENDPOINT_RELEASE_GRACE + Duration::from_secs(2), async {
+                tokio::join!(first, second)
+            })
+            .await
+            .expect("both releases are bounded");
+        assert!(
+            !survived,
+            "the second release returned before the socket was removed"
+        );
+        a.mem.close().await.expect("close");
+    }
+
+    /// #32 review L3: a session dropped without stage 6 still stops its
+    /// accept loop, through the `Hub`'s `Drop` (#28).
+    #[tokio::test]
+    async fn a_session_dropped_without_a_release_stops_accepting() {
+        let dir = crate::test_util::ScratchDir::short("sd");
+        let (a, endpoint) = attached(&dir, "serve-set-drop").await;
+        assert!(
+            tokio::net::UnixStream::connect(endpoint.path())
+                .await
+                .is_ok(),
+            "a bound endpoint accepts"
+        );
+        a.mem.close().await.expect("close");
+        drop(a);
+        let stopped = tokio::time::timeout(Duration::from_secs(2), async {
+            while tokio::net::UnixStream::connect(endpoint.path())
+                .await
+                .is_ok()
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        assert!(
+            stopped.is_ok(),
+            "the dropped session's accept loop still accepts"
+        );
+    }
 }

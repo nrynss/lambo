@@ -65,9 +65,11 @@ pub(super) struct AttachedSession {
     /// reference: #32 PR 4's registry holds sessions as
     /// `Arc<AttachedSession>`, and a request or the router may still hold a
     /// clone when a detach or the shutdown reaches stage 6 (#32 review M2).
-    /// A session dropped without the release still drops its `Hub`, whose
-    /// `Drop` aborts the accept loop (#28).
-    hub: parking_lot::Mutex<Option<Hub>>,
+    /// An async lock, held for the whole release, so a second caller waits
+    /// for the first to finish rather than returning while the socket is
+    /// still being removed. A session dropped without the release still
+    /// drops its `Hub`, whose `Drop` aborts the accept loop (#28).
+    hub: tokio::sync::Mutex<Option<Hub>>,
     /// The endpoint address this session derived and published, if any.
     pub(super) endpoint: Option<SessionEndpoint>,
     /// The session's own background tasks.
@@ -105,7 +107,7 @@ impl AttachedSession {
         Self {
             mem,
             server,
-            hub: parking_lot::Mutex::new(Some(hub)),
+            hub: tokio::sync::Mutex::new(Some(hub)),
             endpoint,
             tasks: SessionTasks { event_pump },
         }
@@ -125,12 +127,14 @@ impl AttachedSession {
     ///
     /// Through `&self`, so a session shared as `Arc<AttachedSession>` can be
     /// released while other clones are alive. The hub is taken out of its
-    /// slot, so a second call (a detach racing the shutdown) finds nothing
-    /// and returns at once: the endpoint is released exactly once.
+    /// slot under a lock held until the release ends, so a second call (a
+    /// detach racing the shutdown) waits for the first and then finds
+    /// nothing: the endpoint is released exactly once, and neither caller
+    /// returns before it is gone.
     pub(super) async fn release_endpoint(&self) {
-        // Its own statement: the guard is released before the await below.
-        let hub = self.hub.lock().take();
-        if let Some(hub) = hub {
+        // Held across the release on purpose (an async lock): see `hub`.
+        let mut slot = self.hub.lock().await;
+        if let Some(hub) = slot.take() {
             hub.release(self.endpoint.as_ref()).await;
         }
     }
