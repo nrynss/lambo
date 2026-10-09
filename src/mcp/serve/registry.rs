@@ -512,6 +512,20 @@ impl SessionRegistry {
                 }
                 (Instant::now() + PINNED_RETRY, true)
             }
+            // A shutdown signal that lands during the attach's load makes it
+            // fail with a configuration error ("shutdown signal arrived"),
+            // which is not the session's fault: the process is exiting, so
+            // leave the slot as it was and say nothing alarming (#32 PR 4
+            // Sonnet review L-A). `build_attach`'s error path has already
+            // released any lease it took.
+            Err(e) if self.is_closing() || self.shutdown_signalled().await => {
+                tracing::debug!(
+                    session = %id,
+                    error = %e,
+                    "lambo serve: a background attach stopped for the shutdown"
+                );
+                return;
+            }
             Err(e) => {
                 tracing::error!(
                     session = %id,
@@ -532,6 +546,15 @@ impl SessionRegistry {
                 warned,
             },
         );
+    }
+
+    /// Whether a shutdown signal has already been recorded. Never waits:
+    /// `EarlyShutdown::fired` resolves at once when one was, and a zero
+    /// timeout polls it exactly once.
+    async fn shutdown_signalled(&self) -> bool {
+        tokio::time::timeout(std::time::Duration::ZERO, self.early.fired())
+            .await
+            .is_ok()
     }
 
     /// Whether the process shutdown has taken the attached set.
@@ -720,7 +743,7 @@ impl SessionRegistry {
 /// embedder could not be reached. Everything else (an erased session, a
 /// contract mismatch, an unprovisioned store, a configuration error) gets
 /// the same answer on every retry.
-fn is_transient(err: &LamboError) -> bool {
+pub(super) fn is_transient(err: &LamboError) -> bool {
     use crate::types::StoreError;
     matches!(
         err,
