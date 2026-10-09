@@ -103,7 +103,11 @@
   `[[serve.projects]]` cwd map and `[[serve.credential]]` entries that name
   the environment variable holding their token. It is parsed and validated
   only; nothing reads it at runtime yet, so a serve with or without it
-  behaves as before. A malformed table, a session name that cannot be
+  behaves as before, and `lambo serve` logs one warning at startup when the
+  table is present (`[serve] is parsed but not yet enforced in this
+  release`). `token_env` must be an upper-case variable name and must not
+  look like a token; a value that fails is refused without being quoted. A
+  malformed table, a session name that cannot be
   addressed by URL, an inline token, or more pinned sessions than
   `max_attached` stops every command. An older binary refuses a file that
   has `[serve]` (unknown key).

@@ -260,7 +260,23 @@ fn shown_env(name: &str) -> &str {
     }
 }
 
+/// What `lambo serve` logs once at startup when the file has a non-empty
+/// `[serve]` table: until #32's later PRs nothing reads it, and an operator who
+/// configured credentials must not think scoping is active. It quotes no value
+/// from the table.
+pub const SERVE_UNENFORCED_NOTICE: &str = "lambo.toml [serve] is parsed but not yet enforced \
+     in this release: its sessions, credentials and limits have no effect yet (#32), and this \
+     serve still authenticates only with --auth-token / LAMBO_AUTH_TOKEN";
+
 impl ServeConfig {
+    /// Log [`SERVE_UNENFORCED_NOTICE`] once if this table is not empty.
+    /// `lambo serve` calls it at startup; it never quotes a value.
+    pub fn warn_if_unenforced(&self) {
+        if !self.is_empty() {
+            tracing::warn!("{SERVE_UNENFORCED_NOTICE}");
+        }
+    }
+
     /// Is this the empty table (equivalently: no `[serve]` in the file)?
     pub fn is_empty(&self) -> bool {
         self == &Self::default()

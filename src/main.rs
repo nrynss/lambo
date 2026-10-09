@@ -537,6 +537,13 @@ fn main() -> ExitCode {
             // `--transport stdio`, stdout is the JSON-RPC channel and one stray
             // line on it corrupts the framing.
             lambo::mcp::init_tracing();
+            // `[serve]` parses but nothing enforces it yet (#32 PR 1 review
+            // L3); say so once. The file already loaded in
+            // `resolve_for_command`, so this re-read cannot newly fail, and a
+            // failure would only skip the notice.
+            if let Ok(file) = LamboFile::load_resolved(config) {
+                file.serve.warn_if_unenforced();
+            }
 
             let transport = match transport.parse::<Transport>() {
                 Ok(t) => t,

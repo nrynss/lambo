@@ -17,7 +17,7 @@ mod serve;
 pub use serve::{
     CredentialConfig, InlineToken, ProjectConfig, ServeConfig, ServeCredential,
     DEFAULT_ATTACH_CONCURRENCY, DEFAULT_IDLE_DETACH_SECS, DEFAULT_MAX_ATTACHED,
-    EVERY_HOSTED_SESSION, RESERVED_CREDENTIAL_NAMES,
+    EVERY_HOSTED_SESSION, RESERVED_CREDENTIAL_NAMES, SERVE_UNENFORCED_NOTICE,
 };
 
 /// Scoring weights for daemon composite (spec §9): recency / frequency / session_activity / density.

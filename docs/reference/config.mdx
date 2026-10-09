@@ -147,7 +147,7 @@ GC also sweeps on time. When `gc_max_interval_secs` has passed since a session's
 
 `[serve]` configures one `lambo serve` process that holds several sessions. It is optional: omit it and `lambo serve` behaves exactly as it always has.
 
-In this release the table is **parsed and validated only**. Nothing reads it at runtime yet; routing by `/mcp/s/{session}`, the credentials and the bounds arrive in later releases. A malformed table is still refused when the file is read, so it stops every command, like an unknown key.
+In this release the table is **parsed and validated only**. Nothing reads it at runtime yet; routing by `/mcp/s/{session}`, the credentials and the bounds arrive in later releases. A malformed table is still refused when the file is read, so it stops every command, like an unknown key. `lambo serve` logs one warning at startup when the table is not empty (`[serve] is parsed but not yet enforced in this release`), naming no value from it.
 
 ```toml
 [serve]
@@ -188,7 +188,7 @@ erase = true
 
 Every session named in `[serve]` must be addressable by URL: 1 to 128 bytes of `A-Z`, `a-z`, `0-9`, `.`, `_`, `:` and `-`, not starting with `.`. A name outside that rule is refused here, but you can still serve it on its own with `lambo serve --session <name>`, which keeps its looser rule.
 
-A credential never holds its token. `token_env` names the environment variable that does, and the token is read from it when the server starts. An inline `token = "..."` is refused, and the refusal does not quote it. A credential reaches the sessions in `sessions` (exact names, or `"*"` for every pinned session plus every session under any credential's prefix) and those under `session_prefix` (ids that start with the prefix and are longer than it). It may carry `create` (attach a session that does not exist yet), `erase` and `admin`. The names `default` and `local` are reserved, and `token_env` may not be `LAMBO_AUTH_TOKEN`. `token_env` must be a conventional variable name (`[A-Z_][A-Z0-9_]*`, at most 64 bytes) and must not look like a token (an AWS key id, or a 20-plus character run of letters and digits with no `_`), because it is the key a token is most likely to be pasted into by mistake. A value that fails is refused without being quoted.
+A credential never holds its token. `token_env` names the environment variable that does, and the token will be read from it when the server starts (#32 PR 5; nothing reads it in this release). An inline `token = "..."` is refused, and the refusal does not quote it. A credential reaches the sessions in `sessions` (exact names, or `"*"` for every pinned session plus every session under any credential's prefix) and those under `session_prefix` (ids that start with the prefix and are longer than it). It may carry `create` (attach a session that does not exist yet), `erase` and `admin`. The names `default` and `local` are reserved, and `token_env` may not be `LAMBO_AUTH_TOKEN`. `token_env` must be a conventional variable name (`[A-Z_][A-Z0-9_]*`, at most 64 bytes) and must not look like a token (an AWS key id, or a 20-plus character run of letters and digits with no `_`), because it is the key a token is most likely to be pasted into by mistake. A value that fails is refused without being quoted.
 
 ## Environment variables
 
