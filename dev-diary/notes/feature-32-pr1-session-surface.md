@@ -26,11 +26,21 @@ exists and means "any name the store accepts" (the CLI's looser
 `check_size` rule). The addressed type is proof that decision 16's strict rule
 ran, so PR 4's router cannot hand an unchecked path segment to an attach.
 
-**The uniform 404 is axum's own unrouted 404.** Status 404, no headers, empty
-body: exactly `StatusCode::NOT_FOUND.into_response()`, which is what axum 0.8's
-router answers for an unmatched path (`routing/not_found.rs`). A refused
-session is then indistinguishable from a path that was never routed, which is
-stronger than "identical across refusal reasons". `SessionRefusal` keeps a
+**The uniform 404 is axum's own unrouted 404.** Status 404, no headers of
+its own, empty body: exactly `StatusCode::NOT_FOUND.into_response()`, which is
+what axum 0.8's router answers for an unmatched path (`routing/not_found.rs`).
+On the wire the server adds `content-length: 0` to both. A refused session is
+then indistinguishable from a path that was never routed, which is stronger
+than "identical across refusal reasons". A wire-level test
+(`a_refused_session_and_an_unrouted_path_are_identical_on_the_wire`) serves a
+real router on loopback and compares the full responses, minus `date`. The
+claim holds only while every layer is added with `.layer` (a `.route_layer`
+skips unrouted paths) and the session route answers every method: **PR 4 must
+route `/mcp/s/{session}` with `any`, returning the uniform 404 for a refused
+id on every method**, because an unrouted method otherwise gets 405 plus
+`Allow`. That would not reveal whether a session exists, but it would break
+the "indistinguishable from an unrouted path" claim. The test pins both
+failure modes. `SessionRefusal` keeps a
 `RefusalReason` for the operator's log only; its `Display` never includes the
 probed id.
 

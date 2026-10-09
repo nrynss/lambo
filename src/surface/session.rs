@@ -154,14 +154,17 @@ impl fmt::Display for SessionRefusal {
     }
 }
 
-/// The one 404 every session refusal renders: status 404, no headers, empty
-/// body.
+/// The one 404 every session refusal renders: status 404, no headers of its
+/// own, empty body. On the wire the server adds `content-length: 0`, as it
+/// does for any empty response.
 ///
 /// Exactly what axum's own router answers for a path nothing routes
 /// (`StatusCode::NOT_FOUND.into_response()`, axum 0.8 `routing/not_found.rs`),
 /// so a refused session id cannot be told apart from an unrouted path either.
-/// Any layer in front of it (the bearer guard, transport headers) applies to
-/// both alike.
+/// That holds only if every layer in front of it (the bearer guard, transport
+/// headers) is added with `.layer`, not `.route_layer`, and the session route
+/// answers every method (`any`), or an unrouted method gets 405 plus `Allow`.
+/// Both are pinned by a wire-level test.
 pub fn not_found_response() -> Response {
     NOT_FOUND_STATUS.into_response()
 }

@@ -118,8 +118,9 @@ async fn parts(resp: Response) -> (StatusCode, usize, Vec<u8>) {
 }
 
 /// One 404 constant: every refusal reason renders the same status, headers
-/// and body, and those are exactly axum's unrouted-path 404 (status 404, no
-/// headers, empty body).
+/// and body as a `Response` value (status 404, no headers of its own, empty
+/// body). What the wire carries is pinned by
+/// `a_refused_session_and_an_unrouted_path_are_identical_on_the_wire`.
 ///
 /// Mutation: give any reason its own status, header or body text → red.
 #[tokio::test]
@@ -331,4 +332,115 @@ fn an_addressed_id_converts_to_the_crate_session_type() {
         crate::types::SessionId("lambo-dev".into())
     );
     assert_eq!(id("lambo-dev").to_string(), "lambo-dev");
+}
+
+/// Serve `app` on an ephemeral loopback port and return its address.
+async fn serve_on_loopback(app: axum::Router) -> std::net::SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback");
+    let addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+    addr
+}
+
+/// One raw HTTP/1.1 exchange: the full response as sent, minus the `date`
+/// header (the only field that varies between two requests).
+async fn on_the_wire(addr: std::net::SocketAddr, method: &str, path: &str) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
+    let request = format!(
+        "{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+    );
+    stream.write_all(request.as_bytes()).await.expect("write");
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).await.expect("read");
+    String::from_utf8(raw)
+        .expect("utf-8 response")
+        .split("\r\n")
+        .filter(|line| !line.to_ascii_lowercase().starts_with("date:"))
+        .collect::<Vec<_>>()
+        .join("\r\n")
+}
+
+/// A response header every response through the layer carries, standing in
+/// for what the real bearer guard and transport layers add.
+async fn mark(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let mut resp = next.run(req).await;
+    resp.headers_mut().insert(
+        "x-lambo-test-layer",
+        axum::http::HeaderValue::from_static("1"),
+    );
+    resp
+}
+
+async fn refuse() -> Response {
+    SessionRefusal::new(RefusalReason::OutOfScope).not_found_response()
+}
+
+/// #32 PR 1 review L2: through a real router and a layer added with
+/// `.layer` (as `serve` and the portal do), a refused session and an unrouted
+/// path are byte-identical on the wire: status line, every header (including
+/// the `content-length: 0` the server adds) and body. The session route
+/// answers every method, as PR 4's must; an unrouted path answers every
+/// method with the 404 too.
+///
+/// It also pins the two ways to break the claim: `.route_layer` (the layer
+/// then skips unrouted paths) and a method-specific route (an unrouted method
+/// gets 405 plus `Allow`).
+///
+/// Mutation: give `not_found_response` a header or body, or switch the real
+/// router to `.route_layer` → red.
+#[tokio::test]
+async fn a_refused_session_and_an_unrouted_path_are_identical_on_the_wire() {
+    let app = axum::Router::new()
+        .route("/mcp/s/{session}", axum::routing::any(refuse))
+        .layer(axum::middleware::from_fn(mark));
+    let addr = serve_on_loopback(app).await;
+
+    let reference = on_the_wire(addr, "GET", "/not/routed").await;
+    assert!(
+        reference.starts_with("HTTP/1.1 404 Not Found\r\n"),
+        "{reference}"
+    );
+    assert!(
+        reference.contains("\r\ncontent-length: 0\r\n"),
+        "{reference}"
+    );
+    assert!(
+        reference.contains("\r\nx-lambo-test-layer: 1\r\n"),
+        "{reference}"
+    );
+    assert!(reference.ends_with("\r\n\r\n"), "empty body: {reference:?}");
+    for method in ["GET", "POST", "DELETE", "PUT"] {
+        for path in ["/mcp/s/refused-id", "/not/routed", "/mcp/s"] {
+            assert_eq!(
+                on_the_wire(addr, method, path).await,
+                reference,
+                "{method} {path} must be the unrouted 404"
+            );
+        }
+    }
+
+    // `.route_layer` would not hold: the unrouted path skips the layer.
+    let route_layered = axum::Router::new()
+        .route("/mcp/s/{session}", axum::routing::any(refuse))
+        .route_layer(axum::middleware::from_fn(mark));
+    let addr = serve_on_loopback(route_layered).await;
+    assert_ne!(
+        on_the_wire(addr, "GET", "/mcp/s/refused-id").await,
+        on_the_wire(addr, "GET", "/not/routed").await,
+        "route_layer distinguishes a refused session from an unrouted path"
+    );
+
+    // Nor would a GET-only route: another method gets 405 and `Allow`.
+    let get_only = axum::Router::new()
+        .route("/mcp/s/{session}", axum::routing::get(refuse))
+        .layer(axum::middleware::from_fn(mark));
+    let addr = serve_on_loopback(get_only).await;
+    let post = on_the_wire(addr, "POST", "/mcp/s/refused-id").await;
+    assert!(post.starts_with("HTTP/1.1 405"), "{post}");
+    assert!(post.to_ascii_lowercase().contains("\r\nallow: "), "{post}");
 }
