@@ -390,6 +390,33 @@ impl Memory {
                 .is_some_and(|w| crate::store::erase::is_erased_holder(&w))
     }
 
+    /// This handle's single-writer lease identity: the holder an in-process
+    /// erase presents to the store (#32 PR 7), which the #23 gate admits as
+    /// the eraser's own live lease, so no other process can take the
+    /// session between this handle's fence and the erase.
+    pub(crate) fn lease_holder(&self) -> &LeaseHolder {
+        &self.lease_holder
+    }
+
+    /// Fence this handle for an erase of its own session by its own process
+    /// (#32 PR 7, design §6.3), exactly as the store's tombstone would fence
+    /// it at the next heartbeat or refused flush (#23 L2): the lease-lost
+    /// flag is latched first, then the wake-up, with the tombstone holder as
+    /// the winner.
+    ///
+    /// From here [`Memory::erased`] holds: every read and write is refused
+    /// with the erased error, the flush loop stops and drops its tail, and
+    /// [`Memory::close`] takes its fenced branch (no final flush, **no lease
+    /// release**). The store is not touched: the lease row stays this
+    /// handle's until the erase replaces it with the tombstone, so no other
+    /// writer can acquire in between. Idempotent, like every latch of the
+    /// fence.
+    pub(crate) fn fence_for_erase(&self) {
+        self.lease_lost.store(true, Ordering::Release);
+        self.lease_lost_signal
+            .latch(crate::store::erase::ERASED_HOLDER);
+    }
+
     /// The honest refusal a fenced handle returns (T86-2): another writer owns
     /// the session now, so this process is no longer the writer and refuses to
     /// touch the graph. A `Conflict`, the same class as the build-time

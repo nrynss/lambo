@@ -653,3 +653,56 @@ async fn a_flush_refused_as_erased_fences_the_handle_without_the_heartbeat() {
         "nothing of the erased session came back"
     );
 }
+
+/// #32 PR 7: `fence_for_erase` fences the handle in-process exactly as the
+/// tombstone would, before the store is touched: reads and writes are
+/// refused with the erased error, and the close discards the tail and does
+/// NOT release the lease, so the row stays this handle's until the erase,
+/// run as the same holder, replaces it with the tombstone (no gap another
+/// writer could take). The tail written before the fence never reaches the
+/// store.
+#[tokio::test]
+async fn fence_for_erase_closes_without_flushing_or_releasing_and_the_holder_erases() {
+    let store = Arc::new(MemoryStore::new());
+    let session = SessionId::new("fenced-for-erase");
+    let mem = memory_on(store.clone(), "fenced-for-erase").await;
+    mem.derive(&[("about to go", ConceptType::Entity)], &ParentOf::none())
+        .await
+        .unwrap();
+
+    mem.fence_for_erase();
+    assert!(mem.erased());
+    let err = mem
+        .recall(query("about to go"))
+        .await
+        .expect_err("reads are refused");
+    assert!(err.to_string().contains("was erased"), "{err}");
+    let err = mem.close().await.expect_err("the tail is not flushed");
+    assert!(err.to_string().contains("was erased"), "{err}");
+
+    let lease = store
+        .read_lease(&session)
+        .await
+        .unwrap()
+        .expect("a lease row");
+    assert_eq!(
+        lease.holder,
+        mem.lease_holder().token(),
+        "the fenced close kept the lease: nothing released it"
+    );
+    let outcome = store
+        .erase_session(&session, mem.lease_holder())
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, crate::store::EraseOutcome::Erased(_)),
+        "the gate admits the eraser's own live lease: {outcome:?}"
+    );
+    assert!(crate::store::erase::is_tombstone(
+        &store.read_lease(&session).await.unwrap().unwrap()
+    ));
+    assert!(
+        store.load_session(&session).await.is_err(),
+        "the unflushed tail never reached the store"
+    );
+}

@@ -678,13 +678,23 @@ impl Memory {
                 drop(task);
             }
             let undrained = self.graph.read().log_len();
-            tracing::error!(
-                session = %self.session,
-                mutations = undrained,
-                "close: this handle lost its single-writer lease; refusing to flush the tail \
-                 ({undrained} mutations discarded) and NOT releasing the lease — another writer \
-                 owns the session"
-            );
+            if self.erased() {
+                tracing::warn!(
+                    session = %self.session,
+                    mutations = undrained,
+                    "close: this session was erased; discarding its in-memory tail \
+                     ({undrained} mutations) and NOT flushing it or releasing the lease (the \
+                     erasure tombstone holds it)"
+                );
+            } else {
+                tracing::error!(
+                    session = %self.session,
+                    mutations = undrained,
+                    "close: this handle lost its single-writer lease; refusing to flush the tail \
+                     ({undrained} mutations discarded) and NOT releasing the lease — another \
+                     writer owns the session"
+                );
+            }
             step.done();
             return Err(self.lease_lost_error());
         }
