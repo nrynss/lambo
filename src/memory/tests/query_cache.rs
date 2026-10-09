@@ -191,13 +191,27 @@ async fn seed(mem: &Memory) -> NodeId {
 async fn an_identical_repeated_recall_skips_the_embed() {
     for source in SOURCES {
         let embedder = CountingEmbedder::new();
-        let mem = open(vector_store(source), "q14-repeat", embedder.clone()).await;
+        let store = vector_store(source);
+        let mem = open(store.clone(), "q14-repeat", embedder.clone()).await;
         let near = seed(&mem).await;
         let q = recall_query(crate::embed::NEAR_B, 5, 1);
 
         let before = embedder.calls();
+        let reads = store.answers().len();
         let first = mem.recall_detailed(q.clone()).await.unwrap();
         assert_eq!(embedder.calls(), before + 1, "{source:?}: a miss embeds");
+        // Pin which vector source ran, so a silent fallback from the graph
+        // to the store's checked read (or back) fails here (#14 review L2).
+        match source {
+            Source::Graph => assert!(
+                store.answers().is_empty(),
+                "the graph source never calls the store's checked read"
+            ),
+            Source::Store => assert!(
+                store.answers().len() > reads,
+                "the store source answered from the checked read"
+            ),
+        }
         for _ in 0..3 {
             let again = mem.recall_detailed(q.clone()).await.unwrap();
             assert_eq!(answer(&again), answer(&first), "{source:?}");
