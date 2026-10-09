@@ -58,20 +58,37 @@ struct ContractFile {
     dim: usize,
 }
 
-/// Read a local file of at most `cap` bytes, checking the size before
-/// reading it.
+/// Read a local file of at most `cap` bytes.
+///
+/// The read itself is bounded (`take(cap + 1)`), so the cap holds for what a
+/// size check cannot see: a pipe, a process substitution (`<(jq ...)`),
+/// `/dev/stdin` or a character device report length 0, and a file can grow
+/// between a size check and the read. A regular file already over the cap
+/// is refused from its metadata first, without reading it.
 fn read_capped(flag: &str, path: &Path, cap: u64) -> Result<Vec<u8>, CliError> {
-    let meta = std::fs::metadata(path)
-        .map_err(|e| CliError::Usage(format!("{flag}: cannot read {}: {e}", path.display())))?;
-    if meta.len() > cap {
+    use std::io::Read as _;
+    let cannot =
+        |e: std::io::Error| CliError::Usage(format!("{flag}: cannot read {}: {e}", path.display()));
+    let file = std::fs::File::open(path).map_err(cannot)?;
+    let meta = file.metadata().map_err(cannot)?;
+    if meta.is_file() && meta.len() > cap {
         return Err(CliError::Usage(format!(
             "{flag}: {} is {} bytes, over the {cap}-byte limit",
             path.display(),
             meta.len()
         )));
     }
-    std::fs::read(path)
-        .map_err(|e| CliError::Usage(format!("{flag}: cannot read {}: {e}", path.display())))
+    let mut bytes = Vec::new();
+    file.take(cap.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(cannot)?;
+    if bytes.len() as u64 > cap {
+        return Err(CliError::Usage(format!(
+            "{flag}: {} is over the {cap}-byte limit",
+            path.display()
+        )));
+    }
+    Ok(bytes)
 }
 
 /// Derive one image concept into session memory.
@@ -458,6 +475,54 @@ mod tests {
             out.contains("'red silk saree [image:r17]': 1 created"),
             "{out}"
         );
+    }
+
+    /// Review L2: the cap bounds the read itself, so a source whose size
+    /// metadata says nothing (a device, a pipe) cannot bypass it.
+    #[cfg(unix)]
+    #[test]
+    fn the_size_cap_holds_for_a_device_with_no_length() {
+        let err = read_capped("--vector-json", Path::new("/dev/zero"), 1024).unwrap_err();
+        assert!(matches!(err, CliError::Usage(_)), "{err}");
+        assert!(
+            err.to_string().contains("over the 1024-byte limit"),
+            "{err}"
+        );
+    }
+
+    /// A pipe written by another thread: more than the cap is refused, at
+    /// the cap is read whole.
+    #[cfg(unix)]
+    #[test]
+    fn the_size_cap_holds_for_a_pipe() {
+        let dir = ScratchDir::new("lambo-cli-derive-image-fifo");
+        for (len, ok) in [(64usize, true), (65, false)] {
+            let fifo = dir.join(&format!("v{len}.fifo"));
+            let status = std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .expect("mkfifo runs");
+            assert!(status.success());
+            let writer = {
+                let fifo = fifo.clone();
+                std::thread::spawn(move || {
+                    use std::io::Write as _;
+                    // The reader may stop early; a broken pipe is fine.
+                    if let Ok(mut f) = std::fs::OpenOptions::new().write(true).open(&fifo) {
+                        let _ = f.write_all(&vec![b'x'; len]);
+                    }
+                })
+            };
+            let got = read_capped("--image", &fifo, 64);
+            writer.join().unwrap();
+            match got {
+                Ok(bytes) => assert!(ok && bytes.len() == len, "{len}"),
+                Err(e) => {
+                    assert!(!ok, "{len}: {e}");
+                    assert!(e.to_string().contains("over the 64-byte limit"), "{e}");
+                }
+            }
+        }
     }
 
     /// The image-id collision reaches the operator with its fix.
