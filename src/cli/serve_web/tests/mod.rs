@@ -62,6 +62,13 @@ const PRODUCTION_SOURCES: &[(&str, &str)] = &[
         )),
     ),
     (
+        "serve_web/scope.rs",
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/cli/serve_web/scope.rs"
+        )),
+    ),
+    (
         "serve_web/state.rs",
         include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -431,6 +438,7 @@ fn state_with_web(
     let exposed = auth.is_some();
     Arc::new(AppState::new(
         SessionId::new(session),
+        [],
         backends,
         exposed,
         auth,

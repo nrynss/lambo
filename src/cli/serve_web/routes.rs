@@ -12,7 +12,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use serde::Serialize;
 
-use super::auth::require_auth;
+use super::auth::guard;
 use super::dto::{
     GraphEdge, GraphNode, GraphResponse, InspectParams, InspectResponse, Pulse, RecallParams,
     RecallResponse, SessionInfo, SinceParams,
@@ -20,6 +20,7 @@ use super::dto::{
 use super::projections::{
     is_structural, read_feed_and_stats, status_str, structural_dependents, structural_rank,
 };
+use super::scope::{resolve_session, SessionCtx};
 use super::state::AppState;
 use super::views::RECALL_PERMIT_WAIT;
 use super::{APP_CSS, APP_JS, INDEX_HTML, POLL_INTERVAL};
@@ -99,8 +100,8 @@ pub(super) async fn healthz() -> Response {
     ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], "ok").into_response()
 }
 
-pub(super) async fn api_session(State(state): State<Arc<AppState>>) -> Response {
-    let view = match state.view().await {
+pub(super) async fn api_session(State(state): State<Arc<AppState>>, ctx: SessionCtx) -> Response {
+    let view = match state.view(&ctx.session).await {
         Ok(view) => view,
         Err(err) => return fail(err),
     };
@@ -108,7 +109,7 @@ pub(super) async fn api_session(State(state): State<Arc<AppState>>) -> Response 
     json(
         StatusCode::OK,
         SessionInfo {
-            session: state.session.as_str().to_string(),
+            session: ctx.session.as_str().to_string(),
             store: state.backends.store_cfg.kind.to_string(),
             embedder: state.backends.embedder_cfg.kind.to_string(),
             embedding_dim: state.backends.embedding.dim,
@@ -131,17 +132,18 @@ pub(super) async fn api_session(State(state): State<Arc<AppState>>) -> Response 
 
 pub(super) async fn api_events(
     State(state): State<Arc<AppState>>,
+    ctx: SessionCtx,
     Query(params): Query<SinceParams>,
 ) -> Response {
-    match state.view().await {
+    match state.view(&ctx.session).await {
         Ok(view) => json(StatusCode::OK, view.events_since(params.since.unwrap_or(0))),
         Err(e) => fail(e),
     }
 }
 
-pub(super) async fn api_stats(State(state): State<Arc<AppState>>) -> Response {
+pub(super) async fn api_stats(State(state): State<Arc<AppState>>, ctx: SessionCtx) -> Response {
     // `usize::MAX` asks for the count without the rows.
-    match read_feed_and_stats(&state, usize::MAX).await {
+    match read_feed_and_stats(&state, &ctx.session, usize::MAX).await {
         Ok((_, read)) => json(StatusCode::OK, read.stats),
         Err(e) => fail(e),
     }
@@ -150,9 +152,10 @@ pub(super) async fn api_stats(State(state): State<Arc<AppState>>) -> Response {
 /// Stats + the event tail in one round trip — what the page actually polls.
 pub(super) async fn api_pulse(
     State(state): State<Arc<AppState>>,
+    ctx: SessionCtx,
     Query(params): Query<SinceParams>,
 ) -> Response {
-    match read_feed_and_stats(&state, params.since.unwrap_or(0)).await {
+    match read_feed_and_stats(&state, &ctx.session, params.since.unwrap_or(0)).await {
         Ok((events, read)) => {
             let vector_search = state
                 .store()
@@ -185,12 +188,13 @@ pub(super) async fn api_pulse(
 /// touched, so a bad query costs no store call.
 pub(super) async fn api_recall(
     State(state): State<Arc<AppState>>,
+    ctx: SessionCtx,
     Query(params): Query<RecallParams>,
 ) -> Response {
     let query = params.q.unwrap_or_default();
     let started = Instant::now();
     let request = match RecallRequest::validate(
-        state.session.as_str(),
+        ctx.session.as_str(),
         query.trim(),
         params.top_k,
         params.max_tokens,
@@ -203,7 +207,7 @@ pub(super) async fn api_recall(
     // semaphore and must not hold a recall permit while it runs, or a few
     // recalls waiting on one slow session would answer every other recall
     // 503. The 503 still comes after the session was resolved (design 5.3).
-    let view = match state.view().await {
+    let view = match state.view(&ctx.session).await {
         Ok(view) => view,
         Err(e) => return fail(e),
     };
@@ -216,7 +220,7 @@ pub(super) async fn api_recall(
         &state.backends,
         &view.reader,
         &request,
-        state.views.queries(&state.session),
+        state.views.queries(&ctx.session),
     )
     .await;
 
@@ -224,7 +228,7 @@ pub(super) async fn api_recall(
         Ok(cli) => json(
             StatusCode::OK,
             RecallResponse {
-                session: state.session.as_str().to_string(),
+                session: ctx.session.as_str().to_string(),
                 query,
                 context: cli.context,
                 elapsed_ms: started.elapsed().as_millis() as u64,
@@ -242,6 +246,7 @@ pub(super) async fn api_recall(
 /// 1 (the page needs hop 1 only).
 pub(super) async fn api_inspect(
     State(state): State<Arc<AppState>>,
+    ctx: SessionCtx,
     Query(params): Query<InspectParams>,
 ) -> Response {
     if params.focus.trim().is_empty() {
@@ -252,7 +257,7 @@ pub(super) async fn api_inspect(
             InspectResponse::missing(params.focus, state.backends.config.promotion_policy),
         );
     }
-    let view = match state.view().await {
+    let view = match state.view(&ctx.session).await {
         Ok(view) => view,
         Err(e) => return fail(e),
     };
@@ -317,7 +322,7 @@ pub(super) async fn api_inspect(
                 } else {
                     match gate_progress(
                         state.store(),
-                        &state.session,
+                        &ctx.session,
                         &concept,
                         state.backends.config.promotion_policy,
                         state.backends.config.canonization_edge_min_age,
@@ -356,8 +361,8 @@ pub(super) async fn api_inspect(
 /// The session's structural skeleton, for the tree view. Read-only: no writer
 /// lease. Ships only `Dependency`/`Causal`/`Hierarchical` edges — the false
 /// `CoOccurrence` edge stays out of the visible claim.
-pub(super) async fn api_graph(State(state): State<Arc<AppState>>) -> Response {
-    let view = match state.view().await {
+pub(super) async fn api_graph(State(state): State<Arc<AppState>>, ctx: SessionCtx) -> Response {
+    let view = match state.view(&ctx.session).await {
         Ok(view) => view,
         Err(e) => return fail(e),
     };
@@ -425,7 +430,7 @@ pub(super) async fn api_graph(State(state): State<Arc<AppState>>) -> Response {
     json(
         StatusCode::OK,
         GraphResponse {
-            session: state.session.as_str().to_string(),
+            session: ctx.session.as_str().to_string(),
             nodes,
             edges,
             truncated,
@@ -433,16 +438,21 @@ pub(super) async fn api_graph(State(state): State<Arc<AppState>>) -> Response {
     )
 }
 
-/// Every route, `GET`-only.
+/// Every route, `GET`-only, behind the session resolution and the guard.
 ///
 /// Adding a mutating method here is what `read_only_router_has_no_mutating_route`
 /// exists to catch: this server is read-only, so a write route is a stranger
 /// with a pen. A new path must also be added to the tests' `ROUTES` list, which
-/// `routes_constant_covers_every_registered_route` enforces. The `require_auth`
-/// layer sits over the whole router and enforces the bearer token whenever one
-/// is configured.
+/// `routes_constant_covers_every_registered_route` enforces.
+///
+/// The routes are the outer router's fallback service, so the two layers
+/// over it run on **every** request before routing, in this order: `guard`
+/// (the bearer token, when one is configured) and then `resolve_session`
+/// (which session the request may read, `super::scope`). A layer over the
+/// routes themselves would run only after routing, too late to decide the
+/// session for an unrouted method or path.
 pub(super) fn router(state: Arc<AppState>) -> Router {
-    Router::new()
+    let routes = Router::new()
         .route("/", get(index))
         .route("/app.css", get(stylesheet))
         .route("/app.js", get(script))
@@ -454,6 +464,12 @@ pub(super) fn router(state: Arc<AppState>) -> Router {
         .route("/api/events", get(api_events))
         .route("/api/stats", get(api_stats))
         .route("/api/pulse", get(api_pulse))
-        .layer(middleware::from_fn_with_state(state.clone(), require_auth))
-        .with_state(state)
+        .with_state(state.clone());
+    Router::new()
+        .fallback_service(routes)
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            resolve_session,
+        ))
+        .layer(middleware::from_fn_with_state(state, guard))
 }

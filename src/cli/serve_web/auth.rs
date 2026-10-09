@@ -1,7 +1,13 @@
 //! Authorization for the portal, mirroring T8.7's fail-closed bearer posture
 //! in `crate::mcp::serve`: the unprintable token, env-over-flag resolution,
-//! the non-loopback refusal, and the gate in front of every route. The
-//! comparison is `crate::surface::bearer`'s, shared with `lambo serve`.
+//! the non-loopback refusal, and the gate in front of every route.
+//!
+//! The credential set is `crate::surface::session`'s [`SessionAuthority`],
+//! the type `lambo serve` authenticates with (#4 PR 2, design 4.1): the
+//! bearer scan, the grants and the order are shared, only the secret type
+//! ([`AuthToken`]) and the 401 wording are the portal's own. With no token
+//! configured the set is the implicit loopback grant `local`; with one, the
+//! legacy grant `default`. Both reach every served session.
 
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -13,6 +19,19 @@ use axum::response::{IntoResponse, Response};
 use super::state::AppState;
 use crate::cli::caps::CliError;
 use crate::mcp::AUTH_TOKEN_ENV;
+use crate::surface::session::{
+    parse_addressed, BearerSecret, HostedSessions, SessionAuthority, SessionGrant,
+};
+use crate::types::SessionId;
+
+/// The portal's credential set.
+pub(super) type PortalAuthority = SessionAuthority<AuthToken>;
+
+/// The grant [`guard`] resolved for a request, carried to the session
+/// resolution in the request's extensions. A request that arrives there
+/// without one (a router served without the guard) is refused, never served.
+#[derive(Clone)]
+pub(super) struct Authenticated(pub(super) Arc<SessionGrant>);
 
 /// A bearer token that cannot be printed.
 ///
@@ -56,14 +75,33 @@ impl std::str::FromStr for AuthToken {
     }
 }
 
-/// Does an `Authorization` header carry the expected bearer token?
+impl BearerSecret for AuthToken {
+    fn secret_bytes(&self) -> &[u8] {
+        self.as_bytes()
+    }
+}
+
+/// The portal's credential set over the served `sessions`.
 ///
-/// Scheme matched case-insensitively (RFC 7235 §2.1); the credential compared
-/// byte-for-byte in constant time. The parse and the comparison are the ones
-/// `mcp::serve` uses, from `crate::surface::bearer` (#28): this surface used
-/// to carry its own copy, which had drifted from that one.
-pub(super) fn bearer_ok(header: Option<&str>, expected: &AuthToken) -> bool {
-    crate::surface::bearer::bearer_ok(header, expected.as_bytes())
+/// The hosted set is the allowlist's addressable names and no prefix, so a
+/// grant reaches nothing outside the allowlist (design 4.2). A loose single
+/// session (one name outside the strict charset) is in no hosted set; the
+/// unscoped aliases reach it through
+/// [`SessionAuthority::authorize_default`], under a scope over every
+/// pinned session, which both of this PR's grants have.
+pub(super) fn portal_authority(auth: Option<AuthToken>, sessions: &[SessionId]) -> PortalAuthority {
+    let hosted = HostedSessions::new(
+        sessions
+            .iter()
+            .filter_map(|s| parse_addressed(s.as_str()).ok()),
+        std::iter::empty(),
+    );
+    match auth {
+        Some(token) => {
+            SessionAuthority::with_credentials([(token, SessionGrant::legacy_default())], hosted)
+        }
+        None => SessionAuthority::implicit(SessionGrant::implicit_local(), hosted),
+    }
 }
 
 /// Resolve the effective token from the flag and the environment (env wins).
@@ -114,35 +152,41 @@ pub(super) fn authorize_bind_web(bind: IpAddr, token: Option<&AuthToken>) -> Res
     )))
 }
 
-/// Bearer gate applied when a token is configured.
+/// Step 1 of the fixed order (design 3.3): resolve the request's bearer
+/// token to a grant, before anything about sessions is evaluated.
 ///
-/// When [`AppState::auth`] is `Some`, every request — static asset, health
-/// check, or API — must carry `Authorization: Bearer <token>`. When it is
-/// `None` (the loopback default) this is a pure pass-through, so a judge's
-/// browser needs no credentials. Mirrors `mcp::serve`'s `guard_request`, minus
-/// the transport-specific rate/session guards this read-only process does not
+/// With a token configured, every request (static asset, health check,
+/// API, unrouted path) must carry `Authorization: Bearer <token>`, compared
+/// by [`SessionAuthority::authenticate`]'s constant-time scan
+/// (`crate::surface::bearer`, shared with `lambo serve`). Under the implicit
+/// loopback grant no header is read, so a judge's browser needs no
+/// credentials. Mirrors `mcp::serve`'s `guard_request`, minus the
+/// transport-specific rate/session guards this read-only process does not
 /// have.
-pub(super) async fn require_auth(
+pub(super) async fn guard(
     axum::extract::State(state): axum::extract::State<Arc<AppState>>,
-    req: axum::extract::Request,
+    mut req: axum::extract::Request,
     next: middleware::Next,
 ) -> Response {
-    if let Some(expected) = &state.auth {
-        let presented = req
-            .headers()
-            .get(header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok());
-        if !bearer_ok(presented, expected) {
-            // Deliberately terse and identical for "no header" and "wrong
-            // token": the difference is not the caller's business, and the
-            // token itself is never echoed.
-            return (
-                StatusCode::UNAUTHORIZED,
-                [(header::WWW_AUTHENTICATE, "Bearer")],
-                "unauthorized: this endpoint requires 'Authorization: Bearer <token>'\n",
-            )
-                .into_response();
-        }
-    }
+    let presented = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok());
+    let Some(grant) = state.authority.authenticate(presented) else {
+        return unauthorized();
+    };
+    req.extensions_mut().insert(Authenticated(grant));
     next.run(req).await
+}
+
+/// The 401. Deliberately terse and identical for "no header" and "wrong
+/// token": the difference is not the caller's business, and the token
+/// itself is never echoed. Independent of the path, so of any session.
+fn unauthorized() -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        [(header::WWW_AUTHENTICATE, "Bearer")],
+        "unauthorized: this endpoint requires 'Authorization: Bearer <token>'\n",
+    )
+        .into_response()
 }

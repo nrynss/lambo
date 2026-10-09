@@ -94,8 +94,9 @@
 //! | module | holds |
 //! |---|---|
 //! | this file | the embedded assets, [`Args`], [`run`], the bounded serve, the signal registration |
-//! | `auth` | [`AuthToken`], env-over-flag resolution, the non-loopback refusal, the bearer gate |
-//! | `state` | `AppState`: session, backends, auth posture, view cache |
+//! | `auth` | [`AuthToken`], env-over-flag resolution, the non-loopback refusal, the credential set and the bearer gate |
+//! | `scope` | which session a request reads: the per-request resolution, before routing (#4) |
+//! | `state` | `AppState`: served sessions, backends, credential set, view cache |
 //! | `views` | the per-session reader views: one load per TTL, single-flight, bounded (#4) |
 //! | `dto` | every response and query type |
 //! | `projections` | the reads: hop-1 structural dependents, the ordered event feed, the stats |
@@ -128,6 +129,7 @@ mod auth;
 mod dto;
 mod projections;
 mod routes;
+mod scope;
 mod state;
 mod views;
 
@@ -254,6 +256,7 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
     let exposed = !args.bind.is_loopback();
     let state = Arc::new(AppState::new(
         SessionId::new(args.session.as_str()),
+        [],
         backends,
         exposed,
         auth,
@@ -284,7 +287,7 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
     );
     // A non-loopback bind always carries a token (`authorize_bind_web`), so
     // the two branches below are exhaustive: token configured, or loopback.
-    if state.auth.is_some() {
+    if state.authority.requires_bearer() {
         eprintln!(
             "⚑ lambo serve-web: authentication is ON — every request must send \
              'Authorization: Bearer <token>' (from {AUTH_TOKEN_ENV} or --auth-token)."

@@ -102,15 +102,6 @@ pub(crate) fn bearer_credential(header: Option<&str>) -> Option<&str> {
         .then(|| credential.trim())
 }
 
-/// Does an `Authorization` header value carry the expected bearer token?
-///
-/// The scheme is matched case-insensitively (RFC 7235 §2.1); the credential
-/// itself is compared byte-for-byte in constant time by [`tokens_match`].
-pub(crate) fn bearer_ok(header: Option<&str>, expected: &[u8]) -> bool {
-    bearer_credential(header)
-        .is_some_and(|credential| tokens_match(credential.as_bytes(), expected))
-}
-
 /// Which of several expected tokens `presented` is, compared against
 /// **every** one with no early exit (#32 design §6.1).
 ///
@@ -156,7 +147,16 @@ fn scan<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::{bearer_credential, bearer_ok, fold_diff, match_any, scan, tokens_match};
+    use super::{bearer_credential, fold_diff, match_any, scan, tokens_match};
+
+    /// Does an `Authorization` header value carry the expected bearer
+    /// token? The parse and the comparison, composed as both surfaces
+    /// compose them (through `SessionAuthority::authenticate` since #4
+    /// PR 2, which moved the portal off the single-token helper).
+    fn bearer_ok(header: Option<&str>, expected: &[u8]) -> bool {
+        bearer_credential(header)
+            .is_some_and(|credential| tokens_match(credential.as_bytes(), expected))
+    }
 
     /// Every acceptance case in one table: `true` only for a byte-equal,
     /// equal-length, non-empty token.

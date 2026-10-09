@@ -1,10 +1,12 @@
-//! The one piece of state the portal's handlers share: the session, the
-//! resolved backends, the auth posture, and the per-session view cache.
+//! The one piece of state the portal's handlers share: the served sessions,
+//! the resolved backends, the credential set, and the per-session view
+//! cache. It holds no "current session": every request resolves its own
+//! (#4 design 3.2, [`super::scope`]).
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::auth::AuthToken;
+use super::auth::{portal_authority, AuthToken, PortalAuthority};
 use super::views::{SessionView, ViewBounds, ViewCache};
 use crate::cli::caps::CliError;
 use crate::config::WebConfig;
@@ -13,34 +15,45 @@ use crate::store::GraphStore;
 use crate::types::SessionId;
 
 pub(super) struct AppState {
-    pub(super) session: SessionId,
+    /// The default session: what the unscoped routes serve, and the first
+    /// served session.
+    pub(super) default_session: SessionId,
     pub(super) backends: ResolvedBackends,
     /// True when `--bind` reaches beyond loopback. A non-loopback bind always
     /// carries a token (see [`authorize_bind_web`](super::auth::authorize_bind_web)).
     pub(super) exposed: bool,
-    /// Optional bearer token. When set, every route requires it.
-    pub(super) auth: Option<AuthToken>,
+    /// Who may read which served session: the implicit loopback grant, or
+    /// the configured bearer token's (`surface::session`, #4 PR 2).
+    pub(super) authority: PortalAuthority,
     /// Every data route reads through this: one load per session per TTL,
     /// shared by every request (#4 PR 1).
     pub(super) views: ViewCache,
 }
 
 impl AppState {
-    /// The state for a portal on `session`, its view bounds from `web`.
+    /// The state for a portal serving `default_session` and `more` (in
+    /// order, each once, the default first), its view bounds from `web`.
     pub(super) fn new(
-        session: SessionId,
+        default_session: SessionId,
+        more: impl IntoIterator<Item = SessionId>,
         backends: ResolvedBackends,
         exposed: bool,
         auth: Option<AuthToken>,
         web: &WebConfig,
     ) -> Self {
+        let mut sessions = vec![default_session.clone()];
+        for session in more {
+            if !sessions.contains(&session) {
+                sessions.push(session);
+            }
+        }
         let bounds = ViewBounds::resolve(web, backends.store_cfg.kind);
         Self {
-            views: ViewCache::new([session.clone()], bounds),
-            session,
+            views: ViewCache::new(sessions.iter().cloned(), bounds),
+            authority: portal_authority(auth, &sessions),
+            default_session,
             backends,
             exposed,
-            auth,
         }
     }
 
@@ -48,16 +61,17 @@ impl AppState {
         self.backends.store.as_ref()
     }
 
-    /// The served session's current view (see [`ViewCache::view`]).
-    pub(super) async fn view(&self) -> Result<Arc<SessionView>, CliError> {
+    /// `session`'s current view (see [`ViewCache::view`]). `session` is one
+    /// the request was authorized for ([`super::scope`]).
+    pub(super) async fn view(&self, session: &SessionId) -> Result<Arc<SessionView>, CliError> {
         self.views
-            .view(self.store(), &self.backends.embedding, &self.session)
+            .view(self.store(), &self.backends.embedding, session)
             .await
     }
 
-    /// Record the durable state's count fingerprint; return how long the
+    /// Record `session`'s durable count fingerprint; return how long the
     /// current one has been standing (see [`ViewCache::observe`]).
-    pub(super) fn observe(&self, fingerprint: u64) -> Duration {
-        self.views.observe(&self.session, fingerprint)
+    pub(super) fn observe(&self, session: &SessionId, fingerprint: u64) -> Duration {
+        self.views.observe(session, fingerprint)
     }
 }

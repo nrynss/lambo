@@ -258,7 +258,7 @@ fn web_ttl_ms(ms: u64) -> crate::config::WebConfig {
 async fn until_queued(state: &AppState, n: u64) {
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     loop {
-        let queued = state.views.queued(&state.session);
+        let queued = state.views.queued(&state.default_session);
         if queued >= n {
             assert_eq!(queued, n, "more requests queued than were sent");
             return;
