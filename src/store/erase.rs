@@ -609,7 +609,8 @@ pub(crate) mod testkit {
     /// A batch that writes the session row (with contract and root goal), two
     /// chained interactions, two concepts (one carrying a `dim`-wide vector
     /// and its #22 `embedding_source`), two edges, a canonization transition,
-    /// a read access and a durable write intent. Concept text is unique per
+    /// a read access and a durable write intent (an unconsumed #22 image
+    /// derive, which carries a vector of its own). Concept text is unique per
     /// call, so two sessions planted in one store never collide on a
     /// canonical key.
     pub(crate) fn planted_batch(sid: &SessionId, dim: usize) -> MutationBatch {
@@ -671,9 +672,21 @@ pub(crate) mod testkit {
                         interaction: i2,
                         lane_seq: 1,
                         issued_ms: ts.timestamp_millis(),
-                        payload: WriteIntentPayload::Derive {
-                            concepts: vec![("prefers navy".into(), ConceptType::Entity)],
+                        // #22: an unconsumed image derive carries its
+                        // vector and source in the intent row; erase
+                        // removes it with the session like any intent.
+                        payload: WriteIntentPayload::DeriveImage {
+                            concepts: vec![(
+                                "prefers navy [image:n1]".into(),
+                                ConceptType::Resource,
+                            )],
                             pairs: vec![],
+                            supplied: crate::types::SuppliedVector {
+                                content: "prefers navy [image:n1]".into(),
+                                vector: (0..dim).map(|i| ((i % 5) as f32) + 1.0).collect(),
+                                contract: contract(dim),
+                                source: crate::store::embedding_source_testkit::server_source(),
+                            },
                         },
                         created_at: ts,
                         outcome: None,

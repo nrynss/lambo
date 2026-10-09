@@ -407,3 +407,89 @@ async fn seed_refuses_an_erased_session_on_sqlite() {
     assert!(err.to_string().contains("was erased"), "{err}");
     assert!(store.load_session(&sid).await.is_err());
 }
+
+/// #22 PR 3 acceptance: everything Lambo keeps about an image (the concept,
+/// its vector, its `embedding_source` and digest, the applied image derive's
+/// intent row) is session-keyed, so erasing the session leaves zero rows in
+/// every table but the tombstone. The concepts here are written by the real
+/// image derive, synchronously and through the write queue.
+#[cfg(feature = "embed-fixture")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn erase_leaves_nothing_of_a_derived_image() {
+    use crate::embed::{png_with_label, Embedder, FixtureEmbedder};
+    use crate::graph::image::{ImageDerive, ImagePayload};
+    use crate::memory::Memory;
+    use crate::types::MatchStrategy;
+    use std::sync::Arc;
+
+    let _quiet = crate::test_util::quiet_logs();
+    let (_dir, path) = scratch_db();
+    let store = Arc::new(SqliteStore::connect(&path).unwrap());
+    store.init_schema().await.unwrap();
+    let sid = SessionId::new("erase-an-image");
+    let mem = Memory::builder()
+        .session(sid.0.clone())
+        .agent("agent-a")
+        .flush_interval(StdDuration::from_secs(3_600))
+        .match_strategy(MatchStrategy::Hybrid)
+        .store(store.clone() as Arc<dyn crate::store::GraphStore>)
+        .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
+        .embedding_contract(EmbeddingContract {
+            kind: "fixture".into(),
+            model: None,
+            dim: FixtureEmbedder::new().dimensions(),
+        })
+        .build()
+        .await
+        .unwrap();
+    let agent = AgentId::new("agent-a");
+    let png = png_with_label("red silk saree");
+    let derive = |id| ImageDerive {
+        caption: "render 17",
+        concept_type: ConceptType::Resource,
+        image_id: Some(id),
+        payload: ImagePayload::Bytes(crate::surface::image::validate(&png, "image/png").unwrap()),
+        parent_of: &[],
+        event_time: None,
+    };
+    mem.derive_image_as(&agent, derive("r17")).await.unwrap();
+    let submitted = mem
+        .derive_image_async_as(&agent, derive("r18"))
+        .await
+        .unwrap();
+    let answer = mem
+        .pipeline()
+        .wait(&agent, submitted.receipt, crate::writeq::RECEIPT_WAIT_MAX)
+        .await;
+    assert_eq!(answer.tag(), "applied", "{answer:?}");
+    mem.close().await.unwrap();
+
+    let before = census(&store, &sid).await;
+    for table in ["concepts", "write_intents", "sessions"] {
+        assert!(
+            before.iter().any(|(t, n)| t == table && *n >= 1),
+            "{table} holds the image's rows before the erase: {before:?}"
+        );
+    }
+    let sources: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM concepts WHERE session_id = ?1 AND embedding_source IS NOT NULL",
+    )
+    .bind(&sid.0)
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(sources, 2, "both image concepts carry their source");
+
+    let report = erased(
+        store
+            .erase_session(&sid, &holder("eraser", 1))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(report.removed.concepts, 2);
+    assert_eq!(report.removed.vectors, 2);
+    for (table, n) in census(&store, &sid).await {
+        let want = i64::from(table == "session_leases");
+        assert_eq!(n, want, "{table} after erase");
+    }
+}

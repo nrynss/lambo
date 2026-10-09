@@ -181,3 +181,8 @@ fn scratch_db() -> (crate::test_util::ScratchDir, String) {
 /// embedder with a documented near/far pair.
 #[cfg(feature = "embed-fixture")]
 mod vector_e2e;
+
+/// #22 PR 3 acceptance: a text query recalls an image concept (the fixture
+/// embeds a labelled PNG as its label's text vector).
+#[cfg(feature = "embed-fixture")]
+mod image_e2e;
