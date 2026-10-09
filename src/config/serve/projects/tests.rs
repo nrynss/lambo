@@ -377,21 +377,31 @@ fn validate_accepts_absolute_and_home_paths_only() {
     }
 }
 
+/// #32 PR 8 merged with PR 4: on stdio the selection keys are enforced, so
+/// a table with only them raises no notice; over HTTP the cwd map is never
+/// read and is still named. `sessions` and `max_attached` are PR 4's, read
+/// over HTTP and not applicable to stdio, so neither transport lists them.
 #[test]
 fn only_selection_keys_count_as_enforced() {
-    assert!(!ServeConfig::default().has_unenforced_keys());
+    assert!(ServeConfig::default().unenforced_keys(true).is_empty());
+    assert!(ServeConfig::default().unenforced_keys(false).is_empty());
     let selection_only = config(vec![project("/p", "a")], Some("general"));
-    assert!(!selection_only.has_unenforced_keys());
+    assert!(selection_only.unenforced_keys(true).is_empty());
+    assert_eq!(
+        selection_only.unenforced_keys(false),
+        vec!["[[serve.projects]]"]
+    );
     let pinned = ServeConfig {
-        sessions: vec!["a".into()],
+        sessions: vec!["general".into()],
+        max_attached: Some(4),
         ..selection_only.clone()
     };
-    assert!(pinned.has_unenforced_keys());
+    assert!(pinned.unenforced_keys(true).is_empty());
     let bounded = ServeConfig {
-        max_attached: Some(4),
+        idle_detach_secs: Some(60),
         ..selection_only
     };
-    assert!(bounded.has_unenforced_keys());
+    assert_eq!(bounded.unenforced_keys(true), vec!["idle_detach_secs"]);
 }
 
 /// A relative path that names `target` when resolved against the process's

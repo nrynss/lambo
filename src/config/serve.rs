@@ -223,8 +223,8 @@ fn addressed(field: &str, value: &str) -> Result<AddressedSessionId, LamboError>
 }
 
 /// What `lambo serve` logs once at startup when the file sets a `[serve]`
-/// key this release does not enforce yet (credentials, the cwd map, the
-/// on-demand bounds): an operator who configured credentials must not think
+/// key this release does not enforce yet (credentials, the on-demand bounds,
+/// and over HTTP the stdio-only cwd map): an operator who configured credentials must not think
 /// scoping is active. Followed by the key names that are set
 /// ([`ServeConfig::unenforced_keys`]); it quotes no value from the table.
 pub const SERVE_UNENFORCED_NOTICE: &str = "lambo.toml [serve] is parsed but not yet enforced \
@@ -246,20 +246,19 @@ impl ServeConfig {
     /// does not enforce yet, by name, each its own entry.
     ///
     /// An HTTP serve enforces `sessions`, `default_session` and
-    /// `max_attached` (#32 PR 4). A stdio serve owns its one `--session`, so
-    /// `default_session` (what a stdio serve without `--session` will use)
-    /// and `[[serve.projects]]` (the stdio cwd map) are listed until #32 PR 8
-    /// enforces them; `sessions` and `max_attached` do not apply to stdio.
+    /// `max_attached` (#32 PR 4). A stdio serve enforces `default_session`
+    /// and `[[serve.projects]]`, which choose its session when `--session`
+    /// is absent (#32 PR 8); `sessions` and `max_attached` do not apply to
+    /// stdio. The cwd map is stdio's only, so an HTTP serve still lists
+    /// `[[serve.projects]]`: nothing over HTTP reads it (design §2.3), and an
+    /// operator must not think it steers HTTP clients.
     pub fn unenforced_keys(&self, stdio: bool) -> Vec<&'static str> {
         let mut keys = Vec::new();
         if !self.credentials.is_empty() {
             keys.push("[[serve.credential]]");
         }
-        if !self.projects.is_empty() {
+        if !stdio && !self.projects.is_empty() {
             keys.push("[[serve.projects]]");
-        }
-        if stdio && self.default_session.is_some() {
-            keys.push("default_session");
         }
         if self.attach_concurrency.is_some() {
             keys.push("attach_concurrency");
@@ -271,17 +270,6 @@ impl ServeConfig {
             keys.push("per_session_rps");
         }
         keys
-    }
-
-    /// Does this table set a key nothing enforces yet? `default_session` and
-    /// `[[serve.projects]]` are enforced (stdio session selection, PR 8).
-    pub fn has_unenforced_keys(&self) -> bool {
-        let rest = Self {
-            default_session: None,
-            projects: Vec::new(),
-            ..self.clone()
-        };
-        !rest.is_empty()
     }
 
     /// Is this the empty table (equivalently: no `[serve]` in the file)?

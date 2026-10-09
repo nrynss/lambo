@@ -94,3 +94,15 @@ fn no_serve_table_no_notice() {
     let stderr = serve_stderr("");
     assert!(!stderr.contains(NOTICE), "{stderr}");
 }
+
+/// #32 PR 8: `default_session` and `[[serve.projects]]` choose a stdio
+/// serve's session, so a stdio serve whose table sets only those says
+/// nothing, even when `--session` (which wins over them) is given.
+#[test]
+fn a_stdio_serve_does_not_report_its_selection_keys() {
+    let stderr = serve_stderr(
+        "[serve]\ndefault_session = \"i32-default\"\n\n\
+         [[serve.projects]]\npath = \"/\"\nsession = \"i32-root\"\n",
+    );
+    assert!(!stderr.contains(NOTICE), "{stderr}");
+}
