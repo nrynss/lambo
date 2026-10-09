@@ -107,7 +107,12 @@ impl LamboServer {
     /// `serve --ledger` is the only caller. Clones share the ledger, as they
     /// share the `Memory`: the streamable-http transport clones this handle per
     /// request and all of them must append to one file.
+    ///
+    /// The handle kept is `ledger` scoped to this server's session
+    /// ([`Ledger::for_session`]), so every call line names the session it was
+    /// made against (#32 decision 15); it shares `ledger`'s file and counters.
     pub fn with_ledger(mem: Arc<Memory>, ledger: Arc<Ledger>) -> Self {
+        let ledger = ledger.for_session(&mem.session().0);
         Self {
             ledger: Some(ledger),
             ..Self::new(mem)

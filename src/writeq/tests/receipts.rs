@@ -185,3 +185,44 @@ fn only_the_two_pendings_are_unsettled() {
         assert!(a.is_settled(), "{} should be terminal", a.tag());
     }
 }
+
+/// The apply-latency window (#11): nearest-rank percentiles over the most
+/// recent [`APPLY_LATENCY_WINDOW`] applied writes, oldest evicted first.
+#[test]
+fn the_apply_latency_window_reports_recent_percentiles() {
+    let mut window = ApplyLatency::default();
+    assert!(window.summary().is_none(), "no applied write, no figure");
+    for ms in 1..=10u64 {
+        window.record(Duration::from_millis(ms));
+    }
+    let s = window.summary().expect("ten samples");
+    assert_eq!(s.samples, 10);
+    assert_eq!(s.p50, Duration::from_millis(5));
+    assert_eq!(s.p90, Duration::from_millis(9));
+    assert_eq!(s.max, Duration::from_millis(10));
+
+    // A full window of fast writes pushes the slow ones out.
+    for _ in 0..APPLY_LATENCY_WINDOW {
+        window.record(Duration::from_millis(2));
+    }
+    let s = window.summary().expect("full window");
+    assert_eq!(s.samples, APPLY_LATENCY_WINDOW);
+    assert_eq!(
+        s.max,
+        Duration::from_millis(2),
+        "the window is recent, not lifetime"
+    );
+
+    // One sample is every percentile.
+    let mut one = ApplyLatency::default();
+    one.record(Duration::from_millis(7));
+    let s = one.summary().expect("one sample");
+    assert_eq!(
+        (s.p50, s.p90, s.max),
+        (
+            Duration::from_millis(7),
+            Duration::from_millis(7),
+            Duration::from_millis(7)
+        )
+    );
+}

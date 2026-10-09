@@ -184,3 +184,56 @@ url = "http://127.0.0.1:8080"
 # index_prefix = "lambo"
 # refresh = "false"
 # timeout_ms = 5000
+
+# Multi-session serving (#32). Optional; omit the whole section and `lambo
+# serve` behaves exactly as it always has. In this release the table is
+# PARSED AND VALIDATED ONLY: nothing reads it at runtime yet (routing by
+# /mcp/s/{session}, credentials and the bounds arrive in later releases), but
+# a malformed table already stops every command, like any unknown key.
+#
+# Every session named here must be addressable by URL: 1 to 128 bytes of
+# [A-Za-z0-9._:-], not starting with '.'. A name outside that rule can still
+# be served on its own with `lambo serve --session <name>`.
+#
+# Credentials name the ENVIRONMENT VARIABLE that holds their token
+# (token_env); an inline `token = "..."` is refused. Each credential covers
+# `sessions` (exact names, or "*" for every pinned session plus every session
+# under any credential's prefix) and/or `session_prefix` (ids that start with
+# it and are longer). Flags: create (may attach a session that does not exist
+# yet), erase, admin. The names "default" and "local" are reserved, and
+# token_env may not be LAMBO_AUTH_TOKEN. token_env must be an upper-case
+# variable name ([A-Z_][A-Z0-9_]*, at most 64 bytes); a value that looks like
+# a token is refused without being quoted.
+#
+# --- [serve] example begins ---
+# [serve]
+# sessions = ["lambo", "rustydocs", "general"]   # pinned: attached at startup
+# default_session = "general"                    # what /mcp and stdio use
+# max_attached = 16                              # pinned + on-demand, >= pinned
+# attach_concurrency = 2
+# idle_detach_secs = 900                         # on-demand sessions only
+# per_session_rps = 50                           # default: --rate-limit-rps
+#
+# [[serve.projects]]                             # stdio: cwd -> session
+# path = "~/Documents/work/lambo"
+# session = "lambo"
+#
+# [[serve.credential]]
+# name = "agents"
+# token_env = "LAMBO_AGENTS_TOKEN"
+# sessions = ["lambo", "rustydocs", "general"]
+#
+# [[serve.credential]]
+# name = "dresscode"
+# token_env = "LAMBO_DRESSCODE_TOKEN"
+# session_prefix = "dc-u-"
+# create = true
+# erase = true
+#
+# [[serve.credential]]
+# name = "operator"
+# token_env = "LAMBO_OPERATOR_TOKEN"
+# sessions = ["*"]
+# erase = true
+# admin = true
+# --- [serve] example ends ---

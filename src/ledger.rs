@@ -229,15 +229,30 @@ type BatchSink = Arc<dyn Fn(&Path, &[u8]) -> std::io::Result<()> + Send + Sync>;
 ///
 /// Cheap to clone-by-`Arc` and safe to share: [`Ledger::append`] takes `&self`,
 /// never blocks, and never fails.
+///
+/// # Session scope (#32 decision 15)
+///
+/// [`Ledger::for_session`] returns another handle onto the **same** file,
+/// writer thread and counters that stamps `session` on every line it appends
+/// that does not already carry one. One `--ledger` file will hold many
+/// sessions once a serve hosts more than one, so every line must say which
+/// session it is about; a serve scopes its handle to its session, and each
+/// attached session will get its own scoped handle (#32 PR 4). The field is
+/// additive: no existing key changes, and [`LINE_VERSION`] does not move.
 #[derive(Debug)]
 pub struct Ledger {
     path: PathBuf,
     /// `None` once [`Ledger::shutdown`] has run — the writer thread ends when
     /// the last sender drops, so shutdown must be able to drop this one.
-    tx: parking_lot::Mutex<Option<SyncSender<Vec<u8>>>>,
+    /// Shared by every scoped handle, so a shutdown through any of them closes
+    /// the one writer.
+    tx: Arc<parking_lot::Mutex<Option<SyncSender<Vec<u8>>>>>,
     counters: Arc<LedgerCounters>,
-    /// Joined by [`Ledger::shutdown`], bounded by [`SHUTDOWN_DRAIN`].
-    writer: parking_lot::Mutex<Option<std::thread::JoinHandle<()>>>,
+    /// Joined by [`Ledger::shutdown`], bounded by [`SHUTDOWN_DRAIN`]. Shared
+    /// like `tx`.
+    writer: Arc<parking_lot::Mutex<Option<std::thread::JoinHandle<()>>>>,
+    /// The session this handle stamps on its lines, if it is scoped.
+    session: Option<Arc<str>>,
 }
 
 impl Ledger {
@@ -339,10 +354,30 @@ impl Ledger {
 
         Arc::new(Self {
             path,
-            tx: parking_lot::Mutex::new(Some(tx)),
+            tx: Arc::new(parking_lot::Mutex::new(Some(tx))),
             counters,
-            writer: parking_lot::Mutex::new(writer),
+            writer: Arc::new(parking_lot::Mutex::new(writer)),
+            session: None,
         })
+    }
+
+    /// A handle onto this ledger that stamps `session` on every line it
+    /// appends (#32 decision 15). Shares the file, the writer thread and the
+    /// counters with `self`; a line that already names a `session` keeps its
+    /// own. Scoping a scoped handle replaces the scope.
+    pub fn for_session(&self, session: &str) -> Arc<Self> {
+        Arc::new(Self {
+            path: self.path.clone(),
+            tx: Arc::clone(&self.tx),
+            counters: Arc::clone(&self.counters),
+            writer: Arc::clone(&self.writer),
+            session: Some(Arc::from(session)),
+        })
+    }
+
+    /// The session this handle stamps on its lines, if it is scoped.
+    pub fn session(&self) -> Option<&str> {
+        self.session.as_deref()
     }
 
     /// The path lines are appended to.
@@ -363,6 +398,18 @@ impl Ledger {
     /// `dropped_channel_full`; a departed writer or a post-shutdown call bumps
     /// `dropped_write_failed`.
     pub fn append(&self, line: &Value) {
+        // A scoped handle adds `session` to an object line that lacks one
+        // (#32 decision 15). A line that names its own session keeps it, and
+        // a non-object value is passed through as it is. The key is spliced
+        // into the serialized bytes rather than inserted into a clone of the
+        // map, so a large line (a recall with its top-k facts) is not
+        // deep-copied on every call.
+        let stamp = match (&self.session, line) {
+            (Some(session), Value::Object(obj)) if !obj.contains_key("session") => {
+                Some((session, obj.is_empty()))
+            }
+            _ => None,
+        };
         let mut bytes = match serde_json::to_vec(line) {
             Ok(b) => b,
             Err(err) => {
@@ -378,6 +425,19 @@ impl Ledger {
                 return;
             }
         };
+        if let Some((session, empty)) = stamp
+            && bytes.last() == Some(&b'}')
+        {
+            // An object serializes as `{...}`; open it at the closing brace.
+            bytes.pop();
+            if !empty {
+                bytes.push(b',');
+            }
+            bytes.extend_from_slice(b"\"session\":");
+            // A `str` always serializes; the fallback is unreachable.
+            let _ = serde_json::to_writer(&mut bytes, &**session);
+            bytes.push(b'}');
+        }
         bytes.push(b'\n');
 
         let guard = self.tx.lock();
@@ -1148,5 +1208,101 @@ mod tests {
         assert_eq!(c["matched_count"], 0);
         // `receipt` lives on the fixed head; a fact must not overwrite it.
         assert_eq!(c["receipt"], "r-1");
+    }
+
+    /// #32 decision 15: a handle scoped to a session stamps `session` on every
+    /// line it appends that does not already carry one, shares the file and
+    /// the counters with the handle it came from, and leaves an unscoped
+    /// handle's lines untouched.
+    ///
+    /// Mutation: drop the insertion in `append`, or overwrite a line's own
+    /// `session` → red.
+    #[test]
+    fn a_session_scoped_handle_stamps_every_line_it_appends() {
+        let dir = temp_dir("session-scope");
+        let path = dir.join("calls.jsonl");
+        let ledger = Ledger::open(&path);
+        let scoped = ledger.for_session("sess-a");
+        assert_eq!(ledger.session(), None);
+        assert_eq!(scoped.session(), Some("sess-a"));
+        assert_eq!(scoped.path(), ledger.path());
+        assert!(
+            Arc::ptr_eq(scoped.counters(), ledger.counters()),
+            "one file, one set of counters"
+        );
+
+        scoped.append(&call_line("lambo_recall", "agent-a", "ok", None, 7, None));
+        scoped.append(&completion_line("agent-a", "r-1", "applied", None));
+        scoped.append(&stats_line(
+            json!({"node_count": 1}),
+            Duration::from_secs(1),
+        ));
+        // A line that names its own session keeps it.
+        scoped.append(&lease_line(
+            "refused", "loser", "sess-b", "agent-b", "x", None,
+        ));
+        // The unscoped handle adds nothing.
+        ledger.append(&call_line("lambo_stats", "agent-a", "ok", None, 1, None));
+        // A non-object value is passed through untouched rather than dropped.
+        scoped.append(&json!("not an object"));
+
+        assert!(
+            until(Duration::from_secs(5), || ledger.counters().written() == 6),
+            "written {}",
+            ledger.counters().written()
+        );
+        let text = std::fs::read_to_string(&path).expect("read ledger");
+        let lines: Vec<Value> = text
+            .lines()
+            .map(|l| serde_json::from_str(l).expect("json"))
+            .collect();
+        assert_eq!(lines.len(), 6);
+        for line in &lines[..3] {
+            assert_eq!(line["session"], "sess-a", "{line}");
+        }
+        assert_eq!(lines[3]["session"], "sess-b", "the line's own session wins");
+        assert!(lines[4].get("session").is_none(), "{}", lines[4]);
+        assert_eq!(lines[5], json!("not an object"));
+
+        // Re-scoping replaces the scope rather than nesting it.
+        let rescoped = scoped.for_session("sess-c");
+        assert_eq!(rescoped.session(), Some("sess-c"));
+
+        ledger.shutdown();
+        // Shutdown through one handle closes the shared writer for all.
+        scoped.append(&call_line("lambo_recall", "agent-a", "ok", None, 1, None));
+        assert_eq!(ledger.counters().dropped_write_failed(), 1);
+    }
+
+    /// The stamp is spliced into the serialized bytes (no clone of the line),
+    /// so pin the edges: an empty object, and a session id that needs JSON
+    /// escaping (`--session` keeps its loose rule). Every other key survives.
+    ///
+    /// Mutation: always write the comma, or skip escaping → red.
+    #[test]
+    fn the_spliced_stamp_is_valid_json_at_the_edges() {
+        let dir = temp_dir("session-splice");
+        let path = dir.join("calls.jsonl");
+        let ledger = Ledger::open(&path);
+        let odd = "sess \"q\" \\ \u{e9}";
+        let scoped = ledger.for_session(odd);
+        scoped.append(&json!({}));
+        scoped.append(&json!({"a": 1, "nested": {"session": "inner"}, "z": [1, 2]}));
+        assert!(
+            until(Duration::from_secs(5), || ledger.counters().written() == 2),
+            "written {}",
+            ledger.counters().written()
+        );
+        let text = std::fs::read_to_string(&path).expect("read ledger");
+        let lines: Vec<Value> = text
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("{l}: {e}")))
+            .collect();
+        assert_eq!(lines[0], json!({"session": odd}));
+        assert_eq!(
+            lines[1],
+            json!({"a": 1, "nested": {"session": "inner"}, "z": [1, 2], "session": odd})
+        );
+        ledger.shutdown();
     }
 }

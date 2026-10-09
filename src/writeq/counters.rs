@@ -16,7 +16,66 @@
 //! | `deferred` | the close drain (`drain.rs`) |
 //! | `replayed`, `replay_owed`, `replay_blocked` | the intent replay (`replay.rs`) |
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::time::Duration;
+
+/// Applied writes the apply-latency window keeps (#11).
+///
+/// A recent window rather than a lifetime histogram, so the percentiles track
+/// an embedder that slows down; 256 is several minutes of a busy rig's writes
+/// and a few KiB of memory.
+pub const APPLY_LATENCY_WINDOW: usize = 256;
+
+/// Apply latency of this pipeline's recent **applied** writes, from admission
+/// to settle: queueing behind earlier writes in the lane plus the write's own
+/// service time, which is what a caller waiting on a receipt experiences (#11).
+///
+/// Failures are not recorded, for the reason they are not sampled into the
+/// observed rate (J3-R2-2): a fast failure is not evidence about how long a
+/// write takes to land.
+#[derive(Debug, Default)]
+pub(super) struct ApplyLatency {
+    samples: VecDeque<Duration>,
+}
+
+impl ApplyLatency {
+    pub(super) fn record(&mut self, latency: Duration) {
+        if self.samples.len() == APPLY_LATENCY_WINDOW {
+            self.samples.pop_front();
+        }
+        self.samples.push_back(latency);
+    }
+
+    /// Nearest-rank percentiles over the window, or `None` before the first
+    /// applied write.
+    pub(super) fn summary(&self) -> Option<ApplyLatencySummary> {
+        if self.samples.is_empty() {
+            return None;
+        }
+        let mut sorted: Vec<Duration> = self.samples.iter().copied().collect();
+        sorted.sort_unstable();
+        let rank = |p: usize| sorted[(sorted.len() * p).div_ceil(100).max(1) - 1];
+        Some(ApplyLatencySummary {
+            samples: sorted.len(),
+            p50: rank(50),
+            p90: rank(90),
+            max: sorted[sorted.len() - 1],
+        })
+    }
+}
+
+/// Percentiles of [`APPLY_LATENCY_WINDOW`] recent apply latencies, for
+/// `lambo_stats` (#11): enough to check a deployment's derive latency against
+/// [`RECEIPT_WAIT_MAX`](super::RECEIPT_WAIT_MAX) without joining the ledger.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ApplyLatencySummary {
+    /// Applied writes in the window.
+    pub samples: usize,
+    pub p50: Duration,
+    pub p90: Duration,
+    pub max: Duration,
+}
 
 /// Why the durable-intent replay last stopped without draining (J3-R2R-8).
 ///

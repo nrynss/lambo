@@ -6,7 +6,8 @@
 //! store outage never drops mutations:
 //!
 //! * **Loss bound is observable.** [`FlushTask::stats`] reports `lag` (time
-//!   since the last successful flush), `depth` (mutations not yet durable:
+//!   since the store last held every mutation: a successful flush, or a poll
+//!   that found nothing pending — #16 §3), `depth` (mutations not yet durable:
 //!   the in-graph log plus the pending batch — in flight, backed off, or
 //!   retained after exhausted retries) and `dead_lettered` (batches dropped
 //!   for a deterministic constraint violation, STORE-4/D5). `lag` uses the
@@ -117,6 +118,16 @@ const BACKOFF_CAP: Duration = Duration::from_secs(10);
 /// sequences", not the exact value.
 const RETAINED_BACKOFF: Duration = BACKOFF_CAP;
 
+/// How often the loop may republish its stats row without a flush attempt
+/// (#11 review P3-5). After an attempt it always publishes.
+const STATS_REPUBLISH_INTERVAL: Duration = Duration::from_secs(5);
+
+/// How far the live lag must drift from the published one before a cycle
+/// with no flush attempt republishes it (#11 review P3-5). Below a second the
+/// row already says "caught up", and rewriting it every poll would turn an
+/// idle writer into a steady stream of store writes.
+const STATS_REPUBLISH_LAG_DRIFT: Duration = Duration::from_secs(1);
+
 /// Flush tuning. Callers pass `Config::backend_flush_*` values; this task has
 /// no `Config` dependency.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -130,8 +141,41 @@ pub struct FlushParams {
 /// Observable durability loss bound (spec §2.4).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FlushStats {
-    /// Time since the last successful flush (tokio clock; 0 until the first
-    /// successful flush after spawn).
+    /// Time since the store was last **caught up** (tokio clock): the drain
+    /// the last successful flush made durable, or the last poll that found
+    /// nothing pending. 0 at spawn.
+    ///
+    /// A successful flush counts from its drain, not from its end (#11 review
+    /// P2-1): a write that lands while a slow or retried flush runs is not in
+    /// that flush, so counting from the end would make the lag younger than
+    /// the oldest write still at risk.
+    ///
+    /// Until #16 §3 this was the time since the last successful flush alone,
+    /// so it grew with idle time while nothing was pending: the dogfood rigs
+    /// read 13.7 minutes, 12.1 hours and 48 hours with `log_depth` 0 in every
+    /// snapshot, a durability bound that looked alarming exactly when there
+    /// was nothing to lose. A caught-up store has nothing to lose, so an idle
+    /// writer now reads at most one `POLL_QUANTUM`; with mutations pending
+    /// (a failing store, a retained batch) it still grows from the last moment
+    /// the store held everything, which is the age bound of what a crash
+    /// would lose. A degraded session (`durability = "none"`) never counts as
+    /// caught up, since it drops what it drains.
+    ///
+    /// Mutations that are **dropped** rather than flushed are reported by
+    /// `dead_lettered` and `degraded`, not by the lag (#11 review P3-3):
+    ///
+    /// * a dead-lettered batch is cleared from `pending`, so the next poll
+    ///   that finds nothing else pending counts the store caught up and the
+    ///   lag falls to under one poll although that batch never landed (it
+    ///   used to keep growing until the next success);
+    /// * a fenced or erased handle stops its loop, so nothing marks it caught
+    ///   up again and the lag grows for as long as the handle lives, with
+    ///   `depth` 0 because the stop cleared `pending`;
+    /// * a degraded session's lag grows for good (above).
+    ///
+    /// The lag also grows by up to one poll while read accesses (#30) wait to
+    /// be flushed, since they are pending too; it exceeds the flush interval
+    /// only when the store is not taking writes.
     pub lag: Duration,
     /// Mutations not yet durable: in-graph log + pending batch (in flight,
     /// backed off, or retained after exhausted retries).
@@ -144,14 +188,14 @@ pub struct FlushStats {
 }
 
 /// Lock-light state shared between the running task and the caller's stats
-/// handle. `last_success` is a `Mutex<Instant>` (held for nanoseconds inside
+/// handle. `caught_up` is a `Mutex<Instant>` (held for nanoseconds inside
 /// `stats`); `started`/`depth`/`degraded`/`dead_lettered` are atomics.
 #[derive(Debug)]
 struct Shared {
     /// Set by `spawn` (check-and-set): exactly one flush loop may run per task.
     /// Visible to `stats`/`degraded` without races.
     started: AtomicBool,
-    last_success: Mutex<tokio::time::Instant>,
+    caught_up: Mutex<tokio::time::Instant>,
     depth: AtomicUsize,
     degraded: AtomicBool,
     /// STORE-4 / D5: dead-lettered-batch counter (deterministic constraint
@@ -166,10 +210,10 @@ struct Shared {
 impl Shared {
     fn new() -> Self {
         Self {
-            // `last_success` is a placeholder until `spawn` initializes it (the
+            // `caught_up` is a placeholder until `spawn` initializes it (the
             // lag contract starts at spawn, not construction — see `spawn`).
             started: AtomicBool::new(false),
-            last_success: Mutex::new(tokio::time::Instant::now()),
+            caught_up: Mutex::new(tokio::time::Instant::now()),
             depth: AtomicUsize::new(0),
             degraded: AtomicBool::new(false),
             dead_lettered: AtomicU64::new(0),
@@ -180,7 +224,7 @@ impl Shared {
     fn stats(&self) -> FlushStats {
         let now = tokio::time::Instant::now();
         FlushStats {
-            lag: now.saturating_duration_since(*self.last_success.lock()),
+            lag: now.saturating_duration_since(*self.caught_up.lock()),
             depth: self.depth.load(Ordering::Acquire),
             dead_lettered: self.dead_lettered.load(Ordering::Acquire),
         }
@@ -261,10 +305,12 @@ impl FlushTask {
     /// Takes `&self` rather than the pinned `self`: the task clones the
     /// graph/store/shared arcs, so the caller keeps this `FlushTask` as its
     /// stats handle — `spawn(self)` would consume the only path to
-    /// [`FlushTask::stats`]. `last_success` is initialized here (not at
-    /// construction), so `stats().lag` is 0 until the first successful flush
-    /// after spawn even if the task was built long before it was spawned. The
-    /// first flush happens one `interval` after spawn.
+    /// [`FlushTask::stats`]. `caught_up` is initialized here (not at
+    /// construction), so `stats().lag` counts from spawn even if the task was
+    /// built long before it was spawned: it reads 0 at spawn and grows until
+    /// the first poll that finds nothing pending (one `POLL_QUANTUM`) or the
+    /// first successful flush. The first flush happens one `interval` after
+    /// spawn.
     pub fn spawn(&self) -> tokio::task::JoinHandle<()> {
         // Single-loop enforcement: check-and-set the shared `started` flag so a
         // second `spawn` panics before it can start another loop. The flag
@@ -274,7 +320,7 @@ impl FlushTask {
             .started
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .expect("FlushTask::spawn called twice — exactly one loop may run");
-        *self.shared.last_success.lock() = tokio::time::Instant::now();
+        *self.shared.caught_up.lock() = tokio::time::Instant::now();
 
         let graph = self.graph.clone();
         let store = self.store.clone();
@@ -295,6 +341,7 @@ impl FlushTask {
                 pending: MutationBatch::default(),
                 retry_after: None,
                 holds_accesses: false,
+                last_published: None,
             }
             .run()
             .await
@@ -425,6 +472,9 @@ struct FlushLoop {
     /// `pending` carries at most one access drain — never a growing backlog
     /// from reads. Cleared whenever `pending` is emptied.
     holds_accesses: bool,
+    /// When the stats row was last published, and what it said (#11 review
+    /// P3-5). `None` until the first flush attempt.
+    last_published: Option<(tokio::time::Instant, SessionFlushStats)>,
 }
 
 impl FlushLoop {
@@ -524,9 +574,28 @@ impl FlushLoop {
     /// (whichever first).
     async fn cycle(&mut self, tick: bool) {
         let session = self.graph.read().session_id().clone();
+        let attempted = self.drain_and_flush(&session, tick).await;
+        self.publish_stats(&session, attempted).await;
+    }
+
+    /// The drain and, when due, the flush of one cycle. `true` when it
+    /// attempted a flush (whatever the outcome), `false` when it returned
+    /// before one: nothing pending, degraded, over `log_max`, a retained
+    /// batch still waiting out its hold, or an early poll with the batch
+    /// not yet full.
+    async fn drain_and_flush(&mut self, session: &SessionId, tick: bool) -> bool {
+        // When this cycle's drain took the log (#11 review P2-1). A flush makes
+        // durable what was drained, so a successful one means the store held
+        // every mutation as of THIS instant, not as of the flush's end: writes
+        // that land while a slow or retried flush runs are not in it, and the
+        // lag has to keep counting them.
+        let drained_at;
         {
             // WRITE lock only for the drain; the guard dies before any I/O.
             let mut graph = self.graph.write();
+            // Read under the write lock, so no mutation can land between the
+            // stamp and the drain.
+            drained_at = tokio::time::Instant::now();
             let drained = graph.drain_log();
             // Carry the epoch watermark forward (issue #17): `drain_log` stamps
             // the batch with the graph's absolute epoch, and this max is the
@@ -575,7 +644,14 @@ impl FlushLoop {
 
         self.refresh_depth();
         if self.pending.is_empty() {
-            return;
+            // Nothing drained and nothing held: the store holds every
+            // mutation, so the durability lag is zero now (#16 §3). Not for a
+            // degraded session, which drops what it drains rather than
+            // flushing it.
+            if !self.shared.degraded.load(Ordering::Acquire) {
+                *self.shared.caught_up.lock() = drained_at;
+            }
+            return false;
         }
         if self.shared.degraded.load(Ordering::Acquire) {
             // durability="none" (spec §2.3 — "none = pure RAM"): the graph is
@@ -585,7 +661,7 @@ impl FlushLoop {
             // Depth is the in-graph log only.
             self.clear_pending();
             self.refresh_depth();
-            return;
+            return false;
         }
         let depth = self.shared.depth.load(Ordering::Acquire);
         if depth > self.params.log_max {
@@ -598,7 +674,7 @@ impl FlushLoop {
                  durability=\"none\", flushing stopped",
                 self.params.log_max,
             );
-            return;
+            return false;
         }
 
         // Post-retry hold (F3): a batch that exhausted its retries waits out
@@ -608,20 +684,22 @@ impl FlushLoop {
         // whole (order preserved) once the hold elapses.
         if let Some(deadline) = self.retry_after {
             if tokio::time::Instant::now() < deadline {
-                return;
+                return false;
             }
             self.retry_after = None;
         }
 
         if !tick && self.pending.len() < self.params.max_batch {
-            return; // early-flush poll: batch not full yet, wait for the tick
+            return false; // early-flush poll: batch not full yet, wait for the tick
         }
 
         match self.flush_with_retry().await {
             Ok(()) => {
                 self.clear_pending();
                 self.retry_after = None;
-                *self.shared.last_success.lock() = tokio::time::Instant::now();
+                // Caught up as of the drain, not now: what landed while the
+                // flush ran is still in the log and still unbounded by it.
+                *self.shared.caught_up.lock() = drained_at;
                 // Writes may have landed while we flushed; depth is the log only now.
                 self.refresh_depth();
             }
@@ -646,7 +724,7 @@ impl FlushLoop {
                      mutations dropped (dead-letter D5, drop-after-log), session continues",
                 );
             }
-            Err(err) if self.erased(&session, &err).await => {
+            Err(err) if self.erased(session, &err).await => {
                 // #23 review L2: the session was erased. The latch fences
                 // this handle, and the top of the next iteration drops
                 // `pending` and stops; nothing is retried against a
@@ -679,17 +757,53 @@ impl FlushLoop {
             }
         }
 
-        // T85-3: publish the observable flush stats to the shared store so a
-        // reader in another process (e.g. `serve-web`) can render real
-        // `flush_lag_ms` / `log_depth` instead of `n/a`. Called after each
-        // completed cycle. Best-effort by design: publication failure must
-        // never perturb the flush path (the local stats handle is unaffected).
+        true
+    }
+
+    /// Publish the observable flush stats to the shared store (T85-3), so a
+    /// reader in another process (e.g. `serve-web`) can render real
+    /// `flush_lag_ms` / `log_depth` instead of `n/a`. Best-effort by design:
+    /// publication failure must never perturb the flush path (the local
+    /// stats handle is unaffected).
+    ///
+    /// Always after a flush attempt. Between attempts too (#11 review P3-5),
+    /// or the row a reader sees froze at the last attempt: a retained batch
+    /// waits out `RETAINED_BACKOFF` with no attempt while its lag grows, and
+    /// an idle writer's lag, which #16 §3 made read under one poll, never
+    /// reached the row at all. Between attempts the row is rewritten only
+    /// when it has drifted from the live figures (a different depth, or a lag
+    /// a second or more apart) and at most once per
+    /// [`STATS_REPUBLISH_INTERVAL`], so an idle writer stops writing once its
+    /// row is right and an outage costs one small upsert every few seconds.
+    /// Nothing is published before the first attempt: until then the honest
+    /// reading for a reader is `n/a`. Nor between attempts once degraded or
+    /// over `log_max` (#11 review round 2, F2): degraded is terminal and does
+    /// no further store I/O, and its lag grows for good, so the drift test
+    /// would pass every time and upsert, inline in this loop, against the
+    /// store whose failures degraded it.
+    async fn publish_stats(&mut self, session: &SessionId, attempted: bool) {
         let fs = self.shared.stats();
         let session_stats = SessionFlushStats {
             flush_lag_ms: fs.lag.as_millis() as u64,
             log_depth: fs.depth as u64,
         };
-        if let Err(err) = self.store.write_flush_stats(&session, &session_stats).await {
+        let now = tokio::time::Instant::now();
+        if !attempted {
+            if self.shared.degraded.load(Ordering::Acquire) || fs.depth > self.params.log_max {
+                return;
+            }
+            let Some((at, published)) = self.last_published else {
+                return;
+            };
+            let drifted = published.log_depth != session_stats.log_depth
+                || published.flush_lag_ms.abs_diff(session_stats.flush_lag_ms)
+                    >= STATS_REPUBLISH_LAG_DRIFT.as_millis() as u64;
+            if !drifted || now.saturating_duration_since(at) < STATS_REPUBLISH_INTERVAL {
+                return;
+            }
+        }
+        self.last_published = Some((now, session_stats));
+        if let Err(err) = self.store.write_flush_stats(session, &session_stats).await {
             tracing::trace!(
                 error = %err,
                 session = %session,
@@ -942,6 +1056,8 @@ mod tests {
         fail_remaining: AtomicUsize,
         fail_always: AtomicBool,
         batch_sizes: Mutex<Vec<usize>>,
+        /// `write_flush_stats` calls, whatever their outcome.
+        stats_writes: AtomicUsize,
     }
 
     impl FlakyStore {
@@ -952,7 +1068,12 @@ mod tests {
                 fail_remaining: AtomicUsize::new(0),
                 fail_always: AtomicBool::new(false),
                 batch_sizes: Mutex::new(Vec::new()),
+                stats_writes: AtomicUsize::new(0),
             }
+        }
+
+        fn stats_writes(&self) -> usize {
+            self.stats_writes.load(Ordering::SeqCst)
         }
 
         fn fail_next(&self, n: usize) {
@@ -1077,6 +1198,24 @@ mod tests {
             token: Option<u64>,
         ) -> Result<(), StoreError> {
             self.inner.record_canonization(event, token).await
+        }
+
+        // The published stats row reaches the inner store whether or not the
+        // flushes fail, as it does on a real store whose flush is refused.
+        async fn write_flush_stats(
+            &self,
+            session: &SessionId,
+            stats: &SessionFlushStats,
+        ) -> Result<(), StoreError> {
+            self.stats_writes.fetch_add(1, Ordering::SeqCst);
+            self.inner.write_flush_stats(session, stats).await
+        }
+
+        async fn read_flush_stats(
+            &self,
+            session: &SessionId,
+        ) -> Result<Option<SessionFlushStats>, StoreError> {
+            self.inner.read_flush_stats(session).await
         }
     }
 
@@ -1689,10 +1828,11 @@ mod tests {
         assert_eq!(snap.interactions.len(), 1);
         assert_eq!(snap.concepts.len(), 1);
         assert_eq!(task.stats().depth, 2);
-        assert!(
-            task.stats().lag < Duration::from_millis(50),
-            "lag reset on success"
-        );
+        // The success made durable what the tick drained 700 ms ago, and the
+        // outage-period writes landed after that drain, so the lag counts
+        // from the drain (#11 review P2-1). This asserted a reset to zero
+        // before, which under-reported the age of those two pending writes.
+        assert_eq!(task.stats().lag, Duration::from_millis(700));
 
         // Next tick catches the session up completely.
         tokio::time::advance(Duration::from_secs(1)).await;
@@ -1839,10 +1979,227 @@ mod tests {
         assert_eq!(snap.concepts.len(), 2);
         assert_eq!(snap.edges.len(), 2); // Derives x2
 
-        // Idle: lag grows again, depth stays 0.
+        // Idle: depth stays 0, and so does the lag beyond one poll — the
+        // store is caught up, so there is nothing for it to bound (#16 §3;
+        // this asserted 500 ms of idle lag before).
         tokio::time::advance(Duration::from_millis(500)).await;
         assert_eq!(task.stats().depth, 0);
-        assert_eq!(task.stats().lag, Duration::from_millis(500));
+        wait_until(|| task.stats().lag <= POLL_QUANTUM).await;
+    }
+
+    /// **#16 §3: an idle writer's lag stays within one poll.** `flush_lag_ms`
+    /// was "time since the last successful flush", which grows with idle
+    /// time while nothing is pending: the dogfood rigs read 13.7 minutes,
+    /// 12.1 hours and 48 hours with `log_depth` 0 in every one of 5,915
+    /// snapshots, so the durability bound looked alarming exactly when there
+    /// was nothing to lose. Lag is now the time since the store was last
+    /// caught up, and a poll that finds nothing pending is caught up.
+    #[tokio::test(start_paused = true)]
+    async fn an_idle_writers_lag_stays_within_one_poll() {
+        let store: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+        let graph = new_graph();
+        let task = FlushTask::new(
+            graph.clone(),
+            store.clone(),
+            params(Duration::from_secs(1), 100, 1, 1_000),
+        );
+        let _handle = task.spawn();
+        let_task_arm().await;
+
+        let iid = add_interaction(&graph, 1, None);
+        add_concept(&graph, 1, iid);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        // The tick flushes the three mutations; lag resets on that success.
+        wait_until(|| task.stats().lag < Duration::from_millis(50)).await;
+
+        // An hour of idle time, a poll at a time as the loop sees it.
+        for _ in 0..36_000 {
+            tokio::time::advance(POLL_QUANTUM).await;
+            tokio::task::yield_now().await;
+        }
+        let stats = task.stats();
+        assert_eq!(stats.depth, 0);
+        assert!(
+            stats.lag <= POLL_QUANTUM,
+            "nothing is pending, so the store is caught up and the lag is at most one poll, \
+             not an hour: {stats:?}"
+        );
+    }
+
+    /// **#11 review P2-1: the lag bounds the age of what a crash would lose,
+    /// even across a slow or retried flush.** A flush makes durable what was
+    /// drained when it started, not what landed while it ran. The store was
+    /// marked caught up at the flush's END, so a write landing during a
+    /// retried flush was already older than the lag reported once the store
+    /// then stopped taking writes.
+    #[tokio::test(start_paused = true)]
+    async fn the_lag_covers_a_write_that_landed_during_a_retried_flush() {
+        let _callsites = quiet_logs();
+
+        let inner: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+        let store = Arc::new(FlakyStore::new(inner));
+        let graph = new_graph();
+        let task = FlushTask::new(
+            graph.clone(),
+            store.clone(),
+            params(Duration::from_secs(1), 100, 1, 1_000),
+        );
+        let _handle = task.spawn();
+        let_task_arm().await;
+
+        // Batch A, drained by the 100 ms poll and flushed at the 1 s tick,
+        // whose first attempt fails: the retry runs BACKOFF_BASE later.
+        store.fail_next(1);
+        let iid = add_interaction(&graph, 1, None);
+        add_concept(&graph, 1, iid);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        wait_until(|| store.flush_calls() >= 1).await;
+
+        // Write B lands while the retry is backing off: not in that flush.
+        tokio::time::advance(BACKOFF_BASE / 2).await;
+        add_concept(&graph, 2, iid);
+        let b_landed = tokio::time::Instant::now();
+        tokio::time::advance(BACKOFF_BASE / 2).await;
+        wait_until(|| store.flush_calls() >= 2).await;
+
+        // The store stops taking writes, so B is what a crash would lose.
+        store.fail_forever();
+        tokio::time::advance(Duration::from_millis(900)).await;
+        wait_until(|| store.flush_calls() >= 3).await;
+        tokio::time::advance(BACKOFF_BASE).await;
+        wait_until(|| store.flush_calls() >= 4).await;
+        tokio::time::advance(Duration::from_secs(3)).await;
+        tokio::task::yield_now().await;
+        let stats = task.stats();
+        assert_eq!(stats.depth, 2, "B is pending: {stats:?}");
+        let b_age = b_landed.elapsed();
+        assert!(
+            stats.lag >= b_age,
+            "lag {:?} must bound B's age {b_age:?}: the retried flush made durable what was \
+             drained when the tick fired, not what landed while it backed off",
+            stats.lag
+        );
+    }
+
+    /// **#11 review P3-5: the published stats row keeps up between flush
+    /// attempts.** A reader in another process (`serve-web`, `lambo stats`)
+    /// sees only the row the writer publishes, and the row was published
+    /// only after a flush attempt. A retained batch waits out
+    /// `RETAINED_BACKOFF` with no attempt, so the row stayed frozen at the
+    /// lag of the last failure while the real lag grew ten seconds, and an
+    /// idle writer's corrected lag (#16 §3) never reached the row at all.
+    #[tokio::test(start_paused = true)]
+    async fn the_published_stats_row_keeps_up_while_a_retained_batch_waits() {
+        let _callsites = quiet_logs();
+
+        let inner: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+        let store = Arc::new(FlakyStore::new(inner));
+        let graph = new_graph();
+        let task = FlushTask::new(
+            graph.clone(),
+            store.clone(),
+            params(Duration::from_secs(1), 100, 1, 1_000),
+        );
+        let _handle = task.spawn();
+        let_task_arm().await;
+
+        store.fail_forever();
+        let iid = add_interaction(&graph, 1, None);
+        add_concept(&graph, 1, iid); // 3 mutations
+        tokio::time::advance(Duration::from_secs(1)).await;
+        wait_until(|| store.flush_calls() >= 1).await;
+        tokio::time::advance(BACKOFF_BASE).await;
+        wait_until(|| store.flush_calls() >= 2).await; // retained
+
+        // Most of the RETAINED_BACKOFF hold, a poll at a time.
+        for _ in 0..80 {
+            tokio::time::advance(POLL_QUANTUM).await;
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(store.flush_calls(), 2, "no attempt during the hold");
+        let live = task.stats();
+        let published = store
+            .read_flush_stats(&sid())
+            .await
+            .unwrap()
+            .expect("the failed attempt published a row");
+        assert_eq!(published.log_depth, 3);
+        let gap = live.lag.as_millis() as u64 - published.flush_lag_ms;
+        assert!(
+            gap <= STATS_REPUBLISH_INTERVAL.as_millis() as u64,
+            "the row a reader sees ({} ms) must not trail the live lag ({:?}) by more than \
+             one republish interval",
+            published.flush_lag_ms,
+            live.lag
+        );
+
+        // The store recovers; once caught up, an idle writer's row reads
+        // what the writer itself reads.
+        store.recover();
+        for _ in 0..200 {
+            tokio::time::advance(POLL_QUANTUM).await;
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(task.stats().depth, 0);
+        let published = store.read_flush_stats(&sid()).await.unwrap().unwrap();
+        assert_eq!(published.log_depth, 0);
+        assert!(
+            published.flush_lag_ms <= POLL_QUANTUM.as_millis() as u64,
+            "{published:?}"
+        );
+    }
+
+    /// **#11 review round 2, F2: a degraded session does not republish its
+    /// stats row between attempts.** Degraded (`durability = "none"`) is
+    /// terminal and makes no further store I/O, but its lag grows for good,
+    /// so the between-attempts republish found the row drifted every time and
+    /// upserted it every [`STATS_REPUBLISH_INTERVAL`], inline in the flush
+    /// loop, against the store whose failures degraded it.
+    #[tokio::test(start_paused = true)]
+    async fn a_degraded_session_does_not_republish_its_stats_row() {
+        let _callsites = quiet_logs();
+
+        let inner: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+        let store = Arc::new(FlakyStore::new(inner));
+        let graph = new_graph();
+        let task = FlushTask::new(
+            graph.clone(),
+            store.clone(),
+            params(Duration::from_secs(1), 100, 1, 4),
+        );
+        let _handle = task.spawn();
+        let_task_arm().await;
+
+        store.fail_forever();
+        let iid = add_interaction(&graph, 1, None);
+        add_concept(&graph, 1, iid); // 3 mutations
+        tokio::time::advance(Duration::from_secs(1)).await;
+        wait_until(|| store.flush_calls() >= 1).await;
+        tokio::time::advance(BACKOFF_BASE).await;
+        wait_until(|| store.flush_calls() >= 2).await; // retained
+        add_concept(&graph, 2, iid); // past log_max = 4
+        tokio::time::advance(Duration::from_secs(1)).await;
+        wait_until(|| task.degraded()).await;
+
+        // Let the degrade cycle publish what it publishes, then count.
+        for _ in 0..10 {
+            tokio::time::advance(POLL_QUANTUM).await;
+            tokio::task::yield_now().await;
+        }
+        let before = store.stats_writes();
+        // Several republish intervals, a poll at a time.
+        let polls = 4 * STATS_REPUBLISH_INTERVAL.as_millis() / POLL_QUANTUM.as_millis();
+        for _ in 0..polls {
+            tokio::time::advance(POLL_QUANTUM).await;
+            tokio::task::yield_now().await;
+        }
+        assert!(task.degraded());
+        assert_eq!(store.flush_calls(), 2, "no flush attempt once degraded");
+        assert_eq!(
+            store.stats_writes(),
+            before,
+            "a degraded session rewrote its stats row between attempts"
+        );
     }
 
     #[tokio::test(start_paused = true)]

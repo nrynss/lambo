@@ -4,6 +4,9 @@
 
 ### Breaking
 
+- `LamboFile` gains a public `serve: ServeConfig` field (#32). Code that
+  builds a `LamboFile` with a struct literal must add
+  `serve: Default::default()`; code that parses one is unaffected.
 - Minimum supported Rust is now 1.99 (`rust-version = "1.99"` in
   `Cargo.toml`; there was none before), and the crate moves from edition 2021
   to edition 2024. The pinned toolchain moves from 1.97.1 to 1.99.0, and CI and
@@ -53,6 +56,67 @@
 
 ### Changed
 
+- `lambo.toml` parse errors no longer quote the offending line. They give
+  the parser's message and a line and column instead, so a misspelled key
+  next to a secret (a DSN with a password, say) no longer prints the secret
+  into a startup log. A script that matched the old `TOML parse error at
+  line N` text must match `(line N, column M)` instead.
+- An unknown `[store] kind` or `[embedder] kind` (in `lambo.toml` or
+  `LAMBO_STORE` / `LAMBO_EMBEDDER`) no longer quotes the value: the error
+  lists the accepted kinds with `(value not shown)`. A wrong-typed or unknown
+  enum value in `lambo.toml` reads `string (value not shown)` or
+  `unknown variant (value not shown)`, and an unknown `promotion_policy` is
+  quoted only when it is a short word. A DSN or token pasted under the wrong
+  key no longer reaches a startup log.
+- Every `serve --ledger` line now carries `session` (#32). `startup` and
+  `lease` lines always did; `call`, `completion` and `stats` lines gain it so
+  one ledger file can hold several sessions later. Additive: `v` stays `1`
+  and no existing key changes.
+- The write queue's startup probe now times a representative write instead
+  of one embed (#11), so `write_queue_probe_serial_items_per_sec` and
+  `write_queue_items_per_sec` read in writes per second, the unit
+  `write_queue_serial_items_per_sec` has always used once your own writes
+  are observed. A `lambo_derive` embeds each concept together with the text
+  of every concept in the call, so a write costs several embeds and its cost
+  grows faster than its concept count. The probe now embeds exactly what a
+  two-concept derive of about 340-byte concepts embeds. Expect the probe
+  figures to read about half what they did. Measured on an M3 Pro with the
+  candle Metal BGE-M3 and a scratch SQLite store: probe 11.4 to 11.6 against
+  an observed 2.3 to 2.8 writes/s before (4.1x to 5.0x apart), 5.7 against
+  the same observed rate after (2.0x to 2.5x; what is left is derives larger
+  than the representative one). The drain rate itself is unchanged: after
+  #8 a write's time is its embeds. An embedder that answers one request at
+  a time may not finish the probe's four-wide leg in its 5 s budget; the
+  serial figures are then still published, and `write_queue_items_per_sec`
+  is `null`, where the whole probe used to read `unmeasured`. A probe that
+  measures nothing logs which leg failed and which budget ran out.
+- The longest `lambo_stats` `wait_ms` is now 34000 (was 4000), and the
+  published schema says so (#11). It covers the longest one write can take
+  to apply (the 30 s hybrid I/O deadline plus two 2 s drain budgets), so a
+  wait that ends `pending` now means other writes were queued ahead of it.
+  On the Metal rig a three- or four-concept derive took up to 4.6 s to
+  apply, so a read-your-writes wait could answer `pending` about a healthy
+  write. A wait still returns the moment the write settles, and at most 16
+  waits run at once, of which one `agent_id` holds at most 8: a wait over
+  either cap answers at once with the receipt's current state. A wait also
+  answers once the session closes, so a wait on a `pending_replay` receipt
+  no longer outlives the server's shutdown; a wait on a write the close
+  defers answers `intent_durable`, not `pending`.
+- `flush_lag_ms` (in `lambo_stats`, the heartbeat and the stats a reader
+  process reads from the store) is now the time since the store last held
+  every write, not the time since the last successful flush (#16 §3). An
+  idle writer reads under 100 ms instead of its idle time: the dogfood rigs
+  read 13.7 minutes, 12.1 hours and 48 hours while `log_depth` was 0 in
+  every snapshot. With writes waiting on a store that is not taking them it
+  grows as before, counted from the moment the last successful flush
+  drained its batch, so it covers writes that landed while that flush was
+  still running. The key, type and unit are unchanged. The stats row a
+  reader process reads is now republished between flushes when it has
+  drifted (at most every 5 s); it used to change only when a flush was
+  attempted, so it never showed an idle writer's lag and froze through the
+  10 s pause after a failed flush. A degraded session stops republishing
+  it. A batch the store rejects outright resets the lag although it never
+  landed; `dead_lettered` is what counts it.
 - On SQLite, the process that holds a session (`lambo serve`, or an embedded
   `Memory`) now ranks recall's vector leg and hybrid `derive`'s semantic match
   against the vectors its in-memory graph already holds, instead of reading,
@@ -74,9 +138,57 @@
     while it matches, and the matching scan no longer spends the derive's 30 s
     store-I/O deadline: it runs in memory, about 0.8 µs per stored vector at
     1,024 dimensions.
+- A session holder (`lambo serve`, or an embedded `Memory`) now keeps the
+  query vectors of its recent recalls, so a repeated recall of the same text
+  no longer calls the embedder (#14). The vector depends only on the text and
+  the embedder, not on the graph, so a write between two identical recalls
+  still reuses it; the recall itself runs in full every time, so results are
+  unchanged. Measured with candle BGE-M3 on Metal over a 3,600-concept SQLite
+  session (release, macOS): a repeated warm recall p50 22.3 ms to 4.1 ms, and
+  the same recall with a derive applied between each pair 21.5 ms to 3.6 ms.
+  A novel query still pays its embed (21.9 ms to 21.8 ms).
+  - The cache belongs to one session and is never shared across sessions in a
+    process, so reply timing cannot reveal another session's queries.
+  - Bounded at 128 entries and 1 MiB per session (about 560 KiB for short
+    queries at 1,024 dimensions), least recently used first out. A failed
+    embed is not cached. A closed or erased session refuses the recall before
+    the cache is consulted.
+  - A vector already cached is reused while the embedder is unavailable, so a
+    repeated query keeps its vector leg through an embedder outage instead of
+    degrading to keyword-only with the `vector_degraded` warning.
+  - `lambo recall` (one recall per process) is unchanged.
 
 ### Added
 
+- An optional `[serve]` table in `lambo.toml` for multi-session serving
+  (#32, first part): pinned `sessions`, `default_session`, `max_attached`,
+  `attach_concurrency`, `idle_detach_secs`, `per_session_rps`, a
+  `[[serve.projects]]` cwd map and `[[serve.credential]]` entries that name
+  the environment variable holding their token. It is parsed and validated
+  only; nothing reads it at runtime yet, so a serve with or without it
+  behaves as before, and `lambo serve` logs one warning at startup when the
+  table is present (`[serve] is parsed but not yet enforced in this
+  release`). `token_env` must be an upper-case variable name and must not
+  look like a token; a value that fails is refused without being quoted. A
+  malformed table, a session name that cannot be
+  addressed by URL, an inline token, or more pinned sessions than
+  `max_attached` stops every command. An older binary refuses a file that
+  has `[serve]` (unknown key).
+- `lambo::surface::session`: session-id validation for ids taken from a
+  request (`parse_addressed`: `[A-Za-z0-9._:-]`, 1 to 128 bytes, no leading
+  `.`, no percent-decoding), the in-memory authorization types the coming
+  multi-session routes and the web portal share, and their one uniform 404.
+  `--session` keeps its looser rule.
+- `Ledger::for_session`, a handle onto the same ledger that stamps `session`
+  on its lines.
+- `lambo_stats` reports `write_queue_probe_optimism` (the startup probe's
+  rate divided by the observed one, `null` until your writes have been
+  observed) and `write_queue_apply_samples` with
+  `write_queue_apply_ms_p50` / `_p90` / `_max`: acknowledgement-to-applied
+  time over the last 256 applied writes, `null` before the first (#11).
+  Together they show whether a deployment's derives fit the `wait_ms`
+  maximum without joining the call ledger. Additive keys; nothing else in
+  the payload changes.
 - An optional Elasticsearch recall tier (#18, feature `recall-elastic`): a
   top-level `[recall]` section in `lambo.toml` wraps the configured store in a
   `TieredStore`. The store stays the source of truth and keeps leases, fencing,
@@ -170,6 +282,15 @@
 
 ### Fixed
 
+- The write queue's startup probe no longer reports `unmeasured` when the
+  embedder's first call is slow (#11). Its discarded warm-up embed shared
+  the 5 s budget of the timed legs, and the candle Metal BGE-M3's first
+  embed on a cold page cache outran it, so the session never had a probe
+  figure to compare its writes against. The warm-up now has its own 30 s
+  bound.
+- A reported write-queue rate no longer exceeds 1024 items/s (#11). The cap
+  was documented but applied only to a zero time, so a fixture embedder's
+  probe published about 200,000 items/s.
 - A `lambo serve` shutdown is now bounded even when its own timers cannot
   fire (#40). Every shutdown bound is a timer inside the server's async
   runtime, and a wedged runtime (every worker thread blocked, or the thread

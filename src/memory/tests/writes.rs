@@ -11,21 +11,36 @@ use super::*;
 /// organically-derived data — with no live cluster. Every answer it gives
 /// is recorded so a test can prove the vector leg *fired* rather than
 /// inferring it from a rank.
-struct VectorSearchStore {
+///
+/// Built with [`VectorSearchStore::graph_ranked`] it also declares its
+/// checked read an exact scan, so a holder ranks in its own graph instead
+/// (#8's `VectorCandidates::Graph`); the #14 query-cache tests run on both.
+pub(super) struct VectorSearchStore {
     inner: Arc<dyn GraphStore>,
     answers: PlMutex<Vec<Vec<Scored<NodeId>>>>,
+    exact_scan: bool,
 }
 
 impl VectorSearchStore {
-    fn new(inner: Arc<dyn GraphStore>) -> Self {
+    pub(super) fn new(inner: Arc<dyn GraphStore>) -> Self {
         Self {
             inner,
             answers: PlMutex::new(Vec::new()),
+            exact_scan: false,
+        }
+    }
+
+    /// The same store, declaring `exact_vector_scan`, so a holder ranks its
+    /// graph's vectors and never calls the checked read.
+    pub(super) fn graph_ranked(inner: Arc<dyn GraphStore>) -> Self {
+        Self {
+            exact_scan: true,
+            ..Self::new(inner)
         }
     }
 
     /// Every `vector_candidates` answer, in call order.
-    fn answers(&self) -> Vec<Vec<Scored<NodeId>>> {
+    pub(super) fn answers(&self) -> Vec<Vec<Scored<NodeId>>> {
         self.answers.lock().clone()
     }
 }
@@ -40,6 +55,9 @@ impl GraphStore for VectorSearchStore {
     }
     fn vector_dimensions(&self) -> Option<usize> {
         Some(1024)
+    }
+    fn exact_vector_scan(&self) -> bool {
+        self.exact_scan
     }
     async fn flush(&self, batch: &MutationBatch, token: Option<u64>) -> Result<(), StoreError> {
         self.inner.flush(batch, token).await
@@ -194,7 +212,7 @@ impl GraphStore for VectorSearchStore {
 /// label before delegating — behaviour BGE-M3 has for free and a hash
 /// fixture cannot. Nothing else about the embedding path is altered.
 #[derive(Debug)]
-struct ContextTolerantEmbedder(FixtureEmbedder);
+pub(super) struct ContextTolerantEmbedder(pub(super) FixtureEmbedder);
 
 #[async_trait]
 impl Embedder for ContextTolerantEmbedder {
@@ -815,4 +833,86 @@ async fn a_hybrid_record_action_on_a_store_without_vector_search_embeds_nothing(
         stamp_before,
         "the stamp is untouched"
     );
+}
+
+// -- the write queue's probe embeds what a derive embeds (#11) -----------
+
+/// An embedder that records every text it is asked to embed.
+#[derive(Debug)]
+struct RecordingEmbedder {
+    inner: FixtureEmbedder,
+    texts: parking_lot::Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl Embedder for RecordingEmbedder {
+    fn dimensions(&self) -> usize {
+        self.inner.dimensions()
+    }
+    async fn embed(&self, text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
+        self.texts.lock().push(text.to_string());
+        self.inner.embed(text).await
+    }
+}
+
+/// **The calibration probe embeds exactly what a real derive of its
+/// concepts embeds** (#11 review P3-7).
+///
+/// The probe's representative write exists so `probe_optimism` compares a
+/// write with a write. The test beside the probe compared the probe's texts
+/// with the framing helpers the probe itself calls, which proves the probe
+/// uses the helpers and not that a derive embeds that. This one runs the
+/// probe's own concepts through a real hybrid derive, through the write
+/// queue, and compares what the embedder was asked to embed.
+#[tokio::test]
+async fn a_real_derive_of_the_probes_concepts_embeds_the_probes_texts() {
+    let inner = Arc::new(MemoryStore::new());
+    let embedder = Arc::new(RecordingEmbedder {
+        inner: FixtureEmbedder::new(),
+        texts: parking_lot::Mutex::new(Vec::new()),
+    });
+    let agent = AgentId::new("agent-a");
+    let mem = Memory::builder()
+        .session("probe-is-a-derive")
+        .agent("agent-a")
+        .flush_interval(Duration::from_secs(3_600))
+        .store(Arc::new(super::replay::VectorSearchable(inner)) as Arc<dyn GraphStore>)
+        .embedder(embedder.clone() as Arc<dyn Embedder>)
+        .embedding_contract(contract("fixture", 1024))
+        .match_strategy(MatchStrategy::Hybrid)
+        .build()
+        .await
+        .expect("build");
+    // The probe embeds through the same embedder; let it finish first.
+    for _ in 0..2_000 {
+        if mem.pipeline().calibration().is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    assert!(mem.pipeline().calibration().is_some(), "the probe landed");
+    embedder.texts.lock().clear();
+
+    let concepts = crate::writeq::probe_write_concepts();
+    let typed: Vec<(&str, ConceptType)> = concepts
+        .iter()
+        .map(|c| (c.as_str(), ConceptType::Logic))
+        .collect();
+    let submitted = mem
+        .derive_async_as(&agent, &typed, &ParentOf::none(), None)
+        .await
+        .expect("ack");
+    let answer = mem
+        .pipeline()
+        .wait(&agent, submitted.receipt, crate::writeq::RECEIPT_WAIT_MAX)
+        .await;
+    assert_eq!(answer.tag(), "applied", "{answer:?}");
+
+    let embedded = embedder.texts.lock().clone();
+    assert_eq!(
+        embedded,
+        crate::writeq::probe_write_contexts(),
+        "the probe's representative write must embed what a derive of its concepts embeds"
+    );
+    mem.close().await.expect("close");
 }

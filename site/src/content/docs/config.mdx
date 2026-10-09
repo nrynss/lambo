@@ -9,7 +9,7 @@ Lambo reads a `lambo.toml` file. It looks for the file in this order: the `--con
 
 ## What lambo.toml contains
 
-The file has `[store]`, `[embedder]` and `[daemon]` sections plus a small number of top-level process settings. It chooses which compiled backends this process runs, the cadence the background work runs at, and the canonization policy the serving verbs run them under.
+The file has `[store]`, `[embedder]` and `[daemon]` sections, an optional `[serve]` section for [multi-session serving](#multi-session-serving), plus a small number of top-level process settings. It chooses which compiled backends this process runs, the cadence the background work runs at, and the canonization policy the serving verbs run them under.
 
 ```toml
 # Top-level keys must come BEFORE the first [table] header, or TOML scopes them
@@ -34,12 +34,10 @@ Recall defaults, flush timing, canonization thresholds, and scoring weights are 
 
 ```
 $ lambo --config lambo.toml provision
-lambo provision: failed to resolve store: config: lambo.toml: TOML parse error at line 1, column 1
-  |
-1 | default_top_k = 5
-  | ^^^^^^^^^^^^^
-unknown field `default_top_k`, expected one of `store`, `embedder`, `daemon`, `promotion_policy`
+lambo provision: failed to resolve store: config: lambo.toml: unknown field `default_top_k`, expected one of `store`, `embedder`, `daemon`, `promotion_policy`, `serve` (line 1, column 1)
 ```
+
+The refusal names the line and column but never quotes the line itself, so a misspelled key next to a secret (a DSN with a password in it, say) does not print the secret into your logs. A value under the wrong key is not quoted back either: an unknown `[store] kind` or `[embedder] kind` lists the accepted kinds with `(value not shown)`, a wrong-typed value reads `invalid type: string (value not shown), expected ...` (numbers are hidden the same way), and an unknown key is named only while it looks like a key (letters, digits, `_` and `-`, up to 40 characters), so a DSN pasted as a quoted key is not printed. An unknown `promotion_policy` is quoted only when it is a short word, so a typo stays visible.
 
 ## Promotion policy
 
@@ -177,6 +175,53 @@ A bad `promotion_policy` has the wider scope of the two, and the difference is w
 Under the default `Swarm` policy `gc_interval` is the one worth understanding. Stage 1 requires `gc_survived >= 3`, so at the default a concept needs roughly 30000 mutations before it can be promoted at all, which an ordinary session of a few dozen concepts never reaches — this is why `lambo demo` sets it to 1 internally. Under `Solo` it does not participate at all; see [Promotion policy](#promotion-policy). `lambo.example.toml` carries the same notes inline.
 
 GC also sweeps on time. When `gc_max_interval_secs` has passed since a session's last sweep and the session took at least `gc_idle_floor` mutations since then, it sweeps even though it is far below `gc_interval`; whichever trigger comes first wins. An idle session never sweeps on time alone (bar the one catch-up below), so `gc_survived` keeps measuring survival under eviction pressure rather than age. The time and watermark of the last sweep are stored with the session, so a writer restart does not reset the clock and does not by itself cause a sweep: a restarted writer sweeps only if one was already due. A session that took at least `gc_idle_floor` mutations since its last sweep and whose writer was down for a week sweeps once on its first cycle back, not seven times. A session that has never swept starts its clock when a writer first attaches to it, rather than sweeping. That is a delay, not an exemption: a never-swept session counts every lifetime mutation toward `gc_idle_floor`, so one that already has at least that many sweeps once about `gc_max_interval_secs` after the clock started, even if no write has arrived since. This is a deliberate catch-up for stores that grew before sweeps ran on time. Both keys must be positive; zero is refused the same way `gc_interval = 0` is. A `gc_idle_floor` at or above `gc_interval` is accepted but makes the time bound unreachable (the mutation trigger always gets there first), so the file is accepted with a warning at startup. Neither changes what a sweep collects.
+
+## Multi-session serving
+
+`[serve]` configures one `lambo serve` process that holds several sessions. It is optional: omit it and `lambo serve` behaves exactly as it always has.
+
+In this release the table is **parsed and validated only**. Nothing reads it at runtime yet; routing by `/mcp/s/{session}`, the credentials and the bounds arrive in later releases. A malformed table is still refused when the file is read, so it stops every command, like an unknown key. `lambo serve` logs one warning at startup when the table is not empty (`[serve] is parsed but not yet enforced in this release`), naming no value from it.
+
+```toml
+[serve]
+sessions = ["lambo", "rustydocs", "general"]   # pinned: attached at startup
+default_session = "general"
+max_attached = 16
+attach_concurrency = 2
+idle_detach_secs = 900
+per_session_rps = 50
+
+[[serve.projects]]
+path = "~/Documents/work/lambo"
+session = "lambo"
+
+[[serve.credential]]
+name = "agents"
+token_env = "LAMBO_AGENTS_TOKEN"
+sessions = ["lambo", "rustydocs", "general"]
+
+[[serve.credential]]
+name = "dresscode"
+token_env = "LAMBO_DRESSCODE_TOKEN"
+session_prefix = "dc-u-"
+create = true
+erase = true
+```
+
+| Key | Default | What it sets |
+|---|---|---|
+| `sessions` | none | Pinned sessions, attached at startup and never idle-detached. |
+| `default_session` | none | The session `/mcp` and a stdio serve without `--session` use. |
+| `max_attached` | `16` | Cap on attached sessions, pinned plus on-demand. At least 1, and at least the number of pinned sessions. |
+| `attach_concurrency` | `2` | Sessions that may attach at once. At least 1. |
+| `idle_detach_secs` | `900` | Seconds an on-demand session may sit idle before it is detached. At least 1. |
+| `per_session_rps` | `--rate-limit-rps` | Request rate for each session. `0` turns the per-session limit off. |
+| `[[serve.projects]]` | none | `path` and `session`: a stdio serve started under `path` uses `session`. |
+| `[[serve.credential]]` | none | A bearer credential and the sessions it may reach (below). |
+
+Every session named in `[serve]` must be addressable by URL: 1 to 128 bytes of `A-Z`, `a-z`, `0-9`, `.`, `_`, `:` and `-`, not starting with `.`. A name outside that rule is refused here, but you can still serve it on its own with `lambo serve --session <name>`, which keeps its looser rule.
+
+A credential never holds its token. `token_env` names the environment variable that does, and the token will be read from it when the server starts (#32 PR 5; nothing reads it in this release). An inline `token = "..."` is refused, and the refusal does not quote it. A credential reaches the sessions in `sessions` (exact names, or `"*"` for every pinned session plus every session under any credential's prefix) and those under `session_prefix` (ids that start with the prefix and are longer than it). It may carry `create` (attach a session that does not exist yet), `erase` and `admin`. The names `default` and `local` are reserved, and `token_env` may not be `LAMBO_AUTH_TOKEN`. `token_env` must be a conventional variable name (`[A-Z_][A-Z0-9_]*`, at most 64 bytes) and must not look like a token (an AWS key id, or a 20-plus character run of letters and digits with no `_`), because it is the key a token is most likely to be pasted into by mistake. A value that fails is refused without being quoted.
 
 ## Environment variables
 

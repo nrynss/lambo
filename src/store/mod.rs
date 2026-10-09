@@ -116,8 +116,12 @@ pub const MAX_VECTOR_CANDIDATE_LIMIT: usize = 2048;
 /// by the writer's `FlushTask`; readers must never write.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SessionFlushStats {
-    /// Milliseconds since the writer's last successful flush — the observable
-    /// durability-lag bound.
+    /// Milliseconds since the store was last caught up with the writer (the
+    /// drain a successful flush covered, or a poll that found nothing
+    /// pending) — the observable durability-lag bound. Near zero while nothing
+    /// is pending (#16 §3; see `crate::store::flush::FlushStats::lag`). As of
+    /// the writer's last publish: after every flush attempt, and between
+    /// attempts once the live figure has drifted, at most every 5 s.
     pub flush_lag_ms: u64,
     /// Mutations not yet durable (in-graph log + pending batch) at publish time.
     pub log_depth: u64,
@@ -904,8 +908,10 @@ impl FromStr for StoreKind {
             "cockroach" | "crdb" => Ok(Self::Cockroach),
             "postgres" | "pg" => Ok(Self::Postgres),
             "sqlite" | "sqlite3" => Ok(Self::Sqlite),
-            other => Err(StoreError::Backend(format!(
-                "unknown store kind {other:?} (expected {STORE_KIND_EXPECTED})"
+            // Never echo the value: a DSN pasted under `kind` would carry
+            // its password into the startup log.
+            _ => Err(StoreError::Backend(format!(
+                "unknown store kind (value not shown; expected {STORE_KIND_EXPECTED})"
             ))),
         }
     }

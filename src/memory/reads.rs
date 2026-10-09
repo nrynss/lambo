@@ -3,11 +3,14 @@
 //!
 //! Reads never take the writers gate (a long recall must not delay
 //! shutdown); they are refused after close by `ensure_open`. Recall's order
-//! is: embed the query (only when the vector leg can run), take the recall
-//! cache, run the daemon's three-phase recall (which takes and releases the
-//! graph lock itself, after its own store I/O), then note every returned hit
-//! as an access. The access note comes after the pipeline returns and is a
-//! leaf lock.
+//! is: `ensure_open`, then the query embedding (only when the vector leg can
+//! run; served from the session's query-embedding cache when this exact text
+//! was embedded before under this contract, #14), take the recall cache, run
+//! the daemon's three-phase recall (which takes and releases the graph lock
+//! itself, after its own store I/O), then note every returned hit as an
+//! access. The access note comes after the pipeline returns and is a leaf
+//! lock. Both caches are consulted only after `ensure_open`, so a closed or
+//! erased session never answers from either (#23).
 
 #[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
 use std::time::Duration;
@@ -16,8 +19,8 @@ use chrono::Utc;
 use tokio::sync::broadcast;
 
 use super::{CanonicalMemory, GcStats, GcSweepSummary, Memory, MemoryStats};
-use crate::recall::candidates;
 use crate::recall::format;
+use crate::recall::query_cache;
 use crate::store::vector_source::VectorCandidates;
 use crate::types::{
     tie_break_by_key, CanonizationStatus, DaemonEvent, LamboError, NodeId, RecallQuery,
@@ -27,11 +30,13 @@ use crate::types::{
 impl Memory {
     /// Three-phase recall (spec §8), rendered as the T5.3 context block.
     ///
-    /// The query is embedded first — **before** any lock — and only when the
-    /// store actually claims `VECTOR_SEARCH`; otherwise the vector leg would be
-    /// refused anyway and the embed call would be wasted latency. An embed
+    /// The query is embedded first — **before** any lock but the session's
+    /// short query-embedding cache lock — and only when the store actually
+    /// claims `VECTOR_SEARCH`; otherwise the vector leg would be refused anyway
+    /// and the embed call would be wasted latency. A query this session
+    /// already embedded under its contract reuses that vector (#14). An embed
     /// failure degrades to the keyword + recent legs with a warning on the
-    /// result rather than failing the read.
+    /// result rather than failing the read, and is not cached.
     pub async fn recall(&self, query: RecallQuery) -> Result<RecallResult, LamboError> {
         self.recall_detailed(query).await.map(Into::into)
     }
@@ -55,17 +60,26 @@ impl Memory {
 
         // The one source this recall's vector leg reaches candidates through
         // (#27); the query embed is its own step, skipped when the leg cannot
-        // run (#14 moves the cache check ahead of it).
+        // run, and served from the session's query-embedding cache on a
+        // repeat (#14). After `ensure_open`, so a closed or erased session
+        // never answers from the cache (#23).
         let vectors = self.vector_candidates();
         let mut warnings = Vec::new();
-        let embedding =
-            match candidates::embed_query(vectors, self.embedder.as_ref(), &query.query).await {
-                Ok(vector) => vector,
-                Err(warning) => {
-                    warnings.push(warning);
-                    None
-                }
-            };
+        let embedding = match query_cache::embed_query_cached(
+            &self.query_embeddings,
+            vectors,
+            self.embedder.as_ref(),
+            &self.embedding,
+            &query.query,
+        )
+        .await
+        {
+            Ok(vector) => vector,
+            Err(warning) => {
+                warnings.push(warning);
+                None
+            }
+        };
 
         // The recall cache is `&mut` across `Daemon::recall`'s awaits. This is
         // NOT the graph lock — `Daemon::recall` takes and releases that itself,
@@ -243,6 +257,13 @@ impl Memory {
             return rx;
         }
         self.daemon.events()
+    }
+
+    /// #14 test hook: drop this session's cached query embeddings, so the
+    /// next recall embeds as if the cache did not exist.
+    #[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
+    pub(crate) fn clear_query_embeddings(&self) {
+        self.query_embeddings.lock().clear();
     }
 
     /// Issue #30 test hook: read accesses noted but not yet applied by the

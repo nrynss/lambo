@@ -26,6 +26,7 @@ use chrono::{DateTime, Utc};
 use parking_lot::Mutex as PlMutex;
 
 use super::{WritePipeline, WRITE_QUEUE_DRAIN_BUDGET};
+use crate::graph::hybrid::HYBRID_IO_TIMEOUT;
 use crate::surface::limits::MAX_CONCEPTS_PER_DERIVE;
 use crate::types::{AgentId, LamboError};
 
@@ -57,6 +58,12 @@ const _: () = assert!(
 );
 
 /// The worst `flush_lag` measured on this rig, in seconds (§Measurements).
+///
+/// Measured under the **old** definition of `flush_lag`, the time since the
+/// last successful flush, which counted idle time (#16 §3 changed it to the
+/// time since the store was last caught up). Under the new definition the
+/// same rig reads at most this, so the relation it guards below stays
+/// conservative; it is not a figure to compare a new reading with.
 ///
 /// A constant rather than a sentence for the same reason
 /// [`MEASURED_LOCAL_EMBEDDER_RPS`](super::MEASURED_LOCAL_EMBEDDER_RPS) is one: it lets the relation below be a
@@ -134,15 +141,41 @@ pub const MAX_RECEIPT_IDS: usize = MAX_CONCEPTS_PER_DERIVE;
 /// memory argument, which is why no constant moved when the reason changed.
 pub const MAX_RETAINED_RECEIPTS: usize = 4096;
 
-/// Longest a caller may block waiting for its own write to apply.
+/// Longest a caller may block waiting for its own write to apply: 34 s.
 ///
-/// Two drain budgets, resting on the one surviving reason (J3-R2R-5 — the
-/// redesign retired admission "projections"): a close's quiesce drains for one
-/// whole budget, so a wait of one budget would expire on jobs that quiesce is
-/// still retiring. The second budget is that quiesce plus slack for the
-/// caller's own job's service time. A wait that runs out answers `pending` —
-/// which is one of the honest answers, not a failure.
-pub const RECEIPT_WAIT_MAX: Duration = Duration::from_secs(4);
+/// **Long enough for any one write at the head of its lane** (#11). A write's
+/// own I/O, every embed and vector lookup of its derive or `record_action`,
+/// runs under one [`HYBRID_IO_TIMEOUT`] deadline, and nothing after it awaits,
+/// so a job a worker has picked up settles, applied or failed, within that
+/// bound. On top of it sit the two drain budgets of the J3 reasoning
+/// (J3-R2R-5): a close's quiesce drains for one whole budget, and the second
+/// is slack for the worker to pick the job up. So a wait that runs out
+/// answers `pending` only when other writes were queued ahead in the same
+/// lane, and that answer is then the honest one.
+///
+/// It was 4 s, the two budgets alone. On the Metal rig a 3 to 4 concept
+/// derive's apply reached 4.6 s (p90 2 s) because each concept is embedded
+/// with the whole call's text, so a caller asking for read-your-writes was
+/// told `pending` about a healthy write about to land.
+///
+/// What a longer bound costs: a wait returns the moment its receipt settles,
+/// so only a wait on a slow write holds its slot longer. The population of
+/// waits is still capped by [`MAX_CONCURRENT_RECEIPT_WAITS`], which is what
+/// bounds the proxy's in-flight burst (the J2-R2-7 residual), and one agent
+/// holds at most [`MAX_RECEIPT_WAITS_PER_AGENT`] of them.
+///
+/// A waiting call does not extend a shutdown, though not because the
+/// transport drops it: hub and proxy endpoint sessions stay connected until
+/// `serve`'s last stage. It is because the close settles every receipt this
+/// process holds: `quiesce` drains, then `abort_workers` settles what is
+/// left `intent_durable` and wakes every waiter, so those waits return with
+/// it. A `pending_replay` id, owed to a replay the close stops, is not
+/// settled; its wait returns once the pipeline is sealed and the close has
+/// settled what its aborted workers left (#11 review P3-2, round 2 F1). Nothing in shutdown joins a waiting call either:
+/// `serve`'s final stage cancels the MCP services without awaiting their
+/// tool tasks.
+pub const RECEIPT_WAIT_MAX: Duration =
+    Duration::from_secs(HYBRID_IO_TIMEOUT.as_secs() + 2 * WRITE_QUEUE_DRAIN_BUDGET.as_secs());
 
 /// Build-time invariant: a wait shorter than the queue's own admission promise
 /// would make the opt-in-synchrony surface useless by construction.
@@ -151,6 +184,13 @@ const _: () = assert!(
     "RECEIPT_WAIT_MAX must be at least twice WRITE_QUEUE_DRAIN_BUDGET — a close's quiesce drains \
      for one whole budget, so a wait of one budget would expire on jobs the quiesce is still \
      retiring",
+);
+
+/// Build-time invariant: a wait covers one write's whole I/O bound (#11).
+const _: () = assert!(
+    RECEIPT_WAIT_MAX.as_secs() > HYBRID_IO_TIMEOUT.as_secs(),
+    "RECEIPT_WAIT_MAX must exceed HYBRID_IO_TIMEOUT — a wait shorter than one write's own I/O \
+     bound answers pending about a write at the head of its lane that is still healthy",
 );
 
 /// Concurrent receipt waits this process will hold at once.
@@ -172,6 +212,61 @@ const _: () = assert!(
 /// `crate::mcp::proxy::INFLIGHT_DEPTH_WARN` is left for ordinary traffic, so
 /// receipt waits alone cannot be what trips the depth warning.
 pub const MAX_CONCURRENT_RECEIPT_WAITS: usize = 16;
+
+/// Receipt waits one agent may hold at once: half of
+/// [`MAX_CONCURRENT_RECEIPT_WAITS`] (#11 review P3-1).
+///
+/// The slots are shared by every agent on the pipeline, and a wait over the
+/// cap answers at once instead of waiting. With no share, one agent issuing
+/// sixteen waits on a slow write turned every other agent's wait into an
+/// immediate `pending` for as long as [`RECEIPT_WAIT_MAX`], which #11 raised
+/// from 4 s to 34 s. Half, not less, because one `agent_id` is often several
+/// clients: the dogfood protocol names an agent by its model, so parallel
+/// subagents of one model share an id, and an 8-wide fan-out of waits on one
+/// id is ordinary traffic (`i1_a_days_worth_of_concurrent_lines_all_parse`
+/// drives exactly that). Half is still the property the finding asks for:
+/// whatever one agent does, every other agent keeps eight slots. A wait over
+/// the share is answered the way a wait over the global cap is: at once, with
+/// the receipt's current state. `agent_id` is caller-asserted, so this is
+/// fairness between well-behaved agents, not a defence against one that
+/// varies its id; the global cap is what bounds the population either way.
+pub const MAX_RECEIPT_WAITS_PER_AGENT: usize = MAX_CONCURRENT_RECEIPT_WAITS / 2;
+
+const _: () = assert!(
+    MAX_RECEIPT_WAITS_PER_AGENT >= 1 && MAX_RECEIPT_WAITS_PER_AGENT < MAX_CONCURRENT_RECEIPT_WAITS,
+    "an agent's share of the receipt-wait slots must allow a wait and leave room for others",
+);
+
+/// One agent's claim on its [`MAX_RECEIPT_WAITS_PER_AGENT`] share, released
+/// when the wait ends however it ends (including a cancelled call).
+struct AgentWaitShare<'a> {
+    waits: &'a PlMutex<HashMap<AgentId, usize>>,
+    agent: &'a AgentId,
+}
+
+impl<'a> AgentWaitShare<'a> {
+    fn claim(waits: &'a PlMutex<HashMap<AgentId, usize>>, agent: &'a AgentId) -> Option<Self> {
+        let mut held = waits.lock();
+        let count = held.entry(agent.clone()).or_insert(0);
+        if *count >= MAX_RECEIPT_WAITS_PER_AGENT {
+            return None;
+        }
+        *count += 1;
+        Some(Self { waits, agent })
+    }
+}
+
+impl Drop for AgentWaitShare<'_> {
+    fn drop(&mut self) {
+        let mut held = self.waits.lock();
+        if let Some(count) = held.get_mut(self.agent) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                held.remove(self.agent);
+            }
+        }
+    }
+}
 
 /// Settled receipts piggybacked on one tool response.
 ///
@@ -750,13 +845,25 @@ impl WritePipeline {
     /// Wait for a receipt to settle — the opt-in synchrony surface.
     ///
     /// `budget` is clamped to [`RECEIPT_WAIT_MAX`], and concurrent waits are
-    /// capped ([`MAX_CONCURRENT_RECEIPT_WAITS`]); both bounds exist because a
+    /// capped ([`MAX_CONCURRENT_RECEIPT_WAITS`], of which one agent holds at
+    /// most [`MAX_RECEIPT_WAITS_PER_AGENT`]); the bounds exist because a
     /// waiting call occupies a proxy in-flight slot for its whole duration.
     /// A wait that runs out returns [`ReceiptAnswer::Pending`] for a receipt
     /// this process holds, or [`ReceiptAnswer::PendingReplay`] for a replay-owed
     /// id — either is honest, and neither is a failure.
     pub async fn wait(&self, agent: &AgentId, id: ReceiptId, budget: Duration) -> ReceiptAnswer {
         let budget = budget.min(RECEIPT_WAIT_MAX);
+        // The agent's share first (#11 review P3-1), so an agent at its share
+        // never takes a global slot another agent could have had.
+        let Some(_share) = AgentWaitShare::claim(&self.waits_per_agent, agent) else {
+            tracing::debug!(
+                session = %self.ctx.session,
+                agent = %agent,
+                "write queue: this agent already holds {MAX_RECEIPT_WAITS_PER_AGENT} receipt \
+                 waits; answering without waiting"
+            );
+            return self.lookup(agent, id);
+        };
         let _slot = match self.wait_slots.clone().try_acquire_owned() {
             Ok(slot) => slot,
             // Refusing the *wait* is not refusing the answer: the current
@@ -788,10 +895,31 @@ impl WritePipeline {
             if tokio::time::Instant::now() >= deadline {
                 return answer;
             }
+            // Closed (#11 review P3-2): once the lanes are sealed and the
+            // close has settled every receipt it held, nothing in this
+            // process can settle the id. A `pending_replay` id is owed to a
+            // replay the close stopped, so without this its wait ran on
+            // against a closed session to its own deadline. Keyed on the
+            // close's settle, not on the workers being marked aborted (a
+            // whole join earlier), and answered with a fresh lookup, so a
+            // settle that landed after the one above is not reported stale
+            // (#11 review round 2, F1).
+            if self.closed_to_settles() {
+                return self.lookup(agent, id);
+            }
             if tokio::time::timeout_at(deadline, notified).await.is_err() {
                 return self.lookup(agent, id);
             }
         }
+    }
+
+    /// `true` once nothing in this process can settle another receipt: the
+    /// lanes are sealed and [`WritePipeline::abort_workers`] has joined the
+    /// workers **and settled** what they left. The replay loop stops at the
+    /// seal as well.
+    fn closed_to_settles(&self) -> bool {
+        let lanes = self.lanes.lock();
+        lanes.sealed && lanes.settled_at_close
     }
 
     /// Take one receipt out of the piggyback queue because it has just been

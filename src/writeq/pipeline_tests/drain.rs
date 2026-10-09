@@ -579,3 +579,64 @@ async fn a_quiesce_after_a_cancelled_abort_does_not_wait_out_the_budget() {
     assert_eq!(rig.pipeline.outstanding(), 0);
     assert_eq!(deferred, 2, "both acked jobs are deferred, not lost");
 }
+
+/// #11 review round 2, F1: a receipt wait that runs while
+/// [`WritePipeline::abort_workers`] is still joining its workers must not
+/// answer `pending` for a queued job the same close is about to settle
+/// `intent_durable`. The seal check that ends a `pending_replay` wait at
+/// close used to fire from the moment the workers were marked aborted, a
+/// whole join before the settle; the wait has to see the close's final
+/// answer.
+///
+/// Deterministic: the lane's worker is held in a synchronous stretch, so the
+/// abort, polled once, sits in its join while the wait starts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_wait_inside_the_close_join_sees_the_intent_durable_settle() {
+    let busy = Arc::new(AtomicBool::new(false));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let finished = Arc::new(AtomicUsize::new(0));
+    let rig = Rig::hybrid(
+        "wq-wait-join-window",
+        Arc::new(BusyEmbedder {
+            busy: busy.clone(),
+            inner: FixtureEmbedder::new(),
+            calls: calls.clone(),
+            finished: finished.clone(),
+        }),
+    );
+    until(
+        || rig.pipeline.calibration().is_some(),
+        "the probe to finish",
+    )
+    .await;
+    busy.store(true, Ordering::SeqCst);
+
+    // One job running inside its embed, one queued behind it on the lane.
+    let agent = AgentId::new("agent-a");
+    rig.derive(&agent, "alpha concept").await;
+    until(
+        || calls.load(Ordering::SeqCst) >= 1,
+        "the first job inside the embedder",
+    )
+    .await;
+    let queued = rig.derive(&agent, "beta concept").await;
+    assert_eq!(queued.answer.tag(), "pending", "{:?}", queued.answer);
+
+    // The close's abort, polled once: workers marked aborted, join pending.
+    let abort = rig.pipeline.abort_workers();
+    tokio::pin!(abort);
+    let polled = tokio::time::timeout(Duration::ZERO, &mut abort).await;
+    assert!(polled.is_err(), "the join completed inside one poll");
+
+    // A wait that starts inside the join window, raced against the rest of
+    // the close.
+    let (deferred, answer) = tokio::join!(
+        abort,
+        rig.pipeline.wait(&agent, queued.receipt, RECEIPT_WAIT_MAX)
+    );
+    assert!(deferred >= 1, "the queued job was deferred by the close");
+    assert!(
+        matches!(answer, ReceiptAnswer::IntentRecorded),
+        "a wait inside the close's join answered before its settle: {answer:?}"
+    );
+}
