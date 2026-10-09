@@ -153,6 +153,17 @@ alias and lease-loss tests; no lease watcher fails the lease-loss test.
 - PR 5: authorize in the router, between `parse_addressed` and
   `registry.lookup` (`transport::addressed_session` and `default_session`),
   with no store call; `warn_if_unenforced` drops `[[serve.credential]]`.
+  **Requirement (review L6):** the order is load-bearing. In PR 4 a hosted
+  session that is not `Live` answers 503 (`HeldElsewhere`, `Detaching`,
+  `Failed`, or the hosted-but-in-no-slot arm) and an unhosted one the
+  uniform 404, so anyone past the bearer can tell which names a serve
+  hosts. That is acceptable in PR 4 only because one token reaches every
+  pinned session (the docs say so). PR 5 must authorize before
+  `registry.lookup`, so an unauthorized caller gets the byte-identical 404
+  for every slot state, and pin it with a byte-level test (PR 1's
+  `on_the_wire`) that an out-of-scope caller gets the same 404 for a
+  `HeldElsewhere` session and for a `Detaching` one as for an unhosted
+  name.
 - PR 6: `Slot` gains `Attaching` (single-flight) for on-demand sessions;
   `lookup`'s "hosted but in no slot" arm becomes the on-demand attach;
   eviction and idle detach reuse `detach` (it is reason-agnostic today and
