@@ -28,8 +28,12 @@
 //! It then computes the SHA-256 once, for the image id and the embedding
 //! source later PRs record.
 //!
-//! The input here is raw bytes. The MCP surface (#22 PR 4) decodes base64 and
-//! caps the encoded length before it calls this.
+//! The input here is raw bytes. The MCP surface (#22 PR 4) decodes base64
+//! with [`decode_base64`], which caps the encoded length **before** it
+//! decodes (stdio has no transport cap), and then calls this.
+//!
+//! A client-computed vector (#22 PR 4) is checked by
+//! [`check_submitted_vector`], the model-safe twin of the core's own check.
 //!
 //! **No message echoes the payload.** A refusal names the rule, the limit and
 //! at most the sniffed format; never image bytes, and never the declared MIME
@@ -47,6 +51,166 @@ pub const MAX_IMAGE_BYTES: usize = 2 * 1024 * 1024;
 
 /// Largest width or height, in pixels, an image header may declare.
 pub const MAX_IMAGE_SIDE_PX: u32 = 4096;
+
+/// Longest base64 text [`decode_base64`] accepts: the padded standard
+/// encoding of [`MAX_IMAGE_BYTES`] (`4 * ceil(MAX_IMAGE_BYTES / 3)`), so no
+/// image the byte cap allows is refused for its encoding, and nothing longer
+/// is ever decoded. The MCP schema publishes it as `maxLength`.
+pub const MAX_IMAGE_B64_LEN: usize = MAX_IMAGE_BYTES.div_ceil(3) * 4;
+
+/// Most components a submitted vector may have. The MCP schema publishes it
+/// as `maxItems`; the live contract's width is checked after it.
+pub const MAX_VECTOR_VALUES: usize = 4096;
+
+/// Bytes an image concept's suffix, `" [image:<id>]"`, adds to its caption
+/// beyond the id itself.
+const SUFFIX_OVERHEAD_BYTES: usize =
+    " ".len() + crate::graph::image::IMAGE_SUFFIX_OPEN.len() + "]".len();
+
+/// Longest caption, in bytes after trimming, whose image content
+/// (`"{caption} [image:<id>]"`) fits the uniform
+/// [`MAX_CONTENT_BYTES`](super::limits::MAX_CONTENT_BYTES) with an id of
+/// `id_len` bytes.
+pub const fn max_caption_bytes(id_len: usize) -> usize {
+    super::limits::MAX_CONTENT_BYTES - SUFFIX_OVERHEAD_BYTES - id_len
+}
+
+/// Longest caption any image derive can accept: the one with a one-byte id
+/// (16,374 bytes). The MCP schema publishes it as `caption`'s `maxLength`.
+pub const MAX_CAPTION_BYTES: usize = max_caption_bytes(1);
+
+/// Refuse a caption whose image content would exceed the uniform content
+/// cap once Lambo appends `" [image:<id>]"`.
+///
+/// `image_id` is the caller's id, or `None` for a default (digest) id, which
+/// is always [`DEFAULT_IMAGE_ID_HEX`](crate::graph::image::DEFAULT_IMAGE_ID_HEX)
+/// characters. The core checks the built content too, but as a
+/// configuration error; checked here, the caller learns its real limit.
+/// The message names lengths only, never the caption.
+pub fn check_caption_fits(caption: &str, image_id: Option<&str>) -> Result<(), String> {
+    use crate::graph::image::DEFAULT_IMAGE_ID_HEX;
+    let id_len = image_id.map_or(DEFAULT_IMAGE_ID_HEX, str::len);
+    let max = max_caption_bytes(id_len);
+    let len = caption.trim().len();
+    if len > max {
+        let id = match image_id {
+            Some(_) => format!("a {id_len}-byte image_id"),
+            None => format!("the default {DEFAULT_IMAGE_ID_HEX}-character image id"),
+        };
+        return Err(format!(
+            "caption is {len} bytes; with {id} it may be at most {max} bytes, because the \
+             stored content, the caption plus \" [image:<id>]\", is capped at {} bytes",
+            super::limits::MAX_CONTENT_BYTES
+        ));
+    }
+    Ok(())
+}
+
+/// The refusal for text that is not standard padded base64, with a hint for
+/// the two shapes real clients most often send: a `data:` URI (copied from a
+/// browser or an `<img src>`) and line-wrapped output (GNU `base64` wraps at
+/// 76 columns). Both are refused rather than repaired, as the schema says
+/// one exact form; the hint names the shape, never the input.
+fn base64_refusal(data: &str) -> String {
+    const BASE: &str = "image.data is not valid base64 (standard alphabet, padded)";
+    if data.trim_start().starts_with("data:") {
+        format!(
+            "{BASE}: send the base64 text alone, without a data: URI prefix such as \
+             \"data:image/png;base64,\""
+        )
+    } else if data.contains(['\n', '\r']) {
+        format!(
+            "{BASE}: send it on one line, with no line breaks (GNU base64 wraps at 76 \
+             columns unless given -w0)"
+        )
+    } else {
+        BASE.to_owned()
+    }
+}
+
+/// Decode an image's base64 text (standard alphabet, padded), refusing text
+/// longer than [`MAX_IMAGE_B64_LEN`] before decoding any of it.
+///
+/// The messages name the rule and the limit; they never quote the input.
+pub fn decode_base64(data: &str) -> Result<Vec<u8>, String> {
+    use base64::Engine as _;
+    if data.len() > MAX_IMAGE_B64_LEN {
+        return Err(format!(
+            "image.data is {} characters, over the {MAX_IMAGE_B64_LEN}-character limit \
+             (a {MAX_IMAGE_BYTES}-byte image, base64-encoded)",
+            data.len()
+        ));
+    }
+    base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .map_err(|_| base64_refusal(data))
+}
+
+/// Check a client-computed vector against the live contract before anything
+/// else sees it: the declared contract must equal `live` exactly (kind, model
+/// and dim), the vector must have at most [`MAX_VECTOR_VALUES`] components
+/// and exactly `live.dim` of them, every component must be finite, and the
+/// norm must not be zero.
+///
+/// The same rules as the core's `check_supplied_values`, with a message a
+/// caller may read: it names which fields of the declared contract differ
+/// and shows the live contract (which `lambo_stats` publishes as
+/// `embedding_contract`), but never quotes the declared strings, the values,
+/// or any other client input.
+pub fn check_submitted_vector(
+    values: &[f32],
+    declared: &crate::types::EmbeddingContract,
+    live: &crate::types::EmbeddingContract,
+) -> Result<(), String> {
+    if values.len() > MAX_VECTOR_VALUES {
+        return Err(format!(
+            "vector.values has {} components, over the limit of {MAX_VECTOR_VALUES}",
+            values.len()
+        ));
+    }
+    let mut differ = Vec::new();
+    if declared.kind != live.kind {
+        differ.push("kind");
+    }
+    if declared.model != live.model {
+        differ.push("model");
+    }
+    if declared.dim != live.dim {
+        differ.push("dim");
+    }
+    if !differ.is_empty() {
+        return Err(format!(
+            "vector.contract does not match this session's embedding contract ({} differ{}); \
+             a vector is accepted only into the exact space it was computed in. This \
+             session's contract is kind={:?} model={:?} dim={} (lambo_stats reports it as \
+             embedding_contract)",
+            differ.join(", "),
+            if differ.len() == 1 { "s" } else { "" },
+            live.kind,
+            live.model.as_deref().unwrap_or(""),
+            live.dim
+        ));
+    }
+    if values.len() != live.dim {
+        return Err(format!(
+            "vector.values has {} components but the embedding contract's dim is {}",
+            values.len(),
+            live.dim
+        ));
+    }
+    if values.iter().any(|x| !x.is_finite()) {
+        return Err("vector.values has a non-finite component (NaN or infinity)".into());
+    }
+    let norm = values
+        .iter()
+        .map(|x| f64::from(*x) * f64::from(*x))
+        .sum::<f64>()
+        .sqrt();
+    if norm == 0.0 || !norm.is_finite() {
+        return Err("vector.values has zero norm; it names no direction to search by".into());
+    }
+    Ok(())
+}
 
 const PNG_MAGIC: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
 const JPEG_MAGIC: &[u8; 3] = b"\xFF\xD8\xFF";
@@ -101,6 +265,13 @@ pub fn validate<'a>(bytes: &'a [u8], declared_mime: &str) -> Result<ImageInput<'
     }
     let sha256: [u8; 32] = Sha256::digest(bytes).into();
     Ok(ImageInput::from_validated(bytes, sniffed, sha256))
+}
+
+/// The format `bytes`' magic bytes name, if any of the three. For a surface
+/// that reads a local file and must pick the declared type itself (`lambo
+/// derive-image --image` without `--mime`); [`validate`] still checks it.
+pub fn sniff_mime(bytes: &[u8]) -> Option<ImageMime> {
+    sniff(bytes)
 }
 
 /// The format the magic bytes name, if any of the three.

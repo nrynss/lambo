@@ -135,11 +135,13 @@ Errors come back as normal tool results with `isError` set to `true` and a short
 | A lock another agent holds | Who holds the node and until when, and that nothing was reserved or released. |
 | The server losing its single-writer lease | The class `conflict` and a note that the detail was logged. The holder and expiry are shown only for a lock another agent holds; the lease's own state is not model-facing. |
 | A store or embedding failure | The class of failure, such as `store error`, and a note that the detail was logged. |
+| An image whose caption and `image_id` a text concept already holds | `image id taken`, your `image_id`, and the fix: choose another image id. On `lambo_derive_image` this arrives on the receipt. |
+| A call this server is not configured for | `configuration error` and the setting to change, such as `[embedder] accept_client_vectors = true`. Only `lambo_derive_image` answers this way. |
 | A handler fault | An internal error, with a note that the call had no effect beyond anything already written. |
 
 ## Tools
 
-These are the seven tools your agents call.
+These are the seven tools your agents call, and `lambo_derive_image`, which a server lists only when it can serve it (see [lambo_derive_image](#lambo_derive_image)).
 
 ### lambo_recall
 
@@ -194,7 +196,7 @@ Writes you send one after another are applied in that order, whatever other agen
 |---|---|---|---|
 | `agent_id` | string | Yes | |
 | `concepts` | array of `{content, concept_type}` | Yes | Up to 64 per call. |
-| `concepts[].content` | string | Yes | Up to 16 KB. |
+| `concepts[].content` | string | Yes | Up to 16 KB. May not contain an image suffix, `[image:<id>]` in any case or spelling, which only `lambo_derive_image` builds; text that only mentions it, such as `see [image: diagram]`, is fine. |
 | `concepts[].concept_type` | enum | Yes | One of `entity`, `logic`, `constraint`, `resource`, `observation`. |
 | `event_time` | RFC3339 timestamp | No | Historical about-time, such as a commit or document date. Omit for a live fact, which is about now. |
 | `parent_of` | array of `{parent, child}` | No | Hierarchy links. Both ends resolve as concepts, and either may be created. |
@@ -221,6 +223,41 @@ Writes you send one after another are applied in that order, whatever other agen
 
 A write refused for backpressure answers the same shape with `receipt_state` of `dropped` and a summary that says plainly that nothing was written. It is not an error: the call succeeded, the write did not.
 
+### lambo_derive_image
+
+Store one image as a concept. You send a caption and either the image itself, which the server embeds, or a vector you computed for it. The concept's content is the caption plus `[image:<image_id>]`, and its vector is the image's, so a text recall such as "red silk saree" finds it through the vector leg. The image bytes are never stored: Lambo keeps the caption, the vector, and where the vector came from. Lambo's own logs never carry the image or the vector, but the MCP library logs every request it receives at debug level, so a server run with `RUST_LOG=rmcp=debug` (not the default) writes each image and vector to its stderr.
+
+**Listed only where it can work.** A server lists this tool when its embedder embeds images, or when the operator set `[embedder] accept_client_vectors = true` (see [Configuration](/config)). Both are settings of the whole server process, so every session one server holds lists the same tools. A server with a text-only embedder (BGE-M3, candle, Gemini) and client vectors off lists exactly the seven tools above, unchanged. A listed tool still needs `match_strategy = "hybrid"` and a store with vector search; without either, every call is refused with a `configuration error` that names what is missing.
+
+**It returns before the write is applied**, with a receipt, exactly as `lambo_derive` does. The image is checked and embedded before the ack, so a bad image is refused on the call itself rather than on the receipt.
+
+| Argument | Type | Required | Notes |
+|---|---|---|---|
+| `agent_id` | string | Yes | |
+| `caption` | string | Yes | What the image is, in words. May not contain an image suffix (`[image:<id>]`) of its own. The stored content, the caption plus ` [image:<image_id>]`, must fit in 16,384 bytes, so a caption may be at most 16,375 bytes less the id's length: 16,372 with `r17`, 16,359 with the default id. A longer caption is refused and the refusal names its limit. |
+| `concept_type` | enum | Yes | One of `entity`, `logic`, `constraint`, `resource`. An image cannot be an `observation`. |
+| `image_id` | string | No | Your id for the image: 1 to 64 lowercase letters and digits (`^[a-z0-9]{1,64}$`). Omit it for an id made from a digest of what you send: the image's bytes, or the normalized vector, so the same image or vector maps to the same concept. |
+| `image` | `{mime, data}` | One of `image`, `vector` | `mime` is `image/png`, `image/jpeg` or `image/webp` and must match the bytes. `data` is the bytes in base64 (standard alphabet, padded), on one line and without a `data:` URI prefix: at most 2 MiB decoded (2,796,204 characters) and at most 4096 pixels a side. |
+| `vector` | `{values, contract}` | One of `image`, `vector` | A vector you computed, with the embedding space it is in. `contract` is `{kind, model, dim}` and must equal the session's `embedding_contract` from [`lambo_stats`](#lambo_stats) exactly. At most 4096 values. Accepted only when the operator enabled client vectors. |
+| `event_time` | RFC3339 timestamp | No | As for `lambo_derive`. |
+| `parent_of` | array of `{parent, child}` | No | As for `lambo_derive`. Name the image concept by its content, `caption [image:<image_id>]`. |
+
+```json
+{"name": "lambo_derive_image", "arguments": {"agent_id": "dresscode",
+  "caption": "red silk saree, gold border", "concept_type": "resource",
+  "image_id": "r17", "image": {"mime": "image/png", "data": "iVBORw0KGgo..."}}}
+```
+
+The same caption and `image_id` derived again is the same concept, and two images with one caption but different ids stay two concepts. An image concept never merges with another concept by similarity, and no text concept merges into it.
+
+**Client vectors.** Lambo checks that the declared contract is exactly the session's and that the vector has the right width, finite values and a non-zero length, then normalizes it to unit length. It cannot check that the vector really came from the model the contract names, which is why accepting them is the operator's decision. A mismatch is refused on the call, naming which of `kind`, `model` and `dim` differ and showing the session's contract; it never repeats what you sent.
+
+**Refusals never repeat your payload.** A refusal names the field and the rule, such as `image.data is not valid base64` or `declared image/jpeg but the bytes are image/png`. Neither the base64, the bytes nor a vector value appears in an error, a receipt or the `--ledger` file.
+
+**One image per call, and only inline.** There is no file path or URL argument.
+
+**Referring to an image concept.** `lambo_derive` and `lambo_record_action`'s `action` refuse an image suffix in a concept's own text: any word that reads as `[image:<id>]` once case is folded, invisible characters are dropped and the word is stemmed (so `[IMAGE:R17]` and `[image:r17]s` are refused, and `see [image: diagram]` is not). To link a text write to an image, name the image concept in `parent_of` or in an action's `produces`, `modifies` or `depends_on`, as `caption [image:<image_id>]`. If the image concept does not exist yet, that creates a text concept with the same content, and a later `lambo_derive_image` with that caption and id fails with `image id taken`; derive the image first.
+
 ### lambo_record_action
 
 Record something the agent did, along with what it produces, modifies, and depends on. The action becomes a `Resource` concept, `produces` and `modifies` become causal edges, and `depends_on` becomes dependency edges.
@@ -230,9 +267,9 @@ Record something the agent did, along with what it produces, modifies, and depen
 | Argument | Type | Required | Notes |
 |---|---|---|---|
 | `agent_id` | string | Yes | |
-| `action` | string | Yes | Up to 16 KB. |
+| `action` | string | Yes | Up to 16 KB. May not contain an image suffix (`[image:<id>]`). |
 | `event_time` | RFC3339 timestamp | No | Historical about-time, such as a commit or document date. Omit for a live fact, which is about now. |
-| `produces`, `modifies`, `depends_on` | array of string | No | Up to 64 entries combined across the three. |
+| `produces`, `modifies`, `depends_on` | array of string | No | Up to 64 entries combined across the three. An entry may name an image concept by its content, `caption [image:<image_id>]`. |
 
 ```json
 {"name": "lambo_record_action", "arguments": {"agent_id": "agent-a",
@@ -297,12 +334,14 @@ Report session health: flush lag, write-behind log depth, background write queue
 | Argument | Type | Required | Notes |
 |---|---|---|---|
 | `agent_id` | string | Yes | |
-| `receipt` | string | No | A receipt id from a `lambo_derive` or `lambo_record_action` ack. Answers what happened to that one write. |
+| `receipt` | string | No | A receipt id from a `lambo_derive`, `lambo_derive_image` or `lambo_record_action` ack. Answers what happened to that one write. |
 | `wait_ms` | integer | No | `0` to `34000`. With `receipt`, wait this long for the write to be applied before answering. A larger value is clamped, not refused. The maximum covers the longest one write can take to apply, so a wait that ends `pending` means other writes were queued ahead of it. A server holds 16 waits at once and one `agent_id` at most 8 of them; a wait over either answers at once with the current state. |
 
 Unlike `lambo stats` on the command line, this reaches the writer, so the flush figures are real rather than `n/a`. `flush_lag_ms` is how long ago the store last held every write. While nothing is waiting to be written it stays under a tenth of a second, however long the session has been idle. It grows while anything is waiting, including the access counts recalls leave behind, so under ordinary traffic it climbs to about the flush interval between flushes; it climbs past the flush interval only when the store is not taking writes, and it then bounds the age of the oldest write a crash would lose. Writes Lambo has dropped rather than flushed are not counted in it: `dead_lettered` counts batches the store rejected outright, and `degraded` says the session has stopped writing to the store. So after a rejected batch the lag falls back under a tenth of a second although that batch never reached the store; only a rising `dead_lettered` says so.
 
 **`promotion_policy`**, always present: which canonization policy this server is actually running, `Swarm` or `Solo`. It is read from the live config, so it reports the value that **won** — `lambo.toml`, `LAMBO_PROMOTION_POLICY`, or the default — and not any one of the three inputs. The counters beside it cannot answer that question: `canonization_cycles` climbs identically under both policies, and `canonical_count` staying at zero is both the normal reading for a young `Swarm` session and the entire symptom of a `Solo` selection that did not take. The same value appears on the tool's text summary and, with `serve --ledger`, on every heartbeat line, because one builder produces all three. See [Configuration](/config).
+
+**`embedding_contract`** and **`embedding_modalities`**, always present: the embedding space this session's vectors are in, as `{kind, model, dim}` (the server's own contract, which is the one every check holds a client vector to: a session's stamp always equals it, because the server stamps a fresh session with it, refuses a session stamped with another, and under `--allow-embedding-mismatch` relabels the session to it before the first write; `model` is the whole string, or `null` for the embedder's default), and what the server's embedder embeds, `["text"]` or `["text", "image"]`. A client that computes its own image vectors copies `embedding_contract` into `lambo_derive_image`'s `vector.contract` rather than hardcoding a model name. The text summary ends with the same facts on an `embedding:` line.
 
 **`gc`**, always present: garbage collection's sweep accounting, read-only. `last_gc_at` (RFC 3339, or `null`) is when the session last swept, or when a writer first started the clock for a session that never has; `last_gc_epoch` is the mutation count the next sweep is measured from. Both are stored with the session, so they survive a restart. `last_sweep` is the most recent sweep **this server** ran, `null` until it runs one: its `trigger` (`mutations` or `elapsed`), how many concepts it `collected`, how many the per-sweep cap `deferred` to the next sweep and whether the cap bound (`collection_cap`, `cap_bound`), how many Resources under their bar it kept because other concepts depend on them (`resources_spared_by_dependents`), and how many survivor bumps it left to drain (`survivors_deferred`, as of that sweep). The text summary carries the headline figures (`last_gc_at`, `last_gc_epoch`, and for the last sweep its trigger, `collected`, `deferred`, the cap and whether it bound) on a `gc:` line.
 
@@ -359,7 +398,7 @@ have no order to keep).
 
 ## Limits
 
-Lambo enforces these when the call runs. The published tool schemas do not carry the maxima, so your client will not reject an out-of-range value before sending it. Expect to learn about an out-of-range value from the error rather than from your client.
+Lambo enforces these when the call runs, and the published tool schemas carry the same bounds (a `maxLength` or an `enum` on every string, `minimum` and `maximum` on every integer), so a client that validates against the schema can catch an out-of-range value before sending it.
 
 | Limit | Value |
 |---|---|
@@ -374,12 +413,11 @@ Lambo enforces these when the call runs. The published tool schemas do not carry
 | Candidates listed for an ambiguous focus | 10 |
 | `wait_ms` on `lambo_stats` | 34000 milliseconds |
 | Write receipts kept | 300 seconds, or 4096 receipts, whichever binds first |
+| Image per `lambo_derive_image` | 1, at most 2 MiB decoded (2,796,204 base64 characters) and 4096 pixels a side |
+| Values in a `lambo_derive_image` vector | 4096 |
+| `lambo_derive_image` caption | 16,384 bytes with its ` [image:<image_id>]` suffix (16,374 at most, with a one-character id) |
 
 Every limit above is a maximum. `top_k`, `max_tokens`, and `ttl_seconds` also have a minimum of `1`, so `0` is refused. `wait_ms` is the one limit that **clamps rather than refuses**: a larger value waits the maximum instead of erroring, because a client asking to wait longer than Lambo will wait is asking for something harmless.
-
-<Warning>
-The published schema for `top_k` states a minimum of `0`, which the runtime does not accept. If you generate a client from the schema, do not let it send `top_k: 0`. It comes back as `top_k must be in 1..=100`.
-</Warning>
 
 `lambo_inspect` renders at most 200 neighbours in total across every hop, not 200 per hop.
 

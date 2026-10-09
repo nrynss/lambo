@@ -440,6 +440,105 @@ async fn two_pinned_sessions_are_served_concurrently_and_never_cross() {
     }
 }
 
+/// The tools `path`'s session lists over the wire, by name.
+async fn tools_list(
+    addr: SocketAddr,
+    path: &str,
+    sid: &str,
+) -> std::collections::BTreeMap<String, serde_json::Value> {
+    let reply = http(
+        addr,
+        "POST",
+        path,
+        Some(sid),
+        r#"{"jsonrpc":"2.0","id":8,"method":"tools/list"}"#,
+    )
+    .await;
+    assert_eq!(reply.status, 200, "tools/list at {path}: {}", reply.body);
+    reply.message()["result"]["tools"]
+        .as_array()
+        .expect("a tool list")
+        .iter()
+        .map(|t| (t["name"].as_str().expect("a name").to_owned(), t.clone()))
+        .collect()
+}
+
+/// An embedder that embeds text only: a text-only deployment's shape.
+struct TextOnly(FixtureEmbedder);
+
+#[async_trait::async_trait]
+impl crate::embed::Embedder for TextOnly {
+    fn dimensions(&self) -> usize {
+        self.0.dimensions()
+    }
+    async fn embed(&self, text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
+        self.0.embed(text).await
+    }
+    async fn embed_query(&self, text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
+        self.0.embed_query(text).await
+    }
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        self.0.as_any()
+    }
+}
+
+/// #22 PR 4 on #32's registry: whether `lambo_derive_image` is listed is a
+/// fact of the process (the embedder's image modality, `[embedder]
+/// accept_client_vectors`), so every session one serve holds lists the same
+/// tools, with byte-identical schemas, at its own path and at `/mcp`.
+#[tokio::test]
+async fn every_session_of_one_serve_lists_the_same_tools() {
+    for (label, embedder, accept, image_listed) in [
+        (
+            "image embedder",
+            Box::new(FixtureEmbedder::new()) as Box<dyn crate::embed::Embedder>,
+            false,
+            true,
+        ),
+        (
+            "text-only, client vectors on",
+            Box::new(TextOnly(FixtureEmbedder::new())),
+            true,
+            true,
+        ),
+        (
+            "text-only, client vectors off",
+            Box::new(TextOnly(FixtureEmbedder::new())),
+            false,
+            false,
+        ),
+    ] {
+        let mut backends = backends_over(
+            Box::new(MemoryStore::new()),
+            crate::Config {
+                accept_client_vectors: accept,
+                ..fast_config(1_000)
+            },
+        );
+        backends.embedder = embedder;
+        let registry = pinned_registry(&["tools-a", "tools-b"], backends, 32).await;
+        let addr = serve_router(&registry, 32).await;
+        let (a, _) = initialize(addr, "/mcp/s/tools-a").await;
+        let (b, _) = initialize(addr, "/mcp/s/tools-b").await;
+        let (d, _) = initialize(addr, "/mcp").await;
+        let in_a = tools_list(addr, "/mcp/s/tools-a", &a).await;
+        let in_b = tools_list(addr, "/mcp/s/tools-b", &b).await;
+        let in_default = tools_list(addr, "/mcp", &d).await;
+        assert_eq!(in_a, in_b, "{label}: the two sessions list different tools");
+        assert_eq!(in_a, in_default, "{label}: /mcp lists different tools");
+        assert_eq!(
+            in_a.contains_key("lambo_derive_image"),
+            image_listed,
+            "{label}: {:?}",
+            in_a.keys()
+        );
+        assert_eq!(in_a.len(), if image_listed { 8 } else { 7 }, "{label}");
+        for session in registry.close_set().await {
+            session.mem.close().await.expect("close");
+        }
+    }
+}
+
 /// `/mcp` is the default session; an unknown, malformed or percent-encoded
 /// id is the uniform 404 on every method.
 #[tokio::test]

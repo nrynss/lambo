@@ -117,6 +117,9 @@ pub const RESOLVE_ENV_VARS: &[&str] = &[
     "LAMBO_GEMINI_MODEL",
     "LAMBO_GEMINI_CREDENTIALS",
     "LAMBO_EMBED_KEEP_WARM_SECS",
+    // #22: read unconditionally by `overlay_env`, like the names above. It
+    // decides whether this process trusts a client's vector label.
+    crate::embed::ACCEPT_CLIENT_VECTORS_ENV,
     "LAMBO_PROMOTION_POLICY",
     // Read past the file, while the backends are built — see "A resolve is not
     // only the file overlay" above.
@@ -255,6 +258,9 @@ pub fn resolve_backends(file: LamboFile) -> Result<ResolvedBackends, LamboError>
     if let Some(policy) = promotion_policy {
         config.promotion_policy = policy;
     }
+    // #22: a process setting the surfaces read through `Memory::config`, set
+    // here so every session this process attaches carries the same value.
+    config.accept_client_vectors = embedder_cfg.accept_client_vectors;
     config.validate()?;
     // Accepted-but-inert settings (issue #29: an idle floor that makes the
     // time trigger unreachable) are logged, not refused.
@@ -621,6 +627,13 @@ mod tests {
                 resolved: Some(|p| format!("{:?}", load(p).embedder.keep_warm_secs)),
             },
             Override {
+                // #22: read unconditionally by `overlay_env`, whatever the kind.
+                var: crate::embed::ACCEPT_CLIENT_VECTORS_ENV,
+                value: "true",
+                file: MEMORY,
+                resolved: Some(|p| format!("{:?}", load(p).embedder.accept_client_vectors)),
+            },
+            Override {
                 var: "LAMBO_PROMOTION_POLICY",
                 value: "Solo",
                 file: MEMORY,
@@ -975,6 +988,26 @@ mod tests {
             crate::canon::PromotionPolicy::Solo,
             "the process-file selector must reach Memory's Config"
         );
+        assert!(
+            !r.config.accept_client_vectors,
+            "client vectors are off unless the operator opts in (#22)"
+        );
+    }
+
+    /// #22: `[embedder] accept_client_vectors` reaches `Memory`'s `Config`,
+    /// which is where the MCP and CLI surfaces read it.
+    #[test]
+    #[cfg(all(feature = "store-memory", feature = "embed-fixture"))]
+    fn resolve_carries_accept_client_vectors_into_the_config() {
+        let env = crate::test_util::env_lock();
+        env.remove(crate::embed::ACCEPT_CLIENT_VECTORS_ENV);
+        let file = LamboFile::from_toml_str(
+            "[store]\nkind = \"memory\"\n[embedder]\nkind = \"fixture\"\ndim = 1024\n\
+             accept_client_vectors = true\n",
+        )
+        .unwrap();
+        let r = resolve_backends(file).unwrap();
+        assert!(r.config.accept_client_vectors);
     }
 
     /// A-E2E-3 closure: the Gemini model-identity stamping is locked at the

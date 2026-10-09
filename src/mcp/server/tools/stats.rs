@@ -64,6 +64,8 @@ impl LamboServer {
         let s = self.mem.stats();
         // One GC reading for both halves of the answer (see `stats_json_with_gc`).
         let gc = self.mem.gc_stats();
+        // #22 PR 4: the space a client vector must be computed in.
+        let contract = self.embedding_contract_json();
         let text = format!(
             "session '{}' (owner agent '{}')\n\
              nodes={} edges={} concepts={} canonical={}\n\
@@ -71,7 +73,8 @@ impl LamboServer {
              flush_lag={:?} log_depth={} flush_depth={} dead_lettered={} degraded={}\n\
              epoch={} daemon_cycles={} canonization_cycles={} canonization_failures={}\n\
              promotion_policy={}\n\
-             {}",
+             {}\n\
+             embedding: kind={} model={} dim={} modalities={}",
             s.session.0,
             s.agent.0,
             s.node_count,
@@ -94,6 +97,10 @@ impl LamboServer {
             // payload to learn which policy the cycle counts above belong to.
             self.mem.config().promotion_policy.as_str(),
             gc_summary_line(&gc),
+            contract["kind"].as_str().unwrap_or_default(),
+            contract["model"].as_str().unwrap_or("(default)"),
+            contract["dim"],
+            self.embedding_modalities().join(","),
         );
         // One payload builder shared with the I2 heartbeat, so a heartbeat can
         // never report different numbers than the tool. With `--ledger` off

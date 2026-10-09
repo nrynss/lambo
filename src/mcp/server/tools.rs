@@ -1,4 +1,4 @@
-//! The tool bodies, one file per tool (the two write tools share one).
+//! The tool bodies, one file per tool (the two text write tools share one).
 //!
 //! The `#[tool]` wrappers in the facade are the only thing the router can
 //! reach, and each runs one of these bodies through `answered`, so everything
@@ -11,6 +11,7 @@
 //! and `lambo_recall` refuse. That is deliberate: an operator inspecting why a
 //! close failed still needs `lambo_stats` to answer.
 
+mod derive_image;
 mod inspect;
 mod recall;
 mod reserve;

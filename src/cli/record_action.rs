@@ -4,7 +4,7 @@ use super::caps::{check_size_cli, require_nonempty, CliError};
 use super::{close_writer, open_writer};
 use crate::graph::action::Action;
 use crate::resolve::ResolvedBackends;
-use crate::surface::validate::check_action_targets;
+use crate::surface::validate::{check_action_targets, check_no_image_suffix};
 
 /// Parsed `record-action` flags.
 pub struct Args {
@@ -24,6 +24,8 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
     check_size_cli("agent", &args.agent)?;
     require_nonempty("action", &args.action)?;
     check_size_cli("action", &args.action)?;
+    // #22 PR 4: the action is its own Resource concept's content.
+    check_no_image_suffix("action", &args.action).map_err(CliError::Usage)?;
 
     let total = args.produces.len() + args.modifies.len() + args.depends_on.len();
     check_action_targets(total).map_err(CliError::Usage)?;

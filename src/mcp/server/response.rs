@@ -9,7 +9,7 @@ use rmcp::model::{CallToolResult, ContentBlock};
 use super::params::breaks_one_line;
 use super::trace::note_error;
 use crate::store::flush::{panic_message, CatchUnwindPoll};
-use crate::surface::error::err_class;
+use crate::surface::error::{err_class, model_safe_message};
 use crate::types::LamboError;
 use crate::writeq::{ReceiptAnswer, ReceiptId};
 
@@ -27,16 +27,26 @@ use crate::writeq::{ReceiptAnswer, ReceiptId};
 /// every [`LamboError::Conflict`]: the lease-lost fence is one, and its message
 /// is exactly the operator-only detail N4 exists for.
 pub(super) fn tool_err(what: &str, err: LamboError) -> CallToolResult {
-    tracing::error!(
-        tool = what,
-        error = %err,
-        "mcp: tool returned a Memory error — full detail logged, class returned to the caller"
-    );
+    // An image id a text concept already holds is a fact the caller fixes
+    // (choose another id), not a server fault, so it is a warning.
+    if matches!(err, LamboError::ImageIdTaken(_)) {
+        tracing::warn!(
+            tool = what,
+            error = %err,
+            "mcp: tool refused a write the caller can fix — class returned to the caller"
+        );
+    } else {
+        tracing::error!(
+            tool = what,
+            error = %err,
+            "mcp: tool returned a Memory error — full detail logged, class returned to the caller"
+        );
+    }
     // I1: the same class the caller is told, in the ledger's `error_kind`.
     note_error(err_class(&err));
     CallToolResult::error(vec![ContentBlock::text(format!(
-        "{what}: {} (the detail was logged server-side)",
-        err_class(&err)
+        "{what}: {}",
+        model_safe_message(&err)
     ))])
 }
 
@@ -131,6 +141,21 @@ pub(super) fn redact_urls(s: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Refuse a call this deployment is not configured to serve, naming the
+/// setting (#22: `lambo_derive_image` without an image embedder, or with a
+/// client vector while `[embedder] accept_client_vectors` is off).
+///
+/// The message is Lambo's own text about Lambo's own configuration keys, so
+/// unlike a `LamboError::Config` from the core (which can quote a DSN or a
+/// path, and goes through [`tool_err`]) it is shown whole. Same ledger class
+/// as `tool_err` gives a `Config`.
+pub(super) fn config_refusal(what: &str, msg: &str) -> CallToolResult {
+    note_error("configuration error");
+    CallToolResult::error(vec![ContentBlock::text(format!(
+        "{what}: configuration error: {msg}"
+    ))])
 }
 
 /// Reject a parameter the server will not act on.

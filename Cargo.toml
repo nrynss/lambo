@@ -60,6 +60,10 @@ uuid = { version = "1", features = ["v4", "serde"] }
 thiserror = "2.0.20"
 anyhow = "1.0.104"
 bitflags = "2.13.1"
+# #22 PR 4: decode `lambo_derive_image`'s inline base64 image on every build
+# (the MCP surface is not feature-gated). Already in Cargo.lock transitively,
+# so no new crate is downloaded.
+base64 = "0.22"
 # J2-R1-3: `geteuid` for the per-uid endpoint directory and its ownership check.
 # std has no equivalent, and the alternative (stat'ing a file we assume we own)
 # is a guess where this needs a fact. Already in Cargo.lock transitively via
