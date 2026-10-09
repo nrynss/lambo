@@ -363,3 +363,35 @@ fn only_selection_keys_count_as_enforced() {
     };
     assert!(bounded.has_unenforced_keys());
 }
+
+/// A relative path that names `target` when resolved against the process's
+/// own working directory: `../` up to the root, then `target` without it.
+fn relative_from_process_cwd(target: &Path) -> PathBuf {
+    let here = std::fs::canonicalize(std::env::current_dir().expect("cwd")).expect("canonical");
+    let target = std::fs::canonicalize(target).expect("canonical target");
+    let mut rel = PathBuf::new();
+    for _ in 0..depth(&here) {
+        rel.push("..");
+    }
+    rel.push(target.strip_prefix("/").expect("absolute target"));
+    rel
+}
+
+#[test]
+fn a_relative_home_is_treated_as_unset() {
+    // #32 PR 8 review L1: `fs::canonicalize` resolves a relative path against
+    // the process cwd, which for a stdio serve is the project, so a relative
+    // `$HOME` would let a `~` catch-all match whatever directory the client
+    // chose and beat the real entry.
+    let root = ScratchDir::new("lambo-pr8-relhome");
+    let cwd = mkdir(&root, "proj");
+    let home = relative_from_process_cwd(&cwd);
+    assert!(home.is_relative());
+    let cfg = config(vec![project("~", "home")], Some("general"));
+    let cwd_owned = cwd.clone();
+    let got = cfg.select_stdio_session_with(None, move || Ok(cwd_owned), Some(&home));
+    assert!(
+        !matches!(&got, Ok(s) if s.session == "home"),
+        "a relative HOME resolved against the process cwd: {got:?}"
+    );
+}

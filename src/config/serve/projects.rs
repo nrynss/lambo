@@ -22,7 +22,8 @@
 //!
 //! An entry's `path` must be absolute or start with `~/` (or be `~`), which
 //! [`check_project_path`] enforces when the file is read. `~` expands to
-//! `$HOME`; `~user` is refused, because resolving another account's home is
+//! `$HOME`; an empty or relative `$HOME` counts as unset (a relative one
+//! would resolve against the cwd the client chose). `~user` is refused, because resolving another account's home is
 //! not something a config file should make a process do implicitly.
 //!
 //! Both sides are canonicalized with [`std::fs::canonicalize`] before they are
@@ -188,7 +189,7 @@ impl ServeConfig {
 
     /// The selection with the working directory and home injected (tests).
     /// `cwd` is called at most once, and only when there is no `flag` and
-    /// the map has entries.
+    /// the map has entries. A `home` that is not absolute counts as unset.
     ///
     /// Order: `flag`, then the longest `[[serve.projects]]` prefix of the
     /// canonical `cwd`, then `default_session`, else
@@ -200,6 +201,10 @@ impl ServeConfig {
         cwd: impl FnOnce() -> std::io::Result<PathBuf>,
         home: Option<&Path>,
     ) -> Result<SelectedSession, SessionSelectionError> {
+        // A relative `$HOME` would be resolved against the process cwd, which
+        // for a stdio serve is the client's chosen project, so a `~` entry
+        // would match wherever the serve was started. Treat it as unset.
+        let home = home.filter(|h| h.is_absolute());
         if let Some(session) = flag {
             return Ok(SelectedSession {
                 session: session.to_owned(),
