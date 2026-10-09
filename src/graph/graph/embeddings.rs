@@ -104,12 +104,19 @@ impl Graph {
     /// same-kind identifier rename relabel existing vectors); this method is
     /// the sanctioned path that replaces vectors first.
     ///
-    /// * `updates` maps every concept id to its freshly embedded vector in the
-    ///   target space. **Every** concept must appear: a concept left out keeps
-    ///   a vector from the old space, which is exactly the mixed-space
-    ///   violation this operation exists to end. An id that is not a concept,
-    ///   a vector of the wrong width, or a non-finite vector is a hard error
-    ///   and the graph is left untouched.
+    /// * `updates` maps every **text** concept id (no `embedding_source`) to
+    ///   its freshly embedded vector in the target space. **Every** text
+    ///   concept must appear: a concept left out keeps a vector from the old
+    ///   space, which is exactly the mixed-space violation this operation
+    ///   exists to end. An id that is not a concept, a vector of the wrong
+    ///   width, or a non-finite vector is a hard error and the graph is left
+    ///   untouched.
+    /// * An **image** concept (#22, `embedding_source` set) is never in
+    ///   `updates`: its vector is not a function of its text, so embedding its
+    ///   caption would mislabel it. One whose vector is already missing is
+    ///   left as it is. One that still carries a vector makes this refuse,
+    ///   because that vector would stay in the old space; see
+    ///   [`Graph::reembed_all_dropping_image_vectors`].
     /// * The contract swap allows the same width only (a re-embed never
     ///   changes dimensionality; a width change is a fresh session, not a
     ///   migration) and, like the RAM invariants everywhere, refuses a
@@ -127,6 +134,29 @@ impl Graph {
         updates: Vec<(NodeId, Vec<f32>)>,
         contract: crate::types::EmbeddingContract,
     ) -> Result<(), LamboError> {
+        self.reembed(updates, contract, false).map(|_| ())
+    }
+
+    /// [`Graph::reembed_all`], nulling the vector of every image concept
+    /// (#22) instead of refusing on it, in the same staged batch. Each one
+    /// keeps its `embedding_source`: an image concept with no vector is
+    /// "image vector missing" (`re-embed --missing-only` skips it, and
+    /// re-deriving the same image restores it), never a text concept. Returns
+    /// how many image vectors were nulled.
+    pub fn reembed_all_dropping_image_vectors(
+        &mut self,
+        updates: Vec<(NodeId, Vec<f32>)>,
+        contract: crate::types::EmbeddingContract,
+    ) -> Result<usize, LamboError> {
+        self.reembed(updates, contract, true)
+    }
+
+    fn reembed(
+        &mut self,
+        updates: Vec<(NodeId, Vec<f32>)>,
+        contract: crate::types::EmbeddingContract,
+        drop_image_vectors: bool,
+    ) -> Result<usize, LamboError> {
         if let Some(existing) = &self.embedding {
             if existing.dim != contract.dim {
                 return Err(invariant(format!(
@@ -142,8 +172,24 @@ impl Graph {
             }
         }
 
-        let concept_ids: std::collections::HashSet<NodeId> =
-            self.concepts().map(|c| c.id).collect();
+        let concept_ids: std::collections::HashSet<NodeId> = self
+            .concepts()
+            .filter(|c| c.embedding_source.is_none())
+            .map(|c| c.id)
+            .collect();
+        let image_vectors: Vec<NodeId> = self
+            .concepts()
+            .filter(|c| c.embedding_source.is_some() && c.embedding.is_some())
+            .map(|c| c.id)
+            .collect();
+        if !image_vectors.is_empty() && !drop_image_vectors {
+            return Err(invariant(format!(
+                "re-embed would leave {} image vector(s) in the old space: an image concept's \
+                 vector cannot be recomputed from its caption. Drop them explicitly \
+                 (reembed_all_dropping_image_vectors) or keep the current embedder",
+                image_vectors.len()
+            )));
+        }
         // Duplicate ids are as fatal as missing ones: a list [a, a] over
         // concepts {a, b} has the right length but leaves `b` carrying an
         // old-space vector — exactly the mixed-space state this method exists
@@ -165,6 +211,13 @@ impl Graph {
         }
         for (id, vector) in &updates {
             if !concept_ids.contains(id) {
+                if matches!(self.nodes.get(id), Some(Node::Concept(c)) if c.embedding_source.is_some())
+                {
+                    return Err(invariant(format!(
+                        "re-embed update targets {id}, an image concept: its vector is never \
+                         replaced by a vector of its caption"
+                    )));
+                }
                 return Err(invariant(format!(
                     "re-embed update targets {id}, which is not a concept in this session"
                 )));
@@ -202,12 +255,25 @@ impl Graph {
             };
             self.append_mutation(Mutation::UpsertNode { node });
         }
+        // #22: null the image vectors (source kept), before the contract
+        // swap like every other vector change of the batch.
+        let dropped = image_vectors.len();
+        for id in image_vectors {
+            let node = match self.nodes.get_mut(&id) {
+                Some(Node::Concept(c)) => {
+                    c.embedding = None;
+                    Node::Concept(c.clone())
+                }
+                _ => unreachable!("collected from this graph's concepts above"),
+            };
+            self.append_mutation(Mutation::UpsertNode { node });
+        }
         self.embedding = Some(contract.clone());
         self.append_mutation(Mutation::SetEmbedding {
             session_id: self.session_id.clone(),
             embedding: Some(contract),
         });
-        Ok(())
+        Ok(dropped)
     }
 
     /// Fill in vectors for concepts that have **none**, without touching the
@@ -229,6 +295,9 @@ impl Graph {
     /// * Every id must name a concept whose `embedding` is `None`. Overwriting
     ///   an existing vector is refused — that is a migration, and migrations go
     ///   through `reembed_all` so the contract moves with them.
+    /// * An image concept (#22, `embedding_source` set) is refused: its
+    ///   missing vector is an image's, and a vector of its caption would
+    ///   mislabel it. Re-deriving the image restores it.
     /// * Width and finiteness are checked exactly as in `reembed_all`.
     /// * Partial coverage is fine and expected: this is the one vector
     ///   operation that does not require every concept, because the concepts it
@@ -272,6 +341,12 @@ impl Graph {
                         return Err(invariant(format!(
                             "backfill targets {id}, which already carries a vector; \
                              replacing a vector is a migration (`re-embed`), not a backfill"
+                        )));
+                    }
+                    if c.embedding_source.is_some() {
+                        return Err(invariant(format!(
+                            "backfill targets {id}, an image concept: its missing vector is \
+                             an image's, never a vector of its caption"
                         )));
                     }
                 }
