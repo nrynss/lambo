@@ -74,10 +74,14 @@
   initializes arriving together can no longer overshoot either. The MCP
   session is attributed to its credential even if the client disconnects
   before the response, and a client that disconnects from a sessionless
-  request (a per-request-protocol call) cancels it, as rmcp does. A request
-  body must arrive in full within 30 s (`408` otherwise), and one still
-  arriving holds no slot of the session cap; a chunked body is held to the
-  same 4 MiB as a declared one.
+  request (a per-request-protocol call) cancels it, as rmcp does. The body
+  of a session-opening request must arrive in full within 30 s (`408`
+  otherwise), and one still arriving holds no slot of the session cap; a
+  chunked one is held to the same 4 MiB as a declared one. Other requests'
+  bodies are not read before routing. Only an `initialize` counts against
+  the cap while in flight, so parallel sessionless calls (per-request
+  `tools/call`, `server/discover`) are no longer refused at a credential's
+  share.
 - A `LAMBO_AUTH_TOKEN` that is set but not valid UTF-8 refuses the start of
   `lambo serve --transport http` and `lambo serve-web` (exit 2, naming the
   variable) instead of being read as unset. A stdio `lambo serve` ignores
