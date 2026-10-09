@@ -451,8 +451,26 @@ const NO_SUCH_MCP_SESSION: &str = "lambo-no-such-mcp-session";
 pub(super) async fn serve_live(
     session: &Arc<AttachedSession>,
     grant: &SessionGrant,
-    mut req: axum::extract::Request,
+    req: axum::extract::Request,
 ) -> axum::response::Response {
+    serve_owned(&session.http, &session.openers, grant.name(), req).await
+}
+
+/// [`serve_live`] over an MCP service and its openers, as `credential`:
+/// the whole of it, generic over the MCP server so a test can serve a
+/// probe through the very code the serve runs (#32 PR 5 third review N3).
+pub(super) async fn serve_owned<S>(
+    http: &rmcp::transport::streamable_http_server::StreamableHttpService<
+        S,
+        super::openers::AttributingSessions,
+    >,
+    openers: &super::openers::Openers,
+    credential: &str,
+    mut req: axum::extract::Request,
+) -> axum::response::Response
+where
+    S: rmcp::ServerHandler + Send + 'static,
+{
     // The cap's reservation for this opener (#32 PR 5 review S4), out of
     // the request before rmcp keeps its parts. Held to the end of this
     // call: an MCP session rmcp mints is attributed before that, so it is
@@ -465,7 +483,7 @@ pub(super) async fn serve_live(
     let named = usable_session_id(req.headers()).map(str::to_string);
     let mut owned = None;
     if let Some(mcp_id) = named {
-        if session.opened_by(&mcp_id, grant.name()) {
+        if openers.opened_by(&mcp_id, credential) {
             owned = Some(mcp_id);
         } else {
             req.headers_mut().insert(
@@ -475,13 +493,13 @@ pub(super) async fn serve_live(
         }
     }
     let deletes = req.method() == axum::http::Method::DELETE;
-    let response = serve_attributed(&session.http, grant.name(), req).await;
+    let response = serve_attributed(http, credential, req).await;
     drop(reservation);
     if deletes
         && response.status().is_success()
         && let Some(mcp_id) = owned
     {
-        session.forget_opener(&mcp_id);
+        openers.forget(&mcp_id);
     }
     response
 }

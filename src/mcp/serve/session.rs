@@ -82,7 +82,7 @@ pub(super) struct AttachedSession {
     /// `super::openers`). A request that names an MCP session another
     /// credential opened is answered as rmcp answers an id it does not
     /// know (see `transport::serve_live`).
-    openers: Arc<Openers>,
+    pub(super) openers: Arc<Openers>,
     /// The session endpoint (J2): the accept loop and its connections.
     ///
     /// In a lock and an `Option` so stage 6 can take it through a shared
@@ -234,23 +234,12 @@ impl AttachedSession {
         self.mcp_sessions.sessions.read().await.len()
     }
 
-    /// Did `credential` open the MCP session `mcp_id`? `false` for an id
-    /// no credential opened here.
-    pub(super) fn opened_by(&self, mcp_id: &str, credential: &str) -> bool {
-        self.openers.opened_by(mcp_id, credential)
-    }
-
     /// How many of this session's live MCP sessions `credential` opened
     /// (#32 PR 5 review M2: its share of the session cap).
     pub(super) async fn live_mcp_sessions_opened_by(&self, credential: &str) -> usize {
         let live = self.mcp_sessions.sessions.read().await;
         self.openers
             .count_opened_by(credential, |id| live.contains_key(id))
-    }
-
-    /// Forget the MCP session `mcp_id` (its opener closed it).
-    pub(super) fn forget_opener(&self, mcp_id: &str) {
-        self.openers.forget(mcp_id);
     }
 
     /// A detach's stage 1 (#32 design §3.4): end every MCP session this
