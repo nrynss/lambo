@@ -155,6 +155,11 @@
     never appears in `Debug` output, errors or logs, even when the endpoint
     echoes it in an error body (it is replaced before the body is quoted). A
     `401` or `403` stays a permanent configuration error.
+  - A token is sent only over `https`, or over plain `http` to a loopback
+    host (`localhost`, `127.0.0.0/8`, `::1`). `api_key_env` with a plain
+    `http` URL to any other host is refused at startup, naming the host,
+    before the variable is read. Configs without `api_key_env` are
+    unaffected.
   - `api_key_env` with any kind other than `bge_m3` is refused.
   - `kind = "openai"` is an alias of `bge_m3`. It still reports and stamps
     `bge_m3`, so no existing session's embedding contract changes. Set `model`

@@ -619,10 +619,13 @@ pub fn build_embedder(cfg: EmbedderConfig) -> Result<Box<dyn Embedder>, EmbedErr
                     .clone()
                     .unwrap_or_else(|| "http://127.0.0.1:8080".to_string());
                 let model = cfg.llama_model.unwrap_or_default();
-                let mut embedder = BgeM3LlamaCppEmbedder::new(url, model, cfg.dim)?;
+                let mut embedder = BgeM3LlamaCppEmbedder::new(url.clone(), model, cfg.dim)?;
                 // Issue #21: the token is read here, at resolve, so a configured
                 // but unset variable stops startup instead of sending no key.
+                // The transport is checked first, so a plaintext non-loopback
+                // URL is refused before the token is even read.
                 if let Some(name) = cfg.api_key_env.as_deref() {
+                    bge_m3::check_bearer_transport(&url)?;
                     embedder = embedder.with_bearer_token(&api_key::resolve(name)?)?;
                 }
                 Ok(Box::new(embedder))
@@ -1000,6 +1003,34 @@ mod tests {
                 "{msg}"
             );
         }
+    }
+
+    /// Issue #21: a plain-http, non-loopback URL with `api_key_env` is
+    /// refused at resolve, before the variable is read: the error is the
+    /// transport one even though the variable is unset.
+    ///
+    /// Mutation: drop the `check_bearer_transport` call in `build_embedder`
+    /// -> red (the error becomes "not set").
+    #[cfg(feature = "embed-bge")]
+    #[test]
+    fn api_key_env_over_plain_http_to_a_remote_host_is_refused_at_resolve() {
+        let Err(err) = build_embedder(EmbedderConfig {
+            kind: EmbedderKind::BgeM3,
+            llama_url: Some("http://embeddings.example.com:8080".into()),
+            api_key_env: Some("LAMBO_TEST_ISSUE21_NEVER_SET_TOKEN".into()),
+            ..Default::default()
+        }) else {
+            panic!("a token over plain http to a remote host must be refused");
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("embeddings.example.com") && msg.contains("https"),
+            "{msg}"
+        );
+        assert!(
+            !msg.contains("not set"),
+            "transport must be checked first: {msg}"
+        );
     }
 
     /// Issue #13: auto keep-warm is off for every non-candle adapter — the

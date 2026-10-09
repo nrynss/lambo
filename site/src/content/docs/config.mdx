@@ -123,6 +123,7 @@ api_key_env = "CLOUDFLARE_API_TOKEN"
 `api_key_env` names a variable; the token itself never goes in `lambo.toml`. Lambo reads the variable when it resolves the embedder and sends `Authorization: Bearer <token>` with every embed request. Without `api_key_env` no `Authorization` header is sent.
 
 - If the variable is unset or empty, startup fails and names the variable. Lambo never falls back to sending no token.
+- The token is sent only over `https`, or over plain `http` to a loopback host (`localhost`, `127.0.0.0/8`, `::1`) such as a local server. Plain `http` to any other host is refused at startup, naming the host, so a token never crosses a network in clear text. Without `api_key_env`, `http` URLs work as before.
 - The value must look like a variable name: upper case letters, digits and `_`, not starting with a digit, at most 64 bytes. A value that does not, or that looks like a token, is refused without being shown. So is an inline `api_key = "..."`.
 - It may not name `LAMBO_AUTH_TOKEN` or any `[[serve.credential]]` `token_env`, from the file or from `LAMBO_EMBED_API_KEY_ENV`. Those variables hold `lambo serve`'s own credentials, and one variable never holds both a serve credential and the embedder's token.
 - A `401` or `403` from the endpoint fails the write as a configuration error, the same as a wrong URL.

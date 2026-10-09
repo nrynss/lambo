@@ -121,6 +121,50 @@ impl std::fmt::Debug for BgeM3LlamaCppEmbedder {
     }
 }
 
+/// May a bearer token be sent to `base_url`? Only over `https`, or over plain
+/// `http` to a loopback host (`localhost`, `127.0.0.0/8`, `::1`), where the
+/// token never leaves the machine (a local server). Anything else would put
+/// the token on the wire in clear text, so it is refused before the token is
+/// read or sent (issue #21). The refusal names the endpoint's host and scheme,
+/// never the full URL (it may carry userinfo) and never the token.
+pub(crate) fn check_bearer_transport(base_url: &str) -> Result<(), EmbedError> {
+    let url = reqwest::Url::parse(base_url).map_err(|_| {
+        EmbedError::Unavailable(
+            "the embedder URL is not a valid URL (value not shown); a bearer token is sent only \
+             over https, or over http to a loopback host"
+                .into(),
+        )
+    })?;
+    if url.scheme() == "https" {
+        return Ok(());
+    }
+    // `url` normalises the host: IPv4 to dotted quad (`127.1` is
+    // `127.0.0.1`), IPv6 in brackets, domains lower-cased.
+    let loopback = url.host_str().is_some_and(|host| {
+        match host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<std::net::IpAddr>()
+        {
+            Ok(std::net::IpAddr::V4(a)) => a.is_loopback(),
+            Ok(std::net::IpAddr::V6(a)) => {
+                a.is_loopback() || a.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback())
+            }
+            Err(_) => host == "localhost" || host == "localhost.",
+        }
+    });
+    if url.scheme() == "http" && loopback {
+        return Ok(());
+    }
+    Err(EmbedError::Unavailable(format!(
+        "refusing to send the embedder API token to {} over {}: a bearer token is sent only over \
+         https, or over http to a loopback host (localhost, 127.0.0.0/8, ::1). Use an https \
+         URL for this endpoint, or remove api_key_env",
+        url.host_str().unwrap_or("(no host)"),
+        url.scheme()
+    )))
+}
+
 fn build_client(connect: Duration, request: Duration) -> Result<reqwest::Client, EmbedError> {
     reqwest::Client::builder()
         .connect_timeout(connect)
@@ -170,7 +214,12 @@ impl BgeM3LlamaCppEmbedder {
     /// The header value is marked sensitive and never appears in `Debug` output
     /// or in any error or log line this adapter writes. A token that is not a
     /// valid header value is refused without quoting it.
+    ///
+    /// Refused unless the base URL is `https`, or `http` to a loopback host
+    /// ([`check_bearer_transport`]): a token is never sent in clear text over
+    /// a network.
     pub fn with_bearer_token(mut self, token: &str) -> Result<Self, EmbedError> {
+        check_bearer_transport(&self.base_url)?;
         let mut value = HeaderValue::from_str(&format!("Bearer {token}")).map_err(|_| {
             EmbedError::Unavailable(
                 "the embedder API token is not a valid HTTP header value (value not shown)".into(),
@@ -709,6 +758,60 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, EmbedError::Unavailable(_)), "{err:?}");
         assert!(!err.to_string().contains("fake-xyzzy"), "{err}");
+    }
+
+    /// Issue #21: a bearer token is never sent in clear text over a network.
+    /// Plain `http` to a non-loopback host is refused, naming the host but
+    /// neither the token nor any userinfo in the URL.
+    ///
+    /// Mutation: drop the `check_bearer_transport` call -> red.
+    #[test]
+    fn a_token_is_refused_over_plain_http_to_a_remote_host() {
+        for (url, host) in [
+            ("http://api.example.com", "api.example.com"),
+            ("http://10.0.0.5:8080/", "10.0.0.5"),
+            ("http://[2001:db8::1]:8080", "[2001:db8::1]"),
+            ("http://localhost.example.com", "localhost.example.com"),
+            ("http://128.0.0.1", "128.0.0.1"),
+            (
+                "http://someone:fake-xyzzy-userinfo@example.com",
+                "example.com",
+            ),
+            ("ftp://example.com", "example.com"),
+        ] {
+            let err = BgeM3LlamaCppEmbedder::new(url, "", 1024)
+                .unwrap()
+                .with_bearer_token(FAKE_TOKEN)
+                .expect_err(&format!("{url}: a token over plain http must be refused"));
+            assert!(matches!(err, EmbedError::Unavailable(_)), "{err:?}");
+            let msg = err.to_string();
+            assert!(msg.contains(host) && msg.contains("https"), "{msg}");
+            assert!(!msg.contains(FAKE_TOKEN), "{msg}");
+            assert!(!msg.contains("fake-xyzzy-userinfo"), "{msg}");
+        }
+        // Without a token the transport is not this check's business.
+        BgeM3LlamaCppEmbedder::new("http://api.example.com", "", 1024).unwrap();
+    }
+
+    /// Issue #21: loopback over plain http (a local server) and any https
+    /// endpoint still take a token.
+    #[test]
+    fn a_token_is_allowed_over_https_and_over_http_to_loopback() {
+        for url in [
+            "http://localhost:8080",
+            "http://LOCALHOST:8080",
+            "http://127.0.0.1:9",
+            "http://127.1.2.3",
+            "http://[::1]:8080",
+            "http://[::ffff:127.0.0.1]:8080",
+            "https://api.cloudflare.com/client/v4/accounts/x/ai",
+            "https://10.0.0.5",
+        ] {
+            BgeM3LlamaCppEmbedder::new(url, "", 1024)
+                .unwrap()
+                .with_bearer_token(FAKE_TOKEN)
+                .unwrap_or_else(|e| panic!("{url}: {e}"));
+        }
     }
 
     /// Issue #21, classification unchanged: a rejected token (401/403) is the
