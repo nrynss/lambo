@@ -773,6 +773,24 @@ pub enum WriteIntentPayload {
         /// `(parent, child)` hierarchy pairs, in submission order.
         pairs: Vec<(String, String)>,
     },
+    /// An image derive (#22): one concept whose vector was supplied rather
+    /// than embedded from its text.
+    ///
+    /// Its own variant, not a defaulted field on [`Self::Derive`] (design
+    /// Q18): a build that predates it fails to decode the intent and says so,
+    /// where a defaulted field would let it drop the vector silently and
+    /// embed the caption in its place. The intent carries the **vector**,
+    /// never image bytes, so a replay needs no image and nothing about the
+    /// image beyond its vector and provenance is ever persisted.
+    DeriveImage {
+        /// `(content, concept_type)`: exactly one, the image concept, whose
+        /// content is `supplied.content`.
+        concepts: Vec<(String, ConceptType)>,
+        /// `(parent, child)` hierarchy pairs, in submission order.
+        pairs: Vec<(String, String)>,
+        /// The vector, the contract it was declared under, and its source.
+        supplied: SuppliedVector,
+    },
     /// A `lambo_record_action` job.
     Action {
         /// The action sentence.
@@ -784,6 +802,92 @@ pub enum WriteIntentPayload {
         /// Concept contents this action depends on.
         depends_on: Vec<String>,
     },
+}
+
+/// A vector supplied for one concept instead of being embedded from its text
+/// (#22, design sections 3.3 and 5.1): an image embedding the server computed
+/// on the call path, or one a client submitted.
+///
+/// It is what an image derive carries through the write queue, the durable
+/// intent and replay, so the derive core never sees image bytes. `contract`
+/// is the space the vector was **declared** to be in: it was checked equal to
+/// the live contract on the call path, is checked against the session stamp
+/// under the commit lock, and against the live contract again on replay,
+/// where a mismatch settles the intent `failed`.
+///
+/// Unknown keys are refused on decode, like [`EmbeddingSource`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SuppliedVector {
+    /// The concept content the vector belongs to: the caption with its
+    /// `[image:<id>]` suffix, exactly as the derive's concept list names it.
+    pub content: String,
+    /// The vector, L2-normalized on the call path.
+    pub vector: Vec<f32>,
+    /// The embedding space the vector was declared to be in.
+    pub contract: EmbeddingContract,
+    /// Where the vector came from; persisted as the concept's
+    /// [`Concept::embedding_source`].
+    pub source: EmbeddingSource,
+}
+
+impl SuppliedVector {
+    /// Refuse a supplied vector that cannot be written under `live`: a
+    /// declared contract that is not exactly `live`, a width other than
+    /// `live.dim`, a non-finite component, or a zero (or overflowing) norm.
+    ///
+    /// The call path runs this before the ack (as a `Config` error), and the
+    /// apply runs it again, so a durable intent replayed under a changed live
+    /// contract, or one whose stored vector was damaged, is refused rather
+    /// than written. The message names both contracts and never quotes the
+    /// vector.
+    pub fn check(&self, live: &EmbeddingContract) -> Result<(), String> {
+        check_supplied_values(&self.vector, &self.contract, live)
+    }
+}
+
+/// [`SuppliedVector::check`] on its parts, for the call path, which checks a
+/// submitted vector before it builds the [`SuppliedVector`].
+pub(crate) fn check_supplied_values(
+    values: &[f32],
+    declared: &EmbeddingContract,
+    live: &EmbeddingContract,
+) -> Result<(), String> {
+    if declared != live {
+        let show = |c: &EmbeddingContract| {
+            format!(
+                "kind={} model={:?} dim={}",
+                c.kind,
+                c.model.as_deref().unwrap_or("(default)"),
+                c.dim
+            )
+        };
+        return Err(format!(
+            "supplied vector's declared embedding contract ({}) is not the live embedding \
+             contract ({}); a vector is accepted only into the exact space it was computed in",
+            show(declared),
+            show(live)
+        ));
+    }
+    if values.len() != live.dim {
+        return Err(format!(
+            "supplied vector has {} components but the embedding contract's width is {}",
+            values.len(),
+            live.dim
+        ));
+    }
+    if values.iter().any(|x| !x.is_finite()) {
+        return Err("supplied vector has a non-finite component (NaN or infinity)".into());
+    }
+    let norm = values
+        .iter()
+        .map(|x| f64::from(*x) * f64::from(*x))
+        .sum::<f64>()
+        .sqrt();
+    if norm == 0.0 || !norm.is_finite() {
+        return Err("supplied vector has zero norm; it names no direction to search by".into());
+    }
+    Ok(())
 }
 
 /// A durable post-validation write intent (J3). See

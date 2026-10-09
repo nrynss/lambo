@@ -28,7 +28,7 @@ use super::{
     MAX_RETAINED_RECEIPTS,
 };
 use crate::surface::limits::MAX_CONTENT_BYTES;
-use crate::types::{AgentId, ConceptType, NodeId, WriteIntent, WriteIntentPayload};
+use crate::types::{AgentId, ConceptType, NodeId, SuppliedVector, WriteIntent, WriteIntentPayload};
 
 /// **Deleted roles, recorded where they lived** (J3 redesign): this block used
 /// to define `DRAIN_PROJECTION_SHARE` (the share of the drain budget an
@@ -182,6 +182,13 @@ pub(super) enum JobPayload {
         concepts: Vec<(String, ConceptType)>,
         pairs: Vec<(String, String)>,
     },
+    /// An image derive (#22): the derive above, with one concept's vector
+    /// supplied. It carries the vector, never image bytes.
+    DeriveImage {
+        concepts: Vec<(String, ConceptType)>,
+        pairs: Vec<(String, String)>,
+        supplied: SuppliedVector,
+    },
     Action {
         action: String,
         produces: Vec<String>,
@@ -194,6 +201,7 @@ impl JobPayload {
     pub(super) fn kind(&self) -> WriteKind {
         match self {
             JobPayload::Derive { .. } => WriteKind::Derive,
+            JobPayload::DeriveImage { .. } => WriteKind::DeriveImage,
             JobPayload::Action { .. } => WriteKind::RecordAction,
         }
     }
@@ -204,6 +212,15 @@ impl JobPayload {
             JobPayload::Derive { concepts, pairs } => WriteIntentPayload::Derive {
                 concepts: concepts.clone(),
                 pairs: pairs.clone(),
+            },
+            JobPayload::DeriveImage {
+                concepts,
+                pairs,
+                supplied,
+            } => WriteIntentPayload::DeriveImage {
+                concepts: concepts.clone(),
+                pairs: pairs.clone(),
+                supplied: supplied.clone(),
             },
             JobPayload::Action {
                 action,
@@ -225,6 +242,15 @@ impl JobPayload {
             WriteIntentPayload::Derive { concepts, pairs } => {
                 JobPayload::Derive { concepts, pairs }
             }
+            WriteIntentPayload::DeriveImage {
+                concepts,
+                pairs,
+                supplied,
+            } => JobPayload::DeriveImage {
+                concepts,
+                pairs,
+                supplied,
+            },
             WriteIntentPayload::Action {
                 action,
                 produces,
@@ -240,11 +266,27 @@ impl JobPayload {
     }
 
     /// Retained payload bytes, for the byte admission condition.
+    ///
+    /// An image derive is charged its strings plus four bytes per vector
+    /// component and the declared contract's strings (design section 5.1), so
+    /// a burst of image derives meets the same byte cap as text.
     pub(super) fn bytes(&self) -> usize {
+        fn derive_bytes(concepts: &[(String, ConceptType)], pairs: &[(String, String)]) -> usize {
+            concepts.iter().map(|(c, _)| c.len()).sum::<usize>()
+                + pairs.iter().map(|(a, b)| a.len() + b.len()).sum::<usize>()
+        }
         match self {
-            JobPayload::Derive { concepts, pairs } => {
-                concepts.iter().map(|(c, _)| c.len()).sum::<usize>()
-                    + pairs.iter().map(|(a, b)| a.len() + b.len()).sum::<usize>()
+            JobPayload::Derive { concepts, pairs } => derive_bytes(concepts, pairs),
+            JobPayload::DeriveImage {
+                concepts,
+                pairs,
+                supplied,
+            } => {
+                derive_bytes(concepts, pairs)
+                    + supplied.content.len()
+                    + std::mem::size_of::<f32>() * supplied.vector.len()
+                    + supplied.contract.kind.len()
+                    + supplied.contract.model.as_ref().map_or(0, String::len)
             }
             JobPayload::Action {
                 action,
