@@ -419,6 +419,41 @@ async fn a_probe_that_cannot_finish_inside_its_budget_reports_no_measurement() {
     assert_eq!(c.items_per_sec, None, "{c:?}");
 }
 
+/// **The probe's failure names the budget that ran out** (#11 review
+/// P3-6). Since #11 the warm-up has its own 30 s budget beside the timed
+/// legs' 5 s, and the warning named the 5 s whatever had happened, so an
+/// operator whose model load outran 30 s read that the embedder could not
+/// answer in 5.
+#[tokio::test(start_paused = true)]
+async fn a_failed_probe_says_which_budget_ran_out() {
+    let answer = Leg::After(Duration::from_millis(1));
+    let (c, miss) = probe_embedder_explained(&scripted(vec![Leg::Hang])).await;
+    assert!(!c.measured());
+    assert_eq!(miss, Some(ProbeMiss::WarmUp { timed_out: true }));
+    let text = miss.expect("a reason").to_string();
+    assert!(
+        text.contains("warm-up") && text.contains(&format!("{PROBE_WARMUP_BUDGET:?}")),
+        "{text}"
+    );
+
+    let (_, miss) = probe_embedder_explained(&scripted(vec![answer, Leg::Hang])).await;
+    assert_eq!(miss, Some(ProbeMiss::Serial { timed_out: true }));
+    let text = miss.expect("a reason").to_string();
+    assert!(text.contains(&format!("{PROBE_BUDGET:?}")), "{text}");
+
+    let (_, miss) = probe_embedder_explained(&scripted(vec![answer, Leg::Refuse])).await;
+    assert_eq!(miss, Some(ProbeMiss::Serial { timed_out: false }));
+
+    let mut plan = vec![answer; 2 + PROBE_WRITE_CONCEPTS];
+    plan.push(Leg::Refuse);
+    let (_, miss) = probe_embedder_explained(&scripted(plan)).await;
+    assert_eq!(miss, Some(ProbeMiss::ConcurrentRefused));
+
+    let (c, miss) = probe_embedder_explained(&scripted(vec![answer])).await;
+    assert!(c.measured());
+    assert_eq!(miss, None, "a probe that measured has nothing to explain");
+}
+
 /// **A cold first embed does not cost the probe its measurement** (#11).
 ///
 /// The warm-up embed exists to pay the model-load cost out of the

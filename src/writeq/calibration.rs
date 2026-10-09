@@ -10,6 +10,7 @@
 //! The probe is spawned at construction ([`WritePipeline::spawn`]) and never
 //! awaited by anything; it is aborted at close and on `Drop`.
 
+use std::fmt;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
@@ -630,18 +631,72 @@ impl ObservedRate {
 /// concurrent leg running out of budget after both serial legs landed (#11
 /// review P2-2): the serial figures are real and are what
 /// [`Calibration::probe_optimism`] needs, so they are published with no
-/// concurrent figure ([`Calibration::from_serial_probe`]). Saying so costs nothing but the telemetry (J3 redesign): the
-/// difference between `Unmeasured` and `Probe` is `write_queue_measured` and an
-/// absent `probe_optimism` baseline — never a bound, and the observed rate
-/// still replaces the figure after [`OBSERVED_MIN_SAMPLES`] real writes.
+/// concurrent figure ([`Calibration::from_serial_probe`]).
+///
+/// Saying so costs nothing but the telemetry (J3 redesign): the difference
+/// between `Unmeasured` and `Probe` is `write_queue_measured` and an absent
+/// `probe_optimism` baseline — never a bound, and the observed rate still
+/// replaces the figure after [`OBSERVED_MIN_SAMPLES`] real writes.
+///
+/// The probe task itself calls [`probe_embedder_explained`] for the reason it
+/// logs; this is the shape the probe's tests read.
+#[cfg(test)]
 pub(super) async fn probe_embedder(embedder: &dyn Embedder) -> Calibration {
+    probe_embedder_explained(embedder).await.0
+}
+
+/// Why a probe published nothing, for the warning an operator reads (#11
+/// review P3-6). The warm-up and the timed legs have different budgets
+/// since #11, and the warning used to name the timed legs' 5 s even when it
+/// was the warm-up's 30 s that ran out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ProbeMiss {
+    /// The warm-up embed failed, or did not answer within
+    /// [`PROBE_WARMUP_BUDGET`].
+    WarmUp { timed_out: bool },
+    /// The short serial embed failed, or did not answer within
+    /// [`PROBE_BUDGET`].
+    Serial { timed_out: bool },
+    /// The embedder refused the concurrent leg's writes.
+    ConcurrentRefused,
+}
+
+impl fmt::Display for ProbeMiss {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ProbeMiss::WarmUp { timed_out: true } => write!(
+                f,
+                "its warm-up embed did not answer within the warm-up budget \
+                 ({PROBE_WARMUP_BUDGET:?})"
+            ),
+            ProbeMiss::WarmUp { timed_out: false } => write!(f, "its warm-up embed failed"),
+            ProbeMiss::Serial { timed_out: true } => write!(
+                f,
+                "its timed embed did not answer within the timed legs' budget \
+                 ({PROBE_BUDGET:?})"
+            ),
+            ProbeMiss::Serial { timed_out: false } => write!(f, "its timed embed failed"),
+            ProbeMiss::ConcurrentRefused => write!(
+                f,
+                "it refused the {PROBE_CONCURRENCY} concurrent writes of the probe's last leg"
+            ),
+        }
+    }
+}
+
+/// [`probe_embedder`], and why it published nothing when it did not.
+pub(super) async fn probe_embedder_explained(
+    embedder: &dyn Embedder,
+) -> (Calibration, Option<ProbeMiss>) {
+    let miss = |miss| (Calibration::unmeasured(), Some(miss));
     // The warm-up has its own bound and the timed legs' clock starts after
     // it (#11): a cold model load is what the warm-up is for.
     let warm_up_deadline = tokio::time::Instant::now() + PROBE_WARMUP_BUDGET;
     for _ in 0..PROBE_WARMUP_EMBEDS {
         match tokio::time::timeout_at(warm_up_deadline, embedder.embed(PROBE_TEXT)).await {
             Ok(Ok(_)) => {}
-            _ => return Calibration::unmeasured(),
+            Ok(Err(_)) => return miss(ProbeMiss::WarmUp { timed_out: false }),
+            Err(_) => return miss(ProbeMiss::WarmUp { timed_out: true }),
         }
     }
     let deadline = tokio::time::Instant::now() + PROBE_BUDGET;
@@ -649,7 +704,8 @@ pub(super) async fn probe_embedder(embedder: &dyn Embedder) -> Calibration {
     let serial_started = tokio::time::Instant::now();
     match tokio::time::timeout_at(deadline, embedder.embed(PROBE_TEXT)).await {
         Ok(Ok(_)) => {}
-        _ => return Calibration::unmeasured(),
+        Ok(Err(_)) => return miss(ProbeMiss::Serial { timed_out: false }),
+        Err(_) => return miss(ProbeMiss::Serial { timed_out: true }),
     }
     let serial_wall = serial_started.elapsed();
 
@@ -694,13 +750,16 @@ pub(super) async fn probe_embedder(embedder: &dyn Embedder) -> Calibration {
         set.push(embed_write(embedder, concurrent_write));
     }
     match tokio::time::timeout_at(deadline, futures_join_all(set)).await {
-        Ok(results) if results.iter().all(Result::is_ok) => Calibration::from_probe(
-            serial_wall,
-            representative_wall,
-            concurrent_started.elapsed(),
+        Ok(results) if results.iter().all(Result::is_ok) => (
+            Calibration::from_probe(
+                serial_wall,
+                representative_wall,
+                concurrent_started.elapsed(),
+            ),
+            None,
         ),
         // A refusal: the embedder failed real work, so nothing is published.
-        Ok(_) => Calibration::unmeasured(),
+        Ok(_) => miss(ProbeMiss::ConcurrentRefused),
         // Out of budget with both serial legs measured (#11 review P2-2): an
         // embedder that serialises requests needs PROBE_CONCURRENCY times a
         // write's time here. Keep the serial figures probe_optimism needs.
@@ -711,7 +770,10 @@ pub(super) async fn probe_embedder(embedder: &dyn Embedder) -> Calibration {
                 "write queue: the calibration probe's concurrent leg did not finish inside its \
                  budget; publishing the serial figures alone"
             );
-            Calibration::from_serial_probe(serial_wall, representative_wall)
+            (
+                Calibration::from_serial_probe(serial_wall, representative_wall),
+                None,
+            )
         }
     }
 }
@@ -828,7 +890,7 @@ impl EmbedderProbe {
     pub(crate) fn spawn(embedder: Arc<dyn Embedder>, session: SessionId) -> Self {
         let (tx, rx) = watch::channel(None);
         let task = tokio::spawn(async move {
-            let calibration = probe_embedder(embedder.as_ref()).await;
+            let (calibration, miss) = probe_embedder_explained(embedder.as_ref()).await;
             match (calibration.measured(), calibration.items_per_sec) {
                 // J3 round-1 N3. These two lines are what an operator reads
                 // about their own deployment, and both said the bounds came
@@ -868,16 +930,18 @@ impl EmbedderProbe {
                     PROBE_BUDGET,
                     PROBE_CONCURRENCY
                 ),
+                // #11 review P3-6: name what actually failed, and which
+                // budget ran out when one did.
                 (false, _) => tracing::warn!(
                     session = %session,
                     bound = calibration.bound,
-                    "write queue: the embedder could not be probed within {:?}, so there is no \
-                     rate telemetry this session and lambo_stats reports \
-                     write_queue_measured=false. The bounds are unaffected — they are static \
-                     (lane {}, queue {}) and never came from the probe. Note what a failed probe \
-                     DOES suggest: with match_strategy=hybrid (the default) an embedder that \
-                     cannot answer will also fail every derive it cannot answer",
-                    PROBE_BUDGET,
+                    "write queue: the embedder could not be probed: {}. There is no rate \
+                     telemetry this session and lambo_stats reports write_queue_measured=false. \
+                     The bounds are unaffected — they are static (lane {}, queue {}) and never \
+                     came from the probe. Note what a failed probe DOES suggest: with \
+                     match_strategy=hybrid (the default) an embedder that cannot answer will \
+                     also fail every derive it cannot answer",
+                    miss.map_or_else(|| "no reason recorded".to_string(), |m| m.to_string()),
                     WRITE_QUEUE_LANE_MAX,
                     WRITE_QUEUE_MAX
                 ),
