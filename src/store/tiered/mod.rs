@@ -76,7 +76,7 @@ pub(crate) mod elastic;
 pub(crate) mod index;
 pub(crate) mod project;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "store-memory"))]
 mod fake;
 #[cfg(all(test, feature = "store-memory"))]
 mod tests;
@@ -145,7 +145,7 @@ struct SessionTier {
 
 /// The tier's view of one session, for tests. Production reports the same
 /// facts through `lambo::recall_tier` warnings.
-#[cfg(test)]
+#[cfg(all(test, feature = "store-memory"))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TierStatus {
     pub sync: TierSync,
@@ -181,14 +181,14 @@ impl TieredStore {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "store-memory"))]
     pub(crate) fn with_repair_backoff(mut self, backoff: Duration) -> Self {
         self.repair_backoff = backoff;
         self
     }
 
     /// The tier's view of `session`.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "store-memory"))]
     pub(crate) fn tier_status(&self, session: &SessionId) -> TierStatus {
         let sessions = self.sessions.lock();
         let st = sessions.get(session);
