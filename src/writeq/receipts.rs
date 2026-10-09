@@ -439,6 +439,34 @@ pub struct AppliedSummary {
     pub embedded: Option<usize>,
 }
 
+impl AppliedSummary {
+    /// The counts an applied write's `completion` ledger line carries (#12):
+    /// the true `created_count` / `matched_count` pair plus the rest of the
+    /// metric-2 fact set — `semantic_merged`, `reinforced`, `edges` and
+    /// `embedded` — so those facts outlive the receipt's retention window.
+    ///
+    /// The optional four are emitted only when `Some`, with the same
+    /// absent-key meaning as on the receipt: absent is "not this write kind"
+    /// (or, for `embedded`, "not a strategy that embeds"), never zero. Counts
+    /// only — no ids, no concept text, nothing from the payload.
+    pub(crate) fn ledger_facts(&self) -> serde_json::Map<String, serde_json::Value> {
+        let mut facts = serde_json::Map::new();
+        for (key, value) in [
+            ("created_count", Some(self.created_count)),
+            ("matched_count", Some(self.matched_count)),
+            ("semantic_merged", self.semantic_merged),
+            ("reinforced", self.reinforced),
+            ("edges", self.edges),
+            ("embedded", self.embedded),
+        ] {
+            if let Some(v) = value {
+                facts.insert(key.into(), serde_json::Value::from(v));
+            }
+        }
+        facts
+    }
+}
+
 /// The answer to "what happened to this receipt?".
 ///
 /// **Eleven** variants, and **none of them is "unknown"** (J3 round-1 F1: this

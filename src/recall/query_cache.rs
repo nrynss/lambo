@@ -9,7 +9,7 @@
 //! never handed to a reader expecting another.
 //!
 //! **Only query-role vectors** (#22). Every entry is filled from
-//! `recall::candidates::embed_query`, which calls
+//! `recall::candidates::embed_query` (crate-private), which calls
 //! [`Embedder::embed_query`], so the key (query text, contract) names exactly
 //! what was embedded: that text, in the query role, under that contract. An
 //! adapter whose query role depends on a prompt names its prompt profile in

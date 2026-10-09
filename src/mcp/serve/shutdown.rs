@@ -13,10 +13,10 @@
 //! | # | stage | step | bound |
 //! |---|---|---|---|
 //! | 1 | transport drain (HTTP graceful drain, stdio cancel) | the transport future inside [`run_and_close_sessions`], ended by [`wind_down`] | [`SHUTDOWN_GRACE`] |
-//! | 2 | keep-warm abort | `stop_before_close` in [`run_and_close_sessions`], from [`ProcessTasks::stop_before_close`](super::process::ProcessTasks::stop_before_close) | instant |
+//! | 2 | keep-warm abort | `stop_before_close` in [`run_and_close_sessions`], from [`ProcessTasks::stop_before_close`](super::process::ProcessTasks::stop_before_close): the keep-warm and the process's write-queue calibration probe ([`EmbedderCalibration`](crate::writeq::EmbedderCalibration), #32 PR 3) | instant |
 //! | 3 | session close | [`close_sessions`], each through [`close_bounded`]: [`Memory::close`] and its own ten logged steps (`serialize`, `replay_stop`, `queue_quiesce`, `writers_gate`, `heartbeat_abort`, `producer_joins`, `flush_join`, `final_drain`, `final_flush`, `lease_release`; `src/memory/shutdown.rs`), or on abandonment the bounded lease release | [`CLOSE_GRACE`] |
 //! | 4 | event pump abort | after the close, in [`close_sessions`], so final-drain events still reach the log | instant |
-//! | 5 | background tasks | [`ProcessTasks::stop`](super::process::ProcessTasks::stop): ledger heartbeat, keep-warm (again), refusal poller | instant |
+//! | 5 | background tasks | [`ProcessTasks::stop`](super::process::ProcessTasks::stop): ledger heartbeat, keep-warm (again), refusal poller; the calibration probe (again) | instant |
 //! | 6 | endpoint release | `hub::Hub::release` per session (`session::AttachedSession::release_endpoint`): stop accepting, end every endpoint session (each cancels its rmcp service and waits for it), then the socket file if still ours | `hub::ENDPOINT_RELEASE_GRACE`, then the stragglers are aborted and joined (unbounded, but milliseconds in practice; the watchdog's 1 s overrun allowance covers it) |
 //! | 7 | ledger close | [`close_ledger`] | the ledger's own shutdown bound |
 //!
@@ -375,10 +375,13 @@ pub(super) async fn wind_down(
 ///
 /// `stop_before_close` is the opposite case: tasks nothing needs during the
 /// close, aborted the moment the transport returns and before `close()`
-/// starts. Today that is the issue-13 embedder keep-warm: once no client can
-/// call, a touch only competes with the final drain (and on a slow remote
+/// starts. [`run_and_close_sessions`] takes it as a hook run at that moment
+/// rather than a list taken before the transport, so a task the transport
+/// started (a probe spawned by an attach while serving) is stopped too. Today that is the issue-13 embedder keep-warm and the process's
+/// write-queue calibration probe (#32 PR 3): once no client can call, a touch
+/// or a probe embed only competes with the final drain (and on a slow remote
 /// embedder could keep a request in flight across it). Aborting is idempotent,
-/// so `serve` still aborts the same task after close on its usual path.
+/// so `serve` still aborts the same tasks after close on its usual path.
 ///
 /// Each stage is logged on `progress` (#40). Stage 1 was started by the
 /// shutdown future when it resolved; a transport that ended on its own
@@ -402,6 +405,11 @@ pub(crate) async fn run_and_close(
         mem: &mem,
         event_pump: &event_pump,
     };
+    let stop_before_close = || {
+        for task in stop_before_close {
+            task.abort();
+        }
+    };
     run_and_close_sessions(&[session], transport, stop_before_close, early, progress).await
 }
 
@@ -422,7 +430,7 @@ pub(super) struct SessionClose<'a> {
 pub(super) async fn run_and_close_sessions(
     sessions: &[SessionClose<'_>],
     transport: impl Future<Output = Result<(), LamboError>>,
-    stop_before_close: &[tokio::task::AbortHandle],
+    stop_before_close: impl FnOnce(),
     early: &EarlyShutdown,
     progress: &ShutdownProgress,
 ) -> Result<(), LamboError> {
@@ -430,11 +438,7 @@ pub(super) async fn run_and_close_sessions(
     let outcome = transport.await;
     progress.end(Stage::TransportDrain);
     // Stage 2: tasks nothing needs during the close.
-    progress.run(Stage::KeepWarmAbort, || {
-        for task in stop_before_close {
-            task.abort();
-        }
-    });
+    progress.run(Stage::KeepWarmAbort, stop_before_close);
     // Stages 3 and 4.
     let closed = close_sessions(sessions, early, progress).await;
 

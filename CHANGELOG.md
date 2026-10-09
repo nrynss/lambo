@@ -90,6 +90,14 @@
 
 ### Changed
 
+- The write queue's probe log lines (`write queue: bounds are static ...`
+  and `the embedder could not be probed`) gain a `scope` field, `session`
+  or `process`, beside the `session=<id>` they already carried (#32).
+  `lambo serve`'s probe is process-wide now: with `scope=process` the
+  figures are the embedder's for every session in the process, and
+  `session` names the session whose attach started the probe (in a
+  one-session serve, its session, as before). The failure warning says
+  who goes without probe telemetry. Filters on `session=` keep matching.
 - `lambo.toml` parse errors no longer quote the offending line. They give
   the parser's message and a line and column instead, so a misspelled key
   next to a secret (a DSN with a password, say) no longer prints the secret
@@ -272,6 +280,18 @@
   addressed by URL, an inline token, or more pinned sessions than
   `max_attached` stops every command. An older binary refuses a file that
   has `[serve]` (unknown key).
+- `lambo::writeq::EmbedderCalibration` and `MemoryBuilder::calibration`
+  (#32, third part): the write queue's startup calibration probe once per
+  embedder for the whole process. Builders over one shared embedder that are
+  given clones of one calibration probe it once; every later build fires no
+  probe embed and reports the same probe figures in `lambo_stats`, while each
+  session's observed rate stays its own. A probe that failed or was
+  aborted is run again by the next build over that embedder, at most once
+  per `writeq::PROBE_RETRY_BACKOFF` (60 s); a measured one never is. The
+  calibration's owner aborts the probe (`EmbedderCalibration::abort`, or
+  dropping the last clone). Without one, each build probes for itself as
+  before. `lambo serve` now creates one per process and aborts its probe at
+  shutdown stage 2, beside the keep-warm.
 - `lambo::surface::session`: session-id validation for ids taken from a
   request (`parse_addressed`: `[A-Za-z0-9._:-]`, 1 to 128 bytes, no leading
   `.`, no percent-decoding), the in-memory authorization types the coming
@@ -427,6 +447,13 @@
   `serve --ledger` file and backups are operator-owned and not scrubbed.
 
 ### Fixed
+
+- The ledger's applied `completion` lines (`applied` and
+  `applied_after_restart`) now carry `semantic_merged`, `reinforced`, `edges`
+  and `embedded` beside `created_count` / `matched_count` (#12), so the
+  metric-2 facts and embedding coverage outlive the 300 s receipt. Additive:
+  `v` and the existing keys are unchanged, and each new key is present only
+  for the write kind that has it.
 
 - The write queue's startup probe no longer reports `unmeasured` when the
   embedder's first call is slow (#11). Its discarded warm-up embed shared
