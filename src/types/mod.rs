@@ -478,12 +478,15 @@ impl EmbeddingSource {
     /// Decode a stored `concepts.embedding_source` value. A value that does
     /// not parse is an error, never `None`: reading it as `None` would let a
     /// re-embed overwrite the supplied vector with a vector of the caption.
-    /// `concept` names the row in the error.
+    /// `concept` names the row in the error, which also names the way out
+    /// (upgrade, or `lambo erase-session`; #22 review L4).
     pub fn from_column(raw: &str, concept: impl fmt::Display) -> Result<Self, StoreError> {
         serde_json::from_str(raw).map_err(|e| {
             StoreError::Invariant(format!(
-                "concept {concept}: concepts.embedding_source does not decode ({e}); \
-                 a newer build may have written it"
+                "concept {concept}: concepts.embedding_source does not decode ({e}). \
+                 A newer Lambo build probably wrote it: upgrade to that build or later \
+                 to load this session, or discard the session with \
+                 `lambo erase-session`, which does not need to load it"
             ))
         })
     }
@@ -1847,6 +1850,9 @@ mod tests {
             assert!(matches!(err, StoreError::Invariant(_)), "{raw}: {err:?}");
             assert!(err.to_string().contains("embedding_source"), "{err}");
             assert!(err.to_string().contains("concept c3"), "{err}");
+            // Review L4: the refusal says how to get the session back.
+            assert!(err.to_string().contains("upgrade"), "{err}");
+            assert!(err.to_string().contains("lambo erase-session"), "{err}");
         }
     }
 
