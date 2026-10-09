@@ -192,13 +192,20 @@ pub(super) fn refusal_poll_interval(attached: usize) -> Duration {
 
 /// The J4 holder-side refusal poller over every attached session: one task,
 /// one cursor per session, each round polling each attached session once.
+///
+/// A cursor outlives a detach (#32 review L2): it is dropped only when its
+/// session is no longer hosted, so a session that is detached and attached
+/// again resumes where it stopped. A fresh cursor reaches back one
+/// `LEASE_TTL`, and the holder token it filters by is this process's,
+/// unchanged across the re-attach, so it would book again every refusal
+/// already booked in that window.
 async fn registry_refusal_poller(registry: Arc<SessionRegistry>, agent: AgentId, my_token: String) {
     registry.started().await;
     let mut cursors: std::collections::HashMap<String, RefusalCursor> = Default::default();
     loop {
         tokio::time::sleep(refusal_poll_interval(registry.attached().len())).await;
         let attached = registry.attached();
-        cursors.retain(|id, _| attached.iter().any(|s| s.id().as_str() == id));
+        cursors.retain(|id, _| registry.hosted().iter().any(|hosted| hosted == id));
         for session in attached {
             let Some(ledger) = session.server.ledger() else {
                 continue;

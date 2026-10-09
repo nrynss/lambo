@@ -487,3 +487,57 @@ async fn a_pinned_session_that_cannot_attach_refuses_the_start_and_releases_the_
         "nothing after the failure is attempted"
     );
 }
+
+/// #32 review L2: the refusal poller keeps a session's cursor across a
+/// detach and re-attach. A refusal booked before the lease loss is not
+/// booked again after the re-election, which a fresh cursor (reaching back
+/// one `LEASE_TTL`, filtering by this process's unchanged token) would do.
+#[tokio::test]
+async fn a_re_attached_session_does_not_book_a_refusal_twice() {
+    let (logs, _guard) = crate::test_util::capture_logs(tracing::Level::INFO);
+    let dir = crate::test_util::ScratchDir::new("lambo-l2");
+    let path = dir.join("ledger.jsonl");
+    let store = Arc::new(MemoryStore::new());
+    let ledger_path = path.clone();
+    let serve = PinnedServe::start(&store, &["l2-a", "l2-b"], move |opts| {
+        opts.ledger = Some(ledger_path);
+    })
+    .await;
+    let booked = |path: &std::path::Path| {
+        std::fs::read_to_string(path)
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| l.contains("refused_takeover") && l.contains("loser-l2@"))
+            .count()
+    };
+
+    store
+        .record_lease_refusal(&SessionId::new("l2-a"), "loser-l2@host#1", &serve_token())
+        .await
+        .expect("a refusal against the serve");
+    until(Duration::from_secs(10), "the refusal booked", || {
+        booked(&path) == 1
+    })
+    .await;
+
+    take_over(&serve, &store, "l2-a").await;
+    until(Duration::from_secs(10), "a's detach", || {
+        logs.lines()
+            .iter()
+            .any(|l| l.contains("session detach finished") && l.contains("l2-a"))
+    })
+    .await;
+    store
+        .release_lease(&SessionId::new("l2-a"), &other_writer())
+        .await
+        .expect("the other writer releases a");
+    until(PINNED_RETRY * 3, "a's re-election", || {
+        serve.attached("l2-a").is_some()
+    })
+    .await;
+    // Several poll rounds over the re-attached session.
+    tokio::time::sleep(Duration::from_millis(2_000)).await;
+
+    serve.stop().await.expect("a clean shutdown");
+    assert_eq!(booked(&path), 1, "the refusal was booked again");
+}
