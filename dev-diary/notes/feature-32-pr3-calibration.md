@@ -88,8 +88,8 @@ by an attach during the transport (PR 4's lazy attach) would escape
 stage 2 and run across the closes. So:
 - `ProcessTasks` holds a clone of the calibration (`spawn` takes it).
   `stop_before_close()` now aborts rather than returning handles: the
-  keep-warm, then `EmbedderCalibration::abort()`. `stop()` aborts the
-  probe again. The serve tests drive exactly these methods.
+  keep-warm, then `EmbedderCalibration::shutdown()` (final; see the
+  Sonnet review's L1 below). `stop()` shuts it down again. The serve tests drive exactly these methods.
 - `run_and_close_sessions` takes stage 2 as an `impl FnOnce()` hook it
   runs when the transport returns, so the calibration is asked for its
   probes at stage 2. The `run_and_close` test seam keeps its handle
@@ -118,13 +118,17 @@ a `ProbeSlot` holding its current probe. When that probe has ended
 without a measurement (it failed, or was aborted before publishing), the
 next build over the embedder spawns a new one, provided
 `PROBE_RETRY_BACKOFF` (60 s, public beside the other `PROBE_*`
-constants) has passed since the last one started. Bounded both ways:
+constants) has passed since the last one ended (published or was
+aborted; it counted from the start until the Sonnet review's L2). Bounded both ways:
 only an ended probe is replaced, so at most one runs per embedder, and
 an embedder that stays down is probed at most once a minute rather than
 at every attach. A measured probe is never repeated. Pipelines hold the
 slot, so earlier sessions see the re-probe's figure too, and the last
 published (unmeasured) figure until it lands. The calibration's owner
-aborting at shutdown is unaffected (no attach follows).
+shutting it down is final: `ProcessTasks` calls
+`EmbedderCalibration::shutdown` at stages 2 and 5, and a build after it
+gets a slot that never probes (Sonnet review L1), while the public
+`abort()` stays re-probeable.
 
 **A kept calibration keeps a running probe (review P3-6).** Closing the
 sessions does not stop a shared probe, and the probe task holds the

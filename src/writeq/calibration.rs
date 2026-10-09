@@ -1126,7 +1126,8 @@ impl PipelineProbe {
 
 /// How long a process-wide probe that failed or was aborted is left alone
 /// before the next attach over its embedder probes it again (#32 PR 3,
-/// review P3-3), counted from the start of the probe it replaces.
+/// review P3-3), counted from when the probe it replaces ended (it
+/// published, or was aborted).
 ///
 /// A failed probe should not be terminal for a long-lived process: a
 /// remote embedder that timed out during the first attach's probe would

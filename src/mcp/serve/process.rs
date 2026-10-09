@@ -120,9 +120,10 @@ impl ProcessTasks {
     /// [`run_and_close_sessions`](super::shutdown::run_and_close_sessions).
     ///
     /// Called **at** stage 2, not before the transport runs: the calibration
-    /// is asked for its probes then (`EmbedderCalibration::abort`), so a
-    /// probe spawned by an attach during the transport (#32 PR 4's lazy
-    /// attaches) is stopped here too, not only at stage 5 (review P3-2).
+    /// is shut down then (`EmbedderCalibration::shutdown`), so a probe
+    /// spawned by an attach during the transport (#32 PR 4's lazy attaches)
+    /// is stopped here too, not only at stage 5 (review P3-2). The shutdown
+    /// is final: an attach still in flight afterwards starts no probe.
     pub(super) fn stop_before_close(&self) {
         if let Some(task) = &self.keep_warm {
             task.abort();
