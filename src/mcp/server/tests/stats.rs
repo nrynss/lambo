@@ -479,7 +479,11 @@ async fn a_shared_calibration_keeps_the_probe_fields_and_per_session_observation
         probe_landed(&b),
         "the second session reads the probe the first one spawned"
     );
-    for (s, writes) in [(&a, 2), (&b, 1)] {
+    // A writes enough for its own observed rate to take over (review P4-1:
+    // `probe_optimism` is then computed, against the shared probe, from A's
+    // observations alone); B stays under it.
+    let a_writes = crate::writeq::OBSERVED_MIN_SAMPLES;
+    for (s, writes) in [(&a, a_writes), (&b, 1)] {
         for i in 0..writes {
             call(
                 s,
@@ -500,7 +504,6 @@ async fn a_shared_calibration_keeps_the_probe_fields_and_per_session_observation
     // unchanged for a shared probe.
     for p in [&pa, &pb] {
         assert_eq!(p["write_queue_measured"], json!(true), "{p}");
-        assert_eq!(p["write_queue_bound_source"], json!("probe"), "{p}");
         assert_eq!(
             p["write_queue_lane_bound"],
             json!(crate::writeq::WRITE_QUEUE_LANE_MAX),
@@ -515,12 +518,22 @@ async fn a_shared_calibration_keeps_the_probe_fields_and_per_session_observation
             p["write_queue_serial_items_per_sec"].as_f64().unwrap() > 0.0,
             "{p}"
         );
-        assert_eq!(
-            p["write_queue_probe_serial_items_per_sec"], p["write_queue_serial_items_per_sec"],
-            "{p}"
-        );
-        assert_eq!(p["write_queue_probe_optimism"], json!(null), "{p}");
     }
+    // B, under OBSERVED_MIN_SAMPLES: still the probe's figure, no optimism.
+    assert_eq!(pb["write_queue_bound_source"], json!("probe"), "{pb}");
+    assert_eq!(
+        pb["write_queue_probe_serial_items_per_sec"], pb["write_queue_serial_items_per_sec"],
+        "{pb}"
+    );
+    assert_eq!(pb["write_queue_probe_optimism"], json!(null), "{pb}");
+    // A, past it: its own observed rate, and an optimism against the probe.
+    assert_eq!(pa["write_queue_bound_source"], json!("observed"), "{pa}");
+    assert!(
+        pa["write_queue_probe_optimism"]
+            .as_f64()
+            .is_some_and(|o| o > 0.0),
+        "{pa}"
+    );
     // One probe: both sessions publish its figures.
     for key in [
         "write_queue_items_per_sec",
@@ -529,9 +542,9 @@ async fn a_shared_calibration_keeps_the_probe_fields_and_per_session_observation
         assert_eq!(pa[key], pb[key], "{key}: {pa} vs {pb}");
     }
     // Per session: each counts and times only its own writes.
-    assert_eq!(pa["write_queue_applied"], json!(2), "{pa}");
+    assert_eq!(pa["write_queue_applied"], json!(a_writes), "{pa}");
     assert_eq!(pb["write_queue_applied"], json!(1), "{pb}");
-    assert_eq!(pa["write_queue_apply_samples"], json!(2), "{pa}");
+    assert_eq!(pa["write_queue_apply_samples"], json!(a_writes), "{pa}");
     assert_eq!(pb["write_queue_apply_samples"], json!(1), "{pb}");
 
     a.mem.close().await.expect("close a");
