@@ -426,3 +426,205 @@ async fn a_refused_session_and_an_unrouted_path_are_identical_on_the_wire() {
     assert!(post.starts_with("HTTP/1.1 405"), "{post}");
     assert!(post.to_ascii_lowercase().contains("\r\nallow: "), "{post}");
 }
+
+/// #32 PR 5: the legacy `default` and implicit `local` grants cover every
+/// pinned session and nothing else (narrower than `"*"`, which also covers
+/// every name inside a configured prefix), and carry no capability.
+#[test]
+fn the_legacy_and_local_grants_cover_the_pinned_sessions_only() {
+    let h = hosted();
+    for grant in [
+        SessionGrant::legacy_default(),
+        SessionGrant::implicit_local(),
+    ] {
+        for pinned in ["lambo", "general"] {
+            grant
+                .authorize(&id(pinned), SessionNeed::Use, &h)
+                .unwrap_or_else(|e| panic!("{}: {pinned}: {e}", grant.name()));
+        }
+        for outside in ["dc-u-1", "kl-9", "rustydocs"] {
+            assert_eq!(
+                grant
+                    .authorize(&id(outside), SessionNeed::Use, &h)
+                    .expect_err(outside)
+                    .reason(),
+                RefusalReason::OutOfScope,
+                "{}: {outside}",
+                grant.name()
+            );
+        }
+        for need in [SessionNeed::Create, SessionNeed::Erase, SessionNeed::Admin] {
+            assert_eq!(
+                grant
+                    .authorize(&id("lambo"), need, &h)
+                    .expect_err("no capability")
+                    .reason(),
+                RefusalReason::MissingCapability,
+                "{}: {need:?}",
+                grant.name()
+            );
+        }
+        assert!(grant.scope().covers_every_pinned());
+        assert!(!grant.scope().is_empty());
+    }
+    assert_eq!(
+        SessionGrant::legacy_default().name(),
+        LEGACY_CREDENTIAL_NAME
+    );
+    assert_eq!(SessionGrant::implicit_local().name(), LOCAL_CREDENTIAL_NAME);
+    assert!(SessionScope::new([], true, None).covers_every_pinned());
+    assert!(!SessionScope::new([id("lambo")], false, Some(prefix("dc-u-"))).covers_every_pinned());
+}
+
+/// A plain byte secret for the authority tests; the serve's `SecretToken`
+/// and the portal's `AuthToken` implement the trait the same way.
+struct Plain(Vec<u8>);
+
+impl BearerSecret for Plain {
+    fn secret_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+/// Fake secrets, built at runtime so no token-shaped literal sits in the
+/// source.
+fn fake(label: &str) -> String {
+    ["fake", label, "for", "tests"].join("-")
+}
+
+fn grant_for(name: &str, session: &str) -> SessionGrant {
+    SessionGrant::new(
+        name,
+        SessionScope::new([id(session)], false, None),
+        SessionCapabilities::default(),
+    )
+}
+
+/// Step 1 over a credential set: the presented token resolves to its own
+/// grant whichever position it holds; a wrong, missing or non-bearer
+/// credential resolves to none.
+#[test]
+fn an_authority_resolves_each_token_to_its_own_grant() {
+    let names = ["first", "second", "third"];
+    let authority = SessionAuthority::with_credentials(
+        names
+            .iter()
+            .map(|n| (Plain(fake(n).into_bytes()), grant_for(n, "lambo"))),
+        hosted(),
+    );
+    assert!(authority.requires_bearer());
+    assert_eq!(authority.credential_names(), names);
+    for name in names {
+        let header = format!("Bearer {}", fake(name));
+        let grant = authority
+            .authenticate(Some(&header))
+            .unwrap_or_else(|| panic!("{name} resolves"));
+        assert_eq!(grant.name(), name);
+    }
+    let wrong = format!("Bearer {}", fake("nobody"));
+    let basic = format!("Basic {}", fake("first"));
+    let prefix_of = format!("Bearer {}", &fake("first")[..8]);
+    for header in [
+        Some(wrong.as_str()),
+        Some(basic.as_str()),
+        Some(prefix_of.as_str()),
+        None,
+        Some(""),
+    ] {
+        assert!(authority.authenticate(header).is_none(), "{header:?}");
+    }
+}
+
+/// The implicit grant answers every request, header or not, and its
+/// presence is what `requires_bearer` reports. An authority with neither
+/// an implicit grant nor a credential refuses everything (fail closed).
+#[test]
+fn an_implicit_grant_answers_every_request_and_an_empty_set_none() {
+    let local = SessionAuthority::<Plain>::implicit(SessionGrant::implicit_local(), hosted());
+    assert!(!local.requires_bearer());
+    assert!(local.credential_names().is_empty());
+    for header in [None, Some("Bearer anything"), Some("garbage")] {
+        assert_eq!(
+            local.authenticate(header).expect("implicit").name(),
+            LOCAL_CREDENTIAL_NAME
+        );
+    }
+
+    let nobody = SessionAuthority::<Plain>::with_credentials([], hosted());
+    assert!(nobody.requires_bearer());
+    assert!(nobody.authenticate(Some("Bearer anything")).is_none());
+    assert!(nobody.authenticate(None).is_none());
+}
+
+/// Steps 2 and 3 through the authority: the grant's scope against the
+/// authority's hosted set, in the fixed order (malformed before scope).
+#[test]
+fn an_authority_authorizes_against_its_hosted_sessions() {
+    let authority = SessionAuthority::with_credentials(
+        [(
+            Plain(fake("star").into_bytes()),
+            SessionGrant::new(
+                "operator",
+                SessionScope::new([], true, None),
+                SessionCapabilities::default(),
+            ),
+        )],
+        hosted(),
+    );
+    let grant = authority
+        .authenticate(Some(&format!("Bearer {}", fake("star"))))
+        .expect("resolves");
+    assert_eq!(
+        authority
+            .authorize(&grant, "dc-u-7", SessionNeed::Use)
+            .expect("inside a configured prefix")
+            .as_str(),
+        "dc-u-7"
+    );
+    assert_eq!(
+        authority
+            .authorize(&grant, "rustydocs", SessionNeed::Use)
+            .expect_err("not hosted")
+            .reason(),
+        RefusalReason::OutOfScope
+    );
+    assert_eq!(
+        authority
+            .authorize(&grant, &"a".repeat(MAX_ADDRESSED_LEN + 1), SessionNeed::Use)
+            .expect_err("oversized")
+            .reason(),
+        RefusalReason::Malformed
+    );
+}
+
+/// #32 PR 5 review L2: a presented credential over
+/// `MAX_BEARER_CREDENTIAL_BYTES` is refused before the scan, so even a
+/// configured secret that long (which the serve refuses at startup) cannot
+/// be matched, while one at the cap still is. Mutation: drop the length
+/// check and the over-cap secret authenticates.
+#[test]
+fn a_presented_credential_over_the_cap_is_refused_unread() {
+    use crate::surface::bearer::MAX_BEARER_CREDENTIAL_BYTES;
+    let at_cap = "a".repeat(MAX_BEARER_CREDENTIAL_BYTES);
+    let over_cap = "b".repeat(MAX_BEARER_CREDENTIAL_BYTES + 1);
+    let authority = SessionAuthority::with_credentials(
+        [
+            (Plain(at_cap.clone().into_bytes()), grant_for("at", "lambo")),
+            (
+                Plain(over_cap.clone().into_bytes()),
+                grant_for("over", "lambo"),
+            ),
+        ],
+        hosted(),
+    );
+    let at = authority
+        .authenticate(Some(&format!("Bearer {at_cap}")))
+        .expect("a credential at the cap is compared");
+    assert_eq!(at.name(), "at");
+    assert!(
+        authority
+            .authenticate(Some(&format!("Bearer {over_cap}")))
+            .is_none(),
+        "a credential over the cap is never compared"
+    );
+}

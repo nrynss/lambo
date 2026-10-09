@@ -47,6 +47,15 @@ fn token_comparison_is_correct_including_lengths() {
     );
 }
 
+/// The serve's bearer check: does the credential set of a serve whose only
+/// credential is `expected` (the legacy token) accept `header`? Since #32
+/// PR 5 that set is what `guard_request` asks.
+fn bearer_ok(header: Option<&str>, expected: &SecretToken) -> bool {
+    legacy_authority(Some(expected.clone()))
+        .authenticate(header)
+        .is_some()
+}
+
 /// The `Authorization` header parse: scheme case-insensitive per RFC 7235,
 /// credential exact.
 #[test]
@@ -84,6 +93,28 @@ fn the_environment_overrides_the_flag() {
     let err = resolve_auth_token_from(flag(), Some("   ".into()))
         .expect_err("a set-but-empty env var must fail closed, not fall back to the flag");
     assert!(err.to_string().contains(AUTH_TOKEN_ENV), "{err}");
+}
+
+/// #32 PR 5 review S2: a set `LAMBO_AUTH_TOKEN` that is not valid UTF-8 is
+/// refused, naming the variable and never the value, instead of being read
+/// as unset (which fell back to the flag, or to no token at all: an
+/// unauthenticated loopback serve). Mutation: read the variable with
+/// `std::env::var(..).ok()` again and this resolves to the flag.
+#[test]
+fn a_non_utf8_auth_token_variable_is_refused_not_treated_as_unset() {
+    use std::os::unix::ffi::OsStringExt;
+    let flag = || Some(SecretToken::new("from-flag").expect("valid"));
+    let mut raw = b"fake-".to_vec();
+    raw.push(0xFF);
+    raw.extend_from_slice(b"-env");
+    for flag in [flag(), None] {
+        let err = resolve_auth_token_from(flag, Some(std::ffi::OsString::from_vec(raw.clone())))
+            .expect_err("a non-UTF-8 value must fail closed");
+        let msg = err.to_string();
+        assert!(msg.contains(AUTH_TOKEN_ENV), "names the variable: {msg}");
+        assert!(msg.contains("UTF-8"), "says why: {msg}");
+        assert!(!msg.contains("fake-"), "never the value: {msg}");
+    }
 }
 
 /// **T82-16 pinned, the load-bearing half.** A non-loopback bind without a
@@ -187,6 +218,115 @@ fn only_a_sessionless_post_opens_a_new_session() {
     )));
 }
 
+/// #32 PR 5 review S1: "opens a new MCP session" is read the way rmcp
+/// 3.1.2 reads the request. rmcp mints a session for a POST whose
+/// `Mcp-Session-Id` is absent *or* not visible ASCII (`to_str` fails), and
+/// it never reads `Last-Event-ID` on a POST. Mutation: restore the
+/// `Last-Event-ID` exemption, or test the header for presence, and this
+/// fails.
+#[test]
+fn a_session_id_rmcp_cannot_read_and_last_event_id_still_open_a_session() {
+    let unreadable = axum::http::HeaderValue::from_bytes(b"\xff").expect("obs-text is a value");
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert("Mcp-Session-Id", unreadable.clone());
+    assert_eq!(usable_session_id(&headers), None, "rmcp reads it as absent");
+    headers.insert(
+        "Mcp-Session-Id",
+        axum::http::HeaderValue::from_static("abc"),
+    );
+    assert_eq!(usable_session_id(&headers), Some("abc"));
+
+    let req = |method: axum::http::Method, headers: &[(&str, axum::http::HeaderValue)]| {
+        let mut b = axum::http::Request::builder().method(method).uri("/mcp");
+        for (name, value) in headers {
+            b = b.header(*name, value.clone());
+        }
+        b.body(axum::body::Body::empty()).expect("request")
+    };
+    let last_event = axum::http::HeaderValue::from_static("1");
+    assert!(
+        opens_a_new_session(&req(
+            axum::http::Method::POST,
+            &[("Last-Event-ID", last_event.clone())]
+        )),
+        "rmcp ignores Last-Event-ID on a POST and mints a session"
+    );
+    assert!(
+        opens_a_new_session(&req(
+            axum::http::Method::POST,
+            &[("Mcp-Session-Id", unreadable)]
+        )),
+        "an id rmcp cannot read names no session: rmcp mints one"
+    );
+    assert!(
+        !opens_a_new_session(&req(
+            axum::http::Method::GET,
+            &[("Last-Event-ID", last_event)]
+        )),
+        "a GET resumes a stream, it does not mint a session"
+    );
+}
+
+/// The `initialize` heads S1 is about: a session id rmcp reads as absent
+/// (byte 0xFF), and a `Last-Event-ID` with no session id.
+fn s1_openers(auth: Option<&str>) -> Vec<Vec<u8>> {
+    let auth = auth
+        .map(|a| format!("Authorization: {a}\r\n"))
+        .unwrap_or_default();
+    let head = |extra: &[u8]| {
+        let mut h = format!("POST /mcp HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n{auth}")
+            .into_bytes();
+        h.extend_from_slice(extra);
+        h.extend_from_slice(b"Connection: close\r\n\r\n");
+        h
+    };
+    vec![
+        head(b"Mcp-Session-Id: \xff\r\n"),
+        head(b"Last-Event-ID: 1\r\n"),
+    ]
+}
+
+/// #32 PR 5 review S1 on the request path: both openers are counted
+/// against the process-wide cap and refused at it, before the service.
+/// Before the fix neither was counted and both reached the service, where
+/// rmcp minted a session past `--max-sessions`.
+#[tokio::test]
+async fn an_initialize_rmcp_would_mint_is_refused_at_the_cap() {
+    let (addr, reached) = spawn_guarded(guard_with(None, 32, 32, 0)).await;
+    for head in s1_openers(None) {
+        let (status, body) = request_bytes(addr, &head).await;
+        assert_eq!(status, 503, "{}: {body}", String::from_utf8_lossy(&head));
+        assert!(body.contains("32/32"), "{body}");
+    }
+    assert_eq!(reached.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+/// #32 PR 5 review S1: the same two openers count against the calling
+/// credential's share and are refused at it, while another credential
+/// still opens one.
+#[tokio::test]
+async fn an_initialize_rmcp_would_mint_is_refused_at_the_share() {
+    let guard = HttpGuard::new(
+        credentials_authority(&["tenant", "operator"]),
+        32,
+        Arc::new(FakeOpeners(vec![("tenant", 16)])),
+        0,
+    );
+    let (addr, reached) = spawn_guarded(guard).await;
+    let tenant = format!("Bearer {}", fake_token("tenant"));
+    for head in s1_openers(Some(&tenant)) {
+        let (status, body) = request_bytes(addr, &head).await;
+        assert_eq!(status, 503, "{body}");
+        assert!(body.contains("16/16 of 32"), "{body}");
+    }
+    assert_eq!(reached.load(std::sync::atomic::Ordering::SeqCst), 0);
+    let operator = format!("Bearer {}", fake_token("operator"));
+    for head in s1_openers(Some(&operator)) {
+        let (status, body) = request_bytes(addr, &head).await;
+        assert_eq!(status, 200, "{body}");
+    }
+}
+
 /// A fixed live-session count, so the cap is testable without standing up
 /// real MCP sessions.
 struct FakeSessions(usize);
@@ -199,12 +339,12 @@ impl LiveSessions for FakeSessions {
 }
 
 fn guard_with(auth: Option<&str>, max_sessions: usize, live: usize, rps: u32) -> HttpGuard {
-    HttpGuard {
-        auth: auth.map(|t| SecretToken::new(t).expect("valid")),
+    HttpGuard::new(
+        legacy_authority(auth.map(|t| SecretToken::new(t).expect("valid"))),
         max_sessions,
-        live: Arc::new(FakeSessions(live)),
-        rate: RateLimiter::new(rps, Instant::now()).map(Arc::new),
-    }
+        Arc::new(FakeSessions(live)),
+        rps,
+    )
 }
 
 /// Stand the guard up in front of a marker route on a real socket.
@@ -241,9 +381,15 @@ async fn spawn_guarded(guard: HttpGuard) -> (SocketAddr, Arc<std::sync::atomic::
 
 /// Fire one request and return `(status_code, body_ish)`.
 async fn request(addr: SocketAddr, head: &str) -> (u16, String) {
+    request_bytes(addr, head.as_bytes()).await
+}
+
+/// [`request`] for a head that is not UTF-8 (a header byte `to_str`
+/// refuses).
+async fn request_bytes(addr: SocketAddr, head: &[u8]) -> (u16, String) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut sock = tokio::net::TcpStream::connect(addr).await.expect("connect");
-    sock.write_all(head.as_bytes()).await.expect("write");
+    sock.write_all(head).await.expect("write");
     let mut raw = Vec::new();
     // The marker route and every refusal close or complete promptly; the
     // timeout keeps a regression from hanging the suite.
@@ -441,4 +587,569 @@ async fn auth_is_checked_before_the_rate_limit_and_the_cap() {
         "the authenticated caller reaches the cap check with budget intact \
              (503, not 429): {body}"
     );
+}
+
+// -----------------------------------------------------------------------
+// #32 PR 5 review M2: fairness between credentials
+// -----------------------------------------------------------------------
+
+/// A fake token for credential `name`, built at runtime so no
+/// token-shaped literal sits in the source.
+fn fake_token(name: &str) -> String {
+    ["fake", name, "guard", "value"].join("-")
+}
+
+/// A loopback HTTP serve's credential set: one configured credential per
+/// name, each over every pinned session.
+fn credentials_authority(names: &[&str]) -> Arc<ServeAuthority> {
+    use crate::surface::session::{SessionCapabilities, SessionGrant, SessionScope};
+    let mut opts = ServeOptions::new("lambo-test", "agent-test");
+    opts.transport = Transport::Http;
+    opts.credentials = names
+        .iter()
+        .map(|name| crate::config::ServeCredential {
+            grant: SessionGrant::new(
+                *name,
+                SessionScope::pinned(),
+                SessionCapabilities::default(),
+            ),
+            token: SecretToken::new(fake_token(name)).expect("non-empty"),
+        })
+        .collect();
+    authority_for(&opts)
+}
+
+/// Live MCP sessions per credential.
+struct FakeOpeners(Vec<(&'static str, usize)>);
+
+#[async_trait::async_trait]
+impl LiveSessions for FakeOpeners {
+    async fn live(&self) -> usize {
+        self.0.iter().map(|(_, n)| n).sum()
+    }
+
+    async fn live_opened_by(&self, credential: &str) -> usize {
+        self.0
+            .iter()
+            .filter(|(name, _)| *name == credential)
+            .map(|(_, n)| n)
+            .sum()
+    }
+}
+
+/// The share: the cap divided evenly, rounded down so the shares fit
+/// inside it, never 0, and the whole cap for one credential (so a
+/// one-credential serve is unchanged).
+#[test]
+fn each_credential_gets_an_even_share_of_the_session_cap() {
+    for (max, credentials, share) in [
+        (32, 1, 32),
+        (32, 2, 16),
+        (32, 3, 10),
+        (8, 4, 2),
+        (2, 3, 1),
+        (0, 1, 1),
+    ] {
+        assert_eq!(
+            credential_share(max, credentials),
+            share,
+            "{max} over {credentials}"
+        );
+        if share > 1 {
+            assert!(share * credentials <= max, "{max} over {credentials}");
+        }
+    }
+    assert_eq!(credential_share(32, 0), 32, "an implicit grant is one");
+}
+
+/// Each credential draws on its own bucket: draining one leaves every
+/// other full, and the drained one refills on its own clock.
+#[test]
+fn each_credential_has_its_own_rate_bucket() {
+    assert!(CredentialRates::new(0).is_none(), "0 disables the limit");
+    let rates = CredentialRates::new(1).expect("enabled");
+    let t0 = Instant::now();
+    // 1 rps => capacity 2.
+    assert!(rates.try_acquire_at("tenant", t0));
+    assert!(rates.try_acquire_at("tenant", t0));
+    assert!(!rates.try_acquire_at("tenant", t0), "tenant is dry");
+    assert!(rates.try_acquire_at("operator", t0), "operator is not");
+    assert!(rates.try_acquire_at("operator", t0));
+    assert!(
+        rates.try_acquire_at("tenant", t0 + Duration::from_secs(1)),
+        "tenant refills"
+    );
+}
+
+/// On the request path: one credential flooding past its bucket gets 429,
+/// and another credential's next request is still served.
+#[tokio::test]
+async fn one_credential_flooding_does_not_rate_limit_another() {
+    let guard = HttpGuard::new(
+        credentials_authority(&["tenant", "operator"]),
+        32,
+        Arc::new(FakeSessions(0)),
+        1,
+    );
+    let (addr, _) = spawn_guarded(guard).await;
+    let tenant = format!("Bearer {}", fake_token("tenant"));
+    let operator = format!("Bearer {}", fake_token("operator"));
+    let mut refused = false;
+    for _ in 0..4 {
+        let (status, _) = request(addr, &post(Some(&tenant), Some("s"))).await;
+        refused |= status == 429;
+    }
+    assert!(refused, "the tenant's flood is refused");
+    let (status, body) = request(addr, &post(Some(&operator), Some("s"))).await;
+    assert_eq!(status, 200, "the operator is still served: {body}");
+}
+
+/// On the request path: a credential at its share of the session cap gets
+/// a 503 naming the share, while another credential, and the first one's
+/// existing MCP sessions, are still served. Mutation: drop the share check
+/// and the tenant's 17th `initialize` reaches the service.
+#[tokio::test]
+async fn a_credential_at_its_share_of_the_session_cap_is_refused_alone() {
+    let guard = HttpGuard::new(
+        credentials_authority(&["tenant", "operator"]),
+        32,
+        Arc::new(FakeOpeners(vec![("tenant", 16), ("operator", 1)])),
+        0,
+    );
+    assert_eq!(guard.credential_sessions, 16);
+    let (addr, reached) = spawn_guarded(guard).await;
+    let tenant = format!("Bearer {}", fake_token("tenant"));
+    let operator = format!("Bearer {}", fake_token("operator"));
+
+    let (status, body) = request(addr, &post(Some(&tenant), None)).await;
+    assert_eq!(status, 503, "the tenant is at its share: {body}");
+    assert!(
+        body.contains("16/16 of 32"),
+        "say what the share is: {body}"
+    );
+    assert!(body.contains("--max-sessions"), "{body}");
+    assert_eq!(reached.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    let (status, _) = request(addr, &post(Some(&tenant), Some("existing"))).await;
+    assert_eq!(status, 200, "the tenant's open sessions keep working");
+    let (status, body) = request(addr, &post(Some(&operator), None)).await;
+    assert_eq!(status, 200, "the operator still opens one: {body}");
+}
+
+/// Stand `guard` up in front of a route that holds each request (its
+/// extensions included, so an admitted opener's reservation) until
+/// `release` is notified: an `initialize` still being handled.
+async fn spawn_holding(
+    guard: HttpGuard,
+) -> (
+    SocketAddr,
+    Arc<std::sync::atomic::AtomicUsize>,
+    Arc<tokio::sync::Notify>,
+) {
+    let reached = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let release = Arc::new(tokio::sync::Notify::new());
+    let (hits, gate) = (reached.clone(), release.clone());
+    let app = axum::Router::new()
+        .route(
+            "/mcp",
+            axum::routing::any(move |req: axum::extract::Request| {
+                let (hits, gate) = (hits.clone(), gate.clone());
+                async move {
+                    hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    gate.notified().await;
+                    drop(req);
+                    "inner service reached"
+                }
+            }),
+        )
+        .layer(axum::middleware::from_fn_with_state(guard, guard_request));
+    let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (addr, reached, release)
+}
+
+/// Wait until `reached` counts `n`.
+async fn until_reached(reached: &std::sync::atomic::AtomicUsize, n: usize) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while reached.load(std::sync::atomic::Ordering::SeqCst) < n {
+        assert!(
+            Instant::now() < deadline,
+            "the opener never reached the service"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+/// #32 PR 5 review S4: the cap is not a check-then-act race. With one
+/// slot left, an `initialize` admitted and still being handled (its MCP
+/// session not yet live) holds that slot, so a second one arriving now is
+/// refused instead of also passing on the same live count; once the first
+/// finishes, the slot is its to fill (here the fake count never grows, so
+/// the next opener is admitted again). Mutation: drop the reservation and
+/// the second `initialize` reaches the service too.
+#[tokio::test]
+async fn a_concurrent_initialize_cannot_overshoot_the_cap() {
+    let (addr, reached, release) = spawn_holding(guard_with(None, 32, 31, 0)).await;
+    let first = tokio::spawn(async move { request(addr, &post(None, None)).await });
+    until_reached(&reached, 1).await;
+
+    let (status, body) = request(addr, &post(None, None)).await;
+    assert_eq!(status, 503, "the last slot is held: {body}");
+    assert!(body.contains("32/32"), "{body}");
+    assert_eq!(reached.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    release.notify_one();
+    assert_eq!(first.await.expect("first").0, 200);
+    let next = tokio::spawn(async move { request(addr, &post(None, None)).await });
+    until_reached(&reached, 2).await;
+    release.notify_one();
+    assert_eq!(next.await.expect("next").0, 200, "the slot came back");
+}
+
+/// #32 PR 5 review S4 for the share: a credential one under its share with
+/// an `initialize` in flight is at its share, so its next one is refused,
+/// while another credential still opens one.
+#[tokio::test]
+async fn a_concurrent_initialize_cannot_overshoot_the_share() {
+    let guard = HttpGuard::new(
+        credentials_authority(&["tenant", "operator"]),
+        32,
+        Arc::new(FakeOpeners(vec![("tenant", 15)])),
+        0,
+    );
+    let (addr, reached, release) = spawn_holding(guard).await;
+    let tenant = format!("Bearer {}", fake_token("tenant"));
+    let first = {
+        let tenant = tenant.clone();
+        tokio::spawn(async move { request(addr, &post(Some(&tenant), None)).await })
+    };
+    until_reached(&reached, 1).await;
+
+    let (status, body) = request(addr, &post(Some(&tenant), None)).await;
+    assert_eq!(status, 503, "the tenant's last slot is held: {body}");
+    assert!(body.contains("16/16 of 32"), "{body}");
+
+    let operator = format!("Bearer {}", fake_token("operator"));
+    let other = tokio::spawn(async move { request(addr, &post(Some(&operator), None)).await });
+    until_reached(&reached, 2).await;
+    release.notify_waiters();
+    assert_eq!(first.await.expect("first").0, 200);
+    assert_eq!(other.await.expect("other").0, 200, "the operator opens one");
+}
+
+/// One credential (the legacy `default`, the dogfood rig's) has the whole
+/// cap and one bucket: exactly the limits a single-token serve always had.
+#[test]
+fn one_credential_keeps_the_whole_cap() {
+    let guard = guard_with(Some("s3cret"), 32, 0, 50);
+    assert_eq!(guard.credential_sessions, 32);
+    let local = guard_with(None, 32, 0, 50);
+    assert_eq!(local.credential_sessions, 32);
+}
+
+// -----------------------------------------------------------------------
+// #32 PR 5 review L2: bounded work and logging for bad tokens
+// -----------------------------------------------------------------------
+
+/// A configured token over the presented-credential cap could never be
+/// presented, so it is refused when it is made (and so at startup); one at
+/// the cap is accepted.
+#[test]
+fn a_token_over_the_credential_cap_is_refused() {
+    use crate::surface::bearer::MAX_BEARER_CREDENTIAL_BYTES;
+    assert!(SecretToken::new("t".repeat(MAX_BEARER_CREDENTIAL_BYTES)).is_ok());
+    let err =
+        SecretToken::new("t".repeat(MAX_BEARER_CREDENTIAL_BYTES + 1)).expect_err("over the cap");
+    assert!(err.contains("4096"), "{err}");
+    assert!(!err.contains("ttt"), "the value is never quoted: {err}");
+}
+
+/// The 401's WARN line: the first refusal in a window is logged with the
+/// count held back before it, the rest of the window is not.
+#[test]
+fn the_refusal_warning_is_logged_once_per_window() {
+    let log = RefusalLog::new(Duration::from_secs(10));
+    let t0 = Instant::now();
+    assert_eq!(log.note_at(t0), Some(0));
+    for i in 1..=5 {
+        assert_eq!(log.note_at(t0 + Duration::from_secs(i)), None);
+    }
+    assert_eq!(log.note_at(t0 + Duration::from_secs(10)), Some(5));
+    assert_eq!(log.note_at(t0 + Duration::from_secs(11)), None);
+    assert_eq!(log.note_at(t0 + Duration::from_secs(25)), Some(1));
+}
+
+/// On the request path: an oversized bearer header is the ordinary 401.
+#[tokio::test]
+async fn an_oversized_bearer_is_the_ordinary_401() {
+    let (addr, reached) = spawn_guarded(guard_with(Some("s3cret"), 32, 0, 0)).await;
+    let long = format!(
+        "Bearer {}",
+        "x".repeat(crate::surface::bearer::MAX_BEARER_CREDENTIAL_BYTES + 1)
+    );
+    let (status, long_body) = request(addr, &post(Some(&long), None)).await;
+    let (_, wrong_body) = request(addr, &post(Some("Bearer wrong"), None)).await;
+    assert_eq!(status, 401);
+    let tail = |b: &str| b.split_once("\r\n\r\n").map(|(_, t)| t.to_string());
+    assert_eq!(tail(&long_body), tail(&wrong_body));
+    assert_eq!(reached.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+/// #32 PR 5 review I2: a request with two `Authorization` headers is the
+/// ordinary 401, even when both carry the right token, so no proxy that
+/// keeps the first or the last can disagree with the guard about who is
+/// calling. Without a credential (the implicit `local`) no header is read.
+#[tokio::test]
+async fn two_authorization_headers_are_the_ordinary_401() {
+    let (addr, reached) = spawn_guarded(guard_with(Some("s3cret"), 32, 0, 0)).await;
+    let twice = "POST /mcp HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\
+                 Authorization: Bearer s3cret\r\nAuthorization: Bearer s3cret\r\n\
+                 Connection: close\r\n\r\n";
+    let (status, body) = request(addr, twice).await;
+    assert_eq!(status, 401, "{body}");
+    assert_eq!(reached.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    let (addr, reached) = spawn_guarded(guard_with(None, 32, 0, 0)).await;
+    let (status, body) = request(addr, twice).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(reached.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+// -----------------------------------------------------------------------
+// #32 PR 5 second review L2: a slow body holds no session slot
+// -----------------------------------------------------------------------
+
+/// An `initialize` whose head declares `declared` body bytes; the caller
+/// writes the body (or not).
+fn initialize_head(declared: usize) -> String {
+    format!(
+        "POST /mcp HTTP/1.1\r\nHost: localhost\r\nContent-Length: {declared}\r\n\
+         Connection: close\r\n\r\n"
+    )
+}
+
+/// #32 PR 5 second review L2: a client dribbling its body holds no slot
+/// of the session cap while it does (the guard reads the whole body before
+/// it reserves), so with one slot left another `initialize` still gets it;
+/// and a body that has not arrived within the guard's body timeout is
+/// refused with 408, never reaching the service.
+///
+/// Mutation: reserve before reading the body and the second `initialize`
+/// is refused at the cap; drop the timeout and the dribbler never gets an
+/// answer.
+#[tokio::test]
+async fn a_dribbled_body_holds_no_slot_and_times_out() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut guard = guard_with(None, 32, 31, 0);
+    guard.body_timeout = Duration::from_secs(2);
+    let (addr, reached) = spawn_guarded(guard).await;
+
+    let mut slow = tokio::net::TcpStream::connect(addr).await.expect("connect");
+    slow.write_all(initialize_head(64).as_bytes())
+        .await
+        .expect("write head");
+    slow.write_all(b"{\"jsonrpc\"")
+        .await
+        .expect("write a little");
+    // Let the guard start reading the body.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let (status, body) = request(addr, &post(None, None)).await;
+    assert_eq!(status, 200, "the last slot is free: {body}");
+    assert_eq!(reached.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    let started = Instant::now();
+    let mut raw = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(10), slow.read_to_end(&mut raw)).await;
+    let reply = String::from_utf8_lossy(&raw);
+    assert!(
+        reply.starts_with("HTTP/1.1 408 Request Timeout\r\n"),
+        "the dribbler is refused: {reply:?}"
+    );
+    assert!(reply.contains("did not arrive within 2 s"), "{reply}");
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert_eq!(
+        reached.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "a body that never arrived never reaches the service"
+    );
+}
+
+/// The guard's read holds a chunked body (no `Content-Length` to refuse up
+/// front) to [`MAX_HTTP_BODY_BYTES`] too.
+#[tokio::test]
+async fn an_oversized_chunked_body_is_refused_before_the_service() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (addr, reached) = spawn_guarded(guard_with(None, 32, 0, 0)).await;
+    let mut sock = tokio::net::TcpStream::connect(addr).await.expect("connect");
+    sock.write_all(b"POST /mcp HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n")
+        .await
+        .expect("write head");
+    let len = usize::try_from(MAX_HTTP_BODY_BYTES).expect("fits") + 1;
+    let mut chunk = format!("{len:x}\r\n").into_bytes();
+    chunk.resize(chunk.len() + len, b' ');
+    chunk.extend_from_slice(b"\r\n0\r\n\r\n");
+    // The server may answer and close before it has read it all.
+    let _ = sock.write_all(&chunk).await;
+    let mut raw = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(10), sock.read_to_end(&mut raw)).await;
+    let reply = String::from_utf8_lossy(&raw);
+    assert!(
+        reply.starts_with("HTTP/1.1 413 Payload Too Large\r\n"),
+        "{reply:?}"
+    );
+    // #32 PR 5 third review L3: the rest of the body is never read, so
+    // the connection is closed rather than drained (the request did not
+    // ask for a close itself, so the header is the guard's).
+    assert!(
+        reply
+            .to_ascii_lowercase()
+            .contains("\r\nconnection: close\r\n"),
+        "{reply:?}"
+    );
+    assert_eq!(reached.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+/// #32 PR 5 third review L3: a body the guard cannot read (a malformed
+/// chunk) is a 400 that closes the connection, never reaching the service.
+#[tokio::test]
+async fn an_unreadable_body_is_a_400_that_closes_the_connection() {
+    let (addr, reached) = spawn_guarded(guard_with(None, 32, 0, 0)).await;
+    let (status, reply) = request(
+        addr,
+        "POST /mcp HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n\
+         zz\r\nnot a chunk\r\n",
+    )
+    .await;
+    assert_eq!(status, 400, "{reply}");
+    assert!(
+        reply
+            .to_ascii_lowercase()
+            .contains("\r\nconnection: close\r\n"),
+        "{reply:?}"
+    );
+    assert_eq!(reached.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+/// #32 PR 5 third review L1: only a request that would open an MCP session
+/// has its body read by the guard. A request inside a session (or any
+/// other one that opens none) goes on to the router with its body unread,
+/// so a body that is still arriving does not hold it at the guard: here the
+/// service answers at once, long before the guard's body timeout, although
+/// most of the declared body never comes.
+///
+/// Mutation: read the body of every request in the guard (the second
+/// review's version) and this request waits out the timeout and gets 408.
+#[tokio::test]
+async fn only_an_opener_has_its_body_read_by_the_guard() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut guard = guard_with(None, 32, 0, 0);
+    guard.body_timeout = Duration::from_secs(5);
+    let (addr, reached) = spawn_guarded(guard).await;
+
+    let mut sock = tokio::net::TcpStream::connect(addr).await.expect("connect");
+    sock.write_all(
+        b"POST /mcp HTTP/1.1\r\nHost: localhost\r\nMcp-Session-Id: abc\r\n\
+          Content-Length: 64\r\nConnection: close\r\n\r\n{\"jsonrpc\"",
+    )
+    .await
+    .expect("write a head and a little body");
+    let started = Instant::now();
+    let mut raw = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(10), sock.read_to_end(&mut raw)).await;
+    let reply = String::from_utf8_lossy(&raw);
+    assert!(reply.starts_with("HTTP/1.1 200 OK\r\n"), "{reply:?}");
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "the request was not held for its body: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(reached.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+// -----------------------------------------------------------------------
+// #32 PR 5 third review L2: a sessionless call holds no opening
+// -----------------------------------------------------------------------
+
+/// An `initialize` rmcp mints an MCP session for.
+const INITIALIZE_BODY: &str = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"guard-test","version":"1"}}}"#;
+
+/// A sessionless `tools/call` carrying its protocol version per request,
+/// which rmcp answers directly, without an MCP session.
+const PER_REQUEST_CALL_BODY: &str = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"lambo_stats","arguments":{},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#;
+
+/// A sessionless POST to `/mcp` as `auth`, carrying `body`.
+fn post_body(auth: &str, body: &str) -> String {
+    format!(
+        "POST /mcp HTTP/1.1\r\nHost: localhost\r\nAuthorization: {auth}\r\n\
+         Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+/// The guard reserves a slot of the cap only for a body rmcp can mint an
+/// MCP session for (an `initialize` request), read with rmcp's own
+/// deserializer; a body that does not parse is counted (the safe side).
+#[test]
+fn only_an_initialize_body_can_mint_a_session() {
+    assert!(can_mint_a_session(INITIALIZE_BODY.as_bytes()));
+    assert!(!can_mint_a_session(PER_REQUEST_CALL_BODY.as_bytes()));
+    assert!(!can_mint_a_session(
+        br#"{"jsonrpc":"2.0","id":3,"method":"server/discover","params":{}}"#
+    ));
+    assert!(!can_mint_a_session(
+        br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#
+    ));
+    assert!(!can_mint_a_session(
+        br#"{"jsonrpc":"2.0","id":4,"result":{}}"#
+    ));
+    // Not JSON-RPC rmcp can read: counted, never let through uncounted.
+    assert!(can_mint_a_session(b""));
+    assert!(can_mint_a_session(b"{\"jsonrpc\""));
+}
+
+/// #32 PR 5 third review L2: parallel sessionless calls from one credential
+/// hold no opening while they run, so with one slot of its share left the
+/// credential can have many in flight and still open an MCP session. Each
+/// call is held at the service (it is still running) while the next ones
+/// and the `initialize` arrive.
+///
+/// Mutation: reserve for every session-opening request (drop the
+/// `can_mint_a_session` check) and the second call is a 503 at the share.
+#[tokio::test]
+async fn parallel_sessionless_calls_are_not_refused_at_the_share() {
+    let guard = HttpGuard::new(
+        credentials_authority(&["tenant", "operator"]),
+        32,
+        Arc::new(FakeOpeners(vec![("tenant", 15)])),
+        0,
+    );
+    let (addr, reached, release) = spawn_holding(guard).await;
+    let tenant = format!("Bearer {}", fake_token("tenant"));
+
+    let mut calls = Vec::new();
+    for n in 1..=4 {
+        let head = post_body(&tenant, PER_REQUEST_CALL_BODY);
+        calls.push(tokio::spawn(async move { request(addr, &head).await }));
+        until_reached(&reached, n).await;
+    }
+    // The tenant's last slot is still free for an `initialize`.
+    let head = post_body(&tenant, INITIALIZE_BODY);
+    let opener = tokio::spawn(async move { request(addr, &head).await });
+    until_reached(&reached, 5).await;
+    // ...and that one does hold it.
+    let (status, body) = request(addr, &post_body(&tenant, INITIALIZE_BODY)).await;
+    assert_eq!(status, 503, "the opener holds the last slot: {body}");
+
+    release.notify_waiters();
+    for call in calls {
+        let (status, body) = call.await.expect("call");
+        assert_eq!(status, 200, "{body}");
+    }
+    assert_eq!(opener.await.expect("opener").0, 200);
 }

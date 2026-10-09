@@ -23,32 +23,84 @@ use chrono::{DateTime, Utc};
 /// test's other writer share one store, as two processes share a database.
 /// While the flag is set, every `load_session` parks forever: a store that
 /// stalls under an attach that has already taken its lease.
-struct Shared(Arc<MemoryStore>, Arc<std::sync::atomic::AtomicBool>);
+///
+/// Every call is also appended to the third field, `(method, session)`,
+/// the recording wrapper #32 PR 5's "zero store calls" claim is measured
+/// with (`registry::authority`).
+pub(super) struct Shared(
+    Arc<MemoryStore>,
+    Arc<std::sync::atomic::AtomicBool>,
+    Arc<StoreCalls>,
+);
+
+/// The calls a [`Shared`] store has seen, in order: the method and the
+/// session it named (empty when it named none).
+#[derive(Default)]
+pub(super) struct StoreCalls(parking_lot::Mutex<Vec<(&'static str, String)>>);
+
+impl StoreCalls {
+    fn note(&self, method: &'static str, session: &str) {
+        self.0.lock().push((method, session.to_string()));
+    }
+
+    /// How many calls so far.
+    pub(super) fn len(&self) -> usize {
+        self.0.lock().len()
+    }
+
+    /// The calls after the first `from`.
+    pub(super) fn since(&self, from: usize) -> Vec<(&'static str, String)> {
+        self.0.lock().get(from..).unwrap_or_default().to_vec()
+    }
+}
 
 impl Shared {
     fn over(store: &Arc<MemoryStore>) -> Box<dyn GraphStore> {
-        Box::new(Self(Arc::clone(store), Default::default()))
+        Box::new(Self(
+            Arc::clone(store),
+            Default::default(),
+            Default::default(),
+        ))
+    }
+
+    /// [`Shared::over`], handing back the call record too.
+    pub(super) fn recording(store: &Arc<MemoryStore>) -> (Box<dyn GraphStore>, Arc<StoreCalls>) {
+        let calls = Arc::new(StoreCalls::default());
+        (
+            Box::new(Self(
+                Arc::clone(store),
+                Default::default(),
+                Arc::clone(&calls),
+            )),
+            calls,
+        )
     }
 }
 
 #[async_trait::async_trait]
 impl GraphStore for Shared {
     async fn init_schema(&self) -> Result<(), StoreError> {
+        self.2.note("init_schema", "");
         self.0.init_schema().await
     }
     fn capabilities(&self) -> Capabilities {
+        self.2.note("capabilities", "");
         self.0.capabilities()
     }
     async fn preflight_schema(&self) -> Result<(), StoreError> {
+        self.2.note("preflight_schema", "");
         self.0.preflight_schema().await
     }
     fn vector_dimensions(&self) -> Option<usize> {
+        self.2.note("vector_dimensions", "");
         self.0.vector_dimensions()
     }
     async fn flush(&self, batch: &MutationBatch, token: Option<u64>) -> Result<(), StoreError> {
+        self.2.note("flush", "");
         self.0.flush(batch, token).await
     }
     async fn load_session(&self, session: &SessionId) -> Result<GraphSnapshot, StoreError> {
+        self.2.note("load_session", session.as_str());
         if self.1.load(std::sync::atomic::Ordering::SeqCst) {
             std::future::pending::<()>().await;
         }
@@ -60,6 +112,7 @@ impl GraphStore for Shared {
         tokens: &[String],
         limit: usize,
     ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+        self.2.note("keyword_candidates", session.as_str());
         self.0.keyword_candidates(session, tokens, limit).await
     }
     async fn vector_candidates(
@@ -68,6 +121,7 @@ impl GraphStore for Shared {
         embedding: &[f32],
         limit: usize,
     ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+        self.2.note("vector_candidates", session.as_str());
         self.0.vector_candidates(session, embedding, limit).await
     }
     async fn vector_candidates_checked(
@@ -77,14 +131,17 @@ impl GraphStore for Shared {
         expected_contract: &EmbeddingContract,
         limit: usize,
     ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+        self.2.note("vector_candidates_checked", session.as_str());
         self.0
             .vector_candidates_checked(session, embedding, expected_contract, limit)
             .await
     }
     fn exact_vector_scan(&self) -> bool {
+        self.2.note("exact_vector_scan", "");
         self.0.exact_vector_scan()
     }
     fn holder_derives_from_graph(&self) -> bool {
+        self.2.note("holder_derives_from_graph", "");
         self.0.holder_derives_from_graph()
     }
     async fn blast_radius(
@@ -94,6 +151,7 @@ impl GraphStore for Shared {
         min_edge_age: Duration,
         now: DateTime<Utc>,
     ) -> Result<u64, StoreError> {
+        self.2.note("blast_radius", session.as_str());
         self.0.blast_radius(session, node, min_edge_age, now).await
     }
     async fn interaction_span(
@@ -103,6 +161,7 @@ impl GraphStore for Shared {
         min_age: Duration,
         now: DateTime<Utc>,
     ) -> Result<crate::types::InteractionSpan, StoreError> {
+        self.2.note("interaction_span", session.as_str());
         self.0.interaction_span(session, node, min_age, now).await
     }
     async fn record_canonization(
@@ -110,6 +169,8 @@ impl GraphStore for Shared {
         event: &CanonizationEvent,
         token: Option<u64>,
     ) -> Result<(), StoreError> {
+        self.2
+            .note("record_canonization", event.session_id.as_str());
         self.0.record_canonization(event, token).await
     }
     async fn erase_session(
@@ -117,6 +178,7 @@ impl GraphStore for Shared {
         session: &SessionId,
         eraser: &LeaseHolder,
     ) -> Result<EraseOutcome, StoreError> {
+        self.2.note("erase_session", session.as_str());
         self.0.erase_session(session, eraser).await
     }
     async fn backfill_recall_index(
@@ -124,6 +186,7 @@ impl GraphStore for Shared {
         session: &SessionId,
         holder: &LeaseHolder,
     ) -> Result<Option<RecallBackfillReport>, StoreError> {
+        self.2.note("backfill_recall_index", session.as_str());
         self.0.backfill_recall_index(session, holder).await
     }
     async fn acquire_lease(
@@ -132,9 +195,11 @@ impl GraphStore for Shared {
         holder: &LeaseHolder,
         ttl: Duration,
     ) -> Result<LeaseOutcome, StoreError> {
+        self.2.note("acquire_lease", session.as_str());
         self.0.acquire_lease(session, holder, ttl).await
     }
     async fn read_lease(&self, session: &SessionId) -> Result<Option<LeaseInfo>, StoreError> {
+        self.2.note("read_lease", session.as_str());
         self.0.read_lease(session).await
     }
     async fn refresh_lease(
@@ -143,6 +208,7 @@ impl GraphStore for Shared {
         holder: &LeaseHolder,
         ttl: Duration,
     ) -> Result<LeaseOutcome, StoreError> {
+        self.2.note("refresh_lease", session.as_str());
         self.0.refresh_lease(session, holder, ttl).await
     }
     async fn release_lease(
@@ -150,6 +216,7 @@ impl GraphStore for Shared {
         session: &SessionId,
         holder: &LeaseHolder,
     ) -> Result<(), StoreError> {
+        self.2.note("release_lease", session.as_str());
         self.0.release_lease(session, holder).await
     }
     async fn record_lease_refusal(
@@ -158,6 +225,7 @@ impl GraphStore for Shared {
         refused_by: &str,
         current_holder: &str,
     ) -> Result<(), StoreError> {
+        self.2.note("record_lease_refusal", session.as_str());
         self.0
             .record_lease_refusal(session, refused_by, current_holder)
             .await
@@ -167,6 +235,7 @@ impl GraphStore for Shared {
         session: &SessionId,
         since: DateTime<Utc>,
     ) -> Result<Vec<crate::store::lease::LeaseRefusal>, StoreError> {
+        self.2.note("pending_lease_refusals", session.as_str());
         self.0.pending_lease_refusals(session, since).await
     }
     async fn write_flush_stats(
@@ -174,12 +243,14 @@ impl GraphStore for Shared {
         session: &SessionId,
         stats: &SessionFlushStats,
     ) -> Result<(), StoreError> {
+        self.2.note("write_flush_stats", session.as_str());
         self.0.write_flush_stats(session, stats).await
     }
     async fn read_flush_stats(
         &self,
         session: &SessionId,
     ) -> Result<Option<SessionFlushStats>, StoreError> {
+        self.2.note("read_flush_stats", session.as_str());
         self.0.read_flush_stats(session).await
     }
 }
@@ -210,7 +281,8 @@ impl PinnedServe {
         };
         let opts = pinned_opts(sessions, tweak);
         let backends = backends_over(Shared::over(store), fast_config(1_000));
-        let task = tokio::spawn(serve_pinned_with(opts, backends, seams));
+        let authority = authority_for(&opts);
+        let task = tokio::spawn(serve_pinned_with(opts, backends, authority, seams));
         let registry = tokio::time::timeout(Duration::from_secs(20), rx)
             .await
             .expect("the serve starts")
@@ -480,7 +552,12 @@ async fn a_pinned_session_that_cannot_attach_refuses_the_start_and_releases_the_
     let backends = backends_over(Shared::over(&store), fast_config(1_000));
     let err = tokio::time::timeout(
         Duration::from_secs(20),
-        serve_pinned_with(opts, backends, PinnedSeams::default()),
+        serve_pinned_with(
+            opts.clone(),
+            backends,
+            authority_for(&opts),
+            PinnedSeams::default(),
+        ),
     )
     .await
     .expect("the refusal is prompt")
@@ -600,6 +677,80 @@ async fn the_serve_s_404_is_byte_identical_on_the_wire() {
     serve.stop().await.expect("a clean shutdown");
 }
 
+/// #32 PR 5 (PR 4 review L6), on the real multi-session serve: with
+/// credentials configured, a caller whose scope leaves out a session held
+/// elsewhere gets the unrouted 404 for it, byte for byte, exactly as for a
+/// name the serve does not host; only a caller in scope sees its 503.
+#[tokio::test]
+async fn an_out_of_scope_caller_gets_the_unrouted_404_for_a_held_session() {
+    let (logs, _guard) = crate::test_util::capture_logs(tracing::Level::INFO);
+    let store = Arc::new(MemoryStore::new());
+    store
+        .acquire_lease(&SessionId::new("held-b"), &other_writer(), LEASE_TTL)
+        .await
+        .expect("the other writer holds b");
+    let fake = |label: &str| ["fake", label, "held", "value"].join("-");
+    let grant = |name: &str, sessions: &[&str]| {
+        crate::surface::session::SessionGrant::new(
+            name,
+            crate::surface::session::SessionScope::new(
+                sessions
+                    .iter()
+                    .map(|s| crate::surface::session::parse_addressed(s).expect("addressable")),
+                false,
+                None,
+            ),
+            Default::default(),
+        )
+    };
+    let credentials = vec![
+        crate::config::ServeCredential {
+            grant: grant("only-a", &["held-a"]),
+            token: SecretToken::new(fake("only-a")).expect("non-empty"),
+        },
+        crate::config::ServeCredential {
+            grant: grant("both", &["held-a", "held-b"]),
+            token: SecretToken::new(fake("both")).expect("non-empty"),
+        },
+    ];
+    let serve = PinnedServe::start(&store, &["held-a", "held-b"], |opts| {
+        opts.credentials = credentials;
+    })
+    .await;
+    let addr = bound_addr(&logs).await;
+
+    let only_a = format!("Bearer {}", fake("only-a"));
+    let reference =
+        crate::test_util::on_the_wire_as(addr, "GET", "/not/routed", Some(&only_a)).await;
+    assert!(
+        reference.starts_with("HTTP/1.1 404 Not Found\r\n"),
+        "{reference}"
+    );
+    for method in ["GET", "POST", "DELETE"] {
+        for path in ["/mcp/s/held-b", "/mcp/s/held-unhosted"] {
+            assert_eq!(
+                crate::test_util::on_the_wire_as(addr, method, path, Some(&only_a)).await,
+                reference,
+                "{method} {path}"
+            );
+        }
+    }
+    let both = format!("Bearer {}", fake("both"));
+    let in_scope =
+        crate::test_util::on_the_wire_as(addr, "GET", "/mcp/s/held-b", Some(&both)).await;
+    assert!(
+        in_scope.starts_with("HTTP/1.1 503 Service Unavailable\r\n"),
+        "{in_scope}"
+    );
+    let no_token = crate::test_util::on_the_wire_as(addr, "GET", "/mcp/s/held-a", None).await;
+    assert!(
+        no_token.starts_with("HTTP/1.1 401 Unauthorized\r\n"),
+        "{no_token}"
+    );
+
+    serve.stop().await.expect("a clean shutdown");
+}
+
 /// #32 review L8: the shutdown does not wait on a background attach. The
 /// retry of a session held elsewhere takes the lease and then stalls in its
 /// store load. J6's pre-arm, which that load is raced against, records no
@@ -615,7 +766,11 @@ async fn the_shutdown_abandons_a_background_attach_and_releases_its_lease() {
     let registry = new_registry(
         &["l8-a", "l8-b"],
         backends_over(
-            Box::new(Shared(Arc::clone(&store), Arc::clone(&stall))),
+            Box::new(Shared(
+                Arc::clone(&store),
+                Arc::clone(&stall),
+                Default::default(),
+            )),
             fast_config(1_000),
         ),
         32,

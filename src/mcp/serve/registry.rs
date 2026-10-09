@@ -38,7 +38,7 @@ use std::time::{Duration, Instant};
 use super::builder::explain_startup_failure;
 use super::hub::{derive_endpoint, SessionEndpoint};
 use super::roles::{record_refused_loser, ELECTION_RETRY};
-use super::session::{session_server, AttachedSession};
+use super::session::{session_server, AttachedSession, HostCheck};
 use super::shutdown::{book_lease_loss, close_sessions, LEASE_RELEASE_GRACE, SHUTDOWN_GRACE};
 use super::signals::EarlyShutdown;
 use super::stages::{ShutdownProgress, Stage};
@@ -128,6 +128,15 @@ struct PreviousHandle {
 /// the `SecondSessionWriter` ERROR the re-attach then logs is a true report.
 const PREVIOUS_HANDLE_WAIT: Duration = Duration::from_secs(30);
 
+/// The states [`SessionRegistry::force_state`] can put a session in.
+#[cfg(all(test, unix, feature = "store-memory", feature = "embed-fixture"))]
+#[derive(Clone, Copy, Debug)]
+pub(super) enum ForcedState {
+    Detaching,
+    HeldElsewhere,
+    Failed,
+}
+
 /// What the router gets for a session id.
 pub(super) enum Lookup {
     /// Serve the request on this session.
@@ -156,6 +165,8 @@ pub(super) struct SessionAttacher {
     pub(super) ledger: Option<Arc<Ledger>>,
     /// The per-session endpoint's MCP-session cap (`--max-sessions`).
     pub(super) max_sessions: usize,
+    /// Each session's HTTP `Host` check (#32 PR 5 review M1).
+    pub(super) host_check: HostCheck,
     /// The agent this process writes as.
     pub(super) agent: String,
 }
@@ -273,6 +284,24 @@ impl SessionRegistry {
         }
     }
 
+    /// Put hosted session `id` in a state that is not serving, without the
+    /// detach, lease or retry that would normally lead there, so the
+    /// router's answers for each state can be compared (#32 PR 5). Gated
+    /// like its reader, the registry tests.
+    #[cfg(all(test, unix, feature = "store-memory", feature = "embed-fixture"))]
+    pub(super) fn force_state(&self, id: &str, state: ForcedState) {
+        let slot = match state {
+            ForcedState::Detaching => Slot::Detaching,
+            ForcedState::HeldElsewhere => Slot::HeldElsewhere {
+                retry_at: Instant::now() + PINNED_RETRY,
+                previous: None,
+                warned: false,
+            },
+            ForcedState::Failed => Slot::Failed,
+        };
+        self.slots.lock().insert(id.to_string(), slot);
+    }
+
     /// Mark the startup set complete: the process tasks waiting on it start.
     pub(super) fn mark_started(&self) {
         self.started.send_replace(true);
@@ -342,12 +371,22 @@ impl SessionRegistry {
         mem: Arc<Memory>,
         endpoint: Option<SessionEndpoint>,
     ) -> Arc<AttachedSession> {
-        let (ledger, max_sessions) = match &self.attacher {
-            Some(attacher) => (attacher.ledger.clone(), attacher.max_sessions),
-            None => (None, crate::mcp::DEFAULT_MAX_SESSIONS),
+        let (ledger, max_sessions, host_check) = match &self.attacher {
+            Some(attacher) => (
+                attacher.ledger.clone(),
+                attacher.max_sessions,
+                attacher.host_check,
+            ),
+            None => (None, crate::mcp::DEFAULT_MAX_SESSIONS, HostCheck::Loopback),
         };
         let server = session_server(&mem, &ledger);
-        let session = Arc::new(AttachedSession::attach(mem, server, endpoint, max_sessions));
+        let session = Arc::new(AttachedSession::attach(
+            mem,
+            server,
+            endpoint,
+            max_sessions,
+            host_check,
+        ));
         self.insert_live(Arc::clone(&session));
         session
     }
@@ -795,13 +834,23 @@ async fn watch_lease(
 }
 
 /// The process-wide MCP-session cap counts every attached session's MCP
-/// sessions (design §3.6): one `--max-sessions` for the whole process.
+/// sessions (design §3.6): one `--max-sessions` for the whole process. Each
+/// credential's share of it counts the MCP sessions that credential opened,
+/// across every attached session (#32 PR 5 review M2).
 #[async_trait::async_trait]
 impl super::http_guards::LiveSessions for SessionRegistry {
     async fn live(&self) -> usize {
         let mut total = 0;
         for session in self.attached() {
             total += session.live_mcp_sessions().await;
+        }
+        total
+    }
+
+    async fn live_opened_by(&self, credential: &str) -> usize {
+        let mut total = 0;
+        for session in self.attached() {
+            total += session.live_mcp_sessions_opened_by(credential).await;
         }
         total
     }

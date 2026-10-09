@@ -73,6 +73,33 @@ fn an_empty_auth_token_is_refused() {
     assert!(AuthToken::new("s3cret").is_ok());
 }
 
+/// A set `LAMBO_AUTH_TOKEN` that is not valid UTF-8 is a usage error
+/// naming the variable, never the value, and never read as unset (which
+/// fell back to the flag or to an unauthenticated loopback window). The
+/// same defect as `lambo serve`'s, #32 PR 5 review S2.
+#[test]
+fn a_non_utf8_auth_token_variable_is_refused_not_treated_as_unset() {
+    use std::os::unix::ffi::OsStringExt;
+    let mut raw = b"fake-".to_vec();
+    raw.push(0xFF);
+    for flag in [Some(AuthToken::new("from-flag").expect("valid")), None] {
+        let err = super::super::auth::resolve_auth_token_from(
+            flag,
+            Some(std::ffi::OsString::from_vec(raw.clone())),
+        )
+        .expect_err("a non-UTF-8 value must fail closed");
+        let msg = err.to_string();
+        assert!(
+            msg.contains(AUTH_TOKEN_ENV) && msg.contains("UTF-8"),
+            "{msg}"
+        );
+        assert!(!msg.contains("fake-"), "never the value: {msg}");
+    }
+    let out = super::super::auth::resolve_auth_token_from(None, Some("from-env".into()))
+        .expect("a UTF-8 value resolves");
+    assert_eq!(out, Some(AuthToken::new("from-env").expect("valid")));
+}
+
 /// The `Authorization` header is parsed strictly: scheme case-insensitive,
 /// credential exact.
 #[test]
