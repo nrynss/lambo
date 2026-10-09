@@ -28,8 +28,12 @@
 //! It then computes the SHA-256 once, for the image id and the embedding
 //! source later PRs record.
 //!
-//! The input here is raw bytes. The MCP surface (#22 PR 4) decodes base64 and
-//! caps the encoded length before it calls this.
+//! The input here is raw bytes. The MCP surface (#22 PR 4) decodes base64
+//! with [`decode_base64`], which caps the encoded length **before** it
+//! decodes (stdio has no transport cap), and then calls this.
+//!
+//! A client-computed vector (#22 PR 4) is checked by
+//! [`check_submitted_vector`], the model-safe twin of the core's own check.
 //!
 //! **No message echoes the payload.** A refusal names the rule, the limit and
 //! at most the sniffed format; never image bytes, and never the declared MIME
@@ -47,6 +51,100 @@ pub const MAX_IMAGE_BYTES: usize = 2 * 1024 * 1024;
 
 /// Largest width or height, in pixels, an image header may declare.
 pub const MAX_IMAGE_SIDE_PX: u32 = 4096;
+
+/// Longest base64 text [`decode_base64`] accepts: the padded standard
+/// encoding of [`MAX_IMAGE_BYTES`] (`4 * ceil(MAX_IMAGE_BYTES / 3)`), so no
+/// image the byte cap allows is refused for its encoding, and nothing longer
+/// is ever decoded. The MCP schema publishes it as `maxLength`.
+pub const MAX_IMAGE_B64_LEN: usize = MAX_IMAGE_BYTES.div_ceil(3) * 4;
+
+/// Most components a submitted vector may have. The MCP schema publishes it
+/// as `maxItems`; the live contract's width is checked after it.
+pub const MAX_VECTOR_VALUES: usize = 4096;
+
+/// Decode an image's base64 text (standard alphabet, padded), refusing text
+/// longer than [`MAX_IMAGE_B64_LEN`] before decoding any of it.
+///
+/// The messages name the rule and the limit; they never quote the input.
+pub fn decode_base64(data: &str) -> Result<Vec<u8>, String> {
+    use base64::Engine as _;
+    if data.len() > MAX_IMAGE_B64_LEN {
+        return Err(format!(
+            "image.data is {} characters, over the {MAX_IMAGE_B64_LEN}-character limit \
+             (a {MAX_IMAGE_BYTES}-byte image, base64-encoded)",
+            data.len()
+        ));
+    }
+    base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .map_err(|_| "image.data is not valid base64 (standard alphabet, padded)".to_owned())
+}
+
+/// Check a client-computed vector against the live contract before anything
+/// else sees it: the declared contract must equal `live` exactly (kind, model
+/// and dim), the vector must have at most [`MAX_VECTOR_VALUES`] components
+/// and exactly `live.dim` of them, every component must be finite, and the
+/// norm must not be zero.
+///
+/// The same rules as the core's `check_supplied_values`, with a message a
+/// caller may read: it names which fields of the declared contract differ
+/// and shows the live contract (which `lambo_stats` publishes as
+/// `embedding_contract`), but never quotes the declared strings, the values,
+/// or any other client input.
+pub fn check_submitted_vector(
+    values: &[f32],
+    declared: &crate::types::EmbeddingContract,
+    live: &crate::types::EmbeddingContract,
+) -> Result<(), String> {
+    if values.len() > MAX_VECTOR_VALUES {
+        return Err(format!(
+            "vector.values has {} components, over the limit of {MAX_VECTOR_VALUES}",
+            values.len()
+        ));
+    }
+    let mut differ = Vec::new();
+    if declared.kind != live.kind {
+        differ.push("kind");
+    }
+    if declared.model != live.model {
+        differ.push("model");
+    }
+    if declared.dim != live.dim {
+        differ.push("dim");
+    }
+    if !differ.is_empty() {
+        return Err(format!(
+            "vector.contract does not match this session's embedding contract ({} differ{}); \
+             a vector is accepted only into the exact space it was computed in. This \
+             session's contract is kind={:?} model={:?} dim={} (lambo_stats reports it as \
+             embedding_contract)",
+            differ.join(", "),
+            if differ.len() == 1 { "s" } else { "" },
+            live.kind,
+            live.model.as_deref().unwrap_or(""),
+            live.dim
+        ));
+    }
+    if values.len() != live.dim {
+        return Err(format!(
+            "vector.values has {} components but the embedding contract's dim is {}",
+            values.len(),
+            live.dim
+        ));
+    }
+    if values.iter().any(|x| !x.is_finite()) {
+        return Err("vector.values has a non-finite component (NaN or infinity)".into());
+    }
+    let norm = values
+        .iter()
+        .map(|x| f64::from(*x) * f64::from(*x))
+        .sum::<f64>()
+        .sqrt();
+    if norm == 0.0 || !norm.is_finite() {
+        return Err("vector.values has zero norm; it names no direction to search by".into());
+    }
+    Ok(())
+}
 
 const PNG_MAGIC: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
 const JPEG_MAGIC: &[u8; 3] = b"\xFF\xD8\xFF";

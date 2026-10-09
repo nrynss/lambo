@@ -579,3 +579,88 @@ fn image_chunks_must_be_well_formed_key_frames_inside_the_riff() {
     past_end.extend_from_slice(&chunk(b"VP8L", &vp8l_payload(8, 8)));
     unreadable("image chunk past the RIFF end", past_end);
 }
+
+/// #22 PR 4: the cap is the padded encoding of the byte cap, so the largest
+/// image the byte cap allows still fits, and nothing longer is decoded.
+#[test]
+fn the_base64_cap_is_the_encoding_of_the_byte_cap() {
+    use base64::Engine as _;
+    assert_eq!(MAX_IMAGE_B64_LEN, 2_796_204);
+    let largest = base64::engine::general_purpose::STANDARD.encode(vec![0u8; MAX_IMAGE_BYTES]);
+    assert_eq!(largest.len(), MAX_IMAGE_B64_LEN);
+    assert_eq!(decode_base64(&largest).unwrap().len(), MAX_IMAGE_BYTES);
+}
+
+#[test]
+fn base64_refusals_never_quote_the_input() {
+    use base64::Engine as _;
+    let png = png(8, 8);
+    let text = base64::engine::general_purpose::STANDARD.encode(&png);
+    assert_eq!(decode_base64(&text).unwrap(), png);
+
+    let over = "QUFB".repeat(MAX_IMAGE_B64_LEN / 4 + 1);
+    let err = decode_base64(&over).unwrap_err();
+    assert!(err.contains(&MAX_IMAGE_B64_LEN.to_string()), "{err}");
+    assert!(!err.contains("QUFB"), "{err}");
+
+    let padded = base64::engine::general_purpose::STANDARD.encode([1u8, 2, 3, 4]);
+    assert_eq!(padded, "AQIDBA==");
+    // Unpadded and URL-safe forms are refused, not guessed at.
+    for bad in ["not base64 at all!", "AQIDBA", "_-_-"] {
+        let err = decode_base64(bad).unwrap_err();
+        assert_eq!(
+            err,
+            "image.data is not valid base64 (standard alphabet, padded)"
+        );
+    }
+}
+
+fn contract(kind: &str, model: Option<&str>, dim: usize) -> crate::types::EmbeddingContract {
+    crate::types::EmbeddingContract {
+        kind: kind.into(),
+        model: model.map(str::to_owned),
+        dim,
+    }
+}
+
+/// AC4 at the wire: a mismatched contract names the fields that differ and the
+/// live contract, never the declared strings or a value.
+#[test]
+fn a_submitted_vector_is_checked_without_echoing_it() {
+    let live = contract(
+        "embeddinggemma2",
+        Some("ggml-org/eg2@x/Q8_0;prompts=lambo-eg2-v1"),
+        4,
+    );
+    let unit = [0.5f32, 0.5, 0.5, 0.5];
+    check_submitted_vector(&unit, &live, &live).unwrap();
+
+    let declared = contract("embeddinggemma2", Some("SECRET-MODEL-LABEL"), 4);
+    let err = check_submitted_vector(&unit, &declared, &live).unwrap_err();
+    assert!(err.contains("(model differs)"), "{err}");
+    assert!(
+        err.contains("prompts=lambo-eg2-v1"),
+        "the live model is shown whole: {err}"
+    );
+    assert!(!err.contains("SECRET-MODEL-LABEL"), "{err}");
+
+    let declared = contract("SECRET-KIND", None, 3);
+    let err = check_submitted_vector(&unit, &declared, &live).unwrap_err();
+    assert!(err.contains("(kind, model, dim differ)"), "{err}");
+    assert!(!err.contains("SECRET-KIND"), "{err}");
+
+    let cases: [(&[f32], &str); 4] = [
+        (&[0.5, 0.5, 0.5], "3 components"),
+        (&[0.5, f32::NAN, 0.5, 0.5], "non-finite"),
+        (&[0.5, f32::INFINITY, 0.5, 0.5], "non-finite"),
+        (&[0.0, 0.0, 0.0, 0.0], "zero norm"),
+    ];
+    for (values, want) in cases {
+        let err = check_submitted_vector(values, &live, &live).unwrap_err();
+        assert!(err.contains(want), "{want}: {err}");
+        assert!(!err.contains("0.5"), "no value is echoed: {err}");
+    }
+    let long = vec![0.1f32; MAX_VECTOR_VALUES + 1];
+    let err = check_submitted_vector(&long, &live, &live).unwrap_err();
+    assert!(err.contains("over the limit of 4096"), "{err}");
+}

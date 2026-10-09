@@ -159,8 +159,62 @@ pub fn check_action_targets(total: usize) -> Result<(), String> {
     Ok(())
 }
 
+/// Refuse text that would carry an image concept's suffix (`[image:`) into a
+/// concept's own content (#22 PR 4): `lambo_derive`'s concepts and
+/// `lambo_record_action`'s action, on MCP and the CLI.
+///
+/// Only `lambo_derive_image` builds that suffix. A text concept whose content
+/// holds it can take an image's canonical key before the image is derived,
+/// and the image derive is then refused (`LamboError::ImageIdTaken`); refusing
+/// the text at the door closes that for every text that is a concept's own
+/// content. Checked on the raw text and on its canonical tokens, the same
+/// rule as an image caption (`graph::image::check_caption`), so `[IMAGE:` or
+/// a suffix split by an invisible character is refused too.
+///
+/// **References are not checked.** A `parent_of` end or an action's
+/// `produces` / `modifies` / `depends_on` entry *names* a concept, and naming
+/// an image concept by its content (`"red saree [image:r17]"`) is how a text
+/// write links to it (design 5.2). If no such concept exists yet, the
+/// reference creates a text concept with that key, and the later image derive
+/// is refused with its own message (choose another image id): loud, never a
+/// silent image with no vector.
+///
+/// The message names the field and the rule; it never quotes the value.
+pub fn check_no_image_suffix(field: &str, value: &str) -> Result<(), String> {
+    use crate::graph::image::IMAGE_SUFFIX_OPEN;
+    if value.contains(IMAGE_SUFFIX_OPEN)
+        || crate::graph::canonical::normalize_tokens(value)
+            .iter()
+            .any(|t| t.contains(IMAGE_SUFFIX_OPEN))
+    {
+        return Err(format!(
+            "{field} may not contain {IMAGE_SUFFIX_OPEN:?}: that suffix names an image concept, \
+             which only lambo_derive_image creates. To refer to an image concept, name it in \
+             parent_of or in an action's produces, modifies or depends_on"
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+    /// #22 PR 4: the image suffix is refused in a concept's own text, raw or
+    /// in any spelling that canonicalizes to it, and the value is not quoted.
+    #[test]
+    fn the_image_suffix_is_refused_in_concept_text_without_quoting_it() {
+        check_no_image_suffix("concept.content", "red silk saree, image of it").unwrap();
+        check_no_image_suffix("concept.content", "an [image] of [a:b]").unwrap();
+        for text in [
+            "render 17 [image:r17]",
+            "Render 17 [IMAGE:R17]",
+            "[ima\u{200B}ge:r17] render",
+        ] {
+            let err = check_no_image_suffix("concept.content", text).unwrap_err();
+            assert!(err.starts_with("concept.content may not contain"), "{err}");
+            assert!(!err.contains("r17") && !err.contains("R17"), "{err}");
+        }
+    }
+
     use super::*;
 
     #[test]
