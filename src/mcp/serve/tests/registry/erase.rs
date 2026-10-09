@@ -1,0 +1,770 @@
+//! #32 PR 7: the admin surface and the in-serve erase (design §6.3), on the
+//! wire, through the serve's own router and guards over a registry of two
+//! pinned sessions on one recording store.
+//!
+//! * Erasing an attached session: the post-erase census is zero rows of
+//!   every kind except the tombstone; a flush parked in flight when the
+//!   erase began never lands; the lease is never released (no gap another
+//!   writer could take); the slot is `Erased`; a later request is refused
+//!   (410) and nothing recreates the session; the other session keeps
+//!   serving; the erased handle is dropped; a repeat is `already_absent`.
+//! * Erasing a session this process does not hold (every table kind
+//!   planted, an image intent included): census zero but the tombstone.
+//! * A live holder elsewhere: 409, nothing touched. A confirm that does not
+//!   repeat the id, or a malformed body: 400, nothing touched.
+//! * A credential without `erase`, or with the session out of its scope,
+//!   gets the unrouted 404 byte for byte with no store call; so does
+//!   `/admin/sessions` without `admin`, which lists only the caller's scope.
+//! * The MCP tool list is the same for every credential and has no erase.
+
+use super::pinned_serve::{Shared, StoreCalls};
+use super::*;
+use crate::config::ServeCredential;
+use crate::mcp::serve::registry::ForcedState;
+use crate::store::erase::testkit::planted_batch;
+use crate::store::lease::{LeaseHolder, LeaseOutcome};
+use crate::surface::session::{
+    parse_addressed, SessionCapabilities, SessionGrant, SessionPrefix, SessionScope,
+};
+use crate::test_util::{on_the_wire_as, on_the_wire_with};
+use crate::types::SessionId;
+
+const A: &str = "er-a";
+const B: &str = "er-b";
+const HELD: &str = "er-held";
+const HOSTED: [&str; 3] = [A, B, HELD];
+/// The MCP-session cap: room for each of the six credentials' share to
+/// hold a few MCP sessions (#32 PR 5 review M2).
+const CAP: usize = 36;
+/// The prefix the `app` credential erases users under.
+const USERS: &str = "er-u-";
+
+fn token(label: &str) -> String {
+    ["fake", label, "erase", "value"].join("-")
+}
+
+fn bearer(label: &str) -> String {
+    format!("Bearer {}", token(label))
+}
+
+/// A credential over exact `sessions` (or every hosted one with `"*"`),
+/// and/or a prefix, with the flags given.
+fn credential(
+    name: &str,
+    sessions: &[&str],
+    prefix: Option<&str>,
+    caps: SessionCapabilities,
+) -> ServeCredential {
+    let every = sessions.contains(&"*");
+    ServeCredential {
+        grant: SessionGrant::new(
+            name,
+            SessionScope::new(
+                sessions
+                    .iter()
+                    .filter(|s| **s != "*")
+                    .map(|s| parse_addressed(s).expect("addressable")),
+                every,
+                prefix.map(|p| SessionPrefix::new(p).expect("a prefix")),
+            ),
+            caps,
+        ),
+        token: SecretToken::new(token(name)).expect("non-empty"),
+    }
+}
+
+fn erase_cap() -> SessionCapabilities {
+    SessionCapabilities {
+        erase: true,
+        ..SessionCapabilities::default()
+    }
+}
+
+fn admin_cap() -> SessionCapabilities {
+    SessionCapabilities {
+        admin: true,
+        ..SessionCapabilities::default()
+    }
+}
+
+/// A config whose write-behind flush runs every 50 ms, so a test can hold
+/// one in flight with the store's flush gate.
+fn flushing_config() -> crate::Config {
+    crate::Config {
+        backend_flush_interval: Duration::from_millis(50),
+        ..fast_config(1_000)
+    }
+}
+
+/// The router over a registry hosting [`HOSTED`]: `er-a` and `er-b`
+/// attached, `er-held` held by another writer. Credentials:
+///
+/// | name | scope | flags |
+/// |---|---|---|
+/// | `agent` | `er-a`, `er-b` | none |
+/// | `ops` | `er-a`, `er-b`, `er-held` | `erase` |
+/// | `other` | `er-b` | `erase` |
+/// | `app` | prefix `er-u-` | `erase` |
+/// | `root` | `"*"` | `admin` |
+/// | `boss-b` | `er-b` | `admin` |
+struct Wire {
+    addr: SocketAddr,
+    store: Arc<MemoryStore>,
+    calls: Arc<StoreCalls>,
+    registry: Arc<SessionRegistry>,
+}
+
+async fn wire() -> Wire {
+    let mut opts = ServeOptions::new(A, "agent-a");
+    opts.sessions = HOSTED.iter().map(|s| s.to_string()).collect();
+    opts.transport = Transport::Http;
+    opts.credentials = vec![
+        credential("agent", &[A, B], None, SessionCapabilities::default()),
+        credential("ops", &HOSTED, None, erase_cap()),
+        credential("other", &[B], None, erase_cap()),
+        credential("app", &[], Some(USERS), erase_cap()),
+        credential("root", &["*"], None, admin_cap()),
+        credential("boss-b", &[B], None, admin_cap()),
+    ];
+    let authority = authority_for(&opts);
+
+    let store = Arc::new(MemoryStore::new());
+    // `er-held` is another process's: a live lease before the serve starts.
+    let LeaseOutcome::Acquired(_) = store
+        .acquire_lease(
+            &SessionId::new(HELD),
+            &elsewhere(),
+            crate::store::lease::LEASE_TTL,
+        )
+        .await
+        .expect("acquire")
+    else {
+        panic!("the other writer takes er-held");
+    };
+    let (recorded, calls) = Shared::recording(&store);
+    let registry = new_registry_with(
+        &HOSTED,
+        backends_over(recorded, flushing_config()),
+        CAP,
+        HostCheck::for_authority(Some(&authority)),
+    );
+    for id in HOSTED {
+        attach_or_hold(&registry, id).await;
+    }
+    registry.mark_started();
+    let addr = serve_app(guarded_app(Arc::clone(&registry), authority, CAP)).await;
+    Wire {
+        addr,
+        store,
+        calls,
+        registry,
+    }
+}
+
+/// Another process's lease holder.
+fn elsewhere() -> LeaseHolder {
+    LeaseHolder {
+        agent: crate::types::AgentId::new("someone-else"),
+        pid: 1,
+        host: "elsewhere".into(),
+        endpoint: None,
+    }
+}
+
+/// `POST /admin/s/{id}/erase` as `cred` with `body`.
+async fn erase_as(addr: SocketAddr, cred: &str, id: &str, body: &str) -> Reply {
+    http_as(
+        addr,
+        "POST",
+        &format!("/admin/s/{id}/erase"),
+        Some(&bearer(cred)),
+        None,
+        body,
+    )
+    .await
+}
+
+fn confirm(id: &str) -> String {
+    serde_json::json!({ "confirm": id }).to_string()
+}
+
+/// Rows of every kind the store keeps for `id`, without the lease row.
+fn census_but_lease(store: &MemoryStore, id: &str) -> Vec<(&'static str, usize)> {
+    store
+        .erase_census(&SessionId::new(id))
+        .into_iter()
+        .filter(|(kind, _)| *kind != "session_leases")
+        .collect()
+}
+
+/// Assert `id` is erased: no row of any kind but the lease row, which is
+/// the tombstone.
+async fn assert_only_the_tombstone(store: &MemoryStore, id: &str) {
+    for (kind, n) in census_but_lease(store, id) {
+        assert_eq!(n, 0, "{id}: {kind} rows remain after the erase");
+    }
+    let lease = store
+        .read_lease(&SessionId::new(id))
+        .await
+        .expect("read_lease")
+        .expect("the tombstone row stays");
+    assert!(
+        crate::store::erase::is_tombstone(&lease),
+        "{id}: the lease row is the tombstone: {lease:?}"
+    );
+}
+
+/// The registry's row for `id` in its admin view.
+fn state_of(registry: &SessionRegistry, id: &str) -> &'static str {
+    registry
+        .slot_views()
+        .into_iter()
+        .find(|v| v.session == id)
+        .map_or("absent", |v| v.state)
+}
+
+/// Wait until `cond` holds, up to 10 s.
+async fn eventually(what: &str, mut cond: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !cond() {
+        assert!(Instant::now() < deadline, "timed out waiting for: {what}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// The acceptance row's first item, with the ordering hazards in play: a
+/// write already flushed, a write applied but not yet durable whose flush
+/// is parked **inside the store** when the erase starts, and an MCP session
+/// still open. After the erase the census is the tombstone alone, and stays
+/// so once the parked flush is let go: the fenced close joined the flush
+/// task, so that flush never lands. The lease is never released on the way
+/// (a release would open the gap another writer could take, design Q7),
+/// the slot is `Erased`, requests are refused with 410, nothing recreates
+/// the session, the handle is dropped, and the other session serves on.
+///
+/// Mutations: erase without the fence-and-close (straight to the store)
+/// and the parked flush lands after it, recreating rows; close the handle
+/// unfenced first (flush and release, then erase) and `release_lease`
+/// shows up; leave the slot `Live` and the request after is served.
+#[tokio::test]
+async fn erasing_an_attached_session_leaves_only_the_tombstone_and_nothing_recreates_it() {
+    let w = wire().await;
+    let addr = w.addr;
+    let agent = bearer("agent");
+
+    // A durable write: wait until the flush has carried it to the store.
+    let (mcp_a, _) = initialize_as(addr, "/mcp/s/er-a", Some(&agent)).await;
+    derive_as(addr, &agent, "/mcp/s/er-a", &mcp_a, &["erase me first"]).await;
+    eventually("the first write is durable", || {
+        census_but_lease(&w.store, A)
+            .iter()
+            .any(|(kind, n)| *kind == "concepts" && *n > 0)
+    })
+    .await;
+    // A second write, applied in RAM, whose flush is parked in the store.
+    w.calls.park_flushes();
+    derive_as(addr, &agent, "/mcp/s/er-a", &mcp_a, &["erase me too"]).await;
+    eventually("a flush is parked in flight", || {
+        w.calls.parked_flushes() > 0
+    })
+    .await;
+
+    // B has data too, and must not lose any of it.
+    let (mcp_b, _) = initialize_as(addr, "/mcp/s/er-b", Some(&agent)).await;
+    let handle_a = Arc::downgrade(&w.registry.attached()[0].mem);
+    assert_eq!(w.registry.attached()[0].id().as_str(), A);
+
+    let before = w.calls.len();
+    let reply = erase_as(addr, "ops", A, &confirm(A)).await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(
+        reply.header("content-type").as_deref(),
+        Some("application/json")
+    );
+    let report: serde_json::Value =
+        serde_json::from_str(reply.body.trim_end()).expect("the report is JSON");
+    assert!(
+        reply.body.ends_with("}\n"),
+        "one line, as the CLI prints it"
+    );
+    assert_eq!(report["session"], A);
+    assert_eq!(report["already_absent"], false);
+    assert!(
+        report["removed"]["concepts"].as_u64().unwrap() >= 1,
+        "{report}"
+    );
+    assert_eq!(report["removed"]["leases"], 1, "{report}");
+    assert_only_the_tombstone(&w.store, A).await;
+    assert_eq!(state_of(&w.registry, A), "erased");
+
+    // The parked flush is let go: the fenced close dropped it, so nothing
+    // lands, now or later.
+    w.calls.release_flushes();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_only_the_tombstone(&w.store, A).await;
+    let during = w.calls.since(before);
+    for (method, session) in &during {
+        assert!(
+            !(*method == "release_lease" && session == A),
+            "the erase released the lease before erasing (a gap another writer could take): \
+             {during:?}"
+        );
+        assert!(
+            !matches!(*method, "acquire_lease" | "load_session" if session == A),
+            "nothing re-attaches the erased session: {during:?}"
+        );
+    }
+    let erase_at = during
+        .iter()
+        .position(|(m, s)| *m == "erase_session" && s == A)
+        .expect("the store erase ran");
+    assert!(
+        !during[erase_at..]
+            .iter()
+            .any(|(m, s)| *m == "record_canonization" && s == A),
+        "no canonization of the erased session reached the store after the erase: {:?}",
+        &during[erase_at..]
+    );
+
+    // Refused from now on, in scope: 410, for a new client and for the MCP
+    // session opened before the erase.
+    let refused = http_as(
+        addr,
+        "POST",
+        "/mcp/s/er-a",
+        Some(&agent),
+        None,
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"x","version":"1"}}}"#,
+    )
+    .await;
+    assert_eq!(refused.status, 410, "{}", refused.body);
+    let stale = http_as(
+        addr,
+        "POST",
+        "/mcp/s/er-a",
+        Some(&agent),
+        Some(&mcp_a),
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+    )
+    .await;
+    assert_eq!(stale.status, 410, "{}", stale.body);
+    // `/mcp` is er-a too (the default).
+    assert_eq!(
+        http_as(addr, "GET", "/mcp", Some(&agent), None, "")
+            .await
+            .status,
+        410
+    );
+
+    // Nothing in this process can attach it again: the tombstone refuses.
+    assert!(w.registry.acquire(A).await.is_err());
+    assert_only_the_tombstone(&w.store, A).await;
+
+    // The erased handle (its graph, recall cache, vectors) is gone.
+    eventually("the erased Memory is dropped", || {
+        handle_a.strong_count() == 0
+    })
+    .await;
+
+    // The other session keeps serving.
+    stats_as(addr, &agent, "/mcp/s/er-b", &mcp_b).await;
+    assert_eq!(state_of(&w.registry, B), "live");
+
+    // A repeat is `already_absent`, 200, and leaves the slot `Erased`.
+    let again = erase_as(addr, "ops", A, &confirm(A)).await;
+    assert_eq!(again.status, 200, "{}", again.body);
+    let again: serde_json::Value = serde_json::from_str(again.body.trim_end()).unwrap();
+    assert_eq!(again["already_absent"], true, "{again}");
+    assert_eq!(again["fence_token"], report["fence_token"]);
+    assert_eq!(state_of(&w.registry, A), "erased");
+}
+
+/// The acceptance row's second item: an id this process does not hold,
+/// with a row planted in every kind the store keeps (an unconsumed #22
+/// image intent with its vector included), erased by a prefix credential.
+/// Only the tombstone remains, the id holds no slot afterwards (the
+/// negative cache is bounded by the hosted set), and a repeat is
+/// `already_absent`.
+#[tokio::test]
+async fn erasing_a_session_this_process_does_not_hold_leaves_only_the_tombstone() {
+    let w = wire().await;
+    let user = format!("{USERS}alice");
+    let sid = SessionId::new(&user);
+    w.store
+        .flush(&planted_batch(&sid, 8), None)
+        .await
+        .expect("plant");
+    assert!(
+        census_but_lease(&w.store, &user)
+            .iter()
+            .filter(|(kind, _)| matches!(
+                *kind,
+                "sessions" | "interactions" | "concepts" | "edges" | "write_intents"
+            ))
+            .all(|(_, n)| *n > 0),
+        "planted"
+    );
+
+    let reply = erase_as(w.addr, "app", &user, &confirm(&user)).await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    let report: serde_json::Value = serde_json::from_str(reply.body.trim_end()).unwrap();
+    assert_eq!(report["already_absent"], false);
+    assert_eq!(report["removed"]["write_intents"], 2, "{report}");
+    assert_only_the_tombstone(&w.store, &user).await;
+    assert_eq!(state_of(&w.registry, &user), "absent");
+
+    let again = erase_as(w.addr, "app", &user, &confirm(&user)).await;
+    assert_eq!(again.status, 200, "{}", again.body);
+    assert!(
+        again.body.contains(r#""already_absent":true"#),
+        "{}",
+        again.body
+    );
+}
+
+/// The acceptance row's third and fourth items: a session another process
+/// holds is a 409 naming nothing but the holder, and is untouched (its
+/// lease stays that writer's, its slot `held_elsewhere`); a confirm that
+/// does not repeat the id, a malformed body and a wrong method are refused
+/// before the registry is asked (400, 400, 405), touching nothing.
+#[tokio::test]
+async fn a_live_holder_elsewhere_is_409_and_a_bad_confirm_is_400() {
+    let w = wire().await;
+    let reply = erase_as(w.addr, "ops", HELD, &confirm(HELD)).await;
+    assert_eq!(reply.status, 409, "{}", reply.body);
+    assert!(reply.body.contains("nothing was erased"), "{}", reply.body);
+    assert!(reply.body.contains(&elsewhere().token()), "{}", reply.body);
+    let lease = w
+        .store
+        .read_lease(&SessionId::new(HELD))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(lease.holder, elsewhere().token());
+    assert_eq!(state_of(&w.registry, HELD), "held_elsewhere");
+
+    let before = w.calls.len();
+    // A confirm naming another session, one differing only in case, and
+    // bodies that are not `{"confirm": ...}` at all (an unknown field
+    // included: nothing may ride along with the typo guard).
+    for body in [
+        confirm(B),
+        confirm("ER-A"),
+        String::new(),
+        "{}".into(),
+        "nope".into(),
+        r#"{"confirm":"er-a","force":true}"#.into(),
+    ] {
+        let reply = erase_as(w.addr, "ops", A, &body).await;
+        assert_eq!(reply.status, 400, "{body:?}: {}", reply.body);
+        assert!(reply.body.contains("nothing was erased"), "{}", reply.body);
+    }
+    let get = http_as(
+        w.addr,
+        "GET",
+        "/admin/s/er-a/erase",
+        Some(&bearer("ops")),
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(get.status, 405, "{}", get.body);
+    assert_eq!(get.header("allow").as_deref(), Some("POST"));
+    assert!(
+        w.calls
+            .since(before)
+            .iter()
+            .all(|(m, _)| *m == "refresh_lease" || *m == "flush"),
+        "a refused erase makes no store call of its own: {:?}",
+        w.calls.since(before)
+    );
+    assert_eq!(state_of(&w.registry, A), "live");
+}
+
+/// The acceptance row's fifth and sixth items, byte for byte: a credential
+/// without `erase` (`agent`), and one whose scope does not cover the id
+/// (`other`, `app`), get exactly the unrouted 404 for the erase route on
+/// every method, for live, held, erased, unknown, malformed and
+/// percent-encoded ids; a credential without `admin` gets it for
+/// `/admin/sessions`. The store sees no call while they are answered (the
+/// live sessions' own lease heartbeat and flushes aside). The erase is
+/// still possible afterwards, so the refusals were refusals.
+///
+/// Mutation: authorize with `SessionNeed::Use` instead of `Erase` and the
+/// `agent` credential's erase is served.
+#[tokio::test]
+async fn an_erase_or_admin_request_without_the_capability_or_scope_is_the_uniform_404() {
+    let w = wire().await;
+    w.registry.force_state("er-b", ForcedState::Erased);
+    let addr = w.addr;
+    let erase_paths = [
+        "/admin/s/er-a/erase",
+        "/admin/s/er-b/erase",
+        "/admin/s/er-held/erase",
+        "/admin/s/er-unknown/erase",
+        "/admin/s/er-u-bob/erase",
+        "/admin/s/.x/erase",
+        "/admin/s/er%2Da/erase",
+        "/admin/s//erase",
+    ];
+    let before = w.calls.len();
+    for cred in ["agent", "other", "app", "root"] {
+        let auth = bearer(cred);
+        let reference = on_the_wire_as(addr, "GET", "/not/routed", Some(&auth)).await;
+        assert!(
+            reference.starts_with("HTTP/1.1 404 Not Found\r\n"),
+            "{reference}"
+        );
+        for path in erase_paths {
+            // In scope with `erase`, these are served below, not refused.
+            let served = match cred {
+                "other" => path == "/admin/s/er-b/erase",
+                "app" => path == "/admin/s/er-u-bob/erase",
+                _ => false,
+            };
+            if served {
+                continue;
+            }
+            for method in ["POST", "GET", "DELETE"] {
+                let body = confirm("er-a");
+                assert_eq!(
+                    on_the_wire_with(addr, method, path, "localhost", Some(&auth), &[], &body)
+                        .await,
+                    reference,
+                    "{cred}: {method} {path} must be the unrouted 404"
+                );
+            }
+        }
+        if !matches!(cred, "root") {
+            for method in ["GET", "POST"] {
+                assert_eq!(
+                    on_the_wire_as(addr, method, "/admin/sessions", Some(&auth)).await,
+                    reference,
+                    "{cred}: {method} /admin/sessions without admin"
+                );
+            }
+        }
+    }
+    let window = w.calls.since(before);
+    assert!(
+        window
+            .iter()
+            .all(|(m, _)| matches!(*m, "refresh_lease" | "flush" | "write_flush_stats")),
+        "a refused admin request makes no store call: {window:?}"
+    );
+    assert_eq!(state_of(&w.registry, A), "live");
+
+    // The same requests in scope are real answers, not the 404: `app`
+    // erases an id under its prefix; `other` reaches er-b, whose slot was
+    // forced to `Erased` while its lease is still this process's agent's,
+    // so the store refuses the CLI-identity erase as held (409).
+    let ok = erase_as(addr, "app", "er-u-bob", &confirm("er-u-bob")).await;
+    assert_eq!(ok.status, 200, "{}", ok.body);
+    let held = erase_as(addr, "other", B, &confirm(B)).await;
+    assert_eq!(held.status, 409, "{}", held.body);
+}
+
+/// `GET /admin/sessions` needs `admin` and lists only the caller's scope:
+/// `root` (`"*"`) sees every hosted session with its state, `boss-b` only
+/// `er-b`. Attached sessions carry their size.
+#[tokio::test]
+async fn admin_sessions_lists_the_slots_in_the_credentials_scope() {
+    let w = wire().await;
+    let all = http_as(
+        w.addr,
+        "GET",
+        "/admin/sessions",
+        Some(&bearer("root")),
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(all.status, 200, "{}", all.body);
+    let all: serde_json::Value = serde_json::from_str(all.body.trim_end()).unwrap();
+    let rows = all["sessions"].as_array().expect("a list");
+    let states: Vec<(&str, &str)> = rows
+        .iter()
+        .map(|r| (r["session"].as_str().unwrap(), r["state"].as_str().unwrap()))
+        .collect();
+    assert_eq!(states, [(A, "live"), (B, "live"), (HELD, "held_elsewhere")]);
+    assert_eq!(rows[0]["default"], true);
+    assert_eq!(rows[0]["pinned"], true);
+    assert!(rows[0]["attached"]["nodes"].is_u64(), "{}", rows[0]);
+    assert!(rows[2].get("attached").is_none(), "{}", rows[2]);
+
+    let mine = http_as(
+        w.addr,
+        "GET",
+        "/admin/sessions",
+        Some(&bearer("boss-b")),
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(mine.status, 200, "{}", mine.body);
+    let mine: serde_json::Value = serde_json::from_str(mine.body.trim_end()).unwrap();
+    let sessions: Vec<&str> = mine["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["session"].as_str().unwrap())
+        .collect();
+    assert_eq!(sessions, [B]);
+
+    let post = http_as(
+        w.addr,
+        "POST",
+        "/admin/sessions",
+        Some(&bearer("root")),
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(post.status, 405, "{}", post.body);
+}
+
+/// Erase is never on the MCP surface: an erase-capable credential and a
+/// plain one see the same tool list, and no tool in it erases (the
+/// published schemas themselves are pinned by the server's golden test).
+#[tokio::test]
+async fn the_mcp_tool_list_is_the_same_for_every_credential_and_has_no_erase() {
+    let w = wire().await;
+    let mut lists = Vec::new();
+    for cred in ["agent", "ops"] {
+        let auth = bearer(cred);
+        let (mcp, _) = initialize_as(w.addr, "/mcp/s/er-a", Some(&auth)).await;
+        let reply = http_as(
+            w.addr,
+            "POST",
+            "/mcp/s/er-a",
+            Some(&auth),
+            Some(&mcp),
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/list"}"#,
+        )
+        .await;
+        assert_eq!(reply.status, 200, "{}", reply.body);
+        lists.push(reply.message()["result"]["tools"].clone());
+    }
+    assert_eq!(lists[0], lists[1]);
+    for tool in lists[0].as_array().unwrap() {
+        let name = tool["name"].as_str().unwrap();
+        assert!(!name.contains("erase"), "{name} on the MCP surface");
+    }
+}
+
+/// An erase while the session is detaching, or a second erase while the
+/// first runs, is a 503 with `Retry-After`; nothing is touched.
+#[tokio::test]
+async fn an_erase_of_a_detaching_session_is_503() {
+    let w = wire().await;
+    w.registry.force_state(B, ForcedState::Detaching);
+    let reply = erase_as(w.addr, "ops", B, &confirm(B)).await;
+    assert_eq!(reply.status, 503, "{}", reply.body);
+    assert!(reply.header("retry-after").is_some());
+    assert!(w
+        .store
+        .read_lease(&SessionId::new(B))
+        .await
+        .unwrap()
+        .is_some_and(|l| !crate::store::erase::is_tombstone(&l)));
+}
+
+/// A pinned session that meets the tombstone when its background retry
+/// attaches it is `Erased`, not `Failed` (#32 PR 4 note for PR 7), so its
+/// requests get 410 rather than a 503 telling an operator to act.
+#[tokio::test]
+async fn a_held_session_erased_meanwhile_becomes_erased_not_failed() {
+    let w = wire().await;
+    // The other writer goes away and the operator erases the session from
+    // the CLI's side.
+    w.store
+        .release_lease(&SessionId::new(HELD), &elsewhere())
+        .await
+        .unwrap();
+    let eraser = LeaseHolder::for_this_process(&crate::types::AgentId::new("lambo-erase-session"));
+    w.store
+        .erase_session(&SessionId::new(HELD), &eraser)
+        .await
+        .unwrap();
+    assert!(w.registry.is_tombstoned(HELD).await);
+    // The retry's error arm, driven directly: an attach of HELD fails, and
+    // the registry classifies it by the lease row.
+    assert!(w.registry.acquire(HELD).await.is_err());
+    w.registry.mark_erased_at_start(HELD);
+    assert_eq!(state_of(&w.registry, HELD), "erased");
+    let reply = http_as(
+        w.addr,
+        "GET",
+        "/mcp/s/er-held",
+        Some(&bearer("ops")),
+        None,
+        "",
+    )
+    .await;
+    assert_eq!(reply.status, 410, "{}", reply.body);
+}
+
+/// `lambo_derive` as `auth` on an open MCP session, waiting for the write
+/// to apply.
+async fn derive_as(addr: SocketAddr, auth: &str, path: &str, mcp: &str, contents: &[&str]) {
+    let concepts: Vec<_> = contents
+        .iter()
+        .map(|c| serde_json::json!({"content": c, "concept_type": "entity"}))
+        .collect();
+    let out = call_as(
+        addr,
+        auth,
+        path,
+        mcp,
+        "lambo_derive",
+        serde_json::json!({"agent_id": "agent-a", "concepts": concepts}),
+    )
+    .await;
+    let receipt = out["structuredContent"]["receipt"]
+        .as_str()
+        .expect("a receipt")
+        .to_string();
+    call_as(
+        addr,
+        auth,
+        path,
+        mcp,
+        "lambo_stats",
+        serde_json::json!({"agent_id": "agent-a", "receipt": receipt, "wait_ms": 10_000}),
+    )
+    .await;
+}
+
+async fn stats_as(addr: SocketAddr, auth: &str, path: &str, mcp: &str) -> serde_json::Value {
+    call_as(
+        addr,
+        auth,
+        path,
+        mcp,
+        "lambo_stats",
+        serde_json::json!({"agent_id": "agent-a"}),
+    )
+    .await
+}
+
+async fn call_as(
+    addr: SocketAddr,
+    auth: &str,
+    path: &str,
+    mcp: &str,
+    name: &str,
+    args: serde_json::Value,
+) -> serde_json::Value {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 7,
+        "method": "tools/call",
+        "params": {"name": name, "arguments": args},
+    })
+    .to_string();
+    let reply = http_as(addr, "POST", path, Some(auth), Some(mcp), &body).await;
+    assert_eq!(reply.status, 200, "{name} at {path}: {}", reply.body);
+    let message = reply.message();
+    assert!(message.get("error").is_none(), "{name}: {message}");
+    message["result"].clone()
+}

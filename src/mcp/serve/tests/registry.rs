@@ -1106,6 +1106,7 @@ async fn a_pinned_session_that_can_no_longer_attach_is_not_retried() {
 
 /// The real multi-session serve, in-process (#32 review M1/M2).
 mod authority;
+mod erase;
 mod pinned_serve;
 
 /// Sonnet review L-C: which background-attach errors keep a pinned session

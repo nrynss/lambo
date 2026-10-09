@@ -35,10 +35,68 @@ pub(super) struct Shared(
 
 /// The calls a [`Shared`] store has seen, in order: the method and the
 /// session it named (empty when it named none).
+///
+/// It also carries a gate for `flush` (#32 PR 7): while it is closed, every
+/// flush parks inside the store, so a test can hold one in flight.
 #[derive(Default)]
-pub(super) struct StoreCalls(parking_lot::Mutex<Vec<(&'static str, String)>>);
+pub(super) struct StoreCalls(parking_lot::Mutex<Vec<(&'static str, String)>>, FlushGate);
+
+/// Parks every `flush` while closed ([`StoreCalls::park_flushes`]).
+#[derive(Default)]
+pub(super) struct FlushGate {
+    closed: std::sync::atomic::AtomicBool,
+    parked: std::sync::atomic::AtomicUsize,
+    opened: tokio::sync::Notify,
+}
 
 impl StoreCalls {
+    /// From now on every `flush` parks inside the store until
+    /// [`StoreCalls::release_flushes`].
+    pub(super) fn park_flushes(&self) {
+        self.1
+            .closed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Let every parked `flush` (and every later one) through.
+    pub(super) fn release_flushes(&self) {
+        self.1
+            .closed
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        self.1.opened.notify_waiters();
+    }
+
+    /// How many flushes are parked right now.
+    pub(super) fn parked_flushes(&self) -> usize {
+        self.1.parked.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Park while the gate is closed. The count goes down however the wait
+    /// ends, a drop of the flush included.
+    async fn pass_flush_gate(&self) {
+        use std::sync::atomic::Ordering;
+        struct Parked<'a>(&'a std::sync::atomic::AtomicUsize);
+        impl Drop for Parked<'_> {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        if !self.1.closed.load(Ordering::SeqCst) {
+            return;
+        }
+        self.1.parked.fetch_add(1, Ordering::SeqCst);
+        let _parked = Parked(&self.1.parked);
+        loop {
+            let opened = self.1.opened.notified();
+            tokio::pin!(opened);
+            opened.as_mut().enable();
+            if !self.1.closed.load(Ordering::SeqCst) {
+                return;
+            }
+            opened.await;
+        }
+    }
+
     fn note(&self, method: &'static str, session: &str) {
         self.0.lock().push((method, session.to_string()));
     }
@@ -97,6 +155,7 @@ impl GraphStore for Shared {
     }
     async fn flush(&self, batch: &MutationBatch, token: Option<u64>) -> Result<(), StoreError> {
         self.2.note("flush", "");
+        self.2.pass_flush_gate().await;
         self.0.flush(batch, token).await
     }
     async fn load_session(&self, session: &SessionId) -> Result<GraphSnapshot, StoreError> {
