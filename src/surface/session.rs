@@ -326,6 +326,11 @@ impl SessionScope {
         self.every_hosted || self.every_pinned
     }
 
+    /// The scope's exact session names.
+    pub fn names(&self) -> impl Iterator<Item = &AddressedSessionId> {
+        self.names.iter()
+    }
+
     /// The scope's prefix, if it has one (feeds [`HostedSessions`]).
     pub fn prefix(&self) -> Option<&SessionPrefix> {
         self.prefix.as_ref()

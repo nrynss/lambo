@@ -293,3 +293,52 @@ fn the_default_session_is_authorized_like_its_addressed_route() {
     let grant = local.authenticate(None).unwrap();
     authorize_default(&local, &grant, loose).expect("local covers the pinned session");
 }
+
+/// #32 PR 5 review I3 and I5: the startup warnings. A legacy token beside
+/// configured credentials is named (it keeps `default`); a credential
+/// naming unpinned sessions is named with those sessions, and one covering
+/// no pinned session at all is named too. No warning names a token, and a
+/// legacy-only, a credentials-only-and-pinned or a stdio serve gets none.
+#[test]
+fn startup_warns_of_a_leftover_legacy_token_and_unreachable_names() {
+    let mut opts = http_opts(&["pin-a", "pin-b"], "127.0.0.1");
+    opts.auth_token = Some(fake("legacy"));
+    assert!(startup_warnings(&opts).is_empty(), "legacy alone");
+
+    opts.credentials = vec![
+        credential("fine", &["pin-a"], None),
+        credential("partly", &["pin-b", "later-1"], None),
+        credential("nowhere", &["later-2"], None),
+        credential("prefixed", &[], Some("dc-u-")),
+    ];
+    let warnings = startup_warnings(&opts);
+    let all = warnings.join("\n");
+    assert!(
+        warnings[0].contains("LAMBO_AUTH_TOKEN") && warnings[0].contains("\"default\""),
+        "{all}"
+    );
+    assert!(
+        all.contains("\"partly\" names sessions this serve does not pin (later-1)"),
+        "{all}"
+    );
+    assert!(
+        all.contains("\"nowhere\" names sessions this serve does not pin (later-2)")
+            && all.contains("\"nowhere\" covers no session"),
+        "{all}"
+    );
+    assert!(all.contains("\"prefixed\" covers no session"), "{all}");
+    assert!(!all.contains("\"fine\""), "{all}");
+    assert!(!all.contains("\"partly\" covers"), "{all}");
+    assert!(!all.contains("fake-"), "a token leaked: {all}");
+
+    opts.auth_token = None;
+    opts.credentials.retain(|c| c.grant.name() == "fine");
+    assert!(startup_warnings(&opts).is_empty());
+    opts.transport = Transport::Stdio;
+    opts.auth_token = Some(fake("legacy"));
+    opts.credentials = vec![credential("nowhere", &["later-2"], None)];
+    assert!(
+        startup_warnings(&opts).is_empty(),
+        "stdio has no credentials"
+    );
+}

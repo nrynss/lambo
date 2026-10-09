@@ -106,7 +106,7 @@ pub use builder::{build_memory, resolve_serve_backends};
 pub use heartbeat::authorize_ledger;
 pub use pinned::{pin_sessions, PinnedSessions};
 
-use authority::{any_credential, serve_authority, ServeAuthority};
+use authority::{any_credential, serve_authority, startup_warnings, ServeAuthority};
 use builder::{explain_startup_failure, serve_builder};
 use heartbeat::serve_startup_line;
 use http_guards::authorize_bind;
@@ -286,6 +286,9 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
         Transport::Http => Some(Arc::new(serve_authority(&opts)?)),
         Transport::Stdio => None,
     };
+    for warning in startup_warnings(&opts) {
+        tracing::warn!("lambo serve: {warning}");
+    }
     // Same argument as the bind check: refuse before any lease is taken.
     authorize_ledger(&opts)?;
     // #32 PR 4: the pinned sessions, refused before any lease too.

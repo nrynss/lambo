@@ -150,6 +150,62 @@ pub(super) fn serve_authority(opts: &ServeOptions) -> Result<ServeAuthority, Lam
     ))
 }
 
+/// What an operator should hear about a serve's credentials at startup
+/// (#32 PR 5 review I3 and I5), one line each. Names credentials and
+/// sessions, never a token.
+///
+/// * The legacy token beside configured credentials: a `LAMBO_AUTH_TOKEN`
+///   left exported (in a plist, a unit file) after `[[serve.credential]]`
+///   was added keeps the `default` credential, and with it every pinned
+///   session, reachable by whoever holds that token.
+/// * A configured credential naming sessions this serve does not pin: until
+///   sessions attach on demand (#32 PR 6) those names cannot be reached,
+///   and a credential whose scope covers no pinned session at all reaches
+///   nothing.
+pub(super) fn startup_warnings(opts: &ServeOptions) -> Vec<String> {
+    let mut out = Vec::new();
+    if opts.transport != Transport::Http {
+        return out;
+    }
+    if opts.auth_token.is_some() && !opts.credentials.is_empty() {
+        out.push(format!(
+            "the legacy --auth-token / LAMBO_AUTH_TOKEN is set beside [[serve.credential]]: it \
+             is the \"{LEGACY_CREDENTIAL_NAME}\" credential and reaches every pinned session. \
+             Unset it if the configured credentials replace it."
+        ));
+    }
+    let pinned: Vec<_> = opts
+        .sessions
+        .iter()
+        .filter_map(|s| parse_addressed(s).ok())
+        .collect();
+    let hosted = HostedSessions::new(pinned.iter().cloned(), std::iter::empty());
+    for cred in &opts.credentials {
+        let scope = cred.grant.scope();
+        let unpinned: Vec<&str> = scope
+            .names()
+            .filter(|name| !pinned.contains(name))
+            .map(|name| name.as_str())
+            .collect();
+        if !unpinned.is_empty() {
+            out.push(format!(
+                "credential {:?} names sessions this serve does not pin ({}): they cannot be \
+                 reached until sessions attach on demand; pin them with --session or [serve] \
+                 sessions",
+                cred.grant.name(),
+                unpinned.join(", ")
+            ));
+        }
+        if !pinned.iter().any(|id| scope.covers(id, &hosted)) {
+            out.push(format!(
+                "credential {:?} covers no session this serve pins, so it reaches nothing yet",
+                cred.grant.name()
+            ));
+        }
+    }
+    out
+}
+
 /// May `grant` use the default session `default` (what `/mcp` serves)?
 ///
 /// A default whose name passes the strict charset is authorized exactly as
