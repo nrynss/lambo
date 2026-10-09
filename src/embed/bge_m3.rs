@@ -257,6 +257,18 @@ impl BgeM3LlamaCppEmbedder {
         if dim == 0 {
             return Err(EmbedError::Unavailable("embedder dim must be > 0".into()));
         }
+        // `v1/embeddings` is appended as text, so a query or fragment would
+        // swallow it (`...?k=v/v1/embeddings` POSTs to the base path). Refused
+        // without quoting: a query may carry a key.
+        if let Ok(parsed) = reqwest::Url::parse(&base_url)
+            && (parsed.query().is_some() || parsed.fragment().is_some())
+        {
+            return Err(EmbedError::Unavailable(format!(
+                "the embedder URL for {} carries a query or fragment (not shown); give the \
+                 base URL only (the v1/embeddings path is appended to it)",
+                url_for_log(&base_url)
+            )));
+        }
         let url = format!("{base_url}/v1/embeddings");
         Ok(Self {
             client: build_client(&base_url, DEFAULT_CONNECT_TIMEOUT, DEFAULT_REQUEST_TIMEOUT)?,
@@ -923,10 +935,8 @@ mod tests {
             shown.contains("\"http://127.0.0.1:9/base/v1/embeddings\""),
             "{shown}"
         );
-        for url in [
-            "http://someone:fake-xyzzy-userinfo@127.0.0.1:9/base",
-            "http://127.0.0.1:9/base?key=fake-xyzzy-query",
-        ] {
+        {
+            let url = "http://someone:fake-xyzzy-userinfo@127.0.0.1:9/base";
             let e = BgeM3LlamaCppEmbedder::new(url, "", 1024).unwrap();
             let shown = format!("{e:?}");
             assert!(!shown.contains("fake-xyzzy"), "{shown}");
@@ -937,6 +947,25 @@ mod tests {
             assert!(!msg.contains("fake-xyzzy"), "{msg}");
             let err = e.check_health().await.unwrap_err().to_string();
             assert!(!err.contains("fake-xyzzy"), "{err}");
+        }
+    }
+
+    /// A base URL with a query or fragment is refused: the appended
+    /// `v1/embeddings` would land inside it and the request would go to the
+    /// base path. The query is not quoted (it may carry a key).
+    ///
+    /// Mutation: drop the query/fragment check in `new` -> red.
+    #[test]
+    fn a_base_url_with_a_query_or_fragment_is_refused() {
+        for url in [
+            "http://127.0.0.1:9/base?key=fake-xyzzy-query",
+            "https://gw.example.com/ai#fake-xyzzy-fragment",
+        ] {
+            let err = BgeM3LlamaCppEmbedder::new(url, "", 1024).unwrap_err();
+            assert!(matches!(err, EmbedError::Unavailable(_)), "{err:?}");
+            let msg = err.to_string();
+            assert!(msg.contains("query or fragment"), "{msg}");
+            assert!(!msg.contains("fake-xyzzy"), "{msg}");
         }
     }
 
