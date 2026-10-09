@@ -1695,3 +1695,48 @@ async fn human_confirmed_survives_the_flush_load_round_trip() {
         .expect("plain concept loaded");
     assert_eq!(plain.human_confirmed, 0);
 }
+
+/// #22 PR 2: a concept's `embedding_source` survives flush→load on the real
+/// adapter, a read access leaves it alone, and an upsert that clears it
+/// clears the column. The shared check is the one every adapter runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn embedding_source_survives_the_flush_load_round_trip() {
+    let store = test_store();
+    store.init_schema().await.unwrap();
+    crate::store::embedding_source_testkit::check_embedding_source_round_trip(
+        &store,
+        &SessionId::from("embedding-source"),
+        4,
+        None,
+    )
+    .await;
+}
+
+/// #22 PR 2: a stored `embedding_source` this build cannot read fails the
+/// load by concept id. Reading it as `None` instead would make an image
+/// concept look text-embedded, and a re-embed would then replace its image
+/// vector with a vector of its caption.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unreadable_embedding_source_fails_the_load() {
+    let store = test_store();
+    store.init_schema().await.unwrap();
+    let sid = SessionId::from("embedding-source-corrupt");
+    crate::store::embedding_source_testkit::check_embedding_source_round_trip(
+        &store, &sid, 4, None,
+    )
+    .await;
+    sqlx::query(
+        "UPDATE concepts SET embedding_source = '{\"modality\":\"audio\",\"origin\":\"client\"}' \
+         WHERE session_id = ? AND embedding_source IS NOT NULL",
+    )
+    .bind(sid.as_str())
+    .execute(store.pool())
+    .await
+    .unwrap();
+    let err = store
+        .load_session(&sid)
+        .await
+        .expect_err("an unreadable source must not load as None");
+    assert!(matches!(err, StoreError::Invariant(_)), "{err:?}");
+    assert!(err.to_string().contains("embedding_source"), "{err}");
+}

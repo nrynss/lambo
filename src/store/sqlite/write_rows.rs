@@ -18,7 +18,8 @@ use crate::store::batch::{AccessUpdate, ConceptRow, FlushStep};
 use crate::store::map_write_err;
 use crate::store::vector::encode_vector_blob;
 use crate::types::{
-    CanonizationEvent, Edge, Interaction, Mutation, Node, NodeId, SessionId, StoreError,
+    CanonizationEvent, Edge, EmbeddingSource, Interaction, Mutation, Node, NodeId, SessionId,
+    StoreError,
 };
 
 /// Apply one planned [`FlushStep`].
@@ -430,7 +431,7 @@ pub(super) async fn upsert_concepts(
              id, session_id, content, canonical_key, concept_type, origin_interaction, \
              origin_agent, created_at, access_count, last_accessed, gc_survived, \
              canonization_status, blast_radius, last_demotion_time, embedding, \
-             chunk_group_id, human_confirmed) ",
+             chunk_group_id, human_confirmed, embedding_source) ",
     );
     qb.push_values(rows.iter().zip(encoded.iter()), |mut b, (r, enc)| {
         let c = r.concept;
@@ -450,7 +451,8 @@ pub(super) async fn upsert_concepts(
             .push_bind(r.canonization.last_demotion_time.map(ts_to_text))
             .push_bind(enc.embedding.clone())
             .push_bind(c.chunk_group_id.clone())
-            .push_bind(c.human_confirmed);
+            .push_bind(c.human_confirmed)
+            .push_bind(enc.embedding_source.clone());
     });
     // Conflict target is the `id` PRIMARY KEY. The partial unique index
     // (session_id, canonical_key) WHERE concept_type <> 'Observation' is NOT a
@@ -479,7 +481,8 @@ pub(super) async fn upsert_concepts(
              gc_survived = excluded.gc_survived, \
              embedding = excluded.embedding, \
              chunk_group_id = excluded.chunk_group_id, \
-             human_confirmed = excluded.human_confirmed",
+             human_confirmed = excluded.human_confirmed, \
+             embedding_source = excluded.embedding_source",
     );
     qb.build()
         .execute(&mut *tx)
@@ -544,6 +547,10 @@ pub(super) struct ConceptBinds {
     /// codec), stored in the BLOB column; never NULL for a present vector, NULL
     /// otherwise.
     embedding: Option<Vec<u8>>,
+    /// #22: the supplied vector's provenance as compact JSON, NULL for a
+    /// concept embedded from its own text. Rides with `embedding` on every
+    /// upsert, since it describes that vector.
+    embedding_source: Option<String>,
 }
 
 pub(super) fn concept_binds(r: &ConceptRow<'_>) -> Result<ConceptBinds, StoreError> {
@@ -556,6 +563,11 @@ pub(super) fn concept_binds(r: &ConceptRow<'_>) -> Result<ConceptBinds, StoreErr
             .as_ref()
             .map(|v| encode_vector_blob(v))
             .transpose()?,
+        embedding_source: r
+            .concept
+            .embedding_source
+            .as_ref()
+            .map(EmbeddingSource::to_column),
     })
 }
 

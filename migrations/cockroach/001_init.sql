@@ -70,6 +70,7 @@ CREATE TABLE IF NOT EXISTS concepts (
     embedding           VECTOR(1024),
     chunk_group_id      STRING,
     human_confirmed     INT NOT NULL DEFAULT 0,
+    embedding_source    STRING,
     INDEX (session_id, canonization_status)
 );
 
@@ -89,6 +90,12 @@ ALTER TABLE concepts ADD COLUMN IF NOT EXISTS chunk_group_id STRING;
 -- so the idempotent ALTER covers them; fresh installs get it from the CREATE
 -- TABLE above and the ALTER is a no-op.
 ALTER TABLE concepts ADD COLUMN IF NOT EXISTS human_confirmed INT NOT NULL DEFAULT 0;
+
+-- #22: the provenance of a supplied vector (compact JSON, NULL = embedded from
+-- the content of the concept itself). Nullable with no default, so rows on an
+-- existing cluster read NULL, which is true of every concept written before
+-- #22. Fresh installs get it from the CREATE TABLE above and this is a no-op.
+ALTER TABLE concepts ADD COLUMN IF NOT EXISTS embedding_source STRING;
 
 -- Errata (2026-08-11, P2 integration / muse-spark M1-M2): the schema's
 -- table-level UNIQUE (session_id, canonical_key) is **partial** — it

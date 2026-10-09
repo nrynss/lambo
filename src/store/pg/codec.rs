@@ -16,7 +16,8 @@ use uuid::Uuid;
 use crate::store::vector::decode_vector;
 use crate::types::{
     tie_break_by_key, CanonizationEvent, CanonizationStatus, Concept, ConceptType, Edge, EdgeType,
-    EmbeddingContract, Interaction, NodeId, Reservation, Scored, SessionId, StoreError, Synonym,
+    EmbeddingContract, EmbeddingSource, Interaction, NodeId, Reservation, Scored, SessionId,
+    StoreError, Synonym,
 };
 
 /// Parse pgvector `format_type` output (`vector(768)`). Rejects Cockroach
@@ -200,6 +201,12 @@ pub(super) fn row_to_concept(row: &PgRow) -> Result<Concept, StoreError> {
     let gc_survived: i64 = row.try_get("gc_survived").map_err(backend)?;
     let blast_radius: Option<i64> = row.try_get("blast_radius").map_err(backend)?;
     let human_confirmed: i64 = row.try_get("human_confirmed").map_err(backend)?;
+    // #22: an unreadable value is an invariant error, never `None` (see
+    // `EmbeddingSource::from_column`).
+    let embedding_source: Option<String> = row.try_get("embedding_source").map_err(backend)?;
+    let embedding_source = embedding_source
+        .map(|raw| EmbeddingSource::from_column(&raw, &id))
+        .transpose()?;
     Ok(Concept {
         id: parse_node_id(&id)?,
         session_id: SessionId(row.try_get("session_id").map_err(backend)?),
@@ -222,7 +229,7 @@ pub(super) fn row_to_concept(row: &PgRow) -> Result<Concept, StoreError> {
         last_demotion_time: row.try_get("last_demotion_time").map_err(backend)?,
         embedding: embedding.as_deref().map(decode_vector).transpose()?,
         human_confirmed: human_confirmed as i32,
-        embedding_source: None,
+        embedding_source,
         chunk_group_id: row.try_get("chunk_group_id").map_err(backend)?,
     })
 }

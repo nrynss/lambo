@@ -961,6 +961,21 @@ async fn check_chunk_group_id_survives_flush_load(store: &CockroachStore) {
     );
 }
 
+/// #22 PR 2: a concept's `embedding_source` survives flush→load on
+/// Cockroach, through the same shared check every adapter runs. The
+/// `cockroach-live` CI job is disabled (`if: false`, 2026-10-06), so this
+/// runs only when the suite is run by hand against a cluster.
+async fn check_embedding_source_survives_flush_load(store: &CockroachStore) {
+    let sid = SessionId::from(format!("conformance-esrc-{}", Uuid::new_v4()));
+    let dim = store
+        .vector_dimensions()
+        .expect("cockroach stores carry vectors");
+    crate::store::embedding_source_testkit::check_embedding_source_round_trip(
+        store, &sid, dim, None,
+    )
+    .await;
+}
+
 async fn check_embedding_contract_read_and_flush_immunity(store: &CockroachStore) {
     // Embedding contract (S5-class snapshot metadata): seed — the PRODUCTION
     // full-snapshot path (STORE-1 remediation) — persists embedding_kind/model/dim,
@@ -1738,6 +1753,7 @@ async fn conformance_suite() {
     check_keyword_mixed_case_ranks_like_memory_store(&store).await;
     check_legal_demote_flush_partial_index(&store).await;
     check_chunk_group_id_survives_flush_load(&store).await;
+    check_embedding_source_survives_flush_load(&store).await;
     check_embedding_contract_read_and_flush_immunity(&store).await;
     check_seed_load_full_snapshot_roundtrip(&store).await;
     check_structural_queries_agree_with_memory_store(&store).await;

@@ -478,10 +478,11 @@ impl EmbeddingSource {
     /// Decode a stored `concepts.embedding_source` value. A value that does
     /// not parse is an error, never `None`: reading it as `None` would let a
     /// re-embed overwrite the supplied vector with a vector of the caption.
-    pub fn from_column(raw: &str) -> Result<Self, StoreError> {
+    /// `concept` names the row in the error.
+    pub fn from_column(raw: &str, concept: impl fmt::Display) -> Result<Self, StoreError> {
         serde_json::from_str(raw).map_err(|e| {
             StoreError::Invariant(format!(
-                "concepts.embedding_source does not decode ({e}); \
+                "concept {concept}: concepts.embedding_source does not decode ({e}); \
                  a newer build may have written it"
             ))
         })
@@ -1810,7 +1811,7 @@ mod tests {
                 "ab".repeat(32)
             )
         );
-        assert_eq!(EmbeddingSource::from_column(&raw).unwrap(), server);
+        assert_eq!(EmbeddingSource::from_column(&raw, "c1").unwrap(), server);
 
         let client = EmbeddingSource {
             modality: SourceModality::Image,
@@ -1823,7 +1824,7 @@ mod tests {
             r#"{"modality":"image","origin":"client"}"#
         );
         assert_eq!(
-            EmbeddingSource::from_column(&client.to_column()).unwrap(),
+            EmbeddingSource::from_column(&client.to_column(), "c2").unwrap(),
             client
         );
     }
@@ -1842,9 +1843,10 @@ mod tests {
             r#"{"modality":"image","origin":"server","mime":"image/gif"}"#,
             r#"{"modality":"image","origin":"client","frame":3}"#,
         ] {
-            let err = EmbeddingSource::from_column(raw).expect_err(raw);
+            let err = EmbeddingSource::from_column(raw, "c3").expect_err(raw);
             assert!(matches!(err, StoreError::Invariant(_)), "{raw}: {err:?}");
             assert!(err.to_string().contains("embedding_source"), "{err}");
+            assert!(err.to_string().contains("concept c3"), "{err}");
         }
     }
 

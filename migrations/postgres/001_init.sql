@@ -103,7 +103,8 @@ CREATE TABLE IF NOT EXISTS concepts (
     last_demotion_time  TIMESTAMPTZ,
     embedding           vector(__LAMBO_VECTOR_DIM__),
     chunk_group_id      TEXT,
-    human_confirmed     BIGINT NOT NULL DEFAULT 0
+    human_confirmed     BIGINT NOT NULL DEFAULT 0,
+    embedding_source    TEXT
 );
 
 CREATE INDEX IF NOT EXISTS concepts_session_status_idx
@@ -112,6 +113,12 @@ CREATE INDEX IF NOT EXISTS concepts_session_status_idx
 ALTER TABLE concepts ADD COLUMN IF NOT EXISTS chunk_group_id TEXT;
 
 ALTER TABLE concepts ADD COLUMN IF NOT EXISTS human_confirmed BIGINT NOT NULL DEFAULT 0;
+
+-- #22: the provenance of a supplied vector (compact JSON, NULL = embedded from
+-- the content of the concept itself). Nullable with no default, so existing
+-- rows read NULL, which is true of every concept written before #22. Fresh
+-- installs get it from the CREATE TABLE above and this is a no-op.
+ALTER TABLE concepts ADD COLUMN IF NOT EXISTS embedding_source TEXT;
 
 -- Spec §4 errata: canonical-key uniqueness is partial (non-Observation
 -- only). Demoted Observations may share a key. The DROP covers a

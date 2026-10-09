@@ -15,7 +15,8 @@ use super::codec::{
 use super::SqliteStore;
 use crate::store::vector::decode_vector_blob;
 use crate::types::{
-    CanonizationEvent, Concept, Edge, GcMark, GraphSnapshot, Interaction, SessionId, StoreError,
+    CanonizationEvent, Concept, Edge, EmbeddingSource, GcMark, GraphSnapshot, Interaction,
+    SessionId, StoreError,
 };
 
 /// Load a session's write intents (J3), in replay order — (`issued_ms`,
@@ -139,7 +140,7 @@ pub(super) async fn load_concepts(
         "SELECT id, session_id, content, canonical_key, concept_type, origin_interaction, \
                 origin_agent, created_at, access_count, last_accessed, gc_survived, \
                 canonization_status, blast_radius, last_demotion_time, embedding, \
-                chunk_group_id, human_confirmed \
+                chunk_group_id, human_confirmed, embedding_source \
          FROM concepts WHERE session_id = ? ORDER BY id ASC",
     )
     .bind(&session.0)
@@ -173,6 +174,13 @@ pub(super) async fn load_concepts(
         let chunk_group_id: Option<String> =
             row.try_get(15).map_err(|e| db_err("load concepts", e))?;
         let human_confirmed: i32 = row.try_get(16).map_err(|e| db_err("load concepts", e))?;
+        // #22: an unreadable value is an invariant error, never `None` (see
+        // `EmbeddingSource::from_column`).
+        let embedding_source: Option<String> =
+            row.try_get(17).map_err(|e| db_err("load concepts", e))?;
+        let embedding_source = embedding_source
+            .map(|raw| EmbeddingSource::from_column(&raw, &id))
+            .transpose()?;
         out.push(Concept {
             id: node_id(&id, "concept id")?,
             session_id: SessionId::from(sid),
@@ -191,7 +199,7 @@ pub(super) async fn load_concepts(
             embedding,
             chunk_group_id,
             human_confirmed,
-            embedding_source: None,
+            embedding_source,
         });
     }
     Ok(out)

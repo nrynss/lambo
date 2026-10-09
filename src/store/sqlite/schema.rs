@@ -80,6 +80,16 @@ impl SqliteStore {
             "ALTER TABLE concepts ADD COLUMN human_confirmed INTEGER NOT NULL DEFAULT 0",
         )
         .await?;
+        // #22: a supplied vector's provenance (compact JSON). Nullable with
+        // no default: existing rows read NULL, which is the truth for every
+        // concept written before #22 (each was embedded from its content).
+        ensure_column(
+            self.pool(),
+            "concepts",
+            "embedding_source",
+            "ALTER TABLE concepts ADD COLUMN embedding_source TEXT",
+        )
+        .await?;
         // D (about-time): the nullable about-time of interactions and edges
         // (NULL = live fact, fallback created_at; an edge inherits it from the
         // writing interaction). Existing pre-D databases converge here; fresh
