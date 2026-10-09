@@ -2500,13 +2500,43 @@ impl crate::embed::Embedder for LabelEmbedder {
         self.0.dimensions()
     }
     async fn embed(&self, text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
+        self.embed_as(text, crate::test_util::TextRole::Document)
+            .await
+    }
+    // #22 design R6: a delegating embedder forwards every method, or it
+    // silently inherits the defaults (a query embedded as a document, an
+    // image refused).
+    async fn embed_query(&self, text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
+        self.embed_as(text, crate::test_util::TextRole::Query).await
+    }
+    fn modalities(&self) -> crate::embed::Modalities {
+        self.0.modalities()
+    }
+    async fn embed_image(
+        &self,
+        image: crate::embed::ImageInput<'_>,
+    ) -> Result<Vec<f32>, crate::embed::EmbedError> {
+        self.0.embed_image(image).await
+    }
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        self.0.as_any()
+    }
+}
+
+impl LabelEmbedder {
+    /// The label reduction, in either text role.
+    async fn embed_as(
+        &self,
+        text: &str,
+        role: crate::test_util::TextRole,
+    ) -> Result<Vec<f32>, crate::embed::EmbedError> {
         let label = text
             .strip_prefix("Concept: ")
             .unwrap_or(text)
             .split(" — ")
             .next()
             .unwrap_or(text);
-        self.0.embed(label).await
+        role.embed(&self.0, label).await
     }
 }
 
