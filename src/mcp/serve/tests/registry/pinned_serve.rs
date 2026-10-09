@@ -1,0 +1,337 @@
+//! #32 PR 4 review M1/M2: the real multi-session serve (`serve_pinned`),
+//! in-process, through its test seams (`PinnedSeams`): the registry it
+//! builds and the pre-arm it shuts down on.
+//!
+//! The store is one `MemoryStore` shared by identity between the serve and
+//! the test, which plays the other writer: it expires a session's lease,
+//! takes it with a token one higher, latches the serve's fence as the
+//! heartbeat would, and later releases the session so the serve's
+//! background retry wins it back.
+
+use super::*;
+use crate::mcp::serve::{serve_pinned_with, PinnedSeams};
+use crate::store::lease::{LeaseHolder, LEASE_TTL};
+use crate::store::{
+    Capabilities, EraseOutcome, LeaseInfo, LeaseOutcome, RecallBackfillReport, SessionFlushStats,
+};
+use crate::types::{
+    AgentId, CanonizationEvent, GraphSnapshot, MutationBatch, NodeId, Scored, SessionId,
+    StoreError,
+};
+use chrono::{DateTime, Utc};
+
+/// `Arc<MemoryStore>` as a `GraphStore`, so the serve under test and the
+/// test's other writer share one store, as two processes share a database.
+struct Shared(Arc<MemoryStore>);
+
+#[async_trait::async_trait]
+impl GraphStore for Shared {
+    async fn init_schema(&self) -> Result<(), StoreError> {
+        self.0.init_schema().await
+    }
+    fn capabilities(&self) -> Capabilities {
+        self.0.capabilities()
+    }
+    async fn preflight_schema(&self) -> Result<(), StoreError> {
+        self.0.preflight_schema().await
+    }
+    fn vector_dimensions(&self) -> Option<usize> {
+        self.0.vector_dimensions()
+    }
+    async fn flush(&self, batch: &MutationBatch, token: Option<u64>) -> Result<(), StoreError> {
+        self.0.flush(batch, token).await
+    }
+    async fn load_session(&self, session: &SessionId) -> Result<GraphSnapshot, StoreError> {
+        self.0.load_session(session).await
+    }
+    async fn keyword_candidates(
+        &self,
+        session: &SessionId,
+        tokens: &[String],
+        limit: usize,
+    ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+        self.0.keyword_candidates(session, tokens, limit).await
+    }
+    async fn vector_candidates(
+        &self,
+        session: &SessionId,
+        embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+        self.0.vector_candidates(session, embedding, limit).await
+    }
+    async fn vector_candidates_checked(
+        &self,
+        session: &SessionId,
+        embedding: &[f32],
+        expected_contract: &EmbeddingContract,
+        limit: usize,
+    ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+        self.0
+            .vector_candidates_checked(session, embedding, expected_contract, limit)
+            .await
+    }
+    fn exact_vector_scan(&self) -> bool {
+        self.0.exact_vector_scan()
+    }
+    fn holder_derives_from_graph(&self) -> bool {
+        self.0.holder_derives_from_graph()
+    }
+    async fn blast_radius(
+        &self,
+        session: &SessionId,
+        node: NodeId,
+        min_edge_age: Duration,
+        now: DateTime<Utc>,
+    ) -> Result<u64, StoreError> {
+        self.0.blast_radius(session, node, min_edge_age, now).await
+    }
+    async fn interaction_span(
+        &self,
+        session: &SessionId,
+        node: NodeId,
+        min_age: Duration,
+        now: DateTime<Utc>,
+    ) -> Result<crate::types::InteractionSpan, StoreError> {
+        self.0.interaction_span(session, node, min_age, now).await
+    }
+    async fn record_canonization(
+        &self,
+        event: &CanonizationEvent,
+        token: Option<u64>,
+    ) -> Result<(), StoreError> {
+        self.0.record_canonization(event, token).await
+    }
+    async fn erase_session(
+        &self,
+        session: &SessionId,
+        eraser: &LeaseHolder,
+    ) -> Result<EraseOutcome, StoreError> {
+        self.0.erase_session(session, eraser).await
+    }
+    async fn backfill_recall_index(
+        &self,
+        session: &SessionId,
+        holder: &LeaseHolder,
+    ) -> Result<Option<RecallBackfillReport>, StoreError> {
+        self.0.backfill_recall_index(session, holder).await
+    }
+    async fn acquire_lease(
+        &self,
+        session: &SessionId,
+        holder: &LeaseHolder,
+        ttl: Duration,
+    ) -> Result<LeaseOutcome, StoreError> {
+        self.0.acquire_lease(session, holder, ttl).await
+    }
+    async fn read_lease(&self, session: &SessionId) -> Result<Option<LeaseInfo>, StoreError> {
+        self.0.read_lease(session).await
+    }
+    async fn refresh_lease(
+        &self,
+        session: &SessionId,
+        holder: &LeaseHolder,
+        ttl: Duration,
+    ) -> Result<LeaseOutcome, StoreError> {
+        self.0.refresh_lease(session, holder, ttl).await
+    }
+    async fn release_lease(
+        &self,
+        session: &SessionId,
+        holder: &LeaseHolder,
+    ) -> Result<(), StoreError> {
+        self.0.release_lease(session, holder).await
+    }
+    async fn record_lease_refusal(
+        &self,
+        session: &SessionId,
+        refused_by: &str,
+        current_holder: &str,
+    ) -> Result<(), StoreError> {
+        self.0
+            .record_lease_refusal(session, refused_by, current_holder)
+            .await
+    }
+    async fn pending_lease_refusals(
+        &self,
+        session: &SessionId,
+        since: DateTime<Utc>,
+    ) -> Result<Vec<crate::store::lease::LeaseRefusal>, StoreError> {
+        self.0.pending_lease_refusals(session, since).await
+    }
+    async fn write_flush_stats(
+        &self,
+        session: &SessionId,
+        stats: &SessionFlushStats,
+    ) -> Result<(), StoreError> {
+        self.0.write_flush_stats(session, stats).await
+    }
+    async fn read_flush_stats(
+        &self,
+        session: &SessionId,
+    ) -> Result<Option<SessionFlushStats>, StoreError> {
+        self.0.read_flush_stats(session).await
+    }
+}
+
+/// The agent the serve under test writes as.
+const AGENT: &str = "agent-a";
+
+/// The serve under test, running in the background.
+struct PinnedServe {
+    registry: Arc<SessionRegistry>,
+    early: EarlyShutdown,
+    task: tokio::task::JoinHandle<Result<(), LamboError>>,
+}
+
+impl PinnedServe {
+    /// Start `serve_pinned` over `store` for `sessions` on a loopback port
+    /// the kernel picks, with `opts` adjusted by `tweak`.
+    async fn start(
+        store: &Arc<MemoryStore>,
+        sessions: &[&str],
+        tweak: impl FnOnce(&mut ServeOptions),
+    ) -> Self {
+        let early = EarlyShutdown::unarmed();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let seams = PinnedSeams {
+            early: Some(early.clone()),
+            registry: Some(tx),
+        };
+        let opts = pinned_opts(sessions, tweak);
+        let backends = backends_over(Box::new(Shared(Arc::clone(store))), fast_config(1_000));
+        let task = tokio::spawn(serve_pinned_with(opts, backends, seams));
+        let registry = tokio::time::timeout(Duration::from_secs(20), rx)
+            .await
+            .expect("the serve starts")
+            .expect("the serve hands out its registry");
+        Self {
+            registry,
+            early,
+            task,
+        }
+    }
+
+    /// Shut the serve down as a SIGTERM would, and return its outcome.
+    async fn stop(self) -> Result<(), LamboError> {
+        self.early.simulate_signal();
+        tokio::time::timeout(Duration::from_secs(30), self.task)
+            .await
+            .expect("the serve shuts down")
+            .expect("the serve task does not panic")
+    }
+
+    fn attached(&self, id: &str) -> Option<Arc<AttachedSession>> {
+        self.registry
+            .attached()
+            .into_iter()
+            .find(|s| s.id().as_str() == id)
+    }
+}
+
+/// `ServeOptions` for an HTTP serve pinning `sessions`, the first the
+/// default, on a port the kernel picks.
+fn pinned_opts(sessions: &[&str], tweak: impl FnOnce(&mut ServeOptions)) -> ServeOptions {
+    let mut opts = ServeOptions::new(sessions[0], AGENT);
+    opts.sessions = sessions.iter().map(|s| s.to_string()).collect();
+    opts.transport = Transport::Http;
+    opts.port = 0;
+    tweak(&mut opts);
+    opts
+}
+
+/// The other writer: a different agent in this process, so its holder
+/// token differs from the serve's.
+fn other_writer() -> LeaseHolder {
+    LeaseHolder::for_this_process(&AgentId::new("another-writer"))
+}
+
+/// The serve's own holder token.
+fn serve_token() -> String {
+    LeaseHolder::for_this_process(&AgentId::new(AGENT)).token()
+}
+
+async fn lease(store: &MemoryStore, id: &str) -> LeaseInfo {
+    store
+        .read_lease(&SessionId::new(id))
+        .await
+        .expect("read")
+        .expect("a lease row")
+}
+
+/// The other writer takes session `id` from the serve: its lease is
+/// expired, the other writer acquires it (a token one higher), and the
+/// serve's fence is latched exactly as its heartbeat would latch it on the
+/// next refresh. Returns the other writer's token.
+async fn take_over(serve: &PinnedServe, store: &MemoryStore, id: &str) -> u64 {
+    let session = SessionId::new(id);
+    store.force_expire_lease(&session);
+    let other = other_writer();
+    let token = match store
+        .acquire_lease(&session, &other, LEASE_TTL)
+        .await
+        .expect("acquire")
+    {
+        LeaseOutcome::Acquired(info) => info.token,
+        LeaseOutcome::Held { current, .. } => panic!("still held by {}", current.holder),
+    };
+    let held = serve.attached(id).expect("attached before the takeover");
+    held.mem.simulate_lease_loss_to(&other.token());
+    token
+}
+
+/// Wait up to `budget` for `done`.
+async fn until(budget: Duration, what: &str, mut done: impl FnMut() -> bool) {
+    let deadline = Instant::now() + budget;
+    while !done() {
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// M1: a detach drops the registry's handle on the session, so the fenced
+/// `Memory` goes (its graph and its second-writer registration with it)
+/// before the background retry attaches the session again. Before the fix
+/// `serve_pinned` held every startup handle until it returned: the old
+/// handle stayed resident and the re-attach logged a false
+/// `SecondSessionWriter` ERROR.
+#[tokio::test]
+async fn a_detached_session_s_handle_is_gone_before_it_is_attached_again() {
+    let (logs, _guard) = crate::test_util::capture_logs(tracing::Level::INFO);
+    let store = Arc::new(MemoryStore::new());
+    let serve = PinnedServe::start(&store, &["m1-a", "m1-b"], |_| {}).await;
+
+    let old = Arc::downgrade(&serve.attached("m1-a").expect("a attached").mem);
+    let first = lease(&store, "m1-a").await.token;
+    let theirs = take_over(&serve, &store, "m1-a").await;
+    assert_eq!(theirs, first + 1);
+    until(Duration::from_secs(10), "a's detach", || {
+        logs.lines()
+            .iter()
+            .any(|l| l.contains("session detach finished") && l.contains("m1-a"))
+    })
+    .await;
+    until(Duration::from_secs(5), "a's old handle to drop", || {
+        old.strong_count() == 0
+    })
+    .await;
+
+    store
+        .release_lease(&SessionId::new("m1-a"), &other_writer())
+        .await
+        .expect("the other writer releases a");
+    until(PINNED_RETRY * 3, "a's re-election", || {
+        serve.attached("m1-a").is_some()
+    })
+    .await;
+    let ours = lease(&store, "m1-a").await;
+    assert_eq!(ours.holder, serve_token(), "the serve holds a again");
+    assert_eq!(ours.token, theirs + 1, "a fresh fencing token");
+    assert!(
+        !logs.lines().iter().any(|l| l.contains("SecondSessionWriter")),
+        "a false second-writer report: {:?}",
+        logs.lines()
+    );
+
+    serve.stop().await.expect("a clean shutdown");
+}

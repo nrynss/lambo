@@ -823,3 +823,6 @@ async fn a_pinned_session_held_elsewhere_is_re_elected_in_the_background() {
         session.mem.close().await.expect("close");
     }
 }
+
+/// The real multi-session serve, in-process (#32 review M1/M2).
+mod pinned_serve;

@@ -84,8 +84,29 @@ enum Slot {
     Detaching,
     /// Another writer holds the lease; the retry loop tries again at
     /// `retry_at`.
-    HeldElsewhere { retry_at: Instant },
+    HeldElsewhere {
+        retry_at: Instant,
+        /// The handle a detach took down, while anything may still hold it
+        /// (#32 review M1). The retry waits for it to go before it attaches
+        /// again: while it lives it keeps its second-writer registration (a
+        /// fenced close fails, and a failed close keeps it, R2-4) and its
+        /// in-RAM graph.
+        previous: Option<PreviousHandle>,
+    },
 }
+
+/// A detached session's old `Memory`, held weakly.
+struct PreviousHandle {
+    mem: Weak<Memory>,
+    detached_at: Instant,
+}
+
+/// How long a retry waits for a detached session's old handle to drop
+/// before attaching anyway. Every owner the registry knows of is gone when
+/// the detach ends; what can remain is a request or an MCP-session task
+/// finishing, which takes milliseconds. Past this, the handle is leaked, and
+/// the `SecondSessionWriter` ERROR the re-attach then logs is a true report.
+const PREVIOUS_HANDLE_WAIT: Duration = Duration::from_secs(30);
 
 /// What the router gets for a session id.
 pub(super) enum Lookup {
@@ -214,7 +235,7 @@ impl SessionRegistry {
             Some(Slot::Detaching) => Lookup::Unavailable {
                 retry_after: Duration::from_secs(1),
             },
-            Some(Slot::HeldElsewhere { retry_at }) => Lookup::Unavailable {
+            Some(Slot::HeldElsewhere { retry_at, .. }) => Lookup::Unavailable {
                 retry_after: retry_at
                     .saturating_duration_since(Instant::now())
                     .max(Duration::from_secs(1)),
@@ -338,6 +359,7 @@ impl SessionRegistry {
             id.to_string(),
             Slot::HeldElsewhere {
                 retry_at: Instant::now() + PINNED_RETRY,
+                previous: None,
             },
         );
     }
@@ -360,16 +382,46 @@ impl SessionRegistry {
         self.order
             .iter()
             .filter(|id| {
-                matches!(slots.get(id.as_str()), Some(Slot::HeldElsewhere { retry_at }) if *retry_at <= now)
+                matches!(slots.get(id.as_str()), Some(Slot::HeldElsewhere { retry_at, .. }) if *retry_at <= now)
             })
             .cloned()
             .collect()
     }
 
+    /// Whether a detached session's old handle is still alive and worth
+    /// waiting for (see [`PREVIOUS_HANDLE_WAIT`]). When it is, the retry is
+    /// pushed back by [`ELECTION_RETRY`]; once it is gone, or the wait is
+    /// over, the slot forgets it.
+    fn awaiting_previous(&self, id: &str) -> bool {
+        let mut slots = self.slots.lock();
+        let Some(Slot::HeldElsewhere { retry_at, previous }) = slots.get_mut(id) else {
+            return false;
+        };
+        let Some(handle) = previous.as_ref() else {
+            return false;
+        };
+        if handle.mem.strong_count() == 0 {
+            *previous = None;
+            return false;
+        }
+        if handle.detached_at.elapsed() < PREVIOUS_HANDLE_WAIT {
+            *retry_at = Instant::now() + ELECTION_RETRY;
+            return true;
+        }
+        tracing::warn!(
+            session = %id,
+            waited_secs = PREVIOUS_HANDLE_WAIT.as_secs(),
+            "lambo serve: the detached handle of this session is still alive; attaching it \
+             again anyway"
+        );
+        *previous = None;
+        false
+    }
+
     /// One background attempt to take pinned session `id` back.
     async fn retry(self: &Arc<Self>, id: &str) {
         let _attaching = self.attach_lock.lock().await;
-        if self.closing.load(Ordering::SeqCst) {
+        if self.closing.load(Ordering::SeqCst) || self.awaiting_previous(id) {
             return;
         }
         let next = match self.acquire(id).await {
@@ -400,9 +452,13 @@ impl SessionRegistry {
                 Instant::now() + PINNED_RETRY
             }
         };
-        self.slots
-            .lock()
-            .insert(id.to_string(), Slot::HeldElsewhere { retry_at: next });
+        self.slots.lock().insert(
+            id.to_string(),
+            Slot::HeldElsewhere {
+                retry_at: next,
+                previous: None,
+            },
+        );
     }
 
     /// Detach session `id` in the background (design §3.4); the process
@@ -424,7 +480,12 @@ impl SessionRegistry {
     /// process's too and is not touched (PR 3).
     ///
     /// The session's slot reads `Detaching` throughout, then
-    /// `HeldElsewhere`, so the retry loop takes it back once it can. A lost
+    /// `HeldElsewhere`, so the retry loop takes it back once it can. The
+    /// detach drops the registry's handle on the session before that (#32
+    /// review M1): the slot was its only long-lived owner, so the fenced
+    /// `Memory` goes with it, and with it its second-writer registration
+    /// and its graph. The retry waits for the handle to be gone before it
+    /// attaches again (`PreviousHandle`). A lost
     /// lease is the only detach in PR 4; idle, eviction, erase and the
     /// operator's detach come with later PRs.
     pub(super) async fn detach(self: &Arc<Self>, id: &str) {
@@ -466,10 +527,16 @@ impl SessionRegistry {
         session.release_endpoint().await;
         progress.end(Stage::EndpointRelease);
         progress.complete();
+        let previous = PreviousHandle {
+            mem: Arc::downgrade(&session.mem),
+            detached_at: Instant::now(),
+        };
+        drop(session);
         self.slots.lock().insert(
             id.to_string(),
             Slot::HeldElsewhere {
                 retry_at: Instant::now() + PINNED_RETRY,
+                previous: Some(previous),
             },
         );
     }

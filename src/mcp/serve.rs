@@ -662,9 +662,10 @@ async fn serve_pinned_with(
         early.clone(),
     );
 
-    // The pinned acquires, in order. Every handle stays held here too, so
-    // the last ones drop when `serve_pinned` returns, after the watchdog is
-    // disarmed, as a one-session serve's does.
+    // The pinned acquires, in order. The registry is the only long-lived
+    // owner of each handle once it is admitted (#32 review M1): a detach
+    // drops its session's handle, and the shutdown's close set drops the
+    // rest after the watchdog is disarmed (`close_holder`).
     let mut acquired: Vec<(Arc<Memory>, Option<hub::SessionEndpoint>)> = Vec::new();
     for id in &opts.sessions {
         match registry.acquire(id).await {
@@ -692,7 +693,6 @@ async fn serve_pinned_with(
             }
         }
     }
-    let mems: Vec<Arc<Memory>> = acquired.iter().map(|(mem, _)| Arc::clone(mem)).collect();
 
     let progress = ShutdownProgress::with_production_watchdog();
     let _disarm = progress.disarm_on_drop();
@@ -732,8 +732,6 @@ async fn serve_pinned_with(
     }
 
     let transport = serve_http(registry.clone(), &opts, shutdown.as_mut());
-    // `mems` drops after `_disarm`, when this returns (declared before it).
-    let _held = mems;
     close_holder(&registry, transport, tasks, &early, &progress, ledger).await
 }
 
@@ -783,13 +781,16 @@ async fn close_holder(
             .collect(),
     )
     .await;
-    // The set's handles (each session's server and `Memory` clone) drop
-    // here, where they always have: at the end of stage 6.
-    drop(sessions);
     progress.end(Stage::EndpointRelease);
     // Stage 7: the call ledger drains last.
     progress.run(Stage::LedgerClose, || close_ledger(ledger));
     progress.complete();
+    // The set's handles (each session's server and `Memory`) drop after the
+    // watchdog is disarmed (`complete`), as the stage table's "not watched"
+    // note says. For a multi-session serve these are the last owners (#32
+    // review M1); a one-session serve also holds its `Memory` until it
+    // returns.
+    drop(sessions);
 
     outcome
 }
