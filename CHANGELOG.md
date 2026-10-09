@@ -74,6 +74,25 @@
     while it matches, and the matching scan no longer spends the derive's 30 s
     store-I/O deadline: it runs in memory, about 0.8 µs per stored vector at
     1,024 dimensions.
+- A session holder (`lambo serve`, or an embedded `Memory`) now keeps the
+  query vectors of its recent recalls, so a repeated recall of the same text
+  no longer calls the embedder (#14). The vector depends only on the text and
+  the embedder, not on the graph, so a write between two identical recalls
+  still reuses it; the recall itself runs in full every time, so results are
+  unchanged. Measured with candle BGE-M3 on Metal over a 3,600-concept SQLite
+  session (release, macOS): a repeated warm recall p50 22.3 ms to 4.1 ms, and
+  the same recall with a derive applied between each pair 21.5 ms to 3.6 ms.
+  A novel query still pays its embed (21.9 ms to 21.8 ms).
+  - The cache belongs to one session and is never shared across sessions in a
+    process, so reply timing cannot reveal another session's queries.
+  - Bounded at 128 entries and 1 MiB per session (about 540 KiB for short
+    queries at 1,024 dimensions), least recently used first out. A failed
+    embed is not cached. A closed or erased session refuses the recall before
+    the cache is consulted.
+  - A vector already cached is reused while the embedder is unavailable, so a
+    repeated query keeps its vector leg through an embedder outage instead of
+    degrading to keyword-only with the `vector_degraded` warning.
+  - `lambo recall` (one recall per process) is unchanged.
 
 ### Added
 
