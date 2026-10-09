@@ -880,6 +880,10 @@ pub(super) async fn guard_request(
     let (parts, body) = req.into_parts();
     let body = match tokio::time::timeout(guard.body_timeout, read_body(body)).await {
         Ok(Ok(body)) => body,
+        // The refusals below answer with the rest of the body unread, so
+        // they close the connection (#32 PR 5 third review L3), as the 408
+        // does: nothing is left to drain, however much the client meant to
+        // send.
         Ok(Err(BodyRead::TooLarge)) => {
             tracing::warn!(
                 max = MAX_HTTP_BODY_BYTES,
@@ -887,6 +891,7 @@ pub(super) async fn guard_request(
             );
             return (
                 StatusCode::PAYLOAD_TOO_LARGE,
+                [(axum::http::header::CONNECTION, "close")],
                 format!("request body too large (limit {MAX_HTTP_BODY_BYTES} bytes)\n"),
             )
                 .into_response();
@@ -894,6 +899,7 @@ pub(super) async fn guard_request(
         Ok(Err(BodyRead::Failed)) => {
             return (
                 StatusCode::BAD_REQUEST,
+                [(axum::http::header::CONNECTION, "close")],
                 "the request body could not be read\n",
             )
                 .into_response();

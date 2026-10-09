@@ -987,12 +987,9 @@ async fn an_oversized_chunked_body_is_refused_before_the_service() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let (addr, reached) = spawn_guarded(guard_with(None, 32, 0, 0)).await;
     let mut sock = tokio::net::TcpStream::connect(addr).await.expect("connect");
-    sock.write_all(
-        b"POST /mcp HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\
-          Connection: close\r\n\r\n",
-    )
-    .await
-    .expect("write head");
+    sock.write_all(b"POST /mcp HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n")
+        .await
+        .expect("write head");
     let len = usize::try_from(MAX_HTTP_BODY_BYTES).expect("fits") + 1;
     let mut chunk = format!("{len:x}\r\n").into_bytes();
     chunk.resize(chunk.len() + len, b' ');
@@ -1004,6 +1001,36 @@ async fn an_oversized_chunked_body_is_refused_before_the_service() {
     let reply = String::from_utf8_lossy(&raw);
     assert!(
         reply.starts_with("HTTP/1.1 413 Payload Too Large\r\n"),
+        "{reply:?}"
+    );
+    // #32 PR 5 third review L3: the rest of the body is never read, so
+    // the connection is closed rather than drained (the request did not
+    // ask for a close itself, so the header is the guard's).
+    assert!(
+        reply
+            .to_ascii_lowercase()
+            .contains("\r\nconnection: close\r\n"),
+        "{reply:?}"
+    );
+    assert_eq!(reached.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+/// #32 PR 5 third review L3: a body the guard cannot read (a malformed
+/// chunk) is a 400 that closes the connection, never reaching the service.
+#[tokio::test]
+async fn an_unreadable_body_is_a_400_that_closes_the_connection() {
+    let (addr, reached) = spawn_guarded(guard_with(None, 32, 0, 0)).await;
+    let (status, reply) = request(
+        addr,
+        "POST /mcp HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n\
+         zz\r\nnot a chunk\r\n",
+    )
+    .await;
+    assert_eq!(status, 400, "{reply}");
+    assert!(
+        reply
+            .to_ascii_lowercase()
+            .contains("\r\nconnection: close\r\n"),
         "{reply:?}"
     );
     assert_eq!(reached.load(std::sync::atomic::Ordering::SeqCst), 0);
