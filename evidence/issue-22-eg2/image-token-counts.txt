@@ -1,0 +1,244 @@
+# llama.cpp b11517 (8a1a9b512), EmbeddingGemma 2 Q8_0 + mmproj Q8_0, Metal, 2026-10-09.
+# Prompt tokens (usage.prompt_tokens) per image, from /v1/embeddings. Images are generated PNGs
+# (solid colour, gradient or 8x8 checkerboard); the count depends on the image's width and height only.
+
+## Budget 280 (--image-min-tokens 280 --image-max-tokens 280 --batch-size 8192 --ubatch-size 8192), solid colour, width x height:
+1000x100 322
+1000x1000 260
+1000x1500 264
+1000x16 403
+1000x2000 257
+1000x3000 256
+1000x330 304
+1000x4096 268
+1000x500 292
+1000x800 256
+100x100 293
+100x1000 322
+100x1500 329
+100x16 298
+100x2000 304
+100x3000 372
+100x330 314
+100x4096 328
+100x500 308
+100x800 292
+1500x100 329
+1500x1000 264
+1500x1500 260
+1500x16 330
+1500x2000 270
+1500x3000 257
+1500x330 292
+1500x4096 274
+1500x500 256
+1500x800 268
+16x100 298
+16x1000 403
+16x1500 330
+16x16 293
+16x2000 380
+16x3000 464
+16x330 308
+16x4096 540
+16x500 286
+16x800 361
+2000x100 304
+2000x1000 257
+2000x1500 270
+2000x16 380
+2000x2000 260
+2000x3000 264
+2000x330 250
+2000x4096 257
+2000x500 268
+2000x800 264
+3000x100 372
+3000x1000 256
+3000x1500 257
+3000x16 464
+3000x2000 264
+3000x3000 260
+3000x330 254
+3000x4096 270
+3000x500 244
+3000x800 260
+330x100 314
+330x1000 304
+330x1500 292
+330x16 308
+330x2000 250
+330x3000 254
+330x330 293
+330x4096 236
+330x500 298
+330x800 301
+4096x100 328
+4096x1000 268
+4096x1500 274
+4096x16 540
+4096x2000 257
+4096x3000 270
+4096x330 236
+4096x4096 260
+4096x500 239
+4096x800 263
+500x100 308
+500x1000 292
+500x1500 256
+500x16 286
+500x2000 268
+500x3000 244
+500x330 298
+500x4096 239
+500x500 293
+500x800 312
+800x100 292
+800x1000 256
+800x1500 268
+800x16 361
+800x2000 264
+800x3000 260
+800x330 301
+800x4096 263
+800x500 312
+800x800 260
+
+## Lambo's reference image (1x1 RGBA PNG) and square renders of the same picture, per server.
+## cos_vs_first: cosine to the first image of the group on the same server.
+== budget 280, ubatch 8192 (the profile)
+ref-1x1-rgba.png             tokens=293 cos_vs_first=1.000000
+red-0064.png                 tokens=293 cos_vs_first=1.000000
+red-0512.png                 tokens=293 cos_vs_first=1.000000
+red-0768.png                 tokens=293 cos_vs_first=1.000000
+red-0896.png                 tokens=260 cos_vs_first=0.998918
+red-1024.png                 tokens=260 cos_vs_first=0.998918
+red-2048.png                 tokens=260 cos_vs_first=0.998918
+checker-0064.png             tokens=293 cos_vs_first=1.000000
+checker-0512.png             tokens=293 cos_vs_first=0.984183
+checker-0768.png             tokens=293 cos_vs_first=0.967691
+checker-0896.png             tokens=260 cos_vs_first=0.985985
+checker-1024.png             tokens=260 cos_vs_first=0.986382
+checker-2048.png             tokens=260 cos_vs_first=0.987421
+== budget 280, default ubatch 512 (capped to 256)
+ref-1x1-rgba.png             tokens=260 cos_vs_first=1.000000
+red-0064.png                 tokens=260 cos_vs_first=1.000000
+red-0512.png                 tokens=260 cos_vs_first=1.000000
+red-0768.png                 tokens=260 cos_vs_first=1.000000
+red-0896.png                 tokens=229 cos_vs_first=0.999173
+red-1024.png                 tokens=260 cos_vs_first=1.000000
+red-2048.png                 tokens=260 cos_vs_first=1.000000
+checker-0064.png             tokens=260 cos_vs_first=1.000000
+checker-0512.png             tokens=260 cos_vs_first=0.988987
+checker-0768.png             tokens=260 cos_vs_first=0.973854
+checker-0896.png             tokens=229 cos_vs_first=0.973114
+checker-1024.png             tokens=260 cos_vs_first=0.988943
+checker-2048.png             tokens=260 cos_vs_first=0.989886
+== no budget flags (dynamic default), ubatch 8192
+ref-1x1-rgba.png             tokens=85 cos_vs_first=1.000000
+red-0064.png                 tokens=85 cos_vs_first=1.000000
+red-0512.png                 tokens=125 cos_vs_first=0.994934
+red-0768.png                 tokens=260 cos_vs_first=0.983948
+red-0896.png                 tokens=365 cos_vs_first=0.980861
+red-1024.png                 tokens=445 cos_vs_first=0.981617
+red-2048.png                 tokens=1093 cos_vs_first=0.972381
+checker-0064.png             tokens=85 cos_vs_first=1.000000
+checker-0512.png             tokens=125 cos_vs_first=0.981935
+checker-0768.png             tokens=260 cos_vs_first=0.967588
+checker-0896.png             tokens=365 cos_vs_first=0.956871
+checker-1024.png             tokens=445 cos_vs_first=0.958044
+checker-2048.png             tokens=1093 cos_vs_first=0.941135
+
+## Other budgets (gradient PNGs), ubatch 8192:
+== budget 280
+1000x100 322
+100x1000 322
+100x300 294
+100x50 292
+1920x1080 268
+1x1 293
+2000x2000 260
+300x100 294
+37x91 301
+48x64 304
+50x100 292
+640x480 304
+64x48 304
+64x64 293
+== budget 256
+1000x100 310
+100x1000 310
+100x300 284
+100x50 280
+1920x1080 256
+1x1 260
+2000x2000 260
+300x100 284
+37x91 290
+48x64 270
+50x100 280
+640x480 270
+64x48 270
+64x64 260
+== budget 240
+1000x100 249
+100x1000 249
+100x300 247
+100x50 246
+1920x1080 224
+1x1 260
+2000x2000 229
+300x100 247
+37x91 254
+48x64 256
+50x100 246
+640x480 256
+64x48 256
+64x64 260
+== budget 300
+1000x100 334
+100x1000 334
+100x300 334
+100x50 329
+1920x1080 280
+1x1 328
+2000x2000 293
+300x100 334
+37x91 340
+48x64 304
+50x100 329
+640x480 304
+64x48 304
+64x64 328
+
+## No budget flags (dynamic default), ubatch 8192:
+1000x100 85
+100x1000 85
+100x300 79
+100x50 76
+1920x1080 924
+1x1 85
+2000x2000 1093
+300x100 79
+37x91 88
+48x64 84
+50x100 76
+640x480 134
+64x48 84
+64x64 85
+1000x750 340
+1024x1024 445
+10x1 85
+1200x900 479
+16x9 88
+1x2 76
+2000x50 110
+224x224 85
+2x1 76
+3000x1000 1087
+300x300 85
+4000x3000 1068
+500x500 104
+50x2000 110
+800x600 225
+896x896 365
