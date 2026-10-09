@@ -283,9 +283,9 @@ async fn run_inner(
                 )
                 .await
         }
-        // #22 PR 6: the vector leg is the point, so no vector search is an
-        // error, not a degradation; and nothing is cached (this process's
-        // cache is discarded anyway).
+        // #22 PR 6: the vector leg is the point, so no vector search, or a
+        // failed vector read, is an error, not a degradation; and nothing
+        // is cached (this process's cache is discarded anyway).
         Some(by) => {
             let vector =
                 query_vector::resolve(by, backends.embedder.as_ref(), &backends.embedding).await?;
@@ -299,6 +299,7 @@ async fn run_inner(
                     &mut cache,
                 )
                 .await
+                .map_err(crate::types::LamboError::Store)?
         }
     };
     // Response-global annotations preserve producer order: the CLI-side

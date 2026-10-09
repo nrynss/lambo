@@ -19,6 +19,8 @@ pub(super) struct VectorSearchStore {
     inner: Arc<dyn GraphStore>,
     answers: PlMutex<Vec<Vec<Scored<NodeId>>>>,
     exact_scan: bool,
+    /// When set, the checked read fails as a backend would (#22 PR 6, M1).
+    fail_reads: std::sync::atomic::AtomicBool,
 }
 
 impl VectorSearchStore {
@@ -27,6 +29,7 @@ impl VectorSearchStore {
             inner,
             answers: PlMutex::new(Vec::new()),
             exact_scan: false,
+            fail_reads: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -37,6 +40,13 @@ impl VectorSearchStore {
             exact_scan: true,
             ..Self::new(inner)
         }
+    }
+
+    /// Make every later checked read fail with a `StoreError::Backend`, as
+    /// a timed-out or unreachable backend would.
+    pub(super) fn fail_vector_reads(&self) {
+        self.fail_reads
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Every `vector_candidates` answer, in call order.
@@ -89,6 +99,11 @@ impl GraphStore for VectorSearchStore {
         limit: usize,
     ) -> Result<Vec<Scored<NodeId>>, StoreError> {
         crate::store::validate_vector_candidate_limit(limit)?;
+        if self.fail_reads.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(StoreError::Backend(
+                "vector read failed: backend db.internal:5432 timed out".into(),
+            ));
+        }
         // A session with nothing flushed yet is an EMPTY candidate pool, not
         // an error — the shape Cockroach returns for an unstamped session
         // before the first commit.

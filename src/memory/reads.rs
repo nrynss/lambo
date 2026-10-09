@@ -138,7 +138,9 @@ impl Memory {
     /// Refused with [`LamboError::Config`] when the store has no vector
     /// search (the vector leg is the whole point), and with whatever
     /// [`query_vector::resolve`] refuses; an image embed failure fails the
-    /// recall rather than degrading to keyword-only. **Nothing is cached**:
+    /// recall rather than degrading to keyword-only, and so does a failed
+    /// vector read ([`LamboError::Store`]): with no text, the other legs
+    /// would answer with whatever was derived last. **Nothing is cached**:
     /// the query-embedding cache (#14) is not consulted or filled, and the
     /// pipeline recall cache is not handed over at all (a fresh, discarded
     /// one stands in), so no structure that outlives this call holds the
@@ -169,7 +171,7 @@ impl Memory {
                 self.config.recall_weights,
                 &mut uncached,
             )
-            .await;
+            .await?;
         self.note_accesses(result.hits.iter().map(|h| h.node_id));
         Ok(result)
     }

@@ -200,3 +200,37 @@ async fn bad_query_vectors_and_stores_without_vector_search_are_refused() {
     assert!(msg.contains("VECTOR_SEARCH"), "{msg}");
     plain.close().await.unwrap();
 }
+
+/// M1: a recall by image or vector whose vector read fails is an error,
+/// not the recent leg's answer. With no text the keyword leg finds nothing,
+/// so degrading would return whatever was derived last as "close to this
+/// image". The error is `LamboError::Store`, which the MCP surface renders
+/// as a bare class (no backend detail); the image path and the vector path
+/// fail alike.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_vector_read_fails_a_recall_by_image_or_vector() {
+    let store = vector_store(Source::Store);
+    let mem = open(store.clone(), "q22-recall-by-read-fails").await;
+    derive_wardrobe(&mem).await;
+    flushed(&mem).await;
+    mem.settle_daemon().await;
+    store.fail_vector_reads();
+
+    let png = similar_query_png();
+    for (by, text) in [
+        (image_query(&png), ""),
+        (vector_query(client_query_vector()), ""),
+        (image_query(&png), "look dismissed for Onam"),
+    ] {
+        let mut q = imageless_text(5);
+        q.query = text.into();
+        let err = mem.recall_by_detailed(q, by).await.unwrap_err();
+        assert!(
+            matches!(err, LamboError::Store(StoreError::Backend(_))),
+            "{err:?}"
+        );
+        let shown = crate::surface::error::model_safe_message(&err);
+        assert_eq!(shown, "store error (the detail was logged server-side)");
+    }
+    mem.close().await.unwrap();
+}
