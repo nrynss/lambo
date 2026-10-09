@@ -671,9 +671,11 @@ async fn an_erase_of_a_detaching_session_is_503() {
 
 /// A pinned session that meets the tombstone when its background retry
 /// attaches it is `Erased`, not `Failed` (#32 PR 4 note for PR 7), so its
-/// requests get 410 rather than a 503 telling an operator to act.
+/// requests get 410 rather than a 503 telling an operator to act, and it
+/// is not retried again.
 #[tokio::test]
 async fn a_held_session_erased_meanwhile_becomes_erased_not_failed() {
+    let (logs, _guard) = crate::test_util::capture_logs(tracing::Level::INFO);
     let w = wire().await;
     // The other writer goes away and the operator erases the session from
     // the CLI's side.
@@ -686,12 +688,16 @@ async fn a_held_session_erased_meanwhile_becomes_erased_not_failed() {
         .erase_session(&SessionId::new(HELD), &eraser)
         .await
         .unwrap();
-    assert!(w.registry.is_tombstoned(HELD).await);
-    // The retry's error arm, driven directly: an attach of HELD fails, and
-    // the registry classifies it by the lease row.
-    assert!(w.registry.acquire(HELD).await.is_err());
-    w.registry.mark_erased_at_start(HELD);
-    assert_eq!(state_of(&w.registry, HELD), "erased");
+    w.registry.spawn_retry_loop();
+    let deadline = Instant::now() + PINNED_RETRY * 3;
+    while state_of(&w.registry, HELD) != "erased" {
+        assert!(
+            Instant::now() < deadline,
+            "the retry never classified the session: {}",
+            state_of(&w.registry, HELD)
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     let reply = http_as(
         w.addr,
         "GET",
@@ -702,6 +708,27 @@ async fn a_held_session_erased_meanwhile_becomes_erased_not_failed() {
     )
     .await;
     assert_eq!(reply.status, 410, "{}", reply.body);
+    let given_up = |logs: &crate::test_util::CapturedLogs| {
+        logs.lines()
+            .iter()
+            .filter(|l| l.contains("was erased; it is not retried") && l.contains(HELD))
+            .count()
+    };
+    assert_eq!(given_up(&logs), 1, "{:?}", logs.lines());
+    assert!(
+        !logs
+            .lines()
+            .iter()
+            .any(|l| l.contains("will not be retried")),
+        "an erased session is not reported as failed"
+    );
+    assert!(crate::store::erase::is_tombstone(
+        &w.store
+            .read_lease(&SessionId::new(HELD))
+            .await
+            .unwrap()
+            .unwrap()
+    ));
 }
 
 /// `lambo_derive` as `auth` on an open MCP session, waiting for the write

@@ -595,17 +595,15 @@ async fn a_lost_lease_is_detached_re_elected_and_served_again_end_to_end() {
 }
 
 /// M2: `serve_pinned`'s startup failure branch. A pinned session that
-/// cannot be attached (here: erased, a tombstone no acquire takes) refuses
-/// the start, after closing the sessions already acquired, so their leases
-/// are released rather than left to lapse.
+/// cannot be attached (here: stored under another embedding contract, an
+/// error no retry clears) refuses the start, after closing the sessions
+/// already acquired, so their leases are released rather than left to
+/// lapse. (An erased session, PR 4's example, no longer refuses the start
+/// since #32 PR 7: see the next test.)
 #[tokio::test]
 async fn a_pinned_session_that_cannot_attach_refuses_the_start_and_releases_the_rest() {
     let store = Arc::new(MemoryStore::new());
-    let operator = LeaseHolder::for_this_process(&AgentId::new("operator"));
-    store
-        .erase_session(&SessionId::new("fail-b"), &operator)
-        .await
-        .expect("erase b");
+    super::plant_foreign_contract(store.as_ref(), "fail-b", None).await;
 
     let opts = pinned_opts(&["fail-a", "fail-b", "fail-c"], |_| {});
     let backends = backends_over(Shared::over(&store), fast_config(1_000));
@@ -620,9 +618,11 @@ async fn a_pinned_session_that_cannot_attach_refuses_the_start_and_releases_the_
     )
     .await
     .expect("the refusal is prompt")
-    .expect_err("an erased pinned session refuses the start")
-    .to_string();
-    assert!(err.contains("erased"), "{err}");
+    .expect_err("a pinned session under another contract refuses the start");
+    assert!(
+        !matches!(err, LamboError::Store(StoreError::StaleWrite(_))),
+        "the refusal is the contract mismatch, not an erased session: {err}"
+    );
 
     let a = lease(&store, "fail-a").await;
     assert_eq!(
@@ -638,6 +638,33 @@ async fn a_pinned_session_that_cannot_attach_refuses_the_start_and_releases_the_
             .is_none(),
         "nothing after the failure is attempted"
     );
+}
+
+/// #32 PR 7 (PR 4's note): an erased pinned session does not refuse the
+/// start. It is served as erased (410, decided on the tombstone, not the
+/// error text), the other sessions attach and serve, and nothing attaches
+/// or recreates the erased one.
+#[tokio::test]
+async fn an_erased_pinned_session_is_served_as_erased_and_the_rest_start() {
+    let store = Arc::new(MemoryStore::new());
+    let operator = LeaseHolder::for_this_process(&AgentId::new("operator"));
+    store
+        .erase_session(&SessionId::new("gone-b"), &operator)
+        .await
+        .expect("erase b");
+
+    let serve = PinnedServe::start(&store, &["gone-a", "gone-b", "gone-c"], |_| {}).await;
+    assert!(serve.attached("gone-a").is_some());
+    assert!(serve.attached("gone-c").is_some());
+    assert!(serve.attached("gone-b").is_none());
+    assert!(matches!(
+        serve.registry.lookup("gone-b"),
+        crate::mcp::serve::registry::Lookup::Erased
+    ));
+    serve.stop().await.expect("a clean shutdown");
+    let b = lease(&store, "gone-b").await;
+    assert!(crate::store::erase::is_tombstone(&b), "{b:?}");
+    assert!(store.load_session(&SessionId::new("gone-b")).await.is_err());
 }
 
 /// #32 review L2: the refusal poller keeps a session's cursor across a
