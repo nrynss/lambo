@@ -95,6 +95,28 @@ fn the_environment_overrides_the_flag() {
     assert!(err.to_string().contains(AUTH_TOKEN_ENV), "{err}");
 }
 
+/// #32 PR 5 review S2: a set `LAMBO_AUTH_TOKEN` that is not valid UTF-8 is
+/// refused, naming the variable and never the value, instead of being read
+/// as unset (which fell back to the flag, or to no token at all: an
+/// unauthenticated loopback serve). Mutation: read the variable with
+/// `std::env::var(..).ok()` again and this resolves to the flag.
+#[test]
+fn a_non_utf8_auth_token_variable_is_refused_not_treated_as_unset() {
+    use std::os::unix::ffi::OsStringExt;
+    let flag = || Some(SecretToken::new("from-flag").expect("valid"));
+    let mut raw = b"fake-".to_vec();
+    raw.push(0xFF);
+    raw.extend_from_slice(b"-env");
+    for flag in [flag(), None] {
+        let err = resolve_auth_token_from(flag, Some(std::ffi::OsString::from_vec(raw.clone())))
+            .expect_err("a non-UTF-8 value must fail closed");
+        let msg = err.to_string();
+        assert!(msg.contains(AUTH_TOKEN_ENV), "names the variable: {msg}");
+        assert!(msg.contains("UTF-8"), "says why: {msg}");
+        assert!(!msg.contains("fake-"), "never the value: {msg}");
+    }
+}
+
 /// **T82-16 pinned, the load-bearing half.** A non-loopback bind without a
 /// token must refuse to start, and the message must tell the operator both
 /// ways out.

@@ -404,3 +404,39 @@ fn a_token_no_request_could_present_refuses_the_start_without_quoting_it() {
     );
     assert!(!stderr.contains(&core), "the token reached stderr");
 }
+
+/// #32 PR 5 review S2: a `LAMBO_AUTH_TOKEN` that is set but not valid
+/// UTF-8 refuses the start with exit 2 before the backends, naming the
+/// variable and never quoting the value. Before the fix it read as unset,
+/// and this loopback serve with no credential came up unauthenticated.
+#[test]
+fn a_non_utf8_auth_token_variable_refuses_the_start() {
+    use std::os::unix::ffi::OsStringExt;
+    let (_dir, cfg) = scratch("");
+    let mut raw = token("bytes").into_bytes();
+    raw.push(0xFF);
+    let runtime = RuntimeDir::new();
+    let mut cmd = serve_command(&cfg, &runtime, &["--session", A], &[]);
+    cmd.env(LEGACY_ENV, std::ffi::OsString::from_vec(raw));
+    let out = ServeChild::new(
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn serve"),
+    )
+    .wait_with_output_within(Duration::from_secs(60))
+    .expect("the refusal is prompt")
+    .expect("wait");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{stderr}");
+    assert!(
+        stderr.contains(LEGACY_ENV) && stderr.contains("UTF-8"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains(&token("bytes")),
+        "the token reached stderr"
+    );
+    assert!(!stderr.contains("failed to build backends"), "{stderr}");
+}

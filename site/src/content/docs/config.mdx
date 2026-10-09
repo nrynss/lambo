@@ -343,7 +343,7 @@ The HTTP transport binds to `127.0.0.1` on port `7700` and serves Streamable HTT
 
 ### Authentication
 
-On loopback the HTTP transport is unauthenticated by default, so a local client needs no token. Binding anywhere else **fails closed**: `lambo serve` refuses to start unless you configure a bearer token, either with `--auth-token` or the `LAMBO_AUTH_TOKEN` environment variable (which takes precedence over the flag), or with a [`[[serve.credential]]`](#credentials). Configuring any credential also ends the unauthenticated loopback default. When a token is configured, every request must send `Authorization: Bearer <token>`. A missing or wrong token is refused with `401`. A set-but-empty `LAMBO_AUTH_TOKEN` is a usage error, not a silent allowance. The token is ignored on `--transport stdio`.
+On loopback the HTTP transport is unauthenticated by default, so a local client needs no token. Binding anywhere else **fails closed**: `lambo serve` refuses to start unless you configure a bearer token, either with `--auth-token` or the `LAMBO_AUTH_TOKEN` environment variable (which takes precedence over the flag), or with a [`[[serve.credential]]`](#credentials). Configuring any credential also ends the unauthenticated loopback default. When a token is configured, every request must send `Authorization: Bearer <token>`. A missing or wrong token is refused with `401`. A `LAMBO_AUTH_TOKEN` that is set but empty, or not valid UTF-8, is a usage error, not a silent allowance. The token is ignored on `--transport stdio`.
 
 ### Rate limit
 

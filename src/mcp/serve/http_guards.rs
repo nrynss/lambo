@@ -139,18 +139,28 @@ impl std::str::FromStr for SecretToken {
 /// fallback to the flag: that shape is nearly always an unset variable that
 /// expanded to nothing, and resolving it to "whatever the flag said" would make
 /// a typo look like it worked.
+///
+/// A set variable that is not valid UTF-8 is an error too (#32 PR 5 review
+/// S2), never "unset": read as unset, a loopback serve with no other
+/// credential would start unauthenticated while the operator believes a
+/// token is required. The error names the variable, never its value.
 pub fn resolve_auth_token(flag: Option<SecretToken>) -> Result<Option<SecretToken>, LamboError> {
-    resolve_auth_token_from(flag, std::env::var(AUTH_TOKEN_ENV).ok())
+    resolve_auth_token_from(flag, std::env::var_os(AUTH_TOKEN_ENV))
 }
 
 pub(super) fn resolve_auth_token_from(
     flag: Option<SecretToken>,
-    env: Option<String>,
+    env: Option<std::ffi::OsString>,
 ) -> Result<Option<SecretToken>, LamboError> {
     match env {
-        Some(raw) => SecretToken::new(raw)
-            .map(Some)
-            .map_err(|e| LamboError::Config(format!("{AUTH_TOKEN_ENV}: {e}"))),
+        Some(raw) => {
+            let raw = raw
+                .into_string()
+                .map_err(|_| LamboError::Config(format!("{AUTH_TOKEN_ENV}: is not valid UTF-8")))?;
+            SecretToken::new(raw)
+                .map(Some)
+                .map_err(|e| LamboError::Config(format!("{AUTH_TOKEN_ENV}: {e}")))
+        }
         None => Ok(flag),
     }
 }
