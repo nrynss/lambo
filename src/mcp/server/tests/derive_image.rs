@@ -411,58 +411,142 @@ async fn an_image_id_taken_by_text_fails_its_receipt_with_the_fix() {
     s.mem.close().await.expect("close");
 }
 
-/// Ledger hygiene: the call line says which payload kind was sent and
-/// nothing of it; no line carries the base64, the caption or a component.
+/// Ledger hygiene, on every line the image tool causes (review L7): the
+/// call line says which payload kind was sent and nothing of it, and the
+/// `completion` lines (written by the write pipeline, so the `Memory` is
+/// built with the ledger, as `serve` builds it) carry the outcome, for an
+/// applied and a failed write alike, and nothing of the image either. A
+/// door refusal is booked with its class only.
 #[tokio::test]
 async fn the_ledger_carries_no_image_payload() {
     let dir = ledger_dir("image-payload");
     let path = dir.join("calls.jsonl");
-    let plain = image_server(
-        "mcp-image-ledger",
-        Config {
+    let ledger = Ledger::open(&path);
+    let mem = Memory::builder()
+        .session("mcp-image-ledger")
+        .agent("agent-a")
+        .config(Config {
             accept_client_vectors: true,
             ..Config::default()
-        },
-    )
-    .await;
-    let s = LamboServer::with_ledger(Arc::clone(plain.memory()), Ledger::open(&path));
-    let ledger = Arc::clone(s.ledger().expect("ledger attached"));
+        })
+        .flush_interval(Duration::from_secs(3_600))
+        .store(Arc::new(crate::test_util::VectorSearchable(Arc::new(
+            MemoryStore::new(),
+        ))) as Arc<dyn GraphStore>)
+        .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
+        .embedding_contract(fixture_contract())
+        .ledger(Some(Arc::clone(&ledger)))
+        .build()
+        .await
+        .expect("build");
+    let s = LamboServer::with_ledger(Arc::new(mem), Arc::clone(&ledger));
 
+    // 1. An image, applied.
     let data = png_b64("red silk saree");
     let ack = call(
         &s,
         "lambo_derive_image",
-        image_args("render seventeen", "r17", "red silk saree"),
+        image_args("secret caption one", "r17", "red silk saree"),
     )
     .await;
-    assert_eq!(ack.is_error, Some(false), "{ack:?}");
+    assert_eq!(settled_receipt(&s, &ack).await["state"], json!("applied"));
+    // 2. A vector, applied.
     let v = fixture_vector("blue linen kurta");
     let ack = call(
         &s,
         "lambo_derive_image",
         json!({
             "agent_id": "agent-a",
-            "caption": "render eighteen",
+            "caption": "secret caption two",
             "concept_type": "resource",
             "vector": {"values": v, "contract": {"kind": "fixture", "dim": 1024}},
         }),
     )
     .await;
-    assert_eq!(ack.is_error, Some(false), "{ack:?}");
-    // One call line each.
-    let lines = read_ledger(&ledger, 2);
-    let calls: Vec<_> = lines
+    assert_eq!(settled_receipt(&s, &ack).await["state"], json!("applied"));
+    // 3. A text reference takes an image's key, so 4. that image's write
+    // fails on its receipt.
+    let action = call(
+        &s,
+        "lambo_record_action",
+        json!({"agent_id": "agent-a", "action": "dismissed the outfit",
+               "depends_on": ["render 19 [image:r19]"]}),
+    )
+    .await;
+    assert_eq!(action.is_error, Some(false), "{action:?}");
+    let ack = call(
+        &s,
+        "lambo_derive_image",
+        image_args("render 19", "r19", "green cotton dhoti"),
+    )
+    .await;
+    assert_eq!(settled_receipt(&s, &ack).await["state"], json!("failed"));
+    // 5. A door refusal: no receipt, so no completion line.
+    let refused = call_raw(
+        &s,
+        "lambo_derive_image",
+        json!({"agent_id": "agent-a", "caption": "secret caption three",
+               "concept_type": "entity",
+               "image": {"mime": "image/png", "data": format!("data:image/png;base64,{data}")}}),
+    )
+    .await;
+    assert_eq!(refused.is_error, Some(true), "{refused:?}");
+
+    // Five call lines (the stats waits are calls too, so filter) and four
+    // completions: the image, the vector, the action and the failed image.
+    let calls_expected = 5 + 3;
+    let lines = read_ledger(&ledger, calls_expected + 4);
+    let image_calls: Vec<_> = lines
         .iter()
-        .filter(|l| l["kind"] == json!("call"))
+        .filter(|l| l["kind"] == json!("call") && l["tool"] == json!("lambo_derive_image"))
         .collect();
-    assert_eq!(calls[0]["payload"], json!("image"), "{}", calls[0]);
-    assert_eq!(calls[1]["payload"], json!("vector"), "{}", calls[1]);
+    let payloads: Vec<_> = image_calls.iter().map(|l| l["payload"].clone()).collect();
+    assert_eq!(
+        payloads,
+        [json!("image"), json!("vector"), json!("image"), json!(null)],
+        "{image_calls:?}"
+    );
+    assert_eq!(image_calls[3]["error_kind"], json!("invalid params"));
+    let completions: Vec<_> = lines
+        .iter()
+        .filter(|l| l["kind"] == json!("completion"))
+        .collect();
+    let states: Vec<_> = completions.iter().map(|l| l["state"].clone()).collect();
+    assert_eq!(
+        states,
+        [
+            json!("applied"),
+            json!("applied"),
+            json!("applied"),
+            json!("failed")
+        ],
+        "{completions:?}"
+    );
 
     let raw = std::fs::read_to_string(&path).expect("ledger file");
     assert!(!raw.contains(&data[..24]), "no base64 in the ledger");
-    assert!(!raw.contains("render seventeen") && !raw.contains("render eighteen"));
-    for x in v.iter().take(8) {
+    assert!(!raw.contains("secret caption"), "no caption in the ledger");
+    // No component, in either spelling a writer might use, and no long
+    // numeric array anywhere.
+    for x in v.iter().take(16) {
         assert!(!raw.contains(&format!("{x}")), "no vector component: {x}");
+        let as_json = serde_json::to_string(x).unwrap();
+        assert!(!raw.contains(&as_json), "no vector component: {as_json}");
+    }
+    fn longest_number_array(v: &serde_json::Value) -> usize {
+        match v {
+            serde_json::Value::Array(a) => a
+                .iter()
+                .map(longest_number_array)
+                .max()
+                .unwrap_or(0)
+                .max(a.iter().filter(|x| x.is_number()).count()),
+            serde_json::Value::Object(o) => o.values().map(longest_number_array).max().unwrap_or(0),
+            _ => 0,
+        }
+    }
+    for line in &lines {
+        assert!(longest_number_array(line) < 16, "{line}");
     }
     ledger.shutdown();
     s.mem.close().await.expect("close");
