@@ -113,7 +113,7 @@ index_prefix = "lambo"
 
 `[recall]` is a top-level table, not part of `[store]`. It needs the `recall-elastic` feature; a binary built without it refuses the section and names the feature rather than ignoring it. Lambo creates each index with its mapping the first time it writes to it.
 
-**Staleness.** A concept becomes searchable in the index up to one refresh interval after its flush, so the vector part of recall can miss a concept written in the last second or so. The keyword and recent parts of recall still find it. This is an accepted difference from a store that ranks vectors itself.
+**Staleness.** A concept becomes searchable in the index up to one refresh interval after its flush, so the vector part of recall can miss a concept written in the last second or so. The keyword and recent parts of recall still find it. This is an accepted difference from a store that ranks vectors itself. Deduplication when a writer derives new concepts does not use the index: it compares against the writer's own in-memory graph, so a fact derived twice in quick succession still merges.
 
 **Ranking.** Lambo creates each vector index with plain float HNSW (no quantization), asks it for 16 more neighbours than recall needs, and re-scores them with exact cosine from the stored vectors. Scores and order therefore match the store's exact scan for the concepts the index returns. The index only chooses which concepts are considered, and an approximate HNSW search can occasionally miss a near neighbour that an exact scan would find. This is the second accepted difference.
 

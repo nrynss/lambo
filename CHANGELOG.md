@@ -105,6 +105,11 @@
   and `timeout_ms = 0` are refused.
 - `lambo recall-index backfill --session <s>`: rebuild one session's recall
   index from the store under the session's lease (#18).
+- `GraphStore::holder_derives_from_graph()` (default `false`): a store whose
+  checked vector read is a lagging tier declares that a session holder's
+  hybrid derive should rank its semantic-merge candidates in its in-memory
+  graph while recall keeps reading the store (#18 review M6, amending #8's
+  single constructor). `TieredStore` declares it. Additive.
 - `GraphStore::backfill_recall_index()` (default `Ok(None)`): the hook the
   backfill verb calls; only a store with a recall tier overrides it. Additive.
 - `GraphStore::exact_vector_scan()` (default `false`): an adapter declares its
