@@ -198,13 +198,38 @@ impl Embedder for ContextTolerantEmbedder {
         self.0.dimensions()
     }
     async fn embed(&self, text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
+        self.embed_as(text, crate::test_util::TextRole::Document)
+            .await
+    }
+    async fn embed_query(&self, text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
+        self.embed_as(text, crate::test_util::TextRole::Query).await
+    }
+    fn modalities(&self) -> crate::embed::Modalities {
+        self.0.modalities()
+    }
+    async fn embed_image(
+        &self,
+        image: crate::embed::ImageInput<'_>,
+    ) -> Result<Vec<f32>, crate::embed::EmbedError> {
+        self.0.embed_image(image).await
+    }
+}
+
+impl ContextTolerantEmbedder {
+    /// The `embed` behaviour above, in either text role (#22: a wrapper
+    /// forwards the role, so its inner embedder sees what the caller asked).
+    async fn embed_as(
+        &self,
+        text: &str,
+        role: crate::test_util::TextRole,
+    ) -> Result<Vec<f32>, crate::embed::EmbedError> {
         let label = text
             .strip_prefix("Concept: ")
             .unwrap_or(text)
             .split(" — ")
             .next()
             .unwrap_or(text);
-        self.0.embed(label).await
+        role.embed(&self.0, label).await
     }
 }
 
