@@ -6,7 +6,8 @@
 //! store outage never drops mutations:
 //!
 //! * **Loss bound is observable.** [`FlushTask::stats`] reports `lag` (time
-//!   since the last successful flush), `depth` (mutations not yet durable:
+//!   since the store last held every mutation: a successful flush, or a poll
+//!   that found nothing pending — #16 §3), `depth` (mutations not yet durable:
 //!   the in-graph log plus the pending batch — in flight, backed off, or
 //!   retained after exhausted retries) and `dead_lettered` (batches dropped
 //!   for a deterministic constraint violation, STORE-4/D5). `lag` uses the
@@ -130,8 +131,20 @@ pub struct FlushParams {
 /// Observable durability loss bound (spec §2.4).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FlushStats {
-    /// Time since the last successful flush (tokio clock; 0 until the first
-    /// successful flush after spawn).
+    /// Time since the store was last **caught up** (tokio clock): the last
+    /// successful flush, or the last poll that found nothing pending. 0 at
+    /// spawn.
+    ///
+    /// Until #16 §3 this was the time since the last successful flush alone,
+    /// so it grew with idle time while nothing was pending: the dogfood rigs
+    /// read 13.7 minutes, 12.1 hours and 48 hours with `log_depth` 0 in every
+    /// snapshot, a durability bound that looked alarming exactly when there
+    /// was nothing to lose. A caught-up store has nothing to lose, so an idle
+    /// writer now reads at most one `POLL_QUANTUM`; with mutations pending
+    /// (a failing store, a retained batch) it still grows from the last moment
+    /// the store held everything, which is the age bound of what a crash
+    /// would lose. A degraded session (`durability = "none"`) never counts as
+    /// caught up, since it drops what it drains.
     pub lag: Duration,
     /// Mutations not yet durable: in-graph log + pending batch (in flight,
     /// backed off, or retained after exhausted retries).
@@ -144,14 +157,14 @@ pub struct FlushStats {
 }
 
 /// Lock-light state shared between the running task and the caller's stats
-/// handle. `last_success` is a `Mutex<Instant>` (held for nanoseconds inside
+/// handle. `caught_up` is a `Mutex<Instant>` (held for nanoseconds inside
 /// `stats`); `started`/`depth`/`degraded`/`dead_lettered` are atomics.
 #[derive(Debug)]
 struct Shared {
     /// Set by `spawn` (check-and-set): exactly one flush loop may run per task.
     /// Visible to `stats`/`degraded` without races.
     started: AtomicBool,
-    last_success: Mutex<tokio::time::Instant>,
+    caught_up: Mutex<tokio::time::Instant>,
     depth: AtomicUsize,
     degraded: AtomicBool,
     /// STORE-4 / D5: dead-lettered-batch counter (deterministic constraint
@@ -166,10 +179,10 @@ struct Shared {
 impl Shared {
     fn new() -> Self {
         Self {
-            // `last_success` is a placeholder until `spawn` initializes it (the
+            // `caught_up` is a placeholder until `spawn` initializes it (the
             // lag contract starts at spawn, not construction — see `spawn`).
             started: AtomicBool::new(false),
-            last_success: Mutex::new(tokio::time::Instant::now()),
+            caught_up: Mutex::new(tokio::time::Instant::now()),
             depth: AtomicUsize::new(0),
             degraded: AtomicBool::new(false),
             dead_lettered: AtomicU64::new(0),
@@ -180,7 +193,7 @@ impl Shared {
     fn stats(&self) -> FlushStats {
         let now = tokio::time::Instant::now();
         FlushStats {
-            lag: now.saturating_duration_since(*self.last_success.lock()),
+            lag: now.saturating_duration_since(*self.caught_up.lock()),
             depth: self.depth.load(Ordering::Acquire),
             dead_lettered: self.dead_lettered.load(Ordering::Acquire),
         }
@@ -261,7 +274,7 @@ impl FlushTask {
     /// Takes `&self` rather than the pinned `self`: the task clones the
     /// graph/store/shared arcs, so the caller keeps this `FlushTask` as its
     /// stats handle — `spawn(self)` would consume the only path to
-    /// [`FlushTask::stats`]. `last_success` is initialized here (not at
+    /// [`FlushTask::stats`]. `caught_up` is initialized here (not at
     /// construction), so `stats().lag` is 0 until the first successful flush
     /// after spawn even if the task was built long before it was spawned. The
     /// first flush happens one `interval` after spawn.
@@ -274,7 +287,7 @@ impl FlushTask {
             .started
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .expect("FlushTask::spawn called twice — exactly one loop may run");
-        *self.shared.last_success.lock() = tokio::time::Instant::now();
+        *self.shared.caught_up.lock() = tokio::time::Instant::now();
 
         let graph = self.graph.clone();
         let store = self.store.clone();
@@ -575,6 +588,13 @@ impl FlushLoop {
 
         self.refresh_depth();
         if self.pending.is_empty() {
+            // Nothing drained and nothing held: the store holds every
+            // mutation, so the durability lag is zero now (#16 §3). Not for a
+            // degraded session, which drops what it drains rather than
+            // flushing it.
+            if !self.shared.degraded.load(Ordering::Acquire) {
+                *self.shared.caught_up.lock() = tokio::time::Instant::now();
+            }
             return;
         }
         if self.shared.degraded.load(Ordering::Acquire) {
@@ -621,7 +641,7 @@ impl FlushLoop {
             Ok(()) => {
                 self.clear_pending();
                 self.retry_after = None;
-                *self.shared.last_success.lock() = tokio::time::Instant::now();
+                *self.shared.caught_up.lock() = tokio::time::Instant::now();
                 // Writes may have landed while we flushed; depth is the log only now.
                 self.refresh_depth();
             }
@@ -1839,10 +1859,51 @@ mod tests {
         assert_eq!(snap.concepts.len(), 2);
         assert_eq!(snap.edges.len(), 2); // Derives x2
 
-        // Idle: lag grows again, depth stays 0.
+        // Idle: depth stays 0, and so does the lag beyond one poll — the
+        // store is caught up, so there is nothing for it to bound (#16 §3;
+        // this asserted 500 ms of idle lag before).
         tokio::time::advance(Duration::from_millis(500)).await;
         assert_eq!(task.stats().depth, 0);
-        assert_eq!(task.stats().lag, Duration::from_millis(500));
+        wait_until(|| task.stats().lag <= POLL_QUANTUM).await;
+    }
+
+    /// **#16 §3: an idle writer's lag stays within one poll.** `flush_lag_ms`
+    /// was "time since the last successful flush", which grows with idle
+    /// time while nothing is pending: the dogfood rigs read 13.7 minutes,
+    /// 12.1 hours and 48 hours with `log_depth` 0 in every one of 5,915
+    /// snapshots, so the durability bound looked alarming exactly when there
+    /// was nothing to lose. Lag is now the time since the store was last
+    /// caught up, and a poll that finds nothing pending is caught up.
+    #[tokio::test(start_paused = true)]
+    async fn an_idle_writers_lag_stays_within_one_poll() {
+        let store: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+        let graph = new_graph();
+        let task = FlushTask::new(
+            graph.clone(),
+            store.clone(),
+            params(Duration::from_secs(1), 100, 1, 1_000),
+        );
+        let _handle = task.spawn();
+        let_task_arm().await;
+
+        let iid = add_interaction(&graph, 1, None);
+        add_concept(&graph, 1, iid);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        // The tick flushes the three mutations; lag resets on that success.
+        wait_until(|| task.stats().lag < Duration::from_millis(50)).await;
+
+        // An hour of idle time, a poll at a time as the loop sees it.
+        for _ in 0..36_000 {
+            tokio::time::advance(POLL_QUANTUM).await;
+            tokio::task::yield_now().await;
+        }
+        let stats = task.stats();
+        assert_eq!(stats.depth, 0);
+        assert!(
+            stats.lag <= POLL_QUANTUM,
+            "nothing is pending, so the store is caught up and the lag is at most one poll, \
+             not an hour: {stats:?}"
+        );
     }
 
     #[tokio::test(start_paused = true)]

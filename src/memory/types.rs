@@ -93,7 +93,10 @@ pub struct MemoryStats {
     pub session: SessionId,
     /// The agent this writer runs as.
     pub agent: AgentId,
-    /// Time since the last successful flush.
+    /// Time since the store was last caught up: the last successful flush, or
+    /// the last flush poll that found nothing pending (#16 §3). At most one
+    /// poll interval while nothing is pending; it grows only while mutations
+    /// wait for a store that is not taking them.
     pub flush_lag: Duration,
     /// Mutations sitting in the graph's write-behind log, awaiting drain.
     /// Read from the graph, so it is **always current**.
