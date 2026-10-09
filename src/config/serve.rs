@@ -227,9 +227,10 @@ fn addressed(field: &str, value: &str) -> Result<AddressedSessionId, LamboError>
 
 /// What `lambo serve` logs once at startup when the file sets a `[serve]`
 /// key this release does not enforce yet (credentials, the on-demand
-/// bounds, and over HTTP the stdio-only cwd map): an operator who configured
-/// credentials must not think scoping is active. Followed by the key names that are set
-/// ([`ServeConfig::unenforced_keys`]); it quotes no value from the table.
+/// bounds, and over HTTP the stdio-only cwd map): an operator who
+/// configured credentials must not think scoping is active. Followed by the
+/// key names that are set ([`ServeConfig::unenforced_keys`]); it quotes no
+/// value from the table.
 pub const SERVE_UNENFORCED_NOTICE: &str = "lambo.toml [serve] is parsed but not yet enforced \
      for some keys in this release; they have no effect yet (#32), and this serve still \
      authenticates only with --auth-token / LAMBO_AUTH_TOKEN";

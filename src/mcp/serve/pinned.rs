@@ -25,10 +25,10 @@ pub struct PinnedSessions {
 
 /// Work out the pinned sessions from the command line and `[serve]`.
 ///
-/// * **stdio** owns exactly one session (design §2.2, Q9), and `[serve] sessions` does not apply. The CLI chooses it
-///   first (`--session`, else PR 8's cwd map, else `default_session`) and
-///   passes it here as the one value; a library caller that passes none is
-///   refused.
+/// * **stdio** owns exactly one session (design §2.2, Q9), and
+///   `[serve] sessions` does not apply. The CLI chooses it first
+///   (`--session`, else PR 8's cwd map, else `default_session`) and passes
+///   it here as the one value; a library caller that passes none is refused.
 /// * **HTTP** pins the ordered union of `--session` and `[serve] sessions`,
 ///   and needs at least one. The default must be pinned (PR 4 hosts nothing
 ///   else), and the union must fit `max_attached`, which `[serve]`'s own
