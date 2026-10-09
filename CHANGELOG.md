@@ -61,6 +61,13 @@
   next to a secret (a DSN with a password, say) no longer prints the secret
   into a startup log. A script that matched the old `TOML parse error at
   line N` text must match `(line N, column M)` instead.
+- An unknown `[store] kind` or `[embedder] kind` (in `lambo.toml` or
+  `LAMBO_STORE` / `LAMBO_EMBEDDER`) no longer quotes the value: the error
+  lists the accepted kinds with `(value not shown)`. A wrong-typed or unknown
+  enum value in `lambo.toml` reads `string (value not shown)` or
+  `unknown variant (value not shown)`, and an unknown `promotion_policy` is
+  quoted only when it is a short word. A DSN or token pasted under the wrong
+  key no longer reaches a startup log.
 - Every `serve --ledger` line now carries `session` (#32). `startup` and
   `lease` lines always did; `call`, `completion` and `stats` lines gain it so
   one ledger file can hold several sessions later. Additive: `v` stays `1`

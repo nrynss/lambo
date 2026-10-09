@@ -99,10 +99,19 @@ quotes the offending source line. A misspelled key beside a secret (a `dssn`
 typo next to a DSN with a password, or a token under a typo of `token_env`)
 printed the secret into the startup error and from there into launchd or
 systemd logs. The error now carries the parser's message and a line and
-column. Its own `fix(config)` commit, failing test first. Residual: the
-parser's message for a wrong-typed value can still include that value (for
-example `invalid type: string "...", expected usize`); no secret-bearing key
-in the file is typed so that a secret would reach that path.
+column. Its own `fix(config)` commit, failing test first.
+
+Residual, corrected after review (L1): the first version of this note said no
+secret-bearing key could reach the value-echo path. That was wrong. `[store]
+kind` and `[embedder] kind` deserialize through `FromStr`, which quoted the
+value (`unknown store kind "postgresql://u:pw@h/db"`), and serde's `invalid
+type: string "...", expected usize` quotes a string under a numeric key such
+as `dim`. A DSN or token pasted under one of those keys reached the startup
+log. Fixed in its own `fix(config)` commit: the two kind parsers no longer
+echo (they list the accepted kinds), `toml_error` replaces serde's quoted
+`string "..."` and `unknown variant `...`` values with `(value not shown)`
+while keeping field names, and `promotion_policy` quotes only a short word
+(its tests pin that a typo is shown). `token_env` is covered separately (M1).
 
 ## Wire compatibility
 
