@@ -220,6 +220,10 @@ struct SessionTier {
     next_check: Option<Instant>,
     /// A repair of this session is running (single-flight, M4).
     repairing: bool,
+    /// The highest mutation epoch a flush through this store committed for
+    /// the session. A repair from an older snapshot must not mark the
+    /// session in sync (#18 review F4).
+    committed_epoch: u64,
     /// The marker-ahead warning was logged and the marker has not been seen
     /// in sync since (F3: log once, not on every check).
     ahead_warned: bool,
@@ -875,9 +879,19 @@ impl Tier {
                 version,
             )
             .await?;
+        // A flush that committed past this snapshot while the repair ran was
+        // not mirrored (mirrors wait for InSync) and is not in these
+        // documents: leave the session untrusted and run once more, from a
+        // fresh snapshot (#18 review F4). A session flushing faster than
+        // it can be re-indexed stays on the fallback until the flushes
+        // pause, which is correct, only slower.
         self.with_state(session, |st| {
-            st.sync = TierSync::InSync;
-            st.next_repair = None;
+            if st.committed_epoch > epoch {
+                st.repair_again = true;
+            } else {
+                st.sync = TierSync::InSync;
+                st.next_repair = None;
+            }
         });
         Ok(RecallBackfillReport {
             session: session.clone(),
@@ -961,11 +975,16 @@ impl Tier {
         batch: &MutationBatch,
         token: Option<u64>,
     ) {
+        // Recorded under the same lock that reads the state, so a repair
+        // ending concurrently either sees this epoch or is seen as in sync.
+        let sync = self.with_state(session, |st| {
+            st.committed_epoch = st.committed_epoch.max(batch.mutation_epoch);
+            st.sync
+        });
         let Some(token) = token else {
             self.mark_unleased(session);
             return;
         };
-        let sync = self.with_state(session, |st| st.sync);
         if sync != TierSync::InSync {
             // The durable snapshot already holds this batch, so a repair
             // covers it; mirroring it on its own first would be redundant.

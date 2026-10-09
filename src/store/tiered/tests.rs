@@ -869,6 +869,59 @@ async fn repairs_run_one_at_a_time_per_session() {
     assert!(live.contains_key(&c3.0.to_string()) && live.contains_key(&c4.0.to_string()));
 }
 
+/// F4: a flush that commits while a repair runs is not in the repair's
+/// snapshot (and was not mirrored: mirrors wait for the session to be in
+/// sync). The repair must not mark the session in sync when it ends; reads
+/// keep falling back until the rerun has indexed that flush too, and then
+/// the busy session does settle.
+#[tokio::test]
+async fn a_repair_overtaken_by_a_flush_is_not_trusted_until_the_rerun() {
+    let (primary, fake) = (memory_primary(), Arc::new(FakeIndex::new()));
+    let store = tier(&primary, &fake);
+    let sid = SessionId::new("overtaken");
+    let token = attach(&store, &sid, &holder("w")).await;
+    let s = stale_after_an_outage(&store, &fake, &sid, token).await;
+    let knn = || fake.knn_calls.load(std::sync::atomic::Ordering::SeqCst);
+
+    // Pass 1 repairs from a snapshot at e2 and parks in its sweep.
+    fake.hold_deletes();
+    let (_, e2) = one_more(&sid, &s, 2);
+    store.flush(&e2, Some(token)).await.unwrap();
+    wait_until("pass 1 reaches its sweep", || {
+        fake.delete_calls.load(std::sync::atomic::Ordering::SeqCst) == 1
+    })
+    .await;
+    // e3 commits under it.
+    let (c3, e3) = one_more(&sid, &s, 3);
+    store.flush(&e3, Some(token)).await.unwrap();
+
+    // Pass 1 ends; the rerun parks at its marker check.
+    let reads = fake.marker_reads.load(std::sync::atomic::Ordering::SeqCst);
+    fake.hold_marker_reads();
+    fake.release_deletes();
+    wait_until("the rerun reaches its marker check", || {
+        fake.marker_reads.load(std::sync::atomic::Ordering::SeqCst) > reads
+    })
+    .await;
+    assert_eq!(fake.marker(&sid), Some(2), "pass 1 wrote its own epoch");
+    assert_ne!(
+        store.tier_status(&sid).sync,
+        TierSync::InSync,
+        "a repair from e2 was trusted after e3 committed"
+    );
+    store
+        .vector_candidates_checked(&sid, &PROBE, &contract(), 10)
+        .await
+        .unwrap();
+    assert_eq!(knn(), 0, "a read was served from an index without e3");
+
+    fake.release_marker_reads();
+    settle(&store).await;
+    assert_eq!(store.tier_status(&sid).sync, TierSync::InSync);
+    assert_eq!(fake.marker(&sid), Some(3));
+    assert!(fake.live(&sid).contains_key(&c3.0.to_string()));
+}
+
 /// M1: a mirror against a slow cluster is bounded by the mirror deadline;
 /// the flush returns and the session goes stale for a repair.
 #[tokio::test]

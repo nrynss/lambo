@@ -35,7 +35,8 @@
 //! float vector is still returned from `_source`.
 //!
 //! **Latency.** `delay_*` stall a call (a slow cluster); `hold_deletes` parks
-//! every delete-by-query until released (a long-running delete).
+//! every delete-by-query until released (a long-running delete), and
+//! `hold_marker_reads` parks every marker read (a slow check).
 //!
 //! **Bugs.** `panic_next_bulk` panics inside the next bulk call, to show a
 //! panicking repair task does not wedge its session.
@@ -84,6 +85,9 @@ pub(crate) struct FakeIndex {
     pub delay_knn_ms: AtomicU64,
     /// Parks every delete-by-query until a permit is added.
     pub delete_gate: Mutex<Option<std::sync::Arc<tokio::sync::Semaphore>>>,
+    /// Parks every marker read until a permit is added.
+    pub marker_gate: Mutex<Option<std::sync::Arc<tokio::sync::Semaphore>>>,
+    pub marker_reads: AtomicUsize,
     /// The next bulk call panics (a bug inside a repair task).
     pub panic_next_bulk: AtomicBool,
     pub knn_calls: AtomicUsize,
@@ -152,6 +156,17 @@ impl FakeIndex {
         let gate = self.delete_gate.lock().clone();
         if let Some(gate) = gate {
             let _ = gate.acquire().await;
+        }
+    }
+
+    /// Park every marker read until [`Self::release_marker_reads`].
+    pub(crate) fn hold_marker_reads(&self) {
+        *self.marker_gate.lock() = Some(std::sync::Arc::new(tokio::sync::Semaphore::new(0)));
+    }
+
+    pub(crate) fn release_marker_reads(&self) {
+        if let Some(gate) = self.marker_gate.lock().take() {
+            gate.add_permits(tokio::sync::Semaphore::MAX_PERMITS);
         }
     }
 
@@ -400,6 +415,11 @@ impl RecallIndex for FakeIndex {
 
     async fn read_marker(&self, session: &SessionId) -> Result<Option<SyncMarker>, StoreError> {
         self.check_up()?;
+        self.marker_reads.fetch_add(1, Ordering::SeqCst);
+        let gate = self.marker_gate.lock().clone();
+        if let Some(gate) = gate {
+            let _ = gate.acquire().await;
+        }
         Ok(self.markers.lock().get(&session.0).map(|(_, m)| *m))
     }
 
