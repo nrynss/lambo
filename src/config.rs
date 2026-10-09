@@ -15,6 +15,7 @@ use crate::types::{LamboError, MatchStrategy};
 
 pub(crate) mod secret_env;
 mod serve;
+mod web;
 /// An environment variable name for an error message, or `(value not shown)`
 /// when it may be a pasted secret (shared by `[serve]` and `[recall]`).
 pub use serve::{
@@ -22,6 +23,10 @@ pub use serve::{
     ServeCredential, SessionSelectionError, SessionSource, DEFAULT_ATTACH_CONCURRENCY,
     DEFAULT_IDLE_DETACH_SECS, DEFAULT_MAX_ATTACHED, EVERY_HOSTED_SESSION,
     RESERVED_CREDENTIAL_NAMES, SERVE_UNENFORCED_NOTICE, SESSION_REQUIRED,
+};
+pub use web::{
+    WebConfig, DEFAULT_LOAD_CONCURRENCY, DEFAULT_MAX_LOADED_SESSIONS, DEFAULT_RECALL_CONCURRENCY,
+    DEFAULT_VIEW_TTL_MS, MAX_VIEW_TTL_MS,
 };
 
 /// Scoring weights for daemon composite (spec §9): recency / frequency / session_activity / density.
@@ -464,6 +469,11 @@ pub struct LamboFile {
     /// by a binary that predates it. See [`ServeConfig`].
     #[serde(default, skip_serializing_if = "ServeConfig::is_empty")]
     pub serve: ServeConfig,
+    /// The read-only portal's view bounds (`[web]`, #4). Read by
+    /// `lambo serve-web` only. Not serialized when empty, like `[serve]`.
+    /// See [`WebConfig`].
+    #[serde(default, skip_serializing_if = "WebConfig::is_empty")]
+    pub web: WebConfig,
 }
 
 /// A `lambo.toml` parse error, with its position and **without** the source
@@ -568,12 +578,13 @@ fn redact_backticked(message: &str, prefix: &str, keep: fn(&str) -> bool) -> Str
 impl LamboFile {
     /// Parse TOML text.
     ///
-    /// Also runs [`ServeConfig::validate`], so a malformed `[serve]` table
-    /// fails closed at the file boundary for every command, like an unknown
-    /// key does.
+    /// Also runs [`ServeConfig::validate`] and [`WebConfig::validate`], so a
+    /// malformed `[serve]` or `[web]` table fails closed at the file boundary
+    /// for every command, like an unknown key does.
     pub fn from_toml_str(s: &str) -> Result<Self, LamboError> {
         let file: Self = toml::from_str(s).map_err(|e| toml_error(s, &e))?;
         file.serve.validate()?;
+        file.web.validate()?;
         file.check_api_key_env_is_not_a_serve_credential()?;
         Ok(file)
     }
@@ -1440,6 +1451,7 @@ kind = "fake"
             promotion_policy: Some(PromotionPolicy::Solo),
             recall: None,
             serve: Default::default(),
+            web: Default::default(),
         };
         let s = toml::to_string(&f).unwrap();
         let back: LamboFile = toml::from_str(&s).unwrap();

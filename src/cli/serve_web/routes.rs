@@ -14,17 +14,18 @@ use serde::Serialize;
 
 use super::auth::require_auth;
 use super::dto::{
-    EmbeddingStatus, GraphEdge, GraphNode, GraphResponse, InspectParams, InspectResponse, Pulse,
-    RecallParams, RecallResponse, SessionInfo, SinceParams,
+    GraphEdge, GraphNode, GraphResponse, InspectParams, InspectResponse, Pulse, RecallParams,
+    RecallResponse, SessionInfo, SinceParams,
 };
 use super::projections::{
-    is_structural, read_events, read_stats, status_str, structural_dependents, structural_rank,
+    is_structural, read_feed_and_stats, status_str, structural_dependents, structural_rank,
 };
 use super::state::AppState;
+use super::views::RECALL_PERMIT_WAIT;
 use super::{APP_CSS, APP_JS, INDEX_HTML, POLL_INTERVAL};
 use crate::canon::gate_progress;
 use crate::cli::caps::CliError;
-use crate::cli::load_reader_graph;
+use crate::cli::recall::RecallRequest;
 use crate::recall::format::blast_radii;
 use crate::store::{Capabilities, StoreKind};
 use crate::surface::focus::{resolve_focus, Focus};
@@ -47,6 +48,26 @@ pub(super) fn asset(content_type: &'static str, body: &'static str) -> Response 
 /// JSON with `no-store`: session memory must never be served from a cache.
 pub(super) fn json<T: Serialize>(status: StatusCode, body: T) -> Response {
     (status, [(header::CACHE_CONTROL, "no-store")], Json(body)).into_response()
+}
+
+/// The answer to a recall that found every [`ViewBounds::recall_concurrency`]
+/// permit taken for [`RECALL_PERMIT_WAIT`]: 503, `Retry-After: 1`, no-store.
+///
+/// [`ViewBounds::recall_concurrency`]: super::views::ViewBounds::recall_concurrency
+pub(super) fn recall_busy() -> Response {
+    let mut response = json(
+        StatusCode::SERVICE_UNAVAILABLE,
+        serde_json::json!({
+            "error": format!(
+                "recall: every recall slot stayed busy for {} s; retry shortly",
+                RECALL_PERMIT_WAIT.as_secs()
+            )
+        }),
+    );
+    response
+        .headers_mut()
+        .insert(header::RETRY_AFTER, header::HeaderValue::from_static("1"));
+    response
 }
 
 pub(super) fn fail(err: CliError) -> Response {
@@ -79,14 +100,11 @@ pub(super) async fn healthz() -> Response {
 }
 
 pub(super) async fn api_session(State(state): State<Arc<AppState>>) -> Response {
-    let loaded = match load_reader_graph(state.store(), state.session.as_str()).await {
-        Ok(loaded) => loaded,
+    let view = match state.view().await {
+        Ok(view) => view,
         Err(err) => return fail(err),
     };
-    let embedding_status = {
-        let graph = loaded.graph.read();
-        EmbeddingStatus::inspect(graph.embedding(), &state.backends.embedding)
-    };
+    let embedding_status = view.embedding.clone();
     json(
         StatusCode::OK,
         SessionInfo {
@@ -115,20 +133,16 @@ pub(super) async fn api_events(
     State(state): State<Arc<AppState>>,
     Query(params): Query<SinceParams>,
 ) -> Response {
-    match read_events(&state, params.since.unwrap_or(0)).await {
-        Ok(payload) => json(StatusCode::OK, payload),
+    match state.view().await {
+        Ok(view) => json(StatusCode::OK, view.events_since(params.since.unwrap_or(0))),
         Err(e) => fail(e),
     }
 }
 
 pub(super) async fn api_stats(State(state): State<Arc<AppState>>) -> Response {
     // `usize::MAX` asks for the count without the rows.
-    let total = match read_events(&state, usize::MAX).await {
-        Ok(p) => p.total,
-        Err(e) => return fail(e),
-    };
-    match read_stats(&state, total).await {
-        Ok(read) => json(StatusCode::OK, read.stats),
+    match read_feed_and_stats(&state, usize::MAX).await {
+        Ok((_, read)) => json(StatusCode::OK, read.stats),
         Err(e) => fail(e),
     }
 }
@@ -138,12 +152,8 @@ pub(super) async fn api_pulse(
     State(state): State<Arc<AppState>>,
     Query(params): Query<SinceParams>,
 ) -> Response {
-    let events = match read_events(&state, params.since.unwrap_or(0)).await {
-        Ok(p) => p,
-        Err(e) => return fail(e),
-    };
-    match read_stats(&state, events.total).await {
-        Ok(read) => {
+    match read_feed_and_stats(&state, params.since.unwrap_or(0)).await {
+        Ok((events, read)) => {
             let vector_search = state
                 .store()
                 .capabilities()
@@ -163,26 +173,50 @@ pub(super) async fn api_pulse(
     }
 }
 
-/// Recall, straight through [`crate::cli::recall::run_detailed`].
+/// Recall, through [`crate::cli::recall::run_detailed_on`] on the session's
+/// view.
 ///
-/// Reusing the CLI reader verbatim is the point: the page cannot show a
-/// prettier or staler context block than the one an agent receives, because it
-/// is running the same code with the same validators and the same caps. H3:
-/// the payload's `context` and its structured `hits` /
-/// `response_annotations` all come from that ONE execution.
+/// Running the CLI reader's own pipeline is the point: the page cannot show a
+/// prettier context block than the one an agent receives, because it is
+/// running the same code with the same validators and the same caps; it can be
+/// at most one view TTL older than a fresh `lambo recall`. H3: the payload's
+/// `context` and its structured `hits` / `response_annotations` all come from
+/// that ONE execution. The arguments are validated before the view is
+/// touched, so a bad query costs no store call.
 pub(super) async fn api_recall(
     State(state): State<Arc<AppState>>,
     Query(params): Query<RecallParams>,
 ) -> Response {
     let query = params.q.unwrap_or_default();
     let started = Instant::now();
-    let result = super::recall::run_detailed(
-        &state.backends,
+    let request = match RecallRequest::validate(
         state.session.as_str(),
         query.trim(),
         params.top_k,
         params.max_tokens,
         params.traversal_depth,
+    ) {
+        Ok(request) => request,
+        Err(e) => return fail(e),
+    };
+    // The view first, then the permit: a slow load is bounded by the load
+    // semaphore and must not hold a recall permit while it runs, or a few
+    // recalls waiting on one slow session would answer every other recall
+    // 503. The 503 still comes after the session was resolved (design 5.3).
+    let view = match state.view().await {
+        Ok(view) => view,
+        Err(e) => return fail(e),
+    };
+    // Bound concurrent recalls process-wide (embed and pipeline work).
+    // Held until the response is built.
+    let Some(_permit) = state.views.recall_permit().await else {
+        return recall_busy();
+    };
+    let result = super::recall::run_detailed_on(
+        &state.backends,
+        &view.reader,
+        &request,
+        state.views.queries(&state.session),
     )
     .await;
 
@@ -218,14 +252,14 @@ pub(super) async fn api_inspect(
             InspectResponse::missing(params.focus, state.backends.config.promotion_policy),
         );
     }
-    let loaded = match load_reader_graph(state.store(), state.session.as_str()).await {
-        Ok(l) => l,
+    let view = match state.view().await {
+        Ok(view) => view,
         Err(e) => return fail(e),
     };
     // Scoped so the (`!Send`) read guard provably never spans the await for
     // the gate-progress query below.
     let found = {
-        let g = loaded.graph.read();
+        let g = view.reader.graph.read();
         match resolve_focus(&g, params.focus.trim()) {
             Focus::Exact(id) | Focus::Fuzzy { id, .. } => match g.node(id) {
                 Some(Node::Concept(c)) => {
@@ -323,12 +357,12 @@ pub(super) async fn api_inspect(
 /// lease. Ships only `Dependency`/`Causal`/`Hierarchical` edges — the false
 /// `CoOccurrence` edge stays out of the visible claim.
 pub(super) async fn api_graph(State(state): State<Arc<AppState>>) -> Response {
-    let loaded = match load_reader_graph(state.store(), state.session.as_str()).await {
-        Ok(l) => l,
+    let view = match state.view().await {
+        Ok(view) => view,
         Err(e) => return fail(e),
     };
     let (nodes, edges, truncated) = {
-        let g = loaded.graph.read();
+        let g = view.reader.graph.read();
         // One in-memory pass for every node's dependent count, matching
         // /api/inspect's live semantics (not the frozen concepts-row column,
         // which is `None` until promotion), so the tree marks load-bearing

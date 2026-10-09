@@ -17,14 +17,20 @@
 //!   module can reach a store: the types take no store handle, so "an
 //!   unauthorized request makes zero store calls" (#32 §6.2) holds by
 //!   construction for the part of the check that lives here.
+//! * [`SessionAuthority`]: a surface's whole credential set (#32 PR 5): which
+//!   grant a presented bearer token resolves to, scanned in constant time
+//!   across every credential, or the implicit loopback grant when none is
+//!   configured. Generic over the surface's own secret type, so the token
+//!   itself never leaves the type that redacts it.
 //! * [`SessionRefusal`] and [`not_found_response`]: the one uniform 404. A
 //!   malformed id, an id outside the credential's scope, and a capability the
 //!   credential lacks all produce byte-identical responses (status, headers and
 //!   body), and those bytes are axum's own unrouted-path 404, so a refused
 //!   session is also indistinguishable from a path that was never routed.
 //!
-//! No routing uses this yet. PR 4 wires `/mcp/s/{session}`, PR 5 the
-//! credentials, PR 7 the admin routes, and #4 the portal.
+//! `lambo serve --transport http` routes `/mcp` and `/mcp/s/{session}`
+//! through it (#32 PR 4) and authenticates and authorizes every request with
+//! it (PR 5); PR 7's admin routes and #4's portal are to use it too.
 //!
 //! # The fixed order (#32 §6.2)
 //!
@@ -38,6 +44,7 @@
 
 use std::collections::BTreeSet;
 use std::fmt;
+use std::sync::Arc;
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -253,20 +260,29 @@ impl HostedSessions {
 
     /// Is `id` one of the sessions this serve may host?
     pub fn contains(&self, id: &AddressedSessionId) -> bool {
-        self.pinned.contains(id) || self.prefixes.iter().any(|p| p.covers(id))
+        self.is_pinned(id) || self.prefixes.iter().any(|p| p.covers(id))
+    }
+
+    /// Is `id` one of the pinned sessions?
+    pub fn is_pinned(&self, id: &AddressedSessionId) -> bool {
+        self.pinned.contains(id)
     }
 }
 
 /// Which sessions one credential may address.
 ///
-/// The union of three parts, any of which may be empty: exact names, `"*"`
-/// (every hosted session, see [`HostedSessions`]) and one prefix. An empty
-/// scope covers nothing; the config layer refuses to build one.
+/// The union of four parts, any of which may be empty: exact names, `"*"`
+/// (every hosted session, see [`HostedSessions`]), one prefix, and "every
+/// pinned session" ([`SessionScope::pinned`], the scope of the legacy
+/// `default` and implicit `local` credentials, which no configured credential
+/// can express). An empty scope covers nothing; the config layer refuses to
+/// build one.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SessionScope {
     names: BTreeSet<AddressedSessionId>,
     every_hosted: bool,
     prefix: Option<SessionPrefix>,
+    every_pinned: bool,
 }
 
 impl SessionScope {
@@ -280,12 +296,39 @@ impl SessionScope {
             names: names.into_iter().collect(),
             every_hosted,
             prefix,
+            every_pinned: false,
+        }
+    }
+
+    /// Every pinned session and nothing else (#32 §6.1): the scope of the
+    /// legacy `default` credential and of the implicit `local` one. Narrower
+    /// than `"*"`, which also covers every name inside any credential's
+    /// prefix.
+    pub fn pinned() -> Self {
+        Self {
+            every_pinned: true,
+            ..Self::default()
         }
     }
 
     /// Does this scope cover nothing at all?
     pub fn is_empty(&self) -> bool {
-        self.names.is_empty() && !self.every_hosted && self.prefix.is_none()
+        self.names.is_empty() && !self.every_hosted && self.prefix.is_none() && !self.every_pinned
+    }
+
+    /// Does this scope cover every pinned session, whatever its name? True
+    /// for `"*"` and for [`SessionScope::pinned`]. A serve uses it for a
+    /// pinned session whose name the strict charset refuses (a one-session
+    /// serve keeps `--session`'s looser rule and is reached only at `/mcp`):
+    /// no exact name or prefix can cover such a session, because none can
+    /// spell it.
+    pub fn covers_every_pinned(&self) -> bool {
+        self.every_hosted || self.every_pinned
+    }
+
+    /// The scope's exact session names.
+    pub fn names(&self) -> impl Iterator<Item = &AddressedSessionId> {
+        self.names.iter()
     }
 
     /// The scope's prefix, if it has one (feeds [`HostedSessions`]).
@@ -298,6 +341,7 @@ impl SessionScope {
         self.names.contains(id)
             || self.prefix.as_ref().is_some_and(|p| p.covers(id))
             || (self.every_hosted && hosted.contains(id))
+            || (self.every_pinned && hosted.is_pinned(id))
     }
 }
 
@@ -316,6 +360,15 @@ pub enum SessionNeed {
     /// The operator surface (`/admin/sessions`, `/admin/s/{s}/detach`).
     Admin,
 }
+
+/// The name the legacy `--auth-token` / `LAMBO_AUTH_TOKEN` credential goes by
+/// (#32 §6.1). Reserved: no configured credential may use it.
+pub const LEGACY_CREDENTIAL_NAME: &str = "default";
+
+/// The name of the implicit loopback credential, which exists only while no
+/// credential is configured (#32 §6.1). Reserved like
+/// [`LEGACY_CREDENTIAL_NAME`].
+pub const LOCAL_CREDENTIAL_NAME: &str = "local";
 
 /// The capability flags a credential carries beyond read and write.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -363,6 +416,28 @@ impl SessionGrant {
             scope,
             capabilities,
         }
+    }
+
+    /// The legacy credential (#32 §6.1): what `--auth-token` /
+    /// `LAMBO_AUTH_TOKEN` becomes. Every pinned session, and no `create`,
+    /// `erase` or `admin`.
+    pub fn legacy_default() -> Self {
+        Self::new(
+            LEGACY_CREDENTIAL_NAME,
+            SessionScope::pinned(),
+            SessionCapabilities::default(),
+        )
+    }
+
+    /// The implicit loopback credential (#32 §6.1, decision 5): the scope of
+    /// [`SessionGrant::legacy_default`] and no capability, so wire erase
+    /// always needs a configured credential, loopback included.
+    pub fn implicit_local() -> Self {
+        Self::new(
+            LOCAL_CREDENTIAL_NAME,
+            SessionScope::pinned(),
+            SessionCapabilities::default(),
+        )
     }
 
     /// The credential's configured name.
@@ -414,6 +489,117 @@ pub fn authorize_addressed(
     let id = parse_addressed(raw)?;
     grant.authorize(&id, need, hosted)?;
     Ok(id)
+}
+
+/// A surface's secret type, as the bytes [`SessionAuthority`] compares.
+/// Implemented by each surface's own redacting token type, so the scan never
+/// needs the secret as a printable string.
+pub(crate) trait BearerSecret {
+    /// The secret, for a constant-time comparison only.
+    fn secret_bytes(&self) -> &[u8];
+}
+
+/// Step 1 of §6.2 for a whole credential set: which grant, if any, a
+/// request's bearer token resolves to (#32 PR 5).
+///
+/// Holds either an implicit grant, used for every request without looking at
+/// any header (the loopback serve with no credential configured, today's
+/// unauthenticated loopback behaviour), or the configured credentials, each a
+/// secret and its grant. Never both: the implicit `local` grant is gone once
+/// any credential exists (§6.1). With neither, every request is refused,
+/// which is the fail-closed answer for a set nobody can present.
+///
+/// [`SessionAuthority::authorize`] then runs steps 2 and 3 against the
+/// grant, in memory only.
+pub(crate) struct SessionAuthority<T> {
+    credentials: Vec<(T, Arc<SessionGrant>)>,
+    implicit: Option<Arc<SessionGrant>>,
+    hosted: HostedSessions,
+}
+
+impl<T: BearerSecret> SessionAuthority<T> {
+    /// Requests must present one of `credentials`.
+    pub(crate) fn with_credentials(
+        credentials: impl IntoIterator<Item = (T, SessionGrant)>,
+        hosted: HostedSessions,
+    ) -> Self {
+        Self {
+            credentials: credentials
+                .into_iter()
+                .map(|(secret, grant)| (secret, Arc::new(grant)))
+                .collect(),
+            implicit: None,
+            hosted,
+        }
+    }
+
+    /// Every request gets `grant`, with no header checked.
+    pub(crate) fn implicit(grant: SessionGrant, hosted: HostedSessions) -> Self {
+        Self {
+            credentials: Vec::new(),
+            implicit: Some(Arc::new(grant)),
+            hosted,
+        }
+    }
+
+    /// Must a request present a bearer token?
+    pub(crate) fn requires_bearer(&self) -> bool {
+        self.implicit.is_none()
+    }
+
+    /// How many credentials a request can arrive as: the configured ones,
+    /// or 1 for an implicit grant (#32 PR 5 review M2: each one's share of
+    /// the serve's bounds). Never 0.
+    pub(crate) fn credential_count(&self) -> usize {
+        self.credentials.len().max(1)
+    }
+
+    /// The configured credentials' names, in order (for the startup log;
+    /// never a secret). Empty under an implicit grant.
+    pub(crate) fn credential_names(&self) -> Vec<&str> {
+        self.credentials.iter().map(|(_, g)| g.name()).collect()
+    }
+
+    /// The grant for an `Authorization` header value, or `None` (the
+    /// surface's 401).
+    ///
+    /// The presented credential is compared against **every** configured
+    /// secret in constant time with no early exit
+    /// ([`crate::surface::bearer::match_any`]), so timing does not reveal
+    /// which credential a guess nearly matched or where it sits in the list.
+    pub(crate) fn authenticate(&self, header: Option<&str>) -> Option<Arc<SessionGrant>> {
+        if let Some(grant) = &self.implicit {
+            return Some(Arc::clone(grant));
+        }
+        // A request without a bearer credential is still scanned (as an
+        // empty one, which matches nothing), so "no header" and "wrong
+        // token" cost the same.
+        let presented = crate::surface::bearer::bearer_credential(header).unwrap_or_default();
+        // Over the fixed cap: refused before the scan (#32 PR 5 review L2).
+        if presented.len() > crate::surface::bearer::MAX_BEARER_CREDENTIAL_BYTES {
+            return None;
+        }
+        let index = crate::surface::bearer::match_any(
+            presented.as_bytes(),
+            self.credentials
+                .iter()
+                .map(|(secret, _)| secret.secret_bytes()),
+        )?;
+        self.credentials
+            .get(index)
+            .map(|(_, grant)| Arc::clone(grant))
+    }
+
+    /// Steps 2 and 3 of §6.2 for an authenticated `grant`:
+    /// [`authorize_addressed`] against this set's hosted sessions.
+    pub(crate) fn authorize(
+        &self,
+        grant: &SessionGrant,
+        raw: &str,
+        need: SessionNeed,
+    ) -> Result<AddressedSessionId, SessionRefusal> {
+        authorize_addressed(raw, grant, need, &self.hosted)
+    }
 }
 
 #[cfg(test)]

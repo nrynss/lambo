@@ -268,8 +268,12 @@ impl Memory {
     /// Session health. `flush_lag`, `log_depth` and `flush_depth` are the spec
     /// §2.4 observable durability bound — the loss window on a writer crash.
     pub fn stats(&self) -> MemoryStats {
-        let flush = self.flush.stats();
         let g = self.graph.read();
+        // Read the flush figures under the graph lock: the flush task drains
+        // the log and publishes the depth that counts it under the write lock,
+        // so reading both here sees the drain whole or not at all, and
+        // `log_depth + flush_depth` never under-reports what is not durable.
+        let flush = self.flush.stats();
         let concept_count = g.concepts().count();
         let canonical_count = g
             .concepts()

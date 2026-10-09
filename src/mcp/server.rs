@@ -73,6 +73,7 @@ pub use params::{
     WireImage, WireImageConceptType, WireParentOf, WireQueryVector, WireResource, WireVector,
 };
 use response::attach_receipts;
+pub(crate) use trace::CallCredential;
 
 // ---------------------------------------------------------------------------
 // Server
@@ -359,6 +360,25 @@ impl LamboServer {
 // at the field built once in `new()` keeps per-call work to a map lookup.
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for LamboServer {
+    /// The macro's own dispatch, inside the call's credential scope
+    /// (#32 PR 5 review I6): the configured credential the HTTP request
+    /// authenticated as, read from the request parts rmcp attaches, so the
+    /// call ledger can name it. Stdio, and the `default` and `local`
+    /// credentials, carry none.
+    async fn call_tool(
+        &self,
+        request: rmcp::model::CallToolRequestParams,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::CallToolResponse, rmcp::ErrorData> {
+        let caller = context
+            .extensions
+            .get::<axum::http::request::Parts>()
+            .and_then(|parts| parts.extensions.get::<CallCredential>())
+            .map(|credential| Arc::clone(&credential.0));
+        let call = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        trace::with_caller(caller, self.tool_router.call(call)).await
+    }
+
     fn get_info(&self) -> ServerInfo {
         // `ServerInfo` / `Implementation` are `#[non_exhaustive]`: start from
         // the SDK's default (which carries the negotiated protocol version) and

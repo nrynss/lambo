@@ -3,15 +3,19 @@
 //! PR 1 parsed and validated the table and resolves credential tokens from
 //! the environment. Since PR 4 an HTTP `lambo serve` pins `sessions` (beside
 //! its `--session` values), serves `default_session` at `/mcp` and enforces
-//! `max_attached` on the union (`crate::mcp::pin_sessions`). The rest is
-//! parsed and validated but **not enforced yet**, and a serve says so once
-//! ([`ServeConfig::warn_if_unenforced`]): PR 5 enforces
-//! `[[serve.credential]]`, PR 6 the on-demand bounds (`attach_concurrency`,
-//! `idle_detach_secs`, `per_session_rps`). Since PR 8 a stdio serve without
-//! `--session` takes its session from the `[[serve.projects]]` cwd map, then
-//! `default_session` ([`ServeConfig::select_stdio_session`]); an HTTP serve
-//! never reads the map, so its notice still names it. See the approved
-//! design, issue #32, sections 2.3, 6.1 and 7.1.
+//! `max_attached` on the union (`crate::mcp::pin_sessions`). Since PR 5 it
+//! enforces `[[serve.credential]]`: every request must present one of the
+//! configured tokens (or the legacy one), and reaches only the sessions in
+//! that credential's scope (`crate::mcp::serve`'s `authority` module). A
+//! stdio serve authenticates nobody, so credentials do not apply to it.
+//! Since PR 8 a stdio serve without `--session` takes its session from the
+//! `[[serve.projects]]` cwd map, then `default_session`
+//! ([`ServeConfig::select_stdio_session`]); an HTTP serve never reads the
+//! map, so its notice still names it. The rest is parsed and validated but
+//! **not enforced yet**, and a serve says so once
+//! ([`ServeConfig::warn_if_unenforced`]): PR 6 the on-demand bounds
+//! (`attach_concurrency`, `idle_detach_secs`, `per_session_rps`). See the
+//! approved design, issue #32, sections 2.3, 6.1 and 7.1.
 //!
 //! ```toml
 //! [serve]
@@ -69,7 +73,7 @@ use super::secret_env;
 use crate::mcp::SecretToken;
 use crate::surface::session::{
     parse_addressed, AddressedSessionId, HostedSessions, SessionCapabilities, SessionGrant,
-    SessionPrefix, SessionScope, MAX_ADDRESSED_LEN,
+    SessionPrefix, SessionScope, LEGACY_CREDENTIAL_NAME, LOCAL_CREDENTIAL_NAME, MAX_ADDRESSED_LEN,
 };
 use crate::types::LamboError;
 
@@ -91,7 +95,7 @@ pub const DEFAULT_IDLE_DETACH_SECS: u64 = 900;
 /// `--auth-token` / `LAMBO_AUTH_TOKEN` becomes, and `local` is the implicit
 /// loopback credential (#32 §6.1). A configured credential with either name
 /// would make a log line ambiguous about which one authorized a request.
-pub const RESERVED_CREDENTIAL_NAMES: &[&str] = &["default", "local"];
+pub const RESERVED_CREDENTIAL_NAMES: &[&str] = &[LEGACY_CREDENTIAL_NAME, LOCAL_CREDENTIAL_NAME];
 
 /// The scope entry meaning "every session this serve may host" (#32 §6.1).
 pub const EVERY_HOSTED_SESSION: &str = "*";
@@ -226,14 +230,12 @@ fn addressed(field: &str, value: &str) -> Result<AddressedSessionId, LamboError>
 }
 
 /// What `lambo serve` logs once at startup when the file sets a `[serve]`
-/// key this release does not enforce yet (credentials, the on-demand
-/// bounds, and over HTTP the stdio-only cwd map): an operator who
-/// configured credentials must not think scoping is active. Followed by the
-/// key names that are set ([`ServeConfig::unenforced_keys`]); it quotes no
-/// value from the table.
+/// key this release does not enforce yet (the on-demand bounds, and over
+/// HTTP the stdio-only cwd map): an operator who configured one must not
+/// think it is active. Followed by the key names that are set
+/// ([`ServeConfig::unenforced_keys`]); it quotes no value from the table.
 pub const SERVE_UNENFORCED_NOTICE: &str = "lambo.toml [serve] is parsed but not yet enforced \
-     for some keys in this release; they have no effect yet (#32), and this serve still \
-     authenticates only with --auth-token / LAMBO_AUTH_TOKEN";
+     for some keys in this release; they have no effect yet (#32)";
 
 impl ServeConfig {
     /// Log [`SERVE_UNENFORCED_NOTICE`] once, naming the keys, if this table
@@ -250,17 +252,16 @@ impl ServeConfig {
     /// does not enforce yet, by name, each its own entry.
     ///
     /// An HTTP serve enforces `sessions`, `default_session` and
-    /// `max_attached` (#32 PR 4). A stdio serve enforces `default_session`
-    /// and `[[serve.projects]]`, which choose its session when `--session`
-    /// is absent (#32 PR 8); `sessions` and `max_attached` do not apply to
-    /// stdio. The cwd map is stdio's only, so an HTTP serve still lists
-    /// `[[serve.projects]]`: nothing over HTTP reads it (design §2.3), and an
-    /// operator must not think it steers HTTP clients.
+    /// `max_attached` (#32 PR 4) and `[[serve.credential]]` (PR 5), which
+    /// never apply to stdio (a stdio serve authenticates nobody, as
+    /// `--auth-token` is ignored there). A stdio serve enforces
+    /// `default_session` and `[[serve.projects]]`, which choose its session
+    /// when `--session` is absent (#32 PR 8); `sessions` and `max_attached`
+    /// do not apply to stdio. The cwd map is stdio's only, so an HTTP serve
+    /// still lists `[[serve.projects]]`: nothing over HTTP reads it (design
+    /// §2.3), and an operator must not think it steers HTTP clients.
     pub fn unenforced_keys(&self, stdio: bool) -> Vec<&'static str> {
         let mut keys = Vec::new();
-        if !self.credentials.is_empty() {
-            keys.push("[[serve.credential]]");
-        }
         if !stdio && !self.projects.is_empty() {
             keys.push("[[serve.projects]]");
         }
@@ -427,9 +428,12 @@ impl ServeConfig {
                     cred.name
                 ))
             })?;
-            let token = SecretToken::new(raw).map_err(|_| {
+            // `SecretToken::new`'s reason never quotes the value (#32 PR 5
+            // review L3: surrounding whitespace, a byte outside printable
+            // ASCII, or over the length cap, besides empty).
+            let token = SecretToken::new(raw).map_err(|why| {
                 serve_err(format!(
-                    "credential {:?}: environment variable {shown} is empty",
+                    "credential {:?}: environment variable {shown}: {why}",
                     cred.name
                 ))
             })?;

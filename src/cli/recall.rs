@@ -10,18 +10,23 @@
 //! serialized from. The CLI string and the HTTP `context` are the same
 //! execution's output by construction.
 
+use std::sync::Arc;
+
+use parking_lot::Mutex;
+
 use super::caps::{
     check_in_range_cli, check_size_cli, clamp_cfg_default, require_nonempty, CliError,
     MAX_MAX_TOKENS, MAX_TOP_K, MAX_TRAVERSAL_DEPTH,
 };
-use super::load_reader_graph_with_contract;
+use super::{load_reader_graph, LoadedReader};
 use crate::config::Config;
 use crate::daemon::{Daemon, RecallPipeline};
 use crate::recall::cache::RecallCache;
 use crate::recall::candidates;
 use crate::recall::detail::{Annotation, AnnotationKind, DetailedHit, DetailedRecall};
+use crate::recall::query_cache::{embed_query_cached, QueryEmbeddingCache};
 use crate::recall::query_vector::{self, QueryBy};
-use crate::resolve::ResolvedBackends;
+use crate::resolve::{assert_session_embedding_compatible, ResolvedBackends};
 use crate::store::vector_source::VectorCandidates;
 use crate::surface::image::{check_submitted_vector_as, sniff_mime, validate, MAX_IMAGE_BYTES};
 use crate::types::RecallQuery;
@@ -160,23 +165,28 @@ pub async fn run_by(
             ));
         }
     };
-    Ok(run_inner(
-        backends,
-        session,
-        query,
-        query_by,
-        top_k,
-        max_tokens,
-        traversal_depth,
-    )
-    .await?
-    .context)
+    let detail = match query_by {
+        None => run_detailed(backends, session, query, top_k, max_tokens, traversal_depth).await?,
+        Some(by) => {
+            run_detailed_by(
+                backends,
+                session,
+                query,
+                by,
+                top_k,
+                max_tokens,
+                traversal_depth,
+            )
+            .await?
+        }
+    };
+    Ok(detail.context)
 }
 
 /// One recall execution producing the CLI string AND the H3 presentation
-/// model. The HTTP endpoint calls this instead of [`run`], so the page's
-/// `context` can never drift from `lambo recall` — both project from the
-/// same execution's data.
+/// model. The HTTP endpoint runs the same execution on its session view
+/// ([`run_detailed_on`]), so the page's `context` can never drift from
+/// `lambo recall` — both project from the same execution's data.
 pub(crate) async fn run_detailed(
     backends: &ResolvedBackends,
     session: &str,
@@ -185,75 +195,147 @@ pub(crate) async fn run_detailed(
     max_tokens: Option<usize>,
     traversal_depth: Option<usize>,
 ) -> Result<CliRecall, CliError> {
-    run_inner(
-        backends,
-        session,
-        query,
-        None,
-        top_k,
-        max_tokens,
-        traversal_depth,
-    )
-    .await
+    let request = RecallRequest::validate(session, query, top_k, max_tokens, traversal_depth)?;
+    let loaded = load_reader_graph(backends.store.as_ref(), session).await?;
+    // One recall per process: nothing to reuse, so no query cache.
+    run_detailed_on(backends, &loaded, &request, None).await
 }
 
-/// [`run_detailed`], optionally searching the vector leg by `by` (#22 PR 6).
-async fn run_inner(
+/// [`run_detailed`], searching the vector leg by `by` (#22 PR 6): the text
+/// may be blank beside it, and is then no text.
+async fn run_detailed_by(
     backends: &ResolvedBackends,
     session: &str,
     query: &str,
-    by: Option<QueryBy<'_>>,
+    by: QueryBy<'_>,
     top_k: Option<usize>,
     max_tokens: Option<usize>,
     traversal_depth: Option<usize>,
 ) -> Result<CliRecall, CliError> {
-    require_nonempty("session", session)?;
-    check_size_cli("session", session)?;
-    // Beside an image or a vector the text is optional; blank is none.
-    let query = if by.is_some() && crate::surface::validate::is_blank(query) {
-        ""
-    } else {
-        require_nonempty("query", query)?;
-        query
+    let request =
+        RecallRequest::validate_as(session, query, true, top_k, max_tokens, traversal_depth)?;
+    let loaded = load_reader_graph(backends.store.as_ref(), session).await?;
+    run_on(backends, &loaded, &request, Some(by), None).await
+}
+
+/// A recall's arguments, validated and with the defaults applied: every
+/// usage refusal happens here, before any store call.
+pub(crate) struct RecallRequest {
+    query: String,
+    top_k: usize,
+    max_tokens: usize,
+    traversal_depth: usize,
+}
+
+impl RecallRequest {
+    /// Validate a recall exactly as `lambo recall` does.
+    pub(crate) fn validate(
+        session: &str,
+        query: &str,
+        top_k: Option<usize>,
+        max_tokens: Option<usize>,
+        traversal_depth: Option<usize>,
+    ) -> Result<Self, CliError> {
+        Self::validate_as(session, query, false, top_k, max_tokens, traversal_depth)
+    }
+
+    /// [`Self::validate`], where `by_vector` says the recall searches by an
+    /// image or a client vector (#22 PR 6): beside one the text is
+    /// optional, and blank text is no text.
+    fn validate_as(
+        session: &str,
+        query: &str,
+        by_vector: bool,
+        top_k: Option<usize>,
+        max_tokens: Option<usize>,
+        traversal_depth: Option<usize>,
+    ) -> Result<Self, CliError> {
+        require_nonempty("session", session)?;
+        check_size_cli("session", session)?;
+        let query = if by_vector && crate::surface::validate::is_blank(query) {
+            ""
+        } else {
+            require_nonempty("query", query)?;
+            query
+        };
+        check_size_cli("query", query)?;
+
+        let cfg = Config::default();
+        let top_k = match top_k {
+            Some(v) => v,
+            None => clamp_cfg_default("default_top_k", cfg.default_top_k, 1, MAX_TOP_K),
+        };
+        let max_tokens = match max_tokens {
+            Some(v) => v,
+            None => clamp_cfg_default(
+                "default_max_tokens",
+                cfg.default_max_tokens,
+                1,
+                MAX_MAX_TOKENS,
+            ),
+        };
+        let traversal_depth = match traversal_depth {
+            Some(v) => v,
+            None => clamp_cfg_default(
+                "default_traversal_depth",
+                cfg.default_traversal_depth,
+                0,
+                MAX_TRAVERSAL_DEPTH,
+            ),
+        };
+        check_in_range_cli("top-k", top_k, 1, MAX_TOP_K)?;
+        check_in_range_cli("traversal-depth", traversal_depth, 0, MAX_TRAVERSAL_DEPTH)?;
+        check_in_range_cli("max-tokens", max_tokens, 1, MAX_MAX_TOKENS)?;
+        Ok(Self {
+            query: query.to_string(),
+            top_k,
+            max_tokens,
+            traversal_depth,
+        })
+    }
+}
+
+/// [`run_detailed`] on an already loaded session: the same pipeline minus
+/// the load, so the CLI and the portal's per-session view (#4) run one
+/// recall implementation.
+///
+/// Fail-closed on the embedding contract of THIS load: a session whose
+/// stored contract disagrees with the live embedder is refused here with the
+/// same message `load_reader_graph_with_contract` gives, whoever loaded it.
+///
+/// `queries` is the session's query-embedding cache (#14) when the caller
+/// keeps one (the portal, one per session); `None` embeds directly.
+pub(crate) async fn run_detailed_on(
+    backends: &ResolvedBackends,
+    loaded: &LoadedReader,
+    request: &RecallRequest,
+    queries: Option<&Mutex<QueryEmbeddingCache>>,
+) -> Result<CliRecall, CliError> {
+    run_on(backends, loaded, request, None, queries).await
+}
+
+/// [`run_detailed_on`], optionally searching the vector leg by `by`
+/// (#22 PR 6) instead of the query text's embedding. A recall by image or
+/// vector never touches `queries`: the #14 cache holds text queries only.
+async fn run_on(
+    backends: &ResolvedBackends,
+    loaded: &LoadedReader,
+    request: &RecallRequest,
+    by: Option<QueryBy<'_>>,
+    queries: Option<&Mutex<QueryEmbeddingCache>>,
+) -> Result<CliRecall, CliError> {
+    // Scoped so the read guard never reaches an await.
+    let compatible = {
+        let graph = loaded.graph.read();
+        assert_session_embedding_compatible(graph.embedding(), &backends.embedding)
     };
-    check_size_cli("query", query)?;
+    compatible.map_err(|e| CliError::Runtime(e.to_string()))?;
 
     let cfg = Config::default();
-    let top_k = match top_k {
-        Some(v) => v,
-        None => clamp_cfg_default("default_top_k", cfg.default_top_k, 1, MAX_TOP_K),
-    };
-    let max_tokens = match max_tokens {
-        Some(v) => v,
-        None => clamp_cfg_default(
-            "default_max_tokens",
-            cfg.default_max_tokens,
-            1,
-            MAX_MAX_TOKENS,
-        ),
-    };
-    let traversal_depth = match traversal_depth {
-        Some(v) => v,
-        None => clamp_cfg_default(
-            "default_traversal_depth",
-            cfg.default_traversal_depth,
-            0,
-            MAX_TRAVERSAL_DEPTH,
-        ),
-    };
-    check_in_range_cli("top-k", top_k, 1, MAX_TOP_K)?;
-    check_in_range_cli("traversal-depth", traversal_depth, 0, MAX_TRAVERSAL_DEPTH)?;
-    check_in_range_cli("max-tokens", max_tokens, 1, MAX_MAX_TOKENS)?;
-
-    let loaded = load_reader_graph_with_contract(
-        backends.store.as_ref(),
-        session,
-        Some(&backends.embedding),
-    )
-    .await?;
+    let query = request.query.as_str();
     // Do NOT spawn: spawn would run GC, which is a writer. Config::default()
     // for knobs — same as `lambo serve` today (T82-12 is not T8.3's to fix).
-    let daemon = Daemon::from_config(loaded.graph, &cfg).with_index(loaded.index);
+    let daemon = Daemon::from_config(loaded.graph.clone(), &cfg).with_index(loaded.index.clone());
 
     // H3: the embed-failure line is a typed, response-global annotation
     // (`vector_degraded`) captured at its producer — never text-parsed later.
@@ -272,21 +354,34 @@ async fn run_inner(
     let mut cache = RecallCache::<RecallPipeline>::new();
     let rq = RecallQuery {
         query: query.to_string(),
-        top_k,
-        max_tokens,
-        traversal_depth,
+        top_k: request.top_k,
+        max_tokens: request.max_tokens,
+        traversal_depth: request.traversal_depth,
     };
     let mut detail = match by {
         None => {
-            let embedding =
-                match candidates::embed_query(vectors, backends.embedder.as_ref(), query).await {
-                    Ok(vector) => vector,
-                    Err(text) => {
-                        extra_annotations
-                            .push(Annotation::new(AnnotationKind::VectorDegraded, text));
-                        None
-                    }
-                };
+            let embedded = match queries {
+                Some(cache) => {
+                    embed_query_cached(
+                        cache,
+                        vectors,
+                        backends.embedder.as_ref(),
+                        &backends.embedding,
+                        query,
+                    )
+                    .await
+                }
+                None => candidates::embed_query(vectors, backends.embedder.as_ref(), query)
+                    .await
+                    .map(|vector| vector.map(Arc::from)),
+            };
+            let embedding: Option<Arc<[f32]>> = match embedded {
+                Ok(vector) => vector,
+                Err(text) => {
+                    extra_annotations.push(Annotation::new(AnnotationKind::VectorDegraded, text));
+                    None
+                }
+            };
             daemon
                 .recall_with(
                     &loaded.session,

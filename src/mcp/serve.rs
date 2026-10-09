@@ -13,7 +13,8 @@
 //! step it calls is in a child module. In order:
 //!
 //! 1. **Pre-lease group** (creates nothing a retry could trip on, runs under
-//!    the default signal disposition): `authorize_bind`, [`authorize_ledger`],
+//!    the default signal disposition): `authorize_bind`, the HTTP credential
+//!    set (`authority::serve_authority`), [`authorize_ledger`],
 //!    the endpoint derivation (`hub::derive_endpoint`), `Ledger::open` and its
 //!    `startup` line, the keep-warm interval, the unarmed `EarlyShutdown`,
 //!    `serve_builder`.
@@ -65,7 +66,8 @@
 //! | `session` | the per-session part (`AttachedSession`, `SessionTasks`) |
 //! | `hub` | every Unix-socket touch: endpoint derivation, bind, accept loop, release, the proxy probe (the #39 seam) |
 //! | `heartbeat` | ledger configuration, the heartbeat, the startup line, the holder refusal poller, the event pump |
-//! | `http_guards` | the bearer token, the bind refusal, the rate limit, the session cap, the body ceiling |
+//! | `authority` | the credential set (`[[serve.credential]]`, the legacy `default`, the implicit `local`) and the default session's authorization (#32 PR 5) |
+//! | `http_guards` | the bearer check, the bind refusal, the rate limit, the session cap, the body ceiling |
 //! | `transport` | stdio, streamable HTTP and its `/mcp` + `/mcp/s/{session}` router, the bounded wind-down both share |
 //! | `signals` | the eager signal registration and J6's pre-arm (`EarlyShutdown`) |
 //! | `shutdown` | the grace budgets, the shutdown future, the close, the named stages (the #40 seam) |
@@ -83,10 +85,12 @@ use crate::resolve::ResolvedBackends;
 use crate::types::LamboError;
 use crate::writeq::EmbedderCalibration;
 
+mod authority;
 mod builder;
 mod heartbeat;
 mod http_guards;
 mod hub;
+mod openers;
 mod pinned;
 mod process;
 mod registry;
@@ -98,10 +102,12 @@ mod stages;
 mod transport;
 mod watchdog;
 
+pub use authority::check_serve_credentials;
 pub use builder::{build_memory, resolve_serve_backends};
 pub use heartbeat::authorize_ledger;
 pub use pinned::{pin_sessions, PinnedSessions};
 
+use authority::{any_credential, serve_authority, startup_warnings, ServeAuthority};
 use builder::{explain_startup_failure, serve_builder};
 use heartbeat::serve_startup_line;
 use http_guards::authorize_bind;
@@ -112,7 +118,7 @@ use pinned::check_pinned;
 use process::ProcessTasks;
 use registry::{Acquired, LeaseLossPolicy, SessionAttacher, SessionRegistry};
 use roles::{resolve_role, Role};
-use session::{session_server, AttachedSession};
+use session::{session_server, AttachedSession, HostCheck};
 use shutdown::{
     close_bounded, close_ledger, close_sessions, holder_shutdown, join_all, registry_shutdown,
     stop_transport, CLOSE_GRACE,
@@ -185,7 +191,16 @@ pub struct ServeOptions {
     pub bind: IpAddr,
     /// Bearer token required on every HTTP request (T8.7). `None` is allowed
     /// only on loopback; [`AUTH_TOKEN_ENV`] overrides whatever the flag said.
+    /// Since #32 PR 5 it is the legacy credential named `default`: every
+    /// pinned session, and no `create`, `erase` or `admin`.
     pub auth_token: Option<SecretToken>,
+    /// The resolved `[[serve.credential]]` entries (#32 PR 5), from
+    /// [`ServeConfig::resolve_credentials`](crate::config::ServeConfig::resolve_credentials).
+    /// HTTP only. With none here and no [`ServeOptions::auth_token`], a
+    /// loopback serve answers every request as the implicit `local`
+    /// credential (today's unauthenticated loopback behaviour); once any is
+    /// set, every request must present one of them.
+    pub credentials: Vec<crate::config::ServeCredential>,
     /// Ceiling on concurrently live MCP sessions.
     pub max_sessions: usize,
     /// Sustained requests/second on the HTTP transport; `0` disables the limit.
@@ -210,6 +225,7 @@ impl ServeOptions {
             port: 7700,
             bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
             auth_token: None,
+            credentials: Vec::new(),
             max_sessions: DEFAULT_MAX_SESSIONS,
             rate_limit_rps: DEFAULT_RATE_LIMIT_RPS,
             ledger: None,
@@ -263,13 +279,26 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     // nothing and leave nothing behind: refusing here means no lease is taken,
     // so the operator's retry after setting a token is not blocked by the
     // lease their own refused start would otherwise be holding.
-    authorize_bind(opts.transport, opts.bind, opts.auth_token.as_ref())?;
+    authorize_bind(opts.transport, opts.bind, any_credential(&opts))?;
+    // #32 PR 5: who may reach which session, refused before any lease too
+    // (a legacy token equal to a configured one, a reserved name). Stdio has
+    // no credentials: its client owns the process.
+    let authority = match opts.transport {
+        Transport::Http => Some(Arc::new(serve_authority(&opts)?)),
+        Transport::Stdio => None,
+    };
+    for warning in startup_warnings(&opts) {
+        tracing::warn!("lambo serve: {warning}");
+    }
     // Same argument as the bind check: refuse before any lease is taken.
     authorize_ledger(&opts)?;
     // #32 PR 4: the pinned sessions, refused before any lease too.
     check_pinned(&opts.session, &opts.sessions, opts.transport)?;
     if LeaseLossPolicy::for_pinned(opts.sessions.len()) == LeaseLossPolicy::DetachSession {
-        return serve_pinned(opts, backends).await;
+        let authority = authority.ok_or_else(|| {
+            LamboError::Config("serve: several pinned sessions need --transport http".into())
+        })?;
+        return serve_pinned(opts, backends, authority).await;
     }
     // J2, and it belongs in this pre-lease group for the same reason the two
     // above do: it creates nothing and binds nothing (its one filesystem access
@@ -561,7 +590,13 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     // `mem` stays held here as well, so the last handle still drops when
     // `serve` returns, after the watchdog is disarmed (the stage table's
     // "not watched" note), not when the set is taken apart at stage 6.
-    let session = AttachedSession::attach(Arc::clone(&mem), server, endpoint, opts.max_sessions);
+    let session = AttachedSession::attach(
+        Arc::clone(&mem),
+        server,
+        endpoint,
+        opts.max_sessions,
+        HostCheck::for_authority(authority.as_deref()),
+    );
     registry.insert_live(Arc::new(session));
     registry.mark_started();
 
@@ -576,7 +611,14 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     let transport = async {
         match opts.transport {
             Transport::Stdio => serve_stdio(stdio_server, shutdown.as_mut()).await,
-            Transport::Http => serve_http(registry.clone(), &opts, shutdown.as_mut()).await,
+            Transport::Http => match authority {
+                Some(authority) => {
+                    serve_http(registry.clone(), authority, &opts, shutdown.as_mut()).await
+                }
+                None => Err(LamboError::Config(
+                    "serve: the HTTP transport has no credential set".into(),
+                )),
+            },
         }
     };
     close_holder(&registry, transport, tasks, &early, &progress, ledger).await
@@ -598,8 +640,12 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
 /// first acquire and every later load races it; the shutdown future is
 /// registered once the pinned acquires are done, before any session part is
 /// built.
-async fn serve_pinned(opts: ServeOptions, backends: ResolvedBackends) -> Result<(), LamboError> {
-    serve_pinned_with(opts, backends, PinnedSeams::default()).await
+async fn serve_pinned(
+    opts: ServeOptions,
+    backends: ResolvedBackends,
+    authority: Arc<ServeAuthority>,
+) -> Result<(), LamboError> {
+    serve_pinned_with(opts, backends, authority, PinnedSeams::default()).await
 }
 
 /// What a test hands [`serve_pinned_with`] so it can drive the real
@@ -620,6 +666,7 @@ struct PinnedSeams {
 async fn serve_pinned_with(
     opts: ServeOptions,
     backends: ResolvedBackends,
+    authority: Arc<ServeAuthority>,
     seams: PinnedSeams,
 ) -> Result<(), LamboError> {
     // The ledger is the process's, opened pre-lease (J4); each session's
@@ -657,6 +704,7 @@ async fn serve_pinned_with(
             store_cfg,
             ledger: ledger.clone(),
             max_sessions: opts.max_sessions,
+            host_check: HostCheck::for_authority(Some(&authority)),
             agent: opts.agent.clone(),
         }),
         early.clone(),
@@ -731,7 +779,7 @@ async fn serve_pinned_with(
         let _ = tx.send(Arc::clone(&registry));
     }
 
-    let transport = serve_http(registry.clone(), &opts, shutdown.as_mut());
+    let transport = serve_http(registry.clone(), authority, &opts, shutdown.as_mut());
     close_holder(&registry, transport, tasks, &early, &progress, ledger).await
 }
 
