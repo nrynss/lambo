@@ -27,11 +27,21 @@ use crate::writeq::{ReceiptAnswer, ReceiptId};
 /// every [`LamboError::Conflict`]: the lease-lost fence is one, and its message
 /// is exactly the operator-only detail N4 exists for.
 pub(super) fn tool_err(what: &str, err: LamboError) -> CallToolResult {
-    tracing::error!(
-        tool = what,
-        error = %err,
-        "mcp: tool returned a Memory error — full detail logged, class returned to the caller"
-    );
+    // An image id a text concept already holds is a fact the caller fixes
+    // (choose another id), not a server fault, so it is a warning.
+    if matches!(err, LamboError::ImageIdTaken(_)) {
+        tracing::warn!(
+            tool = what,
+            error = %err,
+            "mcp: tool refused a write the caller can fix — class returned to the caller"
+        );
+    } else {
+        tracing::error!(
+            tool = what,
+            error = %err,
+            "mcp: tool returned a Memory error — full detail logged, class returned to the caller"
+        );
+    }
     // I1: the same class the caller is told, in the ledger's `error_kind`.
     note_error(err_class(&err));
     CallToolResult::error(vec![ContentBlock::text(format!(
