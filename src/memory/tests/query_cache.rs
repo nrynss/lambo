@@ -18,6 +18,8 @@ struct CountingEmbedder {
     inner: ContextTolerantEmbedder,
     calls: AtomicUsize,
     fail_remaining: AtomicUsize,
+    /// Embeds of exactly this text answer a bad (half-width, NaN) vector.
+    poison: Option<&'static str>,
 }
 
 impl CountingEmbedder {
@@ -30,6 +32,16 @@ impl CountingEmbedder {
             inner: ContextTolerantEmbedder(FixtureEmbedder::new()),
             calls: AtomicUsize::new(0),
             fail_remaining: AtomicUsize::new(n),
+            poison: None,
+        })
+    }
+
+    fn poisoned(text: &'static str) -> Arc<Self> {
+        Arc::new(Self {
+            inner: ContextTolerantEmbedder(FixtureEmbedder::new()),
+            calls: AtomicUsize::new(0),
+            fail_remaining: AtomicUsize::new(0),
+            poison: Some(text),
         })
     }
 
@@ -55,6 +67,12 @@ impl Embedder for CountingEmbedder {
             return Err(crate::embed::EmbedError::Unavailable(
                 "simulated embedder outage".into(),
             ));
+        }
+        if self.poison == Some(text) {
+            let mut bad = self.inner.embed(text).await?;
+            bad.truncate(bad.len() / 2);
+            bad[0] = f32::NAN;
+            return Ok(bad);
         }
         self.inner.embed(text).await
     }
@@ -485,4 +503,28 @@ async fn no_vector_leg_means_no_embed_and_no_entry() {
     assert_eq!(embedder.calls(), calls);
     assert!(mem.query_embeddings.lock().is_empty());
     mem.close().await.unwrap();
+}
+
+/// #14 review L1: a bad vector from a non-validating embedder (wrong width,
+/// non-finite) is used for that one recall but never cached, so a repeat
+/// embeds afresh instead of running keyword-only until eviction.
+#[tokio::test]
+async fn a_bad_query_vector_is_not_cached() {
+    const BAD: &str = "a query the embedder botches";
+    for source in SOURCES {
+        let embedder = CountingEmbedder::poisoned(BAD);
+        let mem = open(vector_store(source), "q14-bad-vector", embedder.clone()).await;
+        seed(&mem).await;
+        let q = recall_query(BAD, 5, 1);
+        let before = embedder.calls();
+        mem.recall_detailed(q.clone()).await.unwrap();
+        mem.recall_detailed(q).await.unwrap();
+        assert_eq!(
+            embedder.calls(),
+            before + 2,
+            "{source:?}: each recall embeds again"
+        );
+        assert!(mem.query_embeddings.lock().is_empty(), "{source:?}");
+        mem.close().await.unwrap();
+    }
 }

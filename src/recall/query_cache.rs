@@ -194,7 +194,10 @@ impl QueryEmbeddingCache {
 /// `Ok(None)` when the vector leg cannot run (no lookup, no embed), `Err`
 /// with the warning line when the embed fails. A hit returns the cached
 /// vector without calling the embedder; a miss embeds and caches the result.
-/// A failed embed is not cached, so the next recall tries again.
+/// A failed embed is not cached, so the next recall tries again. Nor is a
+/// vector [`cacheable`] rejects: it is still returned, so this recall behaves
+/// exactly as it would uncached, but the next one embeds afresh rather than
+/// having one bad answer pinned until eviction.
 ///
 /// The lock is taken twice, briefly, and never across the embed's `.await`,
 /// so concurrent recalls on one session never wait on each other's embed.
@@ -218,8 +221,21 @@ pub(crate) async fn embed_query_cached(
         return Ok(None);
     };
     let vector: Arc<[f32]> = vector.into();
-    cache.lock().insert(query, contract, vector.clone());
+    if cacheable(&vector, contract) {
+        cache.lock().insert(query, contract, vector.clone());
+    }
     Ok(Some(vector))
+}
+
+/// Whether an embedder's answer is fit to keep (#14 review L1): exactly
+/// `contract.dim` wide, every value finite, and a non-zero norm. The shipped
+/// embedders already refuse anything else, but [`Embedder`] is a public trait
+/// and a custom one may not; a transient bad vector should cost one recall,
+/// not every repeat of that query.
+pub(crate) fn cacheable(vector: &[f32], contract: &EmbeddingContract) -> bool {
+    vector.len() == contract.dim
+        && vector.iter().all(|x| x.is_finite())
+        && vector.iter().any(|&x| x != 0.0)
 }
 
 #[cfg(test)]
@@ -310,6 +326,17 @@ mod tests {
             cache.get("small", &c).is_some(),
             "an oversized insert evicts nothing"
         );
+    }
+
+    #[test]
+    fn only_a_full_width_finite_non_zero_vector_is_cacheable() {
+        let c = contract(None);
+        assert!(cacheable(&[0.5, 0.0, -0.5, 0.0], &c));
+        assert!(!cacheable(&[0.5; 3], &c), "too narrow");
+        assert!(!cacheable(&[0.5; 5], &c), "too wide");
+        assert!(!cacheable(&[0.5, f32::NAN, 0.5, 0.5], &c), "NaN");
+        assert!(!cacheable(&[0.5, f32::INFINITY, 0.5, 0.5], &c), "inf");
+        assert!(!cacheable(&[0.0; 4], &c), "zero norm");
     }
 
     #[test]
