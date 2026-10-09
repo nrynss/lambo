@@ -119,6 +119,82 @@ async fn the_image_body_is_the_nested_image_url_data_uri() {
     assert!((norm(&v) - 1.0).abs() < 1e-5);
 }
 
+/// A PNG over 768 px goes out as its canonical form (a 768 px lossless PNG),
+/// and a WebP of any size as a PNG: the request body carries exactly the
+/// bytes `canonical::to_canonical_png` makes, never the submitted ones (22g).
+///
+/// Mutation: send `image.bytes()` again -> red.
+#[tokio::test]
+async fn the_image_body_carries_the_canonical_form() {
+    use image::{codecs::webp::WebPEncoder, ImageEncoder, Rgb, RgbImage};
+
+    let big = RgbImage::from_fn(1536, 1024, |x, y| Rgb([x as u8, y as u8, (x ^ y) as u8]));
+    let mut big_png = Vec::new();
+    image::DynamicImage::ImageRgb8(big.clone())
+        .write_to(std::io::Cursor::new(&mut big_png), image::ImageFormat::Png)
+        .unwrap();
+    let mut small_webp = Vec::new();
+    let small = RgbImage::from_fn(40, 30, |x, y| Rgb([x as u8, y as u8, 9]));
+    WebPEncoder::new_lossless(&mut small_webp)
+        .write_image(small.as_raw(), 40, 30, image::ColorType::Rgb8.into())
+        .unwrap();
+
+    for (bytes, mime, side) in [
+        (&big_png, "image/png", (768, 512)),
+        (&small_webp, "image/webp", (40, 30)),
+    ] {
+        let want =
+            canonical::to_canonical_png(bytes, crate::embed::ImageMime::from_mime(mime).unwrap())
+                .unwrap();
+        let decoded = image::load_from_memory_with_format(&want, image::ImageFormat::Png).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), side, "{mime}");
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(POST)
+                .path("/v1/embeddings")
+                .body(image_body(&want));
+            then.status(200).json_body(ok_body(&native(), Some(293)));
+        });
+        let input = crate::surface::image::validate(bytes, mime).unwrap();
+        let sha = input.sha256();
+        let v = embedder(&server).embed_image(input).await.unwrap();
+        mock.assert_hits(1);
+        assert_eq!(v.len(), 768);
+        // What Lambo stores about the image still describes the submitted
+        // bytes, not the canonical ones.
+        assert_eq!(
+            sha,
+            crate::surface::image::validate(bytes, mime)
+                .unwrap()
+                .sha256()
+        );
+        assert_ne!(want.as_slice(), bytes.as_slice());
+    }
+}
+
+/// An image Lambo cannot decode fails before any request reaches the server.
+#[tokio::test]
+async fn an_undecodable_large_image_never_reaches_the_server() {
+    let server = MockServer::start();
+    let any = server.mock(|when, then| {
+        when.any_request();
+        then.status(200).json_body(ok_body(&native(), Some(293)));
+    });
+    let mut png = Vec::new();
+    image::DynamicImage::new_rgb8(1000, 1000)
+        .write_to(std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+    png.truncate(png.len() / 2);
+    let input = crate::surface::image::validate(&png, "image/png").unwrap();
+    let err = embedder(&server).embed_image(input).await.unwrap_err();
+    assert!(
+        matches!(&err, EmbedError::Backend(m) if m.contains("could not decode")),
+        "{err:?}"
+    );
+    assert!(!err.is_transient());
+    any.assert_hits(0);
+}
+
 /// Empty text is refused before any request, like every other adapter.
 #[tokio::test]
 async fn empty_text_is_refused_without_a_request() {
@@ -1161,7 +1237,7 @@ fn the_kind_and_its_contract_string() {
     assert_eq!(e.modalities(), Modalities::TEXT);
     assert_eq!(
         eg2_identity(e.as_ref()).as_deref(),
-        Some("ggml-org/embeddinggemma-2-GGUF@bfcd2987/Q8_0;prompts=lambo-eg2-v1")
+        Some("ggml-org/embeddinggemma-2-GGUF@bfcd2987/Q8_0;prompts=lambo-eg2-v2")
     );
 
     let custom = build_embedder(EmbedderConfig {
@@ -1175,7 +1251,7 @@ fn the_kind_and_its_contract_string() {
     assert_eq!(custom.modalities(), Modalities::TEXT | Modalities::IMAGE);
     assert_eq!(
         eg2_identity(custom.as_ref()).as_deref(),
-        Some("google/embeddinggemma-2@914f7f89;prompts=lambo-eg2-v1")
+        Some("google/embeddinggemma-2@914f7f89;prompts=lambo-eg2-v2")
     );
     // Not the EG2 adapter: no identity.
     #[cfg(feature = "embed-fixture")]
@@ -1260,7 +1336,7 @@ fn resolve_stamps_the_eg2_contract() {
     assert_eq!(r.embedding.kind, "embeddinggemma2");
     assert_eq!(
         r.embedding.model.as_deref(),
-        Some("ggml-org/embeddinggemma-2-GGUF@bfcd2987/Q8_0;prompts=lambo-eg2-v1")
+        Some("ggml-org/embeddinggemma-2-GGUF@bfcd2987/Q8_0;prompts=lambo-eg2-v2")
     );
     assert_eq!(r.embedding.dim, 512);
 }

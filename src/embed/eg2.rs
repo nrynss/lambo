@@ -6,7 +6,7 @@
 //! token, the https-or-loopback transport rule, no redirects, the capped and
 //! scrubbed error body and the J3 status table. On top of it this layer adds
 //! what makes the vectors EmbeddingGemma 2's, pinned as the prompt profile
-//! [`EG2_PROMPT_PROFILE`] (`lambo-eg2-v1`):
+//! [`EG2_PROMPT_PROFILE`] (`lambo-eg2-v2`):
 //!
 //! - **Role prefixes** from the model card. A document ([`Embedder::embed`])
 //!   is sent as `title: none | text: <text>`, a recall query
@@ -16,16 +16,23 @@
 //! - **A fixed 280-token image budget.** The operator starts `llama-server`
 //!   with `--image-min-tokens 280 --image-max-tokens 280`; the budget changes
 //!   the vectors, and only a fixed one makes them independent of the image's
-//!   pixel size (exactly up to 768 px a side on b11517; larger renders come
-//!   out close but not equal). The server does not report its budget, so for
-//!   a server `/props` verified the adapter embeds a reference image and
-//!   requires its known token count ([`EG2_REFERENCE_IMAGE_TOKENS`]).
+//!   pixel size. The server does not report its budget, so for a server
+//!   `/props` verified the adapter embeds a reference image and requires its
+//!   known token count ([`EG2_REFERENCE_IMAGE_TOKENS`]).
+//! - **A canonical image form** (new in `lambo-eg2-v2`). Even at a fixed
+//!   budget, llama.cpp rounds an image above about 768 px a side to a
+//!   different patch grid than a smaller one, so the same picture embedded at
+//!   two sizes differed. The adapter therefore sends a PNG or JPEG of at most
+//!   [`EG2_CANONICAL_MAX_SIDE`] px a side unchanged, downscales a larger one
+//!   to that bound (lossless PNG), and always re-encodes a WebP as PNG (the
+//!   server decodes WebP only through an external `ffmpeg`). See
+//!   the `canonical` submodule for the rule and the cause.
 //! - **MRL**: the server returns the native 768 dimensions; the adapter
 //!   checks them, truncates to `dim` (768, 512, 256 or 128) and then
 //!   L2-normalizes.
 //!
 //! The contract `model` is the configured weights artifact plus the profile,
-//! `<model>;prompts=lambo-eg2-v1` ([`EmbeddingGemma2Embedder::model_identity`]),
+//! `<model>;prompts=lambo-eg2-v2` ([`EmbeddingGemma2Embedder::model_identity`]),
 //! because `llama-server` ignores the request's model name: two servers
 //! answering to the same name can hold different weights.
 //!
@@ -62,13 +69,19 @@ use super::bge_m3::{
 };
 use super::{api_key, EmbedError, Embedder, EmbedderConfig, ImageInput, Modalities};
 
+mod canonical;
+
+pub use canonical::EG2_CANONICAL_MAX_SIDE;
+
 #[cfg(test)]
 mod tests;
 
 /// The prompt profile this adapter implements, named in the contract `model`.
-/// Changing any part of it (a prefix, the image budget, the order of
-/// truncation and normalization) is a new profile name, so a new contract.
-pub const EG2_PROMPT_PROFILE: &str = "lambo-eg2-v1";
+/// Changing any part of it (a prefix, the image budget, the canonical image
+/// form, the order of truncation and normalization) is a new profile name, so
+/// a new contract. `lambo-eg2-v2` added the canonical image form (22g);
+/// `lambo-eg2-v1` was never released.
+pub const EG2_PROMPT_PROFILE: &str = "lambo-eg2-v2";
 
 /// The weights artifact the contract names when `[embedder] model` is unset:
 /// the Q8_0 GGUF of `ggml-org/embeddinggemma-2-GGUF` at revision `bfcd2987`
@@ -619,7 +632,7 @@ impl EmbeddingGemma2Embedder {
         self
     }
 
-    /// The contract `model`: `<artifact>;prompts=lambo-eg2-v1`.
+    /// The contract `model`: `<artifact>;prompts=lambo-eg2-v2`.
     pub fn model_identity(&self) -> &str {
         &self.identity
     }
@@ -1063,11 +1076,15 @@ impl Embedder for EmbeddingGemma2Embedder {
                     .into(),
             ));
         }
+        // The canonical form (22g): above 768 px, or any WebP, a PNG Lambo
+        // encoded; otherwise the submitted bytes. Done before the server is
+        // asked anything, so an image Lambo cannot read fails on its own.
+        let canonical = canonical::canonicalize_async(&image).await?;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(canonical.bytes());
         if let Eg2ServerCheck::Verified { .. } = self.ensure_server(true).await? {
             self.ensure_image_budget().await?;
         }
-        let encoded = base64::engine::general_purpose::STANDARD.encode(image.bytes());
-        let body = image_request(&self.model, image.mime().as_str(), &encoded);
+        let body = image_request(&self.model, canonical.mime().as_str(), &encoded);
         // The image's own token count is not judged: it varies with the
         // image's size and shape (see EG2_REFERENCE_IMAGE_TOKENS).
         let parsed = self.post(&body, image_status_rule).await?;

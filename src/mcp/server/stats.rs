@@ -53,7 +53,7 @@ impl LamboServer {
     /// design 3.3): the **live** contract, the one `lambo_derive_image`'s
     /// wire check, the apply check and a replay compare a client vector
     /// against. `model` is the whole string (`null` for the server default),
-    /// never shortened: a profile suffix such as `;prompts=lambo-eg2-v1` is
+    /// never shortened: a profile suffix such as `;prompts=lambo-eg2-v2` is
     /// part of the space.
     ///
     /// It is also the session's stamp, which the commit-lock check compares
