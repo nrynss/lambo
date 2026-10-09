@@ -196,7 +196,7 @@ Writes you send one after another are applied in that order, whatever other agen
 |---|---|---|---|
 | `agent_id` | string | Yes | |
 | `concepts` | array of `{content, concept_type}` | Yes | Up to 64 per call. |
-| `concepts[].content` | string | Yes | Up to 16 KB. May not contain `[image:`, the suffix only `lambo_derive_image` builds. |
+| `concepts[].content` | string | Yes | Up to 16 KB. May not contain an image suffix, `[image:<id>]` in any case or spelling, which only `lambo_derive_image` builds; text that only mentions it, such as `see [image: diagram]`, is fine. |
 | `concepts[].concept_type` | enum | Yes | One of `entity`, `logic`, `constraint`, `resource`, `observation`. |
 | `event_time` | RFC3339 timestamp | No | Historical about-time, such as a commit or document date. Omit for a live fact, which is about now. |
 | `parent_of` | array of `{parent, child}` | No | Hierarchy links. Both ends resolve as concepts, and either may be created. |
@@ -234,7 +234,7 @@ Store one image as a concept. You send a caption and either the image itself, wh
 | Argument | Type | Required | Notes |
 |---|---|---|---|
 | `agent_id` | string | Yes | |
-| `caption` | string | Yes | What the image is, in words. Up to 16 KB. May not contain `[image:`. |
+| `caption` | string | Yes | What the image is, in words. Up to 16 KB. May not contain an image suffix (`[image:<id>]`) of its own. |
 | `concept_type` | enum | Yes | One of `entity`, `logic`, `constraint`, `resource`. An image cannot be an `observation`. |
 | `image_id` | string | No | Your id for the image: 1 to 64 lowercase letters and digits (`^[a-z0-9]{1,64}$`). Omit it for an id made from the image's digest. |
 | `image` | `{mime, data}` | One of `image`, `vector` | `mime` is `image/png`, `image/jpeg` or `image/webp` and must match the bytes. `data` is the bytes in base64 (standard alphabet, padded): at most 2 MiB decoded (2,796,204 characters) and at most 4096 pixels a side. |
@@ -256,7 +256,7 @@ The same caption and `image_id` derived again is the same concept, and two image
 
 **One image per call, and only inline.** There is no file path or URL argument.
 
-**Referring to an image concept.** `lambo_derive` and `lambo_record_action`'s `action` refuse `[image:` in a concept's own text. To link a text write to an image, name the image concept in `parent_of` or in an action's `produces`, `modifies` or `depends_on`, as `caption [image:<image_id>]`. If the image concept does not exist yet, that creates a text concept with the same content, and a later `lambo_derive_image` with that caption and id fails with `image id taken`; derive the image first.
+**Referring to an image concept.** `lambo_derive` and `lambo_record_action`'s `action` refuse an image suffix in a concept's own text: any word that reads as `[image:<id>]` once case is folded, invisible characters are dropped and the word is stemmed (so `[IMAGE:R17]` and `[image:r17]s` are refused, and `see [image: diagram]` is not). To link a text write to an image, name the image concept in `parent_of` or in an action's `produces`, `modifies` or `depends_on`, as `caption [image:<image_id>]`. If the image concept does not exist yet, that creates a text concept with the same content, and a later `lambo_derive_image` with that caption and id fails with `image id taken`; derive the image first.
 
 ### lambo_record_action
 
@@ -267,7 +267,7 @@ Record something the agent did, along with what it produces, modifies, and depen
 | Argument | Type | Required | Notes |
 |---|---|---|---|
 | `agent_id` | string | Yes | |
-| `action` | string | Yes | Up to 16 KB. May not contain `[image:`. |
+| `action` | string | Yes | Up to 16 KB. May not contain an image suffix (`[image:<id>]`). |
 | `event_time` | RFC3339 timestamp | No | Historical about-time, such as a commit or document date. Omit for a live fact, which is about now. |
 | `produces`, `modifies`, `depends_on` | array of string | No | Up to 64 entries combined across the three. An entry may name an image concept by its content, `caption [image:<image_id>]`. |
 

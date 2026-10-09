@@ -196,7 +196,7 @@ Stores concepts from the current interaction. Lambo stamps the time itself, so t
 |---|---|---|
 | `--session <SESSION>` | Yes | |
 | `--agent <AGENT>` | Yes | Stamped on the interaction and the concepts. |
-| `--content <CONTENT>` | Yes | The first concept's text. May not contain `[image:`, the suffix only `derive-image` builds; the same holds for `--concept` and for `record-action`'s `--action`. |
+| `--content <CONTENT>` | Yes | The first concept's text. May not contain an image suffix, `[image:<id>]` in any case or spelling, which only `derive-image` builds; text that only mentions it, such as `see [image: diagram]`, is fine. The same holds for `--concept` and for `record-action`'s `--action`. |
 | `--kind <KIND>` | Yes | One of `entity`, `logic`, `constraint`, `resource`, `observation`. |
 | `--concept <CONTENT:KIND>` | No | An extra concept. Repeat it to derive several in one call. |
 | `--parent-of <CHILD:PARENT>` | No | A hierarchy pair. Repeat it for several links. |
@@ -219,7 +219,7 @@ Stores one image as a concept, from a local image file or from a vector file you
 |---|---|---|
 | `--session <SESSION>` | Yes | |
 | `--agent <AGENT>` | Yes | |
-| `--caption <CAPTION>` | Yes | What the image is, in words. May not contain `[image:`. |
+| `--caption <CAPTION>` | Yes | What the image is, in words. May not contain an image suffix (`[image:<id>]`) of its own. |
 | `--kind <KIND>` | Yes | One of `entity`, `logic`, `constraint`, `resource`. An image cannot be an `observation`. |
 | `--image-id <ID>` | No | Your id for the image: 1 to 64 lowercase letters and digits. Without it, an id is made from the image's digest. |
 | `--image <PATH>` | One of `--image`, `--vector-json` | A PNG, JPEG or WebP file, at most 2 MiB and 4096 pixels a side, for the configured embedder to embed. It needs an embedder that embeds images. |

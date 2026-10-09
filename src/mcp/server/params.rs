@@ -337,7 +337,8 @@ pub struct DeriveImageParams {
     #[schemars(length(max = 16_384))]
     pub agent_id: String,
     /// What the image is, in words. It is the concept's text: keyword recall
-    /// and the recall display read it. It may not contain `[image:`.
+    /// and the recall display read it. It may not contain an image suffix
+    /// of its own (`[image:<id>]`).
     #[schemars(length(max = 16_384))]
     pub caption: String,
     /// One of `entity`, `logic`, `constraint`, `resource`.

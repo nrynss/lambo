@@ -216,7 +216,7 @@
           "type": "string"
         },
         "caption": {
-          "description": "What the image is, in words. It is the concept's text: keyword recall\nand the recall display read it. It may not contain `[image:`.",
+          "description": "What the image is, in words. It is the concept's text: keyword recall\nand the recall display read it. It may not contain an image suffix\nof its own (`[image:<id>]`).",
           "maxLength": 16384,
           "type": "string"
         },
