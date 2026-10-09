@@ -588,6 +588,28 @@ impl WritePipeline {
             .await
     }
 
+    /// Queue an image derive (#22). The interaction is already open and the
+    /// supplied vector already checked (call path).
+    pub(crate) async fn submit_derive_image(
+        &self,
+        agent: AgentId,
+        interaction: NodeId,
+        concepts: Vec<(String, ConceptType)>,
+        pairs: Vec<(String, String)>,
+        supplied: SuppliedVector,
+    ) -> Submitted {
+        self.admit(
+            agent,
+            interaction,
+            JobPayload::DeriveImage {
+                concepts,
+                pairs,
+                supplied,
+            },
+        )
+        .await
+    }
+
     /// Queue a `record_action`. The interaction is already open (call path).
     pub(crate) async fn submit_action(
         &self,

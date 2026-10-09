@@ -43,6 +43,7 @@
 //! | `leases` | lease heartbeat, `LeaseLostSignal`, the `ACTIVE_SESSIONS` registry |
 //! | `gate` | `begin_write`, `begin_write_sync`, `ensure_open` |
 //! | `writes` | metadata writes, `derive*`, `record_action*`, `demote`, `retract`, soft locks |
+//! | `image` | `derive_image_as`, `derive_image_async_as` (#22): the call-path image embed and checks |
 //! | `reads` | `recall*`, saints, stats, events, the access ledger hooks |
 //! | `shutdown` | `close`, `Drop`, `HandleCustody`, `TailCustody`, `final_flush` |
 //!
@@ -75,6 +76,7 @@ use crate::writeq::WritePipeline;
 
 mod builder;
 mod gate;
+mod image;
 mod leases;
 mod reads;
 mod shutdown;
