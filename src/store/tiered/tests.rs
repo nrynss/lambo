@@ -1045,6 +1045,52 @@ async fn a_hanging_index_read_is_cut_at_the_deadline_and_counts() {
     );
 }
 
+/// L5: releasing the lease drops the session's tier state.
+#[tokio::test]
+async fn releasing_the_lease_forgets_the_session() {
+    let (primary, fake) = (memory_primary(), Arc::new(FakeIndex::new()));
+    let store = tier(&primary, &fake);
+    let sid = SessionId::new("forget-me");
+    let w = holder("w");
+    let token = attach(&store, &sid, &w).await;
+    let (_, b) = seed_batch(&sid, 1);
+    store.flush(&b, Some(token)).await.unwrap();
+    assert!(store.tracked_sessions().contains(&sid));
+    store.release_lease(&sid, &w).await.unwrap();
+    assert!(!store.tracked_sessions().contains(&sid));
+}
+
+/// L5: a reader that touches many sessions keeps a bounded map, evicting
+/// sessions it neither holds nor repairs, least recently used first; a held
+/// session is never evicted.
+#[tokio::test]
+async fn reader_state_is_bounded_and_held_sessions_stay() {
+    let (primary, fake) = (memory_primary(), Arc::new(FakeIndex::new()));
+    let store = tier(&primary, &fake).with_max_sessions(4);
+    let held = SessionId::new("held");
+    let token = attach(&store, &held, &holder("w")).await;
+    let (_, b) = seed_batch(&held, 1);
+    store.flush(&b, Some(token)).await.unwrap();
+    for i in 0..20 {
+        store
+            .vector_candidates_checked(&SessionId::new(format!("r{i}")), &PROBE, &contract(), 5)
+            .await
+            .unwrap();
+    }
+    let tracked = store.tracked_sessions();
+    assert!(tracked.len() <= 4, "{tracked:?}");
+    assert!(tracked.contains(&held));
+    assert!(
+        tracked.contains(&SessionId::new("r19")),
+        "the most recent stays"
+    );
+    assert_eq!(
+        store.tier_status(&held).flush_counter,
+        1,
+        "its counter survived"
+    );
+}
+
 /// A crash between the primary's commit and the mirror leaves the marker
 /// behind: a reader serves from the primary, the next holder repairs at load.
 #[tokio::test]

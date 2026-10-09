@@ -131,6 +131,13 @@ pub(crate) const MIRROR_DEADLINE: Duration = Duration::from_secs(15);
 /// session marked stale (the backoff then spaces the next attempt).
 pub(crate) const REPAIR_DEADLINE: Duration = Duration::from_secs(600);
 
+/// The most sessions whose tier state one store keeps (#18 review L5). A
+/// long-lived reader (serve-web) touches many sessions; past this, entries
+/// for sessions this store neither holds nor is repairing are evicted,
+/// least recently used first. An evicted reader entry costs one durable load
+/// to re-check on its next read.
+pub(crate) const MAX_TRACKED_SESSIONS: usize = 4096;
+
 /// Consecutive failed or timed-out index reads that open the read breaker
 /// (#18 review M2).
 pub(crate) const BREAKER_THRESHOLD: u32 = 3;
@@ -205,6 +212,18 @@ struct SessionTier {
     repair_again: bool,
     /// The background task running the repair (M1).
     repair_task: Option<tokio::task::JoinHandle<()>>,
+    /// Last time this entry was used, for eviction (L5).
+    last_used: Option<Instant>,
+}
+
+impl SessionTier {
+    /// Whether evicting this entry loses nothing that matters: a held
+    /// session's flush counter must survive (a restarted counter would
+    /// version writes below ones already in the index), and a running
+    /// repair owns its entry.
+    fn evictable(&self) -> bool {
+        self.held.is_none() && !self.repairing
+    }
 }
 
 /// How the index's sync marker compares with a durable snapshot.
@@ -276,6 +295,7 @@ pub(crate) struct Tier {
     mirror_deadline: Duration,
     repair_deadline: Duration,
     release_grace: Duration,
+    max_sessions: usize,
     breaker: Mutex<Breaker>,
     breaker_threshold: u32,
     breaker_cooldown: Duration,
@@ -306,6 +326,7 @@ impl TieredStore {
                 mirror_deadline: MIRROR_DEADLINE,
                 repair_deadline: REPAIR_DEADLINE,
                 release_grace: RELEASE_GRACE,
+                max_sessions: MAX_TRACKED_SESSIONS,
                 breaker: Mutex::new(Breaker::default()),
                 breaker_threshold: BREAKER_THRESHOLD,
                 breaker_cooldown: BREAKER_COOLDOWN,
@@ -345,6 +366,12 @@ impl TieredStore {
         tier.breaker_threshold = threshold;
         tier.breaker_cooldown = cooldown;
         tier.read_deadline = read_deadline;
+        self
+    }
+
+    #[cfg(all(test, feature = "store-memory"))]
+    pub(crate) fn with_max_sessions(mut self, max: usize) -> Self {
+        self.tier_mut().max_sessions = max;
         self
     }
 
@@ -389,9 +416,44 @@ impl Tier {
         }
     }
 
+    /// Sessions whose tier state this store keeps.
+    #[cfg(all(test, feature = "store-memory"))]
+    pub(crate) fn tracked_sessions(&self) -> Vec<SessionId> {
+        self.sessions.lock().keys().cloned().collect()
+    }
+
     /// Run `f` on the session's state. Never held across an `.await`.
+    ///
+    /// Creating an entry past [`MAX_TRACKED_SESSIONS`] first evicts the
+    /// least recently used evictable entries, down to three quarters of the
+    /// bound (so the scan is amortised over many inserts).
     fn with_state<R>(&self, session: &SessionId, f: impl FnOnce(&mut SessionTier) -> R) -> R {
-        f(self.sessions.lock().entry(session.clone()).or_default())
+        let mut sessions = self.sessions.lock();
+        if !sessions.contains_key(session) && sessions.len() >= self.max_sessions {
+            let keep = self.max_sessions - self.max_sessions / 4;
+            let mut idle: Vec<(Option<Instant>, SessionId)> = sessions
+                .iter()
+                .filter(|(_, st)| st.evictable())
+                .map(|(sid, st)| (st.last_used, sid.clone()))
+                .collect();
+            idle.sort_by_key(|(used, _)| *used);
+            let excess = (sessions.len() + 1).saturating_sub(keep);
+            for (_, sid) in idle.into_iter().take(excess) {
+                sessions.remove(&sid);
+            }
+        }
+        let st = sessions.entry(session.clone()).or_default();
+        st.last_used = Some(Instant::now());
+        f(st)
+    }
+
+    /// Forget the session's state: this store no longer holds it and runs
+    /// no repair for it (L5). The next read re-checks it.
+    fn evict(&self, session: &SessionId) {
+        let mut sessions = self.sessions.lock();
+        if sessions.get(session).is_some_and(SessionTier::evictable) {
+            sessions.remove(session);
+        }
     }
 
     /// The next external version for a write to `session` under `token`.
@@ -1401,6 +1463,7 @@ impl GraphStore for TieredStore {
         }
         self.primary.release_lease(session, holder).await?;
         self.with_state(session, |st| st.held = None);
+        self.evict(session);
         Ok(())
     }
 
