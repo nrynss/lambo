@@ -1395,10 +1395,15 @@ async fn an_unattributable_delete_only_batch_deletes_by_id() {
     let (primary, fake) = (memory_primary(), Arc::new(FakeIndex::new()));
     let store = tier(&primary, &fake);
     let sid = SessionId::new("unleased");
-    // Unleased writes (no lease row): the seed / fixture path.
-    let _ = store.load_session(&sid).await;
+    // An index holding the session (from an earlier holder), and no lease
+    // held here: a delete-only batch names no session and cannot be
+    // attributed.
     let (s, b) = seed_batch(&sid, 1);
-    store.flush(&b, None).await.unwrap();
+    primary.flush(&b, None).await.unwrap();
+    plant_snapshot(&primary, &fake, &sid).await;
+    fake.write_marker(&sid, super::index::SyncMarker { synced_epoch: 1 }, Some(1))
+        .await
+        .unwrap();
     assert_eq!(fake.live(&sid).len(), 2);
     store
         .flush(&batch(2, vec![Mutation::DeleteNode { id: s.c2 }]), None)
@@ -1412,6 +1417,52 @@ async fn an_unattributable_delete_only_batch_deletes_by_id() {
     );
 }
 
+/// L4: an unleased write (the seed and fixture path) is never mirrored. The
+/// engine would apply it with internal versioning, which bumps an externally
+/// versioned document to V+1 and collides with the next leased write at
+/// `(T << 32) | (c + 1)`: that write's 409 counts as success and a stale
+/// document is served while in sync. Instead the session goes stale and the
+/// next holder load (or `lambo recall-index backfill`) repairs it.
+#[tokio::test]
+async fn an_unleased_flush_is_not_mirrored_and_the_next_holder_repairs() {
+    let (primary, fake) = (memory_primary(), Arc::new(FakeIndex::new()));
+    let store = tier(&primary, &fake);
+    let sid = SessionId::new("seeded");
+    let _ = store.load_session(&sid).await;
+    let (s, b) = seed_batch(&sid, 1);
+    store.flush(&b, None).await.unwrap();
+    assert!(
+        fake.live(&sid).is_empty(),
+        "an unleased write reached the index"
+    );
+    assert_eq!(fake.bulk_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    let status = store.tier_status(&sid);
+    assert_eq!(status.sync, TierSync::Stale);
+    assert_eq!(status.mirror_failures, 0, "not a failure, a policy");
+    store
+        .vector_candidates_checked(&sid, &PROBE, &contract(), 5)
+        .await
+        .unwrap();
+    assert_eq!(fake.knn_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    let holder_store = tier(&primary, &fake);
+    attach(&holder_store, &sid, &holder("w")).await;
+    settle(&holder_store).await;
+    assert_eq!(holder_store.tier_status(&sid).sync, TierSync::InSync);
+    assert!(fake.live(&sid).contains_key(&s.c1.0.to_string()));
+}
+
+/// Plant every vector of the session's durable snapshot in the index, as an
+/// earlier holder would have mirrored it.
+async fn plant_snapshot(primary: &Arc<dyn GraphStore>, fake: &FakeIndex, sid: &SessionId) {
+    let snap = primary.load_session(sid).await.unwrap();
+    for c in &snap.concepts {
+        if let Some(doc) = super::project::index_doc(c, &contract(), Some(1)) {
+            fake.plant(&contract(), doc);
+        }
+    }
+}
+
 /// H1, the by-id half: a delete-by-id that loses a document to a version
 /// conflict is retried, not counted as done.
 #[tokio::test]
@@ -1421,12 +1472,7 @@ async fn an_unattributed_delete_retries_a_version_conflict() {
     let sid = SessionId::new("by-id-conflict");
     let (s, b) = seed_batch(&sid, 1);
     primary.flush(&b, None).await.unwrap();
-    let snap = primary.load_session(&sid).await.unwrap();
-    for c in &snap.concepts {
-        if let Some(doc) = super::project::index_doc(c, &contract(), Some(1)) {
-            fake.plant(&contract(), doc);
-        }
-    }
+    plant_snapshot(&primary, &fake, &sid).await;
     fake.conflicts_next_delete
         .store(1, std::sync::atomic::Ordering::SeqCst);
     store

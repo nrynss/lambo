@@ -394,12 +394,9 @@ impl Tier {
         f(self.sessions.lock().entry(session.clone()).or_default())
     }
 
-    /// The next external version for a write to `session` under `token`
-    /// (`None` for an unleased write, which takes last-write-wins).
-    fn next_version(&self, session: &SessionId, token: Option<u64>) -> Result<Option<u64>, String> {
-        let Some(token) = token else {
-            return Ok(None);
-        };
+    /// The next external version for a write to `session` under `token`.
+    /// Only leased writes are mirrored (L4), so there always is a token.
+    fn next_version(&self, session: &SessionId, token: u64) -> Result<u64, String> {
         self.with_state(session, |st| {
             if st.token != token {
                 st.token = token;
@@ -415,7 +412,7 @@ impl Tier {
                 format!("fencing token {token} is too large to version a recall-index write")
             })?;
             st.counter = counter;
-            Ok(Some(version))
+            Ok(version)
         })
     }
 
@@ -681,9 +678,10 @@ impl Tier {
         epoch: u64,
         token: u64,
     ) -> Result<RecallBackfillReport, StoreError> {
-        let version = self
-            .next_version(session, Some(token))
-            .map_err(StoreError::Backend)?;
+        let version = Some(
+            self.next_version(session, token)
+                .map_err(StoreError::Backend)?,
+        );
         // Reads fall back while documents are being replaced.
         self.with_state(session, |st| {
             if st.sync == TierSync::InSync {
@@ -808,35 +806,59 @@ impl Tier {
         batch: &MutationBatch,
         token: Option<u64>,
     ) {
+        let Some(token) = token else {
+            self.mark_unleased(session);
+            return;
+        };
         let sync = self.with_state(session, |st| st.sync);
         if sync != TierSync::InSync {
-            match token {
-                // The durable snapshot already holds this batch, so a repair
-                // covers it; mirroring it on its own first would be redundant.
-                Some(_) => self.repair_if_due(session),
-                None => self.mirror_ops(session, batch, None, false).await,
-            }
+            // The durable snapshot already holds this batch, so a repair
+            // covers it; mirroring it on its own first would be redundant.
+            self.repair_if_due(session);
             return;
         }
         let version = match self.next_version(session, token) {
-            Ok(v) => v,
+            Ok(v) => Some(v),
             Err(e) => {
                 self.mark_stale(session, &e);
                 return;
             }
         };
-        self.mirror_ops(session, batch, version, true).await;
+        self.mirror_ops(session, batch, version).await;
     }
 
-    /// Project and write; advance the marker only when `advance_marker` and
+    /// An unleased write (the seed and fixture path) is not mirrored (#18
+    /// review L4). The engine would take it with internal versioning, which
+    /// bumps an externally versioned document to `V + 1`, exactly the next
+    /// leased write's `(T << 32) | (c + 1)`; that write's conflict counts as
+    /// success and a stale document would be served while in sync. So the
+    /// index only ever sees leased, externally versioned writes (plus
+    /// delete-by-query, whose tombstones are never rewritten): the session
+    /// goes stale, reads fall back, and the next holder load or
+    /// `lambo recall-index backfill` repairs it. Not counted as a mirror
+    /// failure.
+    fn mark_unleased(&self, session: &SessionId) {
+        tracing::debug!(
+            target: "lambo::recall_tier",
+            session = %session,
+            "unleased write not mirrored; the recall index catches up at the next holder \
+             load or recall-index backfill"
+        );
+        self.with_state(session, |st| {
+            st.sync = TierSync::Stale;
+            // The batch may have switched the contract; read it again.
+            st.contract = None;
+            st.last_error = Some(
+                "unleased write not mirrored: repaired at the next holder load or \
+                 recall-index backfill"
+                    .into(),
+            );
+        });
+    }
+
+    /// Project and write at `version`; advance the marker only when
     /// everything landed.
-    async fn mirror_ops(
-        &self,
-        session: &SessionId,
-        batch: &MutationBatch,
-        version: Option<u64>,
-        advance_marker: bool,
-    ) {
+    async fn mirror_ops(&self, session: &SessionId, batch: &MutationBatch, version: Option<u64>) {
         let before = match self.durable_contract(session).await {
             Ok(c) => c,
             Err(e) => {
@@ -855,17 +877,15 @@ impl Tier {
             if !projection.ops.is_empty() {
                 self.recall.bulk(&projection.ops).await?;
             }
-            if advance_marker {
-                self.recall
-                    .write_marker(
-                        session,
-                        SyncMarker {
-                            synced_epoch: batch.mutation_epoch,
-                        },
-                        version,
-                    )
-                    .await?;
-            }
+            self.recall
+                .write_marker(
+                    session,
+                    SyncMarker {
+                        synced_epoch: batch.mutation_epoch,
+                    },
+                    version,
+                )
+                .await?;
             Ok::<(), StoreError>(())
         };
         let written = tokio::time::timeout(self.mirror_deadline, written)

@@ -28,9 +28,10 @@ pub(crate) struct IndexDoc {
     pub concept_type: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub embedding: Vec<f32>,
-    /// The external version this document was written at (0 for an unleased
-    /// write). Stored as a field as well so a reconcile can drop every
-    /// session document older than the one it just wrote.
+    /// The external version this document was written at (0 only for a
+    /// projection made without one; the tier mirrors leased writes only).
+    /// Stored as a field as well so a reconcile can drop every session
+    /// document older than the one it just wrote.
     pub v: u64,
 }
 
@@ -38,8 +39,9 @@ pub(crate) struct IndexDoc {
 ///
 /// Both variants carry the external version the write is made at, so a
 /// replayed or late write that is older than what the index holds is refused
-/// by the engine (a version conflict, counted as success). `None` is an
-/// unleased write, which takes the engine's own last-write-wins versioning.
+/// by the engine (a version conflict, counted as success). `None` is a
+/// write without an external version, which takes the engine's internal
+/// versioning; the tier never makes one (unleased writes are not mirrored).
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum DocOp {
     Index {
