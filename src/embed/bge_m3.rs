@@ -101,6 +101,9 @@ pub struct BgeM3LlamaCppEmbedder {
     url: String,
     /// Base URL for `/health`, e.g. `http://127.0.0.1:8080`.
     base_url: String,
+    /// [`Self::url`] as printed in logs, errors and `Debug`: scheme, host,
+    /// port and path only, never userinfo or a query ([`url_for_log`]).
+    log_url: String,
     /// Model id sent in the request (empty => server default).
     model: String,
     /// Expected embedding dimensionality (must match server output and store schema).
@@ -113,7 +116,7 @@ pub struct BgeM3LlamaCppEmbedder {
 impl std::fmt::Debug for BgeM3LlamaCppEmbedder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BgeM3LlamaCppEmbedder")
-            .field("url", &self.url)
+            .field("url", &self.log_url)
             .field("model", &self.model)
             .field("dim", &self.dim)
             .field(
@@ -190,6 +193,22 @@ fn bypasses_env_proxy(base_url: &str) -> bool {
     reqwest::Url::parse(base_url).is_ok_and(|url| url.scheme() == "http" && is_loopback_host(&url))
 }
 
+/// `url` for a log line, an error or `Debug`: scheme, host, port and path.
+/// Userinfo and the query are dropped, since either may carry a credential
+/// (issue #21); an unparseable URL is not shown at all.
+fn url_for_log(url: &str) -> String {
+    match reqwest::Url::parse(url) {
+        Ok(u) => {
+            let host = u.host_str().unwrap_or("");
+            match u.port() {
+                Some(port) => format!("{}://{host}:{port}{}", u.scheme(), u.path()),
+                None => format!("{}://{host}{}", u.scheme(), u.path()),
+            }
+        }
+        Err(_) => "(unparseable URL, not shown)".to_string(),
+    }
+}
+
 /// The HTTP client for `base_url`.
 ///
 /// Redirects are never followed (`Policy::none`): an embeddings POST has no
@@ -238,9 +257,11 @@ impl BgeM3LlamaCppEmbedder {
         if dim == 0 {
             return Err(EmbedError::Unavailable("embedder dim must be > 0".into()));
         }
+        let url = format!("{base_url}/v1/embeddings");
         Ok(Self {
             client: build_client(&base_url, DEFAULT_CONNECT_TIMEOUT, DEFAULT_REQUEST_TIMEOUT)?,
-            url: format!("{base_url}/v1/embeddings"),
+            log_url: url_for_log(&url),
+            url,
             base_url,
             model: model.into(),
             dim,
@@ -307,7 +328,13 @@ impl BgeM3LlamaCppEmbedder {
             .timeout(HEALTH_TIMEOUT)
             .send()
             .await
-            .map_err(|e| EmbedError::Unavailable(format!("llama.cpp health check failed: {e}")))?;
+            .map_err(|e| {
+                EmbedError::Unavailable(format!(
+                    "llama.cpp health check failed at {}: {}",
+                    url_for_log(&self.base_url),
+                    e.without_url()
+                ))
+            })?;
         if !resp.status().is_success() {
             let status = resp.status();
             return Err(EmbedError::Backend(format!(
@@ -343,10 +370,13 @@ impl BgeM3LlamaCppEmbedder {
         if let Some(auth) = &self.authorization {
             req = req.header(AUTHORIZATION, auth.clone());
         }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| EmbedError::Unavailable(format!("llama.cpp unreachable: {e}")))?;
+        let resp = req.send().await.map_err(|e| {
+            EmbedError::Unavailable(format!(
+                "llama.cpp unreachable at {}: {}",
+                self.log_url,
+                e.without_url()
+            ))
+        })?;
         let status = resp.status();
         if status.is_success() {
             let bytes = resp.bytes().await.map_err(|e| {
@@ -387,7 +417,7 @@ impl BgeM3LlamaCppEmbedder {
                 // as transient (the write stays durable) and log the status so
                 // the gap in OUR table is on the record (J3-R2R-1 property 2).
                 tracing::warn!(
-                    url = %self.url,
+                    url = %self.log_url,
                     model = %model,
                     status = %status,
                     "llama.cpp answered with status {status}, which the J3-R2R-1 rule table \
@@ -400,7 +430,7 @@ impl BgeM3LlamaCppEmbedder {
             }
             EmbedStatusClass::Content => {
                 tracing::error!(
-                    url = %self.url,
+                    url = %self.log_url,
                     model = %model,
                     status = %status,
                     "llama.cpp refused this content ({status}); not retrying (CON-2)"
@@ -414,7 +444,7 @@ impl BgeM3LlamaCppEmbedder {
                 // write is failed (the class is permanent for the deployment,
                 // so retrying cannot help) AND an operator is told loudly.
                 tracing::error!(
-                    url = %self.url,
+                    url = %self.log_url,
                     model = %model,
                     status = %status,
                     "llama.cpp answered {status} — a PERMANENT configuration error (URL, model \
@@ -872,6 +902,41 @@ mod tests {
                 .unwrap()
                 .with_bearer_token(FAKE_TOKEN)
                 .unwrap_or_else(|e| panic!("{url}: {e}"));
+        }
+    }
+
+    /// Issue #21 review M2: URL userinfo (and a query) is never printed: not
+    /// by `Debug`, not in a transport error. Only scheme, host, port and path
+    /// are shown.
+    ///
+    /// Mutation: print `self.url` in `Debug` or `{e}` in the send error -> red.
+    #[tokio::test]
+    async fn url_userinfo_is_never_printed() {
+        let e = BgeM3LlamaCppEmbedder::new(
+            "http://someone:fake-xyzzy-userinfo@127.0.0.1:9/base",
+            "",
+            1024,
+        )
+        .unwrap();
+        let shown = format!("{e:?}");
+        assert!(
+            shown.contains("\"http://127.0.0.1:9/base/v1/embeddings\""),
+            "{shown}"
+        );
+        for url in [
+            "http://someone:fake-xyzzy-userinfo@127.0.0.1:9/base",
+            "http://127.0.0.1:9/base?key=fake-xyzzy-query",
+        ] {
+            let e = BgeM3LlamaCppEmbedder::new(url, "", 1024).unwrap();
+            let shown = format!("{e:?}");
+            assert!(!shown.contains("fake-xyzzy"), "{shown}");
+            let err = e.embed("anything").await.unwrap_err();
+            assert!(matches!(err, EmbedError::Unavailable(_)), "{err:?}");
+            let msg = err.to_string();
+            assert!(msg.contains("llama.cpp unreachable"), "{msg}");
+            assert!(!msg.contains("fake-xyzzy"), "{msg}");
+            let err = e.check_health().await.unwrap_err().to_string();
+            assert!(!err.contains("fake-xyzzy"), "{err}");
         }
     }
 
