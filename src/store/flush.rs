@@ -776,7 +776,11 @@ impl FlushLoop {
     /// [`STATS_REPUBLISH_INTERVAL`], so an idle writer stops writing once its
     /// row is right and an outage costs one small upsert every few seconds.
     /// Nothing is published before the first attempt: until then the honest
-    /// reading for a reader is `n/a`.
+    /// reading for a reader is `n/a`. Nor between attempts once degraded or
+    /// over `log_max` (#11 review round 2, F2): degraded is terminal and does
+    /// no further store I/O, and its lag grows for good, so the drift test
+    /// would pass every time and upsert, inline in this loop, against the
+    /// store whose failures degraded it.
     async fn publish_stats(&mut self, session: &SessionId, attempted: bool) {
         let fs = self.shared.stats();
         let session_stats = SessionFlushStats {
@@ -785,6 +789,9 @@ impl FlushLoop {
         };
         let now = tokio::time::Instant::now();
         if !attempted {
+            if self.shared.degraded.load(Ordering::Acquire) || fs.depth > self.params.log_max {
+                return;
+            }
             let Some((at, published)) = self.last_published else {
                 return;
             };
@@ -1049,6 +1056,8 @@ mod tests {
         fail_remaining: AtomicUsize,
         fail_always: AtomicBool,
         batch_sizes: Mutex<Vec<usize>>,
+        /// `write_flush_stats` calls, whatever their outcome.
+        stats_writes: AtomicUsize,
     }
 
     impl FlakyStore {
@@ -1059,7 +1068,12 @@ mod tests {
                 fail_remaining: AtomicUsize::new(0),
                 fail_always: AtomicBool::new(false),
                 batch_sizes: Mutex::new(Vec::new()),
+                stats_writes: AtomicUsize::new(0),
             }
+        }
+
+        fn stats_writes(&self) -> usize {
+            self.stats_writes.load(Ordering::SeqCst)
         }
 
         fn fail_next(&self, n: usize) {
@@ -1193,6 +1207,7 @@ mod tests {
             session: &SessionId,
             stats: &SessionFlushStats,
         ) -> Result<(), StoreError> {
+            self.stats_writes.fetch_add(1, Ordering::SeqCst);
             self.inner.write_flush_stats(session, stats).await
         }
 
@@ -2131,6 +2146,59 @@ mod tests {
         assert!(
             published.flush_lag_ms <= POLL_QUANTUM.as_millis() as u64,
             "{published:?}"
+        );
+    }
+
+    /// **#11 review round 2, F2: a degraded session does not republish its
+    /// stats row between attempts.** Degraded (`durability = "none"`) is
+    /// terminal and makes no further store I/O, but its lag grows for good,
+    /// so the between-attempts republish found the row drifted every time and
+    /// upserted it every [`STATS_REPUBLISH_INTERVAL`], inline in the flush
+    /// loop, against the store whose failures degraded it.
+    #[tokio::test(start_paused = true)]
+    async fn a_degraded_session_does_not_republish_its_stats_row() {
+        let _callsites = quiet_logs();
+
+        let inner: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+        let store = Arc::new(FlakyStore::new(inner));
+        let graph = new_graph();
+        let task = FlushTask::new(
+            graph.clone(),
+            store.clone(),
+            params(Duration::from_secs(1), 100, 1, 4),
+        );
+        let _handle = task.spawn();
+        let_task_arm().await;
+
+        store.fail_forever();
+        let iid = add_interaction(&graph, 1, None);
+        add_concept(&graph, 1, iid); // 3 mutations
+        tokio::time::advance(Duration::from_secs(1)).await;
+        wait_until(|| store.flush_calls() >= 1).await;
+        tokio::time::advance(BACKOFF_BASE).await;
+        wait_until(|| store.flush_calls() >= 2).await; // retained
+        add_concept(&graph, 2, iid); // past log_max = 4
+        tokio::time::advance(Duration::from_secs(1)).await;
+        wait_until(|| task.degraded()).await;
+
+        // Let the degrade cycle publish what it publishes, then count.
+        for _ in 0..10 {
+            tokio::time::advance(POLL_QUANTUM).await;
+            tokio::task::yield_now().await;
+        }
+        let before = store.stats_writes();
+        // Several republish intervals, a poll at a time.
+        let polls = 4 * STATS_REPUBLISH_INTERVAL.as_millis() / POLL_QUANTUM.as_millis();
+        for _ in 0..polls {
+            tokio::time::advance(POLL_QUANTUM).await;
+            tokio::task::yield_now().await;
+        }
+        assert!(task.degraded());
+        assert_eq!(store.flush_calls(), 2, "no flush attempt once degraded");
+        assert_eq!(
+            store.stats_writes(),
+            before,
+            "a degraded session rewrote its stats row between attempts"
         );
     }
 
