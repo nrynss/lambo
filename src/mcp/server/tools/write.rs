@@ -6,6 +6,7 @@ use serde_json::json;
 
 use crate::graph::action::Action;
 use crate::graph::derive::ParentOf;
+use crate::graph::hybrid;
 use crate::mcp::server::params::{check_size, DeriveParams, RecordActionParams};
 use crate::mcp::server::response::{bad_param, redact_urls, tool_err};
 use crate::mcp::server::trace::note_facts;
@@ -82,6 +83,15 @@ impl LamboServer {
         } else {
             ParentOf::from_pairs(&pairs)
         };
+
+        // #74: on a session that embeds, a call whose embedding context
+        // would exceed the hybrid limit is refused now, naming the limit,
+        // rather than failing on its receipt as an opaque configuration error.
+        if self.mem.derive_embeds()
+            && let Err(msg) = hybrid::check_embed_context(&concepts, &parent_of, None)
+        {
+            return bad_param(msg);
+        }
 
         // J3: acknowledged after validation, before the embedder. The
         // validation pre-pass and the interaction that pins this write's place
