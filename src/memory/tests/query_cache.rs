@@ -17,6 +17,8 @@ use crate::store::erase::ERASED_HOLDER;
 struct CountingEmbedder {
     inner: ContextTolerantEmbedder,
     calls: AtomicUsize,
+    /// Every text embedded, in call order.
+    texts: parking_lot::Mutex<Vec<String>>,
     fail_remaining: AtomicUsize,
     /// Embeds of exactly this text answer a bad (half-width, NaN) vector.
     poison: Option<&'static str>,
@@ -31,6 +33,7 @@ impl CountingEmbedder {
         Arc::new(Self {
             inner: ContextTolerantEmbedder(FixtureEmbedder::new()),
             calls: AtomicUsize::new(0),
+            texts: Default::default(),
             fail_remaining: AtomicUsize::new(n),
             poison: None,
         })
@@ -40,6 +43,7 @@ impl CountingEmbedder {
         Arc::new(Self {
             inner: ContextTolerantEmbedder(FixtureEmbedder::new()),
             calls: AtomicUsize::new(0),
+            texts: Default::default(),
             fail_remaining: AtomicUsize::new(0),
             poison: Some(text),
         })
@@ -47,6 +51,12 @@ impl CountingEmbedder {
 
     fn calls(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
+    }
+
+    /// Embeds of exactly `text`, so a background embed (the write
+    /// pipeline's calibration probe) can never shift the count.
+    fn calls_of(&self, text: &str) -> usize {
+        self.texts.lock().iter().filter(|t| *t == text).count()
     }
 }
 
@@ -57,6 +67,7 @@ impl Embedder for CountingEmbedder {
     }
     async fn embed(&self, text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        self.texts.lock().push(text.to_owned());
         let fail = self
             .fail_remaining
             .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
@@ -483,13 +494,13 @@ async fn sessions_do_not_share_query_embeddings() {
     let store = vector_store(Source::Graph);
     let a = open(store.clone(), "q14-tenant-a", embedder.clone()).await;
     let b = open(store, "q14-tenant-b", embedder.clone()).await;
-    let q = recall_query("a private question", 5, 1);
-    let calls = embedder.calls();
+    const TEXT: &str = "a private question";
+    let q = recall_query(TEXT, 5, 1);
     a.recall_detailed(q.clone()).await.unwrap();
     a.recall_detailed(q.clone()).await.unwrap();
-    assert_eq!(embedder.calls(), calls + 1);
+    assert_eq!(embedder.calls_of(TEXT), 1);
     b.recall_detailed(q).await.unwrap();
-    assert_eq!(embedder.calls(), calls + 2, "b embeds for itself");
+    assert_eq!(embedder.calls_of(TEXT), 2, "b embeds for itself");
     a.close().await.unwrap();
     b.close().await.unwrap();
 }
