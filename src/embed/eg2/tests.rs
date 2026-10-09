@@ -389,6 +389,60 @@ async fn a_verified_server_is_checked_with_the_reference_image() {
     }
 }
 
+/// On a server `/props` verified as llama-server, which always reports
+/// `usage`, a reference response without the token count means the budget
+/// cannot be checked: image embeds are refused (naming the build), not
+/// embedded unchecked. Text is unaffected. A server that never verified
+/// (no reference check) still embeds an image without `usage`; its
+/// unchecked budget is the once-only `/props` warning's subject.
+///
+/// Mutation: accept a missing count in `ensure_image_budget` -> red.
+#[tokio::test]
+async fn a_verified_server_without_the_token_count_refuses_images() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(GET).path("/props");
+        then.status(200)
+            .json_body(props("embeddinggemma-2-Q8_0.gguf", "Q8_0", true));
+    });
+    let image_post = server.mock(|when, then| {
+        when.method(POST)
+            .path("/v1/embeddings")
+            .body_contains("image_url");
+        then.status(200).json_body(ok_body(&native(), None));
+    });
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/v1/embeddings")
+            .body_contains("text: ");
+        then.status(200).json_body(ok_body(&native(), None));
+    });
+    let e = embedder(&server);
+    let png = png_2x1();
+    let input = crate::surface::image::validate(&png, "image/png").unwrap();
+    let err = e.embed_image(input).await.unwrap_err();
+    assert!(matches!(err, EmbedError::Backend(_)), "{err:?}");
+    let msg = err.to_string();
+    assert!(msg.contains("without usage.prompt_tokens"), "{msg}");
+    assert!(
+        msg.contains("b11517-8a1a9b512"),
+        "the build is named: {msg}"
+    );
+    // Only the reference was sent, not the image.
+    image_post.assert_hits(1);
+    e.embed("text still works").await.unwrap();
+
+    // Not verified (a hosted endpoint): no reference, no count needed.
+    let hosted = MockServer::start();
+    let hosted_post = hosted.mock(|when, then| {
+        when.method(POST).path("/v1/embeddings");
+        then.status(200).json_body(ok_body(&native(), None));
+    });
+    let input = crate::surface::image::validate(&png, "image/png").unwrap();
+    embedder(&hosted).embed_image(input).await.unwrap();
+    hosted_post.assert_hits(1);
+}
+
 // ---------------------------------------------------------------- images = false
 
 /// `images = false` reports text only and refuses an image as `Unsupported`

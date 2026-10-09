@@ -217,6 +217,8 @@ struct Props {
     model_ftype: Option<String>,
     #[serde(default)]
     modalities: Option<PropsModalities>,
+    #[serde(default)]
+    build_info: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -449,6 +451,9 @@ struct CheckState {
     /// When the reference image last showed the profile's budget; trusted
     /// for [`EG2_PROPS_RECHECK_INTERVAL`] like a kept answer.
     budget_checked_at: Option<Instant>,
+    /// The build the last `/props` answer named (`build_info`), for messages:
+    /// at most 64 characters of `[A-Za-z0-9._-]`.
+    build: Option<String>,
 }
 
 /// EmbeddingGemma 2 (text and image) over `llama-server`. Build it from
@@ -714,7 +719,25 @@ impl EmbeddingGemma2Embedder {
                 self.log_failure_once(&message);
                 Err(EmbedError::Backend(message))
             }
-            _ => {
+            // A llama-server sends usage with every embedding (b11517 does),
+            // and this one passed the /props check, so a response without it
+            // means the server changed shape and the budget cannot be
+            // checked: refuse rather than embed images unchecked.
+            None => {
+                let build = self.state().build.clone();
+                let message = format!(
+                    "the llama-server at {} ({}) answered Lambo's reference image without \
+                     usage.prompt_tokens, which llama-server b11517 sends, so the image budget \
+                     of profile {EG2_PROMPT_PROFILE} cannot be checked; image embeds are \
+                     refused. Run a llama.cpp build that reports usage (b11517 is the one \
+                     checked), or set [embedder] images = false",
+                    self.http.log_base_url(),
+                    build.as_deref().unwrap_or("build not reported"),
+                );
+                self.log_failure_once(&message);
+                Err(EmbedError::Backend(message))
+            }
+            Some(_) => {
                 self.state().budget_checked_at = Some(Instant::now());
                 Ok(())
             }
@@ -845,6 +868,12 @@ impl EmbeddingGemma2Embedder {
         let Some(model_path) = props.model_path else {
             return Ok(Eg2ServerCheck::NotExposed);
         };
+        self.state().build = props.build_info.map(|b| {
+            b.chars()
+                .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+                .take(64)
+                .collect()
+        });
         Ok(judge_props(
             &self.model,
             &self.http.log_base_url(),
