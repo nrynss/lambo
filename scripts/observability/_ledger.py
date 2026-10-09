@@ -17,7 +17,10 @@ because metric 2 and metric 3 **join** to it, and leaves `startup`/`lease` in
 `header()` counts them so a reader is never silently ignoring half a file.
 
     common      v, ts (RFC3339, server-stamped), kind
-                ("call" | "stats" | "startup" | "lease" | "completion")
+                ("call" | "stats" | "startup" | "lease" | "completion"),
+                session (the session the line is about: on every kind since
+                #32 PR 1; `startup` and `lease` always carried their own.
+                Older files lack it on call / completion / stats lines)
     call        tool, agent_id, outcome ("ok"|"error"|"panic"),
                 error_kind (only when outcome != "ok"), duration_us
     + recall    query, top_k, hit_count, hits[], canonical_marker,

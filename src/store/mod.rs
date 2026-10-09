@@ -859,8 +859,10 @@ impl FromStr for StoreKind {
             "cockroach" | "crdb" => Ok(Self::Cockroach),
             "postgres" | "pg" => Ok(Self::Postgres),
             "sqlite" | "sqlite3" => Ok(Self::Sqlite),
-            other => Err(StoreError::Backend(format!(
-                "unknown store kind {other:?} (expected {STORE_KIND_EXPECTED})"
+            // Never echo the value: a DSN pasted under `kind` would carry
+            // its password into the startup log.
+            _ => Err(StoreError::Backend(format!(
+                "unknown store kind (value not shown; expected {STORE_KIND_EXPECTED})"
             ))),
         }
     }

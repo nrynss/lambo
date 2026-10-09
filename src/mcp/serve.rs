@@ -236,7 +236,13 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     // `Ledger::open` never fails or blocks the caller, so this is free to move
     // into the pre-lease group; `authorize_ledger` above still refuses the
     // misconfigured `--ledger-heartbeat`-without-`--ledger` pairing first.
-    let ledger = opts.ledger.as_ref().map(|path| Ledger::open(path.clone()));
+    // #32 decision 15: scoped to the session, so every line this serve
+    // appends (call, completion, heartbeat; startup and lease lines already
+    // name theirs) says which session it is about.
+    let ledger = opts
+        .ledger
+        .as_ref()
+        .map(|path| Ledger::open(path.clone()).for_session(&opts.session));
     if let Some(ledger) = &ledger {
         ledger.append(&serve_startup_line(&opts));
     }
