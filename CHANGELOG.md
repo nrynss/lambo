@@ -382,6 +382,13 @@
 
 ### Fixed
 
+- The ledger's applied `completion` lines (`applied` and
+  `applied_after_restart`) now carry `semantic_merged`, `reinforced`, `edges`
+  and `embedded` beside `created_count` / `matched_count` (#12), so the
+  metric-2 facts and embedding coverage outlive the 300 s receipt. Additive:
+  `v` and the existing keys are unchanged, and each new key is present only
+  for the write kind that has it.
+
 - The write queue's startup probe no longer reports `unmeasured` when the
   embedder's first call is slow (#11). Its discarded warm-up embed shared
   the 5 s budget of the timed legs, and the candle Metal BGE-M3's first
