@@ -44,7 +44,9 @@
 //! quantization is caught before more vectors are stamped under the old
 //! contract. Once a server has been verified, a re-check that cannot run
 //! holds embeds back (transient) and a server that stops reporting its model
-//! is refused.
+//! is refused. A check that cannot run (unreachable, a 5xx) is logged once
+//! per run of failures and retried after a wait that doubles from 1 s up to
+//! 30 s, not on every embed.
 
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -107,6 +109,16 @@ const PROPS_TIMEOUT: Duration = Duration::from_secs(5);
 /// embed request (the server unreachable or unwilling) drops the kept answer
 /// at once, since that is what a restart looks like from here.
 pub const EG2_PROPS_RECHECK_INTERVAL: Duration = Duration::from_secs(60);
+
+/// The first wait after a `/props` check that could not run (unreachable, a
+/// 5xx, a broken body). Each further failure in a row doubles it, up to
+/// [`PROPS_RETRY_MAX`]; embeds in between do not ask. A gateway that
+/// answers 5xx for every path but the embeddings one then costs one GET
+/// every half minute, not one per embed.
+const PROPS_RETRY_BASE: Duration = Duration::from_secs(1);
+
+/// The longest wait between two `/props` checks that could not run.
+const PROPS_RETRY_MAX: Duration = Duration::from_secs(30);
 
 /// At most this much of a `/props` body is read. b11517's is about 6 KiB,
 /// most of it the chat template.
@@ -203,7 +215,8 @@ pub enum Eg2ServerCheck {
     /// endpoint, Ollama), so nothing could be checked.
     NotExposed,
     /// The check could not run (server unreachable, a 5xx, or the check is
-    /// turned off); it is tried again on the next embed.
+    /// turned off). It is logged once and tried again after a wait that
+    /// doubles from 1 s up to 30 s; embeds in between do not ask.
     Skipped,
 }
 
@@ -404,6 +417,10 @@ struct CheckState {
     /// embeds back (transient), and a server that stops reporting its model
     /// is refused, because either can be a different server on the same URL.
     verified_once: bool,
+    /// `/props` checks in a row that could not run; the first is logged.
+    failed_probes: u32,
+    /// No `/props` check before this, after one that could not run.
+    retry_at: Option<Instant>,
 }
 
 /// EmbeddingGemma 2 (text and image) over `llama-server`. Build it from
@@ -423,6 +440,8 @@ pub struct EmbeddingGemma2Embedder {
     server_check: bool,
     /// [`EG2_PROPS_RECHECK_INTERVAL`], shortened by tests.
     recheck_after: Duration,
+    /// [`PROPS_RETRY_BASE`], shortened by tests.
+    retry_base: Duration,
     /// What the `/props` check has learned. Never held across an await.
     state: Mutex<CheckState>,
     /// The last failed-check message logged, so a refusal is logged once and
@@ -471,6 +490,7 @@ impl EmbeddingGemma2Embedder {
             images: true,
             server_check: true,
             recheck_after: EG2_PROPS_RECHECK_INTERVAL,
+            retry_base: PROPS_RETRY_BASE,
             state: Mutex::new(CheckState::default()),
             last_logged: Mutex::new(None),
         })
@@ -516,6 +536,14 @@ impl EmbeddingGemma2Embedder {
         self
     }
 
+    /// Wait `base` (doubling, up to [`PROPS_RETRY_MAX`]) after a `/props`
+    /// check that could not run, instead of [`PROPS_RETRY_BASE`] (tests).
+    #[cfg(test)]
+    pub(crate) fn with_props_retry(mut self, base: Duration) -> Self {
+        self.retry_base = base;
+        self
+    }
+
     /// The contract `model`: `<artifact>;prompts=lambo-eg2-v1`.
     pub fn model_identity(&self) -> &str {
         &self.identity
@@ -547,9 +575,36 @@ impl EmbeddingGemma2Embedder {
         {
             return kept;
         }
-        let probed = self.probe_props().await;
-        let (outcome, changed) = {
+        if self
+            .state()
+            .retry_at
+            .is_some_and(|retry_at| Instant::now() < retry_at)
+        {
+            return Eg2ServerCheck::Skipped;
+        }
+        let (probed, skip_reason) = match self.probe_props().await {
+            Ok(outcome) => (outcome, None),
+            Err(reason) => (Eg2ServerCheck::Skipped, Some(reason)),
+        };
+        let (outcome, changed, first_failure) = {
             let mut state = self.state();
+            let first_failure = match skip_reason {
+                Some(_) => {
+                    state.failed_probes = state.failed_probes.saturating_add(1);
+                    let doublings = (state.failed_probes - 1).min(16);
+                    let wait = self
+                        .retry_base
+                        .saturating_mul(1 << doublings)
+                        .min(PROPS_RETRY_MAX);
+                    state.retry_at = Some(Instant::now() + wait);
+                    state.failed_probes == 1
+                }
+                None => {
+                    state.failed_probes = 0;
+                    state.retry_at = None;
+                    false
+                }
+            };
             let outcome = match probed {
                 Eg2ServerCheck::NotExposed if state.verified_once => {
                     Eg2ServerCheck::Mismatch(self.props_gone_message())
@@ -568,8 +623,15 @@ impl EmbeddingGemma2Embedder {
                     false
                 }
             };
-            (outcome, changed)
+            (
+                outcome,
+                changed,
+                first_failure.then_some(state.verified_once),
+            )
         };
+        if let (Some(verified_once), Some(reason)) = (first_failure, skip_reason) {
+            self.log_unchecked(&reason, verified_once);
+        }
         if changed {
             self.log_kept(&outcome);
         }
@@ -592,6 +654,24 @@ impl EmbeddingGemma2Embedder {
     /// may hold another model.
     fn forget_kept(&self) {
         self.state().kept = None;
+    }
+
+    /// Logged once for each run of `/props` checks that could not run.
+    fn log_unchecked(&self, reason: &str, verified_once: bool) {
+        let url = self.http.log_base_url();
+        let effect = if verified_once {
+            "embeds are held back (and retried) until it answers, because this server was \
+             verified earlier"
+        } else {
+            "embeds go to the server unchecked meanwhile"
+        };
+        tracing::warn!(
+            url = %url,
+            "could not ask the embedder at {url} for /props ({reason}): {effect}; the check is \
+             retried after a wait that doubles up to {} s, and this is logged once until it \
+             answers",
+            PROPS_RETRY_MAX.as_secs()
+        );
     }
 
     fn props_gone_message(&self) -> String {
@@ -664,48 +744,49 @@ impl EmbeddingGemma2Embedder {
         }
     }
 
-    async fn probe_props(&self) -> Eg2ServerCheck {
-        let Ok(mut resp) = self
+    /// Ask `/props` once. `Err` names why the check could not run (the
+    /// server unreachable, a 5xx, a body cut off); every other answer is
+    /// judged.
+    async fn probe_props(&self) -> Result<Eg2ServerCheck, String> {
+        let mut resp = self
             .http
             .authorized_get("/props", PROPS_TIMEOUT)
             .send()
             .await
-        else {
-            return Eg2ServerCheck::Skipped;
-        };
+            .map_err(|e| format!("unreachable: {}", e.without_url()))?;
         let status = resp.status();
         if status.is_server_error() {
-            return Eg2ServerCheck::Skipped;
+            return Err(format!("it answered {status}"));
         }
         if !status.is_success() {
-            return Eg2ServerCheck::NotExposed;
+            return Ok(Eg2ServerCheck::NotExposed);
         }
         let mut body = Vec::new();
         loop {
             match resp.chunk().await {
                 Ok(Some(chunk)) => {
                     if body.len() + chunk.len() > PROPS_READ_CAP {
-                        return Eg2ServerCheck::NotExposed;
+                        return Ok(Eg2ServerCheck::NotExposed);
                     }
                     body.extend_from_slice(&chunk);
                 }
                 Ok(None) => break,
-                Err(_) => return Eg2ServerCheck::Skipped,
+                Err(e) => return Err(format!("the body was cut off: {}", e.without_url())),
             }
         }
         let Ok(props) = serde_json::from_slice::<Props>(&body) else {
-            return Eg2ServerCheck::NotExposed;
+            return Ok(Eg2ServerCheck::NotExposed);
         };
         let Some(model_path) = props.model_path else {
-            return Eg2ServerCheck::NotExposed;
+            return Ok(Eg2ServerCheck::NotExposed);
         };
-        judge_props(
+        Ok(judge_props(
             &self.model,
             &self.http.log_base_url(),
             &model_path,
             props.model_ftype.as_deref(),
             props.modalities.and_then(|m| m.vision),
-        )
+        ))
     }
 
     /// Refuse before sending when the check has found the server wrong, or

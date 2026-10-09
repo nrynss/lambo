@@ -480,7 +480,8 @@ async fn a_server_without_vision_refuses_images_but_embeds_text() {
 
 /// A server that does not answer `/props` with a model (a 404 from a hosted
 /// endpoint, a JSON without `model_path`, a non-JSON page) is used unchecked,
-/// and asked once. A 5xx or an unreachable `/props` is asked again.
+/// and asked once. A 5xx `/props` is asked again, but only after a wait
+/// (see `a_props_check_that_cannot_run_backs_off_and_logs_once`).
 #[tokio::test]
 async fn an_endpoint_without_props_is_used_unchecked() {
     for (status, body) in [
@@ -516,13 +517,13 @@ async fn an_endpoint_without_props_is_used_unchecked() {
     let e = embedder(&server);
     e.embed("a").await.unwrap();
     e.embed("b").await.unwrap();
-    props_mock.assert_hits(2);
+    props_mock.assert_hits(1);
 
     // Turned off, nothing is asked.
     let skipped = embedder(&server).without_server_check();
     assert_eq!(skipped.check_server().await, Eg2ServerCheck::Skipped);
     skipped.embed("c").await.unwrap();
-    props_mock.assert_hits(2);
+    props_mock.assert_hits(1);
 }
 
 /// A `llama-server` restarted on the same URL with another model or another
@@ -633,7 +634,9 @@ async fn a_verified_server_that_stops_answering_props_is_held_back() {
         when.method(POST).path("/v1/embeddings");
         then.status(200).json_body(ok_body(&native(), Some(293)));
     });
-    let e = embedder(&server).with_props_recheck(Duration::ZERO);
+    let e = embedder(&server)
+        .with_props_recheck(Duration::ZERO)
+        .with_props_retry(Duration::ZERO);
     e.embed("a").await.unwrap();
     good.delete();
 
@@ -666,6 +669,57 @@ async fn a_verified_server_that_stops_answering_props_is_held_back() {
     });
     e.embed("d").await.unwrap();
     post.assert_hits(2);
+}
+
+/// A `/props` that answers 5xx (a gateway that routes only the embeddings
+/// path) or cannot be reached is not asked on every embed: after a failure
+/// the next check waits, doubling from 1 s. The first failure of a run is
+/// logged once, naming why; later failures in the same run are not logged.
+///
+/// Mutation: drop the `retry_at` early return in `check` -> red (a GET per
+/// embed); log on every failure -> red.
+#[tokio::test]
+async fn a_props_check_that_cannot_run_backs_off_and_logs_once() {
+    let server = MockServer::start();
+    let props_mock = server.mock(|when, then| {
+        when.method(GET).path("/props");
+        then.status(502).body("bad gateway");
+    });
+    let post = server.mock(|when, then| {
+        when.method(POST).path("/v1/embeddings");
+        then.status(200).json_body(ok_body(&native(), None));
+    });
+    let (logs, _guard) = crate::test_util::capture_logs(tracing::Level::WARN);
+
+    // The default wait: one GET for a burst of embeds.
+    let e = embedder(&server);
+    for text in ["a", "b", "c", "d"] {
+        e.embed(text).await.unwrap();
+    }
+    props_mock.assert_hits(1);
+    post.assert_hits(4);
+
+    // With no wait every embed asks, and the run is still logged once.
+    let eager = embedder(&server).with_props_retry(Duration::ZERO);
+    for text in ["a", "b", "c"] {
+        eager.embed(text).await.unwrap();
+    }
+    props_mock.assert_hits(4);
+    let lines: Vec<String> = logs
+        .lines()
+        .into_iter()
+        .filter(|l| l.contains("could not ask the embedder"))
+        .collect();
+    assert_eq!(lines.len(), 2, "one per embedder: {lines:?}");
+    assert!(lines[0].contains("502"), "{lines:?}");
+    assert!(lines[0].contains("unchecked"), "{lines:?}");
+
+    // Unreachable is the same: a port nothing listens on.
+    let dead = EmbeddingGemma2Embedder::new("http://127.0.0.1:9", MODEL, 768)
+        .unwrap()
+        .with_props_retry(Duration::from_secs(3600));
+    assert_eq!(dead.check_server().await, Eg2ServerCheck::Skipped);
+    assert!(logs.contains("unreachable"), "{}", logs.contents());
 }
 
 /// The bearer token goes on the `/props` request as well as on the embeds.
