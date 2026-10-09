@@ -132,6 +132,17 @@ impl FakeIndex {
         }
     }
 
+    /// Park every delete-by-query until [`Self::release_deletes`].
+    pub(crate) fn hold_deletes(&self) {
+        *self.delete_gate.lock() = Some(std::sync::Arc::new(tokio::sync::Semaphore::new(0)));
+    }
+
+    pub(crate) fn release_deletes(&self) {
+        if let Some(gate) = self.delete_gate.lock().take() {
+            gate.add_permits(tokio::sync::Semaphore::MAX_PERMITS);
+        }
+    }
+
     async fn pass_delete_gate(&self) {
         let gate = self.delete_gate.lock().clone();
         if let Some(gate) = gate {

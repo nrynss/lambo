@@ -53,6 +53,18 @@
 //! index), then writes the marker. Readers never write to the index; a reader
 //! that finds the marker behind serves from the primary.
 //!
+//! A repair runs as a background task, one at a time per session, off the
+//! flush loop and the attach path (#18 review M1): requests while one runs
+//! collapse into a single rerun, each pass reads its own durable snapshot
+//! and repairs only when the marker is behind it (a marker ahead of a load
+//! is re-checked, never repaired from: M4). Bounds: a flush waits at most
+//! [`MIRROR_DEADLINE`] for its mirror, a repair pass runs at most
+//! [`REPAIR_DEADLINE`], releasing the lease waits at most [`RELEASE_GRACE`]
+//! for an in-flight repair, and the index client gives delete-by-query,
+//! refresh and count a longer budget than single-document requests.
+//! `lambo recall-index backfill` still rebuilds inline: it is the operator's
+//! explicit command.
+//!
 //! # The embedding contract
 //!
 //! Each contract's vectors live in their own index, `{prefix}-v-{hash}`
@@ -110,6 +122,19 @@ pub(crate) const REPAIR_BACKOFF: Duration = Duration::from_secs(60);
 /// Documents per bulk request during a repair.
 const REPAIR_CHUNK: usize = 500;
 
+/// The longest a flush waits for its mirror (#18 review M1). Past it the
+/// flush returns, the session goes stale, and a background repair catches
+/// the index up: the primary already holds the batch.
+pub(crate) const MIRROR_DEADLINE: Duration = Duration::from_secs(15);
+
+/// The longest one background repair may run before it is abandoned and the
+/// session marked stale (the backoff then spaces the next attempt).
+pub(crate) const REPAIR_DEADLINE: Duration = Duration::from_secs(600);
+
+/// How long releasing a lease waits for this store's in-flight repair of the
+/// session before abandoning it (the next holder repairs at load).
+pub(crate) const RELEASE_GRACE: Duration = Duration::from_secs(10);
+
 /// Extra neighbours fetched beyond `limit`, so the exact re-rank decides the
 /// last places rather than the engine's approximate order (M3).
 pub(crate) const KNN_OVERFETCH: usize = 16;
@@ -164,6 +189,10 @@ struct SessionTier {
     next_check: Option<Instant>,
     /// A repair of this session is running (single-flight, M4).
     repairing: bool,
+    /// Another repair was asked for while one ran: run once more after it.
+    repair_again: bool,
+    /// The background task running the repair (M1).
+    repair_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 /// How the index's sync marker compares with a durable snapshot.
@@ -219,6 +248,9 @@ pub(crate) struct Tier {
     vector_dim: Option<usize>,
     sessions: Mutex<HashMap<SessionId, SessionTier>>,
     repair_backoff: Duration,
+    mirror_deadline: Duration,
+    repair_deadline: Duration,
+    release_grace: Duration,
 }
 
 impl std::ops::Deref for TieredStore {
@@ -242,6 +274,9 @@ impl TieredStore {
                 vector_dim,
                 sessions: Mutex::new(HashMap::new()),
                 repair_backoff: REPAIR_BACKOFF,
+                mirror_deadline: MIRROR_DEADLINE,
+                repair_deadline: REPAIR_DEADLINE,
+                release_grace: RELEASE_GRACE,
             }),
         }
     }
@@ -255,6 +290,20 @@ impl TieredStore {
     #[cfg(all(test, feature = "store-memory"))]
     pub(crate) fn with_repair_backoff(mut self, backoff: Duration) -> Self {
         self.tier_mut().repair_backoff = backoff;
+        self
+    }
+
+    #[cfg(all(test, feature = "store-memory"))]
+    pub(crate) fn with_deadlines(mut self, mirror: Duration, repair: Duration) -> Self {
+        let tier = self.tier_mut();
+        tier.mirror_deadline = mirror;
+        tier.repair_deadline = repair;
+        self
+    }
+
+    #[cfg(all(test, feature = "store-memory"))]
+    pub(crate) fn with_release_grace(mut self, grace: Duration) -> Self {
+        self.tier_mut().release_grace = grace;
         self
     }
 }
@@ -271,6 +320,25 @@ impl Tier {
             flush_counter: st.map_or(0, |s| s.counter),
             mirror_failures: st.map_or(0, |s| s.mirror_failures),
             last_error: st.and_then(|s| s.last_error.clone()),
+        }
+    }
+
+    /// Wait until no repair is running for any session.
+    #[cfg(all(test, feature = "store-memory"))]
+    pub(crate) async fn repairs_settled(&self) {
+        loop {
+            let tasks: Vec<_> = self
+                .sessions
+                .lock()
+                .values_mut()
+                .filter_map(|st| st.repair_task.take())
+                .collect();
+            if tasks.is_empty() {
+                return;
+            }
+            for task in tasks {
+                let _ = task.await;
+            }
         }
     }
 
@@ -431,7 +499,11 @@ impl Tier {
     /// Settle the session's state after a durable load: cache the contract,
     /// check the marker, and repair if this process holds the lease and the
     /// marker is behind.
-    async fn settle_after_load(&self, session: &SessionId, snap: Option<&GraphSnapshot>) {
+    async fn settle_after_load(
+        self: &Arc<Self>,
+        session: &SessionId,
+        snap: Option<&GraphSnapshot>,
+    ) {
         let held = self.with_state(session, |st| {
             st.contract = Some(snap.and_then(|s| s.embedding.clone()));
             st.held
@@ -441,7 +513,7 @@ impl Tier {
             marker = self.recheck_ahead(session).await;
         }
         match (marker, held) {
-            (Marker::Behind, Some(token)) => self.repair(session, token).await,
+            (Marker::Behind, Some(_)) => self.request_repair(session),
             (marker, _) => self.with_state(session, |st| {
                 // A repair in flight owns the state until it finishes.
                 if !st.repairing {
@@ -454,23 +526,65 @@ impl Tier {
         }
     }
 
-    /// Repair the session from a durable snapshot read here, under the
-    /// single-flight guard: never from a snapshot a caller loaded earlier,
-    /// and only when the marker is behind it (M4). A failure marks the
-    /// session stale and starts the backoff.
-    async fn repair(&self, session: &SessionId, token: u64) {
-        let claimed = self.with_state(session, |st| !std::mem::replace(&mut st.repairing, true));
-        if !claimed {
+    /// Ask for a repair of the session from a durable snapshot read by the
+    /// repair itself, never one a caller loaded earlier (M4), and only when
+    /// the marker is behind it.
+    ///
+    /// The repair runs as a background task (#18 review M1), off the flush
+    /// loop and the attach path: the marker makes deferring it safe, since
+    /// reads fall back until it lands. One runs at a time per session; a
+    /// request while one runs makes it run once more afterwards, which picks
+    /// up whatever committed meanwhile. It uses the lease token held when it
+    /// starts each pass and stops once the lease is gone. Each pass is
+    /// bounded by the repair deadline; a failure marks the session stale and
+    /// starts the backoff, and drops any queued rerun (the backoff covers it).
+    fn request_repair(self: &Arc<Self>, session: &SessionId) {
+        let start = self.with_state(session, |st| {
+            if st.repairing {
+                st.repair_again = true;
+                false
+            } else {
+                st.repairing = true;
+                st.repair_again = false;
+                true
+            }
+        });
+        if !start {
             return;
         }
-        let result = self.repair_once(session, token).await;
-        self.with_state(session, |st| st.repairing = false);
-        if let Err(e) = result {
-            self.mark_stale(session, &format!("repair failed: {e}"));
-            self.with_state(session, |st| {
-                st.next_repair = Some(Instant::now() + self.repair_backoff);
-            });
+        let tier = Arc::clone(self);
+        let sid = session.clone();
+        let task = tokio::spawn(async move { tier.run_repairs(&sid).await });
+        self.with_state(session, |st| st.repair_task = Some(task));
+    }
+
+    async fn run_repairs(&self, session: &SessionId) {
+        // Stops once the lease is gone.
+        while let Some(token) = self.with_state(session, |st| st.held) {
+            let result =
+                match tokio::time::timeout(self.repair_deadline, self.repair_once(session, token))
+                    .await
+                {
+                    Ok(result) => result,
+                    Err(_) => Err(StoreError::Backend(format!(
+                        "repair did not finish within its {}s deadline",
+                        self.repair_deadline.as_secs_f64()
+                    ))),
+                };
+            if let Err(e) = result {
+                self.mark_stale(session, &format!("repair failed: {e}"));
+                self.with_state(session, |st| {
+                    st.next_repair = Some(Instant::now() + self.repair_backoff);
+                    st.repair_again = false;
+                });
+                break;
+            }
+            let again = self.with_state(session, |st| std::mem::take(&mut st.repair_again));
+            if !again {
+                break;
+            }
         }
+        self.with_state(session, |st| st.repairing = false);
     }
 
     async fn repair_once(&self, session: &SessionId, token: u64) -> Result<(), StoreError> {
@@ -574,17 +688,17 @@ impl Tier {
     }
 
     /// Repair from the durable store, unless a recent attempt failed.
-    async fn repair_if_due(&self, session: &SessionId, token: u64) {
+    fn repair_if_due(self: &Arc<Self>, session: &SessionId) {
         let due = self.with_state(session, |st| {
             st.next_repair.is_none_or(|at| Instant::now() >= at)
         });
         if due {
-            self.repair(session, token).await;
+            self.request_repair(session);
         }
     }
 
     /// Mirror a committed batch. Never fails the flush.
-    async fn mirror(&self, batch: &MutationBatch, token: Option<u64>) {
+    async fn mirror(self: &Arc<Self>, batch: &MutationBatch, token: Option<u64>) {
         match sole_session(&batch.mutations) {
             Ok(Some(session)) => self.mirror_session(&session, batch, token).await,
             Ok(None) => self.mirror_unnamed(batch, token).await,
@@ -606,7 +720,7 @@ impl Tier {
 
     /// A batch that names no session: a delete-only batch (a GC sweep), or
     /// one that touches nothing the index holds.
-    async fn mirror_unnamed(&self, batch: &MutationBatch, token: Option<u64>) {
+    async fn mirror_unnamed(self: &Arc<Self>, batch: &MutationBatch, token: Option<u64>) {
         let deleted: Vec<NodeId> = crate::store::batch::batch_deleted_ids(&batch.mutations).0;
         if deleted.is_empty() {
             return;
@@ -630,7 +744,10 @@ impl Tier {
         // Unattributable: delete by id everywhere (always safe, the nodes are
         // durably gone) and leave every marker where it is, so the owning
         // session's next load sees its marker behind and repairs.
-        if let Err(e) = self.sweep(Sweep::Ids(&deleted)).await {
+        let swept = tokio::time::timeout(self.mirror_deadline, self.sweep(Sweep::Ids(&deleted)))
+            .await
+            .unwrap_or_else(|_| Err(self.past_deadline()));
+        if let Err(e) = swept {
             let sessions: Vec<SessionId> = self.sessions.lock().keys().cloned().collect();
             for session in sessions {
                 self.mark_stale(&session, &format!("unattributed delete failed: {e}"));
@@ -638,13 +755,18 @@ impl Tier {
         }
     }
 
-    async fn mirror_session(&self, session: &SessionId, batch: &MutationBatch, token: Option<u64>) {
+    async fn mirror_session(
+        self: &Arc<Self>,
+        session: &SessionId,
+        batch: &MutationBatch,
+        token: Option<u64>,
+    ) {
         let sync = self.with_state(session, |st| st.sync);
         if sync != TierSync::InSync {
             match token {
                 // The durable snapshot already holds this batch, so a repair
                 // covers it; mirroring it on its own first would be redundant.
-                Some(t) => self.repair_if_due(session, t).await,
+                Some(_) => self.repair_if_due(session),
                 None => self.mirror_ops(session, batch, None, false).await,
             }
             return;
@@ -698,11 +820,21 @@ impl Tier {
                     .await?;
             }
             Ok::<(), StoreError>(())
-        }
-        .await;
+        };
+        let written = tokio::time::timeout(self.mirror_deadline, written)
+            .await
+            .unwrap_or_else(|_| Err(self.past_deadline()));
         if let Err(e) = written {
             self.mark_stale(session, &format!("mirror failed: {e}"));
         }
+    }
+
+    fn past_deadline(&self) -> StoreError {
+        StoreError::Backend(format!(
+            "recall index mirror did not finish within its {}s deadline; the batch is \
+             durable and a background repair catches the index up",
+            self.mirror_deadline.as_secs_f64()
+        ))
     }
 
     /// The primary's own checked read, or no vector leg when it has none.
@@ -738,7 +870,7 @@ impl Tier {
     /// A check that cannot settle it (the index or the primary unreachable)
     /// is not repeated by the next read: the session stays `Unknown`, reads
     /// fall back, and the next check waits out the repair backoff.
-    async fn sync_for_read(&self, session: &SessionId) -> TierSync {
+    async fn sync_for_read(self: &Arc<Self>, session: &SessionId) -> TierSync {
         let (sync, due) = self.with_state(session, |st| {
             (st.sync, st.next_check.is_none_or(|at| Instant::now() >= at))
         });
@@ -777,7 +909,7 @@ impl VectorCandidateSource for TieredStore {
             return Ok(Vec::new());
         }
         ensure_is_an_embedding(probe)?;
-        if self.sync_for_read(session).await != TierSync::InSync {
+        if self.tier.sync_for_read(session).await != TierSync::InSync {
             return self
                 .fallback(session, probe, expected_contract, limit)
                 .await;
@@ -903,18 +1035,18 @@ impl GraphStore for TieredStore {
     async fn flush(&self, batch: &MutationBatch, token: Option<u64>) -> Result<(), StoreError> {
         // Fencing is the primary's: on error nothing is mirrored.
         self.primary.flush(batch, token).await?;
-        self.mirror(batch, token).await;
+        self.tier.mirror(batch, token).await;
         Ok(())
     }
 
     async fn load_session(&self, session: &SessionId) -> Result<GraphSnapshot, StoreError> {
         match self.primary.load_session(session).await {
             Ok(snap) => {
-                self.settle_after_load(session, Some(&snap)).await;
+                self.tier.settle_after_load(session, Some(&snap)).await;
                 Ok(snap)
             }
             Err(StoreError::SessionNotFound(s)) => {
-                self.settle_after_load(session, None).await;
+                self.tier.settle_after_load(session, None).await;
                 Err(StoreError::SessionNotFound(s))
             }
             Err(e) => Err(e),
@@ -1119,11 +1251,27 @@ impl GraphStore for TieredStore {
         Ok(outcome)
     }
 
+    /// A repair this store has in flight for the session is given
+    /// [`RELEASE_GRACE`] to finish (a short-lived holder would otherwise
+    /// release before its attach-time repair lands) and abandoned after it;
+    /// the next holder repairs at load.
     async fn release_lease(
         &self,
         session: &SessionId,
         holder: &LeaseHolder,
     ) -> Result<(), StoreError> {
+        let task = self.with_state(session, |st| st.repair_task.take());
+        if let Some(mut task) = task
+            && tokio::time::timeout(self.release_grace, &mut task)
+                .await
+                .is_err()
+        {
+            task.abort();
+            self.with_state(session, |st| {
+                st.repairing = false;
+                st.repair_again = false;
+            });
+        }
         self.primary.release_lease(session, holder).await?;
         self.with_state(session, |st| st.held = None);
         Ok(())

@@ -31,6 +31,14 @@ use crate::types::{EmbeddingContract, NodeId, SessionId, StoreError};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_millis(5000);
 
+/// The budget for a request whose work grows with the session: a refresh, a
+/// delete-by-query over every session document, a count (#18 review M1). The
+/// configured `timeout_ms` is meant for single-document writes and kNN; a
+/// delete-by-query over a large session can take far longer, and timing it
+/// out would leave the session stale forever while the engine keeps
+/// deleting. The configured timeout still bounds connecting.
+const MAINTENANCE_TIMEOUT: Duration = Duration::from_secs(300);
+
 /// `num_candidates` floor for a kNN query (the issue's `max(limit * 4, 100)`).
 const MIN_NUM_CANDIDATES: usize = 100;
 /// Elasticsearch's ceiling for `num_candidates`.
@@ -42,6 +50,8 @@ pub(crate) struct ElasticRecall {
     prefix: String,
     auth: Option<HeaderValue>,
     refresh: &'static str,
+    /// The per-request timeout (`timeout_ms`).
+    timeout: Duration,
     meta_ready: AtomicBool,
     indices_ready: Mutex<HashSet<String>>,
 }
@@ -97,6 +107,7 @@ impl ElasticRecall {
             prefix: cfg.index_prefix.clone(),
             auth,
             refresh: cfg.refresh.as_param(),
+            timeout,
             meta_ready: AtomicBool::new(false),
             indices_ready: Mutex::new(HashSet::new()),
         })
@@ -134,7 +145,35 @@ impl ElasticRecall {
         url: Url,
         body: Option<Body>,
     ) -> Result<(StatusCode, Value), StoreError> {
+        self.send_within(what, method, url, body, None).await
+    }
+
+    /// [`Self::send`] with the maintenance budget instead of the per-request
+    /// timeout.
+    async fn send_maintenance(
+        &self,
+        what: &str,
+        method: Method,
+        url: Url,
+        body: Option<Body>,
+    ) -> Result<(StatusCode, Value), StoreError> {
+        let budget = MAINTENANCE_TIMEOUT.max(self.timeout);
+        self.send_within(what, method, url, body, Some(budget))
+            .await
+    }
+
+    async fn send_within(
+        &self,
+        what: &str,
+        method: Method,
+        url: Url,
+        body: Option<Body>,
+        timeout: Option<Duration>,
+    ) -> Result<(StatusCode, Value), StoreError> {
         let mut req = self.client.request(method, url);
+        if let Some(timeout) = timeout {
+            req = req.timeout(timeout);
+        }
         if let Some(auth) = &self.auth {
             req = req.header(AUTHORIZATION, auth.clone());
         }
@@ -224,7 +263,7 @@ impl ElasticRecall {
             ],
         )?;
         let (status, resp) = self
-            .send(
+            .send_maintenance(
                 what,
                 Method::POST,
                 url,
@@ -385,7 +424,9 @@ impl RecallIndex for ElasticRecall {
             &[&pattern, "_refresh"],
             &[("allow_no_indices", "true"), ("ignore_unavailable", "true")],
         )?;
-        let (status, resp) = self.send("refresh", Method::POST, url, None).await?;
+        let (status, resp) = self
+            .send_maintenance("refresh", Method::POST, url, None)
+            .await?;
         if status.is_success() || status == StatusCode::NOT_FOUND {
             Ok(())
         } else {
@@ -425,7 +466,7 @@ impl RecallIndex for ElasticRecall {
             &[("allow_no_indices", "true"), ("ignore_unavailable", "true")],
         )?;
         let (status, resp) = self
-            .send(
+            .send_maintenance(
                 "count session documents",
                 Method::POST,
                 url,
@@ -946,6 +987,40 @@ mod tests {
             3
         );
         count.assert_async().await;
+    }
+
+    /// M1: a delete-by-query (and the refresh and count around it) runs on
+    /// the maintenance budget, not the per-request timeout that bounds
+    /// single-document writes and kNN.
+    #[tokio::test]
+    async fn maintenance_requests_outlive_the_per_request_timeout() {
+        let server = MockServer::start_async().await;
+        let mut c = cfg(&server.base_url());
+        c.timeout_ms = Some(100);
+        let index = ElasticRecall::new(&c).unwrap();
+        server
+            .mock_async(|when, then| {
+                when.method(POST).path("/lambo-v-*/_delete_by_query");
+                then.status(200)
+                    .delay(Duration::from_millis(400))
+                    .json_body(json!({ "deleted": 1, "version_conflicts": 0, "failures": [] }));
+            })
+            .await;
+        server
+            .mock_async(|when, then| {
+                when.method(GET).path("/lambo-meta/_doc/s");
+                then.status(404)
+                    .delay(Duration::from_millis(400))
+                    .json_body(json!({ "found": false }));
+            })
+            .await;
+        let sid = SessionId::new("s");
+        let report = index.delete_session_docs(&sid, None).await.unwrap();
+        assert_eq!(report.deleted, 1);
+        assert!(
+            index.read_marker(&sid).await.is_err(),
+            "an ordinary request still times out"
+        );
     }
 
     #[tokio::test]

@@ -287,9 +287,11 @@ async fn attach(store: &TieredStore, sid: &SessionId, who: &LeaseHolder) -> u64 
     token
 }
 
-/// Wait for every repair the store has in flight. Repairs run inline until
-/// they move to the background; this is the one place tests wait for them.
-async fn settle(_store: &TieredStore) {}
+/// Wait for every repair the store has in flight (repairs run in the
+/// background, M1); the one place tests wait for them.
+async fn settle(store: &TieredStore) {
+    store.repairs_settled().await;
+}
 
 /// The common seed: a contract, an interaction, two vectors and one
 /// concept without a vector.
@@ -678,6 +680,7 @@ async fn a_mirror_failure_keeps_the_flush_and_the_next_flush_repairs() {
         ))],
     );
     store.flush(&next, Some(token)).await.unwrap();
+    settle(&store).await;
     assert_eq!(store.tier_status(&sid).sync, TierSync::InSync);
     let live = fake.live(&sid);
     for id in [s.c1, s.c2, c4] {
@@ -720,11 +723,227 @@ async fn repair_attempts_back_off_while_the_index_is_down() {
         );
         store.flush(&more, Some(token)).await.unwrap();
     }
+    settle(&store).await;
     assert_eq!(
         store.tier_status(&sid).mirror_failures,
         after_first + 1,
         "one repair attempt inside the backoff window, then none"
     );
+}
+
+/// Poll until `cond` holds (background work has reached a point), failing
+/// after two seconds.
+async fn wait_until(what: &str, cond: impl Fn() -> bool) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !cond() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting: {what}"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+/// Make the session stale with the seed batch durable, the index back up.
+async fn stale_after_an_outage(
+    store: &TieredStore,
+    fake: &FakeIndex,
+    sid: &SessionId,
+    token: u64,
+) -> Seeded {
+    fake.set_down(true);
+    let (s, b) = seed_batch(sid, 1);
+    store.flush(&b, Some(token)).await.unwrap();
+    fake.set_down(false);
+    assert_eq!(store.tier_status(sid).sync, TierSync::Stale);
+    s
+}
+
+fn one_more(sid: &SessionId, s: &Seeded, epoch: u64) -> (NodeId, MutationBatch) {
+    let id = NodeId::new();
+    let b = batch(
+        epoch,
+        vec![upsert(concept(
+            sid,
+            id,
+            s.origin,
+            &format!("more-{epoch}"),
+            Some(vec![0.0, 0.0, 1.0, 0.0]),
+        ))],
+    );
+    (id, b)
+}
+
+/// M1: a flush that finds its session stale asks for a repair and returns.
+/// The repair (a whole-session read, bulk re-index and delete-by-query) runs
+/// in the background, so it delays neither this batch's durability nor the
+/// next one's.
+#[tokio::test]
+async fn a_flush_does_not_wait_for_the_repair_it_triggers() {
+    let (primary, fake) = (memory_primary(), Arc::new(FakeIndex::new()));
+    let store = tier(&primary, &fake);
+    let sid = SessionId::new("flush-repair");
+    let token = attach(&store, &sid, &holder("w")).await;
+    let s = stale_after_an_outage(&store, &fake, &sid, token).await;
+    fake.hold_deletes();
+    let (c4, next) = one_more(&sid, &s, 2);
+    tokio::time::timeout(Duration::from_secs(2), store.flush(&next, Some(token)))
+        .await
+        .expect("the flush waited for the repair")
+        .unwrap();
+    assert_ne!(store.tier_status(&sid).sync, TierSync::InSync);
+
+    fake.release_deletes();
+    settle(&store).await;
+    assert_eq!(store.tier_status(&sid).sync, TierSync::InSync);
+    assert!(fake.live(&sid).contains_key(&c4.0.to_string()));
+    assert_eq!(fake.marker(&sid), Some(2));
+}
+
+/// M1: attaching to a session whose marker is behind returns at once; reads
+/// fall back to the primary until the background repair lands.
+#[tokio::test]
+async fn attaching_does_not_wait_for_the_repair() {
+    let (primary, fake) = (memory_primary(), Arc::new(FakeIndex::new()));
+    let first = tier(&primary, &fake);
+    let sid = SessionId::new("attach-repair");
+    let w = holder("w");
+    let token = attach(&first, &sid, &w).await;
+    let s = stale_after_an_outage(&first, &fake, &sid, token).await;
+    first.release_lease(&sid, &w).await.unwrap();
+
+    fake.hold_deletes();
+    let next = tier(&primary, &fake);
+    tokio::time::timeout(Duration::from_secs(2), attach(&next, &sid, &holder("w2")))
+        .await
+        .expect("the attach waited for the repair");
+    let calls = fake.knn_calls.load(std::sync::atomic::Ordering::SeqCst);
+    next.vector_candidates_checked(&sid, &PROBE, &contract(), 5)
+        .await
+        .unwrap();
+    assert_eq!(
+        fake.knn_calls.load(std::sync::atomic::Ordering::SeqCst),
+        calls,
+        "a read during the repair falls back"
+    );
+
+    fake.release_deletes();
+    settle(&next).await;
+    assert_eq!(next.tier_status(&sid).sync, TierSync::InSync);
+    assert!(fake.live(&sid).contains_key(&s.c1.0.to_string()));
+}
+
+/// M1/M4: one repair per session at a time. Requests that arrive while it
+/// runs collapse into a single rerun, which picks up what they committed.
+#[tokio::test]
+async fn repairs_run_one_at_a_time_per_session() {
+    let (primary, fake) = (memory_primary(), Arc::new(FakeIndex::new()));
+    let store = tier(&primary, &fake);
+    let sid = SessionId::new("single-flight");
+    let token = attach(&store, &sid, &holder("w")).await;
+    let s = stale_after_an_outage(&store, &fake, &sid, token).await;
+    fake.hold_deletes();
+    let (_, e2) = one_more(&sid, &s, 2);
+    store.flush(&e2, Some(token)).await.unwrap();
+    let deletes = || fake.delete_calls.load(std::sync::atomic::Ordering::SeqCst);
+    wait_until("the first repair reaches its sweep", || deletes() == 1).await;
+    let (c3, e3) = one_more(&sid, &s, 3);
+    let (c4, e4) = one_more(&sid, &s, 4);
+    store.flush(&e3, Some(token)).await.unwrap();
+    store.flush(&e4, Some(token)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(deletes(), 1, "a second repair ran beside the first");
+
+    fake.release_deletes();
+    settle(&store).await;
+    assert_eq!(deletes(), 2, "the queued requests collapse into one rerun");
+    assert_eq!(store.tier_status(&sid).sync, TierSync::InSync);
+    assert_eq!(fake.marker(&sid), Some(4));
+    let live = fake.live(&sid);
+    assert!(live.contains_key(&c3.0.to_string()) && live.contains_key(&c4.0.to_string()));
+}
+
+/// M1: a mirror against a slow cluster is bounded by the mirror deadline;
+/// the flush returns and the session goes stale for a repair.
+#[tokio::test]
+async fn a_mirror_on_a_slow_cluster_is_bounded() {
+    let (primary, fake) = (memory_primary(), Arc::new(FakeIndex::new()));
+    let store =
+        tier(&primary, &fake).with_deadlines(Duration::from_millis(50), Duration::from_secs(10));
+    let sid = SessionId::new("slow-mirror");
+    let token = attach(&store, &sid, &holder("w")).await;
+    fake.delay_bulk_ms
+        .store(5_000, std::sync::atomic::Ordering::SeqCst);
+    let (_, b) = seed_batch(&sid, 1);
+    let started = std::time::Instant::now();
+    store.flush(&b, Some(token)).await.unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+    let status = store.tier_status(&sid);
+    assert_eq!(status.sync, TierSync::Stale);
+    assert!(
+        status
+            .last_error
+            .as_deref()
+            .is_some_and(|e| e.contains("deadline")),
+        "{status:?}"
+    );
+}
+
+/// M1: a repair stuck past its deadline is abandoned and the session marked
+/// stale (the backoff spaces the next attempt).
+#[tokio::test]
+async fn a_repair_past_its_deadline_marks_the_session_stale() {
+    let (primary, fake) = (memory_primary(), Arc::new(FakeIndex::new()));
+    let store =
+        tier(&primary, &fake).with_deadlines(Duration::from_secs(10), Duration::from_millis(50));
+    let sid = SessionId::new("slow-repair");
+    let token = attach(&store, &sid, &holder("w")).await;
+    let s = stale_after_an_outage(&store, &fake, &sid, token).await;
+    fake.hold_deletes();
+    let (_, e2) = one_more(&sid, &s, 2);
+    store.flush(&e2, Some(token)).await.unwrap();
+    settle(&store).await;
+    let status = store.tier_status(&sid);
+    assert_eq!(status.sync, TierSync::Stale);
+    assert!(
+        status
+            .last_error
+            .as_deref()
+            .is_some_and(|e| e.contains("deadline")),
+        "{status:?}"
+    );
+    fake.release_deletes();
+}
+
+/// M1: releasing the lease gives an in-flight repair a grace period, then
+/// abandons it rather than holding the release (and `close`) hostage.
+#[tokio::test]
+async fn releasing_the_lease_abandons_a_stuck_repair_after_the_grace() {
+    let (primary, fake) = (memory_primary(), Arc::new(FakeIndex::new()));
+    let store = tier(&primary, &fake).with_release_grace(Duration::from_millis(50));
+    let sid = SessionId::new("release-stuck");
+    let w = holder("w");
+    let token = attach(&store, &sid, &w).await;
+    let s = stale_after_an_outage(&store, &fake, &sid, token).await;
+    fake.hold_deletes();
+    let (c2, e2) = one_more(&sid, &s, 2);
+    store.flush(&e2, Some(token)).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), store.release_lease(&sid, &w))
+        .await
+        .expect("the release waited for the stuck repair")
+        .unwrap();
+
+    // The next holder repairs at load.
+    fake.release_deletes();
+    let next = tier(&primary, &fake);
+    attach(&next, &sid, &holder("w2")).await;
+    settle(&next).await;
+    assert_eq!(next.tier_status(&sid).sync, TierSync::InSync);
+    assert!(fake.live(&sid).contains_key(&c2.0.to_string()));
 }
 
 /// A query-side failure on an in-sync session serves that read from the
@@ -798,6 +1017,7 @@ async fn a_marker_behind_the_durable_epoch_is_caught_at_the_next_load() {
 
     let next = tier(&primary, &fake);
     attach(&next, &sid, &holder("w2")).await;
+    settle(&next).await;
     assert_eq!(next.tier_status(&sid).sync, TierSync::InSync);
     assert!(fake.live(&sid).contains_key(&c4.0.to_string()));
     assert_eq!(fake.marker(&sid), Some(2));
