@@ -189,4 +189,34 @@ mod tests {
         let text = toml::to_string(&LamboFile::default()).expect("serialize");
         assert!(!text.contains("[web]"), "{text}");
     }
+
+    /// The commented `[web]` block in `lambo.example.toml`, uncommented, is a
+    /// valid table with the documented defaults; commented, it sets nothing.
+    #[test]
+    fn the_example_files_web_block_parses_when_uncommented() {
+        let raw = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/lambo.example.toml"));
+        let begin = raw
+            .find("# --- [web] example begins ---")
+            .expect("begin marker");
+        let end = raw
+            .find("# --- [web] example ends ---")
+            .expect("end marker");
+        let block: String = raw[begin..end]
+            .lines()
+            .skip(1)
+            .map(|l| l.strip_prefix("# ").unwrap_or(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let web = LamboFile::from_toml_str(&block)
+            .unwrap_or_else(|e| panic!("example [web] must parse: {e}"))
+            .web;
+        assert_eq!(web.view_ttl_ms, Some(DEFAULT_VIEW_TTL_MS));
+        assert_eq!(web.max_loaded_sessions, Some(DEFAULT_MAX_LOADED_SESSIONS));
+        assert_eq!(web.load_concurrency, Some(DEFAULT_LOAD_CONCURRENCY));
+        assert_eq!(web.recall_concurrency, Some(DEFAULT_RECALL_CONCURRENCY));
+        assert!(LamboFile::from_toml_str(raw)
+            .expect("example")
+            .web
+            .is_empty());
+    }
 }

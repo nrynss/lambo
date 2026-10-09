@@ -379,6 +379,8 @@ lambo serve-web --config lambo.toml --session demo
 
 The page polls read-only `GET` endpoints, `/api/session`, `/api/recall`, `/api/events`, `/api/stats`, `/api/pulse`. Those let it show live recall, the canonization feed, and durable counts without ever writing. A non-loopback reader still needs the token, because reading exposes the whole session to whoever can reach the port.
 
+Every request and every open tab reads one shared view of the session, loaded at most once per `view_ttl_ms` (1.5 seconds by default), so the page can be up to that much older than the store and the store load does not grow with the number of tabs. The session is loaded on the first request, not at startup; startup still checks the store's schema and fails if it is not provisioned. A recall that cannot start within 2 seconds because `recall_concurrency` recalls are already running gets `503` with `Retry-After: 1`. The `[web]` keys set these bounds; see [Read-only window views](/lambo/config/#read-only-window-views).
+
 ## Provision a store
 
 `lambo provision` creates or migrates the durable store schema. It reads the store choice from your config and takes no other flags. It does not build the embedder, so it works on a machine that has no embedding service, and it still refuses a store kind your binary was not built with.
