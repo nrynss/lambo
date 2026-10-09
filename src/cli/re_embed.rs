@@ -98,21 +98,40 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
     // Snapshot concept ids + contents under the graph READ lock, sorted by id
     // for deterministic embed order, then DROP the lock: the embed calls below
     // are real model inference and must never run under any lock.
-    let concepts: Vec<(NodeId, String)> = {
+    let (concepts, supplied): (Vec<(NodeId, String)>, usize) = {
         let g = mem.graph().read();
+        // #22 review L2: a concept whose vector was supplied (an image) has
+        // an `embedding_source`. Embedding its content would replace that
+        // vector with a vector of its caption and leave the image source on
+        // it. Until `--drop-image-vectors` lands (#22 PR 3), refuse instead.
+        let supplied = g
+            .concepts()
+            .filter(|c| c.embedding_source.is_some())
+            .count();
         let mut snapshot: Vec<(NodeId, String)> = g
             .concepts()
             .filter(|c| !args.missing_only || c.embedding.is_none())
             .map(|c| (c.id, c.content.clone()))
             .collect();
         snapshot.sort_by_key(|(id, _)| id.0);
-        snapshot
+        (snapshot, supplied)
     };
 
     // Every path below — success or any mid-run abort — funnels into
     // close_writer at the end of this function (K2-R1-6): a failed migration
     // must release the writer lease immediately, not hold it to TTL.
-    let out = if concepts.is_empty() {
+    let out = if supplied > 0 {
+        Err(CliError::Runtime(format!(
+            "session '{}': {supplied} concept{} carr{} a supplied vector \
+             (embedding_source, e.g. an image), and this build of re-embed cannot \
+             rewrite it without replacing it with a vector of the concept's caption. \
+             Refused; nothing was written. Upgrade to a build whose re-embed handles \
+             supplied vectors (--drop-image-vectors).",
+            args.session,
+            if supplied == 1 { "" } else { "s" },
+            if supplied == 1 { "ies" } else { "y" },
+        )))
+    } else if concepts.is_empty() {
         Ok(if args.missing_only {
             format!(
                 "session '{}': every concept already carries a vector; nothing to backfill",
@@ -394,6 +413,15 @@ mod tests {
     /// vector, one with a NULL embedding (the row an interrupted or degraded
     /// writer leaves behind).
     async fn seed_damaged_session(store: &Arc<MemoryStore>) {
+        seed_session_with_source(store, None).await;
+    }
+
+    /// [`seed_damaged_session`], with `source` as the vectored concept's
+    /// `embedding_source` (#22).
+    async fn seed_session_with_source(
+        store: &Arc<MemoryStore>,
+        source: Option<crate::types::EmbeddingSource>,
+    ) {
         let sid = SessionId::from(SESSION);
         let seeder = LeaseHolder::for_this_process(&AgentId::from("seeder"));
         let LeaseOutcome::Acquired(info) = store
@@ -405,28 +433,34 @@ mod tests {
         };
         let ts = chrono::Utc::now();
         let i1 = NodeId::new();
-        let concept = |id: NodeId, content: &str, emb: Option<Vec<f32>>| Mutation::UpsertNode {
-            node: crate::types::Node::Concept(Concept {
-                id,
-                session_id: sid.clone(),
-                content: content.into(),
-                canonical_key: content.to_lowercase(),
-                concept_type: ConceptType::Entity,
-                origin_interaction: i1,
-                origin_agent: AgentId::from("seeder"),
-                created_at: ts,
-                access_count: 0,
-                last_accessed: None,
-                gc_survived: 0,
-                canonization_status: CanonizationStatus::None,
-                blast_radius: None,
-                last_demotion_time: None,
-                embedding: emb,
-                human_confirmed: 0,
-                embedding_source: None,
-                chunk_group_id: None,
-            }),
-        };
+        let concept =
+            |id: NodeId,
+             content: &str,
+             emb: Option<Vec<f32>>,
+             embedding_source: Option<crate::types::EmbeddingSource>| {
+                Mutation::UpsertNode {
+                    node: crate::types::Node::Concept(Concept {
+                        id,
+                        session_id: sid.clone(),
+                        content: content.into(),
+                        canonical_key: content.to_lowercase(),
+                        concept_type: ConceptType::Entity,
+                        origin_interaction: i1,
+                        origin_agent: AgentId::from("seeder"),
+                        created_at: ts,
+                        access_count: 0,
+                        last_accessed: None,
+                        gc_survived: 0,
+                        canonization_status: CanonizationStatus::None,
+                        blast_radius: None,
+                        last_demotion_time: None,
+                        embedding: emb,
+                        human_confirmed: 0,
+                        embedding_source,
+                        chunk_group_id: None,
+                    }),
+                }
+            };
         let c1 = NodeId::new();
         let c2 = NodeId::new();
         let derives_edge = |target: NodeId| Mutation::UpsertEdge {
@@ -471,9 +505,9 @@ mod tests {
             mutations: vec![
                 interaction,
                 set_contract,
-                concept(c1, "user schema", Some(vec![0.25_f32; 1024])),
+                concept(c1, "user schema", Some(vec![0.25_f32; 1024]), source),
                 derives_edge(c1),
-                concept(c2, "auth middleware", None),
+                concept(c2, "auth middleware", None, None),
                 derives_edge(c2),
             ],
         };
@@ -522,6 +556,54 @@ mod tests {
         let (kind, widths) = durable_state(&store).await;
         assert_eq!(kind.as_deref(), Some("fixture"), "contract must migrate");
         assert_eq!(widths, vec![Some(1024), Some(1024)]);
+    }
+
+    /// #22 review L2: until `re-embed` learns `--drop-image-vectors` (PR 3),
+    /// it must not touch a session holding a supplied vector. Re-embedding
+    /// would replace an image vector with a vector of its caption and leave
+    /// the image source on it, a silent mislabel. Both modes refuse, before
+    /// any write, and the lease is released.
+    #[tokio::test]
+    async fn re_embed_refuses_a_session_with_an_embedding_source() {
+        let source = crate::types::EmbeddingSource {
+            modality: crate::types::SourceModality::Image,
+            origin: crate::types::VectorOrigin::Client,
+            sha256: None,
+            mime: None,
+        };
+        for missing_only in [false, true] {
+            let store = Arc::new(MemoryStore::new());
+            seed_session_with_source(&store, Some(source.clone())).await;
+            let before = durable_state(&store).await;
+            let err = run(
+                backends_on(store.clone(), "fixture", "fixture-model"),
+                Args {
+                    session: SESSION.into(),
+                    agent: AGENT.into(),
+                    allow_embedding_mismatch: false,
+                    missing_only,
+                },
+            )
+            .await
+            .expect_err("a session with a supplied vector is refused");
+            assert!(matches!(err, CliError::Runtime(_)), "{err}");
+            let msg = err.to_string();
+            assert!(msg.contains("1 concept"), "{msg}");
+            assert!(msg.contains("embedding_source"), "{msg}");
+            assert!(msg.contains("nothing was written"), "{msg}");
+            assert_eq!(durable_state(&store).await, before, "no writes");
+            let probe = LeaseHolder::for_this_process(&AgentId::from("probe"));
+            assert!(
+                matches!(
+                    store
+                        .acquire_lease(&SessionId::from(SESSION), &probe, Duration::from_secs(5))
+                        .await
+                        .unwrap(),
+                    LeaseOutcome::Acquired(_)
+                ),
+                "the refusal released the lease"
+            );
+        }
     }
 
     #[tokio::test]

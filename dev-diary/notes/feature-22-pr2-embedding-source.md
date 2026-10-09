@@ -53,6 +53,14 @@ treat that as "image vector missing", never as a text concept. The shared
 check restamps the contract and asserts the vectors are gone and the sources
 kept, on every adapter; a SQLite test covers the width restamp.
 
+**`re-embed` refuses a sourced session until PR 3** (review L2). PR 2 can read
+a source that PR 3 writes, so a release cut between them, or a downgrade, could
+run `re-embed` over an image concept: its vector would become a caption vector
+still labelled as an image. `lambo re-embed`, full or `--missing-only`, now
+counts sourced concepts after attach and, if there are any, refuses with a
+runtime error before embedding or writing anything, releasing the lease. PR 3
+replaces the refusal with `--drop-image-vectors` / `--missing-only` handling.
+
 **SQLite concept chunk 58 to 55.** 58 × 18 = 1044 breaches the conservative
 999-bind ceiling the R1-4 const-assert guards; 55 × 18 = 990. The pg family's
 256-row chunk is 4,608 binds, far under 65,535.

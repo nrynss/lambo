@@ -198,7 +198,9 @@
   it alone, and erasing a session erases it with the concept row. When an
   embedding contract change quarantines a session's vectors, the sources
   are kept: the concept stays marked as image-sourced with no vector, so
-  a later re-embed cannot give it a vector of its caption. A stored
+  a later re-embed cannot give it a vector of its caption. `lambo
+  re-embed` (both modes) refuses a session in which any concept has a
+  source, before any write, until it learns to handle supplied vectors. A stored
   value this build cannot read fails the load rather than reading as
   unset. Nothing writes it yet: image derives arrive in a later release.
 - `lambo::surface::image::validate` (#22): the image rule every surface will
