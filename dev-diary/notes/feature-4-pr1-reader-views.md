@@ -92,10 +92,14 @@ is taken before the view so the bound covers the load a recall may trigger.
 `run_detailed_on` asserts the embedding contract on the view it is given, the
 same assert and message as `load_reader_graph_with_contract`; `lambo recall`
 now loads without a contract and asserts in `run_detailed_on`, same order and
-text. Recall parity: `context` and `response_annotations` are byte-identical to
-`run_detailed`, and `hits` are identical except `score`, whose recency term
-reads the wall clock (two runs milliseconds apart differ in the last bits; the
-test allows 1e-6).
+text. Recall parity: `context`, `response_annotations` and `hits` are
+identical to `run_detailed`, scores included, with no tolerance. Nothing on the
+recall path reads the clock (a reader daemon's score is 0, BM25 sums in sorted
+term order, session recency is anchored to graph timestamps). An earlier draft
+of the test allowed 1e-6 on `score` and blamed a wall-clock recency term; that
+was wrong. The one-ULP difference it saw was serde_json's float parse (the
+crate does not enable `float_roundtrip`) on the HTTP side only, so the test now
+round-trips the CLI's hits through a JSON string and compares exactly.
 
 **#14 per session.** The portal embeds through `embed_query_cached` over the
 slot's `QueryEmbeddingCache`. Never process-wide (#32 decision 13). The

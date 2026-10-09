@@ -624,22 +624,16 @@ async fn recall_on_a_view_matches_the_cli_recall_byte_for_byte() {
     let (addr, handle) = spawn(state_on(store, "t4-recall")).await;
     let page = get_json(addr, "/api/recall?q=user%20schema").await;
     assert_eq!(page["context"], cli.context, "{page}");
-    // Scores carry a recency term computed from the wall clock at recall
-    // time, so two runs a few milliseconds apart differ in the last bits;
-    // everything else in a hit must be identical.
-    let mut cli_hits = serde_json::to_value(&cli.hits).unwrap();
-    let mut page_hits = page["hits"].clone();
-    for (cli_hit, page_hit) in cli_hits
-        .as_array_mut()
-        .unwrap()
-        .iter_mut()
-        .zip(page_hits.as_array_mut().unwrap().iter_mut())
-    {
-        let a = cli_hit["score"].take().as_f64().unwrap();
-        let b = page_hit["score"].take().as_f64().unwrap();
-        assert!((a - b).abs() < 1e-6, "score {a} vs {b}");
-    }
-    assert_eq!(page_hits, cli_hits, "the hits are the CLI's");
+    // Recall over the view ranks exactly what `lambo recall` ranks: nothing
+    // on the path reads the clock (a reader's daemon score is 0, BM25 sums
+    // in sorted term order, session recency is anchored to graph
+    // timestamps). The page's hits arrive as JSON text, and serde_json's
+    // float parse (no `float_roundtrip`) can land one ULP off the f64 it
+    // printed. So the CLI's hits take the same trip through a JSON string,
+    // and the two arrays must then be equal with no tolerance.
+    let cli_hits: serde_json::Value =
+        serde_json::from_str(&serde_json::to_string(&cli.hits).unwrap()).unwrap();
+    assert_eq!(page["hits"], cli_hits, "the hits are the CLI's");
     assert_eq!(
         page["response_annotations"],
         serde_json::to_value(&cli.response_annotations).unwrap()
