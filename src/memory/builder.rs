@@ -361,6 +361,13 @@ impl MemoryBuilder {
     /// owner aborts the probe ([`EmbedderCalibration::abort`]); a session's
     /// close does not, since other sessions read it.
     ///
+    /// Closing every session does not stop a probe still running, and the
+    /// probe holds the embedder until it ends (bounded by
+    /// [`PROBE_WARMUP_BUDGET`](crate::writeq::PROBE_WARMUP_BUDGET) plus
+    /// [`PROBE_BUDGET`](crate::writeq::PROBE_BUDGET)); call
+    /// [`EmbedderCalibration::abort`] when the last session over an embedder
+    /// goes if a caller keeps the calibration.
+    ///
     /// Unset, each build spawns a probe of its own, aborted at its close,
     /// which is what a single-session library caller wants.
     pub fn calibration(mut self, calibration: EmbedderCalibration) -> Self {

@@ -1137,6 +1137,16 @@ pub const PROBE_RETRY_BACKOFF: Duration = Duration::from_secs(60);
 /// owner's and every pipeline's) is dropped the probes are aborted too.
 /// Without a calibration a builder keeps today's behaviour: each pipeline
 /// spawns, owns and aborts its own probe.
+///
+/// **Closing the sessions does not stop the probe.** A caller that keeps a
+/// clone of the calibration after its last session over an embedder closes
+/// keeps that embedder's probe running, and the probe task holds the
+/// embedder (and its model) strongly while it runs, even after the caller
+/// drops its own `Arc`. That lasts until the probe ends on its own: at most
+/// [`PROBE_WARMUP_BUDGET`] for the warm-up plus [`PROBE_BUDGET`] for the
+/// timed legs. Call [`EmbedderCalibration::abort`] when the last session over
+/// an embedder goes to free it at once (never at one session's detach while
+/// others still read the probe).
 #[derive(Clone, Default)]
 pub struct EmbedderCalibration {
     inner: Arc<CalibrationProbes>,
