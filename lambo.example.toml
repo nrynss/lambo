@@ -217,10 +217,19 @@ url = "http://127.0.0.1:8080"
 # timeout_ms = 5000
 
 # Multi-session serving (#32). Optional; omit the whole section and `lambo
-# serve` behaves exactly as it always has. In this release the table is
-# PARSED AND VALIDATED ONLY: nothing reads it at runtime yet (routing by
-# /mcp/s/{session}, credentials and the bounds arrive in later releases), but
-# a malformed table already stops every command, like any unknown key.
+# serve` behaves exactly as it always has. An http `lambo serve` pins
+# `sessions` beside its --session values, serves default_session at /mcp and
+# enforces max_attached. A stdio `lambo serve` started without --session takes
+# its session from [[serve.projects]], then default_session (--session always
+# wins; an http serve never reads [[serve.projects]]). The rest is PARSED AND
+# VALIDATED ONLY (credentials and the on-demand bounds arrive in later
+# releases), but a malformed table already stops every command, like any
+# unknown key.
+# A [[serve.projects]] path is absolute or starts with ~/; it and the working
+# directory are compared as real paths (symlinks resolved). With HOME unset
+# (or relative), ~ entries are skipped with one warning. One global map for
+# every project only applies when the client passes --config (or sets
+# LAMBO_CONFIG); otherwise each serve reads its project's ./lambo.toml.
 #
 # Every session named here must be addressable by URL: 1 to 128 bytes of
 # [A-Za-z0-9._:-], not starting with '.'. A name outside that rule can still
@@ -245,9 +254,9 @@ url = "http://127.0.0.1:8080"
 # idle_detach_secs = 900                         # on-demand sessions only
 # per_session_rps = 50                           # default: --rate-limit-rps
 #
-# [[serve.projects]]                             # stdio: cwd -> session
-# path = "~/Documents/work/lambo"
-# session = "lambo"
+# [[serve.projects]]                             # stdio without --session:
+# path = "~/Documents/work/lambo"                # longest path containing the
+# session = "lambo"                              # cwd wins, else default_session
 #
 # [[serve.credential]]
 # name = "agents"

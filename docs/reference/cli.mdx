@@ -89,7 +89,7 @@ The in-crate candle embedder (`kind = "candle"`) runs BGE-M3 locally with no lla
 
 | Flag | Required | Default |
 |---|---|---|
-| `--session <SESSION>` | Yes, unless `[serve] sessions` names them (HTTP) | Repeatable with `--transport http`: every value is pinned and served at `/mcp/s/<session>`, and the first is the default, served at `/mcp`. A stdio serve takes exactly one. |
+| `--session <SESSION>` | Yes | |
 | `--query <QUERY>` | Yes | |
 | `--top-k <TOP_K>` | No | The session's `default_top_k`, which is `5`. |
 | `--max-tokens <MAX_TOKENS>` | No | The session's `default_max_tokens`, which is `500`. |
@@ -282,7 +282,7 @@ reservations are advisory and RAM-local: this reservation ends when this process
 
 | Flag | Required | Default |
 |---|---|---|
-| `--session <SESSION>` | Yes | |
+| `--session <SESSION>` | Unless `lambo.toml` names the session: `[serve] sessions` over `http`, the cwd map or `default_session` over `stdio` (below) | |
 | `--agent <AGENT>` | No | `lambo-serve` |
 | `--transport <TRANSPORT>` | No | `stdio`, or `http` |
 | `--port <PORT>` | No | `7700`, used when the transport is `http`. |
@@ -296,6 +296,14 @@ reservations are advisory and RAM-local: this reservation ends when this process
 ```bash
 lambo serve --config lambo.toml --session demo --agent agent-a
 ```
+
+Over `stdio`, `--session` can be left out when `lambo.toml` names the session instead (see [Multi-session serving](/config#multi-session-serving)). The serve then uses the `[[serve.projects]]` entry whose `path` contains its working directory, picking the longest such path, and otherwise `[serve] default_session`. If neither applies it refuses with the usual missing `--session` error (exit code 2) before building any backend. This lets one global client config (one command line for every project) land each project in its own session, because MCP clients start a stdio server in the project directory. `--session` still wins whenever it is given; a `stdio` serve takes at most one, and more than one is refused (exit code 2). The map is a `stdio` serve's only: an `http` serve pins its sessions from a repeated `--session` and `[serve] sessions`, never from `[[serve.projects]]` (see [Several sessions in one serve](#several-sessions-in-one-serve)).
+
+```bash
+cd ~/Documents/work/lambo && lambo serve --config ~/lambo.toml   # session from [[serve.projects]]
+```
+
+The map is only read from the `lambo.toml` the serve loads, so a global client config must name that file with `--config` (as above) or `LAMBO_CONFIG`. Without either, each serve reads its project's own `./lambo.toml`, if there is one, and that file's `default_session` or `[[serve.projects]]` chooses the session, just as it already chooses the store.
 
 See [MCP tools](/mcp) for the tools it exposes.
 

@@ -115,9 +115,11 @@
 
 - `lambo_derive`, `lambo_record_action`'s `action`, `lambo derive`
   (`--content`, `--concept`) and `lambo record-action --action` refuse text
-  containing `[image:`, raw or in any spelling that canonicalizes to it
-  (#22 PR 4). Only `lambo_derive_image` builds that suffix; a text concept
-  holding it could take an image's identity before the image is derived.
+  holding a token that reads exactly `[image:<id>]` (a valid image id) once
+  canonicalized, the way the concept key reads it (#22 PR 4). Prose that only
+  mentions `[image:` is accepted. Only `lambo_derive_image` builds that
+  suffix; a text concept holding it could take an image's identity before the
+  image is derived.
   References (`parent_of` ends; `produces`, `modifies`, `depends_on`) still
   accept it, since naming an image concept's content is how a text write
   links to it.
@@ -128,7 +130,9 @@
 - `lambo_stats` (and the I2 heartbeat payload) gains `embedding_contract`
   and `embedding_modalities`, and its text summary an `embedding:` line
   (#22 PR 4). Additive.
-
+- A `[[serve.projects]]` `path` must now be absolute or start with `~/` (or
+  be `~`); a relative path or `~user` is refused when `lambo.toml` is read,
+  naming the entry (#32).
 - The write queue's probe log lines (`write queue: bounds are static ...`
   and `the embedder could not be probed`) gain a `scope` field, `session`
   or `process`, beside the `session=<id>` they already carried (#32).
@@ -152,9 +156,9 @@
 - `lambo.toml` `[serve]` `sessions`, `default_session` and `max_attached`
   are enforced by an HTTP `lambo serve` (#32, fourth part), so the startup
   notice now names only the keys still parsed but not enforced
-  (credentials, `[[serve.projects]]`, `attach_concurrency`,
-  `idle_detach_secs`, `per_session_rps`, and for a stdio serve
-  `default_session`), reads `[serve] is parsed but not
+  (credentials, `attach_concurrency`, `idle_detach_secs`,
+  `per_session_rps`, and for an HTTP serve `[[serve.projects]]`, which only
+  a stdio serve reads, #32 eighth part), reads `[serve] is parsed but not
   yet enforced for some keys`, and is not logged for a table that sets none
   of them. With several sessions, `--ledger-heartbeat` writes one `stats`
   line per session per interval.
@@ -347,6 +351,30 @@
   addressed by URL, an inline token, or more pinned sessions than
   `max_attached` stops every command. An older binary refuses a file that
   has `[serve]` (unknown key).
+- A stdio `lambo serve` no longer needs `--session` when `lambo.toml`
+  names one (#32, eighth part): it uses the `[[serve.projects]]` entry whose
+  `path` contains its working directory (the longest such path wins), then
+  `[serve] default_session`, and otherwise refuses with the same missing
+  `--session` error and exit code 2 as before, now before any backend is
+  built. The working directory and each entry are compared as real paths
+  (`~` expanded, symlinks, `.` and `..` resolved, whole components only);
+  an entry that does not exist never matches, a working directory that
+  cannot be resolved falls back to `default_session`, and two entries for
+  one directory naming different sessions are refused (exit code 1). With
+  `HOME` unset or relative, `~` entries are skipped with one warning and the
+  rest of the map applies. A global map only applies when the client passes
+  `--config` or sets `LAMBO_CONFIG`; otherwise each project's own
+  `./lambo.toml` is read.
+  `--session` always wins, and a stdio serve still takes at most one;
+  `--transport http` pins its sessions as before (`--session` and
+  `[serve] sessions`) and never reads the map.
+  The serve logs which entry it used by its configured path; nothing
+  quotes the working directory. Library: `ServeConfig::select_stdio_session` (and `_with`, with
+  the working directory and home injected), `SelectedSession`,
+  `SessionSource`, `SessionSelectionError`, `MissingSession`,
+  `SESSION_REQUIRED`. The startup `[serve]` notice no longer names
+  `default_session` or `[[serve.projects]]` for a stdio serve; an HTTP
+  serve still names `[[serve.projects]]`.
 - Multi-session serving (#32, fourth part): one `lambo serve --transport
   http` holds several pinned sessions, named by a repeated `--session`
   and/or `[serve] sessions`. Each is served at `/mcp/s/{session}`, and `/mcp`
