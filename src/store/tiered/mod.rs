@@ -54,7 +54,10 @@
 //! that finds the marker behind serves from the primary and checks again at
 //! most once per [`REPAIR_BACKOFF`], so it returns to the index once the
 //! holder's mirror or repair lands (#18 review F1). A holder that reads a
-//! stale session asks for a repair, within the same backoff.
+//! stale session asks for a repair, within the same backoff. A repair
+//! re-checks the lease (this store's record and the durable row) before
+//! every bulk chunk, sweep pass and marker write, and stops without another
+//! write once it is lost (F2).
 //!
 //! A repair runs as a background task, one at a time per session, off the
 //! flush loop and the attach path (#18 review M1): requests while one runs
@@ -340,6 +343,7 @@ pub(crate) struct Tier {
     vector_dim: Option<usize>,
     sessions: Mutex<HashMap<SessionId, SessionTier>>,
     repair_backoff: Duration,
+    repair_chunk: usize,
     mirror_deadline: Duration,
     repair_deadline: Duration,
     release_grace: Duration,
@@ -371,6 +375,7 @@ impl TieredStore {
                 vector_dim,
                 sessions: Mutex::new(HashMap::new()),
                 repair_backoff: REPAIR_BACKOFF,
+                repair_chunk: REPAIR_CHUNK,
                 mirror_deadline: MIRROR_DEADLINE,
                 repair_deadline: REPAIR_DEADLINE,
                 release_grace: RELEASE_GRACE,
@@ -414,6 +419,12 @@ impl TieredStore {
         tier.breaker_threshold = threshold;
         tier.breaker_cooldown = cooldown;
         tier.read_deadline = read_deadline;
+        self
+    }
+
+    #[cfg(all(test, feature = "store-memory"))]
+    pub(crate) fn with_repair_chunk(mut self, chunk: usize) -> Self {
+        self.tier_mut().repair_chunk = chunk;
         self
     }
 
@@ -557,6 +568,36 @@ impl Tier {
         Ok(contract)
     }
 
+    /// Refuse to write to the index for `session` unless this store still
+    /// holds its lease under `token` (#18 review F2).
+    ///
+    /// Two checks: this store's own record (cleared by a refused refresh, a
+    /// release or an erase through this store), then the durable lease row,
+    /// the authority: a takeover or an erase moves its token past `token`
+    /// even when this process has not noticed (a stall past the TTL). A
+    /// repair checks before each bulk chunk, each sweep pass and the marker
+    /// write, so a lost lease ends it without another write. A request
+    /// already in flight when the lease is lost can still land; that window
+    /// is one request, and its version is below anything the next holder
+    /// writes. A store without durable leases has only the first check.
+    async fn ensure_fenced(&self, session: &SessionId, token: u64) -> Result<(), StoreError> {
+        let lost = |why: String| {
+            StoreError::StaleWrite(format!(
+                "recall index write for session {session} under fencing token {token} \
+                 refused: {why}"
+            ))
+        };
+        if self.with_state(session, |st| st.held) != Some(token) {
+            return Err(lost("this store no longer holds the lease".into()));
+        }
+        match self.primary.read_lease(session).await? {
+            Some(info) if info.token != token => {
+                Err(lost(format!("the lease moved on to token {}", info.token)))
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// Delete `what` from the index so that nothing it matched survives.
     ///
     /// Every pass refreshes first: delete-by-query deletes from the engine's
@@ -567,9 +608,19 @@ impl Tier {
     /// the engine skips; the pass is retried, and conflicts that persist
     /// through [`SWEEP_ATTEMPTS`] passes are an error, never a silent
     /// success.
-    async fn sweep(&self, what: Sweep<'_>) -> Result<(), StoreError> {
+    ///
+    /// A repair's sweep passes its lease as `fence`, checked before every
+    /// pass ([`Self::ensure_fenced`]).
+    async fn sweep(
+        &self,
+        what: Sweep<'_>,
+        fence: Option<(&SessionId, u64)>,
+    ) -> Result<(), StoreError> {
         let mut conflicts = 0;
         for _ in 0..SWEEP_ATTEMPTS {
+            if let Some((session, token)) = fence {
+                self.ensure_fenced(session, token).await?;
+            }
             self.recall.refresh().await?;
             let report = match what {
                 Sweep::Session(session, below) => {
@@ -758,6 +809,26 @@ impl Tier {
                         self.repair_deadline.as_secs_f64()
                     ))),
                 };
+            if let Err(StoreError::StaleWrite(why)) = &result {
+                // Not a failure of the index: the session is someone else's
+                // now. Stop without another write and stop calling it held.
+                tracing::warn!(
+                    target: "lambo::recall_tier",
+                    session = %session,
+                    "recall index repair stopped, the lease was lost: {why}"
+                );
+                self.with_state(session, |st| {
+                    if st.held == Some(token) {
+                        st.held = None;
+                    }
+                    st.sync = TierSync::Stale;
+                    st.last_error = Some(format!("repair stopped: {why}"));
+                    st.repair_again = false;
+                    st.repairing = false;
+                });
+                running.ended = true;
+                return;
+            }
             if let Err(e) = result {
                 self.mark_stale(session, &format!("repair failed: {e}"));
                 self.with_state(session, |st| {
@@ -864,12 +935,15 @@ impl Tier {
                     })
                 })
                 .collect();
-            for chunk in ops.chunks(REPAIR_CHUNK) {
+            for chunk in ops.chunks(self.repair_chunk) {
+                self.ensure_fenced(session, token).await?;
                 self.recall.bulk(chunk).await?;
             }
             indexed = ops.len() as u64;
         }
-        self.sweep(Sweep::Session(session, version)).await?;
+        self.sweep(Sweep::Session(session, version), Some((session, token)))
+            .await?;
+        self.ensure_fenced(session, token).await?;
         self.recall
             .write_marker(
                 session,
@@ -958,9 +1032,10 @@ impl Tier {
         // Unattributable: delete by id everywhere (always safe, the nodes are
         // durably gone) and leave every marker where it is, so the owning
         // session's next load sees its marker behind and repairs.
-        let swept = tokio::time::timeout(self.mirror_deadline, self.sweep(Sweep::Ids(&deleted)))
-            .await
-            .unwrap_or_else(|_| Err(self.past_deadline()));
+        let swept =
+            tokio::time::timeout(self.mirror_deadline, self.sweep(Sweep::Ids(&deleted), None))
+                .await
+                .unwrap_or_else(|_| Err(self.past_deadline()));
         if let Err(e) = swept {
             let sessions: Vec<SessionId> = self.sessions.lock().keys().cloned().collect();
             for session in sessions {
@@ -989,6 +1064,15 @@ impl Tier {
             // The durable snapshot already holds this batch, so a repair
             // covers it; mirroring it on its own first would be redundant.
             self.repair_if_due(session);
+            return;
+        }
+        // The primary just accepted `token`; this store's own record of the
+        // lease is the cheap check that it has not been lost since (F2).
+        if self.with_state(session, |st| st.held) != Some(token) {
+            self.mark_stale(
+                session,
+                "the lease was lost after the flush committed; not mirrored",
+            );
             return;
         }
         let version = match self.next_version(session, token) {
@@ -1487,7 +1571,7 @@ impl GraphStore for TieredStore {
             let cleaned = async {
                 let mut left = 0;
                 for _ in 0..ERASE_ATTEMPTS {
-                    self.sweep(Sweep::Session(session, None)).await?;
+                    self.sweep(Sweep::Session(session, None), None).await?;
                     self.recall.refresh().await?;
                     left = self.recall.count_session_docs(session).await?;
                     if left == 0 {

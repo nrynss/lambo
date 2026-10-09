@@ -1018,6 +1018,82 @@ async fn a_panicking_repair_does_not_wedge_the_session() {
     assert!(!store.tracked_sessions().contains(&sid), "never evicted");
 }
 
+/// F2: the holder stalls past its lease TTL in the middle of a repair, and
+/// another process erases the session. The repair checks the durable lease
+/// before each bulk chunk, the sweep and the marker, so once it resumes it
+/// writes nothing more: the erased session is not rebuilt in the index. The
+/// one request already in flight when the lease was lost can still land.
+#[tokio::test]
+async fn a_repair_that_lost_its_lease_stops_writing() {
+    let (primary, fake) = (memory_primary(), Arc::new(FakeIndex::new()));
+    let store = tier(&primary, &fake).with_repair_chunk(1);
+    let sid = SessionId::new("stalled-holder");
+    let token = match store
+        .acquire_lease(&sid, &holder("w"), Duration::from_millis(150))
+        .await
+        .unwrap()
+    {
+        LeaseOutcome::Acquired(info) => info.token,
+        LeaseOutcome::Held { .. } => panic!("held"),
+    };
+    let _ = store.load_session(&sid).await;
+    let s = stale_after_an_outage(&store, &fake, &sid, token).await;
+    let failures = store.tier_status(&sid).mirror_failures;
+
+    // The repair's first chunk is slow; the lease lapses under it.
+    fake.delay_bulk_ms
+        .store(400, std::sync::atomic::Ordering::SeqCst);
+    let (_, e2) = one_more(&sid, &s, 2);
+    store.flush(&e2, Some(token)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let eraser = tier(&primary, &fake);
+    let erased = eraser
+        .erase_session(&sid, &holder("lambo-erase-session"))
+        .await
+        .unwrap();
+    assert!(matches!(erased, EraseOutcome::Erased(_)));
+
+    settle(&store).await;
+    assert_eq!(
+        fake.bulk_calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the repair kept bulk-writing after its lease was lost"
+    );
+    assert_eq!(fake.marker(&sid), None, "the repair rewrote the marker");
+    assert!(fake.live(&sid).len() <= 1, "{:?}", fake.live(&sid).keys());
+    let status = store.tier_status(&sid);
+    assert_eq!(status.sync, TierSync::Stale);
+    assert_eq!(
+        status.mirror_failures, failures,
+        "a lost lease is not an index failure"
+    );
+    assert_eq!(store.with_state(&sid, |st| st.held), None);
+}
+
+/// F2, the mirror side: a flush the primary accepted is not mirrored once
+/// this store has recorded the lease as lost (a refused heartbeat between
+/// the commit and the mirror); the session goes stale instead.
+#[tokio::test]
+async fn a_flush_is_not_mirrored_after_the_lease_was_lost() {
+    let (primary, fake) = (memory_primary(), Arc::new(FakeIndex::new()));
+    let store = tier(&primary, &fake);
+    let sid = SessionId::new("lost-before-mirror");
+    let token = attach(&store, &sid, &holder("w")).await;
+    let (s, b) = seed_batch(&sid, 1);
+    store.flush(&b, Some(token)).await.unwrap();
+    let bulks = fake.bulk_calls.load(std::sync::atomic::Ordering::SeqCst);
+    store.with_state(&sid, |st| st.held = None);
+    let (_, e2) = one_more(&sid, &s, 2);
+    store.flush(&e2, Some(token)).await.unwrap();
+    assert_eq!(
+        fake.bulk_calls.load(std::sync::atomic::Ordering::SeqCst),
+        bulks,
+        "mirrored without the lease"
+    );
+    assert_eq!(fake.marker(&sid), Some(1));
+    assert_eq!(store.tier_status(&sid).sync, TierSync::Stale);
+}
+
 /// M1: releasing the lease gives an in-flight repair a grace period, then
 /// abandons it rather than holding the release (and `close`) hostage.
 #[tokio::test]
