@@ -235,6 +235,15 @@ jobs:
               set -o pipefail
               cargo clippy --all-targets --features embed-gemini -- -D warnings
               cargo test --features embed-gemini
+          # #18: the Elasticsearch recall tier, against the in-process fake
+          # index (no cluster). Lints it with and without the default store,
+          # then runs the library with it compiled in.
+          - name: recall-elastic
+            command: |
+              set -o pipefail
+              cargo clippy --all-targets --features recall-elastic,store-sqlite,fixtures -- -D warnings
+              cargo clippy --all-targets --no-default-features --features recall-elastic -- -D warnings
+              cargo test --features recall-elastic,store-sqlite,fixtures
           # Ship profile (cockroach + memory + embedders + fixtures).
           - name: demo
             command: cargo check --features demo
