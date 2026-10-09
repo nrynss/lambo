@@ -148,6 +148,35 @@ stdio serve proxying into session b, SIGTERM leaving both rows
 Mutation checks: routing every request to the default fails the routing,
 alias and lease-loss tests; no lease watcher fails the lease-loss test.
 
+## Review remediation (Opus review of 8e2f7b6)
+
+- M1: the registry is the only long-lived owner of a pinned session's
+  handle. `serve_pinned` no longer holds the startup `Memory`s; a detach
+  drops its handle and leaves a `Weak` in `HeldElsewhere`, and the retry
+  waits (up to 30 s) for it to be gone, so a fenced handle's
+  second-writer registration and graph are released before the re-attach.
+  `close_holder` drops the close set after the watchdog is disarmed.
+- M2: `serve_pinned_with(opts, backends, PinnedSeams)` lets tests drive
+  the real multi-session serve in-process (`tests/registry/pinned_serve.rs`):
+  the loss, detach, re-election and serving cycle; the failed start; the
+  refusal cursor; the byte-level 404; the abandoned background attach.
+- L1: a background attach error that will not clear (erased, contract
+  mismatch, unprovisioned) is logged once and the slot becomes `Failed`
+  (503, no `Retry-After`); held elsewhere and an unreachable store or
+  embedder keep retrying.
+- L2: refusal cursors survive a detach; pruned only when a session is no
+  longer hosted.
+- L3: `pin_sessions` applies `check_pinned`, and the CLI preflight runs it
+  for both transports, so an unaddressable name exits 2 before any backend.
+- L4: the cap refusal names the request's route.
+- L5: `Ledger::session_counters` (per session) feed `lambo_stats` and the
+  heartbeat; `counters` stays file-wide.
+- L6: see the PR 5 requirement below.
+- L8: the background retry races the whole acquire against the registry's
+  closing watch and releases the lease it may have taken when abandoned.
+- L9: a detach's stage 1 ends at closing, and `close_holder` waits for
+  detaches no longer than `CLOSE_GRACE`, so stage 3 keeps its bound.
+
 ## For PR 5 to 8
 
 - PR 5: authorize in the router, between `parse_addressed` and
@@ -171,5 +200,7 @@ alias and lease-loss tests; no lease watcher fails the lease-loss test.
   with removing the slot). `attach_lock` serializes background attaches;
   `attach_concurrency` replaces it with a semaphore.
 - PR 7: `Slot::Erased` and `Erasing`; an erased pinned session should then
-  be an `Erased` slot rather than a startup error.
+  be an `Erased` slot rather than a startup error, and a background retry
+  that meets a tombstone should land in `Erased` rather than PR 4's
+  `Slot::Failed`.
 - PR 8: stdio selection lives in `pin_sessions`' `Transport::Stdio` arm.
