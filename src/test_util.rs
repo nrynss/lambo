@@ -444,10 +444,25 @@ mod text_role_tests {
 /// `surface::session`'s router test and the serve's own router (#32 PR 4
 /// review L7).
 pub async fn on_the_wire(addr: std::net::SocketAddr, method: &str, path: &str) -> String {
+    on_the_wire_as(addr, method, path, None).await
+}
+
+/// [`on_the_wire`] presenting an `Authorization` header value, for a
+/// surface that authenticates (#32 PR 5): the comparison is between two
+/// requests from the same authenticated caller.
+pub async fn on_the_wire_as(
+    addr: std::net::SocketAddr,
+    method: &str,
+    path: &str,
+    authorization: Option<&str>,
+) -> String {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
+    let authorization = authorization
+        .map(|value| format!("Authorization: {value}\r\n"))
+        .unwrap_or_default();
     let request = format!(
-        "{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: 0\r\n\r\n"
+        "{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n{authorization}Content-Length: 0\r\n\r\n"
     );
     stream.write_all(request.as_bytes()).await.expect("write");
     let mut raw = Vec::new();

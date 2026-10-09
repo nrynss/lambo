@@ -210,6 +210,18 @@ async fn http(
     mcp_session: Option<&str>,
     body: &str,
 ) -> Reply {
+    http_as(addr, method, path, None, mcp_session, body).await
+}
+
+/// [`http`] with an `Authorization` header value (#32 PR 5).
+async fn http_as(
+    addr: SocketAddr,
+    method: &str,
+    path: &str,
+    authorization: Option<&str>,
+    mcp_session: Option<&str>,
+    body: &str,
+) -> Reply {
     let mut sock = tokio::net::TcpStream::connect(addr).await.expect("connect");
     let mut head = format!(
         "{method} {path} HTTP/1.1\r\nHost: localhost\r\nAccept: application/json, \
@@ -217,6 +229,9 @@ async fn http(
          Connection: close\r\n",
         body.len()
     );
+    if let Some(value) = authorization {
+        head.push_str(&format!("Authorization: {value}\r\n"));
+    }
     if let Some(id) = mcp_session {
         head.push_str(&format!("Mcp-Session-Id: {id}\r\n"));
     }
@@ -251,10 +266,20 @@ async fn http(
 
 /// Initialize an MCP session at `path`: its id and the `initialize` result.
 async fn initialize(addr: SocketAddr, path: &str) -> (String, serde_json::Value) {
-    let reply = http(
+    initialize_as(addr, path, None).await
+}
+
+/// [`initialize`] presenting `authorization` (#32 PR 5).
+async fn initialize_as(
+    addr: SocketAddr,
+    path: &str,
+    authorization: Option<&str>,
+) -> (String, serde_json::Value) {
+    let reply = http_as(
         addr,
         "POST",
         path,
+        authorization,
         None,
         r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"registry-test","version":"1"}}}"#,
     )
@@ -262,10 +287,11 @@ async fn initialize(addr: SocketAddr, path: &str) -> (String, serde_json::Value)
     assert_eq!(reply.status, 200, "initialize at {path}: {}", reply.body);
     let id = reply.header("mcp-session-id").expect("an MCP session id");
     let result = reply.message()["result"].clone();
-    let ack = http(
+    let ack = http_as(
         addr,
         "POST",
         path,
+        authorization,
         Some(&id),
         r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
     )
@@ -943,6 +969,7 @@ async fn a_pinned_session_that_can_no_longer_attach_is_not_retried() {
 }
 
 /// The real multi-session serve, in-process (#32 review M1/M2).
+mod authority;
 mod pinned_serve;
 
 /// Sonnet review L-C: which background-attach errors keep a pinned session

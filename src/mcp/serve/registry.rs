@@ -128,6 +128,15 @@ struct PreviousHandle {
 /// the `SecondSessionWriter` ERROR the re-attach then logs is a true report.
 const PREVIOUS_HANDLE_WAIT: Duration = Duration::from_secs(30);
 
+/// The states [`SessionRegistry::force_state`] can put a session in.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+pub(super) enum ForcedState {
+    Detaching,
+    HeldElsewhere,
+    Failed,
+}
+
 /// What the router gets for a session id.
 pub(super) enum Lookup {
     /// Serve the request on this session.
@@ -271,6 +280,23 @@ impl SessionRegistry {
             },
             None => Lookup::NotHosted,
         }
+    }
+
+    /// Put hosted session `id` in a state that is not serving, without the
+    /// detach, lease or retry that would normally lead there, so the
+    /// router's answers for each state can be compared (#32 PR 5).
+    #[cfg(test)]
+    pub(super) fn force_state(&self, id: &str, state: ForcedState) {
+        let slot = match state {
+            ForcedState::Detaching => Slot::Detaching,
+            ForcedState::HeldElsewhere => Slot::HeldElsewhere {
+                retry_at: Instant::now() + PINNED_RETRY,
+                previous: None,
+                warned: false,
+            },
+            ForcedState::Failed => Slot::Failed,
+        };
+        self.slots.lock().insert(id.to_string(), slot);
     }
 
     /// Mark the startup set complete: the process tasks waiting on it start.
