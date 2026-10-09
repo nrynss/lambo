@@ -802,6 +802,30 @@ mod tests {
     /// #18, Level B: `[recall]` is wrapped around the primary at the single
     /// construction site when the tier is compiled in, and refused by feature
     /// name when it is not. Nothing here touches the network.
+    /// #18 under #32's redaction rules: a `[recall]` URL with userinfo parses
+    /// (it is a well-formed string), and the refusal at resolve, whether the
+    /// tier is compiled in or not, never quotes it. Nor does the unset-key
+    /// error quote an `api_key.env` that reads as a pasted key.
+    #[test]
+    #[cfg(all(feature = "store-memory", feature = "embed-fixture"))]
+    fn a_secret_looking_recall_url_never_reaches_a_validation_error() {
+        let base = "[store]\nkind = \"memory\"\n[embedder]\nkind = \"fixture\"\n[recall]\n\
+                    kind = \"elastic\"\n";
+        for tail in [
+            "url = \"https://elastic:xyzzy@es.example.com\"\n",
+            "url = \"https://es.example.com/?api_key=xyzzy\"\n",
+            "url = \"https://es.example.com\"\napi_key = { env = \"sk-xyzzy-0123456789abcdef\" }\n",
+        ] {
+            let toml = format!("{base}{tail}");
+            let file = LamboFile::from_toml_str(&toml).expect("well-formed TOML parses");
+            let err = resolve_backends(file)
+                .err()
+                .unwrap_or_else(|| panic!("{tail}: must be refused"))
+                .to_string();
+            assert!(!err.contains("xyzzy"), "{tail}: {err}");
+        }
+    }
+
     #[test]
     #[cfg(all(feature = "store-memory", feature = "embed-fixture"))]
     fn a_recall_section_is_wrapped_at_resolve_or_refused_by_feature() {

@@ -14,6 +14,9 @@ use crate::store::StoreConfig;
 use crate::types::{LamboError, MatchStrategy};
 
 mod serve;
+/// An environment variable name for an error message, or `(value not shown)`
+/// when it may be a pasted secret (shared by `[serve]` and `[recall]`).
+pub(crate) use serve::shown_env;
 pub use serve::{
     CredentialConfig, InlineToken, ProjectConfig, ServeConfig, ServeCredential,
     DEFAULT_ATTACH_CONCURRENCY, DEFAULT_IDLE_DETACH_SECS, DEFAULT_MAX_ATTACHED,
@@ -1145,6 +1148,31 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("knd"), "{err}");
+    }
+
+    /// #18 under #32's redaction rules: a `[recall]` section is parsed by the
+    /// same `from_toml_str`, so a URL with userinfo pasted under any key, or
+    /// as the wrong type, never reaches the parse error.
+    #[test]
+    fn a_secret_looking_recall_url_never_reaches_a_parse_error() {
+        const URL: &str = "https://elastic:xyzzy@es.example.com";
+        let cases = [
+            format!("[recall]\nkind = \"elastic\"\nurl = \"{URL}\"\ntimeout_ms = \"{URL}\"\n"),
+            format!("[recall]\nkind = \"{URL}\"\nurl = \"{URL}\"\n"),
+            format!("[recall]\nkind = \"elastic\"\nulr = \"{URL}\"\n"),
+            format!("[recall]\nkind = \"elastic\"\n\"{URL}\" = 1\n"),
+            format!("[recall]\nkind = \"elastic\"\nurl = \"{URL}\"\nurl = \"{URL}\"\n"),
+            format!("[recall]\nkind = \"elastic\"\nurl = \"{URL}\"\napi_key = \"{URL}\"\n"),
+            format!("[recall]\nkind = \"elastic\"\nurl = \"{URL}\"\nrefresh = \"{URL}\"\n"),
+            format!("[recall]\nkind = \"elastic\"\nurl = \"{URL}\"\napi_key = {{ env = \"A\", x = \"{URL}\" }}\n"),
+        ];
+        for toml in &cases {
+            let err = LamboFile::from_toml_str(toml).expect_err(toml).to_string();
+            assert!(!err.contains("xyzzy"), "{toml}: {err}");
+        }
+        // A plain typo is still named, since the operator needs it.
+        let err = LamboFile::from_toml_str(&cases[2]).unwrap_err().to_string();
+        assert!(err.contains("ulr"), "{err}");
     }
 
     #[test]

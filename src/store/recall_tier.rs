@@ -71,9 +71,12 @@ impl std::str::FromStr for RecallKind {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.trim().to_ascii_lowercase().as_str() {
             "elastic" | "elasticsearch" => Ok(Self::Elastic),
-            other => Err(StoreError::Backend(format!(
-                "unknown recall tier kind {other:?} (expected elastic)"
-            ))),
+            // Never echo the value: a URL with credentials or a key pasted
+            // under `kind` would reach the parse error and the startup log
+            // (the same rule as `StoreKind`, #32).
+            _ => Err(StoreError::Backend(
+                "unknown recall tier kind (value not shown; expected elastic)".into(),
+            )),
         }
     }
 }
@@ -104,9 +107,12 @@ impl SecretRef {
     pub fn resolve(&self) -> Result<String, StoreError> {
         match std::env::var(&self.env) {
             Ok(v) if !v.trim().is_empty() => Ok(v),
+            // The name is quoted only while it reads as a variable name: a
+            // key pasted into `env` must not reach the error (#32's
+            // `token_env` rule).
             _ => Err(StoreError::Backend(format!(
                 "recall.api_key names environment variable {} but it is unset or empty",
-                self.env
+                crate::config::shown_env(&self.env)
             ))),
         }
     }

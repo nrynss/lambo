@@ -252,7 +252,7 @@ fn is_quotable_env(name: &str) -> bool {
 /// `token_env` for a message: the name when it is quotable, otherwise
 /// [`VALUE_NOT_SHOWN`]. Validation already refuses unquotable values; this is
 /// the second line, so a message can never become the leak.
-fn shown_env(name: &str) -> &str {
+pub(crate) fn shown_env(name: &str) -> &str {
     if is_quotable_env(name) {
         name
     } else {

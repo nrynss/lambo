@@ -214,7 +214,9 @@
   marker `_id` is the SHA-256 of the session id; unleased writes are not
   mirrored; per-session state is evicted on release and bounded; index
   prefixes containing `-v-` or ending in `-v`, URL query strings or fragments,
-  and `timeout_ms = 0` are refused.
+  and `timeout_ms = 0` are refused. Errors follow the `[serve]` redaction
+  rules: an unknown `kind` is not quoted, and `api_key.env` is quoted only
+  while it reads as a variable name.
 - `lambo recall-index backfill --session <s>`: rebuild one session's recall
   index from the store under the session's lease (#18).
 - `GraphStore::holder_derives_from_graph()` (default `false`): a store whose
