@@ -16,11 +16,11 @@ always has, so the serve, the J2 proxy and the lease see no difference.
 
 | piece | where |
 |---|---|
-| the resolver, `SelectedSession`, `SessionSource`, `SessionSelectionError`, `SESSION_REQUIRED` | `src/config/serve/projects.rs` |
-| resolver tests (17) | `src/config/serve/projects/tests.rs` |
+| the resolver, `SelectedSession`, `SessionSource`, `SessionSelectionError`, `MissingSession`, `SESSION_REQUIRED` | `src/config/serve/projects.rs` |
+| resolver tests (21, one of them macOS-only) | `src/config/serve/projects/tests.rs` |
 | entry path check in `validate`; narrowed unenforced notice (`has_unenforced_keys`) | `src/config/serve.rs` |
 | `--session` optional; selection before backends; refusal; startup log line | `src/main.rs` |
-| end-to-end: mapped, default, flag wins, refusal, http | `tests/serve_stdio_cwd_map.rs` |
+| end-to-end: mapped, default, flag wins, refusal, http, HOME unset, ambiguous map exits 1 | `tests/serve_stdio_cwd_map.rs` |
 | docs | `docs/reference/{cli,config}.mdx` and site mirrors, `lambo.example.toml`, `CHANGELOG.md` |
 
 ## Decisions
@@ -68,9 +68,29 @@ twice.
 are refused at file read.** Both are new `validate` refusals (in
 `check_project_path`). A relative path has nothing stable to be relative to
 (the client picks the cwd); `~user` would make the process resolve another
-account's home implicitly. A `~` entry with `HOME` unset is refused at
-selection rather than skipped: the serve cannot tell whether the cwd is inside
-it, and guessing would be the accidental-session failure again.
+account's home implicitly.
+
+**A relative `$HOME` counts as unset** (review L1). `fs::canonicalize`
+resolves a relative path against the process cwd, which for a stdio serve is
+the project the client chose; with `HOME=.` a `~` catch-all canonicalized to
+the cwd itself and beat the real entry. `select_stdio_session_with` filters a
+non-absolute home, so the injected and real paths behave alike.
+
+**With `HOME` unset, `~` entries are skipped, not refused** (review L2; this
+reverses the first cut, which refused the whole selection). The rest of the
+map and `default_session` still apply; `SelectedSession::tilde_entries_skipped`
+makes `main.rs` log one WARN, and a refusal's hint says the `~` entries were
+skipped. Neither quotes an entry, the cwd or `$HOME`. Why: it is the same
+degrade-and-say-so the design already chose for an unresolvable cwd, which
+skips the *whole* map; refusing over `HOME` was stricter than that for a
+smaller unknown, and it cost every absolute entry that did cover the cwd. The
+cost, accepted: a cwd under a skipped `~` entry can land in a shallower
+absolute entry or in `default_session`, which the WARN names. An operator who
+wants fail-closed writes the path out in full. The alternatives the review
+raised were not taken: the passwd home (`std::env::home_dir` falling back to
+`getpwuid_r`) silently disagrees with an environment that deliberately cleared
+`HOME`, and "refuse only if a `~` entry could be deeper" cannot be decided
+without knowing where `~` is.
 
 **HTTP still requires `--session` in this PR.** The design's selection order is
 for stdio. What `[serve] sessions` / `default_session` mean for HTTP is PR 4's
@@ -86,6 +106,23 @@ MissingRequiredArgument, ..)` on the built `serve` subcommand: the same
 could have supplied a session. Selection runs before `resolve_for_command`, so
 a refusal still builds no backend (no embedder load), as clap's did.
 
+**The refusal hint says why** (review L4). `Missing` carries a
+`MissingSession`: when the cwd could not be resolved the hint says the map
+was not checked and there is no `default_session`, instead of "neither applies
+here", which would claim the map was consulted.
+
+**Exit codes and ordering, against the clap-required flag** (review, clap
+compatibility). Missing session: exit 2, same first lines. A map that cannot
+be applied (two entries for one directory, different sessions; a session name
+that is not addressable) is a configuration error: exit 1, before any backend
+or ledger (tested end to end). Two orderings changed when `--session` is
+absent, because selection now reads `lambo.toml` and parses `--transport`
+before clap's old check would have fired: a bogus `--transport` reports the
+transport error (still exit 2) instead of the missing flag, and a malformed
+`lambo.toml` exits 1 with its load error instead of 2 with the missing-flag
+error. With `--session` given nothing changes. `--session` with no value is
+still clap's own error, exit 2.
+
 **Refusals and logs never quote the working directory or `$HOME`.** They name
 configured values only: an entry's `path` as written and session names, which
 are configuration, not secrets. Tests assert a marker in the cwd never appears.
@@ -95,6 +132,20 @@ are configuration, not secrets. Tests assert a marker in the cwd never appears.
 `warn_if_unenforced` now asks `has_unenforced_keys`. The text keeps
 "[serve] is parsed but not yet enforced" (the PR 1 integration test greps it)
 and names the exception. PR 4/5 still own removing it.
+
+**One global map needs `--config` or `LAMBO_CONFIG`** (review L6). Discovery
+is `--config`, `LAMBO_CONFIG`, then `./lambo.toml`, and a stdio serve's cwd is
+the project, so without either the map read is the project's own file. The
+docs say so, with the note that a project's `lambo.toml` can then choose the
+session through `default_session`, the same trust it already has over the
+store.
+
+**Tests the review asked for:** `/` as a catch-all losing to a deeper entry;
+macOS-only (`cfg(target_os = "macos")`) case and NFC/NFD variants matching and
+two such variants with different sessions refused, which holds because
+Darwin's realpath returns the on-disk spelling (the test skips itself on a
+case-sensitive volume); relative `HOME`; HOME unset end to end; an ambiguous
+map exiting 1 end to end.
 
 ## For PR 4 (merge notes)
 
