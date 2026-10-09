@@ -411,7 +411,11 @@ async fn a_refused_session_is_byte_identical_to_an_unrouted_path_with_no_store_c
 }
 
 /// Under a configured token, the 401 comes first and is the same for every
-/// id, served or not; nothing about sessions is evaluated before it.
+/// id, served or not; nothing about sessions is evaluated before it. It is
+/// the unrouted path's 401, byte for byte. The unscoped routes keep the 401
+/// they always had (the gate over the routes; `axum` orders two headers
+/// differently for a routed response, which says only that a route exists,
+/// and the routes are public), with the same status and body.
 #[tokio::test]
 async fn the_401_comes_before_any_session_and_is_the_same_for_every_id() {
     let recording = Recording::new(two_sessions().await);
@@ -423,14 +427,22 @@ async fn the_401_comes_before_any_session_and_is_the_same_for_every_id() {
         &WebConfig::default(),
     );
     let (addr, handle) = spawn(state).await;
-    let expected = wire(&request(addr, "GET", "/api/pulse").await);
-    assert!(expected.0.starts_with("HTTP/1.1 401"), "{}", expected.0);
-    for id in refused_ids()
-        .into_iter()
-        .chain(["t4-a".to_string(), "t4-b".to_string()])
-    {
-        let r = request(addr, "GET", &format!("/s/{id}/api/pulse")).await;
-        assert_eq!(wire(&r), expected, "{id}");
+    for method in METHODS {
+        let expected = wire(&request(addr, method, "/no/such/path").await);
+        assert!(expected.0.starts_with("HTTP/1.1 401"), "{}", expected.0);
+        for id in refused_ids()
+            .into_iter()
+            .chain(["t4-a".to_string(), "t4-b".to_string()])
+        {
+            for rest in ["", "/", "/api/pulse", "/nope"] {
+                let path = format!("/s/{id}{rest}");
+                let r = request(addr, method, &path).await;
+                assert_eq!(wire(&r), expected, "{method} {path}");
+            }
+        }
+        let alias = request(addr, method, "/api/pulse").await;
+        assert_eq!(alias.status, 401, "{method}");
+        assert_eq!(alias.body, expected.1, "{method}");
     }
     assert!(recording.calls().is_empty(), "{:?}", recording.calls());
     handle.abort();
@@ -836,7 +848,8 @@ async fn a_single_loose_session_is_served_at_the_aliases_only() {
 // ---- source pins -----------------------------------------------------------
 
 /// The session is resolved before routing by exactly one construction: the
-/// routes are the fallback service of an outer router with the two layers.
+/// routes (under their gate) are the fallback service of an outer router
+/// with the Host guard and the session resolution.
 /// No `any` route exists (it would answer every method on a route the
 /// read-only sweep does not see), and the resolution is in `scope.rs`.
 #[test]
@@ -872,15 +885,18 @@ fn the_session_is_resolved_by_one_layer_before_routing() {
     let layers: Vec<_> = router.match_indices(".layer(").collect();
     assert_eq!(
         layers.len(),
-        2,
-        "resolve_session and the guard, nothing else"
+        3,
+        "the gate over the routes, resolve_session and the Host guard, nothing else"
     );
+    let gate = router.find("state.clone(), gate)").expect("gate layer");
+    let fallback = router.find(".fallback_service(").expect("fallback");
     let resolve = router
         .find("resolve_session")
         .expect("resolve_session layer");
-    let guard = router.find("state, guard)").expect("guard layer");
+    let host = router.find("state, host_guard)").expect("Host guard layer");
+    assert!(gate < fallback, "the gate is over the routes");
     assert!(
-        resolve < guard,
-        "the guard is outermost: bearer before session"
+        fallback < resolve && resolve < host,
+        "before routing, the Host guard is outermost, then the session"
     );
 }

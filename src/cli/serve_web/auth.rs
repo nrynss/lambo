@@ -39,11 +39,10 @@ use crate::types::SessionId;
 /// The portal's credential set.
 pub(super) type PortalAuthority = SessionAuthority<AuthToken>;
 
-/// The grant [`guard`] resolved for a request, carried to the session
-/// resolution in the request's extensions. A request that arrives there
-/// without one (a router served without the guard) is refused, never served.
-#[derive(Clone)]
-pub(super) struct Authenticated(pub(super) Arc<SessionGrant>);
+/// Marks a request `scope::resolve_session` already authenticated (a
+/// scoped path), so the [`gate`] over the routes does not check it twice.
+#[derive(Clone, Copy)]
+pub(super) struct Authenticated;
 
 /// A bearer token that cannot be printed.
 ///
@@ -258,21 +257,12 @@ fn host_refused() -> Response {
 static HOST_REFUSAL_WARNED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-/// Steps 0 and 1 of the fixed order (design 3.3): the `Host` check (only
-/// under the implicit grant), then the request's bearer token resolved to a
-/// grant, before anything about sessions is evaluated.
-///
-/// With a token configured, every request (static asset, health check,
-/// API, unrouted path) must carry `Authorization: Bearer <token>`, compared
-/// by [`SessionAuthority::authenticate`]'s constant-time scan
-/// (`crate::surface::bearer`, shared with `lambo serve`). Under the implicit
-/// loopback grant no header is read, so a judge's browser needs no
-/// credentials. Mirrors `mcp::serve`'s `guard_request`, minus the
-/// transport-specific rate/session guards this read-only process does not
-/// have.
-pub(super) async fn guard(
+/// Step 0 of the fixed order (design 3.3), before routing, on every
+/// request: the `Host` check. Under the implicit grant only the loopback
+/// names and the allowed hosts are answered; once a token is required, any.
+pub(super) async fn host_guard(
     axum::extract::State(state): axum::extract::State<Arc<AppState>>,
-    mut req: axum::extract::Request,
+    req: axum::extract::Request,
     next: middleware::Next,
 ) -> Response {
     if !state.host_check.allows(&req) {
@@ -287,21 +277,68 @@ pub(super) async fn guard(
         }
         return host_refused();
     }
+    next.run(req).await
+}
+
+/// Step 1 of the fixed order (design 3.3): the request's bearer token
+/// resolved to a grant, or the 401, before anything about sessions is
+/// evaluated.
+///
+/// With a token configured, every request (static asset, health check,
+/// API, unrouted path) must carry `Authorization: Bearer <token>`, compared
+/// by [`SessionAuthority::authenticate`]'s constant-time scan
+/// (`crate::surface::bearer`, shared with `lambo serve`). Under the implicit
+/// loopback grant no header is read, so a judge's browser needs no
+/// credentials. Mirrors `mcp::serve`'s `guard_request`, minus the
+/// transport-specific rate/session guards this read-only process does not
+/// have.
+///
+/// `None` is answered with [`unauthorized`].
+pub(super) fn authenticate(
+    state: &AppState,
+    req: &axum::extract::Request,
+) -> Option<Arc<SessionGrant>> {
     let presented = req
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok());
-    let Some(grant) = state.authority.authenticate(presented) else {
-        return unauthorized();
-    };
-    req.extensions_mut().insert(Authenticated(grant));
+    state.authority.authenticate(presented)
+}
+
+/// The gate over the routes themselves (after routing, where the portal's
+/// bearer gate has always been), for a request `scope::resolve_session` did
+/// not already authenticate: every unscoped path, routed or not. It
+/// authenticates (the 401 a client of the unscoped routes has always seen,
+/// byte for byte, `Allow` on a non-`GET` route included) and then attaches
+/// the default session when the grant may read it (the aliases, design
+/// Q10).
+pub(super) async fn gate(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+    mut req: axum::extract::Request,
+    next: middleware::Next,
+) -> Response {
+    if req.extensions().get::<Authenticated>().is_none() {
+        let Some(grant) = authenticate(&state, &req) else {
+            return unauthorized();
+        };
+        if state
+            .authority
+            .authorize_default(&grant, state.default_session.as_str())
+            .is_ok()
+        {
+            req.extensions_mut().insert(super::scope::SessionCtx {
+                session: state.default_session.clone(),
+            });
+        }
+        req.extensions_mut().insert(Authenticated);
+    }
     next.run(req).await
 }
 
 /// The 401. Deliberately terse and identical for "no header" and "wrong
 /// token": the difference is not the caller's business, and the token
 /// itself is never echoed. Independent of the path, so of any session.
-fn unauthorized() -> Response {
+pub(super) fn unauthorized() -> Response {
     (
         StatusCode::UNAUTHORIZED,
         [(header::WWW_AUTHENTICATE, "Bearer")],

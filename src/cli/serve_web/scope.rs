@@ -1,10 +1,12 @@
 //! Which session a request reads (#4 PR 2, design 3.2 and 3.3).
 //!
 //! The portal holds no "current session". [`resolve_session`] runs on every
-//! request, after the bearer guard and **before routing**, and attaches the
-//! session the request may read as a [`SessionCtx`]; every data handler
-//! takes one. A request that names no session it may read carries none,
-//! and a handler without one answers the uniform 404.
+//! request, after the Host guard and **before routing**: for a scoped path
+//! it checks the bearer, then the session, and attaches the session the
+//! request may read as a [`SessionCtx`]. An unscoped request gets the
+//! default session from the gate over the routes (`auth::gate`). Every data
+//! handler takes a `SessionCtx`; a request that names no session it may
+//! read carries none, and a handler without one answers the uniform 404.
 //!
 //! | path | session |
 //! |---|---|
@@ -35,7 +37,7 @@ use axum::http::{header, HeaderValue, Uri};
 use axum::middleware::Next;
 use axum::response::Response;
 
-use super::auth::Authenticated;
+use super::auth::{authenticate, unauthorized, Authenticated};
 use super::state::AppState;
 use crate::surface::session::{not_found_response, SessionGrant, SessionNeed};
 use crate::types::SessionId;
@@ -66,31 +68,28 @@ impl<S: Send + Sync> FromRequestParts<S> for SessionCtx {
 
 /// Attach the session this request may read, before routing.
 ///
-/// Runs inside the bearer guard, which attached the request's grant. A
-/// scoped path is authorized and rewritten to its unscoped form (or refused
-/// with the uniform 404); an unscoped request reads the default session when
-/// the grant may.
+/// Runs inside the Host guard. A scoped path is authenticated, authorized
+/// and rewritten to its unscoped form (or refused: the 401, then the
+/// uniform 404); an unscoped request passes through untouched, to the gate
+/// over the routes.
 pub(super) async fn resolve_session(
     State(state): State<Arc<AppState>>,
     mut req: Request,
     next: Next,
 ) -> Response {
-    let Some(Authenticated(grant)) = req.extensions().get::<Authenticated>().cloned() else {
-        // Served without the guard: refuse rather than serve.
-        return not_found_response();
-    };
-    let Some(after) = req.uri().path().strip_prefix(SCOPE_PREFIX) else {
-        if state
-            .authority
-            .authorize_default(&grant, state.default_session.as_str())
-            .is_ok()
-        {
-            req.extensions_mut().insert(SessionCtx {
-                session: state.default_session.clone(),
-            });
-        }
+    if !req.uri().path().starts_with(SCOPE_PREFIX) {
+        // Unscoped: authenticated and given the default session by the
+        // gate over the routes (`auth::gate`), where the bearer check has
+        // always run for these paths.
         return next.run(req).await;
+    }
+    // Scoped: the bearer check runs here, before anything about the
+    // session is evaluated (design 3.3), so its 401 is the same for every
+    // id, served or not.
+    let Some(grant) = authenticate(&state, &req) else {
+        return unauthorized();
     };
+    let after = &req.uri().path()[SCOPE_PREFIX.len()..];
     let Some((session, target)) = scoped(&state, &grant, after) else {
         return not_found_response();
     };
@@ -110,6 +109,7 @@ pub(super) async fn resolve_session(
     };
     *req.uri_mut() = uri;
     req.extensions_mut().insert(SessionCtx { session });
+    req.extensions_mut().insert(Authenticated);
     let mut response = next.run(req).await;
     if page && response.status().is_success() {
         // The page's URL names the session: never cache it, and never send

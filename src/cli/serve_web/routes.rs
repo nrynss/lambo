@@ -12,7 +12,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use serde::Serialize;
 
-use super::auth::guard;
+use super::auth::{gate, host_guard};
 use super::dto::{
     GraphEdge, GraphNode, GraphResponse, InspectParams, InspectResponse, Pulse, RecallParams,
     RecallResponse, SessionInfo, SinceParams,
@@ -445,12 +445,15 @@ pub(super) async fn api_graph(State(state): State<Arc<AppState>>, ctx: SessionCt
 /// with a pen. A new path must also be added to the tests' `ROUTES` list, which
 /// `routes_constant_covers_every_registered_route` enforces.
 ///
-/// The routes are the outer router's fallback service, so the two layers
-/// over it run on **every** request before routing, in this order: `guard`
-/// (the bearer token, when one is configured) and then `resolve_session`
-/// (which session the request may read, `super::scope`). A layer over the
-/// routes themselves would run only after routing, too late to decide the
-/// session for an unrouted method or path.
+/// The routes are the outer router's fallback service, so the two outer
+/// layers run on **every** request before routing, in this order:
+/// `host_guard` (the DNS-rebinding `Host` check) and `resolve_session`
+/// (for `/s/{session}/...`: the bearer, then which session, `super::scope`).
+/// A layer over the routes runs only after routing, too late to decide the
+/// session for an unrouted method or path. The `gate` over the routes is
+/// the bearer check for every unscoped path, where it has always been (so
+/// its 401 is unchanged byte for byte), and gives the aliases the default
+/// session.
 pub(super) fn router(state: Arc<AppState>) -> Router {
     let routes = Router::new()
         .route("/", get(index))
@@ -464,6 +467,7 @@ pub(super) fn router(state: Arc<AppState>) -> Router {
         .route("/api/events", get(api_events))
         .route("/api/stats", get(api_stats))
         .route("/api/pulse", get(api_pulse))
+        .layer(middleware::from_fn_with_state(state.clone(), gate))
         .with_state(state.clone());
     Router::new()
         .fallback_service(routes)
@@ -471,5 +475,5 @@ pub(super) fn router(state: Arc<AppState>) -> Router {
             state.clone(),
             resolve_session,
         ))
-        .layer(middleware::from_fn_with_state(state, guard))
+        .layer(middleware::from_fn_with_state(state, host_guard))
 }
