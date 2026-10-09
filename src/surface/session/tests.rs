@@ -596,3 +596,35 @@ fn an_authority_authorizes_against_its_hosted_sessions() {
         RefusalReason::Malformed
     );
 }
+
+/// #32 PR 5 review L2: a presented credential over
+/// `MAX_BEARER_CREDENTIAL_BYTES` is refused before the scan, so even a
+/// configured secret that long (which the serve refuses at startup) cannot
+/// be matched, while one at the cap still is. Mutation: drop the length
+/// check and the over-cap secret authenticates.
+#[test]
+fn a_presented_credential_over_the_cap_is_refused_unread() {
+    use crate::surface::bearer::MAX_BEARER_CREDENTIAL_BYTES;
+    let at_cap = "a".repeat(MAX_BEARER_CREDENTIAL_BYTES);
+    let over_cap = "b".repeat(MAX_BEARER_CREDENTIAL_BYTES + 1);
+    let authority = SessionAuthority::with_credentials(
+        [
+            (Plain(at_cap.clone().into_bytes()), grant_for("at", "lambo")),
+            (
+                Plain(over_cap.clone().into_bytes()),
+                grant_for("over", "lambo"),
+            ),
+        ],
+        hosted(),
+    );
+    let at = authority
+        .authenticate(Some(&format!("Bearer {at_cap}")))
+        .expect("a credential at the cap is compared");
+    assert_eq!(at.name(), "at");
+    assert!(
+        authority
+            .authenticate(Some(&format!("Bearer {over_cap}")))
+            .is_none(),
+        "a credential over the cap is never compared"
+    );
+}

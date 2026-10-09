@@ -11,7 +11,7 @@
 
 use std::net::IpAddr;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 
@@ -62,6 +62,11 @@ impl SecretToken {
     /// almost always an unset variable that expanded to nothing, and treating it
     /// as a valid credential would authenticate every request that sends
     /// `Authorization: Bearer `.
+    ///
+    /// Also reject a token longer than
+    /// [`MAX_BEARER_CREDENTIAL_BYTES`](crate::surface::bearer::MAX_BEARER_CREDENTIAL_BYTES)
+    /// (#32 PR 5 review L2): every presented credential over that length is
+    /// refused unread, so such a token could never authenticate anything.
     pub fn new(raw: impl Into<String>) -> Result<Self, String> {
         let raw = raw.into();
         if raw.trim().is_empty() {
@@ -70,6 +75,12 @@ impl SecretToken {
                         run unauthenticated on loopback"
                     .into(),
             );
+        }
+        if raw.len() > crate::surface::bearer::MAX_BEARER_CREDENTIAL_BYTES {
+            return Err(format!(
+                "auth token is longer than {} bytes, so no request could present it",
+                crate::surface::bearer::MAX_BEARER_CREDENTIAL_BYTES
+            ));
         }
         Ok(Self(raw))
     }
@@ -351,6 +362,57 @@ pub(super) fn credential_share(max_sessions: usize, credentials: usize) -> usize
     (max_sessions / credentials.max(1)).max(1)
 }
 
+/// How often the guard logs a refused bearer token at WARN (#32 PR 5 review
+/// L2): once per window, with the count of refusals it held back.
+pub(super) const REFUSAL_WARN_WINDOW: Duration = Duration::from_secs(10);
+
+/// One WARN line per [`REFUSAL_WARN_WINDOW`] for unauthenticated requests
+/// (#32 PR 5 review L2).
+///
+/// A 401 is answered before the rate limit (an unauthenticated caller must
+/// not spend anyone's budget), so nothing bounded how many of them a caller
+/// could send, and each one wrote a WARN line: a flood of bad tokens was a
+/// log flood. Now the first refusal in a window is logged at WARN, carrying
+/// how many were held back since the last one, and the rest at DEBUG.
+pub(super) struct RefusalLog {
+    window: Duration,
+    state: parking_lot::Mutex<RefusalState>,
+}
+
+struct RefusalState {
+    last_warned: Option<Instant>,
+    held_back: u64,
+}
+
+impl RefusalLog {
+    pub(super) fn new(window: Duration) -> Self {
+        Self {
+            window,
+            state: parking_lot::Mutex::new(RefusalState {
+                last_warned: None,
+                held_back: 0,
+            }),
+        }
+    }
+
+    /// Note one refusal at `now`: `Some(held_back)` when it should be
+    /// logged at WARN (and how many were held back before it), `None` when
+    /// it falls inside the current window.
+    pub(super) fn note_at(&self, now: Instant) -> Option<u64> {
+        let mut state = self.state.lock();
+        let due = state
+            .last_warned
+            .is_none_or(|last| now.saturating_duration_since(last) >= self.window);
+        if due {
+            state.last_warned = Some(now);
+            Some(std::mem::take(&mut state.held_back))
+        } else {
+            state.held_back += 1;
+            None
+        }
+    }
+}
+
 /// How many MCP sessions are live right now.
 ///
 /// A trait so the cap is testable without standing up a real transport:
@@ -391,6 +453,8 @@ pub(crate) struct HttpGuard {
     pub(super) live: Arc<dyn LiveSessions>,
     /// Each credential's request-rate bucket; `None` when disabled.
     pub(super) rate: Option<Arc<CredentialRates>>,
+    /// The throttle on the 401's WARN line.
+    pub(super) refusals: Arc<RefusalLog>,
 }
 
 impl HttpGuard {
@@ -410,6 +474,7 @@ impl HttpGuard {
             credential_sessions,
             live,
             rate: CredentialRates::new(rate_limit_rps).map(Arc::new),
+            refusals: Arc::new(RefusalLog::new(REFUSAL_WARN_WINDOW)),
         }
     }
 }
@@ -493,11 +558,19 @@ pub(super) async fn guard_request(
     let Some(grant) = guard.authority.authenticate(presented) else {
         // Deliberately terse and identical for "no header" and "wrong
         // token": the difference is not the caller's business, and the
-        // token itself is never echoed.
-        tracing::warn!(
-            had_header = presented.is_some(),
-            "mcp http: rejected an unauthenticated request"
-        );
+        // token itself is never echoed. Throttled (#32 PR 5 review L2).
+        match guard.refusals.note_at(Instant::now()) {
+            Some(held_back) => tracing::warn!(
+                had_header = presented.is_some(),
+                held_back,
+                "mcp http: rejected an unauthenticated request (held_back: refusals not logged \
+                 at WARN since the last one)"
+            ),
+            None => tracing::debug!(
+                had_header = presented.is_some(),
+                "mcp http: rejected an unauthenticated request"
+            ),
+        }
         return (
             StatusCode::UNAUTHORIZED,
             [(axum::http::header::WWW_AUTHENTICATE, "Bearer")],

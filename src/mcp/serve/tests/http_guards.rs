@@ -608,3 +608,51 @@ fn one_credential_keeps_the_whole_cap() {
     let local = guard_with(None, 32, 0, 50);
     assert_eq!(local.credential_sessions, 32);
 }
+
+// -----------------------------------------------------------------------
+// #32 PR 5 review L2: bounded work and logging for bad tokens
+// -----------------------------------------------------------------------
+
+/// A configured token over the presented-credential cap could never be
+/// presented, so it is refused when it is made (and so at startup); one at
+/// the cap is accepted.
+#[test]
+fn a_token_over_the_credential_cap_is_refused() {
+    use crate::surface::bearer::MAX_BEARER_CREDENTIAL_BYTES;
+    assert!(SecretToken::new("t".repeat(MAX_BEARER_CREDENTIAL_BYTES)).is_ok());
+    let err =
+        SecretToken::new("t".repeat(MAX_BEARER_CREDENTIAL_BYTES + 1)).expect_err("over the cap");
+    assert!(err.contains("4096"), "{err}");
+    assert!(!err.contains("ttt"), "the value is never quoted: {err}");
+}
+
+/// The 401's WARN line: the first refusal in a window is logged with the
+/// count held back before it, the rest of the window is not.
+#[test]
+fn the_refusal_warning_is_logged_once_per_window() {
+    let log = RefusalLog::new(Duration::from_secs(10));
+    let t0 = Instant::now();
+    assert_eq!(log.note_at(t0), Some(0));
+    for i in 1..=5 {
+        assert_eq!(log.note_at(t0 + Duration::from_secs(i)), None);
+    }
+    assert_eq!(log.note_at(t0 + Duration::from_secs(10)), Some(5));
+    assert_eq!(log.note_at(t0 + Duration::from_secs(11)), None);
+    assert_eq!(log.note_at(t0 + Duration::from_secs(25)), Some(1));
+}
+
+/// On the request path: an oversized bearer header is the ordinary 401.
+#[tokio::test]
+async fn an_oversized_bearer_is_the_ordinary_401() {
+    let (addr, reached) = spawn_guarded(guard_with(Some("s3cret"), 32, 0, 0)).await;
+    let long = format!(
+        "Bearer {}",
+        "x".repeat(crate::surface::bearer::MAX_BEARER_CREDENTIAL_BYTES + 1)
+    );
+    let (status, long_body) = request(addr, &post(Some(&long), None)).await;
+    let (_, wrong_body) = request(addr, &post(Some("Bearer wrong"), None)).await;
+    assert_eq!(status, 401);
+    let tail = |b: &str| b.split_once("\r\n\r\n").map(|(_, t)| t.to_string());
+    assert_eq!(tail(&long_body), tail(&wrong_body));
+    assert_eq!(reached.load(std::sync::atomic::Ordering::SeqCst), 0);
+}

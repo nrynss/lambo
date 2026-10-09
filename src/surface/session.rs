@@ -570,6 +570,10 @@ impl<T: BearerSecret> SessionAuthority<T> {
         // empty one, which matches nothing), so "no header" and "wrong
         // token" cost the same.
         let presented = crate::surface::bearer::bearer_credential(header).unwrap_or_default();
+        // Over the fixed cap: refused before the scan (#32 PR 5 review L2).
+        if presented.len() > crate::surface::bearer::MAX_BEARER_CREDENTIAL_BYTES {
+            return None;
+        }
         let index = crate::surface::bearer::match_any(
             presented.as_bytes(),
             self.credentials

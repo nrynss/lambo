@@ -77,6 +77,17 @@ fn fold_diff(presented: &[u8], expected: &[u8], mut on_step: impl FnMut()) -> u6
     diff
 }
 
+/// The longest bearer credential any surface compares (#32 PR 5 review L2):
+/// 4 KiB, far above any real token.
+///
+/// A presented credential over it is refused before the comparison, so an
+/// unauthenticated caller cannot buy `credentials × header length` of
+/// comparison work per request with a header near hyper's limit. The cap is
+/// a constant, independent of every secret, so refusing on it reveals
+/// nothing; a configured secret over it could never be presented, and the
+/// serve refuses one at startup.
+pub(crate) const MAX_BEARER_CREDENTIAL_BYTES: usize = 4 * 1024;
+
 /// The credential an `Authorization` header value carries, if it is a
 /// bearer one.
 ///
