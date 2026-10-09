@@ -47,6 +47,15 @@ fn token_comparison_is_correct_including_lengths() {
     );
 }
 
+/// The serve's bearer check: does the credential set of a serve whose only
+/// credential is `expected` (the legacy token) accept `header`? Since #32
+/// PR 5 that set is what `guard_request` asks.
+fn bearer_ok(header: Option<&str>, expected: &SecretToken) -> bool {
+    legacy_authority(Some(expected.clone()))
+        .authenticate(header)
+        .is_some()
+}
+
 /// The `Authorization` header parse: scheme case-insensitive per RFC 7235,
 /// credential exact.
 #[test]
@@ -200,7 +209,7 @@ impl LiveSessions for FakeSessions {
 
 fn guard_with(auth: Option<&str>, max_sessions: usize, live: usize, rps: u32) -> HttpGuard {
     HttpGuard {
-        auth: auth.map(|t| SecretToken::new(t).expect("valid")),
+        authority: legacy_authority(auth.map(|t| SecretToken::new(t).expect("valid"))),
         max_sessions,
         live: Arc::new(FakeSessions(live)),
         rate: RateLimiter::new(rps, Instant::now()).map(Arc::new),

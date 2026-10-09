@@ -4,7 +4,10 @@
 //!
 //! The comparison itself is `crate::surface::bearer`'s, shared with the web
 //! portal; this module owns the serve-side token type, its environment
-//! precedence and the order the checks run in.
+//! precedence and the order the checks run in. Since #32 PR 5 the bearer
+//! check resolves the request's credential among every configured one
+//! (`super::authority`) and hands its grant to the router, which checks the
+//! session scope.
 
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -12,6 +15,7 @@ use std::time::Instant;
 
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 
+use super::authority::{Authenticated, ServeAuthority};
 use super::Transport;
 use crate::types::LamboError;
 
@@ -70,6 +74,7 @@ impl SecretToken {
         Ok(Self(raw))
     }
 
+    /// The secret, for the constant-time comparison only.
     pub(super) fn as_bytes(&self) -> &[u8] {
         self.0.as_bytes()
     }
@@ -87,15 +92,6 @@ impl std::str::FromStr for SecretToken {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Self::new(s)
     }
-}
-
-/// Does an `Authorization` header value carry the expected bearer token?
-///
-/// The scheme is matched case-insensitively (RFC 7235 §2.1); the credential
-/// itself is compared byte-for-byte in constant time. The parse and the
-/// comparison are `crate::surface::bearer`'s, shared with the web portal (#28).
-pub(super) fn bearer_ok(header: Option<&str>, expected: &SecretToken) -> bool {
-    crate::surface::bearer::bearer_ok(header, expected.as_bytes())
 }
 
 /// Resolve the effective token from the flag and the environment.
@@ -201,6 +197,12 @@ pub(super) fn resolve_auth_token_from(
 /// the election for up to `ELECTION_BUDGET`, must stay killable by a plain
 /// SIGTERM (J2-R1-7), and it holds nothing — no lease, no tail, no graph — that
 /// a handler could save. J6 adds no member to this group and takes none away.
+///
+/// ## What #32 PR 5 changed
+///
+/// `token` is now *any* credential the serve has (`authority::any_credential`):
+/// the legacy token or a configured `[[serve.credential]]`. Either one means
+/// every request must present a bearer token, so either satisfies the rule.
 pub(super) fn authorize_bind(
     transport: Transport,
     bind: IpAddr,
@@ -211,9 +213,9 @@ pub(super) fn authorize_bind(
     }
     Err(LamboError::Config(format!(
         "refusing to start: --transport http --bind {bind} exposes an unauthenticated MCP \
-         *writer* beyond loopback. Set {AUTH_TOKEN_ENV} (or pass --auth-token) to require \
-         'Authorization: Bearer <token>' on every request, or bind 127.0.0.1 and reach it \
-         through a tunnel or an authenticating proxy."
+         *writer* beyond loopback. Set {AUTH_TOKEN_ENV} (or pass --auth-token), or configure a \
+         [[serve.credential]] in lambo.toml, to require 'Authorization: Bearer <token>' on every \
+         request, or bind 127.0.0.1 and reach it through a tunnel or an authenticating proxy."
     )))
 }
 
@@ -298,10 +300,11 @@ impl LiveSessions for LocalSessionManager {
     }
 }
 
-/// The three checks every HTTP request passes before it reaches rmcp.
+/// The checks every HTTP request passes before it reaches rmcp.
 #[derive(Clone)]
 pub(crate) struct HttpGuard {
-    pub(super) auth: Option<SecretToken>,
+    /// Who may call at all, and as which credential (#32 PR 5).
+    pub(super) authority: Arc<ServeAuthority>,
     pub(super) max_sessions: usize,
     pub(super) live: Arc<dyn LiveSessions>,
     pub(super) rate: Option<Arc<RateLimiter>>,
@@ -362,6 +365,14 @@ fn how_to_close(path: &str) -> String {
 /// vs 401 difference would leak how loaded the server is), and it must be
 /// refused before rmcp sees the request at all — before any session is minted,
 /// any worker task spawned, or any body parsed.
+///
+/// Since #32 PR 5 authentication resolves *which* credential called
+/// ([`ServeAuthority::authenticate`], a constant-time scan over every
+/// configured one) and attaches its grant to the request as
+/// [`Authenticated`]; the router checks that grant's scope before it looks
+/// a session up. Nothing here depends on the addressed session, so every
+/// answer from this guard (401, 429, the cap's 503, 413) is the same for
+/// every session id.
 pub(super) async fn guard_request(
     axum::extract::State(guard): axum::extract::State<HttpGuard>,
     req: axum::extract::Request,
@@ -370,27 +381,27 @@ pub(super) async fn guard_request(
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
 
-    if let Some(expected) = &guard.auth {
-        let presented = req
-            .headers()
-            .get(axum::http::header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok());
-        if !bearer_ok(presented, expected) {
-            // Deliberately terse and identical for "no header" and "wrong
-            // token": the difference is not the caller's business, and the
-            // token itself is never echoed.
-            tracing::warn!(
-                had_header = presented.is_some(),
-                "mcp http: rejected an unauthenticated request"
-            );
-            return (
-                StatusCode::UNAUTHORIZED,
-                [(axum::http::header::WWW_AUTHENTICATE, "Bearer")],
-                "unauthorized: this endpoint requires 'Authorization: Bearer <token>'\n",
-            )
-                .into_response();
-        }
-    }
+    let presented = req
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok());
+    let Some(grant) = guard.authority.authenticate(presented) else {
+        // Deliberately terse and identical for "no header" and "wrong
+        // token": the difference is not the caller's business, and the
+        // token itself is never echoed.
+        tracing::warn!(
+            had_header = presented.is_some(),
+            "mcp http: rejected an unauthenticated request"
+        );
+        return (
+            StatusCode::UNAUTHORIZED,
+            [(axum::http::header::WWW_AUTHENTICATE, "Bearer")],
+            "unauthorized: this endpoint requires 'Authorization: Bearer <token>'\n",
+        )
+            .into_response();
+    };
+    let mut req = req;
+    req.extensions_mut().insert(Authenticated(grant));
 
     if let Some(rate) = &guard.rate
         && !rate.try_acquire()

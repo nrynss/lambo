@@ -641,7 +641,8 @@ fn token_env_must_be_a_conventional_variable_name() {
 }
 
 /// #32 PR 4: over HTTP `sessions`, `default_session` and `max_attached` are
-/// enforced, so a table with only those raises no notice; every key still
+/// enforced (and `[[serve.credential]]` since PR 5), so a table with only
+/// those raises no notice; every key still
 /// parsed but not enforced is named, each its own entry (never its value).
 #[test]
 fn only_unenforced_keys_raise_the_notice() {
@@ -661,14 +662,25 @@ fn only_unenforced_keys_raise_the_notice() {
          [[serve.credential]]\nname = \"agents\"\ntoken_env = \"LAMBO_T32_KEYS\"\nsessions = [\"a\"]\n",
     )
     .expect("parse");
+    // `[[serve.credential]]` is enforced since #32 PR 5 (HTTP; stdio
+    // authenticates nobody), so it is never listed.
     assert_eq!(
         rest.serve.unenforced_keys(false),
         vec![
-            "[[serve.credential]]",
             "[[serve.projects]]",
             "attach_concurrency",
             "idle_detach_secs",
             "per_session_rps",
         ]
     );
+    let credential_only = parse(
+        "[[serve.credential]]\nname = \"agents\"\ntoken_env = \"LAMBO_T32_KEYS\"\nsessions = [\"a\"]\n",
+    )
+    .expect("parse");
+    for stdio in [false, true] {
+        assert!(
+            credential_only.serve.unenforced_keys(stdio).is_empty(),
+            "stdio={stdio}"
+        );
+    }
 }

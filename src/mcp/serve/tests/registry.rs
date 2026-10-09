@@ -19,7 +19,6 @@ use crate::mcp::serve::pinned::check_pinned;
 use crate::mcp::serve::registry::{
     is_transient, Acquired, LeaseLossPolicy, SessionAttacher, SessionRegistry, PINNED_RETRY,
 };
-use crate::mcp::serve::transport::session_router;
 use crate::store::{GraphStore, MemoryStore, StoreConfig};
 use crate::types::EmbeddingContract;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -116,14 +115,36 @@ fn new_registry(
 
 /// Serve `registry` behind the real guards on a loopback port.
 async fn serve_router(registry: &Arc<SessionRegistry>, max_sessions: usize) -> SocketAddr {
+    // The implicit `local` credential: a loopback serve with none configured.
+    let mut opts = ServeOptions::new(registry.hosted()[0].as_str(), "agent-a");
+    opts.sessions = registry.hosted().to_vec();
+    opts.transport = Transport::Http;
+    serve_app(guarded_app(
+        Arc::clone(registry),
+        authority_for(&opts),
+        max_sessions,
+    ))
+    .await
+}
+
+/// The serve's app over `registry` with `authority`, behind the real
+/// guards with no rate limit.
+fn guarded_app(
+    registry: Arc<SessionRegistry>,
+    authority: Arc<ServeAuthority>,
+    max_sessions: usize,
+) -> axum::Router {
     let guard = HttpGuard {
-        auth: None,
+        authority: Arc::clone(&authority),
         max_sessions,
         live: registry.clone(),
         rate: None,
     };
-    let app = session_router(Arc::clone(registry))
-        .layer(axum::middleware::from_fn_with_state(guard, guard_request));
+    crate::mcp::serve::transport::http_app(registry, authority, guard)
+}
+
+/// Serve `app` on a loopback port the kernel picks.
+async fn serve_app(app: axum::Router) -> SocketAddr {
     let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
         .await
         .expect("bind ephemeral port");

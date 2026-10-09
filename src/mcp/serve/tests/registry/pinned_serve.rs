@@ -210,7 +210,8 @@ impl PinnedServe {
         };
         let opts = pinned_opts(sessions, tweak);
         let backends = backends_over(Shared::over(store), fast_config(1_000));
-        let task = tokio::spawn(serve_pinned_with(opts, backends, seams));
+        let authority = authority_for(&opts);
+        let task = tokio::spawn(serve_pinned_with(opts, backends, authority, seams));
         let registry = tokio::time::timeout(Duration::from_secs(20), rx)
             .await
             .expect("the serve starts")
@@ -480,7 +481,12 @@ async fn a_pinned_session_that_cannot_attach_refuses_the_start_and_releases_the_
     let backends = backends_over(Shared::over(&store), fast_config(1_000));
     let err = tokio::time::timeout(
         Duration::from_secs(20),
-        serve_pinned_with(opts, backends, PinnedSeams::default()),
+        serve_pinned_with(
+            opts.clone(),
+            backends,
+            authority_for(&opts),
+            PinnedSeams::default(),
+        ),
     )
     .await
     .expect("the refusal is prompt")

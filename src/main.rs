@@ -495,15 +495,21 @@ struct ServePlan {
     transport: Transport,
     pinned: PinnedSessions,
     file: LamboFile,
+    /// The legacy token, `LAMBO_AUTH_TOKEN` over `--auth-token` (T8.7).
+    auth_token: Option<lambo::mcp::SecretToken>,
+    /// The resolved `[[serve.credential]]` entries (#32 PR 5); HTTP only.
+    credentials: Vec<lambo::config::ServeCredential>,
 }
 
 /// `lambo serve`'s checks that need no backend (#32 PR 4), run before the
 /// resolve so a usage error costs no model load: the transport, the stdio
-/// session rule, the pinned sessions over HTTP, and the `[serve]` notice.
-/// `Err` carries the exit code; the message is already printed.
+/// session rule, the pinned sessions over HTTP, the credentials (#32 PR 5)
+/// and the `[serve]` notice. `Err` carries the exit code; the message is
+/// already printed.
 fn serve_preflight(
     session: &[String],
     transport: &str,
+    auth_token: Option<lambo::mcp::SecretToken>,
     config: Option<&std::path::Path>,
 ) -> Result<ServePlan, ExitCode> {
     // Diagnostics to stderr, before anything can log: under
@@ -538,6 +544,33 @@ fn serve_preflight(
             return Err(ExitCode::from(2));
         }
     };
+    // Env beats flag (T8.7), resolved before any of it reaches a log line.
+    // A set-but-empty LAMBO_AUTH_TOKEN is a usage error, not a silent
+    // fallback to the flag.
+    let auth_token = match lambo::mcp::resolve_auth_token(auth_token) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("lambo serve: {e}");
+            return Err(ExitCode::from(2));
+        }
+    };
+    // #32 PR 5: `[[serve.credential]]` tokens, read from their variables
+    // here so an unset one costs no model load. HTTP only: a stdio serve
+    // authenticates nobody (its client owns the process), so a stdio client
+    // sharing this lambo.toml does not need the HTTP serve's secrets.
+    let credentials = if transport == Transport::Http {
+        match file.serve.resolve_credentials().and_then(|creds| {
+            lambo::mcp::check_serve_credentials(auth_token.as_ref(), &creds).map(|()| creds)
+        }) {
+            Ok(creds) => creds,
+            Err(e) => {
+                eprintln!("lambo serve: {e}");
+                return Err(ExitCode::from(2));
+            }
+        }
+    } else {
+        Vec::new()
+    };
     // `[serve]`: the keys this serve does not enforce yet are named once
     // (#32 PR 1 review L3); never a value.
     file.serve.warn_if_unenforced(transport == Transport::Stdio);
@@ -545,6 +578,8 @@ fn serve_preflight(
         transport,
         pinned,
         file,
+        auth_token,
+        credentials,
     })
 }
 
@@ -628,8 +663,11 @@ fn main() -> ExitCode {
     // `lambo serve`'s usage checks, before any backend is built (#32 PR 4).
     let mut serve_plan = match &cmd {
         Commands::Serve {
-            session, transport, ..
-        } => match serve_preflight(session, transport, config) {
+            session,
+            transport,
+            auth_token,
+            ..
+        } => match serve_preflight(session, transport, auth_token.clone(), config) {
             Ok(plan) => Some(plan),
             Err(code) => return code,
         },
@@ -667,7 +705,7 @@ fn main() -> ExitCode {
                 transport: _,
                 port,
                 bind,
-                auth_token,
+                auth_token: _,
                 max_sessions,
                 rate_limit_rps,
                 allow_embedding_mismatch: _,
@@ -678,19 +716,15 @@ fn main() -> ExitCode {
         ) => {
             // Tracing is up, the transport parsed and the sessions pinned:
             // `serve_preflight`, before the backends were built.
+            // The legacy token and the credentials were resolved there too
+            // (#32 PR 5).
             let ServePlan {
-                transport, pinned, ..
+                transport,
+                pinned,
+                auth_token,
+                credentials,
+                ..
             } = serve_plan.expect("serve_preflight ran for serve");
-            // Env beats flag (T8.7) — resolved here, before any of it reaches a
-            // log line. A set-but-empty LAMBO_AUTH_TOKEN is a usage error, not
-            // a silent fallback to the flag.
-            let auth_token = match lambo::mcp::resolve_auth_token(auth_token) {
-                Ok(t) => t,
-                Err(e) => {
-                    eprintln!("lambo serve: {e}");
-                    return ExitCode::from(2);
-                }
-            };
             // A zero `--ledger-heartbeat` would spin the heartbeat loop as fast
             // as the executor allows, which is a flood, not a heartbeat. The
             // refusal used to live here and now lives in
@@ -707,6 +741,7 @@ fn main() -> ExitCode {
                 port,
                 bind,
                 auth_token,
+                credentials,
                 max_sessions,
                 rate_limit_rps,
                 ledger,

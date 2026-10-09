@@ -77,27 +77,72 @@ fn fold_diff(presented: &[u8], expected: &[u8], mut on_step: impl FnMut()) -> u6
     diff
 }
 
+/// The credential an `Authorization` header value carries, if it is a
+/// bearer one.
+///
+/// The scheme is matched case-insensitively (RFC 7235 §2.1) and surrounding
+/// whitespace is trimmed; anything else (no header, another scheme, a scheme
+/// with nothing after it) is `None`. The credential is returned as sent, for
+/// a constant-time comparison by the caller.
+pub(crate) fn bearer_credential(header: Option<&str>) -> Option<&str> {
+    let (scheme, credential) = header?.trim().split_once(' ')?;
+    scheme
+        .eq_ignore_ascii_case("bearer")
+        .then(|| credential.trim())
+}
+
 /// Does an `Authorization` header value carry the expected bearer token?
 ///
 /// The scheme is matched case-insensitively (RFC 7235 §2.1); the credential
 /// itself is compared byte-for-byte in constant time by [`tokens_match`].
 pub(crate) fn bearer_ok(header: Option<&str>, expected: &[u8]) -> bool {
-    let Some(raw) = header else {
-        return false;
-    };
-    let raw = raw.trim();
-    let Some((scheme, credential)) = raw.split_once(' ') else {
-        return false;
-    };
-    if !scheme.eq_ignore_ascii_case("bearer") {
-        return false;
+    bearer_credential(header)
+        .is_some_and(|credential| tokens_match(credential.as_bytes(), expected))
+}
+
+/// Which of several expected tokens `presented` is, compared against
+/// **every** one with no early exit (#32 design §6.1).
+///
+/// A serve configured with several credentials must not let response timing
+/// say which one a guess nearly matched, or how far down the list the match
+/// was: each comparison is [`tokens_match`] (constant in the secret), every
+/// entry is compared whether or not an earlier one matched, and the winning
+/// index is folded in with a mask rather than a branch. The time taken
+/// therefore depends on the number of credentials and the presented length,
+/// both of which the caller already knows or controls.
+///
+/// At most one entry can match when the tokens are distinct, which the
+/// credential resolver guarantees; were two equal, the last would win.
+pub(crate) fn match_any<'a>(
+    presented: &[u8],
+    expected: impl IntoIterator<Item = &'a [u8]>,
+) -> Option<usize> {
+    scan(presented, expected, || {})
+}
+
+/// The loop behind [`match_any`]. `on_compare` runs once per comparison and
+/// does nothing in production; the unit tests count with it to pin that the
+/// scan visits every entry whichever one matches.
+fn scan<'a>(
+    presented: &[u8],
+    expected: impl IntoIterator<Item = &'a [u8]>,
+    mut on_compare: impl FnMut(),
+) -> Option<usize> {
+    // `usize::MAX` is "no match": no list is that long.
+    let mut found = usize::MAX;
+    for (i, candidate) in expected.into_iter().enumerate() {
+        on_compare();
+        let hit = std::hint::black_box(tokens_match(presented, candidate));
+        // All ones on a hit, zero otherwise: select `i` without branching.
+        let mask = usize::from(hit).wrapping_neg();
+        found = (found & !mask) | (i & mask);
     }
-    tokens_match(credential.trim().as_bytes(), expected)
+    (std::hint::black_box(found) != usize::MAX).then_some(found)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{bearer_ok, fold_diff, tokens_match};
+    use super::{bearer_credential, bearer_ok, fold_diff, match_any, scan, tokens_match};
 
     /// Every acceptance case in one table: `true` only for a byte-equal,
     /// equal-length, non-empty token.
@@ -208,5 +253,49 @@ mod tests {
         assert_ne!(fold_diff(b"s3cr", b"s3cret", || {}), 0);
         assert_ne!(fold_diff(b"s3crex", b"s3cret", || {}), 0);
         assert_ne!(fold_diff(b"s3crets3cret", b"s3cret", || {}), 0);
+    }
+
+    /// #32 §6.1: the scan answers which credential matched, or none.
+    #[test]
+    fn match_any_finds_the_one_matching_entry() {
+        let secrets: [&[u8]; 3] = [b"first-secret", b"second-secret", b"third-secret"];
+        let cases: &[(&[u8], Option<usize>, &str)] = &[
+            (b"first-secret", Some(0), "first"),
+            (b"second-secret", Some(1), "middle"),
+            (b"third-secret", Some(2), "last"),
+            (b"second-secre", None, "a prefix of one entry"),
+            (b"second-secrets", None, "one entry plus a suffix"),
+            (b"", None, "empty"),
+            (b"unrelated", None, "no entry"),
+        ];
+        for (presented, want, label) in cases {
+            assert_eq!(match_any(presented, secrets), *want, "{label}");
+        }
+        assert_eq!(match_any(b"anything", []), None, "no credentials");
+        assert_eq!(match_any(b"x", [b"".as_slice()]), None, "an empty secret");
+    }
+
+    /// The property the scan exists for: every entry is compared whichever
+    /// one matches, and when none does, so the number of comparisons never
+    /// says where in the list a token sits. An early `return Some(i)` keeps
+    /// every answer above and fails here.
+    #[test]
+    fn the_scan_compares_every_entry_whatever_matches() {
+        let secrets: [&[u8]; 4] = [b"aaaa", b"bbbb", b"cccc", b"dddd"];
+        for presented in [b"aaaa".as_slice(), b"cccc", b"dddd", b"zzzz", b""] {
+            let mut compares = 0usize;
+            scan(presented, secrets, || compares += 1);
+            assert_eq!(compares, secrets.len(), "{presented:?}");
+        }
+    }
+
+    /// The header parse on its own: the credential as sent, or `None`.
+    #[test]
+    fn bearer_credential_returns_the_credential_of_a_bearer_header() {
+        assert_eq!(bearer_credential(Some("Bearer abc")), Some("abc"));
+        assert_eq!(bearer_credential(Some(" bearer  abc ")), Some("abc"));
+        assert_eq!(bearer_credential(Some("Basic abc")), None);
+        assert_eq!(bearer_credential(Some("Bearer")), None);
+        assert_eq!(bearer_credential(None), None);
     }
 }
