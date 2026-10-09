@@ -90,7 +90,7 @@ aws-config = { version = "1", optional = true, features = ["credentials-login"] 
 aws-sdk-bedrockruntime = { version = "1", optional = true }
 jsonwebtoken = { version = "9", optional = true }
 # #22 follow-up (22g): EG2 canonicalizes an image whose longer side exceeds
-# 768 px (decode, Catmull-Rom downscale, lossless PNG) so its vector does not
+# 768 px (decode, Lanczos3 downscale, lossless PNG) so its vector does not
 # depend on the submitted size. Only the three accepted formats; no rayon, no
 # other codecs. Optional, pulled in by `embed-eg2` only.
 image = { version = "0.25.10", optional = true, default-features = false, features = ["png", "jpeg", "webp"] }
