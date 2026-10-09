@@ -201,20 +201,6 @@ struct SlotState {
     warned_mismatch: bool,
 }
 
-impl SlotState {
-    fn last_outcome(&self) -> Result<Arc<SessionView>, CliError> {
-        match (&self.failure, &self.ready) {
-            (Some(failure), _) => Err(failure.to_error()),
-            (None, Some(view)) => Ok(view.clone()),
-            // Only eviction clears `ready`, and it never evicts the session a
-            // load has just finished for; answer a retryable error anyway.
-            (None, None) => Err(CliError::Runtime(
-                "serve-web: the session view was dropped before it could be served; retry".into(),
-            )),
-        }
-    }
-}
-
 /// One served session's slot. Never removed: eviction clears `ready` only.
 struct Slot {
     /// Single-flight: one loader at a time; joiners wait here.
@@ -310,7 +296,15 @@ impl ViewCache {
             // A load finished while this request queued: take its outcome
             // rather than loading again (single-flight, TTL 0 included).
             if state.completed > arrived {
-                return state.last_outcome();
+                match (&state.failure, &state.ready) {
+                    (Some(failure), _) => return Err(failure.to_error()),
+                    (None, Some(view)) => return Ok(view.clone()),
+                    // Another session's load evicted this view between its
+                    // load finishing and this request taking the gate (more
+                    // active sessions than `max_loaded_sessions`). Not an
+                    // error: load it again below, still under the gate.
+                    (None, None) => {}
+                }
             }
             if let Some(view) = &state.ready
                 && view.fresh(self.bounds.ttl)

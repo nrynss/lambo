@@ -5,11 +5,17 @@
 //! full session loads a request costs.
 
 use super::*;
+use std::future::Future;
+use std::pin::{pin, Pin};
 use std::sync::atomic::AtomicBool;
+use std::task::{Context, Poll, Waker};
+use tokio::sync::Semaphore;
 
 /// [`Shared`], counting `load_session` and `preflight_schema` calls. `fail`
-/// makes every load answer a backend error; `delay` holds each load open so
-/// concurrent requests provably overlap it.
+/// makes every load answer a backend error; `delay` holds each load open.
+/// A [`LoadCounting::park`]ed session's loads wait for a
+/// [`LoadCounting::release`], so a test decides exactly when each load
+/// finishes instead of racing a timer.
 #[derive(Clone)]
 struct LoadCounting {
     inner: Shared,
@@ -17,6 +23,7 @@ struct LoadCounting {
     preflights: Arc<AtomicUsize>,
     fail: Arc<AtomicBool>,
     delay: Duration,
+    parked: Arc<parking_lot::Mutex<std::collections::HashMap<SessionId, Arc<Semaphore>>>>,
 }
 
 impl LoadCounting {
@@ -27,11 +34,25 @@ impl LoadCounting {
             preflights: Arc::new(AtomicUsize::new(0)),
             fail: Arc::new(AtomicBool::new(false)),
             delay: Duration::ZERO,
+            parked: Arc::default(),
         }
     }
 
     fn loads(&self) -> usize {
         self.loads.load(Ordering::SeqCst)
+    }
+
+    /// From now on, every load of `session` waits for a [`Self::release`].
+    fn park(&self, session: &str) {
+        self.parked
+            .lock()
+            .insert(SessionId::new(session), Arc::new(Semaphore::new(0)));
+    }
+
+    /// Let `n` parked loads of `session` proceed.
+    fn release(&self, session: &str, n: usize) {
+        let gate = self.parked.lock().get(&SessionId::new(session)).cloned();
+        gate.expect("the session is parked").add_permits(n);
     }
 }
 
@@ -55,6 +76,10 @@ impl GraphStore for LoadCounting {
     }
     async fn load_session(&self, session: &SessionId) -> Result<GraphSnapshot, StoreError> {
         self.loads.fetch_add(1, Ordering::SeqCst);
+        let parked = self.parked.lock().get(session).cloned();
+        if let Some(gate) = parked {
+            gate.acquire().await.expect("never closed").forget();
+        }
         if !self.delay.is_zero() {
             tokio::time::sleep(self.delay).await;
         }
@@ -536,22 +561,7 @@ fn bounds(max_loaded_sessions: usize) -> crate::cli::serve_web::views::ViewBound
 /// a request for it reloads, and its freshness tracker survives eviction.
 #[tokio::test]
 async fn the_least_recently_used_view_is_evicted_and_reloads() {
-    let store = seed("t4-a").await;
-    // A second session in the same store.
-    crate::cli::derive::run(
-        backends_on(store.clone()),
-        crate::cli::derive::Args {
-            session: "t4-b".into(),
-            agent: "agent-b".into(),
-            content: "billing ledger".into(),
-            kind: ConceptKind::Entity,
-            parent_of: vec![],
-            concept: vec![],
-        },
-    )
-    .await
-    .expect("derive b");
-    let counting = LoadCounting::new(store);
+    let counting = LoadCounting::new(two_sessions().await);
     let (a, b) = (SessionId::new("t4-a"), SessionId::new("t4-b"));
     let cache = crate::cli::serve_web::views::ViewCache::new([a.clone(), b.clone()], bounds(1));
     let contract = backends_on(Arc::new(MemoryStore::new())).embedding;
@@ -581,6 +591,86 @@ async fn the_least_recently_used_view_is_evicted_and_reloads() {
         .await
         .expect("a cached");
     assert_eq!(counting.loads(), 3);
+}
+
+/// Poll `fut` once with a no-op waker. The tests below step several
+/// requests by hand so the interleaving is the one written, not a timer's.
+fn poll_once<F: Future>(fut: Pin<&mut F>) -> Poll<F::Output> {
+    fut.poll(&mut Context::from_waker(Waker::noop()))
+}
+
+/// Drive `fut` to completion, yielding to the runtime between polls.
+async fn drive<F: Future>(mut fut: Pin<&mut F>) -> F::Output {
+    for _ in 0..10_000 {
+        if let Poll::Ready(out) = poll_once(fut.as_mut()) {
+            return out;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("the future never finished");
+}
+
+/// Two sessions sharing `bounds(1)`: `t4-a` from [`seed`], and `t4-b`
+/// (one concept) in the same store.
+async fn two_sessions() -> Arc<MemoryStore> {
+    let store = seed("t4-a").await;
+    crate::cli::derive::run(
+        backends_on(store.clone()),
+        crate::cli::derive::Args {
+            session: "t4-b".into(),
+            agent: "agent-b".into(),
+            content: "billing ledger".into(),
+            kind: ConceptKind::Entity,
+            parent_of: vec![],
+            concept: vec![],
+        },
+    )
+    .await
+    .expect("derive b");
+    store
+}
+
+/// The eviction race (#4 PR 1 review L1): A's load finishes, and before A's
+/// queued joiner takes the gate, B's load finishes and evicts A
+/// (`max_loaded_sessions = 1`). The joiner must load A again, not answer an
+/// error for a healthy session.
+#[tokio::test]
+async fn a_joiner_whose_view_was_evicted_loads_it_again() {
+    let counting = LoadCounting::new(two_sessions().await);
+    counting.park("t4-a");
+    counting.park("t4-b");
+    let (a, b) = (SessionId::new("t4-a"), SessionId::new("t4-b"));
+    let cache = crate::cli::serve_web::views::ViewCache::new([a.clone(), b.clone()], bounds(1));
+    let contract = backends_on(Arc::new(MemoryStore::new())).embedding;
+
+    let mut loader = pin!(cache.view(&counting, &contract, &a));
+    let mut joiner = pin!(cache.view(&counting, &contract, &a));
+    let mut other = pin!(cache.view(&counting, &contract, &b));
+    assert!(
+        poll_once(loader.as_mut()).is_pending(),
+        "A's load is parked"
+    );
+    assert!(
+        poll_once(joiner.as_mut()).is_pending(),
+        "the joiner queues on A's gate"
+    );
+    assert!(poll_once(other.as_mut()).is_pending(), "B's load is parked");
+
+    counting.release("t4-a", 1);
+    drive(loader.as_mut()).await.expect("A loads");
+    counting.release("t4-b", 1);
+    drive(other.as_mut()).await.expect("B loads");
+    assert!(
+        !cache.is_loaded(&a),
+        "B's load evicted A before the joiner ran"
+    );
+
+    counting.release("t4-a", 1);
+    let view = drive(joiner.as_mut())
+        .await
+        .expect("an evicted view is reloaded, not an error");
+    assert_eq!(view.counts.concepts, 3);
+    assert_eq!(counting.loads(), 3, "the joiner loaded A once more");
 }
 
 /// The view's counts and feed agree with the store's snapshot, and an
