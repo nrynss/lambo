@@ -18,7 +18,7 @@ EmbeddingGemma 2 adapter (PR 5).
 | `ImageDerive`, `ImagePayload`, id/caption/type rules, content suffix, default ids, `normalize` | `src/graph/image.rs`, tests `src/graph/image/tests.rs` |
 | `Memory::derive_image_as`, `Memory::derive_image_async_as` | `src/memory/image.rs`, tests `src/memory/tests/image.rs` |
 | `JobPayload::DeriveImage`, `WriteKind::DeriveImage` (`lambo_derive_image`), byte charge, `submit_derive_image`, the image receipt sentence | `src/writeq/{admission,execution,receipts}.rs` |
-| `FixtureEmbedder` `TEXT | IMAGE`, `embed_image`, `image_label`, `png_with_label` | `src/embed/fixture.rs`, re-exported from `embed` and `fixtures` |
+| `FixtureEmbedder` `TEXT \| IMAGE`, `embed_image`, `image_label`, `png_with_label` | `src/embed/fixture.rs`, re-exported from `embed` and `fixtures` |
 | `re-embed --drop-image-vectors`, image-aware `--missing-only`; `Graph::reembed_all_dropping_image_vectors`; `embed_missing` refuses image concepts | `src/cli/re_embed.rs`, `src/main.rs`, `src/graph/graph/embeddings.rs` |
 | AC3 on SQLite, erase with an image, the image intent round trip, the tier | `src/store/sqlite/tests/{image_e2e,erase,persistence}.rs`, `src/store/tiered/tests.rs`, `src/store/erase.rs` (testkit) |
 
