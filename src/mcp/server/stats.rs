@@ -50,16 +50,25 @@ pub(super) fn gc_stats_json(g: &crate::memory::GcStats) -> serde_json::Value {
 
 impl LamboServer {
     /// The session's embedding contract as `lambo_stats` reports it (#22
-    /// design 3.3): the contract stamped on the session, else the live one
-    /// (a session nothing has embedded into yet). `model` is the whole string
-    /// (`null` for the server default), never shortened: a profile suffix such
-    /// as `;prompts=lambo-eg2-v1` is part of the space.
+    /// design 3.3): the **live** contract, the one `lambo_derive_image`'s
+    /// wire check, the apply check and a replay compare a client vector
+    /// against. `model` is the whole string (`null` for the server default),
+    /// never shortened: a profile suffix such as `;prompts=lambo-eg2-v1` is
+    /// part of the space.
+    ///
+    /// It is also the session's stamp, which the commit-lock check compares
+    /// against, whenever the session has one: a writer's attach stamps a
+    /// fresh session with the live contract, refuses a stamped one that
+    /// differs, and under `--allow-embedding-mismatch` relabels the stamp to
+    /// the live contract before the first write (`MemoryBuilder`). Reporting
+    /// the live contract rather than "stamp, else live" makes the two
+    /// surfaces agree by construction (review L1): what a client copies from
+    /// here is what every check holds it to.
     ///
     /// Per session, so it leaks nothing across sessions (#32's `lambo_stats`
     /// rule).
     pub(super) fn embedding_contract_json(&self) -> serde_json::Value {
-        let stamped = self.mem.graph().read().embedding().cloned();
-        let c = stamped.unwrap_or_else(|| self.mem.embedding_contract().clone());
+        let c = self.mem.embedding_contract();
         json!({ "kind": c.kind, "model": c.model, "dim": c.dim })
     }
 

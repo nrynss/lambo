@@ -552,7 +552,7 @@ async fn a_shared_calibration_keeps_the_probe_fields_and_per_session_observation
 }
 
 /// #22 PR 4: `lambo_stats` tells a client which space to compute a vector in
-/// (the session's stamp, else the live contract) with `model` whole, and what
+/// (the live contract, which the stamp equals) with `model` whole, and what
 /// the embedder embeds.
 #[tokio::test]
 async fn stats_reports_the_embedding_contract_and_modalities() {
@@ -577,8 +577,8 @@ async fn stats_reports_the_embedding_contract_and_modalities() {
     text.mem.close().await.expect("close");
 
     // The PR 5 shape: an artifact and a prompt profile in one model string,
-    // reported whole. A first derive stamps the session; the stamp is what
-    // is reported from then on.
+    // reported whole. A first derive stamps the session with the live contract, which is
+    // what is reported before and after.
     let model = "ggml-org/embeddinggemma-2-GGUF@bfcd2987/Q8_0;prompts=lambo-eg2-v1";
     let eg2 = server_with_parts(
         "mcp-stats-eg2",
@@ -611,4 +611,96 @@ async fn stats_reports_the_embedding_contract_and_modalities() {
     );
     assert!(text_of(&out).contains(model), "the text half names it too");
     eg2.mem.close().await.expect("close");
+}
+
+/// Review L1: under `--allow-embedding-mismatch` (same kind and width, a
+/// renamed model) the contract `lambo_stats` reports is the one a client
+/// vector is checked against at the wire, at apply and under the commit
+/// lock, so a client that copies it is accepted.
+#[tokio::test]
+async fn stats_reports_the_contract_client_vectors_are_checked_against() {
+    let store: Arc<dyn GraphStore> = Arc::new(crate::test_util::VectorSearchable(Arc::new(
+        MemoryStore::new(),
+    )));
+    let named = |model: &str| EmbeddingContract {
+        kind: "fixture".into(),
+        model: Some(model.into()),
+        dim: 1024,
+    };
+    let open = |contract: EmbeddingContract, allow: bool| {
+        let store = Arc::clone(&store);
+        async move {
+            let mem = Memory::builder()
+                .session("mcp-stats-mismatch")
+                .agent("agent-a")
+                .config(Config {
+                    accept_client_vectors: true,
+                    ..Config::default()
+                })
+                .flush_interval(Duration::from_secs(3_600))
+                .store(store)
+                .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
+                .embedding_contract(contract)
+                .allow_embedding_mismatch(allow)
+                .build()
+                .await
+                .expect("build");
+            LamboServer::new(Arc::new(mem))
+        }
+    };
+
+    // A session stamped by the old model name, with a vector in it.
+    let old = open(named("old-name"), false).await;
+    call(
+        &old,
+        "lambo_derive",
+        json!({"agent_id": "agent-a",
+               "concepts": [{"content": "auth middleware", "concept_type": "entity"}]}),
+    )
+    .await;
+    assert_eq!(old.mem.graph().read().embedding(), Some(&named("old-name")));
+    old.mem.close().await.expect("close");
+
+    // Reattached under the renamed model with the operator override.
+    let s = open(named("new-name"), true).await;
+    let payload = call(&s, "lambo_stats", json!({"agent_id": "agent-a"}))
+        .await
+        .structured_content
+        .expect("payload");
+    let reported = payload["embedding_contract"].clone();
+    assert_eq!(
+        reported,
+        json!({"kind": "fixture", "model": "new-name", "dim": 1024})
+    );
+    assert_eq!(
+        s.mem.graph().read().embedding(),
+        Some(&named("new-name")),
+        "the attach relabelled the stamp to the live contract"
+    );
+    let ack = call(
+        &s,
+        "lambo_derive_image",
+        json!({"agent_id": "agent-a", "caption": "red silk saree",
+               "concept_type": "resource", "image_id": "r17",
+               "vector": {"values": FixtureEmbedder::new().embed_sync("red silk saree"),
+                          "contract": reported}}),
+    )
+    .await;
+    assert_eq!(ack.is_error, Some(false), "{ack:?}");
+    let receipt = ack.structured_content.as_ref().expect("ack")["receipt"]
+        .as_str()
+        .expect("receipt")
+        .to_string();
+    let settled = call_raw(
+        &s,
+        "lambo_stats",
+        json!({"agent_id": "agent-a", "receipt": receipt,
+               "wait_ms": crate::writeq::RECEIPT_WAIT_MAX.as_millis() as u64}),
+    )
+    .await
+    .structured_content
+    .expect("stats")["receipt"]
+        .clone();
+    assert_eq!(settled["state"], json!("applied"), "{settled}");
+    s.mem.close().await.expect("close");
 }
