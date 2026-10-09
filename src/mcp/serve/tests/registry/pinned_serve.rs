@@ -546,3 +546,45 @@ async fn a_re_attached_session_does_not_book_a_refusal_twice() {
     serve.stop().await.expect("a clean shutdown");
     assert_eq!(booked(&path), 1, "the refusal was booked again");
 }
+
+/// #32 review L7: on the real serve's router (`serve_http`, its guard
+/// layer included), every refused or unrouted path under `/mcp/` is
+/// byte-identical on the wire to a path the server does not route at all:
+/// status line, every header and the empty body, on every method. PR 1's
+/// comparison ran on its own router only, so a fallback, a header or a
+/// `.route_layer` added to the serve's would have passed.
+#[tokio::test]
+async fn the_serve_s_404_is_byte_identical_on_the_wire() {
+    let (logs, _guard) = crate::test_util::capture_logs(tracing::Level::INFO);
+    let store = Arc::new(MemoryStore::new());
+    let serve = PinnedServe::start(&store, &["wire-a", "wire-b"], |_| {}).await;
+    let addr = bound_addr(&logs).await;
+
+    let reference = crate::test_util::on_the_wire(addr, "GET", "/not/routed").await;
+    assert!(
+        reference.starts_with("HTTP/1.1 404 Not Found\r\n"),
+        "{reference}"
+    );
+    assert!(reference.ends_with("\r\n\r\n"), "empty body: {reference:?}");
+    for method in ["GET", "POST", "DELETE", "PUT"] {
+        for path in [
+            "/not/routed",
+            "/mcp/s/wire-unknown",
+            "/mcp/s/.x",
+            "/mcp/s/a%2Fb",
+            "/mcp/s/wire%2Da",
+            "/mcp/s/",
+            "/mcp/s/wire-a/",
+            "/mcp/s",
+            "/mcp/",
+        ] {
+            assert_eq!(
+                crate::test_util::on_the_wire(addr, method, path).await,
+                reference,
+                "{method} {path} must be the unrouted 404"
+            );
+        }
+    }
+
+    serve.stop().await.expect("a clean shutdown");
+}
