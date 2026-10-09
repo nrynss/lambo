@@ -176,6 +176,19 @@ script deliberately never enables `set -x`. Rotating the secret needs only
 it. That is deliberate: a non-loopback bind refuses to start without a bearer
 token, and the public portal is meant to be readable without one.
 
+An unauthenticated `serve-web` also checks `Host` (DNS-rebinding defence, lambo
+#4 PR 2): it answers only `localhost`, `127.0.0.1`, `[::1]` and names passed
+with `--allowed-host`. With `--hostname` the service runs with
+`--allowed-host <hostname>`, the name Caddy forwards. With `--self-signed`
+Caddy sends the upstream address (`header_up Host {upstream_hostport}`) instead,
+since the public IP is not known when the user data is written. **An exhibit
+launched before this change** keeps its old user data (it is read at first boot
+only): before it runs a lambo build with the Host check, add
+`--allowed-host <hostname>` to the `exec` line in
+`/usr/local/bin/lambo-serve-web` (or, for a self-signed exhibit, the
+`header_up` line to `/etc/caddy/Caddyfile`), or terminate and relaunch.
+Otherwise every page answers 403.
+
 #### TLS — you must choose (plan §8)
 
 `https://<EC2-IP>` **cannot** get a trusted certificate; public CAs do not issue

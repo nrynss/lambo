@@ -591,6 +591,7 @@ async fn a_failing_schema_preflight_still_fails_startup() {
             port: 0,
             bind: Ipv4Addr::LOCALHOST.into(),
             auth_token: None,
+            allowed_hosts: Vec::new(),
             web: crate::config::WebConfig::default(),
         },
     )

@@ -128,6 +128,17 @@ enum Commands {
         /// bind.
         #[arg(long, value_name = "TOKEN")]
         auth_token: Option<lambo::cli::serve_web::AuthToken>,
+        /// A Host (name or address, optionally :port) the portal also
+        /// answers while no token is configured, beside localhost,
+        /// 127.0.0.1 and [::1] and lambo.toml [web] allowed_hosts. Needed
+        /// behind a proxy that forwards its public name (DNS-rebinding
+        /// defence). Repeatable; ignored once a token is configured.
+        #[arg(
+            long = "allowed-host",
+            value_name = "HOST",
+            help = "A Host (name or address, optionally :port) the portal also answers while no token is configured, beside localhost, 127.0.0.1 and [::1]. Needed behind a proxy that forwards its public name. Repeatable."
+        )]
+        allowed_host: Vec<String>,
     },
     /// Scripted two-agent demo scenario (spec §13): two agents build one REST API, `user schema` earns Canonical, and the second agent's recall carries the blast-radius and conflict warnings.
     Demo {
@@ -925,10 +936,17 @@ fn main() -> ExitCode {
     let mut web = lambo::config::WebConfig::default();
     let mut served_web = None;
     let loaded = match &cmd {
-        Commands::ServeWeb { session, .. } => match LamboFile::load_resolved(config) {
+        Commands::ServeWeb {
+            session,
+            allowed_host,
+            ..
+        } => match LamboFile::load_resolved(config) {
             Ok(file) => {
                 web = file.web.clone();
-                match lambo::cli::serve_web::plan_sessions(session, &web) {
+                let planned = lambo::cli::serve_web::plan_sessions(session, &web).and_then(|s| {
+                    lambo::cli::serve_web::plan_allowed_hosts(allowed_host, &web).map(|h| (s, h))
+                });
+                match planned {
                     Ok(plan) => served_web = Some(plan),
                     Err(e) => {
                         eprintln!("lambo serve-web: {e}");
@@ -1056,6 +1074,7 @@ fn main() -> ExitCode {
                 port,
                 bind,
                 auth_token,
+                allowed_host: _,
             },
             Resolved::Full(backends),
         ) => run_async(
@@ -1066,9 +1085,13 @@ fn main() -> ExitCode {
                     // Planned before the backends, above.
                     session: served_web
                         .as_ref()
-                        .map(|p| p.default.clone())
+                        .map(|(p, _)| p.default.clone())
                         .unwrap_or_default(),
-                    sessions: served_web.map(|p| p.sessions).unwrap_or_default(),
+                    sessions: served_web
+                        .as_ref()
+                        .map(|(p, _)| p.sessions.clone())
+                        .unwrap_or_default(),
+                    allowed_hosts: served_web.map(|(_, h)| h).unwrap_or_default(),
                     port,
                     bind,
                     auth_token,

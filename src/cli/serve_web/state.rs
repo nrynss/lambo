@@ -6,10 +6,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::auth::{portal_authority, AuthToken, PortalAuthority};
+use super::auth::{portal_authority, AuthToken, HostCheck, PortalAuthority};
 use super::views::{SessionView, ViewBounds, ViewCache};
 use crate::cli::caps::CliError;
-use crate::config::WebConfig;
+use crate::config::{AllowedHost, WebConfig};
 use crate::resolve::ResolvedBackends;
 use crate::store::GraphStore;
 use crate::types::SessionId;
@@ -25,6 +25,10 @@ pub(super) struct AppState {
     /// Who may read which served session: the implicit loopback grant, or
     /// the configured bearer token's (`surface::session`, #4 PR 2).
     pub(super) authority: PortalAuthority,
+    /// Which `Host` values are answered: the loopback names and the allowed
+    /// hosts under the implicit grant, any once a token is required (#4
+    /// design 4.5).
+    pub(super) host_check: HostCheck,
     /// Every data route reads through this: one load per session per TTL,
     /// shared by every request (#4 PR 1).
     pub(super) views: ViewCache,
@@ -33,12 +37,14 @@ pub(super) struct AppState {
 impl AppState {
     /// The state for a portal serving `default_session` and `more` (in
     /// order, each once, the default first), its view bounds from `web`.
+    /// `allowed_hosts` join the loopback names while no token is configured.
     pub(super) fn new(
         default_session: SessionId,
         more: impl IntoIterator<Item = SessionId>,
         backends: ResolvedBackends,
         exposed: bool,
         auth: Option<AuthToken>,
+        allowed_hosts: &[AllowedHost],
         web: &WebConfig,
     ) -> Self {
         let mut sessions = vec![default_session.clone()];
@@ -48,9 +54,11 @@ impl AppState {
             }
         }
         let bounds = ViewBounds::resolve(web, backends.store_cfg.kind);
+        let authority = portal_authority(auth, &sessions);
         Self {
             views: ViewCache::new(sessions.iter().cloned(), bounds),
-            authority: portal_authority(auth, &sessions),
+            host_check: HostCheck::for_authority(&authority, allowed_hosts),
+            authority,
             default_session,
             backends,
             exposed,

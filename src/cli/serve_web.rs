@@ -21,6 +21,17 @@
 //! path all answer the same bytes (`surface::session`'s uniform 404), before
 //! any store call.
 //!
+//! # Host check (#4 PR 2, DNS rebinding)
+//!
+//! While no bearer token is configured (the loopback default), the portal
+//! answers only requests whose `Host` is `localhost`, `127.0.0.1` or `[::1]`
+//! (any port), or a name given with `--allowed-host` / `[web] allowed_hosts`;
+//! anything else gets one fixed 403. Otherwise a web page the local user
+//! visits could rebind its own name to 127.0.0.1 and read every served
+//! session. A proxy that forwards a public `Host` (Caddy's default) must
+//! name it with `--allowed-host`. With a token configured, any `Host` is
+//! accepted: a rebound page cannot present the token.
+//!
 //! # Read-only, by construction
 //!
 //! **Auth, mirroring T8.7's fail-closed rule.** Two consequences this module
@@ -134,7 +145,7 @@ use crate::surface::session::{parse_addressed, MAX_ADDRESSED_LEN};
 // `routes::api_recall` names it as `super::recall`, unchanged from when it
 // lived here.
 use super::recall;
-use crate::config::WebConfig;
+use crate::config::{AllowedHost, WebConfig};
 use crate::mcp::AUTH_TOKEN_ENV;
 use crate::resolve::ResolvedBackends;
 use crate::store::StoreKind;
@@ -201,6 +212,11 @@ pub struct Args {
     /// [`AUTH_TOKEN_ENV`] env var, which overrides this flag — a token in argv
     /// is visible in `ps` and shell history. Mandatory on any non-loopback bind.
     pub auth_token: Option<AuthToken>,
+    /// Extra `Host` values accepted while no token is configured, beside
+    /// the loopback names (#4 PR 2): the CLI passes the union of
+    /// `--allowed-host` and `[web] allowed_hosts` ([`plan_allowed_hosts`]).
+    /// Ignored, with a startup note, once a token is configured.
+    pub allowed_hosts: Vec<String>,
     /// `[web]` from `lambo.toml`: the view TTL and the load and recall
     /// bounds (#4). [`WebConfig::default`] when the file has no table.
     pub web: WebConfig,
@@ -239,6 +255,24 @@ pub fn plan_sessions(cli: &[String], web: &WebConfig) -> Result<ServedSessions, 
     };
     check_served(&default, &sessions)?;
     Ok(ServedSessions { default, sessions })
+}
+
+/// The extra accepted `Host` values: `--allowed-host` then `[web]
+/// allowed_hosts`, each once. A malformed entry is a usage error (exit 2)
+/// naming it; the CLI runs this before any backend is built.
+pub fn plan_allowed_hosts(cli: &[String], web: &WebConfig) -> Result<Vec<String>, CliError> {
+    let mut hosts: Vec<String> = Vec::new();
+    for host in cli.iter().chain(web.allowed_hosts.iter()) {
+        parse_allowed_host(host)?;
+        if !hosts.contains(host) {
+            hosts.push(host.clone());
+        }
+    }
+    Ok(hosts)
+}
+
+fn parse_allowed_host(host: &str) -> Result<AllowedHost, CliError> {
+    AllowedHost::parse(host).map_err(|e| CliError::Usage(format!("--allowed-host {host:?} {e}")))
 }
 
 /// The rules every served set meets (#4 design 3.1, Q12): the default is
@@ -322,6 +356,11 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
         args.sessions.clone()
     };
     check_served(&args.session, &served)?;
+    let allowed_hosts = args
+        .allowed_hosts
+        .iter()
+        .map(|h| parse_allowed_host(h))
+        .collect::<Result<Vec<_>, _>>()?;
 
     // Env beats flag (mirrors `mcp::serve`). A set-but-empty LAMBO_AUTH_TOKEN
     // is a usage error, not a silent fallback to the flag.
@@ -356,6 +395,7 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
         backends,
         exposed,
         auth,
+        &allowed_hosts,
         &args.web,
     ));
 
@@ -411,6 +451,13 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
              unauthenticated. Anyone who can reach this port can read the whole session; keep \
              it on a private network or behind an authenticating proxy.",
             args.bind
+        );
+    }
+    if state.authority.requires_bearer() && !allowed_hosts.is_empty() {
+        eprintln!(
+            "⚑ lambo serve-web: --allowed-host / [web] allowed_hosts are not checked while a \
+             token is configured: any Host is accepted, since a rebound page cannot present \
+             the token."
         );
     }
     if state.backends.store_cfg.kind == StoreKind::Memory {

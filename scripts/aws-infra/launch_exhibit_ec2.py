@@ -31,6 +31,17 @@ writer lease, and on a non-loopback bind it refuses to start without a bearer
 token. Caddy is the only thing that talks to it, over 127.0.0.1, which keeps the
 public portal token-free without weakening anything.
 
+**The portal checks `Host` (lambo #4 PR 2).** An unauthenticated serve-web
+answers only `localhost`, `127.0.0.1` and `[::1]`, plus `--allowed-host` names,
+as a DNS-rebinding defence. Caddy forwards the visitor's `Host` by default, so
+with `--hostname` the service passes `--allowed-host <hostname>`. With
+`--self-signed` the public address is not known when the user data is written
+(the Elastic IP is allocated after launch), so Caddy instead sends the upstream
+address (`header_up Host {upstream_hostport}`, i.e. `127.0.0.1:7710`), which the
+loopback rule accepts. The service wrapper passes `--allowed-host` only to a
+lambo build whose `serve-web --help` lists it, so an older `--lambo-version`
+(which has no Host check) still starts.
+
 Usage:
 
     python3 scripts/aws-infra/launch_exhibit_ec2.py \\
@@ -301,6 +312,7 @@ LAMBO_REPO="@@LAMBO_REPO@@"
 LAMBO_VERSION="@@LAMBO_VERSION@@"
 CADDY_VERSION="@@CADDY_VERSION@@"
 SESSION="@@SESSION@@"
+ALLOWED_HOST="@@ALLOWED_HOST@@"
 SECRET_ID="@@SECRET_ID@@"
 WEB_PORT="@@WEB_PORT@@"
 
@@ -431,8 +443,16 @@ if [ -n "${LAMBO_LLAMA_HEALTH:-}" ]; then
         sleep 5
     done
 fi
-exec /usr/local/bin/lambo --config /etc/lambo/lambo.toml serve-web \
-    --session "$LAMBO_SESSION" --port "$LAMBO_PORT" --bind 127.0.0.1
+set -- --session "$LAMBO_SESSION" --port "$LAMBO_PORT" --bind 127.0.0.1
+# --allowed-host: the public name Caddy forwards as Host (lambo #4 PR 2's
+# DNS-rebinding check). Empty under --self-signed, where Caddy sends the
+# loopback upstream address instead. Passed only to a build that has the flag:
+# an older one has no Host check and would refuse the unknown argument.
+if [ -n "${LAMBO_ALLOWED_HOST:-}" ] && \
+   /usr/local/bin/lambo serve-web --help 2>/dev/null | grep -q -e '--allowed-host'; then
+    set -- "$@" --allowed-host "$LAMBO_ALLOWED_HOST"
+fi
+exec /usr/local/bin/lambo --config /etc/lambo/lambo.toml serve-web "$@"
 WRAPPER
 chmod 0755 /usr/local/bin/lambo-serve-web
 
@@ -450,6 +470,7 @@ Environment=HOME=/var/lib/lambo
 Environment=LAMBO_REGION=${REGION}
 Environment=LAMBO_SECRET_ID=${SECRET_ID}
 Environment=LAMBO_SESSION=${SESSION}
+Environment=LAMBO_ALLOWED_HOST=${ALLOWED_HOST}
 Environment=LAMBO_PORT=${WEB_PORT}
 Environment=LAMBO_LLAMA_SERVICE=@@LLAMA_SERVICE@@
 Environment=LAMBO_LLAMA_HEALTH=@@LLAMA_HEALTH@@
@@ -695,8 +716,15 @@ def render_lambo_toml(embedder_kind: str, llama_url: str | None) -> str:
 
 
 def render_caddyfile(hostname: str | None, acme_email: str | None) -> str:
+    # With a hostname, Caddy forwards it as Host and serve-web is started with
+    # `--allowed-host <hostname>`. Without one (self-signed), the public
+    # address is unknown when this is rendered, so Caddy sends the loopback
+    # upstream address as Host, which serve-web's DNS-rebinding check accepts.
+    upstream = f"reverse_proxy 127.0.0.1:{LAMBO_WEB_PORT}"
+    if not hostname:
+        upstream += " {\n        header_up Host {upstream_hostport}\n    }"
     proxy = f"""    encode zstd gzip
-    reverse_proxy 127.0.0.1:{LAMBO_WEB_PORT}"""
+    {upstream}"""
     if hostname:
         head = f"{{\n    email {acme_email}\n}}\n\n" if acme_email else ""
         return (
@@ -726,6 +754,10 @@ def render_user_data(args: argparse.Namespace, caddyfile: str, lambo_toml: str) 
         "@@LAMBO_ASSET_ARCH@@": ASSET_NAMES[arch_for_instance_type(args.instance_type)]["lambo"],
         "@@CADDY_ASSET_ARCH@@": ASSET_NAMES[arch_for_instance_type(args.instance_type)]["caddy"],
         "@@SESSION@@": args.session,
+        # serve-web's DNS-rebinding check (lambo #4 PR 2): the public name
+        # Caddy forwards as Host. Empty under --self-signed (see
+        # render_caddyfile).
+        "@@ALLOWED_HOST@@": args.hostname or "",
         "@@SECRET_ID@@": SECRET_NAME,
         "@@WEB_PORT@@": str(LAMBO_WEB_PORT),
         "@@CADDYFILE@@": caddyfile.rstrip("\n"),
@@ -1127,6 +1159,7 @@ def _plan(args: argparse.Namespace, caddyfile: str, lambo_toml: str) -> int:
     if args.hostname:
         note(f"Caddy will request a public certificate for {args.hostname}")
         note(f"create an A record {args.hostname} -> the Elastic IP this script allocates")
+        note(f"serve-web runs with --allowed-host {args.hostname} (its Host check)")
     else:
         warn("SELF-SIGNED: Caddy's internal CA will issue the certificate.")
         warn("Every browser will show a security warning. Judges will see it.")

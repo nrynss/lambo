@@ -233,6 +233,7 @@ fn portal(
         backends,
         auth.is_some(),
         auth,
+        &[],
         web,
     ))
 }
@@ -352,6 +353,7 @@ async fn run_refuses_a_bad_served_set_before_the_store() {
                 port: 0,
                 bind: Ipv4Addr::LOCALHOST.into(),
                 auth_token: None,
+                allowed_hosts: Vec::new(),
                 web: WebConfig::default(),
             },
         )

@@ -8,6 +8,16 @@
 //! ([`AuthToken`]) and the 401 wording are the portal's own. With no token
 //! configured the set is the implicit loopback grant `local`; with one, the
 //! legacy grant `default`. Both reach every served session.
+//!
+//! **DNS rebinding (#4 design 4.5).** Under the implicit grant nothing
+//! about the caller is checked, so a web page the local user visits could
+//! re-resolve its own name to 127.0.0.1 and read the portal same-origin.
+//! [`HostCheck`] closes that: while no token is configured, a request whose
+//! `Host` is not `localhost`, `127.0.0.1` or `[::1]` (any port) or an
+//! `--allowed-host` / `[web] allowed_hosts` entry gets one fixed 403, before
+//! anything else is evaluated. With a token configured any `Host` is
+//! accepted: a rebound page cannot present a token it does not know (the
+//! rule `lambo serve` applies, #32 PR 5 review M1).
 
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -18,6 +28,7 @@ use axum::response::{IntoResponse, Response};
 
 use super::state::AppState;
 use crate::cli::caps::CliError;
+use crate::config::AllowedHost;
 use crate::mcp::AUTH_TOKEN_ENV;
 use crate::surface::session::{
     parse_addressed, BearerSecret, HostedSessions, SessionAuthority, SessionGrant,
@@ -178,8 +189,78 @@ pub(super) fn credential_label(authority: &PortalAuthority) -> &str {
         .unwrap_or(LOCAL_CREDENTIAL_NAME)
 }
 
-/// Step 1 of the fixed order (design 3.3): resolve the request's bearer
-/// token to a grant, before anything about sessions is evaluated.
+/// Which `Host` values the portal answers (#4 design 4.5).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum HostCheck {
+    /// The implicit loopback grant: only these hosts (the loopback names
+    /// and the configured extras).
+    Only(Vec<AllowedHost>),
+    /// A bearer token is required, so any `Host` is accepted.
+    Any,
+}
+
+/// The `Host` names every unauthenticated portal accepts, on any port.
+pub(super) const LOOPBACK_HOSTS: &[&str] = &["localhost", "127.0.0.1", "::1"];
+
+impl HostCheck {
+    /// The check for `authority`: [`HostCheck::Only`] the loopback names and
+    /// `extra` while it needs no bearer, [`HostCheck::Any`] once it does.
+    pub(super) fn for_authority(authority: &PortalAuthority, extra: &[AllowedHost]) -> Self {
+        if authority.requires_bearer() {
+            return Self::Any;
+        }
+        Self::Only(
+            LOOPBACK_HOSTS
+                .iter()
+                .map(|h| AllowedHost::from_parts(h, None))
+                .chain(extra.iter().cloned())
+                .collect(),
+        )
+    }
+
+    /// Does `req` name an accepted host? The `Host` header, else the
+    /// request target's authority (HTTP/2's `:authority`); a request with
+    /// neither, or with one that does not parse, is refused.
+    fn allows(&self, req: &axum::extract::Request) -> bool {
+        let Self::Only(allowed) = self else {
+            return true;
+        };
+        let presented = match req.headers().get(header::HOST) {
+            Some(value) => value
+                .to_str()
+                .ok()
+                .and_then(|h| h.parse::<axum::http::uri::Authority>().ok()),
+            None => req.uri().authority().cloned(),
+        };
+        let Some(presented) = presented else {
+            return false;
+        };
+        let presented = AllowedHost::from_parts(presented.host(), presented.port_u16());
+        allowed.iter().any(|a| a.matches(&presented))
+    }
+}
+
+/// The Host refusal: one fixed 403, independent of the path (so of any
+/// session) and of the `Host` presented, which is never echoed.
+fn host_refused() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        "forbidden: this unauthenticated portal answers only requests addressed to localhost, \
+         127.0.0.1 or [::1], or to a host named by --allowed-host or [web] allowed_hosts\n",
+    )
+        .into_response()
+}
+
+/// Has a Host refusal been logged at `warn` yet? The first one is, so an
+/// operator behind a proxy that forwards its public name sees why; later
+/// ones go to `debug`, so a scanner cannot flood the log.
+static HOST_REFUSAL_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Steps 0 and 1 of the fixed order (design 3.3): the `Host` check (only
+/// under the implicit grant), then the request's bearer token resolved to a
+/// grant, before anything about sessions is evaluated.
 ///
 /// With a token configured, every request (static asset, health check,
 /// API, unrouted path) must carry `Authorization: Bearer <token>`, compared
@@ -194,6 +275,18 @@ pub(super) async fn guard(
     mut req: axum::extract::Request,
     next: middleware::Next,
 ) -> Response {
+    if !state.host_check.allows(&req) {
+        if HOST_REFUSAL_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            tracing::debug!("serve-web: request refused: Host not allowed");
+        } else {
+            tracing::warn!(
+                "serve-web: request refused: its Host is not a loopback name or an allowed \
+                 host (DNS-rebinding defence). Behind a proxy that forwards its public name, \
+                 pass --allowed-host <name>; further refusals are logged at debug"
+            );
+        }
+        return host_refused();
+    }
     let presented = req
         .headers()
         .get(header::AUTHORIZATION)

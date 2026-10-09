@@ -121,6 +121,7 @@ fn router_source() -> &'static str {
 mod auth;
 mod feeds;
 mod graph;
+mod host;
 mod inspect;
 mod recall;
 mod routes;
@@ -443,6 +444,7 @@ fn state_with_web(
         backends,
         exposed,
         auth,
+        &[],
         web,
     ))
 }
