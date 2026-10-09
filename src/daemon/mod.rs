@@ -434,6 +434,55 @@ impl Daemon {
         weights: RecallWeights,
         cache: &mut RecallCache<RecallPipeline>,
     ) -> DetailedRecall {
+        self.recall_routed(session, query, vectors, embedding, weights, cache, true)
+            .await
+    }
+
+    /// Recall by a query vector the caller already holds (#22 PR 6: recall
+    /// by image or by a client vector), instead of the query text's
+    /// embedding.
+    ///
+    /// The blended pipeline always runs: a structural phrasing in the
+    /// (optional) text is **not** dispatched to traversal, because that
+    /// path skips the vector leg and would silently drop the image the
+    /// caller asked about. The keyword leg reads the text as usual (an
+    /// empty text finds nothing), the recent leg is unchanged, and the
+    /// vector leg searches with `embedding`. Nothing is cached: a
+    /// vector-dependent pipeline never is (P1-2), and the caller passes a
+    /// cache of its own for the signature's sake.
+    pub(crate) async fn recall_by_vector_with(
+        &self,
+        session: &SessionId,
+        query: RecallQuery,
+        vectors: crate::store::vector_source::VectorCandidates<'_>,
+        embedding: (&[f32], &crate::types::EmbeddingContract),
+        weights: RecallWeights,
+        cache: &mut RecallCache<RecallPipeline>,
+    ) -> DetailedRecall {
+        self.recall_routed(
+            session,
+            query,
+            vectors,
+            Some(embedding),
+            weights,
+            cache,
+            false,
+        )
+        .await
+    }
+
+    /// [`Daemon::recall_with`], with structural dispatch (T9) on or off.
+    #[allow(clippy::too_many_arguments)]
+    async fn recall_routed(
+        &self,
+        session: &SessionId,
+        query: RecallQuery,
+        vectors: crate::store::vector_source::VectorCandidates<'_>,
+        embedding: Option<(&[f32], &crate::types::EmbeddingContract)>,
+        weights: RecallWeights,
+        cache: &mut RecallCache<RecallPipeline>,
+        route_structural: bool,
+    ) -> DetailedRecall {
         if let Err(err) = crate::store::validate_vector_candidate_limit(query.top_k) {
             return DetailedRecall::warn_only(format!("recall: {err}"));
         }
@@ -453,7 +502,8 @@ impl Daemon {
         // by traversal below; the gather and the blended pipeline are skipped
         // only for a DISPATCHED structural query (N2) - one that actually resolves
         // an anchor with structural dependents.
-        let structural = dispatch::classify(&query.query) == RecallKind::Structural;
+        let structural =
+            route_structural && dispatch::classify(&query.query) == RecallKind::Structural;
 
         // Cheap in-memory dispatch check (no store I/O) under a brief graph read:
         // does the query resolve an anchor WITH structural dependents? Only then

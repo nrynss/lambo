@@ -19,8 +19,11 @@ use chrono::Utc;
 use tokio::sync::broadcast;
 
 use super::{CanonicalMemory, GcStats, GcSweepSummary, Memory, MemoryStats};
+use crate::daemon::RecallPipeline;
+use crate::recall::cache::RecallCache;
 use crate::recall::format;
 use crate::recall::query_cache;
+use crate::recall::query_vector::{self, QueryBy};
 use crate::store::vector_source::VectorCandidates;
 use crate::types::{
     tie_break_by_key, CanonizationStatus, DaemonEvent, LamboError, NodeId, RecallQuery,
@@ -106,6 +109,68 @@ impl Memory {
 
         warnings.append(&mut result.warnings);
         result.warnings = warnings;
+        Ok(result)
+    }
+
+    /// Recall by an image or a client-computed query vector (#22 PR 6),
+    /// projected as [`Memory::recall`] is.
+    pub async fn recall_by(
+        &self,
+        query: RecallQuery,
+        by: QueryBy<'_>,
+    ) -> Result<RecallResult, LamboError> {
+        self.recall_by_detailed(query, by).await.map(Into::into)
+    }
+
+    /// [`Memory::recall_detailed`] with the vector leg searching by `by`
+    /// instead of the query text's embedding (#22 PR 6, design 7 and 12).
+    ///
+    /// `query.query` is optional here: an empty text means "no text", so
+    /// the keyword leg finds nothing and the recent leg runs as it always
+    /// does; a non-empty text still feeds the keyword leg. A structural
+    /// phrasing is not dispatched to traversal (see
+    /// `Daemon::recall_by_vector_with`). The vector is
+    /// [`query_vector::resolve`]'s: an image embedded with
+    /// `Embedder::embed_image` (no prompt prefix), or a client vector whose
+    /// declared contract equals this session's live one exactly; both are
+    /// normalized.
+    ///
+    /// Refused with [`LamboError::Config`] when the store has no vector
+    /// search (the vector leg is the whole point), and with whatever
+    /// [`query_vector::resolve`] refuses; an image embed failure fails the
+    /// recall rather than degrading to keyword-only. **Nothing is cached**:
+    /// the query-embedding cache (#14) is not consulted or filled, and the
+    /// pipeline recall cache is not handed over at all (a fresh, discarded
+    /// one stands in), so no structure that outlives this call holds the
+    /// vector or a digest of the image.
+    pub(crate) async fn recall_by_detailed(
+        &self,
+        query: RecallQuery,
+        by: QueryBy<'_>,
+    ) -> Result<crate::recall::detail::DetailedRecall, LamboError> {
+        self.ensure_open()?;
+        let vectors = self.vector_candidates();
+        if !vectors.available() {
+            return Err(LamboError::Config(
+                "a recall by image or by vector needs a store with vector search \
+                 (VECTOR_SEARCH): it searches only by the vector"
+                    .into(),
+            ));
+        }
+        let vector = query_vector::resolve(by, self.embedder.as_ref(), &self.embedding).await?;
+        let mut uncached = RecallCache::<RecallPipeline>::new();
+        let result = self
+            .daemon
+            .recall_by_vector_with(
+                &self.session,
+                query,
+                vectors,
+                (&vector, &self.embedding),
+                self.config.recall_weights,
+                &mut uncached,
+            )
+            .await;
+        self.note_accesses(result.hits.iter().map(|h| h.node_id));
         Ok(result)
     }
 
