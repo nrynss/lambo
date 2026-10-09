@@ -89,7 +89,7 @@ The in-crate candle embedder (`kind = "candle"`) runs BGE-M3 locally with no lla
 
 | Flag | Required | Default |
 |---|---|---|
-| `--session <SESSION>` | Yes | |
+| `--session <SESSION>` | Yes, unless `[serve] sessions` names them (HTTP) | Repeatable with `--transport http`: every value is pinned and served at `/mcp/s/<session>`, and the first is the default, served at `/mcp`. A stdio serve takes exactly one. |
 | `--query <QUERY>` | Yes | |
 | `--top-k <TOP_K>` | No | The session's `default_top_k`, which is `5`. |
 | `--max-tokens <MAX_TOKENS>` | No | The session's `default_max_tokens`, which is `500`. |
@@ -253,7 +253,7 @@ reservations are advisory and RAM-local: this reservation ends when this process
 
 ## Serve a session
 
-`lambo serve` runs the MCP server and owns the session as its single writer.
+`lambo serve` runs the MCP server and owns the session as its single writer. Over HTTP one process can own several sessions; see [Several sessions in one serve](#several-sessions-in-one-serve).
 
 | Flag | Required | Default |
 |---|---|---|
@@ -293,6 +293,27 @@ beside the new `url` is rejected even when the endpoint responds, so migrate by
 copying the registration across all of them, never by editing one file.
 
 The ledger is the input to the report generators in `scripts/observability/`, which answer recall-first compliance, re-derivation savings, score-band drift, duplicate creation, and which blast-radius warnings actually fired. Keep the file outside the repository: it carries recall queries and truncated concept text, so it inherits the store's hygiene rules.
+
+### Several sessions in one serve
+
+One `lambo serve --transport http` can hold several sessions at once. Each session is still owned by exactly one process, and that process may own many. Name the sessions with a repeated `--session`, with `sessions` in the `[serve]` table of `lambo.toml`, or both; the process pins all of them (`--session` values first, then the table's, each once), attaches every one at startup, and keeps them attached until it exits.
+
+```bash
+lambo serve --config lambo.toml --transport http --session lambo --session general
+```
+
+| URL | Reaches |
+|---|---|
+| `http://127.0.0.1:7700/mcp/s/<session>` | That session. Point each project's client at its own session's URL. |
+| `http://127.0.0.1:7700/mcp` | The default session: the first `--session`, else `[serve] default_session`, else the first pinned session. A client configured for a single-session serve keeps working unchanged. |
+
+Each session is a full writer of its own: its own lease and fencing token, its own graph, caches, write queue and local endpoint, so a stdio `lambo serve --session <name>` on the same machine forwards to this process for that session. Nothing crosses between sessions: recall, inspect, saints, stats and GC each see only the session the request addressed, and an MCP session opened on one session's URL is unknown at another's. The embedder, the store connection and the HTTP listener are shared. `--max-sessions` caps the MCP sessions of the whole process, counted across every session.
+
+A request for a session this process does not host gets a plain `404` with an empty body, the same answer as any path the server does not route, so it does not say whether the session exists. With more than one session, every name must be addressable by URL: 1 to 128 bytes of `A-Z`, `a-z`, `0-9`, `.`, `_`, `:` and `-`, not starting with `.`. A single session keeps `--session`'s looser rule and is served at `/mcp`.
+
+If another writer already holds one of the sessions at startup, the server does not wait for it: it serves the others, answers requests for that session with `503` and a `Retry-After` header, and tries to take it every 5 seconds. If a running session loses its lease to another writer, only that session is detached (its unflushed tail is discarded, as a crash would discard it, and a `lease` `lost` line goes to the ledger); the other sessions keep serving, and the lost session is retried the same way. A serve with one session behaves as it always has: losing the lease ends the process, so its client respawns into a proxy to the new holder.
+
+On shutdown every session is drained and closed concurrently inside the same budget as a single session, and every lease is released. Each shutdown stage line is logged once for the whole set, and each session's close outcome names its session. With `--ledger`, every line carries its `session`, and the heartbeat writes one `stats` line per session. Credentials scoped per session, on-demand sessions and the operator surface are not part of this release; until then every session this serve pins is reachable with its one bearer token.
 
 ### Stopping a writer
 

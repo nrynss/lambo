@@ -25,6 +25,16 @@
 - `LamboFile` gains a public `serve: ServeConfig` field (#32). Code that
   builds a `LamboFile` with a struct literal must add
   `serve: Default::default()`; code that parses one is unaffected.
+- `ServeOptions` gains a public `sessions: Vec<String>` field (#32, fourth
+  part): every session the serve pins, with `session` the default among them.
+  Code that builds `ServeOptions` with a struct literal must add it
+  (`sessions: vec![session.clone()]` keeps one session);
+  `ServeOptions::new` fills it. `lambo serve --session` is now a repeatable
+  flag.
+- `lambo serve --transport http` serves exactly `/mcp` and
+  `/mcp/s/{session}` (#32). A request to any other path under `/mcp/`
+  (which reached the one session before, because the service ignored the
+  path) gets a plain 404 now.
 - Minimum supported Rust is now 1.99 (`rust-version = "1.99"` in
   `Cargo.toml`; there was none before), and the crate moves from edition 2021
   to edition 2024. The pinned toolchain moves from 1.97.1 to 1.99.0, and CI and
@@ -94,6 +104,15 @@
   `unknown variant (value not shown)`, and an unknown `promotion_policy` is
   quoted only when it is a short word. A DSN or token pasted under the wrong
   key no longer reaches a startup log.
+- `lambo.toml` `[serve]` `sessions`, `default_session` and `max_attached`
+  are enforced by an HTTP `lambo serve` (#32, fourth part), so the startup
+  notice now names only the keys still parsed but not enforced
+  (credentials, `[[serve.projects]]`, `attach_concurrency`,
+  `idle_detach_secs`, `per_session_rps`, and for a stdio serve
+  `default_session`), reads `[serve] is parsed but not
+  yet enforced for some keys`, and is not logged for a table that sets none
+  of them. With several sessions, `--ledger-heartbeat` writes one `stats`
+  line per session per interval.
 - Every `serve --ledger` line now carries `session` (#32). `startup` and
   `lease` lines always did; `call`, `completion` and `stats` lines gain it so
   one ledger file can hold several sessions later. Additive: `v` stays `1`
@@ -234,6 +253,22 @@
   addressed by URL, an inline token, or more pinned sessions than
   `max_attached` stops every command. An older binary refuses a file that
   has `[serve]` (unknown key).
+- Multi-session serving (#32, fourth part): one `lambo serve --transport
+  http` holds several pinned sessions, named by a repeated `--session`
+  and/or `[serve] sessions`. Each is served at `/mcp/s/{session}`, and `/mcp`
+  serves the default (the first `--session`, else `[serve] default_session`,
+  else the first pinned). Each session keeps its own lease, fencing token,
+  graph, caches, write queue and local endpoint (so a stdio `serve
+  --session <name>` proxies into it); the embedder, store and listener are
+  shared, and `--max-sessions` counts MCP sessions across the process. An
+  unhosted or malformed id gets the same empty 404 as an unrouted path. A
+  session held by another writer at startup is answered with 503 and
+  `Retry-After` and retried every 5 s; a session that loses its lease is
+  detached and retried while the others keep serving. A one-session serve
+  is unchanged, including exiting when it loses its lease. Shutdown closes
+  every session concurrently inside the existing budget and releases every
+  lease. Credentials per session, on-demand sessions and the operator
+  surface come later.
 - `lambo::writeq::EmbedderCalibration` and `MemoryBuilder::calibration`
   (#32, third part): the write queue's startup calibration probe once per
   embedder for the whole process. Builders over one shared embedder that are
