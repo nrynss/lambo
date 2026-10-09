@@ -25,8 +25,12 @@ enum Commands {
     /// Run the MCP server for a session (primary artifact).
     Serve {
         /// Session id this process owns (single-writer model, spec §2.2).
+        /// Always wins when given. Without it a stdio serve uses the
+        /// lambo.toml [[serve.projects]] entry covering its working directory
+        /// (longest path wins), then [serve] default_session, and refuses if
+        /// neither applies. Required with --transport http.
         #[arg(long)]
-        session: String,
+        session: Option<String>,
         /// Agent identity this process writes as.
         #[arg(long, default_value = "lambo-serve")]
         agent: String,
@@ -505,6 +509,81 @@ fn run_async(
     }
 }
 
+/// Render the missing-session refusal the way clap rendered a missing
+/// required `--session` before the flag became optional (#32 PR 8), and
+/// return clap's usage exit code. `stdio_hint` adds how a stdio serve could
+/// have found one.
+fn session_required(stdio_hint: bool) -> ExitCode {
+    use clap::CommandFactory;
+    let mut command = Cli::command();
+    command.build();
+    let mut message = lambo::config::SESSION_REQUIRED.to_owned();
+    if stdio_hint {
+        message.push_str(
+            "\n\n(without --session, a stdio serve uses the lambo.toml [[serve.projects]] \
+             entry covering its working directory, then [serve] default_session; neither \
+             applies here)",
+        );
+    }
+    let err = match command.find_subcommand_mut("serve") {
+        Some(serve) => serve.error(clap::error::ErrorKind::MissingRequiredArgument, message),
+        None => command.error(clap::error::ErrorKind::MissingRequiredArgument, message),
+    };
+    let _ = err.print();
+    ExitCode::from(2)
+}
+
+/// `lambo serve` without `--session`: select it from `lambo.toml` (#32 PR 8).
+/// Only a stdio serve consults `[[serve.projects]]` and `default_session`;
+/// an HTTP serve still needs `--session` until the session registry lands.
+fn select_serve_session(
+    config: Option<&std::path::Path>,
+    transport: &str,
+) -> Result<lambo::config::SelectedSession, ExitCode> {
+    match transport.parse::<Transport>() {
+        Ok(Transport::Stdio) => {}
+        Ok(Transport::Http) => return Err(session_required(false)),
+        Err(e) => {
+            eprintln!("lambo serve: {e}");
+            return Err(ExitCode::from(2));
+        }
+    }
+    let file = LamboFile::load_resolved(config).map_err(|e| {
+        eprintln!("lambo serve: failed to build backends: {e}");
+        ExitCode::FAILURE
+    })?;
+    file.serve.select_stdio_session(None).map_err(|e| match e {
+        lambo::config::SessionSelectionError::Missing => session_required(true),
+        lambo::config::SessionSelectionError::Config(e) => {
+            eprintln!("lambo serve: {e}");
+            ExitCode::FAILURE
+        }
+    })
+}
+
+/// One startup line saying where a stdio serve's session came from. Names
+/// the configured entry, never the working directory.
+fn log_session_source(session: &str, source: &lambo::config::SessionSource) {
+    use lambo::config::SessionSource;
+    match source {
+        SessionSource::Flag => {}
+        SessionSource::Project { path } => tracing::info!(
+            session,
+            project_path = %path,
+            "session selected by the lambo.toml [[serve.projects]] entry covering the working directory"
+        ),
+        SessionSource::DefaultSession => tracing::info!(
+            session,
+            "session is [serve] default_session: no [[serve.projects]] entry covers the working directory"
+        ),
+        SessionSource::DefaultSessionCwdUnavailable => tracing::warn!(
+            session,
+            "the working directory could not be canonicalized, so [[serve.projects]] was skipped; \
+             using [serve] default_session"
+        ),
+    }
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let config = cli.config.as_deref();
@@ -513,6 +592,24 @@ fn main() -> ExitCode {
         eprintln!("lambo: pass a subcommand (try --help)");
         return ExitCode::from(2);
     };
+
+    // #32 PR 8: a serve without `--session` takes its session from
+    // `lambo.toml` before any backend is built, so a refusal costs nothing.
+    let mut cmd = cmd;
+    let mut session_source = None;
+    if let Commands::Serve {
+        session, transport, ..
+    } = &mut cmd
+        && session.is_none()
+    {
+        match select_serve_session(config, transport) {
+            Ok(selected) => {
+                *session = Some(selected.session);
+                session_source = Some(selected.source);
+            }
+            Err(code) => return code,
+        }
+    }
 
     let allow_embedding_mismatch = cmd.allow_embedding_mismatch();
 
@@ -557,6 +654,12 @@ fn main() -> ExitCode {
             // `--transport stdio`, stdout is the JSON-RPC channel and one stray
             // line on it corrupts the framing.
             lambo::mcp::init_tracing();
+            let Some(session) = session else {
+                return session_required(false);
+            };
+            if let Some(source) = session_source {
+                log_session_source(&session, &source);
+            }
             // `[serve]` parses but nothing enforces it yet (#32 PR 1 review
             // L3); say so once. The file already loaded in
             // `resolve_for_command`, so this re-read cannot newly fail, and a
@@ -946,6 +1049,22 @@ mod tests {
                 "{reader} help must not advertise a writer-only override"
             );
         }
+    }
+
+    #[test]
+    fn serve_session_is_optional_at_parse_time() {
+        // #32 PR 8: lambo.toml can supply it; the refusal moved to
+        // `select_serve_session`, after the file is read.
+        let parsed = Cli::try_parse_from(["lambo", "serve"]).unwrap();
+        assert!(matches!(
+            parsed.command,
+            Some(Commands::Serve { session: None, .. })
+        ));
+        let flagged = Cli::try_parse_from(["lambo", "serve", "--session", "s"]).unwrap();
+        assert!(matches!(
+            flagged.command,
+            Some(Commands::Serve { session: Some(ref s), .. }) if s == "s"
+        ));
     }
 
     #[test]
