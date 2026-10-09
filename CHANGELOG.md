@@ -271,7 +271,7 @@
 
 - EmbeddingGemma 2 embedder over llama.cpp (#22 PR 5): `[embedder] kind =
   "embeddinggemma2"` (aliases `embeddinggemma-2`, `eg2`), feature
-  `embed-eg2`. One `llama-server` (b11452 or later) embeds text and, when
+  `embed-eg2`, which released binaries (`ship`) now carry. One `llama-server` (b11452 or later) embeds text and, when
   started with `--mmproj`, images into one space, so `lambo_derive_image`
   can send the image itself. Lambo adds the model card's task prefixes
   (documents `title: none | text: `, recall queries `task: search result |

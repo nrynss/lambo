@@ -167,6 +167,7 @@ ship = [
     "embed-bge",
     "embed-fixture",
     "embed-gemini",
+    "embed-eg2",
     "recall-elastic",
 ]
 
