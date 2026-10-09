@@ -68,7 +68,17 @@
   keeps its old limits. A configured or legacy token with surrounding
   whitespace, a byte outside printable ASCII or more than 4096 bytes now
   refuses the start (exit 2); a request with two `Authorization` headers
-  gets `401`.
+  gets `401`. An `initialize` counts against the cap and the share whenever
+  it would mint an MCP session: one carrying `Last-Event-ID`, or an
+  `Mcp-Session-Id` that is not visible ASCII, no longer slips past them, and
+  initializes arriving together can no longer overshoot either. The MCP
+  session is attributed to its credential even if the client disconnects
+  before the response.
+- A `LAMBO_AUTH_TOKEN` that is set but not valid UTF-8 refuses the start of
+  `lambo serve --transport http` and `lambo serve-web` (exit 2, naming the
+  variable) instead of being read as unset. A stdio `lambo serve` ignores
+  `LAMBO_AUTH_TOKEN` and `--auth-token` again whatever their value: since the
+  stricter checks above, a stray token they refuse had made it exit 2.
 - Minimum supported Rust is now 1.99 (`rust-version = "1.99"` in
   `Cargo.toml`; there was none before), and the crate moves from edition 2021
   to edition 2024. The pinned toolchain moves from 1.97.1 to 1.99.0, and CI and
