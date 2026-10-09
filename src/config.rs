@@ -731,6 +731,28 @@ mod tests {
         );
     }
 
+    /// #18: the example's commented `[recall]` block is a working section
+    /// once uncommented, and leaving it commented keeps the tier off.
+    #[test]
+    fn lambo_file_example_recall_block_parses_when_uncommented() {
+        let raw = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/lambo.example.toml"));
+        assert_eq!(LamboFile::from_toml_str(raw).unwrap().recall, None);
+        let start = raw
+            .find("# [recall]")
+            .expect("the example documents [recall]");
+        let block: String = raw[start..]
+            .lines()
+            .map(|l| l.strip_prefix("# ").unwrap_or(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let f = LamboFile::from_toml_str(&block).unwrap();
+        let recall = f.recall.expect("uncommented block selects the tier");
+        assert_eq!(recall.kind, crate::store::RecallKind::Elastic);
+        assert_eq!(recall.api_key.unwrap().env, "LAMBO_ES_API_KEY");
+        assert_eq!(recall.index_prefix, "lambo");
+        assert_eq!(recall.timeout_ms, Some(5000));
+    }
+
     #[test]
     fn lambo_file_empty_sections_default() {
         // Empty tables must not hard-fail; kind/dim use serde defaults.

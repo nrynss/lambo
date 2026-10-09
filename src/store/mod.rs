@@ -81,6 +81,9 @@ pub mod erase;
 // #18 — the recall tier: `[recall]` config and its registry arm. Always
 // compiled, so a build without the tier refuses the section by name.
 pub mod recall_tier;
+// #18 — `TieredStore`: the durable store plus an Elasticsearch recall index.
+#[cfg(feature = "recall-elastic")]
+pub(crate) mod tiered;
 
 pub use erase::{EraseCounts, EraseOutcome, EraseReport};
 pub use lease::{LeaseHolder, LeaseInfo, LeaseOutcome};

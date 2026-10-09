@@ -4,6 +4,7 @@
 //! than calling `build_store` + `build_embedder` separately and re-checking.
 
 use crate::embed::{build_embedder, Embedder, EmbedderConfig, EmbedderKind};
+use crate::store::recall_tier::wrap_with_recall_tier;
 use crate::store::{
     build_store, build_store_with_vector_dim, Capabilities, GraphStore, StoreConfig,
 };
@@ -241,6 +242,7 @@ pub fn resolve_backends(file: LamboFile) -> Result<ResolvedBackends, LamboError>
     let embedder_cfg = file.embedder;
     let daemon_cfg = file.daemon;
     let promotion_policy = file.promotion_policy;
+    let recall_cfg = file.recall;
     // Fail closed at the file boundary: every file-driven command rejects a
     // degenerate cadence here, uniformly and BEFORE any store/embedder build
     // (an embedder build may load a model, so we reject the file first).
@@ -265,6 +267,15 @@ pub fn resolve_backends(file: LamboFile) -> Result<ResolvedBackends, LamboError>
     let store =
         build_store_with_vector_dim(store_cfg.clone(), Some(embedder_cfg.dim).filter(|d| *d > 0))
             .map_err(|e| LamboError::Config(e.to_string()))?;
+    // #18: the recall tier wraps whatever primary was just built, here and
+    // nowhere else (Level B single construction site). No `[recall]` returns
+    // the primary untouched; an uncompiled tier is refused, never skipped.
+    let store = wrap_with_recall_tier(
+        store,
+        recall_cfg.as_ref(),
+        Some(embedder_cfg.dim).filter(|d| *d > 0),
+    )
+    .map_err(|e| LamboError::Config(e.to_string()))?;
     let embedder =
         build_embedder(embedder_cfg.clone()).map_err(|e| LamboError::Config(e.to_string()))?;
     check_vector_search_contract(store.as_ref(), store_cfg.kind)?;
@@ -347,7 +358,16 @@ pub fn resolve_store_only(
     explicit: Option<&std::path::Path>,
 ) -> Result<Box<dyn GraphStore>, LamboError> {
     let file = LamboFile::load_resolved(explicit)?;
-    build_store(file.store).map_err(|e| LamboError::Config(e.to_string()))
+    let store = build_store(file.store).map_err(|e| LamboError::Config(e.to_string()))?;
+    // #18: store-only verbs (provision, erase-session, recall-index backfill,
+    // the readers) see the same tiered store a writer does, so an erase reaches
+    // the recall index and a backfill has one to rebuild.
+    wrap_with_recall_tier(
+        store,
+        file.recall.as_ref(),
+        Some(file.embedder.dim).filter(|d| *d > 0),
+    )
+    .map_err(|e| LamboError::Config(e.to_string()))
 }
 
 /// Refuse to use an embedder that disagrees with the session's stamped contract.
@@ -776,6 +796,38 @@ mod tests {
         assert_eq!(
             resolve("keep_warm_secs = 45\n"),
             Some(std::time::Duration::from_secs(45))
+        );
+    }
+
+    /// #18, Level B: `[recall]` is wrapped around the primary at the single
+    /// construction site when the tier is compiled in, and refused by feature
+    /// name when it is not. Nothing here touches the network.
+    #[test]
+    #[cfg(all(feature = "store-memory", feature = "embed-fixture"))]
+    fn a_recall_section_is_wrapped_at_resolve_or_refused_by_feature() {
+        let toml = "[store]\nkind = \"memory\"\n[embedder]\nkind = \"fixture\"\n\
+                    [recall]\nkind = \"elastic\"\nurl = \"http://127.0.0.1:1\"\n";
+        let resolved = resolve_backends(LamboFile::from_toml_str(toml).unwrap());
+        if crate::store::RecallKind::Elastic.is_compiled() {
+            let r = resolved.expect("a compiled tier resolves");
+            assert!(r.store.capabilities().contains(Capabilities::VECTOR_SEARCH));
+            assert_eq!(r.store.vector_dimensions(), Some(1024));
+            assert!(
+                !r.store.exact_vector_scan(),
+                "#8: the tier is not an exact scan"
+            );
+        } else {
+            let err = resolved
+                .err()
+                .expect("an uncompiled tier is refused")
+                .to_string();
+            assert!(err.contains("--features recall-elastic"), "{err}");
+        }
+        let plain = "[store]\nkind = \"memory\"\n[embedder]\nkind = \"fixture\"\n";
+        let r = resolve_backends(LamboFile::from_toml_str(plain).unwrap()).unwrap();
+        assert!(
+            !r.store.capabilities().contains(Capabilities::VECTOR_SEARCH),
+            "no [recall], no tier"
         );
     }
 

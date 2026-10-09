@@ -30,6 +30,7 @@
 
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::store::GraphStore;
 use crate::types::{SessionId, StoreError};
 
 /// Recall tier selector (`[recall] kind`).
@@ -180,6 +181,55 @@ pub struct RecallBackfillReport {
     pub mutation_epoch: u64,
 }
 
+fn missing_feature(kind: RecallKind) -> StoreError {
+    StoreError::Backend(format!(
+        "recall tier kind `{kind}` is not compiled into this binary; rebuild with \
+         `--features {}` (see dev-diary/notes/level-b-pluggability.md)",
+        kind.feature_name()
+    ))
+}
+
+/// Level B registry arm for the recall tier: wrap the durable `primary` in the
+/// configured tier, or hand it back untouched when there is no `[recall]`.
+///
+/// Called only from `resolve` (the single construction site), after the
+/// primary is built. `vector_dim` is the process's configured embedder width,
+/// reported by the tier when the primary persists no vectors of its own.
+///
+/// Fail-closed: a `[recall]` section naming a tier this binary was not built
+/// with is an error, never a silent fall back to the bare primary.
+pub fn wrap_with_recall_tier(
+    primary: Box<dyn GraphStore>,
+    recall: Option<&RecallConfig>,
+    vector_dim: Option<usize>,
+) -> Result<Box<dyn GraphStore>, StoreError> {
+    let Some(cfg) = recall else {
+        return Ok(primary);
+    };
+    if !cfg.kind.is_compiled() {
+        return Err(missing_feature(cfg.kind));
+    }
+    let _ = vector_dim;
+    match cfg.kind {
+        RecallKind::Elastic => {
+            #[cfg(feature = "recall-elastic")]
+            {
+                let index = crate::store::tiered::elastic::ElasticRecall::new(cfg)?;
+                Ok(Box::new(crate::store::tiered::TieredStore::new(
+                    primary,
+                    Box::new(index),
+                    vector_dim,
+                )))
+            }
+            #[cfg(not(feature = "recall-elastic"))]
+            {
+                drop(primary);
+                Err(missing_feature(RecallKind::Elastic))
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,6 +283,27 @@ mod tests {
             .unwrap();
             assert_eq!(cfg.refresh, want);
             assert_eq!(cfg.refresh.as_param(), text);
+        }
+    }
+
+    /// Level B: no `[recall]` hands the primary back; a section naming a tier
+    /// this build lacks is refused by feature name.
+    #[cfg(feature = "store-memory")]
+    #[test]
+    fn the_registry_arm_is_fail_closed() {
+        let primary: Box<dyn GraphStore> = Box::new(crate::store::MemoryStore::new());
+        let same = wrap_with_recall_tier(primary, None, Some(8)).unwrap();
+        assert!(same.vector_dimensions().is_none(), "untouched primary");
+
+        let cfg = parse("kind = \"elastic\"\nurl = \"http://127.0.0.1:1\"\n").unwrap();
+        let primary: Box<dyn GraphStore> = Box::new(crate::store::MemoryStore::new());
+        let built = wrap_with_recall_tier(primary, Some(&cfg), Some(8));
+        if RecallKind::Elastic.is_compiled() {
+            let store = built.expect("compiled tier builds without touching the network");
+            assert_eq!(store.vector_dimensions(), Some(8));
+        } else {
+            let err = built.err().expect("uncompiled tier is refused").to_string();
+            assert!(err.contains("--features recall-elastic"), "{err}");
         }
     }
 }

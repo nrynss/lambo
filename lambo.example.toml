@@ -157,3 +157,26 @@ url = "http://127.0.0.1:8080"
 #
 # Seconds between canonization evaluation passes. Default 60.
 # canonization_eval_interval_secs = 5
+
+# --- Recall tier (issue #18, feature recall-elastic) -------------------------
+# Optional. An Elasticsearch index beside the durable [store] that serves the
+# vector leg of recall. The store above stays the source of truth: leases,
+# fencing, canonization and graph queries never touch Elasticsearch. Each
+# committed flush is mirrored to the index; a mirror failure never fails the
+# flush, it marks the session stale and recall serves vectors from the store
+# until the index is repaired (by the session's writer at its next load or
+# flush, or by `lambo recall-index backfill --session <s>` with no writer).
+# Search lags a flush by up to the index refresh interval (1 s by default).
+#
+# A top-level table, not [store.recall]. A binary built without the feature
+# refuses this section by name. The API key is by reference only: name the
+# environment variable that holds it, never the key itself. Omit api_key for
+# a cluster with security off.
+#
+# [recall]
+# kind = "elastic"
+# url = "https://my-cluster.es.example.com"
+# api_key = { env = "LAMBO_ES_API_KEY" }
+# index_prefix = "lambo"
+# refresh = "false"
+# timeout_ms = 5000
