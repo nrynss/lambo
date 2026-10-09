@@ -15,8 +15,7 @@ use crate::store::{
     Capabilities, EraseOutcome, LeaseInfo, LeaseOutcome, RecallBackfillReport, SessionFlushStats,
 };
 use crate::types::{
-    AgentId, CanonizationEvent, GraphSnapshot, MutationBatch, NodeId, Scored, SessionId,
-    StoreError,
+    AgentId, CanonizationEvent, GraphSnapshot, MutationBatch, NodeId, Scored, SessionId, StoreError,
 };
 use chrono::{DateTime, Utc};
 
@@ -328,7 +327,10 @@ async fn a_detached_session_s_handle_is_gone_before_it_is_attached_again() {
     assert_eq!(ours.holder, serve_token(), "the serve holds a again");
     assert_eq!(ours.token, theirs + 1, "a fresh fencing token");
     assert!(
-        !logs.lines().iter().any(|l| l.contains("SecondSessionWriter")),
+        !logs
+            .lines()
+            .iter()
+            .any(|l| l.contains("SecondSessionWriter")),
         "a false second-writer report: {:?}",
         logs.lines()
     );
@@ -434,7 +436,10 @@ async fn a_lost_lease_is_detached_re_elected_and_served_again_end_to_end() {
         "b was never re-elected"
     );
     assert!(
-        !logs.lines().iter().any(|l| l.contains("SecondSessionWriter")),
+        !logs
+            .lines()
+            .iter()
+            .any(|l| l.contains("SecondSessionWriter")),
         "a false second-writer report: {:?}",
         logs.lines()
     );
