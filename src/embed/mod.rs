@@ -147,7 +147,9 @@ pub trait Embedder: Send + Sync {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EmbedderKind {
-    /// BGE-M3 weights served by a local llama.cpp server (default). Feature: `embed-bge`.
+    /// BGE-M3 weights served by a local llama.cpp server (default), or any
+    /// OpenAI-compatible embeddings endpoint (`openai` alias, issue #21).
+    /// Feature: `embed-bge`.
     #[default]
     BgeM3,
     /// In-process BGE-M3 via candle (K2). Feature: `embed-candle`.
@@ -218,7 +220,10 @@ impl FromStr for EmbedderKind {
             ));
         }
         match t.to_ascii_lowercase().as_str() {
-            "bge_m3" | "bge-m3" | "bge" => Ok(Self::BgeM3),
+            // `openai` (issue #21): the adapter is protocol-shaped, not
+            // model-shaped. It stays `BgeM3`, so it displays and stamps the
+            // EmbeddingContract as `bge_m3` and no existing session changes.
+            "bge_m3" | "bge-m3" | "bge" | "openai" => Ok(Self::BgeM3),
             "candle" => Ok(Self::Candle),
             "gemini" | "vertex" => Ok(Self::Gemini),
             "bedrock" | "titan" => Ok(Self::Bedrock),
@@ -590,7 +595,8 @@ pub fn build_embedder(cfg: EmbedderConfig) -> Result<Box<dyn Embedder>, EmbedErr
         // A credential key the selected adapter would ignore is refused rather
         // than silently dropped: an operator who configured one expects it used.
         return Err(EmbedError::Unavailable(format!(
-            "embedder.api_key_env ({}) applies only to kind `bge_m3`, but kind is `{}`; \
+            "embedder.api_key_env ({}) applies only to kind `bge_m3` (alias `openai`), but kind \
+             is `{}`; \
              remove api_key_env or change the kind",
             api_key::shown_env(name),
             cfg.kind
@@ -693,6 +699,10 @@ mod tests {
             "BGE-M3".parse::<EmbedderKind>().unwrap(),
             EmbedderKind::BgeM3
         );
+        // Issue #21: `openai` is the same adapter, displayed as `bge_m3`.
+        let openai = " OpenAI ".parse::<EmbedderKind>().unwrap();
+        assert_eq!(openai, EmbedderKind::BgeM3);
+        assert_eq!(openai.to_string(), "bge_m3");
         assert_eq!(
             "candle".parse::<EmbedderKind>().unwrap(),
             EmbedderKind::Candle
@@ -1041,6 +1051,8 @@ mod tests {
         assert_eq!(w.kind, EmbedderKind::Gemini);
         let w: Wrap = toml::from_str(r#"kind = "candle""#).unwrap();
         assert_eq!(w.kind, EmbedderKind::Candle);
+        let w: Wrap = toml::from_str(r#"kind = "openai""#).unwrap();
+        assert_eq!(w.kind, EmbedderKind::BgeM3);
     }
 
     #[test]
@@ -1113,6 +1125,21 @@ mod tests {
         .unwrap();
         assert_eq!(e.dimensions(), 1024);
         assert!(EmbedderKind::BgeM3.is_ready());
+    }
+
+    /// Issue #21: `kind = "openai"` in a file builds the same adapter, and a
+    /// re-serialized config writes it back as `bge_m3`.
+    #[test]
+    #[cfg(feature = "embed-bge")]
+    fn openai_kind_builds_the_bge_adapter() {
+        let cfg: EmbedderConfig =
+            toml::from_str("kind = \"openai\"\nurl = \"http://127.0.0.1:9\"\n").unwrap();
+        assert_eq!(cfg.kind, EmbedderKind::BgeM3);
+        assert!(toml::to_string(&cfg).unwrap().contains("kind = \"bge_m3\""));
+        let e = build_embedder(cfg).unwrap();
+        assert_eq!(e.dimensions(), 1024);
+        assert_eq!(candle_identity(e.as_ref()), None);
+        assert_eq!(gemini_identity(e.as_ref()), None);
     }
 
     #[test]
