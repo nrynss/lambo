@@ -520,6 +520,12 @@ fn serve_preflight(
             return Err(ExitCode::from(2));
         }
     };
+    // A usage error is reported before the file is read, so a stdio serve
+    // given several `--session`s exits 2 whatever state the file is in
+    // (#32 PR 8 Sonnet review L1).
+    if transport == Transport::Stdio && session.len() > 1 {
+        return Err(too_many_stdio_sessions(session.len()));
+    }
     let file = match LamboFile::load_resolved(config) {
         Ok(file) => file,
         Err(e) => {
@@ -585,15 +591,18 @@ fn stdio_session(
             log_session_source(&selected);
             Ok(selected.session)
         }
-        many => {
-            eprintln!(
-                "lambo serve: --session was given {} times, but a stdio serve owns exactly one \
-                 session; serve several sessions with --transport http",
-                many.len()
-            );
-            Err(ExitCode::from(2))
-        }
+        many => Err(too_many_stdio_sessions(many.len())),
     }
+}
+
+/// The usage refusal for a stdio serve given `count` (more than one)
+/// `--session`s. Printed here; exit 2.
+fn too_many_stdio_sessions(count: usize) -> ExitCode {
+    eprintln!(
+        "lambo serve: --session was given {count} times, but a stdio serve owns exactly one \
+         session; serve several sessions with --transport http"
+    );
+    ExitCode::from(2)
 }
 
 fn emit_stdout(out: &str) {

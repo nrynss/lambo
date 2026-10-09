@@ -137,8 +137,31 @@ fn the_session_flag_wins_over_the_map() {
     let fx = fixture("lambo-i32h-flag", MAP);
     let cwd = mkdir(&fx.dir, "work/lambo");
     let out = run_serve(&fx, &cwd, &["--session", "i32h-flag"]);
-    assert!(out.status.success(), "{}", stderr(&out));
+    let err = stderr(&out);
+    assert!(out.status.success(), "{err}");
     assert_eq!(started_session(&fx), "i32h-flag");
+    // With `--session` given, the map is not consulted, so nothing says
+    // where the session came from (Sonnet review L2).
+    assert!(
+        !err.contains("[[serve.projects]] entry covering the working directory")
+            && !err.contains("default_session"),
+        "no selection line: {err}"
+    );
+}
+
+/// Two `--session`s on stdio are a usage error (exit 2), reported before
+/// the file is read: a broken `lambo.toml` does not turn it into exit 1
+/// (Sonnet review L1 and L2).
+#[test]
+fn a_stdio_serve_given_two_sessions_exits_2_before_reading_the_file() {
+    let fx = fixture("lambo-i32h-two", MAP);
+    std::fs::write(&fx.cfg, "this is not toml [[[").expect("break the config");
+    let cwd = mkdir(&fx.dir, "work/lambo");
+    let out = run_serve(&fx, &cwd, &["--session", "i32h-a", "--session", "i32h-b"]);
+    let err = stderr(&out);
+    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert!(err.contains("--session was given 2 times"), "{err}");
+    assert!(!fx.ledger.exists(), "refused before the serve started");
 }
 
 #[test]
