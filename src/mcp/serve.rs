@@ -62,6 +62,7 @@
 //! | `roles` | the startup election, `Role`, the loser-side refusal record |
 //! | `pinned` | which sessions a serve pins ([`pin_sessions`]) and `serve`'s own check of them |
 //! | `registry` | the attached sessions (`SessionRegistry`): slots, the pinned attach, the detach, the routing lookup, the lease-loss policy |
+//! | `activity` | when a session was last used and whether a call is in flight in it (#32 PR 6) |
 //! | `process` | the process-wide background tasks (`ProcessTasks`) |
 //! | `session` | the per-session part (`AttachedSession`, `SessionTasks`) |
 //! | `hub` | every Unix-socket touch: endpoint derivation, bind, accept loop, release, the proxy probe (the #39 seam) |
@@ -85,6 +86,7 @@ use crate::resolve::ResolvedBackends;
 use crate::types::LamboError;
 use crate::writeq::EmbedderCalibration;
 
+pub(crate) mod activity;
 mod authority;
 mod builder;
 mod heartbeat;
