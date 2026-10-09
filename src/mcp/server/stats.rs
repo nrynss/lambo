@@ -109,6 +109,12 @@ impl LamboServer {
         // behind, a failed write means the path is broken, and an operator
         // reading one number cannot tell those apart. Additive keys on a payload
         // that only exists when the ledger is on.
+        //
+        // #32 PR 4 review L5: the session's own counters, not the file's, so
+        // with several sessions on one file no session's stats show another's
+        // call volume and the heartbeat lines do not count each line once per
+        // session. A one-session serve scopes every line to its session, so
+        // its numbers are the file's, as before.
         if let Some(ledger) = &self.ledger {
             let obj = payload.as_object_mut().expect("json! built an object");
             obj.insert(
@@ -117,19 +123,19 @@ impl LamboServer {
             );
             obj.insert(
                 "ledger_written_lines".into(),
-                json!(ledger.counters().written()),
+                json!(ledger.session_counters().written()),
             );
             obj.insert(
                 "ledger_dropped_lines".into(),
-                json!(ledger.counters().dropped()),
+                json!(ledger.session_counters().dropped()),
             );
             obj.insert(
                 "ledger_dropped_channel_full".into(),
-                json!(ledger.counters().dropped_channel_full()),
+                json!(ledger.session_counters().dropped_channel_full()),
             );
             obj.insert(
                 "ledger_dropped_write_failed".into(),
-                json!(ledger.counters().dropped_write_failed()),
+                json!(ledger.session_counters().dropped_write_failed()),
             );
             // I-R2-3. Queue depth, because the drop counters have a blind spot
             // about themselves: on a path whose `open` blocks (reader-less FIFO,
@@ -139,7 +145,7 @@ impl LamboServer {
             // on the first call, so "writer parked" is visible immediately.
             obj.insert(
                 "ledger_queued_lines".into(),
-                json!(ledger.counters().queued()),
+                json!(ledger.session_counters().queued()),
             );
         }
         // J3. Unconditional, unlike the `ledger_*` keys above, and the

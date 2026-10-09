@@ -159,13 +159,6 @@ impl ShutdownProgress {
     /// `shutdown finished`, because the process is not shutting down.
     /// It never starts a watchdog: the watchdog bounds the whole process's
     /// shutdown, not a session's (see `super::watchdog`).
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "#32 PR 4's registry detach is the first production caller"
-        )
-    )]
     pub(crate) fn for_session(session: &str) -> Self {
         Self {
             shared: Arc::default(),
