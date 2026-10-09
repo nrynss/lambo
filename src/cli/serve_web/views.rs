@@ -218,6 +218,9 @@ struct Slot {
     /// (tests: a burst test releases its parked load once all are queued).
     #[cfg(test)]
     queued: AtomicU64,
+    /// Mismatch warnings printed for this session (tests: once per session).
+    #[cfg(test)]
+    mismatch_warnings: AtomicU64,
 }
 
 impl Slot {
@@ -233,6 +236,8 @@ impl Slot {
             queries: Mutex::new(QueryEmbeddingCache::new()),
             #[cfg(test)]
             queued: AtomicU64::new(0),
+            #[cfg(test)]
+            mismatch_warnings: AtomicU64::new(0),
         }
     }
 }
@@ -351,6 +356,8 @@ impl ViewCache {
         };
         let view = outcome?;
         if warn {
+            #[cfg(test)]
+            slot.mismatch_warnings.fetch_add(1, Ordering::SeqCst);
             // The startup warning of the single-session portal, moved to the
             // session's first load (design 5.1): an operator log, not a
             // response.
@@ -452,5 +459,17 @@ impl ViewCache {
         self.slots
             .get(session)
             .map_or(0, |slot| slot.queued.load(Ordering::SeqCst))
+    }
+
+    /// How many times the mismatch warning was printed for `session` (tests).
+    #[cfg(test)]
+    #[cfg_attr(
+        not(all(feature = "store-memory", feature = "embed-fixture")),
+        allow(dead_code)
+    )]
+    pub(super) fn mismatch_warnings(&self, session: &SessionId) -> u64 {
+        self.slots
+            .get(session)
+            .map_or(0, |slot| slot.mismatch_warnings.load(Ordering::SeqCst))
     }
 }

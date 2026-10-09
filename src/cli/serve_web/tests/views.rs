@@ -729,6 +729,72 @@ async fn a_joiner_whose_view_was_evicted_loads_it_again() {
     assert_eq!(counting.loads(), 3, "the joiner loaded A once more");
 }
 
+/// SQLite loads one session at a time whatever `[web] load_concurrency`
+/// says (its portal pool is one connection); other stores take the value.
+#[test]
+fn sqlite_forces_one_load_at_a_time() {
+    use crate::cli::serve_web::views::ViewBounds;
+    let web = crate::config::WebConfig {
+        load_concurrency: Some(4),
+        recall_concurrency: Some(3),
+        ..Default::default()
+    };
+    let sqlite = ViewBounds::resolve(&web, StoreKind::Sqlite);
+    assert_eq!(sqlite.load_concurrency, 1, "SQLite is forced to 1");
+    assert_eq!(
+        sqlite.recall_concurrency, 3,
+        "only the load bound is forced"
+    );
+    for kind in [StoreKind::Memory, StoreKind::Postgres, StoreKind::Cockroach] {
+        assert_eq!(
+            ViewBounds::resolve(&web, kind).load_concurrency,
+            4,
+            "{kind:?}"
+        );
+    }
+}
+
+/// The H1 mismatch warning is printed once per session, at its first load
+/// that sees the mismatch, not on every reload; each session gets its own.
+#[tokio::test]
+async fn the_mismatch_warning_is_printed_once_per_session() {
+    let counting = LoadCounting::new(two_sessions().await);
+    let (a, b) = (SessionId::new("t4-a"), SessionId::new("t4-b"));
+    let cache = crate::cli::serve_web::views::ViewCache::new(
+        [a.clone(), b.clone()],
+        crate::cli::serve_web::views::ViewBounds {
+            ttl: Duration::ZERO,
+            ..bounds(4)
+        },
+    );
+    let stored = backends_on(Arc::new(MemoryStore::new())).embedding;
+    let configured = EmbeddingContract {
+        dim: stored.dim + 1,
+        ..stored.clone()
+    };
+
+    for _ in 0..3 {
+        let view = cache.view(&counting, &configured, &a).await.expect("a");
+        assert_eq!(view.embedding.status, "mismatch");
+    }
+    assert_eq!(counting.loads(), 3, "TTL 0: every view is a fresh load");
+    assert_eq!(
+        cache.mismatch_warnings(&a),
+        1,
+        "one warning for a, not three"
+    );
+    assert_eq!(cache.mismatch_warnings(&b), 0, "b has not been loaded");
+
+    cache.view(&counting, &configured, &b).await.expect("b");
+    assert_eq!(cache.mismatch_warnings(&b), 1, "b gets its own warning");
+    assert_eq!(cache.mismatch_warnings(&a), 1);
+
+    // A compatible session prints nothing.
+    let fresh = crate::cli::serve_web::views::ViewCache::new([a.clone()], bounds(4));
+    fresh.view(&counting, &stored, &a).await.expect("a");
+    assert_eq!(fresh.mismatch_warnings(&a), 0);
+}
+
 /// The view's counts and feed agree with the store's snapshot, and an
 /// unserved session is refused without a store call.
 #[tokio::test]
