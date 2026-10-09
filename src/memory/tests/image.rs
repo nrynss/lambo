@@ -441,6 +441,51 @@ async fn an_acknowledged_image_derive_applies_and_says_so() {
     mem.close().await.unwrap();
 }
 
+/// #22 PR 4: a text concept that already holds the image's key refuses the
+/// image derive with its own variant, on the synchronous path, and with its
+/// own model-safe sentence on the receipt: it names the fix and the caller's
+/// image id, never the text concept's node id or anything else.
+#[tokio::test]
+async fn an_image_id_held_by_a_text_concept_is_refused_with_the_fix_on_both_paths() {
+    let mem = image_memory(Arc::new(MemoryStore::new()), "image-id-taken").await;
+    let squat = mem
+        .derive(
+            &[("Render 17 [IMAGE:r17]", ConceptType::Entity)],
+            &ParentOf::none(),
+        )
+        .await
+        .unwrap();
+    let [text_node] = squat.created.try_into().unwrap();
+    let png = png_with_label("red silk saree");
+
+    let err = mem
+        .derive_image_as(&agent(), bytes_derive("render 17", &png, Some("r17")))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, LamboError::ImageIdTaken(id) if id == "r17"),
+        "{err:?}"
+    );
+
+    let submitted = mem
+        .derive_image_async_as(&agent(), bytes_derive("render 17", &png, Some("r17")))
+        .await
+        .unwrap();
+    let answer = mem
+        .pipeline()
+        .wait(&agent(), submitted.receipt, crate::writeq::RECEIPT_WAIT_MAX)
+        .await;
+    let crate::writeq::ReceiptAnswer::Failed(why) = &answer else {
+        panic!("failed: {answer:?}");
+    };
+    assert!(why.contains("choose another image id"), "{why}");
+    assert!(why.contains("\"r17\""), "{why}");
+    assert!(!why.contains(&text_node.to_string()), "{why}");
+    assert!(!why.contains("logged server-side"), "{why}");
+    assert!(image_concepts(&mem).is_empty());
+    mem.close().await.unwrap();
+}
+
 /// The query-embedding cache (#14) only ever holds recall's query vectors:
 /// an image derive, sync or queued, puts nothing in it.
 #[tokio::test]
@@ -568,6 +613,59 @@ async fn a_replayed_image_intent_under_a_changed_live_contract_settles_failed() 
         "consumed as failed, durably"
     );
     assert!(snap.concepts.is_empty());
+}
+
+/// #22 PR 4: a replayed image intent whose key a text concept already holds
+/// settles `failed` with the image-id sentence, not a bare class, and does not
+/// block the replay.
+#[cfg(feature = "fixtures")]
+#[tokio::test]
+async fn a_replayed_image_intent_whose_id_is_taken_settles_failed_with_the_fix() {
+    let session = "image-replay-taken";
+    // A text concept holding the image's key, written by an earlier writer.
+    let squatter = image_memory(Arc::new(MemoryStore::new()), session).await;
+    squatter
+        .derive(
+            &[("Render 17 [IMAGE:r17]", ConceptType::Entity)],
+            &ParentOf::none(),
+        )
+        .await
+        .unwrap();
+    let mut snap = squatter.graph().read().snapshot();
+    squatter.close().await.unwrap();
+    let head = snap.interactions[0].id;
+    // Then an image intent acked behind it, chained after its interaction.
+    let store = Arc::new(MemoryStore::new());
+    let receipt = plant_image_intent(&store, session, live());
+    let mut planted = store.load_session(&SessionId::new(session)).await.unwrap();
+    planted.interactions[0].previous_id = Some(head);
+    let now = Utc::now();
+    snap.edges.push(crate::types::Edge {
+        id: NodeId::new(),
+        session_id: SessionId::new(session),
+        source: planted.interactions[0].id,
+        target: head,
+        edge_type: crate::types::EdgeType::Temporal,
+        weight: 1.0,
+        reinforcements: 0,
+        created_at: now,
+        last_reinforced: now,
+        event_time: None,
+    });
+    snap.write_intents = planted.write_intents;
+    snap.interactions.extend(planted.interactions);
+    store.seed(snap).expect("seed");
+
+    let mem = image_memory(store.clone(), session).await;
+    let answer = settled(&mem, &receipt).await;
+    let crate::writeq::ReceiptAnswer::Failed(why) = &answer else {
+        panic!("failed: {answer:?}");
+    };
+    assert!(why.contains("choose another image id"), "{why}");
+    assert!(why.contains("\"r17\""), "{why}");
+    assert_eq!(mem.pipeline().counters().replay_owed(), 0);
+    assert!(image_concepts(&mem).is_empty());
+    mem.close().await.unwrap();
 }
 
 /// The control: the same intent under the contract it was acked in applies

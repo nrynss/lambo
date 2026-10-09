@@ -594,12 +594,12 @@ fn check_supplied(
 /// * An image concept that already has a vector: `None`, the first vector
 ///   is kept.
 /// * A **text** concept (no `embedding_source`): refused with
-///   [`LamboError::Embed`]. Any text write can produce the image's canonical
+///   [`LamboError::ImageIdTaken`]. Any text write can produce the image's canonical
 ///   key (a derive, an action's resources, a `parent_of` end; case and token
 ///   order fold together), and keeping the text concept would leave the
-///   image with no vector while the call reported success. `Embed`, because
-///   it is a fact about this input, so a replayed intent settles `failed`
-///   rather than blocking the replay.
+///   image with no vector while the call reported success. A fact about
+///   this input, like `Embed`, so a replayed intent settles `failed` rather
+///   than blocking the replay.
 fn supplied_match_repair<'s>(
     graph: &Graph,
     items: &[(&str, ConceptType, String, Option<NodeId>)],
@@ -618,11 +618,20 @@ fn supplied_match_repair<'s>(
         return Ok(None);
     };
     match graph.node(node) {
-        Some(Node::Concept(c)) if c.embedding_source.is_none() => Err(LamboError::Embed(format!(
-            "image derive: a text concept ({node}) already holds this image's caption and id, so \
-             the image would have no vector; derive the image with another image id. The \
-             image concept was not written"
-        ))),
+        Some(Node::Concept(c)) if c.embedding_source.is_none() => {
+            // The node id is the operator's; the caller is told only its own
+            // image id (`LamboError::ImageIdTaken`).
+            tracing::info!(
+                target: "lambo::image",
+                text_concept = %node,
+                "image derive refused: a text concept already holds the image's canonical key"
+            );
+            Err(LamboError::ImageIdTaken(
+                crate::graph::image::image_id_of(&supplied.content)
+                    .unwrap_or_default()
+                    .to_owned(),
+            ))
+        }
         Some(Node::Concept(c)) if c.embedding.is_none() => Ok(Some((node, supplied))),
         _ => Ok(None),
     }
@@ -882,22 +891,32 @@ async fn derive_planned(
                 check_embed_budget(&items, &parent_ends)?;
             }
 
-            if origin_text
-                .as_ref()
-                .is_some_and(|origin| origin.len() > MAX_HYBRID_CONTEXT_BYTES)
+            // The context caps bound what an embedder is sent, so, like the
+            // embed budget above, they apply only when this call will embed:
+            // on a store without vector search nothing is embedded.
+            if vector_ok
+                && origin_text
+                    .as_ref()
+                    .is_some_and(|origin| origin.len() > MAX_HYBRID_CONTEXT_BYTES)
             {
                 return Err(LamboError::Config(format!(
                     "hybrid interaction context exceeds {MAX_HYBRID_CONTEXT_BYTES} bytes"
                 )));
             }
+            // A supplied (image) item's text is never embedded: its vector
+            // arrived with it. Its content may fill the whole per-string cap
+            // (a caption plus its suffix), so framing it would refuse an
+            // image derive the surface accepted (#22 PR 4 review M2).
             let unmatched_contents = items
                 .iter()
-                .filter(|(_, _, _, matched)| matched.is_none())
+                .filter(|(content, _, _, matched)| matched.is_none() && !is_supplied(content))
                 .map(|(content, _, _, _)| *content)
                 .chain(parent_ends.iter().map(|(content, _)| *content));
-            if unmatched_contents.into_iter().any(|content| {
-                context_len(content, origin_text.as_deref()) > MAX_HYBRID_CONTEXT_BYTES
-            }) {
+            if vector_ok
+                && unmatched_contents.into_iter().any(|content| {
+                    context_len(content, origin_text.as_deref()) > MAX_HYBRID_CONTEXT_BYTES
+                })
+            {
                 return Err(LamboError::Config(format!(
                     "hybrid embedding context exceeds {MAX_HYBRID_CONTEXT_BYTES} bytes"
                 )));

@@ -633,11 +633,13 @@ fn serve_web_serves_live_data_over_http_and_stays_read_only() {
 }
 
 // ---------------------------------------------------------------------------
-// 4. MCP stdio: exactly seven tools, and a client timestamp is refused (F18)
+// 4. MCP stdio: the seven spec tools plus the image tool (the fixture embeds
+//    images, #22), a client timestamp is refused (F18), and an image derive
+//    and its base64 cap work over stdio
 // ---------------------------------------------------------------------------
 
 #[test]
-fn mcp_stdio_publishes_exactly_seven_tools_and_refuses_a_client_timestamp() {
+fn mcp_stdio_publishes_the_spec_tools_and_the_image_tool_and_refuses_a_client_timestamp() {
     let s = scratch("mcp");
     const SESSION: &str = "t87-binary-mcp";
 
@@ -647,18 +649,23 @@ fn mcp_stdio_publishes_exactly_seven_tools_and_refuses_a_client_timestamp() {
     let mut mcp = spawn_serve_stdio(&s, SESSION, "agent-a");
     initialize(&mut mcp);
 
-    // tools/list -> exactly the seven spec §6.2 tools (mirror server.rs
-    // the_router_publishes_exactly_the_seven_spec_tools) over the wire.
+    // tools/list -> the seven spec §6.2 tools, plus lambo_derive_image
+    // because the fixture embedder embeds images (#22 design 6.1; a
+    // text-only deployment lists exactly the seven, pinned in-process by
+    // server.rs the_router_publishes_exactly_the_seven_spec_tools).
     mcp.send(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#);
     let listed = mcp.read_response(2);
     assert!(
         !listed.contains("\"error\""),
         "tools/list must succeed, not error: {listed}"
     );
+    let mut expected: Vec<&str> = SEVEN_TOOLS.to_vec();
+    expected.push("lambo_derive_image");
+    expected.sort();
     assert_eq!(
         tool_names(&listed),
-        SEVEN_TOOLS,
-        "spec §6.2 names exactly these seven tools; got: {listed}"
+        expected,
+        "the spec's seven tools and the image tool; got: {listed}"
     );
 
     // F18 — a client-supplied timestamp is an unknown field and is refused.
@@ -698,6 +705,34 @@ fn mcp_stdio_publishes_exactly_seven_tools_and_refuses_a_client_timestamp() {
         ok.contains("\"isError\":false"),
         "a clean derive must still succeed after the refusal; resp=\n{ok}"
     );
+
+    // #22: an image derive over stdio is acked with a receipt (SQLite has
+    // vector search, the fixture embeds the PNG) ...
+    let png = {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode(lambo::embed::png_with_label("red saree"))
+    };
+    mcp.send(&format!(
+        r#"{{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{{"name":"lambo_derive_image","arguments":{{"agent_id":"agent-a","caption":"render 17","concept_type":"resource","image_id":"r17","image":{{"mime":"image/png","data":"{png}"}}}}}}}}"#
+    ));
+    let image = mcp.read_response(6);
+    assert!(
+        image.contains("\"isError\":false") && image.contains("accepted 1 image concept"),
+        "an image derive over stdio is acked; resp=\n{image}"
+    );
+    // ... and stdio, which has no transport cap, still refuses base64 over
+    // the cap before decoding it, without echoing it.
+    let over = "A".repeat(2_796_204 + 4);
+    mcp.send(&format!(
+        r#"{{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{{"name":"lambo_derive_image","arguments":{{"agent_id":"agent-a","caption":"too big","concept_type":"resource","image":{{"mime":"image/png","data":"{over}"}}}}}}}}"#
+    ));
+    let capped = mcp.read_response(7);
+    assert!(
+        capped.contains("\"isError\":true") && capped.contains("2796204-character limit"),
+        "over-cap base64 is refused by name; resp len {}",
+        capped.len()
+    );
+    assert!(capped.len() < 4096, "the refusal does not echo the payload");
 
     mcp.shutdown();
 }

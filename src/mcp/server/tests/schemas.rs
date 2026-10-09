@@ -2,9 +2,12 @@
 
 use super::*;
 
+/// A text-only deployment (BGE-M3, candle, Gemini; client vectors off)
+/// publishes exactly the seven spec tools: #22's image tool is not listed
+/// where it cannot work (design 6.1).
 #[tokio::test]
 async fn the_router_publishes_exactly_the_seven_spec_tools() {
-    let s = server("mcp-seven").await;
+    let s = text_only_server("mcp-seven", Config::default()).await;
     let mut names: Vec<String> = tools(&s).iter().map(|t| t.name.to_string()).collect();
     names.sort();
     assert_eq!(
@@ -21,6 +24,75 @@ async fn the_router_publishes_exactly_the_seven_spec_tools() {
         "spec §6.2 names the seven tools exactly; adding or renaming one is a spec change"
     );
     s.mem.close().await.expect("close");
+}
+
+/// #22 design 6.1: `lambo_derive_image` is listed when the embedder embeds
+/// images or the operator accepts client vectors, and only then. A call to
+/// the unlisted name never reaches a tool body: the router has no route.
+#[tokio::test]
+async fn the_image_tool_is_listed_only_where_it_can_work() {
+    let listed = |s: &LamboServer| tools(s).iter().any(|t| t.name == "lambo_derive_image");
+
+    let text = text_only_server("mcp-list-text", Config::default()).await;
+    assert!(!listed(&text));
+    assert!(!text.tool_router.has_route("lambo_derive_image"));
+    text.mem.close().await.expect("close");
+
+    let vectors = text_only_server(
+        "mcp-list-vectors",
+        Config {
+            accept_client_vectors: true,
+            ..Config::default()
+        },
+    )
+    .await;
+    assert!(listed(&vectors), "client vectors make the tool useful");
+    vectors.mem.close().await.expect("close");
+
+    let images = server("mcp-list-images").await;
+    assert!(listed(&images), "an image embedder makes the tool useful");
+    assert_eq!(tools(&images).len(), 8);
+    images.mem.close().await.expect("close");
+}
+
+/// The published tool list, pinned byte for byte (#22 PR 4 acceptance): the
+/// seven spec tools' descriptions and schemas are exactly what they were
+/// before the image tool existed (the golden's seven entries were captured
+/// from main `932caea`), and the image tool's are pinned beside them. Both
+/// sides go through `serde_json::to_string`, so this is the wire's bytes,
+/// not a semantic comparison.
+#[tokio::test]
+async fn published_tool_schemas_are_pinned_to_the_golden() {
+    let golden: serde_json::Value =
+        serde_json::from_str(include_str!("tool_schemas.golden.json")).expect("golden parses");
+    let golden = golden.as_object().expect("golden is an object");
+    let check = |s: &LamboServer, expect: usize| {
+        let published = tools(s);
+        assert_eq!(published.len(), expect);
+        for t in published {
+            let want = golden
+                .get(t.name.as_ref())
+                .unwrap_or_else(|| panic!("no golden entry for {}", t.name));
+            assert_eq!(
+                serde_json::to_string(&json!(t.description)).unwrap(),
+                serde_json::to_string(&want["description"]).unwrap(),
+                "{} description",
+                t.name
+            );
+            assert_eq!(
+                serde_json::to_string(&*t.input_schema).unwrap(),
+                serde_json::to_string(&want["inputSchema"]).unwrap(),
+                "{} input schema",
+                t.name
+            );
+        }
+    };
+    let text = text_only_server("mcp-golden-text", Config::default()).await;
+    check(&text, 7);
+    text.mem.close().await.expect("close");
+    let images = server("mcp-golden-images").await;
+    check(&images, 8);
+    images.mem.close().await.expect("close");
 }
 
 /// Every tool must advertise a usable object schema with `agent_id`, or a
@@ -208,6 +280,30 @@ async fn f18_tool_schemas_match_the_golden_property_set() {
         ),
         ("lambo_saints", vec!["agent_id"]),
         ("lambo_stats", vec!["agent_id", "receipt", "wait_ms"]),
+        // #22 PR 4. `event_time` is the same historical about-time as on the
+        // two text writes; nothing else here is a time.
+        (
+            "lambo_derive_image",
+            vec![
+                "agent_id",
+                "caption",
+                "concept_type",
+                "event_time",
+                "image",
+                "image.data",
+                "image.mime",
+                "image_id",
+                "parent_of",
+                "parent_of[].child",
+                "parent_of[].parent",
+                "vector",
+                "vector.contract",
+                "vector.contract.dim",
+                "vector.contract.kind",
+                "vector.contract.model",
+                "vector.values",
+            ],
+        ),
     ]
     .into_iter()
     .collect();
@@ -236,7 +332,7 @@ async fn f18_tool_schemas_match_the_golden_property_set() {
 #[tokio::test]
 async fn write_tool_schemas_document_optional_rfc3339_event_time() {
     let s = server("mcp-event-time-schema").await;
-    for name in ["lambo_derive", "lambo_record_action"] {
+    for name in ["lambo_derive", "lambo_record_action", "lambo_derive_image"] {
         let tool = tools(&s)
             .into_iter()
             .find(|t| t.name == name)
@@ -346,6 +442,13 @@ async fn published_schemas_carry_runtime_maxima() {
             0,
             crate::writeq::RECEIPT_WAIT_MAX.as_millis() as i64,
         ),
+        // #22: schemars takes a literal; this keeps it the constant.
+        (
+            "lambo_derive_image",
+            "vector.contract.dim",
+            1,
+            crate::surface::image::MAX_VECTOR_VALUES as i64,
+        ),
     ];
 
     for t in tools(&s) {
@@ -364,9 +467,22 @@ async fn published_schemas_carry_runtime_maxima() {
                 );
             }
             if type_includes(node, "string") && node.get("enum").is_none() {
+                // #22: the three strings with a cap of their own.
+                let cap = match (t.name.as_ref(), path.as_str()) {
+                    ("lambo_derive_image", "image.data") => {
+                        crate::surface::image::MAX_IMAGE_B64_LEN as u64
+                    }
+                    ("lambo_derive_image", "image_id") => {
+                        crate::graph::image::MAX_IMAGE_ID_BYTES as u64
+                    }
+                    ("lambo_derive_image", "caption") => {
+                        crate::surface::image::MAX_CAPTION_BYTES as u64
+                    }
+                    _ => 16_384,
+                };
                 assert_eq!(
                     node.get("maxLength").and_then(|v| v.as_u64()),
-                    Some(16_384),
+                    Some(cap),
                     "tool {} string field {path:?} must publish maxLength 16384 matching \
                          the runtime per-string cap (T88-H4): {}",
                     t.name,
@@ -448,6 +564,21 @@ fn schema_leaves(schema: &serde_json::Value) -> Vec<(String, serde_json::Value)>
         if let Some(items) = node.get("items") {
             walk(items, root, &format!("{prefix}[]"), out);
         }
+        // #22: an optional nested object (`image`, `vector`) is published as
+        // `anyOf: [{$ref}, {type: null}]`. Without this arm its fields were
+        // never visited, so their bounds went unchecked.
+        for key in ["allOf", "anyOf", "oneOf"] {
+            for branch in node
+                .get(key)
+                .and_then(|v| v.as_array())
+                .into_iter()
+                .flatten()
+            {
+                if branch.get("type") != Some(&serde_json::json!("null")) {
+                    walk(branch, root, prefix, out);
+                }
+            }
+        }
     }
     let mut out = Vec::new();
     walk(schema, schema, "", &mut out);
@@ -490,6 +621,7 @@ async fn every_published_tool_name_is_exercised_by_the_test_harness() {
                     | "lambo_inspect"
                     | "lambo_saints"
                     | "lambo_stats"
+                    | "lambo_derive_image"
             ),
             "published tool {} has no harness arm",
             t.name
@@ -527,6 +659,42 @@ fn unknown_fields_are_refused_by_every_params_struct() {
         "agent_id": "a", "node_id": "x", "client_clock_ms": 1
     }))
     .is_err());
+    // #22: the image tool and both its nested payloads.
+    let image = || serde_json::json!({"mime": "image/png", "data": "AAAA"});
+    assert!(
+        serde_json::from_value::<DeriveImageParams>(serde_json::json!({
+            "agent_id": "a", "caption": "x", "concept_type": "entity", "image": image(),
+            "created_at": ts
+        }))
+        .is_err()
+    );
+    assert!(
+        serde_json::from_value::<DeriveImageParams>(serde_json::json!({
+            "agent_id": "a", "caption": "x", "concept_type": "entity",
+            "image": {"mime": "image/png", "data": "AAAA", "url": "https://example.com/x.png"}
+        }))
+        .is_err()
+    );
+    assert!(
+        serde_json::from_value::<DeriveImageParams>(serde_json::json!({
+            "agent_id": "a", "caption": "x", "concept_type": "entity",
+            "vector": {"values": [1.0], "contract": {"kind": "k", "dim": 1, "normalized": true}}
+        }))
+        .is_err()
+    );
+    assert!(
+        serde_json::from_value::<DeriveImageParams>(serde_json::json!({
+            "agent_id": "a", "caption": "x", "concept_type": "observation", "image": image()
+        }))
+        .is_err(),
+        "an image cannot be an observation"
+    );
+    assert!(
+        serde_json::from_value::<DeriveImageParams>(serde_json::json!({
+            "agent_id": "a", "caption": "x", "concept_type": "entity", "image": image()
+        }))
+        .is_ok()
+    );
     // …and the legitimate shapes still parse.
     assert!(serde_json::from_value::<DeriveParams>(serde_json::json!({
         "agent_id": "a", "concepts": [{"content": "x", "concept_type": "entity"}]
@@ -613,6 +781,50 @@ async fn get_info_advertises_tools_and_names_the_session() {
     assert!(
         !instructions.contains("your writes are applied in the order you sent them"),
         "the unscoped ordering promise is stronger than what holds: {instructions}"
+    );
+    s.mem.close().await.expect("close");
+}
+
+/// #22: the image tool's published caps are the runtime's constants
+/// (schemars takes literals), and the maxima guard reaches its nested
+/// optional payloads.
+#[tokio::test]
+async fn the_image_tool_schema_publishes_the_runtime_caps() {
+    let s = server("mcp-image-caps").await;
+    let tool = tools(&s)
+        .into_iter()
+        .find(|t| t.name == "lambo_derive_image")
+        .expect("listed over the fixture");
+    let schema = serde_json::to_value(&*tool.input_schema).unwrap();
+    let leaves = schema_leaves(&schema);
+    let leaf = |path: &str| {
+        leaves
+            .iter()
+            .find(|(p, _)| p == path)
+            .map(|(_, n)| n.clone())
+            .unwrap_or_else(|| panic!("leaf {path} not reached: {leaves:?}"))
+    };
+    assert_eq!(
+        leaf("image.data")["maxLength"],
+        json!(crate::surface::image::MAX_IMAGE_B64_LEN)
+    );
+    assert_eq!(
+        leaf("image_id")["maxLength"],
+        json!(crate::graph::image::MAX_IMAGE_ID_BYTES)
+    );
+    assert_eq!(leaf("image_id")["pattern"], json!("^[a-z0-9]{1,64}$"));
+    assert_eq!(
+        leaf("caption")["maxLength"],
+        json!(crate::surface::image::MAX_CAPTION_BYTES)
+    );
+    assert_eq!(
+        leaf("vector.contract.dim")["maximum"],
+        json!(crate::surface::image::MAX_VECTOR_VALUES)
+    );
+    let values = &schema["$defs"]["WireVector"]["properties"]["values"];
+    assert_eq!(
+        values["maxItems"],
+        json!(crate::surface::image::MAX_VECTOR_VALUES)
     );
     s.mem.close().await.expect("close");
 }

@@ -4,7 +4,7 @@ use super::caps::{check_size_cli, require_nonempty, CliError, ConceptKind};
 use super::{close_writer, open_writer};
 use crate::graph::derive::ParentOf;
 use crate::resolve::ResolvedBackends;
-use crate::surface::validate::check_concept_count;
+use crate::surface::validate::{check_concept_count, check_no_image_suffix};
 use crate::types::ConceptType;
 
 /// Parsed `derive` flags.
@@ -68,6 +68,8 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
     for (content, _) in &concepts {
         check_size_cli("concept.content", content)?;
         require_nonempty("concept.content", content)?;
+        // #22 PR 4: only `lambo derive-image` builds an image suffix.
+        check_no_image_suffix("concept.content", content).map_err(CliError::Usage)?;
     }
 
     let mut pairs: Vec<(String, String)> = Vec::new();

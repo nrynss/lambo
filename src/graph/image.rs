@@ -115,26 +115,56 @@ pub fn validate_image_id(id: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Refuse a caption that holds an image suffix of its own: Lambo builds the
-/// suffix, so a content carries exactly one, at its end.
+/// Whether one canonical token is an image suffix: exactly
+/// `[image:<id>]` with `<id>` a valid image id ([`validate_image_id`]).
 ///
-/// Checked on the caption's canonical tokens too
-/// ([`normalize_tokens`](crate::graph::canonical::normalize_tokens), the
-/// normalization the canonical key uses: invisible characters erased, case
-/// folded), not only on the raw text. Identity is the canonical key, so a
-/// raw-only check is bypassable: `"red [IMAGE:zzz]"` with id `abc` and
+/// Only such a token can make two contents share an image concept's
+/// canonical key: an image key holds exactly one, so a text whose tokens
+/// hold none can never equal it, and a caption whose tokens hold none
+/// leaves the appended suffix the only one. Anything else that merely
+/// starts with `[image:` (`[image:`, `[image:<id>]s` before stemming,
+/// `[image:a-b]`) is ordinary text.
+pub fn is_image_suffix_token(token: &str) -> bool {
+    token
+        .strip_prefix(IMAGE_SUFFIX_OPEN)
+        .and_then(|rest| rest.strip_suffix(']'))
+        .is_some_and(|id| validate_image_id(id).is_ok())
+}
+
+/// Whether `text` canonicalizes to a token that is an image suffix
+/// ([`is_image_suffix_token`]).
+///
+/// Checked on [`normalize_tokens`](crate::graph::canonical::normalize_tokens)
+/// output, the pipeline the canonical key uses (invisible characters
+/// erased, NFC, case folded, split, stemmed), never on the raw text.
+/// Identity is the canonical key, so a raw check is bypassable both ways:
+/// `[IMAGE:R17]` and `[ima\u{200B}ge:r17]` normalize to `[image:r17]`, and
+/// so does `[image:r17]s`, because Porter's `s` rule strips the trailing
+/// `s`.
+pub fn holds_image_suffix(text: &str) -> bool {
+    crate::graph::canonical::normalize_tokens(text)
+        .iter()
+        .any(|t| is_image_suffix_token(t))
+}
+
+/// Refuse a caption that would carry an image suffix of its own: Lambo
+/// builds the suffix, so a content carries exactly one, at its end.
+///
+/// The rule is [`holds_image_suffix`]. A raw or case-sensitive check would
+/// be bypassable: `"red [IMAGE:zzz]"` with id `abc` and
 /// `"red [ima\u{200B}ge:abc]"` with id `zzz` would both normalize to the
 /// tokens `{red, [image:abc], [image:zzz]}`, and two different images would
-/// become one concept.
+/// become one concept. A caption that only mentions the suffix (`"see
+/// [image: diagram]"`, `"the [image:<id>] suffix"`) holds no such token and
+/// is allowed: with no suffix token of its own, the appended one alone
+/// decides the key.
 pub fn check_caption(caption: &str) -> Result<(), String> {
-    if caption.contains(IMAGE_SUFFIX_OPEN)
-        || crate::graph::canonical::normalize_tokens(caption)
-            .iter()
-            .any(|t| t.contains(IMAGE_SUFFIX_OPEN))
-    {
-        return Err(format!(
-            "caption may not contain {IMAGE_SUFFIX_OPEN:?}: Lambo appends the image suffix itself"
-        ));
+    if holds_image_suffix(caption) {
+        return Err(
+            "caption may not contain an image suffix ([image:<id>], in any case or \
+             spelling): Lambo appends the image suffix itself"
+                .into(),
+        );
     }
     Ok(())
 }
@@ -158,6 +188,13 @@ pub fn check_image_concept_type(concept_type: ConceptType) -> Result<(), String>
 /// `caption` is trimmed, so the suffix is always one space after the text.
 pub fn image_content(caption: &str, image_id: &str) -> String {
     format!("{} {IMAGE_SUFFIX_OPEN}{image_id}]", caption.trim())
+}
+
+/// The image id in an image concept's content (`"{caption} [image:{id}]"`),
+/// or `None` when the content does not end in a suffix with a valid id.
+pub fn image_id_of(content: &str) -> Option<&str> {
+    let (_, rest) = content.strip_suffix(']')?.rsplit_once(IMAGE_SUFFIX_OPEN)?;
+    validate_image_id(rest).ok().map(|()| rest)
 }
 
 /// Lowercase hex.

@@ -43,7 +43,7 @@ impl Memory {
     /// text concept merges into it; the same caption and id derived again
     /// matches it (design section 4.4). If a text concept already holds the
     /// same caption and id (its canonical key), the derive is refused with
-    /// [`LamboError::Embed`]: derive the image under another id.
+    /// [`LamboError::ImageIdTaken`]: derive the image under another id.
     ///
     /// Refused with [`LamboError::Config`] before anything is written: a
     /// strategy other than `Hybrid`, a store without vector search, an

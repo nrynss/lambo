@@ -130,6 +130,17 @@ url = "http://127.0.0.1:8080"
 #             Not for gemini: each touch would be a billed Vertex AI request
 #             and keeps nothing local warm.
 # keep_warm_secs = 10
+#
+# Client-computed image vectors (#22), any kind. lambo_derive_image (MCP) and
+# `lambo derive-image --vector-json` accept a vector a client computed, with
+# the embedding contract it declares, only when this is true. Default false:
+# such a call is refused, naming this key. Lambo checks that the declared
+# contract (kind, model, dim) is exactly this session's and that the vector
+# has the right width and a real direction, but it cannot verify that the
+# vector really came from that model: turning this on trusts the client's
+# label. It applies to every session this process serves.
+# LAMBO_ACCEPT_CLIENT_VECTORS (true/false) overrides it.
+# accept_client_vectors = false
 
 # Daemon cadence. Optional; omit the whole section to use the defaults.
 #

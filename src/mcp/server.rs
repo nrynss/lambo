@@ -1,4 +1,17 @@
-//! The seven MCP tools of `lambo serve` (spec §6.2).
+//! The seven MCP tools of `lambo serve` (spec §6.2), and `lambo_derive_image`
+//! (#22) where the deployment can serve it.
+//!
+//! # `lambo_derive_image` is listed only where it can work (#22 design 6.1)
+//!
+//! The router keeps the tool only when the session's embedder embeds images
+//! or the operator accepts client vectors ([`image_tool_listed`]). Both are
+//! process facts: the embedder is resolved once per process and
+//! `accept_client_vectors` is process config, so every session one serve
+//! holds lists the same tools, and nothing about a session or a caller
+//! changes the list. A text-only deployment (BGE-M3, candle, Gemini, with
+//! client vectors off) lists exactly the seven tools it always did, with
+//! byte-identical schemas, and a call to the unlisted name is rmcp's
+//! "tool not found".
 //!
 //! One process owns the session (spec §2.2); every tool call is a task inside
 //! it. [`LamboServer`] is a cheap handle — cloning it clones an `Arc<Memory>`,
@@ -32,7 +45,8 @@
 //! * `response` — model-safe errors, warnings, receipts and panic containment;
 //! * `trace` — the I1 ledger's per-call trace slot and recall facts;
 //! * `stats` — the `lambo_stats` / I2 heartbeat payload;
-//! * `tools` — the seven tool bodies, one file per tool (writes share one).
+//! * `tools` — the tool bodies, one file per tool (the two text writes share
+//!   one).
 
 use std::future::Future;
 use std::sync::Arc;
@@ -54,8 +68,9 @@ mod tools;
 mod trace;
 
 pub use params::{
-    DeriveParams, InspectParams, RecallParams, RecordActionParams, ReserveParams, SaintsParams,
-    StatsParams, WireConcept, WireConceptType, WireParentOf, WireResource,
+    DeriveImageParams, DeriveParams, InspectParams, RecallParams, RecordActionParams,
+    ReserveParams, SaintsParams, StatsParams, WireConcept, WireConceptType, WireEmbeddingContract,
+    WireImage, WireImageConceptType, WireParentOf, WireResource, WireVector,
 };
 use response::attach_receipts;
 pub(crate) use trace::CallCredential;
@@ -95,9 +110,13 @@ impl LamboServer {
     /// server — one per HTTP request, in the streamable-http transport — shares
     /// the single session owner.
     pub fn new(mem: Arc<Memory>) -> Self {
+        let mut tool_router = Self::tool_router();
+        if !image_tool_listed(&mem) {
+            tool_router.remove_route("lambo_derive_image");
+        }
         Self {
             mem,
-            tool_router: Self::tool_router(),
+            tool_router,
             ledger: None,
             started_at: Instant::now(),
         }
@@ -163,6 +182,16 @@ impl LamboServer {
         }
         out
     }
+}
+
+/// Whether `lambo_derive_image` is listed over `mem` (#22 design 6.1): the
+/// embedder embeds images, or `[embedder] accept_client_vectors` is on. See
+/// the module docs for why this is a process fact.
+pub(crate) fn image_tool_listed(mem: &Memory) -> bool {
+    mem.embedder()
+        .modalities()
+        .contains(crate::embed::Modalities::IMAGE)
+        || mem.config().accept_client_vectors
 }
 
 // Each `#[tool]` handler is a thin, panic-contained wrapper (R1/T82-5) around a
@@ -279,6 +308,30 @@ impl LamboServer {
     async fn lambo_saints(&self, Parameters(p): Parameters<SaintsParams>) -> CallToolResult {
         let agent_id = p.agent_id.clone();
         self.answered("lambo_saints", agent_id, self.saints_impl(p))
+            .await
+    }
+
+    /// Derive one image concept (#22): a caption plus the image (embedded
+    /// here) or a client vector. Listed only where it can work; see the
+    /// module docs.
+    #[tool(
+        name = "lambo_derive_image",
+        description = "Derive one image concept into session memory: a caption, plus either \
+                       the image itself (image: mime and base64 data, embedded by this \
+                       server) or a vector you computed in this session's embedding space \
+                       (vector: values and contract, from lambo_stats embedding_contract). \
+                       Send exactly one of image or vector. The concept's content is the \
+                       caption plus [image:<image_id>] and its vector is the image's, so a \
+                       text recall finds it; the same caption and image_id derived again is \
+                       the same concept. created_at is stamped server-side; event_time, \
+                       parent_of, the ack and its receipt work as for lambo_derive."
+    )]
+    async fn lambo_derive_image(
+        &self,
+        Parameters(p): Parameters<DeriveImageParams>,
+    ) -> CallToolResult {
+        let agent_id = p.agent_id.clone();
+        self.answered("lambo_derive_image", agent_id, self.derive_image_impl(p))
             .await
     }
 

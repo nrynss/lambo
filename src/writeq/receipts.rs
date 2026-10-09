@@ -378,7 +378,7 @@ impl FromStr for ReceiptId {
 pub enum WriteKind {
     Derive,
     /// An image derive (#22): a derive whose one concept's vector was
-    /// supplied. Its tool, `lambo_derive_image`, arrives with #22 PR 4.
+    /// supplied, acked by `lambo_derive_image`.
     DeriveImage,
     RecordAction,
 }
@@ -585,10 +585,7 @@ pub enum ReceiptAnswer {
 /// `completion` ledger line and a `tracing::warn!` — so nothing is lost, only
 /// relocated to the audience that can act on it.
 pub(super) fn model_safe_failure(err: &LamboError) -> String {
-    format!(
-        "{} (the detail was logged server-side)",
-        crate::surface::error::err_class(err)
-    )
+    crate::surface::error::model_safe_message(err)
 }
 
 impl ReceiptAnswer {
