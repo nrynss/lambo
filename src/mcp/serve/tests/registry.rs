@@ -824,5 +824,72 @@ async fn a_pinned_session_held_elsewhere_is_re_elected_in_the_background() {
     }
 }
 
+/// #32 review L1: a background attach that fails with an error that will
+/// not clear on its own (here the session was erased by the writer that
+/// held it) is logged once at ERROR and not retried; requests get 503 with
+/// no `Retry-After`. Before, it was retried, and logged at WARN, every
+/// `PINNED_RETRY` for the life of the process.
+#[tokio::test]
+async fn a_pinned_session_that_can_no_longer_attach_is_not_retried() {
+    let (logs, _guard) = crate::test_util::capture_logs(tracing::Level::INFO);
+    let registry = new_registry(
+        &["reg-gone-a", "reg-gone-b"],
+        backends_over(Box::new(MemoryStore::new()), fast_config(1_000)),
+        32,
+    );
+    attach_or_hold(&registry, "reg-gone-a").await;
+    let store = Arc::clone(registry.attached()[0].mem.store());
+    let b = crate::types::SessionId::new("reg-gone-b");
+    let other = crate::store::lease::LeaseHolder::for_this_process(&crate::types::AgentId::new(
+        "another-writer",
+    ));
+    store
+        .acquire_lease(&b, &other, crate::store::lease::LEASE_TTL)
+        .await
+        .expect("the other writer takes b");
+    attach_or_hold(&registry, "reg-gone-b").await;
+    // The holder erases b: a tombstone no acquire can take.
+    store.erase_session(&b, &other).await.expect("erase b");
+    registry.mark_started();
+    registry.spawn_retry_loop();
+    let addr = serve_router(&registry, 32).await;
+
+    let given_up = |logs: &crate::test_util::CapturedLogs| {
+        logs.lines()
+            .iter()
+            .filter(|l| l.contains("will not be retried") && l.contains("reg-gone-b"))
+            .count()
+    };
+    let deadline = Instant::now() + PINNED_RETRY * 3;
+    while given_up(&logs) == 0 {
+        assert!(Instant::now() < deadline, "b was never given up on");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let refused = http(addr, "POST", "/mcp/s/reg-gone-b", None, "{}").await;
+    assert_eq!(refused.status, 503, "{}", refused.body);
+    assert!(
+        refused.header("retry-after").is_none(),
+        "retrying will not help: {}",
+        refused.head
+    );
+
+    // A whole retry period later: still one line, and no retry warnings.
+    tokio::time::sleep(PINNED_RETRY + Duration::from_secs(1)).await;
+    assert_eq!(given_up(&logs), 1, "{:?}", logs.lines());
+    assert!(
+        !logs
+            .lines()
+            .iter()
+            .any(|l| l.contains("retrying a pinned session failed")),
+        "{:?}",
+        logs.lines()
+    );
+    assert_eq!(registry.attached().len(), 1, "a still serves");
+
+    for session in registry.close_set().await {
+        session.mem.close().await.expect("close");
+    }
+}
+
 /// The real multi-session serve, in-process (#32 review M1/M2).
 mod pinned_serve;

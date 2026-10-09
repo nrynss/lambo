@@ -19,6 +19,7 @@
 //! | [`Slot::Live`] | the session's own MCP service | a detach, or the process shutdown |
 //! | [`Slot::Detaching`] | 503, `Retry-After: 1` | the detach ends |
 //! | [`Slot::HeldElsewhere`] | 503, `Retry-After` until the next retry | the background retry wins the lease |
+//! | [`Slot::Failed`] | 503, no `Retry-After` | never: an operator restarts the serve |
 //! | absent | the uniform 404 (`surface::session`) | never, in PR 4: only pinned sessions are hosted |
 //!
 //! # What runs where
@@ -92,7 +93,15 @@ enum Slot {
         /// fenced close fails, and a failed close keeps it, R2-4) and its
         /// in-RAM graph.
         previous: Option<PreviousHandle>,
+        /// Set once a transient attach error in the current streak has been
+        /// logged at WARN, so a long outage logs once, not every retry.
+        warned: bool,
     },
+    /// A background attach failed with an error that will not clear on its
+    /// own (an erased session, an embedding-contract mismatch, an
+    /// unprovisioned store): logged once at ERROR and no longer retried
+    /// (#32 review L1). PR 7's `Erased` slot takes over the erased case.
+    Failed,
 }
 
 /// A detached session's old `Memory`, held weakly.
@@ -114,6 +123,9 @@ pub(super) enum Lookup {
     Live(Arc<AttachedSession>),
     /// Hosted, but not serving right now: answer 503 with this `Retry-After`.
     Unavailable { retry_after: Duration },
+    /// Hosted, but its attach failed for good: answer 503 with no
+    /// `Retry-After`, since retrying will not help until an operator acts.
+    Failed,
     /// Not a session this serve hosts: the uniform 404.
     NotHosted,
 }
@@ -240,6 +252,7 @@ impl SessionRegistry {
                     .saturating_duration_since(Instant::now())
                     .max(Duration::from_secs(1)),
             },
+            Some(Slot::Failed) => Lookup::Failed,
             // Hosted but in no slot: a session between states (a detach
             // clearing its slot). Not a 404, which would say "not hosted".
             None if self.order.iter().any(|hosted| hosted == id) => Lookup::Unavailable {
@@ -360,6 +373,7 @@ impl SessionRegistry {
             Slot::HeldElsewhere {
                 retry_at: Instant::now() + PINNED_RETRY,
                 previous: None,
+                warned: false,
             },
         );
     }
@@ -394,7 +408,10 @@ impl SessionRegistry {
     /// over, the slot forgets it.
     fn awaiting_previous(&self, id: &str) -> bool {
         let mut slots = self.slots.lock();
-        let Some(Slot::HeldElsewhere { retry_at, previous }) = slots.get_mut(id) else {
+        let Some(Slot::HeldElsewhere {
+            retry_at, previous, ..
+        }) = slots.get_mut(id)
+        else {
             return false;
         };
         let Some(handle) = previous.as_ref() else {
@@ -419,12 +436,22 @@ impl SessionRegistry {
     }
 
     /// One background attempt to take pinned session `id` back.
+    ///
+    /// Held elsewhere, or a transient error (the store or the embedder
+    /// could not be reached): tried again in [`PINNED_RETRY`], the error
+    /// logged at WARN once per streak. Any other error will not clear on
+    /// its own: logged once at ERROR, and the slot becomes
+    /// [`Slot::Failed`] (#32 review L1).
     async fn retry(self: &Arc<Self>, id: &str) {
         let _attaching = self.attach_lock.lock().await;
         if self.closing.load(Ordering::SeqCst) || self.awaiting_previous(id) {
             return;
         }
-        let next = match self.acquire(id).await {
+        let warned = matches!(
+            self.slots.lock().get(id),
+            Some(Slot::HeldElsewhere { warned: true, .. })
+        );
+        let (next, warned) = match self.acquire(id).await {
             Ok(Acquired::Attached(mem, endpoint)) => {
                 let session = self.admit(mem, endpoint);
                 tracing::info!(
@@ -440,16 +467,35 @@ impl SessionRegistry {
                     holder = %held.current.holder,
                     "lambo serve: pinned session still held elsewhere"
                 );
-                Instant::now() + PINNED_RETRY
+                (Instant::now() + PINNED_RETRY, false)
+            }
+            Err(e) if is_transient(&e) => {
+                if warned {
+                    tracing::debug!(
+                        session = %id,
+                        error = %e,
+                        "lambo serve: retrying a pinned session failed again"
+                    );
+                } else {
+                    tracing::warn!(
+                        session = %id,
+                        error = %e,
+                        retry_secs = PINNED_RETRY.as_secs(),
+                        "lambo serve: retrying a pinned session failed; trying again later"
+                    );
+                }
+                (Instant::now() + PINNED_RETRY, true)
             }
             Err(e) => {
-                tracing::warn!(
+                tracing::error!(
                     session = %id,
                     error = %e,
-                    retry_secs = PINNED_RETRY.as_secs(),
-                    "lambo serve: retrying a pinned session failed; trying again later"
+                    "lambo serve: a pinned session could not be attached again and will not be \
+                     retried: requests for it get 503 until the serve is restarted. The other \
+                     sessions keep serving"
                 );
-                Instant::now() + PINNED_RETRY
+                self.slots.lock().insert(id.to_string(), Slot::Failed);
+                return;
             }
         };
         self.slots.lock().insert(
@@ -457,6 +503,7 @@ impl SessionRegistry {
             Slot::HeldElsewhere {
                 retry_at: next,
                 previous: None,
+                warned,
             },
         );
     }
@@ -537,6 +584,7 @@ impl SessionRegistry {
             Slot::HeldElsewhere {
                 retry_at: Instant::now() + PINNED_RETRY,
                 previous: Some(previous),
+                warned: false,
             },
         );
     }
@@ -581,6 +629,20 @@ impl SessionRegistry {
             session.tasks.stop();
         }
     }
+}
+
+/// Whether a background attach error may clear without an operator: the
+/// store could not be reached or answered with a backend error, or the
+/// embedder could not be reached. Everything else (an erased session, a
+/// contract mismatch, an unprovisioned store, a configuration error) gets
+/// the same answer on every retry.
+fn is_transient(err: &LamboError) -> bool {
+    use crate::types::StoreError;
+    matches!(
+        err,
+        LamboError::Store(StoreError::Backend(_) | StoreError::Other(_))
+            | LamboError::EmbedUnavailable(_)
+    )
 }
 
 /// The registry's background retry of pinned sessions held elsewhere. Holds

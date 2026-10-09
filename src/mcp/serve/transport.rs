@@ -343,6 +343,14 @@ async fn serve_session(
             "this session is not available on this server right now: retry later\n",
         )
             .into_response(),
+        // Hosted, so not the uniform 404; no `Retry-After`, because a retry
+        // gets the same answer until an operator acts (#32 review L1).
+        Lookup::Failed => (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "this session could not be attached on this server: an operator must act (see the \
+             serve log)\n",
+        )
+            .into_response(),
         Lookup::NotHosted => crate::surface::session::not_found_response(),
     }
 }
