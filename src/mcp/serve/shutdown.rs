@@ -5,9 +5,10 @@
 //!
 //! # The holder's shutdown, stage by stage
 //!
-//! [`serve`](super::serve) runs these in this order on every exit path of the holder branch
-//! (signal, lease loss, client disconnect, transport error). Each stage is one
-//! named step below, so stage logging (#40) attaches at one call each.
+//! [`serve`](super::serve) runs these in this order on every exit path of
+//! the holder branch (signal, lease loss, client disconnect, transport
+//! error). Each stage is one named step below, so stage logging (#40)
+//! attaches at one call each.
 //!
 //! | # | stage | step | bound |
 //! |---|---|---|---|
@@ -20,13 +21,14 @@
 //! | 7 | ledger close | [`close_ledger`] | the ledger's own shutdown bound |
 //!
 //! Stages 1 to 4 are [`run_and_close_sessions`] (its one-session form,
-//! `run_and_close`, is the seam the "close always runs" tests drive). Stages
-//! 3, 4 and 6 run for every attached session, concurrently for 3 and 6, so
-//! one bound covers the set (#32 design §3.5); a single-session serve's set
-//! has one member and logs exactly the lines it always has. Every stage logs a `started` and a `finished in N ms` line
-//! through [`ShutdownProgress`] (#40; the line format is in
-//! [`super::stages`]), so a shutdown that stalls names its stage. The order
-//! is load-bearing:
+//! `run_and_close`, is the seam the "close always runs" tests drive), whose
+//! per-session half, stages 3 and 4, is [`close_sessions`]. Stages 3, 4 and
+//! 6 run for every attached session, concurrently for 3 and 6, so one bound
+//! covers the set (#32 design §3.5); a single-session serve's set has one
+//! member and logs exactly the lines it always has. Every stage logs a
+//! `started` and a `finished in N ms` line through [`ShutdownProgress`]
+//! (#40; the line format is in [`super::stages`]), so a shutdown that stalls
+//! names its stage. The order is load-bearing:
 //!
 //! * the tail is durable (or honestly lost) before any proxy connection is
 //!   cut, in stage 6. Until then an endpoint session stays connected; a call
