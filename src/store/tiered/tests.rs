@@ -35,11 +35,72 @@ use crate::types::{
 struct Shared(
     Arc<dyn GraphStore>,
     Arc<parking_lot::Mutex<Vec<GraphSnapshot>>>,
+    Option<Arc<ExactVectors>>,
 );
 
 impl Shared {
     fn new(primary: Arc<dyn GraphStore>) -> Self {
-        Self(primary, Arc::default())
+        Self(primary, Arc::default(), None)
+    }
+
+    /// A primary that also answers the checked vector read with an exact
+    /// cosine scan of its snapshot (what SQLite or pg would), so a tier's
+    /// durable fallback has something to serve without a SQL store.
+    fn with_exact_vectors(primary: Arc<dyn GraphStore>, exact: Arc<ExactVectors>) -> Self {
+        Self(primary, Arc::default(), Some(exact))
+    }
+}
+
+/// The exact vector read [`Shared::with_exact_vectors`] adds, with a switch
+/// that makes it fail like a backend outage.
+#[derive(Default)]
+struct ExactVectors {
+    fail: std::sync::atomic::AtomicBool,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+/// The backend detail the failing exact read carries; it must never reach
+/// a model-facing message.
+const EXACT_READ_DETAIL: &str = "primary.internal:5432 refused the vector read";
+
+impl ExactVectors {
+    async fn read(
+        &self,
+        primary: &dyn GraphStore,
+        s: &SessionId,
+        e: &[f32],
+        c: &EmbeddingContract,
+        l: usize,
+    ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+        use std::sync::atomic::Ordering;
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if self.fail.load(Ordering::SeqCst) {
+            return Err(StoreError::Backend(EXACT_READ_DETAIL.into()));
+        }
+        let snap = primary.load_session(s).await?;
+        let Some(stored) = snap.embedding else {
+            return Ok(Vec::new());
+        };
+        stored.ensure_compatible(c).map_err(|err| {
+            StoreError::Invariant(format!(
+                "vector candidate lookup refused after embedding contract changed: {err}"
+            ))
+        })?;
+        let keys: Vec<(NodeId, String)> = snap
+            .concepts
+            .iter()
+            .map(|c| (c.id, c.id.0.to_string()))
+            .collect();
+        Ok(crate::store::vector_source::rank_by_cosine(
+            e,
+            snap.concepts
+                .iter()
+                .zip(&keys)
+                .filter_map(|(c, (id, key))| {
+                    c.embedding.as_deref().map(|v| (*id, v, key.as_str()))
+                }),
+            l,
+        ))
     }
 }
 
@@ -49,7 +110,10 @@ impl GraphStore for Shared {
         self.0.init_schema().await
     }
     fn capabilities(&self) -> Capabilities {
-        self.0.capabilities()
+        match self.2 {
+            Some(_) => self.0.capabilities() | Capabilities::VECTOR_SEARCH,
+            None => self.0.capabilities(),
+        }
     }
     fn vector_dimensions(&self) -> Option<usize> {
         self.0.vector_dimensions()
@@ -90,7 +154,10 @@ impl GraphStore for Shared {
         c: &EmbeddingContract,
         l: usize,
     ) -> Result<Vec<Scored<NodeId>>, StoreError> {
-        self.0.vector_candidates_checked(s, e, c, l).await
+        match &self.2 {
+            Some(exact) => exact.read(self.0.as_ref(), s, e, c, l).await,
+            None => self.0.vector_candidates_checked(s, e, c, l).await,
+        }
     }
     async fn blast_radius(
         &self,
@@ -2846,5 +2913,150 @@ async fn graded_similarity_over_the_tier_ranks_by_cosine_not_recency() {
         "the vector leg read the index"
     );
     assert_graded_order(&detailed, &looks);
+    mem.close().await.unwrap();
+}
+
+/// A holder over a tier whose primary answers the checked vector read
+/// exactly, with the graded looks derived, mirrored and settled. The read
+/// breaker opens on the first failed index read and stays open for the
+/// test.
+#[cfg(feature = "embed-fixture")]
+async fn graded_over_a_tier_with_an_exact_primary(
+    session: &str,
+) -> (
+    crate::memory::Memory,
+    Arc<FakeIndex>,
+    Arc<ExactVectors>,
+    EmbeddingContract,
+    crate::test_util::dresscode::GradedLooks,
+) {
+    use crate::embed::{Embedder, FixtureEmbedder};
+    use crate::memory::Memory;
+    use crate::test_util::dresscode::derive_graded_looks;
+    use crate::types::MatchStrategy;
+    let dim = FixtureEmbedder::new().dimensions();
+    let (primary, fake) = (memory_primary(), Arc::new(FakeIndex::new()));
+    let exact = Arc::new(ExactVectors::default());
+    let contract = EmbeddingContract {
+        kind: "fixture".into(),
+        model: None,
+        dim,
+    };
+    let store: Arc<dyn GraphStore> = Arc::new(
+        TieredStore::new(
+            Box::new(Shared::with_exact_vectors(primary.clone(), exact.clone())),
+            Box::new(fake.clone()),
+            Some(dim),
+        )
+        .with_repair_backoff(Duration::ZERO)
+        .with_read_breaker(1, Duration::from_secs(600), Duration::from_secs(5)),
+    );
+    let mem = Memory::builder()
+        .session(session)
+        .agent("agent-a")
+        .flush_interval(Duration::from_millis(10))
+        .match_strategy(MatchStrategy::Hybrid)
+        .store(store)
+        .embedder(Arc::new(LabelEmbedder(FixtureEmbedder::new())) as Arc<dyn Embedder>)
+        .embedding_contract(contract.clone())
+        .build()
+        .await
+        .expect("build");
+    let looks = derive_graded_looks(&mem).await;
+    let sid = SessionId::new(session);
+    wait_until("the looks are mirrored", || {
+        let live = fake.live(&sid);
+        looks
+            .graded
+            .iter()
+            .chain(&looks.unrelated)
+            .all(|id| live.contains_key(&id.0.to_string()))
+    })
+    .await;
+    mem.settle_daemon().await;
+    (mem, fake, exact, contract, looks)
+}
+
+/// #22 PR 6 review Low 2: a recall by query vector over the tier when the
+/// index fails is served by the durable store's exact vector read, first
+/// on the failed index read itself and then with the breaker open (the
+/// index is not asked again). The graded order is the fallback's, and the
+/// recall succeeds both times.
+#[cfg(feature = "embed-fixture")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_recall_by_vector_over_a_failing_tier_is_served_by_the_durable_store() {
+    use crate::recall::query_vector::QueryBy;
+    use crate::test_util::dresscode::{assert_graded_order, imageless_text};
+    use std::sync::atomic::Ordering;
+    let _quiet = crate::test_util::quiet_logs();
+    let (mem, fake, exact, contract, looks) =
+        graded_over_a_tier_with_an_exact_primary("tier-recall-by-fallback").await;
+    fake.knn_down.store(true, Ordering::SeqCst);
+
+    for round in ["the failed index read", "the open breaker"] {
+        let (knn, exact_before) = (
+            fake.knn_calls.load(Ordering::SeqCst),
+            exact.calls.load(Ordering::SeqCst),
+        );
+        let detailed = mem
+            .recall_by_detailed(
+                imageless_text(5),
+                QueryBy::Vector {
+                    values: looks.query.clone(),
+                    declared: contract.clone(),
+                },
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{round}: the fallback serves the recall: {e}"));
+        assert!(
+            exact.calls.load(Ordering::SeqCst) > exact_before,
+            "{round}: the durable store's vector read served the leg"
+        );
+        let asked = fake.knn_calls.load(Ordering::SeqCst) - knn;
+        if round == "the open breaker" {
+            assert_eq!(asked, 0, "an open breaker does not ask the index");
+        } else {
+            assert_eq!(asked, 1, "the index was asked and failed");
+        }
+        assert_graded_order(&detailed, &looks);
+    }
+    mem.close().await.unwrap();
+}
+
+/// #22 PR 6 review Low 2: when the durable fallback fails too, a recall by
+/// query vector fails (it has nothing to degrade to), as a bare store class
+/// with the backend detail kept out of the model-facing message.
+#[cfg(feature = "embed-fixture")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_recall_by_vector_fails_when_the_tier_and_its_fallback_both_fail() {
+    use crate::recall::query_vector::QueryBy;
+    use crate::test_util::dresscode::imageless_text;
+    use crate::types::LamboError;
+    use std::sync::atomic::Ordering;
+    let _quiet = crate::test_util::quiet_logs();
+    let (mem, fake, exact, contract, looks) =
+        graded_over_a_tier_with_an_exact_primary("tier-recall-by-no-fallback").await;
+    fake.knn_down.store(true, Ordering::SeqCst);
+    exact.fail.store(true, Ordering::SeqCst);
+
+    for round in ["the failed index read", "the open breaker"] {
+        let err = mem
+            .recall_by_detailed(
+                imageless_text(5),
+                QueryBy::Vector {
+                    values: looks.query.clone(),
+                    declared: contract.clone(),
+                },
+            )
+            .await
+            .expect_err(round);
+        assert!(
+            matches!(&err, LamboError::Store(StoreError::Backend(m)) if m == EXACT_READ_DETAIL),
+            "{round}: {err:?}"
+        );
+        let shown = crate::surface::error::model_safe_message(&err);
+        assert_eq!(shown, "store error (the detail was logged server-side)");
+        assert!(!shown.contains("primary.internal"), "{shown}");
+    }
     mem.close().await.unwrap();
 }
