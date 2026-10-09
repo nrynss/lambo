@@ -129,7 +129,7 @@ struct PreviousHandle {
 const PREVIOUS_HANDLE_WAIT: Duration = Duration::from_secs(30);
 
 /// The states [`SessionRegistry::force_state`] can put a session in.
-#[cfg(test)]
+#[cfg(all(test, unix, feature = "store-memory", feature = "embed-fixture"))]
 #[derive(Clone, Copy, Debug)]
 pub(super) enum ForcedState {
     Detaching,
@@ -284,8 +284,9 @@ impl SessionRegistry {
 
     /// Put hosted session `id` in a state that is not serving, without the
     /// detach, lease or retry that would normally lead there, so the
-    /// router's answers for each state can be compared (#32 PR 5).
-    #[cfg(test)]
+    /// router's answers for each state can be compared (#32 PR 5). Gated
+    /// like its reader, the registry tests.
+    #[cfg(all(test, unix, feature = "store-memory", feature = "embed-fixture"))]
     pub(super) fn force_state(&self, id: &str, state: ForcedState) {
         let slot = match state {
             ForcedState::Detaching => Slot::Detaching,
