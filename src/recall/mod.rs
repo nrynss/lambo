@@ -6,3 +6,4 @@ pub mod detail;
 pub mod dispatch;
 pub mod expand;
 pub mod format;
+pub mod query_cache;

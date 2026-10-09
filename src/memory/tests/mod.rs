@@ -31,6 +31,7 @@ use std::time::Duration;
 mod access;
 mod attach;
 mod leases;
+mod query_cache;
 mod reads;
 mod replay;
 mod shutdown;
