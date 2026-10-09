@@ -298,7 +298,7 @@ Report session health: flush lag, write-behind log depth, background write queue
 |---|---|---|---|
 | `agent_id` | string | Yes | |
 | `receipt` | string | No | A receipt id from a `lambo_derive` or `lambo_record_action` ack. Answers what happened to that one write. |
-| `wait_ms` | integer | No | `0` to `4000`. With `receipt`, wait this long for the write to be applied before answering. A larger value is clamped, not refused. |
+| `wait_ms` | integer | No | `0` to `34000`. With `receipt`, wait this long for the write to be applied before answering. A larger value is clamped, not refused. The maximum covers the longest one write can take to apply, so a wait that ends `pending` means other writes were queued ahead of it. |
 
 Unlike `lambo stats` on the command line, this reaches the writer, so the flush figures are real rather than `n/a`.
 
@@ -372,7 +372,7 @@ Lambo enforces these when the call runs. The published tool schemas do not carry
 | Reservation TTL | 3600 seconds |
 | Neighbours rendered by `lambo_inspect` | 200 |
 | Candidates listed for an ambiguous focus | 10 |
-| `wait_ms` on `lambo_stats` | 4000 milliseconds |
+| `wait_ms` on `lambo_stats` | 34000 milliseconds |
 | Write receipts kept | 300 seconds, or 4096 receipts, whichever binds first |
 
 Every limit above is a maximum. `top_k`, `max_tokens`, and `ttl_seconds` also have a minimum of `1`, so `0` is refused. `wait_ms` is the one limit that **clamps rather than refuses**: a larger value waits the maximum instead of erroring, because a client asking to wait longer than Lambo will wait is asking for something harmless.

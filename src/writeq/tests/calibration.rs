@@ -213,7 +213,12 @@ fn the_constants_say_what_their_docs_say() {
     // proves the relation, this proves the numbers a reader is quoted.
     assert_eq!(WRITE_QUEUE_DRAIN_BUDGET.as_secs(), 2);
     assert_eq!(crate::mcp::serve::CLOSE_FLUSH_GRACE.as_secs(), 8);
-    assert_eq!(RECEIPT_WAIT_MAX.as_secs(), 4);
+    // #11: one write's own I/O bound plus the two drain budgets.
+    assert_eq!(RECEIPT_WAIT_MAX.as_secs(), 34);
+    assert_eq!(
+        RECEIPT_WAIT_MAX,
+        crate::graph::hybrid::HYBRID_IO_TIMEOUT + 2 * WRITE_QUEUE_DRAIN_BUDGET
+    );
     assert_eq!(MAX_CONCURRENT_RECEIPT_WAITS * 2, 32);
     assert_eq!(crate::mcp::proxy::INFLIGHT_DEPTH_WARN, 64);
 }

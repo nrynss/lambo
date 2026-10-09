@@ -433,3 +433,36 @@ async fn j4_a_completion_line_records_the_applied_derive_lifecycle() {
     assert_eq!(c["created_count"], 1);
     assert_eq!(c["matched_count"], 0);
 }
+
+/// **A receipt wait outlasts any one write at the head of its lane** (#11).
+///
+/// `RECEIPT_WAIT_MAX` was 4 s. On the Metal rig a 3 to 4 concept derive's
+/// apply ran to 4.6 s (p90 2 s), so a caller following the read-your-writes
+/// protocol could be told `pending` about a healthy write about to land. A
+/// write's own I/O is bounded by `HYBRID_IO_TIMEOUT`, so a wait at least that
+/// long always ends on that write's terminal answer when nothing is queued
+/// ahead of it. Here one embed takes a second under that bound.
+#[tokio::test(start_paused = true)]
+async fn a_receipt_wait_outlasts_one_write_at_the_head_of_its_lane() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let rig = Rig::hybrid(
+        "wq-wait-covers-a-write",
+        Arc::new(SlowEmbedder {
+            delay: crate::graph::hybrid::HYBRID_IO_TIMEOUT - Duration::from_secs(1),
+            inner: FixtureEmbedder::new(),
+            calls: calls.clone(),
+        }),
+    );
+    let agent = AgentId::new("agent-a");
+    let submitted = rig.derive(&agent, "a slow but healthy write").await;
+    assert_eq!(submitted.answer.tag(), "pending");
+    let answer = rig
+        .pipeline
+        .wait(&agent, submitted.receipt, Duration::MAX)
+        .await;
+    assert_eq!(
+        answer.tag(),
+        "applied",
+        "a wait clamped to RECEIPT_WAIT_MAX must cover the write's own I/O bound: {answer:?}"
+    );
+}

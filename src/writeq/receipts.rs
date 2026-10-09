@@ -26,6 +26,7 @@ use chrono::{DateTime, Utc};
 use parking_lot::Mutex as PlMutex;
 
 use super::{WritePipeline, WRITE_QUEUE_DRAIN_BUDGET};
+use crate::graph::hybrid::HYBRID_IO_TIMEOUT;
 use crate::surface::limits::MAX_CONCEPTS_PER_DERIVE;
 use crate::types::{AgentId, LamboError};
 
@@ -134,15 +135,31 @@ pub const MAX_RECEIPT_IDS: usize = MAX_CONCEPTS_PER_DERIVE;
 /// memory argument, which is why no constant moved when the reason changed.
 pub const MAX_RETAINED_RECEIPTS: usize = 4096;
 
-/// Longest a caller may block waiting for its own write to apply.
+/// Longest a caller may block waiting for its own write to apply: 34 s.
 ///
-/// Two drain budgets, resting on the one surviving reason (J3-R2R-5 — the
-/// redesign retired admission "projections"): a close's quiesce drains for one
-/// whole budget, so a wait of one budget would expire on jobs that quiesce is
-/// still retiring. The second budget is that quiesce plus slack for the
-/// caller's own job's service time. A wait that runs out answers `pending` —
-/// which is one of the honest answers, not a failure.
-pub const RECEIPT_WAIT_MAX: Duration = Duration::from_secs(4);
+/// **Long enough for any one write at the head of its lane** (#11). A write's
+/// own I/O, every embed and vector lookup of its derive or `record_action`,
+/// runs under one [`HYBRID_IO_TIMEOUT`] deadline, and nothing after it awaits,
+/// so a job a worker has picked up settles, applied or failed, within that
+/// bound. On top of it sit the two drain budgets of the J3 reasoning
+/// (J3-R2R-5): a close's quiesce drains for one whole budget, and the second
+/// is slack for the worker to pick the job up. So a wait that runs out
+/// answers `pending` only when other writes were queued ahead in the same
+/// lane, and that answer is then the honest one.
+///
+/// It was 4 s, the two budgets alone. On the Metal rig a 3 to 4 concept
+/// derive's apply reached 4.6 s (p90 2 s) because each concept is embedded
+/// with the whole call's text, so a caller asking for read-your-writes was
+/// told `pending` about a healthy write about to land.
+///
+/// What a longer bound costs: a wait returns the moment its receipt settles,
+/// so only a wait on a slow write holds its slot longer. The population of
+/// waits is still capped by [`MAX_CONCURRENT_RECEIPT_WAITS`], which is what
+/// bounds the proxy's in-flight burst (the J2-R2-7 residual), and a shutdown
+/// drops in-flight calls after `serve`'s transport grace, so a waiting call
+/// never extends a shutdown.
+pub const RECEIPT_WAIT_MAX: Duration =
+    Duration::from_secs(HYBRID_IO_TIMEOUT.as_secs() + 2 * WRITE_QUEUE_DRAIN_BUDGET.as_secs());
 
 /// Build-time invariant: a wait shorter than the queue's own admission promise
 /// would make the opt-in-synchrony surface useless by construction.
@@ -151,6 +168,13 @@ const _: () = assert!(
     "RECEIPT_WAIT_MAX must be at least twice WRITE_QUEUE_DRAIN_BUDGET — a close's quiesce drains \
      for one whole budget, so a wait of one budget would expire on jobs the quiesce is still \
      retiring",
+);
+
+/// Build-time invariant: a wait covers one write's whole I/O bound (#11).
+const _: () = assert!(
+    RECEIPT_WAIT_MAX.as_secs() > HYBRID_IO_TIMEOUT.as_secs(),
+    "RECEIPT_WAIT_MAX must exceed HYBRID_IO_TIMEOUT — a wait shorter than one write's own I/O \
+     bound answers pending about a write at the head of its lane that is still healthy",
 );
 
 /// Concurrent receipt waits this process will hold at once.
