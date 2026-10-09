@@ -41,12 +41,19 @@ fn read_response(rx: &mpsc::Receiver<String>, id: u64) -> serde_json::Value {
     }
 }
 
+/// Every complete line of the ledger, parsed. The writer may be mid-batch
+/// while this reads, so a last line without its newline is skipped (it is
+/// read again on the next poll); any earlier line must parse.
 fn read_ledger(path: &std::path::Path) -> Vec<serde_json::Value> {
-    std::fs::read_to_string(path)
-        .unwrap_or_default()
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let complete = match text.rfind('\n') {
+        Some(end) => &text[..=end],
+        None => "",
+    };
+    complete
         .lines()
         .filter(|l| !l.trim().is_empty())
-        .map(|l| serde_json::from_str(l).expect("each ledger line is one JSON object"))
+        .map(|l| serde_json::from_str(l).expect("each complete ledger line is one JSON object"))
         .collect()
 }
 
