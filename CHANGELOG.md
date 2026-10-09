@@ -53,6 +53,36 @@
 
 ### Changed
 
+- The write queue's startup probe now times a representative write instead
+  of one embed (#11), so `write_queue_probe_serial_items_per_sec` and
+  `write_queue_items_per_sec` read in writes per second, the unit
+  `write_queue_serial_items_per_sec` has always used once your own writes
+  are observed. A `lambo_derive` embeds each concept together with the text
+  of every concept in the call, so a write costs several embeds and its cost
+  grows faster than its concept count. The probe now embeds exactly what a
+  two-concept derive of about 340-byte concepts embeds. Expect the probe
+  figures to read about half what they did. Measured on an M3 Pro with the
+  candle Metal BGE-M3 and a scratch SQLite store: probe 11.4 to 11.6 against
+  an observed 2.3 to 2.8 writes/s before (4.1x to 5.0x apart), 5.7 against
+  the same observed rate after (2.0x to 2.5x; what is left is derives larger
+  than the representative one). The drain rate itself is unchanged: after
+  #8 a write's time is its embeds.
+- The longest `lambo_stats` `wait_ms` is now 34000 (was 4000), and the
+  published schema says so (#11). It covers the longest one write can take
+  to apply (the 30 s hybrid I/O deadline plus two 2 s drain budgets), so a
+  wait that ends `pending` now means other writes were queued ahead of it.
+  On the Metal rig a three- or four-concept derive took up to 4.6 s to
+  apply, so a read-your-writes wait could answer `pending` about a healthy
+  write. A wait still returns the moment the write settles, at most 16 waits run
+  at once, and a shutdown still drops in-flight calls after its 5 s grace.
+- `flush_lag_ms` (in `lambo_stats`, the heartbeat and the stats a reader
+  process reads from the store) is now the time since the store last held
+  every write, not the time since the last successful flush (#16 §3). An
+  idle writer reads under 100 ms instead of its idle time: the dogfood rigs
+  read 13.7 minutes, 12.1 hours and 48 hours while `log_depth` was 0 in
+  every snapshot. With writes waiting on a store that is not taking them it
+  grows exactly as before. The key, type and unit are unchanged.
+
 - On SQLite, the process that holds a session (`lambo serve`, or an embedded
   `Memory`) now ranks recall's vector leg and hybrid `derive`'s semantic match
   against the vectors its in-memory graph already holds, instead of reading,
@@ -77,6 +107,14 @@
 
 ### Added
 
+- `lambo_stats` reports `write_queue_probe_optimism` (the startup probe's
+  rate divided by the observed one, `null` until your writes have been
+  observed) and `write_queue_apply_samples` with
+  `write_queue_apply_ms_p50` / `_p90` / `_max`: acknowledgement-to-applied
+  time over the last 256 applied writes, `null` before the first (#11).
+  Together they show whether a deployment's derives fit the `wait_ms`
+  maximum without joining the call ledger. Additive keys; nothing else in
+  the payload changes.
 - `GraphStore::exact_vector_scan()` (default `false`): an adapter declares its
   checked vector read is an exact cosine scan of every vector it stores, so a
   session holder may answer that read from its graph (#8). `SqliteStore`
@@ -135,6 +173,15 @@
 
 ### Fixed
 
+- The write queue's startup probe no longer reports `unmeasured` when the
+  embedder's first call is slow (#11). Its discarded warm-up embed shared
+  the 5 s budget of the timed legs, and the candle Metal BGE-M3's first
+  embed on a cold page cache outran it, so the session never had a probe
+  figure to compare its writes against. The warm-up now has its own 30 s
+  bound.
+- A reported write-queue rate no longer exceeds 1024 items/s (#11). The cap
+  was documented but applied only to a zero time, so a fixture embedder's
+  probe published about 200,000 items/s.
 - A `lambo serve` shutdown is now bounded even when its own timers cannot
   fire (#40). Every shutdown bound is a timer inside the server's async
   runtime, and a wedged runtime (every worker thread blocked, or the thread
