@@ -376,6 +376,27 @@ fn configured_quant(model: &str) -> Option<&'static str> {
         .map(|(_, canonical)| *canonical)
 }
 
+/// The longest server-supplied string (a file name, a `model_ftype`) put
+/// into a message or log.
+const SERVER_TEXT_MAX_CHARS: usize = 128;
+
+/// A server-supplied string made safe for a message or log line (review
+/// L3): at most [`SERVER_TEXT_MAX_CHARS`] characters, each printable ASCII;
+/// anything else (control characters, newlines, non-ASCII) becomes `?`, so
+/// a hostile `/props` cannot forge log lines or flood a message.
+fn server_text(s: &str) -> String {
+    s.chars()
+        .take(SERVER_TEXT_MAX_CHARS)
+        .map(|c| {
+            if c.is_ascii_graphic() || c == ' ' {
+                c
+            } else {
+                '?'
+            }
+        })
+        .collect()
+}
+
 /// Judge what `/props` reported against the configured artifact. Pure, so the
 /// rules are unit-tested without a server.
 fn judge_props(
@@ -387,8 +408,8 @@ fn judge_props(
 ) -> Eg2ServerCheck {
     let file = model_path.rsplit(['/', '\\']).next().unwrap_or(model_path);
     // A file name is shown, never the directory (it may name a user), and
-    // only its first 128 characters.
-    let shown: String = file.chars().take(128).collect();
+    // only bounded and sanitized (review L3).
+    let shown = server_text(file);
     let folded: String = file
         .chars()
         .filter(char::is_ascii_alphanumeric)
@@ -412,6 +433,7 @@ fn judge_props(
         && let Some(have_canonical) = reported_quant(have)
         && want != have_canonical
     {
+        let have = server_text(have);
         return Eg2ServerCheck::Mismatch(format!(
             "the llama-server at {log_url} has loaded `{shown}` quantized as {have}, but \
              [embedder] model {configured_model:?} names {want}; vectors from another \

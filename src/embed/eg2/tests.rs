@@ -1031,6 +1031,42 @@ fn the_props_judge_reads_the_file_name_and_quantization() {
     assert!(msg.len() < 900, "{}", msg.len());
 }
 
+/// A hostile `/props` (control characters, newlines, escapes, an endless
+/// `model_ftype`) cannot forge log lines or flood a message: the file name
+/// and the reported quantization are each cut to 128 characters of
+/// printable ASCII (review L3).
+///
+/// Mutation: interpolate the raw `have` or file name again -> red.
+#[test]
+fn hostile_props_strings_are_bounded_and_sanitized() {
+    let file = format!(
+        "/m/embeddinggemma-2\n2026-10-10T00:00:00Z ERROR forged\r\x1b[31m{}.gguf",
+        "y".repeat(400)
+    );
+    let ftype = format!("(guessed){}Q4_0\r\n", "\n".repeat(5000));
+    let Eg2ServerCheck::Mismatch(msg) = judge_props(MODEL, "u", &file, Some(&ftype), None) else {
+        panic!("a Q4_0 server under a Q8_0 artifact must be refused");
+    };
+    assert!(
+        msg.chars().all(|c| c.is_ascii_graphic() || c == ' '),
+        "{msg:?}"
+    );
+    assert!(
+        msg.contains("embeddinggemma-2?2026-10-10T00:00:00Z ERROR forged??"),
+        "{msg}"
+    );
+    assert!(!msg.contains(&"y".repeat(129)), "{}", msg.len());
+    assert!(msg.len() < 1200, "{}", msg.len());
+    // The not-EG2 message bounds the name the same way.
+    let other = format!("/m/bge\n{}.gguf", "z".repeat(400));
+    let Eg2ServerCheck::Mismatch(msg) = judge_props(MODEL, "u", &other, None, None) else {
+        panic!("not EG2");
+    };
+    assert!(msg.contains("bge?zzz"), "{msg}");
+    assert!(!msg.contains('\n'), "{msg:?}");
+    assert!(!msg.contains(&"z".repeat(129)), "{}", msg.len());
+}
+
 /// llama.cpp reports `model_ftype` in its own names (`Q4_K - Medium`, `all
 /// F32`, a `(guessed) ` prefix; b11517's table, and b11517 reports `Q8_0` for
 /// the default GGUF, checked live), while an artifact names the file's token
