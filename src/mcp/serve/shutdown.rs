@@ -1,7 +1,7 @@
 //! Shutdown coordination for a holder: the grace budgets and the build-time
 //! relations between them, the one shutdown future the transports accept
 //! ([`HolderShutdown`], always [`wind_down`]), and the close that runs on
-//! every exit path ([`run_and_close`], [`close_bounded`]).
+//! every exit path ([`run_and_close_sessions`], [`close_bounded`]).
 //!
 //! # The holder's shutdown, stage by stage
 //!
@@ -11,16 +11,19 @@
 //!
 //! | # | stage | step | bound |
 //! |---|---|---|---|
-//! | 1 | transport drain (HTTP graceful drain, stdio cancel) | the transport future inside [`run_and_close`], ended by [`wind_down`] | [`SHUTDOWN_GRACE`] |
-//! | 2 | keep-warm abort | `stop_before_close` in [`run_and_close`], from [`ProcessTasks::stop_before_close`](super::process::ProcessTasks::stop_before_close) | instant |
+//! | 1 | transport drain (HTTP graceful drain, stdio cancel) | the transport future inside [`run_and_close_sessions`], ended by [`wind_down`] | [`SHUTDOWN_GRACE`] |
+//! | 2 | keep-warm abort | `stop_before_close` in [`run_and_close_sessions`], from [`ProcessTasks::stop_before_close`](super::process::ProcessTasks::stop_before_close) | instant |
 //! | 3 | session close | [`close_bounded`]: [`Memory::close`] and its own ten logged steps (`serialize`, `replay_stop`, `queue_quiesce`, `writers_gate`, `heartbeat_abort`, `producer_joins`, `flush_join`, `final_drain`, `final_flush`, `lease_release`; `src/memory/shutdown.rs`), or on abandonment the bounded lease release | [`CLOSE_GRACE`] |
-//! | 4 | event pump abort | after the close, in [`run_and_close`], so final-drain events still reach the log | instant |
+//! | 4 | event pump abort | after the close, in [`run_and_close_sessions`], so final-drain events still reach the log | instant |
 //! | 5 | background tasks | [`ProcessTasks::stop`](super::process::ProcessTasks::stop): ledger heartbeat, keep-warm (again), refusal poller | instant |
-//! | 6 | endpoint release | `hub::Hub::release`: stop accepting, end every endpoint session (each cancels its rmcp service and waits for it), then the socket file if still ours | `hub::ENDPOINT_RELEASE_GRACE`, then the stragglers are aborted and joined (unbounded, but milliseconds in practice; the watchdog's 1 s overrun allowance covers it) |
+//! | 6 | endpoint release | `hub::Hub::release` per session (`session::AttachedSession::release_endpoint`): stop accepting, end every endpoint session (each cancels its rmcp service and waits for it), then the socket file if still ours | `hub::ENDPOINT_RELEASE_GRACE`, then the stragglers are aborted and joined (unbounded, but milliseconds in practice; the watchdog's 1 s overrun allowance covers it) |
 //! | 7 | ledger close | [`close_ledger`] | the ledger's own shutdown bound |
 //!
-//! Stages 1 to 4 are [`run_and_close`], the seam the "close always runs"
-//! tests drive. Every stage logs a `started` and a `finished in N ms` line
+//! Stages 1 to 4 are [`run_and_close_sessions`] (its one-session form,
+//! `run_and_close`, is the seam the "close always runs" tests drive). Stages
+//! 3, 4 and 6 run for every attached session, concurrently for 3 and 6, so
+//! one bound covers the set (#32 design §3.5); a single-session serve's set
+//! has one member and logs exactly the lines it always has. Every stage logs a `started` and a `finished in N ms` line
 //! through [`ShutdownProgress`] (#40; the line format is in
 //! [`super::stages`]), so a shutdown that stalls names its stage. The order
 //! is load-bearing:
@@ -377,10 +380,47 @@ pub(super) async fn wind_down(
 /// Each stage is logged on `progress` (#40). Stage 1 was started by the
 /// shutdown future when it resolved; a transport that ended on its own
 /// (client hangup, transport error) gets both of its lines here.
+///
+/// One session: this is [`run_and_close_sessions`] over a set of one, which
+/// is exactly what a single-session `serve` runs (#32 PR 2). Since that
+/// split `serve` calls the set form itself, so this is the tests' seam,
+/// gated like its readers (`serve`'s close and stage tests and
+/// `memory::tests::shutdown`).
+#[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
 pub(crate) async fn run_and_close(
     mem: Arc<Memory>,
     transport: impl Future<Output = Result<(), LamboError>>,
     event_pump: tokio::task::JoinHandle<()>,
+    stop_before_close: &[tokio::task::AbortHandle],
+    early: &EarlyShutdown,
+    progress: &ShutdownProgress,
+) -> Result<(), LamboError> {
+    let session = SessionClose {
+        mem: &mem,
+        event_pump: &event_pump,
+    };
+    run_and_close_sessions(&[session], transport, stop_before_close, early, progress).await
+}
+
+/// What stages 3 and 4 need of one attached session: its memory, to close,
+/// and its event pump, to abort after the close.
+pub(super) struct SessionClose<'a> {
+    pub(super) mem: &'a Memory,
+    pub(super) event_pump: &'a tokio::task::JoinHandle<()>,
+}
+
+/// [`run_and_close`] over every attached session (#32 design §3.5): stages
+/// 1 and 2 are process-wide and run once; stage 3 closes every session
+/// concurrently, so one [`CLOSE_GRACE`] covers them all; stage 4 aborts every
+/// event pump.
+///
+/// The result is the transport's error if it failed (the closes still ran),
+/// else the first session's close error, else `Ok`. Each session's outcome
+/// is logged, in set order, after stage 4 — for a set of one exactly the line
+/// a single-session serve has always logged.
+pub(super) async fn run_and_close_sessions(
+    sessions: &[SessionClose<'_>],
+    transport: impl Future<Output = Result<(), LamboError>>,
     stop_before_close: &[tokio::task::AbortHandle],
     early: &EarlyShutdown,
     progress: &ShutdownProgress,
@@ -394,24 +434,70 @@ pub(crate) async fn run_and_close(
             task.abort();
         }
     });
-    // Stage 3: the session close.
+    // Stage 3: the session closes, concurrently.
     progress.begin(Stage::SessionClose);
-    let closed = close_bounded(&mem, early).await;
+    let closed = join_all(
+        sessions
+            .iter()
+            .map(|session| close_bounded(session.mem, early))
+            .collect(),
+    )
+    .await;
     progress.end(Stage::SessionClose);
-    // Stage 4: the event pump, after the close.
-    progress.run(Stage::EventPumpAbort, || event_pump.abort());
-
-    match (outcome, closed) {
-        (Err(e), _) => Err(e),
-        (Ok(()), Err(e)) => {
-            tracing::error!(error = %e, "lambo serve: final flush failed — tail lost on exit, not durable (no on-disk WAL)");
-            Err(e)
+    // Stage 4: the event pumps, after the close.
+    progress.run(Stage::EventPumpAbort, || {
+        for session in sessions {
+            session.event_pump.abort();
         }
-        (Ok(()), Ok(())) => {
-            tracing::info!("lambo serve: session closed, tail durable");
-            Ok(())
+    });
+
+    outcome?;
+    let mut failed = None;
+    for closed in closed {
+        match closed {
+            Err(e) => {
+                tracing::error!(error = %e, "lambo serve: final flush failed — tail lost on exit, not durable (no on-disk WAL)");
+                failed.get_or_insert(e);
+            }
+            Ok(()) => tracing::info!("lambo serve: session closed, tail durable"),
         }
     }
+    match failed {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
+/// Drive `futures` to completion concurrently and return their outputs in
+/// order, like `futures::future::join_all` (not a dependency here).
+///
+/// On the calling task, not spawned: nothing has to be `'static`, and every
+/// line the futures log reaches the caller's subscriber, in the caller's
+/// span. A set of one is polled exactly as an `.await` on it would be.
+pub(super) async fn join_all<F: Future>(futures: Vec<F>) -> Vec<F::Output> {
+    let mut futures: Vec<Pin<Box<F>>> = futures.into_iter().map(Box::pin).collect();
+    let mut outputs: Vec<Option<F::Output>> = futures.iter().map(|_| None).collect();
+    std::future::poll_fn(|cx| {
+        let mut pending = false;
+        for (future, output) in futures.iter_mut().zip(outputs.iter_mut()) {
+            if output.is_none() {
+                match future.as_mut().poll(cx) {
+                    std::task::Poll::Ready(value) => *output = Some(value),
+                    std::task::Poll::Pending => pending = true,
+                }
+            }
+        }
+        if pending {
+            std::task::Poll::Pending
+        } else {
+            std::task::Poll::Ready(())
+        }
+    })
+    .await;
+    outputs
+        .into_iter()
+        .map(|output| output.expect("join_all returns only once every future is ready"))
+        .collect()
 }
 
 /// [`Memory::close`], bounded two ways (R2-b).
