@@ -21,11 +21,16 @@
 //! used, by a monotonic tick, as in [`super::cache::RecallCache`].
 //!
 //! Plain data, no locks: the owner wraps it in a short, synchronous mutex
-//! and never holds that across the embed's `.await`.
+//! and never holds that across the embed's `.await` (see
+//! `embed_query_cached`).
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use parking_lot::Mutex;
+
+use crate::embed::Embedder;
+use crate::store::vector_source::VectorCandidates;
 use crate::types::EmbeddingContract;
 
 /// Most entries one session keeps.
@@ -181,6 +186,40 @@ impl QueryEmbeddingCache {
         self.remove(&key);
         true
     }
+}
+
+/// Recall's query embed through the session's cache (#14).
+///
+/// Same contract as [`super::candidates::embed_query`], which it wraps:
+/// `Ok(None)` when the vector leg cannot run (no lookup, no embed), `Err`
+/// with the warning line when the embed fails. A hit returns the cached
+/// vector without calling the embedder; a miss embeds and caches the result.
+/// A failed embed is not cached, so the next recall tries again.
+///
+/// The lock is taken twice, briefly, and never across the embed's `.await`,
+/// so concurrent recalls on one session never wait on each other's embed.
+/// Two concurrent misses for the same text both embed; the second insert
+/// replaces the first with an equal vector. Not worth a single-flight.
+pub(crate) async fn embed_query_cached(
+    cache: &Mutex<QueryEmbeddingCache>,
+    vectors: VectorCandidates<'_>,
+    embedder: &dyn Embedder,
+    contract: &EmbeddingContract,
+    query: &str,
+) -> Result<Option<Arc<[f32]>>, String> {
+    if !vectors.available() {
+        return Ok(None);
+    }
+    let cached = cache.lock().get(query, contract);
+    if let Some(vector) = cached {
+        return Ok(Some(vector));
+    }
+    let Some(vector) = super::candidates::embed_query(vectors, embedder, query).await? else {
+        return Ok(None);
+    };
+    let vector: Arc<[f32]> = vector.into();
+    cache.lock().insert(query, contract, vector.clone());
+    Ok(Some(vector))
 }
 
 #[cfg(test)]
