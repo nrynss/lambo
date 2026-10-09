@@ -92,7 +92,11 @@ schema must publish the same pattern** (`graph::image::validate_image_id`).
 interaction): the `Hybrid` strategy and `VECTOR_SEARCH` (Q16); for bytes, an
 embedder whose `modalities()` include `IMAGE` (`EmbedError::Unsupported` from
 `embed_image` maps to `Config` too); a non-blank, `check_size`-clean caption
-that does not itself contain `[image:` (Lambo builds exactly one suffix); no
+that does not itself contain `[image:` (Lambo builds exactly one suffix;
+checked on the raw text and on its canonical tokens, so `[IMAGE:` or a
+suffix split by a zero-width character is refused too, review M2: two
+captions smuggling each other's id would otherwise give two images one
+key); no
 `Observation` type (observations never canonical-match, so the same image
 would duplicate); `check_size` on the final content. The image embed runs
 under `HYBRID_IO_TIMEOUT` with the text derive's classes (timeout or
@@ -184,7 +188,7 @@ measured in PR 5.
 | `embed::fixture::tests::{png_with_label_is_a_valid_png_whose_label_the_fixture_reads, the_fixture_embeds_images_and_advertises_it, an_unlabelled_image_gets_a_digest_seeded_vector_far_from_text, a_lying_label_length_reads_nothing_and_never_panics}` | every row with `embed-fixture` |
 | `embed::trait_tests::the_fixture_embeds_images_and_keeps_the_query_default` (replaces PR 1's `the_fixture_keeps_every_default`) | same |
 | `graph::hybrid::tests::supplied::*` (11: no merge, text excludes images, dedupe, repair, a text concept holding the key refuses the image (two), AC4 at apply, stamped session, the first-writer race, preconditions and shape, `parent_of`) | same |
-| `graph::image::tests::*` (6) | every row |
+| `graph::image::tests::*` (8, two for the caption check on canonical tokens) | every row |
 | `memory::tests::image::*` (9; the two replay tests need `fixtures`) | rows with `store-memory` + `embed-fixture` |
 | `cli::re_embed::tests::{re_embed_refuses_image_vectors_unless_told_to_drop_them, re_embed_drop_image_vectors_nulls_them_and_reports_the_count, re_embed_never_gives_an_image_concept_a_caption_vector, re_embed_refuses_missing_only_with_drop_image_vectors}` (replace PR 2's `re_embed_refuses_a_session_with_an_embedding_source`) | same |
 | `graph::graph::tests::embeddings::re_embed_and_backfill_never_give_an_image_concept_a_text_vector` | every row |

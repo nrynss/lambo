@@ -117,8 +117,21 @@ pub fn validate_image_id(id: &str) -> Result<(), String> {
 
 /// Refuse a caption that holds an image suffix of its own: Lambo builds the
 /// suffix, so a content carries exactly one, at its end.
+///
+/// Checked on the caption's canonical tokens too
+/// ([`normalize_tokens`](crate::graph::canonical::normalize_tokens), the
+/// normalization the canonical key uses: invisible characters erased, case
+/// folded), not only on the raw text. Identity is the canonical key, so a
+/// raw-only check is bypassable: `"red [IMAGE:zzz]"` with id `abc` and
+/// `"red [ima\u{200B}ge:abc]"` with id `zzz` would both normalize to the
+/// tokens `{red, [image:abc], [image:zzz]}`, and two different images would
+/// become one concept.
 pub fn check_caption(caption: &str) -> Result<(), String> {
-    if caption.contains(IMAGE_SUFFIX_OPEN) {
+    if caption.contains(IMAGE_SUFFIX_OPEN)
+        || crate::graph::canonical::normalize_tokens(caption)
+            .iter()
+            .any(|t| t.contains(IMAGE_SUFFIX_OPEN))
+    {
         return Err(format!(
             "caption may not contain {IMAGE_SUFFIX_OPEN:?}: Lambo appends the image suffix itself"
         ));

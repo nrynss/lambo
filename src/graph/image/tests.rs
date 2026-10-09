@@ -63,6 +63,50 @@ fn image_content_appends_one_suffix_after_the_trimmed_caption() {
     assert!(check_caption("render [image:x] 17").is_err());
 }
 
+/// Review M2: the caption check runs on the canonical tokens, so a suffix
+/// spelled in another case or split by an invisible character is refused
+/// as surely as the plain one.
+#[test]
+fn a_caption_suffix_in_any_case_or_with_invisible_characters_is_refused() {
+    for caption in [
+        "red [IMAGE:zzz]",
+        "red [Image:zzz]",
+        "red [ima\u{200B}ge:zzz]",
+        "red [image\u{2060}:zzz]",
+        "\u{FEFF}[IMAGE:zzz] red",
+        "red [image:",
+    ] {
+        assert!(check_caption(caption).is_err(), "{caption:?}");
+    }
+    for caption in [
+        "red image zzz",
+        "image: red",
+        "[img:zzz] red",
+        "red silk saree",
+    ] {
+        check_caption(caption).unwrap_or_else(|e| panic!("{caption:?}: {e}"));
+    }
+}
+
+/// Review M2, the collision itself: two different images whose captions
+/// smuggle each other's id share one canonical key, so the caption check is
+/// what keeps them two concepts.
+#[test]
+fn two_images_that_smuggle_each_others_id_would_share_a_key_and_are_refused() {
+    let key = |content: &str| canonical_key(content, |_| None);
+    for (a, b) in [
+        ("red [IMAGE:zzz]", "red [IMAGE:abc]"),
+        ("red [ima\u{200B}ge:zzz]", "red [ima\u{200B}ge:abc]"),
+    ] {
+        assert_eq!(
+            key(&image_content(a, "abc")),
+            key(&image_content(b, "zzz")),
+            "without the check {a:?}/abc and {b:?}/zzz are one concept"
+        );
+        assert!(check_caption(a).is_err() && check_caption(b).is_err());
+    }
+}
+
 #[test]
 fn an_observation_cannot_be_an_image_concept() {
     assert!(check_image_concept_type(ConceptType::Observation).is_err());
