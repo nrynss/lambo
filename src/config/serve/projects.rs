@@ -103,6 +103,9 @@ pub struct SelectedSession {
 /// Why nothing selected a session, for the hint under [`SESSION_REQUIRED`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MissingSession {
+    /// The working directory could not be resolved, so `[[serve.projects]]`
+    /// was not checked at all (and there is no `default_session`).
+    pub cwd_unavailable: bool,
     /// `$HOME` was unset (or not absolute), so the `~` entries were skipped.
     pub tilde_entries_skipped: bool,
 }
@@ -114,8 +117,14 @@ impl MissingSession {
     pub fn hint(&self) -> String {
         let mut hint = String::from(
             "(without --session, a stdio serve uses the lambo.toml [[serve.projects]] entry \
-             covering its working directory, then [serve] default_session; neither applies here",
+             covering its working directory, then [serve] default_session; ",
         );
+        hint.push_str(if self.cwd_unavailable {
+            "the working directory could not be resolved, so [[serve.projects]] was not \
+             checked, and there is no default_session"
+        } else {
+            "neither applies here"
+        });
         if self.tilde_entries_skipped {
             hint.push_str(
                 "; [[serve.projects]] entries starting with `~` were skipped because HOME is \
@@ -265,6 +274,7 @@ impl ServeConfig {
 
         let Some(default) = &self.default_session else {
             return Err(SessionSelectionError::Missing(MissingSession {
+                cwd_unavailable,
                 tilde_entries_skipped,
             }));
         };

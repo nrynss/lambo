@@ -431,3 +431,37 @@ fn a_relative_home_is_treated_as_unset() {
         "the `~` entry was skipped as with no HOME"
     );
 }
+
+#[test]
+fn the_refusal_hint_says_when_the_map_was_not_checked() {
+    // #32 PR 8 review L4: an unresolvable cwd skips the map, so "neither
+    // applies here" would tell the operator the map does not cover a
+    // directory it never looked at.
+    let root = ScratchDir::new("lambo-pr8-hint");
+    let proj = mkdir(&root, "proj");
+    let cfg = config(vec![project(s(&proj), "proj")], None);
+
+    let missing = |r: Result<SelectedSession, SessionSelectionError>| match r {
+        Err(SessionSelectionError::Missing(m)) => m,
+        other => panic!("expected Missing, got {other:?}"),
+    };
+
+    let skipped = missing(cfg.select_stdio_session_with(
+        None,
+        || Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
+        None,
+    ));
+    let hint = skipped.hint();
+    assert!(
+        hint.contains("could not be resolved") && hint.contains("not checked"),
+        "{hint}"
+    );
+    assert!(!hint.contains("neither applies"), "{hint}");
+
+    let elsewhere = mkdir(&root, "elsewhere");
+    let unmatched = missing(select(&cfg, &elsewhere));
+    let hint = unmatched.hint();
+    assert!(hint.contains("neither applies here"), "{hint}");
+    assert!(!hint.contains("could not be resolved"), "{hint}");
+    assert_ne!(skipped, unmatched);
+}
