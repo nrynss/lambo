@@ -342,11 +342,11 @@ lambo serve --config lambo.toml --transport http --session lambo --session gener
 
 Each session is a full writer of its own: its own lease and fencing token, its own graph, caches, write queue and local endpoint, so a stdio `lambo serve --session <name>` on the same machine forwards to this process for that session. Nothing crosses between sessions: recall, inspect, saints, stats and GC each see only the session the request addressed, and an MCP session opened on one session's URL is unknown at another's. The embedder, the store connection and the HTTP listener are shared. `--max-sessions` caps the MCP sessions of the whole process, counted across every session.
 
-A request for a session this process does not host gets a plain `404` with an empty body, the same answer as any path the server does not route. So does a request for a session the caller's credential does not reach, whatever state that session is in: the credential is checked before the session is looked up, and no store is consulted for a refused request. Only a caller whose credential reaches a session can see that it is not serving right now (held by another writer, being detached, or failed), which answers `503`. Credentials are configured with `[[serve.credential]]`; see [Credentials](/config#credentials). With more than one session, every name must be addressable by URL: 1 to 128 bytes of `A-Z`, `a-z`, `0-9`, `.`, `_`, `:` and `-`, not starting with `.`. A single session keeps `--session`'s looser rule and is served at `/mcp`.
+A request for a session this process does not host gets a plain `404` with an empty body, the same answer as any path the server does not route. So does a request for a session the caller's credential does not reach, whatever state that session is in: the credential is checked before the session is looked up, and no store is consulted for a refused request. Only a caller whose credential reaches a session can see that it is not serving right now (held by another writer, being detached, or failed), which answers `503`, or erased, which answers `410`. Credentials are configured with `[[serve.credential]]`; see [Credentials](/config#credentials). With more than one session, every name must be addressable by URL: 1 to 128 bytes of `A-Z`, `a-z`, `0-9`, `.`, `_`, `:` and `-`, not starting with `.`. A single session keeps `--session`'s looser rule and is served at `/mcp`.
 
-If another writer already holds one of the sessions at startup, the server does not wait for it: it serves the others, answers requests for that session with `503` and a `Retry-After` header, and tries to take it every 5 seconds. If a running session loses its lease to another writer, only that session is detached (its unflushed tail is discarded, as a crash would discard it, and a `lease` `lost` line goes to the ledger); the other sessions keep serving, and the lost session is retried the same way. If a retry fails with an error that will not clear on its own (the session was erased, its embedding contract no longer matches, or the store is not provisioned), the error is logged once and the session is not retried again: requests for it get `503` with no `Retry-After` until the server is restarted. A store or embedder that cannot be reached is retried, and logged once per outage. A serve with one session behaves as it always has: losing the lease ends the process, so its client respawns into a proxy to the new holder.
+If another writer already holds one of the sessions at startup, the server does not wait for it: it serves the others, answers requests for that session with `503` and a `Retry-After` header, and tries to take it every 5 seconds. If a running session loses its lease to another writer, only that session is detached (its unflushed tail is discarded, as a crash would discard it, and a `lease` `lost` line goes to the ledger); the other sessions keep serving, and the lost session is retried the same way. If a retry fails with an error that will not clear on its own (its embedding contract no longer matches, or the store is not provisioned), the error is logged once and the session is not retried again: requests for it get `503` with no `Retry-After` until the server is restarted. A session that turns out to be erased (at startup or on a retry) is not retried either, and its requests get `410`; the other sessions start and serve as usual. A store or embedder that cannot be reached is retried, and logged once per outage. A serve with one session behaves as it always has: losing the lease ends the process, so its client respawns into a proxy to the new holder.
 
-On shutdown every session is drained and closed concurrently inside the same budget as a single session, and every lease is released. Each shutdown stage line is logged once for the whole set, and each session's close outcome names its session. With `--ledger`, every line carries its `session`, and the heartbeat writes one `stats` line per session. On-demand sessions and the operator surface are not part of this release: a credential with `create` still reaches only the pinned sessions.
+On shutdown every session is drained and closed concurrently inside the same budget as a single session, and every lease is released. Each shutdown stage line is logged once for the whole set, and each session's close outcome names its session. With `--ledger`, every line carries its `session`, and the heartbeat writes one `stats` line per session. On-demand sessions are not part of this release: a credential with `create` still reaches only the pinned sessions. A running serve can erase one of its sessions, and list them, over HTTP: see [Erase from a running serve](#erase-from-a-running-serve).
 
 ### Stopping a writer
 
@@ -406,7 +406,7 @@ $ lambo --config lambo.toml erase-session --session user-42 --confirm user-42
 
 The report is printed only after the store has committed the deletion, so a script can treat exit `0` as done. Running it again is safe: a repeat reports `"already_absent":true`. A run that fails part way, for example on a lost connection, changes nothing, and the next run completes.
 
-It never interrupts a live writer. While a `lambo serve` or another writer holds the session, the command exits `1` and names the holder. Stop that writer first: a clean stop flushes its tail and releases the session, and the erase then removes everything, the flushed tail included.
+It never interrupts a live writer. While a `lambo serve` or another writer holds the session, the command exits `1` and names the holder. Stop that writer first: a clean stop flushes its tail and releases the session, and the erase then removes everything, the flushed tail included. Or erase it through the HTTP `lambo serve` that holds it, without stopping it ([below](#erase-from-a-running-serve)).
 
 An erased id stays erased. Lambo keeps one marker row for it in `session_leases`, holding only the id, and refuses every later write to it, whatever fencing token the writer holds: `derive`, `record-action` and `serve` exit with an error that says the session was erased, and nothing is recreated. A writer that was cut off before the erase cannot write either. A running `serve` that had lost its lease stops at its first refused write or its next heartbeat, whichever comes first, and a `serve` that was forwarding calls to the session's holder answers the next call with the erased error and exits. Edges in other sessions that point at the erased session's concepts or interactions are removed with it.
 
@@ -423,7 +423,33 @@ Never delete the row. Deleting it starts the session's fencing tokens again, so 
 Erasing reaches the store, and the recall index when one is configured: the command reports success only after the index has dropped the session too, and a run that could not reach the index exits `1` and is safe to repeat. Backups and snapshots taken before the erase still hold the session, and so does a call ledger file written by `lambo serve --ledger`, which can contain recall queries and concept text. Your backup and log retention policy governs those copies.
 </Warning>
 
-Only someone with access to the store can erase a session. There is no MCP tool for it, so an agent cannot erase memory it was asked to keep.
+Only someone with access to the store, or an HTTP `lambo serve` credential with `erase`, can erase a session. There is no MCP tool for it, so an agent cannot erase memory it was asked to keep.
+
+### Erase from a running serve
+
+An HTTP `lambo serve` erases a session it can reach without being stopped, for a credential that carries `erase` and reaches that session (see [Credentials](/config#credentials)). The request repeats the id in its body, as `--confirm` does:
+
+```sh
+$ curl -sS -X POST http://127.0.0.1:7700/admin/s/user-42/erase \
+    -H "Authorization: Bearer $OPERATOR_TOKEN" \
+    -d '{"confirm": "user-42"}'
+{"session":"user-42","already_absent":false,"removed":{...},"fence_token":5}
+```
+
+| Status | Meaning |
+|---|---|
+| `200` | Erased. The body is the same JSON report `lambo erase-session` prints. A repeat reports `"already_absent":true`. |
+| `400` | The body is not `{"confirm": "<session>"}`, or `confirm` does not repeat the id in the path exactly. Nothing was erased. |
+| `404` | The credential lacks `erase`, or does not reach the session: the same empty `404` as an unrouted path. No store is consulted. |
+| `409` | Another process holds the session's lease. Nothing was erased; stop that writer and retry. |
+| `500` | The store failed. The body says whether the session is erased from the durable store (repeat the request to finish the rest) or untouched. |
+| `503` | The session is being erased or detached, or the serve is shutting down. Retry after `Retry-After`. |
+
+When the serve holds the session, it stops accepting requests for it, ends its MCP sessions, and closes it without flushing its unflushed tail or releasing its lease, so no other writer can take the session in between. It then erases the session as the holder of that lease. Calls already in progress get the erased error. Requests for the session answer `410` from then on, and nothing in the serve attaches it again. A serve that holds only that session answers the request and then exits, because it has nothing left to serve; a restart on the erased session refuses to start. A session the serve does not hold is erased exactly as `lambo erase-session` erases it.
+
+`GET /admin/sessions`, for a credential with `admin`, lists the sessions in that credential's reach, with each one's state (`live`, `held_elsewhere`, `detaching`, `failed`, `erasing`, `erased`) and, for a live session, its node, edge and concept counts and the bytes of its in-memory vectors. A credential without `admin` gets the empty `404`.
+
+The same warning applies as for the command: backups and the `--ledger` file are not reached.
 
 ## Rebuild the recall index
 
