@@ -4,6 +4,7 @@
 //! `lambo.toml` / env select among compiled kinds. See
 //! `dev-diary/notes/level-b-pluggability.md`.
 
+pub mod api_key;
 pub mod keep_warm;
 mod math;
 
@@ -100,8 +101,9 @@ impl EmbedError {
     /// * [`Self::Backend`] — **permanent for this input or this deployment.**
     ///   The backend answered and the answer was unusable: a status the rule
     ///   table classifies as content (400/413/415/422 — a genuine refusal of
-    ///   this text) or permanent-config (401/403/404 — a wrong URL, model, or
-    ///   credentials), unparseable JSON, the wrong dimensionality, a
+    ///   this text) or permanent-config (any 3xx — a redirect is never
+    ///   followed; 401/403/404 — a wrong URL, model, or credentials),
+    ///   unparseable JSON, the wrong dimensionality, a
     ///   non-finite or zero-norm vector.
     ///
     /// **Where this is imprecise, stated rather than hidden (J3-R2R-1).** The
@@ -365,7 +367,9 @@ pub trait Embedder: Send + Sync {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EmbedderKind {
-    /// BGE-M3 weights served by a local llama.cpp server (default). Feature: `embed-bge`.
+    /// BGE-M3 weights served by a local llama.cpp server (default), or any
+    /// OpenAI-compatible embeddings endpoint (`openai` alias, issue #21).
+    /// Feature: `embed-bge`.
     #[default]
     BgeM3,
     /// In-process BGE-M3 via candle (K2). Feature: `embed-candle`.
@@ -436,7 +440,10 @@ impl FromStr for EmbedderKind {
             ));
         }
         match t.to_ascii_lowercase().as_str() {
-            "bge_m3" | "bge-m3" | "bge" => Ok(Self::BgeM3),
+            // `openai` (issue #21): the adapter is protocol-shaped, not
+            // model-shaped. It stays `BgeM3`, so it displays and stamps the
+            // EmbeddingContract as `bge_m3` and no existing session changes.
+            "bge_m3" | "bge-m3" | "bge" | "openai" => Ok(Self::BgeM3),
             "candle" => Ok(Self::Candle),
             "gemini" | "vertex" => Ok(Self::Gemini),
             "bedrock" | "titan" => Ok(Self::Bedrock),
@@ -482,6 +489,16 @@ pub struct EmbedderConfig {
     /// Model id sent to llama.cpp (empty => server default).
     #[serde(default, alias = "model")]
     pub llama_model: Option<String>,
+    /// Name of the environment variable holding a bearer token for a hosted
+    /// OpenAI-compatible endpoint (issue #21), e.g. `CLOUDFLARE_API_TOKEN`.
+    /// A variable *name*, never the token: see [`api_key`]. `bge_m3` only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key_env: Option<String>,
+    /// An inline `api_key = "..."`, accepted by the parser only so resolve can
+    /// refuse it with a pointer at `api_key_env`. The value is discarded while
+    /// parsing ([`api_key::InlineApiKey`]) and this field is never serialized.
+    #[serde(default, skip_serializing)]
+    pub api_key: Option<api_key::InlineApiKey>,
     /// candle device selection: `auto` | `cpu` | `metal` | `cuda` (K2).
     ///
     /// `auto` (default) resolves Metal on Apple silicon, CUDA elsewhere, and
@@ -531,6 +548,8 @@ impl Default for EmbedderConfig {
             dim: 1024,
             llama_url: None,
             llama_model: None,
+            api_key_env: None,
+            api_key: None,
             device: None,
             repo: None,
             revision: None,
@@ -582,6 +601,11 @@ impl EmbedderConfig {
         {
             self.llama_model = Some(v);
         }
+        if let Ok(v) = env::var(api_key::API_KEY_ENV_OVERRIDE)
+            && !v.is_empty()
+        {
+            self.api_key_env = Some(v);
+        }
         if let Ok(v) = env::var("LAMBO_EMBED_DEVICE")
             && !v.is_empty()
         {
@@ -617,6 +641,9 @@ impl EmbedderConfig {
                 ))
             })?);
         }
+        // Refuse a pasted token while the file is being resolved, before any
+        // later message could quote `api_key_env` (issue #21).
+        api_key::validate(self.api_key_env.as_deref(), self.api_key)?;
         Ok(self)
     }
 }
@@ -779,9 +806,35 @@ fn build_gemini_embedder(cfg: &EmbedderConfig) -> Result<Box<dyn Embedder>, Embe
 /// **Dim is not validated against Cockroach here.** Call
 /// [`crate::resolve::resolve_backends`] (or `check_vector_compatibility`) so the
 /// *store's* `vector_dimensions()` is the authority.
+///
+/// **`api_key_env` checks.** The name rule (`crate::config::secret_env::check`)
+/// runs here too, so a config built in code still cannot name
+/// `LAMBO_AUTH_TOKEN`, a store DSN variable or a Google credentials variable.
+/// The overlap with `[[serve.credential]] token_env` is *not* checked here:
+/// it needs the `[serve]` table, which an `EmbedderConfig` does not carry. It
+/// runs in `LamboFile::from_toml_str` and `LamboFile::load_resolved`, so the
+/// CLI and every config-file path get it; a library caller that builds an
+/// `EmbedderConfig` by hand and also runs `lambo serve` credentials must keep
+/// the two variables apart itself.
 pub fn build_embedder(cfg: EmbedderConfig) -> Result<Box<dyn Embedder>, EmbedError> {
     if cfg.dim == 0 {
         return Err(EmbedError::Unavailable("embedder dim must be > 0".into()));
+    }
+    // Issue #21: `overlay_env` already refused these on the file path; a config
+    // built in code reaches here without it.
+    api_key::validate(cfg.api_key_env.as_deref(), cfg.api_key)?;
+    if let Some(name) = cfg.api_key_env.as_deref()
+        && cfg.kind != EmbedderKind::BgeM3
+    {
+        // A credential key the selected adapter would ignore is refused rather
+        // than silently dropped: an operator who configured one expects it used.
+        return Err(EmbedError::Unavailable(format!(
+            "embedder.api_key_env ({}) applies only to kind `bge_m3` (alias `openai`), but kind \
+             is `{}`; \
+             remove api_key_env or change the kind",
+            crate::config::secret_env::shown(name),
+            cfg.kind
+        )));
     }
     // Pre-check for a clear rebuild hint (see comment above).
     if !cfg.kind.is_compiled() {
@@ -796,7 +849,16 @@ pub fn build_embedder(cfg: EmbedderConfig) -> Result<Box<dyn Embedder>, EmbedErr
                     .clone()
                     .unwrap_or_else(|| "http://127.0.0.1:8080".to_string());
                 let model = cfg.llama_model.unwrap_or_default();
-                Ok(Box::new(BgeM3LlamaCppEmbedder::new(url, model, cfg.dim)?))
+                let mut embedder = BgeM3LlamaCppEmbedder::new(url.clone(), model, cfg.dim)?;
+                // Issue #21: the token is read here, at resolve, so a configured
+                // but unset variable stops startup instead of sending no key.
+                // The transport is checked first, so a plaintext non-loopback
+                // URL is refused before the token is even read.
+                if let Some(name) = cfg.api_key_env.as_deref() {
+                    bge_m3::check_bearer_transport(&url)?;
+                    embedder = embedder.with_bearer_token(&api_key::resolve(name)?)?;
+                }
+                Ok(Box::new(embedder))
             }
             #[cfg(not(feature = "embed-bge"))]
             {
@@ -874,6 +936,10 @@ mod tests {
             "BGE-M3".parse::<EmbedderKind>().unwrap(),
             EmbedderKind::BgeM3
         );
+        // Issue #21: `openai` is the same adapter, displayed as `bge_m3`.
+        let openai = " OpenAI ".parse::<EmbedderKind>().unwrap();
+        assert_eq!(openai, EmbedderKind::BgeM3);
+        assert_eq!(openai.to_string(), "bge_m3");
         assert_eq!(
             "candle".parse::<EmbedderKind>().unwrap(),
             EmbedderKind::Candle
@@ -1079,6 +1145,124 @@ mod tests {
         env.remove("LAMBO_EMBED_KEEP_WARM_SECS");
     }
 
+    /// Issue #21: `api_key_env` is a real `[embedder]` key holding a variable
+    /// name, absent by default, and never serialized when absent.
+    #[test]
+    fn api_key_env_toml_key() {
+        let cfg: EmbedderConfig =
+            toml::from_str("kind = \"bge_m3\"\napi_key_env = \"CLOUDFLARE_API_TOKEN\"\n").unwrap();
+        assert_eq!(cfg.api_key_env.as_deref(), Some("CLOUDFLARE_API_TOKEN"));
+        assert_eq!(cfg.api_key, None);
+        let back: EmbedderConfig = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(back, cfg);
+
+        let cfg: EmbedderConfig = toml::from_str("").unwrap();
+        assert_eq!(cfg.api_key_env, None);
+        assert!(!toml::to_string(&cfg).unwrap().contains("api_key"));
+        // Still deny_unknown_fields: a typo of the key is refused.
+        assert!(toml::from_str::<EmbedderConfig>("api_key_envv = \"X\"\n").is_err());
+    }
+
+    /// Issue #21: `LAMBO_EMBED_API_KEY_ENV` overlays the file's variable name
+    /// with the usual rules, and a token-shaped value is refused at overlay
+    /// without being quoted.
+    #[test]
+    fn api_key_env_overlay() {
+        let env = crate::test_util::env_lock();
+        env.remove(api_key::API_KEY_ENV_OVERRIDE);
+        let base = EmbedderConfig {
+            api_key_env: Some("FROM_FILE".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            base.clone().overlay_env().unwrap().api_key_env.as_deref(),
+            Some("FROM_FILE")
+        );
+        env.set(api_key::API_KEY_ENV_OVERRIDE, "FROM_ENV");
+        assert_eq!(
+            base.clone().overlay_env().unwrap().api_key_env.as_deref(),
+            Some("FROM_ENV")
+        );
+        env.set(api_key::API_KEY_ENV_OVERRIDE, "");
+        assert_eq!(
+            base.clone().overlay_env().unwrap().api_key_env.as_deref(),
+            Some("FROM_FILE")
+        );
+        env.set(api_key::API_KEY_ENV_OVERRIDE, "fake-xyzzy-not-a-name");
+        let err = base.overlay_env().unwrap_err().to_string();
+        assert!(!err.contains("fake-xyzzy"), "{err}");
+        assert!(err.contains("api_key_env"), "{err}");
+        env.remove(api_key::API_KEY_ENV_OVERRIDE);
+    }
+
+    /// Issue #21: an inline `api_key` in the file is refused at overlay (the
+    /// file-resolve path) and at build (a config made in code), naming
+    /// `api_key_env` as the fix.
+    #[test]
+    fn inline_api_key_is_refused_at_resolve() {
+        let env = crate::test_util::env_lock();
+        env.remove(api_key::API_KEY_ENV_OVERRIDE);
+        let cfg: EmbedderConfig = toml::from_str("api_key = \"fake-xyzzy\"\n").unwrap();
+        let err = cfg.clone().overlay_env().unwrap_err().to_string();
+        assert!(err.contains("api_key_env"), "{err}");
+        let Err(err) = build_embedder(cfg) else {
+            panic!("an inline api_key must not build");
+        };
+        assert!(err.to_string().contains("api_key_env"), "{err}");
+    }
+
+    /// Issue #21: `api_key_env` with a kind that would ignore it is refused,
+    /// not silently dropped.
+    #[test]
+    fn api_key_env_is_refused_for_other_kinds() {
+        for kind in [
+            EmbedderKind::Fixture,
+            EmbedderKind::Candle,
+            EmbedderKind::Gemini,
+        ] {
+            let Err(err) = build_embedder(EmbedderConfig {
+                kind,
+                api_key_env: Some("CLOUDFLARE_API_TOKEN".into()),
+                ..Default::default()
+            }) else {
+                panic!("{kind}: api_key_env must be refused");
+            };
+            let msg = err.to_string();
+            assert!(
+                msg.contains("api_key_env") && msg.contains("bge_m3"),
+                "{msg}"
+            );
+        }
+    }
+
+    /// Issue #21: a plain-http, non-loopback URL with `api_key_env` is
+    /// refused at resolve, before the variable is read: the error is the
+    /// transport one even though the variable is unset.
+    ///
+    /// Mutation: drop the `check_bearer_transport` call in `build_embedder`
+    /// -> red (the error becomes "not set").
+    #[cfg(feature = "embed-bge")]
+    #[test]
+    fn api_key_env_over_plain_http_to_a_remote_host_is_refused_at_resolve() {
+        let Err(err) = build_embedder(EmbedderConfig {
+            kind: EmbedderKind::BgeM3,
+            llama_url: Some("http://embeddings.example.com:8080".into()),
+            api_key_env: Some("LAMBO_TEST_ISSUE21_NEVER_SET_TOKEN".into()),
+            ..Default::default()
+        }) else {
+            panic!("a token over plain http to a remote host must be refused");
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("embeddings.example.com") && msg.contains("https"),
+            "{msg}"
+        );
+        assert!(
+            !msg.contains("not set"),
+            "transport must be checked first: {msg}"
+        );
+    }
+
     /// Issue #13: auto keep-warm is off for every non-candle adapter — the
     /// fixture has no weights, and the remote adapters' weights live in another
     /// process.
@@ -1132,6 +1316,8 @@ mod tests {
         assert_eq!(w.kind, EmbedderKind::Gemini);
         let w: Wrap = toml::from_str(r#"kind = "candle""#).unwrap();
         assert_eq!(w.kind, EmbedderKind::Candle);
+        let w: Wrap = toml::from_str(r#"kind = "openai""#).unwrap();
+        assert_eq!(w.kind, EmbedderKind::BgeM3);
     }
 
     #[test]
@@ -1204,6 +1390,21 @@ mod tests {
         .unwrap();
         assert_eq!(e.dimensions(), 1024);
         assert!(EmbedderKind::BgeM3.is_ready());
+    }
+
+    /// Issue #21: `kind = "openai"` in a file builds the same adapter, and a
+    /// re-serialized config writes it back as `bge_m3`.
+    #[test]
+    #[cfg(feature = "embed-bge")]
+    fn openai_kind_builds_the_bge_adapter() {
+        let cfg: EmbedderConfig =
+            toml::from_str("kind = \"openai\"\nurl = \"http://127.0.0.1:9\"\n").unwrap();
+        assert_eq!(cfg.kind, EmbedderKind::BgeM3);
+        assert!(toml::to_string(&cfg).unwrap().contains("kind = \"bge_m3\""));
+        let e = build_embedder(cfg).unwrap();
+        assert_eq!(e.dimensions(), 1024);
+        assert_eq!(candle_identity(e.as_ref()), None);
+        assert_eq!(gemini_identity(e.as_ref()), None);
     }
 
     #[test]

@@ -18,7 +18,7 @@ use crate::types::LamboError;
 /// Environment variable holding the HTTP bearer token. **Takes precedence over
 /// `--auth-token`**: a process manager can inject the secret without it ever
 /// appearing in a command line (where `ps` and shell history would expose it).
-pub const AUTH_TOKEN_ENV: &str = "LAMBO_AUTH_TOKEN";
+pub const AUTH_TOKEN_ENV: &str = crate::config::secret_env::SERVE_AUTH_TOKEN_ENV;
 
 /// Default ceiling on concurrently live MCP sessions (T82-16).
 ///
