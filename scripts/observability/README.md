@@ -271,6 +271,15 @@ and `_ledger.py`. Every line carries `v` (currently `1`) and a server-stamped
 `ts`; **consumers ignore unknown keys**, so adding a field does not bump `v` —
 changing what one means does.
 
+Every line also carries `session`, the lambo session it is about (#32 decision
+15). `startup` and `lease` lines always did; `call`, `completion` and `stats`
+gained it in 0.3.x so that one `--ledger` file can hold several sessions once a
+serve hosts more than one. It is additive (`v` stays `1`), and the shapes below
+show it only where it predates that change. Ledgers written before it simply
+lack the key on those three kinds. Until the kit groups by `session` (a #33
+task), its per-agent figures mix every session in the file, so keep one session
+per ledger file when quoting them.
+
 ```jsonc
 // kind: "call" — one MCP tool call
 {"v":1,"ts":"…","kind":"call","tool":"lambo_recall","agent_id":"…",

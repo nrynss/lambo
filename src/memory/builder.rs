@@ -758,7 +758,8 @@ impl MemoryBuilder {
                 semantic_match_threshold: config.semantic_match_threshold,
                 daemon_wake: daemon.waker(),
                 lease_lost: lease_lost.clone(),
-                ledger: self.ledger,
+                // #32 decision 15: completion lines name this session.
+                ledger: self.ledger.map(|l| l.for_session(&session.0)),
             },
             clock.clone(),
         ));
