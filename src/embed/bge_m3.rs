@@ -335,6 +335,28 @@ impl BgeM3LlamaCppEmbedder {
         Ok(self)
     }
 
+    /// A GET of `path` under the base URL, carrying the bearer header when one
+    /// is configured: the EmbeddingGemma 2 layer's `/props` check (#22 PR 5).
+    /// It goes through the same client, so redirects are not followed and the
+    /// loopback proxy rule holds.
+    #[cfg(feature = "embed-eg2")]
+    pub(crate) fn authorized_get(&self, path: &str, timeout: Duration) -> reqwest::RequestBuilder {
+        let mut req = self
+            .client
+            .get(format!("{}{path}", self.base_url))
+            .timeout(timeout);
+        if let Some(auth) = &self.authorization {
+            req = req.header(AUTHORIZATION, auth.clone());
+        }
+        req
+    }
+
+    /// The base URL as logs and errors may print it ([`url_for_log`]).
+    #[cfg(feature = "embed-eg2")]
+    pub(crate) fn log_base_url(&self) -> String {
+        url_for_log(&self.base_url)
+    }
+
     /// Override connect/request timeouts (most users can rely on the defaults).
     pub fn with_timeouts(
         mut self,
