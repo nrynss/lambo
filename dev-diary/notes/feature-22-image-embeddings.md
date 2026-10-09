@@ -1,7 +1,10 @@
 # #22 PR 5: EmbeddingGemma 2 over llama.cpp (decisions)
 
 Base: main `63df918` plus the orchestrator's `embed-eg2 = ["embed-bge"]` feature
-commit. Design of record: `lambo-handoff-2026-10-08/design/22-DESIGN.md` (sections 2,
+commit. That feature line differs from the amendment's approved R13 text,
+`embed-eg2 = ["dep:reqwest"]`: building on `embed-bge` reuses the #21 client module
+(`bge_m3.rs`), which `eg2` wraps, at the cost of also compiling the `bge_m3` kind into
+an eg2-only build. No new crate either way, and `ship` carries both. Design of record: `lambo-handoff-2026-10-08/design/22-DESIGN.md` (sections 2,
 3, 7.3, 8) as amended by `22-AMENDMENT-PR5.md` (owner approved R20 on 2026-10-09; R11's
 `lambo-eg2-v1` profile and the artifact-naming contract are implemented as the
 defaults). The fifth of the #22 PRs: the server-side embedder that makes
@@ -57,7 +60,8 @@ classes the first `PermanentConfig` with a hint naming `--mmproj` and the second
 The class is still decided where the response is read (J1-R2-2); the rule only lets
 the adapter that knows its server's bodies refine it.
 
-**The 280-token budget is checked on every image response.** Found live: at
+**The 280-token budget is checked on every image response** (superseded by the
+review remediation below: an image's count does not show the budget). Found live: at
 llama-server's default ubatch of 512, `--image-max-tokens 280` is silently capped to
 256 (260 tokens with framing). That server is still size invariant, so the size
 check the amendment planned would pass on it, but its vectors are off the profile
@@ -108,17 +112,52 @@ constant changed here (design 7.3: measured, not adjusted); it is evidence for Q
 
 | test | runs in |
 |---|---|
-| `embed::eg2::tests::*` (18): byte-exact text bodies with the role prefixes, the image body, empty text, MRL at every width, width / non-finite / zero-norm refusals, status classes with the image 500 refined, the token budget, `images = false`, the `/props` check (verified once, mismatch until fixed, no vision, not exposed, 5xx retried, bearer on `/props`), the judge, the kind and contract string, build refusals, resolve stamping the contract | rows with `embed-eg2` (`resolve_stamps_the_eg2_contract` also needs `store-memory`) |
+| `embed::eg2::tests::*` (25 after the review remediation; 18 before): byte-exact text bodies with the role prefixes, the image body, empty text, MRL at every width, width / non-finite / zero-norm refusals, status classes with the image 500 refined, the token budget, `images = false`, the `/props` check (verified once, mismatch until fixed, no vision, not exposed, 5xx retried, bearer on `/props`), the judge, the kind and contract string, build refusals, resolve stamping the contract | rows with `embed-eg2` (`resolve_stamps_the_eg2_contract` also needs `store-memory`) |
 | `embed::tests::{toml_kind_aliases_match_from_str, kind_feature_names}` gain the EG2 kind | every row |
 | `tests/live_eg2.rs` (2, ignored): AC2 and the no-projector case | live only, `LAMBO_EG2_URL` / `LAMBO_EG2_TEXT_ONLY_URL` |
 
 Mutation-checked: routing image calls through the default rule, swapping the two
 prefixes, and normalizing before truncating each turn the named tests red.
 
+## Review remediation (2026-10-09)
+
+The Opus review (M1, M2, L1 to L5) and the measurements behind each fix:
+
+- **An image's token count does not show the budget (L3, and a defect the review did
+  not see).** The 280 to 312 window rested on "b11517 reports 293 for every image",
+  which holds only for small, squarish images. Measured at the profile's budget: 236
+  to 540 prompt tokens across 100 sizes and shapes, 260 for any square of 800 px or
+  more, 250 for 2000x330 (`evidence/issue-22-eg2/image-token-counts.txt`). So ordinary
+  photos were refused on a correct server, and narrowing the window to 293 (the
+  review's ask) would have refused more. The counts of a capped or default budget
+  overlap the range, so no window works. The budget is now checked with a reference
+  image (a 1x1 PNG: 293 at the profile, 260 capped, 85 dynamic, 328 at 300), embedded
+  before the first image for a server `/props` verified and again every 60 s, within
+  8 tokens; an image's own count is not judged. The same data shows the fixed budget
+  does not make every render of a picture one vector (a solid square is 0.9989 apart
+  between 768 and 896 px, the capped server's own offset; a checkerboard 0.97 to 0.99).
+  Whether the profile should downscale images to 768 px before sending is an open
+  question for the owner; it would be a new profile name.
+- **M1: re-check.** A kept `/props` answer is trusted for 60 s
+  (`EG2_PROPS_RECHECK_INTERVAL`) and dropped when an embed fails as unavailable. Once
+  verified, a re-check that cannot run holds embeds back (transient) and a server that
+  stops reporting its model is refused.
+- **L4: backoff.** A check that cannot run is logged once per run of failures and
+  retried after 1 s doubling to 30 s, not on every embed.
+- **L1: quantization names.** Both sides reduce to the file token through llama.cpp's
+  `llama_ftype_name` table (b11517 source and its libllama strings; `(guessed) ` is a
+  prefix there, not a suffix). b11517 reports `Q8_0` for the default GGUF (live).
+- **L2: no count from a verified server** refuses images, naming the build.
+- **L5 (pre-existing, both adapters): "increase the physical batch size"** is now a
+  content refusal. Verified live that the documented command line fits 7,008 tokens
+  and refuses 9,808 (`evidence/issue-22-eg2/long-text.txt`).
+
 ## Not in this PR
 
-- Adding `embed-eg2` to `ship`, and the CI row for it (the orchestrator's, after this
-  PR's live test).
+- The CI row for `embed-eg2` (`cargo clippy --all-targets --features embed-eg2 -- -D
+  warnings` and `cargo test --features embed-eg2`): the orchestrator's, since agents
+  do not edit workflows. `embed-eg2` joined `ship` in this PR (5e2a640), after its live
+  test passed.
 - Recall by image or by vector: PR 6.
 - The fidelity reference against transformers / sentence-transformers (amendment
   section 3), blocking for Dresscode's browser vectors, owner-run.

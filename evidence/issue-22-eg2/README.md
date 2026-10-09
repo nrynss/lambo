@@ -57,7 +57,11 @@ LAMBO_EG2_URL=http://127.0.0.1:8191 LAMBO_EG2_TEXT_ONLY_URL=http://127.0.0.1:819
    312 (b11517 reports 293 at the fixed budget; superseded, see 4), and the documented
    command line adds
    `--ctx-size 8192 --batch-size 8192 --ubatch-size 8192`. The large ubatch also lets a
-   text input of up to 8K tokens fit the one ubatch a non-causal model needs.
+   text input of up to 8,192 tokens fit the one ubatch a non-causal model needs
+   (verified: the server runs 4 slots with `n_ctx_slot = 8192, kv_unified = 'true'`, a
+   7,008-token input embeds and a 9,808-token one gets the "increase the physical
+   batch size" 500, which Lambo settles as a content refusal; see
+   [long-text.txt](long-text.txt)).
 2. **Two image faults arrive as HTTP 500.** "provide the mmproj" (no projector) and
    "Failed to load image or audio file" (undecodable bytes). The J3 table reads a 500
    as transient, which would retry those writes forever. Image calls use a refined
