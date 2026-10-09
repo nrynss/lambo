@@ -2,6 +2,14 @@
 //! serve process runs whatever number of sessions it holds. The per-session
 //! part is in `session`.
 
+use std::sync::Arc;
+use std::time::Duration;
+
+use super::heartbeat::{heartbeat_loop, record_refused_takeovers};
+use crate::ledger::Ledger;
+use crate::mcp::server::LamboServer;
+use crate::memory::Memory;
+
 /// The holder's process-wide background tasks: spawned beside the transport
 /// on the holder path, stopped after the close (stage 5), except the
 /// keep-warm, which is also stopped before it (stage 2).
@@ -21,6 +29,82 @@ pub(super) struct ProcessTasks {
 }
 
 impl ProcessTasks {
+    /// Spawn the holder's process-wide tasks, below the arming (see
+    /// [`serve`](super::serve)): the I2 ledger heartbeat over `server`, the #13
+    /// keep-warm over the session's embedder, and the J4 refusal poller.
+    pub(super) fn spawn(
+        server: &LamboServer,
+        mem: &Arc<Memory>,
+        ledger: &Option<Arc<Ledger>>,
+        heartbeat_every: Option<Duration>,
+        keep_warm: Option<Duration>,
+    ) -> Self {
+        let heartbeat = match (ledger, heartbeat_every) {
+            (Some(ledger), Some(every)) => {
+                tracing::info!(
+                    path = %ledger.path().display(),
+                    interval_secs = every.as_secs(),
+                    version = crate::ledger::VERSION,
+                    git_sha = crate::ledger::GIT_SHA,
+                    "lambo serve: call ledger open, heartbeat armed"
+                );
+                Some(tokio::spawn(heartbeat_loop(
+                    server.clone(),
+                    Arc::clone(ledger),
+                    every,
+                )))
+            }
+            (Some(ledger), None) => {
+                tracing::info!(
+                    path = %ledger.path().display(),
+                    "lambo serve: call ledger open (no heartbeat)"
+                );
+                None
+            }
+            _ => None,
+        };
+        // Issue #13 — embedder keep-warm. Spawned here, below the arming and
+        // beside the heartbeat, for the same reasons: spawning awaits nothing, so
+        // the pre-handshake window is not widened, and the loop's first touch is
+        // one full interval out, so startup gains no forward. Holder path only: a
+        // proxy holds no embedder (it is released when `resolve_role` returns).
+        // Aborted when the transport returns, before the close (see
+        // `run_and_close`), and again beside the heartbeat after it.
+        let keep_warm_task = keep_warm.map(|every| {
+            tracing::info!(
+                interval_secs = every.as_secs(),
+                "lambo serve: embedder keep-warm armed"
+            );
+            tokio::spawn(crate::embed::keep_warm::keep_warm_loop(
+                Arc::clone(mem.embedder()),
+                every,
+            ))
+        });
+        // J4 — the holder side of a refused takeover: record the incumbent's
+        // line when the store reports a refusal this process turned away. Spawned
+        // only when a ledger is attached, and only on the holder path (the proxy
+        // branch returned above). Aborted at close like the heartbeat.
+        let refusal_poller = match ledger {
+            Some(ledger) => {
+                let holder_token =
+                    crate::store::lease::LeaseHolder::for_this_process(mem.agent()).token();
+                Some(tokio::spawn(record_refused_takeovers(
+                    mem.store().clone(),
+                    mem.session().clone(),
+                    mem.agent().clone(),
+                    holder_token,
+                    Arc::clone(ledger),
+                )))
+            }
+            None => None,
+        };
+        Self {
+            heartbeat,
+            keep_warm: keep_warm_task,
+            refusal_poller,
+        }
+    }
+
     /// Stage 2's handles: the keep-warm, which stops when the transport does,
     /// before the close and its final drain (issue #13); see
     /// [`run_and_close`](super::shutdown::run_and_close).

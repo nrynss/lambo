@@ -51,7 +51,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::ledger::Ledger;
-use crate::mcp::server::LamboServer;
 use crate::memory::Memory;
 use crate::resolve::ResolvedBackends;
 use crate::types::LamboError;
@@ -62,6 +61,7 @@ mod http_guards;
 mod hub;
 mod process;
 mod roles;
+mod session;
 mod shutdown;
 mod signals;
 mod stages;
@@ -72,7 +72,7 @@ pub use builder::{build_memory, resolve_serve_backends};
 pub use heartbeat::authorize_ledger;
 
 use builder::{explain_startup_failure, serve_builder};
-use heartbeat::{heartbeat_loop, log_events, record_refused_takeovers, serve_startup_line};
+use heartbeat::serve_startup_line;
 use http_guards::authorize_bind;
 pub use http_guards::{
     resolve_auth_token, SecretToken, AUTH_TOKEN_ENV, DEFAULT_MAX_SESSIONS, DEFAULT_RATE_LIMIT_RPS,
@@ -80,6 +80,7 @@ pub use http_guards::{
 use hub::bind_hub;
 use process::ProcessTasks;
 use roles::{resolve_role, Role};
+use session::{session_server, spawn_event_pump};
 use shutdown::{close_ledger, holder_shutdown};
 use signals::shutdown_signal;
 use stages::Stage;
@@ -94,6 +95,11 @@ pub(crate) use stages::ShutdownProgress;
 pub(crate) use shutdown::close_bounded_until;
 #[cfg(test)]
 pub(crate) use shutdown::CLOSE_FLUSH_GRACE;
+// The unit tests reach the server type through this module's glob; nothing
+// in `serve` itself names it since the session part moved to `session`.
+// Gated like its readers (the heartbeat and hub-release tests).
+#[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
+use crate::mcp::server::LamboServer;
 
 /// Which transport `lambo serve` should listen on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -125,7 +131,8 @@ pub struct ServeOptions {
     /// Session this process owns.
     pub session: String,
     /// Agent identity this process writes as. See the attribution note on
-    /// [`LamboServer`] — `Memory` binds one agent per session handle.
+    /// [`LamboServer`](crate::mcp::server::LamboServer) — `Memory` binds one
+    /// agent per session handle.
     pub agent: String,
     pub transport: Transport,
     pub port: u16,
@@ -461,94 +468,17 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     let shutdown = holder_shutdown(mem.clone(), ledger.clone(), early.clone(), progress.clone());
     tokio::pin!(shutdown);
 
-    // I1/I2. `Ledger::open` never fails — a bad path warns once and counts
-    // every line as a drop — so nothing here can stop a memory server from
-    // serving memory. ONE server handle for the whole process (the HTTP factory
-    // clones it), so every transport appends to the same file and the
-    // heartbeat's uptime is the session's, not a request's.
-    let server = match &ledger {
-        Some(ledger) => LamboServer::with_ledger(mem.clone(), Arc::clone(ledger)),
-        None => LamboServer::new(mem.clone()),
-    };
-    let heartbeat = match (&ledger, opts.ledger_heartbeat) {
-        (Some(ledger), Some(every)) => {
-            tracing::info!(
-                path = %ledger.path().display(),
-                interval_secs = every.as_secs(),
-                version = crate::ledger::VERSION,
-                git_sha = crate::ledger::GIT_SHA,
-                "lambo serve: call ledger open, heartbeat armed"
-            );
-            Some(tokio::spawn(heartbeat_loop(
-                server.clone(),
-                Arc::clone(ledger),
-                every,
-            )))
-        }
-        (Some(ledger), None) => {
-            tracing::info!(
-                path = %ledger.path().display(),
-                "lambo serve: call ledger open (no heartbeat)"
-            );
-            None
-        }
-        _ => None,
-    };
-    // Issue #13 — embedder keep-warm. Spawned here, below the arming and
-    // beside the heartbeat, for the same reasons: spawning awaits nothing, so
-    // the pre-handshake window is not widened, and the loop's first touch is
-    // one full interval out, so startup gains no forward. Holder path only: a
-    // proxy holds no embedder (it is released when `resolve_role` returns).
-    // Aborted when the transport returns, before the close (see
-    // `run_and_close`), and again beside the heartbeat after it.
-    let keep_warm_task = keep_warm.map(|every| {
-        tracing::info!(
-            interval_secs = every.as_secs(),
-            "lambo serve: embedder keep-warm armed"
-        );
-        tokio::spawn(crate::embed::keep_warm::keep_warm_loop(
-            Arc::clone(mem.embedder()),
-            every,
-        ))
-    });
-    // J4 — the holder side of a refused takeover: record the incumbent's
-    // line when the store reports a refusal this process turned away. Spawned
-    // only when a ledger is attached, and only on the holder path (the proxy
-    // branch returned above). Aborted at close like the heartbeat.
-    let refusal_poller = match &ledger {
-        Some(ledger) => {
-            let holder_token =
-                crate::store::lease::LeaseHolder::for_this_process(mem.agent()).token();
-            Some(tokio::spawn(record_refused_takeovers(
-                mem.store().clone(),
-                mem.session().clone(),
-                mem.agent().clone(),
-                holder_token,
-                Arc::clone(ledger),
-            )))
-        }
-        None => None,
-    };
+    let server = session_server(&mem, &ledger);
     // Stopped after the close (and the keep-warm before it); see
     // `process::ProcessTasks` and the stage table in `shutdown`.
-    let tasks = ProcessTasks {
-        heartbeat,
-        keep_warm: keep_warm_task,
-        refusal_poller,
-    };
+    let tasks = ProcessTasks::spawn(&server, &mem, &ledger, opts.ledger_heartbeat, keep_warm);
 
     // J2 — the session endpoint, bound HERE: below the arming and below
     // `LamboServer`, which it needs. A bind failure degrades, it does not stop
     // this process serving memory; see `hub::bind_hub`.
     let hub = bind_hub(endpoint.as_ref(), &server, opts.max_sessions);
 
-    // Exactly once, at startup: `events()` is stateful on its first call — it
-    // hands out the receiver subscribed *before* the daemon spawned, so the
-    // spec §2.5 warm-up condition set (on a resumed session, the whole restored
-    // set) is not lost. Draining it here also stops the broadcast channel from
-    // filling and lagging the daemon.
-    let events = mem.events();
-    let event_pump = tokio::spawn(log_events(events));
+    let event_pump = spawn_event_pump(&mem);
 
     tracing::info!(
         session = %opts.session,
