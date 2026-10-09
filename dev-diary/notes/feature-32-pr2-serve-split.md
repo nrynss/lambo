@@ -15,7 +15,7 @@ session parts in one process.
 |---|---|---|
 | `mcp/serve.rs` | process | composition root: pre-lease group, election, proxy branch, arming, the startup calls, the transport, the stage sequence |
 | `mcp/serve/process.rs` (new) | process | `ProcessTasks` (renamed from `HolderTasks`): `spawn` (ledger heartbeat, #13 keep-warm, J4 refusal poller), `stop_before_close` (stage 2), `stop` (stage 5) |
-| `mcp/serve/session.rs` (new) | session | `AttachedSession` (`mem`, `server`, `hub` (in a `Mutex<Option<Hub>>`), `endpoint`, `tasks`), `SessionTasks` (`event_pump`), `attach`, `closing`, `release_endpoint(&self)`, `session_server`, `spawn_event_pump` |
+| `mcp/serve/session.rs` (new) | session | `AttachedSession` (`mem`, `server`, `hub` (in a `tokio::sync::Mutex<Option<Hub>>`), `endpoint`, `tasks`), `SessionTasks` (`event_pump`), `attach`, `closing`, `release_endpoint(&self)`, `session_server`, `spawn_event_pump` |
 | `mcp/serve/shutdown.rs` | both | `run_and_close_sessions` (stages 1 to 4 over the attached set), `close_sessions` (stages 3 and 4 alone, returning `SessionCloses`), `SessionClose`, `join_all` (panic-isolating); `run_and_close` kept as the one-session form |
 | `mcp/serve/stages.rs` | both | `ShutdownProgress::for_session` (a detach's record: `session` field on every line, `session detach finished` summary, no watchdog) |
 
@@ -85,9 +85,11 @@ panicked session's lease is not released, as before; only its siblings are
 rescued. Stage 6's join gets the same isolation.
 
 **Stage 6 works through a shared reference (review M2).** The hub sits in a
-`parking_lot::Mutex<Option<Hub>>`; `release_endpoint(&self)` takes it in its
-own statement (no guard across the await) and releases it, and a second call
-is a no-op. So PR 4's `Slot::Live(Arc<AttachedSession>)` can be released while
+`tokio::sync::Mutex<Option<Hub>>`; `release_endpoint(&self)` holds the lock
+for the whole release, so a racing second call (a detach racing the
+shutdown) waits for the first to finish and then finds nothing (Sonnet
+review L1: with a sync lock taken in its own statement, the second caller
+returned while the socket was still being removed). So PR 4's `Slot::Live(Arc<AttachedSession>)` can be released while
 the router or a request still holds a clone. #28's semantics hold: `Hub` is
 still consumed by `release`, and a session dropped without the release drops
 its `Hub`, whose `Drop` aborts the accept loop. `serve()` drops the set right
