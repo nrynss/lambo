@@ -764,9 +764,12 @@ pub fn party_key(event: &str) -> &'static str {
 /// facts).
 ///
 /// `state` is `applied` | `applied_after_restart` | `failed` | `deferred`.
-/// For an applied derive, `detail` carries the created/matched counts — the
-/// exact I1 metric-2 fact set that a replayed durable intent previously hid,
-/// because replay bypassed the ordinary call path that builds `call`-line facts.
+/// For the two applied states, `detail` carries the I1 metric-2 fact set from
+/// `AppliedSummary::ledger_facts` — `created_count` / `matched_count`, plus
+/// `semantic_merged` / `reinforced` (derive), `edges` (record_action) and
+/// `embedded` (hybrid strategy) when the write kind has them (#12) — the facts
+/// a replayed durable intent previously hid, because replay bypassed the
+/// ordinary call path that builds `call`-line facts.
 pub fn completion_line(agent: &str, receipt: &str, state: &str, detail: Option<Value>) -> Value {
     let mut line = head("completion");
     let obj = line.as_object_mut().expect("head is an object");

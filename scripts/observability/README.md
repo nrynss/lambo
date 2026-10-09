@@ -330,7 +330,10 @@ lambo_stats         (no extra facts — the numbers are in the heartbeat)
 // created it yet.
 {"v":1,"ts":"…","kind":"completion","agent_id":"…","receipt":"lwr1.…",
  "state":"applied|applied_after_restart|failed|deferred",
- "created_count":3,"matched_count":1}          // applied states only
+ "created_count":3,"matched_count":1,           // applied states only
+ "semantic_merged":0,"reinforced":0,            // derive only (#12)
+ "edges":2,                                     // record_action only (#12)
+ "embedded":3}                                  // hybrid strategy only (#12)
 
 // kind: "startup" (J4) — a serve's intent to acquire the single-writer lease,
 // written BEFORE the acquire, so a serve that LOSES it still leaves an artifact.
@@ -422,9 +425,13 @@ what a derive created.
 
 Three things are worth knowing about what the join does and does not restore:
 
-* **`semantic_merged` and `reinforced` do not come back.** The completion line
-  carries the created/matched pair and no more; those two live only on the
-  receipt, fetchable with `lambo_stats(receipt=...)`. Both reports say so where
+* **`semantic_merged` and `reinforced` do not come back through the join.**
+  Since #12 an applied completion line also carries `semantic_merged`,
+  `reinforced` (derive), `edges` (record_action) and `embedded` (hybrid), each
+  absent rather than zero when the write kind has none, so a raw query over
+  the ledger can answer them (embedding coverage is `embedded` against
+  `created_count`). The reports here still join only the created/matched pair,
+  because lines written before #12 lack the rest. Both reports say so where
   the number would otherwise read as a zero — `dedup_rate.py` labels the
   `sem.merged` column an undercount, and `duplicates.py` suppresses its
   "a zero here means the vector merge never fired" reading, which would

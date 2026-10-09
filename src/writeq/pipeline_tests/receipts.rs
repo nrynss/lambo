@@ -432,6 +432,108 @@ async fn j4_a_completion_line_records_the_applied_derive_lifecycle() {
     // Metric 2's fact set: a fresh derive created one concept, matched none.
     assert_eq!(c["created_count"], 1);
     assert_eq!(c["matched_count"], 0);
+    // #12: the rest of the derive's fact set survives the receipt's 300 s
+    // retention on the durable line.
+    assert_eq!(c["semantic_merged"], 0, "{c}");
+    assert_eq!(c["reinforced"], 0, "{c}");
+    // Absent means "not this write kind / not an embedding strategy", never
+    // zero: a derive has no `edges`, and this rig is canonical.
+    assert!(c.get("edges").is_none(), "{c}");
+    assert!(c.get("embedded").is_none(), "{c}");
+}
+
+/// Read back every `completion` line for `receipt` from a shut-down ledger.
+fn completion_for(path: &std::path::Path, receipt: ReceiptId) -> serde_json::Value {
+    let text = std::fs::read_to_string(path).unwrap();
+    text.lines()
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+        .find(|v| v["kind"] == "completion" && v["receipt"] == receipt.to_string())
+        .unwrap_or_else(|| panic!("no completion line for {receipt}; ledger: {text}"))
+}
+
+/// [`Rig::hybrid_persisting`] with a ledger attached.
+fn hybrid_rig_with_ledger(session: &str, ledger: &Arc<crate::ledger::Ledger>) -> Rig {
+    let mut rig = Rig::hybrid_persisting(session, Arc::new(FixtureEmbedder::new()));
+    Arc::get_mut(&mut rig.pipeline.ctx)
+        .expect("sole owner at build")
+        .ledger = Some(Arc::clone(ledger));
+    rig
+}
+
+/// #12: a hybrid derive's completion line carries `embedded`, so a
+/// ledger-only query can compute embedding coverage of applied writes.
+#[tokio::test]
+async fn a_hybrid_derive_completion_line_carries_its_embedded_count() {
+    let dir = crate::test_util::ScratchDir::new("lambo-12-derive");
+    let ledger_path = dir.join("calls.jsonl");
+    let ledger = crate::ledger::Ledger::open(&ledger_path);
+    let rig = hybrid_rig_with_ledger("wq-12-derive", &ledger);
+    let agent = AgentId::new("agent-a");
+    let submitted = rig.derive(&agent, "an embedded completion concept").await;
+    assert_eq!(
+        rig.pipeline
+            .wait(&agent, submitted.receipt, RECEIPT_WAIT_MAX)
+            .await
+            .tag(),
+        "applied"
+    );
+    ledger.shutdown();
+
+    let c = completion_for(&ledger_path, submitted.receipt);
+    assert_eq!(c["state"], "applied");
+    assert_eq!(c["created_count"], 1, "{c}");
+    assert_eq!(c["embedded"], 1, "{c}");
+    assert_eq!(c["semantic_merged"], 0, "{c}");
+    assert_eq!(c["reinforced"], 0, "{c}");
+    assert!(c.get("edges").is_none(), "{c}");
+}
+
+/// #12: an applied `record_action` completion line carries `edges` (and
+/// `embedded` under hybrid) and none of the derive-only keys. Counts only:
+/// the action text and concept names never reach the line.
+#[tokio::test]
+async fn an_action_completion_line_carries_edges_and_no_derive_only_keys() {
+    let dir = crate::test_util::ScratchDir::new("lambo-12-action");
+    let ledger_path = dir.join("calls.jsonl");
+    let ledger = crate::ledger::Ledger::open(&ledger_path);
+    let rig = hybrid_rig_with_ledger("wq-12-action", &ledger);
+    let agent = AgentId::new("agent-a");
+    let interaction = rig.interaction(&agent);
+    let submitted = rig
+        .pipeline
+        .submit_action(
+            agent.clone(),
+            interaction,
+            "ran the migration".to_string(),
+            vec!["schema v2".to_string()],
+            Vec::new(),
+            vec!["schema v1".to_string()],
+        )
+        .await;
+    let ReceiptAnswer::Applied(s) = rig
+        .pipeline
+        .wait(&agent, submitted.receipt, RECEIPT_WAIT_MAX)
+        .await
+    else {
+        panic!("the action must apply");
+    };
+    ledger.shutdown();
+
+    let c = completion_for(&ledger_path, submitted.receipt);
+    assert_eq!(c["state"], "applied");
+    assert_eq!(c["created_count"], 3, "{c}");
+    assert_eq!(c["matched_count"], 0, "{c}");
+    assert_eq!(c["edges"], s.edges.expect("an action reports edges"), "{c}");
+    assert_eq!(c["embedded"], 3, "{c}");
+    assert!(c.get("semantic_merged").is_none(), "{c}");
+    assert!(c.get("reinforced").is_none(), "{c}");
+    let line = c.to_string();
+    for text in ["ran the migration", "schema v1", "schema v2"] {
+        assert!(
+            !line.contains(text),
+            "payload text leaked into the ledger: {line}"
+        );
+    }
 }
 
 /// **A receipt wait outlasts any one write at the head of its lane** (#11).
@@ -562,5 +664,47 @@ async fn one_agent_cannot_hold_every_receipt_wait_slot() {
         waited(&greedy),
         MAX_RECEIPT_WAITS_PER_AGENT,
         "one agent holds at most its share; its other waits answer at once: {results:?}"
+    );
+}
+
+/// #12: the one fact set both applied completion lines carry — the
+/// in-session `applied` line (`execution.rs`) and the replay's
+/// `applied_after_restart` line (`replay.rs`) both write
+/// [`AppliedSummary::ledger_facts`]. Absent keys stay absent, never zero.
+#[test]
+fn ledger_facts_carry_the_metric_two_set_with_absent_keys_kept_absent() {
+    let derive = AppliedSummary {
+        kind: WriteKind::Derive,
+        summary: "a sentence that must not reach the ledger".into(),
+        created: vec!["id-1".into()],
+        matched: vec!["id-2".into()],
+        created_count: 4,
+        matched_count: 2,
+        semantic_merged: Some(1),
+        reinforced: Some(3),
+        edges: None,
+        embedded: None,
+    };
+    assert_eq!(
+        serde_json::Value::Object(derive.ledger_facts()),
+        serde_json::json!({
+            "created_count": 4, "matched_count": 2,
+            "semantic_merged": 1, "reinforced": 3,
+        })
+    );
+    let action = AppliedSummary {
+        kind: WriteKind::RecordAction,
+        semantic_merged: None,
+        reinforced: None,
+        edges: Some(5),
+        embedded: Some(2),
+        matched_count: 0,
+        ..derive
+    };
+    assert_eq!(
+        serde_json::Value::Object(action.ledger_facts()),
+        serde_json::json!({
+            "created_count": 4, "matched_count": 0, "edges": 5, "embedded": 2,
+        })
     );
 }
