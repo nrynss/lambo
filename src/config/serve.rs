@@ -7,12 +7,15 @@
 //! enforces `[[serve.credential]]`: every request must present one of the
 //! configured tokens (or the legacy one), and reaches only the sessions in
 //! that credential's scope (`crate::mcp::serve`'s `authority` module). A
-//! stdio serve authenticates nobody, so credentials do not apply to it. The
-//! rest is parsed and validated but **not enforced yet**, and a serve says
-//! so once ([`ServeConfig::warn_if_unenforced`]): PR 6 the on-demand bounds
-//! (`attach_concurrency`, `idle_detach_secs`, `per_session_rps`), PR 8 the
-//! `[[serve.projects]]` cwd map. See the approved design, issue #32,
-//! sections 6.1 and 7.1.
+//! stdio serve authenticates nobody, so credentials do not apply to it.
+//! Since PR 8 a stdio serve without `--session` takes its session from the
+//! `[[serve.projects]]` cwd map, then `default_session`
+//! ([`ServeConfig::select_stdio_session`]); an HTTP serve never reads the
+//! map, so its notice still names it. The rest is parsed and validated but
+//! **not enforced yet**, and a serve says so once
+//! ([`ServeConfig::warn_if_unenforced`]): PR 6 the on-demand bounds
+//! (`attach_concurrency`, `idle_detach_secs`, `per_session_rps`). See the
+//! approved design, issue #32, sections 2.3, 6.1 and 7.1.
 //!
 //! ```toml
 //! [serve]
@@ -74,6 +77,11 @@ use crate::surface::session::{
 };
 use crate::types::LamboError;
 
+mod projects;
+pub use projects::{
+    MissingSession, SelectedSession, SessionSelectionError, SessionSource, SESSION_REQUIRED,
+};
+
 /// Default cap on attached sessions, pinned plus on-demand (#32 §3.6).
 pub const DEFAULT_MAX_ATTACHED: usize = 16;
 
@@ -130,12 +138,13 @@ pub struct ServeConfig {
 }
 
 /// One `[[serve.projects]]` entry: a stdio serve whose canonical cwd is under
-/// `path` (longest prefix wins) uses `session` (#32 §2.2). Resolved by PR 8;
-/// here it is only parsed and validated.
+/// `path` (longest prefix wins) uses `session` (#32 §2.2). Resolved by
+/// [`ServeConfig::select_stdio_session`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectConfig {
-    /// A directory. `~` is expanded when the map is resolved (PR 8).
+    /// A directory: absolute, `~` or `~/...`. `~` is expanded to `$HOME` and
+    /// the result canonicalized when the map is resolved.
     pub path: String,
     /// The session a stdio serve started under `path` uses.
     pub session: String,
@@ -221,10 +230,10 @@ fn addressed(field: &str, value: &str) -> Result<AddressedSessionId, LamboError>
 }
 
 /// What `lambo serve` logs once at startup when the file sets a `[serve]`
-/// key this release does not enforce yet (the cwd map, the on-demand
-/// bounds): an operator who configured one must not think it is active.
-/// Followed by the key names that are set ([`ServeConfig::unenforced_keys`]);
-/// it quotes no value from the table.
+/// key this release does not enforce yet (the on-demand bounds, and over
+/// HTTP the stdio-only cwd map): an operator who configured one must not
+/// think it is active. Followed by the key names that are set
+/// ([`ServeConfig::unenforced_keys`]); it quotes no value from the table.
 pub const SERVE_UNENFORCED_NOTICE: &str = "lambo.toml [serve] is parsed but not yet enforced \
      for some keys in this release; they have no effect yet (#32)";
 
@@ -245,17 +254,16 @@ impl ServeConfig {
     /// An HTTP serve enforces `sessions`, `default_session` and
     /// `max_attached` (#32 PR 4) and `[[serve.credential]]` (PR 5), which
     /// never apply to stdio (a stdio serve authenticates nobody, as
-    /// `--auth-token` is ignored there). A stdio serve owns its one `--session`, so
-    /// `default_session` (what a stdio serve without `--session` will use)
-    /// and `[[serve.projects]]` (the stdio cwd map) are listed until #32 PR 8
-    /// enforces them; `sessions` and `max_attached` do not apply to stdio.
+    /// `--auth-token` is ignored there). A stdio serve enforces
+    /// `default_session` and `[[serve.projects]]`, which choose its session
+    /// when `--session` is absent (#32 PR 8); `sessions` and `max_attached`
+    /// do not apply to stdio. The cwd map is stdio's only, so an HTTP serve
+    /// still lists `[[serve.projects]]`: nothing over HTTP reads it (design
+    /// §2.3), and an operator must not think it steers HTTP clients.
     pub fn unenforced_keys(&self, stdio: bool) -> Vec<&'static str> {
         let mut keys = Vec::new();
-        if !self.projects.is_empty() {
+        if !stdio && !self.projects.is_empty() {
             keys.push("[[serve.projects]]");
-        }
-        if stdio && self.default_session.is_some() {
-            keys.push("default_session");
         }
         if self.attach_concurrency.is_some() {
             keys.push("attach_concurrency");
@@ -340,6 +348,7 @@ impl ServeConfig {
             if project.path.trim().is_empty() {
                 return Err(serve_err("a [[serve.projects]] entry has an empty path"));
             }
+            projects::check_project_path(&project.path)?;
             addressed("[[serve.projects]] session", &project.session)?;
             if !paths.insert(project.path.as_str()) {
                 return Err(serve_err(format!(

@@ -217,14 +217,22 @@ url = "http://127.0.0.1:8080"
 # timeout_ms = 5000
 
 # Multi-session serving (#32). Optional; omit the whole section and `lambo
-# serve` behaves exactly as it always has. An HTTP serve pins `sessions`,
-# serves `default_session` at /mcp, enforces `max_attached` and enforces the
-# credentials below: once any credential is configured, every request must
-# present one of their tokens (or LAMBO_AUTH_TOKEN), even on loopback, and
-# reaches only that credential's sessions. A stdio serve ignores the
-# credentials. The cwd map and the on-demand bounds are parsed and validated
-# only (they arrive in later releases); a malformed table stops every
+# serve` behaves exactly as it always has. An http `lambo serve` pins
+# `sessions` beside its --session values, serves default_session at /mcp,
+# enforces max_attached and enforces the credentials below: once any
+# credential is configured, every request must present one of their tokens
+# (or LAMBO_AUTH_TOKEN), even on loopback, and reaches only that credential's
+# sessions. A stdio `lambo serve` ignores the credentials; started without
+# --session it takes its session from [[serve.projects]], then
+# default_session (--session always wins; an http serve never reads
+# [[serve.projects]]). The on-demand bounds are PARSED AND VALIDATED ONLY
+# (they arrive in a later release), but a malformed table already stops every
 # command, like any unknown key.
+# A [[serve.projects]] path is absolute or starts with ~/; it and the working
+# directory are compared as real paths (symlinks resolved). With HOME unset
+# (or relative), ~ entries are skipped with one warning. One global map for
+# every project only applies when the client passes --config (or sets
+# LAMBO_CONFIG); otherwise each serve reads its project's ./lambo.toml.
 #
 # Every session named here must be addressable by URL: 1 to 128 bytes of
 # [A-Za-z0-9._:-], not starting with '.'. A name outside that rule can still
@@ -249,9 +257,9 @@ url = "http://127.0.0.1:8080"
 # idle_detach_secs = 900                         # on-demand sessions only
 # per_session_rps = 50                           # default: --rate-limit-rps
 #
-# [[serve.projects]]                             # stdio: cwd -> session
-# path = "~/Documents/work/lambo"
-# session = "lambo"
+# [[serve.projects]]                             # stdio without --session:
+# path = "~/Documents/work/lambo"                # longest path containing the
+# session = "lambo"                              # cwd wins, else default_session
 #
 # [[serve.credential]]
 # name = "agents"

@@ -23,7 +23,6 @@ use common::{RuntimeDir, ScratchDir, ServeChild};
 const NOTICE: &str = "[serve] is parsed but not yet enforced";
 /// Values from the table that must never appear in the notice.
 const PINNED: &str = "i32-pinned-marker";
-const PROJECT_PATH: &str = "/i32-project-path-marker";
 const CRED_NAME: &str = "i32-cred-marker";
 const CRED_ENV: &str = "LAMBO_TEST_32_UNENFORCED_CRED";
 
@@ -79,8 +78,8 @@ fn serve_stderr(serve_table: &str) -> String {
 #[test]
 fn a_serve_table_is_reported_as_not_yet_enforced_without_its_values() {
     let stderr = serve_stderr(&format!(
-        "[serve]\nsessions = [\"{PINNED}\"]\n\n[[serve.projects]]\npath = \"{PROJECT_PATH}\"\n\
-         session = \"{PINNED}\"\n\n[[serve.credential]]\nname = \"{CRED_NAME}\"\n\
+        "[serve]\nsessions = [\"{PINNED}\"]\nper_session_rps = 5\n\n\
+         [[serve.credential]]\nname = \"{CRED_NAME}\"\n\
          token_env = \"{CRED_ENV}\"\nsessions = [\"{PINNED}\"]\n"
     ));
     assert_eq!(
@@ -93,12 +92,14 @@ fn a_serve_table_is_reported_as_not_yet_enforced_without_its_values() {
         .find(|l| l.contains(NOTICE))
         .expect("notice line");
     assert!(line.contains("WARN"), "a warning: {line}");
-    assert!(line.contains("[[serve.projects]]"), "names the key: {line}");
+    // A stdio serve: `[[serve.projects]]` is enforced there since #32 PR 8,
+    // so an on-demand bound is the key still named.
+    assert!(line.contains("per_session_rps"), "names the key: {line}");
     assert!(
         !line.contains("[[serve.credential]]"),
         "credentials are enforced since #32 PR 5: {line}"
     );
-    for value in [PINNED, PROJECT_PATH, CRED_NAME, CRED_ENV] {
+    for value in [PINNED, CRED_NAME, CRED_ENV] {
         assert!(!line.contains(value), "{value} quoted: {line}");
     }
 }
@@ -106,5 +107,17 @@ fn a_serve_table_is_reported_as_not_yet_enforced_without_its_values() {
 #[test]
 fn no_serve_table_no_notice() {
     let stderr = serve_stderr("");
+    assert!(!stderr.contains(NOTICE), "{stderr}");
+}
+
+/// #32 PR 8: `default_session` and `[[serve.projects]]` choose a stdio
+/// serve's session, so a stdio serve whose table sets only those says
+/// nothing, even when `--session` (which wins over them) is given.
+#[test]
+fn a_stdio_serve_does_not_report_its_selection_keys() {
+    let stderr = serve_stderr(
+        "[serve]\ndefault_session = \"i32-default\"\n\n\
+         [[serve.projects]]\npath = \"/\"\nsession = \"i32-root\"\n",
+    );
     assert!(!stderr.contains(NOTICE), "{stderr}");
 }
