@@ -455,6 +455,25 @@ pub trait GraphStore: Send + Sync {
         false
     }
 
+    /// Whether a session **holder**'s hybrid derive should take its semantic
+    /// merge candidates from its in-memory graph even though
+    /// [`Self::exact_vector_scan`] is false (#18, amending #8).
+    ///
+    /// Derive's dedupe decision has to see what was written seconds ago: two
+    /// agents (or one, twice) deriving the same fact in quick succession must
+    /// merge, not produce paraphrased near-duplicates. A store whose checked
+    /// read is a **lagging tier** (the Elasticsearch recall index: unflushed
+    /// concepts, the last refresh interval, everything while the tier is
+    /// stale) cannot promise that, so it returns `true` and the holder's
+    /// derive ranks in its graph: exact, and fresh up to the write being
+    /// made. Recall keeps asking the store ([`Self::exact_vector_scan`]
+    /// governs that). Default `false`: on the SQL adapters derive and recall
+    /// keep choosing their source together, exactly as before. Ignored unless
+    /// the store also advertises [`Capabilities::VECTOR_SEARCH`].
+    fn holder_derives_from_graph(&self) -> bool {
+        false
+    }
+
     /// Count of concepts that would be orphaned by removing `node` (spec §4.1).
     ///
     /// **Type split (CON-6):** this surface returns `u64`, but the frozen

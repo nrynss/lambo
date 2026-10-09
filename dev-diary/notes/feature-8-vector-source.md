@@ -39,6 +39,23 @@ holder needs.
 `VectorCandidates::for_holder(store, graph)`. #27 left the choice in two places
 because `WriteCtx` holds no `Memory`; the constructor makes it one rule.
 
+**Amended by #18 (2026-10-09, review M6; pending the owner's confirmation):
+derive may take the graph where recall does not.** On a holder over a lagging tier (`TieredStore`, the Elasticsearch
+recall index), recall keeps asking the store, but hybrid derive's semantic
+merge ranks in the holder's graph. The index lacks unflushed concepts, the
+last refresh interval and, while stale, everything, so the commonest dedupe
+case (the same fact derived twice, seconds apart) would mint paraphrased
+near-duplicates, and derive would wait on index latency. A store declares this
+with `GraphStore::holder_derives_from_graph` (default `false`), and the holder
+builds derive's source with `VectorCandidates::for_holder_derive`, which picks
+the graph wherever `for_holder` does plus over such a store. `Memory` and
+`WriteCtx` both call it (`derive_vector_candidates`), so the two write paths
+still cannot disagree: it is two constructors with one caller pair each,
+instead of one constructor for both. SQLite, Postgres and Cockroach declare
+nothing, so their behaviour is unchanged. Cost: derive on a holder over the
+tier is an O(n) scan of the graph, about 3 ms at 3,600 concepts, acceptable
+for a write.
+
 **Postgres and Cockroach keep database-side search** (the scope decision #8
 asked for). Their scores come from database distance arithmetic
 (`distance_to_score`: Postgres `1 - d`, Cockroach `1 - d²/2`) and Cockroach can
@@ -258,5 +275,7 @@ Caveats on these numbers:
   a pure function of the graph at the moment of the scan, which a cache keyed
   on a graph generation can rely on.
 - #18: an Elastic tier is a store (`TieredStore`) whose checked read is its own
-  `VectorCandidateSource`; it leaves `exact_vector_scan` false, so a holder over
-  it keeps calling the store and `for_holder` needs no change.
+  `VectorCandidateSource`; it leaves `exact_vector_scan` false, so a holder's
+  recall over it keeps calling the store and `for_holder` needs no change. Its
+  review (M6) added `holder_derives_from_graph` so a holder's derive ranks in
+  its graph instead (see the amendment above).

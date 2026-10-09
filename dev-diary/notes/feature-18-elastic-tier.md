@@ -73,15 +73,22 @@ interval after a flush); the keyword and recent legs are in RAM and still find
 those concepts. If dogfooding shows the gap matters, the follow-up is an
 explicit `[recall]` knob that names the threshold, not an implicit one.
 
-The same choice reaches hybrid derive, because `VectorCandidates::for_holder`
-is one rule for both callers (#8). On a holder over `TieredStore(sqlite)`,
-derive's semantic match asks the index instead of the graph, so a concept
-derived in the last flush interval plus one refresh is not a semantic-merge
-candidate, exactly as on the pg family today. Exact canonical-key matches are
-unaffected (they are resolved in the graph). Splitting the rule so derive
-keeps the graph while recall uses the index is possible but reopens #8's
-"one constructor, two callers" decision, so it is left as an open question
-rather than done here.
+**Hybrid derive on a holder ranks in its graph (review M6, amending #8).**
+The first cut let derive follow recall's choice (`for_holder` is one rule for
+both callers), so on a holder over `TieredStore(sqlite)` derive's semantic
+match asked the index. The index lacks every unflushed concept, concepts
+flushed within the last refresh interval, and everything while the tier is
+stale, so the commonest dedupe case, the same fact derived twice seconds
+apart, produced paraphrased near-duplicates (exact canonical-key matches still
+merged), a regression from #8 on SQLite, and it put index latency on the write
+path. The split, as the review recommended (pending the owner's confirmation,
+so it is one self-contained commit that can be dropped): `TieredStore` declares
+`GraphStore::holder_derives_from_graph`, and the holder's derive takes
+`VectorCandidates::for_holder_derive`, its in-memory graph (exact, fresh up to
+the write being made). Recall keeps using the tier. Postgres and Cockroach
+declare nothing and are unchanged. The amendment is recorded in
+`feature-8-vector-source.md`. Test:
+`a_holder_derive_merges_a_paraphrase_the_index_has_not_seen`.
 
 **Index per contract.** `{prefix}-v-{hash}`, where the hash is the first 8
 bytes of SHA-256 over `kind`, `model` and `dim` with separators that keep

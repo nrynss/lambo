@@ -425,6 +425,12 @@ async fn the_tier_is_never_an_exact_scan_and_always_offers_vectors() {
         crate::store::vector_source::VectorCandidates::for_holder(&store, &graph),
         crate::store::vector_source::VectorCandidates::Store(_)
     ));
+    // #18 amending #8: a holder's derive ranks in its graph instead.
+    assert!(store.holder_derives_from_graph());
+    assert!(matches!(
+        crate::store::vector_source::VectorCandidates::for_holder_derive(&store, &graph),
+        crate::store::vector_source::VectorCandidates::Graph(_)
+    ));
 }
 
 /// #32: the counter and the token it belongs to are per session.
@@ -2080,4 +2086,108 @@ async fn a_reload_after_a_clean_mirror_is_in_sync() {
         bulks,
         "an in-sync session is not re-indexed at load"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Hybrid derive on a holder over the tier (#18 review M6, amending #8)
+// ---------------------------------------------------------------------------
+
+/// Reduces hybrid's "concept - context" framing to the label, so the
+/// hash-seeded fixture embedder scores the near paraphrases as near (the
+/// same wrapper the SQLite holder tests use).
+#[derive(Debug)]
+struct LabelEmbedder(crate::embed::FixtureEmbedder);
+
+#[async_trait]
+impl crate::embed::Embedder for LabelEmbedder {
+    fn dimensions(&self) -> usize {
+        self.0.dimensions()
+    }
+    async fn embed(&self, text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
+        let label = text
+            .strip_prefix("Concept: ")
+            .unwrap_or(text)
+            .split(" — ")
+            .next()
+            .unwrap_or(text);
+        self.0.embed(label).await
+    }
+}
+
+/// M6: a paraphrase derived seconds after the original merges into it on a
+/// holder over the tier, although the index has not seen the original (not
+/// flushed, and the index lags). Derive's semantic merge ranks in the
+/// holder's graph and never asks the index; recall still does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_holder_derive_merges_a_paraphrase_the_index_has_not_seen() {
+    use crate::embed::{Embedder, FixtureEmbedder, NEAR_A, NEAR_B};
+    use crate::graph::derive::ParentOf;
+    use crate::memory::Memory;
+    use crate::types::{MatchStrategy, RecallQuery};
+    let _quiet = crate::test_util::quiet_logs();
+    let dim = FixtureEmbedder::new().dimensions();
+    let (primary, fake) = (memory_primary(), Arc::new(FakeIndex::lagging()));
+    let contract = EmbeddingContract {
+        kind: "fixture".into(),
+        model: None,
+        dim,
+    };
+    // A session that already has its contract durably, so recall has an
+    // index to ask.
+    let sid = SessionId::new("tier-derive");
+    primary
+        .flush(
+            &batch(
+                1,
+                vec![
+                    set_contract(&sid, Some(contract.clone())),
+                    interaction(&sid, NodeId::new()),
+                ],
+            ),
+            None,
+        )
+        .await
+        .unwrap();
+    let store: Arc<dyn GraphStore> = Arc::new(TieredStore::new(
+        Box::new(Shared::new(primary.clone())),
+        Box::new(fake.clone()),
+        Some(dim),
+    ));
+    let mem = Memory::builder()
+        .session("tier-derive")
+        .agent("agent-a")
+        .flush_interval(Duration::from_secs(3_600))
+        .match_strategy(MatchStrategy::Hybrid)
+        .store(store)
+        .embedder(Arc::new(LabelEmbedder(FixtureEmbedder::new())) as Arc<dyn Embedder>)
+        .embedding_contract(contract)
+        .build()
+        .await
+        .expect("build");
+    let first = mem
+        .derive(&[(NEAR_A, ConceptType::Entity)], &ParentOf::none())
+        .await
+        .unwrap()
+        .created[0];
+    let second = mem
+        .derive(&[(NEAR_B, ConceptType::Entity)], &ParentOf::none())
+        .await
+        .unwrap();
+    assert_eq!(
+        second.semantic_merged,
+        vec![first],
+        "the paraphrase became a near-duplicate: {second:?}"
+    );
+    let knn = || fake.knn_calls.load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(knn(), 0, "derive asked the index");
+    mem.recall_detailed(RecallQuery {
+        query: NEAR_B.into(),
+        top_k: 5,
+        max_tokens: 500,
+        traversal_depth: 1,
+    })
+    .await
+    .unwrap();
+    assert!(knn() > 0, "recall still reads the tier");
+    mem.close().await.unwrap();
 }

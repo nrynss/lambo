@@ -81,8 +81,17 @@
 //! A session holder over a store that declares an exact scan ranks in its own
 //! graph and never asks the store. This store leaves the declaration at its
 //! default `false`: its checked read is a tier, not unmodified delegation, so
-//! a holder over `TieredStore(sqlite)` reaches the index. The note records why
-//! a holder does not switch to its graph for small sessions either.
+//! a holder over `TieredStore(sqlite)` reaches the index for **recall**. The
+//! note records why a holder does not switch to its graph for small sessions
+//! either.
+//!
+//! **Derive is the exception** (#18 review M6, amending #8's "one
+//! constructor, two callers"): the store declares `holder_derives_from_graph`,
+//! so a holder's hybrid derive takes its semantic-merge candidates from its
+//! in-memory graph (`VectorCandidates::for_holder_derive`). The index lags
+//! (unflushed concepts, the refresh interval, everything while stale), and
+//! derive's dedupe of a fact written seconds ago must not miss it and mint a
+//! paraphrased duplicate; it also keeps index latency off the write path.
 
 pub(crate) mod elastic;
 pub(crate) mod index;
@@ -1291,6 +1300,12 @@ impl GraphStore for TieredStore {
 
     // `exact_vector_scan` deliberately keeps its default `false` (#8): see
     // the module docs.
+
+    /// A holder's hybrid derive ranks in its graph, not in this lagging
+    /// tier (#18 amending #8): see the module docs.
+    fn holder_derives_from_graph(&self) -> bool {
+        true
+    }
 
     async fn blast_radius(
         &self,

@@ -104,6 +104,15 @@ impl Memory {
         VectorCandidates::for_holder(self.store.as_ref(), &self.graph)
     }
 
+    /// The vector-candidate source this session's hybrid derive is given:
+    /// [`Self::vector_candidates`]'s, except over a lagging tier, where the
+    /// derive's dedupe ranks in this holder's graph (#18 amending #8,
+    /// [`VectorCandidates::for_holder_derive`]). The write queue's twin is
+    /// `WriteCtx::derive_vector_candidates`.
+    pub(crate) fn derive_vector_candidates(&self) -> VectorCandidates<'_> {
+        VectorCandidates::for_holder_derive(self.store.as_ref(), &self.graph)
+    }
+
     /// Note that a read returned `ids` to a caller (issue #30). Cheap and
     /// lock-light: one leaf-mutex section, no graph lock, no I/O. The counts
     /// reach the graph — and, through the normal flush, the store — on the
