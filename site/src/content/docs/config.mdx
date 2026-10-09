@@ -131,6 +131,7 @@ Erasing a session also removes it from the index, and reports success only once 
 | `model` | string | none | The model id sent to `llama-server`. Empty means the server's own default. Also accepted as `llama_model`. |
 | `api_key_env` | string | none | The name of the environment variable that holds a bearer token, for a hosted OpenAI-compatible endpoint. Used when `kind` is `bge_m3`; any other kind refuses it. See [Hosted endpoints](#hosted-endpoints). |
 | `keep_warm_secs` | integer | auto | Seconds between `lambo serve` keep-warm touches. Omitted means auto: every 10 seconds for the in-process candle embedder on a Metal device, off for everything else. `0` turns it off; any other value applies to every kind. For `gemini`, each touch is a billed Vertex AI embedding request and keeps nothing local warm, so leave it off there. On a battery-powered laptop the default wakes the GPU every 10 seconds (about 0.2% GPU duty); set `keep_warm_secs = 0` to opt out. |
+| `accept_client_vectors` | bool | `false` | Accept an image vector a client computed (`lambo_derive_image` with `vector`, `lambo derive-image --vector-json`). Off by default: such a call is refused and the refusal names this key. Lambo checks that the vector's declared contract (kind, model, dim) is exactly the session's and that the vector has the right width and a real direction, but it cannot check that the vector came from that model, so turning this on trusts the client's label. One setting for the whole process: every session a `lambo serve` holds gets the same value. |
 
 `kind` also accepts `bge`, `bge-m3` and `openai` for `bge_m3`, `vertex` for `gemini`, `titan` for `bedrock`, and `fake` for `fixture`. An alias changes nothing but the spelling: the kind is still reported and stamped as `bge_m3`.
 
@@ -269,6 +270,7 @@ Every variable below overrides the matching file key. An empty value counts as u
 | `LAMBO_LLAMA_MODEL` | `embedder.model` |
 | `LAMBO_EMBED_API_KEY_ENV` | `embedder.api_key_env`. Like the key, it holds a variable name, not the token. |
 | `LAMBO_EMBED_KEEP_WARM_SECS` | `embedder.keep_warm_secs` |
+| `LAMBO_ACCEPT_CLIENT_VECTORS` | `embedder.accept_client_vectors` (`true` or `false`) |
 | `LAMBO_PROMOTION_POLICY` | `promotion_policy` (`Swarm` or `Solo`, any case) |
 
 Keep connection strings in the environment rather than in `lambo.toml`.

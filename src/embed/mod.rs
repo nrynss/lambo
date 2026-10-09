@@ -474,6 +474,10 @@ impl std::fmt::Display for EmbedderKind {
     }
 }
 
+/// The environment variable that overrides `[embedder] accept_client_vectors`
+/// (#22).
+pub const ACCEPT_CLIENT_VECTORS_ENV: &str = "LAMBO_ACCEPT_CLIENT_VECTORS";
+
 fn default_embed_dim() -> usize {
     1024
 }
@@ -542,6 +546,16 @@ pub struct EmbedderConfig {
     /// embedding contract. See [`keep_warm`].
     #[serde(default)]
     pub keep_warm_secs: Option<u64>,
+    /// Accept image vectors a client computed (`lambo_derive_image` with
+    /// `vector`, `lambo derive-image --vector-json`), #22. Default `false`.
+    ///
+    /// Lambo cannot verify that a submitted vector came from the model its
+    /// declared contract names: the contract check is a check of the label.
+    /// So taking labels on trust is the operator's decision, made here for
+    /// the whole process (every session it serves). Not part of the embedding
+    /// contract. `LAMBO_ACCEPT_CLIENT_VECTORS` (`true`/`false`) overrides it.
+    #[serde(default)]
+    pub accept_client_vectors: bool,
 }
 
 impl Default for EmbedderConfig {
@@ -564,6 +578,7 @@ impl Default for EmbedderConfig {
             gemini_model: None,
             gemini_credentials: None,
             keep_warm_secs: None,
+            accept_client_vectors: false,
         }
     }
 }
@@ -643,6 +658,19 @@ impl EmbedderConfig {
                          0 disables keep-warm)"
                 ))
             })?);
+        }
+        if let Ok(v) = env::var(ACCEPT_CLIENT_VECTORS_ENV)
+            && !v.is_empty()
+        {
+            self.accept_client_vectors = match v.as_str() {
+                "true" => true,
+                "false" => false,
+                _ => {
+                    return Err(EmbedError::Unavailable(format!(
+                        "invalid {ACCEPT_CLIENT_VECTORS_ENV}: expected true or false"
+                    )));
+                }
+            };
         }
         // Refuse a pasted token while the file is being resolved, before any
         // later message could quote `api_key_env` (issue #21).
@@ -1121,6 +1149,47 @@ mod tests {
         let err = toml::from_str::<EmbedderConfig>("keep_warm = 30\n").unwrap_err();
         assert!(err.to_string().contains("keep_warm"), "{err}");
         assert!(toml::from_str::<EmbedderConfig>("keep_warm_secs = -1\n").is_err());
+    }
+
+    /// #22: `accept_client_vectors` is a real `[embedder]` key, off when absent.
+    #[test]
+    fn accept_client_vectors_toml_key() {
+        let cfg: EmbedderConfig = toml::from_str("kind = \"fixture\"\n").unwrap();
+        assert!(!cfg.accept_client_vectors, "absent means off");
+        let cfg: EmbedderConfig =
+            toml::from_str("kind = \"fixture\"\naccept_client_vectors = true\n").unwrap();
+        assert!(cfg.accept_client_vectors);
+        assert!(toml::from_str::<EmbedderConfig>("accept_client_vectors = \"yes\"\n").is_err());
+    }
+
+    /// #22: `LAMBO_ACCEPT_CLIENT_VECTORS` overlays the file value (non-empty
+    /// env wins, empty leaves the base), and anything but `true` / `false` is
+    /// a hard error naming the variable, never a silent default. The error
+    /// does not quote the value.
+    #[test]
+    fn accept_client_vectors_env_overlay() {
+        let env = crate::test_util::env_lock();
+        env.remove(ACCEPT_CLIENT_VECTORS_ENV);
+        let base = EmbedderConfig::default();
+        assert!(!base.clone().overlay_env().unwrap().accept_client_vectors);
+
+        env.set(ACCEPT_CLIENT_VECTORS_ENV, "true");
+        assert!(base.clone().overlay_env().unwrap().accept_client_vectors);
+
+        let on = EmbedderConfig {
+            accept_client_vectors: true,
+            ..Default::default()
+        };
+        env.set(ACCEPT_CLIENT_VECTORS_ENV, "false");
+        assert!(!on.clone().overlay_env().unwrap().accept_client_vectors);
+        env.set(ACCEPT_CLIENT_VECTORS_ENV, "");
+        assert!(on.clone().overlay_env().unwrap().accept_client_vectors);
+
+        env.set(ACCEPT_CLIENT_VECTORS_ENV, "maybe-later");
+        let err = base.overlay_env().unwrap_err().to_string();
+        assert!(err.contains(ACCEPT_CLIENT_VECTORS_ENV), "{err}");
+        assert!(!err.contains("maybe-later"), "{err}");
+        env.remove(ACCEPT_CLIENT_VECTORS_ENV);
     }
 
     /// Issue #13: `LAMBO_EMBED_KEEP_WARM_SECS` overlays the file value with the
