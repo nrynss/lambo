@@ -400,16 +400,15 @@ impl Ledger {
     pub fn append(&self, line: &Value) {
         // A scoped handle adds `session` to an object line that lacks one
         // (#32 decision 15). A line that names its own session keeps it, and
-        // a non-object value is passed through as it is.
-        let stamped;
-        let line = match (&self.session, line) {
+        // a non-object value is passed through as it is. The key is spliced
+        // into the serialized bytes rather than inserted into a clone of the
+        // map, so a large line (a recall with its top-k facts) is not
+        // deep-copied on every call.
+        let stamp = match (&self.session, line) {
             (Some(session), Value::Object(obj)) if !obj.contains_key("session") => {
-                let mut obj = obj.clone();
-                obj.insert("session".into(), Value::from(&**session));
-                stamped = Value::Object(obj);
-                &stamped
+                Some((session, obj.is_empty()))
             }
-            _ => line,
+            _ => None,
         };
         let mut bytes = match serde_json::to_vec(line) {
             Ok(b) => b,
@@ -426,6 +425,19 @@ impl Ledger {
                 return;
             }
         };
+        if let Some((session, empty)) = stamp
+            && bytes.last() == Some(&b'}')
+        {
+            // An object serializes as `{...}`; open it at the closing brace.
+            bytes.pop();
+            if !empty {
+                bytes.push(b',');
+            }
+            bytes.extend_from_slice(b"\"session\":");
+            // A `str` always serializes; the fallback is unreachable.
+            let _ = serde_json::to_writer(&mut bytes, &**session);
+            bytes.push(b'}');
+        }
         bytes.push(b'\n');
 
         let guard = self.tx.lock();
@@ -1260,5 +1272,37 @@ mod tests {
         // Shutdown through one handle closes the shared writer for all.
         scoped.append(&call_line("lambo_recall", "agent-a", "ok", None, 1, None));
         assert_eq!(ledger.counters().dropped_write_failed(), 1);
+    }
+
+    /// The stamp is spliced into the serialized bytes (no clone of the line),
+    /// so pin the edges: an empty object, and a session id that needs JSON
+    /// escaping (`--session` keeps its loose rule). Every other key survives.
+    ///
+    /// Mutation: always write the comma, or skip escaping → red.
+    #[test]
+    fn the_spliced_stamp_is_valid_json_at_the_edges() {
+        let dir = temp_dir("session-splice");
+        let path = dir.join("calls.jsonl");
+        let ledger = Ledger::open(&path);
+        let odd = "sess \"q\" \\ \u{e9}";
+        let scoped = ledger.for_session(odd);
+        scoped.append(&json!({}));
+        scoped.append(&json!({"a": 1, "nested": {"session": "inner"}, "z": [1, 2]}));
+        assert!(
+            until(Duration::from_secs(5), || ledger.counters().written() == 2),
+            "written {}",
+            ledger.counters().written()
+        );
+        let text = std::fs::read_to_string(&path).expect("read ledger");
+        let lines: Vec<Value> = text
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("{l}: {e}")))
+            .collect();
+        assert_eq!(lines[0], json!({"session": odd}));
+        assert_eq!(
+            lines[1],
+            json!({"a": 1, "nested": {"session": "inner"}, "z": [1, 2], "session": odd})
+        );
+        ledger.shutdown();
     }
 }
