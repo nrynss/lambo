@@ -34,7 +34,8 @@
 - `lambo serve --transport http` serves exactly `/mcp` and
   `/mcp/s/{session}` (#32). A request to any other path under `/mcp/`
   (which reached the one session before, because the service ignored the
-  path) gets a plain 404 now.
+  path) gets a plain 404 now. That includes `/mcp/` with a trailing slash:
+  a client configured with `http://host:port/mcp/` must drop the slash.
 - Minimum supported Rust is now 1.99 (`rust-version = "1.99"` in
   `Cargo.toml`; there was none before), and the crate moves from edition 2021
   to edition 2024. The pinned toolchain moves from 1.97.1 to 1.99.0, and CI and
