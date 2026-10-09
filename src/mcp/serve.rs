@@ -115,7 +115,7 @@ use roles::{resolve_role, Role};
 use session::{session_server, AttachedSession};
 use shutdown::{
     close_bounded, close_ledger, close_sessions, holder_shutdown, join_all, registry_shutdown,
-    stop_transport,
+    stop_transport, CLOSE_GRACE,
 };
 use signals::shutdown_signal;
 use stages::Stage;
@@ -740,8 +740,9 @@ async fn serve_pinned_with(
 ///
 /// Stages 1-2: the transport drains, then the keep-warm and the calibration
 /// probe stop (#13, #32 PR 3). Stage 3: the registry's attached set is taken
-/// (no attach starts after it) and closed concurrently, beside any detach
-/// still in flight; stage 4 aborts the event pumps. The transport's error
+/// (no attach starts after it, and one in flight is abandoned) and closed
+/// concurrently, beside any detach still in flight, which is waited for no
+/// longer than `CLOSE_GRACE`; stage 4 aborts the event pumps. The transport's error
 /// wins, else the first close error (`SessionCloses::report`). Stage 5: the
 /// process tasks, the registry's retry loop and each session's watcher.
 /// Stage 6: every session's endpoint. Stage 7: the ledger.
@@ -756,10 +757,28 @@ async fn close_holder(
     let outcome = stop_transport(transport, || tasks.stop_before_close(), progress).await;
     let sessions = registry.close_set().await;
     let closing: Vec<_> = sessions.iter().map(|s| s.closing()).collect();
-    let (closed, ()) = tokio::join!(
-        close_sessions(&closing, early, progress),
-        registry.join_detaches()
-    );
+    // A detach still in flight is waited for beside the closes, and for no
+    // longer than they may take (#32 review L9), so stage 3 keeps its
+    // CLOSE_GRACE bound with any number of detaches and the shutdown stays
+    // inside `watchdog::EXIT_BUDGET`, as a one-session serve's does. A detach
+    // that began just before the signal could otherwise run its own stage 1
+    // (SHUTDOWN_GRACE), close (CLOSE_GRACE) and endpoint release in series
+    // past the watchdog. One left behind is abandoned with the process: in
+    // PR 4 a detach is a lost lease, whose fenced close has nothing to flush
+    // or release.
+    let detaches = async {
+        if tokio::time::timeout(CLOSE_GRACE, registry.join_detaches())
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                grace_secs = CLOSE_GRACE.as_secs(),
+                "lambo serve: a session detach did not finish within the close budget; leaving \
+                 it to the process exit"
+            );
+        }
+    };
+    let (closed, ()) = tokio::join!(close_sessions(&closing, early, progress), detaches);
     drop(closing);
     let outcome = match outcome {
         Err(e) => Err(e),

@@ -612,17 +612,24 @@ impl SessionRegistry {
             }
         };
         let progress = ShutdownProgress::for_session(id);
-        // Stage 1: this session's MCP sessions, bounded like the transport.
+        // Stage 1: this session's MCP sessions, bounded like the transport,
+        // and cut short once the process shutdown takes the attached set:
+        // its own transport drain has ended the connections by then, and a
+        // detach must not spend a second SHUTDOWN_GRACE inside the process's
+        // stage 3 (#32 review L9).
         progress.begin(Stage::TransportDrain);
-        if tokio::time::timeout(SHUTDOWN_GRACE, session.close_mcp_sessions())
-            .await
-            .is_err()
-        {
-            tracing::warn!(
-                session = %id,
-                grace_secs = SHUTDOWN_GRACE.as_secs(),
-                "lambo serve: MCP sessions did not end within the grace window; closing anyway"
-            );
+        tokio::select! {
+            drained = tokio::time::timeout(SHUTDOWN_GRACE, session.close_mcp_sessions()) => {
+                if drained.is_err() {
+                    tracing::warn!(
+                        session = %id,
+                        grace_secs = SHUTDOWN_GRACE.as_secs(),
+                        "lambo serve: MCP sessions did not end within the grace window; closing \
+                         anyway"
+                    );
+                }
+            }
+            () = self.closed() => {}
         }
         progress.end(Stage::TransportDrain);
         // Stages 3 and 4. A fenced handle's close refuses to flush or
@@ -675,7 +682,8 @@ impl SessionRegistry {
     }
 
     /// Wait for every detach in flight, so its close and lease release
-    /// finish before the process exits (stage 3, beside the closes).
+    /// finish before the process exits (stage 3, beside the closes). The
+    /// caller bounds the wait (`close_holder`, by `CLOSE_GRACE`).
     pub(super) async fn join_detaches(&self) {
         let detaches = std::mem::take(&mut *self.detaches.lock());
         for detach in detaches {
