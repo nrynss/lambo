@@ -1391,6 +1391,56 @@ async fn a_marker_still_ahead_after_a_reload_is_never_repaired_from() {
     assert_eq!(store.tier_status(&sid).sync, TierSync::Unknown);
 }
 
+/// F3: a marker that stays ahead for a holder (the durable store was
+/// restored from a backup while the index survived) is not a race. It is
+/// never repaired from, and the holder backs off: its flushes do not each
+/// pay a full durable load (and a warning) to find the same thing.
+#[tokio::test]
+async fn a_marker_that_stays_ahead_backs_off_the_holder() {
+    let (primary, fake) = (memory_primary(), Arc::new(FakeIndex::new()));
+    let loads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let store = TieredStore::new(
+        Box::new(CountingLoads(Shared::new(primary.clone()), loads.clone())),
+        Box::new(fake.clone()),
+        Some(4),
+    );
+    let sid = SessionId::new("restored");
+    let token = attach(&store, &sid, &holder("w")).await;
+    let (s, b) = seed_batch(&sid, 1);
+    store.flush(&b, Some(token)).await.unwrap();
+    assert_eq!(store.tier_status(&sid).sync, TierSync::InSync);
+    // The index has seen far more than the durable store now holds.
+    fake.write_marker(
+        &sid,
+        super::index::SyncMarker { synced_epoch: 99 },
+        Some(u64::MAX),
+    )
+    .await
+    .unwrap();
+    store.load_session(&sid).await.unwrap();
+    settle(&store).await;
+    assert_eq!(store.tier_status(&sid).sync, TierSync::Unknown);
+
+    let bulks = fake.bulk_calls.load(std::sync::atomic::Ordering::SeqCst);
+    let before = loads.load(std::sync::atomic::Ordering::SeqCst);
+    for epoch in 2..=4 {
+        let (_, more) = one_more(&sid, &s, epoch);
+        store.flush(&more, Some(token)).await.unwrap();
+        settle(&store).await;
+    }
+    assert_eq!(
+        loads.load(std::sync::atomic::Ordering::SeqCst),
+        before,
+        "every flush re-read the whole durable session"
+    );
+    assert_eq!(
+        fake.bulk_calls.load(std::sync::atomic::Ordering::SeqCst),
+        bulks
+    );
+    assert_eq!(fake.marker(&sid), Some(99), "never repaired from");
+    assert_eq!(store.tier_status(&sid).sync, TierSync::Unknown);
+}
+
 /// A holder attaching while the index is unreachable keeps serving from the
 /// primary, and a reader never trusts an unknown state either.
 #[tokio::test]

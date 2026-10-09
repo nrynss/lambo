@@ -220,6 +220,9 @@ struct SessionTier {
     next_check: Option<Instant>,
     /// A repair of this session is running (single-flight, M4).
     repairing: bool,
+    /// The marker-ahead warning was logged and the marker has not been seen
+    /// in sync since (F3: log once, not on every check).
+    ahead_warned: bool,
     /// Another repair was asked for while one ran: run once more after it.
     repair_again: bool,
     /// The background task running the repair (M1).
@@ -632,12 +635,20 @@ impl Tier {
             Err(_) => return Marker::Unreachable,
         };
         let marker = self.check_marker(session, fresh.as_ref()).await;
-        if marker == Marker::Ahead {
+        let first = self.with_state(session, |st| {
+            let first = marker == Marker::Ahead && !st.ahead_warned;
+            st.ahead_warned = marker == Marker::Ahead;
+            first
+        });
+        if first {
             tracing::warn!(
                 target: "lambo::recall_tier",
                 session = %session,
-                "recall index marker is ahead of the durable session after a re-load; \
-                 not repairing from it, reads fall back until it is re-checked"
+                "recall index marker is ahead of the durable session after a re-load (was the \
+                 database restored from a backup?); not repairing from it. Vector reads fall \
+                 back to the durable store and the marker is re-checked at most once per {}s. \
+                 If it stays ahead, stop the writer and run `lambo recall-index backfill`",
+                self.repair_backoff.as_secs()
             );
         }
         marker
@@ -671,6 +682,18 @@ impl Tier {
                     // within seconds of its commit).
                     if marker == Marker::Ahead || (marker == Marker::Behind && held.is_none()) {
                         st.next_check = Some(Instant::now() + self.repair_backoff);
+                    }
+                    // Nor does a holder's flush spawn a repair for an ahead
+                    // marker before the backoff (F3).
+                    match marker {
+                        Marker::Ahead => {
+                            st.next_repair = Some(Instant::now() + self.repair_backoff);
+                        }
+                        Marker::InSync => {
+                            st.next_repair = None;
+                            st.ahead_warned = false;
+                        }
+                        Marker::Behind | Marker::Unreachable => {}
                     }
                 }
             }),
@@ -775,7 +798,13 @@ impl Tier {
                     st.sync = marker.sync();
                     st.next_repair = None;
                     if marker == Marker::Ahead {
-                        st.next_check = Some(Instant::now() + self.repair_backoff);
+                        // A marker that stays ahead is not a race but a
+                        // durable store behind its index: back off like a
+                        // failed repair, or every flush pays a full durable
+                        // load to find the same thing (#18 review F3).
+                        let later = Instant::now() + self.repair_backoff;
+                        st.next_check = Some(later);
+                        st.next_repair = Some(later);
                     }
                 });
                 return Ok(());
