@@ -131,9 +131,14 @@ pub struct FlushParams {
 /// Observable durability loss bound (spec §2.4).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FlushStats {
-    /// Time since the store was last **caught up** (tokio clock): the last
-    /// successful flush, or the last poll that found nothing pending. 0 at
-    /// spawn.
+    /// Time since the store was last **caught up** (tokio clock): the drain
+    /// the last successful flush made durable, or the last poll that found
+    /// nothing pending. 0 at spawn.
+    ///
+    /// A successful flush counts from its drain, not from its end (#11 review
+    /// P2-1): a write that lands while a slow or retried flush runs is not in
+    /// that flush, so counting from the end would make the lag younger than
+    /// the oldest write still at risk.
     ///
     /// Until #16 §3 this was the time since the last successful flush alone,
     /// so it grew with idle time while nothing was pending: the dogfood rigs
@@ -537,9 +542,18 @@ impl FlushLoop {
     /// (whichever first).
     async fn cycle(&mut self, tick: bool) {
         let session = self.graph.read().session_id().clone();
+        // When this cycle's drain took the log (#11 review P2-1). A flush makes
+        // durable what was drained, so a successful one means the store held
+        // every mutation as of THIS instant, not as of the flush's end: writes
+        // that land while a slow or retried flush runs are not in it, and the
+        // lag has to keep counting them.
+        let drained_at;
         {
             // WRITE lock only for the drain; the guard dies before any I/O.
             let mut graph = self.graph.write();
+            // Read under the write lock, so no mutation can land between the
+            // stamp and the drain.
+            drained_at = tokio::time::Instant::now();
             let drained = graph.drain_log();
             // Carry the epoch watermark forward (issue #17): `drain_log` stamps
             // the batch with the graph's absolute epoch, and this max is the
@@ -593,7 +607,7 @@ impl FlushLoop {
             // degraded session, which drops what it drains rather than
             // flushing it.
             if !self.shared.degraded.load(Ordering::Acquire) {
-                *self.shared.caught_up.lock() = tokio::time::Instant::now();
+                *self.shared.caught_up.lock() = drained_at;
             }
             return;
         }
@@ -641,7 +655,9 @@ impl FlushLoop {
             Ok(()) => {
                 self.clear_pending();
                 self.retry_after = None;
-                *self.shared.caught_up.lock() = tokio::time::Instant::now();
+                // Caught up as of the drain, not now: what landed while the
+                // flush ran is still in the log and still unbounded by it.
+                *self.shared.caught_up.lock() = drained_at;
                 // Writes may have landed while we flushed; depth is the log only now.
                 self.refresh_depth();
             }
@@ -1709,10 +1725,11 @@ mod tests {
         assert_eq!(snap.interactions.len(), 1);
         assert_eq!(snap.concepts.len(), 1);
         assert_eq!(task.stats().depth, 2);
-        assert!(
-            task.stats().lag < Duration::from_millis(50),
-            "lag reset on success"
-        );
+        // The success made durable what the tick drained 700 ms ago, and the
+        // outage-period writes landed after that drain, so the lag counts
+        // from the drain (#11 review P2-1). This asserted a reset to zero
+        // before, which under-reported the age of those two pending writes.
+        assert_eq!(task.stats().lag, Duration::from_millis(700));
 
         // Next tick catches the session up completely.
         tokio::time::advance(Duration::from_secs(1)).await;
@@ -1903,6 +1920,61 @@ mod tests {
             stats.lag <= POLL_QUANTUM,
             "nothing is pending, so the store is caught up and the lag is at most one poll, \
              not an hour: {stats:?}"
+        );
+    }
+
+    /// **#11 review P2-1: the lag bounds the age of what a crash would lose,
+    /// even across a slow or retried flush.** A flush makes durable what was
+    /// drained when it started, not what landed while it ran. The store was
+    /// marked caught up at the flush's END, so a write landing during a
+    /// retried flush was already older than the lag reported once the store
+    /// then stopped taking writes.
+    #[tokio::test(start_paused = true)]
+    async fn the_lag_covers_a_write_that_landed_during_a_retried_flush() {
+        let _callsites = quiet_logs();
+
+        let inner: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+        let store = Arc::new(FlakyStore::new(inner));
+        let graph = new_graph();
+        let task = FlushTask::new(
+            graph.clone(),
+            store.clone(),
+            params(Duration::from_secs(1), 100, 1, 1_000),
+        );
+        let _handle = task.spawn();
+        let_task_arm().await;
+
+        // Batch A, drained by the 100 ms poll and flushed at the 1 s tick,
+        // whose first attempt fails: the retry runs BACKOFF_BASE later.
+        store.fail_next(1);
+        let iid = add_interaction(&graph, 1, None);
+        add_concept(&graph, 1, iid);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        wait_until(|| store.flush_calls() >= 1).await;
+
+        // Write B lands while the retry is backing off: not in that flush.
+        tokio::time::advance(BACKOFF_BASE / 2).await;
+        add_concept(&graph, 2, iid);
+        let b_landed = tokio::time::Instant::now();
+        tokio::time::advance(BACKOFF_BASE / 2).await;
+        wait_until(|| store.flush_calls() >= 2).await;
+
+        // The store stops taking writes, so B is what a crash would lose.
+        store.fail_forever();
+        tokio::time::advance(Duration::from_millis(900)).await;
+        wait_until(|| store.flush_calls() >= 3).await;
+        tokio::time::advance(BACKOFF_BASE).await;
+        wait_until(|| store.flush_calls() >= 4).await;
+        tokio::time::advance(Duration::from_secs(3)).await;
+        tokio::task::yield_now().await;
+        let stats = task.stats();
+        assert_eq!(stats.depth, 2, "B is pending: {stats:?}");
+        let b_age = b_landed.elapsed();
+        assert!(
+            stats.lag >= b_age,
+            "lag {:?} must bound B's age {b_age:?}: the retried flush made durable what was \
+             drained when the tick fired, not what landed while it backed off",
+            stats.lag
         );
     }
 
