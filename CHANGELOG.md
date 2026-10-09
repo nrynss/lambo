@@ -66,22 +66,35 @@
   an observed 2.3 to 2.8 writes/s before (4.1x to 5.0x apart), 5.7 against
   the same observed rate after (2.0x to 2.5x; what is left is derives larger
   than the representative one). The drain rate itself is unchanged: after
-  #8 a write's time is its embeds.
+  #8 a write's time is its embeds. An embedder that answers one request at
+  a time may not finish the probe's four-wide leg in its 5 s budget; the
+  serial figures are then still published, and `write_queue_items_per_sec`
+  is `null`, where the whole probe used to read `unmeasured`. A probe that
+  measures nothing logs which leg failed and which budget ran out.
 - The longest `lambo_stats` `wait_ms` is now 34000 (was 4000), and the
   published schema says so (#11). It covers the longest one write can take
   to apply (the 30 s hybrid I/O deadline plus two 2 s drain budgets), so a
   wait that ends `pending` now means other writes were queued ahead of it.
   On the Metal rig a three- or four-concept derive took up to 4.6 s to
   apply, so a read-your-writes wait could answer `pending` about a healthy
-  write. A wait still returns the moment the write settles, at most 16 waits run
-  at once, and a shutdown still drops in-flight calls after its 5 s grace.
+  write. A wait still returns the moment the write settles, and at most 16
+  waits run at once, of which one `agent_id` holds at most 8: a wait over
+  either cap answers at once with the receipt's current state. A wait also
+  answers once the session closes, so a wait on a `pending_replay` receipt
+  no longer outlives the server's shutdown.
 - `flush_lag_ms` (in `lambo_stats`, the heartbeat and the stats a reader
   process reads from the store) is now the time since the store last held
   every write, not the time since the last successful flush (#16 §3). An
   idle writer reads under 100 ms instead of its idle time: the dogfood rigs
   read 13.7 minutes, 12.1 hours and 48 hours while `log_depth` was 0 in
   every snapshot. With writes waiting on a store that is not taking them it
-  grows exactly as before. The key, type and unit are unchanged.
+  grows as before, counted from the moment the last successful flush
+  drained its batch, so it covers writes that landed while that flush was
+  still running. The key, type and unit are unchanged. The stats row a
+  reader process reads is now republished between flushes when it has
+  drifted (at most every 5 s); it used to change only when a flush was
+  attempted, so it never showed an idle writer's lag and froze through the
+  10 s pause after a failed flush.
 
 - On SQLite, the process that holds a session (`lambo serve`, or an embedded
   `Memory`) now ranks recall's vector leg and hybrid `derive`'s semantic match

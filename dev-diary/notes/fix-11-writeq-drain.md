@@ -97,8 +97,9 @@ and close deferral, both visible now (`write_queue_apply_ms_*`,
    not adaptive: the wait already returns at settle, so a long maximum costs
    only on slow writes. The two bounds the J3 coupled residual needs still
    hold: `MAX_CONCURRENT_RECEIPT_WAITS` caps the population that lengthens
-   the proxy's in-flight burst, and serve drops in-flight calls after
-   `SHUTDOWN_GRACE`, so a wait never extends a shutdown. The published
+   the proxy's in-flight burst, and a wait never extends a shutdown. (This
+   first said serve drops in-flight calls after `SHUTDOWN_GRACE`; that is
+   not why, see R4 below.) The published
    `wait_ms` maximum moves from 4000 to 34000. Raising a maximum accepts
    every previously valid request.
 5. **Telemetry for acceptance item 3**: `write_queue_probe_optimism` and
@@ -112,7 +113,78 @@ and close deferral, both visible now (`write_queue_apply_ms_*`,
    a failing store it grows exactly as before. Chosen over `n/a` or `null`
    when `log_depth` is 0 because the key is read as a number by every
    consumer, including the session_stats row a reader process reads, and the
-   number now means what its doc said.
+   number now means what its doc said. (The row reached readers only after
+   R5 below; until then it was published only after flush attempts.)
+
+## Review remediation (Opus review of e8773e4)
+
+The review found no P0 or P1. Each finding below has its own commit and,
+for a behaviour change, a regression test that failed first; red and green
+logs are in the orchestrator's scratch directory.
+
+- **R1 (P2-1) The lag counts from the drain.** A successful flush stamped
+  the store caught up when the flush returned, but it made durable what the
+  cycle had drained. A write landing during a slow or retried flush was then
+  older than the lag once the store stopped taking writes. The stamp is now
+  the drain instant, read under the graph's write lock.
+  `failing_then_recovering_store_keeps_session_alive` had asserted the old
+  reading (a reset to zero with two outage writes pending) and now asserts
+  the 700 ms since the drain. Test:
+  `the_lag_covers_a_write_that_landed_during_a_retried_flush`.
+- **R2 (P2-2) A serialising embedder keeps its probe figure.** The
+  concurrent leg is now eight ~1 KiB embeds inside the unchanged 5 s budget.
+  An embedder that answers one request at a time at CPU cost lands both
+  serial legs and cannot finish that one, and the whole probe went
+  `unmeasured`, so `probe_optimism` was null for good there. A concurrent
+  leg that runs out of budget now publishes the serial figures with
+  `items_per_sec: None` (`Calibration::from_serial_probe`); a refusal is
+  still `unmeasured`. Chosen over a larger budget because it needs no
+  guess at the slowest embedder. Test:
+  `a_serialising_embedder_keeps_the_probes_serial_figure`.
+- **R3 (P3-1) Each agent gets a share of the wait slots.** One agent could
+  hold all 16 for 34 s. `MAX_RECEIPT_WAITS_PER_AGENT` = 8, half. A quarter
+  was tried first and broke `i1_a_days_worth_of_concurrent_lines_all_parse`,
+  which fans eight waits out on one `agent_id`; that is ordinary traffic,
+  because the dogfood protocol names an agent by its model and parallel
+  subagents share the id. Half still leaves every other agent eight slots.
+  Test: `one_agent_cannot_hold_every_receipt_wait_slot`.
+- **R4 (P3-2) A wait ends with the close.** The real reason a wait does not
+  extend a shutdown: hub and proxy endpoint sessions stay connected until
+  serve's last stage, the close's `quiesce` and `abort_workers` settle every
+  receipt this process holds and wake the waiters, and the last stage
+  cancels the services without joining their tool tasks. A `pending_replay`
+  id is not settled by the close, so its wait ran to its own deadline (up to
+  34 s) against a closed session. `wait` now answers once the lanes are
+  sealed and the workers aborted. Test:
+  `a_wait_on_a_replay_owed_receipt_ends_when_the_session_closes`.
+- **R5 (P3-5, pre-existing) The session_stats row keeps up.** The row a
+  reader process reads was published only after a flush attempt, so it froze
+  through a 10 s retained-batch hold, and the idle lag decision 6 above
+  describes never reached it: the row-reader half of the #16 §3 fix was not
+  real. It is now republished between attempts when it drifts (another
+  depth, or a lag a second or more apart), at most every 5 s; an idle writer
+  stops writing once its row is right. Test:
+  `the_published_stats_row_keeps_up_while_a_retained_batch_waits`.
+- **R6 (P3-6) The probe's warning names what failed.** It named the 5 s
+  budget even when the 30 s warm-up ran out. `ProbeMiss` now says which leg
+  failed and which budget expired. Test:
+  `a_failed_probe_says_which_budget_ran_out`.
+- **R7 (P3-7) The probe's concepts are distinct, and a real derive checks
+  it.** The probe test compared the probe's texts with the helpers the probe
+  calls. Run end to end, a derive of the probe's two identical concepts
+  embedded once. The concepts now differ (each starts one byte further into
+  the same repetition, same length), and
+  `a_real_derive_of_the_probes_concepts_embeds_the_probes_texts` runs them
+  through a real hybrid derive with a recording embedder. The probe already
+  embedded both texts, so the measurements above are unaffected. A derive
+  also runs a vector lookup per embed, which the probe does not time; on
+  these rigs that is store work under 1 ms.
+- **R8 (P3-3, P3-4) Docs.** The lag's edge cases (a dead-lettered batch lets
+  the lag fall; a fenced or erased handle's lag grows with depth 0; read
+  accesses count as pending), the stale `FlushTask::spawn` doc,
+  `MEASURED_WORST_FLUSH_LAG_SECS` (measured under the old, idle-counting
+  definition), and mcp.mdx's "grows only while ... the store is not taking
+  writes", which was wrong for ordinary traffic.
 
 ## For #32 PR 3 (`EmbedderCalibration`)
 
