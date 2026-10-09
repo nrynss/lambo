@@ -136,6 +136,40 @@ while keeping field names, and `promotion_policy` quotes only a short word
   tests); no assertion changed.
 - No MCP tool, `get_info`, route or CLI flag changes.
 
+## For PR 4, 5 and 8 (forward constraints from the PR 1 review)
+
+Not defects in PR 1; each is a decision a later PR must make or a check it
+must add.
+
+- **PR 4/8: a non-hosted default.** `validate()` does not require
+  `default_session` or a `[[serve.projects]] session` to be pinned or covered
+  by any credential's prefix. PR 4/8 must decide what `/mcp` (and a cwd-mapped
+  stdio serve) does when that session is not hosted: attach it on demand, or
+  refuse at startup.
+- **PR 4: the pinned cap after the union.** `pinned.len() > max_attached`
+  counts `[serve] sessions` only. The design's pinned set is the union with
+  repeatable `--session` (§7.2), so PR 4 must re-check the cap after the
+  union.
+- **PR 4: every method gets the 404.** Route `/mcp/s/{session}` with `any`
+  and answer a refused id with the uniform 404 on every method; keep every
+  guard on `.layer`, not `.route_layer`. Pinned by
+  `a_refused_session_and_an_unrouted_path_are_identical_on_the_wire`.
+- **PR 5: the legacy token.** `resolve_credentials` refuses two
+  `[[serve.credential]]` entries with one token, but cannot see the legacy
+  `LAMBO_AUTH_TOKEN` / `--auth-token` credential (`default`). PR 5 must also
+  refuse a configured token equal to the legacy one, without quoting either.
+- **PR 5: drop the unenforced warning.** `ServeConfig::warn_if_unenforced`
+  says `[serve]` is not yet enforced; PR 5 (credentials) must narrow or remove
+  it as each part starts being enforced, and the config reference's "will be
+  read" goes back to the present tense.
+- **PR 8: canonical project paths.** `[[serve.projects]]` duplicate-path
+  detection is textual (`~/a` vs `~/a/`, symlinks). PR 8 canonicalises before
+  comparing.
+- **Timing (no action).** A refusal for an out-of-scope id makes no store
+  call whether or not the id exists, so there is no existence oracle. The only
+  store-dependent timing is in scope (absent vs present), which the design
+  allows.
+
 ## Not in this PR
 
 The `serve()` split (PR 2), calibration (PR 3), the registry and routing (PR
