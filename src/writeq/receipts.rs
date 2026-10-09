@@ -155,9 +155,19 @@ pub const MAX_RETAINED_RECEIPTS: usize = 4096;
 /// What a longer bound costs: a wait returns the moment its receipt settles,
 /// so only a wait on a slow write holds its slot longer. The population of
 /// waits is still capped by [`MAX_CONCURRENT_RECEIPT_WAITS`], which is what
-/// bounds the proxy's in-flight burst (the J2-R2-7 residual), and a shutdown
-/// drops in-flight calls after `serve`'s transport grace, so a waiting call
-/// never extends a shutdown.
+/// bounds the proxy's in-flight burst (the J2-R2-7 residual), and one agent
+/// holds at most [`MAX_RECEIPT_WAITS_PER_AGENT`] of them.
+///
+/// A waiting call does not extend a shutdown, though not because the
+/// transport drops it: hub and proxy endpoint sessions stay connected until
+/// `serve`'s last stage. It is because the close settles every receipt this
+/// process holds: `quiesce` drains, then `abort_workers` settles what is
+/// left `intent_durable` and wakes every waiter, so those waits return with
+/// it. A `pending_replay` id, owed to a replay the close stops, is not
+/// settled; its wait returns once the pipeline is sealed and its workers are
+/// aborted (#11 review P3-2). Nothing in shutdown joins a waiting call either:
+/// `serve`'s final stage cancels the MCP services without awaiting their
+/// tool tasks.
 pub const RECEIPT_WAIT_MAX: Duration =
     Duration::from_secs(HYBRID_IO_TIMEOUT.as_secs() + 2 * WRITE_QUEUE_DRAIN_BUDGET.as_secs());
 
@@ -879,10 +889,27 @@ impl WritePipeline {
             if tokio::time::Instant::now() >= deadline {
                 return answer;
             }
+            // Closed (#11 review P3-2): once the lanes are sealed and the
+            // workers aborted, nothing in this process can settle the id.
+            // The close already settled every receipt it held and woke this
+            // loop; a `pending_replay` id is owed to a replay the close
+            // stopped, so without this its wait ran on against a closed
+            // session to its own deadline.
+            if self.closed_to_settles() {
+                return answer;
+            }
             if tokio::time::timeout_at(deadline, notified).await.is_err() {
                 return self.lookup(agent, id);
             }
         }
+    }
+
+    /// `true` once nothing in this process can settle another receipt: the
+    /// lanes are sealed and [`WritePipeline::abort_workers`] has drained and
+    /// aborted the workers. The replay loop stops at the seal as well.
+    fn closed_to_settles(&self) -> bool {
+        let lanes = self.lanes.lock();
+        lanes.sealed && lanes.workers_aborted
     }
 
     /// Take one receipt out of the piggyback queue because it has just been
