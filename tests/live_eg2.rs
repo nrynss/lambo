@@ -366,7 +366,7 @@ async fn live_eg2_text_and_image() {
     // Design 7.3: the ranking-parity table.
     let w = RecallWeights::default();
     println!();
-    println!("== design 7.3 ranking parity (EG2 Q8_0, profile lambo-eg2-v1, dim 768) ==");
+    println!("== design 7.3 ranking parity (EG2 Q8_0, profile lambo-eg2-v2, dim 768) ==");
     println!("text->image relevant    {}", stats(&t2i_rel));
     println!("text->image irrelevant  {}", stats(&t2i_irr));
     println!("text->text  relevant    {}", stats(&t2t_rel));
@@ -473,4 +473,163 @@ async fn live_eg2_text_only_server_refuses_images_permanently() {
         image(&off, &red).await,
         Err(EmbedError::Unsupported(_))
     ));
+}
+
+// ------------------------------------------------- 22g: size invariance
+
+/// A compressed PNG (the hand-built ones above are stored, too big for the
+/// 2 MiB cap at 3000 px).
+fn png_compressed(side: u32, pixel: impl Fn(u32, u32) -> [u8; 3]) -> Vec<u8> {
+    use image::{codecs::png::CompressionType, codecs::png::FilterType, ImageEncoder};
+    let img = image::RgbImage::from_fn(side, side, |x, y| image::Rgb(pixel(x, y)));
+    let mut out = Vec::new();
+    image::codecs::png::PngEncoder::new_with_quality(
+        &mut out,
+        CompressionType::Best,
+        FilterType::Adaptive,
+    )
+    .write_image(img.as_raw(), side, side, image::ColorType::Rgb8.into())
+    .unwrap();
+    out
+}
+
+/// One picture at any size: 8x8 cells whatever the side, so a render at
+/// 3000 px is the 768 px one scaled up (not more, smaller cells).
+fn checker_cells(side: u32) -> Vec<u8> {
+    let cell = side / 8;
+    png_compressed(side, |x, y| {
+        if (x / cell + y / cell).is_multiple_of(2) {
+            [0, 160, 0]
+        } else {
+            [255, 255, 255]
+        }
+    })
+}
+
+/// A smooth picture: two gradients and a soft disc, closer to a photo than
+/// the checkerboard's hard edges.
+fn gradient(side: u32) -> Vec<u8> {
+    let s = side as f32;
+    png_compressed(side, |x, y| {
+        let (u, v) = (x as f32 / s, y as f32 / s);
+        let d = ((u - 0.5).powi(2) + (v - 0.4).powi(2)).sqrt();
+        let disc = (1.0 - (d * 4.0).min(1.0)) * 200.0;
+        [(u * 255.0) as u8, (v * 255.0) as u8, disc as u8]
+    })
+}
+
+/// The submitted bytes posted straight to the server, as `lambo-eg2-v1` did
+/// (no canonical form), for the "before" column.
+async fn raw_image(url: &str, png: &[u8]) -> Vec<f32> {
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(png);
+    let body = serde_json::json!({
+        "input": [{ "content": [{
+            "type": "image_url",
+            "image_url": { "url": format!("data:image/png;base64,{b64}") }
+        }]}]
+    });
+    let resp: serde_json::Value = reqwest::Client::new()
+        .post(format!("{}/v1/embeddings", url.trim_end_matches('/')))
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    resp["data"][0]["embedding"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_f64().unwrap() as f32)
+        .collect()
+}
+
+/// 22g: with the `lambo-eg2-v2` canonical form, a picture's vector does not
+/// depend on the size it was submitted at. Prints, per picture and size, the
+/// cosine to the native 768 px render, before (the submitted bytes as they
+/// are, `lambo-eg2-v1`) and after (through the adapter). Asserts that above
+/// 768 px every pair of renders agrees to >= 0.999. The cosine to the native
+/// 768 px render is printed, not asserted: a downscaled hard edge is not the
+/// crisp edge drawn at 768 px. Renders at or under 768 px are sent unchanged
+/// and are only printed: the server's own resampling makes a patterned
+/// picture's small renders differ, which no downscale can change.
+#[tokio::test]
+#[ignore = "needs a live llama-server with EmbeddingGemma 2 (LAMBO_EG2_URL)"]
+async fn live_eg2_size_invariance() {
+    let Some(url) = env_url("LAMBO_EG2_URL") else {
+        eprintln!("live_eg2: LAMBO_EG2_URL not set; skipping");
+        return;
+    };
+    let e = EmbeddingGemma2Embedder::new(&url, EG2_DEFAULT_MODEL, 768).unwrap();
+    println!("contract model: {}", e.model_identity());
+    let sizes = [256u32, 512, 768, 1024, 1536, 2048, 3000];
+    type Gen = fn(u32) -> Vec<u8>;
+    let pictures: [(&str, Gen); 3] = [
+        ("solid", |s| png_compressed(s, |_, _| [200, 40, 40])),
+        ("checker 8x8", checker_cells),
+        ("gradient", gradient),
+    ];
+    println!("== 22g size invariance: cosine to the native 768 px render ==");
+    println!("picture      | px   | bytes   | before (v1 raw) | after (v2)  | after == 768 bits");
+    for (name, make) in pictures {
+        let base_png = make(768);
+        let base = image(&e, &base_png).await.unwrap();
+        let base_raw = raw_image(&url, &base_png).await;
+        let mut above = Vec::new();
+        for side in sizes {
+            let png = make(side);
+            let after = image(&e, &png).await.unwrap();
+            assert_unit(&after, 768, name);
+            let before = raw_image(&url, &png).await;
+            let cos_after = cosine(&after, &base);
+            let cos_before = cosine(&before, &base_raw);
+            println!(
+                "{name:<12} | {side:>4} | {:>7} | {cos_before:.6}        | {cos_after:.6}    | {}",
+                png.len(),
+                after == base
+            );
+            // At or under 768 px the bytes go as they are and the server
+            // resamples them to its grid itself, so a patterned picture's
+            // renders differ there (measured on b11517: checkerboard 256 px
+            // 0.985 to the 768 px one); only the sizes above are asserted.
+            if side > 768 {
+                above.push((side, after));
+            }
+        }
+        let mut worst = 1.0f32;
+        for (i, (a_side, a)) in above.iter().enumerate() {
+            for (b_side, b) in &above[i + 1..] {
+                let c = cosine(a, b);
+                println!("{name:<12} | {a_side} vs {b_side}: {c:.6}");
+                worst = worst.min(c);
+            }
+        }
+        println!("{name:<12} | worst pair above 768 px: {worst:.6}");
+        assert!(worst >= 0.999, "{name}: {worst}");
+    }
+
+    // A WebP is converted to PNG: the same pixels as a PNG embed to the
+    // same vector, whatever ffmpeg the server has or lacks.
+    let side = 512;
+    let img = image::RgbImage::from_fn(side, side, |x, y| image::Rgb([x as u8, y as u8, 90]));
+    let mut webp = Vec::new();
+    {
+        use image::ImageEncoder;
+        image::codecs::webp::WebPEncoder::new_lossless(&mut webp)
+            .write_image(img.as_raw(), side, side, image::ColorType::Rgb8.into())
+            .unwrap();
+    }
+    let png = png_compressed(side, |x, y| [x as u8, y as u8, 90]);
+    let wv = e
+        .embed_image(validate(&webp, "image/webp").unwrap())
+        .await
+        .unwrap();
+    let pv = image(&e, &png).await.unwrap();
+    println!(
+        "cos(webp 512, png 512, same pixels) = {:.6}",
+        cosine(&wv, &pv)
+    );
+    assert!(cosine(&wv, &pv) > 0.9999);
 }

@@ -1,0 +1,80 @@
+# 22g: EG2 image size invariance, profile lambo-eg2-v2 (measured 2026-10-10)
+#
+# llama.cpp b11517 release binary (macOS arm64, Metal), EG2 Q8_0 + mmproj Q8_0, started as
+# docs/reference/config.mdx shows (--image-min-tokens 280 --image-max-tokens 280
+# --ctx-size 8192 --batch-size 8192 --ubatch-size 8192) on a private port:
+#   LAMBO_EG2_URL=http://127.0.0.1:<port> \
+#     cargo test --release --features embed-eg2 --test live_eg2 live_eg2_size_invariance \
+#     -- --ignored --nocapture
+#
+# Each picture is drawn natively at every size (checker: 8x8 cells whatever the side).
+# "before" posts the submitted PNG as it is (lambo-eg2-v1); "after" goes through the
+# adapter (canonical form: longer side > 768 px downscaled to 768 with Lanczos3,
+# lossless PNG). Cosine is to the picture drawn natively at 768 px.
+#
+== 22g size invariance: cosine to the native 768 px render ==
+picture      | px   | bytes   | before (v1 raw) | after (v2)  | after == 768 bits
+solid        |  256 |     571 | 1.000000        | 1.000000    | true
+solid        |  512 |    1879 | 1.000000        | 1.000000    | true
+solid        |  768 |    3447 | 1.000000        | 1.000000    | true
+solid        | 1024 |    5335 | 0.999015        | 1.000000    | true
+solid        | 1536 |   10425 | 0.999015        | 1.000000    | true
+solid        | 2048 |   16868 | 0.999015        | 1.000000    | true
+solid        | 3000 |   33237 | 0.999015        | 1.000000    | true
+solid        | 1024 vs 1536: 1.000000
+solid        | 1024 vs 2048: 1.000000
+solid        | 1024 vs 3000: 1.000000
+solid        | 1536 vs 2048: 1.000000
+solid        | 1536 vs 3000: 1.000000
+solid        | 2048 vs 3000: 1.000000
+solid        | worst pair above 768 px: 1.000000
+checker 8x8  |  256 |     652 | 0.984773        | 0.984773    | false
+checker 8x8  |  512 |    1997 | 0.989916        | 0.989916    | false
+checker 8x8  |  768 |    3592 | 1.000000        | 1.000000    | true
+checker 8x8  | 1024 |    5480 | 0.979712        | 0.999703    | false
+checker 8x8  | 1536 |   10674 | 0.980984        | 0.999333    | false
+checker 8x8  | 2048 |   17218 | 0.981247        | 0.999199    | false
+checker 8x8  | 3000 |   33763 | 0.981447        | 0.999112    | false
+checker 8x8  | 1024 vs 1536: 0.999877
+checker 8x8  | 1024 vs 2048: 0.999818
+checker 8x8  | 1024 vs 3000: 0.999775
+checker 8x8  | 1536 vs 2048: 0.999988
+checker 8x8  | 1536 vs 3000: 0.999969
+checker 8x8  | 2048 vs 3000: 0.999995
+checker 8x8  | worst pair above 768 px: 0.999775
+gradient     |  256 |    3734 | 0.999789        | 0.999790    | false
+gradient     |  512 |   11436 | 0.999747        | 0.999747    | false
+gradient     |  768 |   18606 | 1.000000        | 1.000000    | true
+gradient     | 1024 |   33400 | 0.997825        | 0.999754    | false
+gradient     | 1536 |   61498 | 0.997963        | 0.999760    | false
+gradient     | 2048 |   95431 | 0.997892        | 0.999687    | false
+gradient     | 3000 |  169097 | 0.997977        | 0.999737    | false
+gradient     | 1024 vs 1536: 0.999604
+gradient     | 1024 vs 2048: 0.999847
+gradient     | 1024 vs 3000: 0.999720
+gradient     | 1536 vs 2048: 0.999565
+gradient     | 1536 vs 3000: 0.999598
+gradient     | 2048 vs 3000: 0.999748
+gradient     | worst pair above 768 px: 0.999565
+cos(webp 512, png 512, same pixels) = 1.000000
+
+# Reading it
+# - solid: bit-identical vector at every size after canonicalization (before: 0.999015
+#   above 768 px, the 17x17 vs 16x16 patch grid).
+# - checker / gradient above 768 px: every pair of renders agrees to >= 0.99978 / >= 0.99957,
+#   and each is >= 0.99911 / >= 0.99969 from the native 768 px drawing. Not bit-identical:
+#   a downscaled hard edge is not the crisp edge drawn at 768 px.
+# - at or under 768 px the bytes are sent unchanged (vectors as v1 gave them); the server
+#   resamples each to 816x816 itself, so a patterned picture's small renders differ
+#   (checker 256 px 0.9848). No client downscale can change that.
+#
+# Filter choice: the same run with Catmull-Rom (llama.cpp's own a = -0.5 cubic) gave
+#   checker vs 768: 0.999705 0.999033 0.998760 0.998612 (1024..3000), worst pair 0.999434
+#   gradient vs 768: 0.999749 0.999684 0.999718 0.999735, worst pair 0.999636
+# Lanczos3 is better on the hard edges and within 0.0001 on the smooth picture: chosen.
+#
+# WebP: b11517 decodes WebP only by running ffmpeg/ffprobe from its PATH
+# (mtmd-helper.cpp decode_webp_with_ffmpeg). With ffmpeg on PATH a lossless WebP embeds
+# exactly as the same PNG; with PATH=/usr/bin:/bin the server answers
+#   500 {"message":"Failed to load image or audio file"}  (log: probe: failed to launch ffprobe)
+# so lambo-eg2-v2 always sends a WebP as a lossless PNG (cos above: webp vs png = 1.000000).
