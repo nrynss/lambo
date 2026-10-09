@@ -537,3 +537,45 @@ fn a_vp8x_without_a_readable_image_chunk_is_refused() {
         );
     }
 }
+
+#[test]
+fn image_chunks_must_be_well_formed_key_frames_inside_the_riff() {
+    let unreadable = |name: &str, bytes: Vec<u8>| {
+        let msg = refusal(&bytes, "image/webp");
+        assert!(
+            msg.ends_with("header is truncated or unreadable"),
+            "{name}: {msg}"
+        );
+    };
+    let shrink_size = |mut c: Vec<u8>, size: u32| {
+        c[4..8].copy_from_slice(&size.to_le_bytes());
+        c
+    };
+    // A declared chunk size shorter than the header read from it.
+    unreadable(
+        "short VP8 chunk",
+        riff_chunks(&[shrink_size(chunk(b"VP8 ", &vp8_payload(8, 8)), 9)]),
+    );
+    unreadable(
+        "short VP8L chunk",
+        riff_chunks(&[shrink_size(chunk(b"VP8L", &vp8l_payload(8, 8)), 4)]),
+    );
+    unreadable(
+        "short VP8X image chunk",
+        riff_chunks(&[
+            vp8x_chunk(0, 8, 8),
+            shrink_size(chunk(b"VP8L", &vp8l_payload(8, 8)), 4),
+        ]),
+    );
+    // A lossy inter frame, and a lossless stream of a later version.
+    let mut inter = vp8_payload(8, 8);
+    inter[0] |= 1;
+    unreadable("VP8 inter frame", riff(b"VP8 ", &inter));
+    let mut v1 = vp8l_payload(8, 8);
+    v1[4] |= 0x20;
+    unreadable("VP8L version 1", riff(b"VP8L", &v1));
+    // An image chunk after the RIFF end is not part of the file.
+    let mut past_end = riff_chunks(&[vp8x_chunk(0, 8, 8)]);
+    past_end.extend_from_slice(&chunk(b"VP8L", &vp8l_payload(8, 8)));
+    unreadable("image chunk past the RIFF end", past_end);
+}

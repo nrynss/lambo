@@ -213,8 +213,9 @@ fn jpeg_dimensions(b: &[u8]) -> Option<(u32, u32)> {
 fn webp_dimensions(b: &[u8]) -> Result<(u32, u32), HeaderFault> {
     let first = b.get(12..16).ok_or(HeaderFault::Unreadable)?;
     match first {
-        b"VP8 " => vp8_sides(b, WEBP_FIRST_PAYLOAD).ok_or(HeaderFault::Unreadable),
-        b"VP8L" => vp8l_sides(b, WEBP_FIRST_PAYLOAD).ok_or(HeaderFault::Unreadable),
+        b"VP8 " | b"VP8L" => le_u32(b, 16)
+            .and_then(|size| image_chunk_sides(b, first, WEBP_FIRST_PAYLOAD, size))
+            .ok_or(HeaderFault::Unreadable),
         b"VP8X" => vp8x_dimensions(b),
         _ => Err(HeaderFault::Unreadable),
     }
@@ -224,10 +225,28 @@ fn webp_dimensions(b: &[u8]) -> Result<(u32, u32), HeaderFault> {
 /// `WEBP`, the chunk's fourcc and its size.
 const WEBP_FIRST_PAYLOAD: usize = 20;
 
-/// Lossy `VP8 ` payload at `p`: a 3-byte frame tag, the 9D 01 2A start code,
-/// then 14-bit little-endian width and height (the top two bits are scale).
+/// The sides a `VP8 ` or `VP8L` chunk declares, given its payload offset
+/// and declared size. A chunk whose declared size does not cover the header
+/// read here is unreadable, whatever bytes follow it.
+fn image_chunk_sides(b: &[u8], fourcc: &[u8], payload: usize, size: u32) -> Option<(u32, u32)> {
+    let size = usize::try_from(size).ok()?;
+    match fourcc {
+        b"VP8 " if size >= VP8_HEADER => vp8_sides(b, payload),
+        b"VP8L" if size >= VP8L_HEADER => vp8l_sides(b, payload),
+        _ => None,
+    }
+}
+
+/// Bytes of a `VP8 ` payload `vp8_sides` reads: frame tag, start code, sides.
+const VP8_HEADER: usize = 10;
+/// Bytes of a `VP8L` payload `vp8l_sides` reads: signature and packed sides.
+const VP8L_HEADER: usize = 5;
+
+/// Lossy `VP8 ` payload at `p`: a 3-byte frame tag whose low bit is 0 for a
+/// key frame (a WebP image is one key frame), the 9D 01 2A start code, then
+/// 14-bit little-endian width and height (the top two bits are scale).
 fn vp8_sides(b: &[u8], p: usize) -> Option<(u32, u32)> {
-    if b.get(p + 3..p + 6)? != [0x9D, 0x01, 0x2A] {
+    if *b.get(p)? & 1 != 0 || b.get(p.checked_add(3)?..p.checked_add(6)?)? != [0x9D, 0x01, 0x2A] {
         return None;
     }
     let sides = le_u32(b, p + 6)?;
@@ -235,12 +254,16 @@ fn vp8_sides(b: &[u8], p: usize) -> Option<(u32, u32)> {
 }
 
 /// Lossless `VP8L` payload at `p`: the 0x2F signature, then width-1 and
-/// height-1 as two 14-bit fields packed little-endian.
+/// height-1 as two 14-bit fields packed little-endian, an alpha hint bit and
+/// a 3-bit version that must be 0.
 fn vp8l_sides(b: &[u8], p: usize) -> Option<(u32, u32)> {
     if *b.get(p)? != 0x2F {
         return None;
     }
-    let bits = le_u32(b, p + 1)?;
+    let bits = le_u32(b, p.checked_add(1)?)?;
+    if bits >> 29 != 0 {
+        return None;
+    }
     Some(((bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1))
 }
 
@@ -267,26 +290,39 @@ fn vp8x_dimensions(b: &[u8]) -> Result<(u32, u32), HeaderFault> {
 
 /// The sides the first `VP8 `/`VP8L` chunk after the `VP8X` chunk declares.
 /// Walks the RIFF chunks (fourcc, little-endian size, payload padded to an
-/// even length), bounded by the bytes supplied: a chunk that runs past the
-/// end, or no image chunk at all, is unreadable. An `ANMF` frame before any
+/// even length), bounded by the RIFF size and by the bytes supplied: a chunk
+/// that starts past either end, or no image chunk at all, is unreadable (a
+/// decoder ignores bytes after the RIFF end). An `ANMF` frame before any
 /// image chunk is an animation whatever the flags said.
 fn vp8x_image_sides(b: &[u8]) -> Result<(u32, u32), HeaderFault> {
-    let mut at = 12; // the VP8X chunk itself
+    let riff_end = le_u32(b, 4)
+        .and_then(|n| usize::try_from(n).ok())
+        .and_then(|n| n.checked_add(8))
+        .ok_or(HeaderFault::Unreadable)?;
+    let end = riff_end.min(b.len());
+    let mut at: usize = 12; // the VP8X chunk itself
     loop {
-        let fourcc = b.get(at..at + 4).ok_or(HeaderFault::Unreadable)?;
+        // `at` is below `end` <= b.len() <= isize::MAX, so `at + 8` cannot
+        // overflow on any target.
+        if at.checked_add(8).is_none_or(|header_end| header_end > end) {
+            return Err(HeaderFault::Unreadable);
+        }
+        let fourcc = &b[at..at + 4];
         let size = le_u32(b, at + 4).ok_or(HeaderFault::Unreadable)?;
         let payload = at + 8;
         if at != 12 {
             match fourcc {
-                b"VP8 " => return vp8_sides(b, payload).ok_or(HeaderFault::Unreadable),
-                b"VP8L" => return vp8l_sides(b, payload).ok_or(HeaderFault::Unreadable),
+                b"VP8 " | b"VP8L" => {
+                    return image_chunk_sides(b, fourcc, payload, size)
+                        .ok_or(HeaderFault::Unreadable);
+                }
                 b"ANMF" => return Err(HeaderFault::Animated),
                 _ => {}
             }
         }
         // Every step advances by at least 8 bytes, and `size` is at most
-        // u32::MAX, so neither the sum nor the loop can run away; the next
-        // `get` fails once `at` passes the end.
+        // u32::MAX, so neither the sum nor the loop can run away; the bound
+        // check above fails once `at` passes the end.
         let padded = usize::try_from(size)
             .ok()
             .and_then(|n| n.checked_add(n & 1))
