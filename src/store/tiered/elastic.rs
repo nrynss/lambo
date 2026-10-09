@@ -7,7 +7,10 @@
 //!   created on first use with an explicit mapping: `embedding` is a
 //!   `dense_vector` of the contract's width with cosine similarity (HNSW),
 //!   `session_id` a keyword filter, `v` the document's external version.
-//! * `{prefix}-meta` — one sync marker document per session (`_id` = session).
+//! * `{prefix}-meta` — one sync marker document per session. Its `_id` is
+//!   the hex SHA-256 of the session id ([`marker_id`]), never the raw id: the
+//!   URL layer drops `.` and `..` path segments and the engine refuses an
+//!   `_id` over 512 bytes. The session id is stored in the document.
 //!
 //! Secrets: the API key comes from the environment variable `[recall]
 //! api_key = { env = ... }` names, is sent only in the `Authorization`
@@ -111,6 +114,13 @@ impl ElasticRecall {
             meta_ready: AtomicBool::new(false),
             indices_ready: Mutex::new(HashSet::new()),
         })
+    }
+
+    /// `{meta}/_doc/{marker id}`.
+    fn marker_url(&self, session: &SessionId, query: &[(&str, &str)]) -> Result<Url, StoreError> {
+        let meta = self.meta_index();
+        let id = marker_id(session);
+        self.url(&[&meta, "_doc", &id], query)
     }
 
     fn meta_index(&self) -> String {
@@ -296,6 +306,15 @@ impl ElasticRecall {
     }
 }
 
+/// The marker document's `_id` for `session`: hex SHA-256 of the session id.
+pub(crate) fn marker_id(session: &SessionId) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(session.0.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
 /// The stored vector from a hit's `_source`, when the engine returned one
 /// (a cluster that excludes vectors from `_source` returns none).
 fn stored_vector(v: &Value) -> Option<Vec<f32>> {
@@ -325,7 +344,10 @@ impl RecallIndex for ElasticRecall {
             json!({
                 "mappings": {
                     "dynamic": "strict",
-                    "properties": { "synced_epoch": { "type": "long" } }
+                    "properties": {
+                        "synced_epoch": { "type": "long" },
+                        "session_id": { "type": "keyword" }
+                    }
                 }
             }),
         )
@@ -545,8 +567,7 @@ impl RecallIndex for ElasticRecall {
     }
 
     async fn read_marker(&self, session: &SessionId) -> Result<Option<SyncMarker>, StoreError> {
-        let meta = self.meta_index();
-        let url = self.url(&[&meta, "_doc", &session.0], &[])?;
+        let url = self.marker_url(session, &[])?;
         let (status, resp) = self.send("read marker", Method::GET, url, None).await?;
         if status == StatusCode::NOT_FOUND {
             return Ok(None);
@@ -569,15 +590,15 @@ impl RecallIndex for ElasticRecall {
         version: Option<u64>,
     ) -> Result<(), StoreError> {
         self.provision().await?;
-        let meta = self.meta_index();
         let version_text = version.map(|v| v.to_string());
         let mut query = vec![("refresh", self.refresh)];
         if let Some(v) = &version_text {
             query.push(("version", v.as_str()));
             query.push(("version_type", "external"));
         }
-        let url = self.url(&[&meta, "_doc", &session.0], &query)?;
-        let body = serde_json::to_value(marker).map_err(|e| backend("encode marker", e))?;
+        let url = self.marker_url(session, &query)?;
+        let mut body = serde_json::to_value(marker).map_err(|e| backend("encode marker", e))?;
+        body["session_id"] = json!(session.0);
         let (status, resp) = self
             .send("write marker", Method::PUT, url, Some(Body::Json(body)))
             .await?;
@@ -589,8 +610,7 @@ impl RecallIndex for ElasticRecall {
     }
 
     async fn delete_marker(&self, session: &SessionId) -> Result<(), StoreError> {
-        let meta = self.meta_index();
-        let url = self.url(&[&meta, "_doc", &session.0], &[("refresh", "true")])?;
+        let url = self.marker_url(session, &[("refresh", "true")])?;
         let (status, resp) = self
             .send("delete marker", Method::DELETE, url, None)
             .await?;
@@ -670,7 +690,10 @@ mod tests {
         let mock = server
             .mock_async(|when, then| {
                 when.method(GET)
-                    .path("/lambo-meta/_doc/s")
+                    .path(format!(
+                        "/lambo-meta/_doc/{}",
+                        marker_id(&SessionId::new("s"))
+                    ))
                     .header("authorization", "ApiKey fake");
                 then.status(404).json_body(json!({ "found": false }));
             })
@@ -857,8 +880,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn markers_are_versioned_and_session_ids_are_path_encoded() {
+    async fn markers_are_versioned_and_keyed_by_the_hashed_session_id() {
         let server = MockServer::start_async().await;
+        let path = format!("/lambo-meta/_doc/{}", marker_id(&SessionId::new("a/b c")));
         let index = ElasticRecall::new(&cfg(&server.base_url())).unwrap();
         let create = server
             .mock_async(|when, then| {
@@ -870,10 +894,10 @@ mod tests {
         let put = server
             .mock_async(|when, then| {
                 when.method(PUT)
-                    .path("/lambo-meta/_doc/a%2Fb%20c")
+                    .path(&path)
                     .query_param("version", "9")
                     .query_param("version_type", "external")
-                    .json_body(json!({ "synced_epoch": 3 }));
+                    .json_body(json!({ "synced_epoch": 3, "session_id": "a/b c" }));
                 then.status(409)
                     .json_body(json!({ "error": { "type": "version_conflict_engine_exception" } }));
             })
@@ -892,7 +916,7 @@ mod tests {
 
         let get = server
             .mock_async(|when, then| {
-                when.method(GET).path("/lambo-meta/_doc/a%2Fb%20c");
+                when.method(GET).path(&path);
                 then.status(200)
                     .json_body(json!({ "found": true, "_source": { "synced_epoch": 3 } }));
             })
@@ -902,6 +926,58 @@ mod tests {
             Some(SyncMarker { synced_epoch: 3 })
         );
         get.assert_async().await;
+    }
+
+    /// L1: the marker's `_id` is the SHA-256 of the session id, so a session
+    /// id the URL layer would rewrite (`.` and `..` are dropped as path
+    /// segments) or one past the engine's 512-byte `_id` limit still has a
+    /// marker of its own. The session id rides in the body.
+    #[tokio::test]
+    async fn the_marker_id_is_the_hashed_session_id() {
+        use sha2::{Digest, Sha256};
+        let server = MockServer::start_async().await;
+        let index = ElasticRecall::new(&cfg(&server.base_url())).unwrap();
+        server
+            .mock_async(|when, then| {
+                when.method(PUT).path("/lambo-meta");
+                then.status(200).json_body(json!({ "acknowledged": true }));
+            })
+            .await;
+        let long = "x".repeat(600);
+        for raw in ["..", ".", long.as_str()] {
+            let hex: String = Sha256::digest(raw.as_bytes())
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            let put = server
+                .mock_async(|when, then| {
+                    when.method(PUT)
+                        .path(format!("/lambo-meta/_doc/{hex}"))
+                        .json_body(json!({ "synced_epoch": 4, "session_id": raw }));
+                    then.status(201).json_body(json!({ "result": "created" }));
+                })
+                .await;
+            let get = server
+                .mock_async(|when, then| {
+                    when.method(GET).path(format!("/lambo-meta/_doc/{hex}"));
+                    then.status(200).json_body(json!({
+                        "found": true,
+                        "_source": { "synced_epoch": 4, "session_id": raw }
+                    }));
+                })
+                .await;
+            let sid = SessionId::new(raw);
+            index
+                .write_marker(&sid, SyncMarker { synced_epoch: 4 }, Some(1))
+                .await
+                .unwrap();
+            assert_eq!(
+                index.read_marker(&sid).await.unwrap(),
+                Some(SyncMarker { synced_epoch: 4 })
+            );
+            put.assert_async().await;
+            get.assert_async().await;
+        }
     }
 
     #[tokio::test]
@@ -1008,7 +1084,10 @@ mod tests {
             .await;
         server
             .mock_async(|when, then| {
-                when.method(GET).path("/lambo-meta/_doc/s");
+                when.method(GET).path(format!(
+                    "/lambo-meta/_doc/{}",
+                    marker_id(&SessionId::new("s"))
+                ));
                 then.status(404)
                     .delay(Duration::from_millis(400))
                     .json_body(json!({ "found": false }));
