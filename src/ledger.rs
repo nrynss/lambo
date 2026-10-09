@@ -1347,11 +1347,6 @@ mod tests {
         assert_eq!(ledger.counters().dropped_write_failed(), 1);
     }
 
-    /// The stamp is spliced into the serialized bytes (no clone of the line),
-    /// so pin the edges: an empty object, and a session id that needs JSON
-    /// escaping (`--session` keeps its loose rule). Every other key survives.
-    ///
-    /// Mutation: always write the comma, or skip escaping → red.
     /// #32 PR 4 review L5: each session's counters count only the lines
     /// appended through handles scoped to it; the file's counters count
     /// every line. Handles scoped to one session share its counters, and a
@@ -1387,6 +1382,11 @@ mod tests {
         assert_eq!(ledger.counters().dropped_write_failed(), 1);
     }
 
+    /// The stamp is spliced into the serialized bytes (no clone of the line),
+    /// so pin the edges: an empty object, and a session id that needs JSON
+    /// escaping (`--session` keeps its loose rule). Every other key survives.
+    ///
+    /// Mutation: always write the comma, or skip escaping → red.
     #[test]
     fn the_spliced_stamp_is_valid_json_at_the_edges() {
         let dir = temp_dir("session-splice");
