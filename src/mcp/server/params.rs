@@ -268,10 +268,11 @@ pub struct StatsParams {
 // `image.data`, `image_id` and `caption` publish their own `maxLength` (the
 // base64 form of the 2 MiB byte cap, 64, and `surface::image::
 // MAX_CAPTION_BYTES`: the uniform 16384 less the shortest suffix), not the
-// uniform 16384; the maxima test lists all three as named exceptions. `vector.values`' `maxItems` and
-// `contract.dim`'s maximum are `surface::image::MAX_VECTOR_VALUES`; schemars
-// takes literals, so `the_image_tool_schema_publishes_the_runtime_caps` pins
-// them to the constants.
+// uniform 16384; the maxima test lists all three as named exceptions.
+// `vector.values`' `maxItems` and `contract.dim`'s maximum are
+// `surface::image::MAX_VECTOR_VALUES`; schemars takes literals, so
+// `the_image_tool_schema_publishes_the_runtime_caps` pins them to the
+// constants.
 // ===========================================================================
 
 /// What kind of thing the image is. One of `entity`, `logic`, `constraint`,
@@ -297,7 +298,7 @@ impl From<WireImageConceptType> for ConceptType {
 }
 
 /// One image, inline.
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WireImage {
     /// The image's media type, which must match its bytes: `image/png`,
@@ -311,7 +312,7 @@ pub struct WireImage {
 }
 
 /// An embedding space: copy it from `lambo_stats`' `embedding_contract`.
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WireEmbeddingContract {
     /// Embedder kind, e.g. `embeddinggemma2`.
@@ -327,7 +328,7 @@ pub struct WireEmbeddingContract {
 }
 
 /// A vector you computed for the image, in this session's embedding space.
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WireVector {
     /// The components, `dim` of them. Lambo normalizes the vector to unit
@@ -339,7 +340,7 @@ pub struct WireVector {
     pub contract: WireEmbeddingContract,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DeriveImageParams {
     /// Id of the agent making this call. Caller-asserted and unverified: work
@@ -378,6 +379,55 @@ pub struct DeriveImageParams {
     /// be created) as concepts; name the image concept by its content,
     /// `caption [image:<image_id>]`.
     pub parent_of: Option<Vec<WireParentOf>>,
+}
+
+// Redacting `Debug` for the image tool's params (review L4): the base64,
+// the vector, the caption and the client's `mime`, `image_id` and contract
+// strings are
+// user data, so a future `?p` in a log line shows their sizes only, as PR
+// 3's `ImagePayload` does. Not wire copy (no `///`): a `Debug` impl is not
+// in the schema either way.
+impl std::fmt::Debug for WireImage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WireImage")
+            .field("mime_len", &self.mime.len())
+            .field("data_len", &self.data.len())
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for WireEmbeddingContract {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WireEmbeddingContract")
+            .field("kind_len", &self.kind.len())
+            .field("model_len", &self.model.as_ref().map(String::len))
+            .field("dim", &self.dim)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for WireVector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WireVector")
+            .field("len", &self.values.len())
+            .field("contract", &self.contract)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for DeriveImageParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeriveImageParams")
+            .field("agent_id", &self.agent_id)
+            .field("caption_len", &self.caption.len())
+            .field("concept_type", &self.concept_type)
+            .field("image_id_len", &self.image_id.as_ref().map(String::len))
+            .field("image", &self.image)
+            .field("vector", &self.vector)
+            .field("event_time", &self.event_time)
+            .field("parent_of", &self.parent_of.as_ref().map(Vec::len))
+            .finish()
+    }
 }
 
 /// Door-side cap on a caller-asserted `agent_id`, in characters (J1, operator

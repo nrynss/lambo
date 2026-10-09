@@ -467,3 +467,28 @@ async fn the_ledger_carries_no_image_payload() {
     ledger.shutdown();
     s.mem.close().await.expect("close");
 }
+
+/// Review L4: the params' `Debug` shows sizes, never the base64, the
+/// caption, the client's strings or a vector component.
+#[test]
+fn the_params_debug_redacts_the_payload() {
+    use crate::mcp::server::params::DeriveImageParams;
+    let data = png_b64("red silk saree");
+    let v = fixture_vector("red silk saree");
+    for args in [
+        image_args("SECRET-CAPTION", "secretid", "red silk saree"),
+        json!({"agent_id": "agent-a", "caption": "SECRET-CAPTION", "concept_type": "entity",
+               "vector": {"values": v, "contract": {"kind": "fixture", "dim": 1024,
+                                                    "model": "SECRET-MODEL"}}}),
+    ] {
+        let p: DeriveImageParams = serde_json::from_value(args).unwrap();
+        let shown = format!("{p:?}");
+        assert!(shown.contains("caption_len: 14"), "{shown}");
+        for secret in ["SECRET-CAPTION", "secretid", "SECRET-MODEL", &data[..24]] {
+            assert!(!shown.contains(secret), "{secret}: {shown}");
+        }
+        for x in v.iter().take(8) {
+            assert!(!shown.contains(&format!("{x}")), "{x}: {shown}");
+        }
+    }
+}
