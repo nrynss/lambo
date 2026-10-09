@@ -663,10 +663,19 @@ impl Memory {
         // may never make durable. `succeeded` stays false; a retried close hits
         // this same branch (the handles are already reaped) and errors again.
         if self.lease_lost() {
+            // Aborted AND joined (#32 PR 7): `abort()` returns before the
+            // task has stopped, and only the join proves it (R3-1). An erase
+            // run by this process right after this close (design §6.3) must
+            // find none of this handle's tasks still able to reach the store
+            // or the recall index: a flush past its store commit would
+            // otherwise mirror into the index after the erase swept it. The
+            // custody guard hands a handle back to its slot if this future
+            // is dropped mid-join, so a retried close finds it again.
             for slot in [&self.canon_handle, &self.daemon_handle, &self.flush_handle] {
-                if let Some(handle) = slot.lock().take() {
-                    handle.abort();
-                }
+                let mut task = HandleCustody::take(slot);
+                task.abort();
+                let _ = task.join().await;
+                drop(task);
             }
             let undrained = self.graph.read().log_len();
             tracing::error!(
