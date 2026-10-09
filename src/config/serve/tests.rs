@@ -476,6 +476,50 @@ fn a_missing_or_empty_token_variable_fails_closed() {
     }
 }
 
+/// #32 PR 5 review L3: a token no request could present (surrounding
+/// whitespace, a byte outside printable ASCII) is refused at resolve, naming
+/// the credential and its variable but never the value. A space inside a
+/// token is presentable and accepted.
+#[test]
+fn a_token_no_request_could_present_is_refused_unquoted() {
+    let f = parse(&full_toml()).expect("parse");
+    let core = ["fake", "agents", "l3"].join("-");
+    for (bad, why) in [
+        (format!("{core} "), "whitespace"),
+        (format!("{core}\n"), "whitespace"),
+        (format!(" {core}"), "whitespace"),
+        (format!("{core}\u{e9}"), "printable ASCII"),
+        (format!("{core}\tx"), "printable ASCII"),
+    ] {
+        let err = f
+            .serve
+            .resolve_credentials_with(|name| {
+                Some(OsString::from(if name == AGENTS_ENV {
+                    bad.clone()
+                } else {
+                    format!("{name}-value")
+                }))
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("\"agents\"") && err.contains(AGENTS_ENV) && err.contains(why),
+            "{bad:?}: {err}"
+        );
+        assert!(!err.contains(&core), "the value leaked: {err}");
+    }
+    let spaced = format!("{core} inner");
+    f.serve
+        .resolve_credentials_with(|name| {
+            Some(OsString::from(if name == AGENTS_ENV {
+                spaced.clone()
+            } else {
+                format!("{name}-value")
+            }))
+        })
+        .expect("a space inside a token is presentable");
+}
+
 /// A populated `[serve]` round-trips through TOML; an empty one is not
 /// written at all, so a serialized file without it stays readable by a
 /// binary that predates `[serve]`.
@@ -641,9 +685,10 @@ fn token_env_must_be_a_conventional_variable_name() {
 }
 
 /// #32 PR 4: over HTTP `sessions`, `default_session` and `max_attached` are
-/// enforced, and PR 8: over stdio `default_session` and `[[serve.projects]]`
-/// are, so a table with only those raises no notice; every key still parsed
-/// but not enforced is named, each its own entry (never its value).
+/// enforced (and `[[serve.credential]]` since PR 5), and PR 8: over stdio
+/// `default_session` and `[[serve.projects]]` are, so a table with only
+/// those raises no notice; every key still parsed but not enforced is
+/// named, each its own entry (never its value).
 #[test]
 fn only_unenforced_keys_raise_the_notice() {
     let enforced =
@@ -658,10 +703,11 @@ fn only_unenforced_keys_raise_the_notice() {
          [[serve.credential]]\nname = \"agents\"\ntoken_env = \"LAMBO_T32_KEYS\"\nsessions = [\"a\"]\n",
     )
     .expect("parse");
+    // `[[serve.credential]]` is enforced since #32 PR 5 (HTTP; stdio
+    // authenticates nobody), so it is never listed.
     assert_eq!(
         rest.serve.unenforced_keys(false),
         vec![
-            "[[serve.credential]]",
             "[[serve.projects]]",
             "attach_concurrency",
             "idle_detach_secs",
@@ -672,11 +718,16 @@ fn only_unenforced_keys_raise_the_notice() {
     // named.
     assert_eq!(
         rest.serve.unenforced_keys(true),
-        vec![
-            "[[serve.credential]]",
-            "attach_concurrency",
-            "idle_detach_secs",
-            "per_session_rps",
-        ]
+        vec!["attach_concurrency", "idle_detach_secs", "per_session_rps"]
     );
+    let credential_only = parse(
+        "[[serve.credential]]\nname = \"agents\"\ntoken_env = \"LAMBO_T32_KEYS\"\nsessions = [\"a\"]\n",
+    )
+    .expect("parse");
+    for stdio in [false, true] {
+        assert!(
+            credential_only.serve.unenforced_keys(stdio).is_empty(),
+            "stdio={stdio}"
+        );
+    }
 }

@@ -58,7 +58,7 @@ use serde::{Deserialize, Serialize};
 
 use super::bge_m3::{
     check_bearer_transport, default_status_rule, BgeM3LlamaCppEmbedder, EmbedStatusClass,
-    StatusVerdict,
+    StatusVerdict, LLAMA_UNREACHABLE,
 };
 use super::{api_key, EmbedError, Embedder, EmbedderConfig, ImageInput, Modalities};
 
@@ -130,9 +130,11 @@ const PROPS_TIMEOUT: Duration = Duration::from_secs(5);
 /// quantization keeps answering embeds at width 768, so only a fresh `/props`
 /// shows the change; this bounds how long vectors can be stamped under the
 /// old contract after such a restart that Lambo did not see fail. One GET of
-/// about 6 KiB a minute is negligible next to the embeds it guards. A failed
-/// embed request (the server unreachable or unwilling) drops the kept answer
-/// at once, since that is what a restart looks like from here.
+/// about 6 KiB a minute is negligible next to the embeds it guards. An embed
+/// request that gets no HTTP answer (refused, reset), or llama-server's 503
+/// "Loading model", drops the kept answer at once, since that is what a
+/// restart looks like from here; a 503 "busy" or another transient status
+/// from a server that answered does not (see [`restart_seen`]).
 pub const EG2_PROPS_RECHECK_INTERVAL: Duration = Duration::from_secs(60);
 
 /// The first wait after a `/props` check that could not run (unreachable, a
@@ -273,6 +275,24 @@ pub(crate) fn image_status_rule(code: u16, body: &str) -> StatusVerdict {
     default_status_rule(code, body)
 }
 
+/// The rule for Lambo's own reference image ([`REFERENCE_IMAGE_PNG`]): as
+/// [`image_status_rule`], except that a server that cannot decode the fixed
+/// 1x1 PNG is a server or configuration fault (`PermanentConfig`), never a
+/// fact about the user's image (review L2).
+fn reference_status_rule(code: u16, body: &str) -> StatusVerdict {
+    if code == 500 && body.contains("Failed to load image") {
+        return StatusVerdict {
+            class: EmbedStatusClass::PermanentConfig,
+            hint: Some(REFERENCE_DECODE_HINT),
+        };
+    }
+    image_status_rule(code, body)
+}
+
+const REFERENCE_DECODE_HINT: &str = " (the server could not decode Lambo's fixed 1x1 reference \
+     PNG, so its image decoder or --mmproj is broken; this is not about the image being \
+     embedded)";
+
 /// llama.cpp's quantization names (`llama_ftype_name`, which `/props`
 /// reports as `model_ftype`; the table as of b11517), each with the token
 /// GGUF file names and Hugging Face repos use for it, which is what a
@@ -356,6 +376,27 @@ fn configured_quant(model: &str) -> Option<&'static str> {
         .map(|(_, canonical)| *canonical)
 }
 
+/// The longest server-supplied string (a file name, a `model_ftype`) put
+/// into a message or log.
+const SERVER_TEXT_MAX_CHARS: usize = 128;
+
+/// A server-supplied string made safe for a message or log line (review
+/// L3): at most [`SERVER_TEXT_MAX_CHARS`] characters, each printable ASCII;
+/// anything else (control characters, newlines, non-ASCII) becomes `?`, so
+/// a hostile `/props` cannot forge log lines or flood a message.
+fn server_text(s: &str) -> String {
+    s.chars()
+        .take(SERVER_TEXT_MAX_CHARS)
+        .map(|c| {
+            if c.is_ascii_graphic() || c == ' ' {
+                c
+            } else {
+                '?'
+            }
+        })
+        .collect()
+}
+
 /// Judge what `/props` reported against the configured artifact. Pure, so the
 /// rules are unit-tested without a server.
 fn judge_props(
@@ -367,8 +408,8 @@ fn judge_props(
 ) -> Eg2ServerCheck {
     let file = model_path.rsplit(['/', '\\']).next().unwrap_or(model_path);
     // A file name is shown, never the directory (it may name a user), and
-    // only its first 128 characters.
-    let shown: String = file.chars().take(128).collect();
+    // only bounded and sanitized (review L3).
+    let shown = server_text(file);
     let folded: String = file
         .chars()
         .filter(char::is_ascii_alphanumeric)
@@ -392,6 +433,7 @@ fn judge_props(
         && let Some(have_canonical) = reported_quant(have)
         && want != have_canonical
     {
+        let have = server_text(have);
         return Eg2ServerCheck::Mismatch(format!(
             "the llama-server at {log_url} has loaded `{shown}` quantized as {have}, but \
              [embedder] model {configured_model:?} names {want}; vectors from another \
@@ -682,9 +724,8 @@ impl EmbeddingGemma2Embedder {
     }
 
     /// Drop the kept `/props` answer so the next embed asks again. Called
-    /// when an embed request fails as unavailable: a refused connection or a
-    /// loading server is what a restart looks like, and a restarted server
-    /// may hold another model.
+    /// when an embed request fails in a way [`restart_seen`] reads as a
+    /// restart, since a restarted server may hold another model.
     fn forget_kept(&self) {
         let mut state = self.state();
         state.kept = None;
@@ -704,7 +745,21 @@ impl EmbeddingGemma2Embedder {
             return Ok(());
         }
         let body = image_request(&self.model, "image/png", REFERENCE_IMAGE_PNG);
-        let parsed = self.post(&body, image_status_rule).await?;
+        // A refusal of the reference image is a server or configuration
+        // problem, whatever class it has: say so rather than let it read as
+        // a fault in the user's image. A transient failure stays transient.
+        let parsed = self
+            .post(&body, reference_status_rule)
+            .await
+            .map_err(|err| match err {
+                EmbedError::Backend(m) => EmbedError::Backend(format!(
+                    "Lambo's reference image check (a fixed 1x1 PNG embedded before images, to \
+                     check the image budget) failed at the llama-server at {}, a server or \
+                     configuration problem, not a fault in the image being embedded: {m}",
+                    self.http.log_base_url()
+                )),
+                other => other,
+            })?;
         let want = EG2_REFERENCE_IMAGE_TOKENS - REFERENCE_TOKENS_TOLERANCE
             ..=EG2_REFERENCE_IMAGE_TOKENS + REFERENCE_TOKENS_TOLERANCE;
         match parsed.usage.and_then(|u| u.prompt_tokens) {
@@ -905,15 +960,18 @@ impl EmbeddingGemma2Embedder {
         }
     }
 
-    /// POST to the embeddings endpoint; an unavailable answer drops the kept
-    /// `/props` answer ([`Self::forget_kept`]).
+    /// POST to the embeddings endpoint; a failure that looks like a restart
+    /// ([`restart_seen`]) drops the kept `/props` answer
+    /// ([`Self::forget_kept`]).
     async fn post<B: Serialize>(
         &self,
         body: &B,
         rule: super::bge_m3::StatusRule,
     ) -> Result<EmbedResponse, EmbedError> {
         let result = self.http.post_json(body, &self.model, rule).await;
-        if let Err(EmbedError::Unavailable(_)) = &result {
+        if let Err(err) = &result
+            && restart_seen(err)
+        {
             self.forget_kept();
         }
         result
@@ -933,6 +991,19 @@ impl EmbeddingGemma2Embedder {
         let parsed = self.post(&body, default_status_rule).await?;
         truncate_and_normalize(first_embedding(parsed.data)?, self.dim)
     }
+}
+
+/// Whether a failed embed request looks like a llama-server restart, which
+/// drops the kept `/props` answer and image budget check: no HTTP answer at
+/// all (refused, reset), or llama-server's 503 "Loading model" (a server
+/// that just started). A 503 "busy" or another transient status comes from a
+/// server that is still the one checked, and dropping the checks there would
+/// add a `/props` GET and a reference image embed to every retried image on
+/// an already loaded server; the [`EG2_PROPS_RECHECK_INTERVAL`] expiry still
+/// bounds how long such a server is trusted.
+fn restart_seen(err: &EmbedError) -> bool {
+    matches!(err, EmbedError::Unavailable(msg)
+        if msg.starts_with(LLAMA_UNREACHABLE) || msg.contains("Loading model"))
 }
 
 /// One input item whose content is the image alone, as a base64 data URI.

@@ -736,6 +736,128 @@ async fn an_unavailable_embed_forces_a_recheck() {
     post.assert_hits(0);
 }
 
+/// A server whose decoder refuses Lambo's 1x1 reference PNG is reported as a
+/// server or configuration problem naming the reference check, never as a
+/// decode failure of the user's image, which is not sent (review L2).
+///
+/// Mutation: post the reference with `image_status_rule` and no wrapping ->
+/// red (the message blames "this image").
+#[tokio::test]
+async fn a_refused_reference_image_is_a_server_problem() {
+    for (status, body) in [
+        (500, "Failed to load image or audio file"),
+        (400, "bad request"),
+    ] {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(GET).path("/props");
+            then.status(200)
+                .json_body(props("embeddinggemma-2-Q8_0.gguf", "Q8_0", true));
+        });
+        let reference = server.mock(|when, then| {
+            when.method(POST)
+                .path("/v1/embeddings")
+                .body(image_body(&png_1x1()));
+            then.status(status).body(body);
+        });
+        let png = png_2x1();
+        let image = server.mock(|when, then| {
+            when.method(POST)
+                .path("/v1/embeddings")
+                .body(image_body(&png));
+            then.status(200).json_body(ok_body(&native(), Some(260)));
+        });
+        let e = embedder(&server);
+        let input = crate::surface::image::validate(&png, "image/png").unwrap();
+        let err = e.embed_image(input).await.unwrap_err();
+        assert!(matches!(err, EmbedError::Backend(_)), "{status}: {err:?}");
+        let msg = err.to_string();
+        assert!(msg.contains("reference image check"), "{msg}");
+        assert!(
+            msg.contains("not a fault in the image being embedded"),
+            "{msg}"
+        );
+        assert!(!msg.contains("could not decode this image"), "{msg}");
+        reference.assert_hits(1);
+        image.assert_hits(0);
+    }
+}
+
+/// A 503 "busy" from the verified server is transient but keeps the checks:
+/// the retried image costs no extra `/props` GET and no extra reference
+/// image embed (review L1). Only a request that got no HTTP answer, or
+/// llama-server's 503 "Loading model", reads as a restart.
+///
+/// Mutation: call `forget_kept` for every `Unavailable` again -> red.
+#[tokio::test]
+async fn a_busy_server_keeps_its_checks_and_only_a_restart_drops_them() {
+    let server = MockServer::start();
+    let props_mock = server.mock(|when, then| {
+        when.method(GET).path("/props");
+        then.status(200)
+            .json_body(props("embeddinggemma-2-Q8_0.gguf", "Q8_0", true));
+    });
+    let reference = server.mock(|when, then| {
+        when.method(POST)
+            .path("/v1/embeddings")
+            .body(image_body(&png_1x1()));
+        then.status(200).json_body(ok_body(&native(), Some(293)));
+    });
+    let png = png_2x1();
+    let mut image = server.mock(|when, then| {
+        when.method(POST)
+            .path("/v1/embeddings")
+            .body(image_body(&png));
+        then.status(200).json_body(ok_body(&native(), Some(260)));
+    });
+    let e = embedder(&server);
+    let input = || crate::surface::image::validate(&png, "image/png").unwrap();
+    e.embed_image(input()).await.unwrap();
+    image.delete();
+    let mut busy = server.mock(|when, then| {
+        when.method(POST)
+            .path("/v1/embeddings")
+            .body(image_body(&png));
+        then.status(503).body(
+            r#"{"error":{"code":503,"message":"Server is busy","type":"unavailable_error"}}"#,
+        );
+    });
+    let err = e.embed_image(input()).await.unwrap_err();
+    assert!(err.is_transient(), "{err:?}");
+    assert!(!restart_seen(&err), "{err}");
+    busy.delete();
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/v1/embeddings")
+            .body(image_body(&png));
+        then.status(200).json_body(ok_body(&native(), Some(260)));
+    });
+    e.embed_image(input()).await.unwrap();
+    props_mock.assert_hits(1);
+    reference.assert_hits(1);
+
+    // A connection that gets no HTTP answer (the server is gone) and the
+    // loading 503 both read as a restart.
+    // (httpmock pools its servers, so a dropped MockServer still answers;
+    // take a free port and close it instead.)
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let dead = EmbeddingGemma2Embedder::new(format!("http://127.0.0.1:{port}"), MODEL, 768)
+        .unwrap()
+        .without_server_check();
+    let err = dead.embed("a").await.unwrap_err();
+    assert!(err.is_transient(), "{err:?}");
+    assert!(restart_seen(&err), "{err}");
+    assert!(restart_seen(&EmbedError::Unavailable(
+        "llama.cpp is momentarily unwilling (503 Service Unavailable) for model \"m\": \
+         {\"error\":{\"code\":503,\"message\":\"Loading model\"}}"
+            .into()
+    )));
+}
+
 /// Once a server has been verified, a re-check that cannot run holds embeds
 /// back as transient (the write stays durable), and a server that no longer
 /// reports its model is refused: either can be another server on the URL.
@@ -907,6 +1029,42 @@ fn the_props_judge_reads_the_file_name_and_quantization() {
         panic!("not EG2");
     };
     assert!(msg.len() < 900, "{}", msg.len());
+}
+
+/// A hostile `/props` (control characters, newlines, escapes, an endless
+/// `model_ftype`) cannot forge log lines or flood a message: the file name
+/// and the reported quantization are each cut to 128 characters of
+/// printable ASCII (review L3).
+///
+/// Mutation: interpolate the raw `have` or file name again -> red.
+#[test]
+fn hostile_props_strings_are_bounded_and_sanitized() {
+    let file = format!(
+        "/m/embeddinggemma-2\n2026-10-10T00:00:00Z ERROR forged\r\x1b[31m{}.gguf",
+        "y".repeat(400)
+    );
+    let ftype = format!("(guessed){}Q4_0\r\n", "\n".repeat(5000));
+    let Eg2ServerCheck::Mismatch(msg) = judge_props(MODEL, "u", &file, Some(&ftype), None) else {
+        panic!("a Q4_0 server under a Q8_0 artifact must be refused");
+    };
+    assert!(
+        msg.chars().all(|c| c.is_ascii_graphic() || c == ' '),
+        "{msg:?}"
+    );
+    assert!(
+        msg.contains("embeddinggemma-2?2026-10-10T00:00:00Z ERROR forged??"),
+        "{msg}"
+    );
+    assert!(!msg.contains(&"y".repeat(129)), "{}", msg.len());
+    assert!(msg.len() < 1200, "{}", msg.len());
+    // The not-EG2 message bounds the name the same way.
+    let other = format!("/m/bge\n{}.gguf", "z".repeat(400));
+    let Eg2ServerCheck::Mismatch(msg) = judge_props(MODEL, "u", &other, None, None) else {
+        panic!("not EG2");
+    };
+    assert!(msg.contains("bge?zzz"), "{msg}");
+    assert!(!msg.contains('\n'), "{msg:?}");
+    assert!(!msg.contains(&"z".repeat(129)), "{}", msg.len());
 }
 
 /// llama.cpp reports `model_ftype` in its own names (`Q4_K - Medium`, `all
