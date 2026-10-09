@@ -115,9 +115,11 @@
 
 - `lambo_derive`, `lambo_record_action`'s `action`, `lambo derive`
   (`--content`, `--concept`) and `lambo record-action --action` refuse text
-  containing `[image:`, raw or in any spelling that canonicalizes to it
-  (#22 PR 4). Only `lambo_derive_image` builds that suffix; a text concept
-  holding it could take an image's identity before the image is derived.
+  holding a token that reads exactly `[image:<id>]` (a valid image id) once
+  canonicalized, the way the concept key reads it (#22 PR 4). Prose that only
+  mentions `[image:` is accepted. Only `lambo_derive_image` builds that
+  suffix; a text concept holding it could take an image's identity before the
+  image is derived.
   References (`parent_of` ends; `produces`, `modifies`, `depends_on`) still
   accept it, since naming an image concept's content is how a text write
   links to it.
