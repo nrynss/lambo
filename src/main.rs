@@ -43,14 +43,19 @@ enum Commands {
         #[arg(long, default_value_t = 7700)]
         port: u16,
         /// Bind address when transport=http. Loopback by default. Binding
-        /// anywhere else REQUIRES --auth-token (or LAMBO_AUTH_TOKEN): this
+        /// anywhere else REQUIRES a credential, --auth-token (or
+        /// LAMBO_AUTH_TOKEN) or a [[serve.credential]] in lambo.toml: this
         /// process is a session *writer* and serve refuses to start otherwise.
         #[arg(long, default_value = "127.0.0.1")]
         bind: std::net::IpAddr,
-        /// Bearer token required on every HTTP request. Prefer the
-        /// LAMBO_AUTH_TOKEN env var, which overrides this flag — a token in
-        /// argv is visible in `ps` and shell history. Optional on loopback,
-        /// mandatory on any other bind. Ignored by --transport stdio.
+        /// Bearer token for the HTTP transport: the credential named
+        /// `default`, which reaches every pinned session, beside any
+        /// [[serve.credential]] in lambo.toml. Prefer the LAMBO_AUTH_TOKEN
+        /// env var, which overrides this flag — a token in argv is visible
+        /// in `ps` and shell history. Once any credential exists every
+        /// request must present one. Optional on loopback; a non-loopback
+        /// bind needs this or a [[serve.credential]]. Ignored by
+        /// --transport stdio.
         #[arg(long, value_name = "TOKEN", value_parser = SecretTokenParser)]
         auth_token: Option<lambo::mcp::SecretToken>,
         /// Maximum concurrently live MCP sessions on the HTTP transport;
