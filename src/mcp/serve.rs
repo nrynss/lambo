@@ -85,6 +85,7 @@ use crate::resolve::ResolvedBackends;
 use crate::types::LamboError;
 use crate::writeq::EmbedderCalibration;
 
+mod admin;
 mod authority;
 mod builder;
 mod heartbeat;
@@ -719,6 +720,11 @@ async fn serve_pinned_with(
         match registry.acquire(id).await {
             Ok(Acquired::Attached(mem, endpoint)) => acquired.push((mem, endpoint)),
             Ok(Acquired::Held(held)) => registry.mark_held(id, &held).await,
+            // #32 PR 7: an erased pinned session is served as erased (the
+            // tombstone, read back on the lease row, refuses every attach);
+            // the other sessions start. Decided on typed data, never the
+            // error's message.
+            Err(_) if registry.is_tombstoned(id).await => registry.mark_erased_at_start(id),
             Err(e) => {
                 // Fail closed, but release what this start already took:
                 // a refused start must not hold leases until they lapse.

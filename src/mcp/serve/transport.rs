@@ -281,7 +281,8 @@ pub(super) async fn serve_http(
     serve_http_bounded(listener, app, shutdown, SHUTDOWN_GRACE).await
 }
 
-/// The serve's whole HTTP app: [`session_router`] behind the guards, every
+/// The serve's whole HTTP app: [`session_router`] and the operator surface
+/// (`super::admin`, #32 PR 7) behind the guards, every
 /// guard on `.layer` (so an unrouted path passes through them too and a
 /// refused session stays indistinguishable from it). `serve_http` serves
 /// exactly this; the tests serve it too, so they exercise the same
@@ -291,7 +292,8 @@ pub(super) fn http_app(
     authority: Arc<ServeAuthority>,
     guard: HttpGuard,
 ) -> axum::Router {
-    session_router(registry, authority)
+    session_router(Arc::clone(&registry), Arc::clone(&authority))
+        .merge(super::admin::admin_router(registry, authority))
         .layer(axum::middleware::from_fn_with_state(guard, guard_request))
 }
 
@@ -419,6 +421,17 @@ async fn serve_session(
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
             "this session could not be attached on this server: an operator must act (see the \
              serve log)\n",
+        )
+            .into_response(),
+        // Erased, or being erased, by this process (#32 PR 7): the erased
+        // refusal, which only a caller inside the session's scope reaches
+        // (design §6.2). An HTTP status rather than an MCP error, like the
+        // 503s beside it: the request may carry no JSON-RPC id to answer,
+        // and no MCP session of an erased session survives. A call already
+        // inside the session when it was fenced gets the #23 erased error.
+        Lookup::Erased => (
+            axum::http::StatusCode::GONE,
+            "this session was erased: it is never served or recreated again\n",
         )
             .into_response(),
         // In scope but absent. Pinned sessions only until #32 PR 6, so even

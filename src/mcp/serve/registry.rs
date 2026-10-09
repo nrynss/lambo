@@ -20,7 +20,12 @@
 //! | [`Slot::Detaching`] | 503, `Retry-After: 1` | the detach ends |
 //! | [`Slot::HeldElsewhere`] | 503, `Retry-After` until the next retry | the background retry wins the lease |
 //! | [`Slot::Failed`] | 503, no `Retry-After` | never: an operator restarts the serve |
+//! | [`Slot::Erasing`] | 410 (in scope) | the erase ends: `Erased`, or back to the state it had |
+//! | [`Slot::Erased`] | 410 (in scope) | never: the store's tombstone refuses every attach |
 //! | absent | the uniform 404 (`surface::session`) | never, in PR 4: only pinned sessions are hosted |
+//!
+//! The erase itself (#32 PR 7, design §6.3) is [`SessionRegistry::erase`],
+//! in the `erase` child module.
 //!
 //! # What runs where
 //!
@@ -34,6 +39,11 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
+
+mod erase;
+mod views;
+
+pub(super) use erase::EraseAnswer;
 
 use super::builder::explain_startup_failure;
 use super::hub::{derive_endpoint, SessionEndpoint};
@@ -111,8 +121,17 @@ enum Slot {
     /// A background attach failed with an error that will not clear on its
     /// own (an erased session, an embedding-contract mismatch, an
     /// unprovisioned store): logged once at ERROR and no longer retried
-    /// (#32 review L1). PR 7's `Erased` slot takes over the erased case.
+    /// (#32 review L1). An erased session gets [`Slot::Erased`] instead
+    /// (#32 PR 7).
     Failed,
+    /// Being erased by this process (#32 PR 7, design §6.3): requests get
+    /// the erased refusal, and no attach or retry starts for it.
+    Erasing,
+    /// Erased: the store holds the #23 tombstone, which refuses every
+    /// acquire, so nothing in this process attaches it again. Requests get
+    /// the erased refusal without a store call (a negative cache, kept for
+    /// hosted sessions only, so its size is bounded by the hosted set).
+    Erased,
 }
 
 /// A detached session's old `Memory`, held weakly.
@@ -135,6 +154,7 @@ pub(super) enum ForcedState {
     Detaching,
     HeldElsewhere,
     Failed,
+    Erased,
 }
 
 /// What the router gets for a session id.
@@ -146,6 +166,9 @@ pub(super) enum Lookup {
     /// Hosted, but its attach failed for good: answer 503 with no
     /// `Retry-After`, since retrying will not help until an operator acts.
     Failed,
+    /// Erased, or being erased, by this process (#32 PR 7): the erased
+    /// refusal (HTTP 410). Reached only inside the caller's scope.
+    Erased,
     /// Not a session this serve hosts: the uniform 404.
     NotHosted,
 }
@@ -210,8 +233,14 @@ pub(super) struct SessionRegistry {
     early: EarlyShutdown,
     /// The pinned retry loop.
     retry: parking_lot::Mutex<Option<tokio::task::JoinHandle<()>>>,
-    /// Detaches in flight, joined by the process shutdown.
+    /// Detaches in flight, joined by the process shutdown. An in-serve
+    /// erase (#32 PR 7) runs here too, so the shutdown waits for it.
     detaches: parking_lot::Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    /// The store every session shares (one `GraphStore`, Level B), taken
+    /// from the first session admitted: what an erase of a session that is
+    /// not attached runs against when no template builder is at hand (a
+    /// one-session registry, #32 PR 7).
+    store: std::sync::OnceLock<Arc<dyn crate::store::GraphStore>>,
 }
 
 impl SessionRegistry {
@@ -236,6 +265,7 @@ impl SessionRegistry {
             early,
             retry: parking_lot::Mutex::new(None),
             detaches: parking_lot::Mutex::new(Vec::new()),
+            store: std::sync::OnceLock::new(),
         })
     }
 
@@ -275,6 +305,7 @@ impl SessionRegistry {
                     .max(Duration::from_secs(1)),
             },
             Some(Slot::Failed) => Lookup::Failed,
+            Some(Slot::Erasing | Slot::Erased) => Lookup::Erased,
             // Hosted but in no slot: a session between states (a detach
             // clearing its slot). Not a 404, which would say "not hosted".
             None if self.order.iter().any(|hosted| hosted == id) => Lookup::Unavailable {
@@ -298,6 +329,7 @@ impl SessionRegistry {
                 warned: false,
             },
             ForcedState::Failed => Slot::Failed,
+            ForcedState::Erased => Slot::Erased,
         };
         self.slots.lock().insert(id.to_string(), slot);
     }
@@ -321,6 +353,9 @@ impl SessionRegistry {
     /// watcher starts finds the session live and detaches it.
     pub(super) fn insert_live(self: &Arc<Self>, session: Arc<AttachedSession>) {
         let id = session.id().to_string();
+        // Every session shares the one store; the first one in leaves it
+        // for an erase of a session that is not attached (#32 PR 7).
+        let _ = self.store.set(Arc::clone(session.mem.store()));
         self.slots
             .lock()
             .insert(id, Slot::Live(Arc::clone(&session)));
@@ -494,6 +529,11 @@ impl SessionRegistry {
     /// [`Slot::Failed`] (#32 review L1).
     async fn retry(self: &Arc<Self>, id: &str) {
         let _attaching = self.attach_lock.lock().await;
+        // Only a session still held elsewhere is retried: an erase (#32 PR
+        // 7) may have taken the slot while this waited for the lock.
+        if !matches!(self.slots.lock().get(id), Some(Slot::HeldElsewhere { .. })) {
+            return;
+        }
         if self.is_closing() || self.awaiting_previous(id) {
             return;
         }
@@ -563,6 +603,19 @@ impl SessionRegistry {
                     error = %e,
                     "lambo serve: a background attach stopped for the shutdown"
                 );
+                return;
+            }
+            // Erased (decided on the lease row, never the message): the
+            // tombstone refuses every acquire, so the slot is `Erased`, not
+            // `Failed` (#32 PR 4 note for PR 7).
+            Err(e) if self.is_tombstoned(id).await => {
+                tracing::warn!(
+                    session = %id,
+                    error = %e,
+                    "lambo serve: a pinned session was erased; it is not retried and requests \
+                     for it get the erased refusal"
+                );
+                self.slots.lock().insert(id.to_string(), Slot::Erased);
                 return;
             }
             Err(e) => {
