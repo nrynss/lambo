@@ -91,7 +91,7 @@ The in-crate candle embedder (`kind = "candle"`) runs BGE-M3 locally with no lla
 
 | Flag | Required | Default |
 |---|---|---|
-| `--session <SESSION>` | Yes, unless `[serve] sessions` names them (HTTP) | Repeatable with `--transport http`: every value is pinned and served at `/mcp/s/<session>`, and the first is the default, served at `/mcp`. A stdio serve takes exactly one. |
+| `--session <SESSION>` | Yes | |
 | `--query <QUERY>` | Yes | |
 | `--top-k <TOP_K>` | No | The session's `default_top_k`, which is `5`. |
 | `--max-tokens <MAX_TOKENS>` | No | The session's `default_max_tokens`, which is `500`. |
