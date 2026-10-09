@@ -59,6 +59,12 @@ const _: () = assert!(
 
 /// The worst `flush_lag` measured on this rig, in seconds (§Measurements).
 ///
+/// Measured under the **old** definition of `flush_lag`, the time since the
+/// last successful flush, which counted idle time (#16 §3 changed it to the
+/// time since the store was last caught up). Under the new definition the
+/// same rig reads at most this, so the relation it guards below stays
+/// conservative; it is not a figure to compare a new reading with.
+///
 /// A constant rather than a sentence for the same reason
 /// [`MEASURED_LOCAL_EMBEDDER_RPS`](super::MEASURED_LOCAL_EMBEDDER_RPS) is one: it lets the relation below be a
 /// build invariant.

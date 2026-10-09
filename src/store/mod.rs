@@ -109,10 +109,12 @@ pub const MAX_VECTOR_CANDIDATE_LIMIT: usize = 2048;
 /// by the writer's `FlushTask`; readers must never write.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SessionFlushStats {
-    /// Milliseconds since the store was last caught up with the writer (a
-    /// successful flush, or a poll that found nothing pending) — the
-    /// observable durability-lag bound. Near zero while nothing is pending
-    /// (#16 §3; see `crate::store::flush::FlushStats::lag`).
+    /// Milliseconds since the store was last caught up with the writer (the
+    /// drain a successful flush covered, or a poll that found nothing
+    /// pending) — the observable durability-lag bound. Near zero while nothing
+    /// is pending (#16 §3; see `crate::store::flush::FlushStats::lag`). As of
+    /// the writer's last publish: after every flush attempt, and between
+    /// attempts once the live figure has drifted, at most every 5 s.
     pub flush_lag_ms: u64,
     /// Mutations not yet durable (in-graph log + pending batch) at publish time.
     pub log_depth: u64,

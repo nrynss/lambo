@@ -160,6 +160,22 @@ pub struct FlushStats {
     /// the store held everything, which is the age bound of what a crash
     /// would lose. A degraded session (`durability = "none"`) never counts as
     /// caught up, since it drops what it drains.
+    ///
+    /// Mutations that are **dropped** rather than flushed are reported by
+    /// `dead_lettered` and `degraded`, not by the lag (#11 review P3-3):
+    ///
+    /// * a dead-lettered batch is cleared from `pending`, so the next poll
+    ///   that finds nothing else pending counts the store caught up and the
+    ///   lag falls to under one poll although that batch never landed (it
+    ///   used to keep growing until the next success);
+    /// * a fenced or erased handle stops its loop, so nothing marks it caught
+    ///   up again and the lag grows for as long as the handle lives, with
+    ///   `depth` 0 because the stop cleared `pending`;
+    /// * a degraded session's lag grows for good (above).
+    ///
+    /// The lag also grows by up to one poll while read accesses (#30) wait to
+    /// be flushed, since they are pending too; it exceeds the flush interval
+    /// only when the store is not taking writes.
     pub lag: Duration,
     /// Mutations not yet durable: in-graph log + pending batch (in flight,
     /// backed off, or retained after exhausted retries).
@@ -290,9 +306,11 @@ impl FlushTask {
     /// graph/store/shared arcs, so the caller keeps this `FlushTask` as its
     /// stats handle — `spawn(self)` would consume the only path to
     /// [`FlushTask::stats`]. `caught_up` is initialized here (not at
-    /// construction), so `stats().lag` is 0 until the first successful flush
-    /// after spawn even if the task was built long before it was spawned. The
-    /// first flush happens one `interval` after spawn.
+    /// construction), so `stats().lag` counts from spawn even if the task was
+    /// built long before it was spawned: it reads 0 at spawn and grows until
+    /// the first poll that finds nothing pending (one `POLL_QUANTUM`) or the
+    /// first successful flush. The first flush happens one `interval` after
+    /// spawn.
     pub fn spawn(&self) -> tokio::task::JoinHandle<()> {
         // Single-loop enforcement: check-and-set the shared `started` flag so a
         // second `spawn` panics before it can start another loop. The flag
