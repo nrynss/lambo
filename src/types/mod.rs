@@ -481,15 +481,38 @@ impl EmbeddingSource {
     /// `concept` names the row in the error, which also names the way out
     /// (upgrade, or `lambo erase-session`; #22 review L4).
     pub fn from_column(raw: &str, concept: impl fmt::Display) -> Result<Self, StoreError> {
-        serde_json::from_str(raw).map_err(|e| {
+        let source: Self = serde_json::from_str(raw).map_err(|e| {
             StoreError::Invariant(format!(
                 "concept {concept}: concepts.embedding_source does not decode ({e}). \
                  A newer Lambo build probably wrote it: upgrade to that build or later \
                  to load this session, or discard the session with \
                  `lambo erase-session`, which does not need to load it"
             ))
-        })
+        })?;
+        // Review I1: the digest is held to its documented form on the way in,
+        // so nothing downstream sees a sha256 that is not one.
+        if let Some(digest) = &source.sha256
+            && !is_lowercase_sha256_hex(digest)
+        {
+            return Err(StoreError::Invariant(format!(
+                "concept {concept}: concepts.embedding_source has a malformed sha256 \
+                 (expected 64 lowercase hex characters, got {} bytes). Lambo never writes \
+                 a malformed one, so the row was changed outside Lambo: repair it, or \
+                 discard the session with `lambo erase-session`",
+                digest.len()
+            )));
+        }
+        Ok(source)
     }
+}
+
+/// 64 lowercase hex characters: the only form [`EmbeddingSource::sha256`]
+/// takes.
+fn is_lowercase_sha256_hex(digest: &str) -> bool {
+    digest.len() == 64
+        && digest
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// Either kind of graph node.
@@ -1853,6 +1876,37 @@ mod tests {
             // Review L4: the refusal says how to get the session back.
             assert!(err.to_string().contains("upgrade"), "{err}");
             assert!(err.to_string().contains("lambo erase-session"), "{err}");
+        }
+    }
+
+    /// Review I1: the stored digest is decoded as strictly as the rest of the
+    /// value. Anything but 64 lowercase hex characters is refused like an
+    /// unreadable value; a well-formed one loads.
+    #[test]
+    fn embedding_source_refuses_a_malformed_sha256() {
+        let raw = |digest: &str| {
+            format!(r#"{{"modality":"image","origin":"server","sha256":"{digest}"}}"#)
+        };
+        let good = "0123456789abcdef".repeat(4);
+        assert_eq!(
+            EmbeddingSource::from_column(&raw(&good), "c4")
+                .unwrap()
+                .sha256
+                .as_deref(),
+            Some(good.as_str())
+        );
+        for digest in [
+            String::new(),
+            "ab".repeat(31),
+            "ab".repeat(33),
+            "AB".repeat(32),
+            "zz".repeat(32),
+            format!("{}é", "a".repeat(62)),
+        ] {
+            let err = EmbeddingSource::from_column(&raw(&digest), "c4").expect_err(&digest);
+            assert!(matches!(err, StoreError::Invariant(_)), "{digest}: {err:?}");
+            assert!(err.to_string().contains("concept c4"), "{err}");
+            assert!(err.to_string().contains("sha256"), "{err}");
         }
     }
 
