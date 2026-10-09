@@ -599,6 +599,29 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
 /// registered once the pinned acquires are done, before any session part is
 /// built.
 async fn serve_pinned(opts: ServeOptions, backends: ResolvedBackends) -> Result<(), LamboError> {
+    serve_pinned_with(opts, backends, PinnedSeams::default()).await
+}
+
+/// What a test hands [`serve_pinned_with`] so it can drive the real
+/// multi-session serve in-process. `serve` passes the default: a fresh
+/// unarmed pre-arm and nobody to tell.
+#[derive(Default)]
+struct PinnedSeams {
+    /// The J6 pre-arm the serve uses. A test keeps a clone and records a
+    /// signal on it (`EarlyShutdown::simulate_signal`) to shut the serve
+    /// down without sending the test process a real one.
+    early: Option<EarlyShutdown>,
+    /// Sent the registry once the startup sessions are in and the retry
+    /// loop is running.
+    registry: Option<tokio::sync::oneshot::Sender<Arc<SessionRegistry>>>,
+}
+
+/// [`serve_pinned`]'s body, with its test seams (see [`PinnedSeams`]).
+async fn serve_pinned_with(
+    opts: ServeOptions,
+    backends: ResolvedBackends,
+    seams: PinnedSeams,
+) -> Result<(), LamboError> {
     // The ledger is the process's, opened pre-lease (J4); each session's
     // lines go through `ledger.for_session(id)`, and each session gets its
     // own `startup` line.
@@ -610,7 +633,7 @@ async fn serve_pinned(opts: ServeOptions, backends: ResolvedBackends) -> Result<
     }
     let keep_warm = backends.keep_warm_interval();
     let calibration = EmbedderCalibration::new();
-    let early = EarlyShutdown::unarmed();
+    let early = seams.early.unwrap_or_else(EarlyShutdown::unarmed);
     let store_cfg = backends.store_cfg.clone();
     // The template every session is cloned from: no endpoint (each session
     // derives its own), the unscoped ledger (each session scopes its own).
@@ -704,6 +727,9 @@ async fn serve_pinned(opts: ServeOptions, backends: ResolvedBackends) -> Result<
         "lambo serve: serving {} pinned sessions",
         opts.sessions.len()
     );
+    if let Some(tx) = seams.registry {
+        let _ = tx.send(Arc::clone(&registry));
+    }
 
     let transport = serve_http(registry.clone(), &opts, shutdown.as_mut());
     // `mems` drops after `_disarm`, when this returns (declared before it).
