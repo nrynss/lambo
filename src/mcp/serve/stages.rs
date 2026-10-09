@@ -43,7 +43,7 @@ pub(crate) enum Stage {
     SessionClose,
     /// 4: the event pump is aborted, after the close.
     EventPumpAbort,
-    /// 5: `HolderTasks::stop`.
+    /// 5: `ProcessTasks::stop`.
     BackgroundTasks,
     /// 6: `Hub::release`.
     EndpointRelease,

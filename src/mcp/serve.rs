@@ -78,7 +78,7 @@ pub use http_guards::{
 };
 use hub::bind_hub;
 use roles::{resolve_role, Role};
-use shutdown::{close_ledger, holder_shutdown, HolderTasks};
+use shutdown::{close_ledger, holder_shutdown, ProcessTasks};
 use signals::shutdown_signal;
 use stages::Stage;
 use transport::{serve_http, serve_stdio};
@@ -528,8 +528,8 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
         None => None,
     };
     // Stopped after the close (and the keep-warm before it); see
-    // `shutdown::HolderTasks` and the stage table in `shutdown`.
-    let tasks = HolderTasks {
+    // `shutdown::ProcessTasks` and the stage table in `shutdown`.
+    let tasks = ProcessTasks {
         heartbeat,
         keep_warm: keep_warm_task,
         refusal_poller,
