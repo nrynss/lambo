@@ -213,6 +213,9 @@ impl Embedder for ContextTolerantEmbedder {
     ) -> Result<Vec<f32>, crate::embed::EmbedError> {
         self.0.embed_image(image).await
     }
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        self.0.as_any()
+    }
 }
 
 impl ContextTolerantEmbedder {

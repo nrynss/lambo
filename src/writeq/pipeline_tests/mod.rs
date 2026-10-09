@@ -50,6 +50,9 @@ impl Embedder for HeldEmbedder {
     ) -> Result<Vec<f32>, crate::EmbedError> {
         self.inner.embed_image(image).await
     }
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        self.inner.as_any()
+    }
 }
 
 impl HeldEmbedder {
@@ -288,6 +291,9 @@ impl Embedder for SlowEmbedder {
     ) -> Result<Vec<f32>, crate::EmbedError> {
         self.inner.embed_image(image).await
     }
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        self.inner.as_any()
+    }
 }
 
 impl SlowEmbedder {
@@ -390,6 +396,9 @@ impl Embedder for LengthProportionalEmbedder {
         image: crate::embed::ImageInput<'_>,
     ) -> Result<Vec<f32>, crate::EmbedError> {
         self.inner.embed_image(image).await
+    }
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        self.inner.as_any()
     }
 }
 

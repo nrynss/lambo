@@ -249,6 +249,9 @@ impl Embedder for RecordingEmbedder {
     ) -> Result<Vec<f32>, EmbedError> {
         self.inner.embed_image(image).await
     }
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        self.inner.as_any()
+    }
 }
 
 impl RecordingEmbedder {

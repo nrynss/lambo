@@ -370,6 +370,9 @@ impl Embedder for BusyEmbedder {
     ) -> Result<Vec<f32>, crate::EmbedError> {
         self.inner.embed_image(image).await
     }
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        self.inner.as_any()
+    }
 }
 
 impl BusyEmbedder {

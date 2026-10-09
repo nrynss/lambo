@@ -16,7 +16,7 @@ adapter.
 | `surface::image::validate`, `MAX_IMAGE_BYTES`, `MAX_IMAGE_SIDE_PX` | `src/surface/image.rs`, tests in `src/surface/image/tests.rs` |
 | recall's query embed now calls `embed_query` | `src/recall/candidates.rs` (`embed_query`) |
 | query-cache docs: entries are query-role vectors only | `src/recall/query_cache.rs` |
-| `TextRole` helper; 14 delegating test embedders forward every method | `src/test_util.rs` and the test files listed in the commit |
+| `TextRole` helper; the 15 delegating test embedders (14, plus #11's `RecordingEmbedder` after the merge) forward every method | `src/test_util.rs` and the test files listed in the commit |
 
 ## Decisions
 
@@ -101,8 +101,8 @@ case-sensitive, so `image/jpg` is refused.
 behaviour in one `embed_as(text, role)` method and reaches its inner embedder
 through `test_util::TextRole`. Its `embed` and `embed_query` therefore count,
 gate and refuse the same way, while the inner adapter sees the role the caller
-asked for. `modalities` and `embed_image` forward straight to the inner
-embedder, so image calls are not counted or gated: no test sends an image yet,
+asked for. `modalities`, `embed_image` and `as_any` (review L3) forward straight to the
+inner embedder, so image calls are not counted or gated: no test sends an image yet,
 and PR 3 decides whether its image tests need that. Fakes that wrap nothing
 keep the defaults, which are correct for them.
 

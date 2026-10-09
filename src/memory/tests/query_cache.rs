@@ -81,6 +81,9 @@ impl Embedder for CountingEmbedder {
     ) -> Result<Vec<f32>, crate::embed::EmbedError> {
         self.inner.embed_image(image).await
     }
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        self.inner.as_any()
+    }
 }
 
 impl CountingEmbedder {
@@ -614,6 +617,9 @@ impl Embedder for QueryPrefixed {
         image: crate::embed::ImageInput<'_>,
     ) -> Result<Vec<f32>, crate::embed::EmbedError> {
         self.inner.embed_image(image).await
+    }
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        self.inner.as_any()
     }
 }
 
