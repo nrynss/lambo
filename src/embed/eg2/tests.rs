@@ -4,6 +4,7 @@
 use super::*;
 use crate::embed::{build_embedder, eg2_identity, EmbedderKind};
 use httpmock::prelude::*;
+use std::time::Duration;
 
 const MODEL: &str = EG2_DEFAULT_MODEL;
 
@@ -522,6 +523,149 @@ async fn an_endpoint_without_props_is_used_unchecked() {
     assert_eq!(skipped.check_server().await, Eg2ServerCheck::Skipped);
     skipped.embed("c").await.unwrap();
     props_mock.assert_hits(2);
+}
+
+/// A `llama-server` restarted on the same URL with another model or another
+/// quantization after it was verified is caught by the next re-check, before
+/// another vector is sent for it: here the interval is zero, so every embed
+/// re-checks. The default interval is [`EG2_PROPS_RECHECK_INTERVAL`].
+///
+/// Mutation: ignore the kept answer's age in `check` -> red.
+#[tokio::test]
+async fn a_server_swapped_after_verification_is_caught_at_the_recheck() {
+    assert_eq!(EG2_PROPS_RECHECK_INTERVAL, Duration::from_secs(60));
+    for (file, ftype, needle) in [
+        ("embeddinggemma-300M-Q8_0.gguf", "Q8_0", "does not name"),
+        ("embeddinggemma-2-F16.gguf", "F16", "quantized as F16"),
+    ] {
+        let server = MockServer::start();
+        let mut good = server.mock(|when, then| {
+            when.method(GET).path("/props");
+            then.status(200)
+                .json_body(props("embeddinggemma-2-Q8_0.gguf", "Q8_0", true));
+        });
+        let post = server.mock(|when, then| {
+            when.method(POST).path("/v1/embeddings");
+            then.status(200).json_body(ok_body(&native(), Some(293)));
+        });
+        let e = embedder(&server).with_props_recheck(Duration::ZERO);
+        e.embed("a").await.unwrap();
+        e.embed("b").await.unwrap();
+        good.assert_hits(2);
+        post.assert_hits(2);
+
+        good.delete();
+        server.mock(|when, then| {
+            when.method(GET).path("/props");
+            then.status(200).json_body(props(file, ftype, true));
+        });
+        let err = e.embed("c").await.unwrap_err();
+        assert!(matches!(err, EmbedError::Backend(_)), "{file}: {err:?}");
+        assert!(err.to_string().contains(needle), "{file}: {err}");
+        post.assert_hits(2);
+    }
+}
+
+/// An embed that fails as unavailable (a refused connection, a loading
+/// server: what a restart looks like) drops the kept answer, so the next
+/// embed re-checks at once instead of waiting out the interval.
+///
+/// Mutation: drop `forget_kept` from `post` -> red (the swapped server is
+/// used unchecked for up to a minute).
+#[tokio::test]
+async fn an_unavailable_embed_forces_a_recheck() {
+    let server = MockServer::start();
+    let mut good = server.mock(|when, then| {
+        when.method(GET).path("/props");
+        then.status(200)
+            .json_body(props("embeddinggemma-2-Q8_0.gguf", "Q8_0", true));
+    });
+    let mut post = server.mock(|when, then| {
+        when.method(POST).path("/v1/embeddings");
+        then.status(200).json_body(ok_body(&native(), Some(293)));
+    });
+    let e = embedder(&server);
+    e.embed("a").await.unwrap();
+    good.assert_hits(1);
+
+    // The server goes down and comes back as BGE-M3 at 768 dims... or any
+    // other model; the embed in between fails as unavailable.
+    good.delete();
+    let swapped = server.mock(|when, then| {
+        when.method(GET).path("/props");
+        then.status(200)
+            .json_body(props("bge-m3-Q8_0.gguf", "Q8_0", false));
+    });
+    post.delete();
+    let mut loading = server.mock(|when, then| {
+        when.method(POST).path("/v1/embeddings");
+        then.status(503).body("Loading model");
+    });
+    let err = e.embed("b").await.unwrap_err();
+    assert!(err.is_transient(), "{err:?}");
+    swapped.assert_hits(0);
+    loading.delete();
+    let post = server.mock(|when, then| {
+        when.method(POST).path("/v1/embeddings");
+        then.status(200).json_body(ok_body(&native(), Some(293)));
+    });
+
+    let err = e.embed("c").await.unwrap_err();
+    assert!(matches!(err, EmbedError::Backend(_)), "{err:?}");
+    assert!(err.to_string().contains("does not name"), "{err}");
+    swapped.assert_hits(1);
+    post.assert_hits(0);
+}
+
+/// Once a server has been verified, a re-check that cannot run holds embeds
+/// back as transient (the write stays durable), and a server that no longer
+/// reports its model is refused: either can be another server on the URL.
+/// When the verified server answers again, embeds resume.
+#[tokio::test]
+async fn a_verified_server_that_stops_answering_props_is_held_back() {
+    let server = MockServer::start();
+    let good_props = props("embeddinggemma-2-Q8_0.gguf", "Q8_0", true);
+    let mut good = server.mock(|when, then| {
+        when.method(GET).path("/props");
+        then.status(200).json_body(good_props.clone());
+    });
+    let post = server.mock(|when, then| {
+        when.method(POST).path("/v1/embeddings");
+        then.status(200).json_body(ok_body(&native(), Some(293)));
+    });
+    let e = embedder(&server).with_props_recheck(Duration::ZERO);
+    e.embed("a").await.unwrap();
+    good.delete();
+
+    let mut failing = server.mock(|when, then| {
+        when.method(GET).path("/props");
+        then.status(502).body("bad gateway");
+    });
+    let err = e.embed("b").await.unwrap_err();
+    assert!(matches!(err, EmbedError::Unavailable(_)), "{err:?}");
+    assert!(err.to_string().contains("re-check"), "{err}");
+    failing.delete();
+
+    let mut gone = server.mock(|when, then| {
+        when.method(GET).path("/props");
+        then.status(404).body("not found");
+    });
+    let err = e.embed("c").await.unwrap_err();
+    assert!(matches!(err, EmbedError::Backend(_)), "{err:?}");
+    assert!(
+        err.to_string()
+            .contains("verified as EmbeddingGemma 2 earlier"),
+        "{err}"
+    );
+    gone.delete();
+    post.assert_hits(1);
+
+    server.mock(|when, then| {
+        when.method(GET).path("/props");
+        then.status(200).json_body(good_props);
+    });
+    e.embed("d").await.unwrap();
+    post.assert_hits(2);
 }
 
 /// The bearer token goes on the `/props` request as well as on the embeds.

@@ -38,10 +38,16 @@
 //! `/props` that way (a hosted endpoint, Ollama) is used unchecked, and the
 //! adapter says so once in the log. The check runs lazily because resolve is
 //! synchronous; it is repeated until it passes, so fixing the server needs no
-//! restart of Lambo.
+//! restart of Lambo. A passing answer is trusted for
+//! [`EG2_PROPS_RECHECK_INTERVAL`] (60 s) and dropped at once when an embed
+//! request fails as unavailable, so a server restarted with another model or
+//! quantization is caught before more vectors are stamped under the old
+//! contract. Once a server has been verified, a re-check that cannot run
+//! holds embeds back (transient) and a server that stops reporting its model
+//! is refused.
 
-use std::sync::Mutex;
-use std::time::Duration;
+use std::sync::{Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use base64::Engine as _;
@@ -91,6 +97,16 @@ pub const EG2_DOCUMENT_PREFIX: &str = "title: none | text: ";
 pub const EG2_QUERY_PREFIX: &str = "task: search result | query: ";
 
 const PROPS_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long a kept `/props` answer is trusted before it is asked again. A
+/// `llama-server` restarted on the same port with another model or
+/// quantization keeps answering embeds at width 768, so only a fresh `/props`
+/// shows the change; this bounds how long vectors can be stamped under the
+/// old contract after such a restart that Lambo did not see fail. One GET of
+/// about 6 KiB a minute is negligible next to the embeds it guards. A failed
+/// embed request (the server unreachable or unwilling) drops the kept answer
+/// at once, since that is what a restart looks like from here.
+pub const EG2_PROPS_RECHECK_INTERVAL: Duration = Duration::from_secs(60);
 
 /// At most this much of a `/props` body is read. b11517's is about 6 KiB,
 /// most of it the chat template.
@@ -377,6 +393,19 @@ fn truncate_and_normalize(mut v: Vec<f32>, dim: usize) -> Result<Vec<f32>, Embed
     Ok(v)
 }
 
+/// What the `/props` check has learned so far.
+#[derive(Debug, Default)]
+struct CheckState {
+    /// The last answer worth keeping (`Verified` or `NotExposed`) and when it
+    /// was judged; trusted for [`EG2_PROPS_RECHECK_INTERVAL`].
+    kept: Option<(Eg2ServerCheck, Instant)>,
+    /// `/props` has verified this server at least once in this process. From
+    /// then on a fresh answer is required: a re-check that cannot run holds
+    /// embeds back (transient), and a server that stops reporting its model
+    /// is refused, because either can be a different server on the same URL.
+    verified_once: bool,
+}
+
 /// EmbeddingGemma 2 (text and image) over `llama-server`. Build it from
 /// config with [`crate::embed::build_embedder`] (`kind = "embeddinggemma2"`).
 #[derive(Debug)]
@@ -392,9 +421,10 @@ pub struct EmbeddingGemma2Embedder {
     dim: usize,
     images: bool,
     server_check: bool,
-    /// The last `/props` answer worth keeping: `Verified` or `NotExposed`.
-    /// Never held across an await.
-    kept: Mutex<Option<Eg2ServerCheck>>,
+    /// [`EG2_PROPS_RECHECK_INTERVAL`], shortened by tests.
+    recheck_after: Duration,
+    /// What the `/props` check has learned. Never held across an await.
+    state: Mutex<CheckState>,
     /// The last failed-check message logged, so a refusal is logged once and
     /// not on every call.
     last_logged: Mutex<Option<String>>,
@@ -440,7 +470,8 @@ impl EmbeddingGemma2Embedder {
             dim,
             images: true,
             server_check: true,
-            kept: Mutex::new(None),
+            recheck_after: EG2_PROPS_RECHECK_INTERVAL,
+            state: Mutex::new(CheckState::default()),
             last_logged: Mutex::new(None),
         })
     }
@@ -477,6 +508,14 @@ impl EmbeddingGemma2Embedder {
         self
     }
 
+    /// Trust a kept `/props` answer for `interval` instead of
+    /// [`EG2_PROPS_RECHECK_INTERVAL`] (tests).
+    #[cfg(test)]
+    pub(crate) fn with_props_recheck(mut self, interval: Duration) -> Self {
+        self.recheck_after = interval;
+        self
+    }
+
     /// The contract `model`: `<artifact>;prompts=lambo-eg2-v1`.
     pub fn model_identity(&self) -> &str {
         &self.identity
@@ -490,41 +529,80 @@ impl EmbeddingGemma2Embedder {
     }
 
     /// The check as an embed of the given kind needs it. A kept `Verified`
-    /// or `NotExposed` answers without a request, except that an image embed
-    /// asks again while the kept answer says "no vision", so restarting the
-    /// server with `--mmproj` is picked up without restarting Lambo. A
-    /// mismatch is never kept: it is asked again on every embed until the
-    /// server is fixed.
+    /// or `NotExposed` younger than [`Self::recheck_after`] answers without
+    /// a request, except that an image embed asks again while the kept
+    /// answer says "no vision", so restarting the server with `--mmproj` is
+    /// picked up without restarting Lambo. A mismatch is never kept: it is
+    /// asked again on every embed until the server is fixed. Once a server
+    /// has been verified, a later "does not report its model" is a mismatch
+    /// (another server may have taken the URL).
     async fn check(&self, image: bool) -> Eg2ServerCheck {
         if !self.server_check {
             return Eg2ServerCheck::Skipped;
         }
-        let kept = self.kept.lock().ok().and_then(|k| k.clone());
-        if let Some(kept) = kept
+        let kept = self.state().kept.clone();
+        if let Some((kept, judged_at)) = kept
+            && judged_at.elapsed() < self.recheck_after
             && !(image && self.images && kept == Self::NO_VISION)
         {
             return kept;
         }
-        let outcome = self.probe_props().await;
-        if matches!(
-            outcome,
-            Eg2ServerCheck::Verified { .. } | Eg2ServerCheck::NotExposed
-        ) {
-            let changed = match self.kept.lock() {
-                Ok(mut kept) if kept.as_ref() != Some(&outcome) => {
-                    *kept = Some(outcome.clone());
-                    true
+        let probed = self.probe_props().await;
+        let (outcome, changed) = {
+            let mut state = self.state();
+            let outcome = match probed {
+                Eg2ServerCheck::NotExposed if state.verified_once => {
+                    Eg2ServerCheck::Mismatch(self.props_gone_message())
                 }
-                _ => false,
+                other => other,
             };
-            if changed {
-                self.log_kept(&outcome);
-            }
+            let changed = match &outcome {
+                Eg2ServerCheck::Verified { .. } | Eg2ServerCheck::NotExposed => {
+                    let changed = state.kept.as_ref().map(|(k, _)| k) != Some(&outcome);
+                    state.kept = Some((outcome.clone(), Instant::now()));
+                    state.verified_once |= matches!(outcome, Eg2ServerCheck::Verified { .. });
+                    changed
+                }
+                Eg2ServerCheck::Mismatch(_) | Eg2ServerCheck::Skipped => {
+                    state.kept = None;
+                    false
+                }
+            };
+            (outcome, changed)
+        };
+        if changed {
+            self.log_kept(&outcome);
         }
         if let Some(message) = self.failure_message(&outcome) {
             self.log_failure_once(&message);
         }
         outcome
+    }
+
+    /// The check's state. A panic while it was held cannot leave it
+    /// half-written (every update is one assignment), so a poisoned lock is
+    /// used as is.
+    fn state(&self) -> MutexGuard<'_, CheckState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Drop the kept `/props` answer so the next embed asks again. Called
+    /// when an embed request fails as unavailable: a refused connection or a
+    /// loading server is what a restart looks like, and a restarted server
+    /// may hold another model.
+    fn forget_kept(&self) {
+        self.state().kept = None;
+    }
+
+    fn props_gone_message(&self) -> String {
+        format!(
+            "the llama-server at {} was verified as EmbeddingGemma 2 earlier, but now does not \
+             report its model over /props, so another server may have taken its URL; refusing \
+             to embed so no vector from another model enters this contract. If the change is \
+             intended, restart Lambo (and if the model changed, start a fresh session or run \
+             lambo re-embed)",
+            self.http.log_base_url()
+        )
     }
 
     const NO_VISION: Eg2ServerCheck = Eg2ServerCheck::Verified {
@@ -630,15 +708,40 @@ impl EmbeddingGemma2Embedder {
         )
     }
 
-    /// Refuse before sending when the check has found the server wrong.
-    async fn ensure_server(&self, image: bool) -> Result<(), EmbedError> {
-        match self.check(image).await {
-            Eg2ServerCheck::Mismatch(message) => Err(EmbedError::Backend(message)),
+    /// Refuse before sending when the check has found the server wrong, or
+    /// could not re-check a server it verified earlier.
+    async fn ensure_server(&self, image: bool) -> Result<Eg2ServerCheck, EmbedError> {
+        let outcome = self.check(image).await;
+        match &outcome {
+            Eg2ServerCheck::Mismatch(message) => Err(EmbedError::Backend(message.clone())),
             Eg2ServerCheck::Verified {
                 vision: Some(false),
             } if image => Err(EmbedError::Backend(self.no_vision_message())),
-            _ => Ok(()),
+            Eg2ServerCheck::Skipped if self.server_check && self.state().verified_once => {
+                Err(EmbedError::Unavailable(format!(
+                    "could not re-check the llama-server at {} over /props (unreachable or a \
+                     server error) after verifying it earlier; holding embeds until it answers, \
+                     so a server restarted with another model cannot write vectors under this \
+                     contract",
+                    self.http.log_base_url()
+                )))
+            }
+            _ => Ok(outcome),
         }
+    }
+
+    /// POST to the embeddings endpoint; an unavailable answer drops the kept
+    /// `/props` answer ([`Self::forget_kept`]).
+    async fn post<B: Serialize>(
+        &self,
+        body: &B,
+        rule: super::bge_m3::StatusRule,
+    ) -> Result<EmbedResponse, EmbedError> {
+        let result = self.http.post_json(body, &self.model, rule).await;
+        if let Err(EmbedError::Unavailable(_)) = &result {
+            self.forget_kept();
+        }
+        result
     }
 
     async fn embed_text(&self, prefix: &str, text: &str) -> Result<Vec<f32>, EmbedError> {
@@ -652,10 +755,7 @@ impl EmbeddingGemma2Embedder {
             model: &self.model,
             input: format!("{prefix}{text}"),
         };
-        let parsed: EmbedResponse = self
-            .http
-            .post_json(&body, &self.model, default_status_rule)
-            .await?;
+        let parsed = self.post(&body, default_status_rule).await?;
         truncate_and_normalize(first_embedding(parsed.data)?, self.dim)
     }
 }
@@ -717,10 +817,7 @@ impl Embedder for EmbeddingGemma2Embedder {
                 }],
             }],
         };
-        let parsed: EmbedResponse = self
-            .http
-            .post_json(&body, &self.model, image_status_rule)
-            .await?;
+        let parsed = self.post(&body, image_status_rule).await?;
         if let Some(tokens) = parsed.usage.as_ref().and_then(|u| u.prompt_tokens)
             && !(EG2_IMAGE_TOKENS..=EG2_IMAGE_TOKENS + EG2_IMAGE_FRAMING_SLACK).contains(&tokens)
         {
