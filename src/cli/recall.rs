@@ -76,7 +76,9 @@ pub struct RecallBy {
 
 /// [`run`], recalling by an image or a client vector file (#22 PR 6).
 ///
-/// The files are read under the same caps as `lambo derive-image`'s
+/// The store's vector search, and for `--image` the embedder's image
+/// modality, are checked first, before any file is read or the store is
+/// loaded. The files are read under the same caps as `lambo derive-image`'s
 /// (through `take(cap + 1)`, so a pipe or a growing file cannot exceed
 /// them), checked by the same `surface` rules, and never echoed. A vector
 /// file needs `[embedder] accept_client_vectors = true` and the live
@@ -94,6 +96,30 @@ pub async fn run_by(
 ) -> Result<String, CliError> {
     if by.mime.is_some() && by.image.is_none() {
         return Err(CliError::Usage("--mime goes with --image".into()));
+    }
+    // What this deployment can do, before any file is read or the store is
+    // loaded (review L4): the vector leg is the point of a recall by image
+    // or vector, and only an image embedder embeds the image.
+    if by.image.is_some() || by.query_vector_json.is_some() {
+        if !VectorCandidates::from_store(backends.store.as_ref()).available() {
+            return Err(CliError::Runtime(
+                "a recall by image or by vector needs a store with vector search \
+                 (VECTOR_SEARCH), and this store does not search vectors"
+                    .into(),
+            ));
+        }
+        if by.image.is_some()
+            && !backends
+                .embedder
+                .modalities()
+                .contains(crate::embed::Modalities::IMAGE)
+        {
+            return Err(CliError::Runtime(
+                "the configured embedder does not embed images; a recall by image needs one \
+                 that does, or --query-vector-json"
+                    .into(),
+            ));
+        }
     }
     let bytes;
     let query_by = match (&by.image, &by.query_vector_json) {
@@ -191,15 +217,6 @@ async fn run_inner(
         query
     };
     check_size_cli("query", query)?;
-    // #22 PR 6: the vector leg is the point of a recall by image or vector,
-    // so a store that cannot search vectors is an error, before any I/O.
-    if by.is_some() && !VectorCandidates::from_store(backends.store.as_ref()).available() {
-        return Err(CliError::Runtime(
-            "a recall by image or by vector needs a store with vector search \
-             (VECTOR_SEARCH), and this store does not search vectors"
-                .into(),
-        ));
-    }
 
     let cfg = Config::default();
     let top_k = match top_k {
@@ -480,6 +497,19 @@ mod by_tests {
 
     const SECRET_MODEL: &str = "client-declared-model-label";
 
+    /// The fixture's text, with the trait's default (text-only) modalities.
+    struct TextOnly(FixtureEmbedder);
+
+    #[async_trait::async_trait]
+    impl crate::embed::Embedder for TextOnly {
+        fn dimensions(&self) -> usize {
+            self.0.dimensions()
+        }
+        async fn embed(&self, text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
+            crate::embed::Embedder::embed(&self.0, text).await
+        }
+    }
+
     fn backends(store: Box<dyn GraphStore>, accept_client_vectors: bool) -> ResolvedBackends {
         ResolvedBackends {
             store,
@@ -673,8 +703,44 @@ mod by_tests {
         };
         assert!(m.contains("[embedder] accept_client_vectors = true"), "{m}");
 
-        // A store without vector search: refused naming the capability.
+        // L4: the deployment is checked before any file is read: a path
+        // that does not exist is never opened when the store cannot search
+        // vectors, or (for --image) the embedder cannot embed images.
+        let missing = dir.join("never-read.png");
         let plain = backends(Box::new(MemoryStore::new()), true);
+        for by in [
+            RecallBy {
+                image: Some(missing.clone()),
+                ..Default::default()
+            },
+            RecallBy {
+                query_vector_json: Some(missing.clone()),
+                ..Default::default()
+            },
+        ] {
+            let e = refused(&plain, "", by).await;
+            let CliError::Runtime(m) = e else {
+                panic!("runtime error: {e:?}")
+            };
+            assert!(m.contains("VECTOR_SEARCH"), "{m}");
+        }
+        let mut text_only = searchable(true);
+        text_only.embedder = Box::new(TextOnly(FixtureEmbedder::new()));
+        let e = refused(
+            &text_only,
+            "",
+            RecallBy {
+                image: Some(missing),
+                ..Default::default()
+            },
+        )
+        .await;
+        let CliError::Runtime(m) = e else {
+            panic!("runtime error: {e:?}")
+        };
+        assert!(m.contains("does not embed images"), "{m}");
+
+        // A store without vector search: refused naming the capability.
         let e = refused(
             &plain,
             "",
