@@ -153,8 +153,9 @@ fn unknown_serve_keys_fail_closed() {
     }
 }
 
-/// An inline token is refused, whatever its type, and the refusal never
-/// quotes the value: a TOML parse error would have printed the source line.
+/// An inline token is refused, whatever its type, with a message that names
+/// the fix (`token_env`) rather than a bare unknown-field error, and the
+/// refusal never quotes the value.
 #[test]
 fn an_inline_token_is_refused_without_echoing_it() {
     for value in [

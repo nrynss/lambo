@@ -442,6 +442,27 @@ pub struct LamboFile {
     pub serve: ServeConfig,
 }
 
+/// A `lambo.toml` parse error, with its position and **without** the source
+/// line.
+///
+/// `toml::de::Error`'s `Display` quotes the offending line, and the line can
+/// hold a secret: a misspelled key beside a DSN with a password, or a token
+/// under a typo of `token_env`. The message and the position are what an
+/// operator needs to find the problem; the text is already in their file.
+fn toml_error(src: &str, err: &toml::de::Error) -> LamboError {
+    let message = err.message().trim_end();
+    let position = err.span().map(|span| {
+        let before = src.get(..span.start).unwrap_or_default();
+        let line = before.matches('\n').count() + 1;
+        let column = before.rsplit('\n').next().unwrap_or("").chars().count() + 1;
+        format!(" (line {line}, column {column})")
+    });
+    LamboError::Config(format!(
+        "lambo.toml: {message}{}",
+        position.unwrap_or_default()
+    ))
+}
+
 impl LamboFile {
     /// Parse TOML text.
     ///
@@ -449,8 +470,7 @@ impl LamboFile {
     /// fails closed at the file boundary for every command, like an unknown
     /// key does.
     pub fn from_toml_str(s: &str) -> Result<Self, LamboError> {
-        let file: Self =
-            toml::from_str(s).map_err(|e| LamboError::Config(format!("lambo.toml: {e}")))?;
+        let file: Self = toml::from_str(s).map_err(|e| toml_error(s, &e))?;
         file.serve.validate()?;
         Ok(file)
     }
@@ -878,6 +898,41 @@ mod tests {
     fn lambo_file_rejects_empty_kind_strings() {
         assert!(LamboFile::from_toml_str("[store]\nkind = \"\"\n").is_err());
         assert!(LamboFile::from_toml_str("[embedder]\nkind = \"\"\n").is_err());
+    }
+
+    /// A `lambo.toml` parse error must not quote the offending source line.
+    ///
+    /// The `toml` crate's `Display` renders the line under the error, so a
+    /// misspelled key next to a secret (a DSN with a password in it, or a
+    /// bearer token under a typo of `token_env`) printed the secret into the
+    /// startup error, and from there into a launchd or systemd log. The
+    /// refusal keeps the parser's message and a line and column, and drops the
+    /// source text.
+    ///
+    /// Mutation: format the error with `{e}` again → red.
+    #[test]
+    fn a_parse_error_names_the_line_but_never_quotes_it() {
+        for (toml, needles) in [
+            (
+                "[store]\nkind = \"cockroach\"\ndssn = \"postgresql://u:fake-xyzzy@h/db\"\n",
+                &["unknown field `dssn`", "line 3"][..],
+            ),
+            (
+                "[[serve.credential]]\nname = \"agents\"\ntokn = \"fake-xyzzy\"\n",
+                &["unknown field `tokn`", "line 3"][..],
+            ),
+            (
+                "[store]\npath = \"fake-xyzzy\nkind = \"memory\"\n",
+                &["line 2"][..],
+            ),
+        ] {
+            let err = LamboFile::from_toml_str(toml).unwrap_err().to_string();
+            assert!(!err.contains("xyzzy"), "the source line leaked: {err}");
+            assert!(err.contains("lambo.toml: "), "{err}");
+            for needle in needles {
+                assert!(err.contains(needle), "{toml:?} must name {needle:?}: {err}");
+            }
+        }
     }
 
     #[test]

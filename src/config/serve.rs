@@ -39,10 +39,11 @@
 //! A credential names the **environment variable** that holds its token
 //! (`token_env`). An inline `token = "..."` is a config error, and it is
 //! accepted by the parser only so it can be refused by
-//! [`ServeConfig::validate`] with a message that does not quote it: a TOML
-//! parse error renders the offending source line, which would print the
-//! secret. Its value is discarded at parse time ([`InlineToken`]), so it is
-//! never held, logged or serialized. Token values are read from the
+//! [`ServeConfig::validate`] with a message that says what to do instead
+//! (name the variable with `token_env`) rather than a bare unknown-field
+//! error. Its value is discarded at parse time ([`InlineToken`]), so it is
+//! never held, logged or serialized. (A parse error for any other key does
+//! not quote its source line either; see `LamboFile::from_toml_str`.) Token values are read from the
 //! environment at runtime by [`ServeConfig::resolve_credentials`] into
 //! [`SecretToken`], whose `Debug` redacts.
 
@@ -137,7 +138,8 @@ pub struct CredentialConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_env: Option<String>,
     /// An inline `token` key, refused by [`ServeConfig::validate`]. Present
-    /// only so the refusal can avoid quoting the value; see [`InlineToken`].
+    /// only so the refusal can name `token_env` as the fix; the value itself is
+    /// discarded while parsing, see [`InlineToken`].
     #[serde(default, skip_serializing)]
     pub token: Option<InlineToken>,
     /// Exact session names, or `"*"` for every session the serve may host.
