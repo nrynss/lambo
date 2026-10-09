@@ -81,6 +81,19 @@ impl ElasticRecall {
                     .into(),
             ));
         }
+        if base.query().is_some() || base.fragment().is_some() {
+            return Err(StoreError::Backend(
+                "recall.url must not carry a query string or fragment: it would be sent on \
+                 every request and echoed in errors; secrets are by reference only, through \
+                 recall.api_key = { env = \"...\" }"
+                    .into(),
+            ));
+        }
+        if cfg.timeout_ms == Some(0) {
+            return Err(StoreError::Backend(
+                "recall.timeout_ms must be greater than zero".into(),
+            ));
+        }
         let auth = match &cfg.api_key {
             Some(secret) => {
                 let mut value = HeaderValue::from_str(&format!("ApiKey {}", secret.resolve()?))
@@ -682,6 +695,28 @@ mod tests {
             err.to_string().contains("LAMBO_TEST_RECALL_UNSET_VAR"),
             "{err}"
         );
+    }
+
+    /// L3: a query string or fragment on the base URL would ride on every
+    /// request and be echoed in error text (a credential there would pass
+    /// the `user:pass@` check), and a zero timeout fails every request at
+    /// once. Both are refused at construction, without echoing the URL.
+    #[test]
+    fn construction_refuses_a_query_a_fragment_and_a_zero_timeout() {
+        for url in [
+            "http://127.0.0.1:9200/?pretty=true",
+            "http://127.0.0.1:9200/#frag",
+            "http://127.0.0.1:9200?x=y",
+        ] {
+            let err = ElasticRecall::new(&cfg(url)).err().expect(url);
+            assert!(err.to_string().contains("query string"), "{url}: {err}");
+            assert!(!err.to_string().contains("pretty"), "never echo the query");
+        }
+        let mut zero = cfg("http://127.0.0.1:9200");
+        zero.timeout_ms = Some(0);
+        let err = ElasticRecall::new(&zero).err().unwrap();
+        assert!(err.to_string().contains("timeout_ms"), "{err}");
+        ElasticRecall::new(&cfg("http://127.0.0.1:9200/es/")).expect("a path is fine");
     }
 
     #[tokio::test]
