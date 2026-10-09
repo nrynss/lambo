@@ -68,6 +68,13 @@ const PRODUCTION_SOURCES: &[(&str, &str)] = &[
             "/src/cli/serve_web/state.rs"
         )),
     ),
+    (
+        "serve_web/views.rs",
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/cli/serve_web/views.rs"
+        )),
+    ),
 ];
 
 /// The production text of every portal source: each file up to its
@@ -397,16 +404,40 @@ fn state_from_backends(
     session: &str,
     auth: Option<AuthToken>,
 ) -> Arc<AppState> {
-    Arc::new(AppState {
-        session: SessionId::new(session),
+    state_with_web(
         backends,
-        exposed: auth.is_some(),
+        session,
         auth,
-        freshness: Mutex::new(Freshness {
-            fingerprint: 0,
-            observed_at: Instant::now(),
-        }),
-    })
+        &crate::config::WebConfig::default(),
+    )
+}
+
+/// [`state_from_backends`] with explicit `[web]` bounds.
+fn state_with_web(
+    backends: ResolvedBackends,
+    session: &str,
+    auth: Option<AuthToken>,
+    web: &crate::config::WebConfig,
+) -> Arc<AppState> {
+    let exposed = auth.is_some();
+    Arc::new(AppState::new(
+        SessionId::new(session),
+        backends,
+        exposed,
+        auth,
+        web,
+    ))
+}
+
+/// `[web] view_ttl_ms = 0`: every request after a write sees it. For the
+/// tests that write between two requests and assert the second sees the
+/// write, a property of the store read, not of the view TTL (which
+/// `views::a_write_is_served_after_the_ttl_and_not_before` pins).
+fn web_ttl_zero() -> crate::config::WebConfig {
+    crate::config::WebConfig {
+        view_ttl_ms: Some(0),
+        ..Default::default()
+    }
 }
 
 /// A session with real content: two concepts in a hierarchy, an action, and

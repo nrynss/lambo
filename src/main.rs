@@ -781,9 +781,24 @@ fn main() -> ExitCode {
         },
         _ => None,
     };
-    let loaded = serve_plan
-        .as_mut()
-        .map(|plan| std::mem::take(&mut plan.file));
+    // `serve-web` takes `[web]` (#4) from the same single read of
+    // `lambo.toml` that builds its backends, as `serve` takes `[serve]`.
+    let mut web = lambo::config::WebConfig::default();
+    let loaded = match &cmd {
+        Commands::ServeWeb { .. } => match LamboFile::load_resolved(config) {
+            Ok(file) => {
+                web = file.web.clone();
+                Some(file)
+            }
+            Err(e) => {
+                eprintln!("lambo serve-web: failed to build backends: {e}");
+                return ExitCode::FAILURE;
+            }
+        },
+        _ => serve_plan
+            .as_mut()
+            .map(|plan| std::mem::take(&mut plan.file)),
+    };
 
     // Construct once; when Memory/serve land, pass `Resolved` into the command body.
     let mut resolved = match resolve_for_command(&cmd, config, loaded) {
@@ -908,6 +923,7 @@ fn main() -> ExitCode {
                     port,
                     bind,
                     auth_token,
+                    web,
                 },
             ),
         ),

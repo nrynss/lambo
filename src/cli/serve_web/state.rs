@@ -1,20 +1,16 @@
 //! The one piece of state the portal's handlers share: the session, the
-//! resolved backends, the auth posture, and the freshness tracker.
+//! resolved backends, the auth posture, and the per-session view cache.
 
-use std::time::{Duration, Instant};
-
-use parking_lot::Mutex;
+use std::sync::Arc;
+use std::time::Duration;
 
 use super::auth::AuthToken;
+use super::views::{SessionView, ViewBounds, ViewCache};
+use crate::cli::caps::CliError;
+use crate::config::WebConfig;
 use crate::resolve::ResolvedBackends;
 use crate::store::GraphStore;
 use crate::types::SessionId;
-
-/// When this reader last saw the durable snapshot *change*.
-pub(super) struct Freshness {
-    pub(super) fingerprint: u64,
-    pub(super) observed_at: Instant,
-}
 
 pub(super) struct AppState {
     pub(super) session: SessionId,
@@ -24,26 +20,44 @@ pub(super) struct AppState {
     pub(super) exposed: bool,
     /// Optional bearer token. When set, every route requires it.
     pub(super) auth: Option<AuthToken>,
-    pub(super) freshness: Mutex<Freshness>,
+    /// Every data route reads through this: one load per session per TTL,
+    /// shared by every request (#4 PR 1).
+    pub(super) views: ViewCache,
 }
 
 impl AppState {
+    /// The state for a portal on `session`, its view bounds from `web`.
+    pub(super) fn new(
+        session: SessionId,
+        backends: ResolvedBackends,
+        exposed: bool,
+        auth: Option<AuthToken>,
+        web: &WebConfig,
+    ) -> Self {
+        let bounds = ViewBounds::resolve(web, backends.store_cfg.kind);
+        Self {
+            views: ViewCache::new([session.clone()], bounds),
+            session,
+            backends,
+            exposed,
+            auth,
+        }
+    }
+
     pub(super) fn store(&self) -> &dyn GraphStore {
         self.backends.store.as_ref()
     }
 
+    /// The served session's current view (see [`ViewCache::view`]).
+    pub(super) async fn view(&self) -> Result<Arc<SessionView>, CliError> {
+        self.views
+            .view(self.store(), &self.backends.embedding, &self.session)
+            .await
+    }
+
     /// Record the durable state's count fingerprint; return how long the
-    /// current one has been standing.
-    ///
-    /// Counts only: two different graphs with identical counts read as
-    /// "unchanged". That is the right trade for a freshness indicator — it is a
-    /// hint about writer activity, not a consistency claim.
+    /// current one has been standing (see [`ViewCache::observe`]).
     pub(super) fn observe(&self, fingerprint: u64) -> Duration {
-        let mut f = self.freshness.lock();
-        if f.fingerprint != fingerprint {
-            f.fingerprint = fingerprint;
-            f.observed_at = Instant::now();
-        }
-        f.observed_at.elapsed()
+        self.views.observe(&self.session, fingerprint)
     }
 }

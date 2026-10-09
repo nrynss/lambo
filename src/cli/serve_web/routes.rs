@@ -14,18 +14,17 @@ use serde::Serialize;
 
 use super::auth::require_auth;
 use super::dto::{
-    EmbeddingStatus, GraphEdge, GraphNode, GraphResponse, InspectParams, InspectResponse, Pulse,
-    RecallParams, RecallResponse, SessionInfo, SinceParams,
+    GraphEdge, GraphNode, GraphResponse, InspectParams, InspectResponse, Pulse, RecallParams,
+    RecallResponse, SessionInfo, SinceParams,
 };
 use super::projections::{
-    is_structural, read_events, read_feed_and_stats, status_str, structural_dependents,
-    structural_rank,
+    is_structural, read_feed_and_stats, status_str, structural_dependents, structural_rank,
 };
 use super::state::AppState;
 use super::{APP_CSS, APP_JS, INDEX_HTML, POLL_INTERVAL};
 use crate::canon::gate_progress;
 use crate::cli::caps::CliError;
-use crate::cli::load_reader_graph;
+use crate::cli::recall::RecallRequest;
 use crate::recall::format::blast_radii;
 use crate::store::{Capabilities, StoreKind};
 use crate::surface::focus::{resolve_focus, Focus};
@@ -80,14 +79,11 @@ pub(super) async fn healthz() -> Response {
 }
 
 pub(super) async fn api_session(State(state): State<Arc<AppState>>) -> Response {
-    let loaded = match load_reader_graph(state.store(), state.session.as_str()).await {
-        Ok(loaded) => loaded,
+    let view = match state.view().await {
+        Ok(view) => view,
         Err(err) => return fail(err),
     };
-    let embedding_status = {
-        let graph = loaded.graph.read();
-        EmbeddingStatus::inspect(graph.embedding(), &state.backends.embedding)
-    };
+    let embedding_status = view.embedding.clone();
     json(
         StatusCode::OK,
         SessionInfo {
@@ -116,8 +112,8 @@ pub(super) async fn api_events(
     State(state): State<Arc<AppState>>,
     Query(params): Query<SinceParams>,
 ) -> Response {
-    match read_events(&state, params.since.unwrap_or(0)).await {
-        Ok(payload) => json(StatusCode::OK, payload),
+    match state.view().await {
+        Ok(view) => json(StatusCode::OK, view.events_since(params.since.unwrap_or(0))),
         Err(e) => fail(e),
     }
 }
@@ -156,28 +152,36 @@ pub(super) async fn api_pulse(
     }
 }
 
-/// Recall, straight through [`crate::cli::recall::run_detailed`].
+/// Recall, through [`crate::cli::recall::run_detailed_on`] on the session's
+/// view.
 ///
-/// Reusing the CLI reader verbatim is the point: the page cannot show a
-/// prettier or staler context block than the one an agent receives, because it
-/// is running the same code with the same validators and the same caps. H3:
-/// the payload's `context` and its structured `hits` /
-/// `response_annotations` all come from that ONE execution.
+/// Running the CLI reader's own pipeline is the point: the page cannot show a
+/// prettier context block than the one an agent receives, because it is
+/// running the same code with the same validators and the same caps; it can be
+/// at most one view TTL older than a fresh `lambo recall`. H3: the payload's
+/// `context` and its structured `hits` / `response_annotations` all come from
+/// that ONE execution. The arguments are validated before the view is
+/// touched, so a bad query costs no store call.
 pub(super) async fn api_recall(
     State(state): State<Arc<AppState>>,
     Query(params): Query<RecallParams>,
 ) -> Response {
     let query = params.q.unwrap_or_default();
     let started = Instant::now();
-    let result = super::recall::run_detailed(
-        &state.backends,
+    let request = match RecallRequest::validate(
         state.session.as_str(),
         query.trim(),
         params.top_k,
         params.max_tokens,
         params.traversal_depth,
-    )
-    .await;
+    ) {
+        Ok(request) => request,
+        Err(e) => return fail(e),
+    };
+    let result = match state.view().await {
+        Ok(view) => super::recall::run_detailed_on(&state.backends, &view.reader, &request).await,
+        Err(e) => Err(e),
+    };
 
     match result {
         Ok(cli) => json(
@@ -211,14 +215,14 @@ pub(super) async fn api_inspect(
             InspectResponse::missing(params.focus, state.backends.config.promotion_policy),
         );
     }
-    let loaded = match load_reader_graph(state.store(), state.session.as_str()).await {
-        Ok(l) => l,
+    let view = match state.view().await {
+        Ok(view) => view,
         Err(e) => return fail(e),
     };
     // Scoped so the (`!Send`) read guard provably never spans the await for
     // the gate-progress query below.
     let found = {
-        let g = loaded.graph.read();
+        let g = view.reader.graph.read();
         match resolve_focus(&g, params.focus.trim()) {
             Focus::Exact(id) | Focus::Fuzzy { id, .. } => match g.node(id) {
                 Some(Node::Concept(c)) => {
@@ -316,12 +320,12 @@ pub(super) async fn api_inspect(
 /// lease. Ships only `Dependency`/`Causal`/`Hierarchical` edges — the false
 /// `CoOccurrence` edge stays out of the visible claim.
 pub(super) async fn api_graph(State(state): State<Arc<AppState>>) -> Response {
-    let loaded = match load_reader_graph(state.store(), state.session.as_str()).await {
-        Ok(l) => l,
+    let view = match state.view().await {
+        Ok(view) => view,
         Err(e) => return fail(e),
     };
     let (nodes, edges, truncated) = {
-        let g = loaded.graph.read();
+        let g = view.reader.graph.read();
         // One in-memory pass for every node's dependent count, matching
         // /api/inspect's live semantics (not the frozen concepts-row column,
         // which is `None` until promotion), so the tree marks load-bearing

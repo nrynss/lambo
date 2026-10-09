@@ -7,17 +7,16 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::dto::{
-    EmbeddingStatus, EventsPayload, InspectDependent, StatsRead, WebEvent, WebStats, WRITER_ONLY,
-};
+use super::dto::{EventsPayload, InspectDependent, StatsRead, WebEvent, WebStats, WRITER_ONLY};
 use super::state::AppState;
+use super::views::{SessionView, ViewCounts};
 use crate::cli::caps::{CliError, MAX_INSPECT_NODES};
-use crate::cli::load_reader_graph;
 use crate::graph::Graph;
-use crate::store::{GraphStore, SessionFlushStats};
+use crate::store::SessionFlushStats;
+#[cfg(test)]
+use crate::types::GraphSnapshot;
 use crate::types::{
-    tie_break_by_key, CanonizationEvent, CanonizationStatus, Concept, EdgeType, GraphSnapshot,
-    Node, NodeId, SessionId, StoreError,
+    tie_break_by_key, CanonizationEvent, CanonizationStatus, Concept, EdgeType, Node, NodeId,
 };
 
 /// The structural edge types the page may show. Mirrors
@@ -78,22 +77,6 @@ pub(super) fn structural_rank(ty: EdgeType) -> u8 {
     }
 }
 
-/// Raw snapshot for the event tail. A missing session is a first use — an
-/// empty session, not an error (same rule as `store::load::load_session_async`).
-pub(super) async fn load_snapshot(
-    store: &dyn GraphStore,
-    session: &SessionId,
-) -> Result<GraphSnapshot, CliError> {
-    match store.load_session(session).await {
-        Ok(snap) => Ok(snap),
-        Err(StoreError::SessionNotFound(_)) => Ok(GraphSnapshot {
-            session_id: session.clone(),
-            ..GraphSnapshot::default()
-        }),
-        Err(e) => Err(CliError::Runtime(e.to_string())),
-    }
-}
-
 pub(super) fn status_str(s: CanonizationStatus) -> &'static str {
     match s {
         CanonizationStatus::None => "None",
@@ -111,6 +94,7 @@ pub(super) fn status_str(s: CanonizationStatus) -> &'static str {
 /// (issue #2, remediation round 3 — the bare event id was run-minted, which
 /// made `seq` and the cursor built on it per-run arbitrary). The id residual
 /// remains only for events whose node is absent from this snapshot.
+#[cfg(test)]
 pub(super) fn events_from(snap: &GraphSnapshot, since: usize) -> EventsPayload {
     slice_events(
         &ordered_events(snap.concepts.iter(), &snap.canonization_events),
@@ -177,17 +161,16 @@ pub(super) fn slice_events(all: &[WebEvent], since: usize) -> EventsPayload {
 
 pub(super) fn stats_from(
     state: &AppState,
-    g: &Graph,
-    event_total: usize,
+    view: &SessionView,
     flush: Option<SessionFlushStats>,
 ) -> WebStats {
-    let concepts = g.concepts().count();
-    let canonical = g
-        .concepts()
-        .filter(|c| c.canonization_status == CanonizationStatus::Canonical)
-        .count();
-    let nodes = g.node_count();
-    let edges = g.edge_count();
+    let ViewCounts {
+        nodes,
+        edges,
+        concepts,
+        canonical,
+    } = view.counts;
+    let event_total = view.event_total();
 
     let mut fingerprint = 0u64;
     for part in [nodes, edges, concepts, canonical, event_total] {
@@ -220,25 +203,17 @@ pub(super) fn stats_from(
     }
 }
 
-/// The event feed and the stats from ONE session load (#4 PR 1).
+/// The event feed and the stats, from the session's current view (one load
+/// per TTL, #4 PR 1).
 ///
-/// The reader graph carries the counts, the embedding contract and, since a
-/// loaded graph keeps every canonization event of its snapshot, the feed.
-/// `/api/pulse` used to load the raw snapshot for the feed and then the whole
-/// session again for the counts: two full loads per poll per tab, and two
-/// snapshots that could disagree if a writer flushed in between.
+/// The view carries the counts, the embedding contract and the feed; only the
+/// writer-published flush stats are read per request, so `flush_lag_ms` is as
+/// fresh as before (design section 7, #16).
 pub(super) async fn read_feed_and_stats(
     state: &AppState,
     since: usize,
 ) -> Result<(EventsPayload, StatsRead), CliError> {
-    let loaded = load_reader_graph(state.store(), state.session.as_str()).await?;
-    let (feed, embedding_status) = {
-        let g = loaded.graph.read();
-        (
-            ordered_events(g.concepts(), g.canonization_events()),
-            EmbeddingStatus::inspect(g.embedding(), &state.backends.embedding),
-        )
-    };
+    let view = state.view().await?;
     // T85-3: fetch the writer-published flush stats from the shared store when
     // available. A read failure degrades to `n/a` (None) rather than failing
     // the whole stats endpoint — the session/counts payload is the load-bearing
@@ -253,21 +228,11 @@ pub(super) async fn read_feed_and_stats(
             None
         }
     };
-    // Scoped so the (`!Send`) read guard provably never spans an await.
-    let stats = {
-        let g = loaded.graph.read();
-        stats_from(state, &g, feed.len(), flush)
-    };
     Ok((
-        slice_events(&feed, since),
+        view.events_since(since),
         StatsRead {
-            stats,
-            embedding_status,
+            stats: stats_from(state, &view, flush),
+            embedding_status: view.embedding.clone(),
         },
     ))
-}
-
-pub(super) async fn read_events(state: &AppState, since: usize) -> Result<EventsPayload, CliError> {
-    let snap = load_snapshot(state.store(), &state.session).await?;
-    Ok(events_from(&snap, since))
 }

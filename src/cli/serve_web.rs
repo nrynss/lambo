@@ -84,16 +84,17 @@
 //!
 //! # Modules
 //!
-//! [`run`] is the composition root: it resolves auth, loads the reader graph
-//! once to report the embedding contract, builds the one `AppState` and
-//! serves `router` until a signal. Everything a request touches is in a
-//! child module.
+//! [`run`] is the composition root: it resolves auth, preflights the store
+//! schema, builds the one `AppState` (with its view cache, which loads
+//! nothing until a request asks) and serves `router` until a signal.
+//! Everything a request touches is in a child module.
 //!
 //! | module | holds |
 //! |---|---|
 //! | this file | the embedded assets, [`Args`], [`run`], the bounded serve, the signal registration |
 //! | `auth` | [`AuthToken`], env-over-flag resolution, the non-loopback refusal, the bearer gate |
-//! | `state` | `AppState` and the freshness tracker |
+//! | `state` | `AppState`: session, backends, auth posture, view cache |
+//! | `views` | the per-session reader views: one load per TTL, single-flight, bounded (#4) |
 //! | `dto` | every response and query type |
 //! | `projections` | the reads: hop-1 structural dependents, the ordered event feed, the stats |
 //! | `routes` | the handlers and `router`, `GET` only |
@@ -107,16 +108,15 @@
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use axum::Router;
-use parking_lot::Mutex;
 
 use super::caps::{check_size_cli, require_nonempty, CliError};
-use super::load_reader_graph;
 // `routes::api_recall` names it as `super::recall`, unchanged from when it
 // lived here.
 use super::recall;
+use crate::config::WebConfig;
 use crate::mcp::AUTH_TOKEN_ENV;
 use crate::resolve::ResolvedBackends;
 use crate::store::StoreKind;
@@ -127,13 +127,13 @@ mod dto;
 mod projections;
 mod routes;
 mod state;
+mod views;
 
 pub use auth::AuthToken;
 
 use auth::{authorize_bind_web, resolve_auth_token};
-use dto::EmbeddingStatus;
 use routes::router;
-use state::{AppState, Freshness};
+use state::AppState;
 
 // ---------------------------------------------------------------------------
 // Embedded assets — the whole client, compiled into the binary (P9/AWS).
@@ -173,6 +173,9 @@ pub struct Args {
     /// [`AUTH_TOKEN_ENV`] env var, which overrides this flag — a token in argv
     /// is visible in `ps` and shell history. Mandatory on any non-loopback bind.
     pub auth_token: Option<AuthToken>,
+    /// `[web]` from `lambo.toml`: the view TTL and the load and recall
+    /// bounds (#4). [`WebConfig::default`] when the file has no table.
+    pub web: WebConfig,
 }
 
 // ---------------------------------------------------------------------------
@@ -233,37 +236,27 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
     // warning (same posture as `mcp::serve::authorize_bind`).
     authorize_bind_web(args.bind, auth.as_ref())?;
 
-    // H1 reader policy: keep the structural portal available, but never let a
-    // model mismatch look healthy. `/api/session` carries the stored and live
-    // contracts plus a loud message, the page renders it as a banner, and the
-    // recall route remains fail-closed through `cli::recall`. Structural
-    // stats/graph/inspect deliberately load without an embedder contract.
-    let startup = load_reader_graph(backends.store.as_ref(), &args.session).await?;
-    let embedding_status = {
-        let graph = startup.graph.read();
-        EmbeddingStatus::inspect(graph.embedding(), &backends.embedding)
-    };
-    if embedding_status.status == "mismatch" {
-        eprintln!(
-            "lambo serve-web: WARNING — vector recall is disabled for this session: {}",
-            embedding_status
-                .message
-                .as_deref()
-                .unwrap_or("stored and configured embedding contracts differ")
-        );
-    }
+    // Fail fast on an unprovisioned or unreachable store, as the startup load
+    // used to. Sessions themselves load lazily, on the first request that
+    // needs one (#4 Q15), and the H1 mismatch warning moves to that load,
+    // naming the session. H1 reader policy is otherwise unchanged: the
+    // structural portal stays available, `/api/session` and `/api/pulse`
+    // carry the stored and live contracts (the page renders a banner), and
+    // recall stays fail-closed on a mismatched session.
+    backends
+        .store
+        .preflight_schema()
+        .await
+        .map_err(|e| CliError::Runtime(e.to_string()))?;
 
     let exposed = !args.bind.is_loopback();
-    let state = Arc::new(AppState {
-        session: SessionId::new(args.session.as_str()),
+    let state = Arc::new(AppState::new(
+        SessionId::new(args.session.as_str()),
         backends,
         exposed,
         auth,
-        freshness: Mutex::new(Freshness {
-            fingerprint: 0,
-            observed_at: Instant::now(),
-        }),
-    });
+        &args.web,
+    ));
 
     let addr = SocketAddr::new(args.bind, args.port);
     let listener = tokio::net::TcpListener::bind(addr)
@@ -278,6 +271,14 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
         args.session
     );
     println!("lambo serve-web: reader process — no writer lease, no write routes");
+    let bounds = state.views.bounds();
+    println!(
+        "lambo serve-web: session views — refreshed after {} ms, at most {} loaded, {} load(s) \
+         at a time",
+        bounds.ttl.as_millis(),
+        bounds.max_loaded_sessions,
+        bounds.load_concurrency,
+    );
     // A non-loopback bind always carries a token (`authorize_bind_web`), so
     // the two branches below are exhaustive: token configured, or loopback.
     if state.auth.is_some() {
