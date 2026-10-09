@@ -200,3 +200,27 @@ fn without_home_the_tilde_entries_are_skipped_with_one_warning() {
     );
     assert!(!err.contains("cwd-marker"), "the cwd is not quoted: {err}");
 }
+
+#[test]
+fn a_map_that_cannot_be_applied_is_a_config_error_exiting_1() {
+    // An ambiguous map (two entries for one directory, different sessions)
+    // is a configuration error, exit 1, not the usage error's 2, and it
+    // still refuses before the serve starts.
+    let fx = fixture(
+        "lambo-i32h-ambiguous",
+        "[[serve.projects]]\npath = \"{root}/work\"\nsession = \"i32h-one\"\n\n\
+         [[serve.projects]]\npath = \"{root}/alias\"\nsession = \"i32h-two\"\n",
+    );
+    let work = mkdir(&fx.dir, "work");
+    std::os::unix::fs::symlink(&work, fx.dir.join("alias")).expect("symlink");
+    let cwd = mkdir(&fx.dir, "work/cwd-marker");
+    let out = run_serve(&fx, &cwd, &[]);
+    let err = stderr(&out);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(
+        err.contains("same directory") && err.contains("\"i32h-one\""),
+        "{err}"
+    );
+    assert!(!err.contains("cwd-marker"), "the cwd is not quoted: {err}");
+    assert!(!fx.ledger.exists(), "refused before the serve started");
+}

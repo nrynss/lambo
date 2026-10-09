@@ -465,3 +465,76 @@ fn the_refusal_hint_says_when_the_map_was_not_checked() {
     assert!(!hint.contains("could not be resolved"), "{hint}");
     assert_ne!(skipped, unmatched);
 }
+
+#[test]
+fn the_root_directory_is_a_catch_all_that_loses_to_any_deeper_entry() {
+    let root = ScratchDir::new("lambo-pr8-slash-root");
+    let proj = mkdir(&root, "proj");
+    let cwd = mkdir(&root, "proj/src");
+    let elsewhere = mkdir(&root, "elsewhere");
+    let cfg = config(
+        vec![project("/", "everything"), project(s(&proj), "proj")],
+        Some("general"),
+    );
+    assert_eq!(session(select(&cfg, &cwd)), "proj");
+    let got = select(&cfg, &elsewhere).expect("catch-all");
+    assert_eq!(got.session, "everything", "`/` covers every directory");
+    assert_eq!(got.source, SessionSource::Project { path: "/".into() });
+}
+
+/// macOS volumes are case- and normalization-insensitive by default, and
+/// `fs::canonicalize` (realpath) returns the on-disk spelling, so entries
+/// that differ from the directory only in case or Unicode normalization
+/// still match, and two such variants naming different sessions are one
+/// directory and refused. Skips itself on a case-sensitive volume.
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_case_and_unicode_normalization_variants_are_one_directory() {
+    let root = ScratchDir::new("lambo-pr8-macos-fold");
+    let real = mkdir(&root, "Lambo");
+    let cwd = mkdir(&root, "Lambo/src");
+    if !root.join("lambo").exists() {
+        eprintln!("skipping: {} is on a case-sensitive volume", root.display());
+        return;
+    }
+
+    // Case: the entry spells the directory in lower case.
+    let lower = config(vec![project(s(&root.join("lambo")), "lambo")], None);
+    assert_eq!(session(select(&lower, &cwd)), "lambo");
+    // The cwd spelled differently canonicalizes to the on-disk case too.
+    assert_eq!(session(select(&lower, &root.join("LAMBO/SRC"))), "lambo");
+
+    // Two case variants naming different sessions: refused, not file order.
+    let clash = config(
+        vec![
+            project(s(&real), "upper"),
+            project(s(&root.join("lambo")), "lower"),
+        ],
+        None,
+    );
+    let msg = config_error(select(&clash, &cwd));
+    assert!(msg.contains("same directory"), "{msg}");
+
+    // Normalization: directory created NFD, entry written NFC (and back).
+    let nfd = "cafe\u{301}";
+    let nfc = "caf\u{e9}";
+    let dir = mkdir(&root, nfd);
+    let inner = mkdir(&root, &format!("{nfd}/src"));
+    assert!(
+        root.join(nfc).exists(),
+        "APFS looks names up normalization-insensitively"
+    );
+    let by_nfc = config(vec![project(s(&root.join(nfc)), "cafe")], None);
+    assert_eq!(session(select(&by_nfc, &inner)), "cafe");
+    let by_nfd = config(vec![project(s(&dir), "cafe")], None);
+    assert_eq!(
+        session(select(&by_nfd, &root.join(nfc).join("src"))),
+        "cafe"
+    );
+    let both = config(
+        vec![project(s(&dir), "nfd"), project(s(&root.join(nfc)), "nfc")],
+        None,
+    );
+    let msg = config_error(select(&both, &inner));
+    assert!(msg.contains("same directory"), "{msg}");
+}
