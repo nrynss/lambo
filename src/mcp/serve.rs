@@ -60,6 +60,7 @@ mod builder;
 mod heartbeat;
 mod http_guards;
 mod hub;
+mod process;
 mod roles;
 mod shutdown;
 mod signals;
@@ -77,8 +78,9 @@ pub use http_guards::{
     resolve_auth_token, SecretToken, AUTH_TOKEN_ENV, DEFAULT_MAX_SESSIONS, DEFAULT_RATE_LIMIT_RPS,
 };
 use hub::bind_hub;
+use process::ProcessTasks;
 use roles::{resolve_role, Role};
-use shutdown::{close_ledger, holder_shutdown, ProcessTasks};
+use shutdown::{close_ledger, holder_shutdown};
 use signals::shutdown_signal;
 use stages::Stage;
 use transport::{serve_http, serve_stdio};
@@ -528,7 +530,7 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
         None => None,
     };
     // Stopped after the close (and the keep-warm before it); see
-    // `shutdown::ProcessTasks` and the stage table in `shutdown`.
+    // `process::ProcessTasks` and the stage table in `shutdown`.
     let tasks = ProcessTasks {
         heartbeat,
         keep_warm: keep_warm_task,
