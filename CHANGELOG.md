@@ -52,6 +52,15 @@
   (which reached the one session before, because the service ignored the
   path) gets a plain 404 now. That includes `/mcp/` with a trailing slash:
   a client configured with `http://host:port/mcp/` must drop the slash.
+- `lambo serve --transport http` enforces `[[serve.credential]]` (#32,
+  fifth part). A loopback serve whose `lambo.toml` configures any credential
+  no longer accepts a request without a token: every request must present
+  one of the configured tokens (or `LAMBO_AUTH_TOKEN` / `--auth-token`) and
+  reaches only that credential's sessions. A loopback serve with no
+  credential and no token is unchanged. `ServeOptions` gains a public
+  `credentials: Vec<ServeCredential>` field; code that builds `ServeOptions`
+  with a struct literal must add `credentials: Vec::new()` (`ServeOptions::new`
+  fills it).
 - Minimum supported Rust is now 1.99 (`rust-version = "1.99"` in
   `Cargo.toml`; there was none before), and the crate moves from edition 2021
   to edition 2024. The pinned toolchain moves from 1.97.1 to 1.99.0, and CI and
@@ -130,6 +139,21 @@
   yet enforced for some keys`, and is not logged for a table that sets none
   of them. With several sessions, `--ledger-heartbeat` writes one `stats`
   line per session per interval.
+- The `[serve]` startup notice no longer lists `[[serve.credential]]`, which
+  an HTTP serve enforces (#32, fifth part); a stdio serve authenticates
+  nobody, ignores the credentials and does not read their variables. The
+  notice drops its "this serve still authenticates only with --auth-token"
+  clause.
+- A request whose credential does not reach a session gets the same empty
+  404 as an unhosted session or an unrouted path, whatever state the session
+  is in (#32, fifth part). Before, anyone holding the one token could tell a
+  hosted session that was held elsewhere, detaching or failed (503) from a
+  name the serve did not host (404). The credential is checked in memory
+  before the session is looked up, and no store call is made for a refused
+  request.
+- `LAMBO_AUTH_TOKEN` is now read, and an empty one refused (exit 2), before
+  `lambo serve` builds its backends, so the refusal no longer waits for a
+  model to load.
 - Every `serve --ledger` line now carries `session` (#32). `startup` and
   `lease` lines always did; `call`, `completion` and `stats` lines gain it so
   one ledger file can hold several sessions later. Additive: `v` stays `1`
@@ -316,6 +340,22 @@
   every session concurrently inside the existing budget and releases every
   lease. Credentials per session, on-demand sessions and the operator
   surface come later.
+- Credentials for `lambo serve --transport http` (#32, fifth part).
+  `[[serve.credential]]` entries are enforced: each names the variable
+  holding its token (read at startup; an unset, empty or non-UTF-8 one
+  refuses the start with exit 2 before any backend is built, naming the
+  credential, never a value) and reaches the sessions in its `sessions`
+  and/or `session_prefix`. `--auth-token` / `LAMBO_AUTH_TOKEN` becomes the
+  credential `default`, reaching every pinned session; with no credential at
+  all, a loopback serve keeps answering every request as the implicit
+  `local` credential. A non-loopback bind is satisfied by any credential.
+  The presented token is compared with every configured one in constant
+  time, with no early exit. A configured token equal to the legacy one, or
+  shared by two credentials, refuses the start without quoting either.
+  `lambo::mcp::check_serve_credentials` runs those checks for a library
+  caller. `create`, `erase` and `admin` are parsed and carried, but this
+  release serves pinned sessions only and has no operator surface yet, so
+  none of them changes an answer.
 - `lambo::writeq::EmbedderCalibration` and `MemoryBuilder::calibration`
   (#32, third part): the write queue's startup calibration probe once per
   embedder for the whole process. Builders over one shared embedder that are

@@ -208,7 +208,9 @@ GC also sweeps on time. When `gc_max_interval_secs` has passed since a session's
 
 An HTTP `lambo serve` reads `sessions`, `default_session` and `max_attached`: it pins every session in `sessions` beside its `--session` values, serves `default_session` at `/mcp`, and refuses to start when the pinned sessions together exceed `max_attached` or `default_session` is not one of them (this release serves pinned sessions only). See [Several sessions in one serve](/cli#several-sessions-in-one-serve). A stdio serve owns the one session its `--session` names and ignores `sessions`.
 
-The rest of the table is **parsed and validated only**: the credentials, `[[serve.projects]]`, `attach_concurrency`, `idle_detach_secs` and `per_session_rps` arrive in later releases. A malformed table is still refused when the file is read, so it stops every command, like an unknown key. When the table sets any of those keys (or, for a stdio serve, `default_session`, which a stdio serve does not use yet), `lambo serve` logs one warning at startup (`[serve] is parsed but not yet enforced for some keys`) that names the keys and no value from them.
+An HTTP `lambo serve` also enforces `[[serve.credential]]`; see [Credentials](#credentials). A stdio serve authenticates nobody (its client owns the process), so it ignores the credentials and never reads their variables.
+
+The rest of the table is **parsed and validated only**: `[[serve.projects]]`, `attach_concurrency`, `idle_detach_secs` and `per_session_rps` arrive in later releases. A malformed table is still refused when the file is read, so it stops every command, like an unknown key. When the table sets any of those keys (or, for a stdio serve, `default_session`, which a stdio serve does not use yet), `lambo serve` logs one warning at startup (`[serve] is parsed but not yet enforced for some keys`) that names the keys and no value from them.
 
 ```toml
 [serve]
@@ -249,7 +251,24 @@ erase = true
 
 Every session named in `[serve]` must be addressable by URL: 1 to 128 bytes of `A-Z`, `a-z`, `0-9`, `.`, `_`, `:` and `-`, not starting with `.`. A name outside that rule is refused here, but you can still serve it on its own with `lambo serve --session <name>`, which keeps its looser rule.
 
-A credential never holds its token. `token_env` names the environment variable that does, and the token will be read from it when the server starts (#32 PR 5; nothing reads it in this release). An inline `token = "..."` is refused, and the refusal does not quote it. A credential reaches the sessions in `sessions` (exact names, or `"*"` for every pinned session plus every session under any credential's prefix) and those under `session_prefix` (ids that start with the prefix and are longer than it). It may carry `create` (attach a session that does not exist yet), `erase` and `admin`. The names `default` and `local` are reserved, and `token_env` may not be `LAMBO_AUTH_TOKEN`. `token_env` must be a conventional variable name (`[A-Z_][A-Z0-9_]*`, at most 64 bytes) and must not look like a token (an AWS key id, or a 20-plus character run of letters and digits with no `_`), because it is the key a token is most likely to be pasted into by mistake. A value that fails is refused without being quoted.
+A credential never holds its token. `token_env` names the environment variable that does, and an HTTP `lambo serve` reads it at startup: an unset, empty or non-UTF-8 variable refuses the start (exit `2`, before any model is loaded), naming the credential and the variable and never a value. An inline `token = "..."` is refused, and the refusal does not quote it. A credential reaches the sessions in `sessions` (exact names, or `"*"` for every pinned session plus every session under any credential's prefix) and those under `session_prefix` (ids that start with the prefix and are longer than it). It may carry `create` (attach a session that does not exist yet), `erase` and `admin`. The names `default` and `local` are reserved, and `token_env` may not be `LAMBO_AUTH_TOKEN`. `token_env` must be a conventional variable name (`[A-Z_][A-Z0-9_]*`, at most 64 bytes) and must not look like a token (an AWS key id, or a 20-plus character run of letters and digits with no `_`), because it is the key a token is most likely to be pasted into by mistake. A value that fails is refused without being quoted.
+
+### Credentials
+
+Every HTTP request to `lambo serve` presents a bearer token (`Authorization: Bearer <token>`), and the token decides which sessions the request may reach. The credentials a serve has:
+
+| Configured | Credentials |
+|---|---|
+| nothing, on loopback | One implicit credential, `local`: every request is accepted without a token and reaches every pinned session. This is how a loopback serve has always behaved. |
+| nothing, beyond loopback | None: `lambo serve` refuses to start. |
+| `--auth-token` or `LAMBO_AUTH_TOKEN` | `default`: every pinned session. |
+| `[[serve.credential]]` entries | Each entry, with its own `sessions`, `session_prefix` and flags, beside `default` when a legacy token is set too. |
+
+Once any credential is configured, the implicit `local` credential is gone, so a loopback serve with a `[[serve.credential]]` requires a token on every request. Neither `default` nor `local` carries `create`, `erase` or `admin`. A configured token equal to the legacy one, or two credentials with the same token, refuse the start without quoting either token.
+
+The presented token is compared with every configured token in constant time, so response timing does not say which credential a guess nearly matched. A request without a valid token gets `401`, whatever it asked for. A request with a valid token for a session outside that credential's reach gets the same empty `404` as an unknown session or an unrouted path, whether that session exists, is held by another writer, is being detached or failed, and the serve consults no store to answer it. Only inside its reach can a caller see a `503`. `/mcp` serves the default session to a credential that reaches it.
+
+This release serves pinned sessions only: a session inside a credential's `session_prefix` that is not pinned gets the `404`, even with `create = true`.
 
 ## Environment variables
 
@@ -298,7 +317,7 @@ The HTTP transport binds to `127.0.0.1` on port `7700` and serves Streamable HTT
 
 ### Authentication
 
-On loopback the HTTP transport is unauthenticated by default, so a local client needs no token. Binding anywhere else **fails closed**: `lambo serve` refuses to start unless you configure a bearer token, either with `--auth-token` or the `LAMBO_AUTH_TOKEN` environment variable (which takes precedence over the flag). When a token is configured, every request must send `Authorization: Bearer <token>`. A missing or wrong token is refused with `401`. A set-but-empty `LAMBO_AUTH_TOKEN` is a usage error, not a silent allowance. The token is ignored on `--transport stdio`.
+On loopback the HTTP transport is unauthenticated by default, so a local client needs no token. Binding anywhere else **fails closed**: `lambo serve` refuses to start unless you configure a bearer token, either with `--auth-token` or the `LAMBO_AUTH_TOKEN` environment variable (which takes precedence over the flag), or with a [`[[serve.credential]]`](#credentials). Configuring any credential also ends the unauthenticated loopback default. When a token is configured, every request must send `Authorization: Bearer <token>`. A missing or wrong token is refused with `401`. A set-but-empty `LAMBO_AUTH_TOKEN` is a usage error, not a silent allowance. The token is ignored on `--transport stdio`.
 
 ### Rate limit
 

@@ -206,10 +206,14 @@ url = "http://127.0.0.1:8080"
 # timeout_ms = 5000
 
 # Multi-session serving (#32). Optional; omit the whole section and `lambo
-# serve` behaves exactly as it always has. In this release the table is
-# PARSED AND VALIDATED ONLY: nothing reads it at runtime yet (routing by
-# /mcp/s/{session}, credentials and the bounds arrive in later releases), but
-# a malformed table already stops every command, like any unknown key.
+# serve` behaves exactly as it always has. An HTTP serve pins `sessions`,
+# serves `default_session` at /mcp, enforces `max_attached` and enforces the
+# credentials below: once any credential is configured, every request must
+# present one of their tokens (or LAMBO_AUTH_TOKEN), even on loopback, and
+# reaches only that credential's sessions. A stdio serve ignores the
+# credentials. The cwd map and the on-demand bounds are parsed and validated
+# only (they arrive in later releases); a malformed table stops every
+# command, like any unknown key.
 #
 # Every session named here must be addressable by URL: 1 to 128 bytes of
 # [A-Za-z0-9._:-], not starting with '.'. A name outside that rule can still
