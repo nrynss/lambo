@@ -166,6 +166,15 @@ async fn an_out_of_scope_caller_cannot_tell_any_slot_state_and_costs_no_store_ca
         "{reference:?}"
     );
 
+    // A live MCP session on `auth-live`, opened by `ops` before the window,
+    // for the probes that name one.
+    let (mcp_id, _) = initialize_as(addr, "/mcp/s/auth-live", Some(&bearer("ops"))).await;
+    let live_mcp = [
+        MCP_POST[0],
+        MCP_POST[1],
+        ("Mcp-Session-Id", mcp_id.as_str()),
+    ];
+
     let before = wire.calls.len();
     for method in ["GET", "POST", "DELETE", "PUT"] {
         for path in probes() {
@@ -176,25 +185,64 @@ async fn an_out_of_scope_caller_cannot_tell_any_slot_state_and_costs_no_store_ca
             );
         }
         // The other prefix credentials, for the pinned sessions outside
-        // their scope.
+        // their scope, and for `/mcp` (the default session, `auth-live`,
+        // is outside both prefixes).
         for other in ["app", "maker"] {
-            for id in HOSTED {
+            for path in HOSTED
+                .iter()
+                .map(|id| format!("/mcp/s/{id}"))
+                .chain(["/mcp".to_string()])
+            {
                 assert_eq!(
-                    on_the_wire_as(addr, method, &format!("/mcp/s/{id}"), Some(&bearer(other)))
-                        .await,
+                    on_the_wire_as(addr, method, &path, Some(&bearer(other))).await,
                     reference,
-                    "{other}: {method} {id}"
+                    "{other}: {method} {path}"
                 );
             }
         }
     }
+    // The shapes most likely to reach rmcp or the store if the order
+    // regressed (#32 PR 5 review L5): an `initialize` POST with a real
+    // JSON-RPC body, and requests naming a live MCP session, each against
+    // its own unrouted reference with the same headers and body.
+    for (who, path, headers, body) in [
+        ("scoped", "/mcp/s/auth-held", &MCP_POST[..], INITIALIZE),
+        ("app", "/mcp", &MCP_POST[..], INITIALIZE),
+        ("app", "/mcp/s/auth-live", &live_mcp[..], STATS_CALL),
+        ("scoped", "/mcp/s/auth-detaching", &live_mcp[..], STATS_CALL),
+        ("maker", "/mcp/s/auth-live", &live_mcp[..], ""),
+    ] {
+        for method in ["POST", "GET", "DELETE"] {
+            let auth = bearer(who);
+            let unrouted = on_the_wire_with(
+                addr,
+                method,
+                "/not/routed",
+                "localhost",
+                Some(&auth),
+                headers,
+                body,
+            )
+            .await;
+            assert!(
+                unrouted.starts_with("HTTP/1.1 404 Not Found\r\n"),
+                "{unrouted}"
+            );
+            assert_eq!(
+                on_the_wire_with(addr, method, path, "localhost", Some(&auth), headers, body).await,
+                unrouted,
+                "{who}: {method} {path} with {headers:?}"
+            );
+        }
+    }
     // A live session's own background (its lease heartbeat) may tick in
-    // the window; nothing a refused request does may reach the store.
+    // the window; nothing a refused request does may reach the store, so
+    // only that session's own `refresh_lease` is exempt.
     let during: Vec<_> = wire
         .calls
         .since(before)
         .into_iter()
-        .filter(|(method, _)| *method != "refresh_lease")
+        .filter(|(method, session)| !(*method == "refresh_lease" && session == LIVE))
         .collect();
     assert!(
         during.is_empty(),
@@ -279,7 +327,7 @@ async fn a_create_less_credential_is_refused_on_an_absent_session_and_served_on_
             .calls
             .since(before)
             .into_iter()
-            .filter(|(method, _)| *method != "refresh_lease")
+            .filter(|(method, session)| !(*method == "refresh_lease" && session == LIVE))
             .collect();
         assert!(during.is_empty(), "{who}: {during:?}");
     }
