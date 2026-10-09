@@ -1,11 +1,12 @@
 //! `[serve]` in `lambo.toml`: multi-session serving (#32 PR 1).
 //!
-//! This PR parses and validates the table and resolves credential tokens from
-//! the environment. **Nothing reads it at runtime yet**: a `lambo serve` with
-//! or without a `[serve]` table behaves exactly as it did before. PR 4 builds
-//! the session registry from `sessions` / `default_session`, PR 5 enforces
-//! `[[serve.credential]]`, PR 6 the bounds, PR 8 the `[[serve.projects]]` cwd
-//! map. See the approved design, issue #32, sections 6.1 and 7.1.
+//! PR 1 parses and validates the table and resolves credential tokens from
+//! the environment. PR 8 reads `default_session` and the `[[serve.projects]]`
+//! cwd map to choose a stdio serve's session when `--session` is absent (see
+//! [`ServeConfig::select_stdio_session`]); **nothing else reads it at runtime
+//! yet**. PR 4 builds the session registry from `sessions` /
+//! `default_session`, PR 5 enforces `[[serve.credential]]`, PR 6 the bounds.
+//! See the approved design, issue #32, sections 2.2, 6.1 and 7.1.
 //!
 //! ```toml
 //! [serve]
@@ -67,6 +68,9 @@ use crate::surface::session::{
 };
 use crate::types::LamboError;
 
+mod projects;
+pub use projects::{SelectedSession, SessionSelectionError, SessionSource, SESSION_REQUIRED};
+
 /// Default cap on attached sessions, pinned plus on-demand (#32 §3.6).
 pub const DEFAULT_MAX_ATTACHED: usize = 16;
 
@@ -123,12 +127,13 @@ pub struct ServeConfig {
 }
 
 /// One `[[serve.projects]]` entry: a stdio serve whose canonical cwd is under
-/// `path` (longest prefix wins) uses `session` (#32 §2.2). Resolved by PR 8;
-/// here it is only parsed and validated.
+/// `path` (longest prefix wins) uses `session` (#32 §2.2). Resolved by
+/// [`ServeConfig::select_stdio_session`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectConfig {
-    /// A directory. `~` is expanded when the map is resolved (PR 8).
+    /// A directory: absolute, `~` or `~/...`. `~` is expanded to `$HOME` and
+    /// the result canonicalized when the map is resolved.
     pub path: String,
     /// The session a stdio serve started under `path` uses.
     pub session: String,
@@ -213,21 +218,37 @@ fn addressed(field: &str, value: &str) -> Result<AddressedSessionId, LamboError>
     })
 }
 
-/// What `lambo serve` logs once at startup when the file has a non-empty
-/// `[serve]` table: until #32's later PRs nothing reads it, and an operator who
-/// configured credentials must not think scoping is active. It quotes no value
-/// from the table.
+/// What `lambo serve` logs once at startup when the file's `[serve]` table
+/// sets anything beyond the stdio session selection: until #32's later PRs
+/// nothing else reads it, and an operator who configured credentials must not
+/// think scoping is active. It quotes no value from the table.
+/// `default_session` and `[[serve.projects]]` are read (PR 8) to choose a
+/// stdio serve's session when `--session` is absent.
 pub const SERVE_UNENFORCED_NOTICE: &str = "lambo.toml [serve] is parsed but not yet enforced \
-     in this release: its sessions, credentials and limits have no effect yet (#32), and this \
-     serve still authenticates only with --auth-token / LAMBO_AUTH_TOKEN";
+     in this release beyond choosing a stdio serve's session (default_session, \
+     [[serve.projects]]): its pinned sessions, credentials and limits have no effect yet (#32), \
+     and this serve still authenticates only with --auth-token / LAMBO_AUTH_TOKEN";
 
 impl ServeConfig {
-    /// Log [`SERVE_UNENFORCED_NOTICE`] once if this table is not empty.
-    /// `lambo serve` calls it at startup; it never quotes a value.
+    /// Log [`SERVE_UNENFORCED_NOTICE`] once if this table sets anything not
+    /// yet enforced, that is anything but `default_session` and
+    /// `[[serve.projects]]`. `lambo serve` calls it at startup; it never
+    /// quotes a value.
     pub fn warn_if_unenforced(&self) {
-        if !self.is_empty() {
+        if self.has_unenforced_keys() {
             tracing::warn!("{SERVE_UNENFORCED_NOTICE}");
         }
+    }
+
+    /// Does this table set a key nothing enforces yet? `default_session` and
+    /// `[[serve.projects]]` are enforced (stdio session selection, PR 8).
+    pub fn has_unenforced_keys(&self) -> bool {
+        let rest = Self {
+            default_session: None,
+            projects: Vec::new(),
+            ..self.clone()
+        };
+        !rest.is_empty()
     }
 
     /// Is this the empty table (equivalently: no `[serve]` in the file)?
@@ -301,6 +322,7 @@ impl ServeConfig {
             if project.path.trim().is_empty() {
                 return Err(serve_err("a [[serve.projects]] entry has an empty path"));
             }
+            projects::check_project_path(&project.path)?;
             addressed("[[serve.projects]] session", &project.session)?;
             if !paths.insert(project.path.as_str()) {
                 return Err(serve_err(format!(
