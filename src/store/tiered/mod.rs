@@ -122,7 +122,7 @@ use crate::store::lease::{LeaseHolder, LeaseInfo, LeaseOutcome, LeaseRefusal, LE
 use crate::store::vector_source::{ensure_is_an_embedding, rank_by_cosine, VectorCandidateSource};
 use crate::store::{
     validate_vector_candidate_limit, Capabilities, EraseOutcome, GraphStore, RecallBackfillReport,
-    SessionFlushStats,
+    SessionFlushStats, MAX_VECTOR_CANDIDATE_LIMIT,
 };
 use crate::types::{
     tie_break_by_key, CanonizationEvent, Concept, EmbeddingContract, GraphSnapshot,
@@ -171,6 +171,13 @@ pub(crate) const RELEASE_GRACE: Duration = Duration::from_secs(10);
 
 /// Extra neighbours fetched beyond `limit`, so the exact re-rank decides the
 /// last places rather than the engine's approximate order (M3).
+///
+/// Every fetched hit carries its stored vector (the re-rank needs all of
+/// them), so a read's response is about `fetch * dim` floats as JSON text,
+/// roughly 10 bytes each. `fetch` is `limit + KNN_OVERFETCH` capped at
+/// [`MAX_VECTOR_CANDIDATE_LIMIT`] (#18 review F7): at 1024 dimensions,
+/// about 0.7 MB for a limit of 50 and at most about 20 MB at the cap, where
+/// the last places are the engine's order.
 pub(crate) const KNN_OVERFETCH: usize = 16;
 
 /// Delete-by-query passes before a sweep gives up on documents that keep
@@ -1334,7 +1341,7 @@ impl VectorCandidateSource for TieredStore {
                 .fallback(session, probe, expected_contract, limit)
                 .await;
         }
-        let fetch = limit.saturating_add(KNN_OVERFETCH);
+        let fetch = knn_fetch(limit);
         let read = tokio::time::timeout(
             self.read_deadline,
             self.recall.knn(expected_contract, session, probe, fetch),
@@ -1365,6 +1372,14 @@ impl VectorCandidateSource for TieredStore {
         };
         Ok(rerank(probe, &hits, limit))
     }
+}
+
+/// How many neighbours a read of `limit` asks the index for: see
+/// [`KNN_OVERFETCH`] for the response size this bounds.
+fn knn_fetch(limit: usize) -> usize {
+    limit
+        .saturating_add(KNN_OVERFETCH)
+        .min(MAX_VECTOR_CANDIDATE_LIMIT.max(limit))
 }
 
 /// Rank the index's hits exactly (#18 review M3).

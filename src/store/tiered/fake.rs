@@ -91,6 +91,8 @@ pub(crate) struct FakeIndex {
     /// The next bulk call panics (a bug inside a repair task).
     pub panic_next_bulk: AtomicBool,
     pub knn_calls: AtomicUsize,
+    /// The `k` of the last kNN query.
+    pub last_knn_k: AtomicUsize,
     pub bulk_calls: AtomicUsize,
     pub delete_calls: AtomicUsize,
     pub refresh_calls: AtomicUsize,
@@ -389,6 +391,7 @@ impl RecallIndex for FakeIndex {
     ) -> Result<Vec<KnnHit>, StoreError> {
         self.check_up()?;
         self.knn_calls.fetch_add(1, Ordering::SeqCst);
+        self.last_knn_k.store(k, Ordering::SeqCst);
         Self::stall(&self.delay_knn_ms).await;
         if self.knn_down.load(Ordering::SeqCst) {
             return Err(StoreError::Backend("recall index: search timed out".into()));

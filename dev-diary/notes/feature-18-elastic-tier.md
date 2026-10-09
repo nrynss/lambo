@@ -264,6 +264,10 @@ without it (against the previous commit, or with the fix mutated out).
   against a 9.2 cluster here) keeps the engine's score, unquantized under the pinned
   mapping. The remaining divergence is the approximate pool: HNSW can miss a
   near neighbour an exact scan finds. Documented next to the refresh lag.
+  The fetch is capped at `MAX_VECTOR_CANDIDATE_LIMIT` (2048, F7), which
+  bounds a response at about `2048 * dim` floats as JSON (~20 MB at 1024
+  dims, ~0.7 MB at limit 50); vectors are needed for every fetched hit, so
+  the cap, not a narrower vector window, is the bound.
 - **M4, a marker ahead of the load was repaired from.** The marker is
   compared three ways. Behind: a holder repairs. Ahead: re-load and
   re-check, never repair; still ahead, the session stays `Unknown`. A repair

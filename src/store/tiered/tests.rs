@@ -1167,6 +1167,35 @@ async fn releasing_the_lease_abandons_a_stuck_repair_after_the_grace() {
     assert!(fake.live(&sid).contains_key(&c2.0.to_string()));
 }
 
+/// F7: every fetched hit carries its stored vector, so the over-fetch is
+/// what bounds a read's response. It stays `limit + 16` for ordinary limits
+/// and never exceeds the store-wide candidate limit.
+#[tokio::test]
+async fn the_overfetch_never_exceeds_the_candidate_limit() {
+    let (primary, fake) = (memory_primary(), Arc::new(FakeIndex::new()));
+    let store = tier(&primary, &fake);
+    let sid = SessionId::new("fetch-bound");
+    let token = attach(&store, &sid, &holder("w")).await;
+    let (_, b) = seed_batch(&sid, 1);
+    store.flush(&b, Some(token)).await.unwrap();
+    let asked = |limit| {
+        let store = &store;
+        let sid = &sid;
+        let fake = &fake;
+        async move {
+            store
+                .vector_candidates_checked(sid, &PROBE, &contract(), limit)
+                .await
+                .unwrap();
+            fake.last_knn_k.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    };
+    assert_eq!(asked(5).await, 5 + super::KNN_OVERFETCH);
+    let max = crate::store::MAX_VECTOR_CANDIDATE_LIMIT;
+    assert_eq!(asked(max).await, max);
+    assert_eq!(asked(max - 4).await, max);
+}
+
 /// A query-side failure on an in-sync session serves that read from the
 /// primary.
 #[tokio::test]
