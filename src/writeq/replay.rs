@@ -239,6 +239,7 @@ impl WritePipeline {
                     interaction: intent.interaction,
                     bytes: 0,
                     payload: JobPayload::from_intent_payload(intent.payload),
+                    admitted: tokio::time::Instant::now(),
                 };
                 let stamp = ConsumeStamp {
                     tag: "applied_after_restart",

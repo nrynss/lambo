@@ -834,3 +834,85 @@ async fn a_hybrid_record_action_on_a_store_without_vector_search_embeds_nothing(
         "the stamp is untouched"
     );
 }
+
+// -- the write queue's probe embeds what a derive embeds (#11) -----------
+
+/// An embedder that records every text it is asked to embed.
+#[derive(Debug)]
+struct RecordingEmbedder {
+    inner: FixtureEmbedder,
+    texts: parking_lot::Mutex<Vec<String>>,
+}
+
+#[async_trait]
+impl Embedder for RecordingEmbedder {
+    fn dimensions(&self) -> usize {
+        self.inner.dimensions()
+    }
+    async fn embed(&self, text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
+        self.texts.lock().push(text.to_string());
+        self.inner.embed(text).await
+    }
+}
+
+/// **The calibration probe embeds exactly what a real derive of its
+/// concepts embeds** (#11 review P3-7).
+///
+/// The probe's representative write exists so `probe_optimism` compares a
+/// write with a write. The test beside the probe compared the probe's texts
+/// with the framing helpers the probe itself calls, which proves the probe
+/// uses the helpers and not that a derive embeds that. This one runs the
+/// probe's own concepts through a real hybrid derive, through the write
+/// queue, and compares what the embedder was asked to embed.
+#[tokio::test]
+async fn a_real_derive_of_the_probes_concepts_embeds_the_probes_texts() {
+    let inner = Arc::new(MemoryStore::new());
+    let embedder = Arc::new(RecordingEmbedder {
+        inner: FixtureEmbedder::new(),
+        texts: parking_lot::Mutex::new(Vec::new()),
+    });
+    let agent = AgentId::new("agent-a");
+    let mem = Memory::builder()
+        .session("probe-is-a-derive")
+        .agent("agent-a")
+        .flush_interval(Duration::from_secs(3_600))
+        .store(Arc::new(super::replay::VectorSearchable(inner)) as Arc<dyn GraphStore>)
+        .embedder(embedder.clone() as Arc<dyn Embedder>)
+        .embedding_contract(contract("fixture", 1024))
+        .match_strategy(MatchStrategy::Hybrid)
+        .build()
+        .await
+        .expect("build");
+    // The probe embeds through the same embedder; let it finish first.
+    for _ in 0..2_000 {
+        if mem.pipeline().calibration().is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    assert!(mem.pipeline().calibration().is_some(), "the probe landed");
+    embedder.texts.lock().clear();
+
+    let concepts = crate::writeq::probe_write_concepts();
+    let typed: Vec<(&str, ConceptType)> = concepts
+        .iter()
+        .map(|c| (c.as_str(), ConceptType::Logic))
+        .collect();
+    let submitted = mem
+        .derive_async_as(&agent, &typed, &ParentOf::none(), None)
+        .await
+        .expect("ack");
+    let answer = mem
+        .pipeline()
+        .wait(&agent, submitted.receipt, crate::writeq::RECEIPT_WAIT_MAX)
+        .await;
+    assert_eq!(answer.tag(), "applied", "{answer:?}");
+
+    let embedded = embedder.texts.lock().clone();
+    assert_eq!(
+        embedded,
+        crate::writeq::probe_write_contexts(),
+        "the probe's representative write must embed what a derive of its concepts embeds"
+    );
+    mem.close().await.expect("close");
+}

@@ -808,8 +808,10 @@ async fn the_ack_lands_before_the_embedder_is_called() {
         "pending",
         "an ack that had waited for the embedder would already be settled"
     );
-    // Release it and confirm it lands.
-    gate.add_permits(8);
+    // Release it and confirm it lands. Enough permits for whatever is left
+    // of the probe (parked ahead of the write on this FIFO gate) and the
+    // write itself: the probe is PROBE_EMBEDS embeds in all (#11).
+    gate.add_permits(crate::writeq::PROBE_EMBEDS + 8);
     let answer = s
         .mem
         .pipeline()

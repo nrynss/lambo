@@ -336,11 +336,23 @@ fn note_fallback_logged(session: &SessionId) -> bool {
 /// `ContextTolerantEmbedder` that strips the framing before delegating. No such
 /// wrapper exists (or should exist) in production; anything relying on it is testing
 /// the wrapper, not the product.
-fn context_text(content: &str, origin: Option<&str>) -> String {
+pub(crate) fn context_text(content: &str, origin: Option<&str>) -> String {
     match origin.map(str::trim).filter(|s| !s.is_empty()) {
         Some(origin) => format!("{content} — {origin}"),
         None => format!("Concept: {content}"),
     }
+}
+
+/// The interaction prompt a derive opens: its concepts' contents joined by
+/// `"; "`. It is the origin [`context_text`] frames every concept of the call
+/// with, so each concept's embed carries the whole call's text, and the bytes a
+/// `k`-concept derive embeds grow as about `(k + 1)` times its concept bytes.
+///
+/// One function for the derive paths and for the write queue's calibration
+/// probe (#11), which times a representative write by embedding exactly what
+/// a derive of that shape embeds.
+pub(crate) fn derive_prompt<'a>(contents: impl IntoIterator<Item = &'a str>) -> String {
+    contents.into_iter().collect::<Vec<_>>().join("; ")
 }
 
 /// The exact byte length of [`context_text`]`(content, origin)`, without

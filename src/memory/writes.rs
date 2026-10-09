@@ -215,11 +215,7 @@ impl Memory {
         // Held across every await below, so a concurrent `close()` either
         // waits for this whole derive or refuses it (T81-1).
         let _writing = self.begin_write().await?;
-        let prompt = concepts
-            .iter()
-            .map(|(content, _)| *content)
-            .collect::<Vec<_>>()
-            .join("; ");
+        let prompt = hybrid::derive_prompt(concepts.iter().map(|(content, _)| *content));
         let interaction = self.begin_interaction_full(agent, Some(prompt), event_time)?;
 
         let outcome = match self.config.match_strategy {
@@ -465,11 +461,7 @@ impl Memory {
                 }
             }
         }
-        let prompt = concepts
-            .iter()
-            .map(|(content, _)| *content)
-            .collect::<Vec<_>>()
-            .join("; ");
+        let prompt = hybrid::derive_prompt(concepts.iter().map(|(content, _)| *content));
         let interaction = self.begin_interaction_full(agent, Some(prompt), event_time)?;
         Ok(self
             .pipeline
