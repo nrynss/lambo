@@ -904,7 +904,8 @@ impl EmbedderProbe {
                 // deleted. Provenance first now, rates second, and neither line
                 // claims a bound was measured.
                 (true, Some(rate)) => tracing::info!(
-                    scope = %scope,
+                    scope = %scope.kind(),
+                    session = %scope.session(),
                     items_per_sec = rate,
                     serial_items_per_sec = calibration.serial_items_per_sec,
                     bound = calibration.bound,
@@ -920,7 +921,8 @@ impl EmbedderProbe {
                 // #11 review P2-2: the serial legs landed and the concurrent
                 // one ran out of budget.
                 (true, None) => tracing::info!(
-                    scope = %scope,
+                    scope = %scope.kind(),
+                    session = %scope.session(),
                     serial_items_per_sec = calibration.serial_items_per_sec,
                     concurrency = PROBE_CONCURRENCY,
                     "write queue: bounds are static (lane {}, queue {}) and no rate moves them; \
@@ -937,7 +939,8 @@ impl EmbedderProbe {
                 // #11 review P3-6: name what actually failed, and which
                 // budget ran out when one did.
                 (false, _) => tracing::warn!(
-                    scope = %scope,
+                    scope = %scope.kind(),
+                    session = %scope.session(),
                     bound = calibration.bound,
                     "write queue: the embedder could not be probed: {}. There is no probe rate \
                      telemetry for {} and lambo_stats reports write_queue_measured=false. \
@@ -981,33 +984,44 @@ impl EmbedderProbe {
 
 /// Whose probe a probe is, for its log lines (#32 PR 3).
 ///
-/// A pipeline's own probe names its session, as it always has. A shared
-/// probe measures an embedder every session in the process may be using, so
-/// naming the session whose attach happened to spawn it would misattribute
-/// it.
+/// Logged as two plain fields (review P3-4): `scope=session` or
+/// `scope=process`, and `session=<id>`. A pipeline's own probe names its
+/// session, as it always has. A shared probe measures an embedder every
+/// session in the process may be using, so `scope=process` says the figure
+/// is not that session's alone, and `session` names the session whose
+/// attach started the probe (in a one-session `lambo serve`, its session,
+/// as before PR 3).
 #[derive(Clone, Debug)]
 pub(crate) enum ProbeScope {
     /// The probe of one pipeline built without an [`EmbedderCalibration`].
     Session(SessionId),
-    /// The probe of a process-wide [`EmbedderCalibration`].
-    Process,
+    /// The probe of a process-wide [`EmbedderCalibration`], started by the
+    /// attach of `trigger`.
+    Process { trigger: SessionId },
 }
 
 impl ProbeScope {
+    /// The `scope` field: a bare word, so a `key=value` parser reads it whole.
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Session(_) => "session",
+            Self::Process { .. } => "process",
+        }
+    }
+
+    /// The `session` field: the probe's session, or the one whose attach
+    /// started a process-wide probe.
+    fn session(&self) -> &SessionId {
+        match self {
+            Self::Session(session) | Self::Process { trigger: session } => session,
+        }
+    }
+
     /// Who goes without probe telemetry when the probe fails.
     fn telemetry_owner(&self) -> String {
         match self {
             Self::Session(session) => format!("session {session}"),
-            Self::Process => "any session using this embedder in this process".to_string(),
-        }
-    }
-}
-
-impl fmt::Display for ProbeScope {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Session(session) => write!(f, "session {session}"),
-            Self::Process => f.write_str("process"),
+            Self::Process { .. } => "any session using this embedder in this process".to_string(),
         }
     }
 }
@@ -1039,7 +1053,7 @@ impl PipelineProbe {
     ) -> Self {
         match calibration {
             Some(calibration) => Self::Shared {
-                probe: calibration.probe_for(embedder),
+                probe: calibration.probe_for(embedder, session),
                 _calibration: calibration.clone(),
             },
             None => Self::Owned(EmbedderProbe::spawn(
@@ -1135,8 +1149,13 @@ impl EmbedderCalibration {
         Self::default()
     }
 
-    /// `embedder`'s probe, spawned on first use.
-    pub(crate) fn probe_for(&self, embedder: &Arc<dyn Embedder>) -> Arc<EmbedderProbe> {
+    /// `embedder`'s probe, spawned on first use (by the attach of `session`,
+    /// which its log lines name).
+    pub(crate) fn probe_for(
+        &self,
+        embedder: &Arc<dyn Embedder>,
+        session: &SessionId,
+    ) -> Arc<EmbedderProbe> {
         let mut probes = self.inner.probes.lock();
         // An entry whose embedder is gone can never be asked for again (no
         // `Arc` to it exists), and its probe task, which held the embedder,
@@ -1151,7 +1170,9 @@ impl EmbedderCalibration {
         }
         let probe = Arc::new(EmbedderProbe::spawn(
             Arc::clone(embedder),
-            ProbeScope::Process,
+            ProbeScope::Process {
+                trigger: session.clone(),
+            },
         ));
         probes.push(SharedProbe {
             embedder: Arc::downgrade(embedder),

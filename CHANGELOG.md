@@ -64,11 +64,13 @@
 ### Changed
 
 - The write queue's probe log lines (`write queue: bounds are static ...`
-  and `the embedder could not be probed`) carry `scope=session <id>` or
-  `scope=process` instead of `session=<id>` (#32). `lambo serve`'s probe is
-  process-wide now, so naming the session whose attach happened to start it
-  would misattribute it. A log filter on `session=` for these lines must
-  match `scope=` instead.
+  and `the embedder could not be probed`) gain a `scope` field, `session`
+  or `process`, beside the `session=<id>` they already carried (#32).
+  `lambo serve`'s probe is process-wide now: with `scope=process` the
+  figures are the embedder's for every session in the process, and
+  `session` names the session whose attach started the probe (in a
+  one-session serve, its session, as before). The failure warning says
+  who goes without probe telemetry. Filters on `session=` keep matching.
 - `lambo.toml` parse errors no longer quote the offending line. They give
   the parser's message and a line and column instead, so a misspelled key
   next to a secret (a DSN with a password, say) no longer prints the secret

@@ -1,6 +1,7 @@
 //! #32 PR 3: the write queue's calibration probe, shared process-wide
 //! through an [`EmbedderCalibration`] passed to [`MemoryBuilder`].
 
+use super::attach::strip_ansi;
 use super::*;
 use crate::writeq::EmbedderCalibration;
 
@@ -298,6 +299,48 @@ async fn one_calibration_keeps_a_probe_per_embedder() {
     assert_eq!(first.calls(), crate::writeq::PROBE_EMBEDS);
     assert_eq!(second.calls(), crate::writeq::PROBE_EMBEDS);
     for mem in [a, b] {
+        mem.close().await.expect("close");
+    }
+}
+
+/// Review P3-4: the probe's log line carries `scope` as one bare word and
+/// the session as its own field, so a `key=value` parser reads both whole.
+/// An owned probe is `scope=session`; a shared one is `scope=process` and
+/// still names the session whose attach started it (one-session `lambo
+/// serve` keeps the `session=` it logged before PR 3).
+#[tokio::test]
+async fn the_probe_line_names_its_scope_and_session_as_plain_fields() {
+    let (logs, _guard) = capture_logs(tracing::Level::INFO);
+    let own = open("cal-log-own", CountingEmbedder::new(), None).await;
+    probe_landed(&own).await;
+    let calibration = EmbedderCalibration::new();
+    let shared = open(
+        "cal-log-shared",
+        CountingEmbedder::new(),
+        Some(&calibration),
+    )
+    .await;
+    probe_landed(&shared).await;
+
+    let logged = strip_ansi(&logs.contents());
+    let probe_line = |session: &str| {
+        logged
+            .lines()
+            .find(|l| l.contains("write queue: bounds are static") && l.contains(session))
+            .unwrap_or_else(|| panic!("no probe line for {session}: {logged}"))
+            .to_string()
+    };
+    let own_line = probe_line("cal-log-own");
+    assert!(
+        own_line.contains("scope=session session=cal-log-own "),
+        "{own_line}"
+    );
+    let shared_line = probe_line("cal-log-shared");
+    assert!(
+        shared_line.contains("scope=process session=cal-log-shared "),
+        "{shared_line}"
+    );
+    for mem in [own, shared] {
         mem.close().await.expect("close");
     }
 }
