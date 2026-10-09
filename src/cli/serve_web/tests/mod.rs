@@ -103,6 +103,7 @@ mod recall;
 mod routes;
 mod session;
 mod shutdown;
+mod views;
 
 /// Every path `router` answers. The read-only method sweep iterates this,
 /// and `routes_constant_covers_every_registered_route` proves it is not
