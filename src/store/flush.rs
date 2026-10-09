@@ -205,6 +205,12 @@ struct Shared {
     /// permit here; the loop's `biased;` `select!` polls it FIRST and, when it
     /// fires, re-appends `pending` to the front of the graph log and exits.
     stop: Arc<tokio::sync::Notify>,
+    /// Test-only, one-shot pause right after a cycle's drain (the guard
+    /// dropped, before anything else runs): the loop signals the first
+    /// `Notify` and waits on the second, so a test can observe the stats in
+    /// the window between the drain and the rest of the cycle.
+    #[cfg(test)]
+    drain_pause: Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
 }
 
 impl Shared {
@@ -218,6 +224,8 @@ impl Shared {
             degraded: AtomicBool::new(false),
             dead_lettered: AtomicU64::new(0),
             stop: Arc::new(tokio::sync::Notify::new()),
+            #[cfg(test)]
+            drain_pause: Mutex::new(None),
         }
     }
 
@@ -640,8 +648,24 @@ impl FlushLoop {
                     self.pending.mutations.extend(accesses);
                 }
             }
+
+            // Publish the new depth BEFORE the write lock drops, so the drain
+            // and the depth that counts it are one atomic step for anyone who
+            // reads both under the graph lock (`Memory::stats`). Refreshing it
+            // after the guard died left a window where the log read empty and
+            // `depth` still held the previous poll's figure, so
+            // `log_depth + flush_depth` under-reported by what was just drained
+            // and a dirty session could read as clean. One atomic store under
+            // a lock the drain already holds: nothing added to the write path.
+            self.shared
+                .depth
+                .store(self.pending.len() + graph.log_len(), Ordering::Release);
         }
 
+        #[cfg(test)]
+        self.pause_after_drain().await;
+
+        // Writes may have landed since the guard dropped; they only add.
         self.refresh_depth();
         if self.pending.is_empty() {
             // Nothing drained and nothing held: the store holds every
@@ -914,6 +938,17 @@ impl FlushLoop {
     fn clear_pending(&mut self) {
         self.pending.mutations.clear();
         self.holds_accesses = false;
+    }
+
+    /// Test hook: see `Shared::drain_pause`. The guard is taken and dropped in
+    /// its own statement, never held across the `.await`.
+    #[cfg(test)]
+    async fn pause_after_drain(&self) {
+        let pause = self.shared.drain_pause.lock().take();
+        if let Some((reached, resume)) = pause {
+            reached.notify_one();
+            resume.notified().await;
+        }
     }
 
     /// depth = pending batch + in-graph log (everything not yet durable).
@@ -1652,6 +1687,56 @@ mod tests {
             "lag reset after success"
         );
         assert!(!task.degraded());
+    }
+
+    /// The drain and the depth that counts it are one step for a reader that
+    /// takes the graph lock (as `Memory::stats` does): paused right after the
+    /// drain, before the cycle's own refresh, the log reads empty and
+    /// `depth` must already hold the drained mutations. It used to hold the
+    /// previous poll's figure there, so `log_depth + flush_depth` read 0 for a
+    /// session with 3 mutations not yet durable.
+    #[tokio::test(start_paused = true)]
+    async fn depth_counts_a_drain_before_the_graph_lock_drops() {
+        let store: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+        let graph = new_graph();
+        let task = FlushTask::new(
+            graph.clone(),
+            store,
+            params(Duration::from_secs(3_600), 100, 3, 1_000),
+        );
+        let reached = Arc::new(tokio::sync::Notify::new());
+        let resume = Arc::new(tokio::sync::Notify::new());
+        let _handle = task.spawn();
+        let_task_arm().await;
+        // What `Memory::stats` reports: the log length and the flush depth,
+        // both read under one graph read lock.
+        let observe = || {
+            let g = graph.read();
+            let fs = task.stats();
+            (g.log_len(), fs.depth)
+        };
+        assert_eq!(observe(), (0, 0));
+
+        let iid = add_interaction(&graph, 1, None);
+        add_concept(&graph, 1, iid); // 3 mutations, after the last refresh
+        let (log, depth) = observe();
+        assert_eq!(log, 3);
+        assert!(log + depth >= 3 && log.max(depth) == 3, "{log} + {depth}");
+
+        *task.shared.drain_pause.lock() = Some((reached.clone(), resume.clone()));
+        tokio::time::advance(POLL_QUANTUM).await;
+        reached.notified().await;
+        let (log, depth) = observe();
+        assert_eq!(log, 0, "the poll drained the log into pending");
+        assert_eq!(
+            depth, 3,
+            "the drained mutations are counted before the graph lock drops"
+        );
+
+        resume.notify_one();
+        wait_until(|| task.stats().depth == 3 && graph.read().log_len() == 0).await;
+        let (log, depth) = observe();
+        assert_eq!((log, depth), (0, 3), "early poll: below max_batch, held");
     }
 
     /// T85-3: the writer's `FlushTask` publishes its flush stats into the

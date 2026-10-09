@@ -68,13 +68,27 @@ pub(super) fn bearer_ok(header: Option<&str>, expected: &AuthToken) -> bool {
 
 /// Resolve the effective token from the flag and the environment (env wins).
 ///
-/// Mirrors `mcp::serve::resolve_auth_token`: a set-but-empty env var is an
-/// error rather than a silent fallback to the flag.
+/// Mirrors `mcp::serve::resolve_auth_token`: a set-but-empty env var, or
+/// one that is not valid UTF-8, is an error rather than a silent fallback
+/// to the flag (the error names the variable, never its value).
 pub(super) fn resolve_auth_token(flag: Option<AuthToken>) -> Result<Option<AuthToken>, CliError> {
-    match std::env::var(AUTH_TOKEN_ENV).ok() {
-        Some(raw) => AuthToken::new(raw)
-            .map(Some)
-            .map_err(|e| CliError::Usage(format!("{AUTH_TOKEN_ENV}: {e}"))),
+    resolve_auth_token_from(flag, std::env::var_os(AUTH_TOKEN_ENV))
+}
+
+/// [`resolve_auth_token`] over a given value of the variable.
+pub(super) fn resolve_auth_token_from(
+    flag: Option<AuthToken>,
+    env: Option<std::ffi::OsString>,
+) -> Result<Option<AuthToken>, CliError> {
+    match env {
+        Some(raw) => {
+            let raw = raw
+                .into_string()
+                .map_err(|_| CliError::Usage(format!("{AUTH_TOKEN_ENV}: is not valid UTF-8")))?;
+            AuthToken::new(raw)
+                .map(Some)
+                .map_err(|e| CliError::Usage(format!("{AUTH_TOKEN_ENV}: {e}")))
+        }
         None => Ok(flag),
     }
 }

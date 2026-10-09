@@ -19,7 +19,7 @@ use crate::mcp::serve::pinned::check_pinned;
 use crate::mcp::serve::registry::{
     is_transient, Acquired, LeaseLossPolicy, SessionAttacher, SessionRegistry, PINNED_RETRY,
 };
-use crate::mcp::serve::transport::session_router;
+use crate::mcp::serve::session::HostCheck;
 use crate::store::{GraphStore, MemoryStore, StoreConfig};
 use crate::types::EmbeddingContract;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -82,11 +82,34 @@ async fn attach_or_hold(registry: &Arc<SessionRegistry>, id: &str) {
 }
 
 /// A `DetachSession` (or, for one, `ExitProcess`) registry over `backends`
-/// hosting `sessions`, nothing attached yet.
+/// hosting `sessions`, nothing attached yet, whose sessions keep rmcp's
+/// loopback `Host` check (the implicit `local` credential's).
 fn new_registry(
     sessions: &[&str],
     backends: ResolvedBackends,
     max_sessions: usize,
+) -> Arc<SessionRegistry> {
+    new_registry_with(sessions, backends, max_sessions, HostCheck::Loopback)
+}
+
+/// [`new_registry`] with the sessions' `Host` check given (#32 PR 5 review
+/// M1: a serve whose every request presents a bearer accepts any `Host`).
+fn new_registry_with(
+    sessions: &[&str],
+    backends: ResolvedBackends,
+    max_sessions: usize,
+    host_check: HostCheck,
+) -> Arc<SessionRegistry> {
+    new_registry_ledgered(sessions, backends, max_sessions, host_check, None)
+}
+
+/// [`new_registry_with`] whose sessions append to `ledger`.
+fn new_registry_ledgered(
+    sessions: &[&str],
+    backends: ResolvedBackends,
+    max_sessions: usize,
+    host_check: HostCheck,
+    ledger: Option<Arc<crate::ledger::Ledger>>,
 ) -> Arc<SessionRegistry> {
     let opts = ServeOptions::new(sessions[0], "agent-a");
     let early = EarlyShutdown::unarmed();
@@ -106,8 +129,9 @@ fn new_registry(
         Some(SessionAttacher {
             template,
             store_cfg,
-            ledger: None,
+            ledger,
             max_sessions,
+            host_check,
             agent: "agent-a".into(),
         }),
         early,
@@ -116,14 +140,31 @@ fn new_registry(
 
 /// Serve `registry` behind the real guards on a loopback port.
 async fn serve_router(registry: &Arc<SessionRegistry>, max_sessions: usize) -> SocketAddr {
-    let guard = HttpGuard {
-        auth: None,
+    // The implicit `local` credential: a loopback serve with none configured.
+    let mut opts = ServeOptions::new(registry.hosted()[0].as_str(), "agent-a");
+    opts.sessions = registry.hosted().to_vec();
+    opts.transport = Transport::Http;
+    serve_app(guarded_app(
+        Arc::clone(registry),
+        authority_for(&opts),
         max_sessions,
-        live: registry.clone(),
-        rate: None,
-    };
-    let app = session_router(Arc::clone(registry))
-        .layer(axum::middleware::from_fn_with_state(guard, guard_request));
+    ))
+    .await
+}
+
+/// The serve's app over `registry` with `authority`, behind the real
+/// guards with no rate limit.
+fn guarded_app(
+    registry: Arc<SessionRegistry>,
+    authority: Arc<ServeAuthority>,
+    max_sessions: usize,
+) -> axum::Router {
+    let guard = HttpGuard::new(Arc::clone(&authority), max_sessions, registry.clone(), 0);
+    crate::mcp::serve::transport::http_app(registry, authority, guard)
+}
+
+/// Serve `app` on a loopback port the kernel picks.
+async fn serve_app(app: axum::Router) -> SocketAddr {
     let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
         .await
         .expect("bind ephemeral port");
@@ -189,6 +230,18 @@ async fn http(
     mcp_session: Option<&str>,
     body: &str,
 ) -> Reply {
+    http_as(addr, method, path, None, mcp_session, body).await
+}
+
+/// [`http`] with an `Authorization` header value (#32 PR 5).
+async fn http_as(
+    addr: SocketAddr,
+    method: &str,
+    path: &str,
+    authorization: Option<&str>,
+    mcp_session: Option<&str>,
+    body: &str,
+) -> Reply {
     let mut sock = tokio::net::TcpStream::connect(addr).await.expect("connect");
     let mut head = format!(
         "{method} {path} HTTP/1.1\r\nHost: localhost\r\nAccept: application/json, \
@@ -196,6 +249,9 @@ async fn http(
          Connection: close\r\n",
         body.len()
     );
+    if let Some(value) = authorization {
+        head.push_str(&format!("Authorization: {value}\r\n"));
+    }
     if let Some(id) = mcp_session {
         head.push_str(&format!("Mcp-Session-Id: {id}\r\n"));
     }
@@ -237,10 +293,20 @@ async fn http(
 
 /// Initialize an MCP session at `path`: its id and the `initialize` result.
 async fn initialize(addr: SocketAddr, path: &str) -> (String, serde_json::Value) {
-    let reply = http(
+    initialize_as(addr, path, None).await
+}
+
+/// [`initialize`] presenting `authorization` (#32 PR 5).
+async fn initialize_as(
+    addr: SocketAddr,
+    path: &str,
+    authorization: Option<&str>,
+) -> (String, serde_json::Value) {
+    let reply = http_as(
         addr,
         "POST",
         path,
+        authorization,
         None,
         r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"registry-test","version":"1"}}}"#,
     )
@@ -248,10 +314,11 @@ async fn initialize(addr: SocketAddr, path: &str) -> (String, serde_json::Value)
     assert_eq!(reply.status, 200, "initialize at {path}: {}", reply.body);
     let id = reply.header("mcp-session-id").expect("an MCP session id");
     let result = reply.message()["result"].clone();
-    let ack = http(
+    let ack = http_as(
         addr,
         "POST",
         path,
+        authorization,
         Some(&id),
         r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
     )
@@ -1038,6 +1105,7 @@ async fn a_pinned_session_that_can_no_longer_attach_is_not_retried() {
 }
 
 /// The real multi-session serve, in-process (#32 review M1/M2).
+mod authority;
 mod pinned_serve;
 
 /// Sonnet review L-C: which background-attach errors keep a pinned session

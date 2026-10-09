@@ -284,7 +284,12 @@ per ledger file when quoting them.
 // kind: "call" — one MCP tool call
 {"v":1,"ts":"…","kind":"call","tool":"lambo_recall","agent_id":"…",
  "outcome":"ok|error|panic","error_kind":"…",   // error_kind only when not ok
- "duration_us":1234, …per-tool facts merged at the top level }
+ "duration_us":1234, "credential":"…",           // credential: see below
+ …per-tool facts merged at the top level }
+// credential (#32 PR 5): the NAME of the [[serve.credential]] an HTTP call
+// authenticated as, never a token. Absent for stdio and for the legacy
+// `default` (--auth-token / LAMBO_AUTH_TOKEN) and implicit `local`
+// credentials, so a serve that uses only those writes the lines it always did.
 
 // per-tool facts
 lambo_recall        query (≤2000 chars, then "…[truncated]"), top_k, hit_count,

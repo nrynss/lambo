@@ -23,6 +23,7 @@ use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, Stream
 
 use super::heartbeat::log_events;
 use super::hub::{bind_hub, Hub, SessionEndpoint};
+use super::openers::{AttributingSessions, Openers};
 use super::shutdown::SessionClose;
 use crate::ledger::Ledger;
 use crate::mcp::server::LamboServer;
@@ -71,10 +72,17 @@ pub(super) struct AttachedSession {
     /// factory see the request: the router picks the session, then hands
     /// the request to that session's service. An `Mcp-Session-Id` minted
     /// here is unknown to every other session's manager.
-    pub(super) http: StreamableHttpService<LamboServer, LocalSessionManager>,
+    pub(super) http: StreamableHttpService<LamboServer, AttributingSessions>,
     /// The MCP sessions [`Self::http`] has minted: read by the process-wide
     /// session cap, and ended one by one by a detach's stage 1.
     pub(super) mcp_sessions: Arc<LocalSessionManager>,
+    /// Which credential opened each of [`Self::mcp_sessions`]' MCP
+    /// sessions, by `Mcp-Session-Id` (#32 PR 5 review L1). Written by
+    /// [`Self::http`]'s session manager at the moment it mints an id (see
+    /// `super::openers`). A request that names an MCP session another
+    /// credential opened is answered as rmcp answers an id it does not
+    /// know (see `transport::serve_live`).
+    pub(super) openers: Arc<Openers>,
     /// The session endpoint (J2): the accept loop and its connections.
     ///
     /// In a lock and an `Option` so stage 6 can take it through a shared
@@ -114,19 +122,58 @@ impl SessionTasks {
     }
 }
 
+/// Which `Host` headers a session's streamable-HTTP service answers
+/// (#32 PR 5 review M1).
+///
+/// rmcp's default refuses every `Host` but `localhost`, `127.0.0.1` and
+/// `::1` with a 403, as DNS-rebinding protection: a page a browser loaded
+/// from an attacker's name, re-pointed at a loopback serve, would otherwise
+/// reach it as same-origin. That protection is what an **unauthenticated**
+/// serve needs, and it is kept for one. A serve that requires a bearer token
+/// on every request does not need it, because the page cannot present a
+/// token it does not know, and it cannot keep it: a serve bound beyond
+/// loopback is reached under its own address or a DNS name, never under
+/// `localhost`, so the allow-list refused every request the credentials
+/// were configured to admit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum HostCheck {
+    /// rmcp's loopback allow-list: the implicit `local` credential, and a
+    /// stdio serve (which never routes HTTP).
+    Loopback,
+    /// Any `Host`: every request presents a bearer token (the legacy
+    /// `default` credential or a configured one).
+    Any,
+}
+
+impl HostCheck {
+    /// The check for a serve with `authority` (`None`: no HTTP credential
+    /// set, a stdio serve).
+    pub(super) fn for_authority(authority: Option<&super::authority::ServeAuthority>) -> Self {
+        match authority {
+            Some(authority) if authority.requires_bearer() => Self::Any,
+            _ => Self::Loopback,
+        }
+    }
+}
+
 /// The streamable-HTTP configuration every session's service uses: the SDK
-/// default with a 15 s SSE keep-alive.
-fn http_config() -> StreamableHttpServerConfig {
+/// default with a 15 s SSE keep-alive, and the `Host` allow-list `host`
+/// says.
+fn http_config(host: HostCheck) -> StreamableHttpServerConfig {
     // `#[non_exhaustive]` — mutate the SDK default rather than
     // constructing, so a new field cannot silently break the build.
     let mut cfg = StreamableHttpServerConfig::default();
     cfg.sse_keep_alive = Some(Duration::from_secs(15));
-    cfg
+    match host {
+        HostCheck::Loopback => cfg,
+        HostCheck::Any => cfg.disable_allowed_hosts(),
+    }
 }
 
 impl AttachedSession {
     /// Attach the serving parts of a session whose lease `mem` holds: bind
-    /// its endpoint and start its event pump, in that order.
+    /// its endpoint and start its event pump, in that order. `host` is the
+    /// HTTP service's `Host` check ([`HostCheck`]).
     ///
     /// Called below the arming, like every holder startup step (see
     /// [`serve`](super::serve)), so a signal during it still reaches the
@@ -136,6 +183,7 @@ impl AttachedSession {
         server: LamboServer,
         endpoint: Option<SessionEndpoint>,
         max_sessions: usize,
+        host: HostCheck,
     ) -> Self {
         // J2 — the session endpoint, bound HERE: below the arming and below
         // `LamboServer`, which it needs. A bind failure degrades, it does not stop
@@ -151,10 +199,14 @@ impl AttachedSession {
         // service spawns nothing; a stdio serve never routes to it.
         let factory_server = server.clone();
         let mcp_sessions = Arc::new(LocalSessionManager::default());
+        let openers = Arc::new(Openers::default());
         let http = StreamableHttpService::new(
             move || Ok(factory_server.clone()),
-            Arc::clone(&mcp_sessions),
-            http_config(),
+            Arc::new(AttributingSessions::new(
+                Arc::clone(&mcp_sessions),
+                Arc::clone(&openers),
+            )),
+            http_config(host),
         );
 
         Self {
@@ -162,6 +214,7 @@ impl AttachedSession {
             server,
             http,
             mcp_sessions,
+            openers,
             hub: tokio::sync::Mutex::new(Some(hub)),
             endpoint,
             tasks: SessionTasks {
@@ -179,6 +232,14 @@ impl AttachedSession {
     /// How many MCP sessions this session's HTTP service holds open.
     pub(super) async fn live_mcp_sessions(&self) -> usize {
         self.mcp_sessions.sessions.read().await.len()
+    }
+
+    /// How many of this session's live MCP sessions `credential` opened
+    /// (#32 PR 5 review M2: its share of the session cap).
+    pub(super) async fn live_mcp_sessions_opened_by(&self, credential: &str) -> usize {
+        let live = self.mcp_sessions.sessions.read().await;
+        self.openers
+            .count_opened_by(credential, |id| live.contains_key(id))
     }
 
     /// A detach's stage 1 (#32 design §3.4): end every MCP session this

@@ -1,5 +1,6 @@
 //! Unit tests for `lambo serve`, grouped by subject.
 
+use super::authority::*;
 use super::http_guards::*;
 use super::*;
 use super::{heartbeat::*, roles::*, shutdown::*, transport::*};
@@ -9,6 +10,22 @@ use rmcp::service::ServerInitializeError;
 use std::net::SocketAddr;
 use std::time::Instant;
 
+/// The credential set `serve` builds for `opts` (#32 PR 5), as the guard
+/// and the router share it.
+fn authority_for(opts: &ServeOptions) -> Arc<ServeAuthority> {
+    Arc::new(serve_authority(opts).expect("a valid credential set"))
+}
+
+/// The credential set of a loopback HTTP serve whose only credential is
+/// the legacy token `token`, or the implicit `local` one without it.
+fn legacy_authority(token: Option<SecretToken>) -> Arc<ServeAuthority> {
+    let mut opts = ServeOptions::new("lambo-test", "agent-test");
+    opts.transport = Transport::Http;
+    opts.auth_token = token;
+    authority_for(&opts)
+}
+
+mod authority;
 mod heartbeat;
 mod http_guards;
 mod roles;
