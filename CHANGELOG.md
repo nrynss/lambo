@@ -214,10 +214,13 @@
   embedder for the whole process. Builders over one shared embedder that are
   given clones of one calibration probe it once; every later build fires no
   probe embed and reports the same probe figures in `lambo_stats`, while each
-  session's observed rate stays its own. The calibration's owner aborts the
-  probe (`EmbedderCalibration::abort`, or dropping the last clone). Without
-  one, each build probes for itself as before. `lambo serve` now creates one
-  per process and aborts its probe at shutdown stage 2, beside the keep-warm.
+  session's observed rate stays its own. A probe that failed or was
+  aborted is run again by the next build over that embedder, at most once
+  per `writeq::PROBE_RETRY_BACKOFF` (60 s); a measured one never is. The
+  calibration's owner aborts the probe (`EmbedderCalibration::abort`, or
+  dropping the last clone). Without one, each build probes for itself as
+  before. `lambo serve` now creates one per process and aborts its probe at
+  shutdown stage 2, beside the keep-warm.
 - `lambo::surface::session`: session-id validation for ids taken from a
   request (`parse_addressed`: `[A-Za-z0-9._:-]`, 1 to 128 bytes, no leading
   `.`, no percent-decoding), the in-memory authorization types the coming

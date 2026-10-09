@@ -15,6 +15,9 @@ struct CountingEmbedder {
     /// [`CountingEmbedder::release`] closes the semaphore (a closed
     /// semaphore's `acquire` fails at once, which is the open gate).
     gate: Option<tokio::sync::Semaphore>,
+    /// While set, every embed fails (after it is counted, before the gate),
+    /// so a probe ends unmeasured.
+    failing: std::sync::atomic::AtomicBool,
     calls: AtomicUsize,
 }
 
@@ -24,6 +27,7 @@ impl CountingEmbedder {
         Arc::new(Self {
             inner: FixtureEmbedder::new(),
             gate: None,
+            failing: Default::default(),
             calls: AtomicUsize::new(0),
         })
     }
@@ -34,12 +38,18 @@ impl CountingEmbedder {
         Arc::new(Self {
             inner: FixtureEmbedder::new(),
             gate: Some(tokio::sync::Semaphore::new(1)),
+            failing: Default::default(),
             calls: AtomicUsize::new(0),
         })
     }
 
     fn calls(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
+    }
+
+    /// Make every embed fail (`true`) or answer again (`false`).
+    fn fail(&self, failing: bool) {
+        self.failing.store(failing, Ordering::SeqCst);
     }
 
     /// Open the gate for good: every parked and later embed answers.
@@ -70,6 +80,11 @@ impl Embedder for CountingEmbedder {
     }
     async fn embed(&self, text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        if self.failing.load(Ordering::SeqCst) {
+            return Err(crate::embed::EmbedError::Unavailable(
+                "the test's embedder is down".into(),
+            ));
+        }
         if let Some(gate) = &self.gate
             && let Ok(permit) = gate.acquire().await
         {
@@ -341,6 +356,118 @@ async fn the_probe_line_names_its_scope_and_session_as_plain_fields() {
         "{shared_line}"
     );
     for mem in [own, shared] {
+        mem.close().await.expect("close");
+    }
+}
+
+/// Wait until `mem`'s probe figure is a measurement (a re-probe replacing an
+/// unmeasured one has landed).
+async fn measured(mem: &Memory) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while !mem.pipeline().calibration().is_some_and(|c| c.measured()) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no measured probe landed"
+        );
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+}
+
+/// Review P3-3: a shared probe that failed is not terminal. The next attach
+/// over the embedder probes it again once the backoff has passed, and the
+/// session that attached first sees the new figure too.
+#[tokio::test]
+async fn a_failed_shared_probe_is_reprobed_by_the_next_attach() {
+    let counting = CountingEmbedder::new();
+    let embedder: Arc<dyn Embedder> = counting.clone();
+    let calibration = EmbedderCalibration::with_retry_backoff(Duration::ZERO);
+
+    counting.fail(true);
+    let a = open("cal-retry-a", Arc::clone(&embedder), Some(&calibration)).await;
+    probe_landed(&a).await;
+    assert!(!a.pipeline().calibration().expect("landed").measured());
+
+    counting.fail(false);
+    let b = open("cal-retry-b", Arc::clone(&embedder), Some(&calibration)).await;
+    measured(&b).await;
+    measured(&a).await;
+    assert_eq!(calibration.probes(), 1, "still one entry for one embedder");
+
+    // A measured probe is never repeated, backoff or not.
+    let measured_calls = counting.calls();
+    let c = open("cal-retry-c", Arc::clone(&embedder), Some(&calibration)).await;
+    settle().await;
+    assert_eq!(
+        counting.calls(),
+        measured_calls,
+        "no probe after a measurement"
+    );
+    for mem in [a, b, c] {
+        mem.close().await.expect("close");
+    }
+}
+
+/// The backoff: an embedder that is down is not probed again at every
+/// attach. Inside [`crate::writeq::PROBE_RETRY_BACKOFF`] of the failed
+/// probe, a new attach fires no probe embed.
+#[tokio::test]
+async fn a_failed_shared_probe_is_not_reprobed_inside_the_backoff() {
+    let counting = CountingEmbedder::new();
+    let embedder: Arc<dyn Embedder> = counting.clone();
+    let calibration = EmbedderCalibration::new();
+
+    counting.fail(true);
+    let a = open("cal-backoff-a", Arc::clone(&embedder), Some(&calibration)).await;
+    probe_landed(&a).await;
+    let after_failure = counting.calls();
+
+    counting.fail(false);
+    let b = open("cal-backoff-b", Arc::clone(&embedder), Some(&calibration)).await;
+    settle().await;
+    assert_eq!(
+        counting.calls(),
+        after_failure,
+        "no re-probe inside the backoff"
+    );
+    assert!(!b
+        .pipeline()
+        .calibration()
+        .expect("the failed figure")
+        .measured());
+    for mem in [a, b] {
+        mem.close().await.expect("close");
+    }
+}
+
+/// An aborted shared probe (a library caller's `abort()`, say) is probed
+/// again by the next attach, and only one re-probe runs at a time: an
+/// attach while the re-probe is in flight joins it.
+#[tokio::test]
+async fn an_aborted_shared_probe_is_reprobed_once_by_the_next_attaches() {
+    let counting = CountingEmbedder::gated();
+    let embedder: Arc<dyn Embedder> = counting.clone();
+    let calibration = EmbedderCalibration::with_retry_backoff(Duration::ZERO);
+
+    let a = open("cal-reabort-a", Arc::clone(&embedder), Some(&calibration)).await;
+    counting.parked().await;
+    calibration.abort();
+    let at_abort = counting.calls();
+    assert!(a.pipeline().calibration().is_none());
+
+    // The re-probe's embeds pass the (one-permit) gate only once released,
+    // so it is held in flight while a third session attaches.
+    let b = open("cal-reabort-b", Arc::clone(&embedder), Some(&calibration)).await;
+    let c = open("cal-reabort-c", Arc::clone(&embedder), Some(&calibration)).await;
+    counting.release();
+    measured(&b).await;
+    measured(&a).await;
+    measured(&c).await;
+    assert_eq!(
+        counting.calls(),
+        at_abort + crate::writeq::PROBE_EMBEDS,
+        "exactly one re-probe's embeds"
+    );
+    for mem in [a, b, c] {
         mem.close().await.expect("close");
     }
 }

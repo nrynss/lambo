@@ -975,6 +975,15 @@ impl EmbedderProbe {
             handle.abort();
         }
     }
+
+    /// Whether the probe has stopped: it finished (and published), or it was
+    /// aborted.
+    fn ended(&self) -> bool {
+        self.task
+            .lock()
+            .as_ref()
+            .is_none_or(JoinHandle::is_finished)
+    }
 }
 
 /// Whose probe a probe is, for its log lines (#32 PR 3).
@@ -1031,9 +1040,11 @@ pub(crate) enum PipelineProbe {
     /// pipeline, since one session closing must not abort a probe other
     /// sessions read. Holding `_calibration` keeps the owner alive (its last
     /// drop aborts the probe) while any pipeline may still read the probe.
+    /// `slot` is the embedder's slot rather than one probe, so a re-probe
+    /// (see [`EmbedderCalibration`]) reaches every session reading it.
     Shared {
         _calibration: EmbedderCalibration,
-        probe: Arc<EmbedderProbe>,
+        slot: Arc<ProbeSlot>,
     },
 }
 
@@ -1048,7 +1059,7 @@ impl PipelineProbe {
     ) -> Self {
         match calibration {
             Some(calibration) => Self::Shared {
-                probe: calibration.probe_for(embedder, session),
+                slot: calibration.probe_for(embedder, session),
                 _calibration: calibration.clone(),
             },
             None => Self::Owned(EmbedderProbe::spawn(
@@ -1062,7 +1073,7 @@ impl PipelineProbe {
     pub(crate) fn current(&self) -> Option<Calibration> {
         match self {
             Self::Owned(probe) => probe.current(),
-            Self::Shared { probe, .. } => probe.current(),
+            Self::Shared { slot, .. } => slot.current(),
         }
     }
 
@@ -1077,6 +1088,20 @@ impl PipelineProbe {
         }
     }
 }
+
+/// How long a process-wide probe that failed or was aborted is left alone
+/// before the next attach over its embedder probes it again (#32 PR 3,
+/// review P3-3), counted from the start of the probe it replaces.
+///
+/// A failed probe should not be terminal for a long-lived process: a
+/// remote embedder that timed out during the first attach's probe would
+/// otherwise leave every later session, hours later, with
+/// `write_queue_measured=false`. Nor should every attach re-probe an
+/// embedder that is down for good, firing [`PROBE_EMBEDS`] forwards at it
+/// each time. One minute is long against an attach burst and short against
+/// a process's life. At most one probe per embedder runs at a time either
+/// way: a re-probe only replaces a probe that has ended.
+pub const PROBE_RETRY_BACKOFF: Duration = Duration::from_secs(60);
 
 /// The write queue's calibration probe, once per embedder for the whole
 /// process (#32 PR 3, design decision 14).
@@ -1098,6 +1123,14 @@ impl PipelineProbe {
 /// Probes are spawned lazily, at the first pipeline build, so a process that
 /// never builds one (a proxying `serve`) never probes.
 ///
+/// **A failed or aborted probe is retried, not terminal.** When the probe
+/// for an embedder has ended without a measurement (it failed, or was
+/// aborted before it finished), the next build over that embedder spawns a
+/// new one, provided [`PROBE_RETRY_BACKOFF`] has passed since the last one
+/// started. Every session reading the embedder's probe sees the new figure
+/// when it lands, and the last published figure until then. A measured
+/// probe is never repeated.
+///
 /// **The owner aborts.** [`EmbedderCalibration::abort`] aborts every probe
 /// still running; `lambo serve` calls it when its transport stops, before
 /// any session closes, beside the keep-warm. When the last clone (the
@@ -1117,22 +1150,103 @@ impl fmt::Debug for EmbedderCalibration {
     }
 }
 
-#[derive(Default)]
 struct CalibrationProbes {
     probes: PlMutex<Vec<SharedProbe>>,
+    /// [`PROBE_RETRY_BACKOFF`]; a test shortens it.
+    retry_backoff: Duration,
 }
 
-/// One embedder's probe. `embedder` is the key, held weakly; the probe task
+impl Default for CalibrationProbes {
+    fn default() -> Self {
+        Self {
+            probes: PlMutex::default(),
+            retry_backoff: PROBE_RETRY_BACKOFF,
+        }
+    }
+}
+
+/// One embedder's entry. `embedder` is the key, held weakly; the probe task
 /// holds the embedder strongly only while it runs.
 struct SharedProbe {
     embedder: Weak<dyn Embedder>,
-    probe: Arc<EmbedderProbe>,
+    slot: Arc<ProbeSlot>,
+}
+
+/// One embedder's current probe, which a re-probe replaces in place so every
+/// pipeline holding the slot reads the new one.
+pub(crate) struct ProbeSlot {
+    state: PlMutex<SlotState>,
+}
+
+struct SlotState {
+    probe: EmbedderProbe,
+    /// When `probe` was spawned, for [`PROBE_RETRY_BACKOFF`].
+    started: tokio::time::Instant,
+    /// The last figure an earlier probe published (an unmeasured one: a
+    /// measured probe is never replaced), read while a re-probe runs.
+    previous: Option<Calibration>,
+}
+
+impl ProbeSlot {
+    fn spawn(embedder: &Arc<dyn Embedder>, session: &SessionId) -> Self {
+        Self {
+            state: PlMutex::new(SlotState {
+                probe: spawn_process_probe(embedder, session),
+                started: tokio::time::Instant::now(),
+                previous: None,
+            }),
+        }
+    }
+
+    /// The current probe's figure, or the previous probe's while a re-probe
+    /// has not published.
+    fn current(&self) -> Option<Calibration> {
+        let state = self.state.lock();
+        state.probe.current().or(state.previous)
+    }
+
+    fn abort(&self) {
+        self.state.lock().probe.abort();
+    }
+
+    /// Replace the probe with a new one if it ended without a measurement
+    /// and the backoff has passed since it started.
+    fn reprobe_if_due(&self, embedder: &Arc<dyn Embedder>, session: &SessionId, backoff: Duration) {
+        let mut state = self.state.lock();
+        let published = state.probe.current();
+        if !state.probe.ended()
+            || published.is_some_and(|c| c.measured())
+            || state.started.elapsed() < backoff
+        {
+            return;
+        }
+        tracing::info!(
+            scope = %"process",
+            session = %session,
+            "write queue: probing the embedder again; its last probe {} without a measurement \
+             (at most once per {:?} per embedder)",
+            if published.is_some() { "finished" } else { "was stopped" },
+            backoff
+        );
+        state.previous = published.or(state.previous);
+        state.probe = spawn_process_probe(embedder, session);
+        state.started = tokio::time::Instant::now();
+    }
+}
+
+fn spawn_process_probe(embedder: &Arc<dyn Embedder>, session: &SessionId) -> EmbedderProbe {
+    EmbedderProbe::spawn(
+        Arc::clone(embedder),
+        ProbeScope::Process {
+            trigger: session.clone(),
+        },
+    )
 }
 
 impl Drop for CalibrationProbes {
     fn drop(&mut self) {
         for shared in self.probes.get_mut().iter() {
-            shared.probe.abort();
+            shared.slot.abort();
         }
     }
 }
@@ -1144,13 +1258,26 @@ impl EmbedderCalibration {
         Self::default()
     }
 
-    /// `embedder`'s probe, spawned on first use (by the attach of `session`,
-    /// which its log lines name).
+    /// A calibration whose re-probe backoff is `backoff` rather than
+    /// [`PROBE_RETRY_BACKOFF`], so a test can re-probe without waiting.
+    #[cfg(all(test, feature = "embed-fixture"))]
+    pub(crate) fn with_retry_backoff(backoff: Duration) -> Self {
+        Self {
+            inner: Arc::new(CalibrationProbes {
+                probes: PlMutex::default(),
+                retry_backoff: backoff,
+            }),
+        }
+    }
+
+    /// `embedder`'s probe slot, its probe spawned on first use and spawned
+    /// again when due (see [`PROBE_RETRY_BACKOFF`]), by the attach of
+    /// `session`, which the probe's log lines name.
     pub(crate) fn probe_for(
         &self,
         embedder: &Arc<dyn Embedder>,
         session: &SessionId,
-    ) -> Arc<EmbedderProbe> {
+    ) -> Arc<ProbeSlot> {
         let mut probes = self.inner.probes.lock();
         // An entry whose embedder is gone can never be asked for again (no
         // `Arc` to it exists), and its probe task, which held the embedder,
@@ -1161,32 +1288,34 @@ impl EmbedderCalibration {
             .iter()
             .find(|shared| std::ptr::addr_eq(shared.embedder.as_ptr(), Arc::as_ptr(embedder)))
         {
-            return Arc::clone(&shared.probe);
+            shared
+                .slot
+                .reprobe_if_due(embedder, session, self.inner.retry_backoff);
+            return Arc::clone(&shared.slot);
         }
-        let probe = Arc::new(EmbedderProbe::spawn(
-            Arc::clone(embedder),
-            ProbeScope::Process {
-                trigger: session.clone(),
-            },
-        ));
+        let slot = Arc::new(ProbeSlot::spawn(embedder, session));
         probes.push(SharedProbe {
             embedder: Arc::downgrade(embedder),
-            probe: Arc::clone(&probe),
+            slot: Arc::clone(&slot),
         });
-        probe
+        slot
     }
 
     /// Abort every probe still running. Idempotent. A pipeline that later
-    /// reads an aborted probe that had not published reads `None`, as a
-    /// pipeline whose own probe was aborted always has.
+    /// reads an aborted probe that had not published reads `None` (or the
+    /// figure an earlier probe published), as a pipeline whose own probe was
+    /// aborted always has. The next build over the embedder probes it again
+    /// once [`PROBE_RETRY_BACKOFF`] has passed since the aborted probe
+    /// started.
     pub fn abort(&self) {
         for shared in self.inner.probes.lock().iter() {
-            shared.probe.abort();
+            shared.slot.abort();
         }
     }
 
-    /// Probes this calibration has spawned and still holds. Its readers
-    /// are the tests that build sessions over the fixture embedder.
+    /// Embedders this calibration has spawned a probe for and still holds.
+    /// Its readers are the tests that build sessions over the fixture
+    /// embedder.
     #[cfg(all(test, feature = "embed-fixture"))]
     pub(crate) fn probes(&self) -> usize {
         self.inner.probes.lock().len()
