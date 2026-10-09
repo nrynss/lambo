@@ -90,6 +90,7 @@ mod builder;
 mod heartbeat;
 mod http_guards;
 mod hub;
+mod openers;
 mod pinned;
 mod process;
 mod registry;

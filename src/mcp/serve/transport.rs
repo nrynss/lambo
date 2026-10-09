@@ -15,8 +15,7 @@ use rmcp::ServiceExt;
 
 use super::authority::{authorize_default, Authenticated, ServeAuthority};
 use super::http_guards::{
-    guard_request, opens_a_new_session, usable_session_id, HttpGuard, OpeningReservation,
-    MCP_SESSION_ID,
+    guard_request, usable_session_id, HttpGuard, OpeningReservation, MCP_SESSION_ID,
 };
 use super::registry::{Lookup, SessionRegistry};
 use super::session::AttachedSession;
@@ -441,26 +440,28 @@ const NO_SUCH_MCP_SESSION: &str = "lambo-no-such-mcp-session";
 /// rmcp's MCP-session ids carry no owner, so before this a credential that
 /// learned another's id (a log, a shared proxy, a client bug) could post
 /// into that MCP session, read its server-initiated stream or `DELETE` it.
-/// Now an `initialize` records `grant` as the opener of the id rmcp mints,
-/// and a request naming an id another credential opened has the id
-/// replaced by [`NO_SUCH_MCP_SESSION`] before rmcp sees it. The answer is
-/// therefore rmcp's own answer to an unknown id, byte for byte and by
-/// construction (404 `Session not found` for `POST` and `GET`, rmcp's 202
-/// for a `DELETE` of a session it does not hold), so the caller cannot
-/// tell a foreign MCP session from an expired one.
+/// Now an MCP session rmcp mints is recorded as opened by `grant`'s
+/// credential (at the mint, see [`serve_attributed`]), and a request naming
+/// an id another credential opened has the id replaced by
+/// [`NO_SUCH_MCP_SESSION`] before rmcp sees it. The answer is therefore
+/// rmcp's own answer to an unknown id, byte for byte and by construction
+/// (404 `Session not found` for `POST` and `GET`, rmcp's 202 for a
+/// `DELETE` of a session it does not hold), so the caller cannot tell a
+/// foreign MCP session from an expired one.
 pub(super) async fn serve_live(
     session: &Arc<AttachedSession>,
     grant: &SessionGrant,
     mut req: axum::extract::Request,
 ) -> axum::response::Response {
-    // The id as rmcp will read it, and the same "opens a new MCP session"
-    // the session cap applied to this request (#32 PR 5 review S1): a
-    // header that is not visible ASCII names no MCP session to rmcp, which
-    // then mints one, so it names none here and the POST is an opener.
-    let opens = opens_a_new_session(&req);
     // The cap's reservation for this opener (#32 PR 5 review S4), out of
-    // the request before rmcp keeps its parts.
+    // the request before rmcp keeps its parts. Held to the end of this
+    // call: an MCP session rmcp mints is attributed before that, so it is
+    // never missing from both the reservations and its opener's count. A
+    // drop of this future (the client gone) drops it too, after any mint.
     let reservation = req.extensions_mut().remove::<OpeningReservation>();
+    // The id as rmcp will read it (#32 PR 5 review S1): a header that is
+    // not visible ASCII names no MCP session to rmcp, so it names none
+    // here either.
     let named = usable_session_id(req.headers()).map(str::to_string);
     let mut owned = None;
     if let Some(mcp_id) = named {
@@ -474,11 +475,8 @@ pub(super) async fn serve_live(
         }
     }
     let deletes = req.method() == axum::http::Method::DELETE;
-    let response = if opens {
-        open_and_attribute(session, grant, req, reservation).await
-    } else {
-        session.http.handle(req).await.map(axum::body::Body::new)
-    };
+    let response = serve_attributed(&session.http, grant.name(), req).await;
+    drop(reservation);
     if deletes
         && response.status().is_success()
         && let Some(mcp_id) = owned
@@ -488,42 +486,34 @@ pub(super) async fn serve_live(
     response
 }
 
-/// rmcp's answer to a request that may mint an MCP session, with `grant`
-/// recorded as the opener of the id it mints.
+/// rmcp's answer to `req`, handled **inline** as `credential`: an MCP
+/// session rmcp mints while handling it is recorded as opened by
+/// `credential` at the mint, inside rmcp's own call (see
+/// `super::openers`), so the binding exists before the id-bearing response
+/// does, and no drop of this future can leave a minted session
+/// unattributed (#32 PR 5 review S1).
 ///
-/// Run on its own task (#32 PR 5 review S1) so the bookkeeping cannot be
-/// cancelled: axum drops a handler's future when the client disconnects,
-/// and if that happened after rmcp minted the session but before the
-/// opener was recorded, the session would count toward the process cap
-/// and toward no credential's share. The spawned task runs to the end
-/// whether or not anyone still awaits it. The opener is recorded before
-/// the response (and so the id) reaches the caller, and the cap's
-/// `reservation` is given back only after that (#32 PR 5 review S4), so
-/// the new MCP session is never missing from both the reservations and
-/// the opener's live count.
-async fn open_and_attribute(
-    session: &Arc<AttachedSession>,
-    grant: &SessionGrant,
+/// Inline, not on a task of its own (#32 PR 5 second review, L1): axum
+/// drops a handler's future when its client disconnects, and for a
+/// sessionless request rmcp answers directly (a per-request-protocol call
+/// or `server/discover`) that drop is what cancels the call (rmcp's
+/// `serve_negotiated_request_directly` arms a drop guard on the request's
+/// cancellation token). A spawned `handle` outlived the client, and the
+/// call ran on unobserved.
+pub(super) async fn serve_attributed<S>(
+    http: &rmcp::transport::streamable_http_server::StreamableHttpService<
+        S,
+        super::openers::AttributingSessions,
+    >,
+    credential: &str,
     req: axum::extract::Request,
-    reservation: Option<OpeningReservation>,
-) -> axum::response::Response {
-    use axum::response::IntoResponse;
-    let session = Arc::clone(session);
-    let opener = grant.name().to_string();
-    let task = tokio::spawn(async move {
-        let response = session.http.handle(req).await;
-        if let Some(minted) = usable_session_id(response.headers()) {
-            session.record_opener(minted, &opener).await;
-        }
-        drop(reservation);
-        response.map(axum::body::Body::new)
-    });
-    match task.await {
-        Ok(response) => response,
-        Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
-        // Never aborted; only a runtime shutting down cancels it.
-        Err(_) => axum::http::StatusCode::SERVICE_UNAVAILABLE.into_response(),
-    }
+) -> axum::response::Response
+where
+    S: rmcp::ServerHandler + Send + 'static,
+{
+    super::openers::as_credential(credential, http.handle(req))
+        .await
+        .map(axum::body::Body::new)
 }
 
 /// `axum::serve` with a **bounded** graceful shutdown (R1/T82-2).

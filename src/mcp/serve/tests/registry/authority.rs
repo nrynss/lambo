@@ -614,8 +614,9 @@ async fn an_initialize_with_an_id_rmcp_cannot_read_is_counted_and_attributed() {
 /// runtime gets rmcp as far as minting the session and waiting on its
 /// worker, and then dropped.
 ///
-/// Mutation: record the opener inline after `handle` (not on its own task)
-/// and the session stays live but owned by no one.
+/// Mutation: record the opener after `handle` returns (not at the mint, in
+/// `openers::AttributingSessions::create_session`) and the session stays
+/// live but owned by no one.
 #[tokio::test]
 async fn an_mcp_session_whose_initialize_was_dropped_is_still_attributed() {
     use std::future::Future;

@@ -18,6 +18,7 @@ and in-serve erase PR 7.
 | `mcp/serve/authority.rs` (new) | `serve_authority` (the serve's set from `ServeOptions`), `check_serve_credentials`, `any_credential`, `authorize_default`, `Authenticated` |
 | `mcp/serve/http_guards.rs` | the guard resolves the bearer to a grant and attaches it to the request |
 | `mcp/serve/transport.rs` | `http_app` (the router behind the guards, what `serve_http` serves and the tests serve); the routes authorize before the registry lookup |
+| `mcp/serve/openers.rs` (second review) | `Openers` (which credential opened each MCP session) and `AttributingSessions`, the session manager that records the opener at the mint |
 | `main.rs` | the preflight reads `LAMBO_AUTH_TOKEN` and, over HTTP, the credentials' variables, before any backend |
 
 ## Decisions
@@ -168,9 +169,10 @@ branch, one commit per finding.
   `--max-sessions`. One credential means the whole cap and one bucket at the
   old rate, so the rig and every single-token serve are unchanged.
   `LiveSessions::live_opened_by` counts by opener, using L1's map.
-- **L1, MCP-session binding.** `AttachedSession.owners` maps each MCP
+- **L1, MCP-session binding.** `AttachedSession.openers` maps each MCP
   session id to the credential whose `initialize` minted it (pruned against
-  rmcp's map on every insert). `transport::serve_live` replaces a foreign id
+  rmcp's map on every insert; recorded at the mint since the second review,
+  below). `transport::serve_live` replaces a foreign id
   with a value rmcp never mints before rmcp sees the request, so the answer
   is rmcp's own unknown-id answer, byte for byte by construction.
 - **L2.** A presented credential over 4 KiB is refused before the scan;
@@ -194,3 +196,36 @@ branch, one commit per finding.
 Not done: the web portal (`serve-web`) keeps its single-token `bearer_ok`
 without the 4 KiB cap; it compares one secret, so the multiplier L2 is about
 does not exist there.
+
+## Second review remediation, L1 and L2 (2026-10-09)
+
+The Sonnet security review of the S1-S4 fixes left two Lows.
+
+- **L1, attribution at the mint; `handle` inline again.** S1 ran rmcp's
+  whole `handle` on a spawned task so a client disconnect could not leave a
+  minted MCP session unattributed. That also stopped the disconnect from
+  cancelling a sessionless request rmcp answers directly (a
+  per-request-protocol call or `server/discover`,
+  `serve_negotiated_request_directly`, whose drop guard cancels the
+  request's token, rmcp #857): the call ran on after its client left.
+  Now the opener is recorded where the id is minted. `openers.rs` wraps
+  rmcp's `LocalSessionManager` in `AttributingSessions`, the manager each
+  session's streamable-HTTP service mints through, and its
+  `create_session` records the opener in the same poll in which the local
+  manager put the id in its map (it does not await after the insert). The
+  credential reaches it through a task-local (`as_credential`) set around
+  `handle`, because rmcp's `create_session` takes no arguments and is
+  awaited inline in the request's task. `transport::serve_attributed` runs
+  `handle` inline for every request. So a mint is never unattributed, the
+  id-bearing response cannot leave before the binding, and dropping the
+  handler cancels what rmcp cancels.
+  Rejected: spawning only `initialize` requests (needs our own parse of
+  the body that must agree with rmcp's deserializer, or it mints inline
+  again); recording after `handle` returns on a spawned bookkeeping task
+  (a drop between `create_session` and `initialize_session` still leaves
+  the session unowned). `restore_session` keeps the trait default
+  (`NotSupported`): the serve configures no session store, and a restore
+  would mint a session no credential opened.
+  Caveat: lambo's own tools do not watch `RequestContext::ct`, so the
+  cancel ends rmcp's per-request loop and signals the token, but a lambo
+  tool already running still finishes. That was so before S1 as well.
