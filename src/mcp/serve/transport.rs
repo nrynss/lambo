@@ -15,7 +15,8 @@ use rmcp::ServiceExt;
 
 use super::authority::{authorize_default, Authenticated, ServeAuthority};
 use super::http_guards::{
-    guard_request, opens_a_new_session, usable_session_id, HttpGuard, MCP_SESSION_ID,
+    guard_request, opens_a_new_session, usable_session_id, HttpGuard, OpeningReservation,
+    MCP_SESSION_ID,
 };
 use super::registry::{Lookup, SessionRegistry};
 use super::session::AttachedSession;
@@ -457,6 +458,9 @@ pub(super) async fn serve_live(
     // header that is not visible ASCII names no MCP session to rmcp, which
     // then mints one, so it names none here and the POST is an opener.
     let opens = opens_a_new_session(&req);
+    // The cap's reservation for this opener (#32 PR 5 review S4), out of
+    // the request before rmcp keeps its parts.
+    let reservation = req.extensions_mut().remove::<OpeningReservation>();
     let named = usable_session_id(req.headers()).map(str::to_string);
     let mut owned = None;
     if let Some(mcp_id) = named {
@@ -471,7 +475,7 @@ pub(super) async fn serve_live(
     }
     let deletes = req.method() == axum::http::Method::DELETE;
     let response = if opens {
-        open_and_attribute(session, grant, req).await
+        open_and_attribute(session, grant, req, reservation).await
     } else {
         session.http.handle(req).await.map(axum::body::Body::new)
     };
@@ -493,11 +497,15 @@ pub(super) async fn serve_live(
 /// opener was recorded, the session would count toward the process cap
 /// and toward no credential's share. The spawned task runs to the end
 /// whether or not anyone still awaits it. The opener is recorded before
-/// the response (and so the id) reaches the caller.
+/// the response (and so the id) reaches the caller, and the cap's
+/// `reservation` is given back only after that (#32 PR 5 review S4), so
+/// the new MCP session is never missing from both the reservations and
+/// the opener's live count.
 async fn open_and_attribute(
     session: &Arc<AttachedSession>,
     grant: &SessionGrant,
     req: axum::extract::Request,
+    reservation: Option<OpeningReservation>,
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
     let session = Arc::clone(session);
@@ -507,6 +515,7 @@ async fn open_and_attribute(
         if let Some(minted) = usable_session_id(response.headers()) {
             session.record_opener(minted, &opener).await;
         }
+        drop(reservation);
         response.map(axum::body::Body::new)
     });
     match task.await {

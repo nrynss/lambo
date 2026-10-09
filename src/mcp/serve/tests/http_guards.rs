@@ -736,6 +736,112 @@ async fn a_credential_at_its_share_of_the_session_cap_is_refused_alone() {
     assert_eq!(status, 200, "the operator still opens one: {body}");
 }
 
+/// Stand `guard` up in front of a route that holds each request (its
+/// extensions included, so an admitted opener's reservation) until
+/// `release` is notified: an `initialize` still being handled.
+async fn spawn_holding(
+    guard: HttpGuard,
+) -> (
+    SocketAddr,
+    Arc<std::sync::atomic::AtomicUsize>,
+    Arc<tokio::sync::Notify>,
+) {
+    let reached = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let release = Arc::new(tokio::sync::Notify::new());
+    let (hits, gate) = (reached.clone(), release.clone());
+    let app = axum::Router::new()
+        .route(
+            "/mcp",
+            axum::routing::any(move |req: axum::extract::Request| {
+                let (hits, gate) = (hits.clone(), gate.clone());
+                async move {
+                    hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    gate.notified().await;
+                    drop(req);
+                    "inner service reached"
+                }
+            }),
+        )
+        .layer(axum::middleware::from_fn_with_state(guard, guard_request));
+    let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (addr, reached, release)
+}
+
+/// Wait until `reached` counts `n`.
+async fn until_reached(reached: &std::sync::atomic::AtomicUsize, n: usize) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while reached.load(std::sync::atomic::Ordering::SeqCst) < n {
+        assert!(
+            Instant::now() < deadline,
+            "the opener never reached the service"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+/// #32 PR 5 review S4: the cap is not a check-then-act race. With one
+/// slot left, an `initialize` admitted and still being handled (its MCP
+/// session not yet live) holds that slot, so a second one arriving now is
+/// refused instead of also passing on the same live count; once the first
+/// finishes, the slot is its to fill (here the fake count never grows, so
+/// the next opener is admitted again). Mutation: drop the reservation and
+/// the second `initialize` reaches the service too.
+#[tokio::test]
+async fn a_concurrent_initialize_cannot_overshoot_the_cap() {
+    let (addr, reached, release) = spawn_holding(guard_with(None, 32, 31, 0)).await;
+    let first = tokio::spawn(async move { request(addr, &post(None, None)).await });
+    until_reached(&reached, 1).await;
+
+    let (status, body) = request(addr, &post(None, None)).await;
+    assert_eq!(status, 503, "the last slot is held: {body}");
+    assert!(body.contains("32/32"), "{body}");
+    assert_eq!(reached.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    release.notify_one();
+    assert_eq!(first.await.expect("first").0, 200);
+    let next = tokio::spawn(async move { request(addr, &post(None, None)).await });
+    until_reached(&reached, 2).await;
+    release.notify_one();
+    assert_eq!(next.await.expect("next").0, 200, "the slot came back");
+}
+
+/// #32 PR 5 review S4 for the share: a credential one under its share with
+/// an `initialize` in flight is at its share, so its next one is refused,
+/// while another credential still opens one.
+#[tokio::test]
+async fn a_concurrent_initialize_cannot_overshoot_the_share() {
+    let guard = HttpGuard::new(
+        credentials_authority(&["tenant", "operator"]),
+        32,
+        Arc::new(FakeOpeners(vec![("tenant", 15)])),
+        0,
+    );
+    let (addr, reached, release) = spawn_holding(guard).await;
+    let tenant = format!("Bearer {}", fake_token("tenant"));
+    let first = {
+        let tenant = tenant.clone();
+        tokio::spawn(async move { request(addr, &post(Some(&tenant), None)).await })
+    };
+    until_reached(&reached, 1).await;
+
+    let (status, body) = request(addr, &post(Some(&tenant), None)).await;
+    assert_eq!(status, 503, "the tenant's last slot is held: {body}");
+    assert!(body.contains("16/16 of 32"), "{body}");
+
+    let operator = format!("Bearer {}", fake_token("operator"));
+    let other = tokio::spawn(async move { request(addr, &post(Some(&operator), None)).await });
+    until_reached(&reached, 2).await;
+    release.notify_waiters();
+    assert_eq!(first.await.expect("first").0, 200);
+    assert_eq!(other.await.expect("other").0, 200, "the operator opens one");
+}
+
 /// One credential (the legacy `default`, the dogfood rig's) has the whole
 /// cap and one bucket: exactly the limits a single-token serve always had.
 #[test]

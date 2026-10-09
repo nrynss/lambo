@@ -488,6 +488,9 @@ pub(crate) struct HttpGuard {
     pub(super) rate: Option<Arc<CredentialRates>>,
     /// The throttle on the 401's WARN line.
     pub(super) refusals: Arc<RefusalLog>,
+    /// Session-opening requests admitted but not yet counted by
+    /// [`Self::live`] (#32 PR 5 review S4).
+    pub(super) openings: Arc<Openings>,
 }
 
 impl HttpGuard {
@@ -508,8 +511,94 @@ impl HttpGuard {
             live,
             rate: CredentialRates::new(rate_limit_rps).map(Arc::new),
             refusals: Arc::new(RefusalLog::new(REFUSAL_WARN_WINDOW)),
+            openings: Arc::new(Openings::default()),
         }
     }
+}
+
+/// The session-opening requests the cap has admitted and that may not yet
+/// show in [`LiveSessions`] (#32 PR 5 review S4).
+///
+/// The cap and the share are a check, then an act: the guard reads the live
+/// count, and the MCP session appears in it (and is attributed to its
+/// opener) only once rmcp has handled the request. Without this, N
+/// `initialize`s arriving together at one under the cap all read the same
+/// count and all pass, overshooting `--max-sessions` and a credential's
+/// share by up to the rate limit's burst. Each admitted opener now holds an
+/// [`Opening`] until its MCP session is minted and attributed (or the
+/// request ends without one), and the guard counts those beside the live
+/// ones. The guard reserves and reads the others in one step, *before* it
+/// reads the live count: a reservation released after that read is counted
+/// here, and one released before it already shows as live (the session is
+/// minted and attributed before its reservation goes). Two openers racing
+/// for the last slot can both be refused (the conservative side, and
+/// either retries after `Retry-After`); neither can overshoot.
+#[derive(Default)]
+pub(super) struct Openings {
+    counts: parking_lot::Mutex<OpeningCounts>,
+}
+
+#[derive(Default)]
+struct OpeningCounts {
+    total: usize,
+    by_credential: std::collections::HashMap<Arc<str>, usize>,
+}
+
+impl Openings {
+    /// Reserve an opening for `credential`. Returns the reservation and the
+    /// openings already held, in all and by `credential`, not counting
+    /// this one.
+    fn reserve(self: &Arc<Self>, credential: &str) -> (Opening, usize, usize) {
+        let mut counts = self.counts.lock();
+        let others = counts.total;
+        counts.total += 1;
+        let credential: Arc<str> = Arc::from(credential);
+        let mine = counts
+            .by_credential
+            .entry(Arc::clone(&credential))
+            .or_default();
+        let others_mine = *mine;
+        *mine += 1;
+        drop(counts);
+        (
+            Opening {
+                openings: Arc::clone(self),
+                credential,
+            },
+            others,
+            others_mine,
+        )
+    }
+}
+
+/// One admitted session-opening request's place in [`Openings`], given
+/// back on drop: when `transport::serve_live` has recorded the opener of
+/// the MCP session rmcp minted, or when the request ends without reaching
+/// it (refused later, routed elsewhere, the client gone before rmcp).
+pub(crate) struct Opening {
+    openings: Arc<Openings>,
+    credential: Arc<str>,
+}
+
+impl Drop for Opening {
+    fn drop(&mut self) {
+        let mut counts = self.openings.counts.lock();
+        counts.total -= 1;
+        if let Some(n) = counts.by_credential.get_mut(&self.credential) {
+            *n -= 1;
+            if *n == 0 {
+                counts.by_credential.remove(&self.credential);
+            }
+        }
+    }
+}
+
+/// An [`Opening`] as a request extension (extensions must be `Clone`).
+/// `transport::serve_live` takes it out before rmcp sees the request, so
+/// rmcp never keeps it alive with the request's parts.
+#[derive(Clone)]
+pub(crate) struct OpeningReservation {
+    _opening: Arc<Opening>,
 }
 
 /// Ceiling on the size of a single HTTP request body (T82-16 remainder).
@@ -672,7 +761,9 @@ pub(super) async fn guard_request(
     }
 
     if opens_a_new_session(&req) {
-        let live = guard.live.live().await;
+        // Reserve first, then read the live count (see `Openings`).
+        let (opening, opening_total, opening_mine) = guard.openings.reserve(credential.name());
+        let live = guard.live.live().await + opening_total;
         if live >= guard.max_sessions {
             tracing::warn!(
                 live,
@@ -696,7 +787,7 @@ pub(super) async fn guard_request(
         // it is smaller than the cap: with one credential it is the cap,
         // and the check above already decided.
         if guard.credential_sessions < guard.max_sessions {
-            let mine = guard.live.live_opened_by(credential.name()).await;
+            let mine = guard.live.live_opened_by(credential.name()).await + opening_mine;
             if mine >= guard.credential_sessions {
                 tracing::warn!(
                     credential = credential.name(),
@@ -722,6 +813,9 @@ pub(super) async fn guard_request(
                     .into_response();
             }
         }
+        req.extensions_mut().insert(OpeningReservation {
+            _opening: Arc::new(opening),
+        });
     }
 
     // T8.7 body-size ceiling — checked before the body is streamed to rmcp.
