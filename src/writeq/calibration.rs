@@ -1181,8 +1181,9 @@ impl EmbedderCalibration {
             .collect()
     }
 
-    /// Probes this calibration has spawned and still holds.
-    #[cfg(test)]
+    /// Probes this calibration has spawned and still holds. Its readers
+    /// are the tests that build sessions over the fixture embedder.
+    #[cfg(all(test, feature = "embed-fixture"))]
     pub(crate) fn probes(&self) -> usize {
         self.inner.probes.lock().len()
     }
