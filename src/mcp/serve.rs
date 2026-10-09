@@ -491,7 +491,10 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     // Stopped after the close (and the keep-warm before it); see
     // `process::ProcessTasks` and the stage table in `shutdown`.
     let tasks = ProcessTasks::spawn(&server, &mem, &ledger, opts.ledger_heartbeat, keep_warm);
-    let session = AttachedSession::attach(mem, server, endpoint, opts.max_sessions);
+    // `mem` stays held here as well, so the last handle still drops when
+    // `serve` returns, after the watchdog is disarmed (the stage table's
+    // "not watched" note), not when the set is taken apart at stage 6.
+    let session = AttachedSession::attach(Arc::clone(&mem), server, endpoint, opts.max_sessions);
 
     tracing::info!(
         session = %opts.session,
