@@ -30,7 +30,21 @@ pub(crate) fn contract_hash(contract: &EmbeddingContract) -> String {
 
 /// Validate an operator-supplied index prefix against Elasticsearch's index
 /// naming rules, leaving room for the `-v-{hash}` / `-meta` suffixes.
+///
+/// Deletes and counts address every data index through the wildcard
+/// `{prefix}-v-*`. A prefix that contains `-v-` or ends in `-v` would let
+/// that pattern match another deployment's indices on a shared cluster
+/// (#18 review L2: prefix `lambo` reaches `lambo-v-prod-v-<hash>`), so both
+/// are refused. With them refused, `{q}-v-{hash}` starts with `{p}-v-` only
+/// when `p == q`.
 pub(crate) fn validate_index_prefix(prefix: &str) -> Result<(), StoreError> {
+    if prefix.contains("-v-") || prefix.ends_with("-v") {
+        return Err(StoreError::Backend(format!(
+            "recall.index_prefix {prefix:?} must not contain \"-v-\" or end in \"-v\": data \
+             indices are named {{prefix}}-v-{{hash}} and addressed as {{prefix}}-v-*, so such a \
+             prefix would reach another deployment's indices on the same cluster"
+        )));
+    }
     let ok_chars = prefix
         .chars()
         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_' | '.'));
@@ -344,6 +358,57 @@ mod tests {
         }
         for bad in ["", "Lambo", "-x", "_x", "+x", ".x", "a b", "a*", "a/b"] {
             assert!(validate_index_prefix(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    /// L2: deletes reach `{prefix}-v-*`. A prefix that holds `-v-`, or ends
+    /// in `-v`, would make another deployment's data indices match that
+    /// pattern (`lambo-v-*` matches `lambo-v-prod-v-<hash>` and
+    /// `lambo-v-v-<hash>`), so such prefixes are refused: then
+    /// `{p}-v-{hash}` matches `{q}-v-*` only when `p == q`.
+    #[test]
+    fn no_prefix_can_reach_another_deployments_indices() {
+        for bad in ["lambo-v-prod", "lambo-v", "a-v-b", "x-v-"] {
+            let err = validate_index_prefix(bad).unwrap_err();
+            assert!(err.to_string().contains("-v-"), "{bad:?}: {err}");
+        }
+        for good in [
+            "lambo",
+            "lambo-prod",
+            "lambo-vx",
+            "lambo-dev2",
+            "v",
+            "v-lambo",
+        ] {
+            validate_index_prefix(good).unwrap();
+        }
+        // Exhaustive over short prefixes: no two accepted prefixes p != q
+        // let q's data index match p's delete pattern.
+        let alphabet = ['a', 'v', '-'];
+        let mut prefixes = vec![String::new()];
+        for _ in 0..4 {
+            let next: Vec<String> = prefixes
+                .iter()
+                .flat_map(|p| alphabet.iter().map(move |c| format!("{p}{c}")))
+                .collect();
+            prefixes.extend(next);
+        }
+        prefixes.sort();
+        prefixes.dedup();
+        let ok: Vec<&String> = prefixes
+            .iter()
+            .filter(|p| validate_index_prefix(p).is_ok())
+            .collect();
+        for p in &ok {
+            for q in &ok {
+                let index = format!("{q}-v-0123456789abcdef");
+                if p != q {
+                    assert!(
+                        !index.starts_with(&format!("{p}-v-")),
+                        "{p:?}'s pattern reaches {index:?}"
+                    );
+                }
+            }
         }
     }
 
