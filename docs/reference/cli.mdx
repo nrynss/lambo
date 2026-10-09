@@ -257,7 +257,7 @@ reservations are advisory and RAM-local: this reservation ends when this process
 
 | Flag | Required | Default |
 |---|---|---|
-| `--session <SESSION>` | Yes for `http`; see below for `stdio` | Always wins when given. |
+| `--session <SESSION>` | Yes for `http`; see below for `stdio` | |
 | `--agent <AGENT>` | No | `lambo-serve` |
 | `--transport <TRANSPORT>` | No | `stdio`, or `http` |
 | `--port <PORT>` | No | `7700`, used when the transport is `http`. |
@@ -277,6 +277,8 @@ Over `stdio`, `--session` can be left out when `lambo.toml` names the session in
 ```bash
 cd ~/Documents/work/lambo && lambo serve --config ~/lambo.toml   # session from [[serve.projects]]
 ```
+
+The map is only read from the `lambo.toml` the serve loads, so a global client config must name that file with `--config` (as above) or `LAMBO_CONFIG`. Without either, each serve reads its project's own `./lambo.toml`, if there is one, and that file's `default_session` or `[[serve.projects]]` chooses the session, just as it already chooses the store.
 
 See [MCP tools](/mcp) for the tools it exposes.
 

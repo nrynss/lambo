@@ -248,13 +248,17 @@
   (`~` expanded, symlinks, `.` and `..` resolved, whole components only);
   an entry that does not exist never matches, a working directory that
   cannot be resolved falls back to `default_session`, and two entries for
-  one directory naming different sessions are refused. `--session` always
-  wins, and `--transport http` still requires it. The serve logs which
-  entry it used by its configured path; nothing quotes the working
-  directory. Library: `ServeConfig::select_stdio_session` (and `_with`, with
+  one directory naming different sessions are refused (exit code 1). With
+  `HOME` unset or relative, `~` entries are skipped with one warning and the
+  rest of the map applies. A global map only applies when the client passes
+  `--config` or sets `LAMBO_CONFIG`; otherwise each project's own
+  `./lambo.toml` is read.
+  `--session` always wins, and `--transport http` still requires it.
+  The serve logs which entry it used by its configured path; nothing
+  quotes the working directory. Library: `ServeConfig::select_stdio_session` (and `_with`, with
   the working directory and home injected), `SelectedSession`,
-  `SessionSource`, `SessionSelectionError`, `SESSION_REQUIRED` and
-  `ServeConfig::has_unenforced_keys`.
+  `SessionSource`, `SessionSelectionError`, `MissingSession`,
+  `SESSION_REQUIRED` and `ServeConfig::has_unenforced_keys`.
 - `lambo::writeq::EmbedderCalibration` and `MemoryBuilder::calibration`
   (#32, third part): the write queue's startup calibration probe once per
   embedder for the whole process. Builders over one shared embedder that are
