@@ -252,6 +252,10 @@ pub(super) async fn serve_http(
                 return Ok(());
             }
         };
+    // The bound address, not the requested one: they differ only for
+    // `--port 0`, where the kernel picks the port and this line is the only
+    // place it is named.
+    let addr = listener.local_addr().unwrap_or(addr);
     tracing::info!(%addr, "mcp http: listening on /mcp");
     if hosted.len() > 1 {
         tracing::info!(
