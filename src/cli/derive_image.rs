@@ -497,7 +497,7 @@ mod tests {
     fn the_size_cap_holds_for_a_pipe() {
         let dir = ScratchDir::new("lambo-cli-derive-image-fifo");
         for (len, ok) in [(64usize, true), (65, false)] {
-            let fifo = dir.join(&format!("v{len}.fifo"));
+            let fifo = dir.join(format!("v{len}.fifo"));
             let status = std::process::Command::new("mkfifo")
                 .arg(&fifo)
                 .status()
