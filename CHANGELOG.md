@@ -262,6 +262,43 @@
     different embedding contract from a local GGUF of the same model.
   - `lambo.example.toml` and the configuration reference document the Workers
     AI setup. The adapter's `check_health` remains llama.cpp-only.
+- An optional Elasticsearch recall tier (#18, feature `recall-elastic`): a
+  top-level `[recall]` section in `lambo.toml` wraps the configured store in a
+  `TieredStore`. The store stays the source of truth and keeps leases, fencing,
+  canonization and graph queries; each committed flush is mirrored to a
+  per-embedding-contract index at an external version built from the fencing
+  token and a per-session flush counter, and the index serves the vector leg of
+  recall. A mirror failure never fails a flush: the session is marked stale,
+  vector recall falls back to the store's own read (or to the keyword and
+  recent legs when the store has no vector search), and the lease holder
+  repairs the index at its next load or flush. A per-session sync marker in the
+  index makes a crash between commit and mirror visible at the next load.
+  `erase-session` also removes the session from the index and does not report
+  success until a refreshed count finds nothing of it. The API key is by
+  reference only (`api_key = { env = "NAME" }`). A build without the feature
+  refuses a `[recall]` section by name. See
+  `dev-diary/notes/feature-18-elastic-tier.md`.
+  Hardened in review: every delete-by-query refreshes first and retries
+  version conflicts; hits are re-scored with exact cosine from their stored
+  vectors (16 extra fetched) and indices pin float `hnsw`; repairs run in the
+  background, one per session, with deadlines (mirror 15 s, repair 10 min,
+  delete-by-query 300 s); reads skip the index for 30 s after 3 failed or slow
+  reads; a marker ahead of a load is re-checked, never repaired from; the
+  marker `_id` is the SHA-256 of the session id; unleased writes are not
+  mirrored; per-session state is evicted on release and bounded; index
+  prefixes containing `-v-` or ending in `-v`, URL query strings or fragments,
+  and `timeout_ms = 0` are refused. Errors follow the `[serve]` redaction
+  rules: an unknown `kind` is not quoted, and `api_key.env` is quoted only
+  while it reads as a variable name.
+- `lambo recall-index backfill --session <s>`: rebuild one session's recall
+  index from the store under the session's lease (#18).
+- `GraphStore::holder_derives_from_graph()` (default `false`): a store whose
+  checked vector read is a lagging tier declares that a session holder's
+  hybrid derive should rank its semantic-merge candidates in its in-memory
+  graph while recall keeps reading the store (#18 review M6, amending #8's
+  single constructor). `TieredStore` declares it. Additive.
+- `GraphStore::backfill_recall_index()` (default `Ok(None)`): the hook the
+  backfill verb calls; only a store with a recall tier overrides it. Additive.
 - `GraphStore::exact_vector_scan()` (default `false`): an adapter declares its
   checked vector read is an exact cosine scan of every vector it stores, so a
   session holder may answer that read from its graph (#8). `SqliteStore`

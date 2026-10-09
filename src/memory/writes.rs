@@ -222,7 +222,7 @@ impl Memory {
             MatchStrategy::Hybrid => {
                 hybrid::derive_with(
                     self.graph.clone(),
-                    self.vector_candidates(),
+                    self.derive_vector_candidates(),
                     self.embedder.as_ref(),
                     &self.embedding,
                     interaction,

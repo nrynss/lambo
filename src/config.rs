@@ -15,6 +15,8 @@ use crate::types::{LamboError, MatchStrategy};
 
 pub(crate) mod secret_env;
 mod serve;
+/// An environment variable name for an error message, or `(value not shown)`
+/// when it may be a pasted secret (shared by `[serve]` and `[recall]`).
 pub use serve::{
     CredentialConfig, InlineToken, ProjectConfig, ServeConfig, ServeCredential,
     DEFAULT_ATTACH_CONCURRENCY, DEFAULT_IDLE_DETACH_SECS, DEFAULT_MAX_ATTACHED,
@@ -434,6 +436,12 @@ pub struct LamboFile {
         deserialize_with = "crate::canon::deserialize_promotion_policy"
     )]
     pub promotion_policy: Option<PromotionPolicy>,
+    /// `[recall]`: an optional recall tier beside the durable store (#18).
+    /// `None` (no section) keeps the store exactly as `[store]` builds it. A
+    /// section naming a tier this binary was not built with is refused at
+    /// resolve, never ignored (see `store::recall_tier`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recall: Option<crate::store::RecallConfig>,
     /// Multi-session serving (`[serve]`, #32). Parsed and validated only:
     /// nothing reads it at runtime until #32's later PRs, so an absent table
     /// and a present one serve exactly as before. Not serialized when empty,
@@ -870,6 +878,31 @@ mod tests {
         );
     }
 
+    /// #18: the example's commented `[recall]` block is a working section
+    /// once uncommented, and leaving it commented keeps the tier off.
+    #[test]
+    fn lambo_file_example_recall_block_parses_when_uncommented() {
+        let raw = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/lambo.example.toml"));
+        assert_eq!(LamboFile::from_toml_str(raw).unwrap().recall, None);
+        let start = raw
+            .find("# [recall]")
+            .expect("the example documents [recall]");
+        // The block ends at the first blank line: other commented examples
+        // (`[serve]`, #32) follow it in the file.
+        let block: String = raw[start..]
+            .lines()
+            .take_while(|l| !l.trim().is_empty())
+            .map(|l| l.strip_prefix("# ").unwrap_or(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let f = LamboFile::from_toml_str(&block).unwrap();
+        let recall = f.recall.expect("uncommented block selects the tier");
+        assert_eq!(recall.kind, crate::store::RecallKind::Elastic);
+        assert_eq!(recall.api_key.unwrap().env, "LAMBO_ES_API_KEY");
+        assert_eq!(recall.index_prefix, "lambo");
+        assert_eq!(recall.timeout_ms, Some(5000));
+    }
+
     #[test]
     fn lambo_file_empty_sections_default() {
         // Empty tables must not hard-fail; kind/dim use serde defaults.
@@ -1145,6 +1178,31 @@ mod tests {
         assert!(err.contains("knd"), "{err}");
     }
 
+    /// #18 under #32's redaction rules: a `[recall]` section is parsed by the
+    /// same `from_toml_str`, so a URL with userinfo pasted under any key, or
+    /// as the wrong type, never reaches the parse error.
+    #[test]
+    fn a_secret_looking_recall_url_never_reaches_a_parse_error() {
+        const URL: &str = "https://elastic:xyzzy@es.example.com";
+        let cases = [
+            format!("[recall]\nkind = \"elastic\"\nurl = \"{URL}\"\ntimeout_ms = \"{URL}\"\n"),
+            format!("[recall]\nkind = \"{URL}\"\nurl = \"{URL}\"\n"),
+            format!("[recall]\nkind = \"elastic\"\nulr = \"{URL}\"\n"),
+            format!("[recall]\nkind = \"elastic\"\n\"{URL}\" = 1\n"),
+            format!("[recall]\nkind = \"elastic\"\nurl = \"{URL}\"\nurl = \"{URL}\"\n"),
+            format!("[recall]\nkind = \"elastic\"\nurl = \"{URL}\"\napi_key = \"{URL}\"\n"),
+            format!("[recall]\nkind = \"elastic\"\nurl = \"{URL}\"\nrefresh = \"{URL}\"\n"),
+            format!("[recall]\nkind = \"elastic\"\nurl = \"{URL}\"\napi_key = {{ env = \"A\", x = \"{URL}\" }}\n"),
+        ];
+        for toml in &cases {
+            let err = LamboFile::from_toml_str(toml).expect_err(toml).to_string();
+            assert!(!err.contains("xyzzy"), "{toml}: {err}");
+        }
+        // A plain typo is still named, since the operator needs it.
+        let err = LamboFile::from_toml_str(&cases[2]).unwrap_err().to_string();
+        assert!(err.contains("ulr"), "{err}");
+    }
+
     #[test]
     fn lambo_file_rejects_unknown_keys() {
         assert!(
@@ -1362,6 +1420,7 @@ kind = "fake"
             },
             daemon: Default::default(),
             promotion_policy: Some(PromotionPolicy::Solo),
+            recall: None,
             serve: Default::default(),
         };
         let s = toml::to_string(&f).unwrap();

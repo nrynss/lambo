@@ -190,6 +190,13 @@ impl WriteCtx {
         VectorCandidates::for_holder(self.store.as_ref(), &self.graph)
     }
 
+    /// The source a background job's hybrid derive is given: the twin of
+    /// `Memory::derive_vector_candidates`, built by the same constructor
+    /// ([`VectorCandidates::for_holder_derive`]).
+    pub(crate) fn derive_vector_candidates(&self) -> VectorCandidates<'_> {
+        VectorCandidates::for_holder_derive(self.store.as_ref(), &self.graph)
+    }
+
     /// Run one job through the ordinary write path.
     ///
     /// `consume`, when present, consumes the job's durable intent **inside the
@@ -240,7 +247,7 @@ impl WriteCtx {
                         });
                         hybrid::derive_with(
                             self.graph.clone(),
-                            self.vector_candidates(),
+                            self.derive_vector_candidates(),
                             self.embedder.as_ref(),
                             &self.embedding,
                             job.interaction,

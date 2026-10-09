@@ -107,6 +107,25 @@ impl<'a> VectorCandidates<'a> {
         }
     }
 
+    /// The source a **session holder**'s hybrid derive is handed (#18,
+    /// amending #8's "one constructor, two callers").
+    ///
+    /// The holder's graph whenever [`Self::for_holder`] would choose it, and
+    /// also over a store that declares `holder_derives_from_graph` (a lagging
+    /// tier): derive's dedupe needs a fresh, exact view of what was just
+    /// written, which the graph has and the tier does not. Recall still
+    /// takes [`Self::for_holder`]'s choice. Same availability as
+    /// [`Self::for_holder`]: never switches a vector leg on.
+    pub(crate) fn for_holder_derive(store: &'a dyn GraphStore, graph: &'a RwLock<Graph>) -> Self {
+        if store.capabilities().contains(Capabilities::VECTOR_SEARCH)
+            && (store.exact_vector_scan() || store.holder_derives_from_graph())
+        {
+            Self::Graph(GraphVectorSource::new(graph))
+        } else {
+            Self::Store(store)
+        }
+    }
+
     /// Whether the vector leg can run at all. Synchronous and I/O-free, so a
     /// caller can skip the query embed when it cannot.
     pub(crate) fn available(&self) -> bool {
@@ -265,6 +284,7 @@ mod tests {
     struct Declares {
         caps: Capabilities,
         exact: bool,
+        derive_graph: bool,
     }
 
     #[async_trait]
@@ -277,6 +297,9 @@ mod tests {
         }
         fn exact_vector_scan(&self) -> bool {
             self.exact
+        }
+        fn holder_derives_from_graph(&self) -> bool {
+            self.derive_graph
         }
         async fn flush(&self, _: &MutationBatch, _: Option<u64>) -> Result<(), StoreError> {
             unreachable!("selection is I/O-free")
@@ -340,7 +363,11 @@ mod tests {
             (Capabilities::HISTORY, false, false, false),
             (Capabilities::empty(), true, false, false),
         ] {
-            let store = Declares { caps, exact };
+            let store = Declares {
+                caps,
+                exact,
+                derive_graph: false,
+            };
             let source = VectorCandidates::for_holder(&store, &graph);
             assert_eq!(
                 matches!(source, VectorCandidates::Graph(_)),
@@ -418,12 +445,60 @@ mod tests {
         let plain = Plain(Declares {
             caps: Capabilities::VECTOR_SEARCH,
             exact: true,
+            derive_graph: true,
         });
         assert!(!plain.exact_vector_scan(), "a wrapper must opt in itself");
+        assert!(
+            !plain.holder_derives_from_graph(),
+            "a wrapper must opt in itself"
+        );
         let graph = RwLock::new(Graph::new(SessionId::from("s")));
         assert!(matches!(
             VectorCandidates::for_holder(&plain, &graph),
             VectorCandidates::Store(_)
         ));
+        assert!(matches!(
+            VectorCandidates::for_holder_derive(&plain, &graph),
+            VectorCandidates::Store(_)
+        ));
+    }
+
+    /// #18 amending #8: derive takes the graph wherever recall does, and
+    /// also over a lagging tier that declares `holder_derives_from_graph`;
+    /// recall's choice is unchanged by that declaration, and neither ever
+    /// switches a vector leg on.
+    #[test]
+    fn for_holder_derive_adds_the_lagging_tier_case_only() {
+        let graph = RwLock::new(Graph::new(SessionId::from("s")));
+        let vs = Capabilities::VECTOR_SEARCH;
+        for (caps, exact, derive_graph, recall_graph, derive_graph_want, available) in [
+            (vs, true, false, true, true, true),
+            (vs, false, false, false, false, true),
+            (vs, false, true, false, true, true),
+            (vs, true, true, true, true, true),
+            (Capabilities::HISTORY, false, true, false, false, false),
+            (Capabilities::empty(), true, true, false, false, false),
+        ] {
+            let store = Declares {
+                caps,
+                exact,
+                derive_graph,
+            };
+            let recall = VectorCandidates::for_holder(&store, &graph);
+            let derive = VectorCandidates::for_holder_derive(&store, &graph);
+            let case = format!("caps {caps:?} exact {exact} derive_graph {derive_graph}");
+            assert_eq!(
+                matches!(recall, VectorCandidates::Graph(_)),
+                recall_graph,
+                "{case}"
+            );
+            assert_eq!(
+                matches!(derive, VectorCandidates::Graph(_)),
+                derive_graph_want,
+                "{case}"
+            );
+            assert_eq!(derive.available(), available, "{case}");
+            assert_eq!(recall.available(), available, "{case}");
+        }
     }
 }
