@@ -514,16 +514,20 @@ fn run_async(
 /// return clap's usage exit code. `stdio_hint` adds how a stdio serve could
 /// have found one.
 fn session_required(stdio_hint: bool) -> ExitCode {
+    let hint = stdio_hint.then(|| lambo::config::MissingSession::default().hint());
+    session_refusal(hint.as_deref())
+}
+
+/// [`session_required`] with the resolver's own hint (or none) under the
+/// clap text.
+fn session_refusal(hint: Option<&str>) -> ExitCode {
     use clap::CommandFactory;
     let mut command = Cli::command();
     command.build();
     let mut message = lambo::config::SESSION_REQUIRED.to_owned();
-    if stdio_hint {
-        message.push_str(
-            "\n\n(without --session, a stdio serve uses the lambo.toml [[serve.projects]] \
-             entry covering its working directory, then [serve] default_session; neither \
-             applies here)",
-        );
+    if let Some(hint) = hint {
+        message.push_str("\n\n");
+        message.push_str(hint);
     }
     let err = match command.find_subcommand_mut("serve") {
         Some(serve) => serve.error(clap::error::ErrorKind::MissingRequiredArgument, message),
@@ -553,7 +557,9 @@ fn select_serve_session(
         ExitCode::FAILURE
     })?;
     file.serve.select_stdio_session(None).map_err(|e| match e {
-        lambo::config::SessionSelectionError::Missing => session_required(true),
+        lambo::config::SessionSelectionError::Missing(missing) => {
+            session_refusal(Some(&missing.hint()))
+        }
         lambo::config::SessionSelectionError::Config(e) => {
             eprintln!("lambo serve: {e}");
             ExitCode::FAILURE
@@ -561,11 +567,19 @@ fn select_serve_session(
     })
 }
 
-/// One startup line saying where a stdio serve's session came from. Names
-/// the configured entry, never the working directory.
-fn log_session_source(session: &str, source: &lambo::config::SessionSource) {
+/// One startup line saying where a stdio serve's session came from, plus one
+/// WARN when `~` entries were skipped. Names the configured entry, never the
+/// working directory or `$HOME`.
+fn log_session_source(selected: &lambo::config::SelectedSession) {
     use lambo::config::SessionSource;
-    match source {
+    let session = selected.session.as_str();
+    if selected.tilde_entries_skipped {
+        tracing::warn!(
+            "HOME is not set to an absolute path, so [[serve.projects]] entries starting with `~` \
+             were skipped"
+        );
+    }
+    match &selected.source {
         SessionSource::Flag => {}
         SessionSource::Project { path } => tracing::info!(
             session,
@@ -604,8 +618,8 @@ fn main() -> ExitCode {
     {
         match select_serve_session(config, transport) {
             Ok(selected) => {
-                *session = Some(selected.session);
-                session_source = Some(selected.source);
+                *session = Some(selected.session.clone());
+                session_source = Some(selected);
             }
             Err(code) => return code,
         }
@@ -657,8 +671,8 @@ fn main() -> ExitCode {
             let Some(session) = session else {
                 return session_required(false);
             };
-            if let Some(source) = session_source {
-                log_session_source(&session, &source);
+            if let Some(selected) = &session_source {
+                log_session_source(selected);
             }
             // `[serve]` parses but nothing enforces it yet (#32 PR 1 review
             // L3); say so once. The file already loaded in

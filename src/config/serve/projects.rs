@@ -23,7 +23,12 @@
 //! An entry's `path` must be absolute or start with `~/` (or be `~`), which
 //! [`check_project_path`] enforces when the file is read. `~` expands to
 //! `$HOME`; an empty or relative `$HOME` counts as unset (a relative one
-//! would resolve against the cwd the client chose). `~user` is refused, because resolving another account's home is
+//! would resolve against the cwd the client chose). With `$HOME` unset, every
+//! `~` entry is skipped and the rest of the map still applies, the same
+//! degrade-and-say-so as an unresolvable working directory: the result
+//! carries [`SelectedSession::tilde_entries_skipped`] (or
+//! [`MissingSession::tilde_entries_skipped`]) so the caller warns once.
+//! `~user` is refused, because resolving another account's home is
 //! not something a config file should make a process do implicitly.
 //!
 //! Both sides are canonicalized with [`std::fs::canonicalize`] before they are
@@ -48,7 +53,7 @@
 //!
 //! Every message names configured values only (an entry's `path` as written,
 //! a session name), never the working directory, the value of `$HOME`, or a
-//! credential. Session names come out as [`AddressedSessionId`]s: they pass
+//! credential. The skipped-`~` warning names no entry and no value at all. Session names come out as [`AddressedSessionId`]s: they pass
 //! the strict addressed-id rule (already enforced on the file by
 //! [`ServeConfig::validate`], re-checked here).
 
@@ -90,23 +95,53 @@ pub struct SelectedSession {
     pub session: String,
     /// Where it came from.
     pub source: SessionSource,
+    /// `$HOME` was unset (or not absolute), so the `~` entries in the map
+    /// were skipped: the caller warns once.
+    pub tilde_entries_skipped: bool,
+}
+
+/// Why nothing selected a session, for the hint under [`SESSION_REQUIRED`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MissingSession {
+    /// `$HOME` was unset (or not absolute), so the `~` entries were skipped.
+    pub tilde_entries_skipped: bool,
+}
+
+impl MissingSession {
+    /// The one-paragraph hint a stdio refusal adds under
+    /// [`SESSION_REQUIRED`]. Names keys and conditions, never a path or the
+    /// value of `$HOME`.
+    pub fn hint(&self) -> String {
+        let mut hint = String::from(
+            "(without --session, a stdio serve uses the lambo.toml [[serve.projects]] entry \
+             covering its working directory, then [serve] default_session; neither applies here",
+        );
+        if self.tilde_entries_skipped {
+            hint.push_str(
+                "; [[serve.projects]] entries starting with `~` were skipped because HOME is \
+                 not set to an absolute path",
+            );
+        }
+        hint.push(')');
+        hint
+    }
 }
 
 /// Why no session could be selected.
 #[derive(Debug)]
 pub enum SessionSelectionError {
     /// Nothing selected a session: render [`SESSION_REQUIRED`] as a usage
-    /// error.
-    Missing,
+    /// error, with [`MissingSession::hint`] under it.
+    Missing(MissingSession),
     /// The map could not be applied safely (an ambiguous pair of entries, or
-    /// a `~` entry with `$HOME` unset). A configuration error.
+    /// a session name that is not addressable). A configuration error.
     Config(LamboError),
 }
 
 impl std::fmt::Display for SessionSelectionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Missing => f.write_str(SESSION_REQUIRED),
+            Self::Missing(_) => f.write_str(SESSION_REQUIRED),
             Self::Config(e) => write!(f, "{e}"),
         }
     }
@@ -209,14 +244,18 @@ impl ServeConfig {
             return Ok(SelectedSession {
                 session: session.to_owned(),
                 source: SessionSource::Flag,
+                tilde_entries_skipped: false,
             });
         }
 
         let mut cwd_unavailable = false;
+        let mut tilde_entries_skipped = false;
         if !self.projects.is_empty() {
             match cwd().and_then(std::fs::canonicalize) {
                 Ok(cwd) => {
-                    if let Some(selected) = self.match_project(&cwd, home)? {
+                    let matched = self.match_project(&cwd, home)?;
+                    tilde_entries_skipped = matched.tilde_entries_skipped;
+                    if let Some(selected) = matched.selected {
                         return Ok(selected);
                     }
                 }
@@ -225,7 +264,9 @@ impl ServeConfig {
         }
 
         let Some(default) = &self.default_session else {
-            return Err(SessionSelectionError::Missing);
+            return Err(SessionSelectionError::Missing(MissingSession {
+                tilde_entries_skipped,
+            }));
         };
         let id = addressed_session("default_session", default)?;
         Ok(SelectedSession {
@@ -235,25 +276,24 @@ impl ServeConfig {
             } else {
                 SessionSource::DefaultSession
             },
+            tilde_entries_skipped,
         })
     }
 
-    /// The longest entry covering the canonical `cwd`, if any.
+    /// The longest entry covering the canonical `cwd`, if any. A `~` entry
+    /// with no `home` is skipped and reported, not refused.
     fn match_project(
         &self,
         cwd: &Path,
         home: Option<&Path>,
-    ) -> Result<Option<SelectedSession>, SessionSelectionError> {
+    ) -> Result<MapMatch, SessionSelectionError> {
         // (depth, entry index) of every entry covering `cwd`.
         let mut covering: Vec<(usize, usize)> = Vec::new();
+        let mut tilde_entries_skipped = false;
         for (i, project) in self.projects.iter().enumerate() {
             let Some(expanded) = expand_home(&project.path, home) else {
-                return Err(SessionSelectionError::Config(serve_err(format!(
-                    "[[serve.projects]] path {:?} starts with `~` but HOME is not set, so \
-                     the working directory cannot be matched against it; set HOME or write \
-                     the path out in full",
-                    project.path
-                ))));
+                tilde_entries_skipped = true;
+                continue;
             };
             // A path that does not exist cannot contain an existing cwd.
             if let Ok(canonical) = std::fs::canonicalize(&expanded)
@@ -262,8 +302,12 @@ impl ServeConfig {
                 covering.push((depth(&canonical), i));
             }
         }
+        let none = MapMatch {
+            selected: None,
+            tilde_entries_skipped,
+        };
         let Some(longest) = covering.iter().map(|&(d, _)| d).max() else {
-            return Ok(None);
+            return Ok(none);
         };
         // Entries at the same depth that both cover `cwd` are the same
         // directory: they agree, or the map is ambiguous.
@@ -272,7 +316,7 @@ impl ServeConfig {
             .filter(|&&(d, _)| d == longest)
             .map(|&(_, i)| &self.projects[i]);
         let Some(project) = tied.next() else {
-            return Ok(None);
+            return Ok(none);
         };
         if let Some(other) = tied.find(|p| p.session != project.session) {
             return Err(SessionSelectionError::Config(serve_err(format!(
@@ -282,13 +326,23 @@ impl ServeConfig {
             ))));
         }
         let id = addressed_session("[[serve.projects]] session", &project.session)?;
-        Ok(Some(SelectedSession {
-            session: id.as_str().to_owned(),
-            source: SessionSource::Project {
-                path: project.path.clone(),
-            },
-        }))
+        Ok(MapMatch {
+            selected: Some(SelectedSession {
+                session: id.as_str().to_owned(),
+                source: SessionSource::Project {
+                    path: project.path.clone(),
+                },
+                tilde_entries_skipped,
+            }),
+            tilde_entries_skipped,
+        })
     }
+}
+
+/// What [`ServeConfig::match_project`] found.
+struct MapMatch {
+    selected: Option<SelectedSession>,
+    tilde_entries_skipped: bool,
 }
 
 #[cfg(test)]

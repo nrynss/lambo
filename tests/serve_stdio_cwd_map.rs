@@ -55,8 +55,19 @@ fn mkdir(root: &Path, rel: &str) -> PathBuf {
 
 /// Run `lambo serve` in `cwd` with `extra` args until stdin closes.
 fn run_serve(fx: &Fixture, cwd: &Path, extra: &[&str]) -> Output {
+    run_serve_with(fx, cwd, extra, |_| {})
+}
+
+/// [`run_serve`] with a hook to adjust the command (its environment).
+fn run_serve_with(
+    fx: &Fixture,
+    cwd: &Path,
+    extra: &[&str],
+    adjust: impl FnOnce(&mut std::process::Command),
+) -> Output {
     let runtime = RuntimeDir::new();
     let mut cmd = common::lambo_command();
+    adjust(&mut cmd);
     cmd.env(common::RUNTIME_DIR_VAR, runtime.path())
         .current_dir(cwd)
         .arg("--config")
@@ -161,4 +172,31 @@ fn an_http_serve_still_needs_the_session_flag() {
     assert_eq!(out.status.code(), Some(2), "{err}");
     assert!(err.contains("--session <SESSION>"), "{err}");
     assert!(!fx.ledger.exists(), "refused before the serve started");
+}
+
+#[test]
+fn without_home_the_tilde_entries_are_skipped_with_one_warning() {
+    // #32 PR 8 review L2: the rest of the map still applies; the skip is
+    // logged once, quoting neither an entry nor the cwd.
+    let fx = fixture(
+        "lambo-i32h-nohome",
+        "[serve]\ndefault_session = \"i32h-default\"\n\n\
+         [[serve.projects]]\npath = \"~\"\nsession = \"i32h-home\"\n\n\
+         [[serve.projects]]\npath = \"~/elsewhere\"\nsession = \"i32h-home2\"\n\n\
+         [[serve.projects]]\npath = \"{root}/work\"\nsession = \"i32h-outer\"\n",
+    );
+    let cwd = mkdir(&fx.dir, "work/cwd-marker");
+    let out = run_serve_with(&fx, &cwd, &[], |cmd| {
+        cmd.env_remove("HOME");
+    });
+    let err = stderr(&out);
+    assert!(out.status.success(), "{err}");
+    assert_eq!(started_session(&fx), "i32h-outer");
+    assert_eq!(
+        err.matches("entries starting with `~` were skipped")
+            .count(),
+        1,
+        "one warning: {err}"
+    );
+    assert!(!err.contains("cwd-marker"), "the cwd is not quoted: {err}");
 }

@@ -69,7 +69,9 @@ use crate::surface::session::{
 use crate::types::LamboError;
 
 mod projects;
-pub use projects::{SelectedSession, SessionSelectionError, SessionSource, SESSION_REQUIRED};
+pub use projects::{
+    MissingSession, SelectedSession, SessionSelectionError, SessionSource, SESSION_REQUIRED,
+};
 
 /// Default cap on attached sessions, pinned plus on-demand (#32 §3.6).
 pub const DEFAULT_MAX_ATTACHED: usize = 16;

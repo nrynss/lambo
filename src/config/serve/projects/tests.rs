@@ -144,13 +144,43 @@ fn tilde_expands_to_home() {
 }
 
 #[test]
-fn a_tilde_entry_without_home_is_refused_without_quoting_the_cwd() {
+fn a_tilde_entry_without_home_is_skipped_and_reported() {
+    // #32 PR 8 review L2: HOME unset skips the `~` entries (the caller warns
+    // once) instead of refusing a map whose other entries still apply.
     let root = ScratchDir::new("lambo-pr8-nohome");
-    let cwd = mkdir(&root, "secretive-cwd-marker");
-    let cfg = config(vec![project("~/proj", "proj")], Some("general"));
-    let msg = config_error(select(&cfg, &cwd));
-    assert!(msg.contains("\"~/proj\"") && msg.contains("HOME"), "{msg}");
-    assert!(!msg.contains("secretive-cwd-marker"), "cwd quoted: {msg}");
+    let proj = mkdir(&root, "proj");
+    let cwd = mkdir(&root, "proj/secretive-cwd-marker");
+
+    // Only a `~` entry: default_session, flagged.
+    let cfg = config(vec![project("~/proj", "tilde")], Some("general"));
+    let got = select(&cfg, &cwd).expect("default");
+    assert_eq!(got.session, "general");
+    assert_eq!(got.source, SessionSource::DefaultSession);
+    assert!(got.tilde_entries_skipped);
+
+    // An absolute entry still applies, and the skip is still reported.
+    let mixed = config(vec![project("~", "tilde"), project(s(&proj), "proj")], None);
+    let got = select(&mixed, &cwd).expect("absolute entry");
+    assert_eq!(got.session, "proj");
+    assert!(got.tilde_entries_skipped);
+
+    // No `~` entry: nothing to report.
+    let plain = config(vec![project(s(&proj), "proj")], None);
+    assert!(!select(&plain, &cwd).expect("plain").tilde_entries_skipped);
+
+    // Nothing left and no default: the usage refusal, whose hint says why
+    // without quoting the cwd, an entry or HOME's value.
+    let bare = config(vec![project("~/proj", "tilde")], None);
+    match select(&bare, &cwd) {
+        Err(SessionSelectionError::Missing(missing)) => {
+            assert!(missing.tilde_entries_skipped);
+            let hint = missing.hint();
+            assert!(hint.contains("HOME") && hint.contains('~'), "{hint}");
+            assert!(!hint.contains("secretive-cwd-marker"), "cwd quoted: {hint}");
+            assert!(!hint.contains("~/proj"), "entry quoted: {hint}");
+        }
+        other => panic!("expected Missing, got {other:?}"),
+    }
 }
 
 #[cfg(unix)]
@@ -176,7 +206,7 @@ fn symlinks_resolve_on_both_sides() {
     std::os::unix::fs::symlink(&outside, real.join("escape")).expect("symlink");
     let got = select(&by_real, &real.join("escape")).map(|s| s.session);
     assert!(
-        matches!(got, Err(SessionSelectionError::Missing)),
+        matches!(got, Err(SessionSelectionError::Missing(_))),
         "a link out of the project leaves it: {got:?}"
     );
 }
@@ -233,7 +263,7 @@ fn an_unreadable_cwd_falls_back_to_default_session() {
             || Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
             None
         ),
-        Err(SessionSelectionError::Missing)
+        Err(SessionSelectionError::Missing(_))
     ));
 }
 
@@ -244,7 +274,7 @@ fn no_match_and_no_default_is_the_missing_session_refusal() {
     let cwd = mkdir(&root, "elsewhere");
     let cfg = config(vec![project(s(&proj), "proj")], None);
     let err = select(&cfg, &cwd).expect_err("refused");
-    assert!(matches!(err, SessionSelectionError::Missing));
+    assert!(matches!(err, SessionSelectionError::Missing(_)));
     assert_eq!(err.to_string(), SESSION_REQUIRED);
     assert!(SESSION_REQUIRED.contains("--session <SESSION>"));
 }
@@ -261,7 +291,7 @@ fn without_a_map_the_cwd_is_never_read() {
     let empty = ServeConfig::default();
     assert!(matches!(
         empty.select_stdio_session_with(None, || panic!("no map, no cwd read"), None),
-        Err(SessionSelectionError::Missing)
+        Err(SessionSelectionError::Missing(_))
     ));
 }
 
@@ -389,9 +419,15 @@ fn a_relative_home_is_treated_as_unset() {
     assert!(home.is_relative());
     let cfg = config(vec![project("~", "home")], Some("general"));
     let cwd_owned = cwd.clone();
-    let got = cfg.select_stdio_session_with(None, move || Ok(cwd_owned), Some(&home));
+    let got = cfg
+        .select_stdio_session_with(None, move || Ok(cwd_owned), Some(&home))
+        .expect("default");
+    assert_eq!(
+        got.session, "general",
+        "a relative HOME resolved against the process cwd"
+    );
     assert!(
-        !matches!(&got, Ok(s) if s.session == "home"),
-        "a relative HOME resolved against the process cwd: {got:?}"
+        got.tilde_entries_skipped,
+        "the `~` entry was skipped as with no HOME"
     );
 }
