@@ -209,9 +209,15 @@ impl std::fmt::Display for ImageMime {
 /// rely on all of: the bytes are non-empty and at most
 /// `crate::surface::image::MAX_IMAGE_BYTES`; their magic bytes match
 /// [`Self::mime`]; the header's width and height are each between 1 and
-/// `crate::surface::image::MAX_IMAGE_SIDE_PX`; and [`Self::sha256`] is the
-/// digest of exactly [`Self::bytes`]. It borrows the bytes; nothing here
-/// copies or keeps them.
+/// `crate::surface::image::MAX_IMAGE_SIDE_PX` (for an extended WebP, the
+/// canvas and its image chunk agree and it is not animated); and
+/// [`Self::sha256`] is the digest of exactly [`Self::bytes`]. It borrows the
+/// bytes; nothing here copies or keeps them.
+///
+/// **Only the header is validated; the pixels are not decoded.** A PNG with
+/// no image data, a JPEG with no scan, or a corrupt bitstream all pass. An
+/// adapter that decodes must therefore expect a decode to fail, and must
+/// return [`EmbedError::Backend`] when it does, never panic.
 #[derive(Clone, Copy)]
 pub struct ImageInput<'a> {
     bytes: &'a [u8],

@@ -63,6 +63,17 @@ dependencies.
   Animation is refused because an embedding needs one still image and the
   design never asked for it.
 
+Validation is header-only (review L2): a file with a valid header and no or
+corrupt image data passes, so an adapter that decodes maps a decode failure to
+`EmbedError::Backend`. The `ImageInput` docs say so.
+
+The JPEG walk accepts any run of `0xFF` fill bytes before a marker, as the
+JPEG spec allows, and refuses any other byte where a marker is expected
+(review L4). libjpeg instead warns about "extraneous bytes" and resyncs, so a
+file from a buggy encoder that libjpeg decodes can be refused here as
+"truncated or unreadable"; that is deliberate, and recognisable if a PR 4
+user reports it.
+
 Anything the parser cannot read is refused as "truncated or unreadable".
 `every_truncation_of_a_header_is_refused` checks every prefix of each header,
 so none panics or reads out of bounds.
