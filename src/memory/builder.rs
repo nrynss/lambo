@@ -38,6 +38,7 @@ use crate::daemon::access::AccessLedger;
 use crate::daemon::{Clock, Daemon};
 use crate::embed::Embedder;
 use crate::recall::cache::RecallCache;
+use crate::recall::query_cache::QueryEmbeddingCache;
 use crate::resolve::{
     embedding_mismatch_error, session_embedding_compatibility, ResolvedBackends,
     SessionEmbeddingCompatibility,
@@ -795,6 +796,7 @@ impl MemoryBuilder {
             heartbeat_handle: PlMutex::new(Some(heartbeat_handle)),
             startup_events: PlMutex::new(Some(startup_events)),
             recall_cache: tokio::sync::Mutex::new(RecallCache::new()),
+            query_embeddings: PlMutex::new(QueryEmbeddingCache::new()),
             accesses,
             writers: AsyncRwLock::new(()),
             close_state: tokio::sync::Mutex::new(false),
