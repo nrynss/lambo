@@ -215,6 +215,9 @@ impl Memory {
         // Held across every await below, so a concurrent `close()` either
         // waits for this whole derive or refuses it (T81-1).
         let _writing = self.begin_write().await?;
+        // #74: an over-long embedding context is refused before anything is
+        // written, as on the asynchronous path, not after the interaction.
+        hybrid::validate_embed_context(concepts, parent_of, None, self.derive_embeds())?;
         let prompt = hybrid::derive_prompt(concepts.iter().map(|(content, _)| *content));
         let interaction = self.begin_interaction_full(agent, Some(prompt), event_time)?;
 
@@ -456,6 +459,14 @@ impl Memory {
                         concepts,
                         parent_of,
                         self.vector_candidates().available(),
+                    )?;
+                    // #74: and the embedding-context limits, so an
+                    // over-long call is a refusal now, not a failed receipt.
+                    hybrid::validate_embed_context(
+                        concepts,
+                        parent_of,
+                        None,
+                        self.derive_embeds(),
                     )?;
                 }
                 MatchStrategy::Canonical => {

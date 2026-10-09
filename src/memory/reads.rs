@@ -127,6 +127,14 @@ impl Memory {
         VectorCandidates::for_holder_derive(self.store.as_ref(), &self.graph)
     }
 
+    /// Whether a derive on this session embeds: `Hybrid` matching on a store
+    /// with vector search. Only then do the hybrid embedding-context limits
+    /// apply (`graph::hybrid::check_embed_context`, #74).
+    pub(crate) fn derive_embeds(&self) -> bool {
+        self.config.match_strategy == crate::types::MatchStrategy::Hybrid
+            && self.derive_vector_candidates().available()
+    }
+
     /// Note that a read returned `ids` to a caller (issue #30). Cheap and
     /// lock-light: one leaf-mutex section, no graph lock, no I/O. The counts
     /// reach the graph — and, through the normal flush, the store — on the

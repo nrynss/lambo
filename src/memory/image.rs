@@ -181,6 +181,16 @@ impl Memory {
             }
         }
 
+        // #74: a `parent_of` end that would overflow the embedding context
+        // at apply is refused here, before the image embed and the ack.
+        image::check_embed_context(
+            image.caption,
+            image.image_id,
+            image.concept_type,
+            image.parent_of,
+        )
+        .map_err(config)?;
+
         let live = &self.embedding;
         let (vector, default_id, source) = match image.payload {
             ImagePayload::Bytes(input) => {

@@ -82,6 +82,20 @@ impl LamboServer {
             }
         }
 
+        // #74: a parent_of end too long to embed framed with the image
+        // content is refused now, not on the receipt. Only a session that
+        // embeds reaches apply; the preconditions below refuse the rest.
+        if self.mem.derive_embeds()
+            && let Err(msg) = image::check_embed_context(
+                &p.caption,
+                p.image_id.as_deref(),
+                ConceptType::from(p.concept_type),
+                &pairs,
+            )
+        {
+            return bad_param(msg);
+        }
+
         // Deployment preconditions, named so the caller (or its operator) can
         // act: these are Lambo's own settings, not environment detail.
         if self.mem.config().match_strategy != MatchStrategy::Hybrid {
