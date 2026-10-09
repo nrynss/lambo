@@ -150,8 +150,8 @@ pub const OBSERVED_MIN_SAMPLES: u64 = PROBE_CONCURRENCY as u64;
 /// that means something, and a 1-weight rate means only "the last write".
 pub const OBSERVED_EWMA_WEIGHT: u32 = PROBE_CONCURRENCY as u32;
 
-/// Bound on the calibration probe — **all [`PROBE_EMBEDS`] of its embeds
-/// together**.
+/// Bound on the calibration probe's **timed** legs — every embed after the
+/// warm-up, together. The warm-up has its own [`PROBE_WARMUP_BUDGET`] (#11).
 ///
 /// The probe is *spawned*, not awaited, at session build — and since the J3
 /// redesign **nothing else awaits it either**: admission uses the static caps,
@@ -160,10 +160,12 @@ pub const OBSERVED_EWMA_WEIGHT: u32 = PROBE_CONCURRENCY as u32;
 /// `await_calibration`.)
 ///
 /// Unchanged at 5 s even though the probe takes seven embeds rather than
-/// four, one of them at [`PROBE_TEXT_BYTES`]: a deployment too cold to answer
-/// seven embeds in 5 s is better served by reporting `unmeasured` and being
-/// **corrected by observation** ([`OBSERVED_MIN_SAMPLES`]) than by publishing
-/// a number taken while its model was still loading.
+/// four, one of them at [`PROBE_TEXT_BYTES`]: a deployment that, once its
+/// warm-up has answered, still cannot answer the timed legs in 5 s is better
+/// served by reporting `unmeasured` and being **corrected by observation**
+/// ([`OBSERVED_MIN_SAMPLES`]) than by publishing a number nobody can trust.
+/// Model load is not in this window any more: it is what the warm-up, with
+/// its own [`PROBE_WARMUP_BUDGET`], absorbs (#11).
 ///
 /// The J3 redesign makes the trade almost free: the probe is telemetry, so a
 /// blown budget costs `write_queue_measured: false` and an absent baseline for
@@ -171,6 +173,23 @@ pub const OBSERVED_EWMA_WEIGHT: u32 = PROBE_CONCURRENCY as u32;
 /// release binary against the live BGE-M3, all seven embeds land in ~180 ms of
 /// the 5 s.
 pub const PROBE_BUDGET: Duration = Duration::from_secs(5);
+
+/// Bound on the probe's discarded warm-up embed(s), on their own (#11).
+///
+/// The warm-up exists to pay the model-load cost out of the measurement
+/// (J3-R1-2), so it must not be charged to [`PROBE_BUDGET`], which prices the
+/// timed legs. It was, and on the M3 Pro rig the candle Metal BGE-M3's first
+/// embed on a cold page cache outran the 5 s: the probe reported
+/// `unmeasured`, and that session never had the probe figure
+/// [`Calibration::probe_optimism`] divides by.
+///
+/// [`crate::graph::hybrid::HYBRID_IO_TIMEOUT`], because that is how long the
+/// product already lets one write's embeds take: an embedder that cannot
+/// answer one short text inside it cannot apply a write either, and
+/// `unmeasured` is then the honest reading. Nothing waits on the probe (it is
+/// spawned and only ever read), so a long warm-up delays telemetry and nothing
+/// else.
+pub const PROBE_WARMUP_BUDGET: Duration = crate::graph::hybrid::HYBRID_IO_TIMEOUT;
 
 /// Text the probe's **short** leg embeds — 35 bytes, fixed, and chosen for one
 /// property only: **every embedder accepts it.**
@@ -508,7 +527,8 @@ impl ObservedRate {
     }
 }
 
-/// Measure the deployment's embedder in three legs, all inside one
+/// Measure the deployment's embedder: a warm-up inside its own
+/// [`PROBE_WARMUP_BUDGET`], then the timed legs, all inside one
 /// [`PROBE_BUDGET`]:
 ///
 /// 1. **Warm-up** — [`PROBE_WARMUP_EMBEDS`] embeds, timed and **thrown away**.
@@ -545,14 +565,16 @@ impl ObservedRate {
 /// absent `probe_optimism` baseline — never a bound, and the observed rate
 /// still replaces the figure after [`OBSERVED_MIN_SAMPLES`] real writes.
 pub(super) async fn probe_embedder(embedder: &dyn Embedder) -> Calibration {
-    let deadline = tokio::time::Instant::now() + PROBE_BUDGET;
-
+    // The warm-up has its own bound and the timed legs' clock starts after
+    // it (#11): a cold model load is what the warm-up is for.
+    let warm_up_deadline = tokio::time::Instant::now() + PROBE_WARMUP_BUDGET;
     for _ in 0..PROBE_WARMUP_EMBEDS {
-        match tokio::time::timeout_at(deadline, embedder.embed(PROBE_TEXT)).await {
+        match tokio::time::timeout_at(warm_up_deadline, embedder.embed(PROBE_TEXT)).await {
             Ok(Ok(_)) => {}
             _ => return Calibration::unmeasured(),
         }
     }
+    let deadline = tokio::time::Instant::now() + PROBE_BUDGET;
 
     let serial_started = tokio::time::Instant::now();
     match tokio::time::timeout_at(deadline, embedder.embed(PROBE_TEXT)).await {

@@ -370,10 +370,41 @@ async fn a_probe_that_cannot_finish_inside_its_budget_reports_no_measurement() {
         assert!(!c.measured(), "{leg}");
         assert_eq!(c.lane_bound, WRITE_QUEUE_LANE_MAX, "{leg}");
         assert_eq!(c.bound, WRITE_QUEUE_MAX, "{leg}");
+        // The warm-up has its own bound (#11); the timed legs share one,
+        // which starts after a warm-up that here took 1 ms.
+        let bound = if leg == "warm-up" {
+            PROBE_WARMUP_BUDGET
+        } else {
+            PROBE_BUDGET
+        };
         assert!(
-            elapsed <= PROBE_BUDGET + Duration::from_millis(50),
-            "the budget covers all {PROBE_EMBEDS} embeds TOGETHER, so a hang at the {leg} \
-                 leg must still end inside it: {elapsed:?}"
+            elapsed <= bound + Duration::from_millis(50),
+            "the budget covers the timed embeds TOGETHER, so a hang at the {leg} leg must \
+                 still end inside it: {elapsed:?}"
         );
     }
+}
+
+/// **A cold first embed does not cost the probe its measurement** (#11).
+///
+/// The warm-up embed exists to pay the model-load cost out of the
+/// measurement (J3-R1-2), but it was charged to the same [`PROBE_BUDGET`] as
+/// the timed legs. Measured on the M3 Pro with the candle Metal BGE-M3 on a
+/// cold page cache: the first embed outran the 5 s budget, the probe
+/// reported `unmeasured`, and that session never had the probe figure
+/// `probe_optimism` divides by. The warm-up now has its own bound
+/// ([`PROBE_WARMUP_BUDGET`]); the timed legs keep [`PROBE_BUDGET`].
+#[tokio::test(start_paused = true)]
+async fn a_cold_warm_up_does_not_cost_the_probe_its_measurement() {
+    let embedder = scripted(vec![
+        Leg::After(PROBE_BUDGET + Duration::from_secs(2)),
+        Leg::After(Duration::from_millis(35)),
+    ]);
+    let c = probe_embedder(&embedder).await;
+    assert_eq!(
+        c.source,
+        CalibrationSource::Probe,
+        "a slow model load is what the warm-up exists to absorb: {c:?}"
+    );
+    assert!(c.serial_items_per_sec.is_some(), "{c:?}");
 }
