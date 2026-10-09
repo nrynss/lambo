@@ -74,13 +74,16 @@ the column. This is the same path `human_confirmed` took. The dogfood rig pins
 
 | test | store | runs in |
 |---|---|---|
-| `types::tests::embedding_source_*`, `concept_embedding_source_is_serde_default_and_skipped_when_none`, `image_mime_wire_converts_both_ways` | none (serde) | every row |
+| `types::tests::embedding_source_*` (incl. `embedding_source_refuses_a_malformed_sha256`), `concept_embedding_source_is_serde_default_and_skipped_when_none`, `image_mime_wire_converts_both_ways` | none (serde) | every row |
+| `store::pg::codec::tests::decode_embedding_source_reads_null_and_values_and_refuses_the_rest` (the pg family's column decode, offline) | Postgres/Cockroach codec | every row that builds `store-postgres` or `store-cockroach` |
+| `cli::re_embed::tests::re_embed_refuses_a_session_with_an_embedding_source` | Memory | every row |
 | `store::memory::tests::embedding_source_survives_the_flush_load_round_trip` | Memory | every row with `store-memory` |
-| `store::sqlite::tests::persistence::embedding_source_survives_the_flush_load_round_trip`, `an_unreadable_embedding_source_fails_the_load` | SQLite | CI |
+| `store::sqlite::tests::persistence::embedding_source_survives_the_flush_load_round_trip`, `an_unreadable_embedding_source_fails_the_load`, `a_width_restamp_nulls_the_vector_and_keeps_its_source` | SQLite | CI |
+| `store::sqlite::tests::schema::a_lost_add_column_race_converges_instead_of_failing`, `concurrent_provisions_on_one_file_both_succeed` (review L3) | SQLite | CI |
 | `store::sqlite::tests::schema::init_schema_converges_a_pre_22_store_without_embedding_source` (preflight refuses by name, `init_schema` converges, old row reads `None`) | SQLite | CI |
 | `store::pg::cockroach::tests::sql_shapes::embedding_source_rides_the_concept_upsert_and_select_shape`, plus the re-pinned `b0_composed_sql_is_byte_identical_to_the_pre_carve_constants` and `sql_shape_is_a_multi_row_upsert` | Cockroach SQL text | `store-cockroach` builds only: no CI row runs them, so run `cargo test --features store-cockroach,fixtures --lib store::pg::cockroach` after any concept column change |
-| `store::pg::embedding_source_live::postgres_round_trips_the_embedding_source` | live Postgres, `#[ignore]` | not in `ci.yml` yet: the `postgres-live` job runs tests by name, and adding the step is a workflow edit for the owner (diff below) |
-| `conformance_suite` → `check_embedding_source_survives_flush_load` | live Cockroach | by hand only: `cockroach-live` is disabled (`if: false`, 2026-10-06) |
+| `store::pg::embedding_source_live::postgres_round_trips_the_embedding_source` (round trip, quarantine keeps the source, then an unreadable stored value fails the load with an `Invariant`) | live Postgres, `#[ignore]` | not in `ci.yml` yet: the `postgres-live` job runs tests by name, and adding the step is a workflow edit for the owner (diff below) |
+| `conformance_suite` → `check_embedding_source_survives_flush_load` (same steps, including the unreadable-value refusal) | live Cockroach | by hand only: `cockroach-live` is disabled (`if: false`, 2026-10-06) |
 | the #23 erase tests on SQLite, Memory and Postgres | all | the planted vectored concept now carries a source; the census still ends at zero rows |
 
 No Postgres convergence test drops the column on the shared CI database (a
@@ -106,13 +109,15 @@ writes has `None`.
 ## Not in this PR
 
 - Setting the field: `SuppliedVector`, `derive_image_as`, merge exclusion and
-  the `re-embed` rules are PR 3.
+  the `re-embed` rules are PR 3. PR 2 only makes `re-embed` refuse a sourced
+  session (review L2).
 - MCP, CLI and stats surface: PR 4. The EmbeddingGemma 2 adapter: PR 5.
 
 ## The `postgres-live` step to add
 
 ```yaml
-      # #22 PR 2: a concept's embedding_source on live PostgreSQL.
+      # #22 PR 2: a concept's embedding_source on live PostgreSQL (round
+      # trip, quarantine keeps it, an unreadable value fails the load).
       - name: Live Postgres embedding source round trip
         run: |
           set -o pipefail
