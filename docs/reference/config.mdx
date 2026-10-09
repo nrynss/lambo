@@ -86,23 +86,82 @@ The in-memory store is scoped to one process. Many agents can share it through a
 
 The kind you choose must be compiled into your binary. If it is not, Lambo fails at startup and names the feature to rebuild with. See [Installation](/installation).
 
+## Recall tier
+
+`[recall]` adds an Elasticsearch index beside the store that serves the vector part of recall. It is optional, and it is not a store kind: the `[store]` you chose stays the source of truth, and leases, fencing, canonization and graph queries never touch Elasticsearch. Each flush the store commits is copied to the index, and recall asks the index for the nearest concepts instead of scanning vectors in the store.
+
+```toml
+[recall]
+kind = "elastic"
+url = "https://my-cluster.es.example.com"
+api_key = { env = "LAMBO_ES_API_KEY" }
+index_prefix = "lambo"
+```
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `kind` | string | none | `elastic`. Required. |
+| `url` | string | none | The cluster's base URL, `http://` or `https://`. A URL that carries a user name, a password, a query string or a fragment is refused. |
+| `api_key` | table | none | `{ env = "NAME" }`: the environment variable that holds the API key. The key itself is never accepted in the file. Omit it for a cluster with security off. |
+| `index_prefix` | string | `lambo` | Lowercase letters, digits, `-`, `_` and `.`. Vectors go to `<prefix>-v-<hash>`, one index per embedding model, and a small `<prefix>-meta` index keeps one sync marker per session. Must not contain `-v-` or end in `-v`, so that `<prefix>-v-*` can never match another deployment's indices on a shared cluster. |
+| `refresh` | string | `"false"` | When a write becomes searchable: `"false"` leaves it to the index refresh interval (1 second by default), `"wait_for"` waits on every write and is for tests. |
+| `timeout_ms` | integer | `5000` | Per-request timeout for writes and searches. Must be greater than zero. Refreshes, deletes by query and counts, whose work grows with the session, get 300 seconds. |
+
+`[recall]` is a top-level table, not part of `[store]`. It needs the `recall-elastic` feature; a binary built without it refuses the section and names the feature rather than ignoring it. Lambo creates each index with its mapping the first time it writes to it.
+
+**Staleness.** A concept becomes searchable in the index up to one refresh interval after its flush, so the vector part of recall can miss a concept written in the last second or so. The keyword and recent parts of recall still find it. This is an accepted difference from a store that ranks vectors itself. Deduplication when a writer derives new concepts does not use the index: it compares against the writer's own in-memory graph, so a fact derived twice in quick succession still merges.
+
+**Ranking.** Lambo creates each vector index with plain float HNSW (no quantization), asks it for 16 more neighbours than recall needs, and re-scores them with exact cosine from the stored vectors. Scores and order therefore match the store's exact scan for the concepts the index returns. The index only chooses which concepts are considered, and an approximate HNSW search can occasionally miss a near neighbour that an exact scan would find. This is the second accepted difference. Because every neighbour comes back with its stored vector, a query's response grows with the number of concepts asked for: at 1024 dimensions about 0.7 MB for 50, and at most about 20 MB at the largest limit (2048), where Lambo asks for no extra neighbours.
+
+**When the index is unavailable.** A failed copy never fails the flush, because the store already has the data. The session is marked stale, and until the index is repaired recall ranks vectors in the store instead (SQLite, PostgreSQL and CockroachDB do this themselves; the in-memory store has no vector search, so recall uses only its keyword and recent parts). A failed query does the same for that one recall, and after three failed or slow (over 5 seconds) queries in a row recall stops asking the index for 30 seconds before trying again. A flush waits at most 15 seconds for its copy. The writer holding the session repairs its index in the background when it next opens the session and after a later flush, one repair at a time per session, and `lambo recall-index backfill` repairs it when no writer is running. Writes made without a session lease (seeding) are not copied: the next writer to open the session, or a backfill, copies them. See [Command line](/cli#rebuild-the-recall-index).
+
+Erasing a session also removes it from the index, and reports success only once a search of the index finds nothing of the session. See [Command line](/cli#rebuild-the-recall-index).
+
 ## Embedder
 
 `[embedder]` selects how text is turned into vectors.
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
-| `kind` | string | `bge_m3` | `bge_m3` or `fixture`. `bedrock` parses but is not implemented, so it fails at startup. |
+| `kind` | string | `bge_m3` | `bge_m3` (an OpenAI-compatible embeddings API: local `llama-server` or a hosted endpoint), `candle` (in-process BGE-M3), `gemini` (Vertex AI), or `fixture` (tests). `openai` is an alias of `bge_m3`. `bedrock` parses but is not implemented, so it fails at startup. |
 | `dim` | integer | `1024` | The width you expect the embedder to emit. |
 | `url` | string | none | The `llama-server` base URL, used when `kind` is `bge_m3`. Also accepted as `llama_url`. |
 | `model` | string | none | The model id sent to `llama-server`. Empty means the server's own default. Also accepted as `llama_model`. |
+| `api_key_env` | string | none | The name of the environment variable that holds a bearer token, for a hosted OpenAI-compatible endpoint. Used when `kind` is `bge_m3`; any other kind refuses it. See [Hosted endpoints](#hosted-endpoints). |
 | `keep_warm_secs` | integer | auto | Seconds between `lambo serve` keep-warm touches. Omitted means auto: every 10 seconds for the in-process candle embedder on a Metal device, off for everything else. `0` turns it off; any other value applies to every kind. For `gemini`, each touch is a billed Vertex AI embedding request and keeps nothing local warm, so leave it off there. On a battery-powered laptop the default wakes the GPU every 10 seconds (about 0.2% GPU duty); set `keep_warm_secs = 0` to opt out. |
 
-`kind` also accepts `bge` and `bge-m3` for `bge_m3`, `titan` for `bedrock`, and `fake` for `fixture`.
+`kind` also accepts `bge`, `bge-m3` and `openai` for `bge_m3`, `vertex` for `gemini`, `titan` for `bedrock`, and `fake` for `fixture`. An alias changes nothing but the spelling: the kind is still reported and stamped as `bge_m3`.
 
 A store that persists vectors declares its own width, and Lambo refuses to start if `dim` disagrees with it.
 
 While `lambo serve` sits idle, the operating system can compress or swap out model weights that nothing is touching, and the next call pays to bring them back. On Apple silicon the candle embedder's weights live in unified memory, so this is where it shows. Keep-warm embeds one short fixed probe on an interval and discards the vector. It writes nothing to the store, the graph or the call ledger, and it is not part of the embedding contract, so you can change it without re-embedding. The first touch comes one interval after startup, never during it.
+
+### Hosted endpoints
+
+The `bge_m3` kind speaks the OpenAI embeddings API (`POST <url>/v1/embeddings`), so it also reaches a hosted OpenAI-compatible endpoint when you give it a token. Cloudflare Workers AI serves BGE-M3 at 1024 dimensions:
+
+```toml
+[embedder]
+kind = "openai"   # the same adapter as bge_m3
+dim = 1024
+url = "https://api.cloudflare.com/client/v4/accounts/<account-id>/ai"
+model = "@cf/baai/bge-m3"
+api_key_env = "CLOUDFLARE_API_TOKEN"
+```
+
+`api_key_env` names a variable; the token itself never goes in `lambo.toml`. Lambo reads the variable when it resolves the embedder and sends `Authorization: Bearer <token>` with every embed request. Without `api_key_env` no `Authorization` header is sent.
+
+- If the variable is unset or empty, startup fails and names the variable. Lambo never falls back to sending no token.
+- The token is sent only over `https`, or over plain `http` to a loopback host (`localhost`, `127.0.0.0/8`, `::1`) such as a local server. Plain `http` to any other host is refused at startup, naming the host, so a token never crosses a network in clear text. Without `api_key_env`, `http` URLs work as before.
+- The value must look like a variable name: upper case letters, digits and `_`, not starting with a digit, at most 64 bytes. A value that does not, or that looks like a token, is refused without being shown. So is an inline `api_key = "..."`.
+- It may not name `LAMBO_AUTH_TOKEN` or any `[[serve.credential]]` `token_env`, from the file or from `LAMBO_EMBED_API_KEY_ENV`. Those variables hold `lambo serve`'s own credentials, and one variable may not hold both a serve credential and the embedder's token.
+- It may not name a variable lambo reads its own credentials from either: `LAMBO_COCKROACH_DSN`, `LAMBO_POSTGRES_DSN`, `DATABASE_URL`, `GCP_LAMBO_CREDENTIALS`, `GOOGLE_APPLICATION_CREDENTIALS` or `LAMBO_GEMINI_CREDENTIALS`. The same rule applies to `[[serve.credential]] token_env`.
+- Redirects are never followed. A `3xx` from the endpoint fails the write as a configuration error naming the status (not the redirect target): point `url` at the endpoint itself. A `url` with a query or fragment is refused, because the embeddings path is appended to it.
+- Plain `http` to a loopback host ignores `HTTP_PROXY`, `HTTPS_PROXY` and `ALL_PROXY`, so a token meant for a local server is never handed to a proxy. `https` URLs still use them: a proxy only tunnels the TLS connection.
+- When an error body from the endpoint is quoted into an error, any run of 8 or more consecutive characters of the token is replaced, whether raw, JSON-escaped or percent-encoded. Shorter fragments, case-changed copies and other encodings are not detected. Quoted bodies are cut at 8 KiB. Logs and errors show the URL as scheme, host, port and path only.
+- A `401` or `403` from the endpoint fails the write as a configuration error, the same as a wrong URL.
+
+The same model behind a different server is a different embedding contract, because the two can differ numerically. Set `model` to the hosted id (as above) so a hosted session's contract differs from a local one, and start a fresh session or run `lambo re-embed` rather than mixing the two.
 
 <Warning>
 Do not switch embedder models in the middle of a session without re-embedding, because vectors from different models are not comparable. The kind, the model, and the width together form the session's embedding contract.
@@ -206,6 +265,7 @@ Every variable below overrides the matching file key. An empty value counts as u
 | `LAMBO_EMBED_DIM` | `embedder.dim` |
 | `LAMBO_LLAMA_EMBED_URL` | `embedder.url` |
 | `LAMBO_LLAMA_MODEL` | `embedder.model` |
+| `LAMBO_EMBED_API_KEY_ENV` | `embedder.api_key_env`. Like the key, it holds a variable name, not the token. |
 | `LAMBO_EMBED_KEEP_WARM_SECS` | `embedder.keep_warm_secs` |
 | `LAMBO_PROMOTION_POLICY` | `promotion_policy` (`Swarm` or `Solo`, any case) |
 
@@ -221,6 +281,7 @@ Cargo features decide which stores and embedders exist in your binary, and `lamb
 | `store-sqlite` | The SQLite store. |
 | `store-cockroach` | The CockroachDB store. |
 | `store-postgres` | The PostgreSQL + pgvector store. Fail-closed until B2 lands schema init. |
+| `recall-elastic` | The Elasticsearch recall tier (`[recall]`). Released binaries include it. |
 | `embed-fixture` | The deterministic fixture embedder. |
 | `embed-bge` | BGE-M3 embeddings through `llama-server`. |
 | `embed-bedrock` | Reserved for Amazon Titan embeddings through Bedrock. Not implemented yet. |
