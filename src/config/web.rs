@@ -50,6 +50,13 @@ pub const DEFAULT_LOAD_CONCURRENCY: usize = 2;
 /// Default bound on simultaneous recalls (#4 Q17).
 pub const DEFAULT_RECALL_CONCURRENCY: usize = 4;
 
+/// Largest accepted `load_concurrency` and `recall_concurrency`. Each sizes a
+/// semaphore, and tokio's panics beyond `Semaphore::MAX_PERMITS`; a TOML
+/// integer reaches far past that. Refusing at parse time keeps an absurd
+/// value a config error instead of a startup panic, and 1024 is already far
+/// more parallel loads or embeds than one portal process can use.
+pub const MAX_CONCURRENCY: usize = 1_024;
+
 /// `[web]`. Every key is optional; an absent table changes nothing.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
@@ -63,11 +70,11 @@ pub struct WebConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_loaded_sessions: Option<usize>,
     /// Simultaneous session loads. Default [`DEFAULT_LOAD_CONCURRENCY`];
-    /// >= 1. SQLite always uses 1.
+    /// 1 to [`MAX_CONCURRENCY`]. SQLite always uses 1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub load_concurrency: Option<usize>,
     /// Simultaneous recalls, process-wide. Default
-    /// [`DEFAULT_RECALL_CONCURRENCY`]; >= 1.
+    /// [`DEFAULT_RECALL_CONCURRENCY`]; 1 to [`MAX_CONCURRENCY`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recall_concurrency: Option<usize>,
 }
@@ -92,11 +99,15 @@ impl WebConfig {
         if self.max_loaded_sessions == Some(0) {
             return Err(web_err("max_loaded_sessions must be >= 1"));
         }
-        if self.load_concurrency == Some(0) {
-            return Err(web_err("load_concurrency must be >= 1"));
-        }
-        if self.recall_concurrency == Some(0) {
-            return Err(web_err("recall_concurrency must be >= 1"));
+        for (key, value) in [
+            ("load_concurrency", self.load_concurrency),
+            ("recall_concurrency", self.recall_concurrency),
+        ] {
+            if value.is_some_and(|n| !(1..=MAX_CONCURRENCY).contains(&n)) {
+                return Err(web_err(format!(
+                    "{key} must be between 1 and {MAX_CONCURRENCY}"
+                )));
+            }
         }
         Ok(())
     }
@@ -168,12 +179,27 @@ mod tests {
             ("[web]\nmax_loaded_sessions = 0\n", "max_loaded_sessions"),
             ("[web]\nload_concurrency = 0\n", "load_concurrency"),
             ("[web]\nrecall_concurrency = 0\n", "recall_concurrency"),
+            ("[web]\nload_concurrency = 1025\n", "load_concurrency"),
+            ("[web]\nrecall_concurrency = 1025\n", "recall_concurrency"),
+            // Parses as a usize, and would panic in `Semaphore::new`.
+            (
+                "[web]\nload_concurrency = 4000000000000000000\n",
+                "load_concurrency",
+            ),
+            (
+                "[web]\nrecall_concurrency = 4000000000000000000\n",
+                "recall_concurrency",
+            ),
         ] {
             let err = LamboFile::from_toml_str(toml).expect_err(toml).to_string();
             assert!(err.contains("[web]") && err.contains(key), "{err}");
-            assert!(!err.contains("60001"), "the value is not quoted: {err}");
+            for value in ["60001", "1025", "4000000000000000000"] {
+                assert!(!err.contains(value), "the value is not quoted: {err}");
+            }
         }
         LamboFile::from_toml_str("[web]\nview_ttl_ms = 60000\n").expect("the bound itself");
+        LamboFile::from_toml_str("[web]\nload_concurrency = 1024\nrecall_concurrency = 1024\n")
+            .expect("the concurrency bound itself");
     }
 
     #[test]

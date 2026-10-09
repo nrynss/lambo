@@ -282,8 +282,8 @@ recall_concurrency = 4
 |---|---|---|
 | `view_ttl_ms` | `1500` | Milliseconds a view is reused, the page's poll interval. `0` reloads on every request, still one load for requests that arrive together. At most `60000`. |
 | `max_loaded_sessions` | `4` | Views kept in memory at once. The least recently used is dropped beyond it. At least 1. |
-| `load_concurrency` | `2` | Session loads that may run at once. At least 1. Always `1` on SQLite. |
-| `recall_concurrency` | `4` | Recalls that may run at once. A recall that waits 2 seconds for a slot gets `503` with `Retry-After: 1`. At least 1. |
+| `load_concurrency` | `2` | Session loads that may run at once. 1 to 1024. Always `1` on SQLite. |
+| `recall_concurrency` | `4` | Recalls that may run at once. A recall that waits 2 seconds for a slot gets `503` with `Retry-After: 1`. 1 to 1024. |
 
 An unknown key or an out-of-range value is refused when the file is read, so it stops every command, like any other invalid key. The refusal names the key and its bound, never the value. At startup `lambo serve-web` prints the bounds it runs with. It checks the store's schema at startup and loads the session on the first request that needs it. See [Watch a session in a browser](/cli#watch-a-session-in-a-browser).
 
