@@ -255,9 +255,10 @@ pub struct StatsParams {
 // the value reaches `surface::image::validate`, whose refusal never quotes
 // it.
 //
-// `image.data` and `image_id` publish their own `maxLength` (the base64 form
-// of the 2 MiB byte cap, and 64), not the uniform 16384; the maxima test
-// lists both as named exceptions. `vector.values`' `maxItems` and
+// `image.data`, `image_id` and `caption` publish their own `maxLength` (the
+// base64 form of the 2 MiB byte cap, 64, and `surface::image::
+// MAX_CAPTION_BYTES`: the uniform 16384 less the shortest suffix), not the
+// uniform 16384; the maxima test lists all three as named exceptions. `vector.values`' `maxItems` and
 // `contract.dim`'s maximum are `surface::image::MAX_VECTOR_VALUES`; schemars
 // takes literals, so `the_image_tool_schema_publishes_the_runtime_caps` pins
 // them to the constants.
@@ -338,8 +339,10 @@ pub struct DeriveImageParams {
     pub agent_id: String,
     /// What the image is, in words. It is the concept's text: keyword recall
     /// and the recall display read it. It may not contain an image suffix
-    /// of its own (`[image:<id>]`).
-    #[schemars(length(max = 16_384))]
+    /// of its own (`[image:<id>]`). With the suffix Lambo appends, the
+    /// content must fit in 16384 bytes: a caption of at most 16375 bytes less
+    /// the image id's length (16359 with the default 16-character id).
+    #[schemars(length(max = 16_374))]
     pub caption: String,
     /// One of `entity`, `logic`, `constraint`, `resource`.
     pub concept_type: WireImageConceptType,

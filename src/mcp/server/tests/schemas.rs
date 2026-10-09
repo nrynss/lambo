@@ -467,13 +467,16 @@ async fn published_schemas_carry_runtime_maxima() {
                 );
             }
             if type_includes(node, "string") && node.get("enum").is_none() {
-                // #22: the two strings with a cap of their own.
+                // #22: the three strings with a cap of their own.
                 let cap = match (t.name.as_ref(), path.as_str()) {
                     ("lambo_derive_image", "image.data") => {
                         crate::surface::image::MAX_IMAGE_B64_LEN as u64
                     }
                     ("lambo_derive_image", "image_id") => {
                         crate::graph::image::MAX_IMAGE_ID_BYTES as u64
+                    }
+                    ("lambo_derive_image", "caption") => {
+                        crate::surface::image::MAX_CAPTION_BYTES as u64
                     }
                     _ => 16_384,
                 };
@@ -810,6 +813,10 @@ async fn the_image_tool_schema_publishes_the_runtime_caps() {
         json!(crate::graph::image::MAX_IMAGE_ID_BYTES)
     );
     assert_eq!(leaf("image_id")["pattern"], json!("^[a-z0-9]{1,64}$"));
+    assert_eq!(
+        leaf("caption")["maxLength"],
+        json!(crate::surface::image::MAX_CAPTION_BYTES)
+    );
     assert_eq!(
         leaf("vector.contract.dim")["maximum"],
         json!(crate::surface::image::MAX_VECTOR_VALUES)

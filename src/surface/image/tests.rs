@@ -664,3 +664,29 @@ fn a_submitted_vector_is_checked_without_echoing_it() {
     let err = check_submitted_vector(&long, &live, &live).unwrap_err();
     assert!(err.contains("over the limit of 4096"), "{err}");
 }
+
+/// #22 PR 4 review M2: the caption's real limit is the content cap less the
+/// suffix, and a caption at it builds a content exactly at the cap.
+#[test]
+fn a_caption_fits_only_with_room_for_its_suffix() {
+    use crate::graph::image::image_content;
+    use crate::surface::limits::MAX_CONTENT_BYTES;
+    assert_eq!(MAX_CAPTION_BYTES, 16_374);
+    for id in ["a", "r17", &"z".repeat(64)] {
+        let max = max_caption_bytes(id.len());
+        let at = "c".repeat(max);
+        check_caption_fits(&at, Some(id)).unwrap();
+        assert_eq!(image_content(&at, id).len(), MAX_CONTENT_BYTES);
+        // Surrounding whitespace is trimmed before the suffix is appended.
+        check_caption_fits(&format!("  {at}\n"), Some(id)).unwrap();
+        let over = "c".repeat(max + 1);
+        let err = check_caption_fits(&over, Some(id)).unwrap_err();
+        assert!(err.contains(&format!("at most {max} bytes")), "{err}");
+        assert!(!err.contains("ccc"), "never quotes the caption: {err}");
+    }
+    let default = max_caption_bytes(crate::graph::image::DEFAULT_IMAGE_ID_HEX);
+    assert_eq!(default, 16_359);
+    check_caption_fits(&"c".repeat(default), None).unwrap();
+    let err = check_caption_fits(&"c".repeat(default + 1), None).unwrap_err();
+    assert!(err.contains("default 16-character image id"), "{err}");
+}

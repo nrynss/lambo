@@ -198,6 +198,35 @@ async fn caption_id_and_parent_of_follow_the_image_rules() {
     s.mem.close().await.expect("close");
 }
 
+/// Review M2: a caption the content cap cannot hold once the suffix is
+/// appended is the caller's error, refused as a parameter that names the
+/// real limit, never an opaque configuration error.
+#[tokio::test]
+async fn a_caption_too_long_for_its_suffix_is_a_bad_param_naming_the_limit() {
+    let s = image_server("mcp-image-caption-cap", Config::default()).await;
+    // Under the uniform 16384 cap, over the caption's real one.
+    let text = refused(&s, image_args(&"c".repeat(16_380), "r17", "x")).await;
+    assert!(
+        text.contains("caption is 16380 bytes; with a 3-byte image_id it may be at most 16372"),
+        "{text}"
+    );
+    assert!(!text.contains("configuration error"), "{text}");
+    let mut default_id = image_args(&"c".repeat(16_360), "r17", "x");
+    default_id.as_object_mut().unwrap().remove("image_id");
+    let text = refused(&s, default_id).await;
+    assert!(text.contains("at most 16359 bytes"), "{text}");
+
+    // At the limit, the derive is accepted and the content is exactly at the cap.
+    let at = "c".repeat(crate::surface::image::max_caption_bytes(3));
+    let ack = call(&s, "lambo_derive_image", image_args(&at, "r17", "x")).await;
+    assert_eq!(ack.is_error, Some(false), "{ack:?}");
+    let receipt = settled_receipt(&s, &ack).await;
+    assert_eq!(receipt["state"], json!("applied"), "{receipt}");
+    let [c] = image_concepts(&s).try_into().expect("one image concept");
+    assert_eq!(c.content.len(), crate::surface::limits::MAX_CONTENT_BYTES);
+    s.mem.close().await.expect("close");
+}
+
 /// Client vectors are the operator's opt-in (design 3.3): with the key off the
 /// call is refused and the refusal names it.
 #[tokio::test]

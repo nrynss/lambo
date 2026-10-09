@@ -219,7 +219,7 @@ Stores one image as a concept, from a local image file or from a vector file you
 |---|---|---|
 | `--session <SESSION>` | Yes | |
 | `--agent <AGENT>` | Yes | |
-| `--caption <CAPTION>` | Yes | What the image is, in words. May not contain an image suffix (`[image:<id>]`) of its own. |
+| `--caption <CAPTION>` | Yes | What the image is, in words. May not contain an image suffix (`[image:<id>]`) of its own. With the ` [image:<id>]` suffix it must fit in 16,384 bytes: at most 16,375 bytes less the id's length (16,359 with the default id). |
 | `--kind <KIND>` | Yes | One of `entity`, `logic`, `constraint`, `resource`. An image cannot be an `observation`. |
 | `--image-id <ID>` | No | Your id for the image: 1 to 64 lowercase letters and digits. Without it, an id is made from the image's digest. |
 | `--image <PATH>` | One of `--image`, `--vector-json` | A PNG, JPEG or WebP file, at most 2 MiB and 4096 pixels a side, for the configured embedder to embed. It needs an embedder that embeds images. |
@@ -442,6 +442,7 @@ The command line enforces the same limits as the MCP tools.
 | `--top-k` | 100 |
 | `derive-image --image` file | 2 MiB, 4096 pixels a side |
 | `derive-image --vector-json` file | 1 MiB, 4096 values |
+| `derive-image --caption` | 16,384 bytes with its ` [image:<id>]` suffix |
 | `--traversal-depth` and `--depth` | 5 |
 | `--max-tokens` | 100,000 |
 | `--ttl-seconds` | 3600 |

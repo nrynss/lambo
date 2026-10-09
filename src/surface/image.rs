@@ -62,6 +62,50 @@ pub const MAX_IMAGE_B64_LEN: usize = MAX_IMAGE_BYTES.div_ceil(3) * 4;
 /// as `maxItems`; the live contract's width is checked after it.
 pub const MAX_VECTOR_VALUES: usize = 4096;
 
+/// Bytes an image concept's suffix, `" [image:<id>]"`, adds to its caption
+/// beyond the id itself.
+const SUFFIX_OVERHEAD_BYTES: usize =
+    " ".len() + crate::graph::image::IMAGE_SUFFIX_OPEN.len() + "]".len();
+
+/// Longest caption, in bytes after trimming, whose image content
+/// (`"{caption} [image:<id>]"`) fits the uniform
+/// [`MAX_CONTENT_BYTES`](super::limits::MAX_CONTENT_BYTES) with an id of
+/// `id_len` bytes.
+pub const fn max_caption_bytes(id_len: usize) -> usize {
+    super::limits::MAX_CONTENT_BYTES - SUFFIX_OVERHEAD_BYTES - id_len
+}
+
+/// Longest caption any image derive can accept: the one with a one-byte id
+/// (16,374 bytes). The MCP schema publishes it as `caption`'s `maxLength`.
+pub const MAX_CAPTION_BYTES: usize = max_caption_bytes(1);
+
+/// Refuse a caption whose image content would exceed the uniform content
+/// cap once Lambo appends `" [image:<id>]"`.
+///
+/// `image_id` is the caller's id, or `None` for a default (digest) id, which
+/// is always [`DEFAULT_IMAGE_ID_HEX`](crate::graph::image::DEFAULT_IMAGE_ID_HEX)
+/// characters. The core checks the built content too, but as a
+/// configuration error; checked here, the caller learns its real limit.
+/// The message names lengths only, never the caption.
+pub fn check_caption_fits(caption: &str, image_id: Option<&str>) -> Result<(), String> {
+    use crate::graph::image::DEFAULT_IMAGE_ID_HEX;
+    let id_len = image_id.map_or(DEFAULT_IMAGE_ID_HEX, str::len);
+    let max = max_caption_bytes(id_len);
+    let len = caption.trim().len();
+    if len > max {
+        let id = match image_id {
+            Some(_) => format!("a {id_len}-byte image_id"),
+            None => format!("the default {DEFAULT_IMAGE_ID_HEX}-character image id"),
+        };
+        return Err(format!(
+            "caption is {len} bytes; with {id} it may be at most {max} bytes, because the \
+             stored content, the caption plus \" [image:<id>]\", is capped at {} bytes",
+            super::limits::MAX_CONTENT_BYTES
+        ));
+    }
+    Ok(())
+}
+
 /// Decode an image's base64 text (standard alphabet, padded), refusing text
 /// longer than [`MAX_IMAGE_B64_LEN`] before decoding any of it.
 ///

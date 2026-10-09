@@ -216,8 +216,8 @@
           "type": "string"
         },
         "caption": {
-          "description": "What the image is, in words. It is the concept's text: keyword recall\nand the recall display read it. It may not contain an image suffix\nof its own (`[image:<id>]`).",
-          "maxLength": 16384,
+          "description": "What the image is, in words. It is the concept's text: keyword recall\nand the recall display read it. It may not contain an image suffix\nof its own (`[image:<id>]`). With the suffix Lambo appends, the\ncontent must fit in 16384 bytes: a caption of at most 16375 bytes less\nthe image id's length (16359 with the default 16-character id).",
+          "maxLength": 16374,
           "type": "string"
         },
         "concept_type": {

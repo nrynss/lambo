@@ -18,7 +18,7 @@ use crate::mcp::server::params::{check_size, DeriveImageParams};
 use crate::mcp::server::response::{bad_param, config_refusal, redact_urls, tool_err};
 use crate::mcp::server::trace::note_facts;
 use crate::mcp::server::LamboServer;
-use crate::surface::image::{check_submitted_vector, decode_base64, validate};
+use crate::surface::image::{check_caption_fits, check_submitted_vector, decode_base64, validate};
 use crate::surface::validate::require_nonempty;
 use crate::types::{ConceptType, EmbeddingContract, MatchStrategy};
 
@@ -50,6 +50,12 @@ impl LamboServer {
         if let Some(id) = &p.image_id
             && let Err(msg) = image::validate_image_id(id)
         {
+            return bad_param(msg);
+        }
+        // The caption's real limit is the content cap less the suffix
+        // Lambo appends (review M2); past it the core would refuse the
+        // built content as an opaque configuration error.
+        if let Err(msg) = check_caption_fits(&p.caption, p.image_id.as_deref()) {
             return bad_param(msg);
         }
         let pairs: Vec<(&str, &str)> = p

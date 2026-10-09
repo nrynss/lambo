@@ -17,7 +17,9 @@ use super::derive::parse_parent_of;
 use super::{close_writer, open_writer};
 use crate::graph::image::{self, ImageDerive, ImagePayload};
 use crate::resolve::ResolvedBackends;
-use crate::surface::image::{check_submitted_vector, sniff_mime, validate, MAX_IMAGE_BYTES};
+use crate::surface::image::{
+    check_caption_fits, check_submitted_vector, sniff_mime, validate, MAX_IMAGE_BYTES,
+};
 use crate::types::{ConceptType, EmbeddingContract, Node};
 
 /// Largest `--vector-json` file read, in bytes: room for
@@ -86,6 +88,7 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
     if let Some(id) = &args.image_id {
         image::validate_image_id(id).map_err(CliError::Usage)?;
     }
+    check_caption_fits(&args.caption, args.image_id.as_deref()).map_err(CliError::Usage)?;
     let mut pairs: Vec<(String, String)> = Vec::new();
     for raw in &args.parent_of {
         check_size_cli("parent-of", raw)?;
@@ -367,10 +370,18 @@ mod tests {
             ),
             (
                 Args {
-                    image: Some(png),
+                    image: Some(png.clone()),
                     ..args("red [image:zzz]")
                 },
                 "caption may not contain",
+            ),
+            // Review M2: under the uniform cap, over the caption's real one.
+            (
+                Args {
+                    image: Some(png),
+                    ..args(&"c".repeat(16_380))
+                },
+                "with a 3-byte image_id it may be at most 16372 bytes",
             ),
         ];
         for (a, want) in cases {

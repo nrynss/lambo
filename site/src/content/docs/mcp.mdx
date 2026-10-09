@@ -236,7 +236,7 @@ Store one image as a concept. You send a caption and either the image itself, wh
 | Argument | Type | Required | Notes |
 |---|---|---|---|
 | `agent_id` | string | Yes | |
-| `caption` | string | Yes | What the image is, in words. Up to 16 KB. May not contain an image suffix (`[image:<id>]`) of its own. |
+| `caption` | string | Yes | What the image is, in words. May not contain an image suffix (`[image:<id>]`) of its own. The stored content, the caption plus ` [image:<image_id>]`, must fit in 16,384 bytes, so a caption may be at most 16,375 bytes less the id's length: 16,372 with `r17`, 16,359 with the default id. A longer caption is refused and the refusal names its limit. |
 | `concept_type` | enum | Yes | One of `entity`, `logic`, `constraint`, `resource`. An image cannot be an `observation`. |
 | `image_id` | string | No | Your id for the image: 1 to 64 lowercase letters and digits (`^[a-z0-9]{1,64}$`). Omit it for an id made from the image's digest. |
 | `image` | `{mime, data}` | One of `image`, `vector` | `mime` is `image/png`, `image/jpeg` or `image/webp` and must match the bytes. `data` is the bytes in base64 (standard alphabet, padded): at most 2 MiB decoded (2,796,204 characters) and at most 4096 pixels a side. |
@@ -457,6 +457,7 @@ Lambo enforces these when the call runs, and the published tool schemas carry th
 | Write receipts kept | 300 seconds, or 4096 receipts, whichever binds first |
 | Image per `lambo_derive_image` | 1, at most 2 MiB decoded (2,796,204 base64 characters) and 4096 pixels a side |
 | Values in a `lambo_derive_image` vector | 4096 |
+| `lambo_derive_image` caption | 16,384 bytes with its ` [image:<image_id>]` suffix (16,374 at most, with a one-character id) |
 
 Every limit above is a maximum. `top_k`, `max_tokens`, and `ttl_seconds` also have a minimum of `1`, so `0` is refused. `wait_ms` is the one limit that **clamps rather than refuses**: a larger value waits the maximum instead of erroring, because a client asking to wait longer than Lambo will wait is asking for something harmless.
 
