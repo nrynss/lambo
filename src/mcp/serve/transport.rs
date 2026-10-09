@@ -251,6 +251,7 @@ pub(super) async fn serve_http(
     );
 
     let hosted = registry.hosted().to_vec();
+    let registry_on_demand = registry.attaches_on_demand();
     let app = http_app(registry, authority, guard);
     let addr = SocketAddr::new(opts.bind, opts.port);
     // Race `bind` against the shutdown signal too (R2-a): the ~5 ms bind window
@@ -270,11 +271,12 @@ pub(super) async fn serve_http(
     // place it is named.
     let addr = listener.local_addr().unwrap_or(addr);
     tracing::info!(%addr, "mcp http: listening on /mcp");
-    if hosted.len() > 1 {
+    if hosted.len() > 1 || registry_on_demand {
         tracing::info!(
             %addr,
             sessions = ?hosted,
-            "mcp http: serving each pinned session at /mcp/s/{{session}}"
+            on_demand = registry_on_demand,
+            "mcp http: serving each session at /mcp/s/{{session}}"
         );
     }
 
@@ -394,15 +396,35 @@ async fn addressed_session(
 
 /// Hand `req` to session `id`'s own MCP service, or refuse it. Reached only
 /// once `grant` is authorized for `id`, so every answer here is one the
-/// caller is entitled to (§6.2: inside scope the answers can differ).
+/// caller is entitled to (§6.2: inside scope the answers can differ), and
+/// the on-demand attach (#32 PR 6) and its store calls happen only here,
+/// never for an out-of-scope request.
 async fn serve_session(
-    registry: &SessionRegistry,
+    registry: &Arc<SessionRegistry>,
     id: &str,
     grant: &SessionGrant,
     req: axum::extract::Request,
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
-    match registry.lookup(id) {
+    match registry
+        .get_or_attach(id, grant.capabilities().create)
+        .await
+    {
+        // The session's own bucket (#32 PR 6, design §3.6), after the
+        // credential's: a flood on one session spends its own rate, not
+        // another's. The guard's 429, so a client handles both alike.
+        Lookup::Live(session) if !session.admits_request() => {
+            tracing::warn!(
+                session = %id,
+                "mcp http: request refused by the session's rate limit"
+            );
+            (
+                axum::http::StatusCode::TOO_MANY_REQUESTS,
+                [(axum::http::header::RETRY_AFTER, "1")],
+                "rate limit exceeded: slow down and retry\n",
+            )
+                .into_response()
+        }
         Lookup::Live(session) => serve_live(&session, grant, req).await,
         Lookup::Unavailable { retry_after } => (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
@@ -421,9 +443,16 @@ async fn serve_session(
              serve log)\n",
         )
             .into_response(),
-        // In scope but absent. Pinned sessions only until #32 PR 6, so even
-        // a credential with `create` gets the 404: nothing attaches on
-        // demand yet.
+        // In scope, erased (#23): never attached or recreated again. Inside
+        // scope the caller may know it (design §6.2); 410, as the admin
+        // routes answer an erased session.
+        Lookup::Erased => (
+            axum::http::StatusCode::GONE,
+            "this session was erased and cannot be used or created again\n",
+        )
+            .into_response(),
+        // In scope but absent, and the caller may not create it (or the
+        // serve attaches nothing on demand): the uniform 404.
         Lookup::NotHosted => refused(Some(grant), SessionRefusal::new(RefusalReason::Absent)),
     }
 }

@@ -294,22 +294,34 @@ fn the_default_session_is_authorized_like_its_addressed_route() {
     authorize_default(&local, &grant, loose).expect("local covers the pinned session");
 }
 
-/// #32 PR 5 review I3 and I5: the startup warnings. A legacy token beside
-/// configured credentials is named (it keeps `default`); a credential
-/// naming unpinned sessions is named with those sessions, and one covering
-/// no pinned session at all is named too. No warning names a token, and a
-/// legacy-only, a credentials-only-and-pinned or a stdio serve gets none.
+/// #32 PR 5 review I3 and I5, as PR 6 leaves them: the startup warnings. A
+/// legacy token beside configured credentials is named (it keeps
+/// `default`); a credential without `create` whose scope reaches past the
+/// pinned sessions is named with that reach, since it attaches such a
+/// session only once it exists. One with `create` reaches them on demand and
+/// is not named. No warning names a token, and a legacy-only, a
+/// credentials-only-and-pinned or a stdio serve gets none.
 #[test]
 fn startup_warns_of_a_leftover_legacy_token_and_unreachable_names() {
     let mut opts = http_opts(&["pin-a", "pin-b"], "127.0.0.1");
     opts.auth_token = Some(fake("legacy"));
     assert!(startup_warnings(&opts).is_empty(), "legacy alone");
 
+    let mut maker = credential("maker", &["later-3"], Some("dc-m-"));
+    maker.grant = SessionGrant::new(
+        "maker",
+        maker.grant.scope().clone(),
+        SessionCapabilities {
+            create: true,
+            ..SessionCapabilities::default()
+        },
+    );
     opts.credentials = vec![
         credential("fine", &["pin-a"], None),
         credential("partly", &["pin-b", "later-1"], None),
         credential("nowhere", &["later-2"], None),
         credential("prefixed", &[], Some("dc-u-")),
+        maker,
     ];
     let warnings = startup_warnings(&opts);
     let all = warnings.join("\n");
@@ -318,17 +330,21 @@ fn startup_warns_of_a_leftover_legacy_token_and_unreachable_names() {
         "{all}"
     );
     assert!(
-        all.contains("\"partly\" names sessions this serve does not pin (later-1)"),
+        all.contains(
+            "\"partly\" reaches sessions this serve does not pin (later-1) without create"
+        ),
         "{all}"
     );
     assert!(
-        all.contains("\"nowhere\" names sessions this serve does not pin (later-2)")
-            && all.contains("\"nowhere\" covers no session"),
+        all.contains("\"nowhere\" reaches sessions this serve does not pin (later-2)"),
         "{all}"
     );
-    assert!(all.contains("\"prefixed\" covers no session"), "{all}");
+    assert!(
+        all.contains("\"prefixed\" reaches sessions this serve does not pin (prefix \"dc-u-\")"),
+        "{all}"
+    );
     assert!(!all.contains("\"fine\""), "{all}");
-    assert!(!all.contains("\"partly\" covers"), "{all}");
+    assert!(!all.contains("\"maker\""), "create reaches them: {all}");
     assert!(!all.contains("fake-"), "a token leaked: {all}");
 
     opts.auth_token = None;
@@ -341,4 +357,25 @@ fn startup_warns_of_a_leftover_legacy_token_and_unreachable_names() {
         startup_warnings(&opts).is_empty(),
         "stdio has no credentials"
     );
+}
+
+/// #32 PR 6: a serve attaches on demand exactly when a configured
+/// credential reaches past its pinned sessions (an unpinned name or a
+/// prefix), over HTTP. The legacy and implicit credentials cover the pinned
+/// sessions only, so the dogfood rig's shape never attaches on demand.
+#[test]
+fn a_scope_past_the_pinned_sessions_attaches_on_demand() {
+    let mut opts = http_opts(&["pin-a"], "127.0.0.1");
+    assert!(!reaches_past_pinned(&opts), "implicit local");
+    opts.auth_token = Some(fake("legacy"));
+    assert!(!reaches_past_pinned(&opts), "the rig's legacy token");
+    opts.credentials = vec![credential("pinned-only", &["pin-a"], None)];
+    assert!(!reaches_past_pinned(&opts), "names only pinned sessions");
+    opts.credentials
+        .push(credential("unpinned", &["later-1"], None));
+    assert!(reaches_past_pinned(&opts), "an unpinned name");
+    opts.credentials = vec![credential("prefixed", &[], Some("dc-u-"))];
+    assert!(reaches_past_pinned(&opts), "a prefix");
+    opts.transport = Transport::Stdio;
+    assert!(!reaches_past_pinned(&opts), "stdio authenticates nobody");
 }

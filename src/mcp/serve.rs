@@ -36,11 +36,16 @@
 //!    finishes (`stages`, #40). Stages 3, 4 and 6 run over the attached set
 //!    of sessions (`registry::SessionRegistry`).
 //!
-//! With more than one pinned session (HTTP only, #32 PR 4) steps 2 and 3
-//! differ: there is no election, each pinned session is acquired from the
-//! one template builder (`registry::SessionRegistry::acquire`), a session
-//! held elsewhere is retried in the background, and a lost lease detaches
-//! that session instead of ending the process (`registry::LeaseLossPolicy`).
+//! With more than one pinned session, or any session attached on demand
+//! (HTTP only, #32 PRs 4 and 6), steps 2 and 3 differ: there is no
+//! election, each pinned session is acquired from the one template builder
+//! (`registry::SessionRegistry::acquire`), a session held elsewhere is
+//! retried in the background, and a lost lease detaches that session instead
+//! of ending the process (`registry::LeaseLossPolicy`). A credential whose
+//! scope reaches past the pinned sessions (an unpinned name or a
+//! `session_prefix`) attaches the sessions it addresses on its first
+//! request, within the `[serve]` bounds ([`SessionBounds`]), and the
+//! registry detaches them again when idle or evicted.
 //!
 //! # Process part and session part (#32)
 //!
@@ -61,7 +66,7 @@
 //! | `builder` | the one resolve ([`resolve_serve_backends`]), `serve_builder`, [`build_memory`] |
 //! | `roles` | the startup election, `Role`, the loser-side refusal record |
 //! | `pinned` | which sessions a serve pins ([`pin_sessions`]) and `serve`'s own check of them |
-//! | `registry` | the attached sessions (`SessionRegistry`): slots, the pinned attach, the detach, the routing lookup, the lease-loss policy |
+//! | `registry` | the attached sessions (`SessionRegistry`): slots, the pinned attach, the on-demand attach and its bounds, the detach, the idle sweeper, the routing lookup, the lease-loss policy |
 //! | `activity` | when a session was last used and whether a call is in flight in it (#32 PR 6) |
 //! | `process` | the process-wide background tasks (`ProcessTasks`) |
 //! | `session` | the per-session part (`AttachedSession`, `SessionTasks`) |
@@ -109,7 +114,9 @@ pub use builder::{build_memory, resolve_serve_backends};
 pub use heartbeat::authorize_ledger;
 pub use pinned::{pin_sessions, PinnedSessions};
 
-use authority::{any_credential, serve_authority, startup_warnings, ServeAuthority};
+use authority::{
+    any_credential, reaches_past_pinned, serve_authority, startup_warnings, ServeAuthority,
+};
 use builder::{explain_startup_failure, serve_builder};
 use heartbeat::serve_startup_line;
 use http_guards::authorize_bind;
@@ -118,7 +125,9 @@ pub use http_guards::{
 };
 use pinned::check_pinned;
 use process::ProcessTasks;
-use registry::{Acquired, LeaseLossPolicy, SessionAttacher, SessionRegistry};
+use registry::{
+    Acquired, LeaseLossPolicy, OnDemandBounds, RegistryBounds, SessionAttacher, SessionRegistry,
+};
 use roles::{resolve_role, Role};
 use session::{session_server, AttachedSession, HostCheck};
 use shutdown::{
@@ -214,6 +223,69 @@ pub struct ServeOptions {
     /// I2 — append a `stats` heartbeat line on this interval. Requires
     /// [`ServeOptions::ledger`]; `None` is off.
     pub ledger_heartbeat: Option<Duration>,
+    /// The `[serve]` bounds on attached sessions (#32 PR 6): the cap, the
+    /// concurrent attaches, the idle detach and the per-session rate.
+    /// [`ServeOptions::new`] fills the defaults.
+    pub bounds: SessionBounds,
+}
+
+/// The `[serve]` bounds on the sessions one serve attaches (#32 PR 6,
+/// design §3.6), from [`SessionBounds::from_config`]; the defaults are
+/// `[serve]`'s.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionBounds {
+    /// Attached sessions, pinned plus on-demand (`max_attached`). An
+    /// on-demand attach at the cap evicts the least recently used idle
+    /// on-demand session, or is refused with 503 when none is idle.
+    pub max_attached: usize,
+    /// Attaches that may run at once (`attach_concurrency`); forced to 1 on
+    /// SQLite, whose one connection serializes them with every flush (R1).
+    pub attach_concurrency: usize,
+    /// How long an on-demand session may sit unused before it is detached
+    /// (`idle_detach_secs`). Pinned sessions never are.
+    pub idle_detach: Duration,
+    /// Each attached session's own request rate (`per_session_rps`);
+    /// `None` is the serve's `--rate-limit-rps`, and `Some(0)` turns the
+    /// per-session bucket off.
+    pub per_session_rps: Option<u32>,
+}
+
+impl Default for SessionBounds {
+    fn default() -> Self {
+        Self {
+            max_attached: crate::config::DEFAULT_MAX_ATTACHED,
+            attach_concurrency: crate::config::DEFAULT_ATTACH_CONCURRENCY,
+            idle_detach: Duration::from_secs(crate::config::DEFAULT_IDLE_DETACH_SECS),
+            per_session_rps: None,
+        }
+    }
+}
+
+impl SessionBounds {
+    /// The bounds `[serve]` sets, each defaulted as the table documents.
+    pub fn from_config(cfg: &crate::config::ServeConfig) -> Self {
+        Self {
+            max_attached: cfg.max_attached(),
+            attach_concurrency: cfg.attach_concurrency(),
+            idle_detach: cfg.idle_detach(),
+            per_session_rps: cfg.per_session_rps,
+        }
+    }
+
+    /// The per-session rate for a serve whose global rate is `global_rps`.
+    pub fn session_rps(&self, global_rps: u32) -> u32 {
+        self.per_session_rps.unwrap_or(global_rps)
+    }
+
+    /// The concurrent-attach bound on `store`: `attach_concurrency`, but
+    /// never more than one on SQLite (design §3.6, R1), and never zero.
+    pub(crate) fn attach_permits(&self, store: &crate::store::StoreConfig) -> usize {
+        if store.kind == crate::store::StoreKind::Sqlite {
+            1
+        } else {
+            self.attach_concurrency.max(1)
+        }
+    }
 }
 
 impl ServeOptions {
@@ -232,6 +304,7 @@ impl ServeOptions {
             rate_limit_rps: DEFAULT_RATE_LIMIT_RPS,
             ledger: None,
             ledger_heartbeat: None,
+            bounds: SessionBounds::default(),
         }
     }
 }
@@ -296,11 +369,23 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     authorize_ledger(&opts)?;
     // #32 PR 4: the pinned sessions, refused before any lease too.
     check_pinned(&opts.session, &opts.sessions, opts.transport)?;
-    if LeaseLossPolicy::for_pinned(opts.sessions.len()) == LeaseLossPolicy::DetachSession {
+    if opts.transport == Transport::Http && opts.sessions.len() > opts.bounds.max_attached {
+        return Err(LamboError::Config(format!(
+            "ServeOptions: {} pinned sessions exceed max_attached ({})",
+            opts.sessions.len(),
+            opts.bounds.max_attached
+        )));
+    }
+    // #32 PR 6: a credential that reaches past the pinned sessions makes
+    // this a registry that attaches on demand, which is never a one-session
+    // serve: no election, and a lost lease detaches only that session.
+    let on_demand = reaches_past_pinned(&opts);
+    if LeaseLossPolicy::for_scope(opts.sessions.len(), on_demand) == LeaseLossPolicy::DetachSession
+    {
         let authority = authority.ok_or_else(|| {
             LamboError::Config("serve: several pinned sessions need --transport http".into())
         })?;
-        return serve_pinned(opts, backends, authority).await;
+        return serve_pinned(opts, backends, authority, on_demand).await;
     }
     // J2, and it belongs in this pre-lease group for the same reason the two
     // above do: it creates nothing and binds nothing (its one filesystem access
@@ -571,6 +656,7 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
         LeaseLossPolicy::ExitProcess,
         None,
         early.clone(),
+        RegistryBounds::pinned_only(),
     );
     // The holder startup, below the arming, in the order it has always run:
     // the session's server, the process-wide tasks (which read it), then the
@@ -598,6 +684,7 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
         endpoint,
         opts.max_sessions,
         HostCheck::for_authority(authority.as_deref()),
+        opts.bounds.session_rps(opts.rate_limit_rps),
     );
     registry.insert_live(Arc::new(session));
     registry.mark_started();
@@ -626,7 +713,8 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     close_holder(&registry, transport, tasks, &early, &progress, ledger).await
 }
 
-/// `serve` for more than one pinned session (#32 PR 4): HTTP only, under
+/// `serve` for more than one pinned session (#32 PR 4), or for sessions
+/// attached on demand (#32 PR 6): HTTP only, under
 /// [`LeaseLossPolicy::DetachSession`].
 ///
 /// The same pre-lease group, arming, process tasks, transport and shutdown
@@ -641,13 +729,19 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
 /// The arming argument is `serve`'s, unchanged: J6's pre-arm arms at the
 /// first acquire and every later load races it; the shutdown future is
 /// registered once the pinned acquires are done, before any session part is
-/// built.
+/// built. An on-demand attach runs under that registration too, and the
+/// shutdown abandons one in flight (releasing the lease it may have taken).
 async fn serve_pinned(
     opts: ServeOptions,
     backends: ResolvedBackends,
     authority: Arc<ServeAuthority>,
+    on_demand: bool,
 ) -> Result<(), LamboError> {
-    serve_pinned_with(opts, backends, authority, PinnedSeams::default()).await
+    let seams = PinnedSeams {
+        on_demand,
+        ..PinnedSeams::default()
+    };
+    serve_pinned_with(opts, backends, authority, seams).await
 }
 
 /// What a test hands [`serve_pinned_with`] so it can drive the real
@@ -662,6 +756,8 @@ struct PinnedSeams {
     /// Sent the registry once the startup sessions are in and the retry
     /// loop is running.
     registry: Option<tokio::sync::oneshot::Sender<Arc<SessionRegistry>>>,
+    /// Whether sessions attach on demand (`authority::reaches_past_pinned`).
+    on_demand: bool,
 }
 
 /// [`serve_pinned`]'s body, with its test seams (see [`PinnedSeams`]).
@@ -684,6 +780,14 @@ async fn serve_pinned_with(
     let calibration = EmbedderCalibration::new();
     let early = seams.early.unwrap_or_else(EarlyShutdown::unarmed);
     let store_cfg = backends.store_cfg.clone();
+    let attach_permits = opts.bounds.attach_permits(&store_cfg);
+    let bounds = RegistryBounds {
+        attach_permits,
+        on_demand: seams.on_demand.then_some(OnDemandBounds {
+            max_attached: opts.bounds.max_attached,
+            idle_detach: opts.bounds.idle_detach,
+        }),
+    };
     // The template every session is cloned from: no endpoint (each session
     // derives its own), the unscoped ledger (each session scopes its own).
     let template = serve_builder(
@@ -708,8 +812,10 @@ async fn serve_pinned_with(
             max_sessions: opts.max_sessions,
             host_check: HostCheck::for_authority(Some(&authority)),
             agent: opts.agent.clone(),
+            session_rps: opts.bounds.session_rps(opts.rate_limit_rps),
         }),
         early.clone(),
+        bounds,
     );
 
     // The pinned acquires, in order. The registry is the only long-lived
@@ -771,12 +877,22 @@ async fn serve_pinned_with(
     }
     registry.mark_started();
     registry.spawn_retry_loop();
+    registry.spawn_idle_sweeper();
     tracing::info!(
         sessions = ?opts.sessions,
         default = %opts.session,
         "lambo serve: serving {} pinned sessions",
         opts.sessions.len()
     );
+    if registry.attaches_on_demand() {
+        tracing::info!(
+            max_attached = opts.bounds.max_attached,
+            attach_concurrency = attach_permits,
+            idle_detach_secs = opts.bounds.idle_detach.as_secs(),
+            per_session_rps = opts.bounds.session_rps(opts.rate_limit_rps),
+            "lambo serve: sessions outside the pinned set attach on demand"
+        );
+    }
     if let Some(tx) = seams.registry {
         let _ = tx.send(Arc::clone(&registry));
     }

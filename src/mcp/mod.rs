@@ -19,8 +19,8 @@ pub mod server;
 pub use endpoint::SessionEndpoint;
 pub use serve::{
     build_memory, check_serve_credentials, pin_sessions, resolve_auth_token,
-    resolve_serve_backends, serve, PinnedSessions, SecretToken, ServeOptions, Transport,
-    AUTH_TOKEN_ENV, DEFAULT_MAX_SESSIONS, DEFAULT_RATE_LIMIT_RPS,
+    resolve_serve_backends, serve, PinnedSessions, SecretToken, ServeOptions, SessionBounds,
+    Transport, AUTH_TOKEN_ENV, DEFAULT_MAX_SESSIONS, DEFAULT_RATE_LIMIT_RPS,
 };
 pub use server::LamboServer;
 

@@ -13,6 +13,7 @@
 //! | the event pump | [`SessionTasks::event_pump`] | stage 4 |
 //! | the lease-loss watcher (multi-session serves only) | [`SessionTasks::lease_watcher`] | stage 5 |
 //! | the session endpoint (J2, the #39 seam) | [`AttachedSession::hub`] | stage 6, [`AttachedSession::release_endpoint`] |
+//! | its use and its request rate (#32 PR 6) | [`AttachedSession::activity`], [`AttachedSession::rate`] | with the session |
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,7 +22,9 @@ use rmcp::transport::streamable_http_server::session::local::LocalSessionManager
 use rmcp::transport::streamable_http_server::session::SessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 
+use super::activity::SessionActivity;
 use super::heartbeat::log_events;
+use super::http_guards::RateLimiter;
 use super::hub::{bind_hub, Hub, SessionEndpoint};
 use super::openers::{AttributingSessions, Openers};
 use super::shutdown::SessionClose;
@@ -98,6 +101,14 @@ pub(super) struct AttachedSession {
     pub(super) endpoint: Option<SessionEndpoint>,
     /// The session's own background tasks.
     pub(super) tasks: SessionTasks,
+    /// When the session was last used and whether a tool call is running in
+    /// it (#32 PR 6): what the idle sweeper and an eviction read. Shared
+    /// with [`Self::server`], which holds a call in flight on it.
+    pub(super) activity: Arc<SessionActivity>,
+    /// The session's own request bucket at `[serve] per_session_rps` (#32
+    /// PR 6, design §3.6), drawn after the credential's, so one session's
+    /// flood cannot spend another's rate. `None` when the rate is 0.
+    pub(super) rate: Option<RateLimiter>,
 }
 
 /// A session's own background tasks, as opposed to the process-wide ones in
@@ -173,7 +184,8 @@ fn http_config(host: HostCheck) -> StreamableHttpServerConfig {
 impl AttachedSession {
     /// Attach the serving parts of a session whose lease `mem` holds: bind
     /// its endpoint and start its event pump, in that order. `host` is the
-    /// HTTP service's `Host` check ([`HostCheck`]).
+    /// HTTP service's `Host` check ([`HostCheck`]); `session_rps` its own
+    /// request rate (0: none).
     ///
     /// Called below the arming, like every holder startup step (see
     /// [`serve`](super::serve)), so a signal during it still reaches the
@@ -184,7 +196,12 @@ impl AttachedSession {
         endpoint: Option<SessionEndpoint>,
         max_sessions: usize,
         host: HostCheck,
+        session_rps: u32,
     ) -> Self {
+        // #32 PR 6: every handle of this session's server (the HTTP
+        // factory's and the endpoint's) records its use on one activity.
+        let activity = Arc::new(SessionActivity::new());
+        let server = server.with_activity(Arc::clone(&activity));
         // J2 — the session endpoint, bound HERE: below the arming and below
         // `LamboServer`, which it needs. A bind failure degrades, it does not stop
         // this process serving memory; see `hub::bind_hub`.
@@ -221,7 +238,17 @@ impl AttachedSession {
                 event_pump,
                 lease_watcher: parking_lot::Mutex::new(None),
             },
+            activity,
+            rate: RateLimiter::new(session_rps, std::time::Instant::now()),
         }
+    }
+
+    /// Take one token from this session's own bucket, if it has one (#32
+    /// PR 6). Always true when the session has no bucket.
+    pub(super) fn admits_request(&self) -> bool {
+        self.rate
+            .as_ref()
+            .is_none_or(|rate| rate.try_acquire_at(std::time::Instant::now()))
     }
 
     /// The session's id.

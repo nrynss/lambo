@@ -580,6 +580,9 @@ struct ServePlan {
     auth_token: Option<lambo::mcp::SecretToken>,
     /// The resolved `[[serve.credential]]` entries (#32 PR 5); HTTP only.
     credentials: Vec<lambo::config::ServeCredential>,
+    /// The `[serve]` bounds on attached sessions (#32 PR 6), read here
+    /// because `file` is handed to the resolve before the serve starts.
+    bounds: lambo::mcp::SessionBounds,
 }
 
 /// `lambo serve`'s checks that need no backend (#32 PR 4), run before the
@@ -679,9 +682,11 @@ fn serve_preflight(
     // `[serve]`: the keys this serve does not enforce yet are named once
     // (#32 PR 1 review L3); never a value.
     file.serve.warn_if_unenforced(transport == Transport::Stdio);
+    let bounds = lambo::mcp::SessionBounds::from_config(&file.serve);
     Ok(ServePlan {
         transport,
         pinned,
+        bounds,
         file,
         auth_token,
         credentials,
@@ -979,6 +984,7 @@ fn main() -> ExitCode {
                 pinned,
                 auth_token,
                 credentials,
+                bounds,
                 ..
             } = serve_plan.expect("serve_preflight ran for serve");
             // A zero `--ledger-heartbeat` would spin the heartbeat loop as fast
@@ -1002,6 +1008,7 @@ fn main() -> ExitCode {
                 rate_limit_rps,
                 ledger,
                 ledger_heartbeat: ledger_heartbeat.map(std::time::Duration::from_secs),
+                bounds,
             };
 
             // `backends` is the single resolve from `resolve_for_command` above
