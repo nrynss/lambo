@@ -201,6 +201,13 @@ pub fn validate<'a>(bytes: &'a [u8], declared_mime: &str) -> Result<ImageInput<'
     Ok(ImageInput::from_validated(bytes, sniffed, sha256))
 }
 
+/// The format `bytes`' magic bytes name, if any of the three. For a surface
+/// that reads a local file and must pick the declared type itself (`lambo
+/// derive-image --image` without `--mime`); [`validate`] still checks it.
+pub fn sniff_mime(bytes: &[u8]) -> Option<ImageMime> {
+    sniff(bytes)
+}
+
 /// The format the magic bytes name, if any of the three.
 fn sniff(bytes: &[u8]) -> Option<ImageMime> {
     if bytes.starts_with(PNG_MAGIC) {

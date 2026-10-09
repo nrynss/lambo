@@ -261,6 +261,72 @@ enum Commands {
         #[arg(long)]
         allow_embedding_mismatch: bool,
     },
+    /// Derive one image concept from a local image file or a client-computed vector file (#22). Its content is the caption plus [image:<id>] and its vector is the image's.
+    DeriveImage {
+        /// Session this process writes (acquires the single-writer lease).
+        #[arg(
+            long,
+            help = "Session this process writes (acquires the single-writer lease)."
+        )]
+        session: String,
+        /// Agent identity stamped on the interaction and concept.
+        #[arg(long, help = "Agent identity stamped on the interaction and concept.")]
+        agent: String,
+        /// What the image is, in words: the concept's text. May not contain [image:.
+        #[arg(
+            long,
+            help = "What the image is, in words: the concept's text. May not contain [image:."
+        )]
+        caption: String,
+        /// The concept's type: entity, logic, constraint or resource (not observation).
+        #[arg(
+            long,
+            value_enum,
+            help = "The concept's type: entity, logic, constraint or resource (not observation)."
+        )]
+        kind: ConceptKind,
+        /// Your id for the image, 1 to 64 of [a-z0-9]. Default: from the image's digest.
+        #[arg(
+            long = "image-id",
+            value_name = "ID",
+            help = "Your id for the image, 1 to 64 of [a-z0-9]. Default: from the image's digest."
+        )]
+        image_id: Option<String>,
+        /// A PNG, JPEG or WebP file (at most 2 MiB, 4096 px a side) for the configured embedder to embed.
+        #[arg(
+            long,
+            value_name = "PATH",
+            conflicts_with = "vector_json",
+            required_unless_present = "vector_json",
+            help = "A PNG, JPEG or WebP file (at most 2 MiB, 4096 px a side) for the configured embedder to embed."
+        )]
+        image: Option<PathBuf>,
+        /// The image's MIME type (image/png, image/jpeg, image/webp). Default: read from the file; a mismatch is refused.
+        #[arg(
+            long,
+            requires = "image",
+            help = "The image's MIME type (image/png, image/jpeg, image/webp). Default: read from the file; a mismatch is refused."
+        )]
+        mime: Option<String>,
+        /// A JSON file {"values": [...], "contract": {"kind", "model", "dim"}} with a vector computed in this session's space. Needs [embedder] accept_client_vectors = true.
+        #[arg(
+            long = "vector-json",
+            value_name = "PATH",
+            help = "A JSON file {\"values\": [...], \"contract\": {\"kind\", \"model\", \"dim\"}} with a vector computed in this session's space. Needs [embedder] accept_client_vectors = true."
+        )]
+        vector_json: Option<PathBuf>,
+        /// Hierarchy pair CHILD:PARENT (repeatable), as for derive. Name the image concept by its content, caption [image:<id>].
+        #[arg(
+            long = "parent-of",
+            value_name = "CHILD:PARENT",
+            action = ArgAction::Append,
+            help = "Hierarchy pair CHILD:PARENT (repeatable), as for derive. Name the image concept by its content, caption [image:<id>]."
+        )]
+        parent_of: Vec<String>,
+        /// DANGEROUS: attach despite a same-width stored/configured model-id mismatch.
+        #[arg(long)]
+        allow_embedding_mismatch: bool,
+    },
     /// Record an action the agent took, with what it produces, modifies and depends on. Timestamps are stamped server-side; do not send one.
     RecordAction {
         /// Session this process writes (acquires the single-writer lease).
@@ -389,6 +455,7 @@ impl Commands {
             Self::EraseSession { .. } => "erase-session",
             Self::RecallIndex { .. } => "recall-index",
             Self::Derive { .. } => "derive",
+            Self::DeriveImage { .. } => "derive-image",
             Self::RecordAction { .. } => "record-action",
             Self::Reserve { .. } => "reserve",
             Self::Release { .. } => "release",
@@ -419,6 +486,10 @@ impl Commands {
                 ..
             }
             | Self::Derive {
+                allow_embedding_mismatch,
+                ..
+            }
+            | Self::DeriveImage {
                 allow_embedding_mismatch,
                 ..
             }
@@ -753,6 +824,37 @@ fn main() -> ExitCode {
                     kind,
                     parent_of,
                     concept,
+                },
+            ),
+        ),
+        (
+            Commands::DeriveImage {
+                session,
+                agent,
+                caption,
+                kind,
+                image_id,
+                image,
+                mime,
+                vector_json,
+                parent_of,
+                allow_embedding_mismatch: _,
+            },
+            Resolved::Full(backends),
+        ) => run_async(
+            "derive-image",
+            lambo::cli::derive_image::run(
+                *backends,
+                lambo::cli::derive_image::Args {
+                    session,
+                    agent,
+                    caption,
+                    kind,
+                    image_id,
+                    image,
+                    mime,
+                    vector_json,
+                    parent_of,
                 },
             ),
         ),
