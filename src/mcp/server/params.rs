@@ -1,4 +1,5 @@
-//! The seven tools' parameter schemas, and the `agent_id` door check.
+//! The tools' parameter schemas (the seven spec tools and, when the deployment
+//! can serve it, `lambo_derive_image`), and the `agent_id` door check.
 //!
 //! Rustdoc on the params types is published verbatim as JSON-Schema
 //! `description`s in every `tools/list` (see the internal notes below), so
@@ -237,6 +238,198 @@ pub struct StatsParams {
     /// and `schemars` takes a literal).
     #[schemars(range(min = 0, max = 34_000))]
     pub wait_ms: Option<u64>,
+}
+
+// ===========================================================================
+// INTERNAL NOTES for `lambo_derive_image` (#22 PR 4) — `//`, not wire copy.
+//
+// The image concept's type omits `observation` (WireImageConceptType): the
+// core refuses an observation image (observations never canonical-match, so
+// the same image would duplicate), and publishing a value the tool always
+// refuses would be a schema that lies.
+//
+// `mime` is a `String` with a published enum rather than a serde enum: a
+// serde enum's unknown-variant error is built inside rmcp's extractor and
+// quotes the caller's string back (see the byte-echo note above). As a
+// `String` the value reaches `surface::image::validate`, whose refusal never
+// quotes it.
+//
+// That closes one slot, not the class (review L3). Every refusal *our* code
+// builds for this tool names the field and the rule and never quotes a
+// value, but serde's type and variant errors, built inside rmcp's
+// extractor before any Lambo code runs, still quote what the caller sent
+// in a wrongly typed slot: `concept_type: "<anything>"` (unknown variant),
+// `image: "<base64>"` or `vector: "<text>"` (invalid type: string), a
+// string in `vector.values` or `contract.dim`. The echo goes back only to
+// the caller that sent it, so nothing crosses sessions or reaches the
+// ledger; it is the same known residual as the byte-echo note above, with
+// the same revisit trigger (an rmcp extraction-error hook).
+//
+// `image.data`, `image_id` and `caption` publish their own `maxLength` (the
+// base64 form of the 2 MiB byte cap, 64, and `surface::image::
+// MAX_CAPTION_BYTES`: the uniform 16384 less the shortest suffix), not the
+// uniform 16384; the maxima test lists all three as named exceptions.
+// `vector.values`' `maxItems` and `contract.dim`'s maximum are
+// `surface::image::MAX_VECTOR_VALUES`; schemars takes literals, so
+// `the_image_tool_schema_publishes_the_runtime_caps` pins them to the
+// constants.
+// ===========================================================================
+
+/// What kind of thing the image is. One of `entity`, `logic`, `constraint`,
+/// `resource` (an image cannot be an `observation`).
+#[derive(Clone, Copy, Debug, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WireImageConceptType {
+    Entity,
+    Logic,
+    Constraint,
+    Resource,
+}
+
+impl From<WireImageConceptType> for ConceptType {
+    fn from(w: WireImageConceptType) -> Self {
+        match w {
+            WireImageConceptType::Entity => ConceptType::Entity,
+            WireImageConceptType::Logic => ConceptType::Logic,
+            WireImageConceptType::Constraint => ConceptType::Constraint,
+            WireImageConceptType::Resource => ConceptType::Resource,
+        }
+    }
+}
+
+/// One image, inline.
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WireImage {
+    /// The image's media type, which must match its bytes: `image/png`,
+    /// `image/jpeg` or `image/webp`.
+    #[schemars(extend("enum" = ["image/png", "image/jpeg", "image/webp"]))]
+    pub mime: String,
+    /// The image bytes in base64 (standard alphabet, padded), on one line,
+    /// with no `data:` prefix. At most 2 MiB decoded, and at most 4096 pixels
+    /// a side.
+    #[schemars(length(max = 2_796_204))]
+    pub data: String,
+}
+
+/// An embedding space: copy it from `lambo_stats`' `embedding_contract`.
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WireEmbeddingContract {
+    /// Embedder kind, e.g. `embeddinggemma2`.
+    #[schemars(length(max = 16_384))]
+    pub kind: String,
+    /// Model string, exactly as `lambo_stats` reports it (omit or null for
+    /// the server default).
+    #[schemars(length(max = 16_384))]
+    pub model: Option<String>,
+    /// Vector width.
+    #[schemars(range(min = 1, max = 4_096))]
+    pub dim: usize,
+}
+
+/// A vector you computed for the image, in this session's embedding space.
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WireVector {
+    /// The components, `dim` of them. Lambo normalizes the vector to unit
+    /// length.
+    #[schemars(length(max = 4_096))]
+    pub values: Vec<f32>,
+    /// The embedding space the vector was computed in. It must equal this
+    /// session's `embedding_contract` exactly.
+    pub contract: WireEmbeddingContract,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DeriveImageParams {
+    /// Id of the agent making this call. Caller-asserted and unverified: work
+    /// is recorded under exactly the id you send. Use one stable id per agent —
+    /// callers sharing an id share its memory attribution and its soft locks.
+    #[schemars(length(max = 16_384))]
+    pub agent_id: String,
+    /// What the image is, in words. It is the concept's text: keyword recall
+    /// and the recall display read it. It may not contain an image suffix
+    /// of its own (`[image:<id>]`). With the suffix Lambo appends, the
+    /// content must fit in 16384 bytes: a caption of at most 16375 bytes less
+    /// the image id's length (16359 with the default 16-character id).
+    #[schemars(length(max = 16_374))]
+    pub caption: String,
+    /// One of `entity`, `logic`, `constraint`, `resource`.
+    pub concept_type: WireImageConceptType,
+    /// Your id for this image: 1 to 64 lowercase letters and digits. The
+    /// concept's content is the caption plus `[image:<image_id>]`; the same
+    /// caption and id derived again is the same concept. Omit it for an id
+    /// made from a digest of what you send: the image's bytes, or the
+    /// normalized vector.
+    #[schemars(length(max = 64), regex(pattern = r"^[a-z0-9]{1,64}$"))]
+    pub image_id: Option<String>,
+    /// The image itself, for this server to embed. Send exactly one of
+    /// `image` and `vector`.
+    pub image: Option<WireImage>,
+    /// A vector you computed for the image instead (accepted only when the
+    /// operator enabled client vectors). Send exactly one of `image` and
+    /// `vector`.
+    pub vector: Option<WireVector>,
+    /// Optional RFC3339 historical about-time for this evidence, such as a
+    /// commit or document date. Omit it for a live fact, which is about now.
+    /// No additional date-range bounds are applied.
+    #[schemars(length(max = 16_384))]
+    pub event_time: Option<DateTime<Utc>>,
+    /// Optional `(parent, child)` hierarchy pairs. Both ends resolve (and may
+    /// be created) as concepts; name the image concept by its content,
+    /// `caption [image:<image_id>]`.
+    pub parent_of: Option<Vec<WireParentOf>>,
+}
+
+// Redacting `Debug` for the image tool's params (review L4): the base64,
+// the vector, the caption and the client's `mime`, `image_id` and contract
+// strings are
+// user data, so a future `?p` in a log line shows their sizes only, as PR
+// 3's `ImagePayload` does. Not wire copy (no `///`): a `Debug` impl is not
+// in the schema either way.
+impl std::fmt::Debug for WireImage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WireImage")
+            .field("mime_len", &self.mime.len())
+            .field("data_len", &self.data.len())
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for WireEmbeddingContract {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WireEmbeddingContract")
+            .field("kind_len", &self.kind.len())
+            .field("model_len", &self.model.as_ref().map(String::len))
+            .field("dim", &self.dim)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for WireVector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WireVector")
+            .field("len", &self.values.len())
+            .field("contract", &self.contract)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for DeriveImageParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeriveImageParams")
+            .field("agent_id", &self.agent_id)
+            .field("caption_len", &self.caption.len())
+            .field("concept_type", &self.concept_type)
+            .field("image_id_len", &self.image_id.as_ref().map(String::len))
+            .field("image", &self.image)
+            .field("vector", &self.vector)
+            .field("event_time", &self.event_time)
+            .field("parent_of", &self.parent_of.as_ref().map(Vec::len))
+            .finish()
+    }
 }
 
 /// Door-side cap on a caller-asserted `agent_id`, in characters (J1, operator

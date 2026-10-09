@@ -1676,6 +1676,22 @@ pub enum LamboError {
     /// split is about who may read the detail, not about renaming the failure.
     #[error("conflict: {0}")]
     SoftLock(String),
+    /// An image derive (#22) was refused because a **text** concept already
+    /// holds the image's canonical key, its caption plus `[image:<id>]`.
+    ///
+    /// The field is the caller's own image id and nothing else, which is
+    /// what lets every surface render this variant to the caller intact
+    /// (`crate::surface::error`) while every other `Embed` refusal is
+    /// flattened to a class: the fix is the caller's (choose another image
+    /// id), and a bare "embedding error" told it nothing. Produced only by
+    /// `graph::hybrid`'s commit-lock check, the same J1-R2-2 rule as
+    /// [`LamboError::SoftLock`]: the exception is a type, so it opens for
+    /// this producer and no other.
+    ///
+    /// It is a fact about this input, like [`LamboError::Embed`]: a replayed
+    /// intent that meets it settles `failed` instead of blocking the replay.
+    #[error("image id taken: a text concept in this session already holds the caption with image id {0:?}; derive the image with another image id")]
+    ImageIdTaken(String),
     /// Any other failure, kept whole.
     #[error(transparent)]
     Other(#[from] anyhow::Error),

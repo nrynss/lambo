@@ -307,7 +307,7 @@ impl WritePipeline {
                     // would. It never counts toward embedder-sickness evidence,
                     // and the refusal proves the embedder just answered (resets
                     // the streak — observed aliveness).
-                    Err(LamboError::Embed(e)) => {
+                    Err(err @ (LamboError::Embed(_) | LamboError::ImageIdTaken(_))) => {
                         transient_streak = 0;
                         failed += 1;
                         this.counters.replay_owed.fetch_sub(1, Ordering::Relaxed);
@@ -317,10 +317,22 @@ impl WritePipeline {
                         // refused; nothing was written" framing is lambo's own
                         // and is the useful half — it says *when* and *whether*
                         // — so it survives on both.
+                        // #22 PR 4: an image-id collision keeps its own
+                        // model-safe sentence (it names the fix); every other
+                        // refusal is its class, as before.
+                        let reason = match &err {
+                            LamboError::ImageIdTaken(_) => {
+                                crate::surface::error::model_safe_message(&err)
+                            }
+                            _ => crate::surface::error::err_class(&err).to_owned(),
+                        };
                         let why = format!(
-                            "replay after restart was refused ({}); nothing was written",
-                            crate::surface::error::err_class(&LamboError::Embed(e.clone()))
+                            "replay after restart was refused ({reason}); nothing was written"
                         );
+                        let e = match &err {
+                            LamboError::Embed(e) => e.clone(),
+                            other => other.to_string(),
+                        };
                         let detail =
                             format!("replay after restart was refused ({e}); nothing was written");
                         // J4 proof obligation 5: a replayed intent settled

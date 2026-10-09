@@ -169,6 +169,18 @@ pub struct Config {
     /// product default is `Hybrid` (below), which is **not**
     /// `MatchStrategy`'s own `Default`.
     pub match_strategy: MatchStrategy,
+
+    /// Whether the surfaces (MCP `lambo_derive_image`, `lambo derive-image`)
+    /// accept an image vector a client computed (#22). Default `false`.
+    ///
+    /// Copied at resolve from `[embedder] accept_client_vectors` /
+    /// `LAMBO_ACCEPT_CLIENT_VECTORS`, so it is a **process** setting: every
+    /// session one `lambo serve` holds gets the same value. The core
+    /// (`Memory::derive_image_as`) does not read it; the surfaces refuse a
+    /// client vector while it is off, naming the key. A per-credential
+    /// refinement belongs to #32's credentials, not here.
+    #[serde(default)]
+    pub accept_client_vectors: bool,
 }
 
 impl Default for Config {
@@ -209,6 +221,8 @@ impl Default for Config {
             default_traversal_depth: 2,
 
             match_strategy: MatchStrategy::Hybrid,
+
+            accept_client_vectors: false,
         }
     }
 }
@@ -873,6 +887,9 @@ mod tests {
         // Issue #13: the example documents keep_warm_secs commented out, so
         // the shipped example resolves keep-warm to auto.
         assert_eq!(f.embedder.keep_warm_secs, None);
+        // #22: the example documents accept_client_vectors commented out, so
+        // client vectors stay off.
+        assert!(!f.embedder.accept_client_vectors);
         assert_eq!(
             f.embedder.llama_url.as_deref(),
             Some("http://127.0.0.1:8080")

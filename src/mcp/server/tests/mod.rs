@@ -27,6 +27,7 @@ use rmcp::model::ContentBlock;
 use serde_json::json;
 use std::time::Duration;
 
+mod derive_image;
 mod errors;
 mod inspect;
 mod ledger;
@@ -41,6 +42,32 @@ async fn server(session: &str) -> LamboServer {
 
 async fn server_with_config(session: &str, config: Config) -> LamboServer {
     let store: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+    server_with_parts(
+        session,
+        store,
+        Arc::new(FixtureEmbedder::new()),
+        fixture_contract(),
+        config,
+    )
+    .await
+}
+
+fn fixture_contract() -> EmbeddingContract {
+    EmbeddingContract {
+        kind: "fixture".into(),
+        model: None,
+        dim: 1024,
+    }
+}
+
+/// [`server_with_config`] over a chosen store, embedder and contract (#22).
+async fn server_with_parts(
+    session: &str,
+    store: Arc<dyn GraphStore>,
+    embedder: Arc<dyn Embedder>,
+    contract: EmbeddingContract,
+    config: Config,
+) -> LamboServer {
     let mem = Memory::builder()
         .session(session)
         .agent("agent-a")
@@ -48,16 +75,68 @@ async fn server_with_config(session: &str, config: Config) -> LamboServer {
         // Keep the background flush loop out of the assertions.
         .flush_interval(Duration::from_secs(3_600))
         .store(store)
-        .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
-        .embedding_contract(EmbeddingContract {
-            kind: "fixture".into(),
-            model: None,
-            dim: 1024,
-        })
+        .embedder(embedder)
+        .embedding_contract(contract)
         .build()
         .await
         .expect("build");
     LamboServer::new(Arc::new(mem))
+}
+
+/// The fixture embedder with its image modality hidden: the shape of every
+/// text-only deployment (BGE-M3 over llama.cpp, candle, Gemini), whose
+/// servers list exactly the seven spec tools (#22).
+struct TextOnly(FixtureEmbedder);
+
+#[async_trait::async_trait]
+impl Embedder for TextOnly {
+    fn dimensions(&self) -> usize {
+        self.0.dimensions()
+    }
+    async fn embed(&self, text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
+        self.0.embed(text).await
+    }
+    async fn embed_query(&self, text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
+        self.0.embed_query(text).await
+    }
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        self.0.as_any()
+    }
+}
+
+/// A server that can serve an image derive (#22): the fixture embedder, which
+/// embeds images, over a `MemoryStore` that claims vector search, under the
+/// default (`Hybrid`) strategy.
+async fn image_server(session: &str, config: Config) -> LamboServer {
+    server_with_parts(
+        session,
+        Arc::new(crate::test_util::VectorSearchable(Arc::new(
+            MemoryStore::new(),
+        ))),
+        Arc::new(FixtureEmbedder::new()),
+        fixture_contract(),
+        config,
+    )
+    .await
+}
+
+/// A PNG the fixture embeds exactly as the text query `label`, base64-encoded
+/// for the wire.
+fn png_b64(label: &str) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(crate::embed::png_with_label(label))
+}
+
+/// A server whose embedder embeds text only, over a plain `MemoryStore`.
+async fn text_only_server(session: &str, config: Config) -> LamboServer {
+    server_with_parts(
+        session,
+        Arc::new(MemoryStore::new()),
+        Arc::new(TextOnly(FixtureEmbedder::new())),
+        fixture_contract(),
+        config,
+    )
+    .await
 }
 
 fn tools(s: &LamboServer) -> Vec<rmcp::model::Tool> {
@@ -183,6 +262,7 @@ async fn call_raw(s: &LamboServer, name: &str, args: serde_json::Value) -> CallT
         "lambo_inspect" => s.lambo_inspect(parse(args)).await,
         "lambo_saints" => s.lambo_saints(parse(args)).await,
         "lambo_stats" => s.lambo_stats(parse(args)).await,
+        "lambo_derive_image" => s.lambo_derive_image(parse(args)).await,
         other => panic!("unknown tool {other}"),
     }
 }

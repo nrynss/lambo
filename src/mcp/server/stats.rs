@@ -49,6 +49,45 @@ pub(super) fn gc_stats_json(g: &crate::memory::GcStats) -> serde_json::Value {
 }
 
 impl LamboServer {
+    /// The session's embedding contract as `lambo_stats` reports it (#22
+    /// design 3.3): the **live** contract, the one `lambo_derive_image`'s
+    /// wire check, the apply check and a replay compare a client vector
+    /// against. `model` is the whole string (`null` for the server default),
+    /// never shortened: a profile suffix such as `;prompts=lambo-eg2-v1` is
+    /// part of the space.
+    ///
+    /// It is also the session's stamp, which the commit-lock check compares
+    /// against, whenever the session has one: a writer's attach stamps a
+    /// fresh session with the live contract, refuses a stamped one that
+    /// differs, and under `--allow-embedding-mismatch` relabels the stamp to
+    /// the live contract before the first write (`MemoryBuilder`). Reporting
+    /// the live contract rather than "stamp, else live" makes the two
+    /// surfaces agree by construction (review L1): what a client copies from
+    /// here is what every check holds it to.
+    ///
+    /// Per session, so it leaks nothing across sessions (#32's `lambo_stats`
+    /// rule).
+    pub(super) fn embedding_contract_json(&self) -> serde_json::Value {
+        let c = self.mem.embedding_contract();
+        json!({ "kind": c.kind, "model": c.model, "dim": c.dim })
+    }
+
+    /// What the session's embedder embeds, as `lambo_stats` reports it:
+    /// `["text"]` or `["text", "image"]`. Client vectors are a separate
+    /// operator setting; whether they are accepted shows as the
+    /// `lambo_derive_image` tool being listed.
+    pub(super) fn embedding_modalities(&self) -> Vec<&'static str> {
+        let m = self.mem.embedder().modalities();
+        [
+            (crate::embed::Modalities::TEXT, "text"),
+            (crate::embed::Modalities::IMAGE, "image"),
+        ]
+        .into_iter()
+        .filter(|(flag, _)| m.contains(*flag))
+        .map(|(_, name)| name)
+        .collect()
+    }
+
     /// The `lambo_stats` numbers, as the JSON both `lambo_stats` and the I2
     /// heartbeat report.
     ///
@@ -96,6 +135,11 @@ impl LamboServer {
             // `last_sweep` the last sweep THIS process ran (null after a
             // restart until the next one).
             "gc": gc_stats_json(gc),
+            // #22 PR 4: the embedding space a client must compute a vector in
+            // to submit it (`lambo_derive_image`'s `vector.contract`), so no
+            // client hardcodes a model or prompt-profile string. Additive.
+            "embedding_contract": self.embedding_contract_json(),
+            "embedding_modalities": self.embedding_modalities(),
         });
         // I1: dropped lines are reported next to written ones so a gap in the
         // ledger is never mistaken for a gap in the traffic. Emitted ONLY when

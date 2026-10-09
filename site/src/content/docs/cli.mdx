@@ -177,7 +177,7 @@ $ echo $?
 1
 ```
 
-The same refusal covers `derive`, `record-action`, `reserve`, `release`, and a second `serve`.
+The same refusal covers `derive`, `derive-image`, `record-action`, `reserve`, `release`, and a second `serve`.
 
 If the holder is wedged (alive and refreshing its lease, but no longer making progress), an operator can force a takeover by expiring its lease row in the store:
 
@@ -196,12 +196,12 @@ Stores concepts from the current interaction. Lambo stamps the time itself, so t
 |---|---|---|
 | `--session <SESSION>` | Yes | |
 | `--agent <AGENT>` | Yes | Stamped on the interaction and the concepts. |
-| `--content <CONTENT>` | Yes | The first concept's text. |
+| `--content <CONTENT>` | Yes | The first concept's text. May not contain an image suffix, `[image:<id>]` in any case or spelling, which only `derive-image` builds; text that only mentions it, such as `see [image: diagram]`, is fine. The same holds for `--concept` and for `record-action`'s `--action`. |
 | `--kind <KIND>` | Yes | One of `entity`, `logic`, `constraint`, `resource`, `observation`. |
 | `--concept <CONTENT:KIND>` | No | An extra concept. Repeat it to derive several in one call. |
 | `--parent-of <CHILD:PARENT>` | No | A hierarchy pair. Repeat it for several links. |
 
-`--parent-of` puts the child left of the colon and the parent right of it. Each value takes exactly one colon, and Lambo refuses extra colons as ambiguous.
+`--parent-of` puts the child left of the first colon and the parent right of it. Only the first colon separates, so the parent may itself contain colons (an IPv6 CIDR such as `2001:db8::/32`); the child and the parent must both be non-empty.
 
 ```bash
 $ lambo derive --session demo --agent agent-a \
@@ -210,6 +210,31 @@ $ lambo derive --session demo --agent agent-a \
     --parent-of "auth middleware:user schema"
 derived 3 concept(s): 3 created, 2 matched existing
 ```
+
+### lambo derive-image
+
+Stores one image as a concept, from a local image file or from a vector file you computed. The concept's content is the caption plus `[image:<id>]`, and its vector is the image's, so a text recall finds it. It is the command line twin of [`lambo_derive_image`](/lambo/mcp/#lambo_derive_image), with the same rules, and it writes synchronously like `derive`.
+
+| Flag | Required | Notes |
+|---|---|---|
+| `--session <SESSION>` | Yes | |
+| `--agent <AGENT>` | Yes | |
+| `--caption <CAPTION>` | Yes | What the image is, in words. May not contain an image suffix (`[image:<id>]`) of its own. With the ` [image:<id>]` suffix it must fit in 16,384 bytes: at most 16,375 bytes less the id's length (16,359 with the default id). |
+| `--kind <KIND>` | Yes | One of `entity`, `logic`, `constraint`, `resource`. An image cannot be an `observation`. |
+| `--image-id <ID>` | No | Your id for the image: 1 to 64 lowercase letters and digits. Without it, an id is made from a digest of the image file's bytes, or of the normalized vector with `--vector-json`. |
+| `--image <PATH>` | One of `--image`, `--vector-json` | A PNG, JPEG or WebP file, at most 2 MiB and 4096 pixels a side, for the configured embedder to embed. It needs an embedder that embeds images. |
+| `--mime <MIME>` | No | With `--image`: `image/png`, `image/jpeg` or `image/webp`. Without it the type is read from the file; a `--mime` that disagrees with the file is refused. |
+| `--vector-json <PATH>` | One of `--image`, `--vector-json` | A JSON file `{"values": [...], "contract": {"kind", "model", "dim"}}` holding a vector computed in this session's embedding space. Needs `[embedder] accept_client_vectors = true` (see [Configuration](/lambo/config/)). The contract must equal the session's exactly. |
+| `--parent-of <CHILD:PARENT>` | No | As for `derive`. Name the image concept by its content, `caption [image:<id>]`. |
+
+```bash
+$ lambo derive-image --session demo --agent dresscode \
+    --caption "red silk saree, gold border" --kind resource \
+    --image-id r17 --image ./renders/r17.png
+derived 1 image concept 'red silk saree, gold border [image:r17]': 1 created (1 embedded), 0 matched existing
+```
+
+Running it again with the same caption and id matches the same concept. A refusal names the rule and never prints the image or the vector: a vector in another embedding space is refused naming which of `kind`, `model` and `dim` differ, and a malformed vector file is reported by line and column. If a text concept already holds the caption and id (a `record-action` target that named the image before it was derived, for example), the command fails with `image id taken` and asks for another image id.
 
 ### lambo record-action
 
@@ -229,7 +254,7 @@ $ lambo record-action --session demo --agent agent-a \
     --action "created migrations/003.sql" \
     --produces "migrations/003.sql" \
     --depends-on "user schema"
-recorded action 'created migrations/003.sql': 2 concept(s) created, 2 edge(s) added
+recorded action 'created migrations/003.sql': 2 concept(s) created (2 embedded), 2 edge(s) added
 ```
 
 ### lambo reserve and lambo release
@@ -444,6 +469,9 @@ The command line enforces the same limits as the MCP tools.
 |---|---|
 | Any single string | 16 KB |
 | `--top-k` | 100 |
+| `derive-image --image` file | 2 MiB, 4096 pixels a side |
+| `derive-image --vector-json` file | 1 MiB, 4096 values |
+| `derive-image --caption` | 16,384 bytes with its ` [image:<id>]` suffix |
 | `--traversal-depth` and `--depth` | 5 |
 | `--max-tokens` | 100,000 |
 | `--ttl-seconds` | 3600 |

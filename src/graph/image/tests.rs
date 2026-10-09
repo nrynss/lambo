@@ -63,6 +63,25 @@ fn image_content_appends_one_suffix_after_the_trimmed_caption() {
     assert!(check_caption("render [image:x] 17").is_err());
 }
 
+/// Review M1 (PR 4): a caption allowed because it holds no suffix token
+/// still yields exactly one, the appended one, so its id alone decides the
+/// key.
+#[test]
+fn an_allowed_caption_that_mentions_the_suffix_keeps_one_suffix_token() {
+    let key = |content: &str| canonical_key(content, |_| None);
+    for caption in [
+        "see [image: diagram]",
+        "the [image:<id>] suffix",
+        "red [image:",
+    ] {
+        check_caption(caption).unwrap();
+        let k = key(&image_content(caption, "abc"));
+        let suffixes: Vec<_> = k.split(' ').filter(|t| is_image_suffix_token(t)).collect();
+        assert_eq!(suffixes, ["[image:abc]"], "{caption:?}: {k:?}");
+        assert_ne!(k, key(&image_content(caption, "zzz")));
+    }
+}
+
 /// Review M2: the caption check runs on the canonical tokens, so a suffix
 /// spelled in another case or split by an invisible character is refused
 /// as surely as the plain one.
@@ -74,15 +93,24 @@ fn a_caption_suffix_in_any_case_or_with_invisible_characters_is_refused() {
         "red [ima\u{200B}ge:zzz]",
         "red [image\u{2060}:zzz]",
         "\u{FEFF}[IMAGE:zzz] red",
-        "red [image:",
+        // Review M1 (PR 4): Porter's `s` rule turns these into `[image:zzz]`.
+        "red [image:zzz]s",
+        "red [IMAGE:ZZZ]S",
     ] {
         assert!(check_caption(caption).is_err(), "{caption:?}");
     }
+    // Review M1 (PR 4): only a token that canonicalizes to `[image:<id>]`
+    // with a valid id can collide; a caption that only mentions the suffix
+    // is allowed.
     for caption in [
         "red image zzz",
         "image: red",
         "[img:zzz] red",
         "red silk saree",
+        "red [image:",
+        "see [image: diagram]",
+        "the [image:<id>] suffix",
+        "[image:Zz-z] red",
     ] {
         check_caption(caption).unwrap_or_else(|e| panic!("{caption:?}: {e}"));
     }
@@ -97,6 +125,7 @@ fn two_images_that_smuggle_each_others_id_would_share_a_key_and_are_refused() {
     for (a, b) in [
         ("red [IMAGE:zzz]", "red [IMAGE:abc]"),
         ("red [ima\u{200B}ge:zzz]", "red [ima\u{200B}ge:abc]"),
+        ("red [image:zzz]s", "red [image:abc]s"),
     ] {
         assert_eq!(
             key(&image_content(a, "abc")),

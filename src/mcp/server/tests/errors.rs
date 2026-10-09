@@ -725,3 +725,24 @@ async fn containment_does_not_disturb_a_normal_result() {
     assert_eq!(out.is_error, Some(false));
     assert_eq!(text_of(&out), "fine");
 }
+
+/// #22 PR 4 review nit: an image id a text concept holds is the caller's to
+/// fix, so `tool_err` logs it at WARN; every other `Memory` error stays at
+/// ERROR.
+#[test]
+fn an_image_id_collision_is_logged_as_a_warning() {
+    let (logs, _guard) = crate::test_util::capture_logs(tracing::Level::TRACE);
+    let _ = tool_err("lambo_derive_image", LamboError::ImageIdTaken("r17".into()));
+    let _ = tool_err("lambo_derive_image", LamboError::Config("x".into()));
+    let lines = logs.lines();
+    let taken: Vec<_> = lines
+        .iter()
+        .filter(|l| l.contains("caller can fix"))
+        .collect();
+    let fault: Vec<_> = lines
+        .iter()
+        .filter(|l| l.contains("full detail logged"))
+        .collect();
+    assert!(taken.len() == 1 && taken[0].contains("WARN"), "{lines:?}");
+    assert!(fault.len() == 1 && fault[0].contains("ERROR"), "{lines:?}");
+}

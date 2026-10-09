@@ -310,8 +310,8 @@ async fn a_re_derived_image_repairs_its_missing_vector() {
 
 /// Review M1: any text write can produce an image's canonical key (case and
 /// token order fold together). An image derive that canonical-matches a
-/// TEXT concept, with or without a text vector, is refused as `Embed` (so a
-/// replayed intent settles `failed`) instead of succeeding with no vector,
+/// TEXT concept, with or without a text vector, is refused as
+/// `ImageIdTaken` (so a replayed intent settles `failed`) instead of succeeding with no vector,
 /// and the text concept is left exactly as it was.
 #[tokio::test]
 async fn an_image_derive_that_matches_a_text_concept_is_refused() {
@@ -347,7 +347,7 @@ async fn an_image_derive_that_matches_a_text_concept_is_refused() {
         .await
         .unwrap_err();
         assert!(
-            matches!(&err, LamboError::Embed(m) if m.contains("text concept")),
+            matches!(&err, LamboError::ImageIdTaken(id) if id == "r17"),
             "{err:?}"
         );
         assert_eq!(graph.read().epoch(), before, "nothing was written");
@@ -392,7 +392,10 @@ async fn a_text_derive_that_squats_an_image_key_makes_the_image_derive_refuse() 
     )
     .await
     .unwrap_err();
-    assert!(matches!(err, LamboError::Embed(_)), "{err:?}");
+    assert!(
+        matches!(&err, LamboError::ImageIdTaken(id) if id == "r17"),
+        "{err:?}"
+    );
     let g = graph.read();
     assert!(
         g.concepts().all(|c| c.embedding_source.is_none()),
@@ -677,4 +680,54 @@ async fn an_image_derive_parent_of_end_is_text_embedded_and_links_to_the_image()
         .edge_between(parent, image_id, EdgeType::Hierarchical)
         .is_some());
     g.assert_invariants().unwrap();
+}
+
+/// #22 PR 4 review M2: a supplied item's text is never embedded, so the
+/// framed-context cap, which bounds what an embedder is sent, does not
+/// apply to it. An image content at the per-string cap is written; a text
+/// item of the same size in the same position is still refused.
+#[tokio::test]
+async fn the_context_cap_does_not_apply_to_a_supplied_item() {
+    let sess = "supplied-context-cap";
+    let content = format!(
+        "{} [image:r17]",
+        "c".repeat(crate::surface::limits::MAX_CONTENT_BYTES - " [image:r17]".len())
+    );
+    assert_eq!(content.len(), crate::surface::limits::MAX_CONTENT_BYTES);
+    let (graph, iid) = graph_with_interaction(sess, 1, 0, &content);
+    let store = SpyStore::with_vector(Vec::new());
+    let embedder = RecordingEmbedder::new();
+    let image = supplied(&content, "red silk saree");
+    let out = run(
+        &graph,
+        &store,
+        &embedder,
+        &live(),
+        iid,
+        &[(content.as_str(), ConceptType::Resource)],
+        &ParentOf::none(),
+        Some(&image),
+    )
+    .await
+    .expect("an image content at the cap is written");
+    assert_eq!(out.created.len(), 1);
+    assert!(embedder.embedded_texts().is_empty(), "nothing was embedded");
+
+    let (graph, iid) = graph_with_interaction("supplied-context-cap-text", 1, 0, &content);
+    let err = run(
+        &graph,
+        &store,
+        &embedder,
+        &live(),
+        iid,
+        &[(content.as_str(), ConceptType::Resource)],
+        &ParentOf::none(),
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(&err, LamboError::Config(m) if m.contains("embedding context")),
+        "{err:?}"
+    );
 }

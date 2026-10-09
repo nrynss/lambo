@@ -37,6 +37,63 @@ pub(crate) fn err_class(err: &LamboError) -> &'static str {
         // this function moved.
         LamboError::Conflict(_) => "conflict",
         LamboError::SoftLock(_) => "conflict",
+        // #22 PR 4: its own class, so the ledger's `error_kind` tells a
+        // caller-fixable id collision from an embedder refusal.
+        LamboError::ImageIdTaken(_) => "image id taken",
         LamboError::Other(_) => "internal error",
+    }
+}
+
+/// What a caller (often a model) is told about a failed write or tool call:
+/// the class from [`err_class`] and a pointer to the log, the same sentence on
+/// the synchronous path (`mcp::server`'s `tool_err`) and on a write receipt
+/// (`writeq`'s `model_safe_failure`).
+///
+/// **One exception, by type** (the J1-R2-2 rule): a
+/// [`LamboError::ImageIdTaken`] says what happened and how to fix it, because
+/// its only field is the caller's own image id. Even that id is shown only
+/// when it has the published shape (`[a-z0-9]{1,64}`), so nothing else can
+/// ride on it.
+pub(crate) fn model_safe_message(err: &LamboError) -> String {
+    match err {
+        LamboError::ImageIdTaken(id) => {
+            let named = if crate::graph::image::validate_image_id(id).is_ok() {
+                format!(" {id:?}")
+            } else {
+                String::new()
+            };
+            format!(
+                "image id taken: a text concept in this session already holds this caption with \
+                 image id{named}, so the image would have no vector of its own; choose another \
+                 image id"
+            )
+        }
+        other => format!("{} (the detail was logged server-side)", err_class(other)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #22 PR 4: the image-id collision names the fix and the caller's own
+    /// id, and nothing else; every other error is still a bare class.
+    #[test]
+    fn an_image_id_collision_names_the_fix_and_only_the_callers_id() {
+        let msg = model_safe_message(&LamboError::ImageIdTaken("r17".into()));
+        assert!(msg.contains("choose another image id"), "{msg}");
+        assert!(msg.contains("\"r17\""), "{msg}");
+        assert_eq!(
+            err_class(&LamboError::ImageIdTaken("r17".into())),
+            "image id taken"
+        );
+
+        // An id that is not the published shape is not echoed at all.
+        let odd = model_safe_message(&LamboError::ImageIdTaken("/srv/x\nline".into()));
+        assert!(!odd.contains("/srv") && !odd.contains('\n'), "{odd}");
+        assert!(odd.contains("choose another image id"), "{odd}");
+
+        let other = model_safe_message(&LamboError::Embed("/srv/secret.sqlite".into()));
+        assert_eq!(other, "embedding error (the detail was logged server-side)");
     }
 }

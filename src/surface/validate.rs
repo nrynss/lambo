@@ -159,8 +159,87 @@ pub fn check_action_targets(total: usize) -> Result<(), String> {
     Ok(())
 }
 
+/// Refuse text that would carry an image concept's suffix into a concept's
+/// own content (#22 PR 4): `lambo_derive`'s concepts and
+/// `lambo_record_action`'s action, on MCP and the CLI.
+///
+/// Only `lambo_derive_image` builds that suffix. A text concept whose
+/// canonical key holds it can take an image's key before the image is
+/// derived, and the image derive is then refused
+/// (`LamboError::ImageIdTaken`); refusing the text at the door closes that
+/// for every text that is a concept's own content.
+///
+/// **Only a token that can collide is refused**
+/// ([`crate::graph::image::holds_image_suffix`]): after the canonical
+/// key's own normalization and stemming, a token exactly `[image:<id>]`
+/// with a valid id. That catches `[IMAGE:R17]`, a suffix split by an
+/// invisible character, and `[image:r17]s` (which stems to `[image:r17]`).
+/// Prose that only mentions the suffix, such as `"see [image: diagram]"`
+/// or `"the [image:<id>] suffix"`, is allowed: none of its tokens is a
+/// suffix, so it can never share an image's key.
+///
+/// **References are not checked.** A `parent_of` end or an action's
+/// `produces` / `modifies` / `depends_on` entry *names* a concept, and naming
+/// an image concept by its content (`"red saree [image:r17]"`) is how a text
+/// write links to it (design 5.2). If no such concept exists yet, the
+/// reference creates a text concept with that key, and the later image derive
+/// is refused with its own message (choose another image id): loud, never a
+/// silent image with no vector.
+///
+/// The message names the field and the rule; it never quotes the value.
+pub fn check_no_image_suffix(field: &str, value: &str) -> Result<(), String> {
+    if crate::graph::image::holds_image_suffix(value) {
+        return Err(format!(
+            "{field} may not contain an image suffix ([image:<id>], in any case or spelling): \
+             that suffix names an image concept, which only lambo_derive_image creates. To \
+             refer to an image concept, name it in parent_of or in an action's produces, \
+             modifies or depends_on"
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+    /// #22 PR 4: the image suffix is refused in a concept's own text, raw or
+    /// in any spelling that canonicalizes to it, and the value is not quoted.
+    #[test]
+    fn the_image_suffix_is_refused_in_concept_text_without_quoting_it() {
+        check_no_image_suffix("concept.content", "red silk saree, image of it").unwrap();
+        check_no_image_suffix("concept.content", "an [image] of [a:b]").unwrap();
+        for text in [
+            "render 17 [image:r17]",
+            "Render 17 [IMAGE:R17]",
+            "[ima\u{200B}ge:r17] render",
+            // Porter strips the trailing `s`, so these stem to `[image:r17]`.
+            "render 17 [image:r17]s",
+            "render 17 [Image:R17]S",
+        ] {
+            let err = check_no_image_suffix("concept.content", text).unwrap_err();
+            assert!(err.starts_with("concept.content may not contain"), "{err}");
+            assert!(!err.contains("r17") && !err.contains("R17"), "{err}");
+        }
+    }
+
+    /// #22 PR 4 review M1: prose that only mentions the suffix holds no
+    /// token that can collide with an image key, so a concept, an action
+    /// and a caption may all carry it.
+    #[test]
+    fn prose_that_mentions_the_image_suffix_is_allowed() {
+        for text in [
+            "lambo_derive_image appends the `[image:<id>]` suffix",
+            "see [image: diagram]",
+            "the `[image:` prefix is reserved",
+            "check_no_image_suffix refuses '[image:'",
+            "an id is [a-z0-9], so [image:r-17] is not one",
+            "[image:] has no id",
+        ] {
+            check_no_image_suffix("concept.content", text)
+                .unwrap_or_else(|e| panic!("{text:?}: {e}"));
+            crate::graph::image::check_caption(text).unwrap_or_else(|e| panic!("{text:?}: {e}"));
+        }
+    }
+
     use super::*;
 
     #[test]

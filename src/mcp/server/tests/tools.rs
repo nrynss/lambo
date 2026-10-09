@@ -87,6 +87,77 @@ async fn record_action_and_saints_and_stats_round_trip() {
     s.mem.close().await.expect("close");
 }
 
+/// #22 PR 4: a concept's own text may not hold a token that canonicalizes
+/// to an image suffix (review M1: including `[image:r17]s`, which stems to
+/// one), while prose that only mentions the suffix, and a reference that
+/// names an image concept, are accepted.
+#[tokio::test]
+async fn the_image_suffix_is_refused_in_concept_text_but_not_in_references() {
+    let s = server("mcp-image-suffix").await;
+    for (tool, args) in [
+        (
+            "lambo_derive",
+            json!({"agent_id": "agent-a",
+                   "concepts": [{"content": "render 17 [image:r17]", "concept_type": "entity"}]}),
+        ),
+        (
+            "lambo_derive",
+            json!({"agent_id": "agent-a",
+                   "concepts": [{"content": "fine", "concept_type": "entity"},
+                                {"content": "[IMAGE:R17] Render 17", "concept_type": "logic"}]}),
+        ),
+        (
+            "lambo_record_action",
+            json!({"agent_id": "agent-a", "action": "dismissed [image:r17]"}),
+        ),
+        (
+            "lambo_record_action",
+            json!({"agent_id": "agent-a", "action": "dismissed the [image:r17]s"}),
+        ),
+    ] {
+        let out = call_raw(&s, tool, args).await;
+        assert_eq!(out.is_error, Some(true), "{tool}: {out:?}");
+        let text = text_of(&out);
+        assert!(text.contains("only lambo_derive_image creates"), "{text}");
+        assert!(!text.contains("r17") && !text.contains("R17"), "{text}");
+        assert!(
+            out.structured_content.is_none(),
+            "no receipt was issued: {out:?}"
+        );
+    }
+    assert_eq!(s.mem.stats().concept_count, 0, "nothing was written");
+
+    // Naming an image concept from a reference is how a text write links to
+    // it (design 5.2), so references are not refused.
+    let ok = call(
+        &s,
+        "lambo_record_action",
+        json!({"agent_id": "agent-a", "action": "dismissed the red saree",
+               "depends_on": ["red saree [image:r17]"]}),
+    )
+    .await;
+    assert_eq!(ok.is_error, Some(false), "{ok:?}");
+
+    // Prose about the suffix is not a suffix (review M1).
+    let prose = call(
+        &s,
+        "lambo_derive",
+        json!({"agent_id": "agent-a",
+               "concepts": [{"content": "lambo_derive_image appends the [image:<id>] suffix; \
+                                         see [image: diagram]", "concept_type": "logic"}]}),
+    )
+    .await;
+    assert_eq!(prose.is_error, Some(false), "{prose:?}");
+    let action = call(
+        &s,
+        "lambo_record_action",
+        json!({"agent_id": "agent-a", "action": "documented the `[image:` prefix"}),
+    )
+    .await;
+    assert_eq!(action.is_error, Some(false), "{action:?}");
+    s.mem.close().await.expect("close");
+}
+
 /// **N1 pinned.** `lambo_record_action` refuses a target list whose combined
 /// `produces` + `modifies` + `depends_on` count exceeds `MAX_ACTION_TARGETS`,
 /// and accepts one exactly at the cap — so the bound is a real cap, not an
