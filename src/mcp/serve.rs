@@ -19,16 +19,30 @@
 //!    path. A loser that can forward becomes a proxy (`HubProxy::run`, then its
 //!    ledger drains and it returns); the pre-arm is armed inside the acquire.
 //! 3. **Holder startup**, below the arming (`shutdown::holder_shutdown`):
-//!    `LamboServer`, the ledger heartbeat, the #13 keep-warm, the J4 refusal
-//!    poller, the session endpoint (`hub::bind_hub`), the event pump, the
-//!    `session attached` line.
+//!    `LamboServer` (`session::session_server`), the process-wide tasks
+//!    (`process::ProcessTasks::spawn`: the ledger heartbeat, the #13
+//!    keep-warm, the J4 refusal poller), the rest of the session
+//!    (`session::AttachedSession::attach`: the session endpoint through
+//!    `hub::bind_hub`, the event pump), the `session attached` line.
 //! 4. **Transport** (`transport`): stdio or HTTP, each behind the T8.7 guards
 //!    (`http_guards`) where they apply, until a signal, a lease loss or the
 //!    client ends it.
 //! 5. **Shutdown**, the seven named stages in `shutdown`: transport drain,
 //!    keep-warm abort, the bounded session close, event pump, background
 //!    tasks, endpoint release, ledger close. Each logs when it starts and
-//!    finishes (`stages`, #40).
+//!    finishes (`stages`, #40). Stages 3, 4 and 6 run over the attached set
+//!    of sessions, which is one session here.
+//!
+//! # Process part and session part (#32)
+//!
+//! What a serve process has once (the embedder and store in the backends,
+//! the listener and transports, the HTTP guards, the signals and
+//! `EarlyShutdown`, the watchdog, the ledger file, and
+//! `process::ProcessTasks`) is kept apart from what each session it holds
+//! has (`session::AttachedSession`: the `Memory` with its lease and
+//! heartbeat, the `LamboServer`, the endpoint `Hub`, `session::SessionTasks`).
+//! A single-session serve builds one of the latter, so multi-session serving
+//! (#32 PR 4) adds sessions without re-plumbing the process.
 //!
 //! # Modules
 //!
@@ -36,6 +50,8 @@
 //! |---|---|
 //! | `builder` | the one resolve ([`resolve_serve_backends`]), `serve_builder`, [`build_memory`] |
 //! | `roles` | the startup election, `Role`, the loser-side refusal record |
+//! | `process` | the process-wide background tasks (`ProcessTasks`) |
+//! | `session` | the per-session part (`AttachedSession`, `SessionTasks`) |
 //! | `hub` | every Unix-socket touch: endpoint derivation, bind, accept loop, release, the proxy probe (the #39 seam) |
 //! | `heartbeat` | ledger configuration, the heartbeat, the startup line, the holder refusal poller, the event pump |
 //! | `http_guards` | the bearer token, the bind refusal, the rate limit, the session cap, the body ceiling |
@@ -51,7 +67,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::ledger::Ledger;
-use crate::mcp::server::LamboServer;
 use crate::memory::Memory;
 use crate::resolve::ResolvedBackends;
 use crate::types::LamboError;
@@ -60,7 +75,9 @@ mod builder;
 mod heartbeat;
 mod http_guards;
 mod hub;
+mod process;
 mod roles;
+mod session;
 mod shutdown;
 mod signals;
 mod stages;
@@ -71,27 +88,34 @@ pub use builder::{build_memory, resolve_serve_backends};
 pub use heartbeat::authorize_ledger;
 
 use builder::{explain_startup_failure, serve_builder};
-use heartbeat::{heartbeat_loop, log_events, record_refused_takeovers, serve_startup_line};
+use heartbeat::serve_startup_line;
 use http_guards::authorize_bind;
 pub use http_guards::{
     resolve_auth_token, SecretToken, AUTH_TOKEN_ENV, DEFAULT_MAX_SESSIONS, DEFAULT_RATE_LIMIT_RPS,
 };
-use hub::bind_hub;
+use process::ProcessTasks;
 use roles::{resolve_role, Role};
-use shutdown::{close_ledger, holder_shutdown, HolderTasks};
+use session::{session_server, AttachedSession};
+use shutdown::{close_ledger, holder_shutdown, join_all, run_and_close_sessions};
 use signals::shutdown_signal;
 use stages::Stage;
 use transport::{serve_http, serve_stdio};
 
-pub(crate) use shutdown::run_and_close;
 pub(crate) use signals::EarlyShutdown;
 pub(crate) use stages::ShutdownProgress;
 // The crate paths the `memory` and `writeq` tests name; nothing outside a
 // test build reads them through `serve`, so each is gated like its readers.
 #[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
 pub(crate) use shutdown::close_bounded_until;
+#[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
+pub(crate) use shutdown::run_and_close;
 #[cfg(test)]
 pub(crate) use shutdown::CLOSE_FLUSH_GRACE;
+// The unit tests reach the server type through this module's glob; nothing
+// in `serve` itself names it since the session part moved to `session`.
+// Gated like its readers (the heartbeat and hub-release tests).
+#[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
+use crate::mcp::server::LamboServer;
 
 /// Which transport `lambo serve` should listen on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -123,7 +147,8 @@ pub struct ServeOptions {
     /// Session this process owns.
     pub session: String,
     /// Agent identity this process writes as. See the attribution note on
-    /// [`LamboServer`] — `Memory` binds one agent per session handle.
+    /// [`LamboServer`](crate::mcp::server::LamboServer) — `Memory` binds one
+    /// agent per session handle.
     pub agent: String,
     pub transport: Transport,
     pub port: u16,
@@ -450,7 +475,7 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     // "was that a SECOND Ctrl-C?" escape hatch. Both readers must see one
     // count, which is exactly why `EarlyShutdown` is `Clone` over shared state.
     // #40: the shutdown's stage record, shared by the shutdown future (which
-    // starts stage 1), `run_and_close` (stages 1 to 4) and the tail below.
+    // starts stage 1), `run_and_close_sessions` (stages 1 to 4) and the tail below.
     // Its first stage starts the watchdog, an OS thread that aborts the
     // process if the shutdown outlives every one of its own timers; the
     // guard stands it down on every way out of this function.
@@ -459,94 +484,17 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     let shutdown = holder_shutdown(mem.clone(), ledger.clone(), early.clone(), progress.clone());
     tokio::pin!(shutdown);
 
-    // I1/I2. `Ledger::open` never fails — a bad path warns once and counts
-    // every line as a drop — so nothing here can stop a memory server from
-    // serving memory. ONE server handle for the whole process (the HTTP factory
-    // clones it), so every transport appends to the same file and the
-    // heartbeat's uptime is the session's, not a request's.
-    let server = match &ledger {
-        Some(ledger) => LamboServer::with_ledger(mem.clone(), Arc::clone(ledger)),
-        None => LamboServer::new(mem.clone()),
-    };
-    let heartbeat = match (&ledger, opts.ledger_heartbeat) {
-        (Some(ledger), Some(every)) => {
-            tracing::info!(
-                path = %ledger.path().display(),
-                interval_secs = every.as_secs(),
-                version = crate::ledger::VERSION,
-                git_sha = crate::ledger::GIT_SHA,
-                "lambo serve: call ledger open, heartbeat armed"
-            );
-            Some(tokio::spawn(heartbeat_loop(
-                server.clone(),
-                Arc::clone(ledger),
-                every,
-            )))
-        }
-        (Some(ledger), None) => {
-            tracing::info!(
-                path = %ledger.path().display(),
-                "lambo serve: call ledger open (no heartbeat)"
-            );
-            None
-        }
-        _ => None,
-    };
-    // Issue #13 — embedder keep-warm. Spawned here, below the arming and
-    // beside the heartbeat, for the same reasons: spawning awaits nothing, so
-    // the pre-handshake window is not widened, and the loop's first touch is
-    // one full interval out, so startup gains no forward. Holder path only: a
-    // proxy holds no embedder (it is released when `resolve_role` returns).
-    // Aborted when the transport returns, before the close (see
-    // `run_and_close`), and again beside the heartbeat after it.
-    let keep_warm_task = keep_warm.map(|every| {
-        tracing::info!(
-            interval_secs = every.as_secs(),
-            "lambo serve: embedder keep-warm armed"
-        );
-        tokio::spawn(crate::embed::keep_warm::keep_warm_loop(
-            Arc::clone(mem.embedder()),
-            every,
-        ))
-    });
-    // J4 — the holder side of a refused takeover: record the incumbent's
-    // line when the store reports a refusal this process turned away. Spawned
-    // only when a ledger is attached, and only on the holder path (the proxy
-    // branch returned above). Aborted at close like the heartbeat.
-    let refusal_poller = match &ledger {
-        Some(ledger) => {
-            let holder_token =
-                crate::store::lease::LeaseHolder::for_this_process(mem.agent()).token();
-            Some(tokio::spawn(record_refused_takeovers(
-                mem.store().clone(),
-                mem.session().clone(),
-                mem.agent().clone(),
-                holder_token,
-                Arc::clone(ledger),
-            )))
-        }
-        None => None,
-    };
+    // The holder startup, below the arming, in the order it has always run:
+    // the session's server, the process-wide tasks (which read it), then the
+    // rest of the session (its endpoint and event pump).
+    let server = session_server(&mem, &ledger);
     // Stopped after the close (and the keep-warm before it); see
-    // `shutdown::HolderTasks` and the stage table in `shutdown`.
-    let tasks = HolderTasks {
-        heartbeat,
-        keep_warm: keep_warm_task,
-        refusal_poller,
-    };
-
-    // J2 — the session endpoint, bound HERE: below the arming and below
-    // `LamboServer`, which it needs. A bind failure degrades, it does not stop
-    // this process serving memory; see `hub::bind_hub`.
-    let hub = bind_hub(endpoint.as_ref(), &server, opts.max_sessions);
-
-    // Exactly once, at startup: `events()` is stateful on its first call — it
-    // hands out the receiver subscribed *before* the daemon spawned, so the
-    // spec §2.5 warm-up condition set (on a resumed session, the whole restored
-    // set) is not lost. Draining it here also stops the broadcast channel from
-    // filling and lagging the daemon.
-    let events = mem.events();
-    let event_pump = tokio::spawn(log_events(events));
+    // `process::ProcessTasks` and the stage table in `shutdown`.
+    let tasks = ProcessTasks::spawn(&server, &mem, &ledger, opts.ledger_heartbeat, keep_warm);
+    // `mem` stays held here as well, so the last handle still drops when
+    // `serve` returns, after the watchdog is disarmed (the stage table's
+    // "not watched" note), not when the set is taken apart at stage 6.
+    let session = AttachedSession::attach(Arc::clone(&mem), server, endpoint, opts.max_sessions);
 
     tracing::info!(
         session = %opts.session,
@@ -555,6 +503,11 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
         "lambo serve: session attached"
     );
 
+    // #32: the attached set the per-session stages run over. One session in
+    // a single-session serve; PR 4's registry holds many, and the transport
+    // then routes to each. Here the transport serves the one session.
+    let sessions = [session];
+    let server = sessions[0].server.clone();
     let transport = async {
         match opts.transport {
             Transport::Stdio => serve_stdio(server, shutdown.as_mut()).await,
@@ -564,24 +517,26 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
 
     // The holder's shutdown, in the order `shutdown`'s stage table names.
     // Stages 1-4: transport drain, keep-warm abort (issue #13), the bounded
-    // session close, the event pump.
+    // session closes, the event pumps.
     let stop_before_close = tasks.stop_before_close();
-    let outcome = run_and_close(
-        mem.clone(),
-        transport,
-        event_pump,
-        &stop_before_close,
-        &early,
-        &progress,
-    )
-    .await;
+    let closing: Vec<_> = sessions.iter().map(AttachedSession::closing).collect();
+    let outcome =
+        run_and_close_sessions(&closing, transport, &stop_before_close, &early, &progress).await;
     // Stage 5: heartbeat, keep-warm (again), refusal poller.
     progress.run(Stage::BackgroundTasks, || tasks.stop());
-    // Stage 6 (J2 / JE2E-2): AFTER `close()`, the accept loop stops and every
-    // endpoint session is ended (bounded), then the socket file goes, only if
-    // it is still the one this process bound.
+    // Stage 6: every session's endpoint, after the closes; see
+    // `AttachedSession::release_endpoint`.
     progress.begin(Stage::EndpointRelease);
-    hub.release(endpoint.as_ref()).await;
+    join_all(
+        sessions
+            .iter()
+            .map(AttachedSession::release_endpoint)
+            .collect(),
+    )
+    .await;
+    // The set's handles (each session's server and `Memory` clone) drop
+    // here, where they always have: at the end of stage 6.
+    drop(sessions);
     progress.end(Stage::EndpointRelease);
     // Stage 7: the call ledger drains last.
     progress.run(Stage::LedgerClose, || close_ledger(ledger));

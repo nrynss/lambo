@@ -117,8 +117,36 @@ impl Embedder for HangingEmbedder {
         self.inner.dimensions()
     }
     async fn embed(&self, text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
+        self.embed_as(text, crate::test_util::TextRole::Document)
+            .await
+    }
+    async fn embed_query(&self, text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
+        self.embed_as(text, crate::test_util::TextRole::Query).await
+    }
+    fn modalities(&self) -> crate::embed::Modalities {
+        self.inner.modalities()
+    }
+    async fn embed_image(
+        &self,
+        image: crate::embed::ImageInput<'_>,
+    ) -> Result<Vec<f32>, crate::embed::EmbedError> {
+        self.inner.embed_image(image).await
+    }
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        self.inner.as_any()
+    }
+}
+
+impl HangingEmbedder {
+    /// The `embed` behaviour above, in either text role (#22: a wrapper
+    /// forwards the role, so its inner embedder sees what the caller asked).
+    async fn embed_as(
+        &self,
+        text: &str,
+        role: crate::test_util::TextRole,
+    ) -> Result<Vec<f32>, crate::embed::EmbedError> {
         if text.contains(crate::writeq::PROBE_TEXT) {
-            return self.inner.embed(text).await;
+            return role.embed(&self.inner, text).await;
         }
         std::future::pending().await
     }
@@ -263,8 +291,36 @@ impl Embedder for RefusingEmbedder {
         self.inner.dimensions()
     }
     async fn embed(&self, text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
+        self.embed_as(text, crate::test_util::TextRole::Document)
+            .await
+    }
+    async fn embed_query(&self, text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
+        self.embed_as(text, crate::test_util::TextRole::Query).await
+    }
+    fn modalities(&self) -> crate::embed::Modalities {
+        self.inner.modalities()
+    }
+    async fn embed_image(
+        &self,
+        image: crate::embed::ImageInput<'_>,
+    ) -> Result<Vec<f32>, crate::embed::EmbedError> {
+        self.inner.embed_image(image).await
+    }
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        self.inner.as_any()
+    }
+}
+
+impl RefusingEmbedder {
+    /// The `embed` behaviour above, in either text role (#22: a wrapper
+    /// forwards the role, so its inner embedder sees what the caller asked).
+    async fn embed_as(
+        &self,
+        text: &str,
+        role: crate::test_util::TextRole,
+    ) -> Result<Vec<f32>, crate::embed::EmbedError> {
         if text.contains(crate::writeq::PROBE_TEXT) {
-            return self.inner.embed(text).await;
+            return role.embed(&self.inner, text).await;
         }
         Err(crate::embed::EmbedError::Backend(
             "llama.cpp returned 500 Internal Server Error for model \"bge-m3\": \

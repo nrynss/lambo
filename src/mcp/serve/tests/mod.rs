@@ -85,3 +85,8 @@ mod watchdog;
 /// stage 7 drains.
 #[cfg(all(unix, feature = "store-memory", feature = "embed-fixture"))]
 mod hub_release;
+
+/// #32 PR 2: the per-session stages run over an attached set. `join_all`
+/// drives a set concurrently on the calling task; the set-wide close closes
+/// every member and reports each.
+mod session_set;

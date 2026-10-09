@@ -9,6 +9,9 @@
 //! * [`limits`]: request caps (`MAX_TOP_K`, `MAX_CONTENT_BYTES`, ...) and the
 //!   config-default clamp.
 //! * [`validate`]: string validation ([`validate::check_size`]).
+//! * [`image`]: image validation ([`image::validate`]: size, format allowlist,
+//!   magic bytes against the declared type, header dimensions), the only
+//!   constructor of [`crate::embed::ImageInput`] (#22).
 //! * `bearer`: the constant-time bearer-token check both HTTP surfaces
 //!   (`lambo serve --transport http` and the web portal) enforce,
 //!   crate-internal (#28).
@@ -30,6 +33,7 @@
 pub(crate) mod bearer;
 pub(crate) mod error;
 pub(crate) mod focus;
+pub mod image;
 pub mod limits;
 pub(crate) mod neighbourhood;
 pub mod session;
