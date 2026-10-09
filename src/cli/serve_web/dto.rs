@@ -155,8 +155,8 @@ pub(super) struct RecallResponse {
     pub(super) query: String,
     /// The T5.3 context block **verbatim** — canonical markers, `⚑` warnings
     /// and conflict lines exactly as an agent would receive them. Byte-equal
-    /// to `lambo recall` for the same execution (H3: both project from the
-    /// same `run_detailed` call).
+    /// to `lambo recall` for the same execution (H3: both project from one
+    /// `run_detailed_on` call, which `lambo recall`'s `run_detailed` wraps).
     pub(super) context: String,
     pub(super) elapsed_ms: u64,
     /// H3: every ranked hit, with full status, `included_in_context` and the

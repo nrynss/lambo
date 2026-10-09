@@ -34,10 +34,12 @@
 //!
 //! This process is a **reader**: it never constructs a [`Memory`], never takes
 //! the T8.6 writer lease, and never spawns GC — same discipline as
-//! [`crate::cli::recall`] and [`crate::cli::stats`]. Recall reuses
-//! `cli::recall::run_detailed` outright (the H3 single-execution seam — CLI
-//! string, `hits` and `response_annotations` come from one run), so the page
-//! cannot drift from what the CLI and MCP surfaces return.
+//! [`crate::cli::recall`] and [`crate::cli::stats`]. Recall runs
+//! `cli::recall::run_detailed_on` on the session's reader view, the same
+//! pipeline `lambo recall` runs through `run_detailed` (the H3
+//! single-execution seam — CLI string, `hits` and `response_annotations` come
+//! from one run), so the page cannot drift from what the CLI and MCP surfaces
+//! return.
 //!
 //! The honest cost of least privilege, stated on the page rather than papered
 //! over:
