@@ -101,8 +101,9 @@ impl EmbedError {
     /// * [`Self::Backend`] — **permanent for this input or this deployment.**
     ///   The backend answered and the answer was unusable: a status the rule
     ///   table classifies as content (400/413/415/422 — a genuine refusal of
-    ///   this text) or permanent-config (401/403/404 — a wrong URL, model, or
-    ///   credentials), unparseable JSON, the wrong dimensionality, a
+    ///   this text) or permanent-config (any 3xx — a redirect is never
+    ///   followed; 401/403/404 — a wrong URL, model, or credentials),
+    ///   unparseable JSON, the wrong dimensionality, a
     ///   non-finite or zero-norm vector.
     ///
     /// **Where this is imprecise, stated rather than hidden (J3-R2R-1).** The
