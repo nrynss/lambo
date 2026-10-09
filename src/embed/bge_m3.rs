@@ -19,6 +19,8 @@ use std::time::Duration;
 
 use super::{EmbedError, Embedder};
 
+mod scrub;
+
 /// OpenAI-compatible embeddings request body (`model` is omitted when empty so it hits
 /// a llama.cpp server's default model).
 #[derive(Debug, Serialize)]
@@ -279,20 +281,17 @@ impl BgeM3LlamaCppEmbedder {
         Ok(self)
     }
 
-    /// `body` with every occurrence of the bearer token replaced, before it is
-    /// quoted into an error. A gateway may echo the key it refused, and these
-    /// errors reach logs and MCP receipts (issue #21).
-    fn without_token(&self, body: String) -> String {
-        if let Some(auth) = &self.authorization
-            && let Some(token) = auth.as_bytes().strip_prefix(b"Bearer ")
-            && let Ok(token) = std::str::from_utf8(token)
-            && !token.is_empty()
-            && body.contains(token)
-        {
-            body.replace(token, "(token not shown)")
-        } else {
-            body
-        }
+    /// `body`, cut and with every detectable echo of the bearer token replaced
+    /// ([`scrub::quotable_body`], whose doc lists exactly what is caught),
+    /// before it is quoted into an error. A gateway may echo the key it
+    /// refused, and these errors reach logs and MCP receipts (issue #21).
+    fn without_token(&self, body: &str) -> String {
+        let token = self
+            .authorization
+            .as_ref()
+            .and_then(|auth| auth.as_bytes().strip_prefix(b"Bearer "))
+            .and_then(|token| std::str::from_utf8(token).ok());
+        scrub::quotable_body(body, token)
     }
 
     /// Report the server health without embedding anything.
@@ -362,7 +361,7 @@ impl BgeM3LlamaCppEmbedder {
              at the endpoint itself)"
                 .to_string()
         } else {
-            self.without_token(resp.text().await.unwrap_or_default())
+            self.without_token(&resp.text().await.unwrap_or_default())
         };
         match classify_status(code) {
             EmbedStatusClass::Transient => Err(EmbedError::Unavailable(format!(
@@ -949,17 +948,25 @@ mod tests {
     /// Issue #21 self-review: a gateway that echoes the presented key in its
     /// error body (some do, to say which key was refused) must not carry the
     /// token into the error, which reaches logs and MCP receipts. Covers one
-    /// status from every class that quotes the body.
+    /// status from every class that quotes the body, and a raw, a JSON-quoted
+    /// and a masked (prefix and suffix) echo; `scrub`'s own tests cover the
+    /// other forms.
     ///
-    /// Mutation: quote the raw body again -> red.
+    /// Mutation: quote the raw body again, or replace only the exact token
+    /// (review M2) -> red.
     #[tokio::test]
     async fn an_error_body_echoing_the_token_never_carries_it() {
         for code in [401u16, 400, 429, 418] {
             let server = MockServer::start();
             server.mock(|when, then| {
                 when.method(POST).path("/v1/embeddings");
-                then.status(code)
-                    .body(format!("invalid key: Bearer {FAKE_TOKEN} ({FAKE_TOKEN})"));
+                // Raw, JSON-quoted, and masked down to a prefix and a suffix.
+                then.status(code).body(format!(
+                    "invalid key: Bearer {FAKE_TOKEN} {} ({}...{})",
+                    serde_json::json!({ "key": FAKE_TOKEN }),
+                    &FAKE_TOKEN[..10],
+                    &FAKE_TOKEN[FAKE_TOKEN.len() - 10..]
+                ));
             });
             let e = BgeM3LlamaCppEmbedder::new(server.base_url(), "", 1024)
                 .unwrap()
@@ -967,6 +974,11 @@ mod tests {
                 .unwrap();
             let err = e.embed("anything").await.unwrap_err().to_string();
             assert!(!err.contains(FAKE_TOKEN), "{code}: {err}");
+            assert!(!err.contains(&FAKE_TOKEN[..10]), "{code}: {err}");
+            assert!(
+                !err.contains(&FAKE_TOKEN[FAKE_TOKEN.len() - 10..]),
+                "{code}: {err}"
+            );
             assert!(
                 err.contains("invalid key"),
                 "{code}: the rest of the body is kept: {err}"
