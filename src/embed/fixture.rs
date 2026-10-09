@@ -8,7 +8,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 use super::math::cosine;
-use super::{EmbedError, Embedder};
+use super::{EmbedError, Embedder, ImageInput, Modalities};
 
 /// Documented near/far pairs for tests (T1.3 / T7.2) at the **default** dim (1024):
 /// - NEAR_A / NEAR_B: cosine ≥ 0.85 (same seed family)
@@ -109,10 +109,101 @@ impl FixtureEmbedder {
     }
 }
 
+/// The PNG `tEXt` keyword [`FixtureEmbedder::embed_image`] reads its label
+/// from (#22, design section 9).
+pub const IMAGE_LABEL_KEYWORD: &str = "lambo-label";
+
+impl FixtureEmbedder {
+    /// The label a fixture image carries: the text of the first PNG `tEXt`
+    /// chunk whose keyword is [`IMAGE_LABEL_KEYWORD`].
+    ///
+    /// Found by a byte search for `tEXtlambo-label\0`, with no PNG decoding
+    /// and no CRC check. The chunk's own length field bounds the label, so a
+    /// truncated or lying chunk yields `None`, never an out-of-bounds read.
+    /// A label that is empty, blank or not UTF-8 is `None` too.
+    pub fn image_label(bytes: &[u8]) -> Option<&str> {
+        let marker: Vec<u8> = [b"tEXt".as_slice(), IMAGE_LABEL_KEYWORD.as_bytes(), b"\0"].concat();
+        let at = bytes.windows(marker.len()).position(|w| w == marker)?;
+        // The 4-byte big-endian length sits just before the chunk type.
+        let len_at = at.checked_sub(4)?;
+        let len = u32::from_be_bytes(bytes.get(len_at..at)?.try_into().ok()?) as usize;
+        let data_start = at + 4;
+        let label_start = data_start + IMAGE_LABEL_KEYWORD.len() + 1;
+        let data_end = data_start.checked_add(len)?;
+        let label = std::str::from_utf8(bytes.get(label_start..data_end)?).ok()?;
+        (!label.trim().is_empty()).then_some(label)
+    }
+
+    /// The deterministic image vector: exactly [`Self::embed_sync`] of the
+    /// image's label when it has one (the **same** vector a bare text query
+    /// for that label gets, so "a text query recalls the image" is exact), and
+    /// otherwise a hash-seeded unit vector derived from the image's SHA-256,
+    /// far from every text.
+    pub fn embed_image_sync(&self, image: ImageInput<'_>) -> Vec<f32> {
+        match Self::image_label(image.bytes()) {
+            Some(label) => self.embed_sync(label),
+            None => {
+                let hex: String = image.sha256().iter().map(|b| format!("{b:02x}")).collect();
+                // A NUL-prefixed seed: no validated text content can be it.
+                self.embed_sync(&format!("\u{0}fixture-image:{hex}"))
+            }
+        }
+    }
+}
+
+/// A minimal PNG carrying `label` in a `tEXt` chunk keyed
+/// [`IMAGE_LABEL_KEYWORD`], for tests (#22, design section 9).
+///
+/// Signature, a 1x1 greyscale `IHDR`, the `tEXt` chunk and `IEND`, each chunk
+/// with a correct CRC. It has no `IDAT`, so it is a header-valid PNG, not a
+/// decodable one, which is all `surface::image::validate` checks and all
+/// [`FixtureEmbedder::embed_image`] reads. Built in code so no binary file is
+/// committed.
+pub fn png_with_label(label: &str) -> Vec<u8> {
+    fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+        let len = u32::try_from(data.len()).expect("a test label fits a PNG chunk");
+        out.extend_from_slice(&len.to_be_bytes());
+        let start = out.len();
+        out.extend_from_slice(kind);
+        out.extend_from_slice(data);
+        let crc = crc32(&out[start..]);
+        out.extend_from_slice(&crc.to_be_bytes());
+    }
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    // width 1, height 1, bit depth 8, greyscale, deflate, adaptive, no interlace.
+    chunk(&mut png, b"IHDR", &[0, 0, 0, 1, 0, 0, 0, 1, 8, 0, 0, 0, 0]);
+    let text = [IMAGE_LABEL_KEYWORD.as_bytes(), b"\0", label.as_bytes()].concat();
+    chunk(&mut png, b"tEXt", &text);
+    chunk(&mut png, b"IEND", &[]);
+    png
+}
+
+/// CRC-32 (IEEE, reflected, as PNG uses), bitwise. Test-sized inputs only.
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = 0xFFFF_FFFFu32;
+    for &b in bytes {
+        crc ^= u32::from(b);
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+        }
+    }
+    !crc
+}
+
 #[async_trait]
 impl Embedder for FixtureEmbedder {
     fn dimensions(&self) -> usize {
         self.dim
+    }
+
+    /// Text and images, into one space (#22): see [`Self::embed_image_sync`].
+    fn modalities(&self) -> Modalities {
+        Modalities::TEXT | Modalities::IMAGE
+    }
+
+    async fn embed_image(&self, image: ImageInput<'_>) -> Result<Vec<f32>, EmbedError> {
+        Ok(self.embed_image_sync(image))
     }
 
     async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbedError> {
@@ -189,6 +280,64 @@ mod tests {
         let (near, far) = near_far_contract();
         assert!(near >= 0.85);
         assert!(far < 0.85);
+    }
+
+    #[test]
+    fn png_with_label_is_a_valid_png_whose_label_the_fixture_reads() {
+        let png = png_with_label("red silk saree");
+        let input = crate::surface::image::validate(&png, "image/png").expect("header-valid PNG");
+        assert_eq!(FixtureEmbedder::image_label(&png), Some("red silk saree"));
+        let e = FixtureEmbedder::new();
+        assert_eq!(
+            e.embed_image_sync(input),
+            e.embed_sync("red silk saree"),
+            "a labelled image embeds exactly as a bare text query for its label"
+        );
+        // The IHDR CRC is the well-known one for a 1x1 8-bit greyscale header.
+        assert_eq!(&png[29..33], &0x3a7e_9b55u32.to_be_bytes());
+    }
+
+    #[tokio::test]
+    async fn the_fixture_embeds_images_and_advertises_it() {
+        let e = FixtureEmbedder::new();
+        assert_eq!(e.modalities(), Modalities::TEXT | Modalities::IMAGE);
+        let png = png_with_label("render 17");
+        let input = crate::surface::image::validate(&png, "image/png").unwrap();
+        let v = e.embed_image(input).await.unwrap();
+        assert_eq!(v.len(), DEFAULT_FIXTURE_DIM);
+        let n: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!((n - 1.0).abs() < 1e-5, "unit norm, got {n}");
+    }
+
+    #[test]
+    fn an_unlabelled_image_gets_a_digest_seeded_vector_far_from_text() {
+        let e = FixtureEmbedder::new();
+        let a = png_with_label("x");
+        // Same bytes with the keyword spelled differently: no label.
+        let unlabelled: Vec<u8> = {
+            let mut b = a.clone();
+            let at = b.windows(5).position(|w| w == b"lambo").unwrap();
+            b[at] = b'L';
+            b
+        };
+        assert_eq!(FixtureEmbedder::image_label(&unlabelled), None);
+        let input = crate::surface::image::validate(&unlabelled, "image/png").unwrap();
+        let v = e.embed_image_sync(input);
+        assert_eq!(v, e.embed_image_sync(input), "deterministic");
+        assert!(cosine(&v, &e.embed_sync("x")) < 0.5);
+        assert!(cosine(&v, &e.embed_sync(NEAR_A)) < 0.5);
+    }
+
+    #[test]
+    fn a_lying_label_length_reads_nothing_and_never_panics() {
+        let mut png = png_with_label("abc");
+        let at = png.windows(4).position(|w| w == b"tEXt").unwrap();
+        png[at - 4..at].copy_from_slice(&u32::MAX.to_be_bytes());
+        assert_eq!(FixtureEmbedder::image_label(&png), None);
+        for cut in 0..png.len() {
+            let _ = FixtureEmbedder::image_label(&png[..cut]);
+        }
+        assert_eq!(FixtureEmbedder::image_label(&png_with_label("   ")), None);
     }
 
     #[test]

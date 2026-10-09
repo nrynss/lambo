@@ -118,15 +118,15 @@ fn image_input_debug_never_prints_the_bytes() {
 
 #[cfg(feature = "embed-fixture")]
 #[tokio::test]
-async fn the_fixture_keeps_every_default() {
-    // PR 1 changes no shipped adapter: the fixture is symmetric and text-only
-    // until #22 PR 3 gives it a deterministic image embed.
+async fn the_fixture_embeds_images_and_keeps_the_query_default() {
+    // #22 PR 3 gives the fixture a deterministic image embed (design
+    // section 9). It stays symmetric: the query role is still the default.
     let f = FixtureEmbedder::new();
-    assert_eq!(f.modalities(), Modalities::TEXT);
+    assert_eq!(f.modalities(), Modalities::TEXT | Modalities::IMAGE);
     assert_eq!(
         f.embed_query("red silk saree").await.unwrap(),
         f.embed("red silk saree").await.unwrap()
     );
-    let err = f.embed_image(image()).await.unwrap_err();
-    assert!(matches!(err, EmbedError::Unsupported(_)), "{err:?}");
+    let v = f.embed_image(image()).await.unwrap();
+    assert_eq!(v.len(), f.dimensions());
 }

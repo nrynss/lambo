@@ -90,6 +90,14 @@ async fn postgres_round_trips_the_embedding_source() {
         Some(lease.token),
     )
     .await;
+    // #22 review L1, before the corruption below makes the session unloadable.
+    crate::store::embedding_source_testkit::check_a_settled_image_intent_keeps_no_vector(
+        &store,
+        &sid,
+        dim,
+        Some(lease.token),
+    )
+    .await;
     check_unreadable_embedding_source_fails_the_load(&store, &sid).await;
     crate::store::embedding_source_testkit::check_a_malformed_digest_is_refused_on_write(
         &store,

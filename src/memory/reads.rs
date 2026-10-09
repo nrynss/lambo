@@ -280,7 +280,14 @@ impl Memory {
     /// one stored permit, so "settled" means the cycle count stopped moving).
     /// With a long `daemon_tick_interval` nothing runs a cycle after this
     /// until something wakes the daemon again — and reads never do.
-    #[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
+    ///
+    /// #22 PR 3's AC3 on SQLite uses it too, so a fresh image concept is in
+    /// the daemon's score table before its rank is asserted.
+    #[cfg(all(
+        test,
+        feature = "embed-fixture",
+        any(feature = "store-memory", feature = "store-sqlite")
+    ))]
     pub(crate) async fn settle_daemon(&self) {
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {

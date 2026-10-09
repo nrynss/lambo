@@ -24,6 +24,12 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use crate::store::MemoryStore;
 use crate::types::{GraphSnapshot, MutationBatch, StoreError};
 
+/// A minimal labelled PNG for image tests (#22, design section 9). Built in
+/// code, so no binary fixture is committed; the label is what
+/// [`crate::embed::FixtureEmbedder`] embeds the image as.
+#[cfg(feature = "embed-fixture")]
+pub use crate::embed::png_with_label;
+
 /// Absolute path to a fixture JSON file.
 pub fn fixture_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

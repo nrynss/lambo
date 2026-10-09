@@ -15,6 +15,22 @@
   it by name until then, as it did for `human_confirmed`. Provisioning only
   adds the column; existing rows read `NULL`, meaning embedded from their
   own content.
+- `WriteKind` and `WriteIntentPayload` each gain a `DeriveImage` variant
+  (#22), so library code that matches either exhaustively needs the new arm.
+  An unapplied image intent is unreadable to an older build, which fails to
+  load the session rather than replay it without its vector (design risk R5:
+  a downgrade is loud). A settled image intent (applied or failed) keeps
+  only its outcome: the store overwrites its payload with an empty text
+  derive, so its vector does not outlive it and an older build loads it.
+  `Graph::reembed_all` now leaves
+  image concepts out of its coverage rule and refuses while one carries a
+  vector; `Graph::reembed_all_dropping_image_vectors` is the variant that
+  nulls them.
+- `ReplayBlockReason` gains a variant, `ImageConfig` (#22), and the
+  `write_queue_replay_blocked` stat a value, `"image_config"`: a durable
+  image intent replayed by a process whose strategy is not `hybrid` or
+  whose store has no vector search stops the replay with that reason and a
+  log line saying what to change, rather than the generic `"other"`.
 - `EmbedError` gains a variant, `Unsupported` (#22): an embedder refusing a
   kind of input it cannot embed at all, such as an image sent to a text-only
   model. `is_transient()` classes it as permanent. `EmbedError` is also now
@@ -25,6 +41,17 @@
 - `LamboFile` gains a public `serve: ServeConfig` field (#32). Code that
   builds a `LamboFile` with a struct literal must add
   `serve: Default::default()`; code that parses one is unaffected.
+- `ServeOptions` gains a public `sessions: Vec<String>` field (#32, fourth
+  part): every session the serve pins, with `session` the default among them.
+  Code that builds `ServeOptions` with a struct literal must add it
+  (`sessions: vec![session.clone()]` keeps one session);
+  `ServeOptions::new` fills it. `lambo serve --session` is now a repeatable
+  flag.
+- `lambo serve --transport http` serves exactly `/mcp` and
+  `/mcp/s/{session}` (#32). A request to any other path under `/mcp/`
+  (which reached the one session before, because the service ignored the
+  path) gets a plain 404 now. That includes `/mcp/` with a trailing slash:
+  a client configured with `http://host:port/mcp/` must drop the slash.
 - Minimum supported Rust is now 1.99 (`rust-version = "1.99"` in
   `Cargo.toml`; there was none before), and the crate moves from edition 2021
   to edition 2024. The pinned toolchain moves from 1.97.1 to 1.99.0, and CI and
@@ -99,6 +126,15 @@
   `unknown variant (value not shown)`, and an unknown `promotion_policy` is
   quoted only when it is a short word. A DSN or token pasted under the wrong
   key no longer reaches a startup log.
+- `lambo.toml` `[serve]` `sessions`, `default_session` and `max_attached`
+  are enforced by an HTTP `lambo serve` (#32, fourth part), so the startup
+  notice now names only the keys still parsed but not enforced
+  (credentials, `[[serve.projects]]`, `attach_concurrency`,
+  `idle_detach_secs`, `per_session_rps`, and for a stdio serve
+  `default_session`), reads `[serve] is parsed but not
+  yet enforced for some keys`, and is not logged for a table that sets none
+  of them. With several sessions, `--ledger-heartbeat` writes one `stats`
+  line per session per interval.
 - Every `serve --ledger` line now carries `session` (#32). `startup` and
   `lease` lines always did; `call`, `completion` and `stats` lines gain it so
   one ledger file can hold several sessions later. Additive: `v` stays `1`
@@ -211,11 +247,41 @@
   it alone, and erasing a session erases it with the concept row. When an
   embedding contract change quarantines a session's vectors, the sources
   are kept: the concept stays marked as image-sourced with no vector, so
-  a later re-embed cannot give it a vector of its caption. `lambo
-  re-embed` (both modes) refuses a session in which any concept has a
-  source, before any write, until it learns to handle supplied vectors. A stored
+  a later re-embed cannot give it a vector of its caption. A stored
   value this build cannot read fails the load rather than reading as
-  unset. Nothing writes it yet: image derives arrive in a later release.
+  unset. Image derives (below) write it.
+- Image concepts in the library API (#22, third part):
+  `Memory::derive_image_as` and `Memory::derive_image_async_as` take a
+  `graph::image::ImageDerive` (caption, type, optional image id, the image
+  bytes or a client-computed vector with its declared contract, `parent_of`,
+  event time) and derive one concept whose vector is the image's, not the
+  caption's. Its content is `"{caption} [image:{id}]"`, the id being 1 to 64
+  characters of `[a-z0-9]` or, by default, 16 hex characters of the image's
+  (or the vector's) sha256, so the same image derives onto one concept and
+  two images with one caption stay two. Image bytes are embedded on the call
+  path and never stored, queued or written to a durable intent: the queue and
+  its replay carry the vector. A submitted vector must declare exactly the
+  live embedding contract and have its width, finite values and a non-zero
+  norm; the server renormalizes it. An image derive needs the `hybrid`
+  strategy and a store with vector search, refuses an `observation` type,
+  never semantic-merges, and no text concept ever merges into an image; an
+  image derive whose caption and id a text concept already holds is refused
+  rather than left without a vector. A text query reaches image concepts
+  through the ordinary vector leg. A durable image intent replayed under a different live contract settles
+  `failed`. Its receipt kind is `lambo_derive_image`; the MCP tool and CLI
+  verb arrive in a later release.
+- `lambo re-embed` handles image concepts (#22): a full migration refuses
+  while an image concept still carries a vector (it cannot be recomputed
+  from a caption), unless `--drop-image-vectors`, which nulls those vectors
+  in the same transaction as the migration, keeps each image concept and its
+  source, and reports the count; deriving the same image again restores the
+  vector. `--missing-only` and the full migration never give an image concept
+  a vector of its caption, and report the image concepts they skipped. This
+  replaces the blanket refusal of any session holding an image source.
+- `FixtureEmbedder` embeds images (#22): a PNG carrying a `lambo-label`
+  text chunk embeds exactly as a text query for that label, and any other
+  image as a vector seeded from its digest. `png_with_label` builds such a
+  PNG in code for tests.
 - `lambo::surface::image::validate` (#22): the image rule every surface will
   share, and the only constructor of `ImageInput`. The declared type must be
   exactly `image/png`, `image/jpeg` or `image/webp`; the bytes must be
@@ -259,6 +325,22 @@
   the working directory and home injected), `SelectedSession`,
   `SessionSource`, `SessionSelectionError`, `MissingSession`,
   `SESSION_REQUIRED` and `ServeConfig::has_unenforced_keys`.
+- Multi-session serving (#32, fourth part): one `lambo serve --transport
+  http` holds several pinned sessions, named by a repeated `--session`
+  and/or `[serve] sessions`. Each is served at `/mcp/s/{session}`, and `/mcp`
+  serves the default (the first `--session`, else `[serve] default_session`,
+  else the first pinned). Each session keeps its own lease, fencing token,
+  graph, caches, write queue and local endpoint (so a stdio `serve
+  --session <name>` proxies into it); the embedder, store and listener are
+  shared, and `--max-sessions` counts MCP sessions across the process. An
+  unhosted or malformed id gets the same empty 404 as an unrouted path. A
+  session held by another writer at startup is answered with 503 and
+  `Retry-After` and retried every 5 s; a session that loses its lease is
+  detached and retried while the others keep serving. A one-session serve
+  is unchanged, including exiting when it loses its lease. Shutdown closes
+  every session concurrently inside the existing budget and releases every
+  lease. Credentials per session, on-demand sessions and the operator
+  surface come later.
 - `lambo::writeq::EmbedderCalibration` and `MemoryBuilder::calibration`
   (#32, third part): the write queue's startup calibration probe once per
   embedder for the whole process. Builders over one shared embedder that are
@@ -426,6 +508,13 @@
   `serve --ledger` file and backups are operator-owned and not scrubbed.
 
 ### Fixed
+
+- The ledger's applied `completion` lines (`applied` and
+  `applied_after_restart`) now carry `semantic_merged`, `reinforced`, `edges`
+  and `embedded` beside `created_count` / `matched_count` (#12), so the
+  metric-2 facts and embedding coverage outlive the 300 s receipt. Additive:
+  `v` and the existing keys are unchanged, and each new key is present only
+  for the write kind that has it.
 
 - The write queue's startup probe no longer reports `unmeasured` when the
   embedder's first call is slow (#11). Its discarded warm-up embed shared

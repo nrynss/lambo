@@ -89,7 +89,7 @@ The in-crate candle embedder (`kind = "candle"`) runs BGE-M3 locally with no lla
 
 | Flag | Required | Default |
 |---|---|---|
-| `--session <SESSION>` | Yes | |
+| `--session <SESSION>` | Yes, unless `[serve] sessions` names them (HTTP) | Repeatable with `--transport http`: every value is pinned and served at `/mcp/s/<session>`, and the first is the default, served at `/mcp`. A stdio serve takes exactly one. |
 | `--query <QUERY>` | Yes | |
 | `--top-k <TOP_K>` | No | The session's `default_top_k`, which is `5`. |
 | `--max-tokens <MAX_TOKENS>` | No | The session's `default_max_tokens`, which is `500`. |
@@ -253,7 +253,7 @@ reservations are advisory and RAM-local: this reservation ends when this process
 
 ## Serve a session
 
-`lambo serve` runs the MCP server and owns the session as its single writer.
+`lambo serve` runs the MCP server and owns the session as its single writer. Over HTTP one process can own several sessions; see [Several sessions in one serve](#several-sessions-in-one-serve).
 
 | Flag | Required | Default |
 |---|---|---|
@@ -265,7 +265,7 @@ reservations are advisory and RAM-local: this reservation ends when this process
 | `--auth-token <TOKEN>` | No | Bearer token for the HTTP transport. Loopback runs unauthenticated by default. A non-loopback bind fails closed without one. Ignored on `stdio`. `LAMBO_AUTH_TOKEN` overrides it. |
 | `--max-sessions <N>` | No | `32`. Ceiling on concurrently live HTTP MCP sessions. |
 | `--rate-limit-rps <N>` | No | `50`. Sustained HTTP request rate. Burst allowance is double. |
-| `--ledger <PATH>` | No | Off by default. Append JSONL records of what this serve did to `PATH` (append-only, created if absent). **Five line kinds, not one:** `call` (one per MCP tool call), `completion` (one per background write's outcome, carrying the receipt id that joins it back to the `call` line that acked it, plus the created/matched counts for an applied write), `startup` (this serve's intent to acquire the single-writer lease, written *before* the attempt, so a serve that loses it still leaves a record), and `lease` (a refused acquisition from both sides, and a proxy starting or losing its connection to the holder). `stats` is the fifth and arrives only with `--ledger-heartbeat`. Every line carries `session`, the session it is about, so one file can later hold several (#32). Never affects a tool call: the write is buffered onto a dedicated writer thread, and a stalled or unwritable path drops lines rather than failing or delaying anything, counting them in `lambo_stats` as `ledger_dropped_lines`, split by cause into `ledger_dropped_channel_full` (backpressure) and `ledger_dropped_write_failed` (a broken path), alongside `ledger_queued_lines` (accepted but not yet on disk — the one key that moves when a blocked `open` parks the writer before it has dropped anything). Rotation is the operator's (`logrotate`, or just `mv` it — the writer recreates the path on the next line). |
+| `--ledger <PATH>` | No | Off by default. Append JSONL records of what this serve did to `PATH` (append-only, created if absent). **Five line kinds, not one:** `call` (one per MCP tool call), `completion` (one per background write's outcome, carrying the receipt id that joins it back to the `call` line that acked it, plus, for an applied write, the counts the receipt reports: `created_count` and `matched_count`, `semantic_merged` and `reinforced` for a derive, `edges` for a record_action, and `embedded` under the hybrid strategy, each present only for the write kind that has it and never payload text), `startup` (this serve's intent to acquire the single-writer lease, written *before* the attempt, so a serve that loses it still leaves a record), and `lease` (a refused acquisition from both sides, and a proxy starting or losing its connection to the holder). `stats` is the fifth and arrives only with `--ledger-heartbeat`. Every line carries `session`, the session it is about, so one file can later hold several (#32). Never affects a tool call: the write is buffered onto a dedicated writer thread, and a stalled or unwritable path drops lines rather than failing or delaying anything, counting them in `lambo_stats` as `ledger_dropped_lines`, split by cause into `ledger_dropped_channel_full` (backpressure) and `ledger_dropped_write_failed` (a broken path), alongside `ledger_queued_lines` (accepted but not yet on disk — the one key that moves when a blocked `open` parks the writer before it has dropped anything). Rotation is the operator's (`logrotate`, or just `mv` it — the writer recreates the path on the next line). |
 | `--ledger-heartbeat <SECS>` | No | Off by default; requires `--ledger`, and `SECS` must be at least 1. Also append a `stats` line every `SECS`: the `lambo_stats` payload plus process uptime and the binary's version and git sha, so a stretch of ledger can be attributed to the binary that produced it. Build with `LAMBO_GIT_SHA=$(git rev-parse --short HEAD)` for a real sha; it reports `unknown` otherwise. |
 
 ```bash
@@ -301,6 +301,27 @@ beside the new `url` is rejected even when the endpoint responds, so migrate by
 copying the registration across all of them, never by editing one file.
 
 The ledger is the input to the report generators in `scripts/observability/`, which answer recall-first compliance, re-derivation savings, score-band drift, duplicate creation, and which blast-radius warnings actually fired. Keep the file outside the repository: it carries recall queries and truncated concept text, so it inherits the store's hygiene rules.
+
+### Several sessions in one serve
+
+One `lambo serve --transport http` can hold several sessions at once. Each session is still owned by exactly one process, and that process may own many. Name the sessions with a repeated `--session`, with `sessions` in the `[serve]` table of `lambo.toml`, or both; the process pins all of them (`--session` values first, then the table's, each once), attaches every one at startup, and keeps them attached until it exits.
+
+```bash
+lambo serve --config lambo.toml --transport http --session lambo --session general
+```
+
+| URL | Reaches |
+|---|---|
+| `http://127.0.0.1:7700/mcp/s/<session>` | That session. Point each project's client at its own session's URL. |
+| `http://127.0.0.1:7700/mcp` | The default session: the first `--session`, else `[serve] default_session`, else the first pinned session. A client configured for a single-session serve keeps working unchanged. |
+
+Each session is a full writer of its own: its own lease and fencing token, its own graph, caches, write queue and local endpoint, so a stdio `lambo serve --session <name>` on the same machine forwards to this process for that session. Nothing crosses between sessions: recall, inspect, saints, stats and GC each see only the session the request addressed, and an MCP session opened on one session's URL is unknown at another's. The embedder, the store connection and the HTTP listener are shared. `--max-sessions` caps the MCP sessions of the whole process, counted across every session.
+
+A request for a session this process does not host gets a plain `404` with an empty body, the same answer as any path the server does not route, for any name this serve does not host. The names a serve does host are not secret from anyone who holds its token: a hosted session that is not serving right now (held by another writer, being detached, or failed) answers `503`, not `404`. That is by design while one token reaches every pinned session; per-session credentials will check a request before the session is looked up, so a caller without access to a session gets the same `404` whatever its state. With more than one session, every name must be addressable by URL: 1 to 128 bytes of `A-Z`, `a-z`, `0-9`, `.`, `_`, `:` and `-`, not starting with `.`. A single session keeps `--session`'s looser rule and is served at `/mcp`.
+
+If another writer already holds one of the sessions at startup, the server does not wait for it: it serves the others, answers requests for that session with `503` and a `Retry-After` header, and tries to take it every 5 seconds. If a running session loses its lease to another writer, only that session is detached (its unflushed tail is discarded, as a crash would discard it, and a `lease` `lost` line goes to the ledger); the other sessions keep serving, and the lost session is retried the same way. If a retry fails with an error that will not clear on its own (the session was erased, its embedding contract no longer matches, or the store is not provisioned), the error is logged once and the session is not retried again: requests for it get `503` with no `Retry-After` until the server is restarted. A store or embedder that cannot be reached is retried, and logged once per outage. A serve with one session behaves as it always has: losing the lease ends the process, so its client respawns into a proxy to the new holder.
+
+On shutdown every session is drained and closed concurrently inside the same budget as a single session, and every lease is released. Each shutdown stage line is logged once for the whole set, and each session's close outcome names its session. With `--ledger`, every line carries its `session`, and the heartbeat writes one `stats` line per session. Credentials scoped per session, on-demand sessions and the operator surface are not part of this release; until then every session this serve pins is reachable with its one bearer token.
 
 ### Stopping a writer
 

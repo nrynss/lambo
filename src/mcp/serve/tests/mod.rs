@@ -96,3 +96,9 @@ mod session_set;
 /// embedder, and stage 2 aborts that probe, since no session's close does.
 #[cfg(all(feature = "store-memory", feature = "embed-fixture"))]
 mod calibration;
+
+/// #32 PR 4: the session registry — routing, isolation, the process-wide
+/// MCP-session cap, both lease-loss policies, the shutdown's lease release
+/// and sixteen dirty SQLite sessions inside the budget.
+#[cfg(all(unix, feature = "store-memory", feature = "embed-fixture"))]
+mod registry;

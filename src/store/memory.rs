@@ -350,13 +350,21 @@ impl MemoryStore {
                         intent.session_id, snap.session_id
                     )));
                 }
+                // A settled row keeps the settled payload (#22 review L1),
+                // as the SQL adapters' `stored_payload` does.
+                let mut intent = intent.clone();
+                if intent.outcome.is_some()
+                    && let Some(settled) = intent.payload.settled()
+                {
+                    intent.payload = settled;
+                }
                 match snap
                     .write_intents
                     .iter_mut()
                     .find(|i| i.receipt == intent.receipt)
                 {
-                    Some(row) => *row = intent.clone(),
-                    None => snap.write_intents.push(intent.clone()),
+                    Some(row) => *row = intent,
+                    None => snap.write_intents.push(intent),
                 }
             }
             // Consume marks the row with its outcome (retained for the
@@ -383,6 +391,10 @@ impl MemoryStore {
                     .find(|i| i.receipt == *receipt)
                 {
                     row.outcome = Some(outcome.clone());
+                    // #22 review L1: a settled image intent drops its vector.
+                    if let Some(settled) = row.payload.settled() {
+                        row.payload = settled;
+                    }
                 }
                 let cutoff = outcome.consumed_at
                     - chrono::Duration::from_std(crate::types::WRITE_INTENT_RETENTION)
@@ -1252,6 +1264,19 @@ mod tests {
         crate::store::embedding_source_testkit::check_embedding_source_round_trip(
             &MemoryStore::new(),
             &SessionId::from("embedding-source"),
+            4,
+            None,
+        )
+        .await;
+    }
+
+    /// #22 review L1: a settled image intent keeps no vector, as on the SQL
+    /// adapters.
+    #[tokio::test]
+    async fn a_settled_image_intent_keeps_no_vector() {
+        crate::store::embedding_source_testkit::check_a_settled_image_intent_keeps_no_vector(
+            &MemoryStore::new(),
+            &SessionId::from("settled-image-intent"),
             4,
             None,
         )

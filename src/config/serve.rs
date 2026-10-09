@@ -1,12 +1,14 @@
 //! `[serve]` in `lambo.toml`: multi-session serving (#32 PR 1).
 //!
-//! PR 1 parses and validates the table and resolves credential tokens from
-//! the environment. PR 8 reads `default_session` and the `[[serve.projects]]`
-//! cwd map to choose a stdio serve's session when `--session` is absent (see
-//! [`ServeConfig::select_stdio_session`]); **nothing else reads it at runtime
-//! yet**. PR 4 builds the session registry from `sessions` /
-//! `default_session`, PR 5 enforces `[[serve.credential]]`, PR 6 the bounds.
-//! See the approved design, issue #32, sections 2.2, 6.1 and 7.1.
+//! PR 1 parsed and validated the table and resolves credential tokens from
+//! the environment. Since PR 4 an HTTP `lambo serve` pins `sessions` (beside
+//! its `--session` values), serves `default_session` at `/mcp` and enforces
+//! `max_attached` on the union (`crate::mcp::pin_sessions`). The rest is
+//! parsed and validated but **not enforced yet**, and a serve says so once
+//! ([`ServeConfig::warn_if_unenforced`]): PR 5 enforces
+//! `[[serve.credential]]`, PR 6 the on-demand bounds (`attach_concurrency`,
+//! `idle_detach_secs`, `per_session_rps`), PR 8 the `[[serve.projects]]` cwd
+//! map. See the approved design, issue #32, sections 6.1 and 7.1.
 //!
 //! ```toml
 //! [serve]
@@ -220,26 +222,55 @@ fn addressed(field: &str, value: &str) -> Result<AddressedSessionId, LamboError>
     })
 }
 
-/// What `lambo serve` logs once at startup when the file's `[serve]` table
-/// sets anything beyond the stdio session selection: until #32's later PRs
-/// nothing else reads it, and an operator who configured credentials must not
-/// think scoping is active. It quotes no value from the table.
-/// `default_session` and `[[serve.projects]]` are read (PR 8) to choose a
-/// stdio serve's session when `--session` is absent.
+/// What `lambo serve` logs once at startup when the file sets a `[serve]`
+/// key this release does not enforce yet (credentials, the cwd map, the
+/// on-demand bounds): an operator who configured credentials must not think
+/// scoping is active. Followed by the key names that are set
+/// ([`ServeConfig::unenforced_keys`]); it quotes no value from the table.
 pub const SERVE_UNENFORCED_NOTICE: &str = "lambo.toml [serve] is parsed but not yet enforced \
-     in this release beyond choosing a stdio serve's session (default_session, \
-     [[serve.projects]]): its pinned sessions, credentials and limits have no effect yet (#32), \
-     and this serve still authenticates only with --auth-token / LAMBO_AUTH_TOKEN";
+     for some keys in this release; they have no effect yet (#32), and this serve still \
+     authenticates only with --auth-token / LAMBO_AUTH_TOKEN";
 
 impl ServeConfig {
-    /// Log [`SERVE_UNENFORCED_NOTICE`] once if this table sets anything not
-    /// yet enforced, that is anything but `default_session` and
-    /// `[[serve.projects]]`. `lambo serve` calls it at startup; it never
-    /// quotes a value.
-    pub fn warn_if_unenforced(&self) {
-        if self.has_unenforced_keys() {
-            tracing::warn!("{SERVE_UNENFORCED_NOTICE}");
+    /// Log [`SERVE_UNENFORCED_NOTICE`] once, naming the keys, if this table
+    /// sets any key [`ServeConfig::unenforced_keys`] lists for this
+    /// transport. `lambo serve` calls it at startup; it never quotes a value.
+    pub fn warn_if_unenforced(&self, stdio: bool) {
+        let keys = self.unenforced_keys(stdio);
+        if !keys.is_empty() {
+            tracing::warn!(keys = %keys.join(", "), "{SERVE_UNENFORCED_NOTICE}");
         }
+    }
+
+    /// The keys this table sets that a `lambo serve` over this transport
+    /// does not enforce yet, by name, each its own entry.
+    ///
+    /// An HTTP serve enforces `sessions`, `default_session` and
+    /// `max_attached` (#32 PR 4). A stdio serve owns its one `--session`, so
+    /// `default_session` (what a stdio serve without `--session` will use)
+    /// and `[[serve.projects]]` (the stdio cwd map) are listed until #32 PR 8
+    /// enforces them; `sessions` and `max_attached` do not apply to stdio.
+    pub fn unenforced_keys(&self, stdio: bool) -> Vec<&'static str> {
+        let mut keys = Vec::new();
+        if !self.credentials.is_empty() {
+            keys.push("[[serve.credential]]");
+        }
+        if !self.projects.is_empty() {
+            keys.push("[[serve.projects]]");
+        }
+        if stdio && self.default_session.is_some() {
+            keys.push("default_session");
+        }
+        if self.attach_concurrency.is_some() {
+            keys.push("attach_concurrency");
+        }
+        if self.idle_detach_secs.is_some() {
+            keys.push("idle_detach_secs");
+        }
+        if self.per_session_rps.is_some() {
+            keys.push("per_session_rps");
+        }
+        keys
     }
 
     /// Does this table set a key nothing enforces yet? `default_session` and

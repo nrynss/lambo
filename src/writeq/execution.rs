@@ -138,6 +138,26 @@ pub(super) fn derive_sentence(
     submitted: usize,
     outcome: &crate::graph::derive::DeriveOutcome,
 ) -> String {
+    derive_sentence_of(strategy, submitted, outcome, false)
+}
+
+/// [`derive_sentence`], naming an image derive as one (#22: "derived 1 image
+/// concept: ..."). An image derive applies only under `Hybrid`.
+pub(super) fn derive_sentence_of(
+    strategy: MatchStrategy,
+    submitted: usize,
+    outcome: &crate::graph::derive::DeriveOutcome,
+    image: bool,
+) -> String {
+    if image {
+        return format!(
+            "derived {} image concept(s): {} created ({} embedded), {} matched existing",
+            submitted,
+            outcome.created.len(),
+            outcome.embedded,
+            outcome.matched.len()
+        );
+    }
     match strategy {
         MatchStrategy::Hybrid => format!(
             "derived {} concept(s): {} created ({} embedded), {} matched existing",
@@ -213,7 +233,17 @@ impl WriteCtx {
         consume: Option<ConsumeStamp>,
     ) -> Result<AppliedSummary, LamboError> {
         match &job.payload {
-            JobPayload::Derive { concepts, pairs } => {
+            JobPayload::Derive { concepts, pairs }
+            | JobPayload::DeriveImage {
+                concepts, pairs, ..
+            } => {
+                // #22: an image derive is this derive with one concept's
+                // vector supplied (`hybrid::derive_with`'s `supplied`).
+                let supplied = match &job.payload {
+                    JobPayload::DeriveImage { supplied, .. } => Some(supplied),
+                    _ => None,
+                };
+                let image = supplied.is_some();
                 let borrowed: Vec<(&str, ConceptType)> =
                     concepts.iter().map(|(c, t)| (c.as_str(), *t)).collect();
                 let borrowed_pairs: Vec<(&str, &str)> = pairs
@@ -227,6 +257,16 @@ impl WriteCtx {
                 };
                 let strategy = self.match_strategy;
                 let submitted = borrowed.len();
+                if image && strategy != MatchStrategy::Hybrid {
+                    // The call path refuses this; a replay in a process
+                    // configured `Canonical` meets it here. Session-wide
+                    // configuration, so it is not a fact about this intent.
+                    return Err(LamboError::Config(
+                        "an image derive needs match_strategy = \"hybrid\": its concept is \
+                         found only through its supplied vector"
+                            .into(),
+                    ));
+                }
                 let outcome = match strategy {
                     MatchStrategy::Hybrid => {
                         let on_commit: Option<hybrid::CommitHook> = consume.map(|stamp| {
@@ -238,7 +278,9 @@ impl WriteCtx {
                                         receipt,
                                         WriteIntentOutcome {
                                             tag: stamp.tag.into(),
-                                            summary: derive_sentence(strategy, submitted, outcome),
+                                            summary: derive_sentence_of(
+                                                strategy, submitted, outcome, image,
+                                            ),
                                             consumed_at: stamp.at,
                                         },
                                     );
@@ -256,6 +298,7 @@ impl WriteCtx {
                             &parent_of,
                             self.max_cooccurrence_per_derive,
                             self.semantic_match_threshold,
+                            supplied,
                             on_commit,
                         )
                         .await?
@@ -299,8 +342,8 @@ impl WriteCtx {
                     MatchStrategy::Canonical => None,
                 };
                 Ok(AppliedSummary {
-                    kind: WriteKind::Derive,
-                    summary: derive_sentence(strategy, submitted, &outcome),
+                    kind: job.payload.kind(),
+                    summary: derive_sentence_of(strategy, submitted, &outcome, image),
                     created,
                     matched,
                     created_count: outcome.created.len(),
@@ -563,10 +606,7 @@ impl WritePipeline {
                                 &job.agent.to_string(),
                                 &job.receipt.to_string(),
                                 "applied",
-                                Some(json!({
-                                    "created_count": summary.created_count,
-                                    "matched_count": summary.matched_count,
-                                })),
+                                Some(serde_json::Value::Object(summary.ledger_facts())),
                             ));
                         }
                         ReceiptAnswer::Applied(summary)

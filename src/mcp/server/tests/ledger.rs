@@ -1009,3 +1009,41 @@ async fn i32_completion_lines_name_the_memorys_session() {
     ledger.shutdown();
     s.mem.close().await.expect("close");
 }
+
+/// #32 PR 4 review L5: two sessions on one ledger file each report only
+/// their own lines, in `lambo_stats` and in their heartbeat line. Before,
+/// both reported the file's counters: a kit summing the heartbeat lines
+/// counted every line once per session, and one session's stats showed the
+/// other's call volume.
+#[tokio::test]
+async fn each_session_reports_only_its_own_ledger_lines() {
+    let dir = ledger_dir("per-session");
+    let ledger = Ledger::open(dir.join("calls.jsonl"));
+    let a = LamboServer::with_ledger(
+        Arc::clone(server("l5-a").await.memory()),
+        Arc::clone(&ledger),
+    );
+    let b = LamboServer::with_ledger(
+        Arc::clone(server("l5-b").await.memory()),
+        Arc::clone(&ledger),
+    );
+    for _ in 0..3 {
+        call(&a, "lambo_stats", json!({"agent_id": "agent-a"})).await;
+    }
+    call(&b, "lambo_stats", json!({"agent_id": "agent-a"})).await;
+    read_ledger(&ledger, 4);
+
+    let (sa, sb) = (a.stats_json(), b.stats_json());
+    assert_eq!(sa["ledger_written_lines"], json!(3), "{sa}");
+    assert_eq!(sb["ledger_written_lines"], json!(1), "{sb}");
+    assert_eq!(sb["ledger_queued_lines"], json!(0), "{sb}");
+    assert_eq!(
+        b.heartbeat_line()["stats"]["ledger_written_lines"],
+        json!(1),
+        "the heartbeat line is per session too"
+    );
+
+    ledger.shutdown();
+    a.mem.close().await.expect("close a");
+    b.mem.close().await.expect("close b");
+}

@@ -2500,13 +2500,43 @@ impl crate::embed::Embedder for LabelEmbedder {
         self.0.dimensions()
     }
     async fn embed(&self, text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
+        self.embed_as(text, crate::test_util::TextRole::Document)
+            .await
+    }
+    // #22 design R6: a delegating embedder forwards every method, or it
+    // silently inherits the defaults (a query embedded as a document, an
+    // image refused).
+    async fn embed_query(&self, text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
+        self.embed_as(text, crate::test_util::TextRole::Query).await
+    }
+    fn modalities(&self) -> crate::embed::Modalities {
+        self.0.modalities()
+    }
+    async fn embed_image(
+        &self,
+        image: crate::embed::ImageInput<'_>,
+    ) -> Result<Vec<f32>, crate::embed::EmbedError> {
+        self.0.embed_image(image).await
+    }
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        self.0.as_any()
+    }
+}
+
+impl LabelEmbedder {
+    /// The label reduction, in either text role.
+    async fn embed_as(
+        &self,
+        text: &str,
+        role: crate::test_util::TextRole,
+    ) -> Result<Vec<f32>, crate::embed::EmbedError> {
         let label = text
             .strip_prefix("Concept: ")
             .unwrap_or(text)
             .split(" — ")
             .next()
             .unwrap_or(text);
-        self.0.embed(label).await
+        role.embed(&self.0, label).await
     }
 }
 
@@ -2586,4 +2616,95 @@ async fn a_holder_derive_merges_a_paraphrase_the_index_has_not_seen() {
     .unwrap();
     assert!(knn() > 0, "recall still reads the tier");
     mem.close().await.unwrap();
+}
+
+/// #22 PR 3 on a holder over the tier (M6): an image derive asks the index
+/// nothing; a text derive whose nearest neighbour in the holder's graph is
+/// the image (cosine 1 here) stays a separate concept instead of merging
+/// into a picture; and the image's vector is mirrored into the index like
+/// any concept's, so recall's tier serves it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_image_on_a_holder_over_the_tier_is_indexed_and_never_absorbs_text() {
+    use crate::embed::{png_with_label, Embedder, FixtureEmbedder, NEAR_B};
+    use crate::graph::derive::ParentOf;
+    use crate::graph::image::{ImageDerive, ImagePayload};
+    use crate::memory::Memory;
+    use crate::types::MatchStrategy;
+    let _quiet = crate::test_util::quiet_logs();
+    let dim = FixtureEmbedder::new().dimensions();
+    let (primary, fake) = (memory_primary(), Arc::new(FakeIndex::lagging()));
+    let contract = EmbeddingContract {
+        kind: "fixture".into(),
+        model: None,
+        dim,
+    };
+    let sid = SessionId::new("tier-image");
+    primary
+        .flush(
+            &batch(
+                1,
+                vec![
+                    set_contract(&sid, Some(contract.clone())),
+                    interaction(&sid, NodeId::new()),
+                ],
+            ),
+            None,
+        )
+        .await
+        .unwrap();
+    let store: Arc<dyn GraphStore> = Arc::new(TieredStore::new(
+        Box::new(Shared::new(primary.clone())),
+        Box::new(fake.clone()),
+        Some(dim),
+    ));
+    let mem = Memory::builder()
+        .session("tier-image")
+        .agent("agent-a")
+        .flush_interval(Duration::from_secs(3_600))
+        .match_strategy(MatchStrategy::Hybrid)
+        .store(store)
+        .embedder(Arc::new(LabelEmbedder(FixtureEmbedder::new())) as Arc<dyn Embedder>)
+        .embedding_contract(contract)
+        .build()
+        .await
+        .expect("build");
+    let knn = || fake.knn_calls.load(std::sync::atomic::Ordering::SeqCst);
+
+    // The image's vector is exactly the one a text "create account" gets.
+    let png = png_with_label(NEAR_B);
+    let image = mem
+        .derive_image_as(
+            &"agent-a".into(),
+            ImageDerive {
+                caption: "render 17",
+                concept_type: ConceptType::Resource,
+                image_id: Some("r17"),
+                payload: ImagePayload::Bytes(
+                    crate::surface::image::validate(&png, "image/png").unwrap(),
+                ),
+                parent_of: &[],
+                event_time: None,
+            },
+        )
+        .await
+        .unwrap()
+        .created[0];
+    let text = mem
+        .derive(&[(NEAR_B, ConceptType::Entity)], &ParentOf::none())
+        .await
+        .unwrap();
+    assert!(
+        text.semantic_merged.is_empty(),
+        "a text claim never merges into a picture: {text:?}"
+    );
+    assert_eq!(text.created.len(), 1);
+    assert_eq!(knn(), 0, "neither derive asked the index");
+
+    mem.close().await.unwrap();
+    let docs = fake.live(&sid);
+    let (_, doc) = docs
+        .get(&image.0.to_string())
+        .expect("the image concept is mirrored into the index");
+    assert_eq!(doc.content, "render 17 [image:r17]");
+    assert_eq!(doc.embedding, FixtureEmbedder::new().embed_sync(NEAR_B));
 }

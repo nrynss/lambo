@@ -542,6 +542,14 @@ pub(crate) mod testkit {
         WriteIntent, WriteIntentPayload,
     };
 
+    /// A unit vector of `dim` non-integer components, so a JSON round trip
+    /// of it exercises `f32` decimal formatting (review L6).
+    pub(crate) fn unit_vector(dim: usize) -> Vec<f32> {
+        let raw: Vec<f64> = (0..dim).map(|i| ((i as f64) * 0.37 + 0.11).sin()).collect();
+        let norm = raw.iter().map(|x| x * x).sum::<f64>().sqrt();
+        raw.iter().map(|x| (x / norm) as f32).collect()
+    }
+
     /// The contract the planted vectors are written under.
     pub(crate) fn contract(dim: usize) -> EmbeddingContract {
         EmbeddingContract {
@@ -609,9 +617,11 @@ pub(crate) mod testkit {
     /// A batch that writes the session row (with contract and root goal), two
     /// chained interactions, two concepts (one carrying a `dim`-wide vector
     /// and its #22 `embedding_source`), two edges, a canonization transition,
-    /// a read access and a durable write intent. Concept text is unique per
-    /// call, so two sessions planted in one store never collide on a
-    /// canonical key.
+    /// a read access and two durable write intents: a plain text derive and
+    /// an unconsumed #22 image derive, which carries a vector of its own
+    /// (review L6: the census covers both kinds of intent row). Concept text
+    /// is unique per call, so two sessions planted in one store never collide
+    /// on a canonical key.
     pub(crate) fn planted_batch(sid: &SessionId, dim: usize) -> MutationBatch {
         let ts = Utc::now();
         let (i1, i2, c1, c2) = (NodeId::new(), NodeId::new(), NodeId::new(), NodeId::new());
@@ -666,14 +676,42 @@ pub(crate) mod testkit {
                 Mutation::PutWriteIntent {
                     intent: WriteIntent {
                         session_id: sid.clone(),
-                        receipt: format!("erase-test-{c1}"),
+                        receipt: format!("erase-test-text-{c1}"),
                         agent: AgentId::new("erase-test"),
                         interaction: i2,
                         lane_seq: 1,
                         issued_ms: ts.timestamp_millis(),
                         payload: WriteIntentPayload::Derive {
-                            concepts: vec![("prefers navy".into(), ConceptType::Entity)],
+                            concepts: vec![("prefers linen".into(), ConceptType::Entity)],
+                            pairs: vec![("wardrobe".into(), "prefers linen".into())],
+                        },
+                        created_at: ts,
+                        outcome: None,
+                    },
+                },
+                Mutation::PutWriteIntent {
+                    intent: WriteIntent {
+                        session_id: sid.clone(),
+                        receipt: format!("erase-test-{c1}"),
+                        agent: AgentId::new("erase-test"),
+                        interaction: i2,
+                        lane_seq: 2,
+                        issued_ms: ts.timestamp_millis(),
+                        // #22: an unconsumed image derive carries its
+                        // vector and source in the intent row; erase
+                        // removes it with the session like any intent.
+                        payload: WriteIntentPayload::DeriveImage {
+                            concepts: vec![(
+                                "prefers navy [image:n1]".into(),
+                                ConceptType::Resource,
+                            )],
                             pairs: vec![],
+                            supplied: crate::types::SuppliedVector {
+                                content: "prefers navy [image:n1]".into(),
+                                vector: unit_vector(dim),
+                                contract: contract(dim),
+                                source: crate::store::embedding_source_testkit::server_source(),
+                            },
                         },
                         created_at: ts,
                         outcome: None,
@@ -693,7 +731,7 @@ pub(crate) mod testkit {
             vectors: 1,
             edges: 2,
             canonization_events: 1,
-            write_intents: 1,
+            write_intents: 2,
             ..Default::default()
         }
     }

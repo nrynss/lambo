@@ -95,6 +95,13 @@ pub enum ReplayBlockReason {
     /// A non-embedder, session-wide fault (a store error, a lost lease, a
     /// config error) ended the loop.
     Other,
+    /// An image derive intent (#22) reached the head of the backlog in a
+    /// process that cannot apply one: its match strategy is not `hybrid`, or
+    /// its store has no vector search. The replay stops there rather than
+    /// skip it, to keep the lane order (a later intent could otherwise
+    /// create the image's canonical key as text first); restarting with the
+    /// hybrid strategy and a vector-search store drains it.
+    ImageConfig,
 }
 
 /// Queue accounting. See the module docs for why the shape mirrors
@@ -152,7 +159,9 @@ pub struct WriteQueueCounters {
     /// The reason the last replay stopped without draining (J3-R2R-8), or
     /// [`ReplayBlockReason::None`] when it drained / was never owed. Renders as
     /// the `write_queue_replay_blocked` stat: `null` = draining or idle,
-    /// `"embedder"` = sick/wedged, `"other"` = store/lease/config.
+    /// `"embedder"` = sick/wedged, `"other"` = store/lease/config,
+    /// `"image_config"` = an image intent this process's configuration cannot
+    /// apply (#22).
     pub(super) replay_blocked: AtomicU8,
 }
 
@@ -191,6 +200,7 @@ impl WriteQueueCounters {
         match self.replay_blocked.load(Ordering::Relaxed) {
             0 => ReplayBlockReason::None,
             1 => ReplayBlockReason::Embedder,
+            3 => ReplayBlockReason::ImageConfig,
             _ => ReplayBlockReason::Other,
         }
     }
@@ -199,6 +209,7 @@ impl WriteQueueCounters {
             ReplayBlockReason::None => 0,
             ReplayBlockReason::Embedder => 1,
             ReplayBlockReason::Other => 2,
+            ReplayBlockReason::ImageConfig => 3,
         };
         self.replay_blocked.store(disc, Ordering::Relaxed);
     }

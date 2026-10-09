@@ -1,11 +1,13 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::{ArgAction, Parser, Subcommand};
+use clap::{ArgAction, CommandFactory, Parser, Subcommand};
 use lambo::cli::{CliError, ConceptKind};
-use lambo::mcp::{ServeOptions, Transport};
+use lambo::mcp::{PinnedSessions, ServeOptions, Transport};
 use lambo::store::{GraphStore, StoreKind};
-use lambo::{resolve_from_config_path, resolve_store_only, LamboFile, ResolvedBackends};
+use lambo::{
+    resolve_backends, resolve_from_config_path, resolve_store_only, LamboFile, ResolvedBackends,
+};
 
 /// Lambo — agentic graph memory (MCP server + CLI).
 #[derive(Debug, Parser)]
@@ -25,12 +27,15 @@ enum Commands {
     /// Run the MCP server for a session (primary artifact).
     Serve {
         /// Session id this process owns (single-writer model, spec §2.2).
-        /// Always wins when given. Without it a stdio serve uses the
+        /// Repeatable with --transport http: every session given is pinned
+        /// (attached at startup) and served at /mcp/s/<session>, beside
+        /// lambo.toml [serve] sessions; the first is the default, served at
+        /// /mcp. A stdio serve takes at most one; without it, it uses the
         /// lambo.toml [[serve.projects]] entry covering its working directory
         /// (longest path wins), then [serve] default_session, and refuses if
-        /// neither applies. Required with --transport http.
+        /// neither applies.
         #[arg(long)]
-        session: Option<String>,
+        session: Vec<String>,
         /// Agent identity this process writes as.
         #[arg(long, default_value = "lambo-serve")]
         agent: String,
@@ -362,6 +367,9 @@ enum Commands {
         /// Backfill only: embed the concepts that have NO vector, leave every existing vector and the session contract untouched. This is the repair path for a session that accumulated NULL vectors inside its own current space, which the default migration refuses to touch.
         #[arg(long)]
         missing_only: bool,
+        /// Full migration only: null the vector of every image concept instead of refusing on it. An image vector cannot be recomputed from its caption; each image concept keeps its caption and source, and deriving the same image again under the new embedder restores its vector.
+        #[arg(long)]
+        drop_image_vectors: bool,
     },
 }
 
@@ -461,9 +469,16 @@ enum Resolved {
 fn resolve_for_command(
     cmd: &Commands,
     config: Option<&std::path::Path>,
+    loaded: Option<LamboFile>,
 ) -> Result<Resolved, String> {
     if cmd.needs_embedder() {
-        let r = resolve_from_config_path(config).map_err(|e| e.to_string())?;
+        // `serve` reads `lambo.toml` once, in `serve_preflight`, and hands
+        // the file down; every other writer loads it here.
+        let r = match loaded {
+            Some(file) => resolve_backends(file),
+            None => resolve_from_config_path(config),
+        }
+        .map_err(|e| e.to_string())?;
         Ok(Resolved::Full(Box::new(r)))
     } else {
         // Kind comes from the same file resolve_store_only reads; the store is
@@ -473,6 +488,99 @@ fn resolve_for_command(
         let dsn = file.store.dsn.clone();
         let store = resolve_store_only(config).map_err(|e| e.to_string())?;
         Ok(Resolved::StoreOnly { store, kind, dsn })
+    }
+}
+
+/// What `lambo serve` decided before any backend or embedder is built: the
+/// transport, the pinned sessions, and the one read of `lambo.toml`, which
+/// the backend resolve then consumes.
+struct ServePlan {
+    transport: Transport,
+    pinned: PinnedSessions,
+    file: LamboFile,
+}
+
+/// `lambo serve`'s checks that need no backend (#32 PR 4), run before the
+/// resolve so a usage error costs no model load: the transport, the stdio
+/// session rule, the pinned sessions over HTTP, and the `[serve]` notice.
+/// `Err` carries the exit code; the message is already printed.
+fn serve_preflight(
+    session: &[String],
+    transport: &str,
+    config: Option<&std::path::Path>,
+) -> Result<ServePlan, ExitCode> {
+    // Diagnostics to stderr, before anything can log: under
+    // `--transport stdio`, stdout is the JSON-RPC channel and one stray
+    // line on it corrupts the framing.
+    lambo::mcp::init_tracing();
+    let transport = match transport.parse::<Transport>() {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("lambo serve: {e}");
+            return Err(ExitCode::from(2));
+        }
+    };
+    let file = match LamboFile::load_resolved(config) {
+        Ok(file) => file,
+        Err(e) => {
+            eprintln!("lambo serve: failed to build backends: {e}");
+            return Err(ExitCode::FAILURE);
+        }
+    };
+    if transport == Transport::Stdio {
+        stdio_session(session)?;
+    }
+    // Stdio: the one `--session`. HTTP: the ordered union of `--session`
+    // and `[serve] sessions`. Either way checked against `serve`'s own
+    // rules (every name addressable by URL once more than one is pinned),
+    // here, before any backend is built (#32 review L3).
+    let pinned = match lambo::mcp::pin_sessions(session, &file.serve, transport) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("lambo serve: {e}");
+            return Err(ExitCode::from(2));
+        }
+    };
+    // `[serve]`: the keys this serve does not enforce yet are named once
+    // (#32 PR 1 review L3); never a value.
+    file.serve.warn_if_unenforced(transport == Transport::Stdio);
+    Ok(ServePlan {
+        transport,
+        pinned,
+        file,
+    })
+}
+
+/// The one session a stdio serve owns: exactly one `--session`.
+///
+/// No `--session` is clap's own missing-argument error (exit 2), as it was
+/// when the flag was required; more than one is a usage error too. #32 PR 8
+/// replaces this with its resolver (`[[serve.projects]]`, then
+/// `default_session`).
+fn stdio_session(session: &[String]) -> Result<(), ExitCode> {
+    match session {
+        [_] => Ok(()),
+        [] => {
+            let mut cli = Cli::command();
+            cli.build();
+            let serve = cli
+                .find_subcommand_mut("serve")
+                .expect("serve is a subcommand");
+            serve
+                .error(
+                    clap::error::ErrorKind::MissingRequiredArgument,
+                    "the following required arguments were not provided:\n  --session <SESSION>",
+                )
+                .exit()
+        }
+        many => {
+            eprintln!(
+                "lambo serve: --session was given {} times, but a stdio serve owns exactly one \
+                 session; serve several sessions with --transport http",
+                many.len()
+            );
+            Err(ExitCode::from(2))
+        }
     }
 }
 
@@ -607,28 +715,24 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     };
 
-    // #32 PR 8: a serve without `--session` takes its session from
-    // `lambo.toml` before any backend is built, so a refusal costs nothing.
-    let mut cmd = cmd;
-    let mut session_source = None;
-    if let Commands::Serve {
-        session, transport, ..
-    } = &mut cmd
-        && session.is_none()
-    {
-        match select_serve_session(config, transport) {
-            Ok(selected) => {
-                *session = Some(selected.session.clone());
-                session_source = Some(selected);
-            }
-            Err(code) => return code,
-        }
-    }
-
     let allow_embedding_mismatch = cmd.allow_embedding_mismatch();
 
+    // `lambo serve`'s usage checks, before any backend is built (#32 PR 4).
+    let mut serve_plan = match &cmd {
+        Commands::Serve {
+            session, transport, ..
+        } => match serve_preflight(session, transport, config) {
+            Ok(plan) => Some(plan),
+            Err(code) => return code,
+        },
+        _ => None,
+    };
+    let loaded = serve_plan
+        .as_mut()
+        .map(|plan| std::mem::take(&mut plan.file));
+
     // Construct once; when Memory/serve land, pass `Resolved` into the command body.
-    let mut resolved = match resolve_for_command(&cmd, config) {
+    let mut resolved = match resolve_for_command(&cmd, config, loaded) {
         Ok(r) => r,
         Err(e) => {
             let what = if cmd.needs_embedder() {
@@ -650,9 +754,9 @@ fn main() -> ExitCode {
     match (cmd, resolved) {
         (
             Commands::Serve {
-                session,
+                session: _,
                 agent,
-                transport,
+                transport: _,
                 port,
                 bind,
                 auth_token,
@@ -664,31 +768,11 @@ fn main() -> ExitCode {
             },
             Resolved::Full(backends),
         ) => {
-            // Diagnostics to stderr, before anything can log: under
-            // `--transport stdio`, stdout is the JSON-RPC channel and one stray
-            // line on it corrupts the framing.
-            lambo::mcp::init_tracing();
-            let Some(session) = session else {
-                return session_required(false);
-            };
-            if let Some(selected) = &session_source {
-                log_session_source(selected);
-            }
-            // `[serve]` parses but nothing enforces it yet (#32 PR 1 review
-            // L3); say so once. The file already loaded in
-            // `resolve_for_command`, so this re-read cannot newly fail, and a
-            // failure would only skip the notice.
-            if let Ok(file) = LamboFile::load_resolved(config) {
-                file.serve.warn_if_unenforced();
-            }
-
-            let transport = match transport.parse::<Transport>() {
-                Ok(t) => t,
-                Err(e) => {
-                    eprintln!("lambo serve: {e}");
-                    return ExitCode::from(2);
-                }
-            };
+            // Tracing is up, the transport parsed and the sessions pinned:
+            // `serve_preflight`, before the backends were built.
+            let ServePlan {
+                transport, pinned, ..
+            } = serve_plan.expect("serve_preflight ran for serve");
             // Env beats flag (T8.7) — resolved here, before any of it reaches a
             // log line. A set-but-empty LAMBO_AUTH_TOKEN is a usage error, not
             // a silent fallback to the flag.
@@ -708,7 +792,8 @@ fn main() -> ExitCode {
             // the one `Err` arm at the end of this block rather than with two
             // different exit codes for the same class of mistake.
             let opts = ServeOptions {
-                session,
+                session: pinned.default,
+                sessions: pinned.sessions,
                 agent,
                 transport,
                 port,
@@ -941,6 +1026,7 @@ fn main() -> ExitCode {
                 agent,
                 allow_embedding_mismatch: _,
                 missing_only,
+                drop_image_vectors,
             },
             Resolved::Full(backends),
         ) => run_async(
@@ -955,6 +1041,7 @@ fn main() -> ExitCode {
                     // below still lands on ResolvedBackends and is ignored.
                     allow_embedding_mismatch,
                     missing_only,
+                    drop_image_vectors,
                 },
             ),
         ),
@@ -1067,17 +1154,18 @@ mod tests {
 
     #[test]
     fn serve_session_is_optional_at_parse_time() {
-        // #32 PR 8: lambo.toml can supply it; the refusal moved to
-        // `select_serve_session`, after the file is read.
+        // #32 PR 8: lambo.toml can supply a stdio serve's session, and PR 4
+        // an HTTP serve's; the refusals live in `serve_preflight`, after the
+        // file is read.
         let parsed = Cli::try_parse_from(["lambo", "serve"]).unwrap();
         assert!(matches!(
             parsed.command,
-            Some(Commands::Serve { session: None, .. })
+            Some(Commands::Serve { ref session, .. }) if session.is_empty()
         ));
         let flagged = Cli::try_parse_from(["lambo", "serve", "--session", "s"]).unwrap();
         assert!(matches!(
             flagged.command,
-            Some(Commands::Serve { session: Some(ref s), .. }) if s == "s"
+            Some(Commands::Serve { ref session, .. }) if session == &["s"]
         ));
     }
 
