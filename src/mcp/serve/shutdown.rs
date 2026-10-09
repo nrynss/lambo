@@ -56,6 +56,7 @@ use super::signals::{shutdown_signal, EarlyShutdown};
 use super::stages::{ShutdownProgress, Stage};
 use crate::ledger::Ledger;
 use crate::memory::Memory;
+use crate::store::flush::CatchUnwindPoll;
 use crate::store::lease;
 use crate::types::{LamboError, SessionId};
 
@@ -459,13 +460,34 @@ pub(super) async fn close_sessions(
 ) -> SessionCloses {
     // Stage 3: the session closes, concurrently.
     progress.begin(Stage::SessionClose);
-    let closed = join_all(
+    let results = join_all_catching(
         sessions
             .iter()
             .map(|session| close_bounded(session.mem, early))
             .collect(),
     )
     .await;
+    // A member that panicked has no outcome to report. Its siblings' do: log
+    // them, each naming its session, before the panic resumes (#32 review
+    // L2), or a sibling's lost tail would go unlogged with it.
+    let mut panicked = None;
+    let mut closed = Vec::with_capacity(results.len());
+    for (session, result) in sessions.iter().zip(results) {
+        match result {
+            Ok(outcome) => closed.push((session.mem.session().clone(), outcome)),
+            Err(payload) => {
+                panicked.get_or_insert(payload);
+            }
+        }
+    }
+    if let Some(payload) = panicked {
+        let _ = SessionCloses {
+            outcomes: closed,
+            named: true,
+        }
+        .report();
+        std::panic::resume_unwind(payload);
+    }
     progress.end(Stage::SessionClose);
     // Stage 4: the event pumps, after the close.
     progress.run(Stage::EventPumpAbort, || {
@@ -474,19 +496,24 @@ pub(super) async fn close_sessions(
         }
     });
     SessionCloses {
-        outcomes: sessions
-            .iter()
-            .map(|session| session.mem.session().clone())
-            .zip(closed)
-            .collect(),
+        named: closed.len() > 1,
+        outcomes: closed,
     }
 }
+
+/// The line an operator acts on when a session's tail did not reach the
+/// store.
+const TAIL_LOST: &str =
+    "lambo serve: final flush failed — tail lost on exit, not durable (no on-disk WAL)";
 
 /// Each session's close outcome from [`close_sessions`], with the session
 /// it is about, in set order, not yet logged.
 #[must_use = "an unreported close outcome is a tail loss nobody logged"]
 pub(super) struct SessionCloses {
     outcomes: Vec<(SessionId, Result<(), LamboError>)>,
+    /// Whether each line names its session: the set had more than one
+    /// member.
+    named: bool,
 }
 
 impl SessionCloses {
@@ -498,15 +525,15 @@ impl SessionCloses {
     /// names its `session`: "tail lost" is the line an operator acts on, and
     /// N unattributed copies of it would not say whose tail.
     pub(super) fn report(self) -> Result<(), LamboError> {
-        let named = self.outcomes.len() > 1;
+        let named = self.named;
         let mut failed = None;
         for (session, closed) in self.outcomes {
             match closed {
                 Err(e) => {
                     if named {
-                        tracing::error!(session = %session, error = %e, "lambo serve: final flush failed — tail lost on exit, not durable (no on-disk WAL)");
+                        tracing::error!(session = %session, error = %e, "{TAIL_LOST}");
                     } else {
-                        tracing::error!(error = %e, "lambo serve: final flush failed — tail lost on exit, not durable (no on-disk WAL)");
+                        tracing::error!(error = %e, "{TAIL_LOST}");
                     }
                     failed.get_or_insert(e);
                 }
@@ -540,30 +567,49 @@ impl SessionCloses {
 /// For a set of one nothing changes: the panic propagates from the same
 /// poll.
 pub(super) async fn join_all<F: Future>(futures: Vec<F>) -> Vec<F::Output> {
-    let mut futures: Vec<Option<Pin<Box<F>>>> = futures
+    let mut outputs = Vec::with_capacity(futures.len());
+    let mut panicked = None;
+    for result in join_all_catching(futures).await {
+        match result {
+            Ok(output) => outputs.push(output),
+            Err(payload) => {
+                panicked.get_or_insert(payload);
+            }
+        }
+    }
+    if let Some(payload) = panicked {
+        std::panic::resume_unwind(payload);
+    }
+    outputs
+}
+
+/// A panic payload caught at a member's poll.
+pub(super) type Panic = Box<dyn std::any::Any + Send>;
+
+/// [`join_all`] without the resume: each member's output, or the panic it
+/// raised, in input order, once every member is done. For a caller that has
+/// something to do with the siblings' outputs before the panic resumes
+/// ([`close_sessions`] logs their close outcomes).
+pub(super) async fn join_all_catching<F: Future>(futures: Vec<F>) -> Vec<Result<F::Output, Panic>> {
+    let mut futures: Vec<Option<Pin<Box<CatchUnwindPoll<F>>>>> = futures
         .into_iter()
-        .map(|future| Some(Box::pin(future)))
+        .map(|future| Some(Box::pin(CatchUnwindPoll(future))))
         .collect();
-    let mut outputs: Vec<Option<F::Output>> = futures.iter().map(|_| None).collect();
-    let mut panicked: Option<Box<dyn std::any::Any + Send>> = None;
+    let mut outputs: Vec<Option<Result<F::Output, Panic>>> = futures.iter().map(|_| None).collect();
     std::future::poll_fn(|cx| {
         let mut pending = false;
         for (slot, output) in futures.iter_mut().zip(outputs.iter_mut()) {
             let Some(future) = slot.as_mut() else {
                 continue;
             };
-            let polled =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| future.as_mut().poll(cx)));
-            match polled {
-                Ok(std::task::Poll::Ready(value)) => {
-                    *output = Some(value);
+            match future.as_mut().poll(cx) {
+                // A panicked member is dropped at once, as the unwind would
+                // have dropped it, and never polled again.
+                std::task::Poll::Ready(result) => {
+                    *output = Some(result);
                     *slot = None;
                 }
-                Ok(std::task::Poll::Pending) => pending = true,
-                Err(payload) => {
-                    *slot = None;
-                    panicked.get_or_insert(payload);
-                }
+                std::task::Poll::Pending => pending = true,
             }
         }
         if pending {
@@ -573,9 +619,6 @@ pub(super) async fn join_all<F: Future>(futures: Vec<F>) -> Vec<F::Output> {
         }
     })
     .await;
-    if let Some(payload) = panicked {
-        std::panic::resume_unwind(payload);
-    }
     outputs
         .into_iter()
         .map(|output| output.expect("join_all returns only once every future is ready"))
