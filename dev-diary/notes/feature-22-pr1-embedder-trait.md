@@ -53,6 +53,15 @@ dependencies.
   and a scan or end-of-image before the frame header.
 - WebP: the first chunk after RIFF must be `VP8 `, `VP8L` or `VP8X`. A WebP
   whose first chunk is anything else is refused.
+- WebP `VP8X` (review M1): the `VP8X` header declares only a canvas, while the
+  pixels sit in a later `VP8 `/`VP8L` chunk (up to 16383 px a side) or in
+  animation frames. So the animation flag is refused, an `ANMF` chunk before
+  the image chunk is refused, and the parser walks the RIFF chunks (bounded by
+  the bytes supplied) to the first `VP8 `/`VP8L` chunk, whose dimensions must
+  equal the canvas. A `VP8X` with no image chunk is unreadable. This keeps the
+  promise that the checked dimensions bound the decode true for every format.
+  Animation is refused because an embedding needs one still image and the
+  design never asked for it.
 
 Anything the parser cannot read is refused as "truncated or unreadable".
 `every_truncation_of_a_header_is_refused` checks every prefix of each header,

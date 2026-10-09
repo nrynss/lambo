@@ -13,9 +13,17 @@
 //! 4. the header names a width and height, each between 1 and
 //!    [`MAX_IMAGE_SIDE_PX`]. Only the header is read (PNG `IHDR`, the JPEG
 //!    `SOF0`/`SOF1`/`SOF2` frame header, the WebP `VP8 `/`VP8L`/`VP8X`
-//!    header), never the pixels, and without an image crate. This bounds what
-//!    a backend may have to decode. A header this parser cannot read is
-//!    refused.
+//!    header), never the pixels, and without an image crate. A header this
+//!    parser cannot read is refused.
+//!
+//!    For an extended (`VP8X`) WebP the header only declares a canvas; the
+//!    pixels live in a later `VP8 `/`VP8L` chunk that declares its own size
+//!    (up to 16383 px a side), or in any number of animation frames. So an
+//!    animated WebP (the `VP8X` animation flag, or an `ANMF` chunk) is
+//!    refused, and the first `VP8 `/`VP8L` chunk must be present and declare
+//!    exactly the canvas size. With that, for every accepted format the
+//!    dimensions checked here are the ones the bitstream decodes to, which
+//!    bounds what a backend may have to decode.
 //!
 //! It then computes the SHA-256 once, for the image id and the embedding
 //! source later PRs record.
@@ -68,10 +76,21 @@ pub fn validate<'a>(bytes: &'a [u8], declared_mime: &str) -> Result<ImageInput<'
             "image: declared {declared} but the bytes are {sniffed}"
         ));
     }
-    let Some((width, height)) = dimensions(bytes, sniffed) else {
-        return Err(format!(
-            "image: the {sniffed} header is truncated or unreadable"
-        ));
+    let (width, height) = match dimensions(bytes, sniffed) {
+        Ok(sides) => sides,
+        Err(HeaderFault::Unreadable) => {
+            return Err(format!(
+                "image: the {sniffed} header is truncated or unreadable"
+            ));
+        }
+        Err(HeaderFault::Animated) => {
+            return Err("image: animated WebP is not accepted; send one still image".into());
+        }
+        Err(HeaderFault::CanvasMismatch) => {
+            return Err(
+                "image: the WebP canvas size differs from the size of its image data".into(),
+            );
+        }
     };
     for (side, px) in [("width", width), ("height", height)] {
         if px == 0 || px > MAX_IMAGE_SIDE_PX {
@@ -97,13 +116,23 @@ fn sniff(bytes: &[u8]) -> Option<ImageMime> {
     }
 }
 
+/// Why [`dimensions`] could not name a single still image's size.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HeaderFault {
+    /// Truncated, or not a header this parser reads.
+    Unreadable,
+    /// An animated WebP: more than one image to decode.
+    Animated,
+    /// A `VP8X` canvas whose image chunk declares a different size.
+    CanvasMismatch,
+}
+
 /// `(width, height)` from the header of an image whose magic bytes already
-/// matched `mime`. `None` when the header is truncated or not one this parser
-/// reads.
-fn dimensions(bytes: &[u8], mime: ImageMime) -> Option<(u32, u32)> {
+/// matched `mime`.
+fn dimensions(bytes: &[u8], mime: ImageMime) -> Result<(u32, u32), HeaderFault> {
     match mime {
-        ImageMime::Png => png_dimensions(bytes),
-        ImageMime::Jpeg => jpeg_dimensions(bytes),
+        ImageMime::Png => png_dimensions(bytes).ok_or(HeaderFault::Unreadable),
+        ImageMime::Jpeg => jpeg_dimensions(bytes).ok_or(HeaderFault::Unreadable),
         ImageMime::Webp => webp_dimensions(bytes),
     }
 }
@@ -181,31 +210,88 @@ fn jpeg_dimensions(b: &[u8]) -> Option<(u32, u32)> {
 
 /// WebP: the first chunk after the RIFF header is the image header, one of
 /// lossy `VP8 `, lossless `VP8L` or extended `VP8X`.
-fn webp_dimensions(b: &[u8]) -> Option<(u32, u32)> {
-    let payload = 20;
-    match b.get(12..16)? {
-        // Lossy: a 3-byte frame tag, the 9D 01 2A start code, then 14-bit
-        // little-endian width and height (the top two bits are scale).
-        b"VP8 " => {
-            if b.get(payload + 3..payload + 6)? != [0x9D, 0x01, 0x2A] {
-                return None;
+fn webp_dimensions(b: &[u8]) -> Result<(u32, u32), HeaderFault> {
+    let first = b.get(12..16).ok_or(HeaderFault::Unreadable)?;
+    match first {
+        b"VP8 " => vp8_sides(b, WEBP_FIRST_PAYLOAD).ok_or(HeaderFault::Unreadable),
+        b"VP8L" => vp8l_sides(b, WEBP_FIRST_PAYLOAD).ok_or(HeaderFault::Unreadable),
+        b"VP8X" => vp8x_dimensions(b),
+        _ => Err(HeaderFault::Unreadable),
+    }
+}
+
+/// Where the first WebP chunk's payload starts: past `RIFF`, the RIFF size,
+/// `WEBP`, the chunk's fourcc and its size.
+const WEBP_FIRST_PAYLOAD: usize = 20;
+
+/// Lossy `VP8 ` payload at `p`: a 3-byte frame tag, the 9D 01 2A start code,
+/// then 14-bit little-endian width and height (the top two bits are scale).
+fn vp8_sides(b: &[u8], p: usize) -> Option<(u32, u32)> {
+    if b.get(p + 3..p + 6)? != [0x9D, 0x01, 0x2A] {
+        return None;
+    }
+    let sides = le_u32(b, p + 6)?;
+    Some((sides & 0x3FFF, (sides >> 16) & 0x3FFF))
+}
+
+/// Lossless `VP8L` payload at `p`: the 0x2F signature, then width-1 and
+/// height-1 as two 14-bit fields packed little-endian.
+fn vp8l_sides(b: &[u8], p: usize) -> Option<(u32, u32)> {
+    if *b.get(p)? != 0x2F {
+        return None;
+    }
+    let bits = le_u32(b, p + 1)?;
+    Some(((bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1))
+}
+
+/// Extended `VP8X`: flags and 3 reserved bytes, then 24-bit little-endian
+/// canvas width-1 and height-1. The canvas is only a declaration, so the
+/// animation flag is refused and the first image chunk after it must declare
+/// the same size (see the module docs).
+fn vp8x_dimensions(b: &[u8]) -> Result<(u32, u32), HeaderFault> {
+    const ANIMATION_FLAG: u8 = 0x02;
+    let p = WEBP_FIRST_PAYLOAD;
+    let flags = *b.get(p).ok_or(HeaderFault::Unreadable)?;
+    if flags & ANIMATION_FLAG != 0 {
+        return Err(HeaderFault::Animated);
+    }
+    let canvas = le_u24(b, p + 4)
+        .zip(le_u24(b, p + 7))
+        .map(|(w, h)| (w + 1, h + 1))
+        .ok_or(HeaderFault::Unreadable)?;
+    if vp8x_image_sides(b)? != canvas {
+        return Err(HeaderFault::CanvasMismatch);
+    }
+    Ok(canvas)
+}
+
+/// The sides the first `VP8 `/`VP8L` chunk after the `VP8X` chunk declares.
+/// Walks the RIFF chunks (fourcc, little-endian size, payload padded to an
+/// even length), bounded by the bytes supplied: a chunk that runs past the
+/// end, or no image chunk at all, is unreadable. An `ANMF` frame before any
+/// image chunk is an animation whatever the flags said.
+fn vp8x_image_sides(b: &[u8]) -> Result<(u32, u32), HeaderFault> {
+    let mut at = 12; // the VP8X chunk itself
+    loop {
+        let fourcc = b.get(at..at + 4).ok_or(HeaderFault::Unreadable)?;
+        let size = le_u32(b, at + 4).ok_or(HeaderFault::Unreadable)?;
+        let payload = at + 8;
+        if at != 12 {
+            match fourcc {
+                b"VP8 " => return vp8_sides(b, payload).ok_or(HeaderFault::Unreadable),
+                b"VP8L" => return vp8l_sides(b, payload).ok_or(HeaderFault::Unreadable),
+                b"ANMF" => return Err(HeaderFault::Animated),
+                _ => {}
             }
-            let sides = le_u32(b, payload + 6)?;
-            Some((sides & 0x3FFF, (sides >> 16) & 0x3FFF))
         }
-        // Lossless: the 0x2F signature, then width-1 and height-1 as two
-        // 14-bit fields packed little-endian.
-        b"VP8L" => {
-            if *b.get(payload)? != 0x2F {
-                return None;
-            }
-            let bits = le_u32(b, payload + 1)?;
-            Some(((bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1))
-        }
-        // Extended: flags and 3 reserved bytes, then 24-bit little-endian
-        // canvas width-1 and height-1.
-        b"VP8X" => Some((le_u24(b, payload + 4)? + 1, le_u24(b, payload + 7)? + 1)),
-        _ => None,
+        // Every step advances by at least 8 bytes, and `size` is at most
+        // u32::MAX, so neither the sum nor the loop can run away; the next
+        // `get` fails once `at` passes the end.
+        let padded = usize::try_from(size)
+            .ok()
+            .and_then(|n| n.checked_add(n & 1))
+            .ok_or(HeaderFault::Unreadable)?;
+        at = payload.checked_add(padded).ok_or(HeaderFault::Unreadable)?;
     }
 }
 

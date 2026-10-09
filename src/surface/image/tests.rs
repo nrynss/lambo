@@ -41,40 +41,73 @@ fn jpeg(w: u16, h: u16) -> Vec<u8> {
     jpeg_with(0xC0, w, h)
 }
 
-fn riff(chunk: &[u8; 4], payload: &[u8]) -> Vec<u8> {
-    let mut b = b"RIFF".to_vec();
-    b.extend_from_slice(&(4 + 8 + payload.len() as u32).to_le_bytes());
-    b.extend_from_slice(b"WEBP");
-    b.extend_from_slice(chunk);
+/// One RIFF chunk: fourcc, little-endian size, payload, a pad byte when the
+/// payload length is odd.
+fn chunk(fourcc: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+    let mut b = fourcc.to_vec();
     b.extend_from_slice(&(payload.len() as u32).to_le_bytes());
     b.extend_from_slice(payload);
+    if payload.len() % 2 == 1 {
+        b.push(0);
+    }
     b
 }
 
-/// Lossy WebP: frame tag, start code, 14-bit sides.
-fn webp_vp8(w: u16, h: u16) -> Vec<u8> {
+/// A WebP file holding `chunks`, in order.
+fn riff_chunks(chunks: &[Vec<u8>]) -> Vec<u8> {
+    let body: Vec<u8> = chunks.concat();
+    let mut b = b"RIFF".to_vec();
+    b.extend_from_slice(&(4 + body.len() as u32).to_le_bytes());
+    b.extend_from_slice(b"WEBP");
+    b.extend_from_slice(&body);
+    b
+}
+
+fn riff(fourcc: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+    riff_chunks(&[chunk(fourcc, payload)])
+}
+
+/// Lossy `VP8 ` payload: frame tag, start code, 14-bit sides.
+fn vp8_payload(w: u16, h: u16) -> Vec<u8> {
     let mut p = vec![0x50, 0x01, 0x00, 0x9D, 0x01, 0x2A];
     p.extend_from_slice(&w.to_le_bytes());
     p.extend_from_slice(&h.to_le_bytes());
     p.extend_from_slice(&[0; 4]);
-    riff(b"VP8 ", &p)
+    p
 }
 
-/// Lossless WebP: signature, then width-1 and height-1 packed in 14 bits each.
-fn webp_vp8l(w: u32, h: u32) -> Vec<u8> {
+/// Lossless `VP8L` payload: signature, then width-1 and height-1 packed in
+/// 14 bits each.
+fn vp8l_payload(w: u32, h: u32) -> Vec<u8> {
     let bits = (w - 1) | (h - 1) << 14;
     let mut p = vec![0x2F];
     p.extend_from_slice(&bits.to_le_bytes());
     p.extend_from_slice(&[0; 3]);
-    riff(b"VP8L", &p)
+    p
 }
 
-/// Extended WebP: flags, reserved, 24-bit width-1 and height-1.
-fn webp_vp8x(w: u32, h: u32) -> Vec<u8> {
-    let mut p = vec![0x10, 0, 0, 0];
+/// `VP8X` chunk: flags, reserved, 24-bit canvas width-1 and height-1.
+fn vp8x_chunk(flags: u8, w: u32, h: u32) -> Vec<u8> {
+    let mut p = vec![flags, 0, 0, 0];
     p.extend_from_slice(&(w - 1).to_le_bytes()[..3]);
     p.extend_from_slice(&(h - 1).to_le_bytes()[..3]);
-    riff(b"VP8X", &p)
+    chunk(b"VP8X", &p)
+}
+
+/// Lossy WebP.
+fn webp_vp8(w: u16, h: u16) -> Vec<u8> {
+    riff(b"VP8 ", &vp8_payload(w, h))
+}
+
+/// Lossless WebP.
+fn webp_vp8l(w: u32, h: u32) -> Vec<u8> {
+    riff(b"VP8L", &vp8l_payload(w, h))
+}
+
+/// Extended WebP: a still (alpha-flagged) `VP8X` canvas, then a `VP8L` image
+/// chunk of the same size.
+fn webp_vp8x(w: u32, h: u32) -> Vec<u8> {
+    riff_chunks(&[vp8x_chunk(0x10, w, h), chunk(b"VP8L", &vp8l_payload(w, h))])
 }
 
 fn refusal(bytes: &[u8], mime: &str) -> String {
@@ -101,7 +134,7 @@ fn accepts_every_format_and_header_variant() {
         assert_eq!(input.bytes(), bytes.as_slice(), "{name}");
         let digest: [u8; 32] = Sha256::digest(&bytes).into();
         assert_eq!(input.sha256(), digest, "{name}");
-        assert_eq!(dimensions(&bytes, input.mime()), Some((640, 480)), "{name}");
+        assert_eq!(dimensions(&bytes, input.mime()), Ok((640, 480)), "{name}");
     }
 }
 
@@ -127,10 +160,13 @@ fn a_side_of_4097_px_is_refused_in_every_format() {
         ("vp8l", webp_vp8l(1, 4097), "image/webp", "height 4097"),
         ("vp8x", webp_vp8x(4097, 1), "image/webp", "width 4097"),
         (
-            "vp8x huge",
-            webp_vp8x(1, 1 << 24),
+            "vp8x lossy 4097",
+            riff_chunks(&[
+                vp8x_chunk(0, 1, 4097),
+                chunk(b"VP8 ", &vp8_payload(1, 4097)),
+            ]),
             "image/webp",
-            "height 16777216",
+            "height 4097",
         ),
         (
             "png huge",
@@ -380,5 +416,124 @@ fn no_refusal_echoes_the_payload_or_the_declared_string() {
         let msg = refusal(bytes, mime);
         assert!(!msg.contains("PRIVATE"), "{msg}");
         assert!(msg.len() < 120, "a refusal is one short line: {msg}");
+    }
+}
+
+#[test]
+fn a_vp8x_image_chunk_may_follow_other_chunks() {
+    // ICCP and ALPH (odd length, so padded) come before the image chunk in a
+    // real extended WebP; the walk steps over them.
+    let lossy = riff_chunks(&[
+        vp8x_chunk(0x30, 64, 48),
+        chunk(b"ICCP", &[7; 12]),
+        chunk(b"ALPH", &[1; 5]),
+        chunk(b"VP8 ", &vp8_payload(64, 48)),
+    ]);
+    let input = validate(&lossy, "image/webp").unwrap();
+    assert_eq!(dimensions(input.bytes(), input.mime()), Ok((64, 48)));
+}
+
+#[test]
+fn a_vp8x_canvas_must_equal_its_image_chunk() {
+    // M1: a 1x1 canvas over a 16383x16383 bitstream would pass a canvas-only
+    // check and make a backend decode 268M pixels.
+    let msg = "image: the WebP canvas size differs from the size of its image data";
+    let cases: Vec<(&str, Vec<u8>)> = vec![
+        (
+            "tiny canvas, huge lossless bitstream",
+            riff_chunks(&[
+                vp8x_chunk(0, 1, 1),
+                chunk(b"VP8L", &vp8l_payload(16383, 16383)),
+            ]),
+        ),
+        (
+            "lossy bitstream one px wider",
+            riff_chunks(&[
+                vp8x_chunk(0, 64, 48),
+                chunk(b"ALPH", &[1; 3]),
+                chunk(b"VP8 ", &vp8_payload(65, 48)),
+            ]),
+        ),
+        (
+            "canvas larger than the bitstream",
+            riff_chunks(&[
+                vp8x_chunk(0, 4096, 4096),
+                chunk(b"VP8L", &vp8l_payload(8, 8)),
+            ]),
+        ),
+    ];
+    for (name, bytes) in cases {
+        assert_eq!(refusal(&bytes, "image/webp"), msg, "{name}");
+    }
+}
+
+#[test]
+fn an_animated_webp_is_refused() {
+    let msg = "image: animated WebP is not accepted; send one still image";
+    let frame = {
+        // ANMF: frame offset/size/duration/flags (16 bytes), then the frame's
+        // own image chunk.
+        let mut p = vec![0; 16];
+        p.extend_from_slice(&chunk(b"VP8L", &vp8l_payload(8, 8)));
+        chunk(b"ANMF", &p)
+    };
+    let cases: Vec<(&str, Vec<u8>)> = vec![
+        (
+            "animation flag",
+            riff_chunks(&[
+                vp8x_chunk(0x02, 8, 8),
+                chunk(b"ANIM", &[0; 6]),
+                frame.clone(),
+            ]),
+        ),
+        (
+            // Flag set, even with a still image chunk after it.
+            "animation flag over a still chunk",
+            riff_chunks(&[vp8x_chunk(0x12, 8, 8), chunk(b"VP8L", &vp8l_payload(8, 8))]),
+        ),
+        (
+            "ANMF frame without the flag",
+            riff_chunks(&[vp8x_chunk(0, 8, 8), frame.clone(), frame]),
+        ),
+    ];
+    for (name, bytes) in cases {
+        assert_eq!(refusal(&bytes, "image/webp"), msg, "{name}");
+    }
+}
+
+#[test]
+fn a_vp8x_without_a_readable_image_chunk_is_refused() {
+    let cases: Vec<(&str, Vec<u8>)> = vec![
+        ("canvas only", riff_chunks(&[vp8x_chunk(0, 8, 8)])),
+        (
+            "metadata only",
+            riff_chunks(&[vp8x_chunk(0x08, 8, 8), chunk(b"EXIF", &[0; 9])]),
+        ),
+        (
+            "a chunk size running past the end",
+            riff_chunks(&[vp8x_chunk(0, 8, 8), {
+                let mut c = chunk(b"ICCP", &[0; 4]);
+                c[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+                c
+            }]),
+        ),
+        (
+            "bad lossless signature",
+            riff_chunks(&[
+                vp8x_chunk(0, 8, 8),
+                chunk(b"VP8L", &{
+                    let mut p = vp8l_payload(8, 8);
+                    p[0] = 0;
+                    p
+                }),
+            ]),
+        ),
+    ];
+    for (name, bytes) in cases {
+        let msg = refusal(&bytes, "image/webp");
+        assert!(
+            msg.ends_with("header is truncated or unreadable"),
+            "{name}: {msg}"
+        );
     }
 }
