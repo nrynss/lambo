@@ -65,7 +65,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
 
 use parking_lot::Mutex as PlMutex;
-use tokio::sync::{watch, Notify, Semaphore};
+use tokio::sync::{Notify, Semaphore};
 use tokio::task::JoinHandle;
 
 use crate::types::AgentId;
@@ -83,24 +83,32 @@ mod replay;
 pub use admission::{
     DropReason, Submitted, WRITE_QUEUE_LANE_MAX, WRITE_QUEUE_MAX, WRITE_QUEUE_MAX_BYTES,
 };
+/// The probe's representative write, for the test that runs it through a
+/// real derive (`memory::tests::writes`, #11 review P3-7).
+#[cfg(test)]
+pub(crate) use calibration::{probe_write_concepts, probe_write_contexts};
 pub use calibration::{
     Calibration, CalibrationSource, MEASURED_LOCAL_EMBEDDER_RPS, OBSERVED_EWMA_WEIGHT,
-    OBSERVED_MIN_SAMPLES, PROBE_BUDGET, PROBE_CLAMP_RPS, PROBE_CONCURRENCY, PROBE_EMBEDS,
-    PROBE_TEXT, PROBE_TEXT_BYTES, PROBE_WARMUP_EMBEDS,
+    OBSERVED_MIN_SAMPLES, PROBE_BUDGET, PROBE_CLAMP_RPS, PROBE_CONCEPT_BYTES, PROBE_CONCURRENCY,
+    PROBE_EMBEDS, PROBE_TEXT, PROBE_TEXT_BYTES, PROBE_WARMUP_BUDGET, PROBE_WARMUP_EMBEDS,
+    PROBE_WRITE_CONCEPTS,
 };
-pub use counters::{ReplayBlockReason, WriteQueueCounters};
+pub use counters::{
+    ApplyLatencySummary, ReplayBlockReason, WriteQueueCounters, APPLY_LATENCY_WINDOW,
+};
 pub use drain::WRITE_QUEUE_DRAIN_BUDGET;
 pub(crate) use execution::{mirror_concepts, ConsumeStamp, WriteCtx};
 pub use receipts::{
     AppliedSummary, ReceiptAnswer, ReceiptId, WriteKind, MAX_CONCURRENT_RECEIPT_WAITS,
-    MAX_PIGGYBACK_RECEIPTS, MAX_RECEIPT_IDS, MAX_RETAINED_RECEIPTS, MEASURED_WORST_FLUSH_LAG_SECS,
-    RECEIPT_RETENTION, RECEIPT_WAIT_MAX,
+    MAX_PIGGYBACK_RECEIPTS, MAX_RECEIPT_IDS, MAX_RECEIPT_WAITS_PER_AGENT, MAX_RETAINED_RECEIPTS,
+    MEASURED_WORST_FLUSH_LAG_SECS, RECEIPT_RETENTION, RECEIPT_WAIT_MAX,
 };
 pub use replay::EMBEDDER_SICK_THRESHOLD;
 
 // Crate-internal names the sibling modules reach through `super::`.
 use admission::{Job, JobPayload, Lanes};
-use calibration::{probe_embedder, ObservedRate};
+use calibration::{EmbedderProbe, ObservedRate};
+use counters::ApplyLatency;
 use receipts::{model_safe_failure, settle_one, Entry, Receipts};
 
 // ---------------------------------------------------------------------------
@@ -130,11 +138,19 @@ pub struct WritePipeline {
     /// Fair-share cap on concurrent receipt waits (see
     /// [`MAX_CONCURRENT_RECEIPT_WAITS`]).
     wait_slots: Arc<Semaphore>,
-    calibration: watch::Receiver<Option<Calibration>>,
+    /// Receipt waits each agent holds now, so one agent cannot take every
+    /// slot (see [`MAX_RECEIPT_WAITS_PER_AGENT`]). An agent's entry goes when
+    /// its last wait ends.
+    waits_per_agent: Arc<PlMutex<HashMap<AgentId, usize>>>,
+    /// The startup calibration probe of this pipeline's embedder (telemetry).
+    /// Its own type so #32 PR 3 can share one probe per embedder across every
+    /// pipeline in the process (`EmbedderCalibration`, design decision 14).
+    probe: EmbedderProbe,
     /// Service time observed on real writes, which **replaces** the probe's
     /// serial figure once [`OBSERVED_MIN_SAMPLES`] have been seen (J3-R1-2).
     observed: Arc<PlMutex<ObservedRate>>,
-    probe: PlMutex<Option<JoinHandle<()>>>,
+    /// Admission-to-settle latency of recent applied writes (#11).
+    apply_latency: Arc<PlMutex<ApplyLatency>>,
     /// Cross-restart receipt answers (J3 durable intents): receipts issued by
     /// **previous** processes whose fate this process knows — from the loaded
     /// intent records at attach (unconsumed → `Pending`; consumed → the stored
@@ -187,51 +203,7 @@ impl WritePipeline {
     /// and still always publishes something, for the same reason it survives at
     /// all: the probe/observed pair is the divergence telemetry.
     pub(crate) fn spawn(ctx: WriteCtx, clock: crate::daemon::Clock) -> Self {
-        let (tx, rx) = watch::channel(None);
-        let embedder = ctx.embedder.clone();
-        let session = ctx.session.clone();
-        let probe = tokio::spawn(async move {
-            let calibration = probe_embedder(embedder.as_ref()).await;
-            match calibration.items_per_sec {
-                // J3 round-1 N3. These two lines are what an operator reads
-                // about their own deployment, and both said the bounds came
-                // from the probe. They never did after the estimator demotion —
-                // the bounds are static and the second line even named
-                // `WRITE_QUEUE_MIN`, "the unmeasured floor", which THIS BRANCH
-                // deleted. Provenance first now, rates second, and neither line
-                // claims a bound was measured.
-                Some(rate) => tracing::info!(
-                    session = %session,
-                    items_per_sec = rate,
-                    serial_items_per_sec = calibration.serial_items_per_sec,
-                    bound = calibration.bound,
-                    lane_bound = calibration.lane_bound,
-                    concurrency = PROBE_CONCURRENCY,
-                    "write queue: bounds are static (lane {}, queue {}) and no rate moves them; \
-                     the rates below are telemetry measured on this deployment's embedder — the \
-                     serial leg 1-wide, the aggregate {}-wide",
-                    WRITE_QUEUE_LANE_MAX,
-                    WRITE_QUEUE_MAX,
-                    PROBE_CONCURRENCY
-                ),
-                None => tracing::warn!(
-                    session = %session,
-                    bound = calibration.bound,
-                    "write queue: the embedder could not be probed within {:?}, so there is no \
-                     rate telemetry this session and lambo_stats reports \
-                     write_queue_measured=false. The bounds are unaffected — they are static \
-                     (lane {}, queue {}) and never came from the probe. Note what a failed probe \
-                     DOES suggest: with match_strategy=hybrid (the default) an embedder that \
-                     cannot answer will also fail every derive it cannot answer",
-                    PROBE_BUDGET,
-                    WRITE_QUEUE_LANE_MAX,
-                    WRITE_QUEUE_MAX
-                ),
-            }
-            // A closed receiver means the session went away first; there is
-            // nothing to report to and nothing to fix.
-            let _ = tx.send(Some(calibration));
-        });
+        let probe = EmbedderProbe::spawn(ctx.embedder.clone(), ctx.session.clone());
         Self {
             ctx: Arc::new(ctx),
             lanes: Arc::new(PlMutex::new(Lanes::default())),
@@ -239,9 +211,10 @@ impl WritePipeline {
             counters: Arc::new(WriteQueueCounters::default()),
             settled: Arc::new(Notify::new()),
             wait_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_RECEIPT_WAITS)),
-            calibration: rx,
+            waits_per_agent: Arc::new(PlMutex::new(HashMap::new())),
             observed: Arc::new(PlMutex::new(ObservedRate::default())),
-            probe: PlMutex::new(Some(probe)),
+            apply_latency: Arc::new(PlMutex::new(ApplyLatency::default())),
+            probe,
             restart: PlMutex::new(HashMap::new()),
             replay: PlMutex::new(None),
             epoch: rand_epoch(),
@@ -255,6 +228,12 @@ impl WritePipeline {
     /// Queue counters, for `lambo_stats`.
     pub fn counters(&self) -> &Arc<WriteQueueCounters> {
         &self.counters
+    }
+
+    /// Percentiles of recent applied writes' admission-to-settle latency, or
+    /// `None` before the first (#11).
+    pub fn apply_latency(&self) -> Option<ApplyLatencySummary> {
+        self.apply_latency.lock().summary()
     }
 
     fn bound_snapshot(&self) -> usize {

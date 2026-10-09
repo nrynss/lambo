@@ -10,11 +10,18 @@
 //! The probe is spawned at construction ([`WritePipeline::spawn`]) and never
 //! awaited by anything; it is aborted at close and on `Drop`.
 
+use std::fmt;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Duration;
+
+use parking_lot::Mutex as PlMutex;
+use tokio::sync::watch;
+use tokio::task::JoinHandle;
 
 use super::{WritePipeline, WRITE_QUEUE_LANE_MAX, WRITE_QUEUE_MAX};
 use crate::embed::Embedder;
+use crate::types::SessionId;
 
 /// Sanitization clamp on a **reported** rate, in items/second — telemetry
 /// hygiene, not a bound (J3 redesign: no rate sizes a bound any more).
@@ -30,9 +37,10 @@ use crate::embed::Embedder;
 /// infinity, so a fixture-fast reading stays plottable without pretending to
 /// mean something. NOTE for the operator reading
 /// `write_queue_serial_items_per_sec` against these reference figures: since
-/// round 2 that key publishes the **slower of two probe sizes** (35 B and
-/// 1 KiB), so ~18 to 21 items/s is the ordinary reading on this rig, not the
-/// 40–45 the short text alone used to show.
+/// round 2 that key publishes the **slower of two probe sizes**, and since #11
+/// the larger one is a whole representative write ([`PROBE_WRITE_CONCEPTS`]
+/// embeds of ~1 KiB), so the probe now reads in writes per second, the unit
+/// the observed rate has always used — about half the per-embed figures above.
 /// **Stated on its own terms since J3 round-1 N4.** This used to read
 /// `WRITE_QUEUE_MAX as u64`, which tied a telemetry ceiling to an admission cap
 /// for no reason — and, through the build assert below, made the admission cap
@@ -107,15 +115,18 @@ pub const PROBE_CONCURRENCY: usize = 4;
 /// the durability property independent of *which* reading the probe caught.
 pub const PROBE_WARMUP_EMBEDS: usize = 1;
 
-/// Embeds one calibration probe performs in total: a discarded warm-up, **two**
-/// timed alone (the serial legs, which are the width a lane drains at — one at
-/// [`PROBE_TEXT`] and one at [`PROBE_TEXT_BYTES`], J3-R2-1), then
-/// [`PROBE_CONCURRENCY`] together.
+/// Embeds one calibration probe performs in total: a discarded warm-up, one
+/// short embed timed alone, one representative **write** timed alone (the
+/// serial legs, the width a lane drains at — J3-R1-1, J3-R2-1), then
+/// [`PROBE_CONCURRENCY`] representative writes together. A representative
+/// write is [`PROBE_WRITE_CONCEPTS`] embeds (#11).
 ///
-/// Seven rather than six. The seventh is the representative serial leg, and it
-/// is best-effort: `probe_embedder` carries on with the short figure when it
-/// fails, so the count is a budget input rather than a requirement.
-pub const PROBE_EMBEDS: usize = PROBE_WARMUP_EMBEDS + 2 + PROBE_CONCURRENCY;
+/// The representative write is best effort: when it is refused,
+/// `probe_embedder` keeps the short figure and its concurrent leg falls back to
+/// [`PROBE_CONCURRENCY`] short embeds, so the count is a budget input rather
+/// than a requirement.
+pub const PROBE_EMBEDS: usize =
+    PROBE_WARMUP_EMBEDS + 1 + (1 + PROBE_CONCURRENCY) * PROBE_WRITE_CONCEPTS;
 
 /// Real writes observed before their measured service time replaces the
 /// probe's serial figure.
@@ -144,8 +155,8 @@ pub const OBSERVED_MIN_SAMPLES: u64 = PROBE_CONCURRENCY as u64;
 /// that means something, and a 1-weight rate means only "the last write".
 pub const OBSERVED_EWMA_WEIGHT: u32 = PROBE_CONCURRENCY as u32;
 
-/// Bound on the calibration probe — **all [`PROBE_EMBEDS`] of its embeds
-/// together**.
+/// Bound on the calibration probe's **timed** legs — every embed after the
+/// warm-up, together. The warm-up has its own [`PROBE_WARMUP_BUDGET`] (#11).
 ///
 /// The probe is *spawned*, not awaited, at session build — and since the J3
 /// redesign **nothing else awaits it either**: admission uses the static caps,
@@ -153,18 +164,43 @@ pub const OBSERVED_EWMA_WEIGHT: u32 = PROBE_CONCURRENCY as u32;
 /// (Its earlier career as "the worst case an admission can wait" ended with
 /// `await_calibration`.)
 ///
-/// Unchanged at 5 s even though the probe takes seven embeds rather than
-/// four, one of them at [`PROBE_TEXT_BYTES`]: a deployment too cold to answer
-/// seven embeds in 5 s is better served by reporting `unmeasured` and being
-/// **corrected by observation** ([`OBSERVED_MIN_SAMPLES`]) than by publishing
-/// a number taken while its model was still loading.
+/// Unchanged at 5 s even though the probe takes eleven timed embeds (#11: a
+/// representative write is [`PROBE_WRITE_CONCEPTS`] embeds of up to
+/// [`PROBE_TEXT_BYTES`]) where it once took four: a deployment that, once its
+/// warm-up has answered, still cannot answer the serial legs in 5 s is better
+/// served by reporting `unmeasured` and being **corrected by observation**
+/// ([`OBSERVED_MIN_SAMPLES`]) than by publishing a number nobody can trust.
+/// One that answers the serial legs and not the concurrent one (an embedder
+/// that serialises requests needs [`PROBE_CONCURRENCY`] times a write's time
+/// there, about 4 s at CPU cost) keeps its serial figures and reports no
+/// concurrent one ([`Calibration::from_serial_probe`], #11 review P2-2).
+/// Model load is not in this window any more: it is what the warm-up, with
+/// its own [`PROBE_WARMUP_BUDGET`], absorbs (#11).
 ///
 /// The J3 redesign makes the trade almost free: the probe is telemetry, so a
 /// blown budget costs `write_queue_measured: false` and an absent baseline for
 /// [`Calibration::probe_optimism`] — never an admission. Measured warm at the
-/// release binary against the live BGE-M3, all seven embeds land in ~180 ms of
-/// the 5 s.
+/// release binary against the live BGE-M3, the seven embeds of the J3 probe
+/// landed in ~180 ms of the 5 s; the M3 Pro's candle Metal BGE-M3 takes about
+/// 87 ms per ~1 KiB embed, so the eleven of #11 take about 1 s.
 pub const PROBE_BUDGET: Duration = Duration::from_secs(5);
+
+/// Bound on the probe's discarded warm-up embed(s), on their own (#11).
+///
+/// The warm-up exists to pay the model-load cost out of the measurement
+/// (J3-R1-2), so it must not be charged to [`PROBE_BUDGET`], which prices the
+/// timed legs. It was, and on the M3 Pro rig the candle Metal BGE-M3's first
+/// embed on a cold page cache outran the 5 s: the probe reported
+/// `unmeasured`, and that session never had the probe figure
+/// [`Calibration::probe_optimism`] divides by.
+///
+/// [`crate::graph::hybrid::HYBRID_IO_TIMEOUT`], because that is how long the
+/// product already lets one write's embeds take: an embedder that cannot
+/// answer one short text inside it cannot apply a write either, and
+/// `unmeasured` is then the honest reading. Nothing waits on the probe (it is
+/// spawned and only ever read), so a long warm-up delays telemetry and nothing
+/// else.
+pub const PROBE_WARMUP_BUDGET: Duration = crate::graph::hybrid::HYBRID_IO_TIMEOUT;
 
 /// Text the probe's **short** leg embeds — 35 bytes, fixed, and chosen for one
 /// property only: **every embedder accepts it.**
@@ -192,17 +228,23 @@ pub const PROBE_BUDGET: Duration = Duration::from_secs(5);
 /// So the short leg stays, always answerable, and [`PROBE_TEXT_BYTES`] is
 /// measured **beside** it rather than instead of it. The honest reading of the
 /// round-2 re-measurement (largest power of two under the smallest refusal) puts
-/// the representative leg at 1024 B.
+/// the representative leg's largest input at 1024 B.
 pub const PROBE_TEXT: &str = "lambo write queue calibration probe";
 
-/// Size of the probe's **representative** leg, in bytes: 1024.
+/// Size of the **largest single input** the probe's representative leg
+/// sends, in bytes: 1024.
+///
+/// Since #11 that leg is a whole representative write
+/// ([`PROBE_WRITE_CONCEPTS`] concepts of [`PROBE_CONCEPT_BYTES`]), and what it
+/// embeds is each concept framed with the call's whole prompt, exactly as a
+/// hybrid derive does. This constant bounds each of those embedded contexts.
 ///
 /// Two bounds pick this number, one from below and one from above.
 ///
-/// * From below, the workload: lambo's own dogfood concepts — the `Logic` and
-///   `Constraint` entries `lambo_recall` returns — run **700 to 1500 bytes**, so
-///   a leg inside that band measures the embedder on the shape the product
-///   actually writes.
+/// * From below, the workload: a derive embeds each concept with the call's
+///   whole prompt, so even the Metal rig's median concept (~300 B) in a
+///   two-concept call is a ~1 KiB embed. A leg at this size measures the
+///   embedder on the shape the product actually sends it.
 /// * From above, the embedder: an embedder has an input ceiling of its own —
 ///   re-measured on this rig's llama-server, the refusal sits between **2048 B
 ///   and 3072 B** (see [`PROBE_TEXT`]; it moved off the old 1536 B claim, which
@@ -219,6 +261,29 @@ pub const PROBE_TEXT: &str = "lambo write queue calibration probe";
 /// comparison in `lambo_stats` is a diagnosis rather than a pair of numbers that
 /// disagree for a reason nobody recorded.
 pub const PROBE_TEXT_BYTES: usize = 1024;
+
+/// Concepts in the probe's representative write (#11).
+///
+/// The observed rate is one lane job per sample, and a lane job is a whole
+/// write, so the probe has to time a write too or
+/// [`Calibration::probe_optimism`] divides an embed rate by a write rate (4.1x
+/// on the M3 Pro bench with a real BGE-M3 before anything diverged). Two,
+/// because 1 to 2 concepts is the commonest derive on the Metal rig's ledger
+/// (48 of 71), and because a third concept would shrink each one to ~250 B to
+/// keep every context within [`PROBE_TEXT_BYTES`].
+pub const PROBE_WRITE_CONCEPTS: usize = 2;
+
+/// Bytes of each concept in the representative write: the largest that keeps
+/// every embedded context within [`PROBE_TEXT_BYTES`].
+///
+/// A `k`-concept derive embeds each concept as `content — prompt`, where the
+/// prompt is the `k` contents joined by `"; "` (`hybrid::context_text`,
+/// `hybrid::derive_prompt`): `c + 5 + k·c + 2·(k − 1)` bytes, the em dash
+/// being three. Solved for `c` at `k` = [`PROBE_WRITE_CONCEPTS`]: 339 B, close
+/// to the Metal rig's median concept (299 B). A test checks the arithmetic
+/// against the real framing functions.
+pub const PROBE_CONCEPT_BYTES: usize =
+    (PROBE_TEXT_BYTES - 2 * PROBE_WRITE_CONCEPTS - 3) / (PROBE_WRITE_CONCEPTS + 1);
 
 /// Build-time invariant: the representative leg must actually be bigger than the
 /// short one, or the second leg measures the first thing twice and J3-R2-1's
@@ -333,32 +398,44 @@ impl Calibration {
         Self::from_rates(None, None, None, CalibrationSource::Unmeasured)
     }
 
-    /// Publish the probe's timed legs: one embed **alone** at
-    /// [`PROBE_TEXT`], optionally a second alone at [`PROBE_TEXT_BYTES`], then
-    /// [`PROBE_CONCURRENCY`] embeds **together**.
+    /// Publish the probe's timed legs: one short embed **alone** at
+    /// [`PROBE_TEXT`], optionally one representative write alone (#11), then
+    /// [`PROBE_CONCURRENCY`] writes **together**. Every wall time is per write,
+    /// the unit the observed rate samples in.
     ///
     /// The serial rate published is the **slower** of the two serial legs
-    /// (J3-R2-1): they differ only in input length, so the slower one is the
-    /// rate for the larger workload, and an honest telemetry figure is the
-    /// conservative one. `representative_wall` is `None` when that leg was
-    /// refused — which is a real case, not a defensive one: this rig's
+    /// (J3-R2-1): the short one is the smallest possible write, so the slower
+    /// one is the rate for the larger workload, and an honest telemetry figure
+    /// is the conservative one. `representative_wall` is `None` when that leg
+    /// was refused — which is a real case, not a defensive one: this rig's
     /// llama-server answers 1280 B and refuses 1536 B.
     pub fn from_probe(
         serial_wall: Duration,
         representative_wall: Option<Duration>,
         concurrent_wall: Duration,
     ) -> Self {
-        let short = rate_of(1, serial_wall);
-        let serial = match representative_wall {
-            Some(wall) => short.min(rate_of(1, wall)),
-            None => short,
-        };
+        let serial = serial_rate(serial_wall, representative_wall);
         Self::from_rates(
             Some(serial),
             Some(rate_of(PROBE_CONCURRENCY, concurrent_wall)),
             Some(serial),
             CalibrationSource::Probe,
         )
+    }
+
+    /// Publish the probe's serial legs alone, when the concurrent leg ran out
+    /// of [`PROBE_BUDGET`] (#11 review P2-2).
+    ///
+    /// The serial figure is the one [`Calibration::probe_optimism`] divides,
+    /// and an embedder that answers one request at a time (CPU candle, a
+    /// single-slot CPU llama-server) answers both serial legs well inside the
+    /// budget and then needs [`PROBE_CONCURRENCY`] times a write's time for
+    /// the concurrent one. Reporting `unmeasured` there threw away a real
+    /// measurement to avoid publishing one that was not taken; this keeps the
+    /// first and leaves [`Calibration::items_per_sec`] `None`.
+    pub fn from_serial_probe(serial_wall: Duration, representative_wall: Option<Duration>) -> Self {
+        let serial = serial_rate(serial_wall, representative_wall);
+        Self::from_rates(Some(serial), None, Some(serial), CalibrationSource::Probe)
     }
 
     /// Replace the serial rate with one observed from real writes, keeping the
@@ -375,7 +452,7 @@ impl Calibration {
     /// them is the diagnosis.
     pub fn with_observed_serial(&self, serial_items_per_sec: f64) -> Self {
         Self::from_rates(
-            Some(serial_items_per_sec),
+            Some(sanitize_rate(serial_items_per_sec)),
             self.items_per_sec,
             self.probe_serial_items_per_sec,
             CalibrationSource::Observed,
@@ -432,6 +509,16 @@ impl Calibration {
     }
 }
 
+/// The probe's serial rate: the slower of its short and representative legs
+/// (J3-R2-1), or the short one alone when the representative leg was refused.
+fn serial_rate(serial_wall: Duration, representative_wall: Option<Duration>) -> f64 {
+    let short = rate_of(1, serial_wall);
+    match representative_wall {
+        Some(wall) => short.min(rate_of(1, wall)),
+        None => short,
+    }
+}
+
 /// `n` items in `wall`, as items/second. A zero or absurd wall time is the
 /// [`crate::FixtureEmbedder`] case; the clamp is what handles it, so this must
 /// not divide by zero first.
@@ -440,7 +527,25 @@ pub(super) fn rate_of(n: usize, wall: Duration) -> f64 {
     if secs <= 0.0 {
         PROBE_CLAMP_RPS as f64
     } else {
-        n as f64 / secs
+        sanitize_rate(n as f64 / secs)
+    }
+}
+
+/// Clamp a reported rate to [`PROBE_CLAMP_RPS`], the one place every rate
+/// source passes through (#11).
+///
+/// The clamp's docstring promised this for a wall time that reads "zero or
+/// absurd", but only exactly zero was handled, so a fixture probe timed in
+/// microseconds published ~200 000 items/s. Clamping keeps the contract that a
+/// clamped reading means "this measurement is not real": the build guard keeps
+/// the clamp three times above any real embedder measured, so no genuine
+/// reading is touched. A non-finite rate is clamped as well rather than
+/// published as infinity or NaN.
+pub(super) fn sanitize_rate(rate: f64) -> f64 {
+    if rate.is_finite() {
+        rate.min(PROBE_CLAMP_RPS as f64)
+    } else {
+        PROBE_CLAMP_RPS as f64
     }
 }
 
@@ -480,11 +585,12 @@ impl ObservedRate {
             // A fixture-fast deployment. The clamp is what handles it.
             return Some(PROBE_CLAMP_RPS as f64);
         }
-        Some(1.0 / self.mean_secs)
+        Some(sanitize_rate(1.0 / self.mean_secs))
     }
 }
 
-/// Measure the deployment's embedder in three legs, all inside one
+/// Measure the deployment's embedder: a warm-up inside its own
+/// [`PROBE_WARMUP_BUDGET`], then the timed legs, all inside one
 /// [`PROBE_BUDGET`]:
 ///
 /// 1. **Warm-up** — [`PROBE_WARMUP_EMBEDS`] embeds, timed and **thrown away**.
@@ -498,46 +604,112 @@ impl ObservedRate {
 ///    nothing: `project()` was deleted with the estimator, and
 ///    [`Calibration::lane_bound`] copies [`WRITE_QUEUE_LANE_MAX`] for every
 ///    source including `Unmeasured` (J3 round-1 N3).
-/// 3. **Serial, representative** — one embed of [`PROBE_TEXT_BYTES`] bytes
-///    alone, wall-clocked, and **best effort** (J3-R2-1). Input length is a
+/// 3. **Serial, representative** — one representative **write** alone,
+///    wall-clocked, and **best effort** (J3-R2-1, #11): the
+///    [`PROBE_WRITE_CONCEPTS`] embeds a derive of that many
+///    [`PROBE_CONCEPT_BYTES`] concepts makes, each concept framed with the
+///    call's prompt exactly as `hybrid::context_text` frames it, one after the
+///    other as the derive's gather phase runs them. Input length is a
 ///    first-order determinant of a transformer's latency, so leg 2 alone
-///    measures a rate for 35-byte writes; this leg measures the same words at
-///    the size the product's own concepts carry. It is best effort because an
+///    measures a rate for 35-byte writes, and a write is several embeds, so
+///    one embed alone measures a rate for a fraction of a write. It is best
+///    effort because an
 ///    embedder may refuse the larger input outright — measured, not
 ///    hypothesised: this rig's llama-server answers 1280 B and returns HTTP 500
 ///    at 1536 B — and losing the whole probe to a refused *optional* leg would
 ///    trade an optimistic number for no number at all.
-/// 4. **Concurrent** — [`PROBE_CONCURRENCY`] embeds together, wall-clocked, for
-///    the aggregate rate and the parallelism figure an operator reads — for no
-///    bound (J3 round-1 N3: "for the aggregate bound"). At
-///    the representative size when leg 3 proved the embedder accepts it, at the
-///    short one otherwise: the aggregate leg gets the same conservative input as
-///    the serial one wherever that is known to be answerable.
+/// 4. **Concurrent** — [`PROBE_CONCURRENCY`] writes together, wall-clocked,
+///    for the aggregate rate and the parallelism figure an operator reads — for
+///    no bound (J3 round-1 N3: "for the aggregate bound"). Representative
+///    writes when leg 3 proved the embedder accepts them, single short embeds
+///    otherwise: the aggregate leg gets the same conservative input as the
+///    serial one wherever that is known to be answerable.
 ///
-/// Any **required** leg failing or the budget running out means the same thing:
-/// this deployment's rate is not known, and saying so beats inventing a
-/// number. Saying so costs nothing but the telemetry (J3 redesign): the
-/// difference between `Unmeasured` and `Probe` is `write_queue_measured` and an
-/// absent `probe_optimism` baseline — never a bound, and the observed rate
-/// still replaces the figure after [`OBSERVED_MIN_SAMPLES`] real writes.
+/// Any **required** leg failing, or the budget running out before the serial
+/// legs are measured, means the same thing: this deployment's rate is not
+/// known, and saying so beats inventing a number. The one exception is the
+/// concurrent leg running out of budget after both serial legs landed (#11
+/// review P2-2): the serial figures are real and are what
+/// [`Calibration::probe_optimism`] needs, so they are published with no
+/// concurrent figure ([`Calibration::from_serial_probe`]).
+///
+/// Saying so costs nothing but the telemetry (J3 redesign): the difference
+/// between `Unmeasured` and `Probe` is `write_queue_measured` and an absent
+/// `probe_optimism` baseline — never a bound, and the observed rate still
+/// replaces the figure after [`OBSERVED_MIN_SAMPLES`] real writes.
+///
+/// The probe task itself calls [`probe_embedder_explained`] for the reason it
+/// logs; this is the shape the probe's tests read.
+#[cfg(test)]
 pub(super) async fn probe_embedder(embedder: &dyn Embedder) -> Calibration {
-    let deadline = tokio::time::Instant::now() + PROBE_BUDGET;
+    probe_embedder_explained(embedder).await.0
+}
 
-    for _ in 0..PROBE_WARMUP_EMBEDS {
-        match tokio::time::timeout_at(deadline, embedder.embed(PROBE_TEXT)).await {
-            Ok(Ok(_)) => {}
-            _ => return Calibration::unmeasured(),
+/// Why a probe published nothing, for the warning an operator reads (#11
+/// review P3-6). The warm-up and the timed legs have different budgets
+/// since #11, and the warning used to name the timed legs' 5 s even when it
+/// was the warm-up's 30 s that ran out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ProbeMiss {
+    /// The warm-up embed failed, or did not answer within
+    /// [`PROBE_WARMUP_BUDGET`].
+    WarmUp { timed_out: bool },
+    /// The short serial embed failed, or did not answer within
+    /// [`PROBE_BUDGET`].
+    Serial { timed_out: bool },
+    /// The embedder refused the concurrent leg's writes.
+    ConcurrentRefused,
+}
+
+impl fmt::Display for ProbeMiss {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ProbeMiss::WarmUp { timed_out: true } => write!(
+                f,
+                "its warm-up embed did not answer within the warm-up budget \
+                 ({PROBE_WARMUP_BUDGET:?})"
+            ),
+            ProbeMiss::WarmUp { timed_out: false } => write!(f, "its warm-up embed failed"),
+            ProbeMiss::Serial { timed_out: true } => write!(
+                f,
+                "its timed embed did not answer within the timed legs' budget \
+                 ({PROBE_BUDGET:?})"
+            ),
+            ProbeMiss::Serial { timed_out: false } => write!(f, "its timed embed failed"),
+            ProbeMiss::ConcurrentRefused => write!(
+                f,
+                "it refused the {PROBE_CONCURRENCY} concurrent writes of the probe's last leg"
+            ),
         }
     }
+}
+
+/// [`probe_embedder`], and why it published nothing when it did not.
+pub(super) async fn probe_embedder_explained(
+    embedder: &dyn Embedder,
+) -> (Calibration, Option<ProbeMiss>) {
+    let miss = |miss| (Calibration::unmeasured(), Some(miss));
+    // The warm-up has its own bound and the timed legs' clock starts after
+    // it (#11): a cold model load is what the warm-up is for.
+    let warm_up_deadline = tokio::time::Instant::now() + PROBE_WARMUP_BUDGET;
+    for _ in 0..PROBE_WARMUP_EMBEDS {
+        match tokio::time::timeout_at(warm_up_deadline, embedder.embed(PROBE_TEXT)).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(_)) => return miss(ProbeMiss::WarmUp { timed_out: false }),
+            Err(_) => return miss(ProbeMiss::WarmUp { timed_out: true }),
+        }
+    }
+    let deadline = tokio::time::Instant::now() + PROBE_BUDGET;
 
     let serial_started = tokio::time::Instant::now();
     match tokio::time::timeout_at(deadline, embedder.embed(PROBE_TEXT)).await {
         Ok(Ok(_)) => {}
-        _ => return Calibration::unmeasured(),
+        Ok(Err(_)) => return miss(ProbeMiss::Serial { timed_out: false }),
+        Err(_) => return miss(ProbeMiss::Serial { timed_out: true }),
     }
     let serial_wall = serial_started.elapsed();
 
-    let representative = probe_text_at(PROBE_TEXT_BYTES);
+    let representative = probe_write_contexts();
     let representative_started = tokio::time::Instant::now();
     // An OPTIONAL leg may never starve the required one that follows it, so it
     // gets at most half of what is left of the budget and the concurrent leg
@@ -547,40 +719,106 @@ pub(super) async fn probe_embedder(embedder: &dyn Embedder) -> Calibration {
     // improvement into a new way to reach `unmeasured`.
     let representative_deadline =
         representative_started + deadline.saturating_duration_since(representative_started) / 2;
-    let representative_wall =
-        match tokio::time::timeout_at(representative_deadline, embedder.embed(&representative))
-            .await
-        {
-            Ok(Ok(_)) => Some(representative_started.elapsed()),
-            // Refused, errored or out of budget. Keep the short figure and say
-            // nothing about a size this embedder would not take.
-            _ => {
-                tracing::debug!(
+    let representative_wall = match tokio::time::timeout_at(
+        representative_deadline,
+        embed_write(embedder, &representative),
+    )
+    .await
+    {
+        Ok(Ok(())) => Some(representative_started.elapsed()),
+        // Refused, errored or out of budget. Keep the short figure and say
+        // nothing about a size this embedder would not take.
+        _ => {
+            tracing::debug!(
                 bytes = PROBE_TEXT_BYTES,
-                "write queue: the calibration probe's representative leg was not answered; the \
-                 serial rate rests on the short text alone"
+                concepts = PROBE_WRITE_CONCEPTS,
+                "write queue: the calibration probe's representative write was not answered; \
+                 the serial rate rests on the short text alone"
             );
-                None
-            }
-        };
+            None
+        }
+    };
 
-    let concurrent_text: &str = match representative_wall {
+    let short_write = [PROBE_TEXT.to_string()];
+    let concurrent_write: &[String] = match representative_wall {
         Some(_) => &representative,
-        None => PROBE_TEXT,
+        None => &short_write,
     };
     let concurrent_started = tokio::time::Instant::now();
     let mut set = Vec::with_capacity(PROBE_CONCURRENCY);
     for _ in 0..PROBE_CONCURRENCY {
-        set.push(embedder.embed(concurrent_text));
+        set.push(embed_write(embedder, concurrent_write));
     }
     match tokio::time::timeout_at(deadline, futures_join_all(set)).await {
-        Ok(results) if results.iter().all(Result::is_ok) => Calibration::from_probe(
-            serial_wall,
-            representative_wall,
-            concurrent_started.elapsed(),
+        Ok(results) if results.iter().all(Result::is_ok) => (
+            Calibration::from_probe(
+                serial_wall,
+                representative_wall,
+                concurrent_started.elapsed(),
+            ),
+            None,
         ),
-        _ => Calibration::unmeasured(),
+        // A refusal: the embedder failed real work, so nothing is published.
+        Ok(_) => miss(ProbeMiss::ConcurrentRefused),
+        // Out of budget with both serial legs measured (#11 review P2-2): an
+        // embedder that serialises requests needs PROBE_CONCURRENCY times a
+        // write's time here. Keep the serial figures probe_optimism needs.
+        Err(_) => {
+            tracing::debug!(
+                concurrency = PROBE_CONCURRENCY,
+                budget = ?PROBE_BUDGET,
+                "write queue: the calibration probe's concurrent leg did not finish inside its \
+                 budget; publishing the serial figures alone"
+            );
+            (
+                Calibration::from_serial_probe(serial_wall, representative_wall),
+                None,
+            )
+        }
     }
+}
+
+/// Embed one write's texts one after the other, as hybrid derive's gather
+/// phase does. The first refusal ends the write, as it ends a derive.
+async fn embed_write(embedder: &dyn Embedder, texts: &[String]) -> Result<(), crate::EmbedError> {
+    for text in texts {
+        embedder.embed(text).await?;
+    }
+    Ok(())
+}
+
+/// The texts a representative write embeds (#11): one per concept of a
+/// [`PROBE_WRITE_CONCEPTS`]-concept derive of [`probe_write_concepts`], each
+/// framed with the call's prompt by the derive path's own functions so the
+/// two cannot drift.
+///
+/// What the probe does not time: a derive also runs a vector candidate
+/// lookup after each embed, against the store. That is store work, not
+/// embedder work, and the probe measures the embedder; on the rigs measured
+/// the embeds are the whole of a write's time (#8), so the difference shows
+/// in `probe_optimism` only on a slow store.
+pub(crate) fn probe_write_contexts() -> Vec<String> {
+    let concepts = probe_write_concepts();
+    let prompt = crate::graph::hybrid::derive_prompt(concepts.iter().map(String::as_str));
+    concepts
+        .iter()
+        .map(|concept| crate::graph::hybrid::context_text(concept, Some(&prompt)))
+        .collect()
+}
+
+/// The concepts of the probe's representative write: [`PROBE_WRITE_CONCEPTS`]
+/// texts of exactly [`PROBE_CONCEPT_BYTES`], the same words as [`PROBE_TEXT`],
+/// each starting one byte further into the repetition.
+///
+/// Distinct on purpose (#11 review P3-7): a derive of two identical contents
+/// embeds once, so a probe of two identical concepts timed a write no derive
+/// makes. Distinct, the probe's texts are exactly what a real derive of these
+/// concepts embeds, which `memory::tests::writes` checks end to end.
+pub(crate) fn probe_write_concepts() -> Vec<String> {
+    let text = probe_text_at(PROBE_CONCEPT_BYTES + PROBE_WRITE_CONCEPTS);
+    (0..PROBE_WRITE_CONCEPTS)
+        .map(|k| text[k..k + PROBE_CONCEPT_BYTES].to_string())
+        .collect()
 }
 
 /// [`PROBE_TEXT`] repeated to exactly `bytes` bytes.
@@ -631,6 +869,106 @@ pub(super) async fn futures_join_all<F: std::future::Future>(futures: Vec<F>) ->
     .await
 }
 
+/// The startup calibration probe of one embedder: spawned once, read by
+/// whoever holds it, aborted when its holder goes away.
+///
+/// Its own type rather than two fields on [`WritePipeline`] so the probe can
+/// be shared (#32 design decision 14): the probe measures the **embedder**,
+/// which a process may share between many sessions' pipelines, while the
+/// observed rate measures one pipeline's own writes. #32 PR 3
+/// (`EmbedderCalibration`) holds one of these per embedder and hands every
+/// pipeline a shared reference; until then each pipeline spawns its own.
+pub(crate) struct EmbedderProbe {
+    rx: watch::Receiver<Option<Calibration>>,
+    task: PlMutex<Option<JoinHandle<()>>>,
+}
+
+impl EmbedderProbe {
+    /// Spawn the probe against `embedder`. `session` labels the log lines.
+    ///
+    /// Spawned rather than awaited, for the reason on [`WritePipeline::spawn`].
+    pub(crate) fn spawn(embedder: Arc<dyn Embedder>, session: SessionId) -> Self {
+        let (tx, rx) = watch::channel(None);
+        let task = tokio::spawn(async move {
+            let (calibration, miss) = probe_embedder_explained(embedder.as_ref()).await;
+            match (calibration.measured(), calibration.items_per_sec) {
+                // J3 round-1 N3. These two lines are what an operator reads
+                // about their own deployment, and both said the bounds came
+                // from the probe. They never did after the estimator demotion —
+                // the bounds are static and the second line even named
+                // `WRITE_QUEUE_MIN`, "the unmeasured floor", which THIS BRANCH
+                // deleted. Provenance first now, rates second, and neither line
+                // claims a bound was measured.
+                (true, Some(rate)) => tracing::info!(
+                    session = %session,
+                    items_per_sec = rate,
+                    serial_items_per_sec = calibration.serial_items_per_sec,
+                    bound = calibration.bound,
+                    lane_bound = calibration.lane_bound,
+                    concurrency = PROBE_CONCURRENCY,
+                    "write queue: bounds are static (lane {}, queue {}) and no rate moves them; \
+                     the rates below are telemetry measured on this deployment's embedder — the \
+                     serial leg 1-wide, the aggregate {}-wide",
+                    WRITE_QUEUE_LANE_MAX,
+                    WRITE_QUEUE_MAX,
+                    PROBE_CONCURRENCY
+                ),
+                // #11 review P2-2: the serial legs landed and the concurrent
+                // one ran out of budget.
+                (true, None) => tracing::info!(
+                    session = %session,
+                    serial_items_per_sec = calibration.serial_items_per_sec,
+                    concurrency = PROBE_CONCURRENCY,
+                    "write queue: bounds are static (lane {}, queue {}) and no rate moves them; \
+                     the serial rate is telemetry measured on this deployment's embedder, and \
+                     the {}-wide aggregate was not measured because it did not finish within \
+                     {:?} (an embedder that answers one request at a time needs {} times a \
+                     write's time for it)",
+                    WRITE_QUEUE_LANE_MAX,
+                    WRITE_QUEUE_MAX,
+                    PROBE_CONCURRENCY,
+                    PROBE_BUDGET,
+                    PROBE_CONCURRENCY
+                ),
+                // #11 review P3-6: name what actually failed, and which
+                // budget ran out when one did.
+                (false, _) => tracing::warn!(
+                    session = %session,
+                    bound = calibration.bound,
+                    "write queue: the embedder could not be probed: {}. There is no rate \
+                     telemetry this session and lambo_stats reports write_queue_measured=false. \
+                     The bounds are unaffected — they are static (lane {}, queue {}) and never \
+                     came from the probe. Note what a failed probe DOES suggest: with \
+                     match_strategy=hybrid (the default) an embedder that cannot answer will \
+                     also fail every derive it cannot answer",
+                    miss.map_or_else(|| "no reason recorded".to_string(), |m| m.to_string()),
+                    WRITE_QUEUE_LANE_MAX,
+                    WRITE_QUEUE_MAX
+                ),
+            }
+            // A closed receiver means the session went away first; there is
+            // nothing to report to and nothing to fix.
+            let _ = tx.send(Some(calibration));
+        });
+        Self {
+            rx,
+            task: PlMutex::new(Some(task)),
+        }
+    }
+
+    /// The probe's calibration, or `None` until it has published.
+    pub(crate) fn current(&self) -> Option<Calibration> {
+        *self.rx.borrow()
+    }
+
+    /// Abort the probe if it is still running.
+    pub(crate) fn abort(&self) {
+        if let Some(handle) = self.task.lock().take() {
+            handle.abort();
+        }
+    }
+}
+
 impl WritePipeline {
     /// The calibration in force: the probe's, with its serial rate replaced by
     /// the observed one once enough real writes have been seen.
@@ -639,7 +977,7 @@ impl WritePipeline {
     /// stand alone — a probe that failed publishes nothing, and a session must
     /// still be able to earn a real bound after starting on the floor.
     pub fn calibration(&self) -> Option<Calibration> {
-        let probe = *self.calibration.borrow();
+        let probe = self.probe.current();
         let observed = self.observed.lock().items_per_sec();
         let calibration = match (probe, observed) {
             (Some(probe), Some(rate)) => Some(probe.with_observed_serial(rate)),
@@ -686,8 +1024,6 @@ impl WritePipeline {
     /// Abort the calibration probe. Called from `Memory`'s `Drop` and from
     /// `close()`: a probe outliving its session is an embed nobody will read.
     pub(crate) fn abort_probe(&self) {
-        if let Some(handle) = self.probe.lock().take() {
-            handle.abort();
-        }
+        self.probe.abort();
     }
 }

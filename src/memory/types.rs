@@ -93,7 +93,13 @@ pub struct MemoryStats {
     pub session: SessionId,
     /// The agent this writer runs as.
     pub agent: AgentId,
-    /// Time since the last successful flush.
+    /// Time since the store was last caught up: the drain the last successful
+    /// flush covered, or the last flush poll that found nothing pending (#16
+    /// §3). At most one poll interval while nothing is pending; it grows while
+    /// anything waits to be flushed, and past the flush interval only while
+    /// the store is not taking writes. Dropped mutations (dead letters, a
+    /// fenced or degraded session) are not in it; see
+    /// `crate::store::flush::FlushStats::lag`.
     pub flush_lag: Duration,
     /// Mutations sitting in the graph's write-behind log, awaiting drain.
     /// Read from the graph, so it is **always current**.

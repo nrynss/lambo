@@ -433,3 +433,134 @@ async fn j4_a_completion_line_records_the_applied_derive_lifecycle() {
     assert_eq!(c["created_count"], 1);
     assert_eq!(c["matched_count"], 0);
 }
+
+/// **A receipt wait outlasts any one write at the head of its lane** (#11).
+///
+/// `RECEIPT_WAIT_MAX` was 4 s. On the Metal rig a 3 to 4 concept derive's
+/// apply ran to 4.6 s (p90 2 s), so a caller following the read-your-writes
+/// protocol could be told `pending` about a healthy write about to land. A
+/// write's own I/O is bounded by `HYBRID_IO_TIMEOUT`, so a wait at least that
+/// long always ends on that write's terminal answer when nothing is queued
+/// ahead of it. Here one embed takes a second under that bound.
+#[tokio::test(start_paused = true)]
+async fn a_receipt_wait_outlasts_one_write_at_the_head_of_its_lane() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let rig = Rig::hybrid(
+        "wq-wait-covers-a-write",
+        Arc::new(SlowEmbedder {
+            delay: crate::graph::hybrid::HYBRID_IO_TIMEOUT - Duration::from_secs(1),
+            inner: FixtureEmbedder::new(),
+            calls: calls.clone(),
+        }),
+    );
+    let agent = AgentId::new("agent-a");
+    let submitted = rig.derive(&agent, "a slow but healthy write").await;
+    assert_eq!(submitted.answer.tag(), "pending");
+    let answer = rig
+        .pipeline
+        .wait(&agent, submitted.receipt, Duration::MAX)
+        .await;
+    assert_eq!(
+        answer.tag(),
+        "applied",
+        "a wait clamped to RECEIPT_WAIT_MAX must cover the write's own I/O bound: {answer:?}"
+    );
+}
+
+/// **Apply latency is admission to settle, applied writes only** (#11): the
+/// queueing behind earlier writes counts, because a receipt waiter waits for
+/// it too, and a failure is not recorded.
+#[tokio::test(start_paused = true)]
+async fn apply_latency_counts_the_queue_wait_and_only_applied_writes() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let rig = Rig::hybrid(
+        "wq-apply-latency",
+        Arc::new(SlowEmbedder {
+            delay: Duration::from_millis(100),
+            inner: FixtureEmbedder::new(),
+            calls: calls.clone(),
+        }),
+    );
+    let agent = AgentId::new("agent-a");
+    assert!(rig.pipeline.apply_latency().is_none());
+    // Two writes back to back on one lane: the second waits for the first.
+    let first = rig.derive(&agent, "first queued write").await;
+    let second = rig.derive(&agent, "second queued write").await;
+    // A fast failure (stopword-only content is refused before any embed).
+    let failed = rig.derive(&agent, "the and of a").await;
+    for r in [first.receipt, second.receipt, failed.receipt] {
+        rig.pipeline.wait(&agent, r, RECEIPT_WAIT_MAX).await;
+    }
+    assert_eq!(rig.pipeline.counters().failed(), 1);
+    let s = rig.pipeline.apply_latency().expect("two applied writes");
+    assert_eq!(s.samples, 2, "the failure is not a latency sample: {s:?}");
+    assert!(
+        s.max >= Duration::from_millis(200),
+        "the second write waited behind the first: {s:?}"
+    );
+    assert!(s.p50 >= Duration::from_millis(100), "{s:?}");
+}
+
+/// **One agent cannot hold every receipt-wait slot** (#11 review P3-1).
+///
+/// The pipeline holds [`MAX_CONCURRENT_RECEIPT_WAITS`] waits at once, and a
+/// wait over the cap answers at once rather than waiting. With no per-agent
+/// share, one agent issuing sixteen waits on a slow write made every other
+/// agent's wait answer `pending` immediately, for as long as
+/// [`RECEIPT_WAIT_MAX`] (34 s since #11). A wait slot is now a fair share:
+/// one agent holds at most [`MAX_RECEIPT_WAITS_PER_AGENT`] of them.
+#[tokio::test(start_paused = true)]
+async fn one_agent_cannot_hold_every_receipt_wait_slot() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let rig = Rig::hybrid(
+        "wq-wait-fairness",
+        Arc::new(SlowEmbedder {
+            delay: Duration::from_secs(20),
+            inner: FixtureEmbedder::new(),
+            calls: calls.clone(),
+        }),
+    );
+    let greedy = AgentId::new("agent-greedy");
+    let other = AgentId::new("agent-other");
+    let greedy_write = rig
+        .derive(&greedy, "a slow write the greedy agent waits on")
+        .await;
+    let other_write = rig
+        .derive(&other, "a slow write another agent waits on")
+        .await;
+    let budget = Duration::from_secs(5);
+
+    let timed = |agent: AgentId, id: ReceiptId| {
+        let pipeline = &rig.pipeline;
+        async move {
+            let started = tokio::time::Instant::now();
+            let answer = pipeline.wait(&agent, id, budget).await;
+            (agent, answer, started.elapsed())
+        }
+    };
+    let mut waits = Vec::new();
+    for _ in 0..MAX_CONCURRENT_RECEIPT_WAITS {
+        waits.push(timed(greedy.clone(), greedy_write.receipt));
+    }
+    waits.push(timed(other.clone(), other_write.receipt));
+    let results = crate::writeq::calibration::futures_join_all(waits).await;
+
+    let waited = |who: &AgentId| {
+        results
+            .iter()
+            .filter(|(agent, answer, elapsed)| {
+                agent == who && answer.tag() == "pending" && *elapsed >= budget
+            })
+            .count()
+    };
+    assert_eq!(
+        waited(&other),
+        1,
+        "another agent's wait must get a slot however many the first one asked for: {results:?}"
+    );
+    assert_eq!(
+        waited(&greedy),
+        MAX_RECEIPT_WAITS_PER_AGENT,
+        "one agent holds at most its share; its other waits answer at once: {results:?}"
+    );
+}

@@ -235,7 +235,7 @@ pub struct StatsParams {
     /// refused, and `the_published_wait_maximum_is_the_real_one` pins the
     /// literal below to the constant (T88-H4 requires a *published* maximum,
     /// and `schemars` takes a literal).
-    #[schemars(range(min = 0, max = 4_000))]
+    #[schemars(range(min = 0, max = 34_000))]
     pub wait_ms: Option<u64>,
 }
 
