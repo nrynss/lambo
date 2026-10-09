@@ -21,12 +21,14 @@
 //!   known token count ([`EG2_REFERENCE_IMAGE_TOKENS`]).
 //! - **A canonical image form** (new in `lambo-eg2-v2`). Even at a fixed
 //!   budget, llama.cpp rounds an image above about 768 px a side to a
-//!   different patch grid than a smaller one, so the same picture embedded at
-//!   two sizes differed. The adapter therefore sends a PNG or JPEG of at most
-//!   [`EG2_CANONICAL_MAX_SIDE`] px a side unchanged, downscales a larger one
-//!   to that bound (lossless PNG), and always re-encodes a WebP as PNG (the
-//!   server decodes WebP only through an external `ffmpeg`). See
-//!   the `canonical` submodule for the rule and the cause.
+//!   different patch grid than a smaller one, and resamples each image from
+//!   the resolution it was given, so the same picture embedded at two sizes
+//!   differed. The adapter therefore decodes every image and sends it as a
+//!   lossless PNG whose longer side is exactly [`EG2_CANONICAL_SIDE`] px
+//!   (downscaled or upscaled, aspect ratio kept). That also means a WebP is
+//!   never sent as WebP (the server decodes WebP only through an external
+//!   `ffmpeg`). See the `canonical` submodule for the exact rule and the
+//!   cause.
 //! - **MRL**: the server returns the native 768 dimensions; the adapter
 //!   checks them, truncates to `dim` (768, 512, 256 or 128) and then
 //!   L2-normalizes.
@@ -67,11 +69,11 @@ use super::bge_m3::{
     check_bearer_transport, default_status_rule, BgeM3LlamaCppEmbedder, EmbedStatusClass,
     StatusVerdict, LLAMA_UNREACHABLE,
 };
-use super::{api_key, EmbedError, Embedder, EmbedderConfig, ImageInput, Modalities};
+use super::{api_key, EmbedError, Embedder, EmbedderConfig, ImageInput, ImageMime, Modalities};
 
 mod canonical;
 
-pub use canonical::EG2_CANONICAL_MAX_SIDE;
+pub use canonical::EG2_CANONICAL_SIDE;
 
 #[cfg(test)]
 mod tests;
@@ -80,7 +82,10 @@ mod tests;
 /// Changing any part of it (a prefix, the image budget, the canonical image
 /// form, the order of truncation and normalization) is a new profile name, so
 /// a new contract. `lambo-eg2-v2` added the canonical image form (22g);
-/// `lambo-eg2-v1` was never released.
+/// `lambo-eg2-v1` was never released. The canonical pixels come from the
+/// `image` crate's decoders and resampler, which `Cargo.toml` does not pin
+/// exactly: the golden tests in `canonical/tests.rs` fail if an update moves
+/// them, and a moved pixel golden is a new profile name.
 pub const EG2_PROMPT_PROFILE: &str = "lambo-eg2-v2";
 
 /// The weights artifact the contract names when `[embedder] model` is unset:
@@ -1076,15 +1081,15 @@ impl Embedder for EmbeddingGemma2Embedder {
                     .into(),
             ));
         }
-        // The canonical form (22g): above 768 px, or any WebP, a PNG Lambo
-        // encoded; otherwise the submitted bytes. Done before the server is
+        // The canonical form (22g): every image is sent as a lossless PNG
+        // whose longer side is exactly 768 px. Done before the server is
         // asked anything, so an image Lambo cannot read fails on its own.
-        let canonical = canonical::canonicalize_async(&image).await?;
-        let encoded = base64::engine::general_purpose::STANDARD.encode(canonical.bytes());
+        let canonical = canonical::canonicalize(image.bytes(), image.mime()).await?;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&canonical);
         if let Eg2ServerCheck::Verified { .. } = self.ensure_server(true).await? {
             self.ensure_image_budget().await?;
         }
-        let body = image_request(&self.model, canonical.mime().as_str(), &encoded);
+        let body = image_request(&self.model, ImageMime::Png.as_str(), &encoded);
         // The image's own token count is not judged: it varies with the
         // image's size and shape (see EG2_REFERENCE_IMAGE_TOKENS).
         let parsed = self.post(&body, image_status_rule).await?;

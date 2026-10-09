@@ -30,7 +30,7 @@ pub use bge_m3::BgeM3LlamaCppEmbedder;
 pub use candle::CandleEmbedder;
 #[cfg(feature = "embed-eg2")]
 pub use eg2::{
-    Eg2ServerCheck, EmbeddingGemma2Embedder, EG2_CANONICAL_MAX_SIDE, EG2_DEFAULT_MODEL,
+    Eg2ServerCheck, EmbeddingGemma2Embedder, EG2_CANONICAL_SIDE, EG2_DEFAULT_MODEL,
     EG2_DOCUMENT_PREFIX, EG2_IMAGE_TOKENS, EG2_MRL_DIMS, EG2_NATIVE_DIM, EG2_PROMPT_PROFILE,
     EG2_PROPS_RECHECK_INTERVAL, EG2_QUERY_PREFIX, EG2_REFERENCE_IMAGE_TOKENS,
 };

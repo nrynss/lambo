@@ -68,9 +68,9 @@ fn decode_png(bytes: &[u8]) -> DynamicImage {
     image::load_from_memory_with_format(bytes, ImageFormat::Png).unwrap()
 }
 
-fn canonical_of<'a>(bytes: &'a [u8], mime: &str) -> Result<Canonical<'a>, EmbedError> {
+fn canonical_of(bytes: &[u8], mime: &str) -> Result<Vec<u8>, EmbedError> {
     let input = validate(bytes, mime).unwrap();
-    canonicalize(&input)
+    to_canonical_png(input.bytes(), input.mime())
 }
 
 /// The PNG CRC-32 (bitwise; tests only), so a header can be rewritten.
@@ -103,81 +103,133 @@ fn png_declaring(width: u32, height: u32) -> Vec<u8> {
 
 // ------------------------------------------------------------- the size rule
 
-/// The longer side becomes exactly 768 and the shorter keeps the aspect
-/// ratio (nearest pixel, at least 1); at or under 768 nothing changes.
+/// The longer side always becomes exactly 768 and the shorter keeps the
+/// aspect ratio (nearest pixel, halves up, at least 1), whether the image
+/// was larger or smaller.
 ///
-/// Mutation: floor instead of round, or drop the `max(1)` -> red.
+/// Mutation: floor instead of round, drop the `max(1)`, or pass small
+/// images through -> red.
 #[test]
-fn canonical_size_keeps_the_aspect_ratio() {
+fn canonical_size_puts_the_longer_side_at_768() {
     assert_eq!(canonical_size(768, 768), (768, 768));
     assert_eq!(canonical_size(768, 1), (768, 1));
-    assert_eq!(canonical_size(64, 700), (64, 700));
+    assert_eq!(canonical_size(1, 1), (768, 768));
+    assert_eq!(canonical_size(64, 64), (768, 768));
+    assert_eq!(canonical_size(128, 64), (768, 384));
+    // 700 -> 768 is x 1.0971...; 64 * 768 / 700 = 70.217 -> 70.
+    assert_eq!(canonical_size(64, 700), (70, 768));
     assert_eq!(canonical_size(769, 769), (768, 768));
     assert_eq!(canonical_size(1536, 1024), (768, 512));
     assert_eq!(canonical_size(1024, 1536), (512, 768));
     assert_eq!(canonical_size(3000, 2000), (768, 512));
     // 333 * 768 / 1000 = 255.744 -> 256.
     assert_eq!(canonical_size(1000, 333), (768, 256));
-    // 2000 * 768 / 3000 = 512 exactly; 1001 * 768 / 3000 = 256.256 -> 256.
+    // 1001 * 768 / 3000 = 256.256 -> 256.
     assert_eq!(canonical_size(3000, 1001), (768, 256));
-    // A sliver keeps at least one pixel.
+    // An exact half rounds up: 1 * 768 / 512 = 1.5 -> 2; 3 * 768 / 1536 = 1.5 -> 2.
+    assert_eq!(canonical_size(512, 1), (768, 2));
+    assert_eq!(canonical_size(1536, 3), (768, 2));
+    // Just under a half rounds down: 1 * 768 / 1537 = 0.4997 -> 0 -> 1 (the floor).
+    assert_eq!(canonical_size(1537, 1), (768, 1));
+    // A sliver keeps at least one pixel, both ways.
     assert_eq!(canonical_size(4096, 1), (768, 1));
     assert_eq!(canonical_size(1, 4096), (1, 768));
-    // Same aspect ratio at two sizes: the same canonical size.
+    // Same aspect ratio at any size: the same canonical size.
     assert_eq!(canonical_size(1100, 600), canonical_size(2200, 1200));
+    assert_eq!(canonical_size(110, 60), canonical_size(2200, 1200));
 }
 
-// --------------------------------------------------------------- pass-through
-
-/// A PNG or JPEG at or under 768 px a side is sent as it came, byte for
-/// byte, with its own MIME type: nothing is decoded or re-encoded.
-///
-/// Mutation: always re-encode -> red.
+/// Every canonical size, for every shape the validator admits, takes the
+/// server's round-up grid branch on b11517 (`calc_size_preserved_ratio`:
+/// sides aligned to the nearest multiple of 48, at least 48, then compared
+/// with the 280-token area of 645,120 px). Checked over a sweep of extreme
+/// and ordinary aspect ratios.
 #[test]
-fn small_png_and_jpeg_pass_through_byte_identical() {
-    for (w, h) in [(1, 1), (64, 64), (768, 768), (768, 300), (200, 768)] {
-        let png = png_rgb(w, h);
-        match canonical_of(&png, "image/png").unwrap() {
-            Canonical::Original(bytes, mime) => {
-                assert_eq!(bytes, png.as_slice(), "{w}x{h} png");
-                assert!(std::ptr::eq(bytes, png.as_slice()), "not even copied");
-                assert_eq!(mime, ImageMime::Png);
+fn every_canonical_size_takes_the_round_up_grid_branch() {
+    let align = |side: u32| -> u64 {
+        // std::round(x / 48) * 48, with halves away from zero; at least 48.
+        let r = (u64::from(side) + 24) / 48 * 48;
+        r.max(48)
+    };
+    let max_pixels = 280u64 * 48 * 48;
+    for long in [1u32, 2, 47, 48, 100, 767, 768, 769, 791, 792, 1000, 4096] {
+        for short in [1u32, 2, 23, 24, 25, 100, 383, 384, 767, 768, 4096] {
+            let short = short.min(long);
+            for (w, h) in [(long, short), (short, long)] {
+                let (cw, ch) = canonical_size(w, h);
+                assert_eq!(cw.max(ch), 768, "{w}x{h}");
+                assert!(cw.min(ch) >= 1, "{w}x{h}");
+                assert!(
+                    align(cw) * align(ch) < max_pixels,
+                    "{w}x{h} -> {cw}x{ch} would take the round-down branch"
+                );
             }
-            other => panic!("{w}x{h} png was re-encoded: {:?}", other.mime()),
-        }
-        let jpg = jpeg(w, h);
-        match canonical_of(&jpg, "image/jpeg").unwrap() {
-            Canonical::Original(bytes, mime) => {
-                assert_eq!(bytes, jpg.as_slice(), "{w}x{h} jpeg");
-                assert_eq!(mime, ImageMime::Jpeg);
-            }
-            other => panic!("{w}x{h} jpeg was re-encoded: {:?}", other.mime()),
         }
     }
 }
 
-// ------------------------------------------------------------------ downscale
+// ----------------------------------------------------------- every image
 
-/// A PNG over 768 px is downscaled to a 768 px longer side, aspect ratio
-/// kept, and sent as a PNG in its own colour type.
+/// Every PNG, JPEG and WebP, at any size, becomes a PNG whose longer side is
+/// exactly 768: small ones are upscaled, large ones downscaled.
+///
+/// Mutation: pass small images through, or skip the upscale -> red.
 #[test]
-fn a_large_png_is_downscaled_to_768() {
+fn every_image_becomes_a_768_png() {
     for ((w, h), want) in [
+        ((1, 1), (768, 768)),
+        ((64, 48), (768, 576)),
+        ((200, 768), (200, 768)),
+        ((768, 300), (768, 300)),
         ((769, 769), (768, 768)),
         ((1536, 1024), (768, 512)),
-        ((1024, 1536), (512, 768)),
         ((2000, 330), (768, 127)),
     ] {
+        for (bytes, mime) in [
+            (png_rgb(w, h), "image/png"),
+            (jpeg(w, h), "image/jpeg"),
+            (webp(w, h).0, "image/webp"),
+        ] {
+            let out = canonical_of(&bytes, mime).unwrap();
+            let img = decode_png(&out);
+            assert_eq!((img.width(), img.height()), want, "{mime} {w}x{h}");
+        }
+    }
+}
+
+/// An image already 768 px on its longer side is decoded and re-encoded
+/// but not resampled: the canonical PNG holds exactly its pixels.
+#[test]
+fn a_768_image_is_not_resampled() {
+    let png = png_rgb(768, 500);
+    let out = canonical_of(&png, "image/png").unwrap();
+    assert_eq!(decode_png(&out).to_rgb8(), picture(768, 500));
+
+    let (webp, pixels) = webp(300, 768);
+    let out = canonical_of(&webp, "image/webp").unwrap();
+    assert_eq!(
+        decode_png(&out).to_rgba8(),
+        pixels,
+        "lossless: the same pixels"
+    );
+}
+
+/// The resample is the documented one: the downscale filter above 768 px,
+/// the upscale filter below, applied to the decoded image as a whole.
+///
+/// Mutation: swap the two filters (when they differ), or resize in two
+/// steps -> red.
+#[test]
+fn the_resample_uses_the_filter_for_its_direction() {
+    for ((w, h), filter) in [
+        ((1536, 1000), DOWNSCALE_FILTER),
+        ((100, 64), UPSCALE_FILTER),
+    ] {
         let png = png_rgb(w, h);
-        let canonical = canonical_of(&png, "image/png").unwrap();
-        assert_eq!(canonical.mime(), ImageMime::Png);
-        assert!(
-            matches!(canonical, Canonical::Png(_)),
-            "{w}x{h} was not canonicalized"
-        );
-        let img = decode_png(canonical.bytes());
-        assert_eq!((img.width(), img.height()), want, "{w}x{h}");
-        assert_eq!(img.color(), ColorType::Rgb8);
+        let out = canonical_of(&png, "image/png").unwrap();
+        let (tw, th) = canonical_size(w, h);
+        let want = DynamicImage::ImageRgb8(picture(w, h)).resize_exact(tw, th, filter);
+        assert_eq!(decode_png(&out), want, "{w}x{h}");
     }
 }
 
@@ -186,9 +238,7 @@ fn a_large_png_is_downscaled_to_768() {
 #[test]
 fn the_downscale_resamples_the_whole_picture() {
     let png = png_rgb(1536, 1536);
-    let Canonical::Png(out) = canonical_of(&png, "image/png").unwrap() else {
-        panic!("not canonicalized");
-    };
+    let out = canonical_of(&png, "image/png").unwrap();
     let img = decode_png(&out).to_rgb8();
     let tl = img.get_pixel(0, 0);
     let br = img.get_pixel(767, 767);
@@ -196,68 +246,74 @@ fn the_downscale_resamples_the_whole_picture() {
     assert!(br[0] > 245 && br[1] > 245, "{br:?}");
 }
 
-/// A JPEG over 768 px is decoded and sent as a 768 px PNG.
+/// A flat image stays exactly flat through either resample, so its
+/// canonical form, and its vector, is the same at every submitted size.
+#[test]
+fn a_flat_image_is_identical_at_every_size() {
+    let flat = |side: u32| {
+        let img = RgbImage::from_pixel(side, side, Rgb([200, 40, 40]));
+        let mut out = Vec::new();
+        PngEncoder::new(&mut out)
+            .write_image(img.as_raw(), side, side, ColorType::Rgb8.into())
+            .unwrap();
+        out
+    };
+    let base = canonical_of(&flat(768), "image/png").unwrap();
+    for side in [1, 16, 128, 500, 769, 1024, 3000] {
+        assert_eq!(
+            canonical_of(&flat(side), "image/png").unwrap(),
+            base,
+            "{side} px"
+        );
+    }
+}
+
+/// A large JPEG is decoded and sent as a 768 px PNG.
 #[test]
 fn a_large_jpeg_becomes_a_768_png() {
     let jpg = jpeg(1000, 3000);
-    let canonical = canonical_of(&jpg, "image/jpeg").unwrap();
-    assert_eq!(canonical.mime(), ImageMime::Png);
-    let img = decode_png(canonical.bytes());
+    let img = decode_png(&canonical_of(&jpg, "image/jpeg").unwrap());
     assert_eq!((img.width(), img.height()), (256, 768));
 }
 
 /// Alpha and 16-bit depth are kept: the server treats the canonical PNG the
 /// way it would have treated the original's pixels.
 #[test]
-fn alpha_and_sixteen_bit_survive_the_downscale() {
+fn alpha_and_sixteen_bit_survive_the_resample() {
     let mut rgba = Vec::new();
     let img = RgbaImage::from_fn(1000, 800, |x, y| Rgba([x as u8, y as u8, 3, 128]));
     PngEncoder::new(&mut rgba)
         .write_image(img.as_raw(), 1000, 800, ColorType::Rgba8.into())
         .unwrap();
-    let out = canonical_of(&rgba, "image/png").unwrap();
-    let decoded = decode_png(out.bytes());
+    let decoded = decode_png(&canonical_of(&rgba, "image/png").unwrap());
     assert_eq!(decoded.color(), ColorType::Rgba8);
     assert_eq!((decoded.width(), decoded.height()), (768, 614));
     assert_eq!(decoded.to_rgba8().get_pixel(10, 10)[3], 128);
 
-    let wide = DynamicImage::ImageRgb8(picture(900, 900)).into_rgb16();
-    let mut png16 = Vec::new();
-    DynamicImage::ImageRgb16(wide)
-        .write_to(Cursor::new(&mut png16), ImageFormat::Png)
-        .unwrap();
-    let out = canonical_of(&png16, "image/png").unwrap();
-    assert_eq!(decode_png(out.bytes()).color(), ColorType::Rgb16);
+    for side in [900, 300] {
+        let wide = DynamicImage::ImageRgb8(picture(side, side)).into_rgb16();
+        let mut png16 = Vec::new();
+        DynamicImage::ImageRgb16(wide)
+            .write_to(Cursor::new(&mut png16), ImageFormat::Png)
+            .unwrap();
+        let out = decode_png(&canonical_of(&png16, "image/png").unwrap());
+        assert_eq!(out.color(), ColorType::Rgb16, "{side} px");
+    }
 }
 
-/// Canonicalizing is deterministic: the same input gives the same bytes.
+/// The canonical PNG carries no ancillary chunks: only IHDR, IDAT and IEND.
 #[test]
-fn the_canonical_form_is_deterministic() {
-    let png = png_rgb(1200, 900);
-    let a = canonical_of(&png, "image/png").unwrap();
-    let b = canonical_of(&png, "image/png").unwrap();
-    assert_eq!(a, b);
-}
-
-// ----------------------------------------------------------------------- WebP
-
-/// Any WebP, even a small one, is decoded and sent as a lossless PNG of the
-/// same pixels; a large one is downscaled too.
-///
-/// Mutation: let a small WebP pass through -> red.
-#[test]
-fn every_webp_becomes_a_png() {
-    let (small, pixels) = webp(64, 48);
-    let canonical = canonical_of(&small, "image/webp").unwrap();
-    assert_eq!(canonical.mime(), ImageMime::Png);
-    let img = decode_png(canonical.bytes());
-    assert_eq!((img.width(), img.height()), (64, 48));
-    assert_eq!(img.to_rgba8(), pixels, "lossless: the same pixels");
-
-    let (large, _) = webp(2000, 1000);
-    let canonical = canonical_of(&large, "image/webp").unwrap();
-    let img = decode_png(canonical.bytes());
-    assert_eq!((img.width(), img.height()), (768, 384));
+fn the_canonical_png_has_only_critical_chunks() {
+    let out = canonical_of(&png_rgb(1000, 700), "image/png").unwrap();
+    let mut at = 8;
+    let mut kinds = Vec::new();
+    while at + 8 <= out.len() {
+        let len = u32::from_be_bytes(out[at..at + 4].try_into().unwrap()) as usize;
+        kinds.push(String::from_utf8_lossy(&out[at + 4..at + 8]).into_owned());
+        at += 12 + len;
+    }
+    kinds.dedup();
+    assert_eq!(kinds, ["IHDR", "IDAT", "IEND"]);
 }
 
 // ------------------------------------------------------------- bounded decode
@@ -273,8 +329,7 @@ fn a_bomb_header_is_refused_before_decoding() {
             validate(&bomb, "image/png").is_err(),
             "validate refuses it too"
         );
-        let input = ImageInput::from_validated(&bomb, ImageMime::Png, [0; 32]);
-        let err = canonicalize(&input).unwrap_err();
+        let err = to_canonical_png(&bomb, ImageMime::Png).unwrap_err();
         let EmbedError::Backend(msg) = &err else {
             panic!("{err:?}");
         };
@@ -292,9 +347,8 @@ fn a_bomb_header_is_refused_before_decoding() {
     // Inside the side limit, a header that lies about its data fails as a
     // decode error, never a panic.
     let liar = png_declaring(4096, 4096);
-    let input = ImageInput::from_validated(&liar, ImageMime::Png, [0; 32]);
     assert!(matches!(
-        canonicalize(&input).unwrap_err(),
+        to_canonical_png(&liar, ImageMime::Png).unwrap_err(),
         EmbedError::Backend(m) if m.contains("could not decode")
     ));
 }
@@ -311,7 +365,7 @@ fn the_decode_limits_match_the_validator() {
     assert!(check_dimensions(0, 1).is_err());
 }
 
-/// A truncated large image (header fine, data cut) fails as a decode error
+/// A truncated image (header fine, data cut) fails as a decode error
 /// naming the format, never a panic, and never echoes bytes.
 #[test]
 fn a_truncated_large_image_is_a_backend_error() {
@@ -328,7 +382,7 @@ fn a_truncated_large_image_is_a_backend_error() {
     // zune-jpeg may fill a truncated scan with grey rather than fail; either
     // way there is no panic, and a success is a 768 px PNG.
     if let Ok(c) = err {
-        let img = decode_png(c.bytes());
+        let img = decode_png(&c);
         assert_eq!((img.width(), img.height()), (768, 768));
     }
 }

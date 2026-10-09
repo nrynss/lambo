@@ -69,6 +69,13 @@ fn image_body(png: &[u8]) -> String {
     )
 }
 
+/// The request body for a user image: its canonical form (22g), never the
+/// submitted bytes. The reference image is posted as it is
+/// ([`image_body`]).
+fn sent_body(png: &[u8]) -> String {
+    image_body(&canonical::to_canonical_png(png, crate::embed::ImageMime::Png).unwrap())
+}
+
 // ---------------------------------------------------------------- requests
 
 /// The two text roles are sent byte-exact, each with its model-card prefix,
@@ -101,7 +108,7 @@ async fn text_bodies_are_byte_exact_with_the_role_prefix() {
 }
 
 /// The image goes as one input item whose content is the `image_url` part,
-/// a base64 data URI with the validated MIME, no text and no prefix.
+/// a base64 data URI of its canonical PNG, no text and no prefix.
 #[tokio::test]
 async fn the_image_body_is_the_nested_image_url_data_uri() {
     let server = MockServer::start();
@@ -109,7 +116,7 @@ async fn the_image_body_is_the_nested_image_url_data_uri() {
     let mock = server.mock(|when, then| {
         when.method(POST)
             .path("/v1/embeddings")
-            .body(image_body(&png));
+            .body(sent_body(&png));
         then.status(200).json_body(ok_body(&native(), Some(293)));
     });
     let input = crate::surface::image::validate(&png, "image/png").unwrap();
@@ -119,9 +126,10 @@ async fn the_image_body_is_the_nested_image_url_data_uri() {
     assert!((norm(&v) - 1.0).abs() < 1e-5);
 }
 
-/// A PNG over 768 px goes out as its canonical form (a 768 px lossless PNG),
-/// and a WebP of any size as a PNG: the request body carries exactly the
-/// bytes `canonical::to_canonical_png` makes, never the submitted ones (22g).
+/// Every image goes out as its canonical form (a lossless PNG with a 768 px
+/// longer side): a large PNG downscaled, a small WebP upscaled. The request
+/// body carries exactly the bytes `canonical::to_canonical_png` makes, never
+/// the submitted ones (22g).
 ///
 /// Mutation: send `image.bytes()` again -> red.
 #[tokio::test]
@@ -141,7 +149,7 @@ async fn the_image_body_carries_the_canonical_form() {
 
     for (bytes, mime, side) in [
         (&big_png, "image/png", (768, 512)),
-        (&small_webp, "image/webp", (40, 30)),
+        (&small_webp, "image/webp", (768, 576)),
     ] {
         let want =
             canonical::to_canonical_png(bytes, crate::embed::ImageMime::from_mime(mime).unwrap())
@@ -440,7 +448,7 @@ async fn a_verified_server_is_checked_with_the_reference_image() {
         let image = server.mock(|when, then| {
             when.method(POST)
                 .path("/v1/embeddings")
-                .body(image_body(&png));
+                .body(sent_body(&png));
             then.status(200).json_body(ok_body(&native(), Some(260)));
         });
         let e = embedder(&server);
@@ -840,7 +848,7 @@ async fn a_refused_reference_image_is_a_server_problem() {
         let image = server.mock(|when, then| {
             when.method(POST)
                 .path("/v1/embeddings")
-                .body(image_body(&png));
+                .body(sent_body(&png));
             then.status(200).json_body(ok_body(&native(), Some(260)));
         });
         let e = embedder(&server);
@@ -883,7 +891,7 @@ async fn a_busy_server_keeps_its_checks_and_only_a_restart_drops_them() {
     let mut image = server.mock(|when, then| {
         when.method(POST)
             .path("/v1/embeddings")
-            .body(image_body(&png));
+            .body(sent_body(&png));
         then.status(200).json_body(ok_body(&native(), Some(260)));
     });
     let e = embedder(&server);
@@ -893,7 +901,7 @@ async fn a_busy_server_keeps_its_checks_and_only_a_restart_drops_them() {
     let mut busy = server.mock(|when, then| {
         when.method(POST)
             .path("/v1/embeddings")
-            .body(image_body(&png));
+            .body(sent_body(&png));
         then.status(503).body(
             r#"{"error":{"code":503,"message":"Server is busy","type":"unavailable_error"}}"#,
         );
@@ -905,7 +913,7 @@ async fn a_busy_server_keeps_its_checks_and_only_a_restart_drops_them() {
     server.mock(|when, then| {
         when.method(POST)
             .path("/v1/embeddings")
-            .body(image_body(&png));
+            .body(sent_body(&png));
         then.status(200).json_body(ok_body(&native(), Some(260)));
     });
     e.embed_image(input()).await.unwrap();

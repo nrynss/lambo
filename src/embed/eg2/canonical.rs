@@ -8,45 +8,67 @@
 //! under the 280-token budget rounds *up*, and its target then depends only on
 //! its aspect ratio (a square becomes 816x816, 289 tokens); a larger one
 //! rounds *down* (a square of 792 px or more becomes 768x768, 256 tokens). The
-//! two grids give different vectors, so the same picture embedded at 512 and
-//! at 1024 px came out at cosine 0.97 to 0.999, not 1. No server flag picks
-//! the branch. Every image whose longer side is at most
-//! [`EG2_CANONICAL_MAX_SIDE`] takes the round-up branch (768 x 768 = 589,824
-//! px, under the 645,120 the budget allows), so Lambo brings every image to
-//! that bound before sending it.
+//! two grids give different vectors, and within one branch the server still
+//! resamples from whatever resolution it was given, so the same picture
+//! embedded at 512 and at 1024 px came out at cosine 0.97 to 0.999, not 1. No
+//! server flag picks the branch. So Lambo sends every image at one size: its
+//! longer side exactly [`EG2_CANONICAL_SIDE`].
 //!
-//! **The rule.**
+//! **Why 768 always takes the round-up branch.** The server first aligns each
+//! side to the nearest multiple of 48, at least 48. A longer side of 768 is
+//! already aligned and the shorter side aligns to at most 768, so the aligned
+//! area is at most 768 x 768 = 589,824 px, under the 645,120 px (280 tokens of
+//! 2,304 px) the budget allows, for every aspect ratio, including a shorter
+//! side of 1 px (aligned up to 48). The server then scales both sides up by
+//! the same factor, so its target depends only on the aspect ratio of the
+//! canonical form.
 //!
-//! - A PNG or JPEG whose longer side is at most 768 px is sent byte-identical:
-//!   nothing is decoded, so its vector is the one `lambo-eg2-v1` gave it.
-//! - A larger PNG or JPEG is decoded, downscaled to a longer side of exactly
-//!   768 px with the aspect ratio kept (the shorter side rounded to the
-//!   nearest pixel, at least 1), with Lanczos3, and re-encoded as a lossless
-//!   PNG in its own colour type (alpha and 16-bit depth kept; the server drops alpha and
-//!   reduces 16 bits itself, as it does for a small image).
-//! - A WebP of any size is decoded and re-encoded as a lossless PNG, and
-//!   downscaled the same way above 768 px. `llama-server` decodes WebP only by
-//!   running an `ffmpeg`/`ffprobe` found on its `PATH`: without one it refuses
-//!   the image, and with one the pixels depend on that `ffmpeg`. Decoding it
-//!   here keeps the vector a function of the image alone.
+//! **The canonical form, exactly** (a client that computes vectors itself
+//! must reproduce this to be in the same space):
 //!
-//! So an image's vector depends only on its canonical form, and two
-//! submissions of one picture at different sizes above 768 px share it up to
-//! resampling. Lanczos3 was measured against Catmull-Rom (llama.cpp's own
-//! cubic) on b11517: for a hard-edged checkerboard rendered at 1024 to 3000
-//! px its renders agreed to at least 0.99978 pairwise (Catmull-Rom 0.99943)
-//! and 0.99911 with the picture drawn at 768 px (Catmull-Rom 0.99861); a
-//! smooth picture was within 0.0001 either way. A solid colour is identical
-//! at every size with either. `evidence/issue-22-eg2/size-invariance.txt`
-//! has the table.
+//! 1. Decode the PNG, JPEG or WebP with the `image` crate (0.25; zune-jpeg for
+//!    JPEG, image-webp for WebP, the first frame of an animated image).
+//!    EXIF orientation is **not** applied (the pixels are used as stored, as
+//!    `llama-server`'s own decoder does); ICC profiles, gamma and sRGB chunks
+//!    are ignored, and no colour conversion is made except the decoders' own:
+//!    a palette PNG is expanded to RGB or RGBA (`tRNS` becomes alpha), a CMYK
+//!    or YCCK JPEG becomes RGB. The pixel type is otherwise kept: grey, grey
+//!    with alpha, RGB or RGBA, 8 or 16 bits, alpha straight (not
+//!    premultiplied).
+//! 2. Resize to `(w', h')`: the longer side becomes exactly 768 and the
+//!    shorter side is `max(1, floor((s * 768 + floor(L / 2)) / L))` in integer
+//!    arithmetic, where `L` is the longer and `s` the shorter side (the nearest
+//!    integer, halves rounded up). A square stays square. An image already
+//!    768 px on its longer side is not resampled. Otherwise every channel,
+//!    alpha included, is resampled in one step with image-rs's separable
+//!    `resize` (`imageops::resize`): [`DOWNSCALE_FILTER`] (Lanczos3) when
+//!    `L > 768` and [`UPSCALE_FILTER`] (Catmull-Rom, the a = -0.5 cubic)
+//!    when `L < 768`, on the stored channel values (no linearization), then
+//!    rounded and clamped to the pixel type.
+//! 3. Encode as a PNG of that pixel type, with no ancillary chunks
+//!    (`IHDR`, `IDAT`, `IEND` only). The deflate level and filter
+//!    ([`PNG_COMPRESSION`], [`PNG_FILTER`]) change the bytes but not the
+//!    pixels, so they do not change the vector.
+//!
+//! The server then drops alpha and reduces 16 bits to 8 itself. The golden
+//! tests in `canonical/tests.rs` pin the output for fixed inputs: a change
+//! in the decoded pixels (for example after an `image`, `zune-jpeg` or
+//! `image-webp` update) is a new profile name.
+//!
+//! **What this gives**, measured live on b11517
+//! (`evidence/issue-22-eg2/size-invariance.txt`): a flat image embeds
+//! bit-identically at every submitted size; a patterned one does not, since
+//! a picture drawn at 3000 px and scaled to 768 is not the picture drawn at
+//! 768 px, and an upscaled 128 px picture has less detail than either. The
+//! evidence file has the measured bounds.
 //!
 //! **Bounded work.** Before anything is decoded, the header's dimensions are
 //! checked against `crate::surface::image::MAX_IMAGE_SIDE_PX` a side and
 //! [`MAX_DECODE_PIXELS`] in all (the validator already enforces the side, so
 //! this is a second line against a decompression bomb), and the decoder runs
 //! under the same limits plus [`MAX_DECODE_ALLOC`] bytes. The input is at
-//! most `crate::surface::image::MAX_IMAGE_BYTES`. A decode failure is
-//! [`EmbedError::Backend`] (permanent for this input), never a panic.
+//! most `crate::surface::image::MAX_IMAGE_BYTES`. A decode failure is an
+//! error (permanent for this input), never a panic.
 //!
 //! What is stored about an image (its id, its SHA-256, its MIME type) keeps
 //! describing the bytes the client sent; only the embed request carries the
@@ -54,13 +76,38 @@
 
 use std::io::Cursor;
 
-use image::{imageops::FilterType, ImageFormat, ImageReader, Limits};
+use image::{
+    codecs::png::{CompressionType, FilterType as PngFilter, PngEncoder},
+    imageops::FilterType,
+    DynamicImage, ImageFormat, ImageReader, Limits,
+};
 
-use crate::embed::{EmbedError, ImageInput, ImageMime};
+use crate::embed::{EmbedError, ImageMime};
 use crate::surface::image::MAX_IMAGE_SIDE_PX;
 
-/// The longest side, in pixels, of an image's canonical form.
-pub const EG2_CANONICAL_MAX_SIDE: u32 = 768;
+/// The longer side, in pixels, of every image's canonical form.
+pub const EG2_CANONICAL_SIDE: u32 = 768;
+
+/// The resampling filter when the longer side is above
+/// [`EG2_CANONICAL_SIDE`]. Measured better than Catmull-Rom (llama.cpp's own
+/// cubic) on hard edges and equal on smooth pictures.
+pub(crate) const DOWNSCALE_FILTER: FilterType = FilterType::Lanczos3;
+
+/// The resampling filter when the longer side is below
+/// [`EG2_CANONICAL_SIDE`]. Lanczos3 rings when it enlarges a hard edge:
+/// measured live on b11517, a checkerboard drawn at 256 px and upscaled came
+/// out at cosine 0.9796 to the one drawn at 768 px with Lanczos3, 0.9848
+/// with Catmull-Rom (the server's own resampling of the raw 256 px image gave
+/// 0.9848); Triangle matched Catmull-Rom at 128 and 256 px but was worse at
+/// 512 (0.9870 against 0.9918). A smooth picture was within 0.0004 with all
+/// three.
+pub(crate) const UPSCALE_FILTER: FilterType = FilterType::CatmullRom;
+
+/// The canonical PNG's deflate level. Does not change the pixels.
+const PNG_COMPRESSION: CompressionType = CompressionType::Fast;
+
+/// The canonical PNG's row filter. Does not change the pixels.
+const PNG_FILTER: PngFilter = PngFilter::Adaptive;
 
 /// Most pixels an image may declare before Lambo decodes it: a full
 /// `MAX_IMAGE_SIDE_PX` square (16.8 MP).
@@ -69,31 +116,6 @@ pub(crate) const MAX_DECODE_PIXELS: u64 = MAX_IMAGE_SIDE_PX as u64 * MAX_IMAGE_S
 /// Most bytes the decoder may allocate: [`MAX_DECODE_PIXELS`] at the widest
 /// pixel the three formats decode to (16-bit RGBA, 8 bytes).
 pub(crate) const MAX_DECODE_ALLOC: u64 = MAX_DECODE_PIXELS * 8;
-
-/// What to send for an image.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Canonical<'a> {
-    /// The submitted bytes, unchanged, with their MIME type.
-    Original(&'a [u8], ImageMime),
-    /// A lossless PNG Lambo encoded.
-    Png(Vec<u8>),
-}
-
-impl Canonical<'_> {
-    pub(crate) fn bytes(&self) -> &[u8] {
-        match self {
-            Self::Original(bytes, _) => bytes,
-            Self::Png(bytes) => bytes,
-        }
-    }
-
-    pub(crate) fn mime(&self) -> ImageMime {
-        match self {
-            Self::Original(_, mime) => *mime,
-            Self::Png(_) => ImageMime::Png,
-        }
-    }
-}
 
 fn format_of(mime: ImageMime) -> Result<ImageFormat, EmbedError> {
     match mime {
@@ -122,7 +144,7 @@ fn reader(bytes: &[u8], format: ImageFormat) -> ImageReader<Cursor<&[u8]>> {
 }
 
 /// The header's width and height, read without decoding the pixels, and
-/// checked against the side and pixel limits.
+/// checked against the side and pixel limits. Cheap.
 pub(crate) fn dimensions(bytes: &[u8], mime: ImageMime) -> Result<(u32, u32), EmbedError> {
     let (width, height) = reader(bytes, format_of(mime)?)
         .into_dimensions()
@@ -153,36 +175,39 @@ fn decode_error(mime: ImageMime, e: &image::ImageError) -> EmbedError {
     EmbedError::Backend(format!("could not decode this {mime} image: {reason}"))
 }
 
-/// The canonical size for an image of `width` x `height`: unchanged when the
-/// longer side is at most [`EG2_CANONICAL_MAX_SIDE`], else the longer side
-/// becomes exactly that and the shorter one keeps the aspect ratio, rounded
-/// to the nearest pixel (halves up) and at least 1.
+/// The canonical size for an image of `width` x `height`: the longer side
+/// becomes exactly [`EG2_CANONICAL_SIDE`] and the shorter one keeps the
+/// aspect ratio, rounded to the nearest pixel (halves up) and at least 1.
+/// Integer arithmetic only, so a client can reproduce it exactly.
 pub(crate) fn canonical_size(width: u32, height: u32) -> (u32, u32) {
-    let long = width.max(height);
-    if long <= EG2_CANONICAL_MAX_SIDE {
-        return (width, height);
-    }
-    let scale = |side: u32| -> u32 {
-        let num = u64::from(side) * u64::from(EG2_CANONICAL_MAX_SIDE) + u64::from(long) / 2;
-        u32::try_from(num / u64::from(long))
-            .unwrap_or(EG2_CANONICAL_MAX_SIDE)
-            .max(1)
+    let long = u64::from(width.max(height).max(1));
+    let side = u64::from(EG2_CANONICAL_SIDE);
+    let scale = |s: u32| -> u32 {
+        let scaled = (u64::from(s) * side + long / 2) / long;
+        // `s <= long`, so `scaled <= side`; the clamp only guards the cast.
+        u32::try_from(scaled.clamp(1, side)).unwrap_or(EG2_CANONICAL_SIDE)
     };
     (scale(width), scale(height))
 }
 
-/// Whether `image` is sent as it is (no decode needed). Cheap: reads the
-/// header only.
-pub(crate) fn needs_work(bytes: &[u8], mime: ImageMime) -> Result<bool, EmbedError> {
-    if mime == ImageMime::Webp {
-        return Ok(true);
+/// Resize `decoded` to its canonical size with the filter for the direction.
+fn resize(decoded: DynamicImage) -> DynamicImage {
+    let (width, height) = (decoded.width(), decoded.height());
+    let (target_w, target_h) = canonical_size(width, height);
+    if (target_w, target_h) == (width, height) {
+        return decoded;
     }
-    let (width, height) = dimensions(bytes, mime)?;
-    Ok(width.max(height) > EG2_CANONICAL_MAX_SIDE)
+    let filter = if width.max(height) > EG2_CANONICAL_SIDE {
+        DOWNSCALE_FILTER
+    } else {
+        UPSCALE_FILTER
+    };
+    decoded.resize_exact(target_w, target_h, filter)
 }
 
-/// Decode, downscale if needed, and encode as a lossless PNG. CPU-bound:
-/// the embedder runs it off the async runtime.
+/// The canonical PNG of an image: decode, resize to a longer side of exactly
+/// [`EG2_CANONICAL_SIDE`], encode as a lossless PNG. CPU-bound: the embedder
+/// runs it off the async runtime.
 pub(crate) fn to_canonical_png(bytes: &[u8], mime: ImageMime) -> Result<Vec<u8>, EmbedError> {
     let format = format_of(mime)?;
     let (width, height) = dimensions(bytes, mime)?;
@@ -198,15 +223,14 @@ pub(crate) fn to_canonical_png(bytes: &[u8], mime: ImageMime) -> Result<Vec<u8>,
             decoded.height()
         )));
     }
-    let (target_w, target_h) = canonical_size(width, height);
-    let canonical = if (target_w, target_h) == (width, height) {
-        decoded
-    } else {
-        decoded.resize_exact(target_w, target_h, FilterType::Lanczos3)
-    };
+    let canonical = resize(decoded);
     let mut out = Vec::new();
     canonical
-        .write_to(Cursor::new(&mut out), ImageFormat::Png)
+        .write_with_encoder(PngEncoder::new_with_quality(
+            &mut out,
+            PNG_COMPRESSION,
+            PNG_FILTER,
+        ))
         .map_err(|e| {
             EmbedError::Backend(format!(
                 "could not encode the canonical PNG of this {mime} image: {}",
@@ -216,33 +240,13 @@ pub(crate) fn to_canonical_png(bytes: &[u8], mime: ImageMime) -> Result<Vec<u8>,
     Ok(out)
 }
 
-/// The canonical form of `image`, synchronously. The embedder uses
-/// [`needs_work`] and [`to_canonical_png`] directly so the decode runs on a
-/// blocking thread; this is the same rule in one call.
-#[cfg(test)]
-pub(crate) fn canonicalize<'a>(image: &ImageInput<'a>) -> Result<Canonical<'a>, EmbedError> {
-    let (bytes, mime) = (image.bytes(), image.mime());
-    if needs_work(bytes, mime)? {
-        Ok(Canonical::Png(to_canonical_png(bytes, mime)?))
-    } else {
-        Ok(Canonical::Original(bytes, mime))
-    }
-}
-
-/// The canonical form of `image`, decoding on a blocking thread when it has
-/// to (a 4096 px image takes long enough to stall other tasks).
-pub(crate) async fn canonicalize_async<'a>(
-    image: &ImageInput<'a>,
-) -> Result<Canonical<'a>, EmbedError> {
-    let (bytes, mime) = (image.bytes(), image.mime());
-    if !needs_work(bytes, mime)? {
-        return Ok(Canonical::Original(bytes, mime));
-    }
+/// [`to_canonical_png`] on a blocking thread (a 4096 px image takes long
+/// enough to stall other tasks).
+pub(crate) async fn canonicalize(bytes: &[u8], mime: ImageMime) -> Result<Vec<u8>, EmbedError> {
     let owned = bytes.to_vec();
-    let png = tokio::task::spawn_blocking(move || to_canonical_png(&owned, mime))
+    tokio::task::spawn_blocking(move || to_canonical_png(&owned, mime))
         .await
-        .map_err(|e| EmbedError::Backend(format!("canonicalizing an image failed: {e}")))??;
-    Ok(Canonical::Png(png))
+        .map_err(|e| EmbedError::Backend(format!("canonicalizing an image failed: {e}")))?
 }
 
 #[cfg(test)]
