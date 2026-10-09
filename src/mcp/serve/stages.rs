@@ -154,7 +154,9 @@ impl ShutdownProgress {
 
     /// A record for one session's own stages (#32 design §3.4): a detach that
     /// takes one session down while the process keeps serving the others.
-    /// Every line it logs carries a `session` field; the text is the same.
+    /// Every line it logs carries a `session` field. The stage lines read as
+    /// the process's do; the summary says `session detach finished`, not
+    /// `shutdown finished`, because the process is not shutting down.
     /// It never starts a watchdog: the watchdog bounds the whole process's
     /// shutdown, not a session's (see `super::watchdog`).
     #[cfg_attr(
@@ -292,10 +294,13 @@ impl ShutdownProgress {
                     elapsed_ms,
                     "lambo serve: shutdown finished in {elapsed_ms} ms"
                 ),
+                // A detach takes one session down while the process keeps
+                // serving, so its summary must not read as the process's
+                // shutdown. Its stage lines keep the shared text.
                 Some(session) => tracing::info!(
                     session = %session,
                     elapsed_ms,
-                    "lambo serve: shutdown finished in {elapsed_ms} ms"
+                    "lambo serve: session detach finished in {elapsed_ms} ms"
                 ),
             }
         }

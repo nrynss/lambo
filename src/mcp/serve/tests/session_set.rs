@@ -554,7 +554,7 @@ fn a_session_progress_names_its_session_and_the_process_progress_does_not() {
     for (line, needle) in detach.iter().zip([
         "lambo serve: shutdown stage 3/7 session_close started",
         "lambo serve: shutdown stage 3/7 session_close finished in ",
-        "lambo serve: shutdown finished in ",
+        "lambo serve: session detach finished in ",
     ]) {
         assert!(line.contains(needle), "{line}");
         assert!(line.contains("session=serve-detach-a"), "{line}");
@@ -562,12 +562,18 @@ fn a_session_progress_names_its_session_and_the_process_progress_does_not() {
 
     let process = ShutdownProgress::default();
     process.run(Stage::SessionClose, || {});
+    process.complete();
     let lines: Vec<String> = logs.lines().iter().map(|l| plain(l)).collect();
     let process_lines = &lines[detach.len()..];
-    assert_eq!(process_lines.len(), 2, "{process_lines:?}");
+    assert_eq!(process_lines.len(), 3, "{process_lines:?}");
     for line in process_lines {
         assert!(!line.contains("session="), "{line}");
     }
+    assert!(
+        process_lines[2].contains("lambo serve: shutdown finished in "),
+        "{}",
+        process_lines[2]
+    );
 }
 
 /// Stage 6 over a set, with the sessions shared the way #32 PR 4's registry
