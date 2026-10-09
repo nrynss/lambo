@@ -983,6 +983,7 @@ mod tests {
             promotion_policy: Some(crate::canon::PromotionPolicy::Solo),
             recall: None,
             serve: Default::default(),
+            web: Default::default(),
         };
         let r = resolve_backends(file).unwrap();
         assert_eq!(r.embedder.dimensions(), 1024);
@@ -1054,6 +1055,7 @@ mod tests {
             promotion_policy: None,
             recall: None,
             serve: Default::default(),
+            web: Default::default(),
         };
         let r = resolve_backends(file).unwrap();
         assert_eq!(r.embedding.kind, "gemini");
@@ -1098,6 +1100,7 @@ mod tests {
             promotion_policy: None,
             recall: None,
             serve: Default::default(),
+            web: Default::default(),
         };
 
         // The pin asserts this deployment's vectors are 768 wide; the embedder emits

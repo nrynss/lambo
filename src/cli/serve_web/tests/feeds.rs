@@ -63,7 +63,14 @@ fn canon_event_feed_ties_break_on_node_canonical_key_ahead_of_id() {
 #[tokio::test]
 async fn events_endpoint_tails_the_canonization_feed() {
     let store = seed("t85-events").await;
-    let (addr, handle) = spawn(state_on(store.clone(), "t85-events")).await;
+    // TTL 0: the tail below is read right after a write (#4 PR 1).
+    let (addr, handle) = spawn(state_with_web(
+        backends_on(store.clone()),
+        "t85-events",
+        None,
+        &web_ttl_zero(),
+    ))
+    .await;
 
     let all = get_json(addr, "/api/events").await;
     assert_eq!(all["total"], 3, "three audited hops were seeded: {all}");
