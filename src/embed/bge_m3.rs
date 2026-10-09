@@ -107,6 +107,12 @@ pub(crate) struct StatusVerdict {
 /// only lets an adapter that knows its server's bodies refine the table for
 /// a request shape the table was not written for (the EmbeddingGemma 2
 /// image call, whose `500` can be a permanent deployment fault).
+/// How [`BgeM3LlamaCppEmbedder::post_json`] begins the message of a request that never
+/// got an HTTP answer (refused, reset, timed out). A caller that must tell a
+/// connection-level failure from a transient HTTP status (a 503 "busy")
+/// matches on it.
+pub(crate) const LLAMA_UNREACHABLE: &str = "llama.cpp unreachable at ";
+
 pub(crate) type StatusRule = fn(u16, &str) -> StatusVerdict;
 
 /// The body `llama-server` (checked on b11517) sends with `500` for a
@@ -503,7 +509,7 @@ impl BgeM3LlamaCppEmbedder {
         }
         let resp = req.send().await.map_err(|e| {
             EmbedError::Unavailable(format!(
-                "llama.cpp unreachable at {}: {}",
+                "{LLAMA_UNREACHABLE}{}: {}",
                 self.log_url,
                 e.without_url()
             ))

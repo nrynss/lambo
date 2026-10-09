@@ -58,7 +58,7 @@ use serde::{Deserialize, Serialize};
 
 use super::bge_m3::{
     check_bearer_transport, default_status_rule, BgeM3LlamaCppEmbedder, EmbedStatusClass,
-    StatusVerdict,
+    StatusVerdict, LLAMA_UNREACHABLE,
 };
 use super::{api_key, EmbedError, Embedder, EmbedderConfig, ImageInput, Modalities};
 
@@ -130,9 +130,11 @@ const PROPS_TIMEOUT: Duration = Duration::from_secs(5);
 /// quantization keeps answering embeds at width 768, so only a fresh `/props`
 /// shows the change; this bounds how long vectors can be stamped under the
 /// old contract after such a restart that Lambo did not see fail. One GET of
-/// about 6 KiB a minute is negligible next to the embeds it guards. A failed
-/// embed request (the server unreachable or unwilling) drops the kept answer
-/// at once, since that is what a restart looks like from here.
+/// about 6 KiB a minute is negligible next to the embeds it guards. An embed
+/// request that gets no HTTP answer (refused, reset), or llama-server's 503
+/// "Loading model", drops the kept answer at once, since that is what a
+/// restart looks like from here; a 503 "busy" or another transient status
+/// from a server that answered does not (see [`restart_seen`]).
 pub const EG2_PROPS_RECHECK_INTERVAL: Duration = Duration::from_secs(60);
 
 /// The first wait after a `/props` check that could not run (unreachable, a
@@ -682,9 +684,8 @@ impl EmbeddingGemma2Embedder {
     }
 
     /// Drop the kept `/props` answer so the next embed asks again. Called
-    /// when an embed request fails as unavailable: a refused connection or a
-    /// loading server is what a restart looks like, and a restarted server
-    /// may hold another model.
+    /// when an embed request fails in a way [`restart_seen`] reads as a
+    /// restart, since a restarted server may hold another model.
     fn forget_kept(&self) {
         let mut state = self.state();
         state.kept = None;
@@ -905,15 +906,18 @@ impl EmbeddingGemma2Embedder {
         }
     }
 
-    /// POST to the embeddings endpoint; an unavailable answer drops the kept
-    /// `/props` answer ([`Self::forget_kept`]).
+    /// POST to the embeddings endpoint; a failure that looks like a restart
+    /// ([`restart_seen`]) drops the kept `/props` answer
+    /// ([`Self::forget_kept`]).
     async fn post<B: Serialize>(
         &self,
         body: &B,
         rule: super::bge_m3::StatusRule,
     ) -> Result<EmbedResponse, EmbedError> {
         let result = self.http.post_json(body, &self.model, rule).await;
-        if let Err(EmbedError::Unavailable(_)) = &result {
+        if let Err(err) = &result
+            && restart_seen(err)
+        {
             self.forget_kept();
         }
         result
@@ -933,6 +937,19 @@ impl EmbeddingGemma2Embedder {
         let parsed = self.post(&body, default_status_rule).await?;
         truncate_and_normalize(first_embedding(parsed.data)?, self.dim)
     }
+}
+
+/// Whether a failed embed request looks like a llama-server restart, which
+/// drops the kept `/props` answer and image budget check: no HTTP answer at
+/// all (refused, reset), or llama-server's 503 "Loading model" (a server
+/// that just started). A 503 "busy" or another transient status comes from a
+/// server that is still the one checked, and dropping the checks there would
+/// add a `/props` GET and a reference image embed to every retried image on
+/// an already loaded server; the [`EG2_PROPS_RECHECK_INTERVAL`] expiry still
+/// bounds how long such a server is trusted.
+fn restart_seen(err: &EmbedError) -> bool {
+    matches!(err, EmbedError::Unavailable(msg)
+        if msg.starts_with(LLAMA_UNREACHABLE) || msg.contains("Loading model"))
 }
 
 /// One input item whose content is the image alone, as a base64 data URI.

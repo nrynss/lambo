@@ -736,6 +736,81 @@ async fn an_unavailable_embed_forces_a_recheck() {
     post.assert_hits(0);
 }
 
+/// A 503 "busy" from the verified server is transient but keeps the checks:
+/// the retried image costs no extra `/props` GET and no extra reference
+/// image embed (review L1). Only a request that got no HTTP answer, or
+/// llama-server's 503 "Loading model", reads as a restart.
+///
+/// Mutation: call `forget_kept` for every `Unavailable` again -> red.
+#[tokio::test]
+async fn a_busy_server_keeps_its_checks_and_only_a_restart_drops_them() {
+    let server = MockServer::start();
+    let props_mock = server.mock(|when, then| {
+        when.method(GET).path("/props");
+        then.status(200)
+            .json_body(props("embeddinggemma-2-Q8_0.gguf", "Q8_0", true));
+    });
+    let reference = server.mock(|when, then| {
+        when.method(POST)
+            .path("/v1/embeddings")
+            .body(image_body(&png_1x1()));
+        then.status(200).json_body(ok_body(&native(), Some(293)));
+    });
+    let png = png_2x1();
+    let mut image = server.mock(|when, then| {
+        when.method(POST)
+            .path("/v1/embeddings")
+            .body(image_body(&png));
+        then.status(200).json_body(ok_body(&native(), Some(260)));
+    });
+    let e = embedder(&server);
+    let input = || crate::surface::image::validate(&png, "image/png").unwrap();
+    e.embed_image(input()).await.unwrap();
+    image.delete();
+    let mut busy = server.mock(|when, then| {
+        when.method(POST)
+            .path("/v1/embeddings")
+            .body(image_body(&png));
+        then.status(503).body(
+            r#"{"error":{"code":503,"message":"Server is busy","type":"unavailable_error"}}"#,
+        );
+    });
+    let err = e.embed_image(input()).await.unwrap_err();
+    assert!(err.is_transient(), "{err:?}");
+    assert!(!restart_seen(&err), "{err}");
+    busy.delete();
+    server.mock(|when, then| {
+        when.method(POST)
+            .path("/v1/embeddings")
+            .body(image_body(&png));
+        then.status(200).json_body(ok_body(&native(), Some(260)));
+    });
+    e.embed_image(input()).await.unwrap();
+    props_mock.assert_hits(1);
+    reference.assert_hits(1);
+
+    // A connection that gets no HTTP answer (the server is gone) and the
+    // loading 503 both read as a restart.
+    // (httpmock pools its servers, so a dropped MockServer still answers;
+    // take a free port and close it instead.)
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let dead = EmbeddingGemma2Embedder::new(format!("http://127.0.0.1:{port}"), MODEL, 768)
+        .unwrap()
+        .without_server_check();
+    let err = dead.embed("a").await.unwrap_err();
+    assert!(err.is_transient(), "{err:?}");
+    assert!(restart_seen(&err), "{err}");
+    assert!(restart_seen(&EmbedError::Unavailable(
+        "llama.cpp is momentarily unwilling (503 Service Unavailable) for model \"m\": \
+         {\"error\":{\"code\":503,\"message\":\"Loading model\"}}"
+            .into()
+    )));
+}
+
 /// Once a server has been verified, a re-check that cannot run holds embeds
 /// back as transient (the write stays durable), and a server that no longer
 /// reports its model is refused: either can be another server on the URL.
