@@ -344,3 +344,63 @@ fn a_credential_sharing_the_legacy_token_refuses_the_start_without_quoting_it() 
     assert!(!stderr.contains(&shared), "the token reached stderr");
     assert!(!stderr.contains("failed to build backends"), "{stderr}");
 }
+
+/// #32 PR 5 review L3: a token no request could present (here a trailing
+/// space, as an env file leaves one) refuses the start with exit 2 before
+/// the backends, naming where it came from and never quoting it, whether it
+/// is a configured credential's, `LAMBO_AUTH_TOKEN` or `--auth-token`.
+#[test]
+fn a_token_no_request_could_present_refuses_the_start_without_quoting_it() {
+    let (_dir, cfg) = scratch(&two_credentials());
+    let padded = format!("{} ", token("padded"));
+    let core = token("padded");
+
+    let (code, stderr) = refused(&cfg, &[(ENV_A, padded.clone()), (ENV_B, token("b"))]);
+    assert_eq!(code, Some(2), "{stderr}");
+    assert!(
+        stderr.contains("\"cred-a\"") && stderr.contains(ENV_A) && stderr.contains("whitespace"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains(&core), "the token reached stderr");
+    assert!(!stderr.contains("failed to build backends"), "{stderr}");
+
+    let (code, stderr) = refused(
+        &cfg,
+        &[
+            (ENV_A, token("a")),
+            (ENV_B, token("b")),
+            (LEGACY_ENV, padded.clone()),
+        ],
+    );
+    assert_eq!(code, Some(2), "{stderr}");
+    assert!(
+        stderr.contains(LEGACY_ENV) && stderr.contains("whitespace"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains(&core), "the token reached stderr");
+
+    let runtime = RuntimeDir::new();
+    let out = ServeChild::new(
+        serve_command(
+            &cfg,
+            &runtime,
+            &["--session", A, "--auth-token", &padded],
+            &[],
+        )
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn serve"),
+    )
+    .wait_with_output_within(Duration::from_secs(60))
+    .expect("the refusal is prompt")
+    .expect("wait");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{stderr}");
+    assert!(
+        stderr.contains("--auth-token") && stderr.contains("whitespace"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains(&core), "the token reached stderr");
+}

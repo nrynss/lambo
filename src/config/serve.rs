@@ -419,9 +419,12 @@ impl ServeConfig {
                     cred.name
                 ))
             })?;
-            let token = SecretToken::new(raw).map_err(|_| {
+            // `SecretToken::new`'s reason never quotes the value (#32 PR 5
+            // review L3: surrounding whitespace, a byte outside printable
+            // ASCII, or over the length cap, besides empty).
+            let token = SecretToken::new(raw).map_err(|why| {
                 serve_err(format!(
-                    "credential {:?}: environment variable {shown} is empty",
+                    "credential {:?}: environment variable {shown}: {why}",
                     cred.name
                 ))
             })?;

@@ -51,7 +51,7 @@ enum Commands {
         /// LAMBO_AUTH_TOKEN env var, which overrides this flag — a token in
         /// argv is visible in `ps` and shell history. Optional on loopback,
         /// mandatory on any other bind. Ignored by --transport stdio.
-        #[arg(long, value_name = "TOKEN")]
+        #[arg(long, value_name = "TOKEN", value_parser = SecretTokenParser)]
         auth_token: Option<lambo::mcp::SecretToken>,
         /// Maximum concurrently live MCP sessions on the HTTP transport;
         /// further `initialize` requests are refused with 503. With several
@@ -648,6 +648,40 @@ fn run_async(
             eprintln!("lambo {name}: {e}");
             ExitCode::from(e.exit_code())
         }
+    }
+}
+
+/// `--auth-token`'s parser: [`lambo::mcp::SecretToken::new`], with a usage
+/// error that never quotes the value (#32 PR 5 review L3).
+///
+/// clap's error for a rejected value repeats the value ("invalid value
+/// '<it>' for ..."), and for a token with a stray trailing space that is the
+/// secret on stderr. This parser reports the reason alone, still as clap's
+/// usage error (exit 2).
+#[derive(Clone)]
+struct SecretTokenParser;
+
+impl clap::builder::TypedValueParser for SecretTokenParser {
+    type Value = lambo::mcp::SecretToken;
+
+    fn parse_ref(
+        &self,
+        cmd: &clap::Command,
+        arg: Option<&clap::Arg>,
+        value: &std::ffi::OsStr,
+    ) -> Result<Self::Value, clap::Error> {
+        let flag = arg.map_or_else(|| "--auth-token".to_string(), ToString::to_string);
+        let refuse = |why: &str| {
+            clap::Error::raw(
+                clap::error::ErrorKind::InvalidValue,
+                format!("invalid value for '{flag}': {why} (the value is not shown)\n"),
+            )
+            .with_cmd(cmd)
+        };
+        let raw = value
+            .to_str()
+            .ok_or_else(|| refuse("auth token is not valid UTF-8"))?;
+        lambo::mcp::SecretToken::new(raw).map_err(|why| refuse(&why))
     }
 }
 

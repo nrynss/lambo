@@ -476,6 +476,50 @@ fn a_missing_or_empty_token_variable_fails_closed() {
     }
 }
 
+/// #32 PR 5 review L3: a token no request could present (surrounding
+/// whitespace, a byte outside printable ASCII) is refused at resolve, naming
+/// the credential and its variable but never the value. A space inside a
+/// token is presentable and accepted.
+#[test]
+fn a_token_no_request_could_present_is_refused_unquoted() {
+    let f = parse(&full_toml()).expect("parse");
+    let core = ["fake", "agents", "l3"].join("-");
+    for (bad, why) in [
+        (format!("{core} "), "whitespace"),
+        (format!("{core}\n"), "whitespace"),
+        (format!(" {core}"), "whitespace"),
+        (format!("{core}\u{e9}"), "printable ASCII"),
+        (format!("{core}\tx"), "printable ASCII"),
+    ] {
+        let err = f
+            .serve
+            .resolve_credentials_with(|name| {
+                Some(OsString::from(if name == AGENTS_ENV {
+                    bad.clone()
+                } else {
+                    format!("{name}-value")
+                }))
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("\"agents\"") && err.contains(AGENTS_ENV) && err.contains(why),
+            "{bad:?}: {err}"
+        );
+        assert!(!err.contains(&core), "the value leaked: {err}");
+    }
+    let spaced = format!("{core} inner");
+    f.serve
+        .resolve_credentials_with(|name| {
+            Some(OsString::from(if name == AGENTS_ENV {
+                spaced.clone()
+            } else {
+                format!("{name}-value")
+            }))
+        })
+        .expect("a space inside a token is presentable");
+}
+
 /// A populated `[serve]` round-trips through TOML; an empty one is not
 /// written at all, so a serialized file without it stays readable by a
 /// binary that predates `[serve]`.

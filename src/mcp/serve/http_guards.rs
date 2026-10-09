@@ -56,7 +56,10 @@ pub(super) const RATE_LIMIT_BURST_FACTOR: u32 = 2;
 pub struct SecretToken(String);
 
 impl SecretToken {
-    /// Reject empty and whitespace-only tokens.
+    /// Reject empty and whitespace-only tokens, and tokens no request could
+    /// present: surrounding whitespace, or a byte outside printable ASCII
+    /// (0x20 to 0x7E; a space inside the token is presentable). The errors
+    /// never quote the token.
     ///
     /// Fail closed rather than quietly accept: an empty `LAMBO_AUTH_TOKEN` is
     /// almost always an unset variable that expanded to nothing, and treating it
@@ -73,6 +76,26 @@ impl SecretToken {
             return Err(
                 "auth token is empty — pass a non-empty secret, or omit it entirely to \
                         run unauthenticated on loopback"
+                    .into(),
+            );
+        }
+        // #32 PR 5 review L3: a token no request can carry. The guard trims
+        // the presented credential, so surrounding whitespace never
+        // matches, and an HTTP header value that is not printable ASCII is
+        // unreadable to it, so such a byte never matches either. Either
+        // used to start a serve that answered every request 401 with no
+        // hint why (a trailing newline or space from an env file, say).
+        if raw.trim() != raw {
+            return Err(
+                "auth token has leading or trailing whitespace, which a request cannot \
+                        carry (the presented credential is trimmed); remove it"
+                    .into(),
+            );
+        }
+        if raw.bytes().any(|b| !(0x20..=0x7e).contains(&b)) {
+            return Err(
+                "auth token contains a character outside printable ASCII, which an HTTP \
+                 Authorization header cannot carry"
                     .into(),
             );
         }
