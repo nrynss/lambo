@@ -110,6 +110,10 @@ fn concept_sql_for(n: usize) -> String {
 /// candidate SELECTs now also fetch `canonical_key`, so the Rust side can
 /// order exact score ties stably across runs. Their `PRE_*` bodies carry
 /// that one added column; everything else stays parser-faithful.
+///
+/// Second deliberate exception (#22 PR 2, re-pinned by hand): the concept
+/// SELECT also reads `embedding_source`, on its own line after
+/// `human_confirmed`.
 #[test]
 fn b0_composed_sql_is_byte_identical_to_the_pre_carve_constants() {
     const PRE_VECTOR_CANDIDATES_SQL: &str = r#"
@@ -177,7 +181,8 @@ ORDER BY created_at, id
 SELECT id::STRING AS id, session_id, content, canonical_key, concept_type,
        origin_interaction::STRING AS origin_interaction, origin_agent, created_at,
        access_count, last_accessed, gc_survived, canonization_status, blast_radius,
-       last_demotion_time, embedding::STRING AS embedding, chunk_group_id, human_confirmed
+       last_demotion_time, embedding::STRING AS embedding, chunk_group_id, human_confirmed,
+       embedding_source
 FROM concepts
 WHERE session_id = $1
 ORDER BY id
@@ -362,19 +367,19 @@ fn the_access_update_is_shared_and_cast_free() {
 /// and the generated SQL is the half of that change no test on this machine
 /// can put in front of a cluster — so it is asserted directly.
 ///
-/// Three rows must produce 48 placeholders in three `VALUES` tuples, carry
-/// the `::VECTOR` cast on *each* row's embedding placeholder (the cast is
-/// part of the value expression, not the statement), and end in exactly one
-/// `ON CONFLICT` clause.
+/// Three rows must produce 54 placeholders (3 x `CONCEPT_COLUMNS`) in three
+/// `VALUES` tuples, carry the `::VECTOR` cast on *each* row's embedding
+/// placeholder (the cast is part of the value expression, not the
+/// statement), and end in exactly one `ON CONFLICT` clause.
 #[test]
 fn sql_shape_is_a_multi_row_upsert() {
     let sql = concept_sql_for(3);
     assert_eq!(
         placeholder_max(&sql),
-        51,
-        "3 rows x 17 columns, numbered across the whole statement: {sql}"
+        54,
+        "3 rows x 18 columns, numbered across the whole statement: {sql}"
     );
-    for n in [15, 32, 49] {
+    for n in [15, 33, 51] {
         assert!(
             sql.contains(&format!("${n}::VECTOR")),
             "every row's embedding placeholder needs its own cast, missing ${n}: {sql}"
