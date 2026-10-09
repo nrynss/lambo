@@ -74,7 +74,12 @@ impl From<WireConceptType> for ConceptType {
     }
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+/// `Default` is for library callers that build one with a struct literal:
+/// `RecallParams { agent_id, query, ..Default::default() }` keeps compiling
+/// when an optional field is added (as `image` and `query_vector` were, #22
+/// PR 6). It is not a wire default: `agent_id` is still required, and an
+/// empty `query` alone is still refused.
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RecallParams {
     /// Id of the agent making this call. Caller-asserted and unverified: work

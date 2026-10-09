@@ -301,3 +301,21 @@ fn the_recall_params_debug_redacts_the_payload() {
     assert!(!shown.contains("0.123"), "{shown}");
     assert!(!shown.contains(SECRET_MODEL), "{shown}");
 }
+
+/// `RecallParams: Default`, so a library caller's struct literal names only
+/// what it sets and survives the next optional field. The schema is
+/// unchanged by it (the tool-list golden pins that).
+#[tokio::test]
+async fn recall_params_build_from_default() {
+    use crate::mcp::server::params::RecallParams;
+    let p = RecallParams {
+        agent_id: "agent-a".into(),
+        query: "weekend outfit".into(),
+        ..Default::default()
+    };
+    assert!(p.image.is_none() && p.query_vector.is_none() && p.top_k.is_none());
+    let s = image_server("mcp-recall-params-default", accepting()).await;
+    let r = s.recall_impl(p).await;
+    assert_eq!(r.is_error, Some(false), "{r:?}");
+    s.mem.close().await.expect("close");
+}

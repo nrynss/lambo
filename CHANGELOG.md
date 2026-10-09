@@ -8,7 +8,10 @@
   `lambo::mcp::server`) gains two public fields, `image: Option<WireImage>`
   and `query_vector: Option<WireQueryVector>` (#22 PR 6), so code that
   builds it with a struct literal must add `image: None, query_vector:
-  None`. Deserializing it is unaffected.
+  None`, or end the literal with `..Default::default()`: `RecallParams`
+  now derives `Default`, so the next optional field will not break such a
+  literal again. Deserializing it, and its published schema, are
+  unaffected.
 - `Concept` gains a public field, `embedding_source: Option<EmbeddingSource>`
   (#22). Code that builds a `Concept` with a struct literal must add
   `embedding_source: None`; code that reads or deserializes one is
