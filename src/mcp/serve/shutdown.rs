@@ -13,10 +13,10 @@
 //! | # | stage | step | bound |
 //! |---|---|---|---|
 //! | 1 | transport drain (HTTP graceful drain, stdio cancel) | the transport future inside [`run_and_close_sessions`], ended by [`wind_down`] | [`SHUTDOWN_GRACE`] |
-//! | 2 | keep-warm abort | `stop_before_close` in [`run_and_close_sessions`], from [`ProcessTasks::stop_before_close`](super::process::ProcessTasks::stop_before_close) | instant |
+//! | 2 | keep-warm abort | `stop_before_close` in [`run_and_close_sessions`], from [`ProcessTasks::stop_before_close`](super::process::ProcessTasks::stop_before_close) and the process's write-queue calibration probe ([`EmbedderCalibration`](crate::writeq::EmbedderCalibration), #32 PR 3) | instant |
 //! | 3 | session close | [`close_sessions`], each through [`close_bounded`]: [`Memory::close`] and its own ten logged steps (`serialize`, `replay_stop`, `queue_quiesce`, `writers_gate`, `heartbeat_abort`, `producer_joins`, `flush_join`, `final_drain`, `final_flush`, `lease_release`; `src/memory/shutdown.rs`), or on abandonment the bounded lease release | [`CLOSE_GRACE`] |
 //! | 4 | event pump abort | after the close, in [`close_sessions`], so final-drain events still reach the log | instant |
-//! | 5 | background tasks | [`ProcessTasks::stop`](super::process::ProcessTasks::stop): ledger heartbeat, keep-warm (again), refusal poller | instant |
+//! | 5 | background tasks | [`ProcessTasks::stop`](super::process::ProcessTasks::stop): ledger heartbeat, keep-warm (again), refusal poller; the calibration probe (again) | instant |
 //! | 6 | endpoint release | `hub::Hub::release` per session (`session::AttachedSession::release_endpoint`): stop accepting, end every endpoint session (each cancels its rmcp service and waits for it), then the socket file if still ours | `hub::ENDPOINT_RELEASE_GRACE`, then the stragglers are aborted and joined (unbounded, but milliseconds in practice; the watchdog's 1 s overrun allowance covers it) |
 //! | 7 | ledger close | [`close_ledger`] | the ledger's own shutdown bound |
 //!
@@ -375,10 +375,11 @@ pub(super) async fn wind_down(
 ///
 /// `stop_before_close` is the opposite case: tasks nothing needs during the
 /// close, aborted the moment the transport returns and before `close()`
-/// starts. Today that is the issue-13 embedder keep-warm: once no client can
-/// call, a touch only competes with the final drain (and on a slow remote
+/// starts. Today that is the issue-13 embedder keep-warm and the process's
+/// write-queue calibration probe (#32 PR 3): once no client can call, a touch
+/// or a probe embed only competes with the final drain (and on a slow remote
 /// embedder could keep a request in flight across it). Aborting is idempotent,
-/// so `serve` still aborts the same task after close on its usual path.
+/// so `serve` still aborts the same tasks after close on its usual path.
 ///
 /// Each stage is logged on `progress` (#40). Stage 1 was started by the
 /// shutdown future when it resolved; a transport that ended on its own

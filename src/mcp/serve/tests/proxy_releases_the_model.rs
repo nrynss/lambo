@@ -104,14 +104,17 @@ async fn a_proxy_does_not_retain_the_embedder() {
         Some(&endpoint),
         None,
         EarlyShutdown::unarmed(),
+        None,
     )
     .build()
     .await
     .expect("the holder attaches");
     let _listener = endpoint.bind().expect("bind the holder endpoint");
 
-    // The would-be second writer, with a model whose drop we can see.
+    // The would-be second writer, with a model whose drop we can see, and
+    // the process-wide calibration `serve` hands its builder (#32 PR 3).
     let dropped = Arc::new(AtomicBool::new(false));
+    let calibration = crate::writeq::EmbedderCalibration::new();
     let proxy_opts = ServeOptions::new(session, "agent-proxy");
     let builder = serve_builder(
         &proxy_opts,
@@ -125,6 +128,7 @@ async fn a_proxy_does_not_retain_the_embedder() {
         Some(&endpoint),
         None,
         EarlyShutdown::unarmed(),
+        Some(calibration.clone()),
     );
     assert!(
         !dropped.load(Ordering::SeqCst),
@@ -143,6 +147,9 @@ async fn a_proxy_does_not_retain_the_embedder() {
         "a proxying serve must not keep its resolved embedder alive (with candle on \
                  Metal that is ~1.1 GB of weights it never embeds with)"
     );
+    // Nor may the calibration: a proxy builds no pipeline, so it never
+    // probes, and the calibration's key is weak.
+    assert_eq!(calibration.probes(), 0, "a proxy never probes");
 
     drop(proxy);
     holder.close().await.expect("holder close");

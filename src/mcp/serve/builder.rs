@@ -13,6 +13,7 @@ use crate::ledger::Ledger;
 use crate::memory::Memory;
 use crate::resolve::{resolve_from_config_path, ResolvedBackends};
 use crate::types::LamboError;
+use crate::writeq::EmbedderCalibration;
 
 /// The one resolve a serve process performs (Level B).
 ///
@@ -63,10 +64,20 @@ pub async fn build_memory(
     // decision that belongs to a process, not to a builder — the same reason
     // `close_bounded_until` takes its re-armed signal as an argument. An
     // unarmed handle registers nothing and never fires.
-    serve_builder(opts, backends, endpoint, None, EarlyShutdown::unarmed())
-        .build()
-        .await
-        .map_err(explain_startup_failure)
+    // #32 PR 3: no shared calibration either. This builds one `Memory`, so
+    // its pipeline owning its probe (aborted at its close) is the whole of
+    // the behaviour a library caller had before.
+    serve_builder(
+        opts,
+        backends,
+        endpoint,
+        None,
+        EarlyShutdown::unarmed(),
+        None,
+    )
+    .build()
+    .await
+    .map_err(explain_startup_failure)
 }
 
 /// The one [`MemoryBuilder`](crate::MemoryBuilder) a serve process configures.
@@ -85,6 +96,7 @@ pub(super) fn serve_builder(
     endpoint: Option<&SessionEndpoint>,
     ledger: Option<Arc<Ledger>>,
     early: EarlyShutdown,
+    calibration: Option<EmbedderCalibration>,
 ) -> crate::memory::MemoryBuilder {
     let config = backends.config.clone();
     let mut builder = Memory::builder()
@@ -108,6 +120,12 @@ pub(super) fn serve_builder(
     // and the acquire is the only point at which arming is both safe (the
     // election is over) and necessary (a lease and a tail now exist).
     builder = builder.early_shutdown(early);
+    // #32 PR 3: the process's write-queue calibration, so every session this
+    // process attaches reads one probe of the one embedder. Lazy: nothing is
+    // probed until a pipeline is built, so a serve that proxies never probes.
+    if let Some(calibration) = calibration {
+        builder = builder.calibration(calibration);
+    }
     builder.backends(backends)
 }
 

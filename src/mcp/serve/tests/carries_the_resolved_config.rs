@@ -44,6 +44,7 @@ async fn serve_builder_forwards_the_resolved_promotion_policy() {
             None,
             None,
             EarlyShutdown::unarmed(),
+            None,
         )
         .build()
         .await
