@@ -11,10 +11,16 @@
 //! awaited by anything; it is aborted at close and on `Drop`.
 
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Duration;
+
+use parking_lot::Mutex as PlMutex;
+use tokio::sync::watch;
+use tokio::task::JoinHandle;
 
 use super::{WritePipeline, WRITE_QUEUE_LANE_MAX, WRITE_QUEUE_MAX};
 use crate::embed::Embedder;
+use crate::types::SessionId;
 
 /// Sanitization clamp on a **reported** rate, in items/second — telemetry
 /// hygiene, not a bound (J3 redesign: no rate sizes a bound any more).
@@ -649,6 +655,87 @@ pub(super) async fn futures_join_all<F: std::future::Future>(futures: Vec<F>) ->
     .await
 }
 
+/// The startup calibration probe of one embedder: spawned once, read by
+/// whoever holds it, aborted when its holder goes away.
+///
+/// Its own type rather than two fields on [`WritePipeline`] so the probe can
+/// be shared (#32 design decision 14): the probe measures the **embedder**,
+/// which a process may share between many sessions' pipelines, while the
+/// observed rate measures one pipeline's own writes. #32 PR 3
+/// (`EmbedderCalibration`) holds one of these per embedder and hands every
+/// pipeline a shared reference; until then each pipeline spawns its own.
+pub(crate) struct EmbedderProbe {
+    rx: watch::Receiver<Option<Calibration>>,
+    task: PlMutex<Option<JoinHandle<()>>>,
+}
+
+impl EmbedderProbe {
+    /// Spawn the probe against `embedder`. `session` labels the log lines.
+    ///
+    /// Spawned rather than awaited, for the reason on [`WritePipeline::spawn`].
+    pub(crate) fn spawn(embedder: Arc<dyn Embedder>, session: SessionId) -> Self {
+        let (tx, rx) = watch::channel(None);
+        let task = tokio::spawn(async move {
+            let calibration = probe_embedder(embedder.as_ref()).await;
+            match calibration.items_per_sec {
+                // J3 round-1 N3. These two lines are what an operator reads
+                // about their own deployment, and both said the bounds came
+                // from the probe. They never did after the estimator demotion —
+                // the bounds are static and the second line even named
+                // `WRITE_QUEUE_MIN`, "the unmeasured floor", which THIS BRANCH
+                // deleted. Provenance first now, rates second, and neither line
+                // claims a bound was measured.
+                Some(rate) => tracing::info!(
+                    session = %session,
+                    items_per_sec = rate,
+                    serial_items_per_sec = calibration.serial_items_per_sec,
+                    bound = calibration.bound,
+                    lane_bound = calibration.lane_bound,
+                    concurrency = PROBE_CONCURRENCY,
+                    "write queue: bounds are static (lane {}, queue {}) and no rate moves them; \
+                     the rates below are telemetry measured on this deployment's embedder — the \
+                     serial leg 1-wide, the aggregate {}-wide",
+                    WRITE_QUEUE_LANE_MAX,
+                    WRITE_QUEUE_MAX,
+                    PROBE_CONCURRENCY
+                ),
+                None => tracing::warn!(
+                    session = %session,
+                    bound = calibration.bound,
+                    "write queue: the embedder could not be probed within {:?}, so there is no \
+                     rate telemetry this session and lambo_stats reports \
+                     write_queue_measured=false. The bounds are unaffected — they are static \
+                     (lane {}, queue {}) and never came from the probe. Note what a failed probe \
+                     DOES suggest: with match_strategy=hybrid (the default) an embedder that \
+                     cannot answer will also fail every derive it cannot answer",
+                    PROBE_BUDGET,
+                    WRITE_QUEUE_LANE_MAX,
+                    WRITE_QUEUE_MAX
+                ),
+            }
+            // A closed receiver means the session went away first; there is
+            // nothing to report to and nothing to fix.
+            let _ = tx.send(Some(calibration));
+        });
+        Self {
+            rx,
+            task: PlMutex::new(Some(task)),
+        }
+    }
+
+    /// The probe's calibration, or `None` until it has published.
+    pub(crate) fn current(&self) -> Option<Calibration> {
+        *self.rx.borrow()
+    }
+
+    /// Abort the probe if it is still running.
+    pub(crate) fn abort(&self) {
+        if let Some(handle) = self.task.lock().take() {
+            handle.abort();
+        }
+    }
+}
+
 impl WritePipeline {
     /// The calibration in force: the probe's, with its serial rate replaced by
     /// the observed one once enough real writes have been seen.
@@ -657,7 +744,7 @@ impl WritePipeline {
     /// stand alone — a probe that failed publishes nothing, and a session must
     /// still be able to earn a real bound after starting on the floor.
     pub fn calibration(&self) -> Option<Calibration> {
-        let probe = *self.calibration.borrow();
+        let probe = self.probe.current();
         let observed = self.observed.lock().items_per_sec();
         let calibration = match (probe, observed) {
             (Some(probe), Some(rate)) => Some(probe.with_observed_serial(rate)),
@@ -704,8 +791,6 @@ impl WritePipeline {
     /// Abort the calibration probe. Called from `Memory`'s `Drop` and from
     /// `close()`: a probe outliving its session is an embed nobody will read.
     pub(crate) fn abort_probe(&self) {
-        if let Some(handle) = self.probe.lock().take() {
-            handle.abort();
-        }
+        self.probe.abort();
     }
 }

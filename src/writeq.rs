@@ -65,7 +65,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
 
 use parking_lot::Mutex as PlMutex;
-use tokio::sync::{watch, Notify, Semaphore};
+use tokio::sync::{Notify, Semaphore};
 use tokio::task::JoinHandle;
 
 use crate::types::AgentId;
@@ -100,7 +100,7 @@ pub use replay::EMBEDDER_SICK_THRESHOLD;
 
 // Crate-internal names the sibling modules reach through `super::`.
 use admission::{Job, JobPayload, Lanes};
-use calibration::{probe_embedder, ObservedRate};
+use calibration::{EmbedderProbe, ObservedRate};
 use receipts::{model_safe_failure, settle_one, Entry, Receipts};
 
 // ---------------------------------------------------------------------------
@@ -130,11 +130,13 @@ pub struct WritePipeline {
     /// Fair-share cap on concurrent receipt waits (see
     /// [`MAX_CONCURRENT_RECEIPT_WAITS`]).
     wait_slots: Arc<Semaphore>,
-    calibration: watch::Receiver<Option<Calibration>>,
+    /// The startup calibration probe of this pipeline's embedder (telemetry).
+    /// Its own type so #32 PR 3 can share one probe per embedder across every
+    /// pipeline in the process (`EmbedderCalibration`, design decision 14).
+    probe: EmbedderProbe,
     /// Service time observed on real writes, which **replaces** the probe's
     /// serial figure once [`OBSERVED_MIN_SAMPLES`] have been seen (J3-R1-2).
     observed: Arc<PlMutex<ObservedRate>>,
-    probe: PlMutex<Option<JoinHandle<()>>>,
     /// Cross-restart receipt answers (J3 durable intents): receipts issued by
     /// **previous** processes whose fate this process knows — from the loaded
     /// intent records at attach (unconsumed → `Pending`; consumed → the stored
@@ -187,51 +189,7 @@ impl WritePipeline {
     /// and still always publishes something, for the same reason it survives at
     /// all: the probe/observed pair is the divergence telemetry.
     pub(crate) fn spawn(ctx: WriteCtx, clock: crate::daemon::Clock) -> Self {
-        let (tx, rx) = watch::channel(None);
-        let embedder = ctx.embedder.clone();
-        let session = ctx.session.clone();
-        let probe = tokio::spawn(async move {
-            let calibration = probe_embedder(embedder.as_ref()).await;
-            match calibration.items_per_sec {
-                // J3 round-1 N3. These two lines are what an operator reads
-                // about their own deployment, and both said the bounds came
-                // from the probe. They never did after the estimator demotion —
-                // the bounds are static and the second line even named
-                // `WRITE_QUEUE_MIN`, "the unmeasured floor", which THIS BRANCH
-                // deleted. Provenance first now, rates second, and neither line
-                // claims a bound was measured.
-                Some(rate) => tracing::info!(
-                    session = %session,
-                    items_per_sec = rate,
-                    serial_items_per_sec = calibration.serial_items_per_sec,
-                    bound = calibration.bound,
-                    lane_bound = calibration.lane_bound,
-                    concurrency = PROBE_CONCURRENCY,
-                    "write queue: bounds are static (lane {}, queue {}) and no rate moves them; \
-                     the rates below are telemetry measured on this deployment's embedder — the \
-                     serial leg 1-wide, the aggregate {}-wide",
-                    WRITE_QUEUE_LANE_MAX,
-                    WRITE_QUEUE_MAX,
-                    PROBE_CONCURRENCY
-                ),
-                None => tracing::warn!(
-                    session = %session,
-                    bound = calibration.bound,
-                    "write queue: the embedder could not be probed within {:?}, so there is no \
-                     rate telemetry this session and lambo_stats reports \
-                     write_queue_measured=false. The bounds are unaffected — they are static \
-                     (lane {}, queue {}) and never came from the probe. Note what a failed probe \
-                     DOES suggest: with match_strategy=hybrid (the default) an embedder that \
-                     cannot answer will also fail every derive it cannot answer",
-                    PROBE_BUDGET,
-                    WRITE_QUEUE_LANE_MAX,
-                    WRITE_QUEUE_MAX
-                ),
-            }
-            // A closed receiver means the session went away first; there is
-            // nothing to report to and nothing to fix.
-            let _ = tx.send(Some(calibration));
-        });
+        let probe = EmbedderProbe::spawn(ctx.embedder.clone(), ctx.session.clone());
         Self {
             ctx: Arc::new(ctx),
             lanes: Arc::new(PlMutex::new(Lanes::default())),
@@ -239,9 +197,8 @@ impl WritePipeline {
             counters: Arc::new(WriteQueueCounters::default()),
             settled: Arc::new(Notify::new()),
             wait_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_RECEIPT_WAITS)),
-            calibration: rx,
             observed: Arc::new(PlMutex::new(ObservedRate::default())),
-            probe: PlMutex::new(Some(probe)),
+            probe,
             restart: PlMutex::new(HashMap::new()),
             replay: PlMutex::new(None),
             epoch: rand_epoch(),
