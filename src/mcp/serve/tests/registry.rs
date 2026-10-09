@@ -200,8 +200,15 @@ async fn http(
         head.push_str(&format!("Mcp-Session-Id: {id}\r\n"));
     }
     head.push_str("\r\n");
-    sock.write_all(head.as_bytes()).await.expect("write head");
-    sock.write_all(body.as_bytes()).await.expect("write body");
+    // Head and body in one write. A refusal the guard answers before
+    // reading the body (the session cap's 503) closes the connection; a
+    // body arriving in a second segment after that close drew a TCP reset
+    // that, on a loaded machine, beat the response to the client
+    // (`ConnectionReset` on the read, seen once in the embed-candle row).
+    head.push_str(body);
+    sock.write_all(head.as_bytes())
+        .await
+        .expect("write request");
     let mut raw = Vec::new();
     tokio::time::timeout(Duration::from_secs(20), sock.read_to_end(&mut raw))
         .await
