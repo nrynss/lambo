@@ -12,6 +12,36 @@ use std::sync::{Arc, LazyLock, Mutex, MutexGuard, OnceLock};
 use parking_lot::Mutex as PlMutex;
 use tracing_subscriber::fmt::MakeWriter;
 
+use crate::embed::{EmbedError, Embedder};
+
+/// The text role a delegating test embedder forwards (#22).
+///
+/// A wrapper that counts, gates, refuses or rewrites embeds keeps its
+/// behaviour in one `embed_as(text, role)` and calls [`TextRole::embed`] on
+/// its inner embedder where it used to call `embed`. Its `embed` passes
+/// [`TextRole::Document`] and its `embed_query` [`TextRole::Query`], so the
+/// wrapper does the same thing in both roles while the inner adapter sees the
+/// role the caller asked for. (Implementing only `embed` would hand every
+/// query to the inner adapter's *document* role: the trap the `Embedder`
+/// docs describe.)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextRole {
+    /// [`Embedder::embed`].
+    Document,
+    /// [`Embedder::embed_query`].
+    Query,
+}
+
+impl TextRole {
+    /// Embed `text` through `inner` in this role.
+    pub async fn embed(self, inner: &dyn Embedder, text: &str) -> Result<Vec<f32>, EmbedError> {
+        match self {
+            Self::Document => inner.embed(text).await,
+            Self::Query => inner.embed_query(text).await,
+        }
+    }
+}
+
 /// Take the process-environment lock: the only way a lib test may mutate the
 /// environment.
 ///
@@ -368,5 +398,42 @@ mod env_guard_tests {
         let _env = env_lock();
         assert_eq!(std::env::var_os(UNSET), None);
         assert_eq!(std::env::var_os(SET), Some(original));
+    }
+}
+
+#[cfg(test)]
+mod text_role_tests {
+    use super::TextRole;
+    use crate::embed::{EmbedError, Embedder};
+
+    /// Answers `[1, 0]` as a document and `[0, 1]` as a query.
+    struct TwoRoles;
+
+    #[async_trait::async_trait]
+    impl Embedder for TwoRoles {
+        fn dimensions(&self) -> usize {
+            2
+        }
+        async fn embed(&self, _text: &str) -> Result<Vec<f32>, EmbedError> {
+            Ok(vec![1.0, 0.0])
+        }
+        async fn embed_query(&self, _text: &str) -> Result<Vec<f32>, EmbedError> {
+            Ok(vec![0.0, 1.0])
+        }
+    }
+
+    /// #22: the helper every delegating test embedder forwards through
+    /// reaches the role it names, so a wrapper never turns a query into a
+    /// document embed.
+    #[tokio::test]
+    async fn each_role_reaches_its_own_method() {
+        assert_eq!(
+            TextRole::Document.embed(&TwoRoles, "x").await.unwrap(),
+            vec![1.0, 0.0]
+        );
+        assert_eq!(
+            TextRole::Query.embed(&TwoRoles, "x").await.unwrap(),
+            vec![0.0, 1.0]
+        );
     }
 }

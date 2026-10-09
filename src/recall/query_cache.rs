@@ -8,6 +8,17 @@
 //! the second one its embed, and a vector embedded under one contract is
 //! never handed to a reader expecting another.
 //!
+//! **Only query-role vectors** (#22). Every entry is filled from
+//! [`super::candidates::embed_query`], which calls
+//! [`Embedder::embed_query`], so the key (query text, contract) names exactly
+//! what was embedded: that text, in the query role, under that contract. An
+//! adapter whose query role depends on a prompt names its prompt profile in
+//! the contract's `model`, so a profile change misses rather than serving a
+//! vector from the old prompt. Nothing may insert a document-role vector
+//! (`Embedder::embed`) here: for an asymmetric model it is a different vector
+//! for the same text. Image queries (recall by image, a later #22 PR) are not
+//! cached.
+//!
 //! **Scope: one per session, inside `Memory`** (#32 decision 13). A
 //! process-wide cache keyed by text alone would let one user learn, from
 //! reply timing, that another user had run the same query. Do not share an
