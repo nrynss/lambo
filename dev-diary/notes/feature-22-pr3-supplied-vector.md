@@ -120,7 +120,14 @@ write-side check never sees anything else.
 `WriteIntentPayload::DeriveImage` are their own variants (Q18). An image job
 runs the derive arm with the vector supplied; it is refused with `Config`
 under the `Canonical` strategy (a replay in a differently configured process
-meets that). The byte charge is the derive's strings plus the content, four
+meets that). At replay such a refusal (the canonical strategy, or a store
+without vector search) **stops** the replay, as any `Config` does, rather
+than skip the intent: skipping would break the lane order, and a later text
+intent could create the image's canonical key first (the M1 squat). It has
+its own block reason, `ReplayBlockReason::ImageConfig`
+(`write_queue_replay_blocked = "image_config"`), and a warn line naming the
+fix, so an operator can tell it from a store or lease fault (review L4).
+The byte charge is the derive's strings plus the content, four
 bytes per component and the contract's strings. `WriteKind::DeriveImage`
 reports `lambo_derive_image`, and the receipt reads
 `derived 1 image concept(s): C created (E embedded), M matched existing`.

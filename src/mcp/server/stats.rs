@@ -275,6 +275,7 @@ impl LamboServer {
                     crate::writeq::ReplayBlockReason::None => json!(null),
                     crate::writeq::ReplayBlockReason::Embedder => json!("embedder"),
                     crate::writeq::ReplayBlockReason::Other => json!("other"),
+                    crate::writeq::ReplayBlockReason::ImageConfig => json!("image_config"),
                 },
             );
             obj.insert("receipts_retained".into(), json!(queue.receipts_retained()));

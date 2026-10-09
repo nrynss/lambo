@@ -591,3 +591,65 @@ async fn a_replayed_image_intent_under_its_own_contract_applies() {
     ));
     mem.close().await.unwrap();
 }
+
+/// #22 review L4: an image intent at the head of the backlog in a process
+/// that cannot apply one (no vector-search store, or the canonical
+/// strategy) stops the replay with its own block reason, and the intent
+/// stays durable and unconsumed for a process that can.
+#[cfg(feature = "fixtures")]
+#[tokio::test]
+async fn a_replayed_image_intent_this_process_cannot_apply_names_its_block_reason() {
+    let _quiet = crate::test_util::quiet_logs();
+    for (session, vector_search, strategy) in [
+        ("image-replay-no-vectors", false, MatchStrategy::Hybrid),
+        ("image-replay-canonical", true, MatchStrategy::Canonical),
+    ] {
+        let store = Arc::new(MemoryStore::new());
+        let receipt = plant_image_intent(&store, session, live());
+        let backing: Arc<dyn GraphStore> = if vector_search {
+            Arc::new(VectorSearchable(store.clone()))
+        } else {
+            store.clone()
+        };
+        let mem = Memory::builder()
+            .session(session)
+            .agent("agent-a")
+            .flush_interval(Duration::from_secs(3_600))
+            .store(backing)
+            .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
+            .embedding_contract(live())
+            .match_strategy(strategy)
+            .build()
+            .await
+            .expect("build");
+        let counters = mem.pipeline().counters();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while counters.replay_blocked() == crate::writeq::ReplayBlockReason::None {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{session}: replay blocks"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            counters.replay_blocked(),
+            crate::writeq::ReplayBlockReason::ImageConfig,
+            "{session}"
+        );
+        assert_eq!(counters.replay_owed(), 1, "{session}: still owed");
+        assert_eq!(
+            mem.pipeline()
+                .lookup(&agent(), std::str::FromStr::from_str(&receipt).unwrap())
+                .tag(),
+            "pending_replay",
+            "{session}"
+        );
+        assert!(image_concepts(&mem).is_empty());
+        mem.close().await.unwrap();
+        let snap = store.load_session(&SessionId::new(session)).await.unwrap();
+        assert!(
+            snap.write_intents[0].outcome.is_none(),
+            "{session}: durable and unconsumed"
+        );
+    }
+}

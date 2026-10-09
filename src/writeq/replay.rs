@@ -356,6 +356,33 @@ impl WritePipeline {
                         );
                         ReceiptAnswer::Failed(why)
                     }
+                    // #22 review L4: an image intent this process's
+                    // configuration cannot apply (not the hybrid strategy, or
+                    // no vector search) is a `Config` refusal like any other,
+                    // and stops the replay for the same reason: skipping it
+                    // would break the lane order, and a later intent could
+                    // create the image's canonical key as text first. It gets
+                    // its own block reason and log line, because the text
+                    // intents behind it would apply and the fix is specific.
+                    Err(LamboError::Config(e))
+                        if matches!(job.payload, JobPayload::DeriveImage { .. }) =>
+                    {
+                        this.counters
+                            .set_replay_blocked(ReplayBlockReason::ImageConfig);
+                        tracing::warn!(
+                            session = %this.ctx.session,
+                            receipt = %intent.receipt,
+                            error = %e,
+                            applied,
+                            remaining = backlog - applied - failed,
+                            "write queue: a durable IMAGE derive intent cannot be replayed by this \
+                             process (an image derive needs match_strategy = hybrid and a store \
+                             with vector search); it stays DURABLE and unconsumed, and the replay \
+                             stops here so the rest of the backlog keeps its order. Restart with \
+                             the hybrid strategy and a vector-search store to drain it"
+                        );
+                        break;
+                    }
                     // Anything else (store/lease/config) — session-wide and
                     // non-embedder; the next job would hit it too. Stop, leave
                     // everything durable, and name the block reason.

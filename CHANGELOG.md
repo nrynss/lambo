@@ -26,6 +26,11 @@
   image concepts out of its coverage rule and refuses while one carries a
   vector; `Graph::reembed_all_dropping_image_vectors` is the variant that
   nulls them.
+- `ReplayBlockReason` gains a variant, `ImageConfig` (#22), and the
+  `write_queue_replay_blocked` stat a value, `"image_config"`: a durable
+  image intent replayed by a process whose strategy is not `hybrid` or
+  whose store has no vector search stops the replay with that reason and a
+  log line saying what to change, rather than the generic `"other"`.
 - `EmbedError` gains a variant, `Unsupported` (#22): an embedder refusing a
   kind of input it cannot embed at all, such as an image sent to a text-only
   model. `is_transient()` classes it as permanent. `EmbedError` is also now
