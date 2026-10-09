@@ -440,7 +440,7 @@ Full transcripts for every run live in [`evidence/`](https://github.com/nrynss/l
 {/* lambo-site-only:end */}
 ## Limits
 
-Lambo enforces these when the call runs. The published tool schemas do not carry the maxima, so your client will not reject an out-of-range value before sending it. Expect to learn about an out-of-range value from the error rather than from your client.
+Lambo enforces these when the call runs, and the published tool schemas carry the same bounds (a `maxLength` or an `enum` on every string, `minimum` and `maximum` on every integer), so a client that validates against the schema can catch an out-of-range value before sending it.
 
 | Limit | Value |
 |---|---|
@@ -459,10 +459,6 @@ Lambo enforces these when the call runs. The published tool schemas do not carry
 | Values in a `lambo_derive_image` vector | 4096 |
 
 Every limit above is a maximum. `top_k`, `max_tokens`, and `ttl_seconds` also have a minimum of `1`, so `0` is refused. `wait_ms` is the one limit that **clamps rather than refuses**: a larger value waits the maximum instead of erroring, because a client asking to wait longer than Lambo will wait is asking for something harmless.
-
-<Warning>
-The published schema for `top_k` states a minimum of `0`, which the runtime does not accept. If you generate a client from the schema, do not let it send `top_k: 0`. It comes back as `top_k must be in 1..=100`.
-</Warning>
 
 `lambo_inspect` renders at most 200 neighbours in total across every hop, not 200 per hop.
 

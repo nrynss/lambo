@@ -199,7 +199,7 @@ Stores concepts from the current interaction. Lambo stamps the time itself, so t
 | `--concept <CONTENT:KIND>` | No | An extra concept. Repeat it to derive several in one call. |
 | `--parent-of <CHILD:PARENT>` | No | A hierarchy pair. Repeat it for several links. |
 
-`--parent-of` puts the child left of the colon and the parent right of it. Each value takes exactly one colon, and Lambo refuses extra colons as ambiguous.
+`--parent-of` puts the child left of the first colon and the parent right of it. Only the first colon separates, so the parent may itself contain colons (an IPv6 CIDR such as `2001:db8::/32`); the child and the parent must both be non-empty.
 
 ```bash
 $ lambo derive --session demo --agent agent-a \
@@ -252,7 +252,7 @@ $ lambo record-action --session demo --agent agent-a \
     --action "created migrations/003.sql" \
     --produces "migrations/003.sql" \
     --depends-on "user schema"
-recorded action 'created migrations/003.sql': 2 concept(s) created, 2 edge(s) added
+recorded action 'created migrations/003.sql': 2 concept(s) created (2 embedded), 2 edge(s) added
 ```
 
 ### lambo reserve and lambo release
