@@ -1,0 +1,539 @@
+{
+  "lambo_derive": {
+    "description": "Derive concepts from the current interaction into session memory. created_at is stamped server-side. event_time is optional RFC3339 historical about-time, such as a commit or document date; omit it for a live fact, which is about now. Returns as soon as the input is validated and ordered — the write is applied in the background and the ack carries a receipt id. The outcome is piggybacked on your next tool response; to wait for it, call lambo_stats with that receipt and a wait_ms.",
+    "inputSchema": {
+      "$defs": {
+        "WireConcept": {
+          "additionalProperties": false,
+          "properties": {
+            "concept_type": {
+              "$ref": "#/$defs/WireConceptType",
+              "description": "One of `entity`, `logic`, `constraint`, `resource`, `observation`."
+            },
+            "content": {
+              "description": "The concept text.",
+              "maxLength": 16384,
+              "type": "string"
+            }
+          },
+          "required": [
+            "content",
+            "concept_type"
+          ],
+          "type": "object"
+        },
+        "WireConceptType": {
+          "description": "What kind of thing a concept is. Pick the one that fits the content best:\n\n- `entity` — a named thing: a person, service, file, table, or component.\n- `logic` — a rule, decision, or piece of reasoning about how things work.\n- `constraint` — a requirement or limit that must keep holding.\n- `resource` — something produced, consumed, or acted on by the work.\n- `observation` — something noticed in passing; the weakest kind, and\n  the only one that can later be demoted.",
+          "enum": [
+            "entity",
+            "logic",
+            "constraint",
+            "resource",
+            "observation"
+          ],
+          "type": "string"
+        },
+        "WireParentOf": {
+          "additionalProperties": false,
+          "properties": {
+            "child": {
+              "maxLength": 16384,
+              "type": "string"
+            },
+            "parent": {
+              "maxLength": 16384,
+              "type": "string"
+            }
+          },
+          "required": [
+            "parent",
+            "child"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "agent_id": {
+          "description": "Id of the agent making this call. Caller-asserted and unverified: work\nis recorded under exactly the id you send. Use one stable id per agent —\ncallers sharing an id share its memory attribution and its soft locks.",
+          "maxLength": 16384,
+          "type": "string"
+        },
+        "concepts": {
+          "description": "Concepts to derive from this interaction.",
+          "items": {
+            "$ref": "#/$defs/WireConcept"
+          },
+          "type": "array"
+        },
+        "event_time": {
+          "description": "Optional RFC3339 historical about-time for this evidence, such as a\ncommit or document date. Omit it for a live fact, which is about now.\nNo additional date-range bounds are applied.",
+          "format": "date-time",
+          "maxLength": 16384,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parent_of": {
+          "description": "Optional `(parent, child)` hierarchy pairs. Both ends resolve (and may\nbe created) as concepts.",
+          "items": {
+            "$ref": "#/$defs/WireParentOf"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "agent_id",
+        "concepts"
+      ],
+      "type": "object"
+    }
+  },
+  "lambo_derive_image": {
+    "description": "Derive one image concept into session memory: a caption, plus either the image itself (image: mime and base64 data, embedded by this server) or a vector you computed in this session's embedding space (vector: values and contract, from lambo_stats embedding_contract). Send exactly one of image or vector. The concept's content is the caption plus [image:<image_id>] and its vector is the image's, so a text recall finds it; the same caption and image_id derived again is the same concept. created_at is stamped server-side; event_time, parent_of, the ack and its receipt work as for lambo_derive.",
+    "inputSchema": {
+      "$defs": {
+        "WireEmbeddingContract": {
+          "additionalProperties": false,
+          "description": "An embedding space: copy it from `lambo_stats`' `embedding_contract`.",
+          "properties": {
+            "dim": {
+              "description": "Vector width.",
+              "format": "uint",
+              "maximum": 4096,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "kind": {
+              "description": "Embedder kind, e.g. `embeddinggemma2`.",
+              "maxLength": 16384,
+              "type": "string"
+            },
+            "model": {
+              "description": "Model string, exactly as `lambo_stats` reports it (omit or null for\nthe server default).",
+              "maxLength": 16384,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "dim"
+          ],
+          "type": "object"
+        },
+        "WireImage": {
+          "additionalProperties": false,
+          "description": "One image, inline.",
+          "properties": {
+            "data": {
+              "description": "The image bytes in base64 (standard alphabet, padded). At most 2 MiB\ndecoded, and at most 4096 pixels a side.",
+              "maxLength": 2796204,
+              "type": "string"
+            },
+            "mime": {
+              "description": "The image's media type, which must match its bytes: `image/png`,\n`image/jpeg` or `image/webp`.",
+              "enum": [
+                "image/png",
+                "image/jpeg",
+                "image/webp"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "mime",
+            "data"
+          ],
+          "type": "object"
+        },
+        "WireImageConceptType": {
+          "description": "What kind of thing the image is. One of `entity`, `logic`, `constraint`,\n`resource` (an image cannot be an `observation`).",
+          "enum": [
+            "entity",
+            "logic",
+            "constraint",
+            "resource"
+          ],
+          "type": "string"
+        },
+        "WireParentOf": {
+          "additionalProperties": false,
+          "properties": {
+            "child": {
+              "maxLength": 16384,
+              "type": "string"
+            },
+            "parent": {
+              "maxLength": 16384,
+              "type": "string"
+            }
+          },
+          "required": [
+            "parent",
+            "child"
+          ],
+          "type": "object"
+        },
+        "WireVector": {
+          "additionalProperties": false,
+          "description": "A vector you computed for the image, in this session's embedding space.",
+          "properties": {
+            "contract": {
+              "$ref": "#/$defs/WireEmbeddingContract",
+              "description": "The embedding space the vector was computed in. It must equal this\nsession's `embedding_contract` exactly."
+            },
+            "values": {
+              "description": "The components, `dim` of them. Lambo normalizes the vector to unit\nlength.",
+              "items": {
+                "format": "float",
+                "type": "number"
+              },
+              "maxItems": 4096,
+              "type": "array"
+            }
+          },
+          "required": [
+            "values",
+            "contract"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "agent_id": {
+          "description": "Id of the agent making this call. Caller-asserted and unverified: work\nis recorded under exactly the id you send. Use one stable id per agent —\ncallers sharing an id share its memory attribution and its soft locks.",
+          "maxLength": 16384,
+          "type": "string"
+        },
+        "caption": {
+          "description": "What the image is, in words. It is the concept's text: keyword recall\nand the recall display read it. It may not contain `[image:`.",
+          "maxLength": 16384,
+          "type": "string"
+        },
+        "concept_type": {
+          "$ref": "#/$defs/WireImageConceptType",
+          "description": "One of `entity`, `logic`, `constraint`, `resource`."
+        },
+        "event_time": {
+          "description": "Optional RFC3339 historical about-time for this evidence, such as a\ncommit or document date. Omit it for a live fact, which is about now.\nNo additional date-range bounds are applied.",
+          "format": "date-time",
+          "maxLength": 16384,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "image": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WireImage"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The image itself, for this server to embed. Send exactly one of\n`image` and `vector`."
+        },
+        "image_id": {
+          "description": "Your id for this image: 1 to 64 lowercase letters and digits. The\nconcept's content is the caption plus `[image:<image_id>]`; the same\ncaption and id derived again is the same concept. Omit it for an id\nmade from the image's digest.",
+          "maxLength": 64,
+          "pattern": "^[a-z0-9]{1,64}$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parent_of": {
+          "description": "Optional `(parent, child)` hierarchy pairs. Both ends resolve (and may\nbe created) as concepts; name the image concept by its content,\n`caption [image:<image_id>]`.",
+          "items": {
+            "$ref": "#/$defs/WireParentOf"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "vector": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WireVector"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "A vector you computed for the image instead (accepted only when the\noperator enabled client vectors). Send exactly one of `image` and\n`vector`."
+        }
+      },
+      "required": [
+        "agent_id",
+        "caption",
+        "concept_type"
+      ],
+      "type": "object"
+    }
+  },
+  "lambo_inspect": {
+    "description": "Inspect the neighbourhood around a concept: its type, canonization status, blast radius and typed edges out to a depth.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "agent_id": {
+          "description": "Id of the agent making this call. Caller-asserted and unverified: work\nis recorded under exactly the id you send. Use one stable id per agent —\ncallers sharing an id share its memory attribution and its soft locks.",
+          "maxLength": 16384,
+          "type": "string"
+        },
+        "depth": {
+          "description": "Hops out from the focus (default 2, max 5).",
+          "format": "uint",
+          "maximum": 5,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "focus": {
+          "description": "Concept content, a node UUID, or the short-form id rendered in recall\nblocks, to centre the neighbourhood on.",
+          "maxLength": 16384,
+          "type": "string"
+        }
+      },
+      "required": [
+        "agent_id",
+        "focus"
+      ],
+      "type": "object"
+    }
+  },
+  "lambo_recall": {
+    "description": "Recall relevant memory for a query and return the Lambo context block (canonical markers, blast-radius warnings, conflict lines).",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "agent_id": {
+          "description": "Id of the agent making this call. Caller-asserted and unverified: work\nis recorded under exactly the id you send. Use one stable id per agent —\ncallers sharing an id share its memory attribution and its soft locks.",
+          "maxLength": 16384,
+          "type": "string"
+        },
+        "max_tokens": {
+          "description": "Token budget for the rendered context block.",
+          "format": "uint",
+          "maximum": 100000,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "query": {
+          "description": "Natural-language query.",
+          "maxLength": 16384,
+          "type": "string"
+        },
+        "top_k": {
+          "description": "Hits to return. Defaults to the session config's `default_top_k`.",
+          "format": "uint",
+          "maximum": 100,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "traversal_depth": {
+          "description": "Graph traversal depth for phase 2 expansion.",
+          "format": "uint",
+          "maximum": 5,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "agent_id",
+        "query"
+      ],
+      "type": "object"
+    }
+  },
+  "lambo_record_action": {
+    "description": "Record an action the agent took, with what it produces, modifies and depends on. created_at is stamped server-side. event_time is optional RFC3339 historical about-time, such as a commit or document date; omit it for a live fact, which is about now. Returns as soon as the input is validated and ordered — the write is applied in the background and the ack carries a receipt id, resolved the same way as lambo_derive's.",
+    "inputSchema": {
+      "$defs": {
+        "WireResource": {
+          "description": "One entry in a `lambo_record_action` resource list (`produces`,\n`modifies`, `depends_on`). A plain string on the wire, with the same\nper-string size cap the runtime enforces, so a client can pre-validate an\nentry without a round trip.",
+          "maxLength": 16384,
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "description": "The action taken — becomes a `Resource` concept.",
+          "maxLength": 16384,
+          "type": "string"
+        },
+        "agent_id": {
+          "description": "Id of the agent making this call. Caller-asserted and unverified: work\nis recorded under exactly the id you send. Use one stable id per agent —\ncallers sharing an id share its memory attribution and its soft locks.",
+          "maxLength": 16384,
+          "type": "string"
+        },
+        "depends_on": {
+          "description": "Things this action depends on (`Dependency` edges).",
+          "items": {
+            "$ref": "#/$defs/WireResource"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "event_time": {
+          "description": "Optional RFC3339 historical about-time for this evidence, such as a\ncommit or document date. Omit it for a live fact, which is about now.\nNo additional date-range bounds are applied.",
+          "format": "date-time",
+          "maxLength": 16384,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "modifies": {
+          "description": "Resources this action mutates (`Causal` edges).",
+          "items": {
+            "$ref": "#/$defs/WireResource"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "produces": {
+          "description": "Resources this action creates (`Causal` edges).",
+          "items": {
+            "$ref": "#/$defs/WireResource"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "agent_id",
+        "action"
+      ],
+      "type": "object"
+    }
+  },
+  "lambo_reserve": {
+    "description": "Take a soft lock on a memory node before editing it (or release one). Reservations are advisory and do not survive a server restart. The lock is held under the agent_id you send, which is caller-asserted and unverified: a distinct id gets a distinct lock, and callers sharing an id share the lock.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "agent_id": {
+          "description": "Id of the agent making this call — the identity the lock is held under.\nCaller-asserted and unverified: locks are cooperative. A distinct id\ngets a distinct lock; two callers sending the SAME id share one lock and\ncan release each other's. Use one stable id per agent.",
+          "maxLength": 16384,
+          "type": "string"
+        },
+        "node_id": {
+          "description": "Node to reserve, as a UUID string (from `lambo_recall` or\n`lambo_inspect`).",
+          "maxLength": 16384,
+          "type": "string"
+        },
+        "release": {
+          "description": "Release this agent's existing soft lock instead of taking one.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "ttl_seconds": {
+          "description": "Soft-lock lifetime in seconds (default 30, max 3600).",
+          "format": "uint64",
+          "maximum": 3600,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "agent_id",
+        "node_id"
+      ],
+      "type": "object"
+    }
+  },
+  "lambo_saints": {
+    "description": "List the session's canonical memories — concepts that earned Canonical status through the audited transition path.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "agent_id": {
+          "description": "Id of the agent making this call. Caller-asserted and unverified: work\nis recorded under exactly the id you send. Use one stable id per agent —\ncallers sharing an id share its memory attribution and its soft locks.",
+          "maxLength": 16384,
+          "type": "string"
+        }
+      },
+      "required": [
+        "agent_id"
+      ],
+      "type": "object"
+    }
+  },
+  "lambo_stats": {
+    "description": "Session health: flush lag, write-behind log depth, background write queue depth, node/edge/concept counts, canonization progress and degraded state. Pass a receipt from a lambo_derive or lambo_record_action ack to ask what happened to that one write, and wait_ms to wait for it to be applied first.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "additionalProperties": false,
+      "properties": {
+        "agent_id": {
+          "description": "Id of the agent making this call. Caller-asserted and unverified: work\nis recorded under exactly the id you send. Use one stable id per agent —\ncallers sharing an id share its memory attribution and its soft locks.",
+          "maxLength": 16384,
+          "type": "string"
+        },
+        "receipt": {
+          "description": "A write receipt id from a `lambo_derive` or `lambo_record_action` ack.\nAnswers what happened to that one write: applied, failed, dropped,\npending, expired, restart-lost or never-issued. Receipts are scoped to\nthe agent that created them.",
+          "maxLength": 16384,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "wait_ms": {
+          "description": "With `receipt`, wait up to this many milliseconds for the write to be\napplied before answering — the opt-in synchrony that restores\nread-your-writes when you need it. Clamped to the server's own maximum.\nIgnored without `receipt`.\n\nThe published maximum is [`crate::writeq::RECEIPT_WAIT_MAX`] in\nmilliseconds — a client that sends more is clamped to it rather than\nrefused, and `the_published_wait_maximum_is_the_real_one` pins the\nliteral below to the constant (T88-H4 requires a *published* maximum,\nand `schemars` takes a literal).",
+          "format": "uint64",
+          "maximum": 34000,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "agent_id"
+      ],
+      "type": "object"
+    }
+  }
+}

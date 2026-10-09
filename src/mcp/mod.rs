@@ -3,7 +3,9 @@
 //! `lambo serve --session S --transport stdio|http` exposes seven tools —
 //! `lambo_recall`, `lambo_derive`, `lambo_record_action`, `lambo_reserve`,
 //! `lambo_inspect`, `lambo_saints`, `lambo_stats` — over the
-//! [rmcp](https://docs.rs/rmcp) server SDK.
+//! [rmcp](https://docs.rs/rmcp) server SDK, plus `lambo_derive_image` (#22)
+//! when the deployment can serve it (an embedder that embeds images, or
+//! `[embedder] accept_client_vectors = true`).
 //!
 //! This is *Lambo's* MCP server, which agents use to **write** memory. It is
 //! not CockroachDB's managed MCP server, which is separate, read-only, and used

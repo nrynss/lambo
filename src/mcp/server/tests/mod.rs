@@ -27,6 +27,7 @@ use rmcp::model::ContentBlock;
 use serde_json::json;
 use std::time::Duration;
 
+mod derive_image;
 mod errors;
 mod inspect;
 mod ledger;
@@ -101,6 +102,29 @@ impl Embedder for TextOnly {
     fn as_any(&self) -> Option<&dyn std::any::Any> {
         self.0.as_any()
     }
+}
+
+/// A server that can serve an image derive (#22): the fixture embedder, which
+/// embeds images, over a `MemoryStore` that claims vector search, under the
+/// default (`Hybrid`) strategy.
+async fn image_server(session: &str, config: Config) -> LamboServer {
+    server_with_parts(
+        session,
+        Arc::new(crate::test_util::VectorSearchable(Arc::new(
+            MemoryStore::new(),
+        ))),
+        Arc::new(FixtureEmbedder::new()),
+        fixture_contract(),
+        config,
+    )
+    .await
+}
+
+/// A PNG the fixture embeds exactly as the text query `label`, base64-encoded
+/// for the wire.
+fn png_b64(label: &str) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(crate::embed::png_with_label(label))
 }
 
 /// A server whose embedder embeds text only, over a plain `MemoryStore`.
@@ -238,6 +262,7 @@ async fn call_raw(s: &LamboServer, name: &str, args: serde_json::Value) -> CallT
         "lambo_inspect" => s.lambo_inspect(parse(args)).await,
         "lambo_saints" => s.lambo_saints(parse(args)).await,
         "lambo_stats" => s.lambo_stats(parse(args)).await,
+        "lambo_derive_image" => s.lambo_derive_image(parse(args)).await,
         other => panic!("unknown tool {other}"),
     }
 }

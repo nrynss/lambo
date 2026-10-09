@@ -133,6 +133,21 @@ pub(super) fn redact_urls(s: &str) -> String {
         .join(" ")
 }
 
+/// Refuse a call this deployment is not configured to serve, naming the
+/// setting (#22: `lambo_derive_image` without an image embedder, or with a
+/// client vector while `[embedder] accept_client_vectors` is off).
+///
+/// The message is Lambo's own text about Lambo's own configuration keys, so
+/// unlike a `LamboError::Config` from the core (which can quote a DSN or a
+/// path, and goes through [`tool_err`]) it is shown whole. Same ledger class
+/// as `tool_err` gives a `Config`.
+pub(super) fn config_refusal(what: &str, msg: &str) -> CallToolResult {
+    note_error("configuration error");
+    CallToolResult::error(vec![ContentBlock::text(format!(
+        "{what}: configuration error: {msg}"
+    ))])
+}
+
 /// Reject a parameter the server will not act on.
 ///
 /// A bad parameter is the *client's* problem and it is worth surfacing where

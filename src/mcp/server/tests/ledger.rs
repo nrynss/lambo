@@ -87,6 +87,19 @@ async fn i1_every_tool_call_appends_exactly_one_parseable_ledger_line() {
         }),
     )
     .await;
+    // #22: listed here because the fixture embeds images. This store has no
+    // vector search, so it is refused, which still writes its one line.
+    call(
+        &s,
+        "lambo_derive_image",
+        json!({
+            "agent_id": "agent-a",
+            "caption": "red silk saree",
+            "concept_type": "resource",
+            "image": {"mime": "image/png", "data": png_b64("red silk saree")},
+        }),
+    )
+    .await;
 
     let published: Vec<String> = tools(&s).iter().map(|t| t.name.to_string()).collect();
     let lines = read_ledger(&ledger, published.len() as u64);
