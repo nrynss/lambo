@@ -550,3 +550,65 @@ async fn a_shared_calibration_keeps_the_probe_fields_and_per_session_observation
     a.mem.close().await.expect("close a");
     b.mem.close().await.expect("close b");
 }
+
+/// #22 PR 4: `lambo_stats` tells a client which space to compute a vector in
+/// (the session's stamp, else the live contract) with `model` whole, and what
+/// the embedder embeds.
+#[tokio::test]
+async fn stats_reports_the_embedding_contract_and_modalities() {
+    let s = server("mcp-stats-contract").await;
+    let payload = call(&s, "lambo_stats", json!({"agent_id": "agent-a"}))
+        .await
+        .structured_content
+        .expect("payload");
+    assert_eq!(
+        payload["embedding_contract"],
+        json!({"kind": "fixture", "model": null, "dim": 1024})
+    );
+    assert_eq!(payload["embedding_modalities"], json!(["text", "image"]));
+    s.mem.close().await.expect("close");
+
+    let text = text_only_server("mcp-stats-text-only", Config::default()).await;
+    let payload = call(&text, "lambo_stats", json!({"agent_id": "agent-a"}))
+        .await
+        .structured_content
+        .expect("payload");
+    assert_eq!(payload["embedding_modalities"], json!(["text"]));
+    text.mem.close().await.expect("close");
+
+    // The PR 5 shape: an artifact and a prompt profile in one model string,
+    // reported whole. A first derive stamps the session; the stamp is what
+    // is reported from then on.
+    let model = "ggml-org/embeddinggemma-2-GGUF@bfcd2987/Q8_0;prompts=lambo-eg2-v1";
+    let eg2 = server_with_parts(
+        "mcp-stats-eg2",
+        Arc::new(MemoryStore::new()),
+        Arc::new(FixtureEmbedder::new()),
+        EmbeddingContract {
+            kind: "embeddinggemma2".into(),
+            model: Some(model.into()),
+            dim: 1024,
+        },
+        Config::default(),
+    )
+    .await;
+    call(
+        &eg2,
+        "lambo_derive",
+        json!({"agent_id": "agent-a",
+               "concepts": [{"content": "auth middleware", "concept_type": "entity"}]}),
+    )
+    .await;
+    assert!(
+        eg2.mem.graph().read().embedding().is_some(),
+        "premise: stamped"
+    );
+    let out = call(&eg2, "lambo_stats", json!({"agent_id": "agent-a"})).await;
+    let payload = out.structured_content.as_ref().expect("payload");
+    assert_eq!(
+        payload["embedding_contract"],
+        json!({"kind": "embeddinggemma2", "model": model, "dim": 1024})
+    );
+    assert!(text_of(&out).contains(model), "the text half names it too");
+    eg2.mem.close().await.expect("close");
+}
