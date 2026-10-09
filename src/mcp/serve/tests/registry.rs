@@ -863,7 +863,8 @@ async fn sixteen_dirty_sqlite_sessions_close_inside_the_shutdown_budget() {
     assert_eq!(sessions.len(), 16, "every pinned session attached");
 
     // Dirty every session: writes applied to the graph, nothing flushed (the
-    // background flush interval is an hour).
+    // background flush interval is an hour and eight actions stay far below
+    // `backend_flush_max_batch`, so no tick and no early flush can fire).
     for session in &sessions {
         for i in 0..8 {
             let text = format!("dirty write {i} in {}", session.id());
@@ -876,13 +877,23 @@ async fn sixteen_dirty_sqlite_sessions_close_inside_the_shutdown_budget() {
             };
             session.mem.record_action(&action).expect("write");
         }
-        assert!(
-            session.mem.stats().log_depth > 0,
-            "{} is dirty",
-            session.id()
-        );
     }
     drop(sessions);
+    // Dirty means not yet durable, asserted at the store. Not with
+    // `stats().log_depth`: the flush loop's 100 ms early-flush poll drains
+    // the graph log into its own pending buffer without flushing, so under
+    // load the log could read empty for a session that was still dirty.
+    let reader = SqliteStore::connect(path.to_str().expect("utf-8")).expect("reader");
+    for id in &ids {
+        let loaded =
+            crate::store::load::load_session_async(&reader, &crate::types::SessionId::new(id))
+                .await
+                .expect("load");
+        assert!(
+            loaded.graph.is_empty(),
+            "{id} is dirty: nothing durable yet"
+        );
+    }
 
     let started = Instant::now();
     let set = registry.close_set().await;
@@ -900,8 +911,7 @@ async fn sixteen_dirty_sqlite_sessions_close_inside_the_shutdown_budget() {
         "16 SQLite closes took {elapsed:?}, over SHUTDOWN_BUDGET {SHUTDOWN_BUDGET:?}"
     );
 
-    // Durable: a fresh reader sees every session's writes.
-    let reader = SqliteStore::connect(path.to_str().expect("utf-8")).expect("reconnect");
+    // Durable: the reader now sees every session's writes.
     for id in &ids {
         let loaded =
             crate::store::load::load_session_async(&reader, &crate::types::SessionId::new(id))
