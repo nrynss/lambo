@@ -966,6 +966,85 @@ async fn an_index_query_failure_serves_the_read_from_the_primary() {
     assert_eq!(store.tier_status(&sid).sync, TierSync::InSync);
 }
 
+/// M2: after `threshold` consecutive failed reads the breaker opens and
+/// reads go straight to the durable store without asking the index; after
+/// the cool-down one read probes it, and a success closes the breaker.
+#[tokio::test]
+async fn failing_index_reads_open_a_breaker_that_a_probe_closes() {
+    let (primary, fake) = (memory_primary(), Arc::new(FakeIndex::new()));
+    let store = tier(&primary, &fake).with_read_breaker(
+        3,
+        Duration::from_millis(100),
+        Duration::from_secs(5),
+    );
+    let sid = SessionId::new("breaker");
+    let token = attach(&store, &sid, &holder("w")).await;
+    let (s, b) = seed_batch(&sid, 1);
+    store.flush(&b, Some(token)).await.unwrap();
+    let knn = || fake.knn_calls.load(std::sync::atomic::Ordering::SeqCst);
+    let expected = contract();
+    let read = || store.vector_candidates_checked(&sid, &PROBE, &expected, 5);
+
+    fake.knn_down
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    for _ in 0..3 {
+        read().await.expect("a failed read falls back");
+    }
+    assert_eq!(knn(), 3);
+    for _ in 0..5 {
+        read().await.unwrap();
+    }
+    assert_eq!(knn(), 3, "an open breaker does not ask the index");
+
+    fake.knn_down
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let probed = read().await.unwrap();
+    assert_eq!(knn(), 4, "one probe after the cool-down");
+    assert_eq!(
+        probed.first().map(|h| h.item),
+        Some(s.c1),
+        "served by the index"
+    );
+    read().await.unwrap();
+    assert_eq!(knn(), 5, "closed again");
+}
+
+/// M2: a read that hangs (a blackholed cluster) is cut at the read
+/// deadline, served from the durable store, and counts toward the breaker.
+#[tokio::test]
+async fn a_hanging_index_read_is_cut_at_the_deadline_and_counts() {
+    let (primary, fake) = (memory_primary(), Arc::new(FakeIndex::new()));
+    let store = tier(&primary, &fake).with_read_breaker(
+        2,
+        Duration::from_secs(60),
+        Duration::from_millis(50),
+    );
+    let sid = SessionId::new("blackhole");
+    let token = attach(&store, &sid, &holder("w")).await;
+    let (_, b) = seed_batch(&sid, 1);
+    store.flush(&b, Some(token)).await.unwrap();
+    fake.delay_knn_ms
+        .store(5_000, std::sync::atomic::Ordering::SeqCst);
+    let started = std::time::Instant::now();
+    for _ in 0..4 {
+        store
+            .vector_candidates_checked(&sid, &PROBE, &contract(), 5)
+            .await
+            .unwrap();
+    }
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        fake.knn_calls.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "two timeouts open the breaker"
+    );
+}
+
 /// A crash between the primary's commit and the mirror leaves the marker
 /// behind: a reader serves from the primary, the next holder repairs at load.
 #[tokio::test]

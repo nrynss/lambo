@@ -131,6 +131,18 @@ pub(crate) const MIRROR_DEADLINE: Duration = Duration::from_secs(15);
 /// session marked stale (the backoff then spaces the next attempt).
 pub(crate) const REPAIR_DEADLINE: Duration = Duration::from_secs(600);
 
+/// Consecutive failed or timed-out index reads that open the read breaker
+/// (#18 review M2).
+pub(crate) const BREAKER_THRESHOLD: u32 = 3;
+
+/// How long an open breaker sends every vector read straight to the durable
+/// store before one read probes the index again.
+pub(crate) const BREAKER_COOLDOWN: Duration = Duration::from_secs(30);
+
+/// The longest one index read may take, connecting included, before it
+/// counts as a failure and the read is served from the durable store.
+pub(crate) const READ_DEADLINE: Duration = Duration::from_secs(5);
+
 /// How long releasing a lease waits for this store's in-flight repair of the
 /// session before abandoning it (the next holder repairs at load).
 pub(crate) const RELEASE_GRACE: Duration = Duration::from_secs(10);
@@ -219,6 +231,19 @@ impl Marker {
     }
 }
 
+/// The read-side circuit breaker (M2). One per tier: every session's reads
+/// go to the same cluster, so a cluster that is down or blackholed for one
+/// is down for all.
+#[derive(Debug, Default)]
+struct Breaker {
+    /// Index reads that failed or timed out in a row.
+    failures: u32,
+    /// While set and in the future, reads skip the index. Once it passes,
+    /// one read probes the index and pushes it forward again, so readers
+    /// arriving during the probe still skip.
+    open_until: Option<Instant>,
+}
+
 /// The tier's view of one session, for tests. Production reports the same
 /// facts through `lambo::recall_tier` warnings.
 #[cfg(all(test, feature = "store-memory"))]
@@ -251,6 +276,10 @@ pub(crate) struct Tier {
     mirror_deadline: Duration,
     repair_deadline: Duration,
     release_grace: Duration,
+    breaker: Mutex<Breaker>,
+    breaker_threshold: u32,
+    breaker_cooldown: Duration,
+    read_deadline: Duration,
 }
 
 impl std::ops::Deref for TieredStore {
@@ -277,6 +306,10 @@ impl TieredStore {
                 mirror_deadline: MIRROR_DEADLINE,
                 repair_deadline: REPAIR_DEADLINE,
                 release_grace: RELEASE_GRACE,
+                breaker: Mutex::new(Breaker::default()),
+                breaker_threshold: BREAKER_THRESHOLD,
+                breaker_cooldown: BREAKER_COOLDOWN,
+                read_deadline: READ_DEADLINE,
             }),
         }
     }
@@ -298,6 +331,20 @@ impl TieredStore {
         let tier = self.tier_mut();
         tier.mirror_deadline = mirror;
         tier.repair_deadline = repair;
+        self
+    }
+
+    #[cfg(all(test, feature = "store-memory"))]
+    pub(crate) fn with_read_breaker(
+        mut self,
+        threshold: u32,
+        cooldown: Duration,
+        read_deadline: Duration,
+    ) -> Self {
+        let tier = self.tier_mut();
+        tier.breaker_threshold = threshold;
+        tier.breaker_cooldown = cooldown;
+        tier.read_deadline = read_deadline;
         self
     }
 
@@ -837,6 +884,50 @@ impl Tier {
         ))
     }
 
+    /// Whether a read may ask the index now. An open breaker answers no
+    /// until its cool-down passes; then this read is the probe, and the
+    /// cool-down restarts so concurrent readers keep skipping until the
+    /// probe's outcome closes or re-opens it.
+    fn breaker_admits(&self) -> bool {
+        let mut b = self.breaker.lock();
+        match b.open_until {
+            Some(until) if Instant::now() < until => false,
+            Some(_) => {
+                b.open_until = Some(Instant::now() + self.breaker_cooldown);
+                true
+            }
+            None => true,
+        }
+    }
+
+    fn breaker_success(&self) {
+        let mut b = self.breaker.lock();
+        if b.open_until.is_some() {
+            tracing::info!(
+                target: "lambo::recall_tier",
+                "recall index answered again; vector reads use it again"
+            );
+        }
+        *b = Breaker::default();
+    }
+
+    fn breaker_failure(&self) {
+        let mut b = self.breaker.lock();
+        b.failures = b.failures.saturating_add(1);
+        if b.failures >= self.breaker_threshold {
+            if b.open_until.is_none() {
+                tracing::warn!(
+                    target: "lambo::recall_tier",
+                    failures = b.failures,
+                    "recall index reads keep failing; serving vector reads from the durable \
+                     store for {}s before probing it again",
+                    self.breaker_cooldown.as_secs_f64()
+                );
+            }
+            b.open_until = Some(Instant::now() + self.breaker_cooldown);
+        }
+    }
+
     /// The primary's own checked read, or no vector leg when it has none.
     async fn fallback(
         &self,
@@ -936,14 +1027,30 @@ impl VectorCandidateSource for TieredStore {
         // Only the expected contract's index is queried: whatever happened to
         // the durable contract since the check, these vectors are in the
         // caller's space.
+        if !self.breaker_admits() {
+            return self
+                .fallback(session, probe, expected_contract, limit)
+                .await;
+        }
         let fetch = limit.saturating_add(KNN_OVERFETCH);
-        let hits = match self
-            .recall
-            .knn(expected_contract, session, probe, fetch)
-            .await
-        {
-            Ok(hits) => hits,
+        let read = tokio::time::timeout(
+            self.read_deadline,
+            self.recall.knn(expected_contract, session, probe, fetch),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            Err(StoreError::Backend(format!(
+                "recall index read did not answer within {}s",
+                self.read_deadline.as_secs_f64()
+            )))
+        });
+        let hits = match read {
+            Ok(hits) => {
+                self.breaker_success();
+                hits
+            }
             Err(e) => {
+                self.breaker_failure();
                 tracing::warn!(
                     target: "lambo::recall_tier",
                     session = %session,
