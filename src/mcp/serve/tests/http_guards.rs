@@ -1008,3 +1008,39 @@ async fn an_oversized_chunked_body_is_refused_before_the_service() {
     );
     assert_eq!(reached.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
+
+/// #32 PR 5 third review L1: only a request that would open an MCP session
+/// has its body read by the guard. A request inside a session (or any
+/// other one that opens none) goes on to the router with its body unread,
+/// so a body that is still arriving does not hold it at the guard: here the
+/// service answers at once, long before the guard's body timeout, although
+/// most of the declared body never comes.
+///
+/// Mutation: read the body of every request in the guard (the second
+/// review's version) and this request waits out the timeout and gets 408.
+#[tokio::test]
+async fn only_an_opener_has_its_body_read_by_the_guard() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut guard = guard_with(None, 32, 0, 0);
+    guard.body_timeout = Duration::from_secs(5);
+    let (addr, reached) = spawn_guarded(guard).await;
+
+    let mut sock = tokio::net::TcpStream::connect(addr).await.expect("connect");
+    sock.write_all(
+        b"POST /mcp HTTP/1.1\r\nHost: localhost\r\nMcp-Session-Id: abc\r\n\
+          Content-Length: 64\r\nConnection: close\r\n\r\n{\"jsonrpc\"",
+    )
+    .await
+    .expect("write a head and a little body");
+    let started = Instant::now();
+    let mut raw = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(10), sock.read_to_end(&mut raw)).await;
+    let reply = String::from_utf8_lossy(&raw);
+    assert!(reply.starts_with("HTTP/1.1 200 OK\r\n"), "{reply:?}");
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "the request was not held for its body: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(reached.load(std::sync::atomic::Ordering::SeqCst), 1);
+}

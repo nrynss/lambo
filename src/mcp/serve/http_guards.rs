@@ -616,7 +616,8 @@ pub(crate) struct OpeningReservation {
 /// review L2) caps what actually arrives, so a chunked body is held to it too.
 pub(super) const MAX_HTTP_BODY_BYTES: u64 = 4 * 1024 * 1024; // 4 MiB
 
-/// How long [`guard_request`] waits for the whole body of a request,
+/// How long [`guard_request`] waits for the whole body of a session-opening
+/// request ([`opens_a_new_session`]; no other body is read by the guard),
 /// counted from when it starts reading it (#32 PR 5 second review L2).
 ///
 /// The guard reads the body before the session cap reserves a slot, so a
@@ -716,9 +717,11 @@ fn how_to_close(path: &str) -> String {
         .to_string()
 }
 
-/// Auth, then rate, then the body (its size, then the whole of it within
-/// [`REQUEST_BODY_TIMEOUT`]), then the session cap (the process's, then the
-/// credential's share) — in that order, deliberately.
+/// Auth, then rate, then the declared body size; then, for a request that
+/// would open an MCP session ([`opens_a_new_session`]) and only for it, the
+/// whole body within [`REQUEST_BODY_TIMEOUT`] and the session cap (the
+/// process's, then the credential's share) — in that order, deliberately.
+/// Every other request goes on to the router with its body unread.
 ///
 /// Authentication runs **first and alone**: an unauthenticated caller must not
 /// be able to consume rate-limit budget or read the live-session count (a 503
@@ -823,11 +826,21 @@ pub(super) async fn guard_request(
             .into_response();
     }
 
-    // The whole body, read here within `body_timeout` (#32 PR 5 second
-    // review L2) and before the cap reserves anything: a client that
-    // dribbles its body holds no slot of the session cap while it does,
-    // and holds its connection for at most the timeout. rmcp reads the
-    // whole body before it acts anyway (and to the same 4 MiB), so
+    // Only a request that would open an MCP session goes on to the cap,
+    // and only it is buffered here (#32 PR 5 third review L1). Every other
+    // request streams to rmcp as it always did: its body is read by rmcp,
+    // after routing, so a request the router refuses (an unknown path, a
+    // session out of scope or not hosted) is answered without a byte of
+    // its body being read or held.
+    if !opens_a_new_session(&req) {
+        return next.run(req).await;
+    }
+
+    // The whole body of an opener, read here within `body_timeout` (#32 PR
+    // 5 second review L2) and before the cap reserves anything: a client
+    // that dribbles its body holds no slot of the session cap while it
+    // does, and holds its connection for at most the timeout. rmcp reads
+    // the whole body before it acts anyway (and to the same 4 MiB), so
     // buffering it here costs nothing rmcp would not spend.
     let (parts, body) = req.into_parts();
     let body = match tokio::time::timeout(guard.body_timeout, read_body(body)).await {
@@ -868,63 +881,61 @@ pub(super) async fn guard_request(
     };
     let mut req = axum::extract::Request::from_parts(parts, axum::body::Body::from(body));
 
-    if opens_a_new_session(&req) {
-        // Reserve first, then read the live count (see `Openings`).
-        let (opening, opening_total, opening_mine) = guard.openings.reserve(credential.name());
-        let live = guard.live.live().await + opening_total;
-        if live >= guard.max_sessions {
-            tracing::warn!(
-                live,
+    // Reserve first, then read the live count (see `Openings`).
+    let (opening, opening_total, opening_mine) = guard.openings.reserve(credential.name());
+    let live = guard.live.live().await + opening_total;
+    if live >= guard.max_sessions {
+        tracing::warn!(
+            live,
+            max = guard.max_sessions,
+            "mcp http: refusing a new session — at the concurrent-session cap"
+        );
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(axum::http::header::RETRY_AFTER, "5")],
+            format!(
+                "at the concurrent-session cap ({live}/{max} sessions live): this server \
+                 will not open another. Close an idle session ({close}), or restart with a \
+                 higher --max-sessions.\n",
                 max = guard.max_sessions,
-                "mcp http: refusing a new session — at the concurrent-session cap"
+                close = how_to_close(req.uri().path()),
+            ),
+        )
+            .into_response();
+    }
+    // This credential's share (#32 PR 5 review M2). Counted only when
+    // it is smaller than the cap: with one credential it is the cap,
+    // and the check above already decided.
+    if guard.credential_sessions < guard.max_sessions {
+        let mine = guard.live.live_opened_by(credential.name()).await + opening_mine;
+        if mine >= guard.credential_sessions {
+            tracing::warn!(
+                credential = credential.name(),
+                live = mine,
+                share = guard.credential_sessions,
+                max = guard.max_sessions,
+                "mcp http: refusing a new session — the credential is at its share of the \
+                 concurrent-session cap"
             );
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 [(axum::http::header::RETRY_AFTER, "5")],
                 format!(
-                    "at the concurrent-session cap ({live}/{max} sessions live): this server \
-                     will not open another. Close an idle session ({close}), or restart with a \
-                     higher --max-sessions.\n",
+                    "this credential is at its share of the concurrent-session cap ({mine}/\
+                     {share} of {max} sessions): this server will not open another for it. \
+                     Close an idle session ({close}), or restart with a higher \
+                     --max-sessions.\n",
+                    share = guard.credential_sessions,
                     max = guard.max_sessions,
                     close = how_to_close(req.uri().path()),
                 ),
             )
                 .into_response();
         }
-        // This credential's share (#32 PR 5 review M2). Counted only when
-        // it is smaller than the cap: with one credential it is the cap,
-        // and the check above already decided.
-        if guard.credential_sessions < guard.max_sessions {
-            let mine = guard.live.live_opened_by(credential.name()).await + opening_mine;
-            if mine >= guard.credential_sessions {
-                tracing::warn!(
-                    credential = credential.name(),
-                    live = mine,
-                    share = guard.credential_sessions,
-                    max = guard.max_sessions,
-                    "mcp http: refusing a new session — the credential is at its share of the \
-                     concurrent-session cap"
-                );
-                return (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    [(axum::http::header::RETRY_AFTER, "5")],
-                    format!(
-                        "this credential is at its share of the concurrent-session cap ({mine}/\
-                         {share} of {max} sessions): this server will not open another for it. \
-                         Close an idle session ({close}), or restart with a higher \
-                         --max-sessions.\n",
-                        share = guard.credential_sessions,
-                        max = guard.max_sessions,
-                        close = how_to_close(req.uri().path()),
-                    ),
-                )
-                    .into_response();
-            }
-        }
-        req.extensions_mut().insert(OpeningReservation {
-            _opening: Arc::new(opening),
-        });
     }
+    req.extensions_mut().insert(OpeningReservation {
+        _opening: Arc::new(opening),
+    });
 
     next.run(req).await
 }
