@@ -881,6 +881,14 @@ mod tests {
                 "example.com",
             ),
             ("ftp://example.com", "example.com"),
+            // Review L1: unspecified addresses are not loopback.
+            ("http://0.0.0.0:8080", "0.0.0.0"),
+            ("http://[::]:8080", "[::]"),
+            // `localhost` as userinfo: the host is evil.com.
+            ("http://localhost@evil.com", "evil.com"),
+            ("http://localhost:8080@evil.com", "evil.com"),
+            // The scheme is case-insensitive; the host still decides.
+            ("HTTP://api.example.com", "api.example.com"),
         ] {
             let err = BgeM3LlamaCppEmbedder::new(url, "", 1024)
                 .unwrap()
@@ -907,6 +915,19 @@ mod tests {
             "http://127.1.2.3",
             "http://[::1]:8080",
             "http://[::ffff:127.0.0.1]:8080",
+            // Review L1: shorthand, decimal, hex and octal IPv4 forms of
+            // 127.0.0.1 normalise to it and are loopback.
+            "http://127.1",
+            "http://2130706433:8080",
+            "http://0x7f.1",
+            "http://0x7f000001",
+            "http://0177.0.0.1",
+            "http://localhost.:8080",
+            // Userinfo does not change the host.
+            "http://user@127.0.0.1:8080",
+            // Upper-case scheme and host.
+            "HTTP://LOCALHOST:8080",
+            "HTTPS://API.EXAMPLE.COM",
             "https://api.cloudflare.com/client/v4/accounts/x/ai",
             "https://10.0.0.5",
         ] {
