@@ -546,8 +546,10 @@ pub struct EmbedderConfig {
     /// embedding contract. See [`keep_warm`].
     #[serde(default)]
     pub keep_warm_secs: Option<u64>,
-    /// Accept image vectors a client computed (`lambo_derive_image` with
-    /// `vector`, `lambo derive-image --vector-json`), #22. Default `false`.
+    /// Accept vectors a client computed, #22: image vectors to store
+    /// (`lambo_derive_image` with `vector`, `lambo derive-image
+    /// --vector-json`) and query vectors to recall by (`lambo_recall` with
+    /// `query_vector`, `lambo recall --query-vector-json`). Default `false`.
     ///
     /// Lambo cannot verify that a submitted vector came from the model its
     /// declared contract names: the contract check is a check of the label.
