@@ -16,7 +16,8 @@
 //! Not detected: a run shorter than [`MIN_ECHO_RUN`] bytes (a masked echo such
 //! as `sk-ab...yz`), a case-changed echo, and any other re-encoding (base64,
 //! `\uXXXX` escapes of non-ASCII). The body is also cut at
-//! [`QUOTED_BODY_MAX`] bytes, which bounds both the log line and the scan.
+//! [`QUOTED_BODY_MAX`] bytes, which bounds both the log line and the scan, and
+//! the adapter downloads no more of it than [`read_cap`] allows.
 //!
 //! The scan is the longest-common-substring recurrence over (body byte, form
 //! byte): `O(n·k)` time and `O(n + k)` memory per form, for a body of `n`
@@ -31,13 +32,25 @@ pub(super) const MIN_ECHO_RUN: usize = 8;
 /// The most of a body that is quoted into an error.
 pub(super) const QUOTED_BODY_MAX: usize = 8 * 1024;
 
+/// The most of an error body worth downloading for a token of `token_len`
+/// bytes: the quoted part plus the scan's look-ahead past the cut (the
+/// longest token form is its percent-encoding, 3 bytes a byte) and a
+/// character's worth for the boundary. Anything past it is never quoted or
+/// scanned, so it is never read.
+pub(super) fn read_cap(token_len: usize) -> usize {
+    QUOTED_BODY_MAX
+        .saturating_add(token_len.saturating_mul(3))
+        .saturating_add(4)
+}
+
 /// What a scrubbed run is replaced with.
 pub(super) const TOKEN_NOT_SHOWN: &str = "(token not shown)";
 
 /// `body`, cut to [`QUOTED_BODY_MAX`] bytes, with every echo of `token` (see
 /// the module doc) replaced by [`TOKEN_NOT_SHOWN`]. `None` or an empty token
-/// only cuts.
-pub(super) fn quotable_body(body: &str, token: Option<&str>) -> String {
+/// only cuts. `truncated` says the body was read only in part, so its full
+/// length is unknown.
+pub(super) fn quotable_body(body: &str, token: Option<&str>, truncated: bool) -> String {
     let limit = floor_char_boundary(body, QUOTED_BODY_MAX);
     let forms = token
         .filter(|t| !t.is_empty())
@@ -72,7 +85,9 @@ pub(super) fn quotable_body(body: &str, token: Option<&str>) -> String {
             out.push_str(&body[start..i]);
         }
     }
-    if body.len() > limit {
+    if truncated {
+        out.push_str(" ... (rest of the body not shown)");
+    } else if body.len() > limit {
         let _ = write!(out, " ... ({} more bytes not shown)", body.len() - limit);
     }
     out
@@ -205,7 +220,7 @@ mod tests {
     const PLAIN: &str = "fake-xyzzy-embed-token";
 
     fn scrub(body: &str, token: &str) -> String {
-        quotable_body(body, Some(token))
+        quotable_body(body, Some(token), false)
     }
 
     #[test]
@@ -276,8 +291,8 @@ mod tests {
 
     #[test]
     fn no_token_only_cuts() {
-        assert_eq!(quotable_body("plain body", None), "plain body");
-        assert_eq!(quotable_body("plain body", Some("")), "plain body");
+        assert_eq!(quotable_body("plain body", None, false), "plain body");
+        assert_eq!(quotable_body("plain body", Some(""), false), "plain body");
     }
 
     /// A run that ends inside a multi-byte character takes the whole
@@ -294,7 +309,7 @@ mod tests {
     /// is replaced, not left half-shown.
     #[test]
     fn a_long_body_is_cut_and_an_echo_at_the_cut_is_still_replaced() {
-        let out = quotable_body(&"a".repeat(QUOTED_BODY_MAX * 4), None);
+        let out = quotable_body(&"a".repeat(QUOTED_BODY_MAX * 4), None, false);
         assert!(out.starts_with(&"a".repeat(QUOTED_BODY_MAX)));
         assert!(
             out.ends_with(&format!("({} more bytes not shown)", QUOTED_BODY_MAX * 3)),
@@ -309,7 +324,7 @@ mod tests {
 
         // A cut inside a multi-byte character falls back to its start.
         let body = format!("{}\u{e9}\u{e9}", "a".repeat(QUOTED_BODY_MAX - 1));
-        let out = quotable_body(&body, None);
+        let out = quotable_body(&body, None, false);
         assert!(out.starts_with(&"a".repeat(QUOTED_BODY_MAX - 1)));
     }
 }

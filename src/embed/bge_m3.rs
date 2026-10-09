@@ -323,13 +323,36 @@ impl BgeM3LlamaCppEmbedder {
     /// ([`scrub::quotable_body`], whose doc lists exactly what is caught),
     /// before it is quoted into an error. A gateway may echo the key it
     /// refused, and these errors reach logs and MCP receipts (issue #21).
-    fn without_token(&self, body: &str) -> String {
-        let token = self
-            .authorization
+    fn without_token(&self, body: &str, truncated: bool) -> String {
+        scrub::quotable_body(body, self.bearer_token(), truncated)
+    }
+
+    /// The bearer token this adapter sends, if any.
+    fn bearer_token(&self) -> Option<&str> {
+        self.authorization
             .as_ref()
             .and_then(|auth| auth.as_bytes().strip_prefix(b"Bearer "))
-            .and_then(|token| std::str::from_utf8(token).ok());
-        scrub::quotable_body(body, token)
+            .and_then(|token| std::str::from_utf8(token).ok())
+    }
+
+    /// At most [`scrub::read_cap`] bytes of an error body, and whether more
+    /// was left unread. The rest is never downloaded: only that much is ever
+    /// quoted or scanned, and a hostile or broken endpoint can send any
+    /// amount. A read error ends the body where it stopped.
+    async fn capped_error_body(&self, mut resp: reqwest::Response) -> (String, bool) {
+        let cap = scrub::read_cap(self.bearer_token().map_or(0, str::len));
+        let mut body = Vec::new();
+        let mut truncated = false;
+        while let Ok(Some(chunk)) = resp.chunk().await {
+            let room = cap - body.len();
+            if chunk.len() > room {
+                body.extend_from_slice(&chunk[..room]);
+                truncated = true;
+                break;
+            }
+            body.extend_from_slice(&chunk);
+        }
+        (String::from_utf8_lossy(&body).into_owned(), truncated)
     }
 
     /// Report the server health without embedding anything.
@@ -423,7 +446,8 @@ impl BgeM3LlamaCppEmbedder {
              at the endpoint itself)"
                 .to_string()
         } else {
-            self.without_token(&resp.text().await.unwrap_or_default())
+            let (body, truncated) = self.capped_error_body(resp).await;
+            self.without_token(&body, truncated)
         };
         match classify_status(code) {
             EmbedStatusClass::Transient => Err(EmbedError::Unavailable(format!(
@@ -1143,6 +1167,36 @@ mod tests {
                 "{code}: the rest of the body is kept: {err}"
             );
         }
+    }
+
+    /// Issue #21 review: an error body is downloaded only up to what is
+    /// ever quoted or scanned, so a huge body is never read whole, and the
+    /// error says the rest was not shown.
+    ///
+    /// Mutation: read the body with `text()` again -> red (the error then
+    /// counts the bytes it read past the cut).
+    #[tokio::test]
+    async fn a_huge_error_body_is_read_only_up_to_the_cap() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST).path("/v1/embeddings");
+            then.status(400).body("x".repeat(1 << 20));
+        });
+        let e = BgeM3LlamaCppEmbedder::new(server.base_url(), "", 1024)
+            .unwrap()
+            .with_bearer_token(FAKE_TOKEN)
+            .unwrap();
+        let err = e.embed("anything").await.unwrap_err().to_string();
+        assert!(
+            err.ends_with("(rest of the body not shown)"),
+            "{}",
+            &err[err.len() - 80..]
+        );
+        assert!(
+            err.len() < scrub::QUOTED_BODY_MAX + 512,
+            "{} bytes",
+            err.len()
+        );
     }
 
     /// Live test against Cloudflare Workers AI's OpenAI-compatible endpoint
