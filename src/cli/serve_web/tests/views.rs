@@ -12,8 +12,7 @@ use std::task::{Context, Poll, Waker};
 use tokio::sync::Semaphore;
 
 /// [`Shared`], counting `load_session` and `preflight_schema` calls. `fail`
-/// makes every load answer a backend error; `delay` holds each load open.
-/// A [`LoadCounting::park`]ed session's loads wait for a
+/// makes every load answer a backend error. A [`LoadCounting::park`]ed session's loads wait for a
 /// [`LoadCounting::release`], so a test decides exactly when each load
 /// finishes instead of racing a timer.
 #[derive(Clone)]
@@ -22,7 +21,6 @@ struct LoadCounting {
     loads: Arc<AtomicUsize>,
     preflights: Arc<AtomicUsize>,
     fail: Arc<AtomicBool>,
-    delay: Duration,
     parked: Arc<parking_lot::Mutex<std::collections::HashMap<SessionId, Arc<Semaphore>>>>,
 }
 
@@ -33,7 +31,6 @@ impl LoadCounting {
             loads: Arc::new(AtomicUsize::new(0)),
             preflights: Arc::new(AtomicUsize::new(0)),
             fail: Arc::new(AtomicBool::new(false)),
-            delay: Duration::ZERO,
             parked: Arc::default(),
         }
     }
@@ -79,9 +76,6 @@ impl GraphStore for LoadCounting {
         let parked = self.parked.lock().get(session).cloned();
         if let Some(gate) = parked {
             gate.acquire().await.expect("never closed").forget();
-        }
-        if !self.delay.is_zero() {
-            tokio::time::sleep(self.delay).await;
         }
         if self.fail.load(Ordering::SeqCst) {
             return Err(StoreError::Backend("load refused by the test store".into()));
@@ -235,19 +229,20 @@ async fn each_data_route_costs_the_measured_number_of_session_loads() {
 }
 
 /// Serve `session` from `store` through a [`LoadCounting`] wrapper with the
-/// given `[web]` bounds; the wrapper's counters stay readable.
+/// given `[web]` bounds; the wrapper's counters and the state stay readable.
 async fn serve_counting(
     counting: &LoadCounting,
     session: &str,
     web: &crate::config::WebConfig,
-) -> (SocketAddr, tokio::task::JoinHandle<()>) {
-    spawn(state_with_web(
+) -> (Arc<AppState>, SocketAddr, tokio::task::JoinHandle<()>) {
+    let state = state_with_web(
         backends_with_store(Box::new(counting.clone())),
         session,
         None,
         web,
-    ))
-    .await
+    );
+    let (addr, handle) = spawn(state.clone()).await;
+    (state, addr, handle)
 }
 
 fn web_ttl_ms(ms: u64) -> crate::config::WebConfig {
@@ -257,12 +252,40 @@ fn web_ttl_ms(ms: u64) -> crate::config::WebConfig {
     }
 }
 
+/// Wait until `n` requests for the served session have queued for its view.
+/// With the session's load parked, every one of them arrived before any
+/// load finished. The deadline is a hang guard, not a timing assumption.
+async fn until_queued(state: &AppState, n: u64) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let queued = state.views.queued(&state.session);
+        if queued >= n {
+            assert_eq!(queued, n, "more requests queued than were sent");
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "only {queued} of {n} requests queued"
+        );
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+}
+
+/// A spawned request's response. A request that started a second load
+/// behind the parked one would wait forever; fail it instead of hanging.
+async fn answered(poll: tokio::task::JoinHandle<HttpResponse>) -> HttpResponse {
+    tokio::time::timeout(Duration::from_secs(30), poll)
+        .await
+        .expect("the request was answered (did it start another, parked load?)")
+        .expect("poll task")
+}
+
 /// What the page fetches when it opens, plus a recall: one view serves it
 /// all, so one load inside the TTL however many routes are hit.
 #[tokio::test]
 async fn every_route_inside_one_ttl_shares_one_load() {
     let counting = LoadCounting::new(seed("t4-page").await);
-    let (addr, handle) = serve_counting(&counting, "t4-page", &web_ttl_ms(60_000)).await;
+    let (_, addr, handle) = serve_counting(&counting, "t4-page", &web_ttl_ms(60_000)).await;
     for path in [
         "/api/session",
         "/api/pulse?since=0",
@@ -284,15 +307,17 @@ async fn every_route_inside_one_ttl_shares_one_load() {
 /// (single-flight), and the next poll inside the TTL causes none.
 #[tokio::test]
 async fn concurrent_pulses_inside_one_ttl_make_one_load() {
-    let mut counting = LoadCounting::new(seed("t4-burst").await);
-    counting.delay = Duration::from_millis(50);
-    let (addr, handle) = serve_counting(&counting, "t4-burst", &web_ttl_ms(60_000)).await;
+    let counting = LoadCounting::new(seed("t4-burst").await);
+    counting.park("t4-burst");
+    let (state, addr, handle) = serve_counting(&counting, "t4-burst", &web_ttl_ms(60_000)).await;
 
     let polls: Vec<_> = (0..8)
         .map(|_| tokio::spawn(async move { request(addr, "GET", "/api/pulse?since=0").await }))
         .collect();
+    until_queued(&state, 8).await;
+    counting.release("t4-burst", 1);
     for poll in polls {
-        let r = poll.await.expect("poll task");
+        let r = answered(poll).await;
         assert_eq!(r.status, 200, "{}", r.body);
         let body: serde_json::Value = serde_json::from_str(&r.body).expect("json");
         assert_eq!(body["events"]["total"], 3, "{body}");
@@ -309,53 +334,81 @@ async fn concurrent_pulses_inside_one_ttl_make_one_load() {
 /// into one load.
 #[tokio::test]
 async fn a_zero_ttl_reloads_per_request_and_still_single_flights() {
-    let mut counting = LoadCounting::new(seed("t4-zero").await);
-    counting.delay = Duration::from_millis(50);
-    let (addr, handle) = serve_counting(&counting, "t4-zero", &web_ttl_ms(0)).await;
+    let counting = LoadCounting::new(seed("t4-zero").await);
+    counting.park("t4-zero");
+    let (state, addr, handle) = serve_counting(&counting, "t4-zero", &web_ttl_ms(0)).await;
 
     let polls: Vec<_> = (0..6)
         .map(|_| tokio::spawn(async move { request(addr, "GET", "/api/pulse").await }))
         .collect();
+    until_queued(&state, 6).await;
+    counting.release("t4-zero", 1);
     for poll in polls {
-        assert_eq!(poll.await.expect("poll task").status, 200);
+        assert_eq!(answered(poll).await.status, 200);
     }
     assert_eq!(counting.loads(), 1, "a concurrent burst is one load");
 
+    counting.release("t4-zero", 1);
     assert_eq!(request(addr, "GET", "/api/pulse").await.status, 200);
     assert_eq!(counting.loads(), 2, "the next request reloads at TTL 0");
     handle.abort();
 }
 
-/// A write is invisible until the view is older than the TTL, then the next
-/// request reloads and serves it.
-#[tokio::test]
+/// The TTL on the cache itself, on tokio's paused clock (design section
+/// 10): a view is reused until it is `ttl` old, a write is invisible until
+/// then, and the first request at `ttl` reloads and serves it.
+#[tokio::test(start_paused = true)]
 async fn a_write_is_served_after_the_ttl_and_not_before() {
     let store = seed("t4-ttl").await;
     let counting = LoadCounting::new(store.clone());
+    let sid = SessionId::new("t4-ttl");
+    let cache = crate::cli::serve_web::views::ViewCache::new(
+        [sid.clone()],
+        crate::cli::serve_web::views::ViewBounds {
+            ttl: Duration::from_millis(300),
+            ..bounds(4)
+        },
+    );
+    let contract = backends_on(Arc::new(MemoryStore::new())).embedding;
+
+    let first = cache.view(&counting, &contract, &sid).await.expect("view");
+    assert_eq!(first.event_total(), 3);
+    promote(&store, "t4-ttl", "auth middleware").await;
+
+    tokio::time::advance(Duration::from_millis(299)).await;
+    let within = cache.view(&counting, &contract, &sid).await.expect("view");
+    assert!(
+        Arc::ptr_eq(&first, &within),
+        "inside the TTL the view is reused"
+    );
+    assert_eq!(within.event_total(), 3, "the write is not served yet");
+    assert_eq!(counting.loads(), 1);
+
+    tokio::time::advance(Duration::from_millis(1)).await;
+    let after = cache.view(&counting, &contract, &sid).await.expect("view");
+    assert_eq!(after.event_total(), 6, "at the TTL the write is served");
+    assert_eq!(counting.loads(), 2);
+}
+
+/// The same through the pulse route, on the real clock. Only "served after
+/// the TTL" is asserted: how old the view is when a second request lands
+/// depends on the machine, which the paused-clock test above pins instead.
+#[tokio::test]
+async fn the_pulse_serves_a_write_once_the_ttl_has_passed() {
+    let store = seed("t4-ttl-route").await;
+    let counting = LoadCounting::new(store.clone());
     let ttl = Duration::from_millis(300);
-    let (addr, handle) = serve_counting(&counting, "t4-ttl", &web_ttl_ms(300)).await;
+    let (_, addr, handle) = serve_counting(&counting, "t4-ttl-route", &web_ttl_ms(300)).await;
 
     let before = get_json(addr, "/api/pulse?since=0").await;
     assert_eq!(before["events"]["total"], 3, "{before}");
-    let loaded_at = std::time::Instant::now();
-
-    promote(&store, "t4-ttl", "auth middleware").await;
-    let within = get_json(addr, "/api/pulse?since=0").await;
-    // Only meaningful while the view is still young; a slow machine that
-    // already crossed the TTL proves nothing either way here.
-    if loaded_at.elapsed() < ttl {
-        assert_eq!(
-            within["events"]["total"], 3,
-            "inside the TTL the view is reused: {within}"
-        );
-        assert_eq!(counting.loads(), 1);
-    }
+    promote(&store, "t4-ttl-route", "auth middleware").await;
 
     tokio::time::sleep(ttl + Duration::from_millis(50)).await;
     let after = get_json(addr, "/api/pulse?since=0").await;
     assert_eq!(after["events"]["total"], 6, "after the TTL: {after}");
     assert_eq!(after["stats"]["canonization_events"], 6, "{after}");
-    assert!(counting.loads() >= 2);
+    assert_eq!(counting.loads(), 2);
     handle.abort();
 }
 
@@ -363,16 +416,18 @@ async fn a_write_is_served_after_the_ttl_and_not_before() {
 /// next request retries.
 #[tokio::test]
 async fn a_failed_load_is_not_cached() {
-    let mut counting = LoadCounting::new(seed("t4-fail").await);
-    counting.delay = Duration::from_millis(50);
+    let counting = LoadCounting::new(seed("t4-fail").await);
+    counting.park("t4-fail");
     counting.fail.store(true, Ordering::SeqCst);
-    let (addr, handle) = serve_counting(&counting, "t4-fail", &web_ttl_ms(60_000)).await;
+    let (state, addr, handle) = serve_counting(&counting, "t4-fail", &web_ttl_ms(60_000)).await;
 
     let polls: Vec<_> = (0..4)
         .map(|_| tokio::spawn(async move { request(addr, "GET", "/api/pulse").await }))
         .collect();
+    until_queued(&state, 4).await;
+    counting.release("t4-fail", 1);
     for poll in polls {
-        let r = poll.await.expect("poll task");
+        let r = answered(poll).await;
         assert_eq!(r.status, 502, "{}", r.body);
         assert!(
             r.body.contains("load refused by the test store"),
@@ -388,6 +443,7 @@ async fn a_failed_load_is_not_cached() {
     assert_eq!(counting.loads(), 1, "the joiners share the failed load");
 
     counting.fail.store(false, Ordering::SeqCst);
+    counting.release("t4-fail", 1);
     let r = request(addr, "GET", "/api/pulse").await;
     assert_eq!(r.status, 200, "the failure is not cached: {}", r.body);
     assert_eq!(counting.loads(), 2);
@@ -400,7 +456,7 @@ async fn a_failed_load_is_not_cached() {
 async fn an_erased_session_is_empty_on_the_next_view() {
     let store = seed("t4-erase").await;
     let counting = LoadCounting::new(store.clone());
-    let (addr, handle) = serve_counting(&counting, "t4-erase", &web_ttl_ms(0)).await;
+    let (_, addr, handle) = serve_counting(&counting, "t4-erase", &web_ttl_ms(0)).await;
     let before = get_json(addr, "/api/pulse").await;
     assert_eq!(before["stats"]["concepts"], 3, "{before}");
 

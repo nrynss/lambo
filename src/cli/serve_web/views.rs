@@ -214,6 +214,10 @@ struct Slot {
     /// empty one allocates nothing, so a served session nobody recalls on
     /// costs nothing here.
     queries: Mutex<QueryEmbeddingCache>,
+    /// Requests that found no fresh view and went on to queue for the gate
+    /// (tests: a burst test releases its parked load once all are queued).
+    #[cfg(test)]
+    queued: AtomicU64,
 }
 
 impl Slot {
@@ -227,6 +231,8 @@ impl Slot {
                 observed_at: std::time::Instant::now(),
             }),
             queries: Mutex::new(QueryEmbeddingCache::new()),
+            #[cfg(test)]
+            queued: AtomicU64::new(0),
         }
     }
 }
@@ -289,6 +295,8 @@ impl ViewCache {
             }
             state.completed
         };
+        #[cfg(test)]
+        slot.queued.fetch_add(1, Ordering::SeqCst);
 
         let _gate = slot.gate.lock().await;
         {
@@ -431,5 +439,18 @@ impl ViewCache {
         self.slots
             .get(session)
             .is_some_and(|slot| slot.state.lock().ready.is_some())
+    }
+
+    /// How many requests for `session` have gone on to queue for its gate
+    /// (tests).
+    #[cfg(test)]
+    #[cfg_attr(
+        not(all(feature = "store-memory", feature = "embed-fixture")),
+        allow(dead_code)
+    )]
+    pub(super) fn queued(&self, session: &SessionId) -> u64 {
+        self.slots
+            .get(session)
+            .map_or(0, |slot| slot.queued.load(Ordering::SeqCst))
     }
 }

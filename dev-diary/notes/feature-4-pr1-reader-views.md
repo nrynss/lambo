@@ -122,7 +122,15 @@ refresh runs on the requesting task.
   write to the store between two requests and assert the second sees the
   write. That is a property of the store read, so they now run at
   `view_ttl_ms = 0` (`tests::web_ttl_zero`). The TTL itself is pinned by
-  `views::a_write_is_served_after_the_ttl_and_not_before`.
+  `views::a_write_is_served_after_the_ttl_and_not_before`, on `ViewCache`
+  with tokio's paused clock (design section 10): reused at `ttl - 1 ms`,
+  reloaded at `ttl`. `views::the_pulse_serves_a_write_once_the_ttl_has_passed`
+  keeps a real-clock route check that asserts only "served after the TTL".
+- The burst tests (concurrent pulses, TTL 0, failed load) no longer rely on a
+  50 ms store delay. The test store parks the session's loads, the test waits
+  until every request has queued for the view (a `cfg(test)` counter on the
+  slot), then releases one load. A request that would start a second load
+  fails on a 30 s guard instead of hanging.
 - The two `AppState { .. }` literals in `session.rs` and the one in
   `tests/mod.rs` became `state_from_backends` / `state_with_web` calls:
   `AppState` lost its `freshness` field and gained the cache.
