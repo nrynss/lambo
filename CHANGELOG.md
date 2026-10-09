@@ -143,6 +143,11 @@
     token never goes in `lambo.toml`: an inline `api_key` is refused, and so is
     an `api_key_env` that is not an upper-case variable name or looks like a
     token, without quoting the value.
+  - `api_key_env` may not name `LAMBO_AUTH_TOKEN` or any
+    `[[serve.credential]]` `token_env`, which hold `lambo serve`'s own
+    credentials; the embeddings endpoint is never sent serve's token. The
+    `LAMBO_AUTH_TOKEN` rule is the one `token_env` already had, now shared in
+    one place.
   - The variable is read at startup. Unset or empty is a hard error naming it,
     never a request without a key. With a token, every embed request carries
     `Authorization: Bearer <token>`; without `api_key_env` no `Authorization`

@@ -20,6 +20,15 @@ pub(crate) const MAX_SECRET_ENV_LEN: usize = 64;
 /// Shown in place of a value that may be a secret.
 pub(crate) const VALUE_NOT_SHOWN: &str = "(value not shown)";
 
+/// The variable `lambo serve` reads its own bearer token from (the legacy
+/// `--auth-token` credential, named `default`). `crate::mcp::AUTH_TOKEN_ENV`
+/// is defined as this constant, so the two cannot drift.
+///
+/// No key that names a secret's variable may name this one: for `token_env`
+/// it would make a second credential out of the legacy one, and for
+/// `api_key_env` it would send serve's own token to an embeddings endpoint.
+pub(crate) const SERVE_AUTH_TOKEN_ENV: &str = "LAMBO_AUTH_TOKEN";
+
 /// Is `name` a conventional environment variable name: `[A-Z_][A-Z0-9_]*`,
 /// at most [`MAX_SECRET_ENV_LEN`] bytes? Lower case is refused on purpose:
 /// tokens are usually mixed or lower case, variable names upper case.
@@ -69,6 +78,8 @@ pub(crate) enum SecretEnvRefusal {
     NotAName,
     /// A conventional name that reads as a token.
     LooksLikeAToken,
+    /// [`SERVE_AUTH_TOKEN_ENV`], which holds `lambo serve`'s own token.
+    ReservedForServe,
 }
 
 impl SecretEnvRefusal {
@@ -87,16 +98,50 @@ impl SecretEnvRefusal {
                  holding one {VALUE_NOT_SHOWN}. Put the token in an environment variable and set \
                  {key} to that variable's name"
             ),
+            Self::ReservedForServe => format!(
+                "{subject} may not be {SERVE_AUTH_TOKEN_ENV}, which holds lambo serve's own \
+                 token (the legacy --auth-token credential, named \"default\"). Give {key} a \
+                 variable of its own"
+            ),
         }
     }
 }
 
-/// Accept `name` only if it is a quotable variable name.
+/// Refuse `name` for the key `key` (introduced by `subject`) when it is also
+/// the `token_env` of one of `lambo serve`'s `[[serve.credential]]` entries,
+/// given as `(credential name, token_env)` pairs. One variable must not hold
+/// both serve's credential and another secret: the other key's consumer (an
+/// embeddings endpoint, say) would be handed serve's token. `name` is quoted
+/// only through [`shown`].
+pub(crate) fn check_not_a_serve_credential<'a>(
+    name: &str,
+    subject: &str,
+    key: &str,
+    serve_credentials: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> Result<(), String> {
+    match serve_credentials
+        .into_iter()
+        .find(|(_, token_env)| *token_env == name)
+    {
+        Some((credential, _)) => Err(format!(
+            "{subject} names {}, which is also the token_env of [[serve.credential]] \
+             {credential:?}: one variable must not hold both lambo serve's credential and \
+             another secret. Give {key} a variable of its own",
+            shown(name)
+        )),
+        None => Ok(()),
+    }
+}
+
+/// Accept `name` only if it is a quotable variable name other than
+/// [`SERVE_AUTH_TOKEN_ENV`].
 pub(crate) fn check(name: &str) -> Result<(), SecretEnvRefusal> {
     if !is_conventional_env_name(name) {
         Err(SecretEnvRefusal::NotAName)
     } else if looks_like_a_token(name) {
         Err(SecretEnvRefusal::LooksLikeAToken)
+    } else if name == SERVE_AUTH_TOKEN_ENV {
+        Err(SecretEnvRefusal::ReservedForServe)
     } else {
         Ok(())
     }
@@ -140,5 +185,37 @@ mod tests {
                 assert!(!msg.contains(bad), "{msg}");
             }
         }
+    }
+
+    /// Mutation: drop the `SERVE_AUTH_TOKEN_ENV` arm of `check` -> red.
+    #[test]
+    fn serves_own_variable_is_refused_by_name() {
+        assert_eq!(crate::mcp::AUTH_TOKEN_ENV, SERVE_AUTH_TOKEN_ENV);
+        assert_eq!(
+            check(SERVE_AUTH_TOKEN_ENV),
+            Err(SecretEnvRefusal::ReservedForServe)
+        );
+        let msg = SecretEnvRefusal::ReservedForServe.message("embedder.api_key_env", "api_key_env");
+        assert!(msg.contains(SERVE_AUTH_TOKEN_ENV), "{msg}");
+        assert!(msg.contains("api_key_env"), "{msg}");
+    }
+
+    /// Mutation: make `check_not_a_serve_credential` always `Ok` -> red.
+    #[test]
+    fn a_serve_credentials_variable_is_refused_naming_the_credential() {
+        let creds = [("agents", "LAMBO_AGENTS_TOKEN"), ("ops", "LAMBO_OPS_TOKEN")];
+        let err = check_not_a_serve_credential(
+            "LAMBO_OPS_TOKEN",
+            "embedder.api_key_env",
+            "api_key_env",
+            creds,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("\"ops\"") && err.contains("LAMBO_OPS_TOKEN"),
+            "{err}"
+        );
+        assert!(err.contains("api_key_env"), "{err}");
+        check_not_a_serve_credential("CLOUDFLARE_API_TOKEN", "s", "k", creds).unwrap();
     }
 }

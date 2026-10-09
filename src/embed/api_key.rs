@@ -135,6 +135,18 @@ mod tests {
         }
     }
 
+    /// `lambo serve`'s own variable is refused, as it is for `token_env`
+    /// (#32): the embeddings endpoint must never be sent serve's token.
+    #[test]
+    fn serves_auth_token_variable_is_refused() {
+        let err = validate(Some(crate::mcp::AUTH_TOKEN_ENV), None)
+            .expect_err("LAMBO_AUTH_TOKEN must be refused")
+            .to_string();
+        assert!(err.contains("embedder.api_key_env"), "{err}");
+        assert!(err.contains(crate::mcp::AUTH_TOKEN_ENV), "{err}");
+        assert!(err.contains("lambo serve"), "{err}");
+    }
+
     #[test]
     fn an_inline_key_is_refused_naming_api_key_env() {
         let err = validate(None, Some(InlineApiKey)).unwrap_err().to_string();

@@ -122,6 +122,7 @@ api_key_env = "CLOUDFLARE_API_TOKEN"
 
 - If the variable is unset or empty, startup fails and names the variable. Lambo never falls back to sending no token.
 - The value must look like a variable name: upper case letters, digits and `_`, not starting with a digit, at most 64 bytes. A value that does not, or that looks like a token, is refused without being shown. So is an inline `api_key = "..."`.
+- It may not name `LAMBO_AUTH_TOKEN` or any `[[serve.credential]]` `token_env`, from the file or from `LAMBO_EMBED_API_KEY_ENV`. Those variables hold `lambo serve`'s own credentials, and one variable never holds both a serve credential and the embedder's token.
 - A `401` or `403` from the endpoint fails the write as a configuration error, the same as a wrong URL.
 
 The same model behind a different server is a different embedding contract, because the two can differ numerically. Set `model` to the hosted id (as above) so a hosted session's contract differs from a local one, and start a fresh session or run `lambo re-embed` rather than mixing the two.

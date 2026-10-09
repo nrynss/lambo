@@ -439,13 +439,6 @@ impl CredentialConfig {
         secret_env::check(env).map_err(|why| {
             serve_err(why.message(&format!("credential {name:?}: token_env"), "token_env"))
         })?;
-        if env == crate::mcp::AUTH_TOKEN_ENV {
-            return Err(serve_err(format!(
-                "credential {name:?}: token_env may not be {}, which is the legacy \
-                 --auth-token variable (it becomes the credential named \"default\")",
-                crate::mcp::AUTH_TOKEN_ENV
-            )));
-        }
         let mut seen = BTreeSet::new();
         for entry in &self.sessions {
             if entry != EVERY_HOSTED_SESSION {
