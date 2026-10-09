@@ -290,3 +290,42 @@ Still not done: the Docker-gated suite against a real cluster and the recall
 latency figure (no Elasticsearch here). `gc_deletes` tombstone expiry is
 still not modelled; the resurrection window it allows is the one accepted
 under "Versioning".
+
+## Second review remediation (2026-10-09, F1 to F7)
+
+- **F1, a non-holder that saw the marker behind never looked again.** A
+  `Stale` session this store does not hold is re-checked by reads like an
+  `Unknown` one, at most once per repair backoff (60 s): a reader still
+  never repairs, but returns to the index once the holder's mirror or
+  repair lands. A holder that reads a stale session asks for a repair
+  (backoff-gated, never queued behind a running one) instead of waiting
+  for its next flush.
+- **F2, a repair kept writing after its lease was lost.** Reconcile checks
+  a fence before every bulk chunk, sweep pass and the marker write: the
+  store's own record of the lease, then the durable lease row's token (a
+  takeover or an erase moves it even when the stalled process has not
+  noticed). A lost lease ends the repair as `StaleWrite`, with no further
+  write and no failure count. Residual: one request already in flight when
+  the lease is lost can land; Elasticsearch offers no write-side fence
+  (delete-by-query tombstones are internally versioned and expire), and a
+  compensating delete was rejected as a write after the lease is gone.
+- **F3, a marker that stays ahead.** Both places that conclude "ahead"
+  start the repair backoff as well as the re-check; the warning is logged
+  once per episode and names the way out (stop the writer, run
+  `lambo recall-index backfill`). Still never repaired from.
+- **F4, reconcile trusted a snapshot a flush had passed.** The store
+  records the highest epoch it committed per session, under the lock that
+  reads the state on the flush path. A reconcile from an older snapshot
+  leaves the session untrusted and reruns. A session flushing faster than
+  it can be re-indexed stays on the fallback until flushes pause; mirroring
+  during a repair (to converge under load) was not attempted, because a
+  batch whose version predates the repair's would be overwritten by the
+  older snapshot.
+- **F5** a drop guard ends the repair however the task ends; a panic marks
+  the session stale and starts the backoff. Ending a run and taking the
+  rerun request now happen under one lock.
+- **F6** erase, after the durable erase commits, clears this store's held
+  lease for the session and awaits its repair (up to the release grace)
+  before sweeping; a repair that does not stop is aborted and the erase
+  reports failure, to be rerun.
+- **F7** see M3 above: the fetch is capped at the candidate limit.
