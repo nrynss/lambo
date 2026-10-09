@@ -1405,6 +1405,33 @@ mod tests {
         }
     }
 
+    /// #22 PR 6: `--query` is required unless `--image` or
+    /// `--query-vector-json` is given; the two are exclusive, and `--mime`
+    /// needs `--image`.
+    #[test]
+    fn recall_query_is_optional_only_beside_an_image_or_a_vector() {
+        let parse = |args: &[&str]| {
+            let mut all = vec!["lambo", "recall", "--session", "s"];
+            all.extend_from_slice(args);
+            Cli::try_parse_from(all)
+        };
+        assert!(parse(&[]).is_err(), "no query, no image, no vector");
+        assert!(parse(&["--query", "q"]).is_ok());
+        assert!(parse(&["--image", "a.png"]).is_ok());
+        assert!(parse(&["--image", "a.png", "--mime", "image/png", "--query", "q"]).is_ok());
+        assert!(parse(&["--query-vector-json", "v.json"]).is_ok());
+        assert!(parse(&["--image", "a.png", "--query-vector-json", "v.json"]).is_err());
+        assert!(parse(&["--query", "q", "--mime", "image/png"]).is_err());
+        assert!(
+            parse(&["--image", "a.png"])
+                .unwrap()
+                .command
+                .unwrap()
+                .needs_embedder(),
+            "a recall by image embeds"
+        );
+    }
+
     #[test]
     fn saints_stats_inspect_provision_resolve_store_only() {
         let saints = Cli::try_parse_from(["lambo", "saints", "--session", "s"]).unwrap();
