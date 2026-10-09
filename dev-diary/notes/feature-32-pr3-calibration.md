@@ -113,7 +113,7 @@ is sound.
 - `mcp::serve::tests::calibration`: two sessions from one `serve_builder`
   (PR 4's template-builder shape) fire one probe; stage 2 (`run_and_close`
   handed the calibration's abort handles) stops a running probe.
-- Mutation checks: with `PipelineProbe::new` ignoring the calibration, six
+- Mutation checks: with `PipelineProbe::new` ignoring the calibration, five
   of the new tests fail; with `abort_if_owned` aborting a shared probe, the
   close test fails.
 
