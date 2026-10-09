@@ -15,9 +15,9 @@ session parts in one process.
 |---|---|---|
 | `mcp/serve.rs` | process | composition root: pre-lease group, election, proxy branch, arming, the startup calls, the transport, the stage sequence |
 | `mcp/serve/process.rs` (new) | process | `ProcessTasks` (renamed from `HolderTasks`): `spawn` (ledger heartbeat, #13 keep-warm, J4 refusal poller), `stop_before_close` (stage 2), `stop` (stage 5) |
-| `mcp/serve/session.rs` (new) | session | `AttachedSession` (`mem`, `server`, `hub`, `endpoint`, `tasks`), `SessionTasks` (`event_pump`), `attach`, `closing`, `release_endpoint`, `session_server`, `spawn_event_pump` |
-| `mcp/serve/shutdown.rs` | both | `run_and_close_sessions` (stages 1 to 4 over the attached set), `SessionClose`, `join_all`; `run_and_close` kept as the one-session form |
-| `mcp/serve/stages.rs` | both | `ShutdownProgress::for_session` (a detach's record: `session` field on every line, no watchdog) |
+| `mcp/serve/session.rs` (new) | session | `AttachedSession` (`mem`, `server`, `hub` (in a `Mutex<Option<Hub>>`), `endpoint`, `tasks`), `SessionTasks` (`event_pump`), `attach`, `closing`, `release_endpoint(&self)`, `session_server`, `spawn_event_pump` |
+| `mcp/serve/shutdown.rs` | both | `run_and_close_sessions` (stages 1 to 4 over the attached set), `close_sessions` (stages 3 and 4 alone, returning `SessionCloses`), `SessionClose`, `join_all` (panic-isolating); `run_and_close` kept as the one-session form |
+| `mcp/serve/stages.rs` | both | `ShutdownProgress::for_session` (a detach's record: `session` field on every line, `session detach finished` summary, no watchdog) |
 
 Everything else in `serve/` is untouched apart from doc references.
 
@@ -60,6 +60,38 @@ stage tests' `capture_logs` relies on.
 before). Otherwise each session's close outcome is logged in set order after
 stage 4 (`session closed, tail durable` or `final flush failed ...`) and the
 first error is returned. For one session that is the old `match` exactly.
+With more than one session each outcome line carries a `session` field
+(review L2): "tail lost" is the line an operator acts on, and N unattributed
+copies of it do not say whose tail. A set of one logs no field, so the
+single-session output stays byte-identical.
+
+**Stages 3 and 4 are their own function (review M1).** `close_sessions` runs
+the per-session close and pump abort over a set and returns the outcomes
+unlogged (`SessionCloses`); `report()` logs and folds them.
+`run_and_close_sessions` runs stages 1 and 2, then `close_sessions`, and
+reports only if the transport succeeded, which keeps "the transport error
+wins and the outcomes are not logged". The logging is a separate step, not
+inside `close_sessions`, for exactly that reason: moving it in would log
+outcome lines on a transport error, which no serve has ever done. PR 4's
+detach calls `close_sessions(..).await.report()` under `for_session`, with no
+stage 2 and no fake transport.
+
+**One member's panic does not cancel the set (review L3).** `join_all` polls
+each member under `catch_unwind`. A panicking member is dropped, the others
+run to completion, then the first panic is resumed so it still reaches the
+caller. Resumed rather than turned into an `Err`: a set of one then behaves
+exactly as before (the panic propagates from the same poll), and the
+panicked session's lease is not released, as before; only its siblings are
+rescued. Stage 6's join gets the same isolation.
+
+**Stage 6 works through a shared reference (review M2).** The hub sits in a
+`parking_lot::Mutex<Option<Hub>>`; `release_endpoint(&self)` takes it in its
+own statement (no guard across the await) and releases it, and a second call
+is a no-op. So PR 4's `Slot::Live(Arc<AttachedSession>)` can be released while
+the router or a request still holds a clone. #28's semantics hold: `Hub` is
+still consumed by `release`, and a session dropped without the release drops
+its `Hub`, whose `Drop` aborts the accept loop. `serve()` drops the set right
+after stage 6's join, which is where the handles dropped before.
 
 **`run_and_close` stays, as the tests' seam.** Its signature is unchanged and
 it is `run_and_close_sessions` over a set of one, which is what `serve()` runs.
@@ -112,6 +144,18 @@ on its first poll); an empty set; the set-wide close closes both members,
 aborts both pumps, logs stages 3 and 4 once and two `session closed` lines;
 `for_session` lines carry `session=` and the process record's do not.
 
+Remediation (review M1, M2, L2, L3, L4) added: `close_sessions` alone logs
+only stages 3 and 4, with `session=` under `for_session`; outcome lines name
+their session in a set of two and not in a set of one; a panicking member
+leaves its sibling to finish and the panic still reaches the caller (fails
+against the old `join_all`, checked); stage 6 over two sessions held as
+`Arc<AttachedSession>` with extra clones alive, both sockets gone, a second
+release a no-op; through a `MemoryStore` wrapper, stage 3 over two closes
+that each spend 1 s releasing their lease takes 1 s (fails against a serial
+loop, checked), the first of two close errors is returned with all three
+outcomes logged in set order and every session closed, and a transport error
+wins with no outcome lines and every session closed.
+
 ## For PR 4
 
 - The transport serves `sessions[0].server`. PR 4 replaces that with the
@@ -123,9 +167,21 @@ aborts both pumps, logs stages 3 and 4 once and two `session closed` lines;
   `SessionTasks`, stopped at stage 5. With `ExitProcess` (one pinned session),
   `wind_down`'s fence arm stays the exit path, unchanged.
 - A detach runs stages 1, 3, 4, 5 and 6 for one session under
-  `ShutdownProgress::for_session`, reusing `run_and_close_sessions`' close
-  and `AttachedSession::release_endpoint`; stage 1 is the per-session MCP
-  close, not the transport drain.
+  `ShutdownProgress::for_session`, reusing `close_sessions(..).report()` and
+  `AttachedSession::release_endpoint(&self)`; stage 1 is the per-session MCP
+  close, not the transport drain. Its record ends with `session detach
+  finished in N ms`, not `shutdown finished`.
+- **The keep-warm reaches the embedder through the session's `Memory`**
+  (review L1). `ProcessTasks::spawn` passes `Arc::clone(mem.embedder())` to
+  `keep_warm_loop`, so today it is spawned off the one session. The keep-warm
+  is the one genuinely process-wide task (design §3.3, §5): one embedder per
+  process, shared by every session. PR 4 must take the embedder from the
+  resolved backends (an `Arc<dyn Embedder>` held before they are moved into
+  the template builder) and pass that to `ProcessTasks::spawn`, so the
+  keep-warm runs once per process, does not depend on which session attached
+  first, and survives that session's detach. The heartbeat and refusal poller
+  parameters change in the same PR (above), so `spawn`'s signature changes
+  once, not three times.
 - `serve()` keeps its own `Arc<Memory>` today only to hold the drop point;
   with many sessions, each detached session's `Memory` drops at its detach,
   which is outside any watchdog by design (§3.4).
