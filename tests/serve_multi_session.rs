@@ -63,13 +63,11 @@ fn lease_row(db: &str, session: &str) -> Option<lambo::store::LeaseInfo> {
     })
 }
 
-/// An ephemeral loopback port (never 7700).
-fn free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind 0");
-    listener.local_addr().expect("addr").port()
-}
-
 /// A spawned HTTP hub, its stderr collected line by line.
+///
+/// It binds `--port 0`, so the kernel picks a free ephemeral port (never
+/// 7700) and there is no window between choosing a port and binding it;
+/// [`Hub::listening`] reads the port back from the listening line.
 struct Hub {
     child: ServeChild,
     lines: mpsc::Receiver<String>,
@@ -79,7 +77,6 @@ struct Hub {
 
 impl Hub {
     fn spawn(cfg: &std::path::Path, runtime: &RuntimeDir, agent: &str) -> Self {
-        let port = free_port();
         let mut child = ServeChild::new(
             common::lambo_command()
                 .env(RUNTIME_DIR_VAR, runtime.path())
@@ -90,7 +87,7 @@ impl Hub {
                     "--transport",
                     "http",
                     "--port",
-                    &port.to_string(),
+                    "0",
                     "--session",
                     A,
                     "--session",
@@ -117,8 +114,26 @@ impl Hub {
             child,
             lines,
             seen: Vec::new(),
-            addr: SocketAddr::from(([127, 0, 0, 1], port)),
+            addr: SocketAddr::from(([127, 0, 0, 1], 0)),
         }
+    }
+
+    /// Wait for the listening line and take the bound address from it.
+    fn listening(&mut self) {
+        const LISTENING: &str = "mcp http: listening on /mcp";
+        self.wait_for(LISTENING, 1);
+        let line = self
+            .seen
+            .iter()
+            .find(|l| l.contains(LISTENING))
+            .expect("the listening line");
+        let at = line.find("127.0.0.1:").expect("a loopback address");
+        let port: String = line[at + "127.0.0.1:".len()..]
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
+        self.addr = SocketAddr::from(([127, 0, 0, 1], port.parse().expect("a port")));
+        assert_ne!(self.addr.port(), 0, "{line}");
     }
 
     /// Wait for `count` stderr lines containing `needle`.
@@ -272,7 +287,7 @@ fn one_hub_serves_two_pinned_sessions_fenced_proxied_and_released() {
     let runtime = RuntimeDir::new();
 
     let mut hub = Hub::spawn(&cfg, &runtime, "agent-hub");
-    hub.wait_for("mcp http: listening on /mcp", 1);
+    hub.listening();
     hub.wait_for("lambo serve: session attached", 2);
 
     // Routing: each path reaches its own session; /mcp is the first --session.
@@ -318,7 +333,7 @@ fn one_hub_serves_two_pinned_sessions_fenced_proxied_and_released() {
     // Per-session fencing, a second hub: both sessions held elsewhere, 503.
     let mut second = Hub::spawn(&cfg, &runtime, "agent-second");
     second.wait_for("a pinned session is held by another writer", 2);
-    second.wait_for("mcp http: listening on /mcp", 1);
+    second.listening();
     for session in [A, B] {
         let (status, head, body) =
             post(second.addr, &format!("/mcp/s/{session}"), None, INITIALIZE);
