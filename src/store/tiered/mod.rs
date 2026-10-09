@@ -230,6 +230,10 @@ struct SessionTier {
     next_check: Option<Instant>,
     /// A repair of this session is running (single-flight, M4).
     repairing: bool,
+    /// Which repair run `repairing` and `repair_task` belong to: bumped when
+    /// a run starts, so an aborted run's late cleanup cannot end the run
+    /// that replaced it (#18 review round 2, L1).
+    repair_run: u64,
     /// The highest mutation epoch a flush through this store committed for
     /// the session. A repair from an older snapshot must not mark the
     /// session in sync (#18 review F4).
@@ -285,6 +289,8 @@ impl Marker {
 struct RepairRunning<'a> {
     tier: &'a Tier,
     session: &'a SessionId,
+    /// The run this guard belongs to; see `SessionTier::repair_run`.
+    run: u64,
     /// The run ended normally and already cleared `repairing` itself.
     ended: bool,
 }
@@ -294,6 +300,7 @@ impl Drop for RepairRunning<'_> {
         if self.ended {
             return;
         }
+        let run = self.run;
         if std::thread::panicking() {
             self.tier
                 .mark_stale(self.session, "repair failed: the repair task panicked");
@@ -301,9 +308,13 @@ impl Drop for RepairRunning<'_> {
                 st.next_repair = Some(Instant::now() + self.tier.repair_backoff);
             });
         }
+        // Only this run's own state: an abort lands at the task's next
+        // poll, by when a release and a reacquire may have started another.
         self.tier.with_state(self.session, |st| {
-            st.repairing = false;
-            st.repair_again = false;
+            if st.repair_run == run {
+                st.repairing = false;
+                st.repair_again = false;
+            }
         });
     }
 }
@@ -775,26 +786,28 @@ impl Tier {
     /// bounded by the repair deadline; a failure marks the session stale and
     /// starts the backoff, and drops any queued rerun (the backoff covers it).
     fn request_repair(self: &Arc<Self>, session: &SessionId) {
-        let start = self.with_state(session, |st| {
-            if st.repairing {
-                st.repair_again = true;
-                false
-            } else {
-                st.repairing = true;
-                st.repair_again = false;
-                true
-            }
-        });
-        if !start {
-            return;
-        }
         let tier = Arc::clone(self);
         let sid = session.clone();
-        let task = tokio::spawn(async move { tier.run_repairs(&sid).await });
-        self.with_state(session, |st| st.repair_task = Some(task));
+        // Marked running and its handle stored under one lock, so an erase
+        // or a release never sees a run without the handle to wait on
+        // (#18 review round 2, L2). Spawning does not await, and the task
+        // takes this lock only once it runs.
+        self.with_state(session, |st| {
+            if st.repairing {
+                st.repair_again = true;
+                return;
+            }
+            st.repairing = true;
+            st.repair_again = false;
+            st.repair_run += 1;
+            let run = st.repair_run;
+            st.repair_task = Some(tokio::spawn(
+                async move { tier.run_repairs(&sid, run).await },
+            ));
+        });
     }
 
-    async fn run_repairs(&self, session: &SessionId) {
+    async fn run_repairs(&self, session: &SessionId, run: u64) {
         // Clears `repairing` however the task ends: normally, aborted by a
         // release, or by a panic (#18 review F5). Without it a panic leaves
         // the flag set for good: no later repair starts (requests only queue
@@ -802,6 +815,7 @@ impl Tier {
         let mut running = RepairRunning {
             tier: self,
             session,
+            run,
             ended: false,
         };
         // Stops once the lease is gone.
@@ -816,7 +830,13 @@ impl Tier {
                         self.repair_deadline.as_secs_f64()
                     ))),
                 };
-            if let Err(StoreError::StaleWrite(why)) = &result {
+            // A `StaleWrite` is a lost lease only if the fence still says
+            // so: the error alone could come from elsewhere in a pass (#18
+            // review round 2, L4), and that is an index failure like any
+            // other.
+            if let Err(StoreError::StaleWrite(why)) = &result
+                && self.ensure_fenced(session, token).await.is_err()
+            {
                 // Not a failure of the index: the session is someone else's
                 // now. Stop without another write and stop calling it held.
                 tracing::warn!(
@@ -1699,7 +1719,7 @@ impl GraphStore for TieredStore {
         session: &SessionId,
         holder: &LeaseHolder,
     ) -> Result<(), StoreError> {
-        let task = self.with_state(session, |st| st.repair_task.take());
+        let (task, run) = self.with_state(session, |st| (st.repair_task.take(), st.repair_run));
         if let Some(mut task) = task
             && tokio::time::timeout(self.release_grace, &mut task)
                 .await
@@ -1707,8 +1727,10 @@ impl GraphStore for TieredStore {
         {
             task.abort();
             self.with_state(session, |st| {
-                st.repairing = false;
-                st.repair_again = false;
+                if st.repair_run == run {
+                    st.repairing = false;
+                    st.repair_again = false;
+                }
             });
         }
         self.primary.release_lease(session, holder).await?;
