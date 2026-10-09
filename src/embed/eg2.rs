@@ -217,14 +217,87 @@ pub(crate) fn image_status_rule(code: u16, body: &str) -> StatusVerdict {
     default_status_rule(code, body)
 }
 
-/// The quantization a configured artifact names: the segment after the last
-/// `/` that follows an `@revision`, e.g. `Q8_0` in
-/// `ggml-org/embeddinggemma-2-GGUF@bfcd2987/Q8_0`. `None` when the string has
-/// no such segment (an HF id, an Ollama tag).
-fn configured_quant(model: &str) -> Option<&str> {
+/// llama.cpp's quantization names (`llama_ftype_name`, which `/props`
+/// reports as `model_ftype`; the table as of b11517), each with the token
+/// GGUF file names and Hugging Face repos use for it, which is what a
+/// configured artifact names. llama.cpp prefixes a name with `(guessed) `
+/// when the file does not record its type; that prefix is stripped first.
+const LLAMA_FTYPE_NAMES: &[(&str, &str)] = &[
+    ("all F32", "F32"),
+    ("F16", "F16"),
+    ("BF16", "BF16"),
+    ("Q1_0", "Q1_0"),
+    ("Q2_0", "Q2_0"),
+    ("Q4_0", "Q4_0"),
+    ("Q4_1", "Q4_1"),
+    ("Q5_0", "Q5_0"),
+    ("Q5_1", "Q5_1"),
+    ("Q8_0", "Q8_0"),
+    ("MXFP4 MoE", "MXFP4_MOE"),
+    ("NVFP4", "NVFP4"),
+    ("Q2_K - Medium", "Q2_K"),
+    ("Q2_K - Small", "Q2_K_S"),
+    ("Q3_K - Small", "Q3_K_S"),
+    ("Q3_K - Medium", "Q3_K_M"),
+    ("Q3_K - Large", "Q3_K_L"),
+    ("Q4_K - Small", "Q4_K_S"),
+    ("Q4_K - Medium", "Q4_K_M"),
+    ("Q5_K - Small", "Q5_K_S"),
+    ("Q5_K - Medium", "Q5_K_M"),
+    ("Q6_K", "Q6_K"),
+    ("TQ1_0 - 1.69 bpw ternary", "TQ1_0"),
+    ("TQ2_0 - 2.06 bpw ternary", "TQ2_0"),
+    ("IQ2_XXS - 2.0625 bpw", "IQ2_XXS"),
+    ("IQ2_XS - 2.3125 bpw", "IQ2_XS"),
+    ("IQ2_S - 2.5 bpw", "IQ2_S"),
+    ("IQ2_M - 2.7 bpw", "IQ2_M"),
+    ("IQ3_XS - 3.3 bpw", "IQ3_XS"),
+    ("IQ3_XXS - 3.0625 bpw", "IQ3_XXS"),
+    ("IQ1_S - 1.5625 bpw", "IQ1_S"),
+    ("IQ1_M - 1.75 bpw", "IQ1_M"),
+    ("IQ4_NL - 4.5 bpw", "IQ4_NL"),
+    ("IQ4_XS - 4.25 bpw", "IQ4_XS"),
+    ("IQ3_S - 3.4375 bpw", "IQ3_S"),
+    ("IQ3_S mix - 3.66 bpw", "IQ3_M"),
+];
+
+/// The canonical token for a `model_ftype` llama.cpp reported (`Q4_K -
+/// Medium` -> `Q4_K_M`, `all F32` -> `F32`, `(guessed) Q8_0` -> `Q8_0`).
+/// `None` for a name not in the table (a newer build's type, or llama.cpp's
+/// "unknown, may not work"), which is then not judged.
+fn reported_quant(ftype: &str) -> Option<&'static str> {
+    let name = ftype.trim();
+    let name = name.strip_prefix("(guessed)").unwrap_or(name).trim();
+    let name = name.strip_suffix("(guessed)").unwrap_or(name).trim();
+    LLAMA_FTYPE_NAMES
+        .iter()
+        .find(|(reported, _)| reported.eq_ignore_ascii_case(name))
+        .map(|(_, canonical)| *canonical)
+}
+
+/// The canonical quantization a configured artifact names: the segment after
+/// the last `/` that follows an `@revision`, e.g. `Q8_0` in
+/// `ggml-org/embeddinggemma-2-GGUF@bfcd2987/Q8_0`. The segment may also be a
+/// file name (`embeddinggemma-2-Q4_K_M.gguf`): `.gguf` is dropped and its last
+/// `-` or `.` separated part is taken. `None` when there is no such segment
+/// (an HF id, an Ollama tag) or it names no quantization in the table, which
+/// is then not judged.
+fn configured_quant(model: &str) -> Option<&'static str> {
     let (_, after_rev) = model.split_once('@')?;
-    let (_, quant) = after_rev.rsplit_once('/')?;
-    (!quant.is_empty()).then_some(quant)
+    let (_, segment) = after_rev.rsplit_once('/')?;
+    let stem = match segment.len().checked_sub(".gguf".len()) {
+        Some(cut)
+            if segment.is_char_boundary(cut) && segment[cut..].eq_ignore_ascii_case(".gguf") =>
+        {
+            &segment[..cut]
+        }
+        _ => segment,
+    };
+    let token = stem.rsplit(['-', '.']).next()?;
+    LLAMA_FTYPE_NAMES
+        .iter()
+        .find(|(_, canonical)| canonical.eq_ignore_ascii_case(token))
+        .map(|(_, canonical)| *canonical)
 }
 
 /// Judge what `/props` reported against the configured artifact. Pure, so the
@@ -255,9 +328,13 @@ fn judge_props(
              embeddinggemma-2)"
         ));
     }
+    // Both sides are reduced to the canonical token first: llama.cpp reports
+    // `Q4_K - Medium` for the file a repo calls `Q4_K_M`. A side that does
+    // not reduce is not judged.
     if let Some(want) = configured_quant(configured_model)
         && let Some(have) = model_ftype
-        && !want.eq_ignore_ascii_case(have)
+        && let Some(have_canonical) = reported_quant(have)
+        && want != have_canonical
     {
         return Eg2ServerCheck::Mismatch(format!(
             "the llama-server at {log_url} has loaded `{shown}` quantized as {have}, but \

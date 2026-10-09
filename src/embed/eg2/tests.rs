@@ -593,6 +593,74 @@ fn the_props_judge_reads_the_file_name_and_quantization() {
     assert!(msg.len() < 900, "{}", msg.len());
 }
 
+/// llama.cpp reports `model_ftype` in its own names (`Q4_K - Medium`, `all
+/// F32`, a `(guessed) ` prefix; b11517's table, and b11517 reports `Q8_0` for
+/// the default GGUF, checked live), while an artifact names the file's token
+/// (`Q4_K_M`, `F32`), possibly as a whole file name. Both reduce to the same
+/// canonical token, so a correct server is verified and a wrong one refused;
+/// a name either side cannot reduce is not judged.
+///
+/// Mutation: compare the raw strings again -> red (every K-quant, `all F32`
+/// and `(guessed)` row).
+#[test]
+fn the_quantization_compare_reads_llama_cpp_names() {
+    let ok = Eg2ServerCheck::Verified { vision: None };
+    let file = "/m/embeddinggemma-2-x.gguf";
+    for (configured, reported) in [
+        ("org/eg2@rev/Q8_0", "Q8_0"),
+        ("org/eg2@rev/Q8_0", "(guessed) Q8_0"),
+        ("org/eg2@rev/Q8_0", "Q8_0 (guessed)"),
+        ("org/eg2@rev/q8_0", "Q8_0"),
+        ("org/eg2@rev/F16", "F16"),
+        ("org/eg2@rev/BF16", "BF16"),
+        ("org/eg2@rev/F32", "all F32"),
+        ("org/eg2@rev/F32", "(guessed) all F32"),
+        ("org/eg2@rev/Q4_K_M", "Q4_K - Medium"),
+        ("org/eg2@rev/Q4_K_S", "Q4_K - Small"),
+        ("org/eg2@rev/Q3_K_L", "Q3_K - Large"),
+        ("org/eg2@rev/Q2_K", "Q2_K - Medium"),
+        ("org/eg2@rev/Q6_K", "Q6_K"),
+        ("org/eg2@rev/IQ4_XS", "IQ4_XS - 4.25 bpw"),
+        ("org/eg2@rev/IQ3_M", "IQ3_S mix - 3.66 bpw"),
+        ("org/eg2@rev/MXFP4_MOE", "MXFP4 MoE"),
+        // The segment as a file name.
+        ("org/eg2@rev/embeddinggemma-2-Q4_K_M.gguf", "Q4_K - Medium"),
+        ("org/eg2@rev/embeddinggemma-2-Q8_0.GGUF", "Q8_0"),
+        ("org/eg2@rev/embeddinggemma-2.F16.gguf", "F16"),
+        // Not judged: a name llama.cpp does not know, or a segment that
+        // names no quantization.
+        ("org/eg2@rev/Q8_0", "unknown, may not work"),
+        ("org/eg2@rev/Q8_0", "Q9_9 - Future"),
+        ("org/eg2@rev/main", "Q8_0"),
+        ("org/eg2@rev/embeddinggemma-2.gguf", "F16"),
+    ] {
+        assert_eq!(
+            judge_props(configured, "u", file, Some(reported), None),
+            ok,
+            "{configured} vs {reported}"
+        );
+    }
+    for (configured, reported) in [
+        ("org/eg2@rev/Q8_0", "F16"),
+        ("org/eg2@rev/Q8_0", "(guessed) BF16"),
+        ("org/eg2@rev/F16", "all F32"),
+        ("org/eg2@rev/Q4_K_M", "Q4_K - Small"),
+        ("org/eg2@rev/Q2_K_S", "Q2_K - Medium"),
+        ("org/eg2@rev/embeddinggemma-2-Q4_K_M.gguf", "Q8_0"),
+    ] {
+        let Eg2ServerCheck::Mismatch(msg) =
+            judge_props(configured, "u", file, Some(reported), None)
+        else {
+            panic!("{configured} vs {reported} should be refused");
+        };
+        assert!(msg.contains(&format!("quantized as {reported}")), "{msg}");
+    }
+    assert_eq!(reported_quant("Q4_K - Medium"), Some("Q4_K_M"));
+    assert_eq!(reported_quant(" (guessed) all F32 "), Some("F32"));
+    assert_eq!(configured_quant("a@r/x-Q5_K_S.gguf"), Some("Q5_K_S"));
+    assert_eq!(configured_quant("a@r/.gguf"), None);
+}
+
 // ---------------------------------------------------------------- config and contract
 
 /// The kind parses, displays and serializes as `embeddinggemma2`, and its
