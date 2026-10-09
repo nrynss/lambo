@@ -469,6 +469,24 @@ impl From<ImageMimeWire> for crate::embed::ImageMime {
 }
 
 impl EmbeddingSource {
+    /// Refuse to persist a source whose sha256 is not 64 lowercase hex
+    /// characters. [`Self::from_column`] refuses one on load, so writing it
+    /// would make the whole session unloadable; refusing the write keeps the
+    /// bad value out of the store. Every store's concept write calls this
+    /// before [`Self::to_column`].
+    pub fn check_writable(&self, concept: impl fmt::Display) -> Result<(), StoreError> {
+        match &self.sha256 {
+            Some(digest) if !is_lowercase_sha256_hex(digest) => {
+                Err(StoreError::Invariant(format!(
+                    "concept {concept}: refusing to store an embedding_source whose sha256 is not \
+                 64 lowercase hex characters ({} bytes)",
+                    digest.len()
+                )))
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// The compact JSON a store persists in `concepts.embedding_source`.
     pub fn to_column(&self) -> String {
         // A struct of strings and unit enums cannot fail to serialize.

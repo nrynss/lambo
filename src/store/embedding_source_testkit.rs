@@ -269,3 +269,59 @@ pub(crate) async fn check_embedding_source_round_trip(
         "only the upserted row changed"
     );
 }
+
+/// A source whose sha256 is not 64 lowercase hex characters is refused at
+/// the flush, so the store never holds a value its own load would refuse
+/// (#22 review round 2, L1). Nothing of the batch lands.
+pub(crate) async fn check_a_malformed_digest_is_refused_on_write(
+    store: &dyn GraphStore,
+    sid: &SessionId,
+    dim: usize,
+    token: Option<u64>,
+) {
+    let i1 = NodeId::new();
+    let id = NodeId::new();
+    let mut bad = server_source();
+    bad.sha256 = Some("AB".repeat(32));
+    let c = concept(
+        sid,
+        id,
+        i1,
+        &format!("outfit [image:{id}]"),
+        Some((0..dim).map(|i| i as f32 + 1.0).collect()),
+        Some(bad),
+    );
+    let err = store
+        .flush(
+            &MutationBatch {
+                mutations: vec![
+                    Mutation::UpsertNode {
+                        node: Node::Interaction(Interaction {
+                            id: i1,
+                            session_id: sid.clone(),
+                            agent_id: AgentId::new("embedding-source-test"),
+                            prompt_text: None,
+                            previous_id: None,
+                            created_at: Utc::now(),
+                            event_time: None,
+                        }),
+                    },
+                    upsert(&c),
+                ],
+                ..Default::default()
+            },
+            token,
+        )
+        .await
+        .expect_err("a malformed digest must not be written");
+    assert!(
+        matches!(err, crate::store::StoreError::Invariant(_)),
+        "{err:?}"
+    );
+    assert!(err.to_string().contains("sha256"), "{err}");
+    let loaded = store.load_session(sid).await;
+    assert!(
+        loaded.map_or(true, |s| s.concepts.iter().all(|c| c.id != id)),
+        "the refused concept was written"
+    );
+}

@@ -91,6 +91,13 @@ async fn postgres_round_trips_the_embedding_source() {
     )
     .await;
     check_unreadable_embedding_source_fails_the_load(&store, &sid).await;
+    crate::store::embedding_source_testkit::check_a_malformed_digest_is_refused_on_write(
+        &store,
+        &sid,
+        dim,
+        Some(lease.token),
+    )
+    .await;
     // Leave only the erase tombstone behind (#23), as the erase tests do.
     store
         .erase_session(&sid, &holder)

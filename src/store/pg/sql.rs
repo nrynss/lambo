@@ -714,7 +714,9 @@ pub(super) fn concept_upsert_query<'a>(
                 .push_bind(c.chunk_group_id.as_deref())
                 .push_bind(c.human_confirmed)
                 // Owned: `to_column` encodes and cannot fail, so it can run
-                // inside this closure, unlike the vector encode.
+                // inside this closure, unlike the vector encode. The digest
+                // was checked before the query was built
+                // (`EmbeddingSource::check_writable`).
                 .push_bind(c.embedding_source.as_ref().map(EmbeddingSource::to_column));
         },
     );

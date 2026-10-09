@@ -1741,6 +1741,20 @@ async fn an_unreadable_embedding_source_fails_the_load() {
     assert!(err.to_string().contains("embedding_source"), "{err}");
 }
 
+/// #22 review round 2, L1: a malformed digest is refused at the flush.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_malformed_embedding_source_digest_is_refused_on_write() {
+    let store = test_store();
+    store.init_schema().await.unwrap();
+    crate::store::embedding_source_testkit::check_a_malformed_digest_is_refused_on_write(
+        &store,
+        &SessionId::from("embedding-source-bad-digest"),
+        4,
+        None,
+    )
+    .await;
+}
+
 /// #22 review L1 (decided): SQLite also quarantines on a width restamp, and
 /// like the first-stamp quarantine the shared check covers, it nulls the
 /// vector and keeps the source, so the concept stays an image concept.

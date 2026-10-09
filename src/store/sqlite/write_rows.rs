@@ -18,8 +18,7 @@ use crate::store::batch::{AccessUpdate, ConceptRow, FlushStep};
 use crate::store::map_write_err;
 use crate::store::vector::encode_vector_blob;
 use crate::types::{
-    CanonizationEvent, Edge, EmbeddingSource, Interaction, Mutation, Node, NodeId, SessionId,
-    StoreError,
+    CanonizationEvent, Edge, Interaction, Mutation, Node, NodeId, SessionId, StoreError,
 };
 
 /// Apply one planned [`FlushStep`].
@@ -567,7 +566,11 @@ pub(super) fn concept_binds(r: &ConceptRow<'_>) -> Result<ConceptBinds, StoreErr
             .concept
             .embedding_source
             .as_ref()
-            .map(EmbeddingSource::to_column),
+            .map(|s| {
+                s.check_writable(r.concept.id)?;
+                Ok::<_, StoreError>(s.to_column())
+            })
+            .transpose()?,
     })
 }
 
