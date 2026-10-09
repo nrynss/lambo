@@ -297,12 +297,14 @@ The map is read from the `lambo.toml` the serve loads: `--config`, then `LAMBO_C
 
 ## Read-only window views
 
-`[web]` bounds how `lambo serve-web` reads its session. It is optional: omit it and the defaults below apply.
+`[web]` sets which sessions `lambo serve-web` serves, which `Host` names it answers without a token, and how it reads each session. It is optional: omit it and the defaults below apply.
 
-The window reads the store through a **view**: one load of the session that every request and every open tab shares until it is older than `view_ttl_ms`. The next request after that reloads it, and requests that arrive while a load is running wait for that one load instead of starting their own. A failed load is not kept: the requests waiting on it get the error, and the next request tries again. So the store sees about one load per `view_ttl_ms` however many tabs are open, and the page shows durable state up to `view_ttl_ms` older than the store. The writer-published flush lag is still read on every poll.
+The window reads the store through a **view**: one load of a session that every request and every open tab shares until it is older than `view_ttl_ms`. The next request after that reloads it, and requests that arrive while a load is running wait for that one load instead of starting their own. A failed load is not kept: the requests waiting on it get the error, and the next request tries again. So the store sees about one load per session per `view_ttl_ms` however many tabs are open, and the page shows durable state up to `view_ttl_ms` older than the store. The writer-published flush lag is still read on every poll.
 
 ```toml
 [web]
+sessions = ["lambo", "rustydocs"]
+allowed_hosts = ["lambo.example.com"]
 view_ttl_ms = 1500
 max_loaded_sessions = 4
 load_concurrency = 2
@@ -311,12 +313,14 @@ recall_concurrency = 4
 
 | Key | Default | What it sets |
 |---|---|---|
+| `sessions` | none | Sessions to serve, after any `--session` flags. The first one overall is the default, served at `/`; each is served at `/s/<session>/`. With more than one in total, each name must be 1 to 128 bytes of `[A-Za-z0-9._:-]`, not starting with `.`. |
+| `allowed_hosts` | none | `Host` values answered while no token is configured, beside `localhost`, `127.0.0.1` and `[::1]`, after any `--allowed-host` flags. A name, or `name:port` for that port only. |
 | `view_ttl_ms` | `1500` | Milliseconds a view is reused, the page's poll interval. `0` reloads on every request, still one load for requests that arrive together. At most `60000`. |
 | `max_loaded_sessions` | `4` | Views kept in memory at once. The least recently used is dropped beyond it. At least 1. |
 | `load_concurrency` | `2` | Session loads that may run at once. 1 to 1024. Always `1` on SQLite. |
 | `recall_concurrency` | `4` | Recalls that may run at once. A recall that waits 2 seconds for a slot gets `503` with `Retry-After: 1`. 1 to 1024. |
 
-An unknown key or an out-of-range value is refused when the file is read, so it stops every command, like any other invalid key. The refusal names the key and its bound, never the value. At startup `lambo serve-web` prints the bounds it runs with. It checks the store's schema at startup and loads the session on the first request that needs it. See [Watch a session in a browser](/lambo/cli/#watch-a-session-in-a-browser).
+An unknown key, an out-of-range value, an empty or repeated session name and a malformed host are refused when the file is read, so they stop every command, like any other invalid key. A numeric refusal names the key and its bound, never the value. At startup `lambo serve-web` prints the sessions and bounds it runs with. It checks the store's schema at startup and loads each session on the first request that needs it. See [Watch a session in a browser](/lambo/cli/#watch-a-session-in-a-browser).
 
 ## Environment variables
 
@@ -382,7 +386,7 @@ A request whose declared `Content-Length` exceeds `4 MiB` is refused with `413` 
 
 ### The read-only window
 
-`lambo serve-web` opens a read-only browser window onto a session on port `7710` and never takes the writer lease, so it runs safely beside the `lambo serve` writer. It shares the same auth posture: loopback is unauthenticated by default, and a non-loopback bind requires `LAMBO_AUTH_TOKEN` or `--auth-token` and fails closed without one. It reads through a short-lived per-session view bounded by [`[web]`](#read-only-window-views). See [Command line](/lambo/cli/).
+`lambo serve-web` opens a read-only browser window onto one or more sessions on port `7710` and never takes the writer lease, so it runs safely beside the `lambo serve` writer. It shares the same auth posture: loopback is unauthenticated by default, and a non-loopback bind requires `LAMBO_AUTH_TOKEN` or `--auth-token` and fails closed without one; without a token it answers only loopback `Host` names and `[web] allowed_hosts`. It reads through a short-lived per-session view bounded by [`[web]`](#read-only-window-views). See [Command line](/lambo/cli/).
 
 ## Provisioning a durable store
 

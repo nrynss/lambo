@@ -385,6 +385,8 @@ mod tests {
         let web = LamboFile::from_toml_str(&block)
             .unwrap_or_else(|e| panic!("example [web] must parse: {e}"))
             .web;
+        assert_eq!(web.sessions, ["lambo", "rustydocs"]);
+        assert_eq!(web.allowed_hosts, ["lambo.example.com"]);
         assert_eq!(web.view_ttl_ms, Some(DEFAULT_VIEW_TTL_MS));
         assert_eq!(web.max_loaded_sessions, Some(DEFAULT_MAX_LOADED_SESSIONS));
         assert_eq!(web.load_concurrency, Some(DEFAULT_LOAD_CONCURRENCY));

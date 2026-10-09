@@ -281,8 +281,13 @@ url = "http://127.0.0.1:8080"
 # admin = true
 # --- [serve] example ends ---
 
-# Optional. The read-only window's views (`lambo serve-web`, #4). The window
-# reads one shared view of the session, reloaded at most once per
+# Optional. The read-only window (`lambo serve-web`, #4). `sessions` joins the
+# repeatable --session: every one is served at /s/<session>/ and the first also
+# at / (with more than one, names must be [A-Za-z0-9._:-]). `allowed_hosts`
+# joins --allowed-host: Host names the window answers while no token is set,
+# beside localhost, 127.0.0.1 and [::1] (the DNS-rebinding check; a proxy
+# forwarding its public name needs it). The window
+# reads one shared view of each session, reloaded at most once per
 # view_ttl_ms however many tabs poll it; 0 reloads on every request. SQLite
 # always loads one session at a time. A recall that waits 2 s for one of the
 # recall_concurrency slots gets 503 with Retry-After: 1. Omit the table for
@@ -290,6 +295,8 @@ url = "http://127.0.0.1:8080"
 #
 # --- [web] example begins ---
 # [web]
+# sessions = ["lambo", "rustydocs"]        # beside --session; the first is the default
+# allowed_hosts = ["lambo.example.com"]    # beside --allowed-host; Host names answered without a token
 # view_ttl_ms = 1500           # 0 to 60000
 # max_loaded_sessions = 4      # views kept in memory, least recently used dropped
 # load_concurrency = 2         # session loads at once (1 on SQLite)
