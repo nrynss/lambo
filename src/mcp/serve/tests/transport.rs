@@ -389,3 +389,73 @@ async fn a_disconnected_sessionless_request_is_cancelled() {
         .await
         .expect("a disconnect cancels a sessionless call");
 }
+
+/// #32 PR 5 third review N3: the disconnect cancel holds through the real
+/// composition, not only `serve_attributed` alone: the serve's guard
+/// (`guard_request`, which buffers this sessionless POST's body and
+/// classifies it) in front of `serve_owned`, the body of `serve_live`,
+/// with the guard counting the very session manager rmcp mints through.
+///
+/// Mutation: run `next.run` in the guard, or `handle` in `serve_owned`, on
+/// a spawned task and the call is never cancelled.
+#[tokio::test]
+async fn a_disconnected_sessionless_request_is_cancelled_behind_the_guard() {
+    use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
+    use rmcp::transport::streamable_http_server::{
+        StreamableHttpServerConfig, StreamableHttpService,
+    };
+    use tokio::io::AsyncWriteExt;
+
+    let probe = CancelProbe {
+        started: Arc::new(tokio::sync::Notify::new()),
+        cancelled: Arc::new(tokio::sync::Notify::new()),
+    };
+    let (started, cancelled) = (probe.started.clone(), probe.cancelled.clone());
+    let sessions = Arc::new(LocalSessionManager::default());
+    let openers = Arc::new(crate::mcp::serve::openers::Openers::default());
+    let http = StreamableHttpService::new(
+        move || Ok(probe.clone()),
+        Arc::new(crate::mcp::serve::openers::AttributingSessions::new(
+            Arc::clone(&sessions),
+            Arc::clone(&openers),
+        )),
+        StreamableHttpServerConfig::default(),
+    );
+    let guard = HttpGuard::new(legacy_authority(None), 32, sessions, 0);
+    let app = axum::Router::new()
+        .route(
+            "/mcp",
+            axum::routing::any(move |req: axum::extract::Request| {
+                let (http, openers) = (http.clone(), Arc::clone(&openers));
+                async move {
+                    crate::mcp::serve::transport::serve_owned(&http, &openers, "local", req).await
+                }
+            }),
+        )
+        .layer(axum::middleware::from_fn_with_state(guard, guard_request));
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let mut client = tokio::net::TcpStream::connect(addr).await.expect("connect");
+    let head = format!(
+        "POST /mcp HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n\
+         Accept: application/json, text/event-stream\r\nMCP-Protocol-Version: 2026-07-28\r\n\
+         Mcp-Method: tools/call\r\nMcp-Name: wait\r\nContent-Length: {}\r\n\r\n{PER_REQUEST_CALL}",
+        PER_REQUEST_CALL.len()
+    );
+    client.write_all(head.as_bytes()).await.expect("write");
+    tokio::time::timeout(Duration::from_secs(5), started.notified())
+        .await
+        .expect("the call passes the guard and starts");
+
+    // The client goes away mid-call.
+    drop(client);
+    tokio::time::timeout(Duration::from_secs(10), cancelled.notified())
+        .await
+        .expect("a disconnect cancels a sessionless call behind the guard");
+}
