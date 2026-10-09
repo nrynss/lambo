@@ -136,7 +136,7 @@ mod closes {
         let out = run_and_close_sessions(
             &set,
             async { Ok(()) },
-            &[],
+            || {},
             &EarlyShutdown::unarmed(),
             &ShutdownProgress::new(),
         )
@@ -411,7 +411,7 @@ mod folds {
         run_and_close_sessions(
             &set,
             async { transport },
-            &[],
+            || {},
             &EarlyShutdown::unarmed(),
             &ShutdownProgress::new(),
         )

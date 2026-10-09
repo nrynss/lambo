@@ -90,3 +90,9 @@ mod hub_release;
 /// drives a set concurrently on the calling task; the set-wide close closes
 /// every member and reports each.
 mod session_set;
+
+/// #32 PR 3: a serve's write-queue calibration is process-wide. Every
+/// session built from the serve builder reads one probe of the shared
+/// embedder, and stage 2 aborts that probe, since no session's close does.
+#[cfg(all(feature = "store-memory", feature = "embed-fixture"))]
+mod calibration;

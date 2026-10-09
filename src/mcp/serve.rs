@@ -70,6 +70,7 @@ use crate::ledger::Ledger;
 use crate::memory::Memory;
 use crate::resolve::ResolvedBackends;
 use crate::types::LamboError;
+use crate::writeq::EmbedderCalibration;
 
 mod builder;
 mod heartbeat;
@@ -276,6 +277,13 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     // create-nothing pre-lease group; the task it configures is spawned on the
     // holder path only, below the arming.
     let keep_warm = backends.keep_warm_interval();
+    // #32 PR 3 — the write queue's calibration, once per process (design
+    // decision 14): the probe measures the embedder, which every session this
+    // process attaches shares. Creating it probes nothing and holds no
+    // embedder (the first pipeline built spawns the probe, and the key is
+    // weak), so it belongs in this pre-lease group and a proxy that never
+    // builds a pipeline never probes and keeps no model.
+    let calibration = EmbedderCalibration::new();
     // J6 — the pre-arm. Constructing it installs NOTHING; it is armed from
     // inside `build_attach`, in the `LeaseOutcome::Acquired` arm, so the
     // election below stays killable and a serve that loses never arms at all.
@@ -288,6 +296,7 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
         endpoint.as_ref(),
         ledger.clone(),
         early.clone(),
+        Some(calibration.clone()),
     );
     // Moved, not lent: see `resolve_role` — a proxy must not keep the model.
     let role = resolve_role(&opts, builder, endpoint.as_ref(), &ledger).await;
@@ -490,7 +499,14 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     let server = session_server(&mem, &ledger);
     // Stopped after the close (and the keep-warm before it); see
     // `process::ProcessTasks` and the stage table in `shutdown`.
-    let tasks = ProcessTasks::spawn(&server, &mem, &ledger, opts.ledger_heartbeat, keep_warm);
+    let tasks = ProcessTasks::spawn(
+        &server,
+        &mem,
+        &ledger,
+        opts.ledger_heartbeat,
+        keep_warm,
+        &calibration,
+    );
     // `mem` stays held here as well, so the last handle still drops when
     // `serve` returns, after the watchdog is disarmed (the stage table's
     // "not watched" note), not when the set is taken apart at stage 6.
@@ -518,11 +534,21 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     // The holder's shutdown, in the order `shutdown`'s stage table names.
     // Stages 1-4: transport drain, keep-warm abort (issue #13), the bounded
     // session closes, the event pumps.
-    let stop_before_close = tasks.stop_before_close();
+    // The calibration probe (#32 PR 3) stops there too, through `tasks`: it
+    // is the process's to abort now that no session's close does, and an
+    // embed it still has in flight would only compete with the final drains,
+    // as a keep-warm touch would. Instant, so stage 2 stays instant.
     let closing: Vec<_> = sessions.iter().map(AttachedSession::closing).collect();
-    let outcome =
-        run_and_close_sessions(&closing, transport, &stop_before_close, &early, &progress).await;
-    // Stage 5: heartbeat, keep-warm (again), refusal poller.
+    let outcome = run_and_close_sessions(
+        &closing,
+        transport,
+        || tasks.stop_before_close(),
+        &early,
+        &progress,
+    )
+    .await;
+    // Stage 5: heartbeat, keep-warm (again), refusal poller, calibration
+    // probe (again).
     progress.run(Stage::BackgroundTasks, || tasks.stop());
     // Stage 6: every session's endpoint, after the closes; see
     // `AttachedSession::release_endpoint`.

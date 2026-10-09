@@ -10,7 +10,7 @@ use super::*;
 /// `contains("promotion_policy=Swarm")` never matches even when the field is
 /// there. Asserting on the stripped text keeps the assertion about the log
 /// line rather than about the formatter's styling.
-fn strip_ansi(text: &str) -> String {
+pub(super) fn strip_ansi(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars();
     while let Some(c) = chars.next() {

@@ -7,8 +7,9 @@
 //!
 //! 1. `serialize`: serialize on `close_state` (a concurrent close parks
 //!    here); latch `closed`;
-//! 2. `replay_stop`: abort the write queue's probe, stop the intent replay
-//!    (abort and join);
+//! 2. `replay_stop`: abort the write queue's probe if the session owns it
+//!    (a probe shared through an `EmbedderCalibration` is its owner's to
+//!    abort, #32 PR 3), stop the intent replay (abort and join);
 //! 3. `queue_quiesce`: drain the write queue (bounded; what is left is
 //!    deferred as `intent_durable`; its workers are aborted and joined);
 //! 4. `writers_gate`: take the writers gate's write side (waits out

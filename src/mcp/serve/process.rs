@@ -9,6 +9,7 @@ use super::heartbeat::{heartbeat_loop, record_refused_takeovers};
 use crate::ledger::Ledger;
 use crate::mcp::server::LamboServer;
 use crate::memory::Memory;
+use crate::writeq::EmbedderCalibration;
 
 /// The holder's process-wide background tasks: spawned beside the transport
 /// on the holder path, stopped after the close (stage 5), except the
@@ -26,6 +27,11 @@ pub(super) struct ProcessTasks {
     pub(super) keep_warm: Option<tokio::task::JoinHandle<()>>,
     /// J4 holder-side refusal poller, when a ledger is attached.
     pub(super) refusal_poller: Option<tokio::task::JoinHandle<()>>,
+    /// #32 PR 3: the process's write-queue calibration, whose probe is
+    /// aborted beside the keep-warm at stage 2 and again at stage 5. Held
+    /// here so both stages' abort lists are built in one place that `serve`
+    /// and its tests share (review P3-1).
+    pub(super) calibration: EmbedderCalibration,
 }
 
 impl ProcessTasks {
@@ -38,6 +44,7 @@ impl ProcessTasks {
         ledger: &Option<Arc<Ledger>>,
         heartbeat_every: Option<Duration>,
         keep_warm: Option<Duration>,
+        calibration: &EmbedderCalibration,
     ) -> Self {
         let heartbeat = match (ledger, heartbeat_every) {
             (Some(ledger), Some(every)) => {
@@ -102,17 +109,26 @@ impl ProcessTasks {
             heartbeat,
             keep_warm: keep_warm_task,
             refusal_poller,
+            calibration: calibration.clone(),
         }
     }
 
-    /// Stage 2's handles: the keep-warm, which stops when the transport does,
-    /// before the close and its final drain (issue #13); see
+    /// Stage 2: abort the keep-warm, which stops when the transport does,
+    /// before the close and its final drain (issue #13), and the write-queue
+    /// calibration probe (#32 PR 3), which no session's close aborts and
+    /// whose embeds would only compete with the final drains; see
     /// [`run_and_close_sessions`](super::shutdown::run_and_close_sessions).
-    pub(super) fn stop_before_close(&self) -> Vec<tokio::task::AbortHandle> {
-        self.keep_warm
-            .iter()
-            .map(tokio::task::JoinHandle::abort_handle)
-            .collect()
+    ///
+    /// Called **at** stage 2, not before the transport runs: the calibration
+    /// is shut down then (`EmbedderCalibration::shutdown`), so a probe
+    /// spawned by an attach during the transport (#32 PR 4's lazy attaches)
+    /// is stopped here too, not only at stage 5 (review P3-2). The shutdown
+    /// is final: an attach still in flight afterwards starts no probe.
+    pub(super) fn stop_before_close(&self) {
+        if let Some(task) = &self.keep_warm {
+            task.abort();
+        }
+        self.calibration.shutdown();
     }
 
     /// Stage 5: stop every background task, after `close()`.
@@ -137,5 +153,9 @@ impl ProcessTasks {
         if let Some(poller) = self.refusal_poller {
             poller.abort();
         }
+        // #32 PR 3. Already aborted at stage 2; repeated here (idempotent),
+        // like the keep-warm. Dropping `self` drops this clone; the probe's
+        // last holders are the calibration in `serve` and the sessions.
+        self.calibration.shutdown();
     }
 }
