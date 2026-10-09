@@ -213,6 +213,13 @@ enum Commands {
         )]
         confirm: String,
     },
+    /// Maintain the recall tier's index ([recall] in lambo.toml).
+    ///
+    /// Operator-only. Does not construct the embedder.
+    RecallIndex {
+        #[command(subcommand)]
+        action: RecallIndexAction,
+    },
     /// Derive concepts from the current interaction into session memory. Timestamps are stamped server-side; do not send one.
     Derive {
         /// Session this process writes (acquires the single-writer lease).
@@ -354,6 +361,17 @@ enum Commands {
     },
 }
 
+/// `lambo recall-index` actions.
+#[derive(Debug, Subcommand)]
+enum RecallIndexAction {
+    /// Rebuild one session's recall index from the durable store: re-index every stored vector and drop documents the store no longer has. Takes the session's lease, so it is refused while a writer holds the session. Prints one JSON report.
+    Backfill {
+        /// Session to rebuild.
+        #[arg(long, help = "Session to rebuild.")]
+        session: String,
+    },
+}
+
 impl Commands {
     fn name(&self) -> &'static str {
         match self {
@@ -366,6 +384,7 @@ impl Commands {
             Self::Stats { .. } => "stats",
             Self::Provision => "provision",
             Self::EraseSession { .. } => "erase-session",
+            Self::RecallIndex { .. } => "recall-index",
             Self::Derive { .. } => "derive",
             Self::RecordAction { .. } => "record-action",
             Self::Reserve { .. } => "reserve",
@@ -379,6 +398,7 @@ impl Commands {
             self,
             Self::Provision
                 | Self::EraseSession { .. }
+                | Self::RecallIndex { .. }
                 | Self::Saints { .. }
                 | Self::Inspect { .. }
                 | Self::Stats { .. }
@@ -679,6 +699,18 @@ fn main() -> ExitCode {
         (Commands::Provision, Resolved::StoreOnly { store, kind, dsn }) => run_async(
             "provision",
             lambo::cli::provision::run(store, kind, dsn.as_deref()),
+        ),
+        (
+            Commands::RecallIndex {
+                action: RecallIndexAction::Backfill { session },
+            },
+            Resolved::StoreOnly { store, .. },
+        ) => run_async(
+            "recall-index backfill",
+            lambo::cli::recall_index::backfill(
+                store.as_ref(),
+                lambo::cli::recall_index::Args { session },
+            ),
         ),
         (Commands::EraseSession { session, confirm }, Resolved::StoreOnly { store, .. }) => {
             run_async(
@@ -1041,6 +1073,23 @@ mod tests {
             recall.command.unwrap().needs_embedder(),
             "recall still embeds when the store claims VECTOR_SEARCH"
         );
+    }
+
+    /// #18: the recall-index verb is an operator, store-only path.
+    #[test]
+    fn recall_index_backfill_parses_and_needs_no_embedder() {
+        let cli =
+            Cli::try_parse_from(["lambo", "recall-index", "backfill", "--session", "s"]).unwrap();
+        let cmd = cli.command.unwrap();
+        assert_eq!(cmd.name(), "recall-index");
+        assert!(!cmd.needs_embedder());
+        assert!(matches!(
+            cmd,
+            Commands::RecallIndex {
+                action: RecallIndexAction::Backfill { ref session }
+            } if session == "s"
+        ));
+        assert!(Cli::try_parse_from(["lambo", "recall-index", "backfill"]).is_err());
     }
 
     #[test]
