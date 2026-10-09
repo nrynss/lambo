@@ -1060,3 +1060,45 @@ async fn invalid_or_oversized_requests_do_no_external_work() {
     assert_eq!(embedder.calls(), 0);
     assert_eq!(store.vector_calls(), 0);
 }
+
+/// The context caps bound what an embedder is sent, so a store without
+/// vector search, where nothing is embedded, does not apply them: a concept
+/// whose framed context would be over the cap is written keyword-only, as
+/// the embed budget is not applied there either. With vector search the same
+/// call is still refused before any embed.
+#[tokio::test]
+async fn the_context_cap_applies_only_when_the_call_embeds() {
+    let content = "c".repeat(MAX_HYBRID_CONTEXT_BYTES - 4);
+    let run = |store: SpyStore| {
+        let content = content.clone();
+        async move {
+            let (graph, interaction) =
+                graph_with_interaction("hybrid-context-gate", 1, 0, &content);
+            let embedder = RecordingEmbedder::new();
+            let out = derive(
+                graph,
+                &store,
+                &embedder,
+                &contract("fixture", 1024),
+                interaction,
+                &agent(),
+                &[(content.as_str(), ConceptType::Entity)],
+                &ParentOf::none(),
+                10,
+                SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+                None,
+            )
+            .await;
+            (out, embedder.embedded_texts().len())
+        }
+    };
+    let (out, embeds) = run(SpyStore::without_vector()).await;
+    let out = out.expect("keyword-only write on a store without vector search");
+    assert_eq!((out.created.len(), out.embedded, embeds), (1, 0, 0));
+    let (out, embeds) = run(SpyStore::with_vector(Vec::new())).await;
+    assert!(
+        matches!(&out, Err(LamboError::Config(m)) if m.contains("context")),
+        "{out:?}"
+    );
+    assert_eq!(embeds, 0);
+}

@@ -891,9 +891,13 @@ async fn derive_planned(
                 check_embed_budget(&items, &parent_ends)?;
             }
 
-            if origin_text
-                .as_ref()
-                .is_some_and(|origin| origin.len() > MAX_HYBRID_CONTEXT_BYTES)
+            // The context caps bound what an embedder is sent, so, like the
+            // embed budget above, they apply only when this call will embed:
+            // on a store without vector search nothing is embedded.
+            if vector_ok
+                && origin_text
+                    .as_ref()
+                    .is_some_and(|origin| origin.len() > MAX_HYBRID_CONTEXT_BYTES)
             {
                 return Err(LamboError::Config(format!(
                     "hybrid interaction context exceeds {MAX_HYBRID_CONTEXT_BYTES} bytes"
@@ -908,9 +912,11 @@ async fn derive_planned(
                 .filter(|(content, _, _, matched)| matched.is_none() && !is_supplied(content))
                 .map(|(content, _, _, _)| *content)
                 .chain(parent_ends.iter().map(|(content, _)| *content));
-            if unmatched_contents.into_iter().any(|content| {
-                context_len(content, origin_text.as_deref()) > MAX_HYBRID_CONTEXT_BYTES
-            }) {
+            if vector_ok
+                && unmatched_contents.into_iter().any(|content| {
+                    context_len(content, origin_text.as_deref()) > MAX_HYBRID_CONTEXT_BYTES
+                })
+            {
                 return Err(LamboError::Config(format!(
                     "hybrid embedding context exceeds {MAX_HYBRID_CONTEXT_BYTES} bytes"
                 )));
