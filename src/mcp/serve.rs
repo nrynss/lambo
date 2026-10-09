@@ -117,7 +117,7 @@ use pinned::check_pinned;
 use process::ProcessTasks;
 use registry::{Acquired, LeaseLossPolicy, SessionAttacher, SessionRegistry};
 use roles::{resolve_role, Role};
-use session::{session_server, AttachedSession};
+use session::{session_server, AttachedSession, HostCheck};
 use shutdown::{
     close_bounded, close_ledger, close_sessions, holder_shutdown, join_all, registry_shutdown,
     stop_transport, CLOSE_GRACE,
@@ -586,7 +586,13 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     // `mem` stays held here as well, so the last handle still drops when
     // `serve` returns, after the watchdog is disarmed (the stage table's
     // "not watched" note), not when the set is taken apart at stage 6.
-    let session = AttachedSession::attach(Arc::clone(&mem), server, endpoint, opts.max_sessions);
+    let session = AttachedSession::attach(
+        Arc::clone(&mem),
+        server,
+        endpoint,
+        opts.max_sessions,
+        HostCheck::for_authority(authority.as_deref()),
+    );
     registry.insert_live(Arc::new(session));
     registry.mark_started();
 
@@ -694,6 +700,7 @@ async fn serve_pinned_with(
             store_cfg,
             ledger: ledger.clone(),
             max_sessions: opts.max_sessions,
+            host_check: HostCheck::for_authority(Some(&authority)),
             agent: opts.agent.clone(),
         }),
         early.clone(),

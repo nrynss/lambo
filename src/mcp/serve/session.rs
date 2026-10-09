@@ -114,19 +114,58 @@ impl SessionTasks {
     }
 }
 
+/// Which `Host` headers a session's streamable-HTTP service answers
+/// (#32 PR 5 review M1).
+///
+/// rmcp's default refuses every `Host` but `localhost`, `127.0.0.1` and
+/// `::1` with a 403, as DNS-rebinding protection: a page a browser loaded
+/// from an attacker's name, re-pointed at a loopback serve, would otherwise
+/// reach it as same-origin. That protection is what an **unauthenticated**
+/// serve needs, and it is kept for one. A serve that requires a bearer token
+/// on every request does not need it, because the page cannot present a
+/// token it does not know, and it cannot keep it: a serve bound beyond
+/// loopback is reached under its own address or a DNS name, never under
+/// `localhost`, so the allow-list refused every request the credentials
+/// were configured to admit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum HostCheck {
+    /// rmcp's loopback allow-list: the implicit `local` credential, and a
+    /// stdio serve (which never routes HTTP).
+    Loopback,
+    /// Any `Host`: every request presents a bearer token (the legacy
+    /// `default` credential or a configured one).
+    Any,
+}
+
+impl HostCheck {
+    /// The check for a serve with `authority` (`None`: no HTTP credential
+    /// set, a stdio serve).
+    pub(super) fn for_authority(authority: Option<&super::authority::ServeAuthority>) -> Self {
+        match authority {
+            Some(authority) if authority.requires_bearer() => Self::Any,
+            _ => Self::Loopback,
+        }
+    }
+}
+
 /// The streamable-HTTP configuration every session's service uses: the SDK
-/// default with a 15 s SSE keep-alive.
-fn http_config() -> StreamableHttpServerConfig {
+/// default with a 15 s SSE keep-alive, and the `Host` allow-list `host`
+/// says.
+fn http_config(host: HostCheck) -> StreamableHttpServerConfig {
     // `#[non_exhaustive]` — mutate the SDK default rather than
     // constructing, so a new field cannot silently break the build.
     let mut cfg = StreamableHttpServerConfig::default();
     cfg.sse_keep_alive = Some(Duration::from_secs(15));
-    cfg
+    match host {
+        HostCheck::Loopback => cfg,
+        HostCheck::Any => cfg.disable_allowed_hosts(),
+    }
 }
 
 impl AttachedSession {
     /// Attach the serving parts of a session whose lease `mem` holds: bind
-    /// its endpoint and start its event pump, in that order.
+    /// its endpoint and start its event pump, in that order. `host` is the
+    /// HTTP service's `Host` check ([`HostCheck`]).
     ///
     /// Called below the arming, like every holder startup step (see
     /// [`serve`](super::serve)), so a signal during it still reaches the
@@ -136,6 +175,7 @@ impl AttachedSession {
         server: LamboServer,
         endpoint: Option<SessionEndpoint>,
         max_sessions: usize,
+        host: HostCheck,
     ) -> Self {
         // J2 — the session endpoint, bound HERE: below the arming and below
         // `LamboServer`, which it needs. A bind failure degrades, it does not stop
@@ -154,7 +194,7 @@ impl AttachedSession {
         let http = StreamableHttpService::new(
             move || Ok(factory_server.clone()),
             Arc::clone(&mcp_sessions),
-            http_config(),
+            http_config(host),
         );
 
         Self {

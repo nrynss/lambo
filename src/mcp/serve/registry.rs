@@ -38,7 +38,7 @@ use std::time::{Duration, Instant};
 use super::builder::explain_startup_failure;
 use super::hub::{derive_endpoint, SessionEndpoint};
 use super::roles::{record_refused_loser, ELECTION_RETRY};
-use super::session::{session_server, AttachedSession};
+use super::session::{session_server, AttachedSession, HostCheck};
 use super::shutdown::{book_lease_loss, close_sessions, LEASE_RELEASE_GRACE, SHUTDOWN_GRACE};
 use super::signals::EarlyShutdown;
 use super::stages::{ShutdownProgress, Stage};
@@ -165,6 +165,8 @@ pub(super) struct SessionAttacher {
     pub(super) ledger: Option<Arc<Ledger>>,
     /// The per-session endpoint's MCP-session cap (`--max-sessions`).
     pub(super) max_sessions: usize,
+    /// Each session's HTTP `Host` check (#32 PR 5 review M1).
+    pub(super) host_check: HostCheck,
     /// The agent this process writes as.
     pub(super) agent: String,
 }
@@ -369,12 +371,22 @@ impl SessionRegistry {
         mem: Arc<Memory>,
         endpoint: Option<SessionEndpoint>,
     ) -> Arc<AttachedSession> {
-        let (ledger, max_sessions) = match &self.attacher {
-            Some(attacher) => (attacher.ledger.clone(), attacher.max_sessions),
-            None => (None, crate::mcp::DEFAULT_MAX_SESSIONS),
+        let (ledger, max_sessions, host_check) = match &self.attacher {
+            Some(attacher) => (
+                attacher.ledger.clone(),
+                attacher.max_sessions,
+                attacher.host_check,
+            ),
+            None => (None, crate::mcp::DEFAULT_MAX_SESSIONS, HostCheck::Loopback),
         };
         let server = session_server(&mem, &ledger);
-        let session = Arc::new(AttachedSession::attach(mem, server, endpoint, max_sessions));
+        let session = Arc::new(AttachedSession::attach(
+            mem,
+            server,
+            endpoint,
+            max_sessions,
+            host_check,
+        ));
         self.insert_live(Arc::clone(&session));
         session
     }

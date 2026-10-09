@@ -456,13 +456,36 @@ pub async fn on_the_wire_as(
     path: &str,
     authorization: Option<&str>,
 ) -> String {
+    on_the_wire_with(addr, method, path, "localhost", authorization, &[], "").await
+}
+
+/// [`on_the_wire_as`] with the `Host` header, further headers and a body
+/// given (#32 PR 5 review M1 and L5): a request with a non-loopback `Host`,
+/// an `Mcp-Session-Id` or a JSON-RPC body. With no extra header and an
+/// empty body the request bytes are exactly [`on_the_wire_as`]'s.
+pub async fn on_the_wire_with(
+    addr: std::net::SocketAddr,
+    method: &str,
+    path: &str,
+    host: &str,
+    authorization: Option<&str>,
+    headers: &[(&str, &str)],
+    body: &str,
+) -> String {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
     let authorization = authorization
         .map(|value| format!("Authorization: {value}\r\n"))
         .unwrap_or_default();
+    let extra: String = headers
+        .iter()
+        .map(|(name, value)| format!("{name}: {value}\r\n"))
+        .collect();
+    // Head and body in one write, so a refusal answered before the body is
+    // read cannot race a second segment into a reset.
     let request = format!(
-        "{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n{authorization}Content-Length: 0\r\n\r\n"
+        "{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n{authorization}{extra}Content-Length: {}\r\n\r\n{body}",
+        body.len()
     );
     stream.write_all(request.as_bytes()).await.expect("write");
     let mut raw = Vec::new();

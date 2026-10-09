@@ -19,7 +19,7 @@ use crate::mcp::serve::registry::ForcedState;
 use crate::surface::session::{
     parse_addressed, SessionCapabilities, SessionGrant, SessionPrefix, SessionScope,
 };
-use crate::test_util::on_the_wire_as;
+use crate::test_util::{on_the_wire_as, on_the_wire_with};
 
 const LIVE: &str = "auth-live";
 const DETACHING: &str = "auth-detaching";
@@ -78,15 +78,6 @@ struct Wire {
 }
 
 async fn wire() -> Wire {
-    let store = Arc::new(MemoryStore::new());
-    let (recorded, calls) = Shared::recording(&store);
-    let registry = new_registry(&HOSTED, backends_over(recorded, fast_config(1_000)), 8);
-    attach_or_hold(&registry, LIVE).await;
-    registry.force_state(DETACHING, ForcedState::Detaching);
-    registry.force_state(HELD, ForcedState::HeldElsewhere);
-    registry.force_state(FAILED, ForcedState::Failed);
-    registry.mark_started();
-
     let mut opts = ServeOptions::new(LIVE, "agent-a");
     opts.sessions = HOSTED.iter().map(|s| s.to_string()).collect();
     opts.transport = Transport::Http;
@@ -96,7 +87,24 @@ async fn wire() -> Wire {
         credential("app", &[], Some("auth-u-"), false),
         credential("maker", &[], Some("auth-m-"), true),
     ];
-    let addr = serve_app(guarded_app(Arc::clone(&registry), authority_for(&opts), 8)).await;
+    let authority = authority_for(&opts);
+
+    let store = Arc::new(MemoryStore::new());
+    let (recorded, calls) = Shared::recording(&store);
+    // The `Host` check `serve_pinned` gives a credentialed serve.
+    let registry = new_registry_with(
+        &HOSTED,
+        backends_over(recorded, fast_config(1_000)),
+        8,
+        HostCheck::for_authority(Some(&authority)),
+    );
+    attach_or_hold(&registry, LIVE).await;
+    registry.force_state(DETACHING, ForcedState::Detaching);
+    registry.force_state(HELD, ForcedState::HeldElsewhere);
+    registry.force_state(FAILED, ForcedState::Failed);
+    registry.mark_started();
+
+    let addr = serve_app(guarded_app(Arc::clone(&registry), authority, 8)).await;
     Wire {
         addr,
         calls,
@@ -292,4 +300,89 @@ async fn a_create_less_credential_is_refused_on_an_absent_session_and_served_on_
         reference,
         "the default session is outside app's prefix"
     );
+}
+
+/// The `initialize` body the `Host` tests send.
+const INITIALIZE: &str = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"host-test","version":"1"}}}"#;
+
+/// The headers a streamable-HTTP `initialize` POST carries.
+const MCP_POST: [(&str, &str); 2] = [
+    ("Accept", "application/json, text/event-stream"),
+    ("Content-Type", "application/json"),
+];
+
+/// #32 PR 5 review M1: a serve whose every request presents a bearer token
+/// answers a request whose `Host` is not loopback, which is how a client
+/// reaches a serve bound beyond loopback (`Host: 10.0.0.5:7700`). Before
+/// the fix rmcp's default allow-list answered 403 after auth and scope had
+/// both passed. Scope still decides first: `app` is refused with the
+/// uniform 404 whatever the `Host`.
+#[tokio::test]
+async fn a_credentialed_serve_answers_a_non_loopback_host() {
+    let wire = wire().await;
+    let addr = wire.addr;
+    for host in ["10.0.0.5:7700", "lambo.internal", "localhost"] {
+        let reply = on_the_wire_with(
+            addr,
+            "POST",
+            "/mcp/s/auth-live",
+            host,
+            Some(&bearer("scoped")),
+            &MCP_POST,
+            INITIALIZE,
+        )
+        .await;
+        assert!(
+            reply.starts_with("HTTP/1.1 200 OK\r\n"),
+            "Host {host}: {reply}"
+        );
+        assert!(
+            reply.to_ascii_lowercase().contains("mcp-session-id:"),
+            "Host {host} opens an MCP session: {reply}"
+        );
+    }
+    let reference = on_the_wire_as(addr, "GET", "/not/routed", Some(&bearer("app"))).await;
+    assert_eq!(
+        on_the_wire_with(
+            addr,
+            "GET",
+            "/mcp/s/auth-live",
+            "10.0.0.5:7700",
+            Some(&bearer("app")),
+            &[],
+            ""
+        )
+        .await,
+        reference
+    );
+}
+
+/// The other half of M1: a serve with no credential (the implicit `local`
+/// grant on loopback, where no request authenticates) keeps rmcp's
+/// loopback `Host` allow-list, so a page that re-points its own name at
+/// the serve (DNS rebinding) is still refused, while `localhost` and the
+/// loopback addresses are served.
+#[tokio::test]
+async fn the_implicit_local_serve_still_refuses_a_foreign_host() {
+    let registry = pinned_registry(
+        &["host-local"],
+        backends_over(Box::new(MemoryStore::new()), fast_config(1_000)),
+        8,
+    )
+    .await;
+    let addr = serve_router(&registry, 8).await;
+    for host in ["evil.example:7700", "10.0.0.5:7700"] {
+        let reply = on_the_wire_with(addr, "POST", "/mcp", host, None, &MCP_POST, INITIALIZE).await;
+        assert!(
+            reply.starts_with("HTTP/1.1 403 Forbidden\r\n"),
+            "Host {host}: {reply}"
+        );
+    }
+    for host in ["localhost", "127.0.0.1:7700", "[::1]:7700"] {
+        let reply = on_the_wire_with(addr, "POST", "/mcp", host, None, &MCP_POST, INITIALIZE).await;
+        assert!(
+            reply.starts_with("HTTP/1.1 200 OK\r\n"),
+            "Host {host}: {reply}"
+        );
+    }
 }

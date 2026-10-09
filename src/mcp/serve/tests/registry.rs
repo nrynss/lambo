@@ -19,6 +19,7 @@ use crate::mcp::serve::pinned::check_pinned;
 use crate::mcp::serve::registry::{
     is_transient, Acquired, LeaseLossPolicy, SessionAttacher, SessionRegistry, PINNED_RETRY,
 };
+use crate::mcp::serve::session::HostCheck;
 use crate::store::{GraphStore, MemoryStore, StoreConfig};
 use crate::types::EmbeddingContract;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -81,11 +82,23 @@ async fn attach_or_hold(registry: &Arc<SessionRegistry>, id: &str) {
 }
 
 /// A `DetachSession` (or, for one, `ExitProcess`) registry over `backends`
-/// hosting `sessions`, nothing attached yet.
+/// hosting `sessions`, nothing attached yet, whose sessions keep rmcp's
+/// loopback `Host` check (the implicit `local` credential's).
 fn new_registry(
     sessions: &[&str],
     backends: ResolvedBackends,
     max_sessions: usize,
+) -> Arc<SessionRegistry> {
+    new_registry_with(sessions, backends, max_sessions, HostCheck::Loopback)
+}
+
+/// [`new_registry`] with the sessions' `Host` check given (#32 PR 5 review
+/// M1: a serve whose every request presents a bearer accepts any `Host`).
+fn new_registry_with(
+    sessions: &[&str],
+    backends: ResolvedBackends,
+    max_sessions: usize,
+    host_check: HostCheck,
 ) -> Arc<SessionRegistry> {
     let opts = ServeOptions::new(sessions[0], "agent-a");
     let early = EarlyShutdown::unarmed();
@@ -107,6 +120,7 @@ fn new_registry(
             store_cfg,
             ledger: None,
             max_sessions,
+            host_check,
             agent: "agent-a".into(),
         }),
         early,
