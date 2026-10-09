@@ -726,17 +726,36 @@ async fn embed_write(embedder: &dyn Embedder, texts: &[String]) -> Result<(), cr
 }
 
 /// The texts a representative write embeds (#11): one per concept of a
-/// [`PROBE_WRITE_CONCEPTS`]-concept derive whose concepts are
-/// [`PROBE_CONCEPT_BYTES`] of [`PROBE_TEXT`], each framed with the call's
-/// prompt by the derive path's own functions so the two cannot drift.
-pub(super) fn probe_write_contexts() -> Vec<String> {
-    let concept = probe_text_at(PROBE_CONCEPT_BYTES);
-    let prompt = crate::graph::hybrid::derive_prompt(std::iter::repeat_n(
-        concept.as_str(),
-        PROBE_WRITE_CONCEPTS,
-    ));
+/// [`PROBE_WRITE_CONCEPTS`]-concept derive of [`probe_write_concepts`], each
+/// framed with the call's prompt by the derive path's own functions so the
+/// two cannot drift.
+///
+/// What the probe does not time: a derive also runs a vector candidate
+/// lookup after each embed, against the store. That is store work, not
+/// embedder work, and the probe measures the embedder; on the rigs measured
+/// the embeds are the whole of a write's time (#8), so the difference shows
+/// in `probe_optimism` only on a slow store.
+pub(crate) fn probe_write_contexts() -> Vec<String> {
+    let concepts = probe_write_concepts();
+    let prompt = crate::graph::hybrid::derive_prompt(concepts.iter().map(String::as_str));
+    concepts
+        .iter()
+        .map(|concept| crate::graph::hybrid::context_text(concept, Some(&prompt)))
+        .collect()
+}
+
+/// The concepts of the probe's representative write: [`PROBE_WRITE_CONCEPTS`]
+/// texts of exactly [`PROBE_CONCEPT_BYTES`], the same words as [`PROBE_TEXT`],
+/// each starting one byte further into the repetition.
+///
+/// Distinct on purpose (#11 review P3-7): a derive of two identical contents
+/// embeds once, so a probe of two identical concepts timed a write no derive
+/// makes. Distinct, the probe's texts are exactly what a real derive of these
+/// concepts embeds, which `memory::tests::writes` checks end to end.
+pub(crate) fn probe_write_concepts() -> Vec<String> {
+    let text = probe_text_at(PROBE_CONCEPT_BYTES + PROBE_WRITE_CONCEPTS);
     (0..PROBE_WRITE_CONCEPTS)
-        .map(|_| crate::graph::hybrid::context_text(&concept, Some(&prompt)))
+        .map(|k| text[k..k + PROBE_CONCEPT_BYTES].to_string())
         .collect()
 }
 

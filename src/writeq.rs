@@ -83,6 +83,10 @@ mod replay;
 pub use admission::{
     DropReason, Submitted, WRITE_QUEUE_LANE_MAX, WRITE_QUEUE_MAX, WRITE_QUEUE_MAX_BYTES,
 };
+/// The probe's representative write, for the test that runs it through a
+/// real derive (`memory::tests::writes`, #11 review P3-7).
+#[cfg(test)]
+pub(crate) use calibration::{probe_write_concepts, probe_write_contexts};
 pub use calibration::{
     Calibration, CalibrationSource, MEASURED_LOCAL_EMBEDDER_RPS, OBSERVED_EWMA_WEIGHT,
     OBSERVED_MIN_SAMPLES, PROBE_BUDGET, PROBE_CLAMP_RPS, PROBE_CONCEPT_BYTES, PROBE_CONCURRENCY,

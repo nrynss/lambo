@@ -7,7 +7,7 @@ use super::*;
 /// `MemoryStore` behind a `VECTOR_SEARCH` face whose candidate reads
 /// succeed (empty), so hybrid's below-threshold arm actually persists its
 /// vectors — the *embedding column* is what the J3 assertions read.
-struct VectorSearchable(Arc<MemoryStore>);
+pub(super) struct VectorSearchable(pub(super) Arc<MemoryStore>);
 
 #[async_trait]
 impl GraphStore for VectorSearchable {

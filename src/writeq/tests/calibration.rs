@@ -544,16 +544,24 @@ async fn the_probe_times_a_representative_write_in_the_derive_paths_own_framing(
     let c = probe_embedder(&embedder).await;
     assert_eq!(c.source, CalibrationSource::Probe);
 
+    // That these are what a real derive embeds is checked end to end, through
+    // the write queue, by memory::tests::writes::
+    // a_real_derive_of_the_probes_concepts_embeds_the_probes_texts (#11
+    // review P3-7). Here: the sizes, and that the concepts are distinct
+    // (a derive of two identical contents embeds once).
+    let concepts = crate::writeq::probe_write_concepts();
+    assert_eq!(concepts.len(), PROBE_WRITE_CONCEPTS);
+    for (i, concept) in concepts.iter().enumerate() {
+        assert_eq!(concept.len(), PROBE_CONCEPT_BYTES);
+        assert!(concept.contains(PROBE_TEXT), "the same words: {concept:?}");
+        assert!(
+            !concepts[..i].contains(concept),
+            "every concept distinct: {concept:?}"
+        );
+    }
     let contexts = probe_write_contexts();
     assert_eq!(contexts.len(), PROBE_WRITE_CONCEPTS);
-    let concept = probe_text_at(PROBE_CONCEPT_BYTES);
-    let prompt = crate::graph::hybrid::derive_prompt(vec![concept.as_str(); PROBE_WRITE_CONCEPTS]);
     for context in &contexts {
-        assert_eq!(
-            context,
-            &crate::graph::hybrid::context_text(&concept, Some(&prompt)),
-            "the probe must embed what a derive of this shape embeds"
-        );
         assert!(
             context.len() <= PROBE_TEXT_BYTES,
             "every input stays within the input-ceiling bound: {}",
