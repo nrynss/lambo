@@ -119,6 +119,10 @@ pub(super) struct Shared {
 #[derive(Clone, Default)]
 pub(crate) struct ShutdownProgress {
     shared: Arc<Shared>,
+    /// Set by [`ShutdownProgress::for_session`]: the one session these stages
+    /// are about, logged as a `session` field on every line. `None` for the
+    /// process's own shutdown, whose lines carry no `session`.
+    session: Option<Arc<str>>,
 }
 
 impl ShutdownProgress {
@@ -144,6 +148,25 @@ impl ShutdownProgress {
     /// [`watchdog::SHUTDOWN_WATCHDOG`] and aborts the process.
     pub(crate) fn with_production_watchdog() -> Self {
         Self::watched(watchdog::production())
+    }
+
+    /// A record for one session's own stages (#32 design §3.4): a detach that
+    /// takes one session down while the process keeps serving the others.
+    /// Every line it logs carries a `session` field; the text is the same.
+    /// It never starts a watchdog: the watchdog bounds the whole process's
+    /// shutdown, not a session's (see `super::watchdog`).
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "#32 PR 4's registry detach is the first production caller"
+        )
+    )]
+    pub(crate) fn for_session(session: &str) -> Self {
+        Self {
+            shared: Arc::default(),
+            session: Some(Arc::from(session)),
+        }
     }
 
     /// A guard that disarms the watchdog when it drops, so a `serve` that
@@ -183,14 +206,25 @@ impl ShutdownProgress {
         if let Some(spec) = spec {
             watchdog::start(Arc::clone(&self.shared), spec, now);
         }
-        tracing::info!(
-            stage = stage.number(),
-            stage_name = stage.name(),
-            "lambo serve: shutdown stage {}/{} {} started",
-            stage.number(),
-            Stage::COUNT,
-            stage.name(),
-        );
+        match &self.session {
+            None => tracing::info!(
+                stage = stage.number(),
+                stage_name = stage.name(),
+                "lambo serve: shutdown stage {}/{} {} started",
+                stage.number(),
+                Stage::COUNT,
+                stage.name(),
+            ),
+            Some(session) => tracing::info!(
+                session = %session,
+                stage = stage.number(),
+                stage_name = stage.name(),
+                "lambo serve: shutdown stage {}/{} {} started",
+                stage.number(),
+                Stage::COUNT,
+                stage.name(),
+            ),
+        }
     }
 
     /// Finish `stage`: log its elapsed time. A stage that was never begun is
@@ -213,15 +247,27 @@ impl ShutdownProgress {
         let elapsed_ms = started.elapsed().as_millis();
         self.shared.state.lock().current = None;
         self.shared.changed.notify_all();
-        tracing::info!(
-            stage = stage.number(),
-            stage_name = stage.name(),
-            elapsed_ms,
-            "lambo serve: shutdown stage {}/{} {} finished in {elapsed_ms} ms",
-            stage.number(),
-            Stage::COUNT,
-            stage.name(),
-        );
+        match &self.session {
+            None => tracing::info!(
+                stage = stage.number(),
+                stage_name = stage.name(),
+                elapsed_ms,
+                "lambo serve: shutdown stage {}/{} {} finished in {elapsed_ms} ms",
+                stage.number(),
+                Stage::COUNT,
+                stage.name(),
+            ),
+            Some(session) => tracing::info!(
+                session = %session,
+                stage = stage.number(),
+                stage_name = stage.name(),
+                elapsed_ms,
+                "lambo serve: shutdown stage {}/{} {} finished in {elapsed_ms} ms",
+                stage.number(),
+                Stage::COUNT,
+                stage.name(),
+            ),
+        }
     }
 
     /// Run a synchronous stage between its two lines.
@@ -239,10 +285,17 @@ impl ShutdownProgress {
         let began = self.shared.state.lock().began;
         if let Some(began) = began {
             let elapsed_ms = began.elapsed().as_millis();
-            tracing::info!(
-                elapsed_ms,
-                "lambo serve: shutdown finished in {elapsed_ms} ms"
-            );
+            match &self.session {
+                None => tracing::info!(
+                    elapsed_ms,
+                    "lambo serve: shutdown finished in {elapsed_ms} ms"
+                ),
+                Some(session) => tracing::info!(
+                    session = %session,
+                    elapsed_ms,
+                    "lambo serve: shutdown finished in {elapsed_ms} ms"
+                ),
+            }
         }
     }
 }

@@ -123,3 +123,51 @@ mod closes {
         assert_eq!(count("lambo serve: session closed, tail durable"), 2);
     }
 }
+
+/// `line` without its ANSI colour sequences, so a field reads `key=value`.
+fn plain(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            for c in chars.by_ref() {
+                if c == 'm' {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// `ShutdownProgress::for_session` (#32 design §3.4): a detach's stage lines
+/// read exactly like the process's, plus a `session` field; the process's
+/// own lines carry none.
+#[test]
+fn a_session_progress_names_its_session_and_the_process_progress_does_not() {
+    let (logs, _guard) = crate::test_util::capture_logs(tracing::Level::INFO);
+    let session = ShutdownProgress::for_session("serve-detach-a");
+    session.run(Stage::SessionClose, || {});
+    session.complete();
+    let detach: Vec<String> = logs.lines().iter().map(|l| plain(l)).collect();
+    assert_eq!(detach.len(), 3, "{detach:?}");
+    for (line, needle) in detach.iter().zip([
+        "lambo serve: shutdown stage 3/7 session_close started",
+        "lambo serve: shutdown stage 3/7 session_close finished in ",
+        "lambo serve: shutdown finished in ",
+    ]) {
+        assert!(line.contains(needle), "{line}");
+        assert!(line.contains("session=serve-detach-a"), "{line}");
+    }
+
+    let process = ShutdownProgress::default();
+    process.run(Stage::SessionClose, || {});
+    let lines: Vec<String> = logs.lines().iter().map(|l| plain(l)).collect();
+    let process_lines = &lines[detach.len()..];
+    assert_eq!(process_lines.len(), 2, "{process_lines:?}");
+    for line in process_lines {
+        assert!(!line.contains("session="), "{line}");
+    }
+}
