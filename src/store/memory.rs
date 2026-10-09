@@ -1233,6 +1233,20 @@ mod tests {
         );
     }
 
+    /// #22 PR 2: the in-memory adapter keeps a concept's `embedding_source`
+    /// with the same semantics as the SQL adapters (it replaces the whole
+    /// record on upsert and the access update touches two fields only).
+    #[tokio::test]
+    async fn embedding_source_survives_the_flush_load_round_trip() {
+        crate::store::embedding_source_testkit::check_embedding_source_round_trip(
+            &MemoryStore::new(),
+            &SessionId::from("embedding-source"),
+            4,
+            None,
+        )
+        .await;
+    }
+
     fn sample_session() -> (SessionId, NodeId, NodeId, NodeId) {
         let sid = SessionId::from("test-sess");
         let i1 = NodeId::new();

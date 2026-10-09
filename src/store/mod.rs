@@ -78,6 +78,10 @@ pub mod flush;
 pub mod lease;
 // #23 — session erasure: report, tombstone and the shared lease gate.
 pub mod erase;
+// #22 PR 2 — the shared flush/load round-trip check for a concept's
+// `embedding_source`, run by every adapter's tests.
+#[cfg(test)]
+pub(crate) mod embedding_source_testkit;
 
 pub use erase::{EraseCounts, EraseOutcome, EraseReport};
 pub use lease::{LeaseHolder, LeaseInfo, LeaseOutcome};
