@@ -609,7 +609,13 @@ pub fn build_embedder(cfg: EmbedderConfig) -> Result<Box<dyn Embedder>, EmbedErr
                     .clone()
                     .unwrap_or_else(|| "http://127.0.0.1:8080".to_string());
                 let model = cfg.llama_model.unwrap_or_default();
-                Ok(Box::new(BgeM3LlamaCppEmbedder::new(url, model, cfg.dim)?))
+                let mut embedder = BgeM3LlamaCppEmbedder::new(url, model, cfg.dim)?;
+                // Issue #21: the token is read here, at resolve, so a configured
+                // but unset variable stops startup instead of sending no key.
+                if let Some(name) = cfg.api_key_env.as_deref() {
+                    embedder = embedder.with_bearer_token(&api_key::resolve(name)?)?;
+                }
+                Ok(Box::new(embedder))
             }
             #[cfg(not(feature = "embed-bge"))]
             {

@@ -6,8 +6,14 @@
 //! cosine similarity (see `notes/embeddings-portable.md`).
 //!
 //! This backend is selected when `LAMBO_EMBEDDER=bge_m3` (the default).
+//!
+//! Nothing here is llama.cpp-specific except [`BgeM3LlamaCppEmbedder::check_health`]:
+//! with an optional bearer token ([`BgeM3LlamaCppEmbedder::with_bearer_token`],
+//! configured as `[embedder] api_key_env`) the same adapter reaches hosted
+//! OpenAI-compatible endpoints such as Cloudflare Workers AI (issue #21).
 
 use async_trait::async_trait;
+use reqwest::header::{HeaderValue, AUTHORIZATION};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -80,7 +86,9 @@ pub(crate) fn classify_status(code: u16) -> EmbedStatusClass {
 }
 
 /// BGE-M3 embeddings via a local llama.cpp server over HTTP.
-#[derive(Debug, Clone)]
+///
+/// `Debug` is written by hand so the bearer token can never be printed.
+#[derive(Clone)]
 pub struct BgeM3LlamaCppEmbedder {
     client: reqwest::Client,
     /// Full embed endpoint URL, e.g. `http://127.0.0.1:8080/v1/embeddings`.
@@ -91,6 +99,26 @@ pub struct BgeM3LlamaCppEmbedder {
     model: String,
     /// Expected embedding dimensionality (must match server output and store schema).
     dim: usize,
+    /// `Authorization: Bearer <token>` for a hosted endpoint, marked sensitive.
+    /// `None` sends no `Authorization` header at all (issue #21).
+    authorization: Option<HeaderValue>,
+}
+
+impl std::fmt::Debug for BgeM3LlamaCppEmbedder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BgeM3LlamaCppEmbedder")
+            .field("url", &self.url)
+            .field("model", &self.model)
+            .field("dim", &self.dim)
+            .field(
+                "authorization",
+                &self
+                    .authorization
+                    .as_ref()
+                    .map(|_| "Bearer (value not shown)"),
+            )
+            .finish_non_exhaustive()
+    }
 }
 
 fn build_client(connect: Duration, request: Duration) -> Result<reqwest::Client, EmbedError> {
@@ -131,7 +159,26 @@ impl BgeM3LlamaCppEmbedder {
             base_url,
             model: model.into(),
             dim,
+            authorization: None,
         })
+    }
+
+    /// Send `Authorization: Bearer <token>` on every embed request, for a hosted
+    /// OpenAI-compatible endpoint (Workers AI, an API-keyed gateway). Without
+    /// this call no `Authorization` header is sent.
+    ///
+    /// The header value is marked sensitive and never appears in `Debug` output
+    /// or in any error or log line this adapter writes. A token that is not a
+    /// valid header value is refused without quoting it.
+    pub fn with_bearer_token(mut self, token: &str) -> Result<Self, EmbedError> {
+        let mut value = HeaderValue::from_str(&format!("Bearer {token}")).map_err(|_| {
+            EmbedError::Unavailable(
+                "the embedder API token is not a valid HTTP header value (value not shown)".into(),
+            )
+        })?;
+        value.set_sensitive(true);
+        self.authorization = Some(value);
+        Ok(self)
     }
 
     /// Override connect/request timeouts (most users can rely on the defaults).
@@ -145,6 +192,11 @@ impl BgeM3LlamaCppEmbedder {
     }
 
     /// Report the server health without embedding anything.
+    ///
+    /// **llama.cpp only.** It calls llama.cpp's `/health`, which hosted
+    /// OpenAI-compatible endpoints (Workers AI, Ollama) do not serve, and it
+    /// sends no `Authorization` header. Do not wire it into `doctor` or startup
+    /// for this kind; today only tests call it (issue #21).
     pub async fn check_health(&self) -> Result<(), EmbedError> {
         let resp = self
             .client
@@ -184,10 +236,11 @@ impl BgeM3LlamaCppEmbedder {
             model: model.to_string(),
             input: text.to_string(),
         };
-        let resp = self
-            .client
-            .post(&self.url)
-            .json(&body)
+        let mut req = self.client.post(&self.url).json(&body);
+        if let Some(auth) = &self.authorization {
+            req = req.header(AUTHORIZATION, auth.clone());
+        }
+        let resp = req
             .send()
             .await
             .map_err(|e| EmbedError::Unavailable(format!("llama.cpp unreachable: {e}")))?;
@@ -559,6 +612,136 @@ mod tests {
             .with_timeouts(Duration::from_secs(1), Duration::from_secs(2))
             .unwrap();
         assert_eq!(e.dimensions(), 1024);
+    }
+
+    /// A fake token: only ever sent to a local mock server.
+    const FAKE_TOKEN: &str = "fake-xyzzy-embed-token";
+
+    fn has_authorization(r: &httpmock::prelude::HttpMockRequest) -> bool {
+        r.headers
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+    }
+
+    /// Issue #21: with a token, every embed request carries
+    /// `Authorization: Bearer <token>`.
+    #[tokio::test]
+    async fn sends_bearer_token_when_configured() {
+        let server = MockServer::start();
+        let authed = server.mock(|when, then| {
+            when.method(POST)
+                .path("/v1/embeddings")
+                .header("authorization", format!("Bearer {FAKE_TOKEN}"));
+            then.status(200).json_body(ok_response());
+        });
+        let e = BgeM3LlamaCppEmbedder::new(server.base_url(), "@cf/baai/bge-m3", 1024)
+            .unwrap()
+            .with_bearer_token(FAKE_TOKEN)
+            .unwrap();
+        e.embed("user schema").await.unwrap();
+        authed.assert();
+    }
+
+    /// Issue #21: without a token no `Authorization` header is sent at all,
+    /// so a local llama.cpp server sees exactly the request it saw before.
+    #[tokio::test]
+    async fn sends_no_authorization_header_by_default() {
+        let server = MockServer::start();
+        let with_auth = server.mock(|when, then| {
+            when.method(POST)
+                .path("/v1/embeddings")
+                .matches(has_authorization);
+            then.status(500).body("an Authorization header was sent");
+        });
+        let without = server.mock(|when, then| {
+            when.method(POST).path("/v1/embeddings");
+            then.status(200).json_body(ok_response());
+        });
+        let e = BgeM3LlamaCppEmbedder::new(server.base_url(), "", 1024).unwrap();
+        e.embed("user schema").await.unwrap();
+        with_auth.assert_hits(0);
+        without.assert();
+    }
+
+    /// Issue #21: the token never appears in `Debug` output.
+    ///
+    /// Mutation: derive `Debug` again -> red (the derive drops the redaction
+    /// marker; drop `set_sensitive` as well and the header prints the token).
+    #[test]
+    fn debug_never_shows_the_token() {
+        let e = BgeM3LlamaCppEmbedder::new("http://127.0.0.1:9", "", 1024)
+            .unwrap()
+            .with_bearer_token(FAKE_TOKEN)
+            .unwrap();
+        let shown = format!("{e:?}");
+        assert!(!shown.contains(FAKE_TOKEN), "{shown}");
+        assert!(shown.contains("value not shown"), "{shown}");
+        let plain = BgeM3LlamaCppEmbedder::new("http://127.0.0.1:9", "", 1024).unwrap();
+        assert!(format!("{plain:?}").contains("authorization: None"));
+    }
+
+    /// Issue #21: a token that is not a valid header value is refused at
+    /// construction without being quoted.
+    #[test]
+    fn rejects_a_token_that_is_not_a_header_value() {
+        let bad = "fake-xyzzy\nsecond-line";
+        let err = BgeM3LlamaCppEmbedder::new("http://127.0.0.1:9", "", 1024)
+            .unwrap()
+            .with_bearer_token(bad)
+            .unwrap_err();
+        assert!(matches!(err, EmbedError::Unavailable(_)), "{err:?}");
+        assert!(!err.to_string().contains("fake-xyzzy"), "{err}");
+    }
+
+    /// Issue #21, classification unchanged: a rejected token (401/403) is the
+    /// permanent `Backend` an operator must fix, and the error does not carry
+    /// the token.
+    #[tokio::test]
+    async fn rejected_token_is_a_permanent_backend_error() {
+        for code in [401u16, 403] {
+            let server = MockServer::start();
+            server.mock(|when, then| {
+                when.method(POST).path("/v1/embeddings");
+                then.status(code).body("authentication error");
+            });
+            let e = BgeM3LlamaCppEmbedder::new(server.base_url(), "", 1024)
+                .unwrap()
+                .with_bearer_token(FAKE_TOKEN)
+                .unwrap();
+            let err = e.embed("anything").await.unwrap_err();
+            assert!(matches!(err, EmbedError::Backend(_)), "{code}: {err:?}");
+            assert!(!err.to_string().contains(FAKE_TOKEN), "{err}");
+        }
+    }
+
+    /// Live test against Cloudflare Workers AI's OpenAI-compatible endpoint
+    /// (issue #21). `#[ignore]`d, and additionally skipped unless both
+    /// `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` are set, so CI's
+    /// `-- --ignored` never reaches the network without credentials.
+    #[tokio::test]
+    #[ignore]
+    async fn live_workers_ai_bge_m3() {
+        let var = |k: &str| std::env::var(k).ok().filter(|s| !s.trim().is_empty());
+        let (Some(account), Some(token)) =
+            (var("CLOUDFLARE_ACCOUNT_ID"), var("CLOUDFLARE_API_TOKEN"))
+        else {
+            eprintln!(
+                "SKIP live_workers_ai_bge_m3: CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN \
+                 must both be set"
+            );
+            return;
+        };
+        let url = format!("https://api.cloudflare.com/client/v4/accounts/{account}/ai");
+        let e = BgeM3LlamaCppEmbedder::new(url, "@cf/baai/bge-m3", 1024)
+            .unwrap()
+            .with_bearer_token(token.trim())
+            .unwrap();
+        let v = e.embed("register user").await.unwrap();
+        assert_eq!(v.len(), 1024);
+        let n = unit_magnitude(&v);
+        assert!((n - 1.0).abs() < 1e-4, "L2 norm {n} should be ~1");
     }
 
     /// Live smoke test against a running llama.cpp server

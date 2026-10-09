@@ -14,6 +14,8 @@
 
 use super::EmbedError;
 use serde::{Deserialize, Deserializer};
+#[cfg(feature = "embed-bge")]
+use std::env;
 
 /// The variable that overrides `embedder.api_key_env`. Like the key it
 /// overrides, it holds a variable *name*, never a token.
@@ -110,6 +112,37 @@ pub(crate) fn validate(
     Ok(())
 }
 
+/// Read the token from the variable `api_key_env` names, at resolve time.
+///
+/// Unset, empty or whitespace-only is a hard error naming the variable (never a
+/// value): a configured key that silently sends no header would surface later
+/// as a 401 on every write. Surrounding whitespace is trimmed, since a token
+/// never contains any and a trailing newline from `$(cat file)` is not part of
+/// it.
+///
+/// Only the `bge_m3` adapter sends a token, so this exists only where it is
+/// compiled.
+#[cfg(feature = "embed-bge")]
+pub(crate) fn resolve(api_key_env: &str) -> Result<String, EmbedError> {
+    validate(Some(api_key_env), None)?;
+    let shown = shown_env(api_key_env);
+    match env::var(api_key_env) {
+        Ok(v) if !v.trim().is_empty() => Ok(v.trim().to_string()),
+        Ok(_) => Err(EmbedError::Unavailable(format!(
+            "embedder.api_key_env names {shown}, which is set but empty; export the API token \
+             in {shown} or remove api_key_env"
+        ))),
+        Err(env::VarError::NotPresent) => Err(EmbedError::Unavailable(format!(
+            "embedder.api_key_env names {shown}, which is not set; export the API token in \
+             {shown} or remove api_key_env"
+        ))),
+        Err(env::VarError::NotUnicode(_)) => Err(EmbedError::Unavailable(format!(
+            "embedder.api_key_env names {shown}, which does not hold valid UTF-8 \
+             {VALUE_NOT_SHOWN}"
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,5 +208,29 @@ mod tests {
         let back = toml::to_string(&cfg).unwrap();
         assert!(!back.contains(FAKE_TOKEN), "{back}");
         assert!(!back.contains("api_key ="), "{back}");
+    }
+
+    /// Resolve-time lookup: unset and empty are hard errors naming the
+    /// variable; a set value is returned trimmed.
+    #[cfg(feature = "embed-bge")]
+    #[test]
+    fn resolve_reads_the_named_variable() {
+        const VAR: &str = "LAMBO_TEST_ISSUE21_EMBED_TOKEN";
+        let env = crate::test_util::env_lock();
+
+        env.remove(VAR);
+        let err = resolve(VAR).unwrap_err().to_string();
+        assert!(err.contains(VAR) && err.contains("not set"), "{err}");
+
+        env.set(VAR, "   ");
+        let err = resolve(VAR).unwrap_err().to_string();
+        assert!(err.contains(VAR) && err.contains("empty"), "{err}");
+
+        env.set(VAR, format!(" {FAKE_TOKEN}\n"));
+        assert_eq!(resolve(VAR).unwrap(), FAKE_TOKEN);
+
+        // A malformed name is refused before the environment is consulted.
+        let err = resolve(FAKE_TOKEN).unwrap_err().to_string();
+        assert!(!err.contains(FAKE_TOKEN), "{err}");
     }
 }
