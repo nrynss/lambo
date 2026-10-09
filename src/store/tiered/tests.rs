@@ -865,6 +865,50 @@ async fn an_unreachable_index_is_not_rechecked_on_every_read() {
     );
 }
 
+/// A counter that would wrap refuses the mirror instead (the issue's
+/// "never wrap"), and the session repairs at a fresh token.
+#[tokio::test]
+async fn an_exhausted_flush_counter_refuses_the_mirror() {
+    let (primary, fake) = (memory_primary(), Arc::new(FakeIndex::new()));
+    let store = tier(&primary, &fake);
+    let sid = SessionId::new("exhausted");
+    let token = attach(&store, &sid, &holder("w")).await;
+    let (_, b) = seed_batch(&sid, 1);
+    store.flush(&b, Some(token)).await.unwrap();
+    store.with_state(&sid, |st| st.counter = u32::MAX);
+    let (_, more) = seed_batch(&sid, 2);
+    store.flush(&more, Some(token)).await.unwrap();
+    let status = store.tier_status(&sid);
+    assert_eq!(status.sync, TierSync::Stale);
+    assert!(
+        status
+            .last_error
+            .as_deref()
+            .is_some_and(|e| e.contains("exhausted")),
+        "{status:?}"
+    );
+    assert_eq!(fake.marker(&sid), Some(1), "nothing written past the wrap");
+}
+
+/// A hand-built batch over two sessions cannot be attributed: nothing is
+/// mirrored and both sessions go stale rather than being trusted.
+#[tokio::test]
+async fn a_batch_over_several_sessions_marks_each_stale() {
+    let (primary, fake) = (memory_primary(), Arc::new(FakeIndex::new()));
+    let store = tier(&primary, &fake);
+    let (a, b) = (SessionId::new("a"), SessionId::new("b"));
+    let _ = store.load_session(&a).await;
+    let _ = store.load_session(&b).await;
+    let (_, ba) = seed_batch(&a, 1);
+    let (_, bb) = seed_batch(&b, 1);
+    let mut both = ba.mutations;
+    both.extend(bb.mutations);
+    store.flush(&batch(1, both), None).await.unwrap();
+    assert_eq!(store.tier_status(&a).sync, TierSync::Stale);
+    assert_eq!(store.tier_status(&b).sync, TierSync::Stale);
+    assert!(fake.live(&a).is_empty() && fake.live(&b).is_empty());
+}
+
 // ---------------------------------------------------------------------------
 // Deletes
 // ---------------------------------------------------------------------------
