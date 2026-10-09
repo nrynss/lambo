@@ -78,9 +78,13 @@ pub mod flush;
 pub mod lease;
 // #23 — session erasure: report, tombstone and the shared lease gate.
 pub mod erase;
+// #18 — the recall tier: `[recall]` config and its registry arm. Always
+// compiled, so a build without the tier refuses the section by name.
+pub mod recall_tier;
 
 pub use erase::{EraseCounts, EraseOutcome, EraseReport};
 pub use lease::{LeaseHolder, LeaseInfo, LeaseOutcome};
+pub use recall_tier::{RecallBackfillReport, RecallConfig, RecallKind, RecallRefresh, SecretRef};
 
 use async_trait::async_trait;
 use bitflags::bitflags;
@@ -527,6 +531,25 @@ pub trait GraphStore: Send + Sync {
         Err(StoreError::Capability(
             "this store does not implement erase_session".into(),
         ))
+    }
+
+    /// Rebuild the session's **recall index** from this store's durable state
+    /// (#18, `lambo recall-index backfill`).
+    ///
+    /// Only a store with a recall tier (`TieredStore`, `[recall]` in
+    /// `lambo.toml`) has an index to rebuild; it takes the session's lease as
+    /// `holder` for the duration (refusing while a live writer holds it),
+    /// re-indexes every stored vector, drops index documents the durable
+    /// snapshot no longer contains, and returns what it wrote.
+    ///
+    /// Default `Ok(None)`: no recall tier, nothing to rebuild. The caller
+    /// reports that rather than claiming a rebuild happened.
+    async fn backfill_recall_index(
+        &self,
+        _session: &SessionId,
+        _holder: &LeaseHolder,
+    ) -> Result<Option<RecallBackfillReport>, StoreError> {
+        Ok(None)
     }
 
     // -----------------------------------------------------------------------

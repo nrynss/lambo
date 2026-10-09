@@ -426,6 +426,12 @@ pub struct LamboFile {
         deserialize_with = "crate::canon::deserialize_promotion_policy"
     )]
     pub promotion_policy: Option<PromotionPolicy>,
+    /// `[recall]`: an optional recall tier beside the durable store (#18).
+    /// `None` (no section) keeps the store exactly as `[store]` builds it. A
+    /// section naming a tier this binary was not built with is refused at
+    /// resolve, never ignored (see `store::recall_tier`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recall: Option<crate::store::RecallConfig>,
 }
 
 impl LamboFile {
@@ -1042,6 +1048,7 @@ kind = "fake"
             },
             daemon: Default::default(),
             promotion_policy: Some(PromotionPolicy::Solo),
+            recall: None,
         };
         let s = toml::to_string(&f).unwrap();
         let back: LamboFile = toml::from_str(&s).unwrap();
