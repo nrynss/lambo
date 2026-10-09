@@ -602,7 +602,7 @@ pub fn build_embedder(cfg: EmbedderConfig) -> Result<Box<dyn Embedder>, EmbedErr
             "embedder.api_key_env ({}) applies only to kind `bge_m3` (alias `openai`), but kind \
              is `{}`; \
              remove api_key_env or change the kind",
-            api_key::shown_env(name),
+            crate::config::secret_env::shown(name),
             cfg.kind
         )));
     }
