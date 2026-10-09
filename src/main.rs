@@ -527,11 +527,16 @@ fn serve_preflight(
             return Err(ExitCode::FAILURE);
         }
     };
-    if transport == Transport::Stdio {
-        stdio_session(session)?;
-    }
-    // Stdio: the one `--session`. HTTP: the ordered union of `--session`
-    // and `[serve] sessions`. Either way checked against `serve`'s own
+    // Stdio: the one session, from `--session` or the file (#32 PR 8).
+    let stdio_selected;
+    let session = if transport == Transport::Stdio {
+        stdio_selected = stdio_session(session, &file.serve)?;
+        std::slice::from_ref(&stdio_selected)
+    } else {
+        session
+    };
+    // Stdio: the one session chosen above. HTTP: the ordered union of
+    // `--session` and `[serve] sessions`. Either way checked against `serve`'s own
     // rules (every name addressable by URL once more than one is pinned),
     // here, before any backend is built (#32 review L3).
     let pinned = match lambo::mcp::pin_sessions(session, &file.serve, transport) {
@@ -551,27 +556,34 @@ fn serve_preflight(
     })
 }
 
-/// The one session a stdio serve owns: exactly one `--session`.
+/// The one session a stdio serve owns (#32 PR 8): its `--session`, else
+/// the `[[serve.projects]]` entry covering the working directory, else
+/// `[serve] default_session`, chosen from the file `serve_preflight` already
+/// read, before any backend is built.
 ///
-/// No `--session` is clap's own missing-argument error (exit 2), as it was
-/// when the flag was required; more than one is a usage error too. #32 PR 8
-/// replaces this with its resolver (`[[serve.projects]]`, then
-/// `default_session`).
-fn stdio_session(session: &[String]) -> Result<(), ExitCode> {
+/// More than one `--session` is a usage error (exit 2). No session at all
+/// is the clap missing-`--session` text with the resolver's hint (exit 2); a
+/// map that cannot decide (two entries for one directory naming different
+/// sessions) is a configuration error (exit 1). With `--session` given the
+/// file and the working directory are not consulted and nothing is logged.
+fn stdio_session(
+    session: &[String],
+    serve: &lambo::config::ServeConfig,
+) -> Result<String, ExitCode> {
     match session {
-        [_] => Ok(()),
+        [one] => Ok(one.clone()),
         [] => {
-            let mut cli = Cli::command();
-            cli.build();
-            let serve = cli
-                .find_subcommand_mut("serve")
-                .expect("serve is a subcommand");
-            serve
-                .error(
-                    clap::error::ErrorKind::MissingRequiredArgument,
-                    "the following required arguments were not provided:\n  --session <SESSION>",
-                )
-                .exit()
+            let selected = serve.select_stdio_session(None).map_err(|e| match e {
+                lambo::config::SessionSelectionError::Missing(missing) => {
+                    session_refusal(Some(&missing.hint()))
+                }
+                lambo::config::SessionSelectionError::Config(e) => {
+                    eprintln!("lambo serve: {e}");
+                    ExitCode::FAILURE
+                }
+            })?;
+            log_session_source(&selected);
+            Ok(selected.session)
         }
         many => {
             eprintln!(
@@ -617,19 +629,11 @@ fn run_async(
     }
 }
 
-/// Render the missing-session refusal the way clap rendered a missing
-/// required `--session` before the flag became optional (#32 PR 8), and
-/// return clap's usage exit code. `stdio_hint` adds how a stdio serve could
-/// have found one.
-fn session_required(stdio_hint: bool) -> ExitCode {
-    let hint = stdio_hint.then(|| lambo::config::MissingSession::default().hint());
-    session_refusal(hint.as_deref())
-}
-
-/// [`session_required`] with the resolver's own hint (or none) under the
-/// clap text.
+/// The missing-session refusal, rendered the way clap rendered a missing
+/// required `--session` before the flag became optional (#32 PR 8), with the
+/// resolver's hint (or none) under the clap text. Returns clap's usage exit
+/// code.
 fn session_refusal(hint: Option<&str>) -> ExitCode {
-    use clap::CommandFactory;
     let mut command = Cli::command();
     command.build();
     let mut message = lambo::config::SESSION_REQUIRED.to_owned();
@@ -643,36 +647,6 @@ fn session_refusal(hint: Option<&str>) -> ExitCode {
     };
     let _ = err.print();
     ExitCode::from(2)
-}
-
-/// `lambo serve` without `--session`: select it from `lambo.toml` (#32 PR 8).
-/// Only a stdio serve consults `[[serve.projects]]` and `default_session`;
-/// an HTTP serve still needs `--session` until the session registry lands.
-fn select_serve_session(
-    config: Option<&std::path::Path>,
-    transport: &str,
-) -> Result<lambo::config::SelectedSession, ExitCode> {
-    match transport.parse::<Transport>() {
-        Ok(Transport::Stdio) => {}
-        Ok(Transport::Http) => return Err(session_required(false)),
-        Err(e) => {
-            eprintln!("lambo serve: {e}");
-            return Err(ExitCode::from(2));
-        }
-    }
-    let file = LamboFile::load_resolved(config).map_err(|e| {
-        eprintln!("lambo serve: failed to build backends: {e}");
-        ExitCode::FAILURE
-    })?;
-    file.serve.select_stdio_session(None).map_err(|e| match e {
-        lambo::config::SessionSelectionError::Missing(missing) => {
-            session_refusal(Some(&missing.hint()))
-        }
-        lambo::config::SessionSelectionError::Config(e) => {
-            eprintln!("lambo serve: {e}");
-            ExitCode::FAILURE
-        }
-    })
 }
 
 /// One startup line saying where a stdio serve's session came from, plus one
