@@ -551,10 +551,20 @@ pub(super) async fn guard_request(
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
 
-    let presented = req
+    // Exactly one `Authorization` header, or none (#32 PR 5 review I2). A
+    // request carrying two is refused like a wrong token: reading only the
+    // first would let a proxy that appends its own header, or one that
+    // keeps the last, disagree with this guard about who is calling.
+    let mut authorizations = req
         .headers()
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok());
+        .get_all(axum::http::header::AUTHORIZATION)
+        .iter();
+    let first = authorizations.next();
+    let presented = if authorizations.next().is_some() {
+        Some("")
+    } else {
+        first.and_then(|v| v.to_str().ok())
+    };
     let Some(grant) = guard.authority.authenticate(presented) else {
         // Deliberately terse and identical for "no header" and "wrong
         // token": the difference is not the caller's business, and the

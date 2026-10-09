@@ -656,3 +656,23 @@ async fn an_oversized_bearer_is_the_ordinary_401() {
     assert_eq!(tail(&long_body), tail(&wrong_body));
     assert_eq!(reached.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
+
+/// #32 PR 5 review I2: a request with two `Authorization` headers is the
+/// ordinary 401, even when both carry the right token, so no proxy that
+/// keeps the first or the last can disagree with the guard about who is
+/// calling. Without a credential (the implicit `local`) no header is read.
+#[tokio::test]
+async fn two_authorization_headers_are_the_ordinary_401() {
+    let (addr, reached) = spawn_guarded(guard_with(Some("s3cret"), 32, 0, 0)).await;
+    let twice = "POST /mcp HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\
+                 Authorization: Bearer s3cret\r\nAuthorization: Bearer s3cret\r\n\
+                 Connection: close\r\n\r\n";
+    let (status, body) = request(addr, twice).await;
+    assert_eq!(status, 401, "{body}");
+    assert_eq!(reached.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    let (addr, reached) = spawn_guarded(guard_with(None, 32, 0, 0)).await;
+    let (status, body) = request(addr, twice).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(reached.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
