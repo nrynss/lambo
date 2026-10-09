@@ -227,25 +227,33 @@ pub const SERVE_UNENFORCED_NOTICE: &str = "lambo.toml [serve] is parsed but not 
 
 impl ServeConfig {
     /// Log [`SERVE_UNENFORCED_NOTICE`] once, naming the keys, if this table
-    /// sets any key [`ServeConfig::unenforced_keys`] lists. `lambo serve`
-    /// calls it at startup; it never quotes a value. `sessions`,
-    /// `default_session` and `max_attached` are enforced (#32 PR 4) and
-    /// alone raise no notice.
-    pub fn warn_if_unenforced(&self) {
-        let keys = self.unenforced_keys();
+    /// sets any key [`ServeConfig::unenforced_keys`] lists for this
+    /// transport. `lambo serve` calls it at startup; it never quotes a value.
+    pub fn warn_if_unenforced(&self, stdio: bool) {
+        let keys = self.unenforced_keys(stdio);
         if !keys.is_empty() {
             tracing::warn!(keys = %keys.join(", "), "{SERVE_UNENFORCED_NOTICE}");
         }
     }
 
-    /// The keys this table sets that no `lambo serve` enforces yet, by name.
-    pub fn unenforced_keys(&self) -> Vec<&'static str> {
+    /// The keys this table sets that a `lambo serve` over this transport
+    /// does not enforce yet, by name, each its own entry.
+    ///
+    /// An HTTP serve enforces `sessions`, `default_session` and
+    /// `max_attached` (#32 PR 4). A stdio serve owns its one `--session`, so
+    /// `default_session` (what a stdio serve without `--session` will use)
+    /// and `[[serve.projects]]` (the stdio cwd map) are listed until #32 PR 8
+    /// enforces them; `sessions` and `max_attached` do not apply to stdio.
+    pub fn unenforced_keys(&self, stdio: bool) -> Vec<&'static str> {
         let mut keys = Vec::new();
         if !self.credentials.is_empty() {
             keys.push("[[serve.credential]]");
         }
         if !self.projects.is_empty() {
             keys.push("[[serve.projects]]");
+        }
+        if stdio && self.default_session.is_some() {
+            keys.push("default_session");
         }
         if self.attach_concurrency.is_some() {
             keys.push("attach_concurrency");

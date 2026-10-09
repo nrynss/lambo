@@ -640,15 +640,20 @@ fn token_env_must_be_a_conventional_variable_name() {
     }
 }
 
-/// #32 PR 4: `sessions`, `default_session` and `max_attached` are enforced,
-/// so a table with only those raises no notice; every key still parsed but
-/// not enforced is named (never its value).
+/// #32 PR 4: over HTTP `sessions`, `default_session` and `max_attached` are
+/// enforced, so a table with only those raises no notice; every key still
+/// parsed but not enforced is named, each its own entry (never its value).
 #[test]
 fn only_unenforced_keys_raise_the_notice() {
     let enforced =
         parse("[serve]\nsessions = [\"a\", \"b\"]\ndefault_session = \"b\"\nmax_attached = 4\n")
             .expect("parse");
-    assert!(enforced.serve.unenforced_keys().is_empty());
+    assert!(enforced.serve.unenforced_keys(false).is_empty());
+    // A stdio serve does not use default_session yet (#32 PR 8).
+    assert_eq!(
+        enforced.serve.unenforced_keys(true),
+        vec!["default_session"]
+    );
 
     let rest = parse(
         "[serve]\nsessions = [\"a\"]\nattach_concurrency = 1\nidle_detach_secs = 60\n\
@@ -657,7 +662,7 @@ fn only_unenforced_keys_raise_the_notice() {
     )
     .expect("parse");
     assert_eq!(
-        rest.serve.unenforced_keys(),
+        rest.serve.unenforced_keys(false),
         vec![
             "[[serve.credential]]",
             "[[serve.projects]]",

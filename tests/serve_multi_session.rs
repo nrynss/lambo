@@ -384,3 +384,54 @@ fn one_hub_serves_two_pinned_sessions_fenced_proxied_and_released() {
         assert_eq!(row.token, *token, "{session}: the token is kept");
     }
 }
+
+/// A stdio serve with no `--session`, or with more than one, is a usage error
+/// (exit 2) refused before any backend is built: the config here names a
+/// SQLite store in a directory that does not exist, which the backend resolve
+/// would fail on with exit 1.
+#[test]
+fn stdio_session_count_is_refused_before_any_backend() {
+    let dir = ScratchDir::new("lambo-i32-stdio-usage");
+    let cfg = dir.join("lambo.toml");
+    let missing = dir.join("no-such-dir").join("x.sqlite");
+    std::fs::write(
+        &cfg,
+        format!(
+            "[store]\nkind = \"sqlite\"\npath = \"{}\"\n\n[embedder]\nkind = \"fixture\"\ndim = 1024\n",
+            missing.display()
+        ),
+    )
+    .expect("write config");
+    let runtime = RuntimeDir::new();
+    let run = |sessions: &[&str]| {
+        let mut cmd = common::lambo_command();
+        cmd.env(RUNTIME_DIR_VAR, runtime.path())
+            .args([
+                "--config",
+                cfg.to_str().unwrap(),
+                "serve",
+                "--transport",
+                "stdio",
+            ])
+            .stdin(Stdio::null());
+        for s in sessions {
+            cmd.args(["--session", s]);
+        }
+        cmd.output().expect("run serve")
+    };
+
+    let none = run(&[]);
+    assert_eq!(none.status.code(), Some(2), "{none:?}");
+    let stderr = String::from_utf8_lossy(&none.stderr);
+    assert!(stderr.contains("--session <SESSION>"), "{stderr}");
+    assert!(!stderr.contains("failed to build backends"), "{stderr}");
+
+    let two = run(&["i32-a", "i32-b"]);
+    assert_eq!(two.status.code(), Some(2), "{two:?}");
+    let stderr = String::from_utf8_lossy(&two.stderr);
+    assert!(stderr.contains("exactly one"), "{stderr}");
+
+    // The control: one session gets as far as the backends, which fail.
+    let one = run(&["i32-a"]);
+    assert_ne!(one.status.code(), Some(2), "{one:?}");
+}
