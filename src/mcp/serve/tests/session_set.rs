@@ -215,6 +215,313 @@ mod closes {
     }
 }
 
+/// #32 review L4: the set-wide close's risky branches, through a store
+/// that can slow its lease release (the last step of a clean close) or fail
+/// its flush.
+#[cfg(all(feature = "store-memory", feature = "embed-fixture"))]
+mod folds {
+    use super::*;
+    use crate::embed::{Embedder, FixtureEmbedder};
+    use crate::graph::action::Action;
+    use crate::memory::Memory;
+    use crate::store::lease::{LeaseHolder, LeaseInfo, LeaseOutcome};
+    use crate::store::{Capabilities, GraphStore, MemoryStore};
+    use crate::test_util::capture_logs;
+    use crate::types::{
+        CanonizationEvent, EmbeddingContract, GraphSnapshot, InteractionSpan, MutationBatch,
+        NodeId, Scored, SessionId, StoreError,
+    };
+
+    /// `MemoryStore`, with a slow lease release or a failing flush.
+    struct Store {
+        inner: MemoryStore,
+        release_delay: Duration,
+        /// `Some(label)`: every flush fails with an error naming `label`.
+        fail_flush: Option<&'static str>,
+    }
+
+    #[async_trait::async_trait]
+    impl GraphStore for Store {
+        async fn init_schema(&self) -> Result<(), StoreError> {
+            self.inner.init_schema().await
+        }
+        fn capabilities(&self) -> Capabilities {
+            self.inner.capabilities()
+        }
+        fn vector_dimensions(&self) -> Option<usize> {
+            self.inner.vector_dimensions()
+        }
+        async fn flush(&self, batch: &MutationBatch, token: Option<u64>) -> Result<(), StoreError> {
+            match self.fail_flush {
+                Some(label) => Err(StoreError::Backend(format!("simulated outage on {label}"))),
+                None => self.inner.flush(batch, token).await,
+            }
+        }
+        async fn load_session(&self, session: &SessionId) -> Result<GraphSnapshot, StoreError> {
+            self.inner.load_session(session).await
+        }
+        async fn keyword_candidates(
+            &self,
+            session: &SessionId,
+            tokens: &[String],
+            limit: usize,
+        ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+            self.inner.keyword_candidates(session, tokens, limit).await
+        }
+        async fn vector_candidates(
+            &self,
+            session: &SessionId,
+            embedding: &[f32],
+            limit: usize,
+        ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+            self.inner
+                .vector_candidates(session, embedding, limit)
+                .await
+        }
+        async fn blast_radius(
+            &self,
+            session: &SessionId,
+            node: NodeId,
+            min_edge_age: Duration,
+            now: chrono::DateTime<chrono::Utc>,
+        ) -> Result<u64, StoreError> {
+            self.inner
+                .blast_radius(session, node, min_edge_age, now)
+                .await
+        }
+        async fn interaction_span(
+            &self,
+            session: &SessionId,
+            node: NodeId,
+            min_age: Duration,
+            now: chrono::DateTime<chrono::Utc>,
+        ) -> Result<InteractionSpan, StoreError> {
+            self.inner
+                .interaction_span(session, node, min_age, now)
+                .await
+        }
+        async fn record_canonization(
+            &self,
+            event: &CanonizationEvent,
+            token: Option<u64>,
+        ) -> Result<(), StoreError> {
+            self.inner.record_canonization(event, token).await
+        }
+        async fn acquire_lease(
+            &self,
+            session: &SessionId,
+            holder: &LeaseHolder,
+            ttl: Duration,
+        ) -> Result<LeaseOutcome, StoreError> {
+            self.inner.acquire_lease(session, holder, ttl).await
+        }
+        async fn read_lease(&self, session: &SessionId) -> Result<Option<LeaseInfo>, StoreError> {
+            self.inner.read_lease(session).await
+        }
+        async fn refresh_lease(
+            &self,
+            session: &SessionId,
+            holder: &LeaseHolder,
+            ttl: Duration,
+        ) -> Result<LeaseOutcome, StoreError> {
+            self.inner.refresh_lease(session, holder, ttl).await
+        }
+        async fn release_lease(
+            &self,
+            session: &SessionId,
+            holder: &LeaseHolder,
+        ) -> Result<(), StoreError> {
+            tokio::time::sleep(self.release_delay).await;
+            self.inner.release_lease(session, holder).await
+        }
+    }
+
+    async fn mem(session: &str, store: Store) -> Arc<Memory> {
+        let m = Memory::builder()
+            .session(session)
+            .agent("agent-a")
+            .flush_interval(Duration::from_secs(3_600))
+            .store(Arc::new(store) as Arc<dyn GraphStore>)
+            .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
+            .embedding_contract(EmbeddingContract {
+                kind: "fixture".into(),
+                model: None,
+                dim: 1024,
+            })
+            .build()
+            .await
+            .expect("build");
+        Arc::new(m)
+    }
+
+    fn store() -> Store {
+        Store {
+            inner: MemoryStore::new(),
+            release_delay: Duration::ZERO,
+            fail_flush: None,
+        }
+    }
+
+    /// A session whose close fails at its final flush: it has a tail, and
+    /// its store refuses every flush.
+    async fn failing(session: &'static str) -> Arc<Memory> {
+        let m = mem(
+            session,
+            Store {
+                fail_flush: Some(session),
+                ..store()
+            },
+        )
+        .await;
+        m.record_action(&action("a write the close must flush"))
+            .expect("write before the close");
+        m
+    }
+
+    fn action(what: &'static str) -> Action<'static> {
+        Action {
+            event_time: None,
+            action: what,
+            produces: &[],
+            modifies: &[],
+            depends_on: &[],
+        }
+    }
+
+    fn is_closed(m: &Memory) -> bool {
+        m.record_action(&action("post-close write")).is_err()
+    }
+
+    async fn close_set(
+        mems: &[&Arc<Memory>],
+        transport: Result<(), LamboError>,
+    ) -> Result<(), LamboError> {
+        let pumps: Vec<_> = mems
+            .iter()
+            .map(|_| tokio::spawn(std::future::pending::<()>()))
+            .collect();
+        let set: Vec<SessionClose<'_>> = mems
+            .iter()
+            .zip(&pumps)
+            .map(|(mem, pump)| SessionClose {
+                mem,
+                event_pump: pump,
+            })
+            .collect();
+        run_and_close_sessions(
+            &set,
+            async { transport },
+            &[],
+            &EarlyShutdown::unarmed(),
+            &ShutdownProgress::new(),
+        )
+        .await
+    }
+
+    fn outcome_lines(logs: &crate::test_util::CapturedLogs) -> Vec<String> {
+        logs.lines()
+            .iter()
+            .map(|l| plain(l))
+            .filter(|l| {
+                l.contains("lambo serve: session closed, tail durable")
+                    || l.contains("lambo serve: final flush failed")
+            })
+            .collect()
+    }
+
+    /// Stage 3 closes the set concurrently: two closes that each spend one
+    /// second releasing their lease take one second together, not two. A
+    /// serial loop of `.await`s over the set fails this.
+    #[tokio::test(start_paused = true)]
+    async fn stage_three_closes_the_set_concurrently() {
+        const DELAY: Duration = Duration::from_secs(1);
+        let slow = || Store {
+            release_delay: DELAY,
+            ..store()
+        };
+        let a = mem("serve-conc-a", slow()).await;
+        let b = mem("serve-conc-b", slow()).await;
+        let pumps = [
+            tokio::spawn(std::future::pending::<()>()),
+            tokio::spawn(std::future::pending::<()>()),
+        ];
+        let set = [
+            SessionClose {
+                mem: &a,
+                event_pump: &pumps[0],
+            },
+            SessionClose {
+                mem: &b,
+                event_pump: &pumps[1],
+            },
+        ];
+        let started = tokio::time::Instant::now();
+        let out = close_sessions(&set, &EarlyShutdown::unarmed(), &ShutdownProgress::new())
+            .await
+            .report();
+        let elapsed = started.elapsed();
+        assert!(out.is_ok(), "{out:?}");
+        assert!(is_closed(&a) && is_closed(&b));
+        assert!(
+            elapsed >= DELAY && elapsed < 2 * DELAY,
+            "two {DELAY:?} closes took {elapsed:?}: stage 3 ran them one after the other"
+        );
+    }
+
+    /// One session's failure does not stop the others: every session is
+    /// closed, each outcome is logged in set order with its session, and the
+    /// FIRST error is the one returned.
+    #[tokio::test]
+    async fn the_first_close_error_is_returned_and_every_session_still_closes() {
+        let (logs, _guard) = capture_logs(tracing::Level::INFO);
+        let good = mem("serve-fold-good", store()).await;
+        let bad_b = failing("serve-fold-b").await;
+        let bad_c = failing("serve-fold-c").await;
+
+        let out = close_set(&[&good, &bad_b, &bad_c], Ok(())).await;
+
+        let err = out.expect_err("a failed close is reported").to_string();
+        assert!(err.contains("simulated outage on serve-fold-b"), "{err}");
+        for m in [&good, &bad_b, &bad_c] {
+            assert!(is_closed(m), "{}: closed to writers", m.session());
+        }
+        let lines = outcome_lines(&logs);
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert!(
+            lines[0].contains("session closed, tail durable"),
+            "{lines:?}"
+        );
+        assert!(lines[0].contains("session=serve-fold-good"), "{lines:?}");
+        assert!(lines[1].contains("final flush failed"), "{lines:?}");
+        assert!(lines[1].contains("session=serve-fold-b"), "{lines:?}");
+        assert!(lines[2].contains("final flush failed"), "{lines:?}");
+        assert!(lines[2].contains("session=serve-fold-c"), "{lines:?}");
+    }
+
+    /// A transport error wins over every close outcome, and those outcomes
+    /// are not logged (as before the set): but every session is still closed.
+    #[tokio::test]
+    async fn a_transport_error_wins_and_the_closes_still_run() {
+        let (logs, _guard) = capture_logs(tracing::Level::INFO);
+        let good = mem("serve-tx-good", store()).await;
+        let bad = failing("serve-tx-bad").await;
+
+        let out = close_set(
+            &[&good, &bad],
+            Err(LamboError::Config("the transport broke".into())),
+        )
+        .await;
+
+        let err = out
+            .expect_err("the transport error is surfaced")
+            .to_string();
+        assert!(err.contains("the transport broke"), "{err}");
+        assert!(is_closed(&good) && is_closed(&bad), "both closes ran");
+        let lines = outcome_lines(&logs);
+        assert!(lines.is_empty(), "{lines:?}");
+    }
+}
+
 /// `line` without its ANSI colour sequences, so a field reads `key=value`.
 fn plain(line: &str) -> String {
     let mut out = String::with_capacity(line.len());
