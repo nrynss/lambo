@@ -7,3 +7,4 @@ pub mod dispatch;
 pub mod expand;
 pub mod format;
 pub mod query_cache;
+pub mod query_vector;

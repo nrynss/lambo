@@ -4,6 +4,14 @@
 
 ### Breaking
 
+- `RecallParams` (the `lambo_recall` parameters, re-exported from
+  `lambo::mcp::server`) gains two public fields, `image: Option<WireImage>`
+  and `query_vector: Option<WireQueryVector>` (#22 PR 6), so code that
+  builds it with a struct literal must add `image: None, query_vector:
+  None`, or end the literal with `..Default::default()`: `RecallParams`
+  now derives `Default`, so the next optional field will not break such a
+  literal again. Deserializing it, and its published schema, are
+  unaffected.
 - `Concept` gains a public field, `embedding_source: Option<EmbeddingSource>`
   (#22). Code that builds a `Concept` with a struct literal must add
   `embedding_source: None`; code that reads or deserializes one is
@@ -153,6 +161,26 @@
 
 ### Changed
 
+- A tool call that fails because a vector read refused its probe (the
+  session's embedding contract changed mid-query, or the vector width
+  differs) now tells the caller to re-check the session's embedding
+  contract (`lambo_stats`) and retry, instead of a bare `store error (the
+  detail was logged server-side)` (#22 PR 6 review). The text is fixed and
+  echoes nothing from the refusal; the class, and the ledger's
+  `error_kind`, stay `store error`. A recall by image or query vector is
+  where this is usually seen, since it fails rather than degrade.
+
+- `lambo_recall`'s published schema changes additively (#22 PR 6): two
+  optional properties, `image` and `query_vector`, and `query` is no longer
+  in `required` (it gains `"default": ""` and a description saying it is
+  required unless an image or a query vector is sent; the server still
+  refuses a call with none of the three). The tool-list golden is updated
+  for `lambo_recall` only; the other seven schemas are byte-identical.
+  `lambo recall --query` is likewise optional beside `--image` or
+  `--query-vector-json`. A `lambo_recall` call with no `query` (and neither
+  of the two) now gets a tool error (`isError`), `query must be a
+  non-empty string (or send image or query_vector)`, where before serde
+  refused it as a JSON-RPC invalid-params error (`missing field query`).
 - `lambo serve-web` reads its session through a shared per-session view
   (#4 PR 1). Every request and every open tab reads one load of the session
   until it is older than `[web] view_ttl_ms` (1.5 s by default, the page's
@@ -377,6 +405,30 @@
   false` (default on) makes it text-only. `api_key_env` works with this
   kind as with `bge_m3`. See `lambo.example.toml` for the full server
   command line.
+- Recall by image or by a client query vector (#22 PR 6, the Dresscode
+  "close to the one you dismissed" path). `lambo_recall` takes an optional
+  `image` (mime and base64, embedded by the server with
+  `Embedder::embed_image`, no prompt) or `query_vector` (values and the
+  contract they are in), at most one; with either, `query` is optional and
+  still feeds the keyword leg, and the vector leg searches by the image or
+  vector. With no text the recent-interactions leg is skipped: its flat
+  0.35 was calibrated on text and would rank whatever was derived last
+  above a true image match scoring lower; with text it runs as for any
+  recall. The same checks as `lambo_derive_image`: base64 capped before it
+  is decoded, MIME matched to the magic bytes, a client vector accepted
+  only with `[embedder] accept_client_vectors = true` and only in exactly
+  the session's contract, refused with no echo. Not cached (the #14 query
+  cache holds text queries only), never logged; the ledger line gains only
+  `by: "image" | "vector"`. A store without vector search, an image the
+  embedder cannot embed, or a failed vector read is an error rather than an
+  answer without the vector leg, and
+  a structural phrasing beside an image is not dispatched to traversal.
+  Library: `Memory::recall_by` with `recall::query_vector::QueryBy`;
+  `surface::image::check_submitted_vector_as`; CLI `lambo recall --image
+  PATH [--mime M] | --query-vector-json PATH`, under derive-image's file
+  caps. Works over every vector source (#8's holder graph, the store's
+  checked read on SQLite, Postgres and Cockroach, and #18's tier); no store
+  contract changed.
 - `[web]` in `lambo.toml` (#4 PR 1): `view_ttl_ms` (1500, 0 to 60000),
   `max_loaded_sessions` (4), `load_concurrency` (2, 1 to 1024, always 1 on
   SQLite) and `recall_concurrency` (4, 1 to 1024) bound the read-only
@@ -720,6 +772,15 @@
   reported as a server problem, not a decode failure of the user's image.
   `/props` strings (file name, `model_ftype`) in messages and logs are cut
   to 128 printable ASCII characters.
+- A text recall whose vector read fails (a backend error, a timeout, a tier
+  whose durable fallback failed too) still answers from its keyword and
+  recent legs, but no longer silently: the result carries a
+  `vector_degraded` annotation and the same line in `warnings`, so
+  `Memory::recall`, `lambo_recall` and `lambo recall` all say the vector leg
+  was skipped. The line names no backend detail (that is logged). The
+  embedding-contract race's `vector_degraded` line (E2E-6) now reaches
+  `warnings` too, where before only the CLI and the portal showed it.
+
 - `lambo serve-web`'s `/api/pulse`, polled every 1.5 s by every open tab,
   loaded the whole session twice: once for the event feed and again for the
   counts (#4 PR 1). `/api/stats` did the same. Each now costs one load (and

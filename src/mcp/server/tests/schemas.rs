@@ -253,12 +253,23 @@ async fn f18_tool_schemas_match_the_golden_property_set() {
             ],
         ),
         ("lambo_inspect", vec!["agent_id", "depth", "focus"]),
+        // #22 PR 6: recall by image or by a client query vector. Nothing
+        // here is a time.
         (
             "lambo_recall",
             vec![
                 "agent_id",
+                "image",
+                "image.data",
+                "image.mime",
                 "max_tokens",
                 "query",
+                "query_vector",
+                "query_vector.contract",
+                "query_vector.contract.dim",
+                "query_vector.contract.kind",
+                "query_vector.contract.model",
+                "query_vector.values",
                 "top_k",
                 "traversal_depth",
             ],
@@ -449,6 +460,12 @@ async fn published_schemas_carry_runtime_maxima() {
             1,
             crate::surface::image::MAX_VECTOR_VALUES as i64,
         ),
+        (
+            "lambo_recall",
+            "query_vector.contract.dim",
+            1,
+            crate::surface::image::MAX_VECTOR_VALUES as i64,
+        ),
     ];
 
     for t in tools(&s) {
@@ -469,7 +486,7 @@ async fn published_schemas_carry_runtime_maxima() {
             if type_includes(node, "string") && node.get("enum").is_none() {
                 // #22: the three strings with a cap of their own.
                 let cap = match (t.name.as_ref(), path.as_str()) {
-                    ("lambo_derive_image", "image.data") => {
+                    ("lambo_derive_image" | "lambo_recall", "image.data") => {
                         crate::surface::image::MAX_IMAGE_B64_LEN as u64
                     }
                     ("lambo_derive_image", "image_id") => {
@@ -695,6 +712,22 @@ fn unknown_fields_are_refused_by_every_params_struct() {
         }))
         .is_ok()
     );
+    // #22 PR 6: recall's image and query vector refuse unknown keys too
+    // (no `url` or `path`, design 6.4).
+    assert!(serde_json::from_value::<RecallParams>(serde_json::json!({
+        "agent_id": "a",
+        "image": {"mime": "image/png", "data": "AAAA", "path": "/etc/passwd"}
+    }))
+    .is_err());
+    assert!(serde_json::from_value::<RecallParams>(serde_json::json!({
+        "agent_id": "a",
+        "query_vector": {"values": [1.0], "contract": {"kind": "k", "dim": 1}, "url": "x"}
+    }))
+    .is_err());
+    assert!(serde_json::from_value::<RecallParams>(serde_json::json!({
+        "agent_id": "a", "image": image()
+    }))
+    .is_ok());
     // …and the legitimate shapes still parse.
     assert!(serde_json::from_value::<DeriveParams>(serde_json::json!({
         "agent_id": "a", "concepts": [{"content": "x", "concept_type": "entity"}]
@@ -826,5 +859,42 @@ async fn the_image_tool_schema_publishes_the_runtime_caps() {
         values["maxItems"],
         json!(crate::surface::image::MAX_VECTOR_VALUES)
     );
+    s.mem.close().await.expect("close");
+}
+
+/// #22 PR 6: `lambo_recall`'s image and query vector publish the same caps
+/// as `lambo_derive_image`'s, pinned to the same constants, and its text is
+/// required only when neither is sent (so the schema no longer lists it as
+/// required).
+#[tokio::test]
+async fn the_recall_schema_publishes_the_image_and_vector_caps() {
+    let s = server("mcp-recall-caps").await;
+    let tool = tools(&s)
+        .into_iter()
+        .find(|t| t.name == "lambo_recall")
+        .expect("listed");
+    let schema = serde_json::to_value(&*tool.input_schema).unwrap();
+    let leaves = schema_leaves(&schema);
+    let leaf = |path: &str| {
+        leaves
+            .iter()
+            .find(|(p, _)| p == path)
+            .map(|(_, n)| n.clone())
+            .unwrap_or_else(|| panic!("leaf {path} not reached: {leaves:?}"))
+    };
+    assert_eq!(
+        leaf("image.data")["maxLength"],
+        json!(crate::surface::image::MAX_IMAGE_B64_LEN)
+    );
+    assert_eq!(
+        leaf("query_vector.contract.dim")["maximum"],
+        json!(crate::surface::image::MAX_VECTOR_VALUES)
+    );
+    let values = &schema["$defs"]["WireQueryVector"]["properties"]["values"];
+    assert_eq!(
+        values["maxItems"],
+        json!(crate::surface::image::MAX_VECTOR_VALUES)
+    );
+    assert_eq!(schema["required"], json!(["agent_id"]));
     s.mem.close().await.expect("close");
 }

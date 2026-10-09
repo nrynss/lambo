@@ -265,6 +265,34 @@ pub fn candidates_with_legs(
     query: &str,
     limit: usize,
 ) -> (Vec<Scored<NodeId>>, LegProvenance) {
+    candidates_with_legs_as(graph, index, input, query, limit, RecentLeg::Run)
+}
+
+/// Whether phase 1 runs the recent-interactions leg.
+///
+/// Every text recall does (spec §8). A recall by an image or a client vector
+/// with **no text** skips it (#22 PR 6): the leg's flat [`RECENT_SCORE`] was
+/// calibrated against BGE-M3 text cosines, says nothing about the image, and
+/// would rank whatever was derived last above a true image match whose
+/// cosine sits below it (design 7.3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RecentLeg {
+    /// Members of the [`RECENT_INTERACTIONS`] most recent interactions join
+    /// at [`RECENT_SCORE`].
+    Run,
+    /// No recent leg.
+    Skip,
+}
+
+/// [`candidates_with_legs`], with the recent leg on or off.
+pub(crate) fn candidates_with_legs_as(
+    graph: &Graph,
+    index: &InvertedIndex,
+    input: Phase1Input,
+    query: &str,
+    limit: usize,
+    recent: RecentLeg,
+) -> (Vec<Scored<NodeId>>, LegProvenance) {
     // Phase 1 is a candidate OVER-approximation: the final `top_k` truncation
     // is applied downstream in phase-3 assembly (by final score). Prematurely
     // truncating here let the flat-scored recent/vector legs evict strong
@@ -275,8 +303,10 @@ pub fn candidates_with_legs(
     for s in index.search(query, keyword_cap) {
         legs.entry(s.item).or_default().keyword = Some(s.score);
     }
-    for id in recent_concepts(graph) {
-        legs.entry(id).or_default().recent = Some(RECENT_SCORE);
+    if recent == RecentLeg::Run {
+        for id in recent_concepts(graph) {
+            legs.entry(id).or_default().recent = Some(RECENT_SCORE);
+        }
     }
     for s in input.vector {
         merge_max(&mut legs.entry(s.item).or_default().vector, s.score);
@@ -359,9 +389,20 @@ pub fn candidates_without_keyword_with_legs(
     graph: &Graph,
     input: Phase1Input,
 ) -> (Vec<Scored<NodeId>>, LegProvenance) {
+    candidates_without_keyword_with_legs_as(graph, input, RecentLeg::Run)
+}
+
+/// [`candidates_without_keyword_with_legs`], with the recent leg on or off.
+pub(crate) fn candidates_without_keyword_with_legs_as(
+    graph: &Graph,
+    input: Phase1Input,
+    recent: RecentLeg,
+) -> (Vec<Scored<NodeId>>, LegProvenance) {
     let mut legs: LegProvenance = HashMap::new();
-    for id in recent_concepts(graph) {
-        legs.entry(id).or_default().recent = Some(RECENT_SCORE);
+    if recent == RecentLeg::Run {
+        for id in recent_concepts(graph) {
+            legs.entry(id).or_default().recent = Some(RECENT_SCORE);
+        }
     }
     for s in input.vector {
         merge_max(&mut legs.entry(s.item).or_default().vector, s.score);

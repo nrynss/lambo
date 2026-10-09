@@ -25,9 +25,14 @@ use crate::recall::cache::RecallCache;
 use crate::recall::candidates;
 use crate::recall::detail::{Annotation, AnnotationKind, DetailedHit, DetailedRecall};
 use crate::recall::query_cache::{embed_query_cached, QueryEmbeddingCache};
+use crate::recall::query_vector::{self, QueryBy};
 use crate::resolve::{assert_session_embedding_compatible, ResolvedBackends};
 use crate::store::vector_source::VectorCandidates;
+use crate::surface::image::{check_submitted_vector_as, sniff_mime, validate, MAX_IMAGE_BYTES};
 use crate::types::RecallQuery;
+
+use super::derive_image::{read_capped, VectorFile, MAX_VECTOR_FILE_BYTES};
+use std::path::PathBuf;
 
 /// The result of one detailed recall: the full `lambo recall` string plus the
 /// H3 presentation model, all from the same execution.
@@ -60,6 +65,124 @@ pub async fn run(
     )
 }
 
+/// What `lambo recall` searches its vector leg by instead of the query
+/// text's embedding (#22 PR 6): a local image file or a client vector file.
+/// At most one of the two; with either, the text is optional.
+#[derive(Debug, Default)]
+pub struct RecallBy {
+    /// A PNG, JPEG or WebP file for the configured embedder to embed.
+    pub image: Option<PathBuf>,
+    /// The image's MIME type; default, the type its magic bytes name.
+    pub mime: Option<String>,
+    /// A `{"values": [...], "contract": {...}}` file, as `lambo
+    /// derive-image --vector-json` takes.
+    pub query_vector_json: Option<PathBuf>,
+}
+
+/// [`run`], recalling by an image or a client vector file (#22 PR 6).
+///
+/// The store's vector search, and for `--image` the embedder's image
+/// modality, are checked first, before any file is read or the store is
+/// loaded. The files are read under the same caps as `lambo derive-image`'s
+/// (through `take(cap + 1)`, so a pipe or a growing file cannot exceed
+/// them), checked by the same `surface` rules, and never echoed. A vector
+/// file needs `[embedder] accept_client_vectors = true` and the live
+/// contract exactly. Nothing is cached and the vector leg is required: a
+/// store without vector search, or an image the embedder cannot embed, is
+/// an error rather than a keyword-only answer.
+pub async fn run_by(
+    backends: &ResolvedBackends,
+    session: &str,
+    query: &str,
+    by: &RecallBy,
+    top_k: Option<usize>,
+    max_tokens: Option<usize>,
+    traversal_depth: Option<usize>,
+) -> Result<String, CliError> {
+    if by.mime.is_some() && by.image.is_none() {
+        return Err(CliError::Usage("--mime goes with --image".into()));
+    }
+    // What this deployment can do, before any file is read or the store is
+    // loaded (review L4): the vector leg is the point of a recall by image
+    // or vector, and only an image embedder embeds the image.
+    if by.image.is_some() || by.query_vector_json.is_some() {
+        if !VectorCandidates::from_store(backends.store.as_ref()).available() {
+            return Err(CliError::Runtime(
+                "a recall by image or by vector needs a store with vector search \
+                 (VECTOR_SEARCH), and this store does not search vectors"
+                    .into(),
+            ));
+        }
+        if by.image.is_some()
+            && !backends
+                .embedder
+                .modalities()
+                .contains(crate::embed::Modalities::IMAGE)
+        {
+            return Err(CliError::Runtime(
+                "the configured embedder does not embed images; a recall by image needs one \
+                 that does, or --query-vector-json"
+                    .into(),
+            ));
+        }
+    }
+    let bytes;
+    let query_by = match (&by.image, &by.query_vector_json) {
+        (None, None) => None,
+        (Some(path), None) => {
+            bytes = read_capped("--image", path, MAX_IMAGE_BYTES as u64)?;
+            let mime = match &by.mime {
+                Some(m) => m.clone(),
+                None => sniff_mime(&bytes)
+                    .ok_or_else(|| {
+                        CliError::Usage("--image: the file is not a PNG, JPEG or WebP image".into())
+                    })?
+                    .as_str()
+                    .to_owned(),
+            };
+            // An explicit --mime that disagrees with the bytes is refused.
+            Some(QueryBy::Image(
+                validate(&bytes, &mime).map_err(CliError::Usage)?,
+            ))
+        }
+        (None, Some(path)) => {
+            if !backends.config.accept_client_vectors {
+                return Err(CliError::Runtime(
+                    "this process does not accept client-computed vectors; enable them with \
+                     [embedder] accept_client_vectors = true (or LAMBO_ACCEPT_CLIENT_VECTORS=true)"
+                        .into(),
+                ));
+            }
+            let raw = read_capped("--query-vector-json", path, MAX_VECTOR_FILE_BYTES)?;
+            let (values, declared) = VectorFile::parse("--query-vector-json", &raw)?;
+            check_submitted_vector_as("query_vector", &values, &declared, &backends.embedding)
+                .map_err(CliError::Usage)?;
+            Some(QueryBy::Vector { values, declared })
+        }
+        (Some(_), Some(_)) => {
+            return Err(CliError::Usage(
+                "pass at most one of --image or --query-vector-json".into(),
+            ));
+        }
+    };
+    let detail = match query_by {
+        None => run_detailed(backends, session, query, top_k, max_tokens, traversal_depth).await?,
+        Some(by) => {
+            run_detailed_by(
+                backends,
+                session,
+                query,
+                by,
+                top_k,
+                max_tokens,
+                traversal_depth,
+            )
+            .await?
+        }
+    };
+    Ok(detail.context)
+}
+
 /// One recall execution producing the CLI string AND the H3 presentation
 /// model. The HTTP endpoint runs the same execution on its session view
 /// ([`run_detailed_on`]), so the page's `context` can never drift from
@@ -76,6 +199,23 @@ pub(crate) async fn run_detailed(
     let loaded = load_reader_graph(backends.store.as_ref(), session).await?;
     // One recall per process: nothing to reuse, so no query cache.
     run_detailed_on(backends, &loaded, &request, None).await
+}
+
+/// [`run_detailed`], searching the vector leg by `by` (#22 PR 6): the text
+/// may be blank beside it, and is then no text.
+async fn run_detailed_by(
+    backends: &ResolvedBackends,
+    session: &str,
+    query: &str,
+    by: QueryBy<'_>,
+    top_k: Option<usize>,
+    max_tokens: Option<usize>,
+    traversal_depth: Option<usize>,
+) -> Result<CliRecall, CliError> {
+    let request =
+        RecallRequest::validate_as(session, query, true, top_k, max_tokens, traversal_depth)?;
+    let loaded = load_reader_graph(backends.store.as_ref(), session).await?;
+    run_on(backends, &loaded, &request, Some(by), None).await
 }
 
 /// A recall's arguments, validated and with the defaults applied: every
@@ -96,9 +236,28 @@ impl RecallRequest {
         max_tokens: Option<usize>,
         traversal_depth: Option<usize>,
     ) -> Result<Self, CliError> {
+        Self::validate_as(session, query, false, top_k, max_tokens, traversal_depth)
+    }
+
+    /// [`Self::validate`], where `by_vector` says the recall searches by an
+    /// image or a client vector (#22 PR 6): beside one the text is
+    /// optional, and blank text is no text.
+    fn validate_as(
+        session: &str,
+        query: &str,
+        by_vector: bool,
+        top_k: Option<usize>,
+        max_tokens: Option<usize>,
+        traversal_depth: Option<usize>,
+    ) -> Result<Self, CliError> {
         require_nonempty("session", session)?;
         check_size_cli("session", session)?;
-        require_nonempty("query", query)?;
+        let query = if by_vector && crate::surface::validate::is_blank(query) {
+            ""
+        } else {
+            require_nonempty("query", query)?;
+            query
+        };
         check_size_cli("query", query)?;
 
         let cfg = Config::default();
@@ -152,6 +311,19 @@ pub(crate) async fn run_detailed_on(
     request: &RecallRequest,
     queries: Option<&Mutex<QueryEmbeddingCache>>,
 ) -> Result<CliRecall, CliError> {
+    run_on(backends, loaded, request, None, queries).await
+}
+
+/// [`run_detailed_on`], optionally searching the vector leg by `by`
+/// (#22 PR 6) instead of the query text's embedding. A recall by image or
+/// vector never touches `queries`: the #14 cache holds text queries only.
+async fn run_on(
+    backends: &ResolvedBackends,
+    loaded: &LoadedReader,
+    request: &RecallRequest,
+    by: Option<QueryBy<'_>>,
+    queries: Option<&Mutex<QueryEmbeddingCache>>,
+) -> Result<CliRecall, CliError> {
     // Scoped so the read guard never reaches an await.
     let compatible = {
         let graph = loaded.graph.read();
@@ -179,29 +351,6 @@ pub(crate) async fn run_detailed_on(
     // vector leg consistent with assembly and drop the second vector parse
     // (a follow-up in dev-diary/notes/feature-8-vector-source.md).
     let vectors = VectorCandidates::from_store(backends.store.as_ref());
-    let embedded = match queries {
-        Some(cache) => {
-            embed_query_cached(
-                cache,
-                vectors,
-                backends.embedder.as_ref(),
-                &backends.embedding,
-                query,
-            )
-            .await
-        }
-        None => candidates::embed_query(vectors, backends.embedder.as_ref(), query)
-            .await
-            .map(|vector| vector.map(Arc::from)),
-    };
-    let embedding: Option<Arc<[f32]>> = match embedded {
-        Ok(vector) => vector,
-        Err(text) => {
-            extra_annotations.push(Annotation::new(AnnotationKind::VectorDegraded, text));
-            None
-        }
-    };
-
     let mut cache = RecallCache::<RecallPipeline>::new();
     let rq = RecallQuery {
         query: query.to_string(),
@@ -209,18 +358,62 @@ pub(crate) async fn run_detailed_on(
         max_tokens: request.max_tokens,
         traversal_depth: request.traversal_depth,
     };
-    let mut detail = daemon
-        .recall_with(
-            &loaded.session,
-            rq,
-            vectors,
-            embedding
-                .as_deref()
-                .map(|vector| (vector, &backends.embedding)),
-            cfg.recall_weights,
-            &mut cache,
-        )
-        .await;
+    let mut detail = match by {
+        None => {
+            let embedded = match queries {
+                Some(cache) => {
+                    embed_query_cached(
+                        cache,
+                        vectors,
+                        backends.embedder.as_ref(),
+                        &backends.embedding,
+                        query,
+                    )
+                    .await
+                }
+                None => candidates::embed_query(vectors, backends.embedder.as_ref(), query)
+                    .await
+                    .map(|vector| vector.map(Arc::from)),
+            };
+            let embedding: Option<Arc<[f32]>> = match embedded {
+                Ok(vector) => vector,
+                Err(text) => {
+                    extra_annotations.push(Annotation::new(AnnotationKind::VectorDegraded, text));
+                    None
+                }
+            };
+            daemon
+                .recall_with(
+                    &loaded.session,
+                    rq,
+                    vectors,
+                    embedding
+                        .as_deref()
+                        .map(|vector| (vector, &backends.embedding)),
+                    cfg.recall_weights,
+                    &mut cache,
+                )
+                .await
+        }
+        // #22 PR 6: the vector leg is the point, so no vector search, or a
+        // failed vector read, is an error, not a degradation; and nothing
+        // is cached (this process's cache is discarded anyway).
+        Some(by) => {
+            let vector =
+                query_vector::resolve(by, backends.embedder.as_ref(), &backends.embedding).await?;
+            daemon
+                .recall_by_vector_with(
+                    &loaded.session,
+                    rq,
+                    vectors,
+                    (&vector, &backends.embedding),
+                    cfg.recall_weights,
+                    &mut cache,
+                )
+                .await
+                .map_err(crate::types::LamboError::Store)?
+        }
+    };
     // Response-global annotations preserve producer order: the CLI-side
     // `vector_degraded` (embedded before recall) precedes the daemon's
     // (`traversal`, produced during recall).
@@ -381,5 +574,280 @@ mod tests {
             "one header line per warning: {text:?}"
         );
         assert!(text.contains("recall: second note"), "{text:?}");
+    }
+}
+
+/// #22 PR 6: `lambo recall --image | --query-vector-json`'s refusals, on
+/// the memory store. The end-to-end ranking runs on SQLite
+/// (`store::sqlite::tests::image_e2e`), whose checked read really ranks.
+#[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
+mod by_tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::embed::{png_with_label, EmbedderConfig, EmbedderKind, FixtureEmbedder};
+    use crate::store::{GraphStore, MemoryStore, StoreConfig, StoreKind};
+    use crate::test_util::{ScratchDir, VectorSearchable};
+    use crate::types::EmbeddingContract;
+
+    const SECRET_MODEL: &str = "client-declared-model-label";
+
+    /// The fixture's text, with the trait's default (text-only) modalities.
+    struct TextOnly(FixtureEmbedder);
+
+    #[async_trait::async_trait]
+    impl crate::embed::Embedder for TextOnly {
+        fn dimensions(&self) -> usize {
+            self.0.dimensions()
+        }
+        async fn embed(&self, text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
+            crate::embed::Embedder::embed(&self.0, text).await
+        }
+    }
+
+    fn backends(store: Box<dyn GraphStore>, accept_client_vectors: bool) -> ResolvedBackends {
+        ResolvedBackends {
+            store,
+            embedder: Box::new(FixtureEmbedder::new()),
+            store_cfg: StoreConfig {
+                kind: StoreKind::Memory,
+                dsn: None,
+                path: None,
+                vector_dim: None,
+            },
+            embedder_cfg: EmbedderConfig {
+                kind: EmbedderKind::Fixture,
+                dim: 1024,
+                accept_client_vectors,
+                ..Default::default()
+            },
+            embedding: EmbeddingContract {
+                kind: "fixture".into(),
+                model: None,
+                dim: 1024,
+            },
+            allow_embedding_mismatch: false,
+            config: crate::Config {
+                accept_client_vectors,
+                ..crate::Config::default()
+            },
+        }
+    }
+
+    fn searchable(accept: bool) -> ResolvedBackends {
+        backends(
+            Box::new(VectorSearchable(Arc::new(MemoryStore::new()))),
+            accept,
+        )
+    }
+
+    fn write(dir: &ScratchDir, name: &str, bytes: &[u8]) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    async fn refused(b: &ResolvedBackends, query: &str, by: RecallBy) -> CliError {
+        run_by(b, "cli-recall-by", query, &by, Some(5), None, None)
+            .await
+            .expect_err("refused")
+    }
+
+    fn vector_file(dir: &ScratchDir, name: &str, contract: serde_json::Value) -> PathBuf {
+        let v = FixtureEmbedder::new().embed_sync("red silk saree");
+        let body = serde_json::json!({"values": v, "contract": contract});
+        write(dir, name, body.to_string().as_bytes())
+    }
+
+    #[tokio::test]
+    async fn the_flags_files_and_opt_in_are_checked_before_any_recall() {
+        let dir = ScratchDir::new("lambo-cli-recall-by");
+        let png = write(&dir, "q.png", &png_with_label("red silk saree"));
+        let big = write(&dir, "big.png", &vec![0u8; MAX_IMAGE_BYTES + 1]);
+        let text = write(&dir, "q.txt", b"SECRET-FILE-TEXT, not an image");
+        let good = vector_file(
+            &dir,
+            "v.json",
+            serde_json::json!({"kind": "fixture", "dim": 1024}),
+        );
+        let other = vector_file(
+            &dir,
+            "other.json",
+            serde_json::json!({"kind": "fixture", "model": SECRET_MODEL, "dim": 1024}),
+        );
+        let b = searchable(true);
+
+        let usage = |e: CliError| match e {
+            CliError::Usage(m) => m,
+            other => panic!("usage error: {other:?}"),
+        };
+        let m = usage(
+            refused(
+                &b,
+                "",
+                RecallBy {
+                    image: Some(png.clone()),
+                    query_vector_json: Some(good.clone()),
+                    ..Default::default()
+                },
+            )
+            .await,
+        );
+        assert!(
+            m.contains("at most one of --image or --query-vector-json"),
+            "{m}"
+        );
+        let m = usage(
+            refused(
+                &b,
+                "",
+                RecallBy {
+                    mime: Some("image/png".into()),
+                    ..Default::default()
+                },
+            )
+            .await,
+        );
+        assert!(m.contains("--mime goes with --image"), "{m}");
+        // Neither file: the text is required, as for plain `lambo recall`.
+        let m = usage(refused(&b, "  ", RecallBy::default()).await);
+        assert!(m.contains("query"), "{m}");
+        let m = usage(
+            refused(
+                &b,
+                "",
+                RecallBy {
+                    image: Some(big),
+                    ..Default::default()
+                },
+            )
+            .await,
+        );
+        assert!(m.contains("over the 2097152-byte limit"), "{m}");
+        let m = usage(
+            refused(
+                &b,
+                "",
+                RecallBy {
+                    image: Some(text),
+                    ..Default::default()
+                },
+            )
+            .await,
+        );
+        assert!(m.contains("not a PNG, JPEG or WebP"), "{m}");
+        assert!(!m.contains("SECRET-FILE-TEXT"), "{m}");
+        let m = usage(
+            refused(
+                &b,
+                "",
+                RecallBy {
+                    image: Some(png),
+                    mime: Some("image/jpeg".into()),
+                    ..Default::default()
+                },
+            )
+            .await,
+        );
+        assert!(
+            m.contains("declared image/jpeg but the bytes are image/png"),
+            "{m}"
+        );
+        let m = usage(
+            refused(
+                &b,
+                "",
+                RecallBy {
+                    query_vector_json: Some(other),
+                    ..Default::default()
+                },
+            )
+            .await,
+        );
+        assert!(m.starts_with("query_vector.contract"), "{m}");
+        assert!(m.contains("(model differs)"), "{m}");
+        assert!(!m.contains(SECRET_MODEL), "{m}");
+        let malformed = write(&dir, "bad.json", b"{\"values\": [\"SECRET-VALUE\"]}");
+        let m = usage(
+            refused(
+                &b,
+                "",
+                RecallBy {
+                    query_vector_json: Some(malformed),
+                    ..Default::default()
+                },
+            )
+            .await,
+        );
+        assert!(m.contains("line 1"), "{m}");
+        assert!(!m.contains("SECRET-VALUE"), "{m}");
+
+        // Client vectors off: refused naming the key.
+        let off = searchable(false);
+        let e = refused(
+            &off,
+            "",
+            RecallBy {
+                query_vector_json: Some(good.clone()),
+                ..Default::default()
+            },
+        )
+        .await;
+        let CliError::Runtime(m) = e else {
+            panic!("runtime error: {e:?}")
+        };
+        assert!(m.contains("[embedder] accept_client_vectors = true"), "{m}");
+
+        // L4: the deployment is checked before any file is read: a path
+        // that does not exist is never opened when the store cannot search
+        // vectors, or (for --image) the embedder cannot embed images.
+        let missing = dir.join("never-read.png");
+        let plain = backends(Box::new(MemoryStore::new()), true);
+        for by in [
+            RecallBy {
+                image: Some(missing.clone()),
+                ..Default::default()
+            },
+            RecallBy {
+                query_vector_json: Some(missing.clone()),
+                ..Default::default()
+            },
+        ] {
+            let e = refused(&plain, "", by).await;
+            let CliError::Runtime(m) = e else {
+                panic!("runtime error: {e:?}")
+            };
+            assert!(m.contains("VECTOR_SEARCH"), "{m}");
+        }
+        let mut text_only = searchable(true);
+        text_only.embedder = Box::new(TextOnly(FixtureEmbedder::new()));
+        let e = refused(
+            &text_only,
+            "",
+            RecallBy {
+                image: Some(missing),
+                ..Default::default()
+            },
+        )
+        .await;
+        let CliError::Runtime(m) = e else {
+            panic!("runtime error: {e:?}")
+        };
+        assert!(m.contains("does not embed images"), "{m}");
+
+        // A store without vector search: refused naming the capability.
+        let e = refused(
+            &plain,
+            "",
+            RecallBy {
+                query_vector_json: Some(good),
+                ..Default::default()
+            },
+        )
+        .await;
+        let CliError::Runtime(m) = e else {
+            panic!("runtime error: {e:?}")
+        };
+        assert!(m.contains("VECTOR_SEARCH"), "{m}");
     }
 }
