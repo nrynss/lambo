@@ -35,7 +35,35 @@ use std::env;
 use std::str::FromStr;
 use thiserror::Error;
 
+/// Why an [`Embedder`] call failed. [`EmbedError::is_transient`] is the
+/// classification callers act on.
+///
+/// `#[non_exhaustive]` (#22 review L1): #22 already adds `Unsupported`, and
+/// later adapters may need another variant; that must not be a second
+/// breaking change for downstream matchers. Match with a wildcard arm, or ask
+/// [`EmbedError::is_transient`].
+///
+/// ```compile_fail,E0004
+/// // Outside the crate an exhaustive match without a wildcard does not compile.
+/// fn class(e: &lambo::EmbedError) -> u8 {
+///     match e {
+///         lambo::EmbedError::Unavailable(_) => 0,
+///         lambo::EmbedError::Backend(_) => 1,
+///         lambo::EmbedError::Unsupported(_) => 2,
+///     }
+/// }
+/// ```
+///
+/// ```
+/// fn class(e: &lambo::EmbedError) -> u8 {
+///     match e {
+///         lambo::EmbedError::Unavailable(_) => 0,
+///         _ => 1,
+///     }
+/// }
+/// ```
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum EmbedError {
     #[error("embedder unavailable: {0}")]
     Unavailable(String),
@@ -107,6 +135,12 @@ bitflags::bitflags! {
     /// The kinds of input an [`Embedder`] can embed (#22). Every adapter embeds
     /// [`Modalities::TEXT`]; an adapter that also embeds images into the same
     /// space reports [`Modalities::IMAGE`] too.
+    ///
+    /// A `bitflags` 2 type, like [`crate::store::Capabilities`], so `bitflags`
+    /// was already part of the public API before #22 and this adds no new
+    /// public dependency. Use the associated constants and the set operators
+    /// (`contains`, `|`); a new kind of input is a new constant, which is not
+    /// a breaking change.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct Modalities: u8 {
         /// Text, through [`Embedder::embed`] and [`Embedder::embed_query`].
@@ -117,7 +151,23 @@ bitflags::bitflags! {
 }
 
 /// The image formats Lambo accepts (#22): PNG, JPEG and WebP, nothing else.
+///
+/// `#[non_exhaustive]` (#22 review L1): a later format must not break a
+/// downstream exhaustive match. Match with a wildcard arm, or use
+/// [`ImageMime::as_str`].
+///
+/// ```compile_fail,E0004
+/// // Outside the crate an exhaustive match without a wildcard does not compile.
+/// fn ext(m: lambo::embed::ImageMime) -> &'static str {
+///     match m {
+///         lambo::embed::ImageMime::Png => "png",
+///         lambo::embed::ImageMime::Jpeg => "jpg",
+///         lambo::embed::ImageMime::Webp => "webp",
+///     }
+/// }
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ImageMime {
     Png,
     Jpeg,

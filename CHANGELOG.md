@@ -6,9 +6,11 @@
 
 - `EmbedError` gains a variant, `Unsupported` (#22): an embedder refusing a
   kind of input it cannot embed at all, such as an image sent to a text-only
-  model. `is_transient()` classes it as permanent. Library code that matches
-  `EmbedError` exhaustively must add an arm; code that implements `Embedder`
-  is unaffected (see Added).
+  model. `is_transient()` classes it as permanent. `EmbedError` is also now
+  `#[non_exhaustive]`, so library code that matches it outside this crate
+  needs a wildcard arm (or can call `is_transient()`), and later variants
+  will not break it again. Code that implements `Embedder` is unaffected (see
+  Added). The new `ImageMime` enum is `#[non_exhaustive]` from the start.
 - `LamboFile` gains a public `serve: ServeConfig` field (#32). Code that
   builds a `LamboFile` with a struct literal must add
   `serve: Default::default()`; code that parses one is unaffected.
