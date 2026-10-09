@@ -54,6 +54,8 @@ kind = "memory"
 
 [embedder]
 # bge_m3 | gemini | candle | bedrock | fixture
+# (`openai` is an alias of bge_m3: the same OpenAI-compatible adapter, still
+# reported and stamped as bge_m3)
 kind = "bge_m3"
 # Expected embedder output width (default for BGE demos). Not a global product law:
 # stores that persist vectors expose GraphStore::vector_dimensions(); process resolve
@@ -71,6 +73,22 @@ url = "http://127.0.0.1:8080"
 # Optional model id sent to llama.cpp (empty => server default). Part of EmbeddingContract
 # (kind+model+dim) — do not change mid-session without re-embedding.
 # model = "bge-m3-FP16"
+#
+# Hosted OpenAI-compatible endpoint (issue #21), e.g. Cloudflare Workers AI, which
+# serves BGE-M3 at 1024 dims. The adapter appends /v1/embeddings to `url`:
+#   kind = "openai"
+#   url = "https://api.cloudflare.com/client/v4/accounts/<account-id>/ai"
+#   model = "@cf/baai/bge-m3"          # Workers AI's id, so the contract differs
+#   api_key_env = "CLOUDFLARE_API_TOKEN"
+# api_key_env NAMES the environment variable holding the token; the token never
+# goes in this file (an inline `api_key = "..."` is refused). Lambo reads it at
+# startup and sends `Authorization: Bearer <token>`; an unset or empty variable
+# is a hard startup error naming it, never a request without a key. Without
+# api_key_env no Authorization header is sent. LAMBO_EMBED_API_KEY_ENV
+# overrides the name. Workers AI's bge-m3 and a local GGUF can differ
+# numerically, so they are different embedding contracts: start a fresh session
+# or `lambo re-embed`, never mix the two in one session.
+# api_key_env = "CLOUDFLARE_API_TOKEN"
 #
 # In-crate candle BGE-M3 (kind = "candle", feature embed-candle): embeds locally, no
 # llama.cpp server. Weights fetch from hf-hub on first use and cache under the

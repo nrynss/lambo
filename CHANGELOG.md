@@ -96,6 +96,26 @@
 
 ### Added
 
+- The `bge_m3` embedder can send a bearer token, so it reaches hosted
+  OpenAI-compatible embeddings endpoints such as Cloudflare Workers AI (#21).
+  - `[embedder] api_key_env` names the environment variable holding the token
+    (overridden by `LAMBO_EMBED_API_KEY_ENV`, which also holds a name). The
+    token never goes in `lambo.toml`: an inline `api_key` is refused, and so is
+    an `api_key_env` that is not an upper-case variable name or looks like a
+    token, without quoting the value.
+  - The variable is read at startup. Unset or empty is a hard error naming it,
+    never a request without a key. With a token, every embed request carries
+    `Authorization: Bearer <token>`; without `api_key_env` no `Authorization`
+    header is sent, so local `llama-server` setups see no change. The token
+    never appears in `Debug` output, errors or logs. A `401` or `403` stays a
+    permanent configuration error.
+  - `api_key_env` with any kind other than `bge_m3` is refused.
+  - `kind = "openai"` is an alias of `bge_m3`. It still reports and stamps
+    `bge_m3`, so no existing session's embedding contract changes. Set `model`
+    to the hosted id (for example `@cf/baai/bge-m3`): a hosted model is a
+    different embedding contract from a local GGUF of the same model.
+  - `lambo.example.toml` and the configuration reference document the Workers
+    AI setup. The adapter's `check_health` remains llama.cpp-only.
 - `GraphStore::exact_vector_scan()` (default `false`): an adapter declares its
   checked vector read is an exact cosine scan of every vector it stores, so a
   session holder may answer that read from its graph (#8). `SqliteStore`
