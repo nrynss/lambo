@@ -529,11 +529,14 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     progress.begin(Stage::EndpointRelease);
     join_all(
         sessions
-            .into_iter()
+            .iter()
             .map(AttachedSession::release_endpoint)
             .collect(),
     )
     .await;
+    // The set's handles (each session's server and `Memory` clone) drop
+    // here, where they always have: at the end of stage 6.
+    drop(sessions);
     progress.end(Stage::EndpointRelease);
     // Stage 7: the call ledger drains last.
     progress.run(Stage::LedgerClose, || close_ledger(ledger));

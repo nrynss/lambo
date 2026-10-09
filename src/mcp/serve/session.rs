@@ -60,7 +60,14 @@ pub(super) struct AttachedSession {
     /// The MCP server over [`Self::mem`]. The transport serves a clone.
     pub(super) server: LamboServer,
     /// The session endpoint (J2): the accept loop and its connections.
-    pub(super) hub: Hub,
+    ///
+    /// In a lock and an `Option` so stage 6 can take it through a shared
+    /// reference: #32 PR 4's registry holds sessions as
+    /// `Arc<AttachedSession>`, and a request or the router may still hold a
+    /// clone when a detach or the shutdown reaches stage 6 (#32 review M2).
+    /// A session dropped without the release still drops its `Hub`, whose
+    /// `Drop` aborts the accept loop (#28).
+    hub: parking_lot::Mutex<Option<Hub>>,
     /// The endpoint address this session derived and published, if any.
     pub(super) endpoint: Option<SessionEndpoint>,
     /// The session's own background tasks.
@@ -98,7 +105,7 @@ impl AttachedSession {
         Self {
             mem,
             server,
-            hub,
+            hub: parking_lot::Mutex::new(Some(hub)),
             endpoint,
             tasks: SessionTasks { event_pump },
         }
@@ -115,7 +122,16 @@ impl AttachedSession {
     /// Stage 6 for this session (J2 / JE2E-2): AFTER `close()`, the accept
     /// loop stops and every endpoint session is ended (bounded), then the
     /// socket file goes, only if it is still the one this process bound.
-    pub(super) async fn release_endpoint(self) {
-        self.hub.release(self.endpoint.as_ref()).await;
+    ///
+    /// Through `&self`, so a session shared as `Arc<AttachedSession>` can be
+    /// released while other clones are alive. The hub is taken out of its
+    /// slot, so a second call (a detach racing the shutdown) finds nothing
+    /// and returns at once: the endpoint is released exactly once.
+    pub(super) async fn release_endpoint(&self) {
+        // Its own statement: the guard is released before the await below.
+        let hub = self.hub.lock().take();
+        if let Some(hub) = hub {
+            hub.release(self.endpoint.as_ref()).await;
+        }
     }
 }

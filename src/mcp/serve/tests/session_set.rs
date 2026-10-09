@@ -262,3 +262,99 @@ fn a_session_progress_names_its_session_and_the_process_progress_does_not() {
         assert!(!line.contains("session="), "{line}");
     }
 }
+
+/// Stage 6 over a set, with the sessions shared the way #32 PR 4's registry
+/// shares them (`Arc<AttachedSession>`, design §3.1).
+#[cfg(all(unix, feature = "store-memory", feature = "embed-fixture"))]
+mod endpoints {
+    use super::*;
+    use crate::embed::{Embedder, FixtureEmbedder};
+    use crate::mcp::serve::hub::ENDPOINT_RELEASE_GRACE;
+    use crate::mcp::serve::session::AttachedSession;
+    use crate::mcp::SessionEndpoint;
+    use crate::memory::Memory;
+    use crate::store::{GraphStore, MemoryStore, StoreConfig, StoreKind};
+    use crate::types::EmbeddingContract;
+
+    async fn attached(
+        dir: &crate::test_util::ScratchDir,
+        session: &str,
+    ) -> (Arc<AttachedSession>, SessionEndpoint) {
+        let store: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+        let mem = Memory::builder()
+            .session(session)
+            .agent("agent-a")
+            .flush_interval(Duration::from_secs(3_600))
+            .store(store)
+            .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
+            .embedding_contract(EmbeddingContract {
+                kind: "fixture".into(),
+                model: None,
+                dim: 1024,
+            })
+            .build()
+            .await
+            .expect("build");
+        let mem = Arc::new(mem);
+        // The store config only feeds the address derivation.
+        let store_cfg = StoreConfig {
+            kind: StoreKind::Sqlite,
+            path: Some(dir.join("s.db").to_str().expect("utf-8").into()),
+            ..StoreConfig::default()
+        };
+        let endpoint = SessionEndpoint::resolve_in(&dir.join("run"), session, &store_cfg)
+            .expect("endpoint fits");
+        let server = LamboServer::new(Arc::clone(&mem));
+        let attached = AttachedSession::attach(mem, server, Some(endpoint.clone()), 4);
+        assert!(endpoint.path().exists(), "{session}: the endpoint is bound");
+        (Arc::new(attached), endpoint)
+    }
+
+    /// #32 review M2 and L4: every session's endpoint is released through a
+    /// shared reference while other clones are alive, concurrently, and a
+    /// second release (a detach racing the shutdown) is a no-op.
+    #[tokio::test]
+    async fn stage_six_releases_every_shared_session_once() {
+        let dir = crate::test_util::ScratchDir::short("ss");
+        let (a, endpoint_a) = attached(&dir, "serve-set-ep-a").await;
+        let (b, endpoint_b) = attached(&dir, "serve-set-ep-b").await;
+        assert_ne!(endpoint_a.path(), endpoint_b.path());
+        // What a router or an in-flight request would hold.
+        let held = [Arc::clone(&a), Arc::clone(&b)];
+
+        tokio::time::timeout(
+            ENDPOINT_RELEASE_GRACE + Duration::from_secs(2),
+            join_all(
+                [&a, &b]
+                    .into_iter()
+                    .map(|session| session.release_endpoint())
+                    .collect(),
+            ),
+        )
+        .await
+        .expect("stage 6 over the set is bounded by one ENDPOINT_RELEASE_GRACE");
+
+        for endpoint in [&endpoint_a, &endpoint_b] {
+            assert!(
+                !endpoint.path().exists(),
+                "{}: the socket file survived release",
+                endpoint.path().display()
+            );
+            assert!(
+                tokio::net::UnixStream::connect(endpoint.path())
+                    .await
+                    .is_err(),
+                "nothing accepts on a released endpoint"
+            );
+        }
+
+        // Released once: a second call finds no hub and returns at once.
+        tokio::time::timeout(Duration::from_millis(100), held[0].release_endpoint())
+            .await
+            .expect("a second release is a no-op");
+
+        for session in [&a, &b] {
+            session.mem.close().await.expect("close");
+        }
+    }
+}
