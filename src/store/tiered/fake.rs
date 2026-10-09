@@ -44,7 +44,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use parking_lot::Mutex;
 
-use super::index::{DocOp, IndexDoc, KnnHit, RecallIndex, SyncMarker};
+use super::index::{DeleteReport, DocOp, IndexDoc, KnnHit, RecallIndex, SyncMarker};
 use super::project::contract_hash;
 use crate::types::{EmbeddingContract, NodeId, SessionId, StoreError};
 
@@ -84,8 +84,7 @@ pub(crate) struct FakeIndex {
     pub knn_calls: AtomicUsize,
     pub bulk_calls: AtomicUsize,
     pub delete_calls: AtomicUsize,
-    /// Version conflicts the last delete-by-query skipped.
-    pub last_delete_conflicts: AtomicU64,
+    pub refresh_calls: AtomicUsize,
 }
 
 impl FakeIndex {
@@ -209,8 +208,8 @@ impl FakeIndex {
 
     /// The engine's delete-by-query: scroll the searchable snapshot, delete
     /// each match whose realtime version is unchanged, count the rest as
-    /// conflicts, then refresh. Returns `(deleted, conflicts)`.
-    async fn delete_by_query(&self, matches: impl Fn(&Key, &IndexDoc) -> bool) -> (u64, u64) {
+    /// conflicts, then refresh.
+    async fn delete_by_query(&self, matches: impl Fn(&Key, &IndexDoc) -> bool) -> DeleteReport {
         self.delete_calls.fetch_add(1, Ordering::SeqCst);
         self.pass_delete_gate().await;
         let snapshot: Vec<(Key, u64)> = self
@@ -248,11 +247,12 @@ impl FakeIndex {
                 }
             }
         }
-        self.last_delete_conflicts
-            .store(conflicts, Ordering::SeqCst);
         // `refresh=true` refreshes after the deletes.
         self.refresh_now();
-        (deleted, conflicts)
+        DeleteReport {
+            deleted,
+            version_conflicts: conflicts,
+        }
     }
 
     /// The engine's score for `doc` against `probe`, mapped back to cosine.
@@ -314,24 +314,35 @@ impl RecallIndex for FakeIndex {
         Ok(())
     }
 
-    async fn delete_ids(&self, ids: &[NodeId]) -> Result<(), StoreError> {
+    async fn refresh(&self) -> Result<(), StoreError> {
+        self.check_up()?;
+        self.refresh_calls.fetch_add(1, Ordering::SeqCst);
+        self.refresh_now();
+        Ok(())
+    }
+
+    async fn delete_ids(&self, ids: &[NodeId]) -> Result<DeleteReport, StoreError> {
         self.check_up()?;
         let wanted: HashSet<String> = ids.iter().map(|i| i.0.to_string()).collect();
-        self.delete_by_query(|(_, id), _| wanted.contains(id)).await;
-        Ok(())
+        Ok(self.delete_by_query(|(_, id), _| wanted.contains(id)).await)
     }
 
     async fn delete_session_docs(
         &self,
         session: &SessionId,
         below: Option<u64>,
-    ) -> Result<(), StoreError> {
+    ) -> Result<DeleteReport, StoreError> {
         self.check_up()?;
-        self.delete_by_query(|_, doc| {
-            doc.session_id == session.0 && below.is_none_or(|b| doc.v < b)
-        })
-        .await;
-        Ok(())
+        Ok(self
+            .delete_by_query(|_, doc| {
+                doc.session_id == session.0 && below.is_none_or(|b| doc.v < b)
+            })
+            .await)
+    }
+
+    async fn count_session_docs(&self, session: &SessionId) -> Result<u64, StoreError> {
+        self.check_up()?;
+        Ok(self.searchable(session).len() as u64)
     }
 
     async fn knn(
@@ -411,15 +422,21 @@ impl RecallIndex for std::sync::Arc<FakeIndex> {
     async fn bulk(&self, ops: &[DocOp]) -> Result<(), StoreError> {
         (**self).bulk(ops).await
     }
-    async fn delete_ids(&self, ids: &[NodeId]) -> Result<(), StoreError> {
+    async fn refresh(&self) -> Result<(), StoreError> {
+        (**self).refresh().await
+    }
+    async fn delete_ids(&self, ids: &[NodeId]) -> Result<DeleteReport, StoreError> {
         (**self).delete_ids(ids).await
     }
     async fn delete_session_docs(
         &self,
         session: &SessionId,
         below: Option<u64>,
-    ) -> Result<(), StoreError> {
+    ) -> Result<DeleteReport, StoreError> {
         (**self).delete_session_docs(session, below).await
+    }
+    async fn count_session_docs(&self, session: &SessionId) -> Result<u64, StoreError> {
+        (**self).count_session_docs(session).await
     }
     async fn knn(
         &self,
@@ -513,8 +530,9 @@ mod model {
             .await
             .unwrap();
         f.conflicts_next_delete.store(1, Ordering::SeqCst);
-        f.delete_session_docs(&sid, None).await.unwrap();
-        assert_eq!(f.last_delete_conflicts.load(Ordering::SeqCst), 1);
+        let report = f.delete_session_docs(&sid, None).await.unwrap();
+        assert_eq!(report.version_conflicts, 1);
+        assert_eq!(report.deleted, 1);
         assert_eq!(f.searchable(&sid).len(), 1, "the conflicting doc survives");
     }
 

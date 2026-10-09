@@ -272,6 +272,10 @@ async fn attach(store: &TieredStore, sid: &SessionId, who: &LeaseHolder) -> u64 
     token
 }
 
+/// Wait for every repair the store has in flight. Repairs run inline until
+/// they move to the background; this is the one place tests wait for them.
+async fn settle(_store: &TieredStore) {}
+
 /// The common seed: a contract, an interaction, two vectors and one
 /// concept without a vector.
 struct Seeded {
@@ -961,6 +965,34 @@ async fn an_unattributable_delete_only_batch_deletes_by_id() {
     );
 }
 
+/// H1, the by-id half: a delete-by-id that loses a document to a version
+/// conflict is retried, not counted as done.
+#[tokio::test]
+async fn an_unattributed_delete_retries_a_version_conflict() {
+    let (primary, fake) = (memory_primary(), Arc::new(FakeIndex::new()));
+    let store = tier(&primary, &fake);
+    let sid = SessionId::new("by-id-conflict");
+    let (s, b) = seed_batch(&sid, 1);
+    primary.flush(&b, None).await.unwrap();
+    let snap = primary.load_session(&sid).await.unwrap();
+    for c in &snap.concepts {
+        if let Some(doc) = super::project::index_doc(c, &contract(), Some(1)) {
+            fake.plant(&contract(), doc);
+        }
+    }
+    fake.conflicts_next_delete
+        .store(1, std::sync::atomic::Ordering::SeqCst);
+    store
+        .flush(&batch(2, vec![Mutation::DeleteNode { id: s.c2 }]), None)
+        .await
+        .unwrap();
+    assert!(
+        !fake.live(&sid).contains_key(&s.c2.0.to_string()),
+        "the conflicting delete was not retried"
+    );
+    assert!(fake.live(&sid).contains_key(&s.c1.0.to_string()));
+}
+
 // ---------------------------------------------------------------------------
 // Backfill and erase
 // ---------------------------------------------------------------------------
@@ -1079,6 +1111,103 @@ async fn erase_removes_the_session_from_the_index_and_a_rerun_finishes_it() {
     assert!(fake.live(&sid).is_empty());
     assert_eq!(fake.marker(&sid), None);
     assert_eq!(fake.live(&other).len(), 2, "other sessions untouched");
+}
+
+/// H1: the writer's last flush was mirrored with `refresh=false` and erase
+/// runs inside one refresh interval. Delete-by-query only sees what a
+/// refresh exposed, so the erase must refresh first, and must not report
+/// done while anything of the session is still searchable.
+#[tokio::test]
+async fn erase_removes_documents_a_refresh_has_not_exposed_yet() {
+    let (primary, fake) = (memory_primary(), Arc::new(FakeIndex::lagging()));
+    let store = tier(&primary, &fake);
+    let sid = SessionId::new("erase-pending");
+    let w = holder("w");
+    let token = attach(&store, &sid, &w).await;
+    let (_, b) = seed_batch(&sid, 1);
+    store.flush(&b, Some(token)).await.unwrap();
+    assert!(
+        fake.searchable(&sid).is_empty(),
+        "the flush is still pending"
+    );
+    store.release_lease(&sid, &w).await.unwrap();
+
+    let outcome = store
+        .erase_session(&sid, &holder("lambo-erase-session"))
+        .await
+        .unwrap();
+    assert!(matches!(outcome, EraseOutcome::Erased(_)));
+    fake.refresh_now();
+    assert!(
+        fake.searchable(&sid).is_empty(),
+        "erase reported done but the session is searchable: {:?}",
+        fake.searchable(&sid).keys().collect::<Vec<_>>()
+    );
+    assert!(fake.live(&sid).is_empty());
+    assert_eq!(fake.marker(&sid), None);
+}
+
+/// H1, the repair half: a repair's "delete everything below the version I
+/// just wrote" must also catch documents mirrored inside the last refresh
+/// interval, or a node deleted durably keeps a searchable vector.
+#[tokio::test]
+async fn a_repair_sweeps_documents_a_refresh_has_not_exposed_yet() {
+    let (primary, fake) = (memory_primary(), Arc::new(FakeIndex::lagging()));
+    let first = tier(&primary, &fake);
+    let sid = SessionId::new("repair-pending");
+    let w = holder("w");
+    let token = attach(&first, &sid, &w).await;
+    let (s, b) = seed_batch(&sid, 1);
+    first.flush(&b, Some(token)).await.unwrap();
+    // The "crash": c1 is deleted durably and the mirror never runs.
+    primary
+        .flush(
+            &batch(2, vec![Mutation::DeleteNode { id: s.c1 }]),
+            Some(token),
+        )
+        .await
+        .unwrap();
+    first.release_lease(&sid, &w).await.unwrap();
+
+    let next = tier(&primary, &fake);
+    attach(&next, &sid, &holder("w2")).await;
+    settle(&next).await;
+    fake.refresh_now();
+    let searchable = fake.searchable(&sid);
+    assert!(
+        !searchable.contains_key(&s.c1.0.to_string()),
+        "a durably deleted node is still searchable after the repair"
+    );
+    assert!(searchable.contains_key(&s.c2.0.to_string()));
+    assert_eq!(fake.marker(&sid), Some(2));
+}
+
+/// H1: a document rewritten between delete-by-query's scroll and its delete
+/// is a version conflict the engine skips under `conflicts=proceed`. Erase
+/// retries it, and reports done only once a count finds nothing left.
+#[tokio::test]
+async fn erase_retries_a_version_conflict_and_confirms_nothing_is_left() {
+    let (primary, fake) = (memory_primary(), Arc::new(FakeIndex::new()));
+    let store = tier(&primary, &fake);
+    let sid = SessionId::new("erase-conflict");
+    let w = holder("w");
+    let token = attach(&store, &sid, &w).await;
+    let (_, b) = seed_batch(&sid, 1);
+    store.flush(&b, Some(token)).await.unwrap();
+    store.release_lease(&sid, &w).await.unwrap();
+
+    fake.conflicts_next_delete
+        .store(1, std::sync::atomic::Ordering::SeqCst);
+    let outcome = store
+        .erase_session(&sid, &holder("lambo-erase-session"))
+        .await
+        .unwrap();
+    assert!(matches!(outcome, EraseOutcome::Erased(_)));
+    fake.refresh_now();
+    assert!(
+        fake.live(&sid).is_empty() && fake.searchable(&sid).is_empty(),
+        "a conflicting document survived a successful erase"
+    );
 }
 
 // ---------------------------------------------------------------------------

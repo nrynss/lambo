@@ -109,6 +109,22 @@ pub(crate) const REPAIR_BACKOFF: Duration = Duration::from_secs(60);
 /// Documents per bulk request during a repair.
 const REPAIR_CHUNK: usize = 500;
 
+/// Delete-by-query passes before a sweep gives up on documents that keep
+/// being rewritten under it (version conflicts).
+const SWEEP_ATTEMPTS: usize = 3;
+
+/// Sweep-and-count passes an erase makes before it reports failure.
+const ERASE_ATTEMPTS: usize = 3;
+
+/// What a sweep deletes.
+#[derive(Clone, Copy)]
+enum Sweep<'a> {
+    /// The session's documents, all or those below a version.
+    Session(&'a SessionId, Option<u64>),
+    /// Documents by node id, in every data index.
+    Ids(&'a [NodeId]),
+}
+
 /// Whether the index can be trusted for one session.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum TierSync {
@@ -262,6 +278,37 @@ impl TieredStore {
         Ok(contract)
     }
 
+    /// Delete `what` from the index so that nothing it matched survives.
+    ///
+    /// Every pass refreshes first: delete-by-query deletes from the engine's
+    /// last-refresh search snapshot, so a document mirrored with
+    /// `refresh=false` inside the last refresh interval would otherwise be
+    /// missed (and then exposed by the delete's own refresh). A document
+    /// rewritten between the snapshot and its delete is a version conflict
+    /// the engine skips; the pass is retried, and conflicts that persist
+    /// through [`SWEEP_ATTEMPTS`] passes are an error, never a silent
+    /// success.
+    async fn sweep(&self, what: Sweep<'_>) -> Result<(), StoreError> {
+        let mut conflicts = 0;
+        for _ in 0..SWEEP_ATTEMPTS {
+            self.recall.refresh().await?;
+            let report = match what {
+                Sweep::Session(session, below) => {
+                    self.recall.delete_session_docs(session, below).await?
+                }
+                Sweep::Ids(ids) => self.recall.delete_ids(ids).await?,
+            };
+            conflicts = report.version_conflicts;
+            if conflicts == 0 {
+                return Ok(());
+            }
+        }
+        Err(StoreError::Backend(format!(
+            "recall index: {conflicts} documents were still being rewritten after \
+             {SWEEP_ATTEMPTS} delete passes (version conflicts)"
+        )))
+    }
+
     /// Compare the index's marker with the durable epoch.
     async fn check_marker(&self, session: &SessionId, epoch: u64, indexable: bool) -> TierSync {
         match self.recall.read_marker(session).await {
@@ -355,7 +402,7 @@ impl TieredStore {
             }
             indexed = ops.len() as u64;
         }
-        self.recall.delete_session_docs(session, version).await?;
+        self.sweep(Sweep::Session(session, version)).await?;
         self.recall
             .write_marker(
                 session,
@@ -459,7 +506,7 @@ impl TieredStore {
         // Unattributable: delete by id everywhere (always safe, the nodes are
         // durably gone) and leave every marker where it is, so the owning
         // session's next load sees its marker behind and repairs.
-        if let Err(e) = self.recall.delete_ids(&deleted).await {
+        if let Err(e) = self.sweep(Sweep::Ids(&deleted)).await {
             let sessions: Vec<SessionId> = self.sessions.lock().keys().cloned().collect();
             for session in sessions {
                 self.mark_stale(&session, &format!("unattributed delete failed: {e}"));
@@ -796,6 +843,11 @@ impl GraphStore for TieredStore {
     /// the session done while its vectors are still searchable. Rerunning is
     /// safe: the durable erase reports `already_absent` and the index cleanup
     /// is retried.
+    ///
+    /// "Gone" is checked, not assumed (#18 review H1): each pass sweeps the
+    /// session (refresh, delete-by-query, retry on conflicts), refreshes, and
+    /// counts what a search still finds. Only a count of zero lets the marker
+    /// go and the erase report done.
     async fn erase_session(
         &self,
         session: &SessionId,
@@ -804,8 +856,19 @@ impl GraphStore for TieredStore {
         let outcome = self.primary.erase_session(session, eraser).await?;
         if let EraseOutcome::Erased(_) = &outcome {
             let cleaned = async {
-                self.recall.delete_session_docs(session, None).await?;
-                self.recall.delete_marker(session).await
+                let mut left = 0;
+                for _ in 0..ERASE_ATTEMPTS {
+                    self.sweep(Sweep::Session(session, None)).await?;
+                    self.recall.refresh().await?;
+                    left = self.recall.count_session_docs(session).await?;
+                    if left == 0 {
+                        return self.recall.delete_marker(session).await;
+                    }
+                }
+                Err(StoreError::Backend(format!(
+                    "recall index: {left} documents of the session are still searchable after \
+                     {ERASE_ATTEMPTS} delete passes"
+                )))
             }
             .await;
             if let Err(e) = cleaned {

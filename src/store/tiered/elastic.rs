@@ -24,7 +24,7 @@ use reqwest::header::{HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::{Method, StatusCode, Url};
 use serde_json::{json, Value};
 
-use super::index::{DocOp, KnnHit, RecallIndex, SyncMarker};
+use super::index::{DeleteReport, DocOp, KnnHit, RecallIndex, SyncMarker};
 use super::project::{contract_hash, validate_index_prefix};
 use crate::store::RecallConfig;
 use crate::types::{EmbeddingContract, NodeId, SessionId, StoreError};
@@ -205,7 +205,14 @@ impl ElasticRecall {
         Ok(out)
     }
 
-    async fn delete_by_query(&self, what: &str, query: Value) -> Result<(), StoreError> {
+    /// Delete what `query` matches in every data index.
+    ///
+    /// The engine deletes from its last-refresh search snapshot, so the
+    /// caller refreshes first ([`RecallIndex::refresh`]); `refresh=true` here
+    /// only makes the deletes themselves visible afterwards. A document
+    /// rewritten between the snapshot and its delete is skipped and counted
+    /// in `version_conflicts`, which is returned for the caller to act on.
+    async fn delete_by_query(&self, what: &str, query: Value) -> Result<DeleteReport, StoreError> {
         let pattern = self.data_pattern();
         let url = self.url(
             &[&pattern, "_delete_by_query"],
@@ -225,7 +232,7 @@ impl ElasticRecall {
             )
             .await?;
         if status == StatusCode::NOT_FOUND {
-            return Ok(());
+            return Ok(DeleteReport::default());
         }
         if !status.is_success() {
             return Err(Self::fail(what, status, &resp));
@@ -238,7 +245,15 @@ impl ElasticRecall {
                 format!("{} documents failed to delete", failures.len()),
             ));
         }
-        Ok(())
+        Ok(DeleteReport {
+            deleted: resp["deleted"].as_u64().unwrap_or(0),
+            version_conflicts: resp["version_conflicts"].as_u64().unwrap_or(0),
+        })
+    }
+
+    /// The session filter every session-scoped query uses.
+    fn session_filter(session: &SessionId) -> Value {
+        json!({ "term": { "session_id": session.0 } })
     }
 }
 
@@ -351,9 +366,23 @@ impl RecallIndex for ElasticRecall {
         Ok(())
     }
 
-    async fn delete_ids(&self, ids: &[NodeId]) -> Result<(), StoreError> {
+    async fn refresh(&self) -> Result<(), StoreError> {
+        let pattern = self.data_pattern();
+        let url = self.url(
+            &[&pattern, "_refresh"],
+            &[("allow_no_indices", "true"), ("ignore_unavailable", "true")],
+        )?;
+        let (status, resp) = self.send("refresh", Method::POST, url, None).await?;
+        if status.is_success() || status == StatusCode::NOT_FOUND {
+            Ok(())
+        } else {
+            Err(Self::fail("refresh", status, &resp))
+        }
+    }
+
+    async fn delete_ids(&self, ids: &[NodeId]) -> Result<DeleteReport, StoreError> {
         if ids.is_empty() {
-            return Ok(());
+            return Ok(DeleteReport::default());
         }
         let values: Vec<String> = ids.iter().map(|id| id.0.to_string()).collect();
         self.delete_by_query("delete by id", json!({ "ids": { "values": values } }))
@@ -364,8 +393,8 @@ impl RecallIndex for ElasticRecall {
         &self,
         session: &SessionId,
         below: Option<u64>,
-    ) -> Result<(), StoreError> {
-        let mut filter = vec![json!({ "term": { "session_id": session.0 } })];
+    ) -> Result<DeleteReport, StoreError> {
+        let mut filter = vec![Self::session_filter(session)];
         if let Some(below) = below {
             filter.push(json!({ "range": { "v": { "lt": below } } }));
         }
@@ -374,6 +403,33 @@ impl RecallIndex for ElasticRecall {
             json!({ "bool": { "filter": filter } }),
         )
         .await
+    }
+
+    async fn count_session_docs(&self, session: &SessionId) -> Result<u64, StoreError> {
+        let pattern = self.data_pattern();
+        let url = self.url(
+            &[&pattern, "_count"],
+            &[("allow_no_indices", "true"), ("ignore_unavailable", "true")],
+        )?;
+        let (status, resp) = self
+            .send(
+                "count session documents",
+                Method::POST,
+                url,
+                Some(Body::Json(
+                    json!({ "query": Self::session_filter(session) }),
+                )),
+            )
+            .await?;
+        if status == StatusCode::NOT_FOUND {
+            return Ok(0);
+        }
+        if !status.is_success() {
+            return Err(Self::fail("count session documents", status, &resp));
+        }
+        resp["count"]
+            .as_u64()
+            .ok_or_else(|| backend("count session documents", "response without a count"))
     }
 
     async fn knn(
@@ -392,7 +448,7 @@ impl RecallIndex for ElasticRecall {
                 "query_vector": probe,
                 "k": k,
                 "num_candidates": num_candidates,
-                "filter": { "term": { "session_id": session.0 } }
+                "filter": Self::session_filter(session)
             },
             "size": k,
             "_source": ["canonical_key"]
@@ -803,13 +859,21 @@ mod tests {
                         .to_string(),
                     );
                 then.status(200)
-                    .json_body(json!({ "deleted": 2, "failures": [] }));
+                    .json_body(json!({ "deleted": 2, "version_conflicts": 1, "failures": [] }));
             })
             .await;
-        index
+        let report = index
             .delete_session_docs(&SessionId::new("s"), Some(12))
             .await
             .unwrap();
+        assert_eq!(
+            report,
+            DeleteReport {
+                deleted: 2,
+                version_conflicts: 1
+            },
+            "conflicts are reported, not swallowed"
+        );
         ok.assert_async().await;
         ok.delete_async().await;
         server
@@ -824,6 +888,43 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("failed to delete"), "{err}");
+    }
+
+    /// H1: the refresh a sweep makes first, and the count an erase confirms
+    /// with, both cover every data index and tolerate there being none.
+    #[tokio::test]
+    async fn refresh_and_count_cover_every_data_index() {
+        let server = MockServer::start_async().await;
+        let index = ElasticRecall::new(&cfg(&server.base_url())).unwrap();
+        let refresh = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/lambo-v-*/_refresh")
+                    .query_param("allow_no_indices", "true")
+                    .query_param("ignore_unavailable", "true");
+                then.status(200).json_body(json!({ "_shards": {} }));
+            })
+            .await;
+        index.refresh().await.unwrap();
+        refresh.assert_async().await;
+
+        let count = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/lambo-v-*/_count")
+                    .query_param("allow_no_indices", "true")
+                    .json_body(json!({ "query": { "term": { "session_id": "s" } } }));
+                then.status(200).json_body(json!({ "count": 3 }));
+            })
+            .await;
+        assert_eq!(
+            index
+                .count_session_docs(&SessionId::new("s"))
+                .await
+                .unwrap(),
+            3
+        );
+        count.assert_async().await;
     }
 
     #[tokio::test]

@@ -79,6 +79,16 @@ pub(crate) struct KnnHit {
     pub canonical_key: String,
 }
 
+/// What one delete-by-query did. The engine deletes only what its search
+/// snapshot shows and skips (under `conflicts=proceed`) every matched
+/// document rewritten between that snapshot and its delete, so a caller that
+/// needs the documents gone must look at `version_conflicts`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct DeleteReport {
+    pub deleted: u64,
+    pub version_conflicts: u64,
+}
+
 /// The per-session sync marker: the durable mutation epoch the index is known
 /// to reflect. Written after a clean mirror or reconcile, compared with the
 /// durable snapshot's `mutation_epoch` when a session is loaded.
@@ -104,18 +114,30 @@ pub(crate) trait RecallIndex: Send + Sync {
     /// per-item failure fails the call.
     async fn bulk(&self, ops: &[DocOp]) -> Result<(), StoreError>;
 
+    /// Make every write so far visible to search, count and
+    /// delete-by-query in every data index. Search is near-real-time: a
+    /// write made with `refresh=false` is invisible to all three until the
+    /// next refresh, so a delete-by-query that must catch it refreshes first.
+    async fn refresh(&self) -> Result<(), StoreError>;
+
     /// Delete documents by node id from every data index. Used only for a
     /// delete-only batch that cannot be attributed to a session (node ids are
     /// globally unique, so no session filter is needed to delete them).
-    async fn delete_ids(&self, ids: &[NodeId]) -> Result<(), StoreError>;
+    /// Deletes only what is searchable: refresh first.
+    async fn delete_ids(&self, ids: &[NodeId]) -> Result<DeleteReport, StoreError>;
 
     /// Delete the session's documents from every data index, all of them
     /// (`below = None`) or only those written at a version below `below`.
+    /// Deletes only what is searchable: refresh first.
     async fn delete_session_docs(
         &self,
         session: &SessionId,
         below: Option<u64>,
-    ) -> Result<(), StoreError>;
+    ) -> Result<DeleteReport, StoreError>;
+
+    /// How many of the session's documents a search finds in every data
+    /// index (as of the last refresh).
+    async fn count_session_docs(&self, session: &SessionId) -> Result<u64, StoreError>;
 
     /// The `k` nearest session documents in `contract`'s index. A missing
     /// index is an empty answer, not an error.
