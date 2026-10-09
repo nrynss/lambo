@@ -210,7 +210,7 @@ async fn run_inner(
     require_nonempty("session", session)?;
     check_size_cli("session", session)?;
     // Beside an image or a vector the text is optional; blank is none.
-    let query = if by.is_some() && query.trim().is_empty() {
+    let query = if by.is_some() && crate::surface::validate::is_blank(query) {
         ""
     } else {
         require_nonempty("query", query)?;

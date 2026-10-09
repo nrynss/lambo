@@ -116,7 +116,7 @@ impl Route {
     /// recall, and on a recall by vector only beside text (see
     /// [`candidates::RecentLeg`]).
     fn recent_leg(self, text: &str) -> candidates::RecentLeg {
-        if self == Route::ByVector && text.trim().is_empty() {
+        if self == Route::ByVector && crate::surface::validate::is_blank(text) {
             candidates::RecentLeg::Skip
         } else {
             candidates::RecentLeg::Run

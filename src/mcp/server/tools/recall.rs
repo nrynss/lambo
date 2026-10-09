@@ -90,7 +90,7 @@ impl LamboServer {
         }
 
         // Beside an image or a vector, blank text is no text.
-        let text = if by_kind.is_some() && p.query.trim().is_empty() {
+        let text = if by_kind.is_some() && crate::surface::validate::is_blank(&p.query) {
             String::new()
         } else {
             p.query
