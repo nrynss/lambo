@@ -372,12 +372,6 @@ async fn a_probe_that_cannot_finish_inside_its_budget_reports_no_measurement() {
     for (leg, plan) in [
         ("warm-up", vec![Leg::Hang]),
         ("serial", vec![answer, Leg::Hang]),
-        ("concurrent", {
-            // warm-up, short, then the whole representative write answers.
-            let mut plan = vec![answer; 2 + PROBE_WRITE_CONCEPTS];
-            plan.push(Leg::Hang);
-            plan
-        }),
     ] {
         let embedder = scripted(plan);
         let started = tokio::time::Instant::now();
@@ -404,6 +398,23 @@ async fn a_probe_that_cannot_finish_inside_its_budget_reports_no_measurement() {
                  still end inside it: {elapsed:?}"
         );
     }
+
+    // A hang at the concurrent leg still ends inside the budget, but both
+    // serial legs have landed by then, so their figures are published and
+    // only the concurrent one is missing (#11 review P2-2).
+    let mut plan = vec![answer; 2 + PROBE_WRITE_CONCEPTS];
+    plan.push(Leg::Hang);
+    let embedder = scripted(plan);
+    let started = tokio::time::Instant::now();
+    let c = probe_embedder(&embedder).await;
+    assert!(
+        started.elapsed() <= PROBE_BUDGET + Duration::from_millis(50),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(c.source, CalibrationSource::Probe, "{c:?}");
+    assert!(c.serial_items_per_sec.is_some(), "{c:?}");
+    assert_eq!(c.items_per_sec, None, "{c:?}");
 }
 
 /// **A cold first embed does not cost the probe its measurement** (#11).
@@ -428,6 +439,71 @@ async fn a_cold_warm_up_does_not_cost_the_probe_its_measurement() {
         "a slow model load is what the warm-up exists to absorb: {c:?}"
     );
     assert!(c.serial_items_per_sec.is_some(), "{c:?}");
+}
+
+/// An embedder that answers **one request at a time** at a cost per byte:
+/// the shape of CPU candle or a single-slot CPU llama-server, where four
+/// concurrent requests take four times as long as one (#11 review P2-2).
+struct SerialisingEmbedder {
+    per_byte: Duration,
+    slot: tokio::sync::Mutex<()>,
+}
+
+#[async_trait::async_trait]
+impl Embedder for SerialisingEmbedder {
+    fn dimensions(&self) -> usize {
+        8
+    }
+    async fn embed(&self, text: &str) -> Result<Vec<f32>, crate::EmbedError> {
+        let _one_at_a_time = self.slot.lock().await;
+        tokio::time::sleep(self.per_byte * text.len() as u32).await;
+        Ok(vec![0.0; 8])
+    }
+}
+
+/// **A one-at-a-time embedder at CPU-like cost keeps its probe figure**
+/// (#11 review P2-2).
+///
+/// Since #11 the concurrent leg is [`PROBE_CONCURRENCY`] whole writes, eight
+/// ~1 KiB embeds, inside the same [`PROBE_BUDGET`] as before. An embedder
+/// that serialises requests at about 0.6 ms a byte answers both serial legs
+/// well inside the budget and cannot finish the concurrent one, and the
+/// whole probe reported `unmeasured`, so `write_queue_probe_optimism`, the
+/// figure #11 added, was null for good on exactly the deployments where the
+/// probe and the observed rate disagree most. The serial figures are what
+/// `probe_optimism` divides, so they are published, and the concurrent
+/// figure says it was not measured.
+#[tokio::test(start_paused = true)]
+async fn a_serialising_embedder_keeps_the_probes_serial_figure() {
+    let embedder = SerialisingEmbedder {
+        per_byte: Duration::from_micros(600),
+        slot: tokio::sync::Mutex::new(()),
+    };
+    let c = probe_embedder(&embedder).await;
+    assert_eq!(
+        c.source,
+        CalibrationSource::Probe,
+        "both serial legs landed, so the probe measured something: {c:?}"
+    );
+    let write_bytes: usize = probe_write_contexts().iter().map(String::len).sum();
+    let expected = 1.0 / (write_bytes as f64 * 0.000_6);
+    let serial = c
+        .serial_items_per_sec
+        .expect("the serial figure is published");
+    assert!(
+        (serial - expected).abs() < 0.01,
+        "the representative write decides it: {serial} against {expected}"
+    );
+    assert_eq!(c.probe_serial_items_per_sec, c.serial_items_per_sec);
+    assert_eq!(
+        c.items_per_sec, None,
+        "the concurrent leg ran out of budget, so it says nothing it did not measure"
+    );
+    let optimism = c
+        .with_observed_serial(expected / 2.0)
+        .probe_optimism()
+        .expect("probe_optimism survives a concurrent leg that timed out");
+    assert!((optimism - 2.0).abs() < 0.01, "{optimism}");
 }
 
 /// An embedder that records every text it is asked to embed.

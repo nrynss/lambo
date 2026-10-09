@@ -166,9 +166,13 @@ pub const OBSERVED_EWMA_WEIGHT: u32 = PROBE_CONCURRENCY as u32;
 /// Unchanged at 5 s even though the probe takes eleven timed embeds (#11: a
 /// representative write is [`PROBE_WRITE_CONCEPTS`] embeds of up to
 /// [`PROBE_TEXT_BYTES`]) where it once took four: a deployment that, once its
-/// warm-up has answered, still cannot answer the timed legs in 5 s is better
+/// warm-up has answered, still cannot answer the serial legs in 5 s is better
 /// served by reporting `unmeasured` and being **corrected by observation**
 /// ([`OBSERVED_MIN_SAMPLES`]) than by publishing a number nobody can trust.
+/// One that answers the serial legs and not the concurrent one (an embedder
+/// that serialises requests needs [`PROBE_CONCURRENCY`] times a write's time
+/// there, about 4 s at CPU cost) keeps its serial figures and reports no
+/// concurrent one ([`Calibration::from_serial_probe`], #11 review P2-2).
 /// Model load is not in this window any more: it is what the warm-up, with
 /// its own [`PROBE_WARMUP_BUDGET`], absorbs (#11).
 ///
@@ -409,17 +413,28 @@ impl Calibration {
         representative_wall: Option<Duration>,
         concurrent_wall: Duration,
     ) -> Self {
-        let short = rate_of(1, serial_wall);
-        let serial = match representative_wall {
-            Some(wall) => short.min(rate_of(1, wall)),
-            None => short,
-        };
+        let serial = serial_rate(serial_wall, representative_wall);
         Self::from_rates(
             Some(serial),
             Some(rate_of(PROBE_CONCURRENCY, concurrent_wall)),
             Some(serial),
             CalibrationSource::Probe,
         )
+    }
+
+    /// Publish the probe's serial legs alone, when the concurrent leg ran out
+    /// of [`PROBE_BUDGET`] (#11 review P2-2).
+    ///
+    /// The serial figure is the one [`Calibration::probe_optimism`] divides,
+    /// and an embedder that answers one request at a time (CPU candle, a
+    /// single-slot CPU llama-server) answers both serial legs well inside the
+    /// budget and then needs [`PROBE_CONCURRENCY`] times a write's time for
+    /// the concurrent one. Reporting `unmeasured` there threw away a real
+    /// measurement to avoid publishing one that was not taken; this keeps the
+    /// first and leaves [`Calibration::items_per_sec`] `None`.
+    pub fn from_serial_probe(serial_wall: Duration, representative_wall: Option<Duration>) -> Self {
+        let serial = serial_rate(serial_wall, representative_wall);
+        Self::from_rates(Some(serial), None, Some(serial), CalibrationSource::Probe)
     }
 
     /// Replace the serial rate with one observed from real writes, keeping the
@@ -490,6 +505,16 @@ impl Calibration {
             }
             _ => None,
         }
+    }
+}
+
+/// The probe's serial rate: the slower of its short and representative legs
+/// (J3-R2-1), or the short one alone when the representative leg was refused.
+fn serial_rate(serial_wall: Duration, representative_wall: Option<Duration>) -> f64 {
+    let short = rate_of(1, serial_wall);
+    match representative_wall {
+        Some(wall) => short.min(rate_of(1, wall)),
+        None => short,
     }
 }
 
@@ -599,9 +624,13 @@ impl ObservedRate {
 ///    otherwise: the aggregate leg gets the same conservative input as the
 ///    serial one wherever that is known to be answerable.
 ///
-/// Any **required** leg failing or the budget running out means the same thing:
-/// this deployment's rate is not known, and saying so beats inventing a
-/// number. Saying so costs nothing but the telemetry (J3 redesign): the
+/// Any **required** leg failing, or the budget running out before the serial
+/// legs are measured, means the same thing: this deployment's rate is not
+/// known, and saying so beats inventing a number. The one exception is the
+/// concurrent leg running out of budget after both serial legs landed (#11
+/// review P2-2): the serial figures are real and are what
+/// [`Calibration::probe_optimism`] needs, so they are published with no
+/// concurrent figure ([`Calibration::from_serial_probe`]). Saying so costs nothing but the telemetry (J3 redesign): the
 /// difference between `Unmeasured` and `Probe` is `write_queue_measured` and an
 /// absent `probe_optimism` baseline — never a bound, and the observed rate
 /// still replaces the figure after [`OBSERVED_MIN_SAMPLES`] real writes.
@@ -670,7 +699,20 @@ pub(super) async fn probe_embedder(embedder: &dyn Embedder) -> Calibration {
             representative_wall,
             concurrent_started.elapsed(),
         ),
-        _ => Calibration::unmeasured(),
+        // A refusal: the embedder failed real work, so nothing is published.
+        Ok(_) => Calibration::unmeasured(),
+        // Out of budget with both serial legs measured (#11 review P2-2): an
+        // embedder that serialises requests needs PROBE_CONCURRENCY times a
+        // write's time here. Keep the serial figures probe_optimism needs.
+        Err(_) => {
+            tracing::debug!(
+                concurrency = PROBE_CONCURRENCY,
+                budget = ?PROBE_BUDGET,
+                "write queue: the calibration probe's concurrent leg did not finish inside its \
+                 budget; publishing the serial figures alone"
+            );
+            Calibration::from_serial_probe(serial_wall, representative_wall)
+        }
     }
 }
 
@@ -768,7 +810,7 @@ impl EmbedderProbe {
         let (tx, rx) = watch::channel(None);
         let task = tokio::spawn(async move {
             let calibration = probe_embedder(embedder.as_ref()).await;
-            match calibration.items_per_sec {
+            match (calibration.measured(), calibration.items_per_sec) {
                 // J3 round-1 N3. These two lines are what an operator reads
                 // about their own deployment, and both said the bounds came
                 // from the probe. They never did after the estimator demotion —
@@ -776,7 +818,7 @@ impl EmbedderProbe {
                 // `WRITE_QUEUE_MIN`, "the unmeasured floor", which THIS BRANCH
                 // deleted. Provenance first now, rates second, and neither line
                 // claims a bound was measured.
-                Some(rate) => tracing::info!(
+                (true, Some(rate)) => tracing::info!(
                     session = %session,
                     items_per_sec = rate,
                     serial_items_per_sec = calibration.serial_items_per_sec,
@@ -790,7 +832,24 @@ impl EmbedderProbe {
                     WRITE_QUEUE_MAX,
                     PROBE_CONCURRENCY
                 ),
-                None => tracing::warn!(
+                // #11 review P2-2: the serial legs landed and the concurrent
+                // one ran out of budget.
+                (true, None) => tracing::info!(
+                    session = %session,
+                    serial_items_per_sec = calibration.serial_items_per_sec,
+                    concurrency = PROBE_CONCURRENCY,
+                    "write queue: bounds are static (lane {}, queue {}) and no rate moves them; \
+                     the serial rate is telemetry measured on this deployment's embedder, and \
+                     the {}-wide aggregate was not measured because it did not finish within \
+                     {:?} (an embedder that answers one request at a time needs {} times a \
+                     write's time for it)",
+                    WRITE_QUEUE_LANE_MAX,
+                    WRITE_QUEUE_MAX,
+                    PROBE_CONCURRENCY,
+                    PROBE_BUDGET,
+                    PROBE_CONCURRENCY
+                ),
+                (false, _) => tracing::warn!(
                     session = %session,
                     bound = calibration.bound,
                     "write queue: the embedder could not be probed within {:?}, so there is no \
