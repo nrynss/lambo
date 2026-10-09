@@ -206,12 +206,14 @@ url = "http://127.0.0.1:8080"
 # timeout_ms = 5000
 
 # Multi-session serving (#32). Optional; omit the whole section and `lambo
-# serve` behaves exactly as it always has. In this release only
-# default_session and [[serve.projects]] are read, to choose the session of a
-# stdio `lambo serve` started without --session (--session always wins; an
-# http serve still needs it). The rest is PARSED AND VALIDATED ONLY (routing
-# by /mcp/s/{session}, credentials and the bounds arrive in later releases),
-# but a malformed table already stops every command, like any unknown key.
+# serve` behaves exactly as it always has. An http `lambo serve` pins
+# `sessions` beside its --session values, serves default_session at /mcp and
+# enforces max_attached. A stdio `lambo serve` started without --session takes
+# its session from [[serve.projects]], then default_session (--session always
+# wins; an http serve never reads [[serve.projects]]). The rest is PARSED AND
+# VALIDATED ONLY (credentials and the on-demand bounds arrive in later
+# releases), but a malformed table already stops every command, like any
+# unknown key.
 # A [[serve.projects]] path is absolute or starts with ~/; it and the working
 # directory are compared as real paths (symlinks resolved). With HOME unset
 # (or relative), ~ entries are skipped with one warning. One global map for

@@ -103,9 +103,7 @@
 
 - A `[[serve.projects]]` `path` must now be absolute or start with `~/` (or
   be `~`); a relative path or `~user` is refused when `lambo.toml` is read,
-  naming the entry (#32). The `[serve] is parsed but not yet enforced`
-  warning no longer appears for a `[serve]` table that sets only
-  `default_session` and `[[serve.projects]]`, which are now read.
+  naming the entry (#32).
 - The write queue's probe log lines (`write queue: bounds are static ...`
   and `the embedder could not be probed`) gain a `scope` field, `session`
   or `process`, beside the `session=<id>` they already carried (#32).
@@ -129,9 +127,9 @@
 - `lambo.toml` `[serve]` `sessions`, `default_session` and `max_attached`
   are enforced by an HTTP `lambo serve` (#32, fourth part), so the startup
   notice now names only the keys still parsed but not enforced
-  (credentials, `[[serve.projects]]`, `attach_concurrency`,
-  `idle_detach_secs`, `per_session_rps`, and for a stdio serve
-  `default_session`), reads `[serve] is parsed but not
+  (credentials, `attach_concurrency`, `idle_detach_secs`,
+  `per_session_rps`, and for an HTTP serve `[[serve.projects]]`, which only
+  a stdio serve reads, #32 eighth part), reads `[serve] is parsed but not
   yet enforced for some keys`, and is not logged for a table that sets none
   of them. With several sessions, `--ledger-heartbeat` writes one `stats`
   line per session per interval.
@@ -319,12 +317,16 @@
   rest of the map applies. A global map only applies when the client passes
   `--config` or sets `LAMBO_CONFIG`; otherwise each project's own
   `./lambo.toml` is read.
-  `--session` always wins, and `--transport http` still requires it.
+  `--session` always wins, and a stdio serve still takes at most one;
+  `--transport http` pins its sessions as before (`--session` and
+  `[serve] sessions`) and never reads the map.
   The serve logs which entry it used by its configured path; nothing
   quotes the working directory. Library: `ServeConfig::select_stdio_session` (and `_with`, with
   the working directory and home injected), `SelectedSession`,
   `SessionSource`, `SessionSelectionError`, `MissingSession`,
-  `SESSION_REQUIRED` and `ServeConfig::has_unenforced_keys`.
+  `SESSION_REQUIRED`. The startup `[serve]` notice no longer names
+  `default_session` or `[[serve.projects]]` for a stdio serve; an HTTP
+  serve still names `[[serve.projects]]`.
 - Multi-session serving (#32, fourth part): one `lambo serve --transport
   http` holds several pinned sessions, named by a repeated `--session`
   and/or `[serve] sessions`. Each is served at `/mcp/s/{session}`, and `/mcp`

@@ -3,8 +3,9 @@
 //! and the default session `/mcp` serves.
 //!
 //! PR 4 serves pinned sessions only: every session a serve hosts is attached
-//! at startup and stays attached. On-demand sessions (PR 6), credentials (PR
-//! 5) and the stdio cwd map (PR 8) build on this.
+//! at startup and stays attached. On-demand sessions (PR 6) and credentials
+//! (PR 5) build on this. The stdio cwd map (PR 8) chooses a stdio serve's one
+//! session before this runs (`ServeConfig::select_stdio_session`).
 
 use super::Transport;
 use crate::config::ServeConfig;
@@ -24,9 +25,10 @@ pub struct PinnedSessions {
 
 /// Work out the pinned sessions from the command line and `[serve]`.
 ///
-/// * **stdio** owns exactly one session (design §2.2, Q9): exactly one
-///   `--session`, and `[serve] sessions` does not apply. Choosing a stdio
-///   session without `--session` is PR 8's.
+/// * **stdio** owns exactly one session (design §2.2, Q9), and `[serve] sessions` does not apply. The CLI chooses it
+///   first (`--session`, else PR 8's cwd map, else `default_session`) and
+///   passes it here as the one value; a library caller that passes none is
+///   refused.
 /// * **HTTP** pins the ordered union of `--session` and `[serve] sessions`,
 ///   and needs at least one. The default must be pinned (PR 4 hosts nothing
 ///   else), and the union must fit `max_attached`, which `[serve]`'s own

@@ -208,9 +208,9 @@ GC also sweeps on time. When `gc_max_interval_secs` has passed since a session's
 
 `[serve]` configures one `lambo serve` process that holds several sessions. It is optional: omit it and `lambo serve` behaves exactly as it always has.
 
-An HTTP `lambo serve` reads `sessions`, `default_session` and `max_attached`: it pins every session in `sessions` beside its `--session` values, serves `default_session` at `/mcp`, and refuses to start when the pinned sessions together exceed `max_attached` or `default_session` is not one of them (this release serves pinned sessions only). See [Several sessions in one serve](/lambo/cli/#several-sessions-in-one-serve). A stdio serve owns the one session its `--session` names and ignores `sessions`.
+An HTTP `lambo serve` reads `sessions`, `default_session` and `max_attached`: it pins every session in `sessions` beside its `--session` values, serves `default_session` at `/mcp`, and refuses to start when the pinned sessions together exceed `max_attached` or `default_session` is not one of them (this release serves pinned sessions only). See [Several sessions in one serve](/lambo/cli/#several-sessions-in-one-serve). A stdio serve owns one session and ignores `sessions` and `max_attached`: its `--session`, or, without one, the session `[[serve.projects]]` or `default_session` chooses ([below](#choosing-a-stdio-serves-session)).
 
-The rest of the table is **parsed and validated only**: the credentials, `[[serve.projects]]`, `attach_concurrency`, `idle_detach_secs` and `per_session_rps` arrive in later releases. A malformed table is still refused when the file is read, so it stops every command, like an unknown key. When the table sets any of those keys (or, for a stdio serve, `default_session`, which a stdio serve does not use yet), `lambo serve` logs one warning at startup (`[serve] is parsed but not yet enforced for some keys`) that names the keys and no value from them.
+The rest of the table is **parsed and validated only**: the credentials, `attach_concurrency`, `idle_detach_secs` and `per_session_rps` arrive in later releases, and an HTTP serve never reads `[[serve.projects]]`, which is a stdio serve's only. A malformed table is still refused when the file is read, so it stops every command, like an unknown key. When the table sets any of those keys (or, for an HTTP serve, `[[serve.projects]]`), `lambo serve` logs one warning at startup (`[serve] is parsed but not yet enforced for some keys`) that names the keys and no value from them.
 
 ```toml
 [serve]
@@ -241,12 +241,12 @@ erase = true
 | Key | Default | What it sets |
 |---|---|---|
 | `sessions` | none | Pinned sessions, attached at startup and never idle-detached. Served by an HTTP `lambo serve`, beside its `--session` values. |
-| `default_session` | none | The session `/mcp` and a stdio serve without `--session` use. |
+| `default_session` | none | The session `/mcp` serves, and the one a stdio serve without `--session` uses when no `[[serve.projects]]` entry covers its working directory. |
 | `max_attached` | `16` | Cap on attached sessions, pinned plus on-demand. At least 1, and at least the number of pinned sessions. |
 | `attach_concurrency` | `2` | Sessions that may attach at once. At least 1. |
 | `idle_detach_secs` | `900` | Seconds an on-demand session may sit idle before it is detached. At least 1. |
 | `per_session_rps` | `--rate-limit-rps` | Request rate for each session. `0` turns the per-session limit off. |
-| `[[serve.projects]]` | none | `path` and `session`: a stdio serve started without `--session` under `path` uses `session`. `path` must be absolute or start with `~/`. |
+| `[[serve.projects]]` | none | `path` and `session`: a stdio serve started without `--session` under `path` uses `session`. `path` must be absolute or start with `~/`. An HTTP serve does not read it. |
 | `[[serve.credential]]` | none | A bearer credential and the sessions it may reach (below). |
 
 Every session named in `[serve]` must be addressable by URL: 1 to 128 bytes of `A-Z`, `a-z`, `0-9`, `.`, `_`, `:` and `-`, not starting with `.`. A name outside that rule is refused here, but you can still serve it on its own with `lambo serve --session <name>`, which keeps its looser rule.
