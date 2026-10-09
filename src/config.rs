@@ -13,6 +13,13 @@ use crate::embed::{EmbedError, EmbedderConfig};
 use crate::store::StoreConfig;
 use crate::types::{LamboError, MatchStrategy};
 
+mod serve;
+pub use serve::{
+    CredentialConfig, InlineToken, ProjectConfig, ServeConfig, ServeCredential,
+    DEFAULT_ATTACH_CONCURRENCY, DEFAULT_IDLE_DETACH_SECS, DEFAULT_MAX_ATTACHED,
+    EVERY_HOSTED_SESSION, RESERVED_CREDENTIAL_NAMES,
+};
+
 /// Scoring weights for daemon composite (spec §9): recency / frequency / session_activity / density.
 ///
 /// Every field is a public `f64` and this struct deserializes from `lambo.toml`
@@ -426,12 +433,26 @@ pub struct LamboFile {
         deserialize_with = "crate::canon::deserialize_promotion_policy"
     )]
     pub promotion_policy: Option<PromotionPolicy>,
+    /// Multi-session serving (`[serve]`, #32). Parsed and validated only:
+    /// nothing reads it at runtime until #32's later PRs, so an absent table
+    /// and a present one serve exactly as before. Not serialized when empty,
+    /// so a file written from a [`LamboFile`] without `[serve]` stays readable
+    /// by a binary that predates it. See [`ServeConfig`].
+    #[serde(default, skip_serializing_if = "ServeConfig::is_empty")]
+    pub serve: ServeConfig,
 }
 
 impl LamboFile {
     /// Parse TOML text.
+    ///
+    /// Also runs [`ServeConfig::validate`], so a malformed `[serve]` table
+    /// fails closed at the file boundary for every command, like an unknown
+    /// key does.
     pub fn from_toml_str(s: &str) -> Result<Self, LamboError> {
-        toml::from_str(s).map_err(|e| LamboError::Config(format!("lambo.toml: {e}")))
+        let file: Self =
+            toml::from_str(s).map_err(|e| LamboError::Config(format!("lambo.toml: {e}")))?;
+        file.serve.validate()?;
+        Ok(file)
     }
 
     /// Load from a path.
@@ -1042,6 +1063,7 @@ kind = "fake"
             },
             daemon: Default::default(),
             promotion_policy: Some(PromotionPolicy::Solo),
+            serve: Default::default(),
         };
         let s = toml::to_string(&f).unwrap();
         let back: LamboFile = toml::from_str(&s).unwrap();
