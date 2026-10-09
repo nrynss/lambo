@@ -159,9 +159,11 @@ url = "http://127.0.0.1:8080"
 #             and keeps nothing local warm.
 # keep_warm_secs = 10
 #
-# Client-computed image vectors (#22), any kind. lambo_derive_image (MCP) and
-# `lambo derive-image --vector-json` accept a vector a client computed, with
-# the embedding contract it declares, only when this is true. Default false:
+# Client-computed vectors (#22), any kind. lambo_derive_image (MCP) and
+# `lambo derive-image --vector-json` (an image vector to store), and
+# lambo_recall's query_vector and `lambo recall --query-vector-json` (a
+# vector to recall by), accept a vector a client computed, with the
+# embedding contract it declares, only when this is true. Default false:
 # such a call is refused, naming this key. Lambo checks that the declared
 # contract (kind, model, dim) is exactly this session's and that the vector
 # has the right width and a real direction, but it cannot verify that the

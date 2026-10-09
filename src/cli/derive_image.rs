@@ -44,18 +44,41 @@ pub struct Args {
 /// `vector`, `{"values": [...], "contract": {"kind", "model", "dim"}}`.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct VectorFile {
-    values: Vec<f32>,
-    contract: ContractFile,
+pub(crate) struct VectorFile {
+    pub(crate) values: Vec<f32>,
+    pub(crate) contract: ContractFile,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ContractFile {
-    kind: String,
+pub(crate) struct ContractFile {
+    pub(crate) kind: String,
     #[serde(default)]
-    model: Option<String>,
-    dim: usize,
+    pub(crate) model: Option<String>,
+    pub(crate) dim: usize,
+}
+
+impl VectorFile {
+    /// Parse a vector file read from `flag`, reporting a malformed one by
+    /// line and column only: serde quotes the offending value.
+    pub(crate) fn parse(flag: &str, raw: &[u8]) -> Result<(Vec<f32>, EmbeddingContract), CliError> {
+        let file: VectorFile = serde_json::from_slice(raw).map_err(|e| {
+            CliError::Usage(format!(
+                "{flag} must be {{\"values\": [...], \"contract\": {{\"kind\", \
+                 \"model\", \"dim\"}}}} with no other keys (line {}, column {})",
+                e.line(),
+                e.column()
+            ))
+        })?;
+        Ok((
+            file.values,
+            EmbeddingContract {
+                kind: file.contract.kind,
+                model: file.contract.model,
+                dim: file.contract.dim,
+            },
+        ))
+    }
 }
 
 /// Read a local file of at most `cap` bytes.
@@ -65,7 +88,7 @@ struct ContractFile {
 /// `/dev/stdin` or a character device report length 0, and a file can grow
 /// between a size check and the read. A regular file already over the cap
 /// is refused from its metadata first, without reading it.
-fn read_capped(flag: &str, path: &Path, cap: u64) -> Result<Vec<u8>, CliError> {
+pub(crate) fn read_capped(flag: &str, path: &Path, cap: u64) -> Result<Vec<u8>, CliError> {
     use std::io::Read as _;
     let cannot =
         |e: std::io::Error| CliError::Usage(format!("{flag}: cannot read {}: {e}", path.display()));
@@ -147,25 +170,10 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
             let raw = read_capped("--vector-json", path, MAX_VECTOR_FILE_BYTES)?;
             // The parse error's position, never its text: serde quotes the
             // offending value.
-            let file: VectorFile = serde_json::from_slice(&raw).map_err(|e| {
-                CliError::Usage(format!(
-                    "--vector-json must be {{\"values\": [...], \"contract\": {{\"kind\", \
-                     \"model\", \"dim\"}}}} with no other keys (line {}, column {})",
-                    e.line(),
-                    e.column()
-                ))
-            })?;
-            let declared = EmbeddingContract {
-                kind: file.contract.kind,
-                model: file.contract.model,
-                dim: file.contract.dim,
-            };
-            check_submitted_vector(&file.values, &declared, &backends.embedding)
+            let (values, declared) = VectorFile::parse("--vector-json", &raw)?;
+            check_submitted_vector(&values, &declared, &backends.embedding)
                 .map_err(CliError::Usage)?;
-            ImagePayload::Vector {
-                values: file.values,
-                declared,
-            }
+            ImagePayload::Vector { values, declared }
         }
         _ => {
             return Err(CliError::Usage(

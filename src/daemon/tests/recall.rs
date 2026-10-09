@@ -832,4 +832,9 @@ async fn gather_contract_race_annotates_vector_degraded() {
         "no other response annotations on this path: {:?}",
         result.response_annotations
     );
+    assert!(
+        result.warnings.contains(&degraded[0].text),
+        "the caller's warnings carry the same line: {:?}",
+        result.warnings
+    );
 }

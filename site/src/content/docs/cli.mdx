@@ -92,10 +92,13 @@ The in-crate candle embedder (`kind = "candle"`) runs BGE-M3 locally with no lla
 | Flag | Required | Default |
 |---|---|---|
 | `--session <SESSION>` | Yes | |
-| `--query <QUERY>` | Yes | |
+| `--query <QUERY>` | Yes, unless `--image` or `--query-vector-json` is given | |
 | `--top-k <TOP_K>` | No | The session's `default_top_k`, which is `5`. |
 | `--max-tokens <MAX_TOKENS>` | No | The session's `default_max_tokens`, which is `500`. |
 | `--traversal-depth <TRAVERSAL_DEPTH>` | No | The session's `default_traversal_depth`, which is `2`. |
+| `--image <PATH>` | No; at most one of `--image`, `--query-vector-json` | Recall what is close to this PNG, JPEG or WebP file (at most 2 MiB and 4096 pixels a side), embedded by the configured embedder. Needs an embedder that embeds images. |
+| `--mime <MIME>` | No | With `--image`, as for `derive-image`. |
+| `--query-vector-json <PATH>` | No; at most one of `--image`, `--query-vector-json` | Recall what is close to a vector: a JSON file in the shape `derive-image --vector-json` takes. Needs `[embedder] accept_client_vectors = true`, and the contract must equal the session's exactly. |
 
 ```bash
 $ lambo recall --session demo --query "update user schema" --top-k 5
@@ -104,6 +107,12 @@ user schema [Entity] (score 1.44, id 3f9c2a10)
 auth middleware [Entity] (score 0.25, id 71b0e4c2)
 
 migrations/003.sql [Resource] (score 0.25, id 9d44f8b1)
+```
+
+**Recall by image or by vector.** With `--image` or `--query-vector-json`, the vector leg searches by that image's or vector's embedding instead of the query text's, with the same rules as `lambo_recall`'s `image` and `query_vector`. `--query` is then optional and still matches words through the keyword leg; without it, recent interactions are left out, as for `lambo_recall`. The files are read under the same size caps as `derive-image`'s and are never printed, stored or cached. A store without vector search, or a vector search that fails, is an error rather than a keyword-only answer, since the vector leg is the point.
+
+```bash
+$ lambo recall --session dresscode --image ./photos/today.png --top-k 3
 ```
 
 ### lambo saints

@@ -196,3 +196,156 @@ async fn an_acknowledged_image_derive_is_recalled_through_the_vector_leg() {
     assert_recalled_by_the_vector_leg(&reopened, image_id).await;
     reopened.close().await.unwrap();
 }
+
+// -- #22 PR 6: recall by image or by a client vector -----------------------
+
+/// The Dresscode path on SQLite (design 12, PR 6): a photo of a similar
+/// outfit, and the dismissed look's vector as a client sends it, each find
+/// the look dismissed for Onam first, with no text, through the session
+/// holder (`Memory::recall_by`) and through the lease-free reader `lambo
+/// recall --image | --query-vector-json` (whose vector leg is SQLite's own
+/// checked scan), before and after a reload.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recall_by_image_and_by_vector_find_the_dismissed_look() {
+    use crate::recall::query_vector::QueryBy;
+    use crate::test_util::dresscode::{
+        assert_dismissed_is_the_top_vector_hit, client_query_vector, derive_wardrobe,
+        imageless_text, similar_query_png,
+    };
+
+    let _quiet = crate::test_util::quiet_logs();
+    let (dir, path) = scratch_db();
+    let store = Arc::new(SqliteStore::connect(&path).unwrap());
+    store.init_schema().await.unwrap();
+    let session = "sqlite-recall-by";
+
+    let mem = open(store.clone(), session).await;
+    let wardrobe = derive_wardrobe(&mem).await;
+    mem.settle_daemon().await;
+    let png = similar_query_png();
+    let image =
+        || QueryBy::Image(crate::surface::image::validate(&png, "image/png").expect("valid png"));
+    let vector = || QueryBy::Vector {
+        values: client_query_vector(),
+        declared: contract(),
+    };
+    for by in [image(), vector()] {
+        let detailed = mem.recall_by_detailed(imageless_text(5), by).await.unwrap();
+        assert_dismissed_is_the_top_vector_hit(&detailed, &wardrobe);
+    }
+    mem.close().await.unwrap();
+
+    let reopened = open(store.clone(), session).await;
+    reopened.settle_daemon().await;
+    for by in [image(), vector()] {
+        let detailed = reopened
+            .recall_by_detailed(imageless_text(5), by)
+            .await
+            .unwrap();
+        assert_dismissed_is_the_top_vector_hit(&detailed, &wardrobe);
+    }
+    reopened.close().await.unwrap();
+
+    // The CLI reader, over the flushed store.
+    let backends = crate::resolve::ResolvedBackends {
+        store: Box::new(SqliteStore::connect(&path).unwrap()),
+        embedder: Box::new(FixtureEmbedder::new()),
+        store_cfg: crate::store::StoreConfig {
+            kind: crate::store::StoreKind::Sqlite,
+            dsn: None,
+            path: Some(path.clone()),
+            vector_dim: None,
+        },
+        embedder_cfg: crate::embed::EmbedderConfig {
+            kind: crate::embed::EmbedderKind::Fixture,
+            dim: 1024,
+            accept_client_vectors: true,
+            ..Default::default()
+        },
+        embedding: contract(),
+        allow_embedding_mismatch: false,
+        config: crate::Config {
+            accept_client_vectors: true,
+            ..crate::Config::default()
+        },
+    };
+    let png_path = dir.join("similar.png");
+    std::fs::write(&png_path, &png).unwrap();
+    let vector_path = dir.join("query.json");
+    std::fs::write(
+        &vector_path,
+        serde_json::json!({"values": client_query_vector(), "contract": {"kind": "fixture", "dim": 1024}})
+            .to_string(),
+    )
+    .unwrap();
+    for by in [
+        crate::cli::recall::RecallBy {
+            image: Some(png_path),
+            ..Default::default()
+        },
+        crate::cli::recall::RecallBy {
+            query_vector_json: Some(vector_path),
+            ..Default::default()
+        },
+    ] {
+        let out = crate::cli::recall::run_by(&backends, session, "", &by, Some(3), None, Some(0))
+            .await
+            .unwrap();
+        let first = out
+            .lines()
+            .find(|l| l.contains("[image:"))
+            .unwrap_or_else(|| panic!("an image hit: {out}"));
+        assert!(
+            first.contains("look dismissed for Onam [image:look2]"),
+            "the dismissed look is the first image block: {out}"
+        );
+    }
+}
+
+/// Graded similarity on SQLite (M2): the holder ranks looks at cosines 0.8,
+/// 0.5 and 0.3 to a client vector in that order, ahead of two unrelated
+/// looks derived last (no recent leg without text), and so does the
+/// lease-free reader over SQLite's own checked scan.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn graded_similarity_ranks_by_cosine_not_recency_on_sqlite() {
+    use crate::recall::query_vector::QueryBy;
+    use crate::test_util::dresscode::{assert_graded_order, derive_graded_looks, imageless_text};
+
+    let _quiet = crate::test_util::quiet_logs();
+    let (_dir, path) = scratch_db();
+    let store = Arc::new(SqliteStore::connect(&path).unwrap());
+    store.init_schema().await.unwrap();
+    let session = "sqlite-recall-by-graded";
+    let mem = open(store.clone(), session).await;
+    let looks = derive_graded_looks(&mem).await;
+    mem.settle_daemon().await;
+    let detailed = mem
+        .recall_by_detailed(
+            imageless_text(5),
+            QueryBy::Vector {
+                values: looks.query.clone(),
+                declared: contract(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_graded_order(&detailed, &looks);
+    mem.close().await.unwrap();
+
+    // Reopened: the vector leg is SQLite's checked scan of the reloaded
+    // vectors, the daemon's scores rebuilt from the store.
+    let reopened = open(store.clone(), session).await;
+    reopened.settle_daemon().await;
+    let detailed = reopened
+        .recall_by_detailed(
+            imageless_text(5),
+            QueryBy::Vector {
+                values: looks.query.clone(),
+                declared: contract(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_graded_order(&detailed, &looks);
+    reopened.close().await.unwrap();
+}

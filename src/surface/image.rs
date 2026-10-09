@@ -162,9 +162,21 @@ pub fn check_submitted_vector(
     declared: &crate::types::EmbeddingContract,
     live: &crate::types::EmbeddingContract,
 ) -> Result<(), String> {
+    check_submitted_vector_as("vector", values, declared, live)
+}
+
+/// [`check_submitted_vector`] for a vector sent in the field `field`
+/// (`"vector"` on `lambo_derive_image`, `"query_vector"` on `lambo_recall`,
+/// #22 PR 6), so each refusal names the field the caller actually sent.
+pub fn check_submitted_vector_as(
+    field: &str,
+    values: &[f32],
+    declared: &crate::types::EmbeddingContract,
+    live: &crate::types::EmbeddingContract,
+) -> Result<(), String> {
     if values.len() > MAX_VECTOR_VALUES {
         return Err(format!(
-            "vector.values has {} components, over the limit of {MAX_VECTOR_VALUES}",
+            "{field}.values has {} components, over the limit of {MAX_VECTOR_VALUES}",
             values.len()
         ));
     }
@@ -180,7 +192,7 @@ pub fn check_submitted_vector(
     }
     if !differ.is_empty() {
         return Err(format!(
-            "vector.contract does not match this session's embedding contract ({} differ{}); \
+            "{field}.contract does not match this session's embedding contract ({} differ{}); \
              a vector is accepted only into the exact space it was computed in. This \
              session's contract is kind={:?} model={:?} dim={} (lambo_stats reports it as \
              embedding_contract)",
@@ -193,13 +205,15 @@ pub fn check_submitted_vector(
     }
     if values.len() != live.dim {
         return Err(format!(
-            "vector.values has {} components but the embedding contract's dim is {}",
+            "{field}.values has {} components but the embedding contract's dim is {}",
             values.len(),
             live.dim
         ));
     }
     if values.iter().any(|x| !x.is_finite()) {
-        return Err("vector.values has a non-finite component (NaN or infinity)".into());
+        return Err(format!(
+            "{field}.values has a non-finite component (NaN or infinity)"
+        ));
     }
     let norm = values
         .iter()
@@ -207,7 +221,9 @@ pub fn check_submitted_vector(
         .sum::<f64>()
         .sqrt();
     if norm == 0.0 || !norm.is_finite() {
-        return Err("vector.values has zero norm; it names no direction to search by".into());
+        return Err(format!(
+            "{field}.values has zero norm; it names no direction to search by"
+        ));
     }
     Ok(())
 }

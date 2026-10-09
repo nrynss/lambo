@@ -36,6 +36,7 @@ mod image;
 mod leases;
 mod query_cache;
 mod reads;
+mod recall_by;
 mod replay;
 mod shutdown;
 mod writes;

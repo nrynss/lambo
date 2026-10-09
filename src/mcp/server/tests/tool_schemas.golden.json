@@ -320,6 +320,88 @@
   "lambo_recall": {
     "description": "Recall relevant memory for a query and return the Lambo context block (canonical markers, blast-radius warnings, conflict lines).",
     "inputSchema": {
+      "$defs": {
+        "WireEmbeddingContract": {
+          "additionalProperties": false,
+          "description": "An embedding space: copy it from `lambo_stats`' `embedding_contract`.",
+          "properties": {
+            "dim": {
+              "description": "Vector width.",
+              "format": "uint",
+              "maximum": 4096,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "kind": {
+              "description": "Embedder kind, e.g. `embeddinggemma2`.",
+              "maxLength": 16384,
+              "type": "string"
+            },
+            "model": {
+              "description": "Model string, exactly as `lambo_stats` reports it (omit or null for\nthe server default).",
+              "maxLength": 16384,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "dim"
+          ],
+          "type": "object"
+        },
+        "WireImage": {
+          "additionalProperties": false,
+          "description": "One image, inline.",
+          "properties": {
+            "data": {
+              "description": "The image bytes in base64 (standard alphabet, padded), on one line,\nwith no `data:` prefix. At most 2 MiB decoded, and at most 4096 pixels\na side.",
+              "maxLength": 2796204,
+              "type": "string"
+            },
+            "mime": {
+              "description": "The image's media type, which must match its bytes: `image/png`,\n`image/jpeg` or `image/webp`.",
+              "enum": [
+                "image/png",
+                "image/jpeg",
+                "image/webp"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "mime",
+            "data"
+          ],
+          "type": "object"
+        },
+        "WireQueryVector": {
+          "additionalProperties": false,
+          "description": "A query vector you computed, in this session's embedding space.",
+          "properties": {
+            "contract": {
+              "$ref": "#/$defs/WireEmbeddingContract",
+              "description": "The embedding space the vector was computed in. It must equal this\nsession's `embedding_contract` exactly."
+            },
+            "values": {
+              "description": "The components, `dim` of them. Lambo normalizes the vector to unit\nlength.",
+              "items": {
+                "format": "float",
+                "type": "number"
+              },
+              "maxItems": 4096,
+              "type": "array"
+            }
+          },
+          "required": [
+            "values",
+            "contract"
+          ],
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,
       "properties": {
@@ -327,6 +409,17 @@
           "description": "Id of the agent making this call. Caller-asserted and unverified: work\nis recorded under exactly the id you send. Use one stable id per agent —\ncallers sharing an id share its memory attribution and its soft locks.",
           "maxLength": 16384,
           "type": "string"
+        },
+        "image": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WireImage"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Optional: recall what is close to this image, for this server to\nembed (when its embedder embeds images). Send at most one of `image`\nand `query_vector`. Not stored."
         },
         "max_tokens": {
           "description": "Token budget for the rendered context block.",
@@ -339,9 +432,21 @@
           ]
         },
         "query": {
-          "description": "Natural-language query.",
+          "default": "",
+          "description": "Natural-language query. Required, unless you send `image` or\n`query_vector`; beside either it is optional and its words still\nmatch concept text.",
           "maxLength": 16384,
           "type": "string"
+        },
+        "query_vector": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WireQueryVector"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Optional: recall what is close to a vector you computed, in this\nsession's embedding space (accepted only when the operator enabled\nclient vectors). Send at most one of `image` and `query_vector`. Not\nstored."
         },
         "top_k": {
           "description": "Hits to return. Defaults to the session config's `default_top_k`.",
@@ -365,8 +470,7 @@
         }
       },
       "required": [
-        "agent_id",
-        "query"
+        "agent_id"
       ],
       "type": "object"
     }
