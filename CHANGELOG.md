@@ -351,8 +351,16 @@
   images none), truncates to `dim` (768, 512, 256 or 128) and
   re-normalizes. The contract `model` is the weights artifact plus the
   prompt profile, by default
-  `ggml-org/embeddinggemma-2-GGUF@bfcd2987/Q8_0;prompts=lambo-eg2-v1`, since
-  `llama-server` ignores the request's model name. The profile fixes the
+  `ggml-org/embeddinggemma-2-GGUF@bfcd2987/Q8_0;prompts=lambo-eg2-v2`, since
+  `llama-server` ignores the request's model name. The profile sends every
+  image in a canonical form, so its vector does not depend on the size it was
+  submitted at: a PNG or JPEG of at most 768 px a side goes unchanged, a
+  larger one is scaled to 768 px on its longer side (lossless PNG), and a WebP
+  is always converted to PNG (`llama-server` decodes WebP only through an
+  external `ffmpeg`). The `embed-eg2` feature now pulls in the `image` crate
+  (PNG, JPEG and WebP only) for this. The profile was `lambo-eg2-v1` during
+  development, without the canonical form; nothing was released with it, so
+  there is no migration. The profile fixes the
   image budget at 280 tokens: start the server with `--image-min-tokens 280
   --image-max-tokens 280 --batch-size 8192 --ubatch-size 8192` (at the
   default ubatch of 512 the server silently caps the budget to 256). Lambo

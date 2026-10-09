@@ -112,8 +112,9 @@ url = "http://127.0.0.1:8080"
 #   kind = "embeddinggemma2"
 #   url = "http://127.0.0.1:8191"
 #   dim = 768        # 768 | 512 | 256 | 128 (Matryoshka); the 1024 default is refused
-# The contract model is this artifact plus ";prompts=lambo-eg2-v1" (the task prefixes,
-# the 280-token image budget, truncate-then-normalize). llama-server ignores the model
+# The contract model is this artifact plus ";prompts=lambo-eg2-v2" (the task prefixes,
+# the 280-token image budget, images over 768 px a side and any WebP sent as a 768 px
+# lossless PNG, truncate-then-normalize). llama-server ignores the model
 # name, so name the weights it runs; a different artifact is a different contract.
 # Before the first embed Lambo checks llama-server's /props (loaded file name,
 # quantization, vision) against it and refuses a mismatch.
