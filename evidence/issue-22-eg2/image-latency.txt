@@ -1,0 +1,15 @@
+# server-side time per request at the fixed 280 budget (slot launch -> release), 8191 this run:
+35.31.525.352 I slot launch_slot_: id  1 | task 268 | processing task, is_child = 0
+35.31.892.162 I slot      release: id  1 | task 268 | stop processing: n_tokens = 293, truncated = 0
+35.31.903.000 I slot launch_slot_: id  3 | task 272 | processing task, is_child = 0
+35.32.269.349 I slot      release: id  3 | task 272 | stop processing: n_tokens = 293, truncated = 0
+35.32.280.508 I slot launch_slot_: id  1 | task 276 | processing task, is_child = 0
+35.32.646.607 I slot      release: id  1 | task 276 | stop processing: n_tokens = 293, truncated = 0
+
+# the earlier eval's 280-budget server (<EVAL>/server-mm280.log):
+5.56.508.046 I slot get_availabl: id  0 | task -1 | selected slot by LRU, t_last = -1
+5.56.508.402 I slot launch_slot_: id  0 | task 0 | processing task, is_child = 0
+5.57.179.696 I slot      release: id  0 | task 0 | stop processing: n_tokens = 293, truncated = 0
+6.14.816.726 I slot get_availabl: id  0 | task -1 | selected slot by LCP similarity, f_sim_best = 1.000 (> 0.100 thold), f_keep = 1.000
+6.14.816.733 I slot launch_slot_: id  0 | task 2 | processing task, is_child = 0
+6.15.196.020 I slot      release: id  0 | task 2 | stop processing: n_tokens = 293, truncated = 0

@@ -70,7 +70,7 @@ mod trace;
 pub use params::{
     DeriveImageParams, DeriveParams, InspectParams, RecallParams, RecordActionParams,
     ReserveParams, SaintsParams, StatsParams, WireConcept, WireConceptType, WireEmbeddingContract,
-    WireImage, WireImageConceptType, WireParentOf, WireResource, WireVector,
+    WireImage, WireImageConceptType, WireParentOf, WireQueryVector, WireResource, WireVector,
 };
 use response::attach_receipts;
 pub(crate) use trace::CallCredential;

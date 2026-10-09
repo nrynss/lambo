@@ -152,9 +152,13 @@ enum Commands {
             help = "Session to recall against (reader process; does not take the writer lease)."
         )]
         session: String,
-        /// Natural-language query.
-        #[arg(long, help = "Natural-language query.")]
-        query: String,
+        /// Natural-language query. Optional with --image or --query-vector-json.
+        #[arg(
+            long,
+            required_unless_present_any = ["image", "query_vector_json"],
+            help = "Natural-language query. Optional with --image or --query-vector-json."
+        )]
+        query: Option<String>,
         /// Hits to return. Defaults to the session config's default_top_k.
         #[arg(
             long,
@@ -167,6 +171,28 @@ enum Commands {
         /// Graph traversal depth for phase 2 expansion.
         #[arg(long, help = "Graph traversal depth for phase 2 expansion.")]
         traversal_depth: Option<usize>,
+        /// Recall what is close to this PNG, JPEG or WebP file (at most 2 MiB, 4096 px a side), embedded by the configured embedder (#22). Not stored.
+        #[arg(
+            long,
+            value_name = "PATH",
+            conflicts_with = "query_vector_json",
+            help = "Recall what is close to this PNG, JPEG or WebP file (at most 2 MiB, 4096 px a side), embedded by the configured embedder. Not stored."
+        )]
+        image: Option<PathBuf>,
+        /// The --image file's MIME type (image/png, image/jpeg, image/webp). Default: read from the file; a mismatch is refused.
+        #[arg(
+            long,
+            requires = "image",
+            help = "The --image file's MIME type (image/png, image/jpeg, image/webp). Default: read from the file; a mismatch is refused."
+        )]
+        mime: Option<String>,
+        /// Recall what is close to a vector: a JSON file {"values": [...], "contract": {"kind", "model", "dim"}} in this session's space. Needs [embedder] accept_client_vectors = true.
+        #[arg(
+            long = "query-vector-json",
+            value_name = "PATH",
+            help = "Recall what is close to a vector: a JSON file {\"values\": [...], \"contract\": {\"kind\", \"model\", \"dim\"}} in this session's space. Needs [embedder] accept_client_vectors = true."
+        )]
+        query_vector_json: Option<PathBuf>,
     },
     /// List the session's canonical memories — concepts that earned Canonical status through the audited transition path.
     Saints {
@@ -1082,19 +1108,45 @@ fn main() -> ExitCode {
                 top_k,
                 max_tokens,
                 traversal_depth,
+                image,
+                mime,
+                query_vector_json,
             },
             Resolved::Full(backends),
-        ) => run_async(
-            "recall",
-            lambo::cli::recall::run(
-                &backends,
-                &session,
-                &query,
-                top_k,
-                max_tokens,
-                traversal_depth,
-            ),
-        ),
+        ) => {
+            let query = query.unwrap_or_default();
+            if image.is_none() && query_vector_json.is_none() {
+                run_async(
+                    "recall",
+                    lambo::cli::recall::run(
+                        &backends,
+                        &session,
+                        &query,
+                        top_k,
+                        max_tokens,
+                        traversal_depth,
+                    ),
+                )
+            } else {
+                let by = lambo::cli::recall::RecallBy {
+                    image,
+                    mime,
+                    query_vector_json,
+                };
+                run_async(
+                    "recall",
+                    lambo::cli::recall::run_by(
+                        &backends,
+                        &session,
+                        &query,
+                        &by,
+                        top_k,
+                        max_tokens,
+                        traversal_depth,
+                    ),
+                )
+            }
+        }
         (Commands::Saints { session }, Resolved::StoreOnly { store, .. }) => {
             run_async("saints", lambo::cli::saints::run(store.as_ref(), &session))
         }
@@ -1504,6 +1556,33 @@ mod tests {
                 "provision --help must name {kind}: {about}"
             );
         }
+    }
+
+    /// #22 PR 6: `--query` is required unless `--image` or
+    /// `--query-vector-json` is given; the two are exclusive, and `--mime`
+    /// needs `--image`.
+    #[test]
+    fn recall_query_is_optional_only_beside_an_image_or_a_vector() {
+        let parse = |args: &[&str]| {
+            let mut all = vec!["lambo", "recall", "--session", "s"];
+            all.extend_from_slice(args);
+            Cli::try_parse_from(all)
+        };
+        assert!(parse(&[]).is_err(), "no query, no image, no vector");
+        assert!(parse(&["--query", "q"]).is_ok());
+        assert!(parse(&["--image", "a.png"]).is_ok());
+        assert!(parse(&["--image", "a.png", "--mime", "image/png", "--query", "q"]).is_ok());
+        assert!(parse(&["--query-vector-json", "v.json"]).is_ok());
+        assert!(parse(&["--image", "a.png", "--query-vector-json", "v.json"]).is_err());
+        assert!(parse(&["--query", "q", "--mime", "image/png"]).is_err());
+        assert!(
+            parse(&["--image", "a.png"])
+                .unwrap()
+                .command
+                .unwrap()
+                .needs_embedder(),
+            "a recall by image embeds"
+        );
     }
 
     #[test]

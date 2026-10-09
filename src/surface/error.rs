@@ -54,6 +54,13 @@ pub(crate) fn err_class(err: &LamboError) -> &'static str {
 /// its only field is the caller's own image id. Even that id is shown only
 /// when it has the published shape (`[a-z0-9]{1,64}`), so nothing else can
 /// ride on it.
+///
+/// **And one by kind** (#22 PR 6 review Low 1): a store error that is a
+/// vector read refusing a probe outside the session's embedding space
+/// ([`crate::types::StoreError::is_embedding_contract_refusal`]: the contract
+/// changed mid-query, or the width differs) says to re-check the contract and
+/// retry. The text is fixed; nothing from the refusal is echoed, and the
+/// class (`err_class`, the ledger's `error_kind`) is still `store error`.
 pub(crate) fn model_safe_message(err: &LamboError) -> String {
     match err {
         LamboError::ImageIdTaken(id) => {
@@ -67,6 +74,12 @@ pub(crate) fn model_safe_message(err: &LamboError) -> String {
                  image id{named}, so the image would have no vector of its own; choose another \
                  image id"
             )
+        }
+        LamboError::Store(e) if e.is_embedding_contract_refusal() => {
+            "store error: the session's embedding contract no longer matches this query \
+             (it changed mid-query, or the vector width differs); re-check the session's \
+             embedding contract (lambo_stats) and retry"
+                .into()
         }
         other => format!("{} (the detail was logged server-side)", err_class(other)),
     }
@@ -95,5 +108,39 @@ mod tests {
 
         let other = model_safe_message(&LamboError::Embed("/srv/secret.sqlite".into()));
         assert_eq!(other, "embedding error (the detail was logged server-side)");
+    }
+
+    /// #22 PR 6 review Low 1: a contract race or a width mismatch on a
+    /// vector read says to re-check the contract and retry, distinct from a
+    /// generic store error, and echoes nothing of the refusal (the session
+    /// id, the models, the widths). Any other invariant stays a bare class.
+    #[test]
+    fn a_contract_refusal_says_to_recheck_and_retry_and_echoes_nothing() {
+        use crate::types::StoreError;
+        for refusal in [
+            "vector candidate lookup refused after embedding contract changed: \
+             stored kind=bge model=\"/srv/models/m.gguf\" dim=1024",
+            "query embedding has 768 dimensions but session secret-sess stores vectors of 1024",
+        ] {
+            let err = LamboError::Store(StoreError::Invariant(refusal.into()));
+            let msg = model_safe_message(&err);
+            assert!(msg.starts_with("store error: "), "{msg}");
+            assert!(msg.contains("re-check") && msg.contains("retry"), "{msg}");
+            for leak in ["/srv", "secret-sess", "768", "1024", "bge"] {
+                assert!(!msg.contains(leak), "{leak} in {msg}");
+            }
+            assert_eq!(err_class(&err), "store error");
+        }
+        for other in [
+            StoreError::Invariant("concept x carries a vector of 3 dimensions".into()),
+            StoreError::Backend(
+                "vector candidate lookup refused after embedding contract changed".into(),
+            ),
+        ] {
+            assert_eq!(
+                model_safe_message(&LamboError::Store(other)),
+                "store error (the detail was logged server-side)"
+            );
+        }
     }
 }

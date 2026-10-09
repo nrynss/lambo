@@ -1,0 +1,11 @@
+{
+  "model_path": "<HOME>/models/embeddinggemma-2-gguf/embeddinggemma-2-Q8_0.gguf",
+  "model_ftype": "Q8_0",
+  "modalities": {
+    "vision": false,
+    "video": false,
+    "audio": false
+  },
+  "build_info": "b11517-8a1a9b512",
+  "total_slots": 4
+}
