@@ -440,3 +440,72 @@ fn a_non_utf8_auth_token_variable_refuses_the_start() {
     );
     assert!(!stderr.contains("failed to build backends"), "{stderr}");
 }
+
+/// A stdio `lambo serve --session A` on `cfg` with `args` and `envs`, run
+/// until its client closes stdin.
+fn stdio_serve(
+    cfg: &std::path::Path,
+    args: &[&str],
+    envs: &[(&str, std::ffi::OsString)],
+) -> std::process::Output {
+    let runtime = RuntimeDir::new();
+    let mut cmd = common::lambo_command();
+    cmd.env(RUNTIME_DIR_VAR, runtime.path())
+        .env_remove("RUST_LOG")
+        .env_remove(LEGACY_ENV)
+        .args(["--config", cfg.to_str().unwrap(), "serve"])
+        .args([
+            "--transport",
+            "stdio",
+            "--session",
+            A,
+            "--agent",
+            "agent-i32e",
+        ])
+        .args(args);
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    ServeChild::new(
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn serve"),
+    )
+    .wait_with_output_within(Duration::from_secs(60))
+    .expect("serve exits when stdin closes")
+    .expect("wait")
+}
+
+/// #32 PR 5 review S3: a stdio serve ignores the legacy token, so a stray
+/// exported `LAMBO_AUTH_TOKEN` (with a trailing space, or not UTF-8), or an
+/// `--auth-token`, that an HTTP serve would refuse does not stop it from
+/// starting. It serves until its client closes stdin and exits 0, saying
+/// nothing about the token. Before the fix each exited 2.
+#[test]
+fn a_stdio_serve_ignores_a_legacy_token_it_never_uses() {
+    use std::os::unix::ffi::OsStringExt;
+    let (_dir, cfg) = scratch("");
+    let padded = format!("{} ", token("stray"));
+    let mut bytes = token("stray").into_bytes();
+    bytes.push(0xFF);
+    let outs = [
+        stdio_serve(&cfg, &[], &[(LEGACY_ENV, padded.clone().into())]),
+        stdio_serve(
+            &cfg,
+            &[],
+            &[(LEGACY_ENV, std::ffi::OsString::from_vec(bytes))],
+        ),
+        stdio_serve(&cfg, &["--auth-token", &padded], &[]),
+    ];
+    for (case, out) in outs.iter().enumerate() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "case {case}: {stderr}");
+        assert!(!stderr.contains("whitespace"), "case {case}: {stderr}");
+        assert!(
+            !stderr.contains(&token("stray")),
+            "case {case}: the token reached stderr"
+        );
+    }
+}

@@ -59,8 +59,8 @@ enum Commands {
         /// request must present one. Optional on loopback; a non-loopback
         /// bind needs this or a [[serve.credential]]. Ignored by
         /// --transport stdio.
-        #[arg(long, value_name = "TOKEN", value_parser = SecretTokenParser)]
-        auth_token: Option<lambo::mcp::SecretToken>,
+        #[arg(long, value_name = "TOKEN", value_parser = AuthTokenArgParser)]
+        auth_token: Option<AuthTokenArg>,
         /// Maximum concurrently live MCP sessions on the HTTP transport;
         /// further `initialize` requests are refused with 503. With several
         /// credentials each may hold an even share (this divided by their
@@ -590,7 +590,7 @@ struct ServePlan {
 fn serve_preflight(
     session: &[String],
     transport: &str,
-    auth_token: Option<lambo::mcp::SecretToken>,
+    auth_token: Option<AuthTokenArg>,
     config: Option<&std::path::Path>,
 ) -> Result<ServePlan, ExitCode> {
     // Diagnostics to stderr, before anything can log: under
@@ -603,6 +603,13 @@ fn serve_preflight(
             eprintln!("lambo serve: {e}");
             return Err(ExitCode::from(2));
         }
+    };
+    // `--auth-token` is checked only where it is used, HTTP (#32 PR 5
+    // review S3), and before the file is read, as clap checked it before.
+    let auth_token = if transport == Transport::Http {
+        http_auth_token_flag(auth_token)?
+    } else {
+        None
     };
     // A usage error is reported before the file is read, so a stdio serve
     // given several `--session`s exits 2 whatever state the file is in
@@ -638,13 +645,19 @@ fn serve_preflight(
     };
     // Env beats flag (T8.7), resolved before any of it reaches a log line.
     // A set-but-empty LAMBO_AUTH_TOKEN is a usage error, not a silent
-    // fallback to the flag.
-    let auth_token = match lambo::mcp::resolve_auth_token(auth_token) {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("lambo serve: {e}");
-            return Err(ExitCode::from(2));
+    // fallback to the flag. HTTP only (#32 PR 5 review S3): a stdio serve
+    // authenticates nobody and ignores the token, so a stray exported one
+    // it would refuse must not stop it from starting.
+    let auth_token = if transport == Transport::Http {
+        match lambo::mcp::resolve_auth_token(auth_token) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("lambo serve: {e}");
+                return Err(ExitCode::from(2));
+            }
         }
+    } else {
+        None
     };
     // #32 PR 5: `[[serve.credential]]` tokens, read from their variables
     // here so an unset one costs no model load. HTTP only: a stdio serve
@@ -751,38 +764,79 @@ fn run_async(
     }
 }
 
-/// `--auth-token`'s parser: [`lambo::mcp::SecretToken::new`], with a usage
-/// error that never quotes the value (#32 PR 5 review L3).
+/// `--auth-token` as given, not yet checked, and never printable (its
+/// [`Debug`] is redacted like [`lambo::mcp::SecretToken`]'s, since
+/// `Commands` derives `Debug`).
 ///
-/// clap's error for a rejected value repeats the value ("invalid value
-/// '<it>' for ..."), and for a token with a stray trailing space that is the
-/// secret on stderr. This parser reports the reason alone, still as clap's
-/// usage error (exit 2).
+/// Checked by [`http_auth_token_flag`] only for `--transport http` (#32 PR 5
+/// review S3): stdio ignores the flag, so a value no request could present
+/// must not stop a stdio serve from starting.
 #[derive(Clone)]
-struct SecretTokenParser;
+struct AuthTokenArg(std::ffi::OsString);
 
-impl clap::builder::TypedValueParser for SecretTokenParser {
-    type Value = lambo::mcp::SecretToken;
+impl std::fmt::Debug for AuthTokenArg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AuthTokenArg(<redacted>)")
+    }
+}
+
+/// `--auth-token`'s parser: takes the value as given. The check is
+/// [`http_auth_token_flag`]'s, once the transport is known.
+#[derive(Clone)]
+struct AuthTokenArgParser;
+
+impl clap::builder::TypedValueParser for AuthTokenArgParser {
+    type Value = AuthTokenArg;
 
     fn parse_ref(
         &self,
-        cmd: &clap::Command,
-        arg: Option<&clap::Arg>,
+        _cmd: &clap::Command,
+        _arg: Option<&clap::Arg>,
         value: &std::ffi::OsStr,
     ) -> Result<Self::Value, clap::Error> {
-        let flag = arg.map_or_else(|| "--auth-token".to_string(), ToString::to_string);
-        let refuse = |why: &str| {
-            clap::Error::raw(
-                clap::error::ErrorKind::InvalidValue,
-                format!("invalid value for '{flag}': {why} (the value is not shown)\n"),
-            )
-            .with_cmd(cmd)
-        };
-        let raw = value
-            .to_str()
-            .ok_or_else(|| refuse("auth token is not valid UTF-8"))?;
-        lambo::mcp::SecretToken::new(raw).map_err(|why| refuse(&why))
+        Ok(AuthTokenArg(value.to_owned()))
     }
+}
+
+/// `--auth-token` for an HTTP serve: [`lambo::mcp::SecretToken::new`], with
+/// clap's usage error (exit 2) that never quotes the value (#32 PR 5 review
+/// L3).
+///
+/// clap's own error for a rejected value repeats the value ("invalid value
+/// '<it>' for ..."), and for a token with a stray trailing space that is the
+/// secret on stderr. This reports the reason alone.
+fn http_auth_token_flag(
+    flag: Option<AuthTokenArg>,
+) -> Result<Option<lambo::mcp::SecretToken>, ExitCode> {
+    let Some(AuthTokenArg(raw)) = flag else {
+        return Ok(None);
+    };
+    let checked = match raw.to_str() {
+        Some(raw) => lambo::mcp::SecretToken::new(raw),
+        None => Err("auth token is not valid UTF-8".to_string()),
+    };
+    checked.map(Some).map_err(|why| {
+        let mut command = Cli::command();
+        command.build();
+        let err = match command.find_subcommand_mut("serve") {
+            Some(serve) => {
+                let flag = serve
+                    .get_arguments()
+                    .find(|a| a.get_id() == "auth_token")
+                    .map_or_else(|| "--auth-token".to_string(), ToString::to_string);
+                serve.error(
+                    clap::error::ErrorKind::InvalidValue,
+                    format!("invalid value for '{flag}': {why} (the value is not shown)"),
+                )
+            }
+            None => command.error(
+                clap::error::ErrorKind::InvalidValue,
+                format!("invalid value for '--auth-token': {why} (the value is not shown)"),
+            ),
+        };
+        let _ = err.print();
+        ExitCode::from(2)
+    })
 }
 
 /// The missing-session refusal, rendered the way clap rendered a missing
