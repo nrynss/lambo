@@ -29,8 +29,19 @@ use crate::types::{
 
 /// Forwards every `GraphStore` method to a shared primary, so two
 /// `TieredStore`s (two processes, a takeover, a restart) can sit on one
-/// durable store and one index.
-struct Shared(Arc<dyn GraphStore>);
+/// durable store and one index. Pinned snapshots, when queued, answer the
+/// next loads instead, one each (a load that read an older snapshot than a
+/// concurrent flush committed).
+struct Shared(
+    Arc<dyn GraphStore>,
+    Arc<parking_lot::Mutex<Vec<GraphSnapshot>>>,
+);
+
+impl Shared {
+    fn new(primary: Arc<dyn GraphStore>) -> Self {
+        Self(primary, Arc::default())
+    }
+}
 
 #[async_trait]
 impl GraphStore for Shared {
@@ -50,7 +61,11 @@ impl GraphStore for Shared {
         self.0.flush(b, t).await
     }
     async fn load_session(&self, s: &SessionId) -> Result<GraphSnapshot, StoreError> {
-        self.0.load_session(s).await
+        let pinned = self.1.lock().pop();
+        match pinned {
+            Some(snap) => Ok(snap),
+            None => self.0.load_session(s).await,
+        }
     }
     async fn keyword_candidates(
         &self,
@@ -168,7 +183,7 @@ fn memory_primary() -> Arc<dyn GraphStore> {
 /// A tier over `primary` and `fake` that repairs without waiting.
 fn tier(primary: &Arc<dyn GraphStore>, fake: &Arc<FakeIndex>) -> TieredStore {
     TieredStore::new(
-        Box::new(Shared(primary.clone())),
+        Box::new(Shared::new(primary.clone())),
         Box::new(fake.clone()),
         Some(4),
     )
@@ -682,7 +697,7 @@ async fn a_mirror_failure_keeps_the_flush_and_the_next_flush_repairs() {
 async fn repair_attempts_back_off_while_the_index_is_down() {
     let (primary, fake) = (memory_primary(), Arc::new(FakeIndex::new()));
     let store = TieredStore::new(
-        Box::new(Shared(primary.clone())),
+        Box::new(Shared::new(primary.clone())),
         Box::new(fake.clone()),
         Some(4),
     );
@@ -788,6 +803,102 @@ async fn a_marker_behind_the_durable_epoch_is_caught_at_the_next_load() {
     assert_eq!(fake.marker(&sid), Some(2));
 }
 
+/// M4: the holder's process loads an older snapshot (e1) while its own flush
+/// has already committed and mirrored e2, so the marker is *ahead* of the
+/// load. That is not staleness: repairing from the older snapshot would
+/// re-index the node e2 deleted, delete the concept e2 added and rewind the
+/// marker, all while the session reports in sync. A marker ahead is
+/// re-checked against a fresh load, never repaired from.
+#[tokio::test]
+async fn a_marker_ahead_of_the_loaded_snapshot_is_rechecked_not_repaired() {
+    let (primary, fake) = (memory_primary(), Arc::new(FakeIndex::new()));
+    let shared = Shared::new(primary.clone());
+    let pin = shared.1.clone();
+    let store = TieredStore::new(Box::new(shared), Box::new(fake.clone()), Some(4))
+        .with_repair_backoff(Duration::ZERO);
+    let sid = SessionId::new("ahead");
+    let token = attach(&store, &sid, &holder("w")).await;
+    let (s, b) = seed_batch(&sid, 1);
+    store.flush(&b, Some(token)).await.unwrap();
+    let older = primary.load_session(&sid).await.unwrap();
+    let c4 = NodeId::new();
+    store
+        .flush(
+            &batch(
+                2,
+                vec![
+                    upsert(concept(
+                        &sid,
+                        c4,
+                        s.origin,
+                        "delta",
+                        Some(vec![0.0, 0.0, 1.0, 0.0]),
+                    )),
+                    Mutation::DeleteNode { id: s.c2 },
+                ],
+            ),
+            Some(token),
+        )
+        .await
+        .unwrap();
+    assert_eq!(fake.marker(&sid), Some(2));
+
+    pin.lock().push(older);
+    store.load_session(&sid).await.unwrap();
+    settle(&store).await;
+
+    let live = fake.live(&sid);
+    assert!(
+        live.contains_key(&c4.0.to_string()),
+        "e2's concept was removed"
+    );
+    assert!(
+        !live.contains_key(&s.c2.0.to_string()),
+        "e2's delete was undone"
+    );
+    assert_eq!(fake.marker(&sid), Some(2), "the marker was rewound");
+    assert_eq!(store.tier_status(&sid).sync, TierSync::InSync);
+}
+
+/// M4: a marker that is still ahead after the re-load is left alone: the
+/// session is not trusted (reads fall back) and nothing is repaired from a
+/// snapshot older than what the index already reflects.
+#[tokio::test]
+async fn a_marker_still_ahead_after_a_reload_is_never_repaired_from() {
+    let (primary, fake) = (memory_primary(), Arc::new(FakeIndex::new()));
+    let shared = Shared::new(primary.clone());
+    let pin = shared.1.clone();
+    let store = TieredStore::new(Box::new(shared), Box::new(fake.clone()), Some(4))
+        .with_repair_backoff(Duration::ZERO);
+    let sid = SessionId::new("still-ahead");
+    let token = attach(&store, &sid, &holder("w")).await;
+    let (s, b) = seed_batch(&sid, 1);
+    store.flush(&b, Some(token)).await.unwrap();
+    let older = primary.load_session(&sid).await.unwrap();
+    store
+        .flush(
+            &batch(2, vec![Mutation::DeleteNode { id: s.c2 }]),
+            Some(token),
+        )
+        .await
+        .unwrap();
+    let bulks = fake.bulk_calls.load(std::sync::atomic::Ordering::SeqCst);
+
+    // Every load for a while answers with the older snapshot.
+    pin.lock().extend([older.clone(), older.clone(), older]);
+    store.load_session(&sid).await.unwrap();
+    settle(&store).await;
+
+    assert_eq!(
+        fake.bulk_calls.load(std::sync::atomic::Ordering::SeqCst),
+        bulks,
+        "repaired from an older snapshot"
+    );
+    assert!(!fake.live(&sid).contains_key(&s.c2.0.to_string()));
+    assert_eq!(fake.marker(&sid), Some(2));
+    assert_eq!(store.tier_status(&sid).sync, TierSync::Unknown);
+}
+
 /// A holder attaching while the index is unreachable keeps serving from the
 /// primary, and a reader never trusts an unknown state either.
 #[tokio::test]
@@ -889,7 +1000,7 @@ async fn an_unreachable_index_is_not_rechecked_on_every_read() {
     fake.set_down(true);
     let loads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let reader = TieredStore::new(
-        Box::new(CountingLoads(Shared(primary.clone()), loads.clone())),
+        Box::new(CountingLoads(Shared::new(primary.clone()), loads.clone())),
         Box::new(fake.clone()),
         Some(4),
     );
@@ -1045,7 +1156,7 @@ async fn backfill_converges_and_refuses_a_live_writer() {
     seeder.flush(&b, Some(token)).await.unwrap();
 
     let ops = TieredStore::new(
-        Box::new(Shared(primary.clone())),
+        Box::new(Shared::new(primary.clone())),
         Box::new(fake.clone()),
         Some(4),
     );
@@ -1264,7 +1375,7 @@ async fn a_stale_index_hit_never_reaches_the_assembled_recall() {
     };
     let (primary, fake) = (memory_primary(), Arc::new(FakeIndex::new()));
     let writer = TieredStore::new(
-        Box::new(Shared(primary.clone())),
+        Box::new(Shared::new(primary.clone())),
         Box::new(fake.clone()),
         Some(1024),
     );
@@ -1330,7 +1441,7 @@ async fn a_stale_index_hit_never_reaches_the_assembled_recall() {
 
     let backends = crate::resolve::ResolvedBackends {
         store: Box::new(TieredStore::new(
-            Box::new(Shared(primary.clone())),
+            Box::new(Shared::new(primary.clone())),
             Box::new(fake.clone()),
             Some(1024),
         )),

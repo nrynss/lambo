@@ -162,6 +162,32 @@ struct SessionTier {
     /// whole durable session, so an unreachable index must not cost one per
     /// recall).
     next_check: Option<Instant>,
+    /// A repair of this session is running (single-flight, M4).
+    repairing: bool,
+}
+
+/// How the index's sync marker compares with a durable snapshot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Marker {
+    /// The marker is the snapshot's epoch (or nothing was ever indexable).
+    InSync,
+    /// Behind the snapshot: a mirror was lost. A holder repairs.
+    Behind,
+    /// Ahead of the snapshot: the load raced a later mirrored flush.
+    /// Re-checked, never repaired from.
+    Ahead,
+    /// The index could not be asked.
+    Unreachable,
+}
+
+impl Marker {
+    fn sync(self) -> TierSync {
+        match self {
+            Self::InSync => TierSync::InSync,
+            Self::Behind => TierSync::Stale,
+            Self::Ahead | Self::Unreachable => TierSync::Unknown,
+        }
+    }
 }
 
 /// The tier's view of one session, for tests. Production reports the same
@@ -340,56 +366,148 @@ impl Tier {
         )))
     }
 
-    /// Compare the index's marker with the durable epoch.
-    async fn check_marker(&self, session: &SessionId, epoch: u64, indexable: bool) -> TierSync {
+    /// Compare the index's marker with the durable epoch of a snapshot.
+    async fn check_marker(&self, session: &SessionId, snap: Option<&GraphSnapshot>) -> Marker {
+        let epoch = snap.map_or(0, |s| s.mutation_epoch);
+        let indexable = snap.is_some_and(|s| {
+            s.embedding
+                .as_ref()
+                .is_some_and(|c| s.concepts.iter().any(|k| index_doc(k, c, None).is_some()))
+        });
         match self.recall.read_marker(session).await {
-            Ok(Some(m)) if m.synced_epoch == epoch => TierSync::InSync,
+            Ok(Some(m)) if m.synced_epoch == epoch => Marker::InSync,
+            Ok(Some(m)) if m.synced_epoch > epoch => Marker::Ahead,
             // Nothing was ever mirrored and there is nothing to mirror.
-            Ok(None) if !indexable => TierSync::InSync,
-            Ok(_) => TierSync::Stale,
+            Ok(None) if !indexable => Marker::InSync,
+            Ok(_) => Marker::Behind,
             Err(e) => {
                 tracing::warn!(
                     target: "lambo::recall_tier",
                     session = %session,
                     "recall index unreachable while checking its sync marker: {e}"
                 );
-                TierSync::Unknown
+                Marker::Unreachable
             }
         }
     }
 
+    /// The durable snapshot, `None` for a session the store does not have.
+    async fn load_durable(&self, session: &SessionId) -> Result<Option<GraphSnapshot>, StoreError> {
+        match self.primary.load_session(session).await {
+            Ok(snap) => {
+                self.with_state(session, |st| st.contract = Some(snap.embedding.clone()));
+                Ok(Some(snap))
+            }
+            Err(StoreError::SessionNotFound(_)) => {
+                self.with_state(session, |st| st.contract = Some(None));
+                Ok(None)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// A marker ahead of the snapshot this process loaded is not staleness:
+    /// the load raced a flush that committed and mirrored a later epoch.
+    /// Re-check against a fresh load; never repair from the older snapshot
+    /// (#18 review M4). Still ahead after the re-load: leave the session
+    /// `Unknown` (reads fall back) and re-check after the backoff.
+    async fn recheck_ahead(&self, session: &SessionId) -> Marker {
+        let fresh = match self.load_durable(session).await {
+            Ok(snap) => snap,
+            Err(_) => return Marker::Unreachable,
+        };
+        let marker = self.check_marker(session, fresh.as_ref()).await;
+        if marker == Marker::Ahead {
+            tracing::warn!(
+                target: "lambo::recall_tier",
+                session = %session,
+                "recall index marker is ahead of the durable session after a re-load; \
+                 not repairing from it, reads fall back until it is re-checked"
+            );
+        }
+        marker
+    }
+
     /// Settle the session's state after a durable load: cache the contract,
-    /// check the marker, and repair if this process holds the lease.
+    /// check the marker, and repair if this process holds the lease and the
+    /// marker is behind.
     async fn settle_after_load(&self, session: &SessionId, snap: Option<&GraphSnapshot>) {
-        let contract = snap.and_then(|s| s.embedding.clone());
-        let epoch = snap.map_or(0, |s| s.mutation_epoch);
-        let concepts = snap.map_or(&[][..], |s| s.concepts.as_slice());
-        let indexable = contract
-            .as_ref()
-            .is_some_and(|c| concepts.iter().any(|k| index_doc(k, c, None).is_some()));
         let held = self.with_state(session, |st| {
-            st.contract = Some(contract.clone());
+            st.contract = Some(snap.and_then(|s| s.embedding.clone()));
             st.held
         });
-        let sync = self.check_marker(session, epoch, indexable).await;
-        if sync == TierSync::InSync {
-            self.with_state(session, |st| st.sync = TierSync::InSync);
+        let mut marker = self.check_marker(session, snap).await;
+        if marker == Marker::Ahead {
+            marker = self.recheck_ahead(session).await;
+        }
+        match (marker, held) {
+            (Marker::Behind, Some(token)) => self.repair(session, token).await,
+            (marker, _) => self.with_state(session, |st| {
+                // A repair in flight owns the state until it finishes.
+                if !st.repairing {
+                    st.sync = marker.sync();
+                    if marker == Marker::Ahead {
+                        st.next_check = Some(Instant::now() + self.repair_backoff);
+                    }
+                }
+            }),
+        }
+    }
+
+    /// Repair the session from a durable snapshot read here, under the
+    /// single-flight guard: never from a snapshot a caller loaded earlier,
+    /// and only when the marker is behind it (M4). A failure marks the
+    /// session stale and starts the backoff.
+    async fn repair(&self, session: &SessionId, token: u64) {
+        let claimed = self.with_state(session, |st| !std::mem::replace(&mut st.repairing, true));
+        if !claimed {
             return;
         }
-        match held {
-            Some(token) => {
-                if let Err(e) = self
-                    .reconcile(session, contract.as_ref(), concepts, epoch, token)
-                    .await
-                {
-                    self.mark_stale(session, &format!("repair at load failed: {e}"));
-                    self.with_state(session, |st| {
-                        st.next_repair = Some(Instant::now() + self.repair_backoff);
-                    });
-                }
-            }
-            None => self.with_state(session, |st| st.sync = sync),
+        let result = self.repair_once(session, token).await;
+        self.with_state(session, |st| st.repairing = false);
+        if let Err(e) = result {
+            self.mark_stale(session, &format!("repair failed: {e}"));
+            self.with_state(session, |st| {
+                st.next_repair = Some(Instant::now() + self.repair_backoff);
+            });
         }
+    }
+
+    async fn repair_once(&self, session: &SessionId, token: u64) -> Result<(), StoreError> {
+        let snap = self.load_durable(session).await?;
+        let mut marker = self.check_marker(session, snap.as_ref()).await;
+        if marker == Marker::Ahead {
+            marker = self.recheck_ahead(session).await;
+        }
+        match marker {
+            Marker::Behind => {}
+            Marker::Unreachable => {
+                return Err(StoreError::Backend(
+                    "recall index unreachable while checking its sync marker".into(),
+                ));
+            }
+            Marker::InSync | Marker::Ahead => {
+                self.with_state(session, |st| {
+                    st.sync = marker.sync();
+                    st.next_repair = None;
+                    if marker == Marker::Ahead {
+                        st.next_check = Some(Instant::now() + self.repair_backoff);
+                    }
+                });
+                return Ok(());
+            }
+        }
+        let (contract, concepts, epoch) = match &snap {
+            Some(s) => (
+                s.embedding.as_ref(),
+                s.concepts.as_slice(),
+                s.mutation_epoch,
+            ),
+            None => (None, &[][..], 0),
+        };
+        self.reconcile(session, contract, concepts, epoch, token)
+            .await
+            .map(|_| ())
     }
 
     /// Rebuild the session's index documents from durable state, at a fresh
@@ -460,33 +578,8 @@ impl Tier {
         let due = self.with_state(session, |st| {
             st.next_repair.is_none_or(|at| Instant::now() >= at)
         });
-        if !due {
-            return;
-        }
-        let result = match self.primary.load_session(session).await {
-            Ok(snap) => {
-                self.with_state(session, |st| st.contract = Some(snap.embedding.clone()));
-                self.reconcile(
-                    session,
-                    snap.embedding.as_ref(),
-                    &snap.concepts,
-                    snap.mutation_epoch,
-                    token,
-                )
-                .await
-                .map(|_| ())
-            }
-            Err(StoreError::SessionNotFound(_)) => self
-                .reconcile(session, None, &[], 0, token)
-                .await
-                .map(|_| ()),
-            Err(e) => Err(e),
-        };
-        if let Err(e) = result {
-            self.mark_stale(session, &format!("repair after flush failed: {e}"));
-            self.with_state(session, |st| {
-                st.next_repair = Some(Instant::now() + self.repair_backoff);
-            });
+        if due {
+            self.repair(session, token).await;
         }
     }
 
