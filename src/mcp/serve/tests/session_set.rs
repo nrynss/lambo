@@ -121,6 +121,15 @@ mod closes {
         assert_eq!(count("shutdown stage 3/7 session_close started"), 1);
         assert_eq!(count("shutdown stage 4/7 event_pump_abort started"), 1);
         assert_eq!(count("lambo serve: session closed, tail durable"), 2);
+        // #32 review L2: with more than one session, each outcome line names
+        // its session, in set order.
+        let outcomes: Vec<String> = lines
+            .iter()
+            .map(|l| plain(l))
+            .filter(|l| l.contains("lambo serve: session closed, tail durable"))
+            .collect();
+        assert!(outcomes[0].contains("session=serve-set-a"), "{outcomes:?}");
+        assert!(outcomes[1].contains("session=serve-set-b"), "{outcomes:?}");
     }
 
     /// #32 review M1: stages 3 and 4 stand on their own, for a detach (design
@@ -167,6 +176,9 @@ mod closes {
             .filter(|l| l.contains("lambo serve: session closed, tail durable"))
             .collect();
         assert_eq!(closed.len(), 1, "{lines:?}");
+        // A set of one logs the outcome line a single-session serve always
+        // has: no `session` field (#32 review L2).
+        assert!(!closed[0].contains("session="), "{}", closed[0]);
     }
 }
 

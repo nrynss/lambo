@@ -55,7 +55,7 @@ use super::stages::{ShutdownProgress, Stage};
 use crate::ledger::Ledger;
 use crate::memory::Memory;
 use crate::store::lease;
-use crate::types::LamboError;
+use crate::types::{LamboError, SessionId};
 
 /// How long a transport gets to wind itself down after the shutdown signal
 /// before it is dropped and `close()` runs anyway.
@@ -471,28 +471,47 @@ pub(super) async fn close_sessions(
             session.event_pump.abort();
         }
     });
-    SessionCloses { outcomes: closed }
+    SessionCloses {
+        outcomes: sessions
+            .iter()
+            .map(|session| session.mem.session().clone())
+            .zip(closed)
+            .collect(),
+    }
 }
 
-/// Each session's close outcome from [`close_sessions`], in set order, not
-/// yet logged.
+/// Each session's close outcome from [`close_sessions`], with the session
+/// it is about, in set order, not yet logged.
 #[must_use = "an unreported close outcome is a tail loss nobody logged"]
 pub(super) struct SessionCloses {
-    outcomes: Vec<Result<(), LamboError>>,
+    outcomes: Vec<(SessionId, Result<(), LamboError>)>,
 }
 
 impl SessionCloses {
     /// Log each session's outcome, in set order, and fold them: the first
-    /// close error, else `Ok`. For a set of one this is exactly the line a
-    /// single-session serve has always logged.
+    /// close error, else `Ok`.
+    ///
+    /// For a set of one this is exactly the line a single-session serve has
+    /// always logged, with no `session` field. With more than one, each line
+    /// names its `session`: "tail lost" is the line an operator acts on, and
+    /// N unattributed copies of it would not say whose tail.
     pub(super) fn report(self) -> Result<(), LamboError> {
+        let named = self.outcomes.len() > 1;
         let mut failed = None;
-        for closed in self.outcomes {
+        for (session, closed) in self.outcomes {
             match closed {
                 Err(e) => {
-                    tracing::error!(error = %e, "lambo serve: final flush failed — tail lost on exit, not durable (no on-disk WAL)");
+                    if named {
+                        tracing::error!(session = %session, error = %e, "lambo serve: final flush failed — tail lost on exit, not durable (no on-disk WAL)");
+                    } else {
+                        tracing::error!(error = %e, "lambo serve: final flush failed — tail lost on exit, not durable (no on-disk WAL)");
+                    }
                     failed.get_or_insert(e);
                 }
+                Ok(()) if named => tracing::info!(
+                    session = %session,
+                    "lambo serve: session closed, tail durable"
+                ),
                 Ok(()) => tracing::info!("lambo serve: session closed, tail durable"),
             }
         }
