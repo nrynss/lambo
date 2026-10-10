@@ -448,6 +448,41 @@ async fn the_401_comes_before_any_session_and_is_the_same_for_every_id() {
     handle.abort();
 }
 
+/// Review L3: a request carrying two `Authorization` headers is refused
+/// like a wrong token, in either order (good then bad, bad then good), on
+/// the unscoped and the scoped routes, with the 401 each path gives a
+/// request with no header, byte for byte. One good header still passes.
+#[tokio::test]
+async fn two_authorization_headers_are_401_in_either_order() {
+    let secret = ["t4", "-", "l3", "-", "key"].concat();
+    let token = AuthToken::new(secret.as_str()).expect("token");
+    let state = portal(
+        backends_on(two_sessions().await),
+        &["t4-a", "t4-b"],
+        Some(token),
+        &WebConfig::default(),
+    );
+    let (addr, handle) = spawn(state).await;
+    let good = format!("Authorization: Bearer {secret}\r\n");
+    let bad = format!("Authorization: Bearer {secret}x\r\n");
+    let send = |path: &str, auth: String| {
+        let req = format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\n{auth}Connection: close\r\n\r\n");
+        async move { send_raw(addr, &req).await }
+    };
+    for path in ["/api/stats", "/s/t4-b/api/stats", "/s/t4-a/"] {
+        let none = send(path, String::new()).await;
+        assert_eq!(none.status, 401, "{path}");
+        let one = send(path, good.clone()).await;
+        assert_eq!(one.status, 200, "{path}: {}", one.body);
+        for (first, second) in [(&good, &bad), (&bad, &good), (&good, &good)] {
+            let r = send(path, format!("{first}{second}")).await;
+            assert_eq!(wire(&r), wire(&none), "{path}");
+            assert!(!r.body.contains(&secret), "never echoed");
+        }
+    }
+    handle.abort();
+}
+
 // ---- in scope -----------------------------------------------------------
 
 /// Q11 and the read-only sweep under a scope: a served session's routes

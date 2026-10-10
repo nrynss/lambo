@@ -139,6 +139,24 @@ pub(crate) fn check_configured_token(raw: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The `Authorization` value a request presents: exactly one header, or
+/// none (#32 PR 5 review I2, shared with the portal by #4 PR 2 review L3).
+///
+/// A request carrying two is presented as `Some("")`, which no credential
+/// matches, so it is refused like a wrong token: reading only the first
+/// would let a proxy that appends its own header, or one that keeps the
+/// last, disagree with the surface about who is calling. A value that is
+/// not visible ASCII is unreadable, and presented as none.
+pub(crate) fn presented_authorization(headers: &axum::http::HeaderMap) -> Option<&str> {
+    let mut values = headers.get_all(axum::http::header::AUTHORIZATION).iter();
+    let first = values.next();
+    if values.next().is_some() {
+        Some("")
+    } else {
+        first.and_then(|v| v.to_str().ok())
+    }
+}
+
 /// The credential an `Authorization` header value carries, if it is a
 /// bearer one.
 ///

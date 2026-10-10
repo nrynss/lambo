@@ -187,6 +187,8 @@
   presented credential is trimmed, and such a header value is unreadable),
   so the window used to answer every request `401` with no hint why. The
   rule and its messages are now one validator shared with `lambo serve`.
+  A request carrying two `Authorization` headers now gets the `401`, as
+  `lambo serve` answers it; before, the first header decided.
 
 ### Changed
 

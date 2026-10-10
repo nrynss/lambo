@@ -378,7 +378,7 @@ Under a supervisor (launchd, systemd, Kubernetes), give the server more than 20 
 | `--session <SESSION>` | Yes, unless `[web] sessions` names one | Repeatable. Every session given, then `[web] sessions`, is served; the first is the default. |
 | `--port <PORT>` | No | `7710` |
 | `--bind <BIND>` | No | `127.0.0.1` |
-| `--auth-token <TOKEN>` | No | Bearer token. Loopback is unauthenticated by default. A non-loopback bind requires it and fails closed without one. `LAMBO_AUTH_TOKEN` overrides it. The token must be printable ASCII with no leading or trailing whitespace, and at most 4096 bytes, as for `lambo serve`; otherwise the start exits `2`, never quoting the token. |
+| `--auth-token <TOKEN>` | No | Bearer token. Loopback is unauthenticated by default. A non-loopback bind requires it and fails closed without one. `LAMBO_AUTH_TOKEN` overrides it. The token must be printable ASCII with no leading or trailing whitespace, and at most 4096 bytes, as for `lambo serve`; otherwise the start exits `2`, never quoting the token. A request carrying two `Authorization` headers gets `401`. |
 | `--allowed-host <HOST>` | No | Repeatable. A `Host` the unauthenticated window also answers, beside `localhost`, `127.0.0.1` and `[::1]`. A name, or `name:port` to accept only that port. Ignored once a token is configured. |
 
 ```bash

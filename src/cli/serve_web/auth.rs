@@ -290,15 +290,18 @@ pub(super) async fn host_guard(
 /// transport-specific rate/session guards this read-only process does not
 /// have.
 ///
+/// A request carrying two `Authorization` headers is refused like a wrong
+/// token, by the extraction `lambo serve` uses
+/// ([`presented_authorization`](crate::surface::bearer::presented_authorization);
+/// #4 PR 2 review L3): this is the one helper behind both the scoped check
+/// and the [`gate`], so the 401 is [`unauthorized`]'s, byte for byte.
+///
 /// `None` is answered with [`unauthorized`].
 pub(super) fn authenticate(
     state: &AppState,
     req: &axum::extract::Request,
 ) -> Option<Arc<SessionGrant>> {
-    let presented = req
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok());
+    let presented = crate::surface::bearer::presented_authorization(req.headers());
     state.authority.authenticate(presented)
 }
 
