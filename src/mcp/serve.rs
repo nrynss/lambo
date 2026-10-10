@@ -95,6 +95,7 @@ pub(crate) mod activity;
 mod admin;
 mod authority;
 mod builder;
+mod frames;
 mod heartbeat;
 mod http_guards;
 mod hub;
