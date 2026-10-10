@@ -220,7 +220,7 @@ impl GraphStore for Recording {
 }
 
 /// A portal serving `sessions` (the first is the default).
-fn portal(
+pub(super) fn portal(
     backends: ResolvedBackends,
     sessions: &[&str],
     auth: Option<AuthToken>,

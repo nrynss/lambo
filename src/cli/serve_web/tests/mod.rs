@@ -124,6 +124,7 @@ mod feeds;
 mod graph;
 mod host;
 mod inspect;
+mod page;
 mod recall;
 mod routes;
 mod routing;

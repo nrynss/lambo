@@ -59,7 +59,9 @@ pub(super) type PortalAuthority = SessionAuthority<AuthToken>;
 pub(super) struct Authenticated;
 
 /// The grant the request authenticated as, attached by [`gate`] for an
-/// unscoped request (the listing reads it, #4 PR 3). Never a secret.
+/// unscoped request and by `scope::resolve_session` for a scoped one (the
+/// listing reads it, #4 PR 3; `/api/session`'s `switchable`, #4 PR 4).
+/// Never a secret.
 #[derive(Clone)]
 pub(super) struct Caller(pub(super) Arc<SessionGrant>);
 
@@ -318,14 +320,35 @@ pub(super) fn credential_reach<'a>(
     authority
         .grants()
         .into_iter()
-        .map(|grant| {
-            let reach = sessions
-                .iter()
-                .filter(|s| authority.authorize_default(grant, s.as_str()).is_ok())
-                .count();
-            (grant.name(), reach)
-        })
+        .map(|grant| (grant.name(), reach(authority, grant, sessions)))
         .collect()
+}
+
+/// How many served sessions `grant` reads: at its own path, or, for a
+/// loose single default, at the aliases
+/// ([`SessionAuthority::authorize_default`]). In memory only.
+pub(super) fn reach(
+    authority: &PortalAuthority,
+    grant: &SessionGrant,
+    sessions: &[SessionId],
+) -> usize {
+    sessions
+        .iter()
+        .filter(|s| authority.authorize_default(grant, s.as_str()).is_ok())
+        .count()
+}
+
+/// Can `grant` switch sessions: does it read more than one served session
+/// (#4 PR 4)? `/api/session` says so, and the page shows its picker only
+/// then, so a single-session portal, or a credential that reads one
+/// session, gets the page exactly as before. A count of the caller's own
+/// reach, never a name and never a session outside its scope.
+pub(super) fn switchable(
+    authority: &PortalAuthority,
+    grant: &SessionGrant,
+    sessions: &[SessionId],
+) -> bool {
+    reach(authority, grant, sessions) > 1
 }
 
 /// Each grant's exact session names that are not served, in scan order,
