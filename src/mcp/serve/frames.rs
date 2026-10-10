@@ -401,7 +401,9 @@ impl<R: AsyncRead + Unpin> AsyncRead for CappedFrames<R> {
 /// the lock stays held until the `FrameWriter` itself is dropped, which
 /// releases it. rmcp abandons a send only when its service is already
 /// ending (its send tasks are aborted at shutdown) or wedged, and it drops
-/// the transport, and this writer with it, when the service ends.
+/// the transport, and this writer with it, when the service ends. Until
+/// then a reply waits, and end of input waits for it at most
+/// [`REPLY_DRAIN_LIMIT`].
 pub(crate) struct FrameWriter<W> {
     shared: Arc<Mutex<W>>,
     guard: Option<OwnedMutexGuard<W>>,

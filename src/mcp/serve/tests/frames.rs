@@ -443,6 +443,50 @@ async fn a_reply_queued_just_before_end_of_input_is_written_before_the_end() {
     drop(reader);
 }
 
+/// #101 review 2 L2: a frame rmcp abandons part-written keeps the frame
+/// lock (nothing else can tell it will not be finished), and dropping the
+/// `FrameWriter`, as rmcp does with its transport when its service ends,
+/// lets the lock go, so the queued reply is written.
+///
+/// Mutation: keep the guard alive past the writer (leak it on drop) and
+/// the reply never arrives.
+#[tokio::test]
+async fn dropping_the_writer_mid_frame_lets_the_reply_through() {
+    let input = format!(
+        "{{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"x\",\"params\":\"{}\"}}\n",
+        "p".repeat(64)
+    );
+    let (server_out, client_out) = tokio::io::duplex(4096);
+    let (mut reader, mut writer) = crate::mcp::serve::frames::capped_transport_with_cap(
+        std::io::Cursor::new(input.into_bytes()),
+        server_out,
+        "stdio",
+        16,
+    );
+    writer.write_all(b"{\"cut\":").await.expect("write");
+    let reads = tokio::spawn(async move {
+        let mut sink = Vec::new();
+        reader.read_to_end(&mut sink).await.expect("read");
+        reader
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(!reads.is_finished(), "the reply waits for the frame lock");
+    drop(writer);
+    let mut lines = BufReader::new(client_out).lines();
+    let line = tokio::time::timeout(std::time::Duration::from_secs(5), lines.next_line())
+        .await
+        .expect("the reply is written once the writer is dropped")
+        .expect("read")
+        .expect("a line");
+    // The abandoned bytes come first: the reply follows them, unsplit.
+    let reply = line.strip_prefix("{\"cut\":").expect("the cut frame first");
+    assert!(
+        reply.contains("-32600") && reply.contains("\"id\":4"),
+        "{reply}"
+    );
+    drop(reads.await.expect("reader"));
+}
+
 /// An over-cap frame cut off by end of input gets no reply: the client has
 /// stopped sending, and its transport is shutting down.
 ///
