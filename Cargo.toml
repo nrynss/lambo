@@ -40,7 +40,13 @@ parking_lot = "0.12"
 # MCP server (T8.2). `default-features = false` is REQUIRED, not style: rmcp's optional
 # `reqwest` is `^0.13.2` and this repo pins reqwest 0.12 for BGE-M3 — default features
 # would compile reqwest twice. None of the four features below reach reqwest.
-rmcp = { version = "3.1.2", default-features = false, features = [
+#
+# Pinned exactly (`=`), not caret: the HTTP session cap and its per-credential
+# attribution (#32 PR 5) read `LocalSessionManager::sessions` directly
+# (`src/mcp/serve/http_guards.rs`) and wrap rmcp's session manager. Those are
+# public but implementation-shaped, so a semver-compatible rmcp release could
+# change them under us. Bump deliberately, rerunning the serve tests.
+rmcp = { version = "=3.1.2", default-features = false, features = [
     "server",
     "macros",
     "transport-io",
