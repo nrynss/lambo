@@ -532,6 +532,17 @@ fn reject_empty_key(content: &str, key: &str) -> Result<(), LamboError> {
 /// embedder (from `ResolvedBackends`); it is stamped on the graph at first embed
 /// and checked via [`EmbeddingContract::ensure_compatible`] on later hybrid
 /// writes — a mid-session kind/model/dim swap is refused without re-embedding.
+///
+/// **Vector source: always the store** (`GraphStore::vector_candidates_checked`),
+/// whatever the store declares (decided in #60's review, I-2). A session
+/// holder's derive (`Memory`, the write queue) ranks part or all of its merge
+/// candidates in its graph instead (#8, #18, #60), because it knows two things
+/// this function cannot: that `graph` is the session's complete copy, loaded
+/// from `store`, and that its own flush keeps the graph's unflushed set exact,
+/// which the Postgres family's union relies on. A caller here may hold a
+/// partial graph or flush by hand, so it keeps the store's answer, which on a
+/// lagging store misses what was written since the last flush. A library
+/// caller that owns a session should derive through [`crate::Memory`].
 #[allow(clippy::too_many_arguments)]
 pub async fn derive(
     graph: Arc<RwLock<Graph>>,
