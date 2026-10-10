@@ -1,4 +1,4 @@
-//! `lambo serve-web` — the T8.5 demo window: a read-only page onto one session.
+//! `lambo serve-web` — the T8.5 demo window: a read-only page onto a session.
 //!
 //! # What it is
 //!
@@ -6,6 +6,31 @@
 //! **recall context block verbatim**, the T6.4 **canonization event feed**, and
 //! durable session counts. It is a window onto the product's real output, not a
 //! product — no framework, no build step, no client state beyond a poll cursor.
+//!
+//! # Which sessions (#4 PR 2)
+//!
+//! It serves an explicit allowlist: the ordered union of the repeatable
+//! `--session` and `[web] sessions` ([`plan_sessions`]). There is no store
+//! discovery. Each served session is read at `/s/{session}/` and
+//! `/s/{session}/api/...`; the unscoped `/` and `/api/...` are aliases for the
+//! first (the default), so a one-session portal is exactly what it was. With
+//! more than one session every name must pass the strict addressed-id charset
+//! (`surface::session::parse_addressed`); one session keeps `--session`'s
+//! looser rule and is reached through the aliases. A request for a session the
+//! portal does not serve, a malformed or percent-encoded id, and an unrouted
+//! path all answer the same bytes (`surface::session`'s uniform 404), before
+//! any store call.
+//!
+//! # Host check (#4 PR 2, DNS rebinding)
+//!
+//! While no bearer token is configured (the loopback default), the portal
+//! answers only requests whose `Host` is `localhost`, `127.0.0.1` or `[::1]`
+//! (any port), or a name given with `--allowed-host` / `[web] allowed_hosts`;
+//! anything else gets one fixed 403. Otherwise a web page the local user
+//! visits could rebind its own name to 127.0.0.1 and read every served
+//! session. A proxy that forwards a public `Host` (Caddy's default) must
+//! name it with `--allowed-host`. With a token configured, any `Host` is
+//! accepted: a rebound page cannot present the token.
 //!
 //! # Read-only, by construction
 //!
@@ -94,8 +119,9 @@
 //! | module | holds |
 //! |---|---|
 //! | this file | the embedded assets, [`Args`], [`run`], the bounded serve, the signal registration |
-//! | `auth` | [`AuthToken`], env-over-flag resolution, the non-loopback refusal, the bearer gate |
-//! | `state` | `AppState`: session, backends, auth posture, view cache |
+//! | `auth` | [`AuthToken`], env-over-flag resolution, the non-loopback refusal, the credential set and the bearer gate |
+//! | `scope` | which session a request reads: the per-request resolution, before routing (#4) |
+//! | `state` | `AppState`: served sessions, backends, credential set, view cache |
 //! | `views` | the per-session reader views: one load per TTL, single-flight, bounded (#4) |
 //! | `dto` | every response and query type |
 //! | `projections` | the reads: hop-1 structural dependents, the ordered event feed, the stats |
@@ -115,10 +141,11 @@ use std::time::Duration;
 use axum::Router;
 
 use super::caps::{check_size_cli, require_nonempty, CliError};
+use crate::surface::session::{parse_addressed, MAX_ADDRESSED_LEN};
 // `routes::api_recall` names it as `super::recall`, unchanged from when it
 // lived here.
 use super::recall;
-use crate::config::WebConfig;
+use crate::config::{AllowedHost, WebConfig};
 use crate::mcp::AUTH_TOKEN_ENV;
 use crate::resolve::ResolvedBackends;
 use crate::store::StoreKind;
@@ -128,6 +155,7 @@ mod auth;
 mod dto;
 mod projections;
 mod routes;
+mod scope;
 mod state;
 mod views;
 
@@ -164,8 +192,17 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 /// `lambo serve-web` arguments, mirroring `lambo serve`'s bind/port conventions.
 #[derive(Debug, Clone)]
 pub struct Args {
-    /// Session to open a window onto. Read as a reader; never written.
+    /// The default session: what the unscoped routes (`/`, `/api/...`)
+    /// serve. Read as a reader; never written. Must be one of
+    /// [`Args::sessions`] when that is not empty.
     pub session: String,
+    /// Every served session, in order, the default first (#4 PR 2): the
+    /// allowlist. Empty serves [`Args::session`] alone. The CLI builds both
+    /// fields with [`plan_sessions`] from `--session` and `[web] sessions`;
+    /// [`run`] re-checks them, so a library caller meets the same rules, and
+    /// reads neither `[web] sessions` nor `[web] allowed_hosts` from
+    /// [`Args::web`] itself.
+    pub sessions: Vec<String>,
     /// TCP port to listen on.
     pub port: u16,
     /// Bind address. Loopback by default — no token required. A non-loopback
@@ -175,9 +212,100 @@ pub struct Args {
     /// [`AUTH_TOKEN_ENV`] env var, which overrides this flag — a token in argv
     /// is visible in `ps` and shell history. Mandatory on any non-loopback bind.
     pub auth_token: Option<AuthToken>,
+    /// Extra `Host` values accepted while no token is configured, beside
+    /// the loopback names (#4 PR 2): the CLI passes the union of
+    /// `--allowed-host` and `[web] allowed_hosts` ([`plan_allowed_hosts`]).
+    /// Ignored, with a startup note, once a token is configured.
+    pub allowed_hosts: Vec<String>,
     /// `[web]` from `lambo.toml`: the view TTL and the load and recall
     /// bounds (#4). [`WebConfig::default`] when the file has no table.
     pub web: WebConfig,
+}
+
+/// The sessions a portal serves, and the default among them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ServedSessions {
+    /// What the unscoped routes serve: the first `--session`, else the first
+    /// `[web] sessions` entry.
+    pub default: String,
+    /// Every served session, in order: the `--session` values first, then
+    /// `[web] sessions`, each once.
+    pub sessions: Vec<String>,
+}
+
+/// The served sessions from the repeatable `--session` and `[web]
+/// sessions`: their ordered union, each once, the first the default.
+///
+/// Refuses (a usage error, exit 2) an empty union, and every name
+/// [`check_served`] refuses. The CLI runs it before any backend is built,
+/// so a bad name costs no model load.
+pub fn plan_sessions(cli: &[String], web: &WebConfig) -> Result<ServedSessions, CliError> {
+    let mut sessions: Vec<String> = Vec::new();
+    for name in cli.iter().chain(web.sessions.iter()) {
+        if !sessions.contains(name) {
+            sessions.push(name.clone());
+        }
+    }
+    let Some(default) = sessions.first().cloned() else {
+        return Err(CliError::Usage(
+            "--session <SESSION> is required, or name the sessions to serve in lambo.toml \
+             [web] sessions"
+                .into(),
+        ));
+    };
+    check_served(&default, &sessions)?;
+    Ok(ServedSessions { default, sessions })
+}
+
+/// The extra accepted `Host` values: `--allowed-host` then `[web]
+/// allowed_hosts`, each once. A malformed entry is a usage error (exit 2)
+/// naming it; the CLI runs this before any backend is built.
+pub fn plan_allowed_hosts(cli: &[String], web: &WebConfig) -> Result<Vec<String>, CliError> {
+    let mut hosts: Vec<String> = Vec::new();
+    for host in cli.iter().chain(web.allowed_hosts.iter()) {
+        parse_allowed_host(host)?;
+        if !hosts.contains(host) {
+            hosts.push(host.clone());
+        }
+    }
+    Ok(hosts)
+}
+
+fn parse_allowed_host(host: &str) -> Result<AllowedHost, CliError> {
+    AllowedHost::parse(host).map_err(|e| CliError::Usage(format!("--allowed-host {host:?} {e}")))
+}
+
+/// The rules every served set meets (#4 design 3.1, Q12): the default is
+/// served, nothing is served twice, every name is non-empty and within the
+/// size rule, and with more than one session every name can be addressed
+/// by URL (`/s/{session}/`). One session keeps `--session`'s looser rule and
+/// is served at the unscoped routes, so no deployed name breaks.
+fn check_served(default: &str, sessions: &[String]) -> Result<(), CliError> {
+    if !sessions.iter().any(|s| s == default) {
+        return Err(CliError::Usage(format!(
+            "the default session {default:?} is not one of the served sessions"
+        )));
+    }
+    for (i, name) in sessions.iter().enumerate() {
+        require_nonempty("session", name)?;
+        check_size_cli("session", name)?;
+        if sessions[..i].contains(name) {
+            return Err(CliError::Usage(format!("session {name:?} is listed twice")));
+        }
+    }
+    if sessions.len() > 1 {
+        for name in sessions {
+            if parse_addressed(name).is_err() {
+                return Err(CliError::Usage(format!(
+                    "session {name:?} cannot be addressed by URL: with more than one session, \
+                     each is served at /s/<session>/ and must be 1 to {MAX_ADDRESSED_LEN} \
+                     bytes of [A-Za-z0-9._:-], not starting with '.'. A session outside that \
+                     rule can still be served on its own with `lambo serve-web --session <name>`"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -222,8 +350,17 @@ fn shutdown_signal() -> impl std::future::Future<Output = ()> {
 
 /// Serve the read-only session window until SIGINT / SIGTERM.
 pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliError> {
-    require_nonempty("session", &args.session)?;
-    check_size_cli("session", &args.session)?;
+    let served = if args.sessions.is_empty() {
+        vec![args.session.clone()]
+    } else {
+        args.sessions.clone()
+    };
+    check_served(&args.session, &served)?;
+    let allowed_hosts = args
+        .allowed_hosts
+        .iter()
+        .map(|h| parse_allowed_host(h))
+        .collect::<Result<Vec<_>, _>>()?;
 
     // Env beats flag (mirrors `mcp::serve`). A set-but-empty LAMBO_AUTH_TOKEN
     // is a usage error, not a silent fallback to the flag.
@@ -254,9 +391,11 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
     let exposed = !args.bind.is_loopback();
     let state = Arc::new(AppState::new(
         SessionId::new(args.session.as_str()),
+        served.iter().map(|s| SessionId::new(s.as_str())),
         backends,
         exposed,
         auth,
+        &allowed_hosts,
         &args.web,
     ));
 
@@ -268,11 +407,28 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
         .local_addr()
         .map_err(|e| CliError::Runtime(format!("local_addr: {e}")))?;
 
-    println!(
-        "lambo serve-web: read-only window on session '{}' at http://{local}/",
-        args.session
-    );
+    if served.len() == 1 {
+        println!(
+            "lambo serve-web: read-only window on session '{}' at http://{local}/",
+            args.session
+        );
+    } else {
+        println!(
+            "lambo serve-web: read-only window on {} sessions at http://{local}/s/<session>/ \
+             (the default, '{}', also at http://{local}/)",
+            served.len(),
+            args.session
+        );
+    }
     println!("lambo serve-web: reader process — no writer lease, no write routes");
+    // The count line (#4 design 4.1): which credential reaches how many
+    // sessions. Names a credential, never a token.
+    println!(
+        "lambo serve-web: credential '{}' reads {} session{}",
+        auth::credential_label(&state.authority),
+        served.len(),
+        if served.len() == 1 { "" } else { "s" }
+    );
     let bounds = state.views.bounds();
     println!(
         "lambo serve-web: session views — refreshed after {} ms, at most {} loaded, {} load(s) \
@@ -284,7 +440,7 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
     );
     // A non-loopback bind always carries a token (`authorize_bind_web`), so
     // the two branches below are exhaustive: token configured, or loopback.
-    if state.auth.is_some() {
+    if state.authority.requires_bearer() {
         eprintln!(
             "⚑ lambo serve-web: authentication is ON — every request must send \
              'Authorization: Bearer <token>' (from {AUTH_TOKEN_ENV} or --auth-token)."
@@ -295,6 +451,13 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
              unauthenticated. Anyone who can reach this port can read the whole session; keep \
              it on a private network or behind an authenticating proxy.",
             args.bind
+        );
+    }
+    if state.authority.requires_bearer() && !allowed_hosts.is_empty() {
+        eprintln!(
+            "⚑ lambo serve-web: --allowed-host / [web] allowed_hosts are not checked while a \
+             token is configured: any Host is accepted, since a rebound page cannot present \
+             the token."
         );
     }
     if state.backends.store_cfg.kind == StoreKind::Memory {

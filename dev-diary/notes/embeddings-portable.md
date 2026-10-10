@@ -222,15 +222,16 @@ evidence: `evidence/issue-22-eg2/`.
     --ctx-size 8192 --batch-size 8192 --ubatch-size 8192
   ```
 
-  The image flags fix the 280-token budget of the `lambo-eg2-v1` profile (the server's
+  The image flags fix the 280-token budget of the `lambo-eg2-v2` profile (the server's
   default sizes images at 85 to 125 tokens, and the budget changes the vectors). The
   batch flags let a whole image fit one ubatch: at the default 512 the server caps the
   budget to 256 without failing, and Lambo then refuses every image. Leave out
   `--mmproj` for a text-only server and set `[embedder] images = false`.
 - **What Lambo does, not the server:** the task prefixes (`title: none | text: ` for
   stored text, `task: search result | query: ` for recall queries, none for images),
-  MRL truncation to `dim` (768, 512, 256 or 128) with re-normalization, and the
-  contract string `<artifact>;prompts=lambo-eg2-v1`.
+  the canonical image form (every image decoded and resized to a 768 px longer side,
+  sent as lossless PNG), MRL truncation to `dim` (768, 512, 256 or 128)
+  with re-normalization, and the contract string `<artifact>;prompts=lambo-eg2-v2`.
 - **Startup check:** before its first embed Lambo reads `/props` (`model_path`,
   `model_ftype`, `modalities.vision`) and refuses a file that is not EmbeddingGemma 2,
   another quantization than `model` names, or images on a server without a projector.

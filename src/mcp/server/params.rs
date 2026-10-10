@@ -104,7 +104,9 @@ pub struct RecallParams {
     pub traversal_depth: Option<usize>,
     /// Optional: recall what is close to this image, for this server to
     /// embed (when its embedder embeds images). Send at most one of `image`
-    /// and `query_vector`. Not stored.
+    /// and `query_vector`. Not stored. The embedder may resize it
+    /// (EmbeddingGemma 2: to a 768 px longer side); send the same rendition
+    /// of an image when you need identical vectors.
     pub image: Option<WireImage>,
     /// Optional: recall what is close to a vector you computed, in this
     /// session's embedding space (accepted only when the operator enabled
@@ -396,7 +398,9 @@ pub struct DeriveImageParams {
     #[schemars(length(max = 64), regex(pattern = r"^[a-z0-9]{1,64}$"))]
     pub image_id: Option<String>,
     /// The image itself, for this server to embed. Send exactly one of
-    /// `image` and `vector`.
+    /// `image` and `vector`. The embedder may resize it (EmbeddingGemma 2:
+    /// to a 768 px longer side); send the same rendition of an image when
+    /// you need identical vectors.
     pub image: Option<WireImage>,
     /// A vector you computed for the image instead (accepted only when the
     /// operator enabled client vectors). Send exactly one of `image` and

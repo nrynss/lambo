@@ -6,7 +6,7 @@
 //! token, the https-or-loopback transport rule, no redirects, the capped and
 //! scrubbed error body and the J3 status table. On top of it this layer adds
 //! what makes the vectors EmbeddingGemma 2's, pinned as the prompt profile
-//! [`EG2_PROMPT_PROFILE`] (`lambo-eg2-v1`):
+//! [`EG2_PROMPT_PROFILE`] (`lambo-eg2-v2`):
 //!
 //! - **Role prefixes** from the model card. A document ([`Embedder::embed`])
 //!   is sent as `title: none | text: <text>`, a recall query
@@ -16,16 +16,25 @@
 //! - **A fixed 280-token image budget.** The operator starts `llama-server`
 //!   with `--image-min-tokens 280 --image-max-tokens 280`; the budget changes
 //!   the vectors, and only a fixed one makes them independent of the image's
-//!   pixel size (exactly up to 768 px a side on b11517; larger renders come
-//!   out close but not equal). The server does not report its budget, so for
-//!   a server `/props` verified the adapter embeds a reference image and
-//!   requires its known token count ([`EG2_REFERENCE_IMAGE_TOKENS`]).
+//!   pixel size. The server does not report its budget, so for a server
+//!   `/props` verified the adapter embeds a reference image and requires its
+//!   known token count ([`EG2_REFERENCE_IMAGE_TOKENS`]).
+//! - **A canonical image form** (new in `lambo-eg2-v2`). Even at a fixed
+//!   budget, llama.cpp rounds an image above about 768 px a side to a
+//!   different patch grid than a smaller one, and resamples each image from
+//!   the resolution it was given, so the same picture embedded at two sizes
+//!   differed. The adapter therefore decodes every image and sends it as a
+//!   lossless PNG whose longer side is exactly [`EG2_CANONICAL_SIDE`] px
+//!   (downscaled or upscaled, aspect ratio kept). That also means a WebP is
+//!   never sent as WebP (the server decodes WebP only through an external
+//!   `ffmpeg`). See the `canonical` submodule for the exact rule and the
+//!   cause.
 //! - **MRL**: the server returns the native 768 dimensions; the adapter
 //!   checks them, truncates to `dim` (768, 512, 256 or 128) and then
 //!   L2-normalizes.
 //!
 //! The contract `model` is the configured weights artifact plus the profile,
-//! `<model>;prompts=lambo-eg2-v1` ([`EmbeddingGemma2Embedder::model_identity`]),
+//! `<model>;prompts=lambo-eg2-v2` ([`EmbeddingGemma2Embedder::model_identity`]),
 //! because `llama-server` ignores the request's model name: two servers
 //! answering to the same name can hold different weights.
 //!
@@ -60,15 +69,26 @@ use super::bge_m3::{
     check_bearer_transport, default_status_rule, BgeM3LlamaCppEmbedder, EmbedStatusClass,
     StatusVerdict, LLAMA_UNREACHABLE,
 };
-use super::{api_key, EmbedError, Embedder, EmbedderConfig, ImageInput, Modalities};
+use super::{api_key, EmbedError, Embedder, EmbedderConfig, ImageInput, ImageMime, Modalities};
+
+mod canonical;
+
+pub use canonical::EG2_CANONICAL_SIDE;
 
 #[cfg(test)]
 mod tests;
 
 /// The prompt profile this adapter implements, named in the contract `model`.
-/// Changing any part of it (a prefix, the image budget, the order of
-/// truncation and normalization) is a new profile name, so a new contract.
-pub const EG2_PROMPT_PROFILE: &str = "lambo-eg2-v1";
+/// Changing any part of it (a prefix, the image budget, the canonical image
+/// form, the order of truncation and normalization) is a new profile name, so
+/// a new contract. `lambo-eg2-v2` added the canonical image form (22g);
+/// `lambo-eg2-v1` was never released. The canonical pixels come from the
+/// `image` crate's decoders and resampler, which `Cargo.toml` does not pin
+/// exactly: the golden tests in `canonical/tests.rs` fail if an update moves
+/// them, and a moved pixel golden is a new profile name. A cross-platform
+/// wobble of at most one step per sample (downscales and JPEGs, see the
+/// golden test) is not a change and not a new profile name.
+pub const EG2_PROMPT_PROFILE: &str = "lambo-eg2-v2";
 
 /// The weights artifact the contract names when `[embedder] model` is unset:
 /// the Q8_0 GGUF of `ggml-org/embeddinggemma-2-GGUF` at revision `bfcd2987`
@@ -619,7 +639,7 @@ impl EmbeddingGemma2Embedder {
         self
     }
 
-    /// The contract `model`: `<artifact>;prompts=lambo-eg2-v1`.
+    /// The contract `model`: `<artifact>;prompts=lambo-eg2-v2`.
     pub fn model_identity(&self) -> &str {
         &self.identity
     }
@@ -1063,11 +1083,20 @@ impl Embedder for EmbeddingGemma2Embedder {
                     .into(),
             ));
         }
+        // The canonical form (22g): every image is sent as a lossless PNG
+        // whose longer side is exactly 768 px. Its header is read first
+        // (cheap), so an image Lambo cannot even size fails before the
+        // server is asked anything. The full decode comes after the server
+        // and budget checks, so while the server is down or misconfigured a
+        // retried embed fails fast instead of paying for a decode each time.
+        let (bytes, mime) = (image.bytes(), image.mime());
+        canonical::dimensions(bytes, mime)?;
         if let Eg2ServerCheck::Verified { .. } = self.ensure_server(true).await? {
             self.ensure_image_budget().await?;
         }
-        let encoded = base64::engine::general_purpose::STANDARD.encode(image.bytes());
-        let body = image_request(&self.model, image.mime().as_str(), &encoded);
+        let canonical = canonical::canonicalize(bytes, mime).await?;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&canonical);
+        let body = image_request(&self.model, ImageMime::Png.as_str(), &encoded);
         // The image's own token count is not judged: it varies with the
         // image's size and shape (see EG2_REFERENCE_IMAGE_TOKENS).
         let parsed = self.post(&body, image_status_rule).await?;

@@ -88,6 +88,75 @@ fn fold_diff(presented: &[u8], expected: &[u8], mut on_step: impl FnMut()) -> u6
 /// serve refuses one at startup.
 pub(crate) const MAX_BEARER_CREDENTIAL_BYTES: usize = 4 * 1024;
 
+/// Check a configured bearer token (a secret this process will compare
+/// presented credentials against), the one rule `lambo serve` and
+/// `lambo serve-web` both apply at startup (#4 PR 2 review M2).
+///
+/// Refused, in this order, each with a message that never quotes the
+/// token:
+/// - empty or whitespace-only: almost always an unset variable that
+///   expanded to nothing, and accepting it would authenticate every request
+///   that sends `Authorization: Bearer ` (fail closed, not silently);
+/// - leading or trailing whitespace: [`bearer_credential`] trims what a
+///   request presents, so such a token never matches (a trailing newline
+///   or space from an env file, say; #32 PR 5 review L3);
+/// - a byte outside printable ASCII (0x20 to 0x7E; a space inside the
+///   token is presentable): a header value holding one is unreadable to the
+///   guard, so it never matches either;
+/// - longer than [`MAX_BEARER_CREDENTIAL_BYTES`]: every presented
+///   credential over it is refused unread (#32 PR 5 review L2).
+///
+/// Each of the last three used to start a server that answered every
+/// request 401 with no hint why.
+pub(crate) fn check_configured_token(raw: &str) -> Result<(), String> {
+    if raw.trim().is_empty() {
+        return Err(
+            "auth token is empty — pass a non-empty secret, or omit it entirely to \
+             run unauthenticated on loopback"
+                .into(),
+        );
+    }
+    if raw.trim() != raw {
+        return Err(
+            "auth token has leading or trailing whitespace, which a request cannot \
+             carry (the presented credential is trimmed); remove it"
+                .into(),
+        );
+    }
+    if raw.bytes().any(|b| !(0x20..=0x7e).contains(&b)) {
+        return Err(
+            "auth token contains a character outside printable ASCII, which an HTTP \
+             Authorization header cannot carry"
+                .into(),
+        );
+    }
+    if raw.len() > MAX_BEARER_CREDENTIAL_BYTES {
+        return Err(format!(
+            "auth token is longer than {MAX_BEARER_CREDENTIAL_BYTES} bytes, so no request \
+             could present it"
+        ));
+    }
+    Ok(())
+}
+
+/// The `Authorization` value a request presents: exactly one header, or
+/// none (#32 PR 5 review I2, shared with the portal by #4 PR 2 review L3).
+///
+/// A request carrying two is presented as `Some("")`, which no credential
+/// matches, so it is refused like a wrong token: reading only the first
+/// would let a proxy that appends its own header, or one that keeps the
+/// last, disagree with the surface about who is calling. A value that is
+/// not visible ASCII is unreadable, and presented as none.
+pub(crate) fn presented_authorization(headers: &axum::http::HeaderMap) -> Option<&str> {
+    let mut values = headers.get_all(axum::http::header::AUTHORIZATION).iter();
+    let first = values.next();
+    if values.next().is_some() {
+        Some("")
+    } else {
+        first.and_then(|v| v.to_str().ok())
+    }
+}
+
 /// The credential an `Authorization` header value carries, if it is a
 /// bearer one.
 ///
@@ -100,15 +169,6 @@ pub(crate) fn bearer_credential(header: Option<&str>) -> Option<&str> {
     scheme
         .eq_ignore_ascii_case("bearer")
         .then(|| credential.trim())
-}
-
-/// Does an `Authorization` header value carry the expected bearer token?
-///
-/// The scheme is matched case-insensitively (RFC 7235 §2.1); the credential
-/// itself is compared byte-for-byte in constant time by [`tokens_match`].
-pub(crate) fn bearer_ok(header: Option<&str>, expected: &[u8]) -> bool {
-    bearer_credential(header)
-        .is_some_and(|credential| tokens_match(credential.as_bytes(), expected))
 }
 
 /// Which of several expected tokens `presented` is, compared against
@@ -156,7 +216,16 @@ fn scan<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::{bearer_credential, bearer_ok, fold_diff, match_any, scan, tokens_match};
+    use super::{bearer_credential, fold_diff, match_any, scan, tokens_match};
+
+    /// Does an `Authorization` header value carry the expected bearer
+    /// token? The parse and the comparison, composed as both surfaces
+    /// compose them (through `SessionAuthority::authenticate` since #4
+    /// PR 2, which moved the portal off the single-token helper).
+    fn bearer_ok(header: Option<&str>, expected: &[u8]) -> bool {
+        bearer_credential(header)
+            .is_some_and(|credential| tokens_match(credential.as_bytes(), expected))
+    }
 
     /// Every acceptance case in one table: `true` only for a byte-equal,
     /// equal-length, non-empty token.

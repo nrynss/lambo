@@ -73,6 +73,61 @@ fn an_empty_auth_token_is_refused() {
     assert!(AuthToken::new("s3cret").is_ok());
 }
 
+/// #4 PR 2: a token longer than the shared presented-credential cap could
+/// never match (the scan refuses a longer header first), so it is refused at
+/// construction, naming the bound and not the value. The cap itself is fine.
+#[test]
+fn an_auth_token_over_the_presented_cap_is_refused() {
+    let max = crate::surface::bearer::MAX_BEARER_CREDENTIAL_BYTES;
+    let at_cap = "k".repeat(max);
+    let token = AuthToken::new(at_cap.as_str()).expect("the cap itself");
+    let authority = portal_authority(Some(token), &[SessionId::new("t4-cap")]);
+    assert!(
+        authority
+            .authenticate(Some(&format!("Bearer {at_cap}")))
+            .is_some(),
+        "a token at the cap authenticates"
+    );
+    let over = "k".repeat(max + 1);
+    let err = AuthToken::new(over.as_str()).expect_err("over the cap");
+    assert!(err.contains(&max.to_string()), "{err}");
+    assert!(!err.contains(&over), "the value is never quoted");
+}
+
+/// #4 PR 2 review M2: a token no request could present is refused at
+/// construction by the rule `lambo serve` applies (one shared validator),
+/// with the same message, never quoting the token: surrounding whitespace
+/// (the presented credential is trimmed) and a byte outside printable
+/// ASCII (a header value holding one is unreadable). 4096 bytes is
+/// accepted, 4097 refused. A space inside the token is presentable.
+#[test]
+fn an_auth_token_no_request_could_present_is_refused_as_serve_refuses_it() {
+    let core = ["t4", "m2", "core"].concat();
+    let max = crate::surface::bearer::MAX_BEARER_CREDENTIAL_BYTES;
+    let refused = [
+        (format!(" {core}"), "leading or trailing whitespace"),
+        (format!("{core} "), "leading or trailing whitespace"),
+        (format!("\t{core}"), "leading or trailing whitespace"),
+        (format!("{core}\r"), "leading or trailing whitespace"),
+        (format!("{core}\n"), "leading or trailing whitespace"),
+        (format!("{core}\tx"), "printable ASCII"),
+        (format!("{core}\u{e9}"), "printable ASCII"),
+        (format!("{core}\u{7f}x"), "printable ASCII"),
+        ("k".repeat(max + 1), "longer than 4096 bytes"),
+    ];
+    for (raw, rule) in &refused {
+        let err = AuthToken::new(raw.as_str()).expect_err("refused");
+        assert!(err.contains(rule), "{rule}: {err}");
+        assert!(!err.contains(&core), "the value is never quoted: {err}");
+        let serve = crate::mcp::SecretToken::new(raw.as_str()).expect_err("serve refuses");
+        assert_eq!(err, serve, "one rule, one message");
+    }
+    for raw in [format!("{core} inner"), "k".repeat(max)] {
+        assert!(AuthToken::new(raw.as_str()).is_ok());
+        assert!(crate::mcp::SecretToken::new(raw.as_str()).is_ok());
+    }
+}
+
 /// A set `LAMBO_AUTH_TOKEN` that is not valid UTF-8 is a usage error
 /// naming the variable, never the value, and never read as unset (which
 /// fell back to the flag or to an unauthenticated loopback window). The
@@ -101,19 +156,23 @@ fn a_non_utf8_auth_token_variable_is_refused_not_treated_as_unset() {
 }
 
 /// The `Authorization` header is parsed strictly: scheme case-insensitive,
-/// credential exact.
+/// credential exact. Since #4 PR 2 through the portal's credential set
+/// (`surface::session::SessionAuthority`), as every request is.
 #[test]
 fn bearer_header_is_parsed_strictly() {
-    let expected = AuthToken::new("s3cret").expect("valid");
-    assert!(bearer_ok(Some("Bearer s3cret"), &expected));
-    assert!(bearer_ok(Some("bearer s3cret"), &expected), "RFC 7235 §2.1");
-    assert!(bearer_ok(Some("  Bearer s3cret  "), &expected));
-    assert!(!bearer_ok(None, &expected), "a missing header is a refusal");
-    assert!(!bearer_ok(Some("Bearer wrong"), &expected));
-    assert!(!bearer_ok(Some("Basic s3cret"), &expected), "wrong scheme");
-    assert!(!bearer_ok(Some("s3cret"), &expected), "no scheme at all");
-    assert!(!bearer_ok(Some("Bearer"), &expected));
-    assert!(!bearer_ok(Some(""), &expected));
+    let secret = ["s3", "cret"].concat();
+    let expected = AuthToken::new(secret.as_str()).expect("valid");
+    let authority = portal_authority(Some(expected), &[SessionId::new("t4-parse")]);
+    let ok = |header: Option<&str>| authority.authenticate(header).is_some();
+    assert!(ok(Some(&format!("Bearer {secret}"))));
+    assert!(ok(Some(&format!("bearer {secret}"))), "RFC 7235 §2.1");
+    assert!(ok(Some(&format!("  Bearer {secret}  "))));
+    assert!(!ok(None), "a missing header is a refusal");
+    assert!(!ok(Some("Bearer wrong")));
+    assert!(!ok(Some(&format!("Basic {secret}"))), "wrong scheme");
+    assert!(!ok(Some(&secret)), "no scheme at all");
+    assert!(!ok(Some("Bearer")));
+    assert!(!ok(Some("")));
 }
 
 /// The comparator (`crate::surface::bearer::tokens_match`, shared with
@@ -203,17 +262,28 @@ async fn a_configured_token_is_required_on_every_route() {
 /// The copies diverged once already: T1-P3-1's remediation rewrote only this
 /// surface's comparator, in the opposite loop direction, so its iteration
 /// count followed the secret's length. Boolean results cannot tell the two
-/// apart, so the pin is structural: no comparator is defined in the portal,
-/// and its gate goes through the shared check.
+/// apart, so the pin is structural: no comparator or scan is defined in the
+/// portal, and its gate goes through the shared credential set. Since #4
+/// PR 2 that is `surface::session::SessionAuthority::authenticate` (which
+/// scans with `surface::bearer::match_any`), the set `lambo serve` uses,
+/// instead of the single-token `bearer_ok`.
 #[test]
 fn the_portal_uses_the_shared_bearer_check() {
     let prod = production_source();
+    for banned in [
+        "fn tokens_match",
+        "fn match_any",
+        "fn bearer_credential",
+        "fn fold_diff",
+    ] {
+        assert!(
+            !prod.contains(banned),
+            "serve_web defines its own '{banned}'; use crate::surface::bearer"
+        );
+    }
     assert!(
-        !prod.contains("fn tokens_match"),
-        "serve_web defines its own token comparator; use crate::surface::bearer"
-    );
-    assert!(
-        prod.contains("crate::surface::bearer::bearer_ok"),
-        "serve_web's bearer gate must delegate to crate::surface::bearer::bearer_ok"
+        prod.contains("SessionAuthority<AuthToken>") && prod.contains(".authenticate(presented)"),
+        "serve_web's bearer gate must resolve the token through surface::session's \
+         SessionAuthority"
     );
 }

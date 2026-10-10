@@ -373,22 +373,30 @@ Under a supervisor (launchd, systemd, Kubernetes), give the server more than 20 
 
 ### Watch a session in a browser
 
-`lambo serve-web` opens a read-only browser window onto a session. It is a **reader**: it never takes the writer lease and exposes no mutating route, so it runs safely beside a `lambo serve` writer on the same session. Point it at the same store so it reads the same data.
+`lambo serve-web` opens a read-only browser window onto one or more sessions. It is a **reader**: it never takes the writer lease and exposes no mutating route, so it runs safely beside a `lambo serve` writer on the same session. Point it at the same store so it reads the same data.
 
 | Flag | Required | Default |
 |---|---|---|
-| `--session <SESSION>` | Yes | |
+| `--session <SESSION>` | Yes, unless `[web] sessions` names one | Repeatable. Every session given, then `[web] sessions`, is served; the first is the default. |
 | `--port <PORT>` | No | `7710` |
 | `--bind <BIND>` | No | `127.0.0.1` |
-| `--auth-token <TOKEN>` | No | Bearer token. Loopback is unauthenticated by default. A non-loopback bind requires it and fails closed without one. `LAMBO_AUTH_TOKEN` overrides it. |
+| `--auth-token <TOKEN>` | No | Bearer token. Loopback is unauthenticated by default. A non-loopback bind requires it and fails closed without one. `LAMBO_AUTH_TOKEN` overrides it. The token must be printable ASCII with no leading or trailing whitespace, and at most 4096 bytes, as for `lambo serve`; otherwise the start exits `2`, never quoting the token. A request carrying two `Authorization` headers gets `401`. |
+| `--allowed-host <HOST>` | No | Repeatable. A `Host` the unauthenticated window also answers, beside `localhost`, `127.0.0.1` and `[::1]`. A name, or `name:port` to accept only that port. Ignored once a token is configured. |
 
 ```bash
 lambo serve-web --config lambo.toml --session demo
+lambo serve-web --config lambo.toml --session lambo --session rustydocs
 ```
 
-The page polls read-only `GET` endpoints, `/api/session`, `/api/recall`, `/api/events`, `/api/stats`, `/api/pulse`. Those let it show live recall, the canonization feed, and durable counts without ever writing. A non-loopback reader still needs the token, because reading exposes the whole session to whoever can reach the port.
+The page polls read-only `GET` endpoints, `/api/session`, `/api/recall`, `/api/events`, `/api/stats`, `/api/pulse`. Those let it show live recall, the canonization feed, and durable counts without ever writing. A non-loopback reader still needs the token, because reading exposes every served session to whoever can reach the port.
 
-Every request and every open tab reads one shared view of the session, loaded at most once per `view_ttl_ms` (1.5 seconds by default), so the page can be up to that much older than the store and the store load does not grow with the number of tabs. The session is loaded on the first request, not at startup; startup still checks the store's schema and fails if it is not provisioned. A recall that cannot start within 2 seconds because `recall_concurrency` recalls are already running gets `503` with `Retry-After: 1`. The `[web]` keys set these bounds; see [Read-only window views](/config#read-only-window-views).
+**Which sessions.** The window serves exactly the sessions you name, the ordered union of `--session` and `[web] sessions`, and never looks for others in the store. Each is read at `/s/<session>/` (the page there shows that session; `/s/<session>` without the slash redirects to it), with its data routes under `/s/<session>/api/...`. The unscoped `/` and `/api/...` serve the first, so a one-session window is reached exactly as before. With more than one session, every name must be 1 to 128 bytes of `[A-Za-z0-9._:-]` and must not start with `.`, or startup exits `2` naming it; a single session keeps the looser `--session` rule and is reached at `/`. A session that is not served, a malformed or percent-encoded name, and a path that does not exist all answer the same empty `404`, before the store is read. A served session that has never been written, or was erased, is an empty page; remove an erased session from the list. A non-`GET` request to a served session's route gets `405`, as on `/`.
+
+**The `Host` check.** With no token configured, the window answers only requests whose `Host` is `localhost`, `127.0.0.1` or `[::1]` (any port), or a host named with `--allowed-host` or `[web] allowed_hosts`. Anything else gets `403`, as does a malformed `Host` (user info, an empty or non-numeric port) and a request with two `Host` headers. This stops a web page you visit from reading the window by pointing its own name at `127.0.0.1` (DNS rebinding). A reverse proxy that forwards its public name as `Host`, as Caddy does by default, needs that name in `--allowed-host`. With a token configured any `Host` is accepted, because a page cannot present a token it does not know.
+
+**Tokens and browsers.** One token reads every served session. The page sends no `Authorization` header itself, so with a token configured a plain browser cannot open it: put it behind a proxy that adds the header, or read the JSON routes from a script.
+
+Every request and every open tab reads one shared view of each session, loaded at most once per `view_ttl_ms` (1.5 seconds by default), so the page can be up to that much older than the store and the store load does not grow with the number of tabs. A session is loaded on the first request for it, not at startup; startup still checks the store's schema and fails if it is not provisioned. A recall that cannot start within 2 seconds because `recall_concurrency` recalls are already running gets `503` with `Retry-After: 1`. The `[web]` keys set these bounds; see [Read-only window views](/config#read-only-window-views).
 
 ## Provision a store
 

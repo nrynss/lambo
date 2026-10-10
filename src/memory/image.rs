@@ -291,6 +291,9 @@ impl Memory {
             Ok(Err(EmbedError::Unsupported(e))) => Err(LamboError::Config(format!(
                 "the configured embedder does not embed images ({e}); nothing was written"
             ))),
+            Ok(Err(EmbedError::Unreadable(e))) => Err(LamboError::Embed(format!(
+                "Lambo could not read the image ({e}); nothing was written"
+            ))),
             Ok(Err(e)) if e.is_transient() => Err(LamboError::EmbedUnavailable(format!(
                 "the embedder could not be reached for the image ({e}); nothing was written"
             ))),

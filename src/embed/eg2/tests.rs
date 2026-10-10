@@ -69,6 +69,13 @@ fn image_body(png: &[u8]) -> String {
     )
 }
 
+/// The request body for a user image: its canonical form (22g), never the
+/// submitted bytes. The reference image is posted as it is
+/// ([`image_body`]).
+fn sent_body(png: &[u8]) -> String {
+    image_body(&canonical::to_canonical_png(png, crate::embed::ImageMime::Png).unwrap())
+}
+
 // ---------------------------------------------------------------- requests
 
 /// The two text roles are sent byte-exact, each with its model-card prefix,
@@ -101,7 +108,7 @@ async fn text_bodies_are_byte_exact_with_the_role_prefix() {
 }
 
 /// The image goes as one input item whose content is the `image_url` part,
-/// a base64 data URI with the validated MIME, no text and no prefix.
+/// a base64 data URI of its canonical PNG, no text and no prefix.
 #[tokio::test]
 async fn the_image_body_is_the_nested_image_url_data_uri() {
     let server = MockServer::start();
@@ -109,7 +116,7 @@ async fn the_image_body_is_the_nested_image_url_data_uri() {
     let mock = server.mock(|when, then| {
         when.method(POST)
             .path("/v1/embeddings")
-            .body(image_body(&png));
+            .body(sent_body(&png));
         then.status(200).json_body(ok_body(&native(), Some(293)));
     });
     let input = crate::surface::image::validate(&png, "image/png").unwrap();
@@ -117,6 +124,137 @@ async fn the_image_body_is_the_nested_image_url_data_uri() {
     mock.assert_hits(1);
     assert_eq!(v.len(), 768);
     assert!((norm(&v) - 1.0).abs() < 1e-5);
+}
+
+/// Every image goes out as its canonical form (a lossless PNG with a 768 px
+/// longer side): a large PNG downscaled, a small WebP upscaled. The request
+/// body carries exactly the bytes `canonical::to_canonical_png` makes, never
+/// the submitted ones (22g).
+///
+/// Mutation: send `image.bytes()` again -> red.
+#[tokio::test]
+async fn the_image_body_carries_the_canonical_form() {
+    use image::{codecs::webp::WebPEncoder, ImageEncoder, Rgb, RgbImage};
+
+    let big = RgbImage::from_fn(1536, 1024, |x, y| Rgb([x as u8, y as u8, (x ^ y) as u8]));
+    let mut big_png = Vec::new();
+    image::DynamicImage::ImageRgb8(big.clone())
+        .write_to(std::io::Cursor::new(&mut big_png), image::ImageFormat::Png)
+        .unwrap();
+    let mut small_webp = Vec::new();
+    let small = RgbImage::from_fn(40, 30, |x, y| Rgb([x as u8, y as u8, 9]));
+    WebPEncoder::new_lossless(&mut small_webp)
+        .write_image(small.as_raw(), 40, 30, image::ColorType::Rgb8.into())
+        .unwrap();
+
+    for (bytes, mime, side) in [
+        (&big_png, "image/png", (768, 512)),
+        (&small_webp, "image/webp", (768, 576)),
+    ] {
+        let want =
+            canonical::to_canonical_png(bytes, crate::embed::ImageMime::from_mime(mime).unwrap())
+                .unwrap();
+        let decoded = image::load_from_memory_with_format(&want, image::ImageFormat::Png).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), side, "{mime}");
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(POST)
+                .path("/v1/embeddings")
+                .body(image_body(&want));
+            then.status(200).json_body(ok_body(&native(), Some(293)));
+        });
+        let input = crate::surface::image::validate(bytes, mime).unwrap();
+        let sha = input.sha256();
+        let v = embedder(&server).embed_image(input).await.unwrap();
+        mock.assert_hits(1);
+        assert_eq!(v.len(), 768);
+        // What Lambo stores about the image still describes the submitted
+        // bytes, not the canonical ones.
+        assert_eq!(
+            sha,
+            crate::surface::image::validate(bytes, mime)
+                .unwrap()
+                .sha256()
+        );
+        assert_ne!(want.as_slice(), bytes.as_slice());
+    }
+}
+
+/// An image whose header Lambo cannot read fails before the server is asked
+/// anything, not even `/props`.
+#[tokio::test]
+async fn an_unreadable_header_never_reaches_the_server() {
+    let server = MockServer::start();
+    let any = server.mock(|when, then| {
+        when.any_request();
+        then.status(200).json_body(ok_body(&native(), Some(293)));
+    });
+    // A valid PNG signature and IHDR, then the width zeroed: the validator
+    // is bypassed (as a library caller with `from_validated` could).
+    let mut png = png_2x1();
+    png[16..20].copy_from_slice(&0u32.to_be_bytes());
+    let input =
+        crate::embed::ImageInput::from_validated(&png, crate::embed::ImageMime::Png, [0; 32]);
+    let err = embedder(&server).embed_image(input).await.unwrap_err();
+    assert!(matches!(&err, EmbedError::Unreadable(_)), "{err:?}");
+    assert!(!err.is_transient());
+    any.assert_hits(0);
+}
+
+/// An image whose data Lambo cannot decode never reaches the embeddings
+/// endpoint.
+#[tokio::test]
+async fn an_undecodable_large_image_never_reaches_the_server() {
+    let server = MockServer::start();
+    let embeddings = server.mock(|when, then| {
+        when.method(POST).path("/v1/embeddings");
+        then.status(200).json_body(ok_body(&native(), Some(293)));
+    });
+    let mut png = Vec::new();
+    image::DynamicImage::new_rgb8(1000, 1000)
+        .write_to(std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+    png.truncate(png.len() / 2);
+    let input = crate::surface::image::validate(&png, "image/png").unwrap();
+    let err = embedder(&server).embed_image(input).await.unwrap_err();
+    assert!(
+        matches!(&err, EmbedError::Unreadable(m) if m.contains("could not decode")),
+        "{err:?}"
+    );
+    assert!(!err.is_transient());
+    embeddings.assert_hits(0);
+}
+
+/// The server and budget checks run before the full decode (22g review L4):
+/// with a verified server whose image budget is wrong, an image whose data
+/// would not decode fails on the budget, so a decode is never paid for an
+/// embed the server state already refuses.
+///
+/// Mutation: decode before `ensure_server` -> red (the error becomes
+/// `Unreadable`).
+#[tokio::test]
+async fn the_server_is_checked_before_the_image_is_decoded() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(GET).path("/props");
+        then.status(200)
+            .json_body(props("embeddinggemma-2-Q8_0.gguf", "Q8_0", true));
+    });
+    let reference = server.mock(|when, then| {
+        when.method(POST)
+            .path("/v1/embeddings")
+            .body(image_body(&png_1x1()));
+        then.status(200).json_body(ok_body(&native(), Some(260)));
+    });
+    let mut png = Vec::new();
+    image::DynamicImage::new_rgb8(1000, 1000)
+        .write_to(std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+    png.truncate(png.len() / 2);
+    let input = crate::surface::image::validate(&png, "image/png").unwrap();
+    let err = embedder(&server).embed_image(input).await.unwrap_err();
+    assert!(err.to_string().contains("reference image"), "{err}");
+    reference.assert_hits(1);
 }
 
 /// Empty text is refused before any request, like every other adapter.
@@ -364,7 +502,7 @@ async fn a_verified_server_is_checked_with_the_reference_image() {
         let image = server.mock(|when, then| {
             when.method(POST)
                 .path("/v1/embeddings")
-                .body(image_body(&png));
+                .body(sent_body(&png));
             then.status(200).json_body(ok_body(&native(), Some(260)));
         });
         let e = embedder(&server);
@@ -764,7 +902,7 @@ async fn a_refused_reference_image_is_a_server_problem() {
         let image = server.mock(|when, then| {
             when.method(POST)
                 .path("/v1/embeddings")
-                .body(image_body(&png));
+                .body(sent_body(&png));
             then.status(200).json_body(ok_body(&native(), Some(260)));
         });
         let e = embedder(&server);
@@ -807,7 +945,7 @@ async fn a_busy_server_keeps_its_checks_and_only_a_restart_drops_them() {
     let mut image = server.mock(|when, then| {
         when.method(POST)
             .path("/v1/embeddings")
-            .body(image_body(&png));
+            .body(sent_body(&png));
         then.status(200).json_body(ok_body(&native(), Some(260)));
     });
     let e = embedder(&server);
@@ -817,7 +955,7 @@ async fn a_busy_server_keeps_its_checks_and_only_a_restart_drops_them() {
     let mut busy = server.mock(|when, then| {
         when.method(POST)
             .path("/v1/embeddings")
-            .body(image_body(&png));
+            .body(sent_body(&png));
         then.status(503).body(
             r#"{"error":{"code":503,"message":"Server is busy","type":"unavailable_error"}}"#,
         );
@@ -829,7 +967,7 @@ async fn a_busy_server_keeps_its_checks_and_only_a_restart_drops_them() {
     server.mock(|when, then| {
         when.method(POST)
             .path("/v1/embeddings")
-            .body(image_body(&png));
+            .body(sent_body(&png));
         then.status(200).json_body(ok_body(&native(), Some(260)));
     });
     e.embed_image(input()).await.unwrap();
@@ -1161,7 +1299,7 @@ fn the_kind_and_its_contract_string() {
     assert_eq!(e.modalities(), Modalities::TEXT);
     assert_eq!(
         eg2_identity(e.as_ref()).as_deref(),
-        Some("ggml-org/embeddinggemma-2-GGUF@bfcd2987/Q8_0;prompts=lambo-eg2-v1")
+        Some("ggml-org/embeddinggemma-2-GGUF@bfcd2987/Q8_0;prompts=lambo-eg2-v2")
     );
 
     let custom = build_embedder(EmbedderConfig {
@@ -1175,7 +1313,7 @@ fn the_kind_and_its_contract_string() {
     assert_eq!(custom.modalities(), Modalities::TEXT | Modalities::IMAGE);
     assert_eq!(
         eg2_identity(custom.as_ref()).as_deref(),
-        Some("google/embeddinggemma-2@914f7f89;prompts=lambo-eg2-v1")
+        Some("google/embeddinggemma-2@914f7f89;prompts=lambo-eg2-v2")
     );
     // Not the EG2 adapter: no identity.
     #[cfg(feature = "embed-fixture")]
@@ -1260,7 +1398,65 @@ fn resolve_stamps_the_eg2_contract() {
     assert_eq!(r.embedding.kind, "embeddinggemma2");
     assert_eq!(
         r.embedding.model.as_deref(),
-        Some("ggml-org/embeddinggemma-2-GGUF@bfcd2987/Q8_0;prompts=lambo-eg2-v1")
+        Some("ggml-org/embeddinggemma-2-GGUF@bfcd2987/Q8_0;prompts=lambo-eg2-v2")
     );
     assert_eq!(r.embedding.dim, 512);
+}
+
+// ------------------------------------------------- recall by image (PR 6)
+
+/// A recall by image goes through the same canonical form as a derive: the
+/// query image's request body is its canonical PNG, so a query vector is in
+/// the stored images' space whatever size the query was submitted at
+/// (22g review M4).
+///
+/// Mutation: have `QueryBy::Image` post the submitted bytes -> red.
+#[tokio::test]
+async fn a_recall_by_image_sends_the_canonical_form() {
+    use crate::recall::query_vector::{resolve, QueryBy};
+
+    let big = image::RgbImage::from_fn(1600, 900, |x, y| {
+        image::Rgb([
+            (x % 256) as u8,
+            (y % 256) as u8,
+            ((x / 16 + y / 16) % 2 * 200) as u8,
+        ])
+    });
+    let mut png = Vec::new();
+    image::DynamicImage::ImageRgb8(big)
+        .write_to(std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+    let server = MockServer::start();
+    let mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/v1/embeddings")
+            .body(sent_body(&png));
+        then.status(200).json_body(ok_body(&native(), Some(260)));
+    });
+    let e = embedder(&server);
+    let live = crate::types::EmbeddingContract {
+        kind: "embeddinggemma2".into(),
+        model: Some(e.model_identity().to_string()),
+        dim: 768,
+    };
+    let input = crate::surface::image::validate(&png, "image/png").unwrap();
+    let v = resolve(QueryBy::Image(input), &e, &live).await.unwrap();
+    mock.assert_hits(1);
+    assert_eq!(v.len(), 768);
+    assert!((norm(&v) - 1.0).abs() < 1e-5);
+
+    // An image Lambo cannot read is named as such, not as an embedder
+    // refusal (22g review L3).
+    let mut bad = png.clone();
+    bad.truncate(bad.len() / 2);
+    let input = crate::surface::image::validate(&bad, "image/png").unwrap();
+    let err = resolve(QueryBy::Image(input), &e, &live).await.unwrap_err();
+    let crate::types::LamboError::Embed(msg) = &err else {
+        panic!("{err:?}");
+    };
+    assert!(
+        msg.starts_with("Lambo could not read the query image"),
+        "{msg}"
+    );
+    mock.assert_hits(1);
 }
