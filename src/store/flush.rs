@@ -523,7 +523,7 @@ impl FlushLoop {
             // bounded the in-flight cycle.)
             if self.fenced() {
                 let dropped = self.pending.mutations.len();
-                self.clear_pending();
+                self.drop_pending();
                 self.refresh_depth();
                 tracing::error!(
                     dropped,
@@ -683,7 +683,7 @@ impl FlushLoop {
             // drained batch instead of retaining it — post-degrade retention
             // used to grow without bound for the session's remaining life.
             // Depth is the in-graph log only.
-            self.clear_pending();
+            self.drop_pending();
             self.refresh_depth();
             return false;
         }
@@ -719,7 +719,7 @@ impl FlushLoop {
 
         match self.flush_with_retry().await {
             Ok(()) => {
-                self.clear_pending();
+                self.commit_pending();
                 self.retry_after = None;
                 // Caught up as of the drain, not now: what landed while the
                 // flush ran is still in the log and still unbounded by it.
@@ -735,7 +735,7 @@ impl FlushLoop {
                 // stats, session continues, never degrade for a dead-lettered
                 // batch.
                 let batch_len = self.pending.len();
-                self.clear_pending();
+                self.drop_pending();
                 self.retry_after = None;
                 self.shared.dead_lettered.fetch_add(1, Ordering::AcqRel);
                 self.refresh_depth();
@@ -938,6 +938,27 @@ impl FlushLoop {
     fn clear_pending(&mut self) {
         self.pending.mutations.clear();
         self.holds_accesses = false;
+    }
+
+    /// The store committed `pending` (#60): tell the graph which writes are
+    /// durable now, then clear it. The graph's unflushed set is cleared only
+    /// here, after the commit was acknowledged, so a concept is never absent
+    /// from both the database and that set. A brief write lock, no I/O.
+    fn commit_pending(&mut self) {
+        let through = self.pending.mutation_epoch;
+        self.graph.write().mark_durable_through(through);
+        self.clear_pending();
+    }
+
+    /// `pending` is dropped without reaching the store (a dead letter, a
+    /// degraded session, a lost lease): keep what it touched marked as not
+    /// durable in the graph (#60), then clear it. A later successful stamp
+    /// must not count these writes as committed.
+    fn drop_pending(&mut self) {
+        if !self.pending.mutations.is_empty() {
+            self.graph.write().pin_unflushed(&self.pending.mutations);
+        }
+        self.clear_pending();
     }
 
     /// Test hook: see `Shared::drain_pause`. The guard is taken and dropped in
@@ -1542,6 +1563,8 @@ mod tests {
         inner: Arc<dyn GraphStore>,
         flush_calls: AtomicUsize,
         batch_sizes: Mutex<Vec<usize>>,
+        /// Refuse only the first flush, then delegate (#60's pin test).
+        only_first: bool,
     }
 
     impl ConstraintStore {
@@ -1550,6 +1573,14 @@ mod tests {
                 inner,
                 flush_calls: AtomicUsize::new(0),
                 batch_sizes: Mutex::new(Vec::new()),
+                only_first: false,
+            }
+        }
+
+        fn only_first(inner: Arc<dyn GraphStore>) -> Self {
+            Self {
+                only_first: true,
+                ..Self::new(inner)
             }
         }
 
@@ -1572,8 +1603,11 @@ mod tests {
             batch: &MutationBatch,
             _token: Option<u64>,
         ) -> Result<(), StoreError> {
-            self.flush_calls.fetch_add(1, Ordering::SeqCst);
+            let call = self.flush_calls.fetch_add(1, Ordering::SeqCst);
             self.batch_sizes.lock().push(batch.len());
+            if self.only_first && call > 0 {
+                return self.inner.flush(batch, _token).await;
+            }
             Err(StoreError::Constraint("23505".into()))
         }
 
@@ -1672,10 +1706,20 @@ mod tests {
             store.load_session(&sid()).await.is_err(),
             "nothing flushed yet"
         );
+        assert_eq!(
+            graph.read().unflushed_len(),
+            1,
+            "#60: drained is not durable; the concept stays unflushed"
+        );
 
         // Interval tick delivers the batch.
         tokio::time::advance(Duration::from_millis(900)).await;
         wait_until(|| task.stats().depth == 0).await;
+        assert_eq!(
+            graph.read().unflushed_len(),
+            0,
+            "#60: the committed batch cleared the unflushed set"
+        );
 
         let snap = store.load_session(&sid()).await.unwrap();
         assert_eq!(snap.interactions.len(), 1);
@@ -2823,6 +2867,39 @@ mod tests {
         let out = logs.contents();
         assert!(out.contains("FlushDeadLettered"), "warn missing: {out}");
         assert!(out.contains("23505"), "constraint code missing: {out}");
+    }
+
+    /// #60: a dead-lettered concept never reached the store, so a later
+    /// successful flush, whose stamp is higher, must not count it as
+    /// durable. The holder's derive would otherwise find it in neither the
+    /// database nor the unflushed set.
+    #[tokio::test(start_paused = true)]
+    async fn a_dead_lettered_concept_stays_unflushed_after_a_later_commit() {
+        let _quiet = quiet_logs();
+        let inner: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+        let store = Arc::new(ConstraintStore::only_first(inner));
+        let graph = new_graph();
+        let task = FlushTask::new(
+            graph.clone(),
+            store.clone(),
+            params(Duration::from_secs(1), 100, 3, 1_000),
+        );
+        let _handle = task.spawn();
+        let_task_arm().await;
+
+        let iid = add_interaction(&graph, 1, None);
+        let lost = add_concept(&graph, 1, iid);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        wait_until(|| task.stats().dead_lettered == 1).await;
+
+        let kept = add_concept(&graph, 2, iid);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        wait_until(|| !graph.read().is_unflushed(&kept)).await;
+        assert_eq!(store.flush_calls(), 2);
+        assert!(
+            graph.read().is_unflushed(&lost),
+            "a dead-lettered concept was counted as durable"
+        );
     }
 
     #[tokio::test(start_paused = true)]

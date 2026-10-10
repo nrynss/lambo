@@ -39,6 +39,7 @@
 //! * `embeddings.rs`: the embedding contract, re-embed and backfill;
 //! * `mutation_log.rs`: the log, the epoch, write intents, GC's mark and clock;
 //! * `accesses.rs`: read-access bookkeeping (issue #30);
+//! * `unflushed.rs`: what the durable store has not seen yet (#60);
 //! * `root_goal.rs`: the root goal, synonyms and reservations;
 //! * `invariants.rs`: [`Graph::assert_invariants`], the single §5.7 checker.
 
@@ -58,6 +59,7 @@ mod mutation_log;
 mod root_goal;
 mod snapshot;
 mod transitions;
+mod unflushed;
 
 pub use root_goal::root_goal_texts;
 
@@ -126,6 +128,11 @@ pub struct Graph {
     /// is unreachable, it holds at most one entry per concept, and the values
     /// are read from the node when drained. RAM-only, like the log.
     access_dirty: HashSet<NodeId>,
+    /// Ids whose latest upsert or delete is not yet durable, with the epoch
+    /// of that write (#60; see `unflushed.rs`). RAM-only, like the log.
+    unflushed: HashMap<NodeId, u64>,
+    /// The epoch of a `SetEmbedding` not yet durable (#60).
+    unflushed_contract: Option<u64>,
 }
 
 impl Graph {
@@ -149,6 +156,8 @@ impl Graph {
             epoch: 0,
             gc_mark: GcMark::default(),
             access_dirty: HashSet::new(),
+            unflushed: HashMap::new(),
+            unflushed_contract: None,
         }
     }
 
@@ -626,8 +635,11 @@ impl Graph {
     // -----------------------------------------------------------------------
 
     fn append_mutation(&mut self, m: Mutation) {
-        self.mutation_log.push(m);
         self.epoch += 1;
+        // #60: at the epoch the drained batch will be stamped with, so the
+        // flush can clear exactly what it committed.
+        self.note_unflushed(&m);
+        self.mutation_log.push(m);
     }
 
     /// Validate and store an edge: session match, endpoints exist, weight sanity,
