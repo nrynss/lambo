@@ -62,10 +62,14 @@ move dogfood. That is a different change. GC eviction recency
 | `a_stall_cannot_flip_a_half_cosine_ahead_of_point_three` | Real derives, best first, 40 ms sleep, both daemon-scored. 0.5 stays ahead of 0.3. This is the flip. | Failed on the historical formula: the 0.3 look scored 0.500 and the 0.5 look 0.475. |
 | `a_stall_keeps_the_graded_daemon_scores_together_on_sqlite` (was `graded_similarity_survives_a_stall_between_derives_on_sqlite`, cited by the #79 note) | Worst first, so the order cannot catch a flip. Pins the daemon-score spread across the three graded looks (`< 0.05`) and the full graded result, vector-leg cosines and unrelated looks included. | Failed on the historical formula: spread was about 0.24. |
 
-`script_step_clears_the_recency_floor_without_moving_relative_recency` checks
-that, at the real call indices (0–8, 10, 11, 13), a 60 s step gives the same
-`f64` position as a 10 ms step, that the last edit's offset is at least the
-floor, and that no interaction stamp is after the wall clock.
+`script_step_clears_the_recency_floor_without_moving_relative_recency`
+checks that each `INTERACTION_CALLS` index has the same `f64` position at
+a 60 s step as at a 10 ms step, and that the last edit's offset is at
+least the floor. That loop is the scaling identity. The live stamp check
+is `assert_shape`. The test also checks that
+`POST_EDIT_CLOCK_READS × SCRIPT_STEP` is inside `RECEIPT_RETENTION`. The
+count is the hand trace in the demo section, not a count of closes in a
+run.
 
 ## Short-span tests, and what happened to each
 
@@ -97,26 +101,24 @@ retrieval "recency floor" do not read `ScoreDims.recency`.
 
 ## Demo
 
-`lambo demo` stamps from `script_clock`. Twelve `begin_interaction` calls
-read it, and so does every `Memory::close` (the write-queue drain stamps
-receipts still pending at close; there are none in the script). Traced
-with a temporary backtrace on each read: seventeen reads, the interactions
-at calls 0–8, 10, 11 and 13, the closes at 9, 12, 14, 15 and 16. Agent A's
-last edit is call 13 (`SCRIPT_LAST_EDIT_INDEX`). `SCRIPT_STEP` is 60 s, so
-the span is 13 minutes, above the floor. `STEP_PACING` stays 10 ms of wall
-time and spaces nothing on the script clock.
+`lambo demo` stamps from `script_clock`. Call indices, the close reads,
+and the ahead-of-wall lead are documented on `SCRIPT_LAST_EDIT_INDEX`.
+Hand trace, 2026-10-10, a temporary backtrace, not re-checked on each run:
+seventeen reads; interactions at `INTERACTION_CALLS`; closes at 9, 12, 14,
+15 and 16. `POST_EDIT_CLOCK_READS` is that count of three closes after the
+last edit. Their lead is `3 × SCRIPT_STEP` (180 s), inside
+`RECEIPT_RETENTION` (300 s), and they stamp no receipt in this script.
+`SCRIPT_STEP` is 60 s, so the span is 13 minutes, above the floor.
+`STEP_PACING` stays 10 ms of wall time and spaces nothing on the script
+clock.
 
-The clock is backdated by 13 steps so that edit falls on `Utc::now`
+The clock is backdated by 13 steps so the last edit falls on `Utc::now`
 (truncated to whole milliseconds, which SQLite keeps) at construction.
-`assert_shape` checks that every interaction lands on `INTERACTION_CALLS`,
-and names the landed indices if a change to the close reads moves them. Positions are the old 10 ms positions at the
-same call indices. Dropping the close reads off this clock moved the
-printed headroom from 2.06× to 2.10×; they stay.
-
-The three closes after the last edit land one to three minutes ahead of
-the wall clock. They stamp no receipt in the script, no receipt is minted
-or expired on this clock, and the lead is under `RECEIPT_RETENTION`
-(300 s). The daemon, canonization and recall read the wall clock.
+`assert_shape` checks that every interaction lands on `INTERACTION_CALLS`
+and names the landed indices if a close read moves them. Positions are
+the old 10 ms positions at the same call indices. Dropping the close
+reads off this clock moved the printed headroom from 2.06× to 2.10×;
+they stay.
 
 The first version of this branch left `conflict_recency_window` at 30 s.
 The daemon ages a write on the wall clock, so act II's writes (calls 10

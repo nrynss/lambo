@@ -117,11 +117,14 @@
 //! same-tick edges from inflating either measure. Compressing it from 60s to
 //! 10ms keeps the guard **live**: every cycle still applies it, and an edge
 //! younger than 10ms would not count. Cycles are frozen during the build, so
-//! the floor is not applied then. Script-clock edges from the build are
-//! minutes old by the first canonization cycle, so the 10ms floor does not
-//! filter those. Edges created while settling (the synonym declarations) are
-//! wall-stamped and can be younger than 10ms; this does not claim the floor
-//! ignores them.
+//! the floor is not applied then. The newest script-clock edge is agent A's
+//! last edit, stamped at the clock's construction instant. By the first
+//! canonization cycle it is at least the twelve wall pauses behind that
+//! instant (`12 ×` [`STEP_PACING`], 120ms), which is well over 10ms, so the
+//! floor does not filter the script-clock build edges. Earlier acts are
+//! minutes older. Edges created while settling (the synonym declarations)
+//! are wall-stamped and can be younger than 10ms; this does not claim the
+//! floor ignores them.
 //!
 //! `conflict_recency_window` is widened to [`DEMO_CONFLICT_RECENCY_WINDOW`]
 //! because the script clock is not the wall clock. The daemon measures a
@@ -275,6 +278,11 @@ pub const SCRIPT_STEP: Duration = Duration::from_secs(60);
 pub const SCRIPT_LAST_EDIT_INDEX: i64 = 13;
 
 /// Script-clock reads after [`SCRIPT_LAST_EDIT_INDEX`]. See that constant.
+///
+/// Hand-counted on 2026-10-10: the closes after act III, canonization, and
+/// agent B's recall. The demo does not re-count these reads. The unit test
+/// only checks that this count times [`SCRIPT_STEP`] is inside
+/// [`crate::writeq::RECEIPT_RETENTION`].
 pub const POST_EDIT_CLOCK_READS: i64 = 3;
 
 /// The demo's `conflict_recency_window`: the spec's 30s plus the script
@@ -1830,7 +1838,8 @@ mod tests {
         );
         assert!(
             SCRIPT_STEP * (POST_EDIT_CLOCK_READS as u32) < crate::writeq::RECEIPT_RETENTION,
-            "closes after the last edit must stay inside receipt retention"
+            "the hand-counted post-edit lead must stay inside receipt retention; \
+             this does not re-count the closes in a run"
         );
     }
 
@@ -1857,7 +1866,8 @@ mod tests {
         assert!(
             STEP_PACING * (EXPECT_INTERACTIONS as u32)
                 <= crate::daemon::conflict::CONFLICT_RECENCY_WINDOW,
-            "wall-clock pacing must fit in the 30s of slack past the script span"
+            "wall pacing must stay inside the 30s slack past the script span; \
+             this is that bound, not a pin of the 10ms pause"
         );
     }
 

@@ -67,10 +67,13 @@ applies to inbound structural edges and Stage 3 applies to the blast-radius
 query — the guard that stops a burst of same-tick edges from inflating either
 measure. Compressing it from 60s to 10ms keeps the guard **live**: every cycle
 still applies it, and an edge younger than 10ms would not count. Cycles are
-frozen during the build, so the floor is not applied then. Script-clock edges
-from the build are minutes old by the first canonization cycle, so the 10ms
-floor does not filter those. Edges created while settling are wall-stamped
-and can be younger than 10ms; this does not claim the floor ignores them.
+frozen during the build, so the floor is not applied then. The newest
+script-clock edge is agent A's last edit, stamped when the script clock is
+built. By the first canonization cycle it is at least the twelve wall pauses
+behind that instant (12 × `STEP_PACING`, 120ms), which is well over 10ms, so
+the floor does not filter the script-clock build edges. Earlier acts are
+minutes older. Edges created while settling are wall-stamped and can be
+younger than 10ms; this does not claim the floor ignores them.
 
 Freezing `canonization_eval_interval` during the build is not cosmetic: it
 guarantees no cycle ever evaluates a half-built graph, so the state machine
@@ -135,9 +138,9 @@ a **fixed point**, not a snapshot taken at a lucky instant:
    60 seconds (`SCRIPT_STEP`). The twelve interactions are `INTERACTION_CALLS`
    (see `SCRIPT_LAST_EDIT_INDEX` in `src/cli/demo.rs`). The session spans 13
    minutes, above the 10-minute recency floor, and recency positions match
-   the old 10ms step. The last edit is stamped at the wall clock's present
-   (the demo checks this), and the conflict window spans the rest (see the
-   knobs). Twelve writes issued back to back would land microseconds apart,
+   the old 10ms step. The demo checks the stamp indices, and the conflict
+   window spans the rest (see the knobs). Twelve writes issued back to back
+   would land microseconds apart,
    and that jitter would be the span.
 
 ### What is normalized, and why
