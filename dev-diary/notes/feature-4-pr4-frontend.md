@@ -164,3 +164,33 @@ the field always serialized (the single-session and credential tests).
 
 PR 5: H7 closure, `lambo.example.toml` `[web]`, the full
 `feature-4-multi-session-portal.md` note.
+
+## Opus review remediation (2026-10-10)
+
+The review approved with Low fixes. After merging main (#32 PR 7), each
+finding got its own commit:
+
+- **L1.** Only the probe's 404 drops a name and says it cannot be read.
+  A 401, a 5xx or no answer keeps the name and gives a retryable message.
+- **L2.** Listing mode ends the select with "Other session…", which
+  reveals the text field, so a session reached through a prefix can be
+  opened. Each control now has its own static label.
+- **L3.** The session name is cut with an ellipsis, with the full name in
+  `title`, and the picker's message wraps anywhere. Checked in a browser
+  at 375 px: the scroll width stays at 375.
+- **L4.** The empty state follows the poll's count, and the hero repaints
+  on the transition. Checked live: a first write and an erase each showed
+  within one poll.
+- **L5.** New wire tests cover `switchable` for prefix grants and the
+  probe's 404 and 401. The name-rule test now runs the regex parsed out of
+  `app.js`.
+- **I3.** `ScopedRequest` lets the listing refuse a scoped request by
+  itself.
+- **I4.** The docs say the JSON and headers are unchanged and the page
+  HTML gained hidden markup.
+- **I5.** The docs note that the history is per browser profile.
+- **I6.** The select now has `aria-describedby`.
+
+Unchanged by the owner's decision:
+- **I1:** `switchable` is kept.
+- **CSP:** deferred to #92, and none is added here.
