@@ -28,8 +28,8 @@ Each release carries one `lambo` binary per platform plus a SHA-256 checksum fil
 To pin a version or choose the install directory, set the variables on `sh`, the command that reads them. `LAMBO_INSTALL_DIR` must be writable by the current user.
 
 ```bash
-curl -fsSLo install.sh https://github.com/nrynss/lambo/releases/download/v0.3.0/install.sh
-LAMBO_VERSION=0.3.0 LAMBO_INSTALL_DIR="$HOME/bin" sh install.sh
+curl -fsSLo install.sh https://github.com/nrynss/lambo/releases/download/v0.4.0/install.sh
+LAMBO_VERSION=0.4.0 LAMBO_INSTALL_DIR="$HOME/bin" sh install.sh
 ```
 
 To install the Metal build on Apple silicon, set `LAMBO_FLAVOR=metal` on `sh`, the command that reads it. The script verifies its checksum the same way, and refuses `metal` on any other platform.
@@ -38,11 +38,11 @@ To install the Metal build on Apple silicon, set `LAMBO_FLAVOR=metal` on `sh`, t
 curl -fsSL https://github.com/nrynss/lambo/releases/latest/download/install.sh | LAMBO_FLAVOR=metal sh
 ```
 
-`LAMBO_FLAVOR` needs the v0.3.0 install script or later. Until v0.3.0 is the latest release, the `latest` URL above serves an older script that ignores `LAMBO_FLAVOR` and installs the stock build. To be sure of the Metal build, download the v0.3.0 script and run it pinned:
+`LAMBO_FLAVOR` needs the v0.3.0 install script or later, which the `latest` URL above serves. To pin the Metal build to a version, download that release's script and run it pinned:
 
 ```bash
-curl -fsSLo install.sh https://github.com/nrynss/lambo/releases/download/v0.3.0/install.sh
-LAMBO_VERSION=0.3.0 LAMBO_FLAVOR=metal sh install.sh
+curl -fsSLo install.sh https://github.com/nrynss/lambo/releases/download/v0.4.0/install.sh
+LAMBO_VERSION=0.4.0 LAMBO_FLAVOR=metal sh install.sh
 ```
 
 Set `LAMBO_DRY_RUN=1` the same way to print the asset and URLs the script would fetch without downloading anything.

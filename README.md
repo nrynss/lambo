@@ -118,10 +118,8 @@ On Apple silicon, `LAMBO_FLAVOR=metal` installs the Metal build instead
 (`lambo-<version>-macos-arm64-metal`): the same adapter set plus the in-process candle
 embedder on the GPU (`[embedder] kind = "candle"`, `device = "metal"`). The stock binaries
 do not carry candle. The script refuses `metal` on any other platform.
-`LAMBO_FLAVOR` needs the v0.3.0 install script or later: until v0.3.0 is the latest
-release, the `latest` URL below serves an older script that ignores it and installs the
-stock build, so pin v0.3.0 as shown in the
-[installation guide](docs/reference/installation.mdx).
+`LAMBO_FLAVOR` needs the v0.3.0 install script or later, which the `latest` URL below
+serves. To pin a version, see the [installation guide](docs/reference/installation.mdx).
 
 ```bash
 curl -fsSL https://github.com/nrynss/lambo/releases/latest/download/install.sh | LAMBO_FLAVOR=metal sh
