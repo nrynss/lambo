@@ -12,7 +12,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use serde::Serialize;
 
-use super::auth::{gate, host_guard, listable, Caller};
+use super::auth::{gate, host_guard, listable, switchable, Caller};
 use super::dto::{
     GraphEdge, GraphNode, GraphResponse, InspectParams, InspectResponse, Pulse, RecallParams,
     RecallResponse, SessionInfo, SessionList, SinceParams,
@@ -127,7 +127,18 @@ pub(super) async fn api_sessions(
     )
 }
 
-pub(super) async fn api_session(State(state): State<Arc<AppState>>, ctx: SessionCtx) -> Response {
+/// `GET /api/session`: who this session is, which backends read it, and
+/// (#4 PR 4) whether the caller may switch to another served session.
+pub(super) async fn api_session(
+    State(state): State<Arc<AppState>>,
+    ctx: SessionCtx,
+    caller: Option<axum::Extension<Caller>>,
+) -> Response {
+    // Every request that reaches a data route carries its grant (the gate
+    // or the scoped resolution attached it); without one, no picker.
+    let switchable = caller.is_some_and(|axum::Extension(Caller(grant))| {
+        switchable(&state.authority, &grant, &state.sessions)
+    });
     let view = match state.view(&ctx.session).await {
         Ok(view) => view,
         Err(err) => return fail(err),
@@ -153,6 +164,7 @@ pub(super) async fn api_session(State(state): State<Arc<AppState>>, ctx: Session
             exposed_beyond_loopback: state.exposed,
             poll_interval_ms: POLL_INTERVAL.as_millis() as u64,
             version: env!("CARGO_PKG_VERSION"),
+            switchable,
         },
     )
 }

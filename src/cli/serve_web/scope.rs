@@ -40,7 +40,7 @@ use axum::http::{header, HeaderValue, Method, StatusCode, Uri};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 
-use super::auth::{authenticate, unauthorized, Authenticated};
+use super::auth::{authenticate, unauthorized, Authenticated, Caller};
 use super::state::AppState;
 use crate::surface::session::{not_found_response, SessionGrant, SessionNeed};
 use crate::types::SessionId;
@@ -127,6 +127,7 @@ pub(super) async fn resolve_session(
     };
     *req.uri_mut() = uri;
     req.extensions_mut().insert(SessionCtx { session });
+    req.extensions_mut().insert(Caller(grant));
     req.extensions_mut().insert(Authenticated);
     let mut response = next.run(req).await;
     if page && response.status().is_success() {
