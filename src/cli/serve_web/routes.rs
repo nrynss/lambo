@@ -17,6 +17,7 @@ use super::dto::{
     GraphEdge, GraphNode, GraphResponse, InspectParams, InspectResponse, Pulse, RecallParams,
     RecallResponse, SessionInfo, SessionList, SinceParams,
 };
+use super::headers::security_headers;
 use super::projections::{
     is_structural, read_feed_and_stats, status_str, structural_dependents, structural_rank,
 };
@@ -488,15 +489,21 @@ pub(super) async fn api_graph(State(state): State<Arc<AppState>>, ctx: SessionCt
 /// with a pen. A new path must also be added to the tests' `ROUTES` list, which
 /// `routes_constant_covers_every_registered_route` enforces.
 ///
-/// The routes are the outer router's fallback service, so the two outer
-/// layers run on **every** request before routing, in this order:
-/// `host_guard` (the DNS-rebinding `Host` check) and `resolve_session`
-/// (for `/s/{session}/...`: the bearer, then which session, `super::scope`).
-/// A layer over the routes runs only after routing, too late to decide the
-/// session for an unrouted method or path. The `gate` over the routes is
-/// the bearer check for every unscoped path, where it has always been (so
-/// its 401 is unchanged byte for byte), and gives the aliases the default
-/// session.
+/// The routes are the outer router's fallback service, so the outer
+/// layers run on **every** request before routing. Axum runs the last
+/// `.layer()` first on the way in, so the source order below is the
+/// reverse of the call order: `resolve_session` (for `/s/{session}/...`:
+/// the bearer, then which session, `super::scope`), then `host_guard`
+/// (the DNS-rebinding `Host` check), then `security_headers`
+/// ([`super::headers`], outermost). That last layer stamps
+/// `X-Content-Type-Options: nosniff` on every response and the page
+/// `Content-Security-Policy` on `text/html`, including a `403` / `401` /
+/// `404` / `308` an inner layer returns without calling onward. A layer
+/// over the routes runs only after routing, too late to decide the
+/// session for an unrouted method or path and too late to stamp those
+/// early refusals. The `gate` over the routes is the bearer check for
+/// every unscoped path, where it has always been, and gives the aliases
+/// the default session.
 ///
 /// `/api/sessions` is registered only with `[web] list_sessions` (#4 PR 3):
 /// off, the path is unrouted, so every method gets the uniform 404 rather
@@ -527,4 +534,5 @@ pub(super) fn router(state: Arc<AppState>) -> Router {
             resolve_session,
         ))
         .layer(middleware::from_fn_with_state(state, host_guard))
+        .layer(middleware::from_fn(security_headers))
 }

@@ -155,6 +155,7 @@ use crate::types::SessionId;
 
 mod auth;
 mod dto;
+mod headers;
 mod projections;
 mod routes;
 mod scope;

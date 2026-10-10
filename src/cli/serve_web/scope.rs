@@ -11,7 +11,7 @@
 //! | path | session |
 //! |---|---|
 //! | `/s/{session}` | `GET`/`HEAD`: a `308` to `/s/{session}/` (query kept), so the page's relative `api/...` URLs resolve under the session; other methods: the page route's 405 |
-//! | `/s/{session}/` | `{session}`'s page (the same `INDEX_HTML`, plus `no-store` and `Referrer-Policy: same-origin`) |
+//! | `/s/{session}/` | `{session}`'s page (the same `INDEX_HTML`, plus `no-store` and `Referrer-Policy: same-origin`, and the page `Content-Security-Policy` because the response is `text/html`; `X-Content-Type-Options: nosniff` is on every response) |
 //! | `/s/{session}/api/{route}` | `{session}`, served by the same `GET`-only route as the alias |
 //! | `/s/{session}/api/sessions` | none: the uniform 404 (the listing is unscoped, #4 PR 3; refused by the path check here and again by the listing, which refuses any request marked [`ScopedRequest`]) |
 //! | `/s/{session}/{anything else}` | none: the uniform 404 |

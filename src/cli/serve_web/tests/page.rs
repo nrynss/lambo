@@ -376,6 +376,61 @@ fn the_script_renders_names_as_text_and_builds_relative_urls() {
     // Names reach the DOM as text: the picker's options and message.
     assert!(APP_JS.contains("var o = el(\"option\", null, name);"));
     assert!(APP_JS.contains("$(\"session-picker-msg\").textContent = text"));
+    // The page's own markup stays free of inline script, style, and HTML
+    // event-handler attributes, so `script-src 'self'` / `style-src 'self'`
+    // need no `'unsafe-inline'`. `element.onclick =` in app.js is a property
+    // assignment from the external script, not an HTML handler.
+    assert_eq!(INDEX_HTML.matches("<script").count(), 1, "{INDEX_HTML}");
+    assert!(INDEX_HTML.contains(r#"<script src="/app.js"></script>"#));
+    assert!(
+        !INDEX_HTML.to_ascii_lowercase().contains("<style"),
+        "index.html must not carry an inline style"
+    );
+    let handlers = inline_event_handler_attributes(INDEX_HTML);
+    assert!(
+        handlers.is_empty(),
+        "index.html has inline event-handler attributes: {handlers:?}"
+    );
+}
+
+/// Attribute names inside tags that are HTML event handlers (`onclick`, …).
+fn inline_event_handler_attributes(html: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut rest = html;
+    while let Some(start) = rest.find('<') {
+        rest = &rest[start + 1..];
+        if rest.starts_with('!') || rest.starts_with('/') || rest.starts_with('?') {
+            let Some(end) = rest.find('>') else { break };
+            rest = &rest[end + 1..];
+            continue;
+        }
+        let Some(end) = rest.find('>') else { break };
+        let tag = &rest[..end];
+        rest = &rest[end + 1..];
+        let bytes = tag.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i].is_ascii_whitespace() {
+                let name_at = i + 1;
+                let mut j = name_at;
+                while j < bytes.len() && bytes[j].is_ascii_alphanumeric() {
+                    j += 1;
+                }
+                if j < bytes.len()
+                    && bytes[j] == b'='
+                    && j > name_at + 2
+                    && tag[name_at..name_at + 2].eq_ignore_ascii_case("on")
+                    && tag.as_bytes()[name_at + 2].is_ascii_alphabetic()
+                {
+                    found.push(tag[name_at..j].to_string());
+                }
+                i = j;
+            } else {
+                i += 1;
+            }
+        }
+    }
+    found
 }
 
 /// Acceptance: `localStorage` failures are tolerated. Every access sits in

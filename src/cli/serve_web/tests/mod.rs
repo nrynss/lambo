@@ -48,6 +48,13 @@ const PRODUCTION_SOURCES: &[(&str, &str)] = &[
         )),
     ),
     (
+        "serve_web/headers.rs",
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/cli/serve_web/headers.rs"
+        )),
+    ),
+    (
         "serve_web/projections.rs",
         include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -128,6 +135,7 @@ mod page;
 mod recall;
 mod routes;
 mod routing;
+mod security;
 mod session;
 mod shutdown;
 mod views;
