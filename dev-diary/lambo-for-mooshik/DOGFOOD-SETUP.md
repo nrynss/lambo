@@ -652,3 +652,155 @@ Two lines for the two calls, and a `git_sha` that is **not** `unknown`. A `git_s
 means §4's `--ledger` did not reach the registration. Either way the rig serves memory
 fine and measures nothing, which is the failure worth catching here rather than a week
 later.
+
+## 7. Multi-session: a planned move (the rig stays single-session)
+
+**The rig is single-session, and it stays single-session until its owner
+decides otherwise.** Nothing in this section has been run against the rig.
+The live unit serves `--session lambo-dev` from `lambo-0.3.0`, and every
+client points at `http://127.0.0.1:7700/mcp`.
+
+This section is a runbook to read, not a change to apply. It records how an
+operator would move the rig to several sessions in one serve, which is
+#33's cut-over (split `lambo-dev` into per-project sessions), using what
+#32 shipped. The background is in
+[feature-32-multi-session.md](../notes/feature-32-multi-session.md) and
+`docs/reference/cli.mdx` § "Several sessions in one serve".
+
+### 7.1 Before anything: the binary
+
+- **Version.** Multi-session serving is on main from #32 PR 4 onward. The
+  admin routes arrived in PR 7, which is main `fe8c3d71`. **v0.3.0 has
+  none of it**, and an older binary refuses a `lambo.toml` that has
+  `[serve]` (an unknown key). Re-pin with the §2 flow first: stage, bootout,
+  back up, `provision`, swap, bootstrap, verify.
+- **Change nothing else on the first restart.** With the plist unchanged
+  (one `--session lambo-dev`, no `[serve]`), the new binary behaves exactly
+  as before. It still exits on a lost lease, so `KeepAlive` restarts it,
+  and it still serves at `/mcp`. Let it run for a day before any split, so
+  a regression in the binary is not mistaken for one in the split.
+
+### 7.2 Config
+
+Add to `~/lambo-dogfood/lambo.toml`:
+
+```toml
+[serve]
+sessions = ["lambo", "rustydocs", "general"]   # pinned: attached at startup, never evicted
+default_session = "general"                    # what /mcp serves
+# max_attached = 16                            # the default; the pinned count must fit
+```
+
+Then drop `--session lambo-dev` from the plist's `ProgramArguments`. An
+HTTP serve takes its sessions from `[serve] sessions` when no `--session`
+is given. If a `--session` is kept, it is pinned too, and the first one
+becomes the default.
+
+Before you restart, know these:
+
+- **Names.** Every pinned name must be addressable by URL:
+  `[A-Za-z0-9._:-]`, 1 to 128 bytes, no leading `.`. A bad name in
+  `[serve]` is refused when the file is read, which stops every command,
+  `provision` included, before any model loads.
+- **`lambo-dev` is not migrated.** The new sessions start empty. The
+  design keeps `lambo-dev` read-only and archived, not pinned. Its content
+  stays readable without a lease, through `lambo serve-web --session
+  lambo-dev` or the CLI read verbs. Moving its concepts into the project
+  sessions is #33's split tool, which does not exist yet. Pinning
+  `lambo-dev` beside the new sessions for a transition is also valid.
+- **Lease loss changes.** With two or more pinned sessions, a lost lease
+  detaches only that session (`DetachSession`), and the session is retried
+  every 5 s. The process does not exit, so `KeepAlive` no longer restarts
+  it. A session that keeps losing its lease shows up in the log, not as a
+  restart.
+- **SQLite carries every session.** Every session's flushes, heartbeats and
+  attaches share the one SQLite connection, and `attach_concurrency` is
+  forced to 1. Shutdown closes every session inside the same budget, so
+  `ExitTimeOut 30` stays right for a handful of sessions. A test covers 16
+  dirty SQLite sessions inside the budget.
+- **On-demand attach stays off.** Leave the on-demand keys at their
+  defaults (`attach_concurrency`, `idle_detach_secs`, `per_session_rps`).
+  The rig has no credential that reaches past the pinned sessions, so
+  nothing is ever attached on demand.
+
+### 7.3 Credentials: none, on purpose
+
+The rig binds `127.0.0.1` and configures no credential, so every request
+runs as the implicit `local` credential, which reaches every pinned
+session. That is enough for a pinned-only rig, and it is the recommended
+setting.
+
+Adding any `[[serve.credential]]`, even an operator-only one, ends
+`local`. **Every client registration would then have to send
+`Authorization: Bearer <token>`**, or get `401`. A credential with a
+`session_prefix` or an unpinned name would also turn on on-demand attach.
+
+If the owner wants erase or listing over the wire anyway:
+
+1. Add an `operator` credential with `admin = true`, and `erase = true`
+   only if wanted.
+2. Give it `token_env`, never an inline token, and keep the token out of
+   the plist and the repo. The plist's `EnvironmentVariables` is a
+   plain-text file.
+3. Give every client its own credential scoped to the pinned names.
+
+Without that, erase a session with `lambo erase-session`. It needs the
+writer stopped (bootout first), because it never interrupts a live
+writer.
+
+### 7.4 Client wiring per project
+
+- **Keep the server name `lambo-dogfood`.** The memory-protocol hooks key
+  on the server name, not the URL, so they keep working.
+- **Per-project clients use `http://127.0.0.1:7700/mcp/s/<project>`.**
+  - Claude Code: the §4 rule against a project `.mcp.json` (this repo is
+    public) still holds. Use `local` scope (`claude mcp add --scope local
+    --transport http lambo-dogfood http://127.0.0.1:7700/mcp/s/lambo`, run
+    in the project directory). It is stored in `~/.claude.json` under that
+    project, not in the repo.
+  - Cursor: a project `.cursor/mcp.json`, kept out of git through
+    `.git/info/exclude`.
+- **Global-config clients stay on `/mcp`.** Codex, Grok and anything else
+  configured only globally reach `/mcp`, which is `default_session`
+  (`general`). Binding them by MCP `roots` is a follow-up, not v1.
+- **Stdio is not used.** The stdio cwd map (`[[serve.projects]]`) is for
+  stdio serves, and the rig is HTTP only (§5). An HTTP serve never reads
+  the map, and logs a startup warning if the table sets it.
+- **Migrate every layer.** As with every transport change, a stale layer
+  keeps the old URL (§5). Move the registration in every config layer that
+  names the server.
+
+### 7.5 What to watch
+
+- **Startup.** `serve.log` shows one `lambo serve: session attached` line
+  per pinned session. A session another writer holds logs `a pinned session
+  is held by another writer` and answers `503` until the 5 s retry takes
+  it. A session that cannot attach and will not recover (a contract
+  mismatch, say) answers `503` with no `Retry-After` until a restart.
+- **Leases.** `sqlite3 ~/lambo-dogfood/lambo-dev.db "select session_id,
+  holder from session_leases;"` shows one row per pinned session, all held
+  by `http-shared-writer`.
+- **Ledger.** Every line carries `session`, and the heartbeat writes one
+  `stats` line per session. The observability kit still groups by
+  `agent_id`, not `session`, so its numbers mix sessions until it is taught
+  to split them (#33, design R8). Filter on `session` by hand until then.
+- **Smoke test, per URL.** Run §6's test against each session's URL:
+  `lambo_stats` names the session it answers for, and a recall in one
+  session must not return another's concepts.
+- **A wrong URL looks like nothing at all.** A misspelled session in a
+  client URL gets an empty `404`, the same as any unknown path. Check the
+  URL first when a client "has no lambo".
+- **Lease loss.** Look for `lease lost to ...; detaching this session and
+  serving the others` in `serve.log`, and `lease` `lost` lines in the
+  ledger. The process keeps running, so nothing restarts.
+
+### 7.6 Rolling back
+
+1. Bootout.
+2. Remove the `[serve]` table, or the names that were added, and restore
+   `--session lambo-dev` in the plist.
+3. Bootstrap, and point the clients back at `/mcp`.
+
+The clean shutdown released every session's lease, so the next writer
+takes them at once. Remove `[serve]` before re-pinning a binary older than
+#32, which refuses the table.
