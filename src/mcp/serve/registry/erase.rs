@@ -154,9 +154,13 @@ impl SessionRegistry {
         let owned = id.to_string();
         let started = self.track_unless_closing(|| {
             tokio::spawn(async move {
+                // Declared before the answer is sent and dropped after it,
+                // so the fence's wake-up strictly follows the hand-off
+                // (#32 PR 7 review I1), on every way out.
+                let announce = AnnounceOnDrop::default();
                 let answer = tokio::select! {
                     biased;
-                    answer = registry.erase_now(&owned) => answer,
+                    answer = registry.erase_now(&owned, &announce) => answer,
                     () = registry.erase_cut_off() => {
                         tracing::warn!(
                             session = %owned,
@@ -174,6 +178,7 @@ impl SessionRegistry {
                     }
                 };
                 let _ = tx.send(answer);
+                drop(announce);
             })
         });
         if !started {
@@ -195,7 +200,7 @@ impl SessionRegistry {
     }
 
     /// [`SessionRegistry::erase`]'s body, on its task.
-    async fn erase_now(self: &Arc<Self>, id: &str) -> EraseAnswer {
+    async fn erase_now(self: &Arc<Self>, id: &str, announce: &AnnounceOnDrop) -> EraseAnswer {
         let busy = EraseAnswer::Busy {
             retry_after: Duration::from_secs(1),
         };
@@ -252,7 +257,7 @@ impl SessionRegistry {
         // so no other session's attach waits on this erase.
         drop(permits);
         match attached {
-            Some(session) => self.erase_attached(id, session).await,
+            Some(session) => self.erase_attached(id, session, announce).await,
             None => self.erase_unattached(id, prior).await,
         }
     }
@@ -262,6 +267,7 @@ impl SessionRegistry {
         self: &Arc<Self>,
         id: &str,
         session: Arc<AttachedSession>,
+        announce: &AnnounceOnDrop,
     ) -> EraseAnswer {
         tracing::info!(session = %id, "lambo serve: erasing an attached session");
         // Step 2, then 3: no watcher left to read the fence as a lost lease.
@@ -269,9 +275,10 @@ impl SessionRegistry {
         session.mem.fence_for_erase();
         // The fence's wake-up waits for the erase's answer (#32 PR 7 review
         // L1): a one-session serve winds down on it, and its transport
-        // drain would otherwise race the response. Sent on every way out,
-        // a cut-off or a panic included.
-        let _announce = AnnounceOnDrop(Arc::clone(&session.mem));
+        // drain would otherwise race the response. `announce` is the erase
+        // task's, which sends it once the answer is handed to the request
+        // (review I1), on every way out, a cut-off or a panic included.
+        announce.arm(&session.mem);
         // Step 4: the detach's per-session stages, under its own record.
         let progress = ShutdownProgress::for_session(id);
         progress.begin(Stage::TransportDrain);
@@ -561,12 +568,28 @@ impl SessionRegistry {
     }
 }
 
-/// Wakes whatever waits on a handle's fence when dropped
+/// Wakes whatever waits on an erased handle's fence when dropped
 /// ([`Memory::announce_fence`]), after a quiet [`Memory::fence_for_erase`].
-struct AnnounceOnDrop(Arc<Memory>);
+/// Owned by the erase task and dropped after its answer is sent, so the
+/// wake-up strictly follows the hand-off (#32 PR 7 review I1); armed by
+/// [`SessionRegistry::erase_attached`] once it has fenced the handle.
+///
+/// Holds the handle weakly, so the erase does not keep it alive: a waiter
+/// on the fence ([`Memory::lease_lost_latched`]) borrows the handle, so if
+/// it is gone no one is waiting.
+#[derive(Default)]
+struct AnnounceOnDrop(parking_lot::Mutex<Option<Weak<Memory>>>);
+
+impl AnnounceOnDrop {
+    fn arm(&self, mem: &Arc<Memory>) {
+        *self.0.lock() = Some(Arc::downgrade(mem));
+    }
+}
 
 impl Drop for AnnounceOnDrop {
     fn drop(&mut self) {
-        self.0.announce_fence();
+        if let Some(mem) = self.0.get_mut().take().and_then(|w| w.upgrade()) {
+            mem.announce_fence();
+        }
     }
 }
