@@ -34,6 +34,8 @@ mod calibration;
 mod context_limit;
 mod image;
 mod leases;
+#[cfg(all(feature = "embed-eg2", feature = "store-sqlite"))]
+mod live_eg2_cold;
 mod query_cache;
 mod reads;
 mod recall_by;

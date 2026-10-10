@@ -10,15 +10,18 @@
 //!   --image-min-tokens 280 --image-max-tokens 280 \
 //!   --ctx-size 8192 --batch-size 8192 --ubatch-size 8192
 //! LAMBO_EG2_URL=http://127.0.0.1:8191 \
-//!   cargo test --features embed-eg2 --test live_eg2 -- --ignored --nocapture
+//!   cargo test --features embed-eg2,store-sqlite --lib --test live_eg2 \
+//!   -- --ignored --nocapture live_eg2
 //! ```
+//!
+//! `--lib` and `store-sqlite` add the #79 cold-path test, which lives in the
+//! crate (`src/memory/tests/live_eg2_cold.rs`); the `live_eg2` filter keeps
+//! the library's other ignored tests out. Without `store-sqlite`,
+//! `live_eg2_cold_start_needs_store_sqlite` fails loudly when a server is
+//! configured rather than letting the cold-path test compile out unnoticed.
 //!
 //! For the no-projector case, also start a second server without `--mmproj`
 //! and set `LAMBO_EG2_TEXT_ONLY_URL` to it.
-//!
-//! The #79 cold-start ranking table goes through a SQLite store; add
-//! `store-sqlite` to the features (`--features embed-eg2,store-sqlite`) to
-//! run it.
 //!
 //! Every image is generated here as an uncompressed PNG; nothing binary is
 //! committed. The run prints the design 7.3 ranking-parity table.
@@ -124,8 +127,12 @@ fn checkerboard(side: u32) -> Vec<u8> {
 /// One live test at a time against the shared llama-server. With several
 /// requests in flight the server batches them across its slots, and a
 /// batched embedding is not bit-identical to a lone one, which
-/// `live_eg2_size_invariance` asserts. Running the #79 table beside it made
-/// that test fail 3/3; serialized, all four pass.
+/// `live_eg2_size_invariance` asserts. Running a fourth live test beside it
+/// made that test fail 3/3; serialized, they pass. The lock serializes only
+/// within this test binary: the crate's #79 cold-path test runs in the lib
+/// binary, which cargo runs before or after this one, never beside it, but
+/// a concurrent `cargo test` or another client of the same server still
+/// batches.
 static SERVER: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn env_url(name: &str) -> Option<String> {
@@ -660,241 +667,23 @@ async fn live_eg2_size_invariance() {
     assert_eq!(wv, pv);
 }
 
-/// #79 with real EG2 vectors through the SQLite-backed public recall route:
-/// the before/after ranking table.
-///
-/// A public `Memory` cannot hold its daemon back (derive wakes it and it
-/// rescores in milliseconds), so the cold read itself is not observable
-/// here; the frozen-table cold assertions are the crate's fixture tests.
-/// This test measures what those rules do with real numbers instead:
-///
-/// 1. Phase A: derive older images (one relevant, two noise), let the
-///    daemon settle, recall. Each hit's daemon score is recovered as
-///    `d = (final - w_query × q) / w_daemon`, with `q` the cosine of the
-///    vector this test supplied. That table is what a recall made right
-///    after the fresh derives would read.
-/// 2. Phase B: derive a fresh relevant image and a fresh noise image, let the
-///    daemon settle, recall again (the settled ranking).
-///
-/// It prints, per concept, `q`, the frozen `d`, the pre-#79 cold final (a
-/// missing entry scored 0 inside the blend), the #79 cold final
-/// (`w_query × q` for every member), and the settled final, and asserts the
-/// #79 cold order puts every relevant image above every noise image.
-#[cfg(feature = "store-sqlite")]
+/// #79's live cold-path test runs in the crate (it must hold the daemon
+/// back, which needs a crate-private hook): `live_eg2_cold_start_ranks_the_fresh_matching_image_first`
+/// in `src/memory/tests/live_eg2_cold.rs`. It needs `store-sqlite`, so a
+/// live run without that feature would compile it out silently. This stand-in
+/// makes that loud instead: with a server configured, it fails and names the
+/// command that runs every live EG2 test.
+#[cfg(not(feature = "store-sqlite"))]
 #[tokio::test]
-#[ignore = "needs an owned live llama-server with EG2 and LAMBO_EG2_URL"]
-async fn live_eg2_public_recall_ranks_a_new_matching_image_above_old_noise() {
-    let _server = SERVER.lock().await;
-    use lambo::graph::image::{ImageDerive, ImagePayload};
-    use lambo::recall::query_vector::QueryBy;
-    use lambo::store::SqliteStore;
-    use lambo::{
-        AgentId, ConceptType, EmbeddingContract, GraphStore, MatchStrategy, Memory, NodeId,
-        RecallQuery,
-    };
-    use std::collections::HashMap;
-    use std::sync::Arc;
-    use std::time::Duration;
-
-    let Some(url) = env_url("LAMBO_EG2_URL") else {
+#[ignore = "needs a live llama-server with EmbeddingGemma 2 (LAMBO_EG2_URL)"]
+async fn live_eg2_cold_start_needs_store_sqlite() {
+    if env_url("LAMBO_EG2_URL").is_none() {
         eprintln!("live_eg2: LAMBO_EG2_URL not set; skipping");
         return;
-    };
-    let e = EmbeddingGemma2Embedder::new(&url, EG2_DEFAULT_MODEL, 768).unwrap();
-    assert!(matches!(
-        e.check_server().await,
-        Eg2ServerCheck::Verified { .. }
-    ));
-    let contract = EmbeddingContract {
-        kind: "embeddinggemma2".into(),
-        model: Some(e.model_identity().to_string()),
-        dim: 768,
-    };
-    let query_vector = e.embed_query("a red square").await.unwrap();
-    // (caption, image id, rgb, relevant, fresh)
-    let looks: [(&str, &str, [u8; 3], bool, bool); 5] = [
-        (
-            "old dark red image",
-            "olddarkred",
-            [170, 20, 20],
-            true,
-            false,
-        ),
-        ("old blue image", "oldblue", [0, 0, 255], false, false),
-        ("old green image", "oldgreen", [0, 160, 0], false, false),
-        ("fresh red image", "freshred", [255, 0, 0], true, true),
-        (
-            "fresh gray image",
-            "freshgray",
-            [128, 128, 128],
-            false,
-            true,
-        ),
-    ];
-    let mut vectors = Vec::new();
-    for (_, _, rgb, _, _) in &looks {
-        vectors.push(image(&e, &solid(64, *rgb)).await.unwrap());
     }
-    let q: Vec<f64> = vectors
-        .iter()
-        .map(|v| f64::from(cosine(&query_vector, v)))
-        .collect();
-
-    let dir = std::env::temp_dir().join(format!("lambo-79-live-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("live.db");
-    let store = Arc::new(SqliteStore::connect(path.to_str().unwrap()).unwrap());
-    store.init_schema().await.unwrap();
-    let mem = Memory::builder()
-        .session(format!("eg2-cold-{}", uuid::Uuid::new_v4()))
-        .agent("live-eg2")
-        .flush_interval(Duration::from_millis(10))
-        .match_strategy(MatchStrategy::Hybrid)
-        .store(store as Arc<dyn GraphStore>)
-        .embedder(Arc::new(e) as Arc<dyn Embedder>)
-        .embedding_contract(contract.clone())
-        .build()
-        .await
-        .unwrap();
-    let w = RecallWeights::default();
-    let agent = AgentId::from("live-eg2");
-    let mut ids: Vec<Option<NodeId>> = vec![None; looks.len()];
-    let mut d_frozen: Vec<Option<f64>> = vec![None; looks.len()];
-
-    // Settled: writes applied and flushed, and two full daemon ticks after.
-    async fn settle(mem: &Memory) {
-        tokio::time::timeout(Duration::from_secs(20), async {
-            loop {
-                let s = mem.stats();
-                if s.log_depth == 0 && s.flush_depth == 0 {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-            let start = mem.stats().daemon_cycles;
-            while mem.stats().daemon_cycles < start + 2 {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
-        .await
-        .expect("the daemon settles");
-    }
-    async fn recall(
-        mem: &Memory,
-        query_vector: &[f32],
-        contract: &EmbeddingContract,
-    ) -> HashMap<NodeId, f64> {
-        mem.recall_by(
-            RecallQuery {
-                query: String::new(),
-                top_k: 10,
-                max_tokens: 10_000,
-                traversal_depth: 0,
-            },
-            QueryBy::Vector {
-                values: query_vector.to_vec(),
-                declared: contract.clone(),
-            },
-        )
-        .await
-        .unwrap()
-        .hits
-        .into_iter()
-        .map(|h| (h.node_id, h.score))
-        .collect()
-    }
-
-    for fresh_phase in [false, true] {
-        for (i, (caption, image_id, _, _, fresh)) in looks.iter().enumerate() {
-            if *fresh != fresh_phase {
-                continue;
-            }
-            let out = mem
-                .derive_image_as(
-                    &agent,
-                    ImageDerive {
-                        caption,
-                        concept_type: ConceptType::Resource,
-                        image_id: Some(image_id),
-                        payload: ImagePayload::Vector {
-                            values: vectors[i].clone(),
-                            declared: contract.clone(),
-                        },
-                        parent_of: &[],
-                        event_time: None,
-                    },
-                )
-                .await
-                .unwrap();
-            ids[i] = Some(out.created[0]);
-        }
-        settle(&mem).await;
-        if !fresh_phase {
-            // Phase A's table is the frozen one: recover each old d.
-            let frozen = recall(&mem, &query_vector, &contract).await;
-            for (i, id) in ids.iter().enumerate() {
-                d_frozen[i] = id.map(|id| (frozen[&id] - w.w_query * q[i].max(0.0)) / w.w_daemon);
-            }
-        }
-    }
-    let settled = recall(&mem, &query_vector, &contract).await;
-
-    let rank = |finals: &[f64]| {
-        let mut order: Vec<usize> = (0..finals.len()).collect();
-        order.sort_by(|a, b| finals[*b].total_cmp(&finals[*a]));
-        let mut r = vec![0; finals.len()];
-        for (pos, i) in order.into_iter().enumerate() {
-            r[i] = pos + 1;
-        }
-        r
-    };
-    let pre: Vec<f64> = (0..looks.len())
-        .map(|i| w.w_daemon * d_frozen[i].unwrap_or(0.0) + w.w_query * q[i].max(0.0))
-        .collect();
-    let cold: Vec<f64> = (0..looks.len())
-        .map(|i| w.w_query * q[i].max(0.0))
-        .collect();
-    let after: Vec<f64> = (0..looks.len())
-        .map(|i| settled[&ids[i].unwrap()])
-        .collect();
-    let (r_pre, r_cold, r_after) = (rank(&pre), rank(&cold), rank(&after));
-    println!(
-        "#79 EG2 ranking table (query \"a red square\", w_daemon {} w_query {}):",
-        w.w_daemon, w.w_query
+    panic!(
+        "live_eg2: the #79 cold-path test needs store-sqlite and was compiled out; run \
+         cargo test --features embed-eg2,store-sqlite --lib --test live_eg2 -- --ignored \
+         --nocapture live_eg2"
     );
-    println!(
-        "{:<20} {:>3} {:>7} {:>8} {:>13} {:>13} {:>13}",
-        "concept", "rel", "q", "d frozen", "pre-#79 cold", "#79 cold", "settled"
-    );
-    for (i, (caption, _, _, relevant, _)) in looks.iter().enumerate() {
-        println!(
-            "{:<20} {:>3} {:>7.4} {:>8} {:>8.4} (#{}) {:>8.4} (#{}) {:>8.4} (#{})",
-            caption,
-            if *relevant { "yes" } else { "no" },
-            q[i],
-            d_frozen[i].map_or("missing".to_string(), |d| format!("{d:.4}")),
-            pre[i],
-            r_pre[i],
-            cold[i],
-            r_cold[i],
-            after[i],
-            r_after[i],
-        );
-    }
-    let worst_relevant = (0..looks.len())
-        .filter(|i| looks[*i].3)
-        .map(|i| r_cold[i])
-        .max()
-        .unwrap();
-    let best_noise = (0..looks.len())
-        .filter(|i| !looks[*i].3)
-        .map(|i| r_cold[i])
-        .min()
-        .unwrap();
-    assert!(
-        worst_relevant < best_noise,
-        "#79 cold order must put every relevant image above every noise image"
-    );
-    mem.close().await.unwrap();
-    std::fs::remove_dir_all(dir).unwrap();
 }
