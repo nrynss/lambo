@@ -361,7 +361,7 @@ inherit_serve_credentials = false
 | `load_concurrency` | `2` | Session loads that may run at once. 1 to 1024. Always `1` on SQLite. |
 | `recall_concurrency` | `4` | Recalls that may run at once. A recall that waits 2 seconds for a slot gets `503` with `Retry-After: 1`. 1 to 1024. |
 | `list_sessions` | `false` | Answer `GET /api/sessions` with the served sessions the presenting credential may list. Off, the route does not exist. With no credential configured it names every served session to anyone who reaches the port, and startup warns about it. |
-| `inherit_serve_credentials` | `false` | Also accept every `[[serve.credential]]` as a read credential with the same scope. Its `create`, `erase` and `admin` are dropped: the window only reads. |
+| `inherit_serve_credentials` | `false` | Also accept every `[[serve.credential]]` as a read credential with the same scope as on `lambo serve`, so its `"*"` is serve's, not every served session (see below). Its `create`, `erase` and `admin` are dropped: the window only reads. |
 
 An unknown key, an out-of-range value, an empty or repeated session name and a malformed host are refused when the file is read, so they stop every command, like any other invalid key. A numeric refusal names the key and its bound, never the value. At startup `lambo serve-web` prints the sessions and bounds it runs with. It checks the store's schema at startup and loads each session on the first request that needs it. See [Watch a session in a browser](/cli#watch-a-session-in-a-browser).
 
@@ -386,7 +386,11 @@ sessions = ["lambo"]
 | `sessions` | Exact session names, or `"*"` for every served session. |
 | `session_prefix` | Every served session whose name starts with this and is longer. A session that is not served is never read, whatever its name. |
 
-Each credential reads only the served sessions in its scope, beside the `default` credential from `--auth-token` or `LAMBO_AUTH_TOKEN`, which reads them all. Once any credential is configured, every request needs a bearer, on loopback too, and the `Host` check is off. `create`, `erase` and `admin` are refused by name, as is an inline `token`, a credential without `token_env` or scope, and a name or `token_env` used twice. `lambo serve-web` reads each variable at startup and exits `2`, naming the credential and never a value, when one is unset, holds a token no request could present, or holds the same token as another credential or as `LAMBO_AUTH_TOKEN`. `[embedder] api_key_env` may not name a `token_env`. A browser cannot send the header itself; see [Watch a session in a browser](/cli#watch-a-session-in-a-browser).
+Each credential reads only the served sessions in its scope, beside the `default` credential from `--auth-token` or `LAMBO_AUTH_TOKEN`, which reads them all. Once any credential is configured, every request needs a bearer, on loopback too, and the `Host` check is off. `create`, `erase` and `admin` are refused by name, as is an inline `token`, a credential without `token_env` or scope, and a name or `token_env` used twice. `lambo serve-web` reads each variable at startup and exits `2`, naming the credential and never a value, when one is unset, holds a token no request could present, or holds the same token as another credential or as `LAMBO_AUTH_TOKEN`. `[embedder] api_key_env` may not name a `token_env`.
+
+An inherited `[[serve.credential]]` reads what it reaches on `lambo serve`, within the served sessions: its exact names, its prefix, and for `"*"` the `[serve] sessions` of the same `lambo.toml` plus every session under any `[[serve.credential]]` prefix. That is what `"*"` means to `lambo serve`, which attaches those sessions on demand. It never means every session `[web]` serves: with `[serve] sessions = ["lambo"]` and `[web] sessions = ["lambo", "hr-private"]`, an inherited `"*"` reads `lambo` and gets the `404` for `hr-private`. A session that `lambo serve` pins only with a `--session` flag is not in the file, so an inherited `"*"` does not reach it; name it in `[serve] sessions` or give the window its own `[[web.credential]]`. With `list_sessions`, an inherited `"*"` lists the served sessions in `[serve] sessions`, never one it reaches only through a prefix.
+
+A browser cannot send the header itself; see [Watch a session in a browser](/cli#watch-a-session-in-a-browser).
 
 ## Environment variables
 

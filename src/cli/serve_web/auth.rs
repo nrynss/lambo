@@ -12,7 +12,7 @@
 //! | nothing (loopback only) | the implicit `local`, no header read | every served session |
 //! | `LAMBO_AUTH_TOKEN` / `--auth-token` | `default` | every served session |
 //! | `[[web.credential]]` (#4 PR 3) | each its own, after `default` if a legacy token is set too | its `sessions` (`"*"` = the allowlist) and/or `session_prefix`, intersected with the allowlist |
-//! | `[web] inherit_serve_credentials` | each `[[serve.credential]]`, after the web ones, capabilities dropped | as configured for serve, intersected with the allowlist |
+//! | `[web] inherit_serve_credentials` | each `[[serve.credential]]`, after the web ones, capabilities dropped | as configured for serve (`"*"` = serve's hosted set, never the allowlist), intersected with the allowlist |
 //!
 //! `local` exists only while no credential of any kind is configured; one
 //! configured credential (legacy, web or inherited) and every request needs
@@ -167,6 +167,14 @@ pub(super) fn portal_authority(
 /// inherit_serve_credentials`, every `[[serve.credential]]` as a read grant
 /// with the same scope and no capability (design 4.1, Q5).
 ///
+/// "The same scope" is serve's: an inherited `"*"` covers what `"*"` covers
+/// on serve, the `[serve] sessions` of this `lambo.toml` plus every name
+/// under any `[[serve.credential]]` prefix (`ServeConfig::hosted_sessions`,
+/// the set serve attaches on demand since #32 PR 6), intersected with the
+/// portal's allowlist; never the allowlist alone (#4 PR 3 review M1). A
+/// session pinned only by `lambo serve --session` is not in the file, so an
+/// inherited `"*"` does not reach it: the import narrows, never widens.
+///
 /// Fails closed, naming the credential and its variable but never a value:
 /// an unset, non-UTF-8 or unpresentable token, and one token shared by two
 /// credentials (across both tables too). A configured credential equal to
@@ -207,7 +215,16 @@ pub(super) fn resolve_web_credentials_with(
             AuthToken::new,
         )
         .map_err(usage)?;
-        out.extend(imported.into_iter().map(read_grant));
+        // Serve's `"*"` is serve's hosted set, never the portal's
+        // allowlist (review M1): pin it before the grant reaches the
+        // portal's authority, which judges `"*"` against the allowlist.
+        let hosted = serve.hosted_sessions();
+        out.extend(
+            imported
+                .into_iter()
+                .map(|(name, scope, token)| (name, scope.star_within(hosted.clone()), token))
+                .map(read_grant),
+        );
     }
     Ok(out)
 }
@@ -336,8 +353,10 @@ pub(super) fn unserved_names<'a>(
 
 /// The served sessions `grant` may list (design 6.2), in allowlist order:
 /// its exact names, or every one when its scope covers every served
-/// session (`local`, `default`, `"*"`). Never a prefix expansion: a prefix
-/// grant reads the allowlisted ids under it but lists none of them.
+/// session (`local`, `default`, a web `"*"`). An inherited `"*"` lists the
+/// served sessions `[serve] sessions` pins (review M1). Never a prefix
+/// expansion: a prefix grant reads the allowlisted ids under it but lists
+/// none of them.
 pub(super) fn listable<'a>(grant: &SessionGrant, sessions: &'a [SessionId]) -> Vec<&'a str> {
     let scope = grant.scope();
     sessions
@@ -345,7 +364,7 @@ pub(super) fn listable<'a>(grant: &SessionGrant, sessions: &'a [SessionId]) -> V
         .map(SessionId::as_str)
         .filter(|s| {
             scope.covers_every_pinned()
-                || parse_addressed(s).is_ok_and(|id| scope.names().any(|n| *n == id))
+                || parse_addressed(s).is_ok_and(|id| scope.names_exactly(&id))
         })
         .collect()
 }

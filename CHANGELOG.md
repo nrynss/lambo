@@ -545,7 +545,9 @@
   write capabilities: `create`, `erase` and `admin` are refused by name,
   whatever their value. `[web] inherit_serve_credentials = true` also
   accepts every `[[serve.credential]]` token as a read credential with its
-  scope, its capabilities dropped. A session outside the caller's scope is
+  scope, its capabilities dropped; an inherited `"*"` is what `"*"` reaches
+  on `lambo serve` (the `[serve] sessions` plus every session under a
+  `[[serve.credential]]` prefix), never every served session. A session outside the caller's scope is
   the same empty `404` as an unserved one, before any store read; the
   unscoped `/` and `/api/...` serve the default session only to a credential
   that may read it. Tokens are read at startup, before any backend, and a

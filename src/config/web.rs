@@ -64,7 +64,9 @@
 //! time. `inherit_serve_credentials = true` imports every
 //! `[[serve.credential]]` as a read grant with the same scope and no
 //! capability (write implies read); a name or `token_env` may then not
-//! appear in both tables. Tokens are read from the environment by
+//! appear in both tables. An inherited `"*"` keeps serve's meaning, the
+//! `[serve] sessions` plus every name under a `[[serve.credential]]`
+//! prefix, never this allowlist (#4 PR 3 review M1). Tokens are read from the environment by
 //! `lambo serve-web` at startup, never here.
 
 use std::time::Duration;

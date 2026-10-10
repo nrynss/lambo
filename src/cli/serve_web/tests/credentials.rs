@@ -87,12 +87,17 @@ fn resolve(
 
 /// One concept in `session`, so its view is not empty.
 async fn derive_in(store: &Arc<MemoryStore>, session: &str) {
+    derive_text(store, session, content_of(session)).await;
+}
+
+/// One concept holding `content` in `session`.
+async fn derive_text(store: &Arc<MemoryStore>, session: &str, content: &str) {
     crate::cli::derive::run(
         backends_on(store.clone()),
         crate::cli::derive::Args {
             session: session.into(),
             agent: "agent-4c".into(),
-            content: content_of(session).into(),
+            content: content.into(),
             kind: ConceptKind::Entity,
             parent_of: vec![],
             concept: vec![],
@@ -311,6 +316,82 @@ async fn an_inherited_credential_reads_its_serve_scope_only() {
         let r = as_caller(addr, method, "/s/t4-b/api/session", Some(&agents)).await;
         assert_eq!(r.status, 405, "{method}: still read-only");
     }
+    handle.abort();
+}
+
+/// Review M1: an inherited `"*"` means what it means on serve (the
+/// `[serve] sessions` plus every name under a `[[serve.credential]]`
+/// prefix), never the portal's allowlist. Serve pins `lambo` and the `app`
+/// credential's prefix is `dc-u-`; the portal also serves `hr-private`,
+/// which the `agents` token could never reach through MCP, so it must not
+/// read, list or count it here either. A web `"*"` still covers the whole
+/// allowlist.
+#[tokio::test]
+async fn an_inherited_star_is_serves_hosted_set_never_the_allowlist() {
+    const SERVED_M1: &[&str] = &["lambo", "hr-private", "dc-u-1"];
+    const HR: &str = "payroll grievances";
+    let toml = format!(
+        "[serve]\nsessions = [\"lambo\"]\n\n         [[serve.credential]]\nname = \"agents\"\ntoken_env = \"{AGENTS_ENV}\"\n         sessions = [\"*\"]\n\n         [[serve.credential]]\nname = \"app\"\ntoken_env = \"{PREFIX_ENV}\"\n         session_prefix = \"dc-u-\"\n\n         [web]\nsessions = [\"lambo\", \"hr-private\", \"dc-u-1\"]\nlist_sessions = true\n         inherit_serve_credentials = true\n\n         [[web.credential]]\nname = \"star\"\ntoken_env = \"{STAR_ENV}\"\nsessions = [\"*\"]\n"
+    );
+    let (web, creds) = resolve(&toml, &env()).expect("resolve");
+    assert_eq!(
+        creds.iter().map(|c| c.grant.name()).collect::<Vec<_>>(),
+        ["star", "agents", "app"]
+    );
+    let ids: Vec<SessionId> = SERVED_M1.iter().map(|s| SessionId::new(*s)).collect();
+    let authority = portal_authority(None, creds.clone(), &ids);
+    assert_eq!(
+        super::super::auth::credential_reach(&authority, &ids),
+        [("star", 3), ("agents", 2), ("app", 1)],
+        "agents reaches lambo (pinned) and dc-u-1 (serve's prefix), not hr-private"
+    );
+    assert!(
+        super::super::auth::unserved_names(&authority, &ids).is_empty(),
+        "an expanded star names no session the operator did not write"
+    );
+
+    let store = four_sessions().await;
+    derive_text(&store, "lambo", "agent notes").await;
+    derive_text(&store, "hr-private", HR).await;
+    derive_text(&store, "dc-u-1", "user pantry").await;
+    let recording = Recording::new(store);
+    let state = Arc::new(AppState::new(
+        ids[0].clone(),
+        ids,
+        backends_with_store(Box::new(recording.clone())),
+        true,
+        None,
+        creds,
+        &[],
+        &web,
+    ));
+    let (addr, handle) = spawn(state).await;
+    let agents = tok("agents");
+    let unrouted = wire(&as_caller(addr, "GET", "/no/such/path", Some(&agents)).await);
+    for ok in ["lambo", "dc-u-1"] {
+        let r = as_caller(addr, "GET", &format!("/s/{ok}/api/graph"), Some(&agents)).await;
+        assert_eq!(r.status, 200, "agents reads {ok}, as on serve");
+    }
+    let before = recording.calls();
+    for route in DATA {
+        let r = as_caller(addr, "GET", &format!("/s/hr-private{route}"), Some(&agents)).await;
+        assert_eq!(wire(&r), unrouted, "agents: {route} on hr-private");
+    }
+    assert_eq!(recording.calls(), before, "the refusal reads no store");
+    assert_eq!(listing(addr, Some(&agents)).await, ["lambo"]);
+    assert_eq!(listing(addr, Some(&tok("pre"))).await, Vec::<String>::new());
+    for path in ["/", "/api/sessions", "/api/graph", "/api/session"] {
+        let r = as_caller(addr, "GET", path, Some(&agents)).await;
+        assert!(
+            !r.body.contains("hr-private") && !r.body.contains(HR),
+            "agents: GET {path} names hr-private"
+        );
+    }
+    // A web `"*"` is the allowlist: it reads and lists hr-private.
+    let star = tok("star");
+    let r = as_caller(addr, "GET", "/s/hr-private/api/graph", Some(&star)).await;
+    assert_eq!(r.status, 200);
+    assert_eq!(listing(addr, Some(&star)).await, SERVED_M1);
     handle.abort();
 }
 

@@ -333,7 +333,8 @@ url = "http://127.0.0.1:8080"
 # load_concurrency = 2         # session loads at once (1 on SQLite)
 # recall_concurrency = 4       # recalls at once
 # list_sessions = false        # true: GET /api/sessions names the caller's sessions
-# inherit_serve_credentials = false  # true: [[serve.credential]] tokens read too (no write)
+# inherit_serve_credentials = false  # true: [[serve.credential]] tokens read too (no write);
+#                                    # their "*" is serve's sessions + prefixes, not this list
 #
 # [[web.credential]]           # a read-only token for some sessions; none = LAMBO_AUTH_TOKEN reads all
 # name = "lambo-viewers"
