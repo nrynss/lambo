@@ -18,6 +18,9 @@ which of these are actually needed:
   demo page.
 - **Tier 3 (H5, H6, H7)** would help. None of it is load-bearing.
 
+**All seven are DONE** (2026-10-10): H7, the last, closed with #4's five PRs
+(see its section).
+
 Everything below was verified against the source or a running instance during
 the redesign brief, not inferred.
 
@@ -962,10 +965,26 @@ capped array length as the apparent total.
 
 ### H7 - One session per process
 
-**Status:** **PARKED / NEEDS DESIGN** — tracked publicly as
-[issue #4](https://github.com/nrynss/lambo/issues/4) (filed 2026-08-17, owner's
-call: not for this cycle). The issue carries the same six decisions and the
-recommended allowlist scope; this section stays the fuller record
+**Status:** **DONE** (2026-10-10), as
+[issue #4](https://github.com/nrynss/lambo/issues/4). The six decisions below
+were answered by the owner on 2026-10-06
+([issue comment](https://github.com/nrynss/lambo/issues/4#issuecomment-6014402698)),
+and the design that implements them, with the allowlist scope recommended
+here, was approved on 2026-10-09
+([issue comment](https://github.com/nrynss/lambo/issues/4#issuecomment-6084141497)).
+It shipped in five PRs:
+[#78](https://github.com/nrynss/lambo/pull/78) (reader views, `d1aeb60b`),
+[#85](https://github.com/nrynss/lambo/pull/85) (allowlist, `/s/{session}`
+routing, the `Host` check, `4a6d935b`),
+[#90](https://github.com/nrynss/lambo/pull/90) (per-credential read scope and
+the opt-in listing, `9c63b060`),
+[#94](https://github.com/nrynss/lambo/pull/94) (the page's session picker,
+`61f3ada0`), and #4 PR 5 (docs, branch `docs/4-pr5-docs`). The record of
+what shipped, every decision and every deviation is
+[feature-4-multi-session-portal.md](feature-4-multi-session-portal.md). The
+text below is the original parked task, kept as written; its line references
+are stale. Previously: **PARKED / NEEDS DESIGN**, tracked as issue #4 (filed
+2026-08-17).
 **Severity:** low current product pressure; high architectural and security
 risk if implemented casually
 **Do not claim for implementation until:** selection, discovery, URL and auth
@@ -1071,11 +1090,10 @@ implementation -> adversarial review -> remediation loop (H2: one CLEAN review
 round plus a docs disposition; H3: one REQUEST_CHANGES round plus one CLEAN
 round). Neither task may be selected again.
 
-H7 is **PARKED / NEEDS DESIGN** and is not an implementation task until its
-selection, discovery, URL and authorization decisions are recorded and
-reviewed.
+H7 is **DONE** (2026-10-10): its decisions were recorded and approved on
+issue #4, and it shipped as #4 PRs 1 to 5 (#78, #85, #90, #94 and the docs
+PR; see the H7 section and
+[feature-4-multi-session-portal.md](feature-4-multi-session-portal.md)).
 
-All hardening implementation tasks are therefore closed; the remaining
-hardening work is the H7 design note. Re-audit line references at claim time:
-`serve_web.rs` and `web/app.js` both moved substantially in the rebuild, so any
-line number recorded against `46ca7be` is stale.
+Every hardening task, H1 to H7, is therefore closed. None may be selected
+again.
