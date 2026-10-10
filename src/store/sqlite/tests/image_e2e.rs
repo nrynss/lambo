@@ -39,32 +39,6 @@ async fn open(store: Arc<SqliteStore>, session: &str) -> Memory {
         .expect("build")
 }
 
-/// The cosine-order fixture isolates the vector leg from structural scoring.
-/// Its original default 50/50 blend could put the 0.3 look above the 0.5
-/// look when their daemon scores differed; that is a steady-state inversion,
-/// so #79's temporary missing-score rule cannot fix it.
-async fn open_graded(store: Arc<SqliteStore>, session: &str) -> Memory {
-    let config = crate::Config {
-        recall_weights: crate::config::RecallWeights {
-            w_daemon: 0.0,
-            w_query: 1.0,
-        },
-        ..crate::Config::default()
-    };
-    Memory::builder()
-        .session(session)
-        .agent("agent-a")
-        .config(config)
-        .flush_interval(Duration::from_secs(3_600))
-        .match_strategy(MatchStrategy::Hybrid)
-        .store(store as Arc<dyn GraphStore>)
-        .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
-        .embedding_contract(contract())
-        .build()
-        .await
-        .expect("build")
-}
-
 async fn derive_noise(mem: &Memory) {
     for text in [
         "quantum chromodynamics lattice gauge",
@@ -337,7 +311,7 @@ async fn graded_similarity_ranks_by_cosine_not_recency_on_sqlite() {
     let store = Arc::new(SqliteStore::connect(&path).unwrap());
     store.init_schema().await.unwrap();
     let session = "sqlite-recall-by-graded";
-    let mem = open_graded(store.clone(), session).await;
+    let mem = open(store.clone(), session).await;
     let looks = derive_graded_looks(&mem).await;
     mem.settle_daemon().await;
     let detailed = mem
@@ -355,7 +329,7 @@ async fn graded_similarity_ranks_by_cosine_not_recency_on_sqlite() {
 
     // Reopened: the vector leg is SQLite's checked scan of the reloaded
     // vectors, the daemon's scores rebuilt from the store.
-    let reopened = open_graded(store.clone(), session).await;
+    let reopened = open(store.clone(), session).await;
     reopened.settle_daemon().await;
     let detailed = reopened
         .recall_by_detailed(
@@ -369,6 +343,61 @@ async fn graded_similarity_ranks_by_cosine_not_recency_on_sqlite() {
         .unwrap();
     assert_graded_order(&detailed, &looks);
     reopened.close().await.unwrap();
+}
+
+/// The #79 flake, pinned: a scheduler stall before the last graded derive,
+/// under the default 0.5/0.5 blend. The daemon's recency is a concept's
+/// millisecond position in the session's wall-clock span; a stall there
+/// gives the look derived after it recency near 1 and every earlier look
+/// near 0. Derived best first, the stalled look was the 0.3 one and it
+/// outranked the 0.5 look (+0.104 of daemon share against a 0.1 query gap).
+/// Derived worst first, the stalled look is the 0.8 one, so recency can
+/// only widen the cosine order. Every look is daemon-scored here, so #79's
+/// cold-start rule is not in play.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn graded_similarity_survives_a_stall_between_derives_on_sqlite() {
+    use crate::recall::query_vector::QueryBy;
+    use crate::test_util::dresscode::{
+        assert_graded_order, derive_graded_looks_stalled, imageless_text,
+    };
+
+    let _quiet = crate::test_util::quiet_logs();
+    let (_dir, path) = scratch_db();
+    let store = Arc::new(SqliteStore::connect(&path).unwrap());
+    store.init_schema().await.unwrap();
+    let mem = open(store, "sqlite-recall-by-graded-stall").await;
+    let looks = derive_graded_looks_stalled(&mem, Duration::from_millis(40)).await;
+    mem.settle_daemon().await;
+    let scores = mem.daemon_scores_for_test();
+    let daemon = |id: NodeId| {
+        scores
+            .ranked
+            .iter()
+            .find(|s| s.item == id)
+            .map(|s| s.score)
+            .expect("every graded look is daemon-scored")
+    };
+    // The stall is real: it split the graded looks' daemon scores by more
+    // than the 0.1 query gap could absorb if it favoured the wrong look.
+    let d: Vec<f64> = looks.graded.iter().map(|id| daemon(*id)).collect();
+    let spread =
+        d.iter().copied().fold(f64::MIN, f64::max) - d.iter().copied().fold(f64::MAX, f64::min);
+    assert!(
+        spread > 0.2,
+        "the stall must separate the daemon scores: {d:?}"
+    );
+    let detailed = mem
+        .recall_by_detailed(
+            imageless_text(5),
+            QueryBy::Vector {
+                values: looks.query.clone(),
+                declared: contract(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_graded_order(&detailed, &looks);
+    mem.close().await.unwrap();
 }
 
 // -- #79: assembly against a frozen pre-derive table ------------------------
