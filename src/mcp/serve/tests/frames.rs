@@ -242,7 +242,11 @@ async fn a_reply_never_lands_inside_a_frame_the_server_is_writing() {
 }
 
 /// A writer whose first flush is not ready at once, as tokio's `Stdout`
-/// often is not (its writes run on the blocking pool).
+/// often is not (its writes run on the blocking pool). It wakes the task
+/// itself, standing in for the blocking operation finishing; that is why
+/// it cannot catch a lost waker, which
+/// `a_reply_does_not_take_the_waker_of_a_server_write_parked_at_a_boundary`
+/// covers with a real writer.
 struct SlowFirstFlush {
     inner: tokio::io::DuplexStream,
     flushes: usize,
@@ -277,14 +281,13 @@ impl AsyncWrite for SlowFirstFlush {
     }
 }
 
-/// A flush that is pending at a frame boundary does not leave the server's
-/// writer holding the frame lock afterwards: the reply to a discarded
-/// frame goes out while the server writes nothing more. (Found by the
-/// stdio binary test, where the reply sometimes waited for rmcp's next
-/// frame.)
+/// A flush that is pending at a frame boundary keeps the frame lock only
+/// until it completes, not afterwards: the reply to a discarded frame goes
+/// out while the server writes nothing more. (Found by the stdio binary
+/// test, where the reply sometimes waited for rmcp's next frame.)
 ///
-/// Mutation: keep the lock after a pending flush at a boundary (treat a
-/// held lock as mid-frame, as the first version did) and the reply never
+/// Mutation: keep the lock after the flush completes at a boundary (treat
+/// a held lock as mid-frame, as the first version did) and the reply never
 /// arrives.
 #[tokio::test]
 async fn a_pending_flush_does_not_keep_the_reply_waiting() {
@@ -315,6 +318,88 @@ async fn a_pending_flush_does_not_keep_the_reply_waiting() {
         reply.contains("-32600") && reply.contains("\"id\":1"),
         "{reply}"
     );
+    drop(writer);
+}
+
+/// #101 review 2 H1: a server write that is waiting on a full writer at a
+/// frame boundary keeps the frame lock until it completes, so a reply
+/// cannot poll the writer meanwhile and take the one waker it stores.
+///
+/// The output pipe is 64 bytes. The first frame fills it exactly, so the
+/// server's next frame parks at the boundary with its waker stored in the
+/// pipe; then a reply is queued and the reply task tries the writer too.
+/// Once the client reads, the server's write must be woken and finish.
+/// tokio's writers (`DuplexStream`, a socket's write half, `Stdout`) all
+/// keep a single write waker, and `DuplexStream` is used here as it is,
+/// with no test writer that wakes itself.
+///
+/// Mutation: let the lock go on `Pending` at a boundary in
+/// `FrameWriter::with_lock` (drop `polled.is_ready()`) and the reply task
+/// replaces the server's waker: the server's write is never woken and
+/// this fails at its 5 s timeout, every run.
+#[tokio::test]
+async fn a_reply_does_not_take_the_waker_of_a_server_write_parked_at_a_boundary() {
+    let (mut client_in, server_in) = tokio::io::duplex(64 * 1024);
+    let (server_out, client_out) = tokio::io::duplex(64);
+    let (mut reader, mut writer) =
+        crate::mcp::serve::frames::capped_transport_with_cap(server_in, server_out, "stdio", 16);
+    let first = format!("{{\"a\":\"{}\"}}", "x".repeat(55));
+    assert_eq!(first.len() + 1, 64, "the first frame fills the pipe");
+    writer
+        .write_all(format!("{first}\n").as_bytes())
+        .await
+        .expect("write");
+    writer.flush().await.expect("flush");
+    // The next frame parks: the pipe is full, at a frame boundary.
+    let server = tokio::spawn(async move {
+        writer.write_all(b"{\"b\":2}\n").await.expect("write");
+        writer.flush().await.expect("flush");
+        writer
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    // A reply is queued, and the reply task goes for the writer.
+    let request = format!(
+        "{{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"x\",\"params\":\"{}\"}}\n",
+        "p".repeat(64)
+    );
+    client_in.write_all(request.as_bytes()).await.expect("send");
+    drop(client_in);
+    let reads = tokio::spawn(async move {
+        let mut sink = Vec::new();
+        reader.read_to_end(&mut sink).await.expect("read");
+        assert!(sink.is_empty(), "the request was over the cap");
+        reader
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    // The client reads.
+    let drain = tokio::spawn(async move {
+        let mut lines = BufReader::new(client_out).lines();
+        let mut got = Vec::new();
+        while got.len() < 3 {
+            match tokio::time::timeout(std::time::Duration::from_secs(5), lines.next_line()).await {
+                Ok(Ok(Some(line))) => got.push(line),
+                _ => break,
+            }
+        }
+        got
+    });
+    let writer = tokio::time::timeout(std::time::Duration::from_secs(5), server)
+        .await
+        .expect("the server's parked write is woken once the client reads (a reply took its waker)")
+        .expect("server");
+    let got = drain.await.expect("drain");
+    assert_eq!(got.len(), 3, "{got:?}");
+    assert_eq!(got[0], first);
+    assert_eq!(
+        got[1], "{\"b\":2}",
+        "the parked frame goes before the reply"
+    );
+    assert!(
+        got[2].contains("-32600") && got[2].contains("\"id\":7"),
+        "{}",
+        got[2]
+    );
+    drop(reads.await.expect("reader"));
     drop(writer);
 }
 
@@ -794,6 +879,81 @@ mod tool_path {
             client
                 .oversized_frame_is_refused(case, &prefix, "QUJD", &suffix, &id, n)
                 .await;
+        }
+        drop(client);
+        hub.release(Some(&endpoint)).await;
+        mem.close().await.expect("close");
+    }
+
+    /// #101 review 2 H1 end to end: a reply queued while the endpoint
+    /// socket is backed up does not strand rmcp's output.
+    ///
+    /// The client sends pings and reads nothing until the socket is full.
+    /// rmcp's answers are small, and a small write to a full Unix stream
+    /// socket is refused whole, so rmcp parks at a frame boundary with its
+    /// waker in the socket's one writer slot. An oversized request then
+    /// queues a reply. Once the client reads, every ping, the reply and a
+    /// last ping must all be answered.
+    ///
+    /// Mutation: let the frame lock go on `Pending` at a boundary in
+    /// `FrameWriter::with_lock` and the reply task takes rmcp's waker: the
+    /// last ping is never answered.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_reply_queued_while_the_endpoint_is_backed_up_does_not_stall_it() {
+        const PINGS: u64 = 5_000;
+        let dir = crate::test_util::ScratchDir::short("fb");
+        let store = crate::store::StoreConfig {
+            kind: crate::store::StoreKind::Sqlite,
+            path: Some(dir.join("s.db").to_str().expect("utf-8").into()),
+            ..crate::store::StoreConfig::default()
+        };
+        let endpoint =
+            crate::mcp::SessionEndpoint::resolve_in(&dir.join("run"), "frames-backed", &store)
+                .expect("endpoint fits");
+        let server = server().await;
+        let mem = Arc::clone(server.memory());
+        let hub = crate::mcp::serve::hub::bind_hub(Some(&endpoint), &server, 4);
+        let mut client = Client::dial(&endpoint).await;
+        for id in 1_000..1_000 + PINGS {
+            client
+                .send(&format!(r#"{{"jsonrpc":"2.0","id":{id},"method":"ping"}}"#))
+                .await;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let (prefix, filler, suffix) = field_frame("image.data", 10);
+        tokio::time::timeout(
+            Duration::from_secs(60),
+            stream_frame(&mut client.to_server, &prefix, filler, OVER, &suffix),
+        )
+        .await
+        .expect("the server reads on while its output is backed up");
+        client
+            .send(r#"{"jsonrpc":"2.0","id":99,"method":"ping"}"#)
+            .await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let (mut pongs, mut refused, mut last) = (0, 0, false);
+        while !(last && refused == 1 && pongs == PINGS) {
+            let line =
+                tokio::time::timeout(Duration::from_secs(20), client.from_server.next_line())
+                    .await
+                    .unwrap_or_else(|_| {
+                        panic!(
+                            "output stalled: {pongs} of {PINGS} pings, {refused} replies, \
+                         last ping answered: {last}"
+                        )
+                    })
+                    .expect("read")
+                    .expect("not closed");
+            let v: serde_json::Value = serde_json::from_str(&line).expect("whole frames");
+            if v["error"]["code"] == json!(TOO_LARGE_CODE) {
+                assert_eq!(v["id"], json!(10), "{line}");
+                refused += 1;
+            } else if v["id"] == json!(99) {
+                last = true;
+            } else {
+                pongs += 1;
+            }
         }
         drop(client);
         hub.release(Some(&endpoint)).await;

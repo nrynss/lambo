@@ -53,7 +53,9 @@
 //! * the real writer sits in a shared `tokio::sync::Mutex`;
 //! * rmcp is given a [`FrameWriter`], which takes the lock on the first byte
 //!   of a frame and holds it until a write ends on the frame's newline (rmcp
-//!   writes compact JSON, so a newline only ever ends a frame);
+//!   writes compact JSON, so a newline only ever ends a frame), and holds it
+//!   across any operation the writer has not yet completed (`Pending`), so
+//!   a reply never takes the one waker a tokio writer stores for rmcp;
 //! * the reader queues each reply line on a small channel (waiting for room,
 //!   never dropping one), and one task per transport takes the lock, writes
 //!   the whole line and flushes.
@@ -341,11 +343,26 @@ impl<R: AsyncRead + Unpin> AsyncRead for CappedFrames<R> {
 /// The write half rmcp is given: the shared writer, locked a frame at a
 /// time. See the module docs.
 ///
-/// The lock is held only while a frame is part-written (`mid_frame`). At a
-/// frame boundary it is let go after every operation, `Pending` included:
-/// the bytes rmcp has written so far are already in the writer, so a reply
-/// written next cannot split them, and a flush that is still pending must
-/// not keep the reply task waiting for rmcp's next frame.
+/// The lock is held while a frame is part-written (`mid_frame`), and while
+/// an operation the writer returned `Pending` for is still to complete. It
+/// is let go once an operation completes at a frame boundary.
+///
+/// * Not on `Pending`, even at a boundary: the writer has stored rmcp's
+///   waker, and tokio's writers keep exactly one (`Stdout`'s blocking
+///   operation, a socket's writer slot, `DuplexStream`'s `write_waker`). A
+///   reply polled on the writer meanwhile replaces it, and rmcp's send task,
+///   which holds rmcp's own write mutex, is never woken again: every later
+///   message on the transport stalls (#101 review 2 H1). The cost is that a
+///   reply waits for the operation rmcp already has in flight.
+/// * Not inferred from "the lock is held": `mid_frame` is set only by
+///   writes, so a flush that completes at a boundary lets the lock go and
+///   the reply does not wait for rmcp's next frame (the bug 71830a68 fixed).
+///
+/// If rmcp drops a send mid-frame and never writes to this writer again,
+/// the lock stays held until the `FrameWriter` itself is dropped, which
+/// releases it. rmcp abandons a send only when its service is already
+/// ending (its send tasks are aborted at shutdown) or wedged, and it drops
+/// the transport, and this writer with it, when the service ends.
 pub(crate) struct FrameWriter<W> {
     shared: Arc<Mutex<W>>,
     guard: Option<OwnedMutexGuard<W>>,
@@ -396,7 +413,11 @@ impl<W: AsyncWrite + Unpin + Send + 'static> FrameWriter<W> {
             Poll::Ready(Err(_)) => self.mid_frame = false,
             Poll::Pending => {}
         }
-        if !self.mid_frame {
+        // Let go only once the operation is done. A writer that returned
+        // `Pending` has stored this task's waker, and tokio's writers store
+        // one: a reply polled on it now would replace that waker, and
+        // rmcp's send would never be woken (#101 review 2 H1).
+        if !self.mid_frame && polled.is_ready() {
             self.guard = None;
         }
         polled
