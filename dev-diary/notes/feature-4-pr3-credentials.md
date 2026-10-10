@@ -180,14 +180,76 @@ the legacy token, configured credentials ignored without a legacy token,
 allowlist not checked, inherited capabilities kept, listing always
 registered.
 
+## Review remediation (Opus review, 2026-10-10)
+
+Merged `origin/main` (with #32 PR 6, on-demand attach) first.
+
+**M1: an inherited `"*"` is serve's hosted set, never the allowlist.**
+The import kept the serve scope unchanged, and the portal's authority
+judged `"*"` against the allowlist, so with `[serve] sessions = ["lambo"]`
+and `[web] sessions = ["lambo", "hr-private"]` an agent's `"*"` token read
+and listed `hr-private`, which it could never use through MCP.
+
+*Decision: expand, do not refuse.* `SessionScope::star_within(hosted)`
+pins a `"*"` to a fixed `HostedSessions`. The portal applies it to every
+inherited grant with `ServeConfig::hosted_sessions()` (the `[serve]
+sessions` plus every `[[serve.credential]]` prefix), and the portal's own
+allowlist check (`is_pinned` on scoped paths) still intersects. Why
+static is right after #32 PR 6: on-demand attach changes *when* serve
+holds a session, not *which* sessions `"*"` may address. `HostedSessions`
+is still exactly the pinned names plus the configured prefixes, and
+another credential's unpinned exact name is not in it. So serve's `"*"`
+is expressible from the file, and refusing inheritance would have
+dropped a working feature for nothing. The one thing the file cannot
+see is a session pinned only by `lambo serve --session`. An inherited
+`"*"` does not reach such a session, so the import narrows and never
+widens; the docs tell the operator to name it in `[serve] sessions` or
+give the window a `[[web.credential]]`.
+
+Consequences:
+
+- A pinned `"*"` has `covers_every_pinned() == false`, so it never
+  reaches a loose single session (no exact name can spell one).
+- It counts at startup by what it reaches.
+- It lists (`SessionScope::names_exactly`) only the allowlisted `[serve]
+  sessions`, never a prefix expansion.
+- A web `"*"` is unchanged: it is the allowlist and lists it whole. This
+  settles the I4 wording: "`*` = the allowlist" (design 4.1) holds for
+  `[[web.credential]]`. An inherited `"*"` lists serve's exact pinned
+  names, consistent with 6.2's exact-name rule.
+
+Tests:
+
+- `an_inherited_star_is_serves_hosted_set_never_the_allowlist`: the
+  review's example over the wire, every data route on `hr-private` gives
+  the uniform 404 with zero store calls, the listing is `["lambo"]`, the
+  prefix session `dc-u-1` is still read, and a web `"*"` still reads and
+  lists all.
+- `surface::session::tests::a_star_pinned_to_its_hosted_set_never_widens`.
+
+Mutation check: dropping `star_within` at the import fails the first
+test.
+
+**L1.** The legacy-token warning says "beside configured credentials
+([[web.credential]], or [[serve.credential]] imported by [web]
+inherit_serve_credentials)".
+
+**L2.** The non-loopback refusal also names `[[web.credential]]`.
+
+**L3.** `inherit_serve_credentials` with nothing to import prints a
+startup note (`inherit_note` and `InheritNote`). With no other
+credential, the note says the portal is UNAUTHENTICATED on loopback.
+
 ## Open questions
 
-- **Recall fairness.** `recall_concurrency` is process-wide, so one
-  credential's script can hold every recall permit and make the others wait
-  into the 503. Per-credential permit shares (serve's `floor(n / k)` rule)
-  would fix it; the design keeps semaphores only (Q13), so it is not done.
-- **`inherit_serve_credentials` with no `[[serve.credential]]`** is accepted
-  silently (it imports nothing). A startup note would be cheap.
+- **Recall fairness (review L4): follow-up, not this PR.**
+  `recall_concurrency` is process-wide, so one credential's script can
+  hold every recall permit and make the others wait into the 503.
+  Per-credential permit shares are a follow-up. They need their own
+  design: Q13 settled "semaphores only, process-wide", and serve's
+  `floor(n / k)` rule gives 0 when credentials outnumber permits, so the
+  design needs a floor of 1 and an oversubscription rule. The legacy
+  token already allowed this.
 
 ## Not done here
 
