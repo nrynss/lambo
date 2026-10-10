@@ -629,3 +629,33 @@ async fn a_prefix_grant_is_switchable_only_over_two_served_sessions() {
     }
     handle.abort();
 }
+
+/// Review I3: the listing refuses a request that arrived scoped by itself,
+/// not only through `scope::scoped`'s path check. Called directly with the
+/// marker the scoped resolution attaches, it is the uniform 404 even with a
+/// caller that may list; without the marker the same caller is listed.
+#[tokio::test]
+async fn the_listing_refuses_a_scoped_request_itself() {
+    let web = WebConfig {
+        list_sessions: true,
+        ..Default::default()
+    };
+    let state = portal(
+        backends_on(two_sessions().await),
+        &["t4-a", "t4-b"],
+        None,
+        &web,
+    );
+    let grant = Arc::new(credential("pre-two", &[], Some("t4-")).grant);
+    let caller = || Some(axum::Extension(Caller(grant.clone())));
+    let scoped = super::super::scope::ScopedRequest;
+    let refused = api_sessions(
+        axum::extract::State(state.clone()),
+        caller(),
+        Some(axum::Extension(scoped)),
+    )
+    .await;
+    assert_eq!(refused.status(), 404);
+    let listed = api_sessions(axum::extract::State(state), caller(), None).await;
+    assert_eq!(listed.status(), 200);
+}

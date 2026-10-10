@@ -20,7 +20,7 @@ use super::dto::{
 use super::projections::{
     is_structural, read_feed_and_stats, status_str, structural_dependents, structural_rank,
 };
-use super::scope::{resolve_session, SessionCtx};
+use super::scope::{resolve_session, ScopedRequest, SessionCtx};
 use super::state::AppState;
 use super::views::RECALL_PERMIT_WAIT;
 use super::{APP_CSS, APP_JS, INDEX_HTML, POLL_INTERVAL};
@@ -109,11 +109,15 @@ pub(super) async fn healthz() -> Response {
 /// unrouted, so it is the uniform 404 on every method. In memory only: no
 /// store call. Reached only through the gate, which attaches the caller's
 /// grant; a request without one (never, behind the gate) is the uniform 404.
+/// So is a request that arrived scoped (`/s/{session}/api/sessions`, which
+/// `scope::scoped` already refuses before routing): the listing is the
+/// caller's, never a session's, and it says so itself too (review I3).
 pub(super) async fn api_sessions(
     State(state): State<Arc<AppState>>,
     caller: Option<axum::Extension<Caller>>,
+    scoped: Option<axum::Extension<ScopedRequest>>,
 ) -> Response {
-    let Some(axum::Extension(Caller(grant))) = caller else {
+    let (Some(axum::Extension(Caller(grant))), None) = (caller, scoped) else {
         return crate::surface::session::not_found_response();
     };
     json(
