@@ -74,6 +74,39 @@ line, remaining headers, and body matched in every case
 `HEAD /`, and `nosniff` on all sixteen. Main sent neither header. Both
 servers were stopped.
 
+### Scoped window (remediation)
+
+The sixteen rows above are the unscoped window only, so the run was
+repeated against the same two binaries (`lambo-main`, and `lambo-branch`
+from `84641ef3`; the remediation changed tests and doc comments only, so
+the served code is unchanged) on a fresh copy of the same `byteid` store,
+`127.0.0.1:18792` and `:18793`, with the same raw HTTP/1.1 client.
+Thirty-three rows: the sixteen above, then `GET` and `HEAD` of `/s/byteid/` (200),
+`GET` and `HEAD` of `/s/byteid` (308), `GET` and `HEAD` of
+`/s/byteid/api/stats`, `GET /s/byteid/api/session`, `GET
+/s/byteid/app.js` and `/s/byteid/no/such` (404: assets are served at
+`/app.js` only), `POST /s/byteid/` (405), refused scoped ids (`GET` and
+`HEAD /s/not-served/`, `GET /s/not-served/api/stats`, `GET /s/.x/`, all
+404), `GET /s/byteid/` with `Host: rebind.example` (403), and `GET
+/api/recall?q=` and `/s/byteid/api/recall?q=` (handler 400).
+
+Then both binaries were restarted with `--auth-token` set to a value the
+driver generated at runtime and passed in argv only (no environment
+variable, never printed; the driver checked it is absent from both
+server logs). Seven rows: `GET /api/stats` and `GET /no/such` with no
+bearer, `GET /s/byteid/` and `GET /no/such` with a wrong one (all 401),
+and with the right one `GET /` (200), `GET /s/byteid/api/stats` (200),
+`GET /no/such` (404).
+
+After stripping `Date`, `Content-Security-Policy`, and
+`X-Content-Type-Options` only, status line, remaining headers in order,
+and body matched on all forty rows of both runs (`mismatches=0
+cases=40`). The branch sent
+the exact policy on exactly the five HTML responses (`GET` and `HEAD` of
+`/` and of `/s/byteid/`, and the bearer `GET /`), `nosniff` once on all
+forty, and main sent neither header on any. Both server pairs were
+stopped.
+
 ## Browser
 
 Google Chrome 155 headless (`--dump-dom`, virtual time budget 12s) against
