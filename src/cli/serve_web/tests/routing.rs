@@ -997,9 +997,10 @@ async fn a_single_loose_session_is_served_at_the_aliases_only() {
 
 /// The session is resolved before routing by exactly one construction: the
 /// routes (under their gate) are the fallback service of an outer router
-/// with the Host guard and the session resolution.
-/// No `any` route exists (it would answer every method on a route the
-/// read-only sweep does not see), and the resolution is in `scope.rs`.
+/// with the session resolution, the Host guard, and the security-header
+/// layer outside both. No `any` route exists (it would answer every method
+/// on a route the read-only sweep does not see), and the resolution is in
+/// `scope.rs`.
 #[test]
 fn the_session_is_resolved_by_one_layer_before_routing() {
     let prod = production_source();
@@ -1033,8 +1034,8 @@ fn the_session_is_resolved_by_one_layer_before_routing() {
     let layers: Vec<_> = router.match_indices(".layer(").collect();
     assert_eq!(
         layers.len(),
-        3,
-        "the gate over the routes, resolve_session and the Host guard, nothing else"
+        4,
+        "the gate over the routes, resolve_session, the Host guard, and security headers"
     );
     let gate = router.find("state.clone(), gate)").expect("gate layer");
     let fallback = router.find(".fallback_service(").expect("fallback");
@@ -1042,9 +1043,13 @@ fn the_session_is_resolved_by_one_layer_before_routing() {
         .find("resolve_session")
         .expect("resolve_session layer");
     let host = router.find("state, host_guard)").expect("Host guard layer");
+    let secure = router
+        .find("from_fn(security_headers)")
+        .expect("security headers layer");
     assert!(gate < fallback, "the gate is over the routes");
     assert!(
-        fallback < resolve && resolve < host,
-        "before routing, the Host guard is outermost, then the session"
+        fallback < resolve && resolve < host && host < secure,
+        "source order is fallback, then resolve_session, then the Host guard, \
+         then security headers (outermost, so they stamp the Host guard's early 403)"
     );
 }

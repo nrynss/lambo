@@ -121,6 +121,7 @@
 //! | module | holds |
 //! |---|---|
 //! | this file | the embedded assets, [`Args`], [`run`], the bounded serve, the signal registration |
+//! | `headers` | `nosniff` on every response the router answers, and the page CSP on `text/html`, as the outermost layer (#92) |
 //! | `auth` | [`AuthToken`], env-over-flag resolution, the non-loopback refusal, the credential set and the bearer gate |
 //! | `scope` | which session a request reads: the per-request resolution, before routing (#4) |
 //! | `state` | `AppState`: served sessions, backends, credential set, view cache |
@@ -155,6 +156,7 @@ use crate::types::SessionId;
 
 mod auth;
 mod dto;
+mod headers;
 mod projections;
 mod routes;
 mod scope;
