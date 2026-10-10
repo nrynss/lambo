@@ -115,7 +115,8 @@ pub use heartbeat::authorize_ledger;
 pub use pinned::{pin_sessions, PinnedSessions};
 
 use authority::{
-    any_credential, reaches_past_pinned, serve_authority, startup_warnings, ServeAuthority,
+    any_credential, on_demand_credentials, reaches_past_pinned, serve_authority, startup_warnings,
+    ServeAuthority,
 };
 use builder::{explain_startup_failure, serve_builder};
 use heartbeat::serve_startup_line;
@@ -127,6 +128,7 @@ use pinned::check_pinned;
 use process::ProcessTasks;
 use registry::{
     Acquired, LeaseLossPolicy, OnDemandBounds, RegistryBounds, SessionAttacher, SessionRegistry,
+    EVICT_MIN_IDLE,
 };
 use roles::{resolve_role, Role};
 use session::{session_server, AttachedSession, HostCheck};
@@ -375,6 +377,15 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
             opts.sessions.len(),
             opts.bounds.max_attached
         )));
+    }
+    // `[serve]` refuses `idle_detach_secs = 0`; a library caller's zero is
+    // refused here too (#32 PR 6 review L5), as `[serve]` would.
+    if opts.bounds.idle_detach < Duration::from_secs(1) {
+        return Err(LamboError::Config(
+            "ServeOptions: bounds.idle_detach must be at least 1 s (pinned sessions are never \
+             idle-detached)"
+                .into(),
+        ));
     }
     // #32 PR 6: a credential that reaches past the pinned sessions makes
     // this a registry that attaches on demand, which is never a one-session
@@ -786,6 +797,8 @@ async fn serve_pinned_with(
         on_demand: seams.on_demand.then_some(OnDemandBounds {
             max_attached: opts.bounds.max_attached,
             idle_detach: opts.bounds.idle_detach,
+            share_among: on_demand_credentials(&opts),
+            min_idle_to_evict: EVICT_MIN_IDLE,
         }),
     };
     // The template every session is cloned from: no endpoint (each session

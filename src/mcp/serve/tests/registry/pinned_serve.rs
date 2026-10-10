@@ -21,8 +21,8 @@ use chrono::{DateTime, Utc};
 
 /// `Arc<MemoryStore>` as a `GraphStore`, so the serve under test and the
 /// test's other writer share one store, as two processes share a database.
-/// While the flag is set, every `load_session` parks forever: a store that
-/// stalls under an attach that has already taken its lease.
+/// While the flag is set, every `load_session` parks until it is cleared: a
+/// store that stalls under an attach that has already taken its lease.
 ///
 /// Every call is also appended to the third field, `(method, session)`,
 /// the recording wrapper #32 PR 5's "zero store calls" claim is measured
@@ -65,13 +65,17 @@ impl Shared {
 
     /// [`Shared::over`], handing back the call record too.
     pub(super) fn recording(store: &Arc<MemoryStore>) -> (Box<dyn GraphStore>, Arc<StoreCalls>) {
+        Self::recording_with_stall(store, Default::default())
+    }
+
+    /// [`Shared::recording`], whose loads stall while `stall` is set.
+    pub(super) fn recording_with_stall(
+        store: &Arc<MemoryStore>,
+        stall: Arc<std::sync::atomic::AtomicBool>,
+    ) -> (Box<dyn GraphStore>, Arc<StoreCalls>) {
         let calls = Arc::new(StoreCalls::default());
         (
-            Box::new(Self(
-                Arc::clone(store),
-                Default::default(),
-                Arc::clone(&calls),
-            )),
+            Box::new(Self(Arc::clone(store), stall, Arc::clone(&calls))),
             calls,
         )
     }
@@ -101,8 +105,8 @@ impl GraphStore for Shared {
     }
     async fn load_session(&self, session: &SessionId) -> Result<GraphSnapshot, StoreError> {
         self.2.note("load_session", session.as_str());
-        if self.1.load(std::sync::atomic::Ordering::SeqCst) {
-            std::future::pending::<()>().await;
+        while self.1.load(std::sync::atomic::Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
         self.0.load_session(session).await
     }
@@ -841,10 +845,25 @@ async fn one_pinned_session_with_a_prefix_credential_attaches_on_demand() {
     .await;
     assert!(serve.registry.attaches_on_demand());
     let id = "od-e2e-u-1";
+    let routed = serve
+        .registry
+        .get_or_attach(
+            id,
+            crate::mcp::serve::registry::Requester {
+                credential: "app",
+                create: true,
+            },
+        )
+        .await;
     assert!(matches!(
-        serve.registry.get_or_attach(id, true).await,
+        routed.lookup,
         crate::mcp::serve::registry::Lookup::Live(_)
     ));
+    assert!(
+        routed.in_flight.is_some(),
+        "a live answer holds the session"
+    );
+    drop(routed);
     assert_eq!(lease(&store, id).await.holder, serve_token());
     serve.stop().await.expect("a clean shutdown");
     for id in ["od-e2e-pin", id] {

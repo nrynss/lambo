@@ -158,14 +158,26 @@ pub(super) fn serve_authority(opts: &ServeOptions) -> Result<ServeAuthority, Lam
 /// `"*"` reaches past them only through another credential's prefix, so
 /// neither changes the answer. HTTP only: stdio authenticates nobody.
 pub(super) fn reaches_past_pinned(opts: &ServeOptions) -> bool {
-    opts.transport == Transport::Http
-        && opts.credentials.iter().any(|cred| {
+    on_demand_credentials(opts) > 0
+}
+
+/// How many configured credentials reach a session this serve does not pin
+/// (see [`reaches_past_pinned`]); 0 over stdio. The on-demand places are
+/// shared among them for eviction (#32 PR 6 review M4).
+pub(super) fn on_demand_credentials(opts: &ServeOptions) -> usize {
+    if opts.transport != Transport::Http {
+        return 0;
+    }
+    opts.credentials
+        .iter()
+        .filter(|cred| {
             let scope = cred.grant.scope();
             scope.prefix().is_some()
                 || scope
                     .names()
                     .any(|name| !opts.sessions.iter().any(|pinned| pinned == name.as_str()))
         })
+        .count()
 }
 
 /// What an operator should hear about a serve's credentials at startup

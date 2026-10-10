@@ -379,3 +379,25 @@ fn a_scope_past_the_pinned_sessions_attaches_on_demand() {
     opts.transport = Transport::Stdio;
     assert!(!reaches_past_pinned(&opts), "stdio authenticates nobody");
 }
+
+/// #32 PR 6 review M4: the on-demand places are shared among the
+/// credentials that reach past the pinned sessions, and only those.
+#[test]
+fn the_on_demand_credentials_are_those_reaching_past_the_pinned_sessions() {
+    let mut opts = http_opts(&["pin-a"], "127.0.0.1");
+    opts.auth_token = Some(fake("legacy"));
+    opts.credentials = vec![
+        credential("pinned-only", &["pin-a"], None),
+        credential("unpinned", &["later-1"], None),
+        credential("prefixed", &[], Some("dc-u-")),
+    ];
+    assert_eq!(
+        crate::mcp::serve::authority::on_demand_credentials(&opts),
+        2
+    );
+    opts.transport = Transport::Stdio;
+    assert_eq!(
+        crate::mcp::serve::authority::on_demand_credentials(&opts),
+        0
+    );
+}

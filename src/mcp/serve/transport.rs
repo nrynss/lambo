@@ -17,7 +17,7 @@ use super::authority::{authorize_default, Authenticated, ServeAuthority};
 use super::http_guards::{
     guard_request, usable_session_id, HttpGuard, OpeningReservation, MCP_SESSION_ID,
 };
-use super::registry::{Lookup, SessionRegistry};
+use super::registry::{Lookup, Requester, SessionRegistry};
 use super::session::AttachedSession;
 use super::shutdown::{HolderShutdown, SHUTDOWN_GRACE};
 use super::ServeOptions;
@@ -406,10 +406,21 @@ async fn serve_session(
     req: axum::extract::Request,
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
-    match registry
-        .get_or_attach(id, grant.capabilities().create)
-        .await
-    {
+    let routed = registry
+        .get_or_attach(
+            id,
+            Requester {
+                credential: grant.name(),
+                create: grant.capabilities().create,
+            },
+        )
+        .await;
+    // The request's hold on a live session (#32 PR 6 review M1), taken when
+    // it was routed and held until the session's MCP service has answered:
+    // no eviction or idle detach takes the session in between. A tool call
+    // rmcp dispatches after that answer holds its own (`call_tool`).
+    let _in_flight = routed.in_flight;
+    match routed.lookup {
         // The session's own bucket (#32 PR 6, design §3.6), after the
         // credential's: a flood on one session spends its own rate, not
         // another's. The guard's 429, so a client handles both alike.

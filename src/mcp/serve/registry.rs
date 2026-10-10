@@ -31,13 +31,13 @@
 //!
 //! | slot | a request gets | how it leaves |
 //! |---|---|---|
-//! | [`Slot::Attaching`] (on-demand) | waits for the one attach in flight (single-flight) | the attach ends: `Live`, or removed |
+//! | [`Slot::Attaching`] (on-demand) | waits for the one attach in flight (single-flight), at most `ATTACH_WAIT` | the attach ends: `Live`, or removed (a negative outcome is cached, see `on_demand`) |
 //! | [`Slot::Live`] | the session's own MCP service | a detach, or the process shutdown |
 //! | [`Slot::Detaching`] | 503, `Retry-After: 1` | the detach ends: `HeldElsewhere` (pinned) or removed (on-demand) |
 //! | [`Slot::HeldElsewhere`] (pinned) | 503, `Retry-After` until the next retry | the background retry wins the lease |
 //! | [`Slot::Failed`] (pinned) | 503, no `Retry-After` | never: an operator restarts the serve |
 //! | absent, pinned | 503, `Retry-After: 1` (between states) | |
-//! | absent, not pinned | an on-demand attach, when the serve attaches on demand; else the uniform 404 (`surface::session`) | |
+//! | absent, not pinned | a cached negative outcome; else an on-demand attach, when the serve attaches on demand; else the uniform 404 (`surface::session`) | |
 //!
 //! # What runs where
 //!
@@ -49,9 +49,19 @@
 //! stops the loops (see [`SessionRegistry::close_set`] and
 //! [`SessionRegistry::stop_tasks`]).
 
+mod on_demand;
+
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
+
+#[cfg(all(test, unix, feature = "store-memory", feature = "embed-fixture"))]
+pub(super) use on_demand::NEGATIVE_TTL;
+use on_demand::{choose_victim, place_share, takes_a_place, Flight, Negative, NegativeCache};
+pub(super) use on_demand::{
+    Requester, Routed, ATTACH_BUSY_RETRY, ATTACH_TIMEOUT, ATTACH_WAIT, EVICT_MIN_IDLE,
+    PROBE_TIMEOUT,
+};
 
 use super::builder::explain_startup_failure;
 use super::hub::{derive_endpoint, SessionEndpoint};
@@ -152,9 +162,24 @@ pub(super) struct OnDemandBounds {
     /// Attached sessions, pinned plus on-demand: an on-demand session may
     /// take one of the `max_attached - pinned` places left.
     pub(super) max_attached: usize,
-    /// An on-demand session unused this long is detached.
+    /// An on-demand session unused this long is detached. At least
+    /// [`MIN_IDLE_DETACH`]: [`SessionRegistry::new`] raises a shorter one
+    /// (#32 PR 6 review L5).
     pub(super) idle_detach: Duration,
+    /// How many credentials reach on-demand sessions
+    /// (`authority::on_demand_credentials`): the on-demand places are
+    /// shared among them for eviction (#32 PR 6 review M4,
+    /// `on_demand::place_share`). At least 1.
+    pub(super) share_among: usize,
+    /// How long an on-demand session must have been idle before an attach
+    /// may evict it ([`EVICT_MIN_IDLE`] in a serve).
+    pub(super) min_idle_to_evict: Duration,
 }
+
+/// The shortest `idle_detach` a registry runs with (#32 PR 6 review L5):
+/// `[serve]` refuses 0, and a library caller's 0 would make the idle
+/// sweeper spin and detach every session the moment its calls end.
+pub(super) const MIN_IDLE_DETACH: Duration = Duration::from_secs(1);
 
 /// How an on-demand attach ended, as every request waiting on it learns it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -204,6 +229,10 @@ enum Slot {
         /// credential has `create` does not take an `Absent` from one that
         /// had not.
         create: bool,
+        /// Whether the attach has passed its existence probe and reserved
+        /// one of the on-demand places (#32 PR 6 review H1). Until then it
+        /// takes no place under `max_attached` and has evicted nothing.
+        placed: bool,
     },
     /// Attached and serving.
     Live(Arc<AttachedSession>),
@@ -260,6 +289,9 @@ pub(super) enum Lookup {
     Unavailable { retry_after: Duration },
     /// Hosted, but its attach failed for good: answer 503 with no
     /// `Retry-After`, since retrying will not help until an operator acts.
+    /// A pinned session stays failed until a restart; an on-demand one is
+    /// answered from the negative cache for `NEGATIVE_TTL`, then tried
+    /// again.
     Failed,
     /// An on-demand session that was erased (#23): it is never attached or
     /// recreated again. Reached only inside the caller's scope.
@@ -333,6 +365,14 @@ pub(super) struct SessionRegistry {
     /// hold them: an attach of the same id waits for its handle to go (see
     /// `PreviousHandle`), as a pinned retry does.
     previous: parking_lot::Mutex<HashMap<String, PreviousHandle>>,
+    /// Which credential's request attached each on-demand session (#32 PR 6
+    /// review M4), for the fair share of places. Set when an attach
+    /// reserves its place, dropped with the slot. Locked after `slots`,
+    /// never before.
+    owners: parking_lot::Mutex<HashMap<String, String>>,
+    /// Negative on-demand attach outcomes, answered without the store for
+    /// a while (#32 PR 6 review M3). Locked after `slots`, never before.
+    negative: parking_lot::Mutex<NegativeCache>,
     /// Opened once the startup sessions are in, so the heartbeat's first
     /// line sees them (the process tasks are spawned before the session
     /// parts, to keep the startup's log order).
@@ -365,7 +405,14 @@ impl SessionRegistry {
         bounds: RegistryBounds,
     ) -> Arc<Self> {
         let permit_count = u32::try_from(bounds.attach_permits.max(1)).unwrap_or(u32::MAX);
-        let on_demand = bounds.on_demand.filter(|_| attacher.is_some());
+        let on_demand = bounds
+            .on_demand
+            .filter(|_| attacher.is_some())
+            .map(|bounds| OnDemandBounds {
+                idle_detach: bounds.idle_detach.max(MIN_IDLE_DETACH),
+                share_among: bounds.share_among.max(1),
+                ..bounds
+            });
         Arc::new(Self {
             order,
             default,
@@ -377,6 +424,8 @@ impl SessionRegistry {
             permit_count,
             on_demand,
             previous: parking_lot::Mutex::new(HashMap::new()),
+            owners: parking_lot::Mutex::new(HashMap::new()),
+            negative: parking_lot::Mutex::new(NegativeCache::default()),
             started: tokio::sync::watch::channel(false).0,
             early,
             retry: parking_lot::Mutex::new(None),
@@ -454,169 +503,190 @@ impl SessionRegistry {
     /// Reached only after the request's grant is authorized for `id`
     /// (`transport::serve_session`, design §6.2), so nothing here is an
     /// oracle: an out-of-scope caller never gets this far, and no store
-    /// call is made for it. `create` is the grant's `create` capability.
+    /// call is made for it. `requester` is the grant's credential and its
+    /// `create` capability.
     ///
-    /// 1. A live session is served at once, and its use stamped. A request
-    ///    for a session whose attach is in flight waits for that attach's
-    ///    outcome (single-flight: N concurrent first requests cause one
-    ///    `build_attach`).
-    /// 2. An absent session that is not pinned starts an attach, unless
-    ///    the serve does not attach on demand (the uniform 404) or is
-    ///    closing (503). At `max_attached`, the least recently used idle
-    ///    on-demand session is evicted first; with none idle, 503 with
-    ///    `Retry-After`. The attach itself (`attach_on_demand`) probes for
-    ///    the session, takes a permit and runs the template's
-    ///    `build_attach`.
-    pub(super) async fn get_or_attach(self: &Arc<Self>, id: &str, create: bool) -> Lookup {
+    /// 1. A live session is served at once: its use is stamped, and the
+    ///    request's [`Routed::in_flight`] is taken under the slots' lock, so
+    ///    neither an eviction nor the idle sweeper can take the session
+    ///    while the request is on its way to it (#32 PR 6 review M1). A
+    ///    request for a session whose attach is in flight waits for that
+    ///    attach's outcome (single-flight: N concurrent first requests
+    ///    cause one `build_attach`), for at most `ATTACH_WAIT`.
+    /// 2. An absent session that is not pinned is answered from the
+    ///    negative cache while it holds a fresh outcome for it (#32 PR 6
+    ///    review M3), and otherwise starts an attach, unless the serve does
+    ///    not attach on demand (the uniform 404) or is closing (503). The
+    ///    attach (`attach_on_demand`) probes for the session before it
+    ///    reserves a place or evicts anything (#32 PR 6 review H1); see
+    ///    `on_demand` for the order.
+    pub(super) async fn get_or_attach(
+        self: &Arc<Self>,
+        id: &str,
+        requester: Requester<'_>,
+    ) -> Routed {
         for _ in 0..ATTACH_FOLLOWS {
-            let (mut done, flight_create) = match self.route_or_start(id, create) {
-                Route::Answer(lookup) => return lookup,
+            let (mut done, flight_create) = match self.route_or_start(id, requester) {
+                Route::Answer(routed) => return routed,
                 Route::Wait { done, create } => (done, create),
             };
-            // The sender is the attach task's, which always sends before it
-            // ends; a closed channel (the task gone without an answer) is a
-            // retry-later, never a hang.
-            let outcome = match done.wait_for(Option::is_some).await {
-                Ok(outcome) => outcome.clone(),
-                Err(_) => None,
-            };
-            match outcome.unwrap_or(AttachOutcome::Busy {
+            // The sender is the attach's `Flight`, which always sends before
+            // it goes, even on a panic; a closed channel is a retry-later,
+            // never a hang, and so is a wait past `ATTACH_WAIT` (#32 PR 6
+            // review M2): the attach goes on without this request.
+            let outcome =
+                match tokio::time::timeout(ATTACH_WAIT, done.wait_for(Option::is_some)).await {
+                    Ok(Ok(outcome)) => outcome.clone(),
+                    Ok(Err(_)) => None,
+                    Err(_) => {
+                        return Routed::answer(Lookup::Unavailable {
+                            retry_after: ATTACH_BUSY_RETRY,
+                        });
+                    }
+                };
+            let lookup = match outcome.unwrap_or(AttachOutcome::Busy {
                 retry_after: Duration::from_secs(1),
             }) {
                 // Live now: the next round serves it.
                 AttachOutcome::Attached => continue,
                 // An attach that could not create it, while this request
                 // may: start one that can.
-                AttachOutcome::Absent if create && !flight_create => continue,
-                AttachOutcome::Absent => return Lookup::NotHosted,
-                AttachOutcome::Erased => return Lookup::Erased,
-                AttachOutcome::Busy { retry_after } => return Lookup::Unavailable { retry_after },
-                AttachOutcome::Failed => return Lookup::Failed,
-            }
+                AttachOutcome::Absent if requester.create && !flight_create => continue,
+                AttachOutcome::Absent => Lookup::NotHosted,
+                AttachOutcome::Erased => Lookup::Erased,
+                AttachOutcome::Busy { retry_after } => Lookup::Unavailable { retry_after },
+                AttachOutcome::Failed => Lookup::Failed,
+            };
+            return Routed::answer(lookup);
         }
-        Lookup::Unavailable {
+        Routed::answer(Lookup::Unavailable {
             retry_after: Duration::from_secs(1),
-        }
+        })
     }
 
     /// Step 1 and 2 of [`SessionRegistry::get_or_attach`], under the slots'
     /// lock: answer now, wait on an attach in flight, or start one.
-    fn route_or_start(self: &Arc<Self>, id: &str, create: bool) -> Route {
+    fn route_or_start(self: &Arc<Self>, id: &str, requester: Requester<'_>) -> Route {
         let mut slots = self.slots.lock();
         match slots.get(id) {
             Some(Slot::Live(session)) => {
-                session.activity.touch();
-                return Route::Answer(Lookup::Live(Arc::clone(session)));
+                // In flight from here, under the lock an eviction and the
+                // idle sweeper choose under (review M1).
+                let in_flight = session.activity.enter();
+                return Route::Answer(Routed {
+                    lookup: Lookup::Live(Arc::clone(session)),
+                    in_flight: Some(in_flight),
+                });
             }
-            Some(Slot::Attaching { done, create }) => {
+            Some(Slot::Attaching { done, create, .. }) => {
                 return Route::Wait {
                     done: done.clone(),
                     create: *create,
                 };
             }
-            Some(slot) => return Route::Answer(answer_for(slot)),
+            Some(slot) => return Route::Answer(Routed::answer(answer_for(slot))),
             None if self.is_pinned(id) => {
-                return Route::Answer(Lookup::Unavailable {
+                return Route::Answer(Routed::answer(Lookup::Unavailable {
                     retry_after: Duration::from_secs(1),
-                });
+                }));
             }
             None => {}
         }
-        let Some(bounds) = &self.on_demand else {
-            return Route::Answer(Lookup::NotHosted);
-        };
+        if self.on_demand.is_none() {
+            return Route::Answer(Routed::answer(Lookup::NotHosted));
+        }
         // Design §3.2 step 1: no attach starts once the shutdown has begun.
         if self.is_closing() {
-            return Route::Answer(Lookup::Unavailable {
+            return Route::Answer(Routed::answer(Lookup::Unavailable {
                 retry_after: Duration::from_secs(1),
-            });
+            }));
         }
-        // Step 3, capacity. Every on-demand slot that holds or is about to
-        // hold a `Memory` takes a place, a detaching one included until its
-        // detach ends, so the cap holds while sessions come and go.
-        let places = bounds.max_attached.saturating_sub(self.order.len());
-        let taken = slots
-            .iter()
-            .filter(|(slot_id, slot)| {
-                !self.is_pinned(slot_id)
-                    && matches!(
-                        slot,
-                        Slot::Live(_) | Slot::Attaching { .. } | Slot::Detaching
-                    )
-            })
-            .count();
-        let victim = if taken >= places {
-            let Some((victim_id, victim)) =
-                least_recently_used_idle(&slots, |slot_id| self.is_pinned(slot_id))
-            else {
-                tracing::info!(
-                    max_attached = bounds.max_attached,
-                    "lambo serve: an on-demand attach was refused: max_attached sessions are \
-                     attached and none of the on-demand ones is idle (503)"
-                );
-                return Route::Answer(Lookup::Unavailable {
-                    retry_after: AT_CAPACITY_RETRY,
-                });
-            };
-            // Taken out of service now, under the lock, so no other attach
-            // picks it too and no request reaches it.
-            slots.insert(victim_id.clone(), Slot::Detaching);
-            Some((victim_id, victim))
-        } else {
-            None
-        };
+        // A negative outcome still fresh (review M3): no store call, no
+        // permit. An `Absent` one never stops a credential with `create`.
+        let cached = self.negative.lock().get(id, requester.create);
+        if let Some(negative) = cached {
+            return Route::Answer(Routed::answer(match negative {
+                Negative::Absent => Lookup::NotHosted,
+                Negative::Erased => Lookup::Erased,
+                Negative::Failed => Lookup::Failed,
+            }));
+        }
+        // No place is taken and nothing is evicted yet: the attach probes
+        // first (review H1).
         let (tx, done) = tokio::sync::watch::channel(None);
         slots.insert(
             id.to_string(),
             Slot::Attaching {
                 done: done.clone(),
-                create,
+                create: requester.create,
+                placed: false,
             },
         );
-        drop(slots);
+        let flight = Flight::new(Arc::clone(self), id.to_string(), requester.create, tx);
+        let credential = requester.credential.to_string();
         let registry = Arc::clone(self);
-        let id = id.to_string();
         let task = tokio::spawn(async move {
-            registry.attach_on_demand(id, create, victim, tx).await;
+            registry.attach_on_demand(flight, credential).await;
         });
+        // Tracked before the slots' lock is released, so a shutdown that
+        // takes the set after it also joins this task (review L4).
         self.track(task);
-        Route::Wait { done, create }
+        drop(slots);
+        Route::Wait {
+            done,
+            create: requester.create,
+        }
     }
 
-    /// An on-demand attach of `id`, on its own task so a request that goes
-    /// away does not cancel it half way (a lease taken and not admitted),
-    /// and its outcome is sent to every request waiting on it.
-    async fn attach_on_demand(
-        self: Arc<Self>,
-        id: String,
-        create: bool,
-        victim: Option<(String, Arc<AttachedSession>)>,
-        tx: tokio::sync::watch::Sender<Option<AttachOutcome>>,
-    ) {
-        if let Some((victim_id, victim)) = victim {
-            tracing::info!(
-                session = %victim_id,
-                attaching = %id,
-                "lambo serve: evicting the least recently used idle on-demand session to make \
-                 room under max_attached"
-            );
-            self.run_detach(&victim_id, victim, DetachReason::Evicted)
-                .await;
-        }
-        let outcome = self.attach_outcome(&id, create).await;
-        if outcome != AttachOutcome::Attached {
-            let mut slots = self.slots.lock();
-            if matches!(slots.get(&id), Some(Slot::Attaching { .. })) {
-                slots.remove(&id);
+    /// An on-demand attach, on its own task so a request that goes away
+    /// does not cancel it half way (a lease taken and not admitted), bounded
+    /// by `ATTACH_TIMEOUT` (review M2), and ended through its [`Flight`],
+    /// which answers every request waiting on it even if this panics
+    /// (review L1).
+    async fn attach_on_demand(self: Arc<Self>, flight: Flight, credential: String) {
+        let acquiring = std::sync::atomic::AtomicBool::new(false);
+        let outcome = match tokio::time::timeout(
+            ATTACH_TIMEOUT,
+            self.attach_outcome(&flight, &credential, &acquiring),
+        )
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(_) => {
+                tracing::warn!(
+                    session = %flight.id(),
+                    timeout_secs = ATTACH_TIMEOUT.as_secs(),
+                    "lambo serve: an on-demand attach did not finish in time and was abandoned \
+                     (503); a later request tries again"
+                );
+                // The permit went with the attach's future. A lease the
+                // acquire may have taken is released by holder.
+                if acquiring.load(std::sync::atomic::Ordering::SeqCst) {
+                    self.release_abandoned(flight.id()).await;
+                }
+                AttachOutcome::Busy {
+                    retry_after: ATTACH_BUSY_RETRY,
+                }
             }
-        }
-        // Nobody waiting is fine: the outcome is in the slot already.
-        let _ = tx.send(Some(outcome));
+        };
+        flight.finish(outcome);
     }
 
-    /// The attach itself: a permit, the existence probe, the acquire and
-    /// the admission, each raced against the shutdown.
-    async fn attach_outcome(self: &Arc<Self>, id: &str, create: bool) -> AttachOutcome {
+    /// The attach itself: a permit, the existence probe, the place (and
+    /// the eviction that frees one), the acquire and the admission, each
+    /// raced against the shutdown.
+    ///
+    /// Nothing is evicted until the probe says the attach will go ahead
+    /// (#32 PR 6 review H1): an erased session, one that does not exist
+    /// and may not be created, and one another live writer holds each end
+    /// the attach before a place is reserved.
+    async fn attach_outcome(
+        self: &Arc<Self>,
+        flight: &Flight,
+        credential: &str,
+        acquiring: &std::sync::atomic::AtomicBool,
+    ) -> AttachOutcome {
+        let id = flight.id();
         let busy = AttachOutcome::Busy {
             retry_after: Duration::from_secs(1),
         };
@@ -641,7 +711,8 @@ impl SessionRegistry {
         }
         // Step 2, existence: a lease row (#23 never deletes one, and every
         // writer attach makes one). Read for a `create` credential too, so
-        // an erased session is told apart before any acquire.
+        // an erased session is told apart before any acquire, and a session
+        // another live writer holds before anything is evicted.
         let Some(store) = attacher.template.shared_store() else {
             return AttachOutcome::Failed;
         };
@@ -649,20 +720,36 @@ impl SessionRegistry {
         let probe = tokio::select! {
             biased;
             () = self.closed() => return busy,
-            probe = store.read_lease(&session) => probe,
+            probe = tokio::time::timeout(PROBE_TIMEOUT, store.read_lease(&session)) => probe,
         };
+        let mine = crate::store::lease::LeaseHolder::for_this_process(&crate::types::AgentId::new(
+            &attacher.agent,
+        ))
+        .token();
         match probe {
-            Ok(Some(row)) if crate::store::erase::is_tombstone(&row) => {
+            Ok(Ok(Some(row))) if crate::store::erase::is_tombstone(&row) => {
                 tracing::info!(
                     session = %id,
                     "lambo serve: an on-demand attach of an erased session was refused"
                 );
                 return AttachOutcome::Erased;
             }
-            Ok(Some(_)) => {}
-            Ok(None) if create => {}
-            Ok(None) => return AttachOutcome::Absent,
-            Err(e) => {
+            Ok(Ok(Some(row))) => {
+                if let Some(lapses_in) = held_elsewhere(&row, &mine) {
+                    tracing::info!(
+                        session = %id,
+                        holder = %row.holder,
+                        retry_secs = lapses_in.as_secs(),
+                        "lambo serve: an on-demand session is held by another writer (503)"
+                    );
+                    return AttachOutcome::Busy {
+                        retry_after: lapses_in,
+                    };
+                }
+            }
+            Ok(Ok(None)) if flight.create() => {}
+            Ok(Ok(None)) => return AttachOutcome::Absent,
+            Ok(Err(e)) => {
                 tracing::warn!(
                     session = %id,
                     error = %e,
@@ -671,9 +758,49 @@ impl SessionRegistry {
                 );
                 return busy;
             }
+            Err(_) => {
+                tracing::warn!(
+                    session = %id,
+                    timeout_secs = PROBE_TIMEOUT.as_secs(),
+                    "lambo serve: an on-demand attach's lease read timed out; answering 503"
+                );
+                return busy;
+            }
+        }
+        // Step 3, capacity, now that the attach will go ahead.
+        let victim = match self.reserve_place(flight, credential) {
+            Reserved::Free => None,
+            Reserved::Evicting(victim) => Some(victim),
+            Reserved::Full => {
+                return AttachOutcome::Busy {
+                    retry_after: AT_CAPACITY_RETRY,
+                };
+            }
+            Reserved::Stopped => return busy,
+        };
+        if let Some((victim_id, victim)) = victim {
+            // Detached on a tracked task of its own, so neither the attach's
+            // timeout nor the shutdown can leave it half done; the attach
+            // waits for it, so the evicted lease is released before the new
+            // one is taken and the live `Memory`s never exceed the cap.
+            let (detached, gone) = tokio::sync::oneshot::channel::<()>();
+            let registry = Arc::clone(self);
+            let task = tokio::spawn(async move {
+                registry
+                    .run_detach(&victim_id, victim, DetachReason::Evicted)
+                    .await;
+                let _ = detached.send(());
+            });
+            self.track(task);
+            tokio::select! {
+                biased;
+                () = self.closed() => return busy,
+                _ = gone => {}
+            }
         }
         // Step 5, `build_attach` through the template, raced against the
         // shutdown like a pinned retry (#32 review L8).
+        acquiring.store(true, std::sync::atomic::Ordering::SeqCst);
         let attempt = tokio::select! {
             biased;
             () = self.closed() => None,
@@ -689,13 +816,15 @@ impl SessionRegistry {
                 tracing::info!(
                     session = %session.id(),
                     agent = %session.mem.agent(),
+                    credential = %credential,
                     "lambo serve: session attached (on demand)"
                 );
                 AttachOutcome::Attached
             }
             Ok(Acquired::Held(held)) => {
-                // No election wait on the request path (design §3.2): the
-                // caller retries once the holder's lease could lapse.
+                // Taken between the probe and the acquire. No election wait
+                // on the request path (design §3.2): the caller retries once
+                // the holder's lease could lapse.
                 let lapses_in = (held.current.expires_at - chrono::Utc::now())
                     .to_std()
                     .unwrap_or_default()
@@ -736,6 +865,67 @@ impl SessionRegistry {
                 );
                 AttachOutcome::Failed
             }
+        }
+    }
+
+    /// Reserve one of the on-demand places for `flight`, under the slots'
+    /// lock: a free one, or the place of the eviction victim the
+    /// requester's share allows (`on_demand::choose_victim`), which is set
+    /// `Detaching` here so no other attach picks it and no request reaches
+    /// it. The session is attributed to `credential` from here on.
+    fn reserve_place(&self, flight: &Flight, credential: &str) -> Reserved {
+        let Some(bounds) = &self.on_demand else {
+            return Reserved::Stopped;
+        };
+        let mut slots = self.slots.lock();
+        if self.is_closing() || !flight.owns(slots.get(flight.id())) {
+            return Reserved::Stopped;
+        }
+        let places = bounds.max_attached.saturating_sub(self.order.len());
+        let taken = slots
+            .iter()
+            .filter(|(id, slot)| !self.is_pinned(id) && takes_a_place(slot))
+            .count();
+        let mut owners = self.owners.lock();
+        let victim = if taken >= places {
+            let share = place_share(places, bounds.share_among);
+            let Some((victim_id, victim)) = choose_victim(
+                &slots,
+                &owners,
+                |id| self.is_pinned(id),
+                credential,
+                share,
+                bounds.min_idle_to_evict,
+            ) else {
+                tracing::info!(
+                    max_attached = bounds.max_attached,
+                    credential = %credential,
+                    share,
+                    "lambo serve: an on-demand attach was refused: max_attached sessions are \
+                     attached and none this credential may evict is idle (503)"
+                );
+                return Reserved::Full;
+            };
+            tracing::info!(
+                session = %victim_id,
+                owner = %owners.get(&victim_id).map(String::as_str).unwrap_or(""),
+                attaching = %flight.id(),
+                credential = %credential,
+                "lambo serve: evicting the least recently used idle on-demand session to make \
+                 room under max_attached"
+            );
+            slots.insert(victim_id.clone(), Slot::Detaching);
+            Some((victim_id, victim))
+        } else {
+            None
+        };
+        if let Some(Slot::Attaching { placed, .. }) = slots.get_mut(flight.id()) {
+            *placed = true;
+        }
+        owners.insert(flight.id().to_string(), credential.to_string());
+        match victim {
+            Some(victim) => Reserved::Evicting(victim),
+            None => Reserved::Free,
         }
     }
 
@@ -784,6 +974,16 @@ impl SessionRegistry {
             ForcedState::Failed => Slot::Failed,
         };
         self.slots.lock().insert(id.to_string(), slot);
+    }
+
+    /// Abort every on-demand attach and detach task in flight, which ends
+    /// an attach as a panic in it would (#32 PR 6 review L1). Gated like
+    /// its reader, the registry tests.
+    #[cfg(all(test, unix, feature = "store-memory", feature = "embed-fixture"))]
+    pub(super) fn abort_tasks(&self) {
+        for task in self.detaches.lock().iter() {
+            task.abort();
+        }
     }
 
     /// Mark the startup set complete: the process tasks waiting on it start.
@@ -1007,14 +1207,29 @@ impl SessionRegistry {
         // startup has not armed it at all. Abandoned, it may hold the lease
         // it took, so that is released before the shutdown's close set is
         // taken; the attach permit is held until then.
+        // Bounded like an on-demand attach (#32 PR 6 review M2), so a hung
+        // store cannot hold an attach permit for good; a timeout is a
+        // transient failure, tried again in `PINNED_RETRY`.
         let attempt = tokio::select! {
             biased;
             () = self.closed() => None,
-            attempt = self.acquire(id) => Some(attempt),
+            attempt = tokio::time::timeout(ATTACH_TIMEOUT, self.acquire(id)) => Some(attempt),
         };
         let Some(attempt) = attempt else {
             self.release_abandoned(id).await;
             return;
+        };
+        let attempt = match attempt {
+            Ok(attempt) => attempt,
+            Err(_) => {
+                self.release_abandoned(id).await;
+                Err(LamboError::Store(crate::types::StoreError::Other(
+                    anyhow::anyhow!(
+                        "the attach did not finish within {} s",
+                        ATTACH_TIMEOUT.as_secs()
+                    ),
+                )))
+            }
         };
         let (next, warned) = match attempt {
             Ok(Acquired::Attached(mem, endpoint)) => {
@@ -1128,19 +1343,19 @@ impl SessionRegistry {
         {
             Ok(Ok(())) => tracing::info!(
                 session = %id,
-                "lambo serve: a background attach was abandoned at shutdown; its lease, if it \
+                "lambo serve: an attach was abandoned (shutdown or timeout); its lease, if it \
                  took one, is released"
             ),
             Ok(Err(e)) => tracing::warn!(
                 session = %id,
                 error = %e,
-                "lambo serve: a background attach was abandoned at shutdown and its lease could \
+                "lambo serve: an attach was abandoned (shutdown or timeout) and its lease could \
                  not be released; it will lapse at TTL"
             ),
             Err(_) => tracing::warn!(
                 session = %id,
                 grace_secs = LEASE_RELEASE_GRACE.as_secs(),
-                "lambo serve: a background attach was abandoned at shutdown and releasing its \
+                "lambo serve: an attach was abandoned (shutdown or timeout) and releasing its \
                  lease timed out; it will lapse at TTL"
             ),
         }
@@ -1261,6 +1476,7 @@ impl SessionRegistry {
         let mut slots = self.slots.lock();
         if matches!(slots.get(id), Some(Slot::Detaching)) {
             slots.remove(id);
+            self.owners.lock().remove(id);
         }
     }
 
@@ -1272,7 +1488,9 @@ impl SessionRegistry {
         let Some(bounds) = &self.on_demand else {
             return;
         };
-        let every = bounds.idle_detach.min(IDLE_SWEEP_MAX);
+        // `new` keeps `idle_detach` at `MIN_IDLE_DETACH` or more, so this
+        // never sleeps zero (#32 PR 6 review L5).
+        let every = bounds.idle_detach.min(IDLE_SWEEP_MAX).max(MIN_IDLE_DETACH);
         let registry = Arc::downgrade(self);
         *self.sweeper.lock() = Some(tokio::spawn(idle_sweeper(registry, every)));
     }
@@ -1284,8 +1502,14 @@ impl SessionRegistry {
             return;
         };
         let now = tokio::time::Instant::now();
+        let mut slots = self.slots.lock();
+        // Checked under the lock the shutdown's set is taken under, and each
+        // detach tracked before it is released, so a sweep cannot start a
+        // detach the shutdown does not join (#32 PR 6 review L4).
+        if self.is_closing() {
+            return;
+        }
         let idle: Vec<(String, Arc<AttachedSession>)> = {
-            let mut slots = self.slots.lock();
             let due: Vec<String> = slots
                 .iter()
                 .filter(|(id, _)| !self.is_pinned(id))
@@ -1315,6 +1539,7 @@ impl SessionRegistry {
             });
             self.track(task);
         }
+        drop(slots);
     }
 
     /// The process shutdown's attached set (stage 3): no attach starts after
@@ -1323,6 +1548,12 @@ impl SessionRegistry {
     /// the registry gives out.
     pub(super) async fn close_set(&self) -> Vec<Arc<AttachedSession>> {
         self.closing.send_replace(true);
+        // The idle sweeper stops before the set is taken (#32 PR 6 review
+        // L4); a round already under way saw `closing` under the slots' lock
+        // or tracked its detaches before this takes that lock.
+        if let Some(sweeper) = self.sweeper.lock().take() {
+            sweeper.abort();
+        }
         // Every permit: each attach in flight has admitted its session or
         // given up by then. Never closed, so this cannot fail.
         let _no_attach_in_flight = self.attach_permits.acquire_many(self.permit_count).await;
@@ -1399,7 +1630,7 @@ pub(super) fn is_transient(err: &LamboError) -> bool {
 /// What [`SessionRegistry::route_or_start`] decided.
 enum Route {
     /// Answer the request with this.
-    Answer(Lookup),
+    Answer(Routed),
     /// Wait for the attach in flight.
     Wait {
         done: tokio::sync::watch::Receiver<Option<AttachOutcome>>,
@@ -1425,27 +1656,29 @@ fn answer_for(slot: &Slot) -> Lookup {
     }
 }
 
-/// The on-demand session to evict for an attach at `max_attached`: the
-/// least recently used live one with no call in flight (design §3.2 step
-/// 3). Pinned sessions (`pinned`) are never evicted.
-fn least_recently_used_idle(
-    slots: &HashMap<String, Slot>,
-    pinned: impl Fn(&str) -> bool,
-) -> Option<(String, Arc<AttachedSession>)> {
-    let now = tokio::time::Instant::now();
-    slots
-        .iter()
-        .filter(|(id, _)| !pinned(id))
-        .filter_map(|(id, slot)| match slot {
-            Slot::Live(session) => session
-                .activity
-                .idle_at(now)
-                .map(|idle| (idle, id, session)),
-            _ => None,
-        })
-        // Longest idle first; the id breaks a tie, so the choice is stable.
-        .max_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(a.1)))
-        .map(|(_, id, session)| (id.clone(), Arc::clone(session)))
+/// What [`SessionRegistry::reserve_place`] found.
+enum Reserved {
+    /// A free place.
+    Free,
+    /// The place of this session, now `Detaching`, which the attach
+    /// detaches before it acquires.
+    Evicting((String, Arc<AttachedSession>)),
+    /// No free place, and none the requester may evict: 503.
+    Full,
+    /// The serve is closing, or the attach's slot is gone.
+    Stopped,
+}
+
+/// When another live writer holds the lease in `row` (not released, not
+/// this process's holder `mine`, not lapsed): how long until it could
+/// lapse, at least a second. `None` when the attach may go ahead.
+fn held_elsewhere(row: &crate::store::LeaseInfo, mine: &str) -> Option<Duration> {
+    if row.holder == crate::store::lease::RELEASED_HOLDER || row.holder == mine {
+        return None;
+    }
+    // A lapsed lease converts to an error: the acquire takes it over.
+    let left = (row.expires_at - chrono::Utc::now()).to_std().ok()?;
+    Some(left.max(Duration::from_secs(1)))
 }
 
 /// The idle sweeper: one [`SessionRegistry::sweep_idle`] round every

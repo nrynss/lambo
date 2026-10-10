@@ -15,7 +15,7 @@
 use super::pinned_serve::{Shared, StoreCalls};
 use super::*;
 use crate::config::ServeCredential;
-use crate::mcp::serve::registry::OnDemandBounds;
+use crate::mcp::serve::registry::{Lookup, OnDemandBounds, Requester};
 use crate::store::lease::{LeaseHolder, LEASE_TTL, RELEASED_HOLDER};
 use crate::surface::session::{
     parse_addressed, SessionCapabilities, SessionGrant, SessionPrefix, SessionScope,
@@ -56,29 +56,72 @@ fn credential(name: &str, create: bool) -> ServeCredential {
     }
 }
 
+/// A credential over [`PINNED`] only: it reaches no on-demand session.
+fn pinned_only(name: &str) -> ServeCredential {
+    ServeCredential {
+        grant: SessionGrant::new(
+            name,
+            SessionScope::new([parse_addressed(PINNED).expect("addressable")], false, None),
+            SessionCapabilities {
+                create: true,
+                ..SessionCapabilities::default()
+            },
+        ),
+        token: SecretToken::new(token(name)).expect("non-empty"),
+    }
+}
+
+/// `name` asking, with or without `create`.
+fn asking(name: &str, create: bool) -> Requester<'_> {
+    Requester {
+        credential: name,
+        create,
+    }
+}
+
 /// A registry pinning [`PINNED`] that attaches on demand within
 /// `max_attached` and `idle_detach`, each session at `session_rps`, served
-/// behind the real guards with two credentials: `maker` (with `create`)
-/// and `reader` (without).
+/// behind the real guards with three credentials: `maker` (with `create`)
+/// and `reader` (without) over [`PREFIX`], and `pinned` over [`PINNED`]
+/// only. The on-demand places are shared between `maker` and `reader`.
 struct OnDemand {
     addr: SocketAddr,
     registry: Arc<SessionRegistry>,
     store: Arc<MemoryStore>,
     calls: Arc<StoreCalls>,
+    /// While set, every session load stalls (`Shared`).
+    stall: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl OnDemand {
+    /// No eviction floor, so a test can evict a session it just used.
     async fn start(max_attached: usize, idle_detach: Duration, session_rps: u32) -> Self {
+        Self::start_with(max_attached, idle_detach, session_rps, Duration::ZERO).await
+    }
+
+    async fn start_with(
+        max_attached: usize,
+        idle_detach: Duration,
+        session_rps: u32,
+        min_idle_to_evict: Duration,
+    ) -> Self {
         let mut opts = ServeOptions::new(PINNED, "agent-a");
         opts.transport = Transport::Http;
-        opts.credentials = vec![credential("maker", true), credential("reader", false)];
+        opts.credentials = vec![
+            credential("maker", true),
+            credential("reader", false),
+            pinned_only("pinned"),
+        ];
         assert!(
             crate::mcp::serve::authority::reaches_past_pinned(&opts),
             "a prefix reaches past the pinned session"
         );
+        let share_among = crate::mcp::serve::authority::on_demand_credentials(&opts);
+        assert_eq!(share_among, 2, "maker and reader, not pinned");
         let authority = authority_for(&opts);
         let store = Arc::new(MemoryStore::new());
-        let (recorded, calls) = Shared::recording(&store);
+        let stall = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (recorded, calls) = Shared::recording_with_stall(&store, Arc::clone(&stall));
         let backends = backends_over(recorded, fast_config(1_000));
         let early = EarlyShutdown::unarmed();
         let store_cfg = backends.store_cfg.clone();
@@ -109,6 +152,8 @@ impl OnDemand {
                 on_demand: Some(OnDemandBounds {
                     max_attached,
                     idle_detach,
+                    share_among,
+                    min_idle_to_evict,
                 }),
             },
         );
@@ -121,6 +166,37 @@ impl OnDemand {
             registry,
             store,
             calls,
+            stall,
+        }
+    }
+
+    fn stall_loads(&self, on: bool) {
+        self.stall.store(on, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Give `id` a lease row, released: a session a writer has used.
+    async fn make_existing(&self, id: &str) {
+        let writer = LeaseHolder::for_this_process(&AgentId::new("another-writer"));
+        let session = SessionId::new(id);
+        self.store
+            .acquire_lease(&session, &writer, LEASE_TTL)
+            .await
+            .expect("acquire");
+        self.store
+            .release_lease(&session, &writer)
+            .await
+            .expect("release");
+    }
+
+    /// Wait until the store has been asked `method` for `id` `n` times.
+    async fn until_called(&self, method: &str, id: &str, n: usize) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while self.count(method, id) < n {
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {method} {id}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
 
@@ -248,18 +324,27 @@ async fn until(budget: Duration, what: &str, mut done: impl FnMut() -> bool) {
 
 /// Acceptance: N concurrent first requests for one session cause one
 /// `build_attach` (one lease acquire, one existence probe), and every one
-/// of them is served by the session it attached.
+/// of them is served by the session it attached. The load is held until
+/// all eight have arrived, so they overlap by construction (review L7).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_first_requests_attach_once() {
     let od = OnDemand::start(16, Duration::from_secs(900), 0).await;
     let id = "od-u-flight";
     let path = format!("/mcp/s/{id}");
+    od.stall_loads(true);
     let mut requests = tokio::task::JoinSet::new();
-    for _ in 0..8 {
+    for i in 0..8 {
         let path = path.clone();
         let addr = od.addr;
         requests.spawn(async move { initialize_as(addr, &path, Some(&bearer("maker"))).await });
+        if i == 0 {
+            // The first one's attach is in its (stalled) load: every later
+            // request finds the flight in its slot.
+            od.until_called("load_session", id, 1).await;
+        }
     }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    od.stall_loads(false);
     let mut served = 0;
     while let Some(done) = requests.join_next().await {
         let (_, info) = done.expect("a request task");
@@ -382,11 +467,10 @@ async fn nothing_to_evict_or_held_elsewhere_is_503_with_retry_after() {
         od.attached(busy).is_some(),
         "a session in use is never evicted"
     );
-    assert_eq!(
-        od.count("read_lease", "od-u-next"),
-        0,
-        "refused before any store call"
-    );
+    // The probe runs before any place is reserved (review H1): one read,
+    // no acquire, nothing evicted.
+    assert_eq!(od.count("read_lease", "od-u-next"), 1, "probed once");
+    assert_eq!(od.count("acquire_lease", "od-u-next"), 0, "never acquired");
 
     drop(in_flight);
     initialize_as(od.addr, "/mcp/s/od-u-next", Some(&bearer("maker"))).await;
@@ -613,4 +697,422 @@ fn attach_concurrency_is_one_on_sqlite() {
         ..Default::default()
     };
     assert_eq!(own.session_rps(50), 5);
+}
+
+/// Review H1: at the cap, requests from a credential without `create` for
+/// ids that do not exist (and for an erased one, and one another writer
+/// holds) are answered after the probe and evict nothing: no live session
+/// is detached and no lease released. An existing id from the same
+/// credential then does evict, so eviction was possible all along.
+#[tokio::test]
+async fn requests_that_will_not_attach_never_evict() {
+    // Two on-demand places, a share of one each for maker and reader.
+    let od = OnDemand::start(3, Duration::from_secs(900), 0).await;
+    let (m1, m2) = ("od-u-m1", "od-u-m2");
+    for id in [m1, m2] {
+        initialize_as(od.addr, &format!("/mcp/s/{id}"), Some(&bearer("maker"))).await;
+    }
+    let reference =
+        crate::test_util::on_the_wire_as(od.addr, "GET", "/not/routed", Some(&bearer("reader")))
+            .await;
+    for i in 0..4 {
+        let path = format!("/mcp/s/od-u-nope-{i}");
+        assert_eq!(
+            crate::test_util::on_the_wire_as(od.addr, "POST", &path, Some(&bearer("reader"))).await,
+            reference,
+            "absent, no create, at the cap: still the uniform 404"
+        );
+    }
+    // Erased, and held by another live writer: answered, nothing evicted.
+    let writer = LeaseHolder::for_this_process(&AgentId::new("another-writer"));
+    let erased = SessionId::new("od-u-gone");
+    od.store
+        .acquire_lease(&erased, &writer, LEASE_TTL)
+        .await
+        .expect("acquire");
+    od.store
+        .erase_session(&erased, &writer)
+        .await
+        .expect("erase");
+    let gone = http_as(
+        od.addr,
+        "POST",
+        "/mcp/s/od-u-gone",
+        Some(&bearer("reader")),
+        None,
+        "{}",
+    )
+    .await;
+    assert_eq!(gone.status, 410, "{}", gone.body);
+    od.store
+        .acquire_lease(&SessionId::new("od-u-taken"), &writer, LEASE_TTL)
+        .await
+        .expect("the other writer holds it");
+    let taken = http_as(
+        od.addr,
+        "POST",
+        "/mcp/s/od-u-taken",
+        Some(&bearer("maker")),
+        None,
+        "{}",
+    )
+    .await;
+    assert_eq!(taken.status, 503, "{}", taken.body);
+    assert_eq!(
+        od.count("acquire_lease", "od-u-taken"),
+        0,
+        "the probe saw the live holder: no acquire"
+    );
+    for id in [m1, m2] {
+        assert!(od.attached(id).is_some(), "{id} was not evicted");
+        assert_eq!(od.count("release_lease", id), 0, "{id} kept its lease");
+    }
+
+    // An existing session for the reader, which is under its share while
+    // maker is over its own: maker's least recently used session goes.
+    od.make_existing("od-u-real").await;
+    initialize_as(od.addr, "/mcp/s/od-u-real", Some(&bearer("reader"))).await;
+    assert!(od.attached("od-u-real").is_some());
+    assert!(
+        od.attached(m1).is_none(),
+        "the least recently used was evicted"
+    );
+    assert!(od.attached(m2).is_some());
+    od.close().await;
+}
+
+/// Review M1: a request routed to a live session holds it in flight from
+/// the routing, so an attach at the cap cannot evict it before its call
+/// starts; once the request is done the session can be evicted.
+#[tokio::test]
+async fn a_routed_request_holds_its_session_against_eviction() {
+    let od = OnDemand::start(2, Duration::from_secs(900), 0).await;
+    let held = "od-u-held";
+    initialize_as(od.addr, &format!("/mcp/s/{held}"), Some(&bearer("maker"))).await;
+    let routed = od.registry.get_or_attach(held, asking("maker", true)).await;
+    assert!(matches!(routed.lookup, Lookup::Live(_)));
+    assert!(routed.in_flight.is_some());
+
+    let refused = http_as(
+        od.addr,
+        "POST",
+        "/mcp/s/od-u-next",
+        Some(&bearer("maker")),
+        None,
+        "{}",
+    )
+    .await;
+    assert_eq!(refused.status, 503, "{}", refused.body);
+    assert_eq!(refused.header("retry-after").as_deref(), Some("5"));
+    assert!(od.attached(held).is_some(), "the routed session stays");
+
+    drop(routed);
+    initialize_as(od.addr, "/mcp/s/od-u-next", Some(&bearer("maker"))).await;
+    assert!(
+        od.attached(held).is_none(),
+        "evicted once its request is done"
+    );
+    od.close().await;
+}
+
+/// Review M1 and M4: a session used within the eviction floor is not
+/// evicted; past it, it is.
+#[tokio::test]
+async fn a_session_used_just_now_is_not_evicted() {
+    let floor = Duration::from_millis(500);
+    let od = OnDemand::start_with(2, Duration::from_secs(900), 0, floor).await;
+    initialize_as(od.addr, "/mcp/s/od-u-fresh", Some(&bearer("maker"))).await;
+    let refused = http_as(
+        od.addr,
+        "POST",
+        "/mcp/s/od-u-other",
+        Some(&bearer("maker")),
+        None,
+        "{}",
+    )
+    .await;
+    assert_eq!(refused.status, 503, "{}", refused.body);
+    assert!(od.attached("od-u-fresh").is_some());
+    tokio::time::sleep(floor + Duration::from_millis(100)).await;
+    initialize_as(od.addr, "/mcp/s/od-u-other", Some(&bearer("maker"))).await;
+    assert!(od.attached("od-u-fresh").is_none());
+    od.close().await;
+}
+
+/// Review M4: at the cap, a credential at its share evicts only its own
+/// sessions; with none of its own idle it gets 503, and another
+/// credential's session within its share is never taken.
+#[tokio::test]
+async fn a_credential_at_its_share_evicts_only_its_own_sessions() {
+    // Two places, a share of one each.
+    let od = OnDemand::start(3, Duration::from_secs(900), 0).await;
+    od.make_existing("od-u-r1").await;
+    initialize_as(od.addr, "/mcp/s/od-u-r1", Some(&bearer("reader"))).await;
+    initialize_as(od.addr, "/mcp/s/od-u-m1", Some(&bearer("maker"))).await;
+    // The reader's session is the least recently used, but not maker's to
+    // take: maker's own goes.
+    initialize_as(od.addr, "/mcp/s/od-u-m2", Some(&bearer("maker"))).await;
+    assert!(od.attached("od-u-m1").is_none(), "maker's own was evicted");
+    assert!(
+        od.attached("od-u-r1").is_some(),
+        "the reader's share is kept"
+    );
+
+    // Maker's only session busy: 503, and still not the reader's.
+    let busy = od.attached("od-u-m2").expect("attached").activity.enter();
+    let refused = http_as(
+        od.addr,
+        "POST",
+        "/mcp/s/od-u-m3",
+        Some(&bearer("maker")),
+        None,
+        "{}",
+    )
+    .await;
+    assert_eq!(refused.status, 503, "{}", refused.body);
+    assert!(od.attached("od-u-r1").is_some());
+    assert!(od.attached("od-u-m2").is_some());
+    drop(busy);
+    od.close().await;
+}
+
+/// Review M3: absent (to a credential without `create`) and erased are
+/// answered from memory for `NEGATIVE_TTL`; a credential with `create` is
+/// not stopped by an absent entry; past the TTL the store is asked again.
+#[tokio::test]
+async fn negative_outcomes_are_cached_and_create_is_not_blocked() {
+    let od = OnDemand::start(16, Duration::from_secs(900), 0).await;
+    let absent = "od-u-later";
+    for _ in 0..3 {
+        let reply = http_as(
+            od.addr,
+            "POST",
+            &format!("/mcp/s/{absent}"),
+            Some(&bearer("reader")),
+            None,
+            "{}",
+        )
+        .await;
+        assert_eq!(reply.status, 404, "{}", reply.body);
+    }
+    assert_eq!(
+        od.count("read_lease", absent),
+        1,
+        "probed once, then cached"
+    );
+    // Maker may create it, cached absent or not.
+    initialize_as(od.addr, &format!("/mcp/s/{absent}"), Some(&bearer("maker"))).await;
+    assert!(od.attached(absent).is_some());
+    assert_eq!(od.count("acquire_lease", absent), 1);
+
+    let writer = LeaseHolder::for_this_process(&AgentId::new("another-writer"));
+    let erased = "od-u-erased-c";
+    od.store
+        .acquire_lease(&SessionId::new(erased), &writer, LEASE_TTL)
+        .await
+        .expect("acquire");
+    od.store
+        .erase_session(&SessionId::new(erased), &writer)
+        .await
+        .expect("erase");
+    for who in ["maker", "reader", "maker"] {
+        let reply = http_as(
+            od.addr,
+            "POST",
+            &format!("/mcp/s/{erased}"),
+            Some(&bearer(who)),
+            None,
+            "{}",
+        )
+        .await;
+        assert_eq!(reply.status, 410, "{who}: {}", reply.body);
+    }
+    assert_eq!(od.count("read_lease", erased), 1, "cached after one probe");
+
+    tokio::time::pause();
+    tokio::time::advance(crate::mcp::serve::registry::NEGATIVE_TTL).await;
+    tokio::time::resume();
+    let reply = http_as(
+        od.addr,
+        "POST",
+        &format!("/mcp/s/{erased}"),
+        Some(&bearer("reader")),
+        None,
+        "{}",
+    )
+    .await;
+    assert_eq!(reply.status, 410);
+    assert_eq!(
+        od.count("read_lease", erased),
+        2,
+        "asked again past the TTL"
+    );
+    od.close().await;
+}
+
+/// Review M2: an attach whose store hangs gives its waiters 503 after
+/// `ATTACH_WAIT`, and is abandoned after `ATTACH_TIMEOUT`: its slot is
+/// removed, the lease it took is released, and the permit is free for the
+/// next attach (paused clock).
+#[tokio::test]
+async fn an_attach_that_hangs_times_out_and_does_not_stick() {
+    let od = OnDemand::start(16, Duration::from_secs(900), 0).await;
+    let id = "od-u-hang";
+    od.stall_loads(true);
+    tokio::time::pause();
+    let started = tokio::time::Instant::now();
+    let routed = od.registry.get_or_attach(id, asking("maker", true)).await;
+    match routed.lookup {
+        Lookup::Unavailable { retry_after } => {
+            assert_eq!(retry_after, crate::mcp::serve::registry::ATTACH_BUSY_RETRY)
+        }
+        _ => panic!("expected 503 while the attach hangs"),
+    }
+    assert!(started.elapsed() >= crate::mcp::serve::registry::ATTACH_WAIT);
+    assert!(
+        matches!(od.registry.lookup(id), Lookup::Unavailable { .. }),
+        "still attaching"
+    );
+    // Past the attach's own bound: abandoned and cleared.
+    tokio::time::sleep(crate::mcp::serve::registry::ATTACH_TIMEOUT).await;
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::resume();
+    until(
+        Duration::from_secs(10),
+        "the abandoned attach to clear",
+        || matches!(od.registry.lookup(id), Lookup::NotHosted),
+    )
+    .await;
+    od.registry.join_detaches().await;
+    assert_eq!(od.lease(id).await.holder, RELEASED_HOLDER, "lease released");
+    // A busy outcome is not cached: the next request attaches.
+    od.stall_loads(false);
+    initialize_as(od.addr, &format!("/mcp/s/{id}"), Some(&bearer("maker"))).await;
+    assert!(od.attached(id).is_some());
+    od.close().await;
+}
+
+/// Review L1: an attach that dies without an outcome (a panic, here an
+/// abort) wakes its waiters with an error, clears its `Attaching` slot so
+/// it holds no place, and releases the lease it took.
+#[tokio::test]
+async fn an_attach_that_dies_answers_its_waiters_and_frees_its_place() {
+    // One on-demand place.
+    let od = OnDemand::start(2, Duration::from_secs(900), 0).await;
+    let id = "od-u-dies";
+    od.stall_loads(true);
+    let registry = Arc::clone(&od.registry);
+    let waiter = tokio::spawn(async move {
+        registry
+            .get_or_attach(id, asking("maker", true))
+            .await
+            .lookup
+    });
+    od.until_called("load_session", id, 1).await;
+    od.registry.abort_tasks();
+    let answer = tokio::time::timeout(Duration::from_secs(5), waiter)
+        .await
+        .expect("the waiter is woken")
+        .expect("the waiter task");
+    assert!(matches!(answer, Lookup::Failed), "an error, not a hang");
+    assert!(
+        matches!(od.registry.lookup(id), Lookup::NotHosted),
+        "slot cleared"
+    );
+    od.stall_loads(false);
+    od.registry.join_detaches().await;
+    assert_eq!(od.lease(id).await.holder, RELEASED_HOLDER, "lease released");
+    // The place is free: another session attaches without evicting.
+    initialize_as(od.addr, "/mcp/s/od-u-after", Some(&bearer("maker"))).await;
+    assert!(od.attached("od-u-after").is_some());
+    od.close().await;
+}
+
+/// Review L7 (design R5): a shutdown during an on-demand attach abandons
+/// it promptly and releases the lease it took.
+#[tokio::test]
+async fn the_shutdown_during_an_on_demand_attach_releases_its_lease() {
+    let od = OnDemand::start(16, Duration::from_secs(900), 0).await;
+    let id = "od-u-sigterm";
+    od.stall_loads(true);
+    let registry = Arc::clone(&od.registry);
+    let waiter = tokio::spawn(async move {
+        registry
+            .get_or_attach(id, asking("maker", true))
+            .await
+            .lookup
+    });
+    od.until_called("load_session", id, 1).await;
+    let set = tokio::time::timeout(Duration::from_secs(5), od.registry.close_set())
+        .await
+        .expect("the shutdown does not wait on the stalled attach");
+    assert!(set.iter().all(|s| s.id().as_str() != id));
+    tokio::time::timeout(Duration::from_secs(5), od.registry.join_detaches())
+        .await
+        .expect("the attach task ends");
+    let answer = waiter.await.expect("the waiter task");
+    assert!(matches!(answer, Lookup::Unavailable { .. }));
+    assert_eq!(od.lease(id).await.holder, RELEASED_HOLDER);
+    for session in set {
+        session.mem.close().await.expect("close");
+    }
+}
+
+/// Review L7: out of scope, against a registry that attaches on demand,
+/// is the byte-identical 404 with no store call: the reader asking outside
+/// its prefix, and a pinned-only credential asking inside it.
+#[tokio::test]
+async fn out_of_scope_requests_make_no_store_call_on_demand() {
+    let od = OnDemand::start(16, Duration::from_secs(900), 0).await;
+    let reference =
+        crate::test_util::on_the_wire_as(od.addr, "GET", "/not/routed", Some(&bearer("reader")))
+            .await;
+    let before = od.calls.len();
+    for (who, path) in [
+        ("reader", "/mcp/s/other-x"),
+        ("pinned", "/mcp/s/od-u-x"),
+        ("pinned", "/mcp/s/od-u-y"),
+    ] {
+        assert_eq!(
+            crate::test_util::on_the_wire_as(od.addr, "POST", path, Some(&bearer(who))).await,
+            reference,
+            "{who} {path}"
+        );
+    }
+    assert!(
+        od.calls.since(before).is_empty(),
+        "{:?}",
+        od.calls.since(before)
+    );
+    od.close().await;
+}
+
+/// Review L7: the idle sweeper skips a session with a request in flight,
+/// however long it has been idle, and takes it once the request is done.
+#[tokio::test]
+async fn the_idle_sweep_skips_a_session_in_use() {
+    let idle = Duration::from_secs(60);
+    let od = OnDemand::start(16, idle, 0).await;
+    let id = "od-u-busy-idle";
+    initialize_as(od.addr, &format!("/mcp/s/{id}"), Some(&bearer("maker"))).await;
+    let routed = od.registry.get_or_attach(id, asking("maker", true)).await;
+    tokio::time::pause();
+    tokio::time::advance(idle * 3).await;
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    assert!(od.attached(id).is_some(), "in use: never idle");
+    drop(routed);
+    tokio::time::advance(idle * 2).await;
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::resume();
+    until(Duration::from_secs(10), "the idle detach", || {
+        matches!(od.registry.lookup(id), Lookup::NotHosted)
+    })
+    .await;
+    od.close().await;
 }
