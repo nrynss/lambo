@@ -1063,6 +1063,13 @@
   differently than before; a flushed concept the Cockroach approximate index
   misses is still missed, as before. The library function
   `graph::hybrid::derive` keeps asking the database only (see its docs).
+  A batch the flush drops instead of committing (a dead-lettered constraint
+  violation, a degraded session's drop, a lost lease) keeps its concepts in
+  the unflushed set until the process restarts, since they never reached
+  the database. A degraded session, or one dead-lettered batch of about
+  2,000 concepts, therefore derives by comparing against every concept in
+  memory for the rest of the process; the holder logs a warning the first
+  time that happens.
 - A freshly derived text or image concept ranks by query relevance before
   the daemon scores it (#79). Previously its missing daemon score counted as
   0 inside the 0.5/0.5 blend, so a fresh relevant EG2 image (0.3616) ranked

@@ -133,6 +133,9 @@ pub struct Graph {
     unflushed: HashMap<NodeId, u64>,
     /// The epoch of a `SetEmbedding` not yet durable (#60).
     unflushed_contract: Option<u64>,
+    /// Whether the holder has logged its first whole-graph fallback for an
+    /// overflowing unflushed set (#60 review L-2). RAM-only.
+    unflushed_overflow_logged: unflushed::LoggedOnce,
 }
 
 impl Graph {
@@ -158,6 +161,7 @@ impl Graph {
             access_dirty: HashSet::new(),
             unflushed: HashMap::new(),
             unflushed_contract: None,
+            unflushed_overflow_logged: unflushed::LoggedOnce::default(),
         }
     }
 

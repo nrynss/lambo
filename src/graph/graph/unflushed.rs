@@ -22,7 +22,10 @@
 //!   handed to [`Graph::pin_unflushed`]: its ids stay here for the rest of the
 //!   process, because a later, successful stamp does not make them durable.
 //!   A later upsert of the same concept replaces the pin with its own epoch,
-//!   and is durable once its own batch commits.
+//!   and is durable once its own batch commits. A degraded session pins
+//!   everything it drains, so its set only grows; past about 2,000 entries
+//!   the derive source ranks the whole graph for the rest of the process,
+//!   and logs that once ([`Graph::first_unflushed_overflow`]).
 //!
 //! Deletes are recorded too: until the delete is durable the database still
 //! returns the row, and the reader has to know that the graph, not the
@@ -31,8 +34,21 @@
 //! RAM-only, like the access dirty set: a loaded session starts empty
 //! (everything it loaded is durable), and nothing here is snapshotted.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use super::Graph;
 use crate::types::{Mutation, Node, NodeId};
+
+/// A flag a reader under the read lock can set once. A clone carries its
+/// value, so a hybrid commit's staged clone keeps it.
+#[derive(Debug, Default)]
+pub(super) struct LoggedOnce(AtomicBool);
+
+impl Clone for LoggedOnce {
+    fn clone(&self) -> Self {
+        Self(AtomicBool::new(self.0.load(Ordering::Relaxed)))
+    }
+}
 
 /// The epoch a pinned entry carries: above every stamp, so no flush clears it.
 const PINNED: u64 = u64::MAX;
@@ -109,5 +125,16 @@ impl Graph {
     /// store's checked read still compares against the old one.
     pub(crate) fn contract_unflushed(&self) -> bool {
         self.unflushed_contract.is_some()
+    }
+
+    /// `true` the first time it is called on this graph, `false` after: the
+    /// derive source logs its first whole-graph fallback for an overflowing
+    /// set once, not on every derive. Takes `&self` so the reader can call
+    /// it under the read lock.
+    pub(crate) fn first_unflushed_overflow(&self) -> bool {
+        !self
+            .unflushed_overflow_logged
+            .0
+            .swap(true, Ordering::Relaxed)
     }
 }

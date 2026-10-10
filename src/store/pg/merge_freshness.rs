@@ -912,12 +912,16 @@ fn whole_graph_rank(
 /// [`crate::store::MAX_VECTOR_CANDIDATE_LIMIT`] (2,048) the store would
 /// refuse the read. The source ranks the whole graph instead, with no
 /// database call, and returns to the union as soon as a commit clears the
-/// set. At exactly the bound it still asks the database.
+/// set. At exactly the bound it still asks the database. The first
+/// fallback is logged once per holder, not on every derive (review L-2).
 #[tokio::test]
 async fn an_overflowing_unflushed_set_ranks_the_whole_graph() {
     async fn check<D: Dialect>(kind: StoreKind, name: &str) {
         use crate::store::vector_source::VectorCandidates;
         const LIMIT: usize = 8;
+        const NOTICE: &str = "more than the database read can over-fetch for";
+        let (logs, _guard) = crate::test_util::capture_logs(tracing::Level::INFO);
+        let notices = || logs.lines().iter().filter(|l| l.contains(NOTICE)).count();
         let session = SessionId::from(format!("pg-overflow-{name}").as_str());
         let embedder = LabelVectors::new(DIM);
         let store = LaggingDatabase::<D>::new(kind);
@@ -943,6 +947,7 @@ async fn an_overflowing_unflushed_set_ranks_the_whole_graph() {
         let hits = ask().await;
         assert_eq!(store.vector_calls(), 1, "{name}: at the bound, the union");
         assert_eq!(hits.first().map(|h| h.0), Some(ids[0]), "{name}");
+        assert_eq!(notices(), 0, "{name}: logged a fallback at the bound");
 
         // One more: 2,049 > 2,048, the whole graph, no database call.
         add_concept(&graph, &embedder, "one unflushed fact too many");
@@ -954,6 +959,11 @@ async fn an_overflowing_unflushed_set_ranks_the_whole_graph() {
         );
         assert_eq!(hits, whole_graph_rank(&graph, &probe, LIMIT), "{name}");
         assert_eq!(hits.first().map(|h| h.0), Some(ids[0]), "{name}");
+        assert!(logs.contains("WARN"), "{name}: {}", logs.contents());
+        // Another derive while still overflowing: no second log line.
+        assert_eq!(ask().await, hits, "{name}");
+        assert_eq!(store.vector_calls(), 1, "{name}");
+        assert_eq!(notices(), 1, "{name}: logged once: {}", logs.contents());
 
         // A commit clears the set: back to the union, one database call.
         commit(&graph, &store);

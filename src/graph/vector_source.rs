@@ -303,7 +303,22 @@ impl VectorCandidateSource for StoreAndUnflushedSource<'_> {
                 None => UnionPlan::Done(Vec::new()),
                 Some(dim) => {
                     let store_limit = limit.saturating_add(graph.unflushed_len());
-                    if graph.contract_unflushed() || store_limit > MAX_VECTOR_CANDIDATE_LIMIT {
+                    let overflow = store_limit > MAX_VECTOR_CANDIDATE_LIMIT;
+                    if overflow && graph.first_unflushed_overflow() {
+                        tracing::warn!(
+                            session = %session.0,
+                            unflushed = graph.unflushed_len(),
+                            limit,
+                            max = MAX_VECTOR_CANDIDATE_LIMIT,
+                            "derive merge candidates: {} concepts are unflushed, more than the \
+                             database read can over-fetch for, so derive ranks every concept in \
+                             the holder's graph until a flush clears them (logged once per \
+                             holder; a dead-lettered or degraded batch stays unflushed until \
+                             restart)",
+                            graph.unflushed_len(),
+                        );
+                    }
+                    if graph.contract_unflushed() || overflow {
                         UnionPlan::Done(rank_concepts(
                             session,
                             probe,
