@@ -194,8 +194,9 @@
   // credential that reads one session, gets the page exactly as before.
   //
   // Names come from the operator's opt-in listing (/api/sessions) when it
-  // answers. Otherwise the picker is a text field plus the names this browser
-  // has opened, most recent first, under one localStorage key. Names only:
+  // answers, with "Other session…" for a name the listing does not give.
+  // Otherwise the picker is a text field plus the names this browser has
+  // opened, most recent first, under one localStorage key. Names only:
   // no counts, no times. Every name is rendered as text, never as markup.
 
   var SESSION_HISTORY_KEY = "lambo-sessions";
@@ -253,7 +254,18 @@
     });
   }
 
-  // The listing answered with names: a plain choice among them.
+  // The select's last option: type a name instead. No session name is
+  // empty, so its value cannot collide with one.
+  var OTHER_SESSION = "";
+
+  function choosingOther() {
+    return picker.mode === "choice" && $("session-choice").value === OTHER_SESSION;
+  }
+
+  // The listing answered with names: a choice among them, plus "Other
+  // session…", which reveals the text field. The listing names a
+  // credential's exact sessions only, never a prefix expansion, so a
+  // session the caller reads through a prefix is opened by typing it.
   function showSessionChoice(names) {
     picker.mode = "choice";
     var select = $("session-choice");
@@ -264,7 +276,15 @@
       if (name === picker.current) o.selected = true;
       select.appendChild(o);
     });
-    $("session-picker-label").htmlFor = "session-choice";
+    var other = el("option", null, "Other session…");
+    other.value = OTHER_SESSION;
+    select.appendChild(other);
+    // Revealed in place, right after the select in tab order; focus is not
+    // moved, so arrowing through the options never jumps out of the select.
+    select.addEventListener("change", function () {
+      show($("session-entry"), choosingOther());
+      pickerMessage(choosingOther() ? "Type the session's name, then Open." : "");
+    });
     show(select, true);
     show($("session-entry"), false);
     show($("session-picker"), true);
@@ -275,7 +295,6 @@
     picker.mode = "entry";
     rememberSession(picker.current);
     fillKnownSessions();
-    $("session-picker-label").htmlFor = "session-entry";
     show($("session-entry"), true);
     show($("session-choice"), false);
     show($("session-picker"), true);
@@ -283,7 +302,8 @@
 
   function openPickedSession(ev) {
     ev.preventDefault();
-    var name = (picker.mode === "choice" ? $("session-choice").value : $("session-entry").value).trim();
+    var typed = picker.mode === "entry" || choosingOther();
+    var name = (typed ? $("session-entry").value : $("session-choice").value).trim();
     if (!name || name === picker.current) { pickerMessage(""); return; }
     if (!SESSION_NAME_RE.test(name)) {
       pickerMessage("Not a session name: use letters, digits, '.', '_', ':' or '-'.");

@@ -450,3 +450,47 @@ async fn only_the_probes_404_means_a_name_cannot_be_read() {
     ));
     assert!(probe.contains(r#"pickerMessage("Could not reach the server. Try again.");"#));
 }
+
+/// Review L2: listing mode can name fewer sessions than the caller reads.
+/// The listing gives a credential's exact names only, never a prefix
+/// expansion, so `mixed` (`t4-a` plus prefix `t4q-`) lists `t4-a` alone
+/// while it reads, and may switch to, `t4q-1` too. The select therefore
+/// ends with "Other session…", which reveals the labelled text field, and
+/// a typed name is what the picker then opens.
+#[tokio::test]
+async fn listing_mode_still_offers_a_typed_name() {
+    let (addr, handle) = credentialed(true).await;
+    let token = cred_token("mixed");
+    let r = as_caller(addr, "GET", "/api/sessions", Some(&token)).await;
+    assert_eq!(r.status, 200);
+    let listed: serde_json::Value = serde_json::from_str(&r.body).expect("json");
+    assert_eq!(listed["sessions"], serde_json::json!(["t4-a"]));
+    let r = as_caller(addr, "GET", "/s/t4q-1/api/session", Some(&token)).await;
+    assert_eq!(r.status, 200, "read through the prefix");
+    let info: serde_json::Value = serde_json::from_str(&r.body).expect("json");
+    assert_eq!(info["switchable"], true, "{info}");
+    let r = as_caller(addr, "HEAD", "/s/t4q-1/", Some(&token)).await;
+    assert_eq!(r.status, 200, "the typed name's probe");
+    handle.abort();
+
+    let choice = APP_JS
+        .split("function showSessionChoice(names) {")
+        .nth(1)
+        .and_then(|rest| rest.split("function showSessionEntry()").next())
+        .expect("showSessionChoice");
+    assert!(choice.contains(r#"var other = el("option", null, "Other session…");"#));
+    assert!(choice.contains("other.value = OTHER_SESSION;"));
+    assert!(choice.contains(r#"show($("session-entry"), choosingOther());"#));
+    assert!(APP_JS.contains(r#"var OTHER_SESSION = "";"#));
+    assert!(APP_JS.contains(
+        r#"return picker.mode === "choice" && $("session-choice").value === OTHER_SESSION;"#
+    ));
+    assert!(APP_JS.contains(r#"var typed = picker.mode === "entry" || choosingOther();"#));
+    assert!(APP_JS.contains(
+        r#"var name = (typed ? $("session-entry").value : $("session-choice").value).trim();"#
+    ));
+    // Each control has its own label, in either mode.
+    assert!(!APP_JS.contains("htmlFor"), "labels are static");
+    assert!(INDEX_HTML.contains(r#"for="session-choice">Switch to session</label>"#));
+    assert!(INDEX_HTML.contains(r#"for="session-entry">Session name to open</label>"#));
+}
