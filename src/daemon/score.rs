@@ -28,7 +28,8 @@
 //!   `(last_touch − start) / span` bits: the two expressions agree in real
 //!   arithmetic and not in `f64`, and the bits are what the fixtures pin.
 //!   A single-instant session returns `1.0` when `last_touch` is that
-//!   instant. No wall clock enters.
+//!   instant, and a session with no interactions returns `1.0`. No wall
+//!   clock enters.
 //! * **frequency** — `access_count` normalized by [`FREQUENCY_NORMALIZER`]
 //!   (10 accesses = full frequency), clamped.
 //! * **session_activity** — the share of the session's interactions that
@@ -69,9 +70,13 @@ pub const MAX_BONUS: f64 = MAX_EDGE_BONUS + MAX_CONCEPT_MODIFIER;
 /// Ten minutes. A session shorter than this still measures recency back from
 /// its latest interaction across this window, so a stall of tens of
 /// milliseconds cannot move a final recall score by a real query gap. A
-/// session at least this long uses its own span, and `max` (not a `>`
-/// branch) keeps the exactly-at-floor session on that span. Do not convert
-/// the denominator to seconds: truncating it would move those bits.
+/// session at least this long uses its own span. The denominator is
+/// `max(span, MIN_RECENCY_SPAN)`, and the historical division is taken when
+/// `denom == span_ms`, which is `span_ms >= MIN_RECENCY_SPAN`: a session of
+/// exactly this length stays on the historical bits. A `span_ms >
+/// MIN_RECENCY_SPAN` test would send it down the floor formula instead. Do
+/// not convert the denominator to seconds: truncating it would move those
+/// bits.
 pub const MIN_RECENCY_SPAN: i64 = 10 * 60 * 1_000;
 
 /// Additive per-edge-type bonus (T4.1 interpretation; v0.6.0's table is not
@@ -94,7 +99,9 @@ pub fn concept_type_modifier(t: ConceptType) -> f64 {
 
 /// Per-concept inputs to the spec §9 formula (typed carrier).
 ///
-/// Raw, un-clamped dimension values; [`score`] applies the spec's clamp rule.
+/// [`score`] applies the spec's clamp rule. Every dimension except `recency`
+/// is the raw, un-clamped value; `recency` arrives already clamped to
+/// `[0, 1]` (issue #95), so the clamp is a no-op for it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ScoreDims {
     pub recency: f64,
@@ -332,7 +339,14 @@ impl SessionContext {
 /// widen it, the value is `1 − (end − last_touch) / MIN_RECENCY_SPAN`: a
 /// short session scores near 1 instead of spreading a few milliseconds
 /// across `[0, 1]`. Clamped to `[0, 1]`.
+///
+/// A session with no interactions has no extent (`start` falls back to the
+/// wall clock), so it returns `1.0`, as the historical zero-span branch did,
+/// rather than aging a concept against the wall clock.
 fn concept_recency(last_touch: DateTime<Utc>, ctx: &SessionContext) -> f64 {
+    if ctx.total_interactions == 0 {
+        return 1.0;
+    }
     let span_ms = (ctx.end - ctx.start).num_milliseconds();
     let denom = span_ms.max(MIN_RECENCY_SPAN);
     let recency = if denom == span_ms {
@@ -1220,6 +1234,72 @@ mod tests {
         let expected = 1.0 - 40.0 / MIN_RECENCY_SPAN as f64;
         assert_eq!(recency.to_bits(), expected.to_bits());
         assert!(recency < 1.0);
+    }
+
+    /// The other tests read the floor symbolically, so a much shorter floor
+    /// would still pass them. This pins 10 minutes: a 9-minute session sits
+    /// under it, and its oldest concept scores exactly `1 − 540000/600000`.
+    #[test]
+    fn the_floor_is_ten_minutes() {
+        assert_eq!(MIN_RECENCY_SPAN, 600_000);
+        let nine_minutes = 9 * 60 * 1_000;
+        let (g, concepts) = session_with_touches(
+            nine_minutes,
+            &[(1, "oldest", 0), (2, "newest", nine_minutes)],
+        );
+        let ctx = SessionContext::compute(&g);
+        let oldest = score_concept(&g, &concepts[0], &ctx).recency;
+        assert_eq!(
+            oldest.to_bits(),
+            (1.0 - 540_000.0_f64 / 600_000.0).to_bits()
+        );
+        assert_eq!(score_concept(&g, &concepts[1], &ctx).recency, 1.0);
+    }
+
+    /// A touch after the session's latest interaction is clamped to `1.0`,
+    /// on the floor formula (a 40ms session) and on the historical division
+    /// (exactly at the floor, and 30 minutes).
+    #[test]
+    fn a_touch_after_the_session_end_clamps_to_one() {
+        for end_ms in [40, MIN_RECENCY_SPAN, 30 * 60 * 1_000] {
+            let (g, concepts) = session_with_touches(end_ms, &[(1, "after", end_ms + 5_000)]);
+            let ctx = SessionContext::compute(&g);
+            assert_eq!((ctx.end - ctx.start).num_milliseconds(), end_ms);
+            assert_eq!(
+                score_concept(&g, &concepts[0], &ctx).recency,
+                1.0,
+                "span {end_ms}"
+            );
+        }
+    }
+
+    /// A touch before the session's start is clamped to `0.0`: on the
+    /// historical division (any touch before `start`), and on the floor
+    /// formula once the touch is more than the floor before `end`.
+    #[test]
+    fn a_touch_before_the_session_start_clamps_to_zero() {
+        let long = 30 * 60 * 1_000;
+        let (g, concepts) = session_with_touches(long, &[(1, "before", -5_000)]);
+        let ctx = SessionContext::compute(&g);
+        assert_eq!(score_concept(&g, &concepts[0], &ctx).recency, 0.0);
+        assert!(historical_recency(&concepts[0], &ctx) < 0.0);
+
+        let short = 40;
+        let (g, concepts) =
+            session_with_touches(short, &[(1, "before", short - MIN_RECENCY_SPAN - 5_000)]);
+        let ctx = SessionContext::compute(&g);
+        assert_eq!(score_concept(&g, &concepts[0], &ctx).recency, 0.0);
+    }
+
+    /// No interactions means no extent: `start` falls back to the wall
+    /// clock. Recency is `1.0` there, as the historical zero-span branch
+    /// returned, not an age measured against the wall clock.
+    #[test]
+    fn a_session_without_interactions_scores_recency_one() {
+        let ctx = SessionContext::compute(&Graph::new(sid()));
+        assert_eq!(ctx.total_interactions, 0);
+        assert_eq!(concept_recency(at_ms(-3_600_000), &ctx), 1.0);
+        assert_eq!(concept_recency(at_ms(0), &ctx), 1.0);
     }
 
     #[test]
