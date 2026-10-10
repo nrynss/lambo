@@ -1,6 +1,12 @@
-//! #101: an oversized argument over streamable HTTP is refused before the
-//! body is read in full, through the serve's own router, guards and the
-//! session's rmcp service (built with `session::http_config`).
+//! #101: a pin, not a fix. An oversized argument over streamable HTTP is
+//! refused before the body is read in full, through the serve's own router,
+//! guards and the session's rmcp service (built with `session::http_config`).
+//! This held before #101 too, because rmcp's default ceiling is the same
+//! 4 MiB; the test guards that it keeps holding, now that `http_config`
+//! sets the ceiling explicitly. That the explicit setting is Lambo's own
+//! constant is pinned directly by
+//! `transport::rmcp_still_mints_through_create_session_with_the_same_ceiling`
+//! (#101 review L4).
 //!
 //! Inside an MCP session the guard leaves the body to rmcp, which streams
 //! it and answers `413` once more than the ceiling has arrived, before
@@ -16,11 +22,14 @@ use crate::mcp::serve::frames::MAX_MCP_FRAME_BYTES;
 /// How far past the ceiling the body runs.
 const OVER: usize = 8 * MAX_MCP_FRAME_BYTES;
 
+/// A pin of HTTP behaviour that predates #101 (see the module docs).
+///
 /// Mutation: raise the ceiling in `http_config`
 /// (`with_max_request_body_bytes(usize::MAX)`) and rmcp reads the whole
-/// body, parses it and answers 200 with the tool's refusal.
+/// body, parses it and answers 200 with the tool's refusal. (Dropping the
+/// explicit setting does not fail this test: rmcp's default is the same.)
 #[tokio::test]
-async fn an_oversized_tool_call_body_is_refused_before_it_is_read() {
+async fn an_oversized_tool_call_body_is_still_refused_before_it_is_read() {
     let store: Box<dyn GraphStore> = Box::new(MemoryStore::new());
     let registry = pinned_registry(
         &["oversized-body"],
