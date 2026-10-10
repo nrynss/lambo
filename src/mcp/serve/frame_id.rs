@@ -342,7 +342,9 @@ fn rstring_start(b: &[u8], end: usize) -> Option<usize> {
 }
 
 /// The start of the scalar value that ends at `b[end - 1]`, or `None` for an
-/// object or array value, or one that may begin before `b` does.
+/// object or array value, or a string that may begin before `b` does. A
+/// bare scalar that runs back to the start of `b` may begin before it too;
+/// its start is 0, and [`scan_tail`] rejects it because no `:` precedes it.
 fn rscalar_start(b: &[u8], end: usize) -> Option<usize> {
     let last = *b.get(end.checked_sub(1)?)?;
     if last == b'"' {
@@ -355,7 +357,7 @@ fn rscalar_start(b: &[u8], end: usize) -> Option<usize> {
     while s > 0 && (b[s - 1].is_ascii_alphanumeric() || matches!(b[s - 1], b'.' | b'+' | b'-')) {
         s -= 1;
     }
-    (s > 0).then_some(s)
+    Some(s)
 }
 
 /// Walk backwards from the closing `}` at the end of `b` across top-level
