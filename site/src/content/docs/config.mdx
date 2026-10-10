@@ -250,11 +250,11 @@ GC also sweeps on time. When `gc_max_interval_secs` has passed since a session's
 
 `[serve]` configures one `lambo serve` process that holds several sessions. It is optional: omit it and `lambo serve` behaves exactly as it always has.
 
-An HTTP `lambo serve` reads `sessions`, `default_session` and `max_attached`: it pins every session in `sessions` beside its `--session` values, serves `default_session` at `/mcp`, and refuses to start when the pinned sessions together exceed `max_attached` or `default_session` is not one of them (this release serves pinned sessions only). See [Several sessions in one serve](/lambo/cli/#several-sessions-in-one-serve). A stdio serve owns one session and ignores `sessions` and `max_attached`: its `--session`, or, without one, the session `[[serve.projects]]` or `default_session` chooses ([below](#choosing-a-stdio-serves-session)).
+An HTTP `lambo serve` reads `sessions`, `default_session` and `max_attached`: it pins every session in `sessions` beside its `--session` values, serves `default_session` at `/mcp`, and refuses to start when the pinned sessions together exceed `max_attached` or `default_session` is not one of them (the default session must be pinned). See [Several sessions in one serve](/lambo/cli/#several-sessions-in-one-serve). A stdio serve owns one session and ignores `sessions` and `max_attached`: its `--session`, or, without one, the session `[[serve.projects]]` or `default_session` chooses ([below](#choosing-a-stdio-serves-session)).
 
 An HTTP `lambo serve` also enforces `[[serve.credential]]`; see [Credentials](#credentials). A stdio serve authenticates nobody (its client owns the process), so it ignores the credentials and never reads their variables.
 
-The rest of the table is **parsed and validated only**: `attach_concurrency`, `idle_detach_secs` and `per_session_rps` arrive in later releases, and an HTTP serve never reads `[[serve.projects]]`, which is a stdio serve's only. A malformed table is still refused when the file is read, so it stops every command, like an unknown key. When the table sets any of those keys (or, for an HTTP serve, `[[serve.projects]]`), `lambo serve` logs one warning at startup (`[serve] is parsed but not yet enforced for some keys`) that names the keys and no value from them.
+An HTTP `lambo serve` enforces `attach_concurrency`, `idle_detach_secs` and `per_session_rps` too. `per_session_rps` gives every session its own request bucket; the other two bound the sessions a serve attaches on demand, which it does once a credential reaches past the pinned sessions (a `session_prefix`, or an unpinned name). A stdio serve owns one session, so none of the three applies to it. An HTTP serve never reads `[[serve.projects]]`, which is a stdio serve's only: when an HTTP serve's table sets it, `lambo serve` logs one warning at startup (`[serve] is parsed but not yet enforced for some keys`) that names the key and no value from it. A malformed table is still refused when the file is read, so it stops every command, like an unknown key.
 
 ```toml
 [serve]
@@ -286,10 +286,10 @@ erase = true
 |---|---|---|
 | `sessions` | none | Pinned sessions, attached at startup and never idle-detached. Served by an HTTP `lambo serve`, beside its `--session` values. |
 | `default_session` | none | The session `/mcp` serves, and the one a stdio serve without `--session` uses when no `[[serve.projects]]` entry covers its working directory. |
-| `max_attached` | `16` | Cap on attached sessions, pinned plus on-demand. At least 1, and at least the number of pinned sessions. |
-| `attach_concurrency` | `2` | Sessions that may attach at once. At least 1. |
-| `idle_detach_secs` | `900` | Seconds an on-demand session may sit idle before it is detached. At least 1. |
-| `per_session_rps` | `--rate-limit-rps` | Request rate for each session. `0` turns the per-session limit off. |
+| `max_attached` | `16` | Cap on attached sessions, pinned plus on-demand. At least 1, and at least the number of pinned sessions. At the cap, an on-demand attach detaches the least recently used idle on-demand session that the asking credential's share allows, or is refused with `503` and `Retry-After` when there is none. A credential reaching past the pinned sessions with no place left beside them is warned of at startup. |
+| `attach_concurrency` | `2` | Sessions that may attach at once, on demand or retried in the background. At least 1. Always 1 on SQLite, whose one connection serializes attaches with every flush. |
+| `idle_detach_secs` | `900` | Seconds an on-demand session may go without a tool call before it is detached (its tail flushed, its lease released). At least 1. Pinned sessions are never idle-detached. |
+| `per_session_rps` | `--rate-limit-rps` | Request rate for each attached session (burst twice that), drawn after the credential's; a request over it gets `429`. `0` turns the per-session limit off. A serve of one session that attaches nothing on demand applies it only when it is set. |
 | `[[serve.projects]]` | none | `path` and `session`: a stdio serve started without `--session` under `path` uses `session`. `path` must be absolute or start with `~/`. An HTTP serve does not read it. |
 | `[[serve.credential]]` | none | A bearer credential and the sessions it may reach (below). |
 
@@ -312,7 +312,7 @@ Once any credential is configured, the implicit `local` credential is gone, so a
 
 The presented token is compared with every configured token in constant time, so response timing does not say which credential a guess nearly matched. A request without a valid token gets `401`, whatever it asked for. A request with a valid token for a session outside that credential's reach gets the same empty `404` as an unknown session or an unrouted path, whether that session exists, is held by another writer, is being detached or failed, and the serve consults no store to answer it. Only inside its reach can a caller see a `503`. `/mcp` serves the default session to a credential that reaches it.
 
-This release serves pinned sessions only: a session inside a credential's `session_prefix` that is not pinned gets the `404`, even with `create = true`. `lambo serve` logs a warning at startup for a credential that names sessions it does not pin, or reaches none of them, and for `LAMBO_AUTH_TOKEN` (or `--auth-token`) set beside `[[serve.credential]]`: that token stays the `default` credential, reaching every pinned session, until you unset it.
+A session inside a credential's `session_prefix`, or named in its `sessions` but not pinned, is attached on demand by the first request for it: always with `create = true`, and without it only once the session exists (a writer has used it); otherwise the request gets the `404`. See [Several sessions in one serve](/lambo/cli/#several-sessions-in-one-serve). `lambo serve` logs a warning at startup for a credential without `create` that reaches sessions it does not pin, and for `LAMBO_AUTH_TOKEN` (or `--auth-token`) set beside `[[serve.credential]]`: that token stays the `default` credential, reaching every pinned session, until you unset it.
 
 A token must be printable ASCII with no leading or trailing whitespace, and at most 4096 bytes. A token that breaks this (a trailing newline from an env file, say) refuses the start with exit 2, naming the credential and never quoting the token. A presented token over 4096 bytes, or a request carrying two `Authorization` headers, gets the ordinary `401`.
 

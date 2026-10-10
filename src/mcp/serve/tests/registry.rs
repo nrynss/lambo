@@ -17,7 +17,8 @@ use super::*;
 use crate::embed::FixtureEmbedder;
 use crate::mcp::serve::pinned::check_pinned;
 use crate::mcp::serve::registry::{
-    is_transient, Acquired, LeaseLossPolicy, SessionAttacher, SessionRegistry, PINNED_RETRY,
+    is_transient, Acquired, LeaseLossPolicy, RegistryBounds, SessionAttacher, SessionRegistry,
+    PINNED_RETRY,
 };
 use crate::mcp::serve::session::HostCheck;
 use crate::store::{GraphStore, MemoryStore, StoreConfig};
@@ -125,7 +126,7 @@ fn new_registry_ledgered(
     SessionRegistry::new(
         sessions.iter().map(|s| s.to_string()).collect(),
         Some(sessions[0].to_string()),
-        LeaseLossPolicy::for_pinned(sessions.len()),
+        LeaseLossPolicy::for_scope(sessions.len(), false),
         Some(SessionAttacher {
             template,
             store_cfg,
@@ -133,8 +134,10 @@ fn new_registry_ledgered(
             max_sessions,
             host_check,
             agent: "agent-a".into(),
+            session_rps: 0,
         }),
         early,
+        RegistryBounds::pinned_only(),
     )
 }
 
@@ -714,13 +717,22 @@ fn the_pinned_retry_is_five_election_retries_and_at_least_a_second() {
 /// The policy is derived from the pinned count, in one place.
 #[test]
 fn one_pinned_session_exits_on_lease_loss_and_more_detach() {
-    assert_eq!(LeaseLossPolicy::for_pinned(1), LeaseLossPolicy::ExitProcess);
     assert_eq!(
-        LeaseLossPolicy::for_pinned(2),
+        LeaseLossPolicy::for_scope(1, false),
+        LeaseLossPolicy::ExitProcess
+    );
+    assert_eq!(
+        LeaseLossPolicy::for_scope(2, false),
         LeaseLossPolicy::DetachSession
     );
     assert_eq!(
-        LeaseLossPolicy::for_pinned(16),
+        LeaseLossPolicy::for_scope(16, false),
+        LeaseLossPolicy::DetachSession
+    );
+    // #32 PR 6: sessions attached on demand make even one pinned session a
+    // registry that detaches, never a process that exits.
+    assert_eq!(
+        LeaseLossPolicy::for_scope(1, true),
         LeaseLossPolicy::DetachSession
     );
 }
@@ -1114,6 +1126,8 @@ async fn a_pinned_session_that_can_no_longer_attach_is_not_retried() {
 
 /// The real multi-session serve, in-process (#32 review M1/M2).
 mod authority;
+/// #32 PR 6: sessions attached on demand.
+mod on_demand;
 mod pinned_serve;
 
 /// Sonnet review L-C: which background-attach errors keep a pinned session

@@ -624,6 +624,7 @@ mod endpoints {
             Some(endpoint.clone()),
             4,
             crate::mcp::serve::session::HostCheck::Loopback,
+            0,
         );
         assert!(endpoint.path().exists(), "{session}: the endpoint is bound");
         (Arc::new(attached), endpoint)

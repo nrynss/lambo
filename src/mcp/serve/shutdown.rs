@@ -283,7 +283,7 @@ pub(super) fn holder_shutdown(
 /// watcher (`registry::watch_lease`), and the process and its other sessions
 /// keep serving (design §4.2). `serve` picks between this and
 /// [`holder_shutdown`] by the registry's policy, which is derived in one
-/// place (`LeaseLossPolicy::for_pinned`); a one-session serve always gets
+/// place (`LeaseLossPolicy::for_scope`); a one-session serve always gets
 /// [`holder_shutdown`], so JE2E-4's exit on a lost lease is unchanged.
 pub(super) fn registry_shutdown(
     early: EarlyShutdown,

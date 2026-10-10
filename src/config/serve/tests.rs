@@ -685,10 +685,12 @@ fn token_env_must_be_a_conventional_variable_name() {
 }
 
 /// #32 PR 4: over HTTP `sessions`, `default_session` and `max_attached` are
-/// enforced (and `[[serve.credential]]` since PR 5), and PR 8: over stdio
-/// `default_session` and `[[serve.projects]]` are, so a table with only
-/// those raises no notice; every key still parsed but not enforced is
-/// named, each its own entry (never its value).
+/// enforced (and `[[serve.credential]]` since PR 5, and `attach_concurrency`,
+/// `idle_detach_secs` and `per_session_rps` since PR 6), and PR 8: over
+/// stdio `default_session` and `[[serve.projects]]` are, so a table with
+/// only those raises no notice. The keys that do not apply to stdio are not
+/// named there either. What is left is the cwd map over HTTP, named by key
+/// (never its value).
 #[test]
 fn only_unenforced_keys_raise_the_notice() {
     let enforced =
@@ -704,22 +706,15 @@ fn only_unenforced_keys_raise_the_notice() {
     )
     .expect("parse");
     // `[[serve.credential]]` is enforced since #32 PR 5 (HTTP; stdio
-    // authenticates nobody), so it is never listed.
+    // authenticates nobody), and the bounds since PR 6, so neither is
+    // listed.
     assert_eq!(
         rest.serve.unenforced_keys(false),
-        vec![
-            "[[serve.projects]]",
-            "attach_concurrency",
-            "idle_detach_secs",
-            "per_session_rps",
-        ]
+        vec!["[[serve.projects]]"]
     );
     // The cwd map is a stdio serve's (#32 PR 8): enforced there, and so not
-    // named.
-    assert_eq!(
-        rest.serve.unenforced_keys(true),
-        vec!["attach_concurrency", "idle_detach_secs", "per_session_rps"]
-    );
+    // named; the bounds do not apply to a one-session stdio serve.
+    assert!(rest.serve.unenforced_keys(true).is_empty());
     let credential_only = parse(
         "[[serve.credential]]\nname = \"agents\"\ntoken_env = \"LAMBO_T32_KEYS\"\nsessions = [\"a\"]\n",
     )

@@ -21,8 +21,8 @@ use chrono::{DateTime, Utc};
 
 /// `Arc<MemoryStore>` as a `GraphStore`, so the serve under test and the
 /// test's other writer share one store, as two processes share a database.
-/// While the flag is set, every `load_session` parks forever: a store that
-/// stalls under an attach that has already taken its lease.
+/// While the flag is set, every `load_session` parks until it is cleared: a
+/// store that stalls under an attach that has already taken its lease.
 ///
 /// Every call is also appended to the third field, `(method, session)`,
 /// the recording wrapper #32 PR 5's "zero store calls" claim is measured
@@ -65,13 +65,17 @@ impl Shared {
 
     /// [`Shared::over`], handing back the call record too.
     pub(super) fn recording(store: &Arc<MemoryStore>) -> (Box<dyn GraphStore>, Arc<StoreCalls>) {
+        Self::recording_with_stall(store, Default::default())
+    }
+
+    /// [`Shared::recording`], whose loads stall while `stall` is set.
+    pub(super) fn recording_with_stall(
+        store: &Arc<MemoryStore>,
+        stall: Arc<std::sync::atomic::AtomicBool>,
+    ) -> (Box<dyn GraphStore>, Arc<StoreCalls>) {
         let calls = Arc::new(StoreCalls::default());
         (
-            Box::new(Self(
-                Arc::clone(store),
-                Default::default(),
-                Arc::clone(&calls),
-            )),
+            Box::new(Self(Arc::clone(store), stall, Arc::clone(&calls))),
             calls,
         )
     }
@@ -101,8 +105,8 @@ impl GraphStore for Shared {
     }
     async fn load_session(&self, session: &SessionId) -> Result<GraphSnapshot, StoreError> {
         self.2.note("load_session", session.as_str());
-        if self.1.load(std::sync::atomic::Ordering::SeqCst) {
-            std::future::pending::<()>().await;
+        while self.1.load(std::sync::atomic::Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
         self.0.load_session(session).await
     }
@@ -275,11 +279,12 @@ impl PinnedServe {
     ) -> Self {
         let early = EarlyShutdown::unarmed();
         let (tx, rx) = tokio::sync::oneshot::channel();
+        let opts = pinned_opts(sessions, tweak);
         let seams = PinnedSeams {
             early: Some(early.clone()),
             registry: Some(tx),
+            on_demand: crate::mcp::serve::authority::reaches_past_pinned(&opts),
         };
-        let opts = pinned_opts(sessions, tweak);
         let backends = backends_over(Shared::over(store), fast_config(1_000));
         let authority = authority_for(&opts);
         let task = tokio::spawn(serve_pinned_with(opts, backends, authority, seams));
@@ -808,5 +813,64 @@ async fn the_shutdown_abandons_a_background_attach_and_releases_its_lease() {
     );
     for session in set {
         session.mem.close().await.expect("close a");
+    }
+}
+
+/// #32 PR 6 through the real serve: one pinned session and a credential
+/// whose prefix reaches past it make a registry that attaches on demand
+/// (`DetachSession`, no election), and the shutdown releases the on-demand
+/// session's lease with the pinned one's.
+#[tokio::test]
+async fn one_pinned_session_with_a_prefix_credential_attaches_on_demand() {
+    let store = Arc::new(MemoryStore::new());
+    let serve = PinnedServe::start(&store, &["od-e2e-pin"], |opts| {
+        opts.credentials = vec![crate::config::ServeCredential {
+            grant: crate::surface::session::SessionGrant::new(
+                "app",
+                crate::surface::session::SessionScope::new(
+                    std::iter::empty(),
+                    false,
+                    Some(crate::surface::session::SessionPrefix::new("od-e2e-u-").expect("prefix")),
+                ),
+                crate::surface::session::SessionCapabilities {
+                    create: true,
+                    ..Default::default()
+                },
+            ),
+            // Built at runtime, so no token-shaped literal sits here.
+            token: SecretToken::new(["fake", "e2e", "ondemand", "value"].join("-"))
+                .expect("non-empty"),
+        }];
+    })
+    .await;
+    assert!(serve.registry.attaches_on_demand());
+    let id = "od-e2e-u-1";
+    let routed = serve
+        .registry
+        .get_or_attach(
+            id,
+            crate::mcp::serve::registry::Requester {
+                credential: "app",
+                create: true,
+            },
+        )
+        .await;
+    assert!(matches!(
+        routed.lookup,
+        crate::mcp::serve::registry::Lookup::Live(_)
+    ));
+    assert!(
+        routed.in_flight.is_some(),
+        "a live answer holds the session"
+    );
+    drop(routed);
+    assert_eq!(lease(&store, id).await.holder, serve_token());
+    serve.stop().await.expect("a clean shutdown");
+    for id in ["od-e2e-pin", id] {
+        assert_eq!(
+            lease(&store, id).await.holder,
+            crate::store::lease::RELEASED_HOLDER,
+            "{id}"
+        );
     }
 }

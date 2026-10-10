@@ -379,8 +379,9 @@ fn validate_accepts_absolute_and_home_paths_only() {
 
 /// #32 PR 8 merged with PR 4: on stdio the selection keys are enforced, so
 /// a table with only them raises no notice; over HTTP the cwd map is never
-/// read and is still named. `sessions` and `max_attached` are PR 4's, read
-/// over HTTP and not applicable to stdio, so neither transport lists them.
+/// read and is still named. `sessions` and `max_attached` are PR 4's, and
+/// the other bounds PR 6's, read over HTTP and not applicable to stdio, so
+/// neither transport lists them.
 #[test]
 fn only_selection_keys_count_as_enforced() {
     assert!(ServeConfig::default().unenforced_keys(true).is_empty());
@@ -401,7 +402,7 @@ fn only_selection_keys_count_as_enforced() {
         idle_detach_secs: Some(60),
         ..selection_only
     };
-    assert_eq!(bounded.unenforced_keys(true), vec!["idle_detach_secs"]);
+    assert!(bounded.unenforced_keys(true).is_empty());
 }
 
 /// A relative path that names `target` when resolved against the process's
