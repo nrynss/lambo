@@ -403,6 +403,46 @@ async fn a_reply_does_not_take_the_waker_of_a_server_write_parked_at_a_boundary(
     drop(writer);
 }
 
+/// #101 review 2 L1: a complete over-cap frame followed at once by end of
+/// input is still answered. The reader reports the end only once the reply
+/// is written, so the writer shut down straight after it (as rmcp closes
+/// the transport at end of input) cannot cut the reply off.
+///
+/// Mutation: report end of input without `poll_drained` and the shutdown
+/// runs before the reply task writes; the reply is lost.
+#[tokio::test]
+async fn a_reply_queued_just_before_end_of_input_is_written_before_the_end() {
+    let input = format!(
+        "{{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"x\",\"params\":\"{}\"}}\n",
+        "p".repeat(64)
+    );
+    let (server_out, mut client_out) = tokio::io::duplex(4096);
+    let (mut reader, mut writer) = crate::mcp::serve::frames::capped_transport_with_cap(
+        input.as_bytes(),
+        server_out,
+        "stdio",
+        16,
+    );
+    let mut sink = Vec::new();
+    reader.read_to_end(&mut sink).await.expect("read");
+    assert!(sink.is_empty(), "the request was over the cap");
+    writer.shutdown().await.expect("shutdown");
+    let mut out = Vec::new();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        client_out.read_to_end(&mut out),
+    )
+    .await
+    .expect("the output ends")
+    .expect("read");
+    let out = String::from_utf8(out).expect("utf-8");
+    assert!(
+        out.contains("-32600") && out.contains("\"id\":3") && out.ends_with('\n'),
+        "{out:?}"
+    );
+    drop(reader);
+}
+
 /// An over-cap frame cut off by end of input gets no reply: the client has
 /// stopped sending, and its transport is shutting down.
 ///

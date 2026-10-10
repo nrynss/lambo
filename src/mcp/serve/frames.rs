@@ -41,7 +41,10 @@
 //! leaves the caller waiting for its own timeout. The frame is logged at
 //! WARN with its size and the cap, never its content. An over-cap frame cut
 //! off by end of input gets no reply: the client has stopped sending, and
-//! rmcp is already shutting the transport down.
+//! rmcp is already shutting the transport down. A frame that ends with its
+//! newline just before end of input is answered: the reader reports the end
+//! only once the replies already queued are written (for at most 5 s, so a
+//! client that has stopped reading too cannot keep the session alive).
 //!
 //! ## How the reply reaches the client
 //!
@@ -109,6 +112,11 @@ const RETAINED_FRAME_BYTES: usize = 64 * 1024;
 /// slow to read: no reply is dropped.
 const REPLY_QUEUE: usize = 8;
 
+/// How long end of input waits for replies already queued to be written
+/// before it is reported. Bounded so a client that has stopped reading as
+/// well as sending cannot keep the session from ending.
+const REPLY_DRAIN_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// A reply waiting for room on the reply queue.
 type Reserving = Pin<
     Box<dyn Future<Output = Result<mpsc::OwnedPermit<String>, mpsc::error::SendError<()>>> + Send>,
@@ -147,6 +155,12 @@ pub(crate) struct CappedFrames<R> {
     /// The reply to the last discarded frame, while it waits for room on the
     /// queue; nothing more is read until it has it.
     pending: Option<(String, Reserving)>,
+    /// The task that writes the replies, awaited at end of input so a reply
+    /// already queued is written before rmcp sees the end and closes the
+    /// transport (#101 review 2 L1).
+    reply_task: Option<tokio::task::JoinHandle<()>>,
+    /// When that wait gives up ([`REPLY_DRAIN_LIMIT`]).
+    drain_deadline: Option<Pin<Box<tokio::time::Sleep>>>,
     /// The most bytes `frame` has held at once, and the most it has had
     /// room for, for the tests' proof that an oversized frame is never
     /// buffered.
@@ -177,6 +191,8 @@ impl<R: AsyncRead + Unpin> CappedFrames<R> {
             probe: None,
             replies: None,
             pending: None,
+            reply_task: None,
+            drain_deadline: None,
             #[cfg(test)]
             peak: Arc::default(),
             #[cfg(test)]
@@ -246,6 +262,28 @@ impl<R: AsyncRead + Unpin> CappedFrames<R> {
         }
         Poll::Ready(())
     }
+
+    /// At end of input: close the reply queue and wait, for at most
+    /// [`REPLY_DRAIN_LIMIT`], until the reply task has written and flushed
+    /// every reply already on it. Without this, rmcp could see the end and
+    /// shut the writer down (or the process exit) before the reply to a
+    /// frame that ended just before it was written.
+    fn poll_drained(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+        // Nothing more is read, so nothing more is queued; the task ends
+        // once it has written what is on the queue.
+        self.replies = None;
+        if let Some(task) = self.reply_task.as_mut() {
+            let deadline = self
+                .drain_deadline
+                .get_or_insert_with(|| Box::pin(tokio::time::sleep(REPLY_DRAIN_LIMIT)));
+            if Pin::new(task).poll(cx).is_pending() && deadline.as_mut().poll(cx).is_pending() {
+                return Poll::Pending;
+            }
+            self.reply_task = None;
+            self.drain_deadline = None;
+        }
+        Poll::Ready(())
+    }
 }
 
 /// Grow `frame` for `more` bytes, doubling, but never past `cap` while the
@@ -296,6 +334,7 @@ impl<R: AsyncRead + Unpin> AsyncRead for CappedFrames<R> {
                     this.ready = true;
                     continue;
                 }
+                ready!(this.poll_drained(cx));
                 return Poll::Ready(Ok(()));
             }
             let (take, terminated) = match available.iter().position(|b| *b == b'\n') {
@@ -452,7 +491,8 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AsyncWrite for FrameWriter<W> {
 /// A line-framed transport for rmcp with the frame cap in front of `read`
 /// and the reply to a discarded frame written to `write` between rmcp's own
 /// frames (see the module docs). Spawns the reply task, which ends when the
-/// reader is dropped.
+/// reader is dropped or reaches end of input; at end of input the reader
+/// waits for it to write the replies already queued.
 pub(crate) fn capped_transport<R, W>(
     read: R,
     write: W,
@@ -479,7 +519,7 @@ where
     let shared = Arc::new(Mutex::new(write));
     let (tx, mut rx) = mpsc::channel::<String>(REPLY_QUEUE);
     let out = Arc::clone(&shared);
-    tokio::spawn(async move {
+    let reply_task = tokio::spawn(async move {
         while let Some(reply) = rx.recv().await {
             let mut w = out.lock().await;
             let written = async {
@@ -500,5 +540,6 @@ where
     });
     let mut reader = CappedFrames::with_cap(read, transport, cap);
     reader.replies = Some(tx);
+    reader.reply_task = Some(reply_task);
     (reader, FrameWriter::new(shared))
 }
