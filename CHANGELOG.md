@@ -379,8 +379,30 @@
   images none), truncates to `dim` (768, 512, 256 or 128) and
   re-normalizes. The contract `model` is the weights artifact plus the
   prompt profile, by default
-  `ggml-org/embeddinggemma-2-GGUF@bfcd2987/Q8_0;prompts=lambo-eg2-v1`, since
-  `llama-server` ignores the request's model name. The profile fixes the
+  `ggml-org/embeddinggemma-2-GGUF@bfcd2987/Q8_0;prompts=lambo-eg2-v2`, since
+  `llama-server` ignores the request's model name. The profile sends every
+  image in a canonical form: Lambo decodes each PNG, JPEG or WebP and sends
+  a lossless PNG whose longer side is exactly 768 px (Lanczos3 down,
+  Catmull-Rom up, aspect ratio kept; the exact rule is in the
+  configuration reference). A flat image then embeds bit-identically at
+  any submitted size from 128 to 3000 px; a patterned one stays close but
+  not identical (measured on b11517: at least 0.9991 cosine between renders
+  at 768 px and above, 0.982 for a checkerboard submitted at 128 px), since
+  resampling changes its pixels. **Size invariance has a limit:** small
+  images with sharp detail can drift by up to about 2%, so if bit-identical
+  vectors matter (comparing vectors directly, deduplicating), always send
+  the same rendition of an image, such as the original file. A WebP is
+  never sent as WebP (`llama-server` decodes it only through an external
+  `ffmpeg`). Decoding is
+  bounded (4096 px a side, two at a time), and an image Lambo cannot decode
+  is refused as unreadable before the server sees it. The canonical pixels
+  are pinned by golden tests: if a dependency update moves them, that ships
+  as a new profile name. Downscaled and JPEG cases are pinned to within one
+  step per sample, since they are not bit-exact across platforms; that
+  wobble is not a new profile. The `embed-eg2` feature now pulls in the `image`
+  crate (PNG, JPEG and WebP only) for this. The profile was `lambo-eg2-v1` during
+  development, without the canonical form; nothing was released with it, so
+  there is no migration. The profile fixes the
   image budget at 280 tokens: start the server with `--image-min-tokens 280
   --image-max-tokens 280 --batch-size 8192 --ubatch-size 8192` (at the
   default ubatch of 512 the server silently caps the budget to 256). Lambo

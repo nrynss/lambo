@@ -579,7 +579,7 @@ async fn stats_reports_the_embedding_contract_and_modalities() {
     // The PR 5 shape: an artifact and a prompt profile in one model string,
     // reported whole. A first derive stamps the session with the live contract, which is
     // what is reported before and after.
-    let model = "ggml-org/embeddinggemma-2-GGUF@bfcd2987/Q8_0;prompts=lambo-eg2-v1";
+    let model = "ggml-org/embeddinggemma-2-GGUF@bfcd2987/Q8_0;prompts=lambo-eg2-v2";
     let eg2 = server_with_parts(
         "mcp-stats-eg2",
         Arc::new(MemoryStore::new()),

@@ -751,3 +751,70 @@ async fn a_replayed_image_intent_this_process_cannot_apply_names_its_block_reaso
         );
     }
 }
+
+/// An embedder whose image path fails as Lambo's own decoder does (22g).
+#[derive(Debug)]
+struct UnreadableImages(FixtureEmbedder);
+
+#[async_trait::async_trait]
+impl Embedder for UnreadableImages {
+    fn dimensions(&self) -> usize {
+        self.0.dimensions()
+    }
+    async fn embed(&self, text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
+        self.0.embed(text).await
+    }
+    async fn embed_query(&self, text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
+        self.0.embed_query(text).await
+    }
+    fn modalities(&self) -> crate::embed::Modalities {
+        self.0.modalities()
+    }
+    async fn embed_image(
+        &self,
+        _image: crate::embed::ImageInput<'_>,
+    ) -> Result<Vec<f32>, crate::embed::EmbedError> {
+        Err(crate::embed::EmbedError::Unreadable(
+            "could not decode this image/png image: truncated".into(),
+        ))
+    }
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        self.0.as_any()
+    }
+}
+
+/// An image Lambo itself cannot read is a permanent `Embed` refusal that
+/// says so, not "the embedder refused the image": no embedder was asked
+/// (22g review L3).
+///
+/// Mutation: drop the `Unreadable` arm in `embed_image_or_refuse` -> red.
+#[tokio::test]
+async fn an_unreadable_image_is_named_as_lambos_own_failure() {
+    let mem = Memory::builder()
+        .session("image-unreadable")
+        .agent("agent-a")
+        .flush_interval(Duration::from_secs(3_600))
+        .store(Arc::new(VectorSearchable(Arc::new(MemoryStore::new()))) as Arc<dyn GraphStore>)
+        .embedder(Arc::new(UnreadableImages(FixtureEmbedder::new())) as Arc<dyn Embedder>)
+        .embedding_contract(live())
+        .match_strategy(MatchStrategy::Hybrid)
+        .build()
+        .await
+        .unwrap();
+    let png = png_with_label("red silk saree");
+    let err = mem
+        .derive_image_as(&agent(), bytes_derive("render 17", &png, None))
+        .await
+        .unwrap_err();
+    let LamboError::Embed(msg) = &err else {
+        panic!("{err:?}");
+    };
+    assert!(msg.starts_with("Lambo could not read the image"), "{msg}");
+    assert!(
+        msg.contains("could not decode this image/png image"),
+        "{msg}"
+    );
+    assert!(!msg.contains("embedder refused"), "{msg}");
+    assert!(image_concepts(&mem).is_empty(), "nothing was written");
+    mem.close().await.unwrap();
+}

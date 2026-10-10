@@ -6,7 +6,7 @@ commit. That feature line differs from the amendment's approved R13 text,
 (`bge_m3.rs`), which `eg2` wraps, at the cost of also compiling the `bge_m3` kind into
 an eg2-only build. No new crate either way, and `ship` carries both. Design of record: `lambo-handoff-2026-10-08/design/22-DESIGN.md` (sections 2,
 3, 7.3, 8) as amended by `22-AMENDMENT-PR5.md` (owner approved R20 on 2026-10-09; R11's
-`lambo-eg2-v1` profile and the artifact-naming contract are implemented as the
+`lambo-eg2-v2` profile and the artifact-naming contract are implemented as the
 defaults). The fifth of the #22 PRs: the server-side embedder that makes
 `lambo_derive_image` with an image (not a vector) work against a real model. Live
 evidence: `evidence/issue-22-eg2/`.
@@ -29,12 +29,14 @@ bearer header, the https-or-loopback rule, no redirects, the proxy bypass for lo
 http, the capped and scrubbed error body and the J3 status table are the same code,
 not a copy. The only seam is the status rule (below).
 
-**The profile `lambo-eg2-v1` pins four things**: the two model-card text prefixes
+**The profile `lambo-eg2-v2` pins five things**: the two model-card text prefixes
 (`title: none | text: ` for `embed`, `task: search result | query: ` for
-`embed_query`), no image prefix, the fixed 280-token image budget, and
-truncate-then-normalize. Any change is a new profile name, so a new contract.
+`embed_query`), no image prefix, the fixed 280-token image budget, the canonical
+image form (22g, below), and truncate-then-normalize. Any change is a new profile
+name, so a new contract. (`lambo-eg2-v1`, the same without the canonical form, was
+never released.)
 
-**The contract `model` is `<artifact>;prompts=lambo-eg2-v1`.** `llama-server` ignores
+**The contract `model` is `<artifact>;prompts=lambo-eg2-v2`.** `llama-server` ignores
 the request's model name (a wrong name returns the same vector with 200), so the
 contract names the weights: by default `ggml-org/embeddinggemma-2-GGUF@bfcd2987/Q8_0`.
 The artifact is also sent as the request's `model` (ignored by llama-server; an Ollama
@@ -136,8 +138,8 @@ The Opus review (M1, M2, L1 to L5) and the measurements behind each fix:
   8 tokens; an image's own count is not judged. The same data shows the fixed budget
   does not make every render of a picture one vector (a solid square is 0.9989 apart
   between 768 and 896 px, the capped server's own offset; a checkerboard 0.97 to 0.99).
-  Whether the profile should downscale images to 768 px before sending is an open
-  question for the owner; it would be a new profile name.
+  Whether the profile should downscale images to 768 px before sending was an open
+  question for the owner; resolved in 22g (below).
 - **M1: re-check.** A kept `/props` answer is trusted for 60 s
   (`EG2_PROPS_RECHECK_INTERVAL`) and dropped when an embed fails as unavailable. Once
   verified, a re-check that cannot run holds embeds back (transient) and a server that
@@ -163,3 +165,29 @@ The Opus review (M1, M2, L1 to L5) and the measurements behind each fix:
   section 3), blocking for Dresscode's browser vectors, owner-run.
 - An Ollama deployment of this kind (untested; it would run without the `/props`
   check).
+
+**22g: the canonical image form (profile `lambo-eg2-v2`).** Owner decision: EG2
+image vectors must be size-invariant. Cause, read in b11517's source
+(`mtmd-image.cpp` `calc_size_preserved_ratio`, `gemma4v` projector, 48 px cells): with
+min = max = 280 tokens (645,120 px), an image whose 48-aligned area is under the budget
+rounds up and its grid depends only on its aspect ratio (a square becomes 816x816, 289
+tokens); a larger one rounds down (a square of 792 px or more becomes 768x768, 256
+tokens). No flag or request field picks the branch, so the fix is client-side
+(`src/embed/eg2/canonical.rs`). The first cut passed images of at most 768 px through
+unchanged; the Opus review (M1) showed the server's own resampling still left a 512 px
+and a 1024 px render up to about 0.01 apart, so the remediation resizes **every** image: decode
+(no EXIF orientation, no colour management), resize in one step to a longer side of
+exactly 768 px (shorter side rounded half up, at least 1; Lanczos3 down, Catmull-Rom up,
+because Lanczos3 rang on enlarged hard edges: checkerboard at 256 px 0.9796 against
+0.9848), encode as a PNG with no ancillary chunks. With the longer side at 768 the
+aligned area is at most 589,824 px, so the server always takes the round-up branch. WebP
+is therefore never sent as WebP (llama-server decodes it only by running an
+`ffmpeg`/`ffprobe` from its `PATH`; without one it answers 500). Measured
+(`evidence/issue-22-eg2/size-invariance.txt`): flat images bit-identical at 128 to 3000
+px; patterned images not (worst 0.9818, a checkerboard at 128 px against 768 px), since a
+resampled picture is not the picture drawn at 768 px. The `image` crate (0.25,
+png/jpeg/webp only) is pulled in by `embed-eg2`; golden tests pin the canonical PNG and
+pixels for fixed inputs, and moved pixels mean a new profile name. Decoding is bounded
+by the header's dimensions (4096 px a side), an allocation limit with 64 MiB headroom,
+and a process-wide limit of two concurrent decodes whose permit outlives a timed-out
+request. Stored image metadata (id, SHA-256, MIME) still describes the submitted bytes.

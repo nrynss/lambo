@@ -8,9 +8,11 @@
 //!
 //! - [`QueryBy::Image`]: validated bytes (`crate::surface::image::validate`)
 //!   embedded with [`Embedder::embed_image`]. Images take no prompt prefix
-//!   (design 3.2's `lambo-eg2-v1` profile), so the query role and the
-//!   document role are the same call for an image; that is why an image
-//!   query vector is directly comparable with a stored image concept's.
+//!   (design 3.2; EmbeddingGemma 2's `lambo-eg2-v2` profile), so the query
+//!   role and the document role are the same call for an image, including
+//!   the adapter's canonical image form (22g: every image resized to a
+//!   768 px longer side); that is why an image query vector is directly
+//!   comparable with a stored image concept's.
 //! - [`QueryBy::Vector`]: a vector the client computed, with the contract it
 //!   declares. Accepted only when that contract equals the live one exactly,
 //!   and when the vector has the contract's width, finite components and a
@@ -106,6 +108,11 @@ pub(crate) async fn resolve(
                     Ok(Err(EmbedError::Unsupported(e))) => {
                         return Err(LamboError::Config(format!(
                             "the configured embedder does not embed images ({e})"
+                        )));
+                    }
+                    Ok(Err(EmbedError::Unreadable(e))) => {
+                        return Err(LamboError::Embed(format!(
+                            "Lambo could not read the query image ({e})"
                         )));
                     }
                     Ok(Err(e)) if e.is_transient() => {

@@ -1,0 +1,83 @@
+# 22g: EG2 image size invariance, profile lambo-eg2-v2 (re-measured 2026-10-10, after review)
+#
+# llama.cpp b11517 release binary (macOS arm64, Metal), EG2 Q8_0 + mmproj Q8_0, started as
+# docs/reference/config.mdx shows (--image-min-tokens 280 --image-max-tokens 280
+# --ctx-size 8192 --batch-size 8192 --ubatch-size 8192) on a private port:
+#   LAMBO_EG2_URL=http://127.0.0.1:<port> \
+#     cargo test --release --features embed-eg2 --test live_eg2 -- --ignored --nocapture
+#
+# Each picture is drawn natively at every size (checker: 8x8 cells whatever the side).
+# "before" posts the submitted PNG as it is (as lambo-eg2-v1 did); "after" goes through the
+# adapter (canonical form: every image decoded and resized so its longer side is exactly
+# 768 px, Lanczos3 down, Catmull-Rom up, lossless PNG). Cosine is to the picture drawn
+# natively at 768 px. The test asserts solid == bit-identical at every size, every pair
+# >= 0.975, and webp == png bit-identical.
+#
+contract model: ggml-org/embeddinggemma-2-GGUF@bfcd2987/Q8_0;prompts=lambo-eg2-v2
+== 22g size invariance: cosine to the native 768 px render ==
+picture      | px   | bytes   | before (v1 raw) | after (v2)  | after == 768 bits
+solid        |  128 |     257 | 1.000000        | 1.000000    | true
+solid        |  256 |     571 | 1.000000        | 1.000000    | true
+solid        |  512 |    1879 | 1.000000        | 1.000000    | true
+solid        |  768 |    3447 | 1.000000        | 1.000000    | true
+solid        | 1024 |    5335 | 0.999015        | 1.000000    | true
+solid        | 1536 |   10425 | 0.999015        | 1.000000    | true
+solid        | 2048 |   16868 | 0.999015        | 1.000000    | true
+solid        | 3000 |   33237 | 0.999015        | 1.000000    | true
+solid        | worst to 768: 1.000000; worst pair 1.000000 (128 vs 256); worst pair at 768 px and above: 1.000000
+checker 8x8  |  128 |     312 | 0.981663        | 0.981761    | false
+checker 8x8  |  256 |     652 | 0.984773        | 0.984802    | false
+checker 8x8  |  512 |    1997 | 0.989916        | 0.991750    | false
+checker 8x8  |  768 |    3592 | 1.000000        | 1.000000    | true
+checker 8x8  | 1024 |    5480 | 0.979712        | 0.999703    | false
+checker 8x8  | 1536 |   10674 | 0.980984        | 0.999333    | false
+checker 8x8  | 2048 |   17218 | 0.981247        | 0.999199    | false
+checker 8x8  | 3000 |   33763 | 0.981447        | 0.999112    | false
+checker 8x8  | worst to 768: 0.981761; worst pair 0.981761 (128 vs 768); worst pair at 768 px and above: 0.999112
+gradient     |  128 |    1662 | 0.999572        | 0.999592    | false
+gradient     |  256 |    3734 | 0.999789        | 0.999787    | false
+gradient     |  512 |   11436 | 0.999747        | 0.999813    | false
+gradient     |  768 |   18606 | 1.000000        | 1.000000    | true
+gradient     | 1024 |   33400 | 0.997825        | 0.999754    | false
+gradient     | 1536 |   61498 | 0.997963        | 0.999760    | false
+gradient     | 2048 |   95431 | 0.997892        | 0.999687    | false
+gradient     | 3000 |  169097 | 0.997977        | 0.999737    | false
+gradient     | worst to 768: 0.999592; worst pair 0.999448 (128 vs 1536); worst pair at 768 px and above: 0.999565
+cos(webp 512, png 512, same pixels) = 1.000000
+
+# Reading it
+# - solid: bit-identical vector at every size from 128 to 3000 px (before: 0.999015 above
+#   768 px, the 17x17 vs 16x16 patch grid).
+# - patterned pictures are NOT bit-identical across sizes, and cannot be: a picture drawn
+#   at 3000 px and scaled to 768 is not the picture drawn at 768 px, and a 128 px picture
+#   enlarged to 768 lacks detail the 768 px one has.
+#   - renders at 768 px and above: every pair >= 0.999112 (checker), >= 0.999565 (gradient)
+#     (before: 0.9797 / 0.9978 to the 768 px render).
+#   - all sizes 128 to 3000 px: every pair >= 0.981761 (checker, 128 vs 768),
+#     >= 0.999448 (gradient). Below 768 px the canonical form matches or beats the
+#     server's own resampling (checker 512 px: 0.991750 against 0.989916 before).
+# - webp vs png of the same pixels: bit-identical (both become the same canonical PNG).
+#
+# Filter choice.
+# Downscale (earlier run, same pictures): Lanczos3 beat Catmull-Rom on hard edges
+#   checker vs 768 at 1024..3000: Lanczos3 0.999703 0.999333 0.999199 0.999112,
+#   Catmull-Rom 0.999705 0.999033 0.998760 0.998612; gradient within 0.0001.
+# Upscale (this round, cosine to the 768 px render at 128 / 256 / 512 px):
+#   checker  Lanczos3   0.980228 0.979604 0.994841   (rings on enlarged hard edges)
+#            CatmullRom 0.981761 0.984802 0.991750   (chosen)
+#            Triangle   0.981764 0.984797 0.987042
+#   gradient Lanczos3   0.999219 0.999782 0.999836
+#            CatmullRom 0.999592 0.999787 0.999813
+#            Triangle   0.999642 0.999771 0.999832
+#   Catmull-Rom has the best worst case (0.9818 against Lanczos3's 0.9796).
+#
+# Grid check (b11517 calc_size_preserved_ratio): with the longer side at exactly 768, each
+# side aligns to max(48, round48(side)) <= 768, so the aligned area is <= 589,824 px,
+# under 645,120 (280 x 2,304): every canonical image takes the round-up branch, for every
+# aspect ratio including a 1 px shorter side (unit test
+# every_canonical_size_takes_the_round_up_grid_branch).
+#
+# WebP: b11517 decodes WebP only by running ffmpeg/ffprobe from its PATH
+# (mtmd-helper.cpp decode_webp_with_ffmpeg). With PATH=/usr/bin:/bin it answers
+#   500 {"message":"Failed to load image or audio file"}  (log: probe: failed to launch ffprobe)
+# lambo-eg2-v2 never sends WebP: every image is sent as its canonical PNG.
