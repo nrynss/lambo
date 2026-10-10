@@ -308,3 +308,13 @@ fn the_picker_markup_is_hidden_labelled_and_keyboard_operable() {
     assert!(APP_JS.contains("ev.preventDefault();"));
     assert!(APP_CSS.contains(".sr-only"));
 }
+
+/// Design Q9: an allowlisted session with no memory says so, rather than
+/// "concepts are being recorded".
+#[test]
+fn an_empty_session_says_so() {
+    assert!(APP_JS.contains(r#"var EMPTY_SESSION = "No memory in this session yet";"#));
+    assert!(APP_JS.contains("return state.graph.nodes.length === 0;"));
+    assert!(APP_JS.contains("return state.concepts === 0;"));
+    assert!(INDEX_HTML.contains(r#"<h1 id="hero-empty-heading">Nothing relied on yet</h1>"#));
+}

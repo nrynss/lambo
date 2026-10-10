@@ -148,6 +148,7 @@
     failures: 0,
     painted: false,
     embeddingKey: null,
+    concepts: null,       // from the last poll; 0 = nothing in this session yet
     lookupSeq: 0,
     heroSeq: 0,           // sequence token for the hero deps /api/inspect fetch
     showFallback: false,
@@ -462,12 +463,26 @@
     });
   }
 
+  // ---- empty session ---------------------------------------------------
+  // An allowlisted session nothing was ever written to, or one that was
+  // erased, is served as an empty page (#4 design Q9). Known from the counts
+  // (the poll) or the structure, whichever answered.
+
+  var EMPTY_SESSION = "No memory in this session yet";
+  var AUDIT_EMPTY = "No status changes yet in this session. Concepts are being recorded; none has reached Canonical.";
+
+  function isEmptySession() {
+    if (state.graph) return state.graph.nodes.length === 0;
+    return state.concepts === 0;
+  }
+
   // ---- history ---------------------------------------------------------
 
   function renderHistory() {
     var wrap = $("audit");
     clear(wrap);
     var rows = state.events.slice(-40);
+    $("audit-empty").textContent = isEmptySession() ? EMPTY_SESSION + "." : AUDIT_EMPTY;
     show($("audit-empty"), rows.length === 0);
     show(wrap, rows.length > 0);
 
@@ -527,9 +542,15 @@
     show($("hero-empty"), !pillar);
 
     if (!pillar) {
-      $("hero-empty-msg").textContent = state.graph
-        ? "No concept here has enough depending on it yet. They are being recorded; status has to be earned."
-        : "Waiting for the session's structure.";
+      // Q9 of the #4 design: a never-written (or erased) session is an empty
+      // page, and it says so rather than implying concepts are on their way.
+      var nothing = isEmptySession();
+      $("hero-empty-heading").textContent = nothing ? EMPTY_SESSION : "Nothing relied on yet";
+      $("hero-empty-msg").textContent = nothing
+        ? "Nothing has been recorded here. When agents write to this session, it shows up on this page."
+        : state.graph
+          ? "No concept here has enough depending on it yet. They are being recorded; status has to be earned."
+          : "Waiting for the session's structure.";
       return;
     }
 
@@ -1225,6 +1246,8 @@
         state.failures = 0;
         setConn("live", "Live");
         renderCounts(p.stats);
+        var wasEmpty = isEmptySession();
+        state.concepts = p.stats.concepts;
         applyEmbeddingStatus(p.embedding_contract);
         var fresh = p.events && p.events.events && p.events.events.length;
         if (fresh) {
@@ -1234,7 +1257,7 @@
         // Paint on the first answer even when there is nothing in it, so a
         // genuinely empty session says so; after that, only when something
         // actually moved, so the page does not redraw under the cursor.
-        if (fresh || !state.painted) {
+        if (fresh || !state.painted || wasEmpty !== isEmptySession()) {
           state.painted = true;
           renderHistory();
           renderLadder();
