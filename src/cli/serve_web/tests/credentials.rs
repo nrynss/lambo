@@ -782,13 +782,14 @@ fn each_credential_is_counted_at_startup() {
 #[test]
 fn startup_warnings_name_credentials_never_tokens() {
     use super::super::startup_warnings;
-    assert!(startup_warnings(false, &[("default", 1)], &[], false).is_empty());
-    assert!(startup_warnings(false, &[("local", 2)], &[], false).is_empty());
+    assert!(startup_warnings(false, &[("default", 1)], &[], false, None).is_empty());
+    assert!(startup_warnings(false, &[("local", 2)], &[], false, None).is_empty());
     let w = startup_warnings(
         true,
         &[("default", 2), ("ghost", 0)],
         &[("ghost", vec!["t4-z", "t4-y"])],
         false,
+        None,
     );
     assert_eq!(w.len(), 3, "{w:?}");
     assert!(w[0].contains("LAMBO_AUTH_TOKEN") && w[0].contains("\"default\""));
@@ -804,7 +805,7 @@ fn startup_warnings_name_credentials_never_tokens() {
     );
     assert!(w[1].contains("'ghost'") && w[1].contains("(t4-z, t4-y)"));
     assert!(w[2].contains("'ghost'") && w[2].contains("no served session"));
-    let w = startup_warnings(false, &[("local", 2)], &[], true);
+    let w = startup_warnings(false, &[("local", 2)], &[], true, None);
     assert_eq!(w.len(), 1);
     assert!(w[0].contains("list_sessions") && w[0].contains("anyone"));
 
@@ -826,6 +827,57 @@ fn startup_warnings_name_credentials_never_tokens() {
         super::super::auth::unserved_names(&authority, &ids),
         [("ghost", vec!["t4-z"])]
     );
+}
+
+/// Review L3: `inherit_serve_credentials` with no `[[serve.credential]]`
+/// imports nothing, and startup says so; with no other credential it says
+/// plainly that the portal is unauthenticated on loopback.
+#[test]
+fn inheriting_nothing_is_announced_at_startup() {
+    use super::super::{inherit_note, startup_warnings, InheritNote};
+    let serve_less = |web_cred: bool| {
+        let web = if web_cred {
+            format!(
+                "\n[[web.credential]]\nname = \"viewers\"\ntoken_env = \"{VIEWERS_ENV}\"\n\
+                 sessions = [\"t4-a\"]\n"
+            )
+        } else {
+            String::new()
+        };
+        format!("[web]\nsessions = [\"t4-a\"]\ninherit_serve_credentials = true\n{web}")
+    };
+    let (web, creds) = resolve(&serve_less(false), &env()).expect("resolve");
+    assert!(creds.is_empty());
+    let note = inherit_note(&web, false, &creds);
+    assert_eq!(note, Some(InheritNote::NothingImportedUnauthenticated));
+    let w = startup_warnings(false, &[("local", 1)], &[], false, note);
+    assert_eq!(w.len(), 1, "{w:?}");
+    assert!(
+        w[0].contains("inherit_serve_credentials")
+            && w[0].contains("nothing was imported")
+            && w[0].contains("UNAUTHENTICATED on loopback"),
+        "{}",
+        w[0]
+    );
+    // A legacy token, or a web credential, still authenticates: the note
+    // says nothing was imported, never "unauthenticated".
+    assert_eq!(
+        inherit_note(&web, true, &creds),
+        Some(InheritNote::NothingImported)
+    );
+    let (web, creds) = resolve(&serve_less(true), &env()).expect("resolve");
+    let note = inherit_note(&web, false, &creds);
+    assert_eq!(note, Some(InheritNote::NothingImported));
+    let w = startup_warnings(false, &[("viewers", 1)], &[], false, note);
+    assert!(
+        w.len() == 1 && w[0].contains("nothing was imported") && !w[0].contains("UNAUTH"),
+        "{w:?}"
+    );
+    // Something imported, or inheritance off: no note.
+    let (web, creds) = resolve(&config(false, true), &env()).expect("resolve");
+    assert_eq!(inherit_note(&web, false, &creds), None);
+    let (web, creds) = resolve(&config(false, false), &env()).expect("resolve");
+    assert_eq!(inherit_note(&web, false, &creds), None);
 }
 
 /// Acceptance: the constant-time scan is reused, not re-implemented. Every

@@ -556,7 +556,9 @@
   never a value. Startup prints one count line per credential and warns
   about a legacy token left beside configured credentials, a credential
   naming sessions that are not served, and a credential that reads no
-  served session. `[embedder] api_key_env` may not name a
+  served session; it also notes an `inherit_serve_credentials` that imports
+  nothing (saying so plainly when that leaves the window unauthenticated
+  on loopback). `[embedder] api_key_env` may not name a
   `[[web.credential]]` variable. The page still sends no `Authorization`
   header, so per-credential scope serves a proxy that adds it, and scripts.
 - `[web] list_sessions = true` (#4 PR 3): `GET /api/sessions` answers

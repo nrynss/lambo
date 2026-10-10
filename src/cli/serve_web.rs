@@ -415,6 +415,7 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
     )?;
     let configured = args.credentials.len();
     let legacy_beside_configured = auth.is_some() && configured > 0;
+    let inherit_note = inherit_note(&args.web, auth.is_some(), &args.credentials);
 
     // Fail fast on an unprovisioned or unreachable store, as the startup load
     // used to. Sessions themselves load lazily, on the first request that
@@ -521,6 +522,7 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
         &reach,
         &unserved,
         implicit && state.list_sessions,
+        inherit_note,
     ) {
         eprintln!("⚑ lambo serve-web: {warning}");
     }
@@ -550,14 +552,33 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
 ///   allowlist, or its prefix covers none): it authenticates and then sees
 ///   only the uniform 404;
 /// * the listing under the implicit grant (`listing_unauthenticated`):
-///   every served name to anyone who reaches the port (design 6.2, R5).
+///   every served name to anyone who reaches the port (design 6.2, R5);
+/// * `inherit_serve_credentials` on with nothing to import (`inherit`,
+///   review L3): the operator expects agent tokens to work, and with no
+///   other credential the portal is in fact unauthenticated on loopback.
 fn startup_warnings(
     legacy_beside_configured: bool,
     reach: &[(&str, usize)],
     unserved: &[(&str, Vec<&str>)],
     listing_unauthenticated: bool,
+    inherit: Option<InheritNote>,
 ) -> Vec<String> {
     let mut out = Vec::new();
+    match inherit {
+        Some(InheritNote::NothingImportedUnauthenticated) => out.push(
+            "[web] inherit_serve_credentials is on but [serve] has no [[serve.credential]]: \
+             nothing was imported, and no other credential is configured, so this portal is \
+             UNAUTHENTICATED on loopback: anyone who can reach the port reads every served \
+             session"
+                .to_string(),
+        ),
+        Some(InheritNote::NothingImported) => out.push(
+            "[web] inherit_serve_credentials is on but [serve] has no [[serve.credential]]: \
+             nothing was imported, so no agent token authenticates here"
+                .to_string(),
+        ),
+        None => {}
+    }
     if legacy_beside_configured {
         out.push(format!(
             "{AUTH_TOKEN_ENV} / --auth-token is set beside configured credentials \
@@ -590,6 +611,39 @@ fn startup_warnings(
         );
     }
     out
+}
+
+/// Why `inherit_serve_credentials` imported nothing, for
+/// [`startup_warnings`] (review L3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InheritNote {
+    /// Nothing imported; other credentials still require a bearer.
+    NothingImported,
+    /// Nothing imported and nothing else configured: the implicit
+    /// loopback grant, no authentication.
+    NothingImportedUnauthenticated,
+}
+
+/// [`InheritNote`] for a portal over `credentials` (review L3): `None`
+/// unless `[web] inherit_serve_credentials` is on and no credential came
+/// from `[serve]`. Names are unique across both tables, so an imported
+/// credential is any that `[[web.credential]]` does not name.
+fn inherit_note(
+    web: &WebConfig,
+    legacy: bool,
+    credentials: &[WebCredential],
+) -> Option<InheritNote> {
+    let imported = credentials
+        .iter()
+        .any(|c| !web.credentials.iter().any(|w| w.name == c.grant.name()));
+    if !web.inherit_serve_credentials || imported {
+        return None;
+    }
+    Some(if !legacy && credentials.is_empty() {
+        InheritNote::NothingImportedUnauthenticated
+    } else {
+        InheritNote::NothingImported
+    })
 }
 
 /// `axum::serve` under a shutdown signal, with the grace window applied to the
