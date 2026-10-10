@@ -477,7 +477,9 @@
   sessions), never stopping a credential with `create`. A request waits at
   most 15 seconds for an attach, and an attach is abandoned (its lease
   released) after 60 seconds, as is a pinned session's background retry;
-  both answer `503` with `Retry-After: 5`. A startup warning names a
+  both answer `503` with `Retry-After: 5`. At most twice `max_attached`
+  attaches wait to start; past that a request for another unattached
+  session gets `503` with `Retry-After: 5`. A startup warning names a
   `max_attached` that leaves no on-demand place, and a library
   `idle_detach` under a second is refused.
 - `[web]` in `lambo.toml` (#4 PR 1): `view_ttl_ms` (1500, 0 to 60000),

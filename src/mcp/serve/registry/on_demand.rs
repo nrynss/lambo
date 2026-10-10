@@ -12,6 +12,8 @@
 //!
 //! 1. The router asks [`SessionRegistry::get_or_attach`](super::SessionRegistry::get_or_attach).
 //!    A cached negative answer (absent, erased, failed) is given at once.
+//!    With [`unplaced_cap`] attaches already waiting for their probe, the
+//!    request gets 503 `Retry-After` and starts nothing (review L-b).
 //! 2. The attach task takes a permit and probes the session's lease row:
 //!    erased, absent without `create`, or held by another live writer each
 //!    end the attach **here, before anything is evicted**.
@@ -75,6 +77,21 @@ pub(in crate::mcp::serve) const NEGATIVE_TTL: Duration = Duration::from_secs(30)
 
 /// How many negative outcomes are remembered at most; the oldest goes first.
 pub(in crate::mcp::serve) const NEGATIVE_CACHE_MAX: usize = 1024;
+
+/// How many on-demand attaches may wait before their existence probe, per
+/// `max_attached` place (#32 PR 6 Sonnet review L-b). An attach that has
+/// not probed yet takes no place under `max_attached` (review H1), so
+/// without a bound of its own a flood of distinct absent ids would each add
+/// an `Attaching` slot and a task queued on the attach permits, bounded
+/// only by the credential's request rate. Past the bound a request is
+/// answered 503 with [`ATTACH_BUSY_RETRY`] and starts nothing.
+pub(super) const UNPLACED_PER_PLACE: usize = 2;
+
+/// The most on-demand attaches that may wait unplaced at once:
+/// [`UNPLACED_PER_PLACE`] × `max_attached`, at least 1.
+pub(super) fn unplaced_cap(max_attached: usize) -> usize {
+    max_attached.saturating_mul(UNPLACED_PER_PLACE).max(1)
+}
 
 /// Who is asking for a session: the credential the request authenticated
 /// as, and whether that credential may create a session.
@@ -416,6 +433,14 @@ mod tests {
             cache.get(&format!("s{}", NEGATIVE_CACHE_MAX + 9), false),
             Some(Negative::Failed)
         );
+    }
+
+    #[test]
+    fn the_unplaced_cap_is_twice_max_attached_and_at_least_one() {
+        assert_eq!(unplaced_cap(16), 32);
+        assert_eq!(unplaced_cap(1), 2);
+        assert_eq!(unplaced_cap(0), 1);
+        assert_eq!(unplaced_cap(usize::MAX), usize::MAX);
     }
 
     #[test]

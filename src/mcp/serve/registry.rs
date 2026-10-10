@@ -37,7 +37,7 @@
 //! | [`Slot::HeldElsewhere`] (pinned) | 503, `Retry-After` until the next retry | the background retry wins the lease |
 //! | [`Slot::Failed`] (pinned) | 503, no `Retry-After` | never: an operator restarts the serve |
 //! | absent, pinned | 503, `Retry-After: 1` (between states) | |
-//! | absent, not pinned | a cached negative outcome; else an on-demand attach, when the serve attaches on demand; else the uniform 404 (`surface::session`) | |
+//! | absent, not pinned | a cached negative outcome; else an on-demand attach, when the serve attaches on demand (503 `Retry-After` while `2 × max_attached` attaches wait for their probe); else the uniform 404 (`surface::session`) | |
 //!
 //! # What runs where
 //!
@@ -57,7 +57,9 @@ use std::time::{Duration, Instant};
 
 #[cfg(all(test, unix, feature = "store-memory", feature = "embed-fixture"))]
 pub(super) use on_demand::NEGATIVE_TTL;
-use on_demand::{choose_victim, place_share, takes_a_place, Flight, Negative, NegativeCache};
+use on_demand::{
+    choose_victim, place_share, takes_a_place, unplaced_cap, Flight, Negative, NegativeCache,
+};
 pub(super) use on_demand::{
     Requester, Routed, ATTACH_BUSY_RETRY, ATTACH_TIMEOUT, ATTACH_WAIT, EVICT_MIN_IDLE,
     PROBE_TIMEOUT,
@@ -522,7 +524,9 @@ impl SessionRegistry {
     /// 2. An absent session that is not pinned is answered from the
     ///    negative cache while it holds a fresh outcome for it (#32 PR 6
     ///    review M3), and otherwise starts an attach, unless the serve does
-    ///    not attach on demand (the uniform 404) or is closing (503). The
+    ///    not attach on demand (the uniform 404), is closing (503), or
+    ///    already has `2 × max_attached` attaches waiting for their probe
+    ///    (503 `Retry-After`, Sonnet review L-b). The
     ///    attach (`attach_on_demand`) probes for the session before it
     ///    reserves a place or evicts anything (#32 PR 6 review H1); see
     ///    `on_demand` for the order.
@@ -598,9 +602,9 @@ impl SessionRegistry {
             }
             None => {}
         }
-        if self.on_demand.is_none() {
+        let Some(bounds) = &self.on_demand else {
             return Route::Answer(Routed::answer(Lookup::NotHosted));
-        }
+        };
         // Design §3.2 step 1: no attach starts once the shutdown has begun.
         if self.is_closing() {
             return Route::Answer(Routed::answer(Lookup::Unavailable {
@@ -615,6 +619,25 @@ impl SessionRegistry {
                 Negative::Absent => Lookup::NotHosted,
                 Negative::Erased => Lookup::Erased,
                 Negative::Failed => Lookup::Failed,
+            }));
+        }
+        // An attach that has not probed takes no place (review H1), so the
+        // ones waiting for their probe are bounded on their own (Sonnet
+        // review L-b): a flood of distinct ids starts no task past the cap.
+        let unplaced = slots
+            .values()
+            .filter(|slot| matches!(slot, Slot::Attaching { placed: false, .. }))
+            .count();
+        if unplaced >= unplaced_cap(bounds.max_attached) {
+            tracing::debug!(
+                session = %id,
+                credential = %requester.credential,
+                unplaced,
+                "lambo serve: an on-demand attach was refused: too many attaches are waiting \
+                 already (503)"
+            );
+            return Route::Answer(Routed::answer(Lookup::Unavailable {
+                retry_after: ATTACH_BUSY_RETRY,
             }));
         }
         // No place is taken and nothing is evicted yet: the attach probes

@@ -1168,3 +1168,111 @@ async fn a_panic_after_admission_does_not_block_the_session() {
     assert_eq!(od.count("acquire_lease", id), 2);
     od.close().await;
 }
+
+/// Sonnet review L-b: a flood of distinct absent ids stays bounded. An
+/// attach that has not probed yet takes no place, so the ones waiting for
+/// their probe are capped at `2 × max_attached`; past that a request gets
+/// 503 with `Retry-After` at once, adds no slot and starts no attach. Here
+/// both attach permits are held by two stalled loads, so nothing can probe.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_flood_of_absent_ids_stays_bounded() {
+    let max_attached = 4;
+    let cap = 2 * max_attached;
+    let od = OnDemand::start(max_attached, Duration::from_secs(900), 0).await;
+    od.stall_loads(true);
+    let mut holders = Vec::new();
+    for id in ["od-u-hold-1", "od-u-hold-2"] {
+        let registry = Arc::clone(&od.registry);
+        holders.push(tokio::spawn(async move {
+            registry
+                .get_or_attach(id, asking("maker", true))
+                .await
+                .lookup
+        }));
+        od.until_called("load_session", id, 1).await;
+    }
+
+    let flood: Vec<String> = (0..30).map(|i| format!("od-u-flood-{i}")).collect();
+    let mut waiting = Vec::new();
+    let mut refused = 0;
+    for id in &flood {
+        let registry = Arc::clone(&od.registry);
+        let asked = id.clone();
+        let task = tokio::spawn(async move {
+            registry
+                .get_or_attach(&asked, asking("reader", false))
+                .await
+        });
+        // Under the cap the request waits on its attach's slot; past it
+        // the request is answered at once.
+        until(Duration::from_secs(10), "a slot or an answer", || {
+            task.is_finished() || matches!(od.registry.lookup(id), Lookup::Unavailable { .. })
+        })
+        .await;
+        if task.is_finished() {
+            match task.await.expect("the request task").lookup {
+                Lookup::Unavailable { retry_after } => {
+                    assert_eq!(retry_after, crate::mcp::serve::registry::ATTACH_BUSY_RETRY);
+                    refused += 1;
+                }
+                _ => panic!("past the cap: 503 with Retry-After"),
+            }
+        } else {
+            waiting.push(task);
+        }
+    }
+    assert_eq!(waiting.len(), cap, "at most 2 x max_attached attaches wait");
+    assert_eq!(refused, flood.len() - cap);
+    let attaching = flood
+        .iter()
+        .filter(|id| matches!(od.registry.lookup(id), Lookup::Unavailable { .. }))
+        .count();
+    assert_eq!(attaching, cap, "no slot past the cap");
+    assert!(
+        flood.iter().all(|id| od.count("read_lease", id) == 0),
+        "nothing probed while the permits are held"
+    );
+    // The same over HTTP: 503 with Retry-After, and no slot.
+    let reply = http_as(
+        od.addr,
+        "POST",
+        "/mcp/s/od-u-flood-http",
+        Some(&bearer("reader")),
+        None,
+        "{}",
+    )
+    .await;
+    assert_eq!(reply.status, 503, "{}", reply.body);
+    assert_eq!(reply.header("retry-after").as_deref(), Some("5"));
+    assert!(matches!(
+        od.registry.lookup("od-u-flood-http"),
+        Lookup::NotHosted
+    ));
+
+    // Once the permits are free the waiting attaches probe and end, and the
+    // cap no longer refuses.
+    od.stall_loads(false);
+    for task in waiting {
+        let routed = tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .expect("the waiting attach ends")
+            .expect("the request task");
+        assert!(matches!(routed.lookup, Lookup::NotHosted));
+    }
+    for holder in holders {
+        let lookup = holder.await.expect("the holder task");
+        assert!(matches!(lookup, Lookup::Live(_)));
+    }
+    let reply = http_as(
+        od.addr,
+        "POST",
+        "/mcp/s/od-u-flood-after",
+        Some(&bearer("reader")),
+        None,
+        "{}",
+    )
+    .await;
+    assert_eq!(reply.status, 404, "{}", reply.body);
+    od.registry.join_detaches().await;
+    od.close().await;
+}
