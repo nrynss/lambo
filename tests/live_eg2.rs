@@ -16,6 +16,10 @@
 //! For the no-projector case, also start a second server without `--mmproj`
 //! and set `LAMBO_EG2_TEXT_ONLY_URL` to it.
 //!
+//! The #79 cold-start ranking table goes through a SQLite store; add
+//! `store-sqlite` to the features (`--features embed-eg2,store-sqlite`) to
+//! run it.
+//!
 //! Every image is generated here as an uncompressed PNG; nothing binary is
 //! committed. The run prints the design 7.3 ranking-parity table.
 
@@ -117,6 +121,13 @@ fn checkerboard(side: u32) -> Vec<u8> {
 
 // ------------------------------------------------------------ helpers
 
+/// One live test at a time against the shared llama-server. With several
+/// requests in flight the server batches them across its slots, and a
+/// batched embedding is not bit-identical to a lone one, which
+/// `live_eg2_size_invariance` asserts. Running the #79 table beside it made
+/// that test fail 3/3; serialized, all four pass.
+static SERVER: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn env_url(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.trim().is_empty())
 }
@@ -200,6 +211,7 @@ const FAR: [(&str, &str); 4] = [
 #[tokio::test]
 #[ignore = "needs a live llama-server with EmbeddingGemma 2 (LAMBO_EG2_URL)"]
 async fn live_eg2_text_and_image() {
+    let _server = SERVER.lock().await;
     let Some(url) = env_url("LAMBO_EG2_URL") else {
         eprintln!("live_eg2: LAMBO_EG2_URL not set; skipping");
         return;
@@ -424,6 +436,7 @@ async fn live_eg2_text_and_image() {
 #[tokio::test]
 #[ignore = "needs a live llama-server without --mmproj (LAMBO_EG2_TEXT_ONLY_URL)"]
 async fn live_eg2_text_only_server_refuses_images_permanently() {
+    let _server = SERVER.lock().await;
     let Some(url) = env_url("LAMBO_EG2_TEXT_ONLY_URL") else {
         eprintln!("live_eg2: LAMBO_EG2_TEXT_ONLY_URL not set; skipping");
         return;
@@ -561,6 +574,7 @@ async fn raw_image(url: &str, png: &[u8]) -> Vec<f32> {
 #[tokio::test]
 #[ignore = "needs a live llama-server with EmbeddingGemma 2 (LAMBO_EG2_URL)"]
 async fn live_eg2_size_invariance() {
+    let _server = SERVER.lock().await;
     let Some(url) = env_url("LAMBO_EG2_URL") else {
         eprintln!("live_eg2: LAMBO_EG2_URL not set; skipping");
         return;
@@ -646,20 +660,39 @@ async fn live_eg2_size_invariance() {
     assert_eq!(wv, pv);
 }
 
-/// Real EG2 vectors through the SQLite-backed public recall route. The
-/// daemon may finish a cycle during the network-backed derive; the deterministic
-/// frozen-score cold assertion lives in Memory's fixture test. We record the
-/// cycle delta here instead of pretending wall-clock timing proves cold mode.
+/// #79 with real EG2 vectors through the SQLite-backed public recall route:
+/// the before/after ranking table.
+///
+/// A public `Memory` cannot hold its daemon back (derive wakes it and it
+/// rescores in milliseconds), so the cold read itself is not observable
+/// here; the frozen-table cold assertions are the crate's fixture tests.
+/// This test measures what those rules do with real numbers instead:
+///
+/// 1. Phase A: derive older images (one relevant, two noise), let the
+///    daemon settle, recall. Each hit's daemon score is recovered as
+///    `d = (final - w_query × q) / w_daemon`, with `q` the cosine of the
+///    vector this test supplied. That table is what a recall made right
+///    after the fresh derives would read.
+/// 2. Phase B: derive a fresh relevant image and a fresh noise image, let the
+///    daemon settle, recall again (the settled ranking).
+///
+/// It prints, per concept, `q`, the frozen `d`, the pre-#79 cold final (a
+/// missing entry scored 0 inside the blend), the #79 cold final
+/// (`w_query × q` for every member), and the settled final, and asserts the
+/// #79 cold order puts every relevant image above every noise image.
 #[cfg(feature = "store-sqlite")]
 #[tokio::test]
 #[ignore = "needs an owned live llama-server with EG2 and LAMBO_EG2_URL"]
 async fn live_eg2_public_recall_ranks_a_new_matching_image_above_old_noise() {
+    let _server = SERVER.lock().await;
     use lambo::graph::image::{ImageDerive, ImagePayload};
     use lambo::recall::query_vector::QueryBy;
     use lambo::store::SqliteStore;
     use lambo::{
-        AgentId, ConceptType, EmbeddingContract, GraphStore, MatchStrategy, Memory, RecallQuery,
+        AgentId, ConceptType, EmbeddingContract, GraphStore, MatchStrategy, Memory, NodeId,
+        RecallQuery,
     };
+    use std::collections::HashMap;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -678,9 +711,34 @@ async fn live_eg2_public_recall_ranks_a_new_matching_image_above_old_noise() {
         dim: 768,
     };
     let query_vector = e.embed_query("a red square").await.unwrap();
-    let red_vector = image(&e, &solid(64, [255, 0, 0])).await.unwrap();
-    let blue_vector = image(&e, &solid(64, [0, 0, 255])).await.unwrap();
-    assert!(cosine(&query_vector, &red_vector) > cosine(&query_vector, &blue_vector));
+    // (caption, image id, rgb, relevant, fresh)
+    let looks: [(&str, &str, [u8; 3], bool, bool); 5] = [
+        (
+            "old dark red image",
+            "olddarkred",
+            [170, 20, 20],
+            true,
+            false,
+        ),
+        ("old blue image", "oldblue", [0, 0, 255], false, false),
+        ("old green image", "oldgreen", [0, 160, 0], false, false),
+        ("fresh red image", "freshred", [255, 0, 0], true, true),
+        (
+            "fresh gray image",
+            "freshgray",
+            [128, 128, 128],
+            false,
+            true,
+        ),
+    ];
+    let mut vectors = Vec::new();
+    for (_, _, rgb, _, _) in &looks {
+        vectors.push(image(&e, &solid(64, *rgb)).await.unwrap());
+    }
+    let q: Vec<f64> = vectors
+        .iter()
+        .map(|v| f64::from(cosine(&query_vector, v)))
+        .collect();
 
     let dir = std::env::temp_dir().join(format!("lambo-79-live-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -698,84 +756,145 @@ async fn live_eg2_public_recall_ranks_a_new_matching_image_above_old_noise() {
         .build()
         .await
         .unwrap();
+    let w = RecallWeights::default();
     let agent = AgentId::from("live-eg2");
-    let old = mem
-        .derive_image_as(
-            &agent,
-            ImageDerive {
-                caption: "old unrelated blue image",
-                concept_type: ConceptType::Resource,
-                image_id: Some("oldblue"),
-                payload: ImagePayload::Vector {
-                    values: blue_vector,
-                    declared: contract.clone(),
-                },
-                parent_of: &[],
-                event_time: None,
-            },
-        )
-        .await
-        .unwrap()
-        .created[0];
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while mem.stats().daemon_cycles == 0 {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
-    let before = mem.stats().daemon_cycles;
-    let fresh = mem
-        .derive_image_as(
-            &agent,
-            ImageDerive {
-                caption: "fresh matching red image",
-                concept_type: ConceptType::Resource,
-                image_id: Some("freshred"),
-                payload: ImagePayload::Vector {
-                    values: red_vector,
-                    declared: contract.clone(),
-                },
-                parent_of: &[],
-                event_time: None,
-            },
-        )
-        .await
-        .unwrap()
-        .created[0];
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            let stats = mem.stats();
-            if stats.log_depth == 0 && stats.flush_depth == 0 {
-                break;
+    let mut ids: Vec<Option<NodeId>> = vec![None; looks.len()];
+    let mut d_frozen: Vec<Option<f64>> = vec![None; looks.len()];
+
+    // Settled: writes applied and flushed, and two full daemon ticks after.
+    async fn settle(mem: &Memory) {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let s = mem.stats();
+                if s.log_depth == 0 && s.flush_depth == 0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
-    let result = mem
-        .recall_by(
+            let start = mem.stats().daemon_cycles;
+            while mem.stats().daemon_cycles < start + 2 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the daemon settles");
+    }
+    async fn recall(
+        mem: &Memory,
+        query_vector: &[f32],
+        contract: &EmbeddingContract,
+    ) -> HashMap<NodeId, f64> {
+        mem.recall_by(
             RecallQuery {
                 query: String::new(),
-                top_k: 2,
+                top_k: 10,
                 max_tokens: 10_000,
                 traversal_depth: 0,
             },
             QueryBy::Vector {
-                values: query_vector,
-                declared: contract,
+                values: query_vector.to_vec(),
+                declared: contract.clone(),
             },
         )
         .await
-        .unwrap();
+        .unwrap()
+        .hits
+        .into_iter()
+        .map(|h| (h.node_id, h.score))
+        .collect()
+    }
+
+    for fresh_phase in [false, true] {
+        for (i, (caption, image_id, _, _, fresh)) in looks.iter().enumerate() {
+            if *fresh != fresh_phase {
+                continue;
+            }
+            let out = mem
+                .derive_image_as(
+                    &agent,
+                    ImageDerive {
+                        caption,
+                        concept_type: ConceptType::Resource,
+                        image_id: Some(image_id),
+                        payload: ImagePayload::Vector {
+                            values: vectors[i].clone(),
+                            declared: contract.clone(),
+                        },
+                        parent_of: &[],
+                        event_time: None,
+                    },
+                )
+                .await
+                .unwrap();
+            ids[i] = Some(out.created[0]);
+        }
+        settle(&mem).await;
+        if !fresh_phase {
+            // Phase A's table is the frozen one: recover each old d.
+            let frozen = recall(&mem, &query_vector, &contract).await;
+            for (i, id) in ids.iter().enumerate() {
+                d_frozen[i] = id.map(|id| (frozen[&id] - w.w_query * q[i].max(0.0)) / w.w_daemon);
+            }
+        }
+    }
+    let settled = recall(&mem, &query_vector, &contract).await;
+
+    let rank = |finals: &[f64]| {
+        let mut order: Vec<usize> = (0..finals.len()).collect();
+        order.sort_by(|a, b| finals[*b].total_cmp(&finals[*a]));
+        let mut r = vec![0; finals.len()];
+        for (pos, i) in order.into_iter().enumerate() {
+            r[i] = pos + 1;
+        }
+        r
+    };
+    let pre: Vec<f64> = (0..looks.len())
+        .map(|i| w.w_daemon * d_frozen[i].unwrap_or(0.0) + w.w_query * q[i].max(0.0))
+        .collect();
+    let cold: Vec<f64> = (0..looks.len())
+        .map(|i| w.w_query * q[i].max(0.0))
+        .collect();
+    let after: Vec<f64> = (0..looks.len())
+        .map(|i| settled[&ids[i].unwrap()])
+        .collect();
+    let (r_pre, r_cold, r_after) = (rank(&pre), rank(&cold), rank(&after));
     println!(
-        "EG2 public recall: daemon cycles before fresh={before}, after read={}; hits={:?}",
-        mem.stats().daemon_cycles,
-        result.hits.iter().map(|h| h.node_id).collect::<Vec<_>>()
+        "#79 EG2 ranking table (query \"a red square\", w_daemon {} w_query {}):",
+        w.w_daemon, w.w_query
     );
-    assert_eq!(result.hits.first().map(|h| h.node_id), Some(fresh));
-    assert!(result.hits.iter().any(|hit| hit.node_id == old));
+    println!(
+        "{:<20} {:>3} {:>7} {:>8} {:>13} {:>13} {:>13}",
+        "concept", "rel", "q", "d frozen", "pre-#79 cold", "#79 cold", "settled"
+    );
+    for (i, (caption, _, _, relevant, _)) in looks.iter().enumerate() {
+        println!(
+            "{:<20} {:>3} {:>7.4} {:>8} {:>8.4} (#{}) {:>8.4} (#{}) {:>8.4} (#{})",
+            caption,
+            if *relevant { "yes" } else { "no" },
+            q[i],
+            d_frozen[i].map_or("missing".to_string(), |d| format!("{d:.4}")),
+            pre[i],
+            r_pre[i],
+            cold[i],
+            r_cold[i],
+            after[i],
+            r_after[i],
+        );
+    }
+    let worst_relevant = (0..looks.len())
+        .filter(|i| looks[*i].3)
+        .map(|i| r_cold[i])
+        .max()
+        .unwrap();
+    let best_noise = (0..looks.len())
+        .filter(|i| !looks[*i].3)
+        .map(|i| r_cold[i])
+        .min()
+        .unwrap();
+    assert!(
+        worst_relevant < best_noise,
+        "#79 cold order must put every relevant image above every noise image"
+    );
     mem.close().await.unwrap();
     std::fs::remove_dir_all(dir).unwrap();
 }
