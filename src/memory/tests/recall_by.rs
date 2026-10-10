@@ -549,9 +549,16 @@ async fn sqlite_public_recall_by_ranks_fresh_supplied_image_and_guards_noise() {
     mem.close().await.unwrap();
 }
 
+/// #79 public text recall (review L2): the recent-only noise is derived
+/// BEFORE the freeze, so the daemon has scored it and its recency is high.
+/// Under the old blend a missing daemon entry scored 0, so the fresh strong
+/// vector hit sat at `0.5 × cosine` below the noise's `0.5 × d + 0.5 ×
+/// RECENT_SCORE`; the test asserts that hazard holds before asserting cold
+/// mode reverses it.
 #[cfg(feature = "store-sqlite")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sqlite_public_text_recall_keeps_strong_fresh_vector_above_recent_noise() {
+    use crate::recall::candidates::RECENT_SCORE;
     let _quiet = crate::test_util::quiet_logs();
     let (_dir, mem) = cold_sqlite_memory("issue-79-public-text").await;
     mem.derive(
@@ -560,15 +567,6 @@ async fn sqlite_public_text_recall_keeps_strong_fresh_vector_above_recent_noise(
     )
     .await
     .unwrap();
-    flushed(&mem).await;
-    mem.settle_daemon().await;
-    stop_daemon_for_cold_start(&mem).await;
-    let scores = mem.daemon.scores();
-    let fresh = mem
-        .derive(&[("register user", ConceptType::Entity)], &ParentOf::none())
-        .await
-        .unwrap()
-        .created[0];
     let recent = mem
         .derive(
             &[("orbital neutrino mechanics", ConceptType::Entity)],
@@ -578,10 +576,22 @@ async fn sqlite_public_text_recall_keeps_strong_fresh_vector_above_recent_noise(
         .unwrap()
         .created[0];
     flushed(&mem).await;
-    assert!(scores
+    mem.settle_daemon().await;
+    stop_daemon_for_cold_start(&mem).await;
+    let scores = mem.daemon.scores();
+    let recent_d = scores
         .ranked
         .iter()
-        .all(|hit| hit.item != fresh && hit.item != recent));
+        .find(|hit| hit.item == recent)
+        .map(|hit| hit.score)
+        .expect("the recent noise is scored before the freeze");
+    let fresh = mem
+        .derive(&[("register user", ConceptType::Entity)], &ParentOf::none())
+        .await
+        .unwrap()
+        .created[0];
+    flushed(&mem).await;
+    assert!(scores.ranked.iter().all(|hit| hit.item != fresh));
     let query = RecallQuery {
         query: "create account".into(),
         top_k: 5,
@@ -591,10 +601,21 @@ async fn sqlite_public_text_recall_keeps_strong_fresh_vector_above_recent_noise(
     let detailed = mem.recall_detailed(query).await.unwrap();
     let fresh_leg = detailed.legs.get(&fresh).unwrap();
     let recent_leg = detailed.legs.get(&recent).unwrap();
-    assert!(fresh_leg.vector.unwrap() > 0.90);
-    assert!(recent_leg.recent.is_some());
+    let fresh_cosine = fresh_leg.vector.unwrap();
+    assert!(fresh_cosine > 0.90);
+    assert_eq!(recent_leg.keyword, None);
+    // On the recency floor: its own cosine to the query is noise.
+    assert!(recent_leg.vector.is_none_or(|v| v < RECENT_SCORE));
+    assert_eq!(recent_leg.recent, Some(RECENT_SCORE));
+    // The hazard is real: the old blend put the recent noise first.
+    assert!(
+        0.5 * recent_d + 0.5 * RECENT_SCORE > 0.5 * fresh_cosine,
+        "recent noise d {recent_d} too low to test the hazard (fresh cosine {fresh_cosine})"
+    );
+    assert!(detailed.cold_start);
     let ids: Vec<NodeId> = detailed.hits.iter().map(|hit| hit.node_id).collect();
-    assert!(ids.iter().position(|id| *id == fresh) < ids.iter().position(|id| *id == recent));
+    let pos = |id: NodeId| ids.iter().position(|x| *x == id).expect("returned");
+    assert!(pos(fresh) < pos(recent), "{:?}", detailed.hits);
     mem.close().await.unwrap();
 }
 
