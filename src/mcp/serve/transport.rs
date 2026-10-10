@@ -283,7 +283,8 @@ pub(super) async fn serve_http(
     serve_http_bounded(listener, app, shutdown, SHUTDOWN_GRACE).await
 }
 
-/// The serve's whole HTTP app: [`session_router`] behind the guards, every
+/// The serve's whole HTTP app: [`session_router`] and the operator surface
+/// (`super::admin`, #32 PR 7) behind the guards, every
 /// guard on `.layer` (so an unrouted path passes through them too and a
 /// refused session stays indistinguishable from it). `serve_http` serves
 /// exactly this; the tests serve it too, so they exercise the same
@@ -293,7 +294,8 @@ pub(super) fn http_app(
     authority: Arc<ServeAuthority>,
     guard: HttpGuard,
 ) -> axum::Router {
-    session_router(registry, authority)
+    session_router(Arc::clone(&registry), Arc::clone(&authority))
+        .merge(super::admin::admin_router(registry, authority))
         .layer(axum::middleware::from_fn_with_state(guard, guard_request))
 }
 
@@ -454,17 +456,58 @@ async fn serve_session(
              serve log)\n",
         )
             .into_response(),
-        // In scope, erased (#23): never attached or recreated again. Inside
-        // scope the caller may know it (design §6.2); 410, as the admin
-        // routes answer an erased session.
-        Lookup::Erased => (
-            axum::http::StatusCode::GONE,
-            "this session was erased and cannot be used or created again\n",
-        )
-            .into_response(),
+        // In scope and erased (#23): erased by this process (#32 PR 7), or
+        // found tombstoned by the on-demand probe (#32 PR 6). Never attached
+        // or recreated again. Inside scope the caller may know it (design
+        // §6.2): the #23 erased error.
+        Lookup::Erased => erased_answer(req).await,
         // In scope but absent, and the caller may not create it (or the
         // serve attaches nothing on demand): the uniform 404.
         Lookup::NotHosted => refused(Some(grant), SessionRefusal::new(RefusalReason::Absent)),
+    }
+}
+
+/// What a session that is erased answers (design §6.2, #32 PR 7): the #23
+/// erased error, MCP error `-32003` (the frame `lambo serve`'s proxy
+/// answers a call to an erased session with), to a `POST` that carries one
+/// JSON-RPC request; `410` to everything else, which has no request id to
+/// answer: a `GET` or `DELETE`, a notification or a response, a batch, or a
+/// body that cannot be read. Never handed to rmcp: no MCP session of an
+/// erased session survives, and none is opened. A call already inside the
+/// session when it was fenced gets the same error from the tool layer.
+async fn erased_answer(req: axum::extract::Request) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let gone = || {
+        (
+            axum::http::StatusCode::GONE,
+            "this session was erased and cannot be used or created again\n",
+        )
+            .into_response()
+    };
+    if req.method() != axum::http::Method::POST {
+        return gone();
+    }
+    // Bounded as every MCP body is (the guard's ceiling and timeout).
+    let limit = usize::try_from(super::http_guards::MAX_HTTP_BODY_BYTES).unwrap_or(usize::MAX);
+    let body = tokio::time::timeout(
+        super::http_guards::REQUEST_BODY_TIMEOUT,
+        axum::body::to_bytes(req.into_body(), limit),
+    )
+    .await;
+    let Ok(Ok(body)) = body else {
+        return gone();
+    };
+    match std::str::from_utf8(&body)
+        .ok()
+        .and_then(crate::mcp::proxy::erased_reply)
+    {
+        Some(reply) => (
+            axum::http::StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            reply,
+        )
+            .into_response(),
+        None => gone(),
     }
 }
 

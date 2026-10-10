@@ -658,9 +658,20 @@ pub(super) fn usable_session_id(headers: &axum::http::HeaderMap) -> Option<&str>
 /// `Last-Event-ID` plays no part: rmcp reads it only on a GET (resuming a
 /// stream), never on a POST, so a POST carrying it with no usable session id
 /// mints a session like any other (#32 PR 5 review S1).
+///
+/// The operator surface (`/admin/...`, #32 PR 7) mints no MCP session, so
+/// its requests are never openers: an erase posted while the cap is full
+/// is not refused by it, and its small body is read by its own route,
+/// after authorization, not buffered here.
 pub(super) fn opens_a_new_session(req: &axum::extract::Request) -> bool {
-    req.method() == axum::http::Method::POST && usable_session_id(req.headers()).is_none()
+    req.method() == axum::http::Method::POST
+        && usable_session_id(req.headers()).is_none()
+        && !req.uri().path().starts_with(ADMIN_PATH_PREFIX)
 }
+
+/// The path prefix of the operator surface (`super::admin`), which opens
+/// no MCP session.
+pub(super) const ADMIN_PATH_PREFIX: &str = "/admin/";
 
 /// Can rmcp mint an MCP session for a session-opening request
 /// ([`opens_a_new_session`]) whose whole body is `body`? (#32 PR 5 third

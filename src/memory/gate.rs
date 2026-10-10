@@ -66,6 +66,14 @@ impl Memory {
         Ok(permit)
     }
 
+    /// Hold the writers gate's read side, as a write in progress holds it
+    /// (across a slow embedder or store call), so a test can stall a close
+    /// at its `writers_gate` step (#32 PR 7 review M1).
+    #[cfg(all(test, feature = "store-memory", feature = "embed-fixture"))]
+    pub(crate) async fn hold_writers_gate(&self) -> AsyncRwLockReadGuard<'_, ()> {
+        self.writers.read().await
+    }
+
     /// Enter the writers gate from a **synchronous** method.
     ///
     /// `try_read` rather than `read().await`: these methods cannot await, and
