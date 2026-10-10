@@ -225,13 +225,17 @@
   stall of tens of milliseconds cannot flip a real query gap. A session at
   least 10 minutes long scores bit-for-bit as before, including one whose
   span is exactly 10 minutes. Garbage-collection eviction recency is
-  unchanged. `lambo demo` keeps a 10ms wall pause and widens its script
-  clock to 60 seconds a step. The last edit is call index 13 (twelve
-  interactions plus a pipeline read at each act hand-off), a 13-minute
-  span, so the demo's recency values, P90 candidate set and printed GC
-  headroom stay what they were. Conflict lines on writes older than that
-  last edit leave the recall block: they are outside the 30-second window,
-  which is unchanged. The spec §13 line is the last edit and stays.
+  unchanged. A session with no interactions scores recency `1.0`, as
+  before. `lambo demo` keeps a 10ms wall pause and widens its script clock
+  to 60 seconds a step. Each close also reads that clock, and two closes
+  come before act III, so the twelve interactions are calls 0–8, 10, 11
+  and 13: a 13-minute span, above the floor, with the positions the old
+  10ms step gave them. The demo's recency values, P90 candidate set,
+  printed GC headroom and recall output are what they were. Because the
+  script clock now spans minutes, the demo's `conflict_recency_window` is
+  30 seconds plus that span (810 seconds), so agent B's recall still
+  carries all eight warnings, including its own conflict lines on `redis
+  backend` and `middleware/session.rs`.
 
 - A tool call that fails because a vector read refused its probe (the
   session's embedding contract changed mid-query, or the vector width

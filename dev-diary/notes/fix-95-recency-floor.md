@@ -18,9 +18,10 @@ recency = 1 − (end − last_touch) / max(span, MIN_RECENCY_SPAN)
 
 clamped to `[0, 1]`. `last_touch` stays `max(last_accessed, created_at)`.
 
-`max`, not a `>` branch. A `>` branch would send the exactly-10-minute
-session down the young formula. `graph_with_two_concepts` is exactly 10
-minutes.
+The historical division is taken when `denom == span_ms`, which is
+`span_ms >= MIN_RECENCY_SPAN`. A `span_ms > MIN_RECENCY_SPAN` test would send
+the exactly-10-minute session down the young formula.
+`graph_with_two_concepts` is exactly 10 minutes.
 
 When `max` equals the span, the value is the historical
 `(last_touch − start) / span` bits. `1 − (end − last_touch) / span` is the
@@ -30,7 +31,10 @@ have to stay bit-identical so the JSON goldens and the dogfood ledger do
 not move. When the floor widens the denominator, the value is the formula
 above: a short session scores near 1. The zero-span branch is gone. A
 single instant returns `1.0`. A concept backdated against that instant
-lands slightly under 1, which the old branch hid.
+lands slightly under 1, which the old branch hid. A session with no
+interactions returns `1.0` explicitly: its `start` falls back to
+`Utc::now`, and without the guard the floor formula would age concepts
+against the wall clock. The old zero-span branch returned `1.0` there too.
 
 ## Why 10 minutes
 
@@ -51,11 +55,17 @@ move dogfood. That is a different change. GC eviction recency
 | `a_session_at_or_above_the_floor_matches_the_historical_bits` | Spans of exactly the floor, the floor + 1 ms, and 30 minutes, including a 1 ms offset and a `last_accessed` before `created_at`. `to_bits` against a copy of the old function. | Passed on the historical formula, as it should. |
 | `recency_is_continuous_at_the_floor` | Oldest concept at the floor is 0. One millisecond under, it is `1 − (floor−1)/floor`, about `1.7e-6`. | Failed on the historical formula (that side was 0). |
 | `a_single_instant_session_scores_one_unless_backdated` | Zero span returns 1.0. A concept 40 ms earlier does not. | Failed on the old zero-span branch (it returned 1.0). |
-| `a_stall_cannot_flip_a_half_cosine_ahead_of_point_three` | Real derives, 40 ms sleep, both daemon-scored. 0.5 stays ahead of 0.3. | Failed on the historical formula: the 0.3 look scored 0.500 and the 0.5 look 0.475. |
-| `graded_similarity_survives_a_stall_between_derives_on_sqlite` | Same 40 ms stall. Daemon-score spread must be `< 0.05`, and cosine order holds. | Failed on the historical formula: spread was about 0.24. |
+| `the_floor_is_ten_minutes` | `MIN_RECENCY_SPAN == 600_000`, and a 9-minute session's oldest concept is exactly `1 − 540000/600000`. The other tests read the floor symbolically, so a much shorter floor passes them. | Fails on any other floor. |
+| `a_touch_after_the_session_end_clamps_to_one` | A touch 5 s after the last interaction scores 1.0 on the floor formula (40 ms) and on the historical division (exactly the floor, 30 minutes). | Fails without the clamp. |
+| `a_touch_before_the_session_start_clamps_to_zero` | Before `start` on the historical division, and more than the floor before `end` on the floor formula, scores 0. | Fails without the clamp. |
+| `a_session_without_interactions_scores_recency_one` | No interactions: 1.0 for any touch. | Without the guard, an old touch ages against `Utc::now` and scores 0. |
+| `a_stall_cannot_flip_a_half_cosine_ahead_of_point_three` | Real derives, best first, 40 ms sleep, both daemon-scored. 0.5 stays ahead of 0.3. This is the flip. | Failed on the historical formula: the 0.3 look scored 0.500 and the 0.5 look 0.475. |
+| `a_stall_keeps_the_graded_daemon_scores_together_on_sqlite` (was `graded_similarity_survives_a_stall_between_derives_on_sqlite`, cited by the #79 note) | Worst first, so the order cannot catch a flip. Pins the daemon-score spread across the three graded looks (`< 0.05`) and the full graded result, vector-leg cosines and unrelated looks included. | Failed on the historical formula: spread was about 0.24. |
 
 `script_step_clears_the_recency_floor_without_moving_relative_recency` checks
-that a 60 s step keeps `k/11` bit-identical to a 10 ms step.
+that, at the real call indices (0–8, 10, 11, 13), a 60 s step gives the same
+`f64` position as a 10 ms step, that the last edit's offset is at least the
+floor, and that no interaction stamp is after the wall clock.
 
 ## Short-span tests, and what happened to each
 
@@ -75,7 +85,8 @@ that a 60 s step keeps `k/11` bit-identical to a 10 ms step.
   make the tests slow and would put recency back on the session span, which
   is the hazard #79 already worked around. The floor makes that order
   stricter, not weaker.
-- `graded_similarity_survives_a_stall_between_derives_on_sqlite`: the span
+- `a_stall_keeps_the_graded_daemon_scores_together_on_sqlite` (renamed from
+  `graded_similarity_survives_a_stall_between_derives_on_sqlite`): the span
   is the 40 ms stall. It asserted daemon-score spread `> 0.2`, which is the
   old formula. The assertion is now `spread < 0.05`. Cosine order is still
   asserted. A stall long enough to keep `spread > 0.2` under the floor
@@ -86,34 +97,63 @@ retrieval "recency floor" do not read `ScoreDims.recency`.
 
 ## Demo
 
-`lambo demo` stamps from `script_clock`. The write pipeline reads that
-clock too (a receipt at each act hand-off). Measured call index of agent
-A's last edit: 13. `SCRIPT_STEP` is 60 s, so the span is 13 minutes, above
-the floor. `STEP_PACING` stays 10 ms. Sleeping 60 s would age the last edit
-out of the 30 s conflict window and make the scenario take minutes.
+`lambo demo` stamps from `script_clock`. Twelve `begin_interaction` calls
+read it, and so does every `Memory::close` (the write-queue drain stamps
+receipts still pending at close; there are none in the script). Traced
+with a temporary backtrace on each read: seventeen reads, the interactions
+at calls 0–8, 10, 11 and 13, the closes at 9, 12, 14, 15 and 16. Agent A's
+last edit is call 13 (`SCRIPT_LAST_EDIT_INDEX`). `SCRIPT_STEP` is 60 s, so
+the span is 13 minutes, above the floor. `STEP_PACING` stays 10 ms of wall
+time and spaces nothing on the script clock.
 
-The clock is backdated by 13 steps so that edit falls on `Utc::now` at
-construction. Relative positions are the old 10 ms positions scaled by the
-same call pattern. Dropping the pipeline reads off this clock moved the
+The clock is backdated by 13 steps so that edit falls on `Utc::now`
+(truncated to whole milliseconds, which SQLite keeps) at construction.
+`assert_shape` checks that the newest interaction is exactly that instant
+and not after the wall clock, and names the call it landed on if a change
+to the close reads moves it. Positions are the old 10 ms positions at the
+same call indices. Dropping the close reads off this clock moved the
 printed headroom from 2.06× to 2.10×; they stay.
 
-Compared `lambo demo --scenario rest-api` on `60adee99` and on this branch,
-fixture embedder, fresh sqlite, outcome block normalized the way the binary
+The three closes after the last edit land one to three minutes ahead of
+the wall clock. They stamp no receipt in the script, no receipt is minted
+or expired on this clock, and the lead is under `RECEIPT_RETENTION`
+(300 s). The daemon, canonization and recall read the wall clock.
+
+The first version of this branch left `conflict_recency_window` at 30 s.
+The daemon ages a write on the wall clock, so act II's writes (calls 10
+and 11, two to three minutes back) fell out of the window, and agent B's
+conflict lines on `redis backend` and `middleware/session.rs` left the
+recall block (8 warnings to 6). That was a defect: the demo has to keep
+main's recall output. The demo window is now
+`CONFLICT_RECENCY_WINDOW + SCRIPT_LAST_EDIT_INDEX × SCRIPT_STEP` (810 s),
+so every write the 30 s window covered when the whole run took a second of
+wall time is inside it. It is set in `build_config`, so both phases carry
+it, and it is in the knob table and the printed header. The high-risk
+modification line reads `HIGH_RISK_WRITE_WINDOW` (a fixed 30 s) and is
+unaffected. `agent_b_keeps_both_conflict_lines_on_the_memory_store` and the
+two ×2 scenario tests assert 8 warnings and both agent B lines. They failed
+on the first version.
+
+Compared `lambo demo --scenario rest-api` on the review base `212d3c4a` (a
+throwaway worktree) and on this branch after the window fix, fixture
+embedder, fresh sqlite each, outcome block normalized the way the binary
 test normalizes it (`<s>`, `<n>`, `<node>`):
 
+- Outcome block (from `scenario` down): identical.
+- `recall_warnings`: 8 on both, in the same order, with `Agent B wrote to
+  it <n> seconds ago` under `redis backend` and under
+  `middleware/session.rs`.
 - GC headroom, both: `user id column` at `2.06×`.
-- Statuses, canonization events, canonical set, blast radius: identical.
-  P90 candidates remain `add oauth_id to user schema` and
-  `wire login endpoint`. `user schema` still climbs None → Candidate →
-  Venerable → Canonical.
-- Two runs on the branch: outcome blocks identical.
-- Diff against main: `redis backend` (Agent B) and `middleware/session.rs`
-  (Agent B) leave the recall block, and `recall_warnings` goes from 8 to 6.
-  Those writes are minutes older than the last edit, so they are outside
-  the 30 s conflict window, which was not widened. They had been
-  force-included by that conflict. The spec §13 line (`Agent A wrote to it
-  <n> seconds ago` on `user schema`) and the high-risk modification line
-  stay.
+- P90 candidates, both: `add oauth_id to user schema` and
+  `wire login endpoint`. `user schema` climbs None → Candidate →
+  Venerable → Canonical, blast radius 9.
+- Transcript differences: the header now prints the window
+  (`30s → 810s`), and agent B's raw lines read `120 seconds ago` where
+  main's read about 0. Both ages are masked in the outcome. The cycle
+  number printed beside `user schema → Candidate` read `0` once on the
+  branch against `1` on main; four more runs of each read `1`. It is read
+  after the status poll, so it races the cycle counter, and it is not in
+  the outcome.
 
 ## Goldens
 
