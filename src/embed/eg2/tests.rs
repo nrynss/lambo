@@ -1402,3 +1402,61 @@ fn resolve_stamps_the_eg2_contract() {
     );
     assert_eq!(r.embedding.dim, 512);
 }
+
+// ------------------------------------------------- recall by image (PR 6)
+
+/// A recall by image goes through the same canonical form as a derive: the
+/// query image's request body is its canonical PNG, so a query vector is in
+/// the stored images' space whatever size the query was submitted at
+/// (22g review M4).
+///
+/// Mutation: have `QueryBy::Image` post the submitted bytes -> red.
+#[tokio::test]
+async fn a_recall_by_image_sends_the_canonical_form() {
+    use crate::recall::query_vector::{resolve, QueryBy};
+
+    let big = image::RgbImage::from_fn(1600, 900, |x, y| {
+        image::Rgb([
+            (x % 256) as u8,
+            (y % 256) as u8,
+            ((x / 16 + y / 16) % 2 * 200) as u8,
+        ])
+    });
+    let mut png = Vec::new();
+    image::DynamicImage::ImageRgb8(big)
+        .write_to(std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+    let server = MockServer::start();
+    let mock = server.mock(|when, then| {
+        when.method(POST)
+            .path("/v1/embeddings")
+            .body(sent_body(&png));
+        then.status(200).json_body(ok_body(&native(), Some(260)));
+    });
+    let e = embedder(&server);
+    let live = crate::types::EmbeddingContract {
+        kind: "embeddinggemma2".into(),
+        model: Some(e.model_identity().to_string()),
+        dim: 768,
+    };
+    let input = crate::surface::image::validate(&png, "image/png").unwrap();
+    let v = resolve(QueryBy::Image(input), &e, &live).await.unwrap();
+    mock.assert_hits(1);
+    assert_eq!(v.len(), 768);
+    assert!((norm(&v) - 1.0).abs() < 1e-5);
+
+    // An image Lambo cannot read is named as such, not as an embedder
+    // refusal (22g review L3).
+    let mut bad = png.clone();
+    bad.truncate(bad.len() / 2);
+    let input = crate::surface::image::validate(&bad, "image/png").unwrap();
+    let err = resolve(QueryBy::Image(input), &e, &live).await.unwrap_err();
+    let crate::types::LamboError::Embed(msg) = &err else {
+        panic!("{err:?}");
+    };
+    assert!(
+        msg.starts_with("Lambo could not read the query image"),
+        "{msg}"
+    );
+    mock.assert_hits(1);
+}
