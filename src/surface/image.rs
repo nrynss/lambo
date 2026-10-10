@@ -30,7 +30,9 @@
 //!
 //! The input here is raw bytes. The MCP surface (#22 PR 4) decodes base64
 //! with [`decode_base64`], which caps the encoded length **before** it
-//! decodes (stdio has no transport cap), and then calls this.
+//! decodes, and then calls this. The transports cap a whole frame at 4 MiB
+//! before it is parsed (#101), which bounds what reaches this check but is
+//! above [`MAX_IMAGE_B64_LEN`], so the check still refuses.
 //!
 //! A client-computed vector (#22 PR 4) is checked by
 //! [`check_submitted_vector`], the model-safe twin of the core's own check.
@@ -45,7 +47,8 @@ use sha2::{Digest, Sha256};
 use crate::embed::{ImageInput, ImageMime};
 
 /// Most bytes one image may have, decoded (2 MiB). Its base64 form, 2,796,204
-/// bytes, fits under the HTTP transport's 4 MiB body cap with room for the
+/// bytes, fits under the MCP transports' 4 MiB frame cap (the HTTP body cap,
+/// and since #101 the stdio and session-endpoint frame cap) with room for the
 /// JSON envelope.
 pub const MAX_IMAGE_BYTES: usize = 2 * 1024 * 1024;
 

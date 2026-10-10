@@ -473,8 +473,11 @@ const INITIALIZE: &str = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","param
 ///   inline in the request's task (so `AttributingSessions` sees every
 ///   mint, under the request's `as_credential` scope), and the id it puts
 ///   in the local manager's map is the id it answers with;
-/// * the guard's [`MAX_HTTP_BODY_BYTES`] is rmcp's own default ceiling
-///   (rmcp's constant is crate-private, so the guard repeats it).
+/// * the ceiling rmcp enforces is the one `http_config` sets, and it is
+///   the guard's [`MAX_HTTP_BODY_BYTES`] and the line-framed transports'
+///   frame cap. Since #101 `http_config` sets it explicitly, so rmcp's
+///   own default no longer matters and is not compared (#101 review L2: an
+///   rmcp bump that moved the default would have failed here for nothing).
 ///
 /// If this fails after an rmcp upgrade, re-check `openers`' module docs
 /// (atomicity of the mint and the binding, the inline `create_session`),
@@ -528,9 +531,22 @@ async fn rmcp_still_mints_through_create_session_with_the_same_ceiling() {
          under the request's credential: MCP sessions would go unattributed. Re-check \
          mcp/serve/openers.rs against this rmcp before upgrading"
     );
-    assert_eq!(
-        u64::try_from(StreamableHttpServerConfig::default().max_request_body_bytes).expect("fits"),
-        MAX_HTTP_BODY_BYTES,
-        "rmcp's default body ceiling moved: the guard's must match it"
-    );
+    // Mutation: drop `with_max_request_body_bytes` from `http_config` and
+    // the service runs on rmcp's default, which this no longer assumes.
+    for host in [
+        crate::mcp::serve::session::HostCheck::Loopback,
+        crate::mcp::serve::session::HostCheck::Any,
+    ] {
+        let cfg = crate::mcp::serve::session::http_config(host);
+        assert_eq!(
+            cfg.max_request_body_bytes,
+            crate::mcp::serve::MAX_MCP_FRAME_BYTES,
+            "http_config must carry Lambo's own body ceiling, the frame cap"
+        );
+        assert_eq!(
+            u64::try_from(cfg.max_request_body_bytes).expect("fits"),
+            MAX_HTTP_BODY_BYTES,
+            "the guard reads an opener's body under the same ceiling"
+        );
+    }
 }

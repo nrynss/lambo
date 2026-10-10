@@ -136,7 +136,8 @@ async fn exactly_one_of_image_or_vector_is_required() {
     s.mem.close().await.expect("close");
 }
 
-/// The base64 cap holds before any decoding (stdio has no transport cap),
+/// The base64 cap holds before any decoding (a frame under the transports'
+/// 4 MiB frame cap can still carry base64 over it),
 /// and no refusal quotes the payload.
 #[tokio::test]
 async fn base64_and_image_refusals_never_echo_the_payload() {
