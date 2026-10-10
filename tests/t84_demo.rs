@@ -140,6 +140,43 @@ fn assert_spec_13(outcome: &DemoOutcome) {
     );
 }
 
+/// Agent B's recall carries eight warnings, two of them agent B's own
+/// conflict lines on `redis backend` and `middleware/session.rs`. Those
+/// writes are act II's, minutes before the recall on the script clock, so
+/// they hold only while the demo's conflict window spans the script (#95).
+fn assert_conflict_lines(outcome: &DemoOutcome) {
+    const AGENT_B_LINE: &str = "Agent B wrote to it <n> seconds ago";
+    assert_eq!(
+        outcome.recall_warnings.len(),
+        8,
+        "agent B's recall must carry every warning main's demo renders: {:?}",
+        outcome.recall_warnings
+    );
+    assert_eq!(
+        outcome
+            .recall_warnings
+            .iter()
+            .filter(|w| *w == AGENT_B_LINE)
+            .count(),
+        2,
+        "{:?}",
+        outcome.recall_warnings
+    );
+    let ctx = &outcome.recall_context;
+    let lines: Vec<&str> = ctx.lines().collect();
+    for hit in ["redis backend", "middleware/session.rs"] {
+        let at = lines
+            .iter()
+            .position(|l| l.starts_with(&format!("{hit} [")))
+            .unwrap_or_else(|| panic!("'{hit}' left the recall block:\n{ctx}"));
+        assert_eq!(
+            lines.get(at + 1).copied(),
+            Some(AGENT_B_LINE),
+            "'{hit}' lost agent B's conflict line:\n{ctx}"
+        );
+    }
+}
+
 /// The transcript is the video's script; it must name each act and quote the
 /// promotion log, so a reviewer can read a run without a debugger.
 fn assert_transcript(run: &DemoRun) {
@@ -186,6 +223,7 @@ fn scenario_is_identical_twice_on_the_memory_store() {
 
     assert_spec_13(&first.outcome);
     assert_spec_13(&second.outcome);
+    assert_conflict_lines(&first.outcome);
     assert_transcript(&first);
     assert_eq!(
         first.outcome,
@@ -195,6 +233,21 @@ fn scenario_is_identical_twice_on_the_memory_store() {
         first.outcome.render(),
         second.outcome.render()
     );
+    runtime.shutdown_background();
+}
+
+/// Issue #95 parity: the recency floor must not change what agent B is told.
+#[test]
+fn agent_b_keeps_both_conflict_lines_on_the_memory_store() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let store: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+    let embedder: Arc<dyn Embedder> = Arc::new(FixtureEmbedder::new());
+    let run = runtime.block_on(run_once(&store, &embedder));
+    assert_spec_13(&run.outcome);
+    assert_conflict_lines(&run.outcome);
     runtime.shutdown_background();
 }
 
@@ -233,6 +286,7 @@ mod sqlite {
 
         assert_spec_13(&first.outcome);
         assert_spec_13(&second.outcome);
+        assert_conflict_lines(&first.outcome);
         assert_eq!(
             first.outcome,
             second.outcome,
