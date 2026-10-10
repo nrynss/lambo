@@ -306,6 +306,27 @@ pub(super) async fn serve_endpoint(
     }
 }
 
+/// An endpoint connection as rmcp's transport, with Lambo's frame cap in
+/// front of its read half (#101): the socket is fed by a proxy (which caps
+/// its own reads, `MAX_FRAME_BYTES` in `crate::mcp::proxy`) but anything that
+/// can connect to it can write to it, and rmcp's line reader has no limit.
+/// The write half carries the request-too-large reply to a discarded frame
+/// between rmcp's own frames (see `super::frames`).
+///
+/// `into_split` rather than rmcp's `tokio::io::split`: the halves are owned,
+/// and dropping the write half (once rmcp and the reply task have both let
+/// go of it) half-closes the socket, so the peer sees EOF as soon as the
+/// session is done writing rather than when the read half goes too.
+fn capped_endpoint(
+    stream: tokio::net::UnixStream,
+) -> (
+    super::frames::CappedFrames<tokio::net::unix::OwnedReadHalf>,
+    super::frames::FrameWriter<tokio::net::unix::OwnedWriteHalf>,
+) {
+    let (read, write) = stream.into_split();
+    super::frames::capped_transport(read, write, "endpoint")
+}
+
 /// One endpoint session: the MCP handshake, then the session until the client
 /// leaves or [`Hub::release`] stops it.
 ///
@@ -322,7 +343,7 @@ async fn serve_connection(
     let service = tokio::select! {
         biased;
         () = stop_requested(&mut stopped) => return,
-        served = server.serve(stream) => match served {
+        served = server.serve(capped_endpoint(stream)) => match served {
             Ok(service) => service,
             Err(e) => {
                 tracing::warn!(error = %e, "lambo serve: endpoint handshake failed");

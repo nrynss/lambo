@@ -345,17 +345,19 @@ async fn graded_similarity_ranks_by_cosine_not_recency_on_sqlite() {
     reopened.close().await.unwrap();
 }
 
-/// The #79 flake, pinned: a scheduler stall before the last graded derive,
-/// under the default 0.5/0.5 blend. The daemon's recency is a concept's
-/// millisecond position in the session's wall-clock span; a stall there
-/// gives the look derived after it recency near 1 and every earlier look
-/// near 0. Derived best first, the stalled look was the 0.3 one and it
-/// outranked the 0.5 look (+0.104 of daemon share against a 0.1 query gap).
-/// Derived worst first, the stalled look is the 0.8 one, so recency can
-/// only widen the cosine order. Every look is daemon-scored here, so #79's
-/// cold-start rule is not in play.
+/// The daemon scores, not the order. Formerly
+/// `graded_similarity_survives_a_stall_between_derives_on_sqlite` (#79).
+/// The three graded looks are derived worst first with a 40ms stall before
+/// the 0.8 look, so recency could only widen the cosine order and the order
+/// is not what this test can catch: `a_stall_cannot_flip_a_half_cosine_ahead_of_point_three`
+/// is the flip. What this pins is that, on real derives through the store,
+/// the stall leaves the three daemon scores within 0.05 of each other (on
+/// the historical formula they spread by about 0.24), and that the full
+/// Dresscode result — vector-leg cosines, no recent leg, graded looks best
+/// first ahead of the unrelated looks — survives it. Every look is
+/// daemon-scored here, so #79's cold-start rule is not in play.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn graded_similarity_survives_a_stall_between_derives_on_sqlite() {
+async fn a_stall_keeps_the_graded_daemon_scores_together_on_sqlite() {
     use crate::recall::query_vector::QueryBy;
     use crate::test_util::dresscode::{
         assert_graded_order, derive_graded_looks_stalled, imageless_text,
@@ -377,14 +379,15 @@ async fn graded_similarity_survives_a_stall_between_derives_on_sqlite() {
             .map(|s| s.score)
             .expect("every graded look is daemon-scored")
     };
-    // The stall is real: it split the graded looks' daemon scores by more
-    // than the 0.1 query gap could absorb if it favoured the wrong look.
+    // The stall is real and, under the floor, too small to flip a 0.2
+    // cosine gap (0.1 of the default blend). On the historical formula this
+    // spread was above 0.2.
     let d: Vec<f64> = looks.graded.iter().map(|id| daemon(*id)).collect();
     let spread =
         d.iter().copied().fold(f64::MIN, f64::max) - d.iter().copied().fold(f64::MAX, f64::min);
     assert!(
-        spread > 0.2,
-        "the stall must separate the daemon scores: {d:?}"
+        spread < 0.05,
+        "a tens-of-ms stall must not split daemon scores: {d:?}"
     );
     let detailed = mem
         .recall_by_detailed(
@@ -397,6 +400,55 @@ async fn graded_similarity_survives_a_stall_between_derives_on_sqlite() {
         .await
         .unwrap();
     assert_graded_order(&detailed, &looks);
+    mem.close().await.unwrap();
+}
+
+/// Issue #95. Derive the 0.5 look, stall 40ms, then derive the 0.3 look.
+/// Both are daemon-scored, so cold start is not what keeps the order. On
+/// the historical formula the stall gives the 0.3 look recency near 1 and
+/// the 0.5 look recency near 0, and that 0.125 of final score flips the
+/// 0.1 query gap. The floor must leave 0.5 ahead.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stall_cannot_flip_a_half_cosine_ahead_of_point_three() {
+    use crate::recall::query_vector::QueryBy;
+    use crate::test_util::dresscode::{derive_half_then_point_three_after, imageless_text};
+
+    let _quiet = crate::test_util::quiet_logs();
+    let (_dir, path) = scratch_db();
+    let store = Arc::new(SqliteStore::connect(&path).unwrap());
+    store.init_schema().await.unwrap();
+    let mem = open(store, "sqlite-recall-by-recency-floor").await;
+    let gap = derive_half_then_point_three_after(&mem, Duration::from_millis(40)).await;
+    mem.settle_daemon().await;
+    let scores = mem.daemon_scores_for_test();
+    for id in [gap.earlier, gap.later] {
+        assert!(
+            scores.ranked.iter().any(|s| s.item == id),
+            "both looks are daemon-scored, so this is not the cold-start path"
+        );
+    }
+    let detailed = mem
+        .recall_by_detailed(
+            imageless_text(5),
+            QueryBy::Vector {
+                values: gap.query,
+                declared: contract(),
+            },
+        )
+        .await
+        .unwrap();
+    let order: Vec<_> = detailed.hits.iter().map(|h| h.node_id).collect();
+    let pos = |id| {
+        order
+            .iter()
+            .position(|h| *h == id)
+            .unwrap_or_else(|| panic!("missing hit {id}: {:?}", detailed.hits))
+    };
+    assert!(
+        pos(gap.earlier) < pos(gap.later),
+        "0.5 must stay ahead of 0.3 after a 40ms stall: {:?}",
+        detailed.hits
+    );
     mem.close().await.unwrap();
 }
 

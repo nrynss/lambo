@@ -236,6 +236,23 @@
   Relative to the commit this change is based on, the responses compared
   in `dev-diary/notes/feature-92-portal-csp.md` match apart from these two
   headers, and the layer does not rewrite bodies.
+- Daemon recency in a session younger than 10 minutes no longer treats that
+  short span as the whole `[0, 1]` range (#95). The denominator is
+  `max(span, 10 minutes)` in integer milliseconds, clamped to `[0, 1]`, so a
+  stall of tens of milliseconds cannot flip a real query gap. A session at
+  least 10 minutes long scores bit-for-bit as before, including one whose
+  span is exactly 10 minutes. Garbage-collection eviction recency is
+  unchanged. A session with no interactions scores recency `1.0`, as
+  before. `lambo demo` keeps a 10ms wall pause and widens its script clock
+  to 60 seconds a step. Each close also reads that clock, and two closes
+  come before act III, so the twelve interactions are calls 0–8, 10, 11
+  and 13: a 13-minute span, above the floor, with the positions the old
+  10ms step gave them. The demo's recency values, P90 candidate set,
+  printed GC headroom and recall output are what they were. Because the
+  script clock now spans minutes, the demo's `conflict_recency_window` is
+  30 seconds plus that span (810 seconds), so agent B's recall still
+  carries all eight warnings, including its own conflict lines on `redis
+  backend` and `middleware/session.rs`.
 
 - A tool call that fails because a vector read refused its probe (the
   session's embedding contract changed mid-query, or the vector width
@@ -1052,6 +1069,36 @@
 
 ### Fixed
 
+- `lambo serve` over stdio, and the session endpoint a proxying serve
+  forwards to, now cap one request at 4 MiB before parsing it, the same
+  ceiling as the HTTP body limit (#101). rmcp reads those transports a line
+  at a time with no limit and parses every argument into memory before any
+  Lambo check runs, so an oversized `image.data` on `lambo_derive_image` or
+  `lambo_recall`, or an oversized `vector.values` or `query_vector.values`,
+  was allocated in full, and then again as a JSON value tree, before the
+  tool refused it. A longer request line is now discarded unread up to its
+  newline and logged at WARN with its size, never its content, and answered
+  with a JSON-RPC error, code `-32600`, "request too large (over 4 MiB)",
+  keyed to the request's `id` when it can be read from the line's start or
+  end (before or after `params`), else to `null`. The connection stays open
+  and the session goes on serving. A proxying serve drops such a request
+  from its client itself, unforwarded, and answers it the same way.
+  Requests of at most 4 MiB reach rmcp byte for byte, so a field over its
+  own cap inside one is refused by the tool exactly as before (same
+  message, still a tool error), and the tool schemas are unchanged. The
+  HTTP service now sets rmcp's body ceiling from Lambo's constant instead
+  of inheriting rmcp's default; it was already 4 MiB and answers `413`
+  before parsing.
+
+  **Behaviour change for stdio clients that sent requests over 4 MiB.** The
+  cap is not above every request the tools' own limits allow: a
+  `lambo_derive` with 64 concepts and 256 `parent_of` pairs at 16 KB a
+  string is about 9.5 MB, a `lambo_derive_image` with a full image and 256
+  pairs about 11.2 MB, and `\uXXXX` escaping makes either up to three times
+  larger. Stdio used to accept those; they are now refused with the error
+  above, as HTTP already refused them with `413`. Split such a batch into
+  calls under 4 MiB. The `parent_of` limit (256 pairs, 512 concepts and
+  pairs combined) is now in the MCP reference's limits table.
 - On PostgreSQL and CockroachDB, a paraphrase derived seconds after the
   original now merges into it instead of becoming a permanent near-duplicate
   (#60). The database's vector search sees only flushed rows, and the

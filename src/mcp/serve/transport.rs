@@ -10,10 +10,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rmcp::service::ServerInitializeError;
-use rmcp::transport::io::stdio;
 use rmcp::ServiceExt;
 
 use super::authority::{authorize_default, Authenticated, ServeAuthority};
+use super::frames::{capped_transport, CappedFrames, FrameWriter};
 use super::http_guards::{
     guard_request, usable_session_id, HttpGuard, OpeningReservation, MCP_SESSION_ID,
 };
@@ -122,6 +122,19 @@ pub(super) async fn run_until_shutdown<T>(
     }
 }
 
+/// rmcp's stdio transport with Lambo's frame cap in front of stdin (#101):
+/// stdin through [`CappedFrames`], so a frame over
+/// [`MAX_MCP_FRAME_BYTES`](super::frames::MAX_MCP_FRAME_BYTES) is discarded
+/// before rmcp buffers or parses it, and stdout through a [`FrameWriter`], so
+/// the request-too-large reply to it goes out between rmcp's own frames.
+pub(super) fn capped_stdio() -> (
+    CappedFrames<tokio::io::Stdin>,
+    FrameWriter<tokio::io::Stdout>,
+) {
+    let (stdin, stdout) = rmcp::transport::io::stdio();
+    capped_transport(stdin, stdout, "stdio")
+}
+
 /// stdio transport — the shape an MCP client launches as a subprocess.
 ///
 /// **stdout is the protocol channel.** Nothing but JSON-RPC may be written to
@@ -138,7 +151,7 @@ pub(super) async fn serve_stdio(
     // Race the handshake against the shutdown signal (R2-a). `shutdown.as_mut()`
     // reborrows, so the same registration is still live for the transport race
     // below if the handshake wins.
-    let service = match setup_or_shutdown(server.serve(stdio()), shutdown.as_mut()).await {
+    let service = match setup_or_shutdown(server.serve(capped_stdio()), shutdown.as_mut()).await {
         Some(Ok(service)) => service,
         // A client that hangs up *before* it finishes `initialize` has
         // disconnected; it has not misconfigured anything. Reporting that as

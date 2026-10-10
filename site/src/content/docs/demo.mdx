@@ -62,8 +62,11 @@ The demo has to finish in seconds rather than in an afternoon, so it compresses 
 | `daemon_tick_interval` | 1s | 5ms |
 | `backend_flush_interval` | 1s | 5ms |
 | `gc_interval` | 10000 mutations | 1 mutation |
+| `conflict_recency_window` | 30s | 810s |
 
-Every admission threshold stays at its default. Those are minimum peer count 20, `gc_survived` at least 3, and a score strictly above P90. They also include at least 3 distinct sources, coverage at least 0.3, blast radius above 5, and a 30 second conflict window.
+The conflict window is the one knob the demo widens. The demo stamps its writes from a script clock that spans 13 minutes, so the window is the default 30 seconds plus that span. Every scripted write stays inside it, as every write did when the run was stamped from the wall clock and took about a second.
+
+Every admission threshold stays at its default. Those are minimum peer count 20, `gc_survived` at least 3, and a score strictly above P90. They also include at least 3 distinct sources, coverage at least 0.3, and blast radius above 5.
 
 ## Why two runs match
 

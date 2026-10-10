@@ -168,12 +168,17 @@ impl HostCheck {
 }
 
 /// The streamable-HTTP configuration every session's service uses: the SDK
-/// default with a 15 s SSE keep-alive, and the `Host` allow-list `host`
-/// says.
-fn http_config(host: HostCheck) -> StreamableHttpServerConfig {
+/// default with Lambo's body cap, a 15 s SSE keep-alive, and the `Host`
+/// allow-list `host` says.
+pub(super) fn http_config(host: HostCheck) -> StreamableHttpServerConfig {
     // `#[non_exhaustive]` — mutate the SDK default rather than
     // constructing, so a new field cannot silently break the build.
-    let mut cfg = StreamableHttpServerConfig::default();
+    let mut cfg = StreamableHttpServerConfig::default()
+        // #101: Lambo's ceiling, not an inherited default. rmcp streams a
+        // body and answers 413 past it before parsing any of it; the guard
+        // reads an opener's body under the same constant, and the
+        // line-framed transports cap a frame at it too.
+        .with_max_request_body_bytes(super::frames::MAX_MCP_FRAME_BYTES);
     cfg.sse_keep_alive = Some(Duration::from_secs(15));
     match host {
         HostCheck::Loopback => cfg,

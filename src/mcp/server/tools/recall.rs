@@ -114,8 +114,9 @@ impl LamboServer {
                 if let Err(e) = self.recall_by_preconditions(true) {
                     return e;
                 }
-                // The length cap runs before any decoding: stdio has no
-                // transport cap of its own.
+                // The length cap runs before any decoding. A frame under
+                // the transports' 4 MiB frame cap (#101) can still carry
+                // base64 longer than an image may be.
                 bytes = match decode_base64(&img.data) {
                     Ok(b) => b,
                     Err(msg) => return bad_param(msg),

@@ -13,6 +13,14 @@ use tokio::io::AsyncBufReadExt;
 /// defect rather than a big call, and is dropped as one.
 pub(super) const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
+/// The largest frame the proxy forwards from its client to the holder: the
+/// holder's own request cap ([`crate::mcp::serve::MAX_MCP_FRAME_BYTES`],
+/// #101), which discards anything longer unread. Dropping it here instead
+/// spares forwarding up to [`MAX_FRAME_BYTES`] the holder will throw away,
+/// and leaves no forwarded request in the in-flight list that can never be
+/// answered. Responses from the holder keep the wider [`MAX_FRAME_BYTES`].
+pub(super) const MAX_CLIENT_FRAME_BYTES: usize = crate::mcp::serve::MAX_MCP_FRAME_BYTES;
+
 /// One frame from a line-framed peer, or the reason there is not one.
 ///
 /// # Why this exists rather than `AsyncBufReadExt::lines()`
@@ -41,10 +49,24 @@ pub(super) enum Framed {
     /// The peer stopped mid-frame: this many bytes arrived with no newline
     /// after them. Never forwarded — a torn JSON line is never valid to
     /// deliver — and always followed by end-of-stream.
+    ///
+    /// A direct stdio serve differs here on purpose: its reader
+    /// (`crate::mcp::serve`'s `frames`) hands an unterminated last line
+    /// within the cap on to rmcp, which parses one. Do not align either
+    /// with the other (#101 review I5).
     Torn(usize),
-    /// A frame past [`MAX_FRAME_BYTES`], discarded through its newline. The
-    /// stream is still usable.
-    Oversize(usize),
+    /// A frame past the cap ([`MAX_FRAME_BYTES`] unless the reader was given
+    /// another), `bytes` long, discarded through its newline. The stream is
+    /// still usable. `id` is its request id, recovered from the bytes seen
+    /// (its head and a small ring of its tail, #101 review M2; see
+    /// `crate::mcp::serve`'s `frame_id`), and `None` when there is no
+    /// confident one. `terminated` is false for a frame cut off by end of
+    /// stream, which is always followed by [`Framed::Eof`].
+    Oversize {
+        bytes: usize,
+        id: Option<serde_json::Value>,
+        terminated: bool,
+    },
     /// A complete frame that is not UTF-8, so it cannot be JSON-RPC. Discarded;
     /// the stream is still usable.
     NotUtf8(usize),
@@ -60,16 +82,31 @@ pub(super) async fn read_frame<R>(r: &mut R) -> std::io::Result<Framed>
 where
     R: tokio::io::AsyncBufRead + Unpin,
 {
+    read_frame_within(r, MAX_FRAME_BYTES).await
+}
+
+/// [`read_frame`] with a frame cap of `cap` bytes instead of
+/// [`MAX_FRAME_BYTES`].
+pub(super) async fn read_frame_within<R>(r: &mut R, cap: usize) -> std::io::Result<Framed>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
     let mut buf: Vec<u8> = Vec::new();
     // Set once the frame passes the cap: from then on bytes are counted and
     // thrown away rather than buffered, up to the newline that ends the frame.
+    // `buf` keeps the head (at most `cap` bytes), which the id is read from.
     let mut over = 0usize;
+    let mut probe: Option<crate::mcp::serve::IdProbe> = None;
     loop {
         let (consume, terminated) = {
             let available = r.fill_buf().await?;
             if available.is_empty() {
                 return Ok(if over > 0 {
-                    Framed::Oversize(buf.len() + over)
+                    Framed::Oversize {
+                        bytes: buf.len() + over,
+                        id: None,
+                        terminated: false,
+                    }
                 } else if buf.is_empty() {
                     Framed::Eof
                 } else {
@@ -80,8 +117,16 @@ where
                 Some(i) => (i, true),
                 None => (available.len(), false),
             };
-            if over > 0 || buf.len() + take > MAX_FRAME_BYTES {
+            if let Some(probe) = probe.as_mut() {
                 over += take;
+                probe.feed(&available[..take]);
+            } else if buf.len() + take > cap {
+                let room = cap - buf.len();
+                buf.extend_from_slice(&available[..room]);
+                let mut started = crate::mcp::serve::IdProbe::new(&buf);
+                started.feed(&available[room..take]);
+                probe = Some(started);
+                over = take - room;
             } else {
                 buf.extend_from_slice(&available[..take]);
             }
@@ -89,8 +134,12 @@ where
         };
         r.consume(consume);
         if terminated {
-            if over > 0 {
-                return Ok(Framed::Oversize(buf.len() + over));
+            if let Some(probe) = probe {
+                return Ok(Framed::Oversize {
+                    bytes: buf.len() + over,
+                    id: probe.finish(),
+                    terminated: true,
+                });
             }
             // `\r\n` is legal on the wire; `Lines` strips it, so this does too.
             if buf.last() == Some(&b'\r') {

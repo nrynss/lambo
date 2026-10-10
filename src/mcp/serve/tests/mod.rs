@@ -26,6 +26,10 @@ fn legacy_authority(token: Option<SecretToken>) -> Arc<ServeAuthority> {
 }
 
 mod authority;
+/// #101 review M2: the request id of a frame over the cap.
+mod frame_id;
+/// #101: the line-framed transports' frame cap.
+mod frames;
 mod heartbeat;
 mod http_guards;
 mod roles;
