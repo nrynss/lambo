@@ -51,13 +51,27 @@ builds derive's source with `VectorCandidates::for_holder_derive`, which picks
 the graph wherever `for_holder` does plus over such a store. `Memory` and
 `WriteCtx` both call it (`derive_vector_candidates`), so the two write paths
 still cannot disagree: it is two constructors with one caller pair each,
-instead of one constructor for both. SQLite, Postgres and Cockroach declare
-nothing, so their behaviour is unchanged. Cost: derive on a holder over the
+instead of one constructor for both. SQLite declares nothing (its exact scan
+already puts both callers on the graph). Cost: derive on a holder over the
 tier is an O(n) scan of the graph, about 3 ms at 3,600 concepts, acceptable
 for a write.
 
-**Postgres and Cockroach keep database-side search** (the scope decision #8
-asked for). Their scores come from database distance arithmetic
+**Extended to the Postgres family by #60 (2026-10-10).** `PgStore<D>` (Postgres
+and Cockroach, one adapter) now declares `holder_derives_from_graph` too, with
+no new mechanism: the same `for_holder_derive` picks the holder's graph for
+derive, and `exact_vector_scan` stays `false`, so recall keeps the database
+search below. Why: the database sees only flushed rows and the write-behind
+flush lags by seconds to minutes (`flush_lag_ms` read 50 to 130 s on the
+dogfood rig), so paraphrases derived seconds apart both missed each other and
+became permanent duplicates. Accepted divergence: the merge leg now scores
+exact `f32` cosine where it scored the database's distance, so a pair on the
+threshold edge can decide differently, and a target the Cockroach ANN beam
+would have missed is now found. Tests: `store::pg::merge_freshness` (offline
+over a double that lags like the database, plus the Postgres live test and the
+Cockroach conformance leg).
+
+**Postgres and Cockroach keep database-side search for recall** (the scope
+decision #8 asked for; derive's merge moved to the graph in #60, above). Their scores come from database distance arithmetic
 (`distance_to_score`: Postgres `1 - d`, Cockroach `1 - d²/2`) and Cockroach can
 serve from a partial ANN index, so graph-side cosine would change scores and,
 under the index, candidate sets. #8's acceptance is bit-identical ranking. The
@@ -278,4 +292,5 @@ Caveats on these numbers:
   `VectorCandidateSource`; it leaves `exact_vector_scan` false, so a holder's
   recall over it keeps calling the store and `for_holder` needs no change. Its
   review (M6) added `holder_derives_from_graph` so a holder's derive ranks in
-  its graph instead (see the amendment above).
+  its graph instead (see the amendment above). #60 set the same declaration
+  on the Postgres family.

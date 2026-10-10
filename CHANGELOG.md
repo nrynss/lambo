@@ -968,7 +968,8 @@
   checked vector read is a lagging tier declares that a session holder's
   hybrid derive should rank its semantic-merge candidates in its in-memory
   graph while recall keeps reading the store (#18 review M6, amending #8's
-  single constructor). `TieredStore` declares it. Additive.
+  single constructor). `TieredStore` declares it, and so does the Postgres
+  family's `PgStore` since #60. Additive.
 - `GraphStore::backfill_recall_index()` (default `Ok(None)`): the hook the
   backfill verb calls; only a store with a recall tier overrides it. Additive.
 - `GraphStore::exact_vector_scan()` (default `false`): an adapter declares its
@@ -1029,6 +1030,21 @@
 
 ### Fixed
 
+- On PostgreSQL and CockroachDB, a paraphrase derived seconds after the
+  original now merges into it instead of becoming a permanent near-duplicate
+  (#60). The process that holds a session (`lambo serve`, or an embedded
+  `Memory`) ranks hybrid `derive`'s semantic-merge candidates against its
+  in-memory graph, which holds every concept as soon as it is written,
+  instead of asking the database, whose vector search sees only flushed rows
+  (the write-behind flush can lag by minutes). This is the per-purpose split
+  #18 made for the Elasticsearch tier: `PgStore` declares
+  `holder_derives_from_graph`. Recall is unchanged and still ranks vectors in
+  the database. The merge leg now scores exact cosine similarity instead of
+  the database's distance (`1 - d` on Postgres, `1 - d²/2` on Cockroach,
+  which can answer from its approximate index), so a pair whose similarity
+  sits right at `semantic_match_threshold` can decide differently than
+  before, and a merge target the Cockroach index would have missed is now
+  found. Derive on the holder makes no vector call to the database.
 - A freshly derived text or image concept ranks by query relevance before
   the daemon scores it (#79). Previously its missing daemon score counted as
   0 inside the 0.5/0.5 blend, so a fresh relevant EG2 image (0.3616) ranked

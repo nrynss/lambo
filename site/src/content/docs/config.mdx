@@ -88,6 +88,8 @@ The in-memory store is scoped to one process. Many agents can share it through a
 
 The kind you choose must be compiled into your binary. If it is not, Lambo fails at startup and names the feature to rebuild with. See [Installation](/lambo/installation/).
 
+**Where deduplication looks.** With hybrid matching, the writer that holds a session decides whether a new concept repeats an existing one by comparing it against its own in-memory graph, on `sqlite`, `cockroach` and `postgres` alike, so a fact derived twice in quick succession merges even before the first copy is flushed. Recall on `cockroach` and `postgres` still ranks vectors in the database. The two can disagree on a pair whose similarity sits right at `semantic_match_threshold`, because the writer uses exact cosine similarity and the database uses its own distance, which on CockroachDB can come from an approximate index.
+
 ## Recall tier
 
 `[recall]` adds an Elasticsearch index beside the store that serves the vector part of recall. It is optional, and it is not a store kind: the `[store]` you chose stays the source of truth, and leases, fencing, canonization and graph queries never touch Elasticsearch. Each flush the store commits is copied to the index, and recall asks the index for the nearest concepts instead of scanning vectors in the store.

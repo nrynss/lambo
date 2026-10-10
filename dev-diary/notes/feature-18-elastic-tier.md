@@ -85,9 +85,12 @@ path. The split, as the review recommended (pending the owner's confirmation,
 so it is one self-contained commit that can be dropped): `TieredStore` declares
 `GraphStore::holder_derives_from_graph`, and the holder's derive takes
 `VectorCandidates::for_holder_derive`, its in-memory graph (exact, fresh up to
-the write being made). Recall keeps using the tier. Postgres and Cockroach
-declare nothing and are unchanged. The amendment is recorded in
-`feature-8-vector-source.md`. Test:
+the write being made). Recall keeps using the tier. The amendment is recorded
+in `feature-8-vector-source.md`. **#60 (2026-10-10) extends the split to the
+Postgres family:** `PgStore` declares `holder_derives_from_graph` as well, for
+the same reason (its search sees only flushed rows), so a holder over
+Postgres or Cockroach derives against its graph and recalls from the database.
+Same mechanism, no second switch; tests in `store::pg::merge_freshness`. Test:
 `a_holder_derive_merges_a_paraphrase_the_index_has_not_seen`.
 
 **Index per contract.** `{prefix}-v-{hash}`, where the hash is the first 8
