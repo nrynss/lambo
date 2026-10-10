@@ -28,6 +28,19 @@
 //! Once the daemon catches up, normal blended scoring resumes and ranks may
 //! change. Canonical-first and hot-list force-inclusion still apply.
 //!
+//! Two consequences of cold order, by design:
+//!
+//! * **Traversal and sibling members score exactly 0** (their `q` is 0 and
+//!   the daemon share is withheld), so they rank after every phase-1 hit.
+//!   Phase 1 normally fills `top_k`, so a `traversal_depth > 0` recall made
+//!   in the window usually returns no structural expansions; in the blend
+//!   they compete at `w_daemon × d`.
+//! * **Reservation holders the blend would show stay** (#79 review L4). A
+//!   member with an active reservation that the blended order would emit is
+//!   force-included in cold mode, so its Reservation warning is not lost to
+//!   the window. A holder the blend would not show is not promoted, and the
+//!   blend itself forces no holder.
+//!
 //! * **query_relevance** — the member's phase-1 candidate score (BM25 for
 //!   keyword hits, the max-merged score otherwise). Members that were never
 //!   phase-1 candidates — BFS-reached concepts and force-included
@@ -115,7 +128,7 @@
 //! The default estimator is [`default_token_count`] (`ceil(bytes / 3.5)`);
 //! callers pass their own `Fn(&str) -> usize` to override.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 
@@ -229,20 +242,39 @@ where
         rank_members(graph, &mut members);
         members
     };
-    let forced = |id: NodeId| hot_payloads.contains_key(&id);
-    // M1: cold mode is worth its cost only when an unscored fresh concept
-    // could be SHOWN. Under the blend its d is 0, so it ranks no higher than
-    // under query-only order; if query-only order would not emit it within
-    // top_k, neither mode can, and every returned hit keeps its daemon share.
-    let cold = w_query > 0.0
+    let hot = |id: NodeId| hot_payloads.contains_key(&id);
+    let any_fresh = w_query > 0.0
         && expanded
             .required
             .iter()
             .chain(expanded.siblings.iter())
-            .any(|s| fresh_unscored(s.item))
-        && emitted(graph, &scored(true), forced, query.top_k)
+            .any(|s| fresh_unscored(s.item));
+    // L4: a member with an active reservation (soft lock) that the blend
+    // would show keeps its slot, and so its Reservation warning, in cold
+    // mode: the warning is about the concept, not its rank, and cold order
+    // must not drop it for the length of the window. A holder the blend
+    // would not show either is not promoted.
+    let reserved_keep: HashSet<NodeId> = if any_fresh {
+        emitted(graph, &scored(false), hot, query.top_k)
+            .into_iter()
+            .map(|s| s.item)
+            .filter(|id| active_reservation(graph, *id, now).is_some())
+            .collect()
+    } else {
+        HashSet::new()
+    };
+    let cold_forced = |id: NodeId| hot(id) || reserved_keep.contains(&id);
+    // M1: cold mode is worth its cost only when an unscored fresh concept
+    // could be SHOWN. Under the blend its d is 0, so it ranks no higher than
+    // under query-only order; if query-only order would not emit it within
+    // top_k, neither mode can, and every returned hit keeps its daemon share.
+    let cold = any_fresh
+        && emitted(graph, &scored(true), cold_forced, query.top_k)
             .iter()
             .any(|s| fresh_unscored(s.item));
+    // Forcing the kept holders only in cold mode: in the blend they already
+    // hold their slots, and a forced member would free one for another hit.
+    let forced = |id: NodeId| if cold { cold_forced(id) } else { hot(id) };
 
     // Score every member independently; sort by final score desc, id asc.
     let members = scored(cold);
@@ -2198,5 +2230,68 @@ mod tests {
         assert_eq!(ids_of(&result), vec![uid(1), uid(3)]);
         assert!(approx(result.hits[0].score, 0.40));
         assert!(approx(result.hits[1].score, 0.10));
+    }
+
+    /// L4 (#79 review): a reservation holder the blend would show keeps its
+    /// slot and its Reservation warning in cold mode, even when query-only
+    /// order ranks it below the cut. A holder the blend would not show is
+    /// not promoted, and the blend itself forces no holder.
+    #[test]
+    fn cold_mode_keeps_a_reservation_holder_the_blend_would_show() {
+        let mut g = graph_with(3);
+        let now = ts(60);
+        for id in [1, 3] {
+            g.set_reservation(Reservation {
+                session_id: sid(),
+                node_id: uid(id),
+                agent_id: AgentId::from("agent-c"),
+                expires_at: now + chrono::Duration::seconds(60),
+            });
+        }
+        let scores = ScoreTable {
+            epoch: 1,
+            ranked: vec![
+                Scored::new(uid(1), 0.90), // reserved, shown by the blend
+                Scored::new(uid(3), 0.05), // reserved, shown by neither
+            ],
+        };
+        let run = |fresh_q: f64| {
+            let phase1 = vec![
+                Scored::new(uid(1), 0.30),
+                Scored::new(uid(2), fresh_q), // fresh, no daemon entry
+                Scored::new(uid(3), 0.10),
+            ];
+            let expanded = ExpandedSet {
+                required: phase1.clone(),
+                siblings: Vec::new(),
+            };
+            assemble(
+                &g,
+                &expanded,
+                &phase1,
+                &scores,
+                &HashMap::new(),
+                &query(1, 10_000),
+                RecallWeights::default(),
+                now,
+                default_token_count,
+            )
+        };
+
+        // Cold: the fresh hit takes the one slot, the blend's reserved hit
+        // stays (at its cold score) with its warning, uid 3 stays out.
+        let cold = run(0.80);
+        assert!(cold.cold_start);
+        assert_eq!(ids_of(&cold), vec![uid(2), uid(1)]);
+        assert!(approx(cold.hits[1].score, 0.15));
+        assert_eq!(
+            cold.warnings,
+            vec!["Reserved by agent-c until 2025-07-08T19:41:00Z".to_string()]
+        );
+
+        // Blend (the fresh hit cannot be shown): one hit, no forcing.
+        let blend = run(0.05);
+        assert!(!blend.cold_start);
+        assert_eq!(ids_of(&blend), vec![uid(1)]);
     }
 }
