@@ -1677,7 +1677,7 @@ embedding lookups on the write path). Untouched: `min_peer_count` 20,
 |---|---|
 | Canonization cycles racing the build | acts I–III run with the eval interval frozen and GC at spec default; the canonization attach **writes nothing**, so no cycle ever sees a half-built graph |
 | Stage 1's `gc_survived >= 3` gate | GC bumps only on session mutations, so an idle session's counters stop. `settle_gc_survived` declares one real synonym at a time and **awaits the resulting sweep** until the floor is met for every concept — which is what makes the fixed point unique (a node admitted under the earlier P90 is still admitted under the final one) |
-| `recency` measured against real timestamps | `STEP_PACING` (10ms) makes the session's temporal extent a property of the script, not of scheduler jitter. Also makes the narration readable on camera |
+| `recency` measured against real timestamps | The script clock (`SCRIPT_STEP`, 60s) makes the session's temporal extent a property of the script, not of scheduler jitter. The wall pause (`STEP_PACING`, 10ms) makes the narration readable on camera. The last edit is call index 13 (13 minutes), above the recency floor, and the call pattern matches the old 10ms step so positions do too |
 | Exact score ties broken by random `NodeId` | structurally identical siblings in one derive carry **distinct concept types**; the audit trail is grouped by concept rather than by node id |
 
 **GC cannot be disabled for the demo** (this was tried first): Stage 1 gates on

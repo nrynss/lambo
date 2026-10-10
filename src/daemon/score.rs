@@ -18,10 +18,17 @@
 //! graph scores identically regardless of wall clock (fixture-friendly):
 //!
 //! * **recency** — how recently the concept was last touched (the later of
-//!   `last_accessed` and `created_at`) relative to the session's
-//!   interaction temporal extent: `(last_touch − start) / (end − start)`,
-//!   clamped. A single-point extent (all timestamps equal) yields `1.0`
-//!   (everything is "now").
+//!   `last_accessed` and `created_at`), measured back from the session's
+//!   latest interaction. In integer milliseconds,
+//!   `1 − (end − last_touch) / max(end − start, MIN_RECENCY_SPAN)`, clamped
+//!   to `[0, 1]`. [`MIN_RECENCY_SPAN`] is 10 minutes, so a session younger
+//!   than that scores every concept near 1 and a millisecond gap between
+//!   derives cannot sweep the dimension. A session at least that long uses
+//!   its own span, and those values are the historical
+//!   `(last_touch − start) / span` bits: the two expressions agree in real
+//!   arithmetic and not in `f64`, and the bits are what the fixtures pin.
+//!   A single-instant session returns `1.0` when `last_touch` is that
+//!   instant. No wall clock enters.
 //! * **frequency** — `access_count` normalized by [`FREQUENCY_NORMALIZER`]
 //!   (10 accesses = full frequency), clamped.
 //! * **session_activity** — the share of the session's interactions that
@@ -56,6 +63,16 @@ pub const MAX_CONCEPT_MODIFIER: f64 = 0.15;
 pub const MIN_CONCEPT_MODIFIER: f64 = -0.10;
 /// Upper bound of `edge_type_bonus + concept_type_modifier`.
 pub const MAX_BONUS: f64 = MAX_EDGE_BONUS + MAX_CONCEPT_MODIFIER;
+
+/// Floor on recency's denominator, in integer milliseconds (issue #95).
+///
+/// Ten minutes. A session shorter than this still measures recency back from
+/// its latest interaction across this window, so a stall of tens of
+/// milliseconds cannot move a final recall score by a real query gap. A
+/// session at least this long uses its own span, and `max` (not a `>`
+/// branch) keeps the exactly-at-floor session on that span. Do not convert
+/// the denominator to seconds: truncating it would move those bits.
+pub const MIN_RECENCY_SPAN: i64 = 10 * 60 * 1_000;
 
 /// Additive per-edge-type bonus (T4.1 interpretation; v0.6.0's table is not
 /// in-repo). Structural / load-bearing edge types carry the most weight.
@@ -304,6 +321,29 @@ impl SessionContext {
     }
 }
 
+/// Recency of one touch against the session extent (issue #95).
+///
+/// `last_touch` is already the later of `last_accessed` and `created_at`.
+/// The denominator is `max(span, MIN_RECENCY_SPAN)` in integer milliseconds.
+/// When that `max` equals the span, this returns the historical
+/// `(last_touch − start) / span` bits. `1 − (end − last_touch) / span` is the
+/// same real number and a different `f64` for most positions, so a session
+/// the floor does not widen must not take that form. When the floor does
+/// widen it, the value is `1 − (end − last_touch) / MIN_RECENCY_SPAN`: a
+/// short session scores near 1 instead of spreading a few milliseconds
+/// across `[0, 1]`. Clamped to `[0, 1]`.
+fn concept_recency(last_touch: DateTime<Utc>, ctx: &SessionContext) -> f64 {
+    let span_ms = (ctx.end - ctx.start).num_milliseconds();
+    let denom = span_ms.max(MIN_RECENCY_SPAN);
+    let recency = if denom == span_ms {
+        (last_touch - ctx.start).num_milliseconds() as f64 / denom as f64
+    } else {
+        let age_ms = (ctx.end - last_touch).num_milliseconds();
+        1.0 - age_ms as f64 / denom as f64
+    };
+    recency.clamp(0.0, 1.0)
+}
+
 /// Compute the six dimension values for one concept from graph state.
 pub fn score_concept(graph: &Graph, c: &Concept, ctx: &SessionContext) -> ScoreDims {
     // The later of the two: a concept is never "touched" before it existed. A
@@ -314,12 +354,7 @@ pub fn score_concept(graph: &Graph, c: &Concept, ctx: &SessionContext) -> ScoreD
     let last_touch = c
         .last_accessed
         .map_or(c.created_at, |t| t.max(c.created_at));
-    let span_ms = (ctx.end - ctx.start).num_milliseconds();
-    let recency = if span_ms == 0 {
-        1.0
-    } else {
-        (last_touch - ctx.start).num_milliseconds() as f64 / span_ms as f64
-    };
+    let recency = concept_recency(last_touch, ctx);
 
     let frequency = c.access_count as f64 / FREQUENCY_NORMALIZER;
 
@@ -450,13 +485,13 @@ mod tests {
     /// [`score_concept`] now reads a once-per-sweep count from the
     /// [`SessionContext`]; the two must agree bit for bit.
     fn score_concept_reference(graph: &Graph, c: &Concept, ctx: &SessionContext) -> ScoreDims {
-        let last_touch = c.last_accessed.unwrap_or(c.created_at);
-        let span_ms = (ctx.end - ctx.start).num_milliseconds();
-        let recency = if span_ms == 0 {
-            1.0
-        } else {
-            (last_touch - ctx.start).num_milliseconds() as f64 / span_ms as f64
-        };
+        // Same touch rule and the same recency as [`score_concept`]. The
+        // oracle's job is the per-concept `session_activity` scan, not a
+        // second formula.
+        let last_touch = c
+            .last_accessed
+            .map_or(c.created_at, |t| t.max(c.created_at));
+        let recency = concept_recency(last_touch, ctx);
         let frequency = c.access_count as f64 / FREQUENCY_NORMALIZER;
         let derived_by = graph
             .interactions()
@@ -982,6 +1017,209 @@ mod tests {
         assert_eq!(d1.recency, 0.0);
         assert_eq!(d2.recency, 1.0);
         assert!(d2.recency > d1.recency);
+    }
+
+    fn at_ms(ms: i64) -> DateTime<Utc> {
+        Utc.timestamp_opt(1_700_000_000, 0).unwrap() + chrono::Duration::milliseconds(ms)
+    }
+
+    fn interaction_ms(id: u64, prev: Option<u64>, at: i64) -> crate::types::Interaction {
+        crate::types::Interaction {
+            created_at: at_ms(at),
+            ..interaction(id, prev, 0)
+        }
+    }
+
+    fn concept_ms(id: u64, origin: NodeId, content: &str, at: i64) -> Concept {
+        Concept {
+            created_at: at_ms(at),
+            ..concept(id, origin, content, 0)
+        }
+    }
+
+    /// Two interactions at `0` and `end_ms`, and one concept per touch time,
+    /// each derived from the interaction that shares its timestamp when one
+    /// does, otherwise from the first.
+    fn session_with_touches(end_ms: i64, touches: &[(u64, &str, i64)]) -> (Graph, Vec<Concept>) {
+        let mut g = Graph::new(sid());
+        let i1 = interaction_ms(1, None, 0);
+        let i2 = interaction_ms(2, Some(1), end_ms);
+        let origin = i1.id;
+        g.insert_interaction(i1).unwrap();
+        g.insert_interaction(i2).unwrap();
+        let mut concepts = Vec::new();
+        for (id, content, at) in touches {
+            let c = concept_ms(*id, origin, content, *at);
+            g.insert_concept(c.clone(), origin).unwrap();
+            concepts.push(c);
+        }
+        (g, concepts)
+    }
+
+    /// The pre-#95 recency expression, including the `last_touch` guard that
+    /// stays. A span of zero yielded `1.0`.
+    fn historical_recency(c: &Concept, ctx: &SessionContext) -> f64 {
+        let last_touch = c
+            .last_accessed
+            .map_or(c.created_at, |t| t.max(c.created_at));
+        let span_ms = (ctx.end - ctx.start).num_milliseconds();
+        if span_ms == 0 {
+            1.0
+        } else {
+            (last_touch - ctx.start).num_milliseconds() as f64 / span_ms as f64
+        }
+    }
+
+    fn recall_final(daemon: f64, query: f64) -> f64 {
+        let w = crate::config::RecallWeights::default();
+        w.w_daemon * daemon + w.w_query * query
+    }
+
+    /// Issue #95. A 40ms stall between two otherwise identical derives, on a
+    /// session younger than the floor. Query cosines 0.5 then 0.3 are a real
+    /// gap (0.1 of the default 0.5/0.5 blend). On the historical formula the
+    /// stall assigns recency 0 and 1, and 0.125 of final score flips that gap.
+    #[test]
+    fn a_tens_of_ms_stall_cannot_flip_a_real_query_gap() {
+        let stall_ms = 40;
+        let (g, concepts) =
+            session_with_touches(stall_ms, &[(1, "established", 0), (2, "stalled", stall_ms)]);
+        let ctx = SessionContext::compute(&g);
+        assert!(
+            (ctx.end - ctx.start).num_milliseconds() < MIN_RECENCY_SPAN,
+            "the session has to be younger than the floor"
+        );
+        let established = score_concept(&g, &concepts[0], &ctx);
+        let stalled = score_concept(&g, &concepts[1], &ctx);
+        for (name, a, b) in [
+            ("frequency", established.frequency, stalled.frequency),
+            (
+                "session_activity",
+                established.session_activity,
+                stalled.session_activity,
+            ),
+            ("density", established.density, stalled.density),
+            (
+                "edge_type_bonus",
+                established.edge_type_bonus,
+                stalled.edge_type_bonus,
+            ),
+            (
+                "concept_type_modifier",
+                established.concept_type_modifier,
+                stalled.concept_type_modifier,
+            ),
+        ] {
+            assert_eq!(a.to_bits(), b.to_bits(), "{name} must not differ");
+        }
+        let gap = stalled.recency - established.recency;
+        assert!(
+            gap > 0.0 && gap < 0.01,
+            "the stall must barely move recency, got {gap} ({established:?} vs {stalled:?})"
+        );
+        let earlier = recall_final(established.composite(), 0.5);
+        let later = recall_final(stalled.composite(), 0.3);
+        assert!(
+            earlier > later,
+            "0.5 must stay ahead of 0.3: {earlier} vs {later}"
+        );
+    }
+
+    /// A session at or above the floor matches the historical expression bit
+    /// for bit, including exactly at the floor and at offsets where
+    /// `1 - (end - last) / span` is a different `f64`.
+    #[test]
+    fn a_session_at_or_above_the_floor_matches_the_historical_bits() {
+        for end_ms in [MIN_RECENCY_SPAN, 30 * 60 * 1_000, MIN_RECENCY_SPAN + 1] {
+            let touches = [
+                (1u64, "start", 0i64),
+                (2, "one-ms", 1),
+                (3, "awkward", 123_456.min(end_ms)),
+                (4, "end", end_ms),
+            ];
+            let (mut g, concepts) = session_with_touches(end_ms, &touches);
+            // A read stamped before creation must not move recency backwards.
+            let mut backdated = concepts[2].clone();
+            backdated.last_accessed = Some(at_ms(0));
+            backdated.content = "backdated-read".into();
+            backdated.canonical_key = "backdated-read".into();
+            backdated.id = NodeId(Uuid::from_u64_pair(1, 99));
+            g.insert_concept(backdated, concepts[2].origin_interaction)
+                .unwrap();
+            let ctx = SessionContext::compute(&g);
+            assert!(
+                (ctx.end - ctx.start).num_milliseconds() >= MIN_RECENCY_SPAN,
+                "span {end_ms} must be at or above the floor"
+            );
+            for c in g.concepts() {
+                let got = score_concept(&g, c, &ctx).recency;
+                let historical = historical_recency(c, &ctx);
+                assert_eq!(
+                    got.to_bits(),
+                    historical.to_bits(),
+                    "span {end_ms} {}: {got} vs {historical}",
+                    c.content
+                );
+            }
+        }
+    }
+
+    /// The young-session formula meets the historical value at the floor.
+    /// One millisecond under it, the oldest concept scores `1 - (floor-1)/floor`,
+    /// which is about `1.7e-6`, not a jump.
+    #[test]
+    fn recency_is_continuous_at_the_floor() {
+        let (at_floor, at_concepts) = session_with_touches(
+            MIN_RECENCY_SPAN,
+            &[(1, "oldest", 0), (2, "newest", MIN_RECENCY_SPAN)],
+        );
+        let ctx = SessionContext::compute(&at_floor);
+        assert_eq!(score_concept(&at_floor, &at_concepts[0], &ctx).recency, 0.0);
+        assert_eq!(score_concept(&at_floor, &at_concepts[1], &ctx).recency, 1.0);
+        assert_eq!(
+            score_concept(&at_floor, &at_concepts[0], &ctx)
+                .recency
+                .to_bits(),
+            historical_recency(&at_concepts[0], &ctx).to_bits()
+        );
+
+        let just_under = MIN_RECENCY_SPAN - 1;
+        let (below, below_concepts) =
+            session_with_touches(just_under, &[(1, "oldest", 0), (2, "newest", just_under)]);
+        let ctx = SessionContext::compute(&below);
+        let oldest = score_concept(&below, &below_concepts[0], &ctx).recency;
+        let expected = 1.0 - just_under as f64 / MIN_RECENCY_SPAN as f64;
+        assert_eq!(oldest.to_bits(), expected.to_bits());
+        assert!(
+            oldest < 1e-5,
+            "crossing the floor must not jump the oldest concept, got {oldest}"
+        );
+        assert_eq!(score_concept(&below, &below_concepts[1], &ctx).recency, 1.0);
+    }
+
+    /// A single instant is "now" without a zero-span branch. A concept
+    /// backdated against that instant lands slightly under 1, which the old
+    /// branch hid by returning 1.0 for every touch.
+    #[test]
+    fn a_single_instant_session_scores_one_unless_backdated() {
+        let (g, concepts) = session_with_touches(0, &[(1, "now", 0)]);
+        let ctx = SessionContext::compute(&g);
+        assert_eq!((ctx.end - ctx.start).num_milliseconds(), 0);
+        assert_eq!(score_concept(&g, &concepts[0], &ctx).recency, 1.0);
+
+        let mut backdated = concepts[0].clone();
+        backdated.created_at = at_ms(-40);
+        backdated.id = NodeId(Uuid::from_u64_pair(1, 7));
+        backdated.content = "earlier".into();
+        backdated.canonical_key = "earlier".into();
+        let mut g = g;
+        g.insert_concept(backdated.clone(), concepts[0].origin_interaction)
+            .unwrap();
+        let ctx = SessionContext::compute(&g);
+        let recency = score_concept(&g, &backdated, &ctx).recency;
+        let expected = 1.0 - 40.0 / MIN_RECENCY_SPAN as f64;
+        assert_eq!(recency.to_bits(), expected.to_bits());
+        assert!(recency < 1.0);
     }
 
     #[test]

@@ -116,11 +116,18 @@ a **fixed point**, not a snapshot taken at a lucky instant:
 4. **Sibling concepts derived in one interaction carry distinct concept types**,
    so structurally identical siblings never score exactly equal. An exact tie is
    broken by `NodeId`, and node ids are random UUIDs.
-5. **The script is paced** (`STEP_PACING`, 10ms between interactions). The
-   `recency` dimension is each concept's position inside the session's real
-   temporal extent; twelve writes issued back to back land microseconds apart,
-   so their interior spacing would be scheduler jitter. Pacing makes the extent
-   a property of the script. It also makes the narration readable on screen.
+5. **The script is paced on two clocks.** The wall pause (`STEP_PACING`, 10ms
+   between interactions) keeps the narration readable and agent A's last edit
+   inside the 30-second conflict window. The script clock steps 60 seconds
+   (`SCRIPT_STEP`). The write pipeline reads that clock too, so the last edit
+   is call index 13 and the session spans 13 minutes, above the 10-minute
+   recency floor. Recency is a position inside the span, and the call pattern
+   is the one the old 10ms step used, so every demo recency value is
+   unchanged. Writes that are not that last edit sit minutes back, outside
+   the 30-second conflict window, and their conflict lines leave the recall
+   block. The spec §13 line is the last edit and stays. Twelve writes issued
+   back to back would land microseconds apart, and that jitter would be the
+   span.
 
 ### What is normalized, and why
 

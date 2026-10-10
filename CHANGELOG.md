@@ -219,6 +219,20 @@
 
 ### Changed
 
+- Daemon recency in a session younger than 10 minutes no longer treats that
+  short span as the whole `[0, 1]` range (#95). The denominator is
+  `max(span, 10 minutes)` in integer milliseconds, clamped to `[0, 1]`, so a
+  stall of tens of milliseconds cannot flip a real query gap. A session at
+  least 10 minutes long scores bit-for-bit as before, including one whose
+  span is exactly 10 minutes. Garbage-collection eviction recency is
+  unchanged. `lambo demo` keeps a 10ms wall pause and widens its script
+  clock to 60 seconds a step. The last edit is call index 13 (twelve
+  interactions plus a pipeline read at each act hand-off), a 13-minute
+  span, so the demo's recency values, P90 candidate set and printed GC
+  headroom stay what they were. Conflict lines on writes older than that
+  last edit leave the recall block: they are outside the 30-second window,
+  which is unchanged. The spec §13 line is the last edit and stays.
+
 - A tool call that fails because a vector read refused its probe (the
   session's embedding contract changed mid-query, or the vector width
   differs) now tells the caller to re-check the session's embedding
