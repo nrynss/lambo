@@ -117,9 +117,18 @@ const PNG_FILTER: PngFilter = PngFilter::Adaptive;
 /// `MAX_IMAGE_SIDE_PX` square (16.8 MP).
 pub(crate) const MAX_DECODE_PIXELS: u64 = MAX_IMAGE_SIDE_PX as u64 * MAX_IMAGE_SIDE_PX as u64;
 
+/// Headroom above the decoded pixels for the decoder's own buffers. The
+/// `image` crate reserves the output first and hands the codec only what is
+/// left of the limit, so without headroom a full-size 16-bit RGBA image
+/// leaves the codec nothing for scratch (an interlaced PNG's passes, a
+/// future codec that counts its row buffers) and an image the validator
+/// accepted would be refused.
+pub(crate) const DECODE_ALLOC_HEADROOM: u64 = 64 * 1024 * 1024;
+
 /// Most bytes the decoder may allocate: [`MAX_DECODE_PIXELS`] at the widest
-/// pixel the three formats decode to (16-bit RGBA, 8 bytes).
-pub(crate) const MAX_DECODE_ALLOC: u64 = MAX_DECODE_PIXELS * 8;
+/// pixel the three formats decode to (16-bit RGBA, 8 bytes), plus
+/// [`DECODE_ALLOC_HEADROOM`].
+pub(crate) const MAX_DECODE_ALLOC: u64 = MAX_DECODE_PIXELS * 8 + DECODE_ALLOC_HEADROOM;
 
 fn format_of(mime: ImageMime) -> Result<ImageFormat, EmbedError> {
     match mime {

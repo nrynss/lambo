@@ -359,7 +359,7 @@ fn the_decode_limits_match_the_validator() {
     let l = limits();
     assert_eq!(l.max_image_width, Some(MAX_IMAGE_SIDE_PX));
     assert_eq!(l.max_image_height, Some(MAX_IMAGE_SIDE_PX));
-    assert_eq!(l.max_alloc, Some(4096 * 4096 * 8));
+    assert_eq!(l.max_alloc, Some(4096 * 4096 * 8 + 64 * 1024 * 1024));
     assert!(check_dimensions(4096, 4096).is_ok());
     assert!(check_dimensions(4097, 1).is_err());
     assert!(check_dimensions(0, 1).is_err());
@@ -453,4 +453,37 @@ async fn a_timed_out_decode_holds_its_permit_until_it_finishes() {
 fn the_process_wide_bound_is_two() {
     assert_eq!(MAX_CONCURRENT_DECODES, 2);
     assert!(DECODES.available_permits() <= MAX_CONCURRENT_DECODES);
+}
+
+/// An image at the exact cap, the widest pixel type at the largest size the
+/// validator admits (a flat 4096 px square of 16-bit RGBA, 128 MiB
+/// decoded), decodes under the limits and becomes a 768 px PNG.
+///
+/// Mutation: drop the headroom and have the codec count a scratch buffer,
+/// or lower the cap below 16-bit RGBA -> red.
+#[test]
+fn an_image_at_the_exact_cap_decodes() {
+    let side = MAX_IMAGE_SIDE_PX;
+    let flat = image::ImageBuffer::<Rgba<u16>, Vec<u16>>::from_pixel(
+        side,
+        side,
+        Rgba([40_000, 1_000, 20_000, 65_535]),
+    );
+    let mut png = Vec::new();
+    DynamicImage::ImageRgba16(flat)
+        .write_with_encoder(PngEncoder::new_with_quality(
+            &mut png,
+            CompressionType::Fast,
+            PngFilter::Adaptive,
+        ))
+        .unwrap();
+    assert!(
+        png.len() < crate::surface::image::MAX_IMAGE_BYTES,
+        "{}",
+        png.len()
+    );
+    let out = canonical_of(&png, "image/png").unwrap();
+    let img = decode_png(&out);
+    assert_eq!((img.width(), img.height()), (768, 768));
+    assert_eq!(img.color(), ColorType::Rgba16);
 }
