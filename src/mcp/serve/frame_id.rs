@@ -284,6 +284,12 @@ fn scan_head(b: &[u8]) -> Seen {
             return seen;
         }
         i = skip_ws(b, i + 1);
+        // A `result` or `error` key is enough to make it a response, even
+        // when its value runs past what was seen (it usually does: it is
+        // what made the frame too large).
+        if key_is(key, "result") || key_is(key, "error") {
+            seen.response = true;
+        }
         let Some(value_end) = value_end(b, i) else {
             return seen;
         };
