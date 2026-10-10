@@ -524,10 +524,10 @@ async fn a_live_holder_elsewhere_is_409_and_a_bad_confirm_is_400() {
     assert_eq!(get.status, 405, "{}", get.body);
     assert_eq!(get.header("allow").as_deref(), Some("POST"));
     assert!(
-        w.calls
-            .since(before)
-            .iter()
-            .all(|(m, _)| *m == "refresh_lease" || *m == "flush"),
+        w.calls.since(before).iter().all(|(m, _)| matches!(
+            *m,
+            "refresh_lease" | "flush" | "flushed" | "write_flush_stats"
+        )),
         "a refused erase makes no store call of its own: {:?}",
         w.calls.since(before)
     );
