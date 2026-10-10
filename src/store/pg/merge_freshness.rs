@@ -20,9 +20,10 @@
 //! exercise the family's own answer, not the double's, and it loads what it
 //! flushed, so a holder can reopen a durable session. The scenario
 //! [`run_merge_freshness`] runs offline against it and live against a real
-//! database: the Postgres leg is the `#[ignore]`d test at the bottom (the
-//! `postgres-live` CI job runs it by name) and the Cockroach leg runs inside
-//! `cockroach::conformance::conformance_suite`.
+//! database: the Postgres leg is the `#[ignore]`d test at the bottom, run by
+//! name by the `postgres-live` CI step once that step is added (see the #60
+//! CI request); the Cockroach leg runs inside
+//! `cockroach::conformance::conformance_suite`, whose job is disabled.
 //!
 //! # What changes at the threshold edge
 //!
@@ -855,7 +856,9 @@ async fn a_merge_at_the_threshold_edge_follows_exact_cosine() {
     for_each_dialect!(check);
 }
 
-/// **#60 live, Postgres.** The `postgres-live` CI job runs this by name.
+/// **#60 live, Postgres.** Run by name by the `postgres-live` CI step once
+/// that step is added (the #60 CI request); until then, by hand with
+/// `--ignored` against a database.
 #[cfg(feature = "store-postgres")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "live: requires LAMBO_POSTGRES_DSN against pinned pgvector/pgvector:pg17"]
