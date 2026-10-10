@@ -158,8 +158,17 @@ fn reader(bytes: &[u8], format: ImageFormat) -> ImageReader<Cursor<&[u8]>> {
 
 /// The header's width and height, read without decoding the pixels, and
 /// checked against the side and pixel limits. Cheap.
+///
+/// The header is read under the allocation limit only, not the side limits,
+/// so the side check here is Lambo's own ([`check_dimensions`]) and the
+/// decoder's [`limits`] are an independent second line behind it (each is
+/// tested with the other out of the way).
 pub(crate) fn dimensions(bytes: &[u8], mime: ImageMime) -> Result<(u32, u32), EmbedError> {
-    let (width, height) = reader(bytes, format_of(mime)?)
+    let mut header = ImageReader::with_format(Cursor::new(bytes), format_of(mime)?);
+    let mut alloc_only = Limits::default();
+    alloc_only.max_alloc = Some(MAX_DECODE_ALLOC);
+    header.limits(alloc_only);
+    let (width, height) = header
         .into_dimensions()
         .map_err(|e| decode_error(mime, &e))?;
     check_dimensions(width, height)?;

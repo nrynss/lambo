@@ -318,32 +318,40 @@ fn the_canonical_png_has_only_critical_chunks() {
 
 // ------------------------------------------------------------- bounded decode
 
-/// A header declaring more than 4096 px a side (a decompression bomb in a
-/// few dozen bytes) is refused from the header alone, before any decode.
-/// `validate` refuses it first in production; this is the second line.
+/// Lambo's own size check refuses a header declaring more than 4096 px a
+/// side (a decompression bomb in a few dozen bytes) from the header alone, before any decode and with its own message. `validate`
+/// refuses these first in production; this is the second line.
+///
+/// Mutation: remove `check_dimensions` -> red (the header read itself does
+/// not apply the side limits).
 #[test]
-fn a_bomb_header_is_refused_before_decoding() {
-    for (w, h) in [(20_000, 20_000), (4097, 10), (10, 4097), (u32::MAX, 1)] {
+fn lambos_size_check_refuses_a_bomb_header() {
+    for (w, h) in [(20_000, 20_000), (4097, 10), (10, 4097)] {
         let bomb = png_declaring(w, h);
         assert!(
             validate(&bomb, "image/png").is_err(),
             "validate refuses it too"
         );
-        let err = to_canonical_png(&bomb, ImageMime::Png).unwrap_err();
-        let EmbedError::Unreadable(msg) = &err else {
-            panic!("{err:?}");
-        };
-        // u32::MAX is not a legal PNG width, so the header parser refuses
-        // it; the others are refused by the side limit.
-        if w == u32::MAX {
-            assert!(msg.contains("could not decode"), "{msg}");
-        } else {
+        for err in [
+            dimensions(&bomb, ImageMime::Png).unwrap_err(),
+            to_canonical_png(&bomb, ImageMime::Png).unwrap_err(),
+        ] {
+            let EmbedError::Unreadable(msg) = &err else {
+                panic!("{w}x{h}: {err:?}");
+            };
             assert!(
-                msg.contains("4096 px a side") || msg.contains("limit"),
-                "{msg}"
+                msg.contains(&format!("declares {w}x{h} px"))
+                    && msg.contains("1 to 4096 px a side"),
+                "{w}x{h}: {msg}"
             );
         }
     }
+    // u32::MAX is not a legal PNG width: the header parser refuses it.
+    let err = to_canonical_png(&png_declaring(u32::MAX, 1), ImageMime::Png).unwrap_err();
+    assert!(
+        matches!(&err, EmbedError::Unreadable(m) if m.contains("could not decode")),
+        "{err:?}"
+    );
     // Inside the side limit, a header that lies about its data fails as a
     // decode error, never a panic.
     let liar = png_declaring(4096, 4096);
@@ -351,6 +359,24 @@ fn a_bomb_header_is_refused_before_decoding() {
         to_canonical_png(&liar, ImageMime::Png).unwrap_err(),
         EmbedError::Unreadable(m) if m.contains("could not decode")
     ));
+}
+
+/// The decoder's own limits refuse an over-limit header even with Lambo's
+/// size check out of the way. 4097 x 10 RGB is far under the `image`
+/// crate's default allocation limit, so only Lambo's limits refuse it.
+///
+/// Mutation: drop `reader.limits(limits())` -> red (the decode then fails
+/// on the missing data, not on a limit).
+#[test]
+fn the_decoders_limits_refuse_a_bomb_header() {
+    for (w, h) in [(4097, 10), (10, 4097)] {
+        let bomb = png_declaring(w, h);
+        let err = reader(&bomb, ImageFormat::Png).decode().unwrap_err();
+        assert!(
+            matches!(err, image::ImageError::Limits(_)),
+            "{w}x{h}: {err:?}"
+        );
+    }
 }
 
 /// The limits the decoder runs under are the validator's.
