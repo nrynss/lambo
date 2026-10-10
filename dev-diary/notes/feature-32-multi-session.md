@@ -508,7 +508,7 @@ Since PR 6, the only key `SERVE_UNENFORCED_NOTICE` can name is
 design. PR 9 reworded the notice to say so: `lambo.toml [serve] sets keys
 this serve ignores: an HTTP serve never reads [[serve.projects]], the stdio
 serve's project map (#32)`, followed by the key names. The "not yet
-enforced" framing is gone. `tests/serve_table_unenforced.rs` pins the text;
+enforced" framing is gone. `tests/serve_table_unenforced.rs` pins its leading phrase;
 its file name predates the rewording.
 
 ## Deviations from the design, in one table
