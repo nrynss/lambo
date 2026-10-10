@@ -13,7 +13,7 @@
 //! | `/s/{session}` | `GET`/`HEAD`: a `308` to `/s/{session}/` (query kept), so the page's relative `api/...` URLs resolve under the session; other methods: the page route's 405 |
 //! | `/s/{session}/` | `{session}`'s page (the same `INDEX_HTML`, plus `no-store` and `Referrer-Policy: same-origin`) |
 //! | `/s/{session}/api/{route}` | `{session}`, served by the same `GET`-only route as the alias |
-//! | `/s/{session}/api/sessions` | none: the uniform 404 (the listing is unscoped, #4 PR 3) |
+//! | `/s/{session}/api/sessions` | none: the uniform 404 (the listing is unscoped, #4 PR 3; refused by the path check here and again by the listing, which refuses any request marked [`ScopedRequest`]) |
 //! | `/s/{session}/{anything else}` | none: the uniform 404 |
 //! | `/`, `/api/{route}` | the default session (aliases, design Q10), authorized as `SessionAuthority::authorize_default` rules |
 //! | `/app.css`, `/app.js`, `/healthz` | none needed |
@@ -40,7 +40,7 @@ use axum::http::{header, HeaderValue, Method, StatusCode, Uri};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 
-use super::auth::{authenticate, unauthorized, Authenticated};
+use super::auth::{authenticate, unauthorized, Authenticated, Caller};
 use super::state::AppState;
 use crate::surface::session::{not_found_response, SessionGrant, SessionNeed};
 use crate::types::SessionId;
@@ -50,6 +50,14 @@ const SCOPE_PREFIX: &str = "/s/";
 
 /// The listing route, as it would follow `/s/{session}/`: refused there.
 const LISTING: &str = "api/sessions";
+
+/// Marks a request that arrived on a scoped path (`/s/{session}/...`),
+/// inserted by [`resolve_session`] only. The listing refuses a request that
+/// carries it (review I3): [`scoped`] already never routes
+/// `/s/{session}/api/sessions`, and this keeps that true should the path
+/// check ever miss a spelling.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct ScopedRequest;
 
 /// The session a request was authorized to read. Inserted by
 /// [`resolve_session`] only; a handler extracts it.
@@ -127,7 +135,9 @@ pub(super) async fn resolve_session(
     };
     *req.uri_mut() = uri;
     req.extensions_mut().insert(SessionCtx { session });
+    req.extensions_mut().insert(Caller(grant));
     req.extensions_mut().insert(Authenticated);
+    req.extensions_mut().insert(ScopedRequest);
     let mut response = next.run(req).await;
     if page && response.status().is_success() {
         // Only on the page itself, so a scoped 405 is the alias's 405 byte

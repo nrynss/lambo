@@ -49,6 +49,13 @@ pub(super) struct SessionInfo {
     pub(super) exposed_beyond_loopback: bool,
     pub(super) poll_interval_ms: u64,
     pub(super) version: &'static str,
+    /// The presenting credential reads more than one served session, so the
+    /// page shows its session picker (#4 PR 4, design 6.2). Sent only when
+    /// `true`: a single-session portal's payload is byte for byte what it
+    /// was, and the page treats an absent field as `false`. Says nothing
+    /// about sessions outside the caller's own scope.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub(super) switchable: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
