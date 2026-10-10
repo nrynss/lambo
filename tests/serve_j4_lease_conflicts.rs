@@ -89,6 +89,11 @@ fn spawn_serve(
             agent,
             "--transport",
             transport,
+            // Never the default 7700: a serve that wins the lease when the
+            // test expects a refusal (a slow holder under load) would bind
+            // the developer's live writer's port, or fail on it.
+            "--port",
+            "0",
             "--ledger",
             ledger.to_str().unwrap(),
         ])
