@@ -604,6 +604,64 @@ fn end_of_input_after_the_reply_task_has_ended_makes_no_timer() {
     });
 }
 
+/// A writer that never completes a write and never wakes its caller: a
+/// client that has stopped reading.
+struct StuckWriter;
+
+impl AsyncWrite for StuckWriter {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+        _: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::task::Poll::Pending
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Pending
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Pending
+    }
+}
+
+/// #101 review 3 I2: end of input waits for a queued reply for
+/// [`REPLY_DRAIN_LIMIT`] and no longer. The reply's writer never completes,
+/// so only the limit ends the wait; the clock is paused, so the wait is
+/// measured exactly.
+///
+/// Mutations: drop the deadline and end of input is never reported; report
+/// it without waiting for the reply task and it comes before the limit.
+#[tokio::test(start_paused = true)]
+async fn end_of_input_waits_for_a_stuck_reply_for_the_drain_limit_only() {
+    use crate::mcp::serve::frames::REPLY_DRAIN_LIMIT;
+    let input = b"{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"over the cap\"}\n";
+    let (mut reader, _writer) =
+        crate::mcp::serve::frames::capped_transport_with_cap(&input[..], StuckWriter, "stdio", 16);
+    let start = tokio::time::Instant::now();
+    let reads = tokio::spawn(async move {
+        let mut sink = Vec::new();
+        reader.read_to_end(&mut sink).await.expect("read");
+        (sink, tokio::time::Instant::now())
+    });
+    // Not before the limit.
+    tokio::time::sleep(REPLY_DRAIN_LIMIT - std::time::Duration::from_millis(1)).await;
+    assert!(!reads.is_finished(), "end of input waits for the reply");
+    let (sink, ended) = tokio::time::timeout(REPLY_DRAIN_LIMIT * 10, reads)
+        .await
+        .expect("end of input is reported once the limit passes")
+        .expect("reader");
+    assert!(sink.is_empty(), "the request was over the cap");
+    assert_eq!(ended - start, REPLY_DRAIN_LIMIT, "reported at the limit");
+}
+
 /// The real tool path: rmcp's stdio transport over [`CappedFrames`] (what
 /// `capped_stdio` builds, with in-memory pipes in place of stdin and stdout)
 /// in front of a `LamboServer` that serves all three fields.

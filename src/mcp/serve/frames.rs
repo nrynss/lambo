@@ -116,7 +116,7 @@ const REPLY_QUEUE: usize = 8;
 /// How long end of input waits for replies already queued to be written
 /// before it is reported. Bounded so a client that has stopped reading as
 /// well as sending cannot keep the session from ending.
-const REPLY_DRAIN_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
+pub(super) const REPLY_DRAIN_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// A reply waiting for room on the reply queue.
 type Reserving = Pin<
