@@ -318,32 +318,46 @@ url = "http://127.0.0.1:8080"
 # admin = true
 # --- [serve] example ends ---
 
-# Optional. The read-only window (`lambo serve-web`, #4). `sessions` joins the
-# repeatable --session: every one is served at /s/<session>/ and the first also
-# at / (with more than one, names must be [A-Za-z0-9._:-]). `allowed_hosts`
-# joins --allowed-host: Host names the window answers while no credential is set,
-# beside localhost, 127.0.0.1 and [::1] (the DNS-rebinding check; a proxy
-# forwarding its public name needs it). The window
-# reads one shared view of each session, reloaded at most once per
-# view_ttl_ms however many tabs poll it; 0 reloads on every request. SQLite
-# always loads one session at a time. A recall that waits 2 s for one of the
-# recall_concurrency slots gets 503 with Retry-After: 1. Omit the table for
-# these defaults.
+# Optional. The read-only window (`lambo serve-web`, #4): a reader that holds
+# no lease and shows one or more sessions in a browser. `sessions` joins the
+# repeatable --session: every one is served at /s/<session>/ and the first
+# also at / (with more than one, names must be 1 to 128 bytes of
+# [A-Za-z0-9._:-], not starting with '.'). The window serves exactly these and
+# never looks for others in the store. A session not served, or not in the
+# caller's scope, is the same empty 404 as an unknown path.
+#
+# Who reads: with no credential at all the window is unauthenticated on
+# loopback, and then answers only the Host names localhost, 127.0.0.1, [::1]
+# and `allowed_hosts` (beside --allowed-host): the DNS-rebinding check, so a
+# proxy that forwards its public name must list it. Any credential (the
+# legacy LAMBO_AUTH_TOKEN / --auth-token, a [[web.credential]], or an
+# inherited [[serve.credential]]) makes every request need a bearer token,
+# loopback included, and turns the Host check off. LAMBO_AUTH_TOKEN reads
+# every served session; a [[web.credential]] reads only its scope. The page
+# sends no Authorization header itself, so with a credential a browser needs
+# a proxy that adds it.
+#
+# How it reads: one shared view of each session, reloaded at most once per
+# view_ttl_ms however many tabs poll it, so the page can be up to that much
+# older than the store; 0 reloads on every request. SQLite always loads one
+# session at a time. A recall that waits 2 s for one of the
+# recall_concurrency slots gets 503 with Retry-After: 1. Every value below
+# is the default; omit the table for all of them.
 #
 # --- [web] example begins ---
 # [web]
-# sessions = ["lambo", "rustydocs"]        # beside --session; the first is the default
-# allowed_hosts = ["lambo.example.com"]    # beside --allowed-host; Host names answered without a credential
+# sessions = ["lambo", "rustydocs"]        # default none; beside --session, the first overall is the default
+# allowed_hosts = ["lambo.example.com"]    # default none; name or name:port, checked only with no credential
 # view_ttl_ms = 1500           # 0 to 60000
-# max_loaded_sessions = 4      # views kept in memory, least recently used dropped
-# load_concurrency = 2         # session loads at once (1 on SQLite)
-# recall_concurrency = 4       # recalls at once
-# list_sessions = false        # true: GET /api/sessions names the caller's sessions
+# max_loaded_sessions = 4      # views kept in memory, least recently used dropped; >= 1
+# load_concurrency = 2         # session loads at once, 1 to 1024 (always 1 on SQLite)
+# recall_concurrency = 4       # recalls at once, 1 to 1024
+# list_sessions = false        # true: GET /api/sessions names the caller's sessions (off: no such route)
 # inherit_serve_credentials = false  # true: [[serve.credential]] tokens read too (no write);
 #                                    # their "*" is serve's sessions + prefixes, not this list
 #
-# [[web.credential]]           # a read-only token for some sessions; none = LAMBO_AUTH_TOKEN reads all
-# name = "lambo-viewers"
+# [[web.credential]]           # a read-only token for some served sessions (none by default)
+# name = "lambo-viewers"       # not "default" or "local"
 # token_env = "LAMBO_WEB_LAMBO_TOKEN"   # the variable holding the token, never the token
 # sessions = ["lambo"]         # exact names, "*" = every served session
 # # session_prefix = "dc-u-"   # served sessions under a prefix
