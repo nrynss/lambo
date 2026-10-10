@@ -1082,13 +1082,18 @@ impl Embedder for EmbeddingGemma2Embedder {
             ));
         }
         // The canonical form (22g): every image is sent as a lossless PNG
-        // whose longer side is exactly 768 px. Done before the server is
-        // asked anything, so an image Lambo cannot read fails on its own.
-        let canonical = canonical::canonicalize(image.bytes(), image.mime()).await?;
-        let encoded = base64::engine::general_purpose::STANDARD.encode(&canonical);
+        // whose longer side is exactly 768 px. Its header is read first
+        // (cheap), so an image Lambo cannot even size fails before the
+        // server is asked anything. The full decode comes after the server
+        // and budget checks, so while the server is down or misconfigured a
+        // retried embed fails fast instead of paying for a decode each time.
+        let (bytes, mime) = (image.bytes(), image.mime());
+        canonical::dimensions(bytes, mime)?;
         if let Eg2ServerCheck::Verified { .. } = self.ensure_server(true).await? {
             self.ensure_image_budget().await?;
         }
+        let canonical = canonical::canonicalize(bytes, mime).await?;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&canonical);
         let body = image_request(&self.model, ImageMime::Png.as_str(), &encoded);
         // The image's own token count is not judged: it varies with the
         // image's size and shape (see EG2_REFERENCE_IMAGE_TOKENS).

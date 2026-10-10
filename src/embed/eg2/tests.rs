@@ -180,12 +180,34 @@ async fn the_image_body_carries_the_canonical_form() {
     }
 }
 
-/// An image Lambo cannot decode fails before any request reaches the server.
+/// An image whose header Lambo cannot read fails before the server is asked
+/// anything, not even `/props`.
 #[tokio::test]
-async fn an_undecodable_large_image_never_reaches_the_server() {
+async fn an_unreadable_header_never_reaches_the_server() {
     let server = MockServer::start();
     let any = server.mock(|when, then| {
         when.any_request();
+        then.status(200).json_body(ok_body(&native(), Some(293)));
+    });
+    // A valid PNG signature and IHDR, then the width zeroed: the validator
+    // is bypassed (as a library caller with `from_validated` could).
+    let mut png = png_2x1();
+    png[16..20].copy_from_slice(&0u32.to_be_bytes());
+    let input =
+        crate::embed::ImageInput::from_validated(&png, crate::embed::ImageMime::Png, [0; 32]);
+    let err = embedder(&server).embed_image(input).await.unwrap_err();
+    assert!(matches!(&err, EmbedError::Unreadable(_)), "{err:?}");
+    assert!(!err.is_transient());
+    any.assert_hits(0);
+}
+
+/// An image whose data Lambo cannot decode never reaches the embeddings
+/// endpoint.
+#[tokio::test]
+async fn an_undecodable_large_image_never_reaches_the_server() {
+    let server = MockServer::start();
+    let embeddings = server.mock(|when, then| {
+        when.method(POST).path("/v1/embeddings");
         then.status(200).json_body(ok_body(&native(), Some(293)));
     });
     let mut png = Vec::new();
@@ -200,7 +222,39 @@ async fn an_undecodable_large_image_never_reaches_the_server() {
         "{err:?}"
     );
     assert!(!err.is_transient());
-    any.assert_hits(0);
+    embeddings.assert_hits(0);
+}
+
+/// The server and budget checks run before the full decode (22g review L4):
+/// with a verified server whose image budget is wrong, an image whose data
+/// would not decode fails on the budget, so a decode is never paid for an
+/// embed the server state already refuses.
+///
+/// Mutation: decode before `ensure_server` -> red (the error becomes
+/// `Unreadable`).
+#[tokio::test]
+async fn the_server_is_checked_before_the_image_is_decoded() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(GET).path("/props");
+        then.status(200)
+            .json_body(props("embeddinggemma-2-Q8_0.gguf", "Q8_0", true));
+    });
+    let reference = server.mock(|when, then| {
+        when.method(POST)
+            .path("/v1/embeddings")
+            .body(image_body(&png_1x1()));
+        then.status(200).json_body(ok_body(&native(), Some(260)));
+    });
+    let mut png = Vec::new();
+    image::DynamicImage::new_rgb8(1000, 1000)
+        .write_to(std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+    png.truncate(png.len() / 2);
+    let input = crate::surface::image::validate(&png, "image/png").unwrap();
+    let err = embedder(&server).embed_image(input).await.unwrap_err();
+    assert!(err.to_string().contains("reference image"), "{err}");
+    reference.assert_hits(1);
 }
 
 /// Empty text is refused before any request, like every other adapter.
