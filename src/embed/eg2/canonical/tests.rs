@@ -391,10 +391,10 @@ fn the_decode_limits_match_the_validator() {
     assert!(check_dimensions(0, 1).is_err());
 }
 
-/// A truncated image (header fine, data cut) fails as a decode error
+/// A truncated image (header fine, data cut) fails as unreadable
 /// naming the format, never a panic, and never echoes bytes.
 #[test]
-fn a_truncated_large_image_is_a_backend_error() {
+fn a_truncated_large_image_is_unreadable() {
     let mut png = png_rgb(1000, 1000);
     png.truncate(png.len() / 2);
     let err = canonical_of(&png, "image/png").unwrap_err();
