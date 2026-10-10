@@ -299,7 +299,8 @@ pub(super) fn authorize_bind_web(bind: IpAddr, token: Option<&AuthToken>) -> Res
     }
     Err(CliError::Usage(format!(
         "refusing to start: --bind {bind} exposes an unauthenticated read-only session beyond \
-         loopback. Set {AUTH_TOKEN_ENV} (or pass --auth-token) to require \
+         loopback. Set {AUTH_TOKEN_ENV} (or pass --auth-token), or configure a \
+         [[web.credential]] in lambo.toml for a token scoped to some sessions, to require \
          'Authorization: Bearer <token>' on every request, or bind 127.0.0.1 and reach it \
          through a tunnel or an authenticating proxy."
     )))

@@ -54,6 +54,12 @@ fn authorize_bind_web_fails_closed_off_loopback() {
             authorize_bind_web(bind, None).expect_err("{bind} without a token must not start");
         let msg = err.to_string();
         assert!(msg.contains("refusing to start"), "{msg}");
+        // Review L2: any configured credential satisfies the rule, so the
+        // refusal names the scoped route beside the legacy token.
+        assert!(
+            msg.contains("LAMBO_AUTH_TOKEN") && msg.contains("[[web.credential]]"),
+            "{msg}"
+        );
 
         let token = AuthToken::new("s3cret").expect("valid");
         authorize_bind_web(bind, Some(&token)).expect("a token satisfies the rule");
