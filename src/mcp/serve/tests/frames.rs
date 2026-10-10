@@ -94,7 +94,7 @@ async fn an_oversized_frame_is_discarded_without_being_buffered() {
     let mut capped = CappedFrames::new(server, "stdio");
     let peak = capped.peak();
     let writer = tokio::spawn(async move {
-        stream_frame(&mut client, "{\"values\":[", "0.5,", OVER, "0.5]}\n").await;
+        stream_frame(&mut client, "{\"values\":\"", "zqzq", OVER, "\"}\n").await;
         client.write_all(b"{\"after\":1}\n").await.expect("after");
     });
     let mut out = Vec::new();
@@ -118,13 +118,17 @@ async fn an_oversized_frame_is_discarded_without_being_buffered() {
         "{logged}"
     );
     // Its size (prefix, filler, suffix) and the cap, as fields.
-    let size = "{\"values\":[".len() + OVER + "0.5]}".len();
+    let size = "{\"values\":\"".len() + OVER + "\"}".len();
     assert!(logged.contains(&size.to_string()), "{logged}");
     assert!(
         logged.contains(&MAX_MCP_FRAME_BYTES.to_string()),
         "{logged}"
     );
-    assert!(!logged.contains("0.5"), "the log never quotes the frame");
+    // The filler is a marker that cannot occur in a timestamp, a field name
+    // or the message (#101 review L1: `0.5` matched `…:30.5…` timestamps).
+    //
+    // Mutation: add the frame's first bytes to the WARN and this fails.
+    assert!(!logged.contains("zq"), "the log never quotes the frame");
 }
 
 /// The real tool path: rmcp's stdio transport over [`CappedFrames`] (what
