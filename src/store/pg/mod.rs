@@ -53,6 +53,17 @@
 //! width + hnsw from init (B2), cosine-distance ranking (B3: `<=>` and
 //! score `1 - d`). It does not copy Cockroach SQL.
 //!
+//! # A holder's two vector sources (#8, #60)
+//!
+//! `exact_vector_scan` stays `false`: the database scores by its own
+//! distance and Cockroach may answer from an approximate index, so a session
+//! holder's **recall** keeps the database search (#8). `holder_derives_from_graph`
+//! is `true`: the database sees only flushed rows, so a holder's **hybrid
+//! derive** ranks its semantic-merge candidates in its in-memory graph, the
+//! same purpose split #18 made for the Elastic tier. The merge leg therefore
+//! scores exact cosine, not the database's distance; the accepted differences
+//! are recorded in `merge_freshness`, which also holds the tests.
+//!
 //! # Dialect-aware as of B2, still recorded where B3 owns the rest
 //!
 //! B0 shipped **one** working dialect. B2 splits the two over-merged
@@ -404,6 +415,22 @@ impl<D: Dialect> GraphStore for PgStore<D> {
             limit,
         )
         .await
+    }
+
+    // `exact_vector_scan` keeps its default `false` (#8): the database ranks
+    // by its own distance, and Cockroach may answer from an approximate
+    // index, so a holder's **recall** keeps asking the database.
+
+    /// A holder's hybrid derive ranks its semantic-merge candidates in its
+    /// in-memory graph (#60, the purpose split #18 introduced). The database
+    /// sees only flushed rows, and the write-behind flush lags by seconds to
+    /// minutes, so a paraphrase derived right after the original would miss
+    /// it and become a permanent near-duplicate. The graph is fresh up to the
+    /// write being made and scores exact cosine; merges at the threshold edge
+    /// may therefore decide differently from the database's distance, which
+    /// is accepted (see `merge_freshness`).
+    fn holder_derives_from_graph(&self) -> bool {
+        true
     }
 
     async fn blast_radius(

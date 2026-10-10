@@ -111,9 +111,10 @@ impl<'a> VectorCandidates<'a> {
     /// amending #8's "one constructor, two callers").
     ///
     /// The holder's graph whenever [`Self::for_holder`] would choose it, and
-    /// also over a store that declares `holder_derives_from_graph` (a lagging
-    /// tier): derive's dedupe needs a fresh, exact view of what was just
-    /// written, which the graph has and the tier does not. Recall still
+    /// also over a store that declares `holder_derives_from_graph` (one that
+    /// lags the holder: the Elastic tier, #18; the Postgres family, #60):
+    /// derive's dedupe needs a fresh, exact view of what was just written,
+    /// which the graph has and the lagging store does not. Recall still
     /// takes [`Self::for_holder`]'s choice. Same availability as
     /// [`Self::for_holder`]: never switches a vector leg on.
     pub(crate) fn for_holder_derive(store: &'a dyn GraphStore, graph: &'a RwLock<Graph>) -> Self {

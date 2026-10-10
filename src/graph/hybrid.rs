@@ -63,7 +63,9 @@
 //!    context, `embedder.embed`, then the checked candidate read of the source
 //!    this call was handed (`VectorCandidates`): the holder's graph, ranked in
 //!    RAM under a brief read lock with no await, when the store ranks by an
-//!    exact scan (#8), else `store.vector_candidates_checked` through the
+//!    exact scan (#8) or lags the holder and declares
+//!    `holder_derives_from_graph` (the Elastic tier, #18; the Postgres
+//!    family, #60), else `store.vector_candidates_checked` through the
 //!    [`GraphStore`] trait only. A capability-miss marks the concept
 //!    for the canonical fallback (logged once per session); an embed failure or
 //!    timeout fails the whole call before anything is written (J3-R3-1); a
@@ -149,7 +151,7 @@
 //!    Persisting a vector lowers nothing.
 //! 3. **A vector minted in this call can never drive a merge in this call.**
 //!    Candidates come from the live graph (on a holder whose store ranks
-//!    exactly, #8) or from the store, and neither can see this call's staged
+//!    exactly, #8, or lags it, #18 and #60) or from the store, and neither can see this call's staged
 //!    writes: they live on a private clone until the commit swaps it in;
 //!    `*target != id` is the defence in depth.
 //!
@@ -157,8 +159,9 @@
 //!
 //! Once committed, a fresh vector **is** a legal merge *target* for a later
 //! derive (`Resolution::HybridMerge { targets }`): at once on a holder that ranks
-//! in its graph (#8, which is why an unflushed concept can be merged into), after
-//! the next flush on one that reads the store. That is unavoidable here:
+//! in its graph for derive (SQLite since #8, the Elastic tier since #18, the
+//! Postgres family since #60, which is why an unflushed concept can be merged
+//! into), after the next flush on one that reads the store. That is unavoidable here:
 //! the checked candidate read targets `embedding IS NOT NULL` and cannot
 //! tell the merge leg from the recall leg apart. A strict target-exclusion would
 //! need durable per-vector provenance (a new `concepts` column plus a migration

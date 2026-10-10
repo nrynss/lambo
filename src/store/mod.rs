@@ -472,12 +472,18 @@ pub trait GraphStore: Send + Sync {
     /// merge, not produce paraphrased near-duplicates. A store whose checked
     /// read is a **lagging tier** (the Elasticsearch recall index: unflushed
     /// concepts, the last refresh interval, everything while the tier is
-    /// stale) cannot promise that, so it returns `true` and the holder's
-    /// derive ranks in its graph: exact, and fresh up to the write being
-    /// made. Recall keeps asking the store ([`Self::exact_vector_scan`]
-    /// governs that). Default `false`: on the SQL adapters derive and recall
-    /// keep choosing their source together, exactly as before. Ignored unless
-    /// the store also advertises [`Capabilities::VECTOR_SEARCH`].
+    /// stale) cannot promise that, and neither can the Postgres family
+    /// (#60: its search sees only flushed rows, and the write-behind flush
+    /// lags by seconds to minutes). Both return `true`, and the holder's
+    /// derive ranks in its graph: exact cosine, and fresh up to the write
+    /// being made. Recall keeps asking the store ([`Self::exact_vector_scan`]
+    /// governs that). The cost is parity at the threshold edge: the graph
+    /// scores exact cosine where the store scored by its own distance (or an
+    /// approximate index), so a pair on the threshold may decide differently.
+    /// Default `false`: a store that does not opt in keeps derive and recall
+    /// on one source. SQLite needs no opt-in, its exact scan already puts
+    /// both on the graph. Ignored unless the store also advertises
+    /// [`Capabilities::VECTOR_SEARCH`].
     fn holder_derives_from_graph(&self) -> bool {
         false
     }
