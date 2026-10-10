@@ -1036,9 +1036,6 @@
   recalls could overlap a window; a write-heavy multi-agent session will
   see more, which `cold_start` now makes measurable. Once the daemon scores
   the concept, the normal blend returns and ranks can change.
-- A daemon rescore that panicked no longer leaves the score table stale
-  until the next write: the cycle marks its epoch done only after
-  publishing, so the next cycle retries (#79 review).
   Expected-output change: the assembly test fixture with a deliberately
   unscored phase-1 member (c2) now orders `c1,c2,c5,c3,c4,c6`
   (`.75,.375,.15,0,0,0`) instead of `c1,c2,c5,c6,c4,c3`
@@ -1048,6 +1045,11 @@
   golden test passes with the cold mode made to panic, so fully scored
   goldens (recall, context and H3 payload goldens) are unchanged.
   `RECENT_SCORE`, merge thresholds and cosine scales are untouched (#87).
+- A daemon rescore that panicked no longer leaves the score table stale
+  until the next write: the cycle marks its epoch done only after
+  publishing, so the next cycle retries. The rescore is contained on its
+  own, so one that panics every cycle no longer stops detection, the hot
+  list and GC; it logs one warning per epoch (#79 review).
 - `graded_similarity_ranks_by_cosine_not_recency_on_sqlite` no longer fails
   intermittently. The daemon's recency is a concept's millisecond position
   in the session's wall-clock span, and the fixture's session lasts about
