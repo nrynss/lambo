@@ -241,6 +241,83 @@ async fn a_reply_never_lands_inside_a_frame_the_server_is_writing() {
     drop(reads.await.expect("reader"));
 }
 
+/// A writer whose first flush is not ready at once, as tokio's `Stdout`
+/// often is not (its writes run on the blocking pool).
+struct SlowFirstFlush {
+    inner: tokio::io::DuplexStream,
+    flushes: usize,
+}
+
+impl AsyncWrite for SlowFirstFlush {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        self.flushes += 1;
+        if self.flushes == 1 {
+            cx.waker().wake_by_ref();
+            return std::task::Poll::Pending;
+        }
+        std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+/// A flush that is pending at a frame boundary does not leave the server's
+/// writer holding the frame lock afterwards: the reply to a discarded
+/// frame goes out while the server writes nothing more. (Found by the
+/// stdio binary test, where the reply sometimes waited for rmcp's next
+/// frame.)
+///
+/// Mutation: keep the lock after a pending flush at a boundary (treat a
+/// held lock as mid-frame, as the first version did) and the reply never
+/// arrives.
+#[tokio::test]
+async fn a_pending_flush_does_not_keep_the_reply_waiting() {
+    let input = format!(
+        "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"x\",\"params\":\"{}\"}}\n",
+        "p".repeat(64)
+    );
+    let (server_out, client_out) = tokio::io::duplex(4096);
+    let out = SlowFirstFlush {
+        inner: server_out,
+        flushes: 0,
+    };
+    let (mut reader, mut writer) =
+        crate::mcp::serve::frames::capped_transport_with_cap(input.as_bytes(), out, "stdio", 16);
+    writer.write_all(b"{\"a\":1}\n").await.expect("write");
+    writer.flush().await.expect("flush");
+    let mut sink = Vec::new();
+    reader.read_to_end(&mut sink).await.expect("read");
+    let mut lines = BufReader::new(client_out).lines();
+    let first = lines.next_line().await.expect("read").expect("a frame");
+    assert_eq!(first, "{\"a\":1}");
+    let reply = tokio::time::timeout(std::time::Duration::from_secs(5), lines.next_line())
+        .await
+        .expect("the reply arrives while the server writes nothing more")
+        .expect("read")
+        .expect("a frame");
+    assert!(
+        reply.contains("-32600") && reply.contains("\"id\":1"),
+        "{reply}"
+    );
+    drop(writer);
+}
+
 /// An over-cap frame cut off by end of input gets no reply: the client has
 /// stopped sending, and its transport is shutting down.
 ///

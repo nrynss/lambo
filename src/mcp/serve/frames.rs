@@ -340,23 +340,39 @@ impl<R: AsyncRead + Unpin> AsyncRead for CappedFrames<R> {
 
 /// The write half rmcp is given: the shared writer, locked a frame at a
 /// time. See the module docs.
+///
+/// The lock is held only while a frame is part-written (`mid_frame`). At a
+/// frame boundary it is let go after every operation, `Pending` included:
+/// the bytes rmcp has written so far are already in the writer, so a reply
+/// written next cannot split them, and a flush that is still pending must
+/// not keep the reply task waiting for rmcp's next frame.
 pub(crate) struct FrameWriter<W> {
     shared: Arc<Mutex<W>>,
     guard: Option<OwnedMutexGuard<W>>,
     locking: Option<Pin<Box<dyn Future<Output = OwnedMutexGuard<W>> + Send>>>,
+    /// Bytes of a frame have been written and its newline has not.
+    mid_frame: bool,
 }
 
-impl<W: Send + 'static> FrameWriter<W> {
+impl<W: AsyncWrite + Unpin + Send + 'static> FrameWriter<W> {
     fn new(shared: Arc<Mutex<W>>) -> Self {
         Self {
             shared,
             guard: None,
             locking: None,
+            mid_frame: false,
         }
     }
 
-    /// Hold the lock, waiting for it if a reply has it.
-    fn poll_lock(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+    /// Run `op` on the writer under the lock, waiting for the lock if a
+    /// reply has it, and let the lock go afterwards unless a frame is
+    /// part-written.
+    fn with_lock<T>(
+        &mut self,
+        cx: &mut Context<'_>,
+        op: impl FnOnce(Pin<&mut W>, &mut Context<'_>) -> Poll<std::io::Result<T>>,
+        after: impl FnOnce(&T) -> Option<bool>,
+    ) -> Poll<std::io::Result<T>> {
         if self.guard.is_none() {
             let shared = &self.shared;
             let locking = self
@@ -366,7 +382,24 @@ impl<W: Send + 'static> FrameWriter<W> {
             self.locking = None;
             self.guard = Some(guard);
         }
-        Poll::Ready(())
+        let Some(guard) = self.guard.as_mut() else {
+            unreachable!("the lock is held here");
+        };
+        let polled = op(Pin::new(&mut **guard), cx);
+        match &polled {
+            Poll::Ready(Ok(v)) => {
+                if let Some(mid_frame) = after(v) {
+                    self.mid_frame = mid_frame;
+                }
+            }
+            // A failed writer has no frame left to protect.
+            Poll::Ready(Err(_)) => self.mid_frame = false,
+            Poll::Pending => {}
+        }
+        if !self.mid_frame {
+            self.guard = None;
+        }
+        polled
     }
 }
 
@@ -376,42 +409,22 @@ impl<W: AsyncWrite + Unpin + Send + 'static> AsyncWrite for FrameWriter<W> {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
-        let this = self.get_mut();
-        ready!(this.poll_lock(cx));
-        let Some(guard) = this.guard.as_mut() else {
-            unreachable!("poll_lock holds the lock when it is ready");
-        };
-        let n = ready!(Pin::new(&mut **guard).poll_write(cx, buf))?;
-        // A write that ends a frame ends this writer's turn.
-        if n > 0 && buf[n - 1] == b'\n' {
-            this.guard = None;
-        }
-        Poll::Ready(Ok(n))
+        self.get_mut().with_lock(
+            cx,
+            |w, cx| w.poll_write(cx, buf),
+            // A write that ends on a newline ends the frame.
+            |n| (*n > 0).then(|| buf[*n - 1] != b'\n'),
+        )
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        let this = self.get_mut();
-        let mid_frame = this.guard.is_some();
-        ready!(this.poll_lock(cx));
-        let Some(guard) = this.guard.as_mut() else {
-            unreachable!("poll_lock holds the lock when it is ready");
-        };
-        ready!(Pin::new(&mut **guard).poll_flush(cx))?;
-        if !mid_frame {
-            this.guard = None;
-        }
-        Poll::Ready(Ok(()))
+        self.get_mut()
+            .with_lock(cx, |w, cx| w.poll_flush(cx), |()| None)
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        let this = self.get_mut();
-        ready!(this.poll_lock(cx));
-        let Some(guard) = this.guard.as_mut() else {
-            unreachable!("poll_lock holds the lock when it is ready");
-        };
-        ready!(Pin::new(&mut **guard).poll_shutdown(cx))?;
-        this.guard = None;
-        Poll::Ready(Ok(()))
+        self.get_mut()
+            .with_lock(cx, |w, cx| w.poll_shutdown(cx), |()| Some(false))
     }
 }
 
