@@ -13,6 +13,14 @@ use tokio::io::AsyncBufReadExt;
 /// defect rather than a big call, and is dropped as one.
 pub(super) const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
+/// The largest frame the proxy forwards from its client to the holder: the
+/// holder's own request cap ([`crate::mcp::serve::MAX_MCP_FRAME_BYTES`],
+/// #101), which discards anything longer unread. Dropping it here instead
+/// spares forwarding up to [`MAX_FRAME_BYTES`] the holder will throw away,
+/// and leaves no forwarded request in the in-flight list that can never be
+/// answered. Responses from the holder keep the wider [`MAX_FRAME_BYTES`].
+pub(super) const MAX_CLIENT_FRAME_BYTES: usize = crate::mcp::serve::MAX_MCP_FRAME_BYTES;
+
 /// One frame from a line-framed peer, or the reason there is not one.
 ///
 /// # Why this exists rather than `AsyncBufReadExt::lines()`
@@ -42,7 +50,8 @@ pub(super) enum Framed {
     /// after them. Never forwarded — a torn JSON line is never valid to
     /// deliver — and always followed by end-of-stream.
     Torn(usize),
-    /// A frame past [`MAX_FRAME_BYTES`], discarded through its newline. The
+    /// A frame past the cap ([`MAX_FRAME_BYTES`] unless the reader was given
+    /// another), discarded through its newline. The
     /// stream is still usable.
     Oversize(usize),
     /// A complete frame that is not UTF-8, so it cannot be JSON-RPC. Discarded;
@@ -57,6 +66,15 @@ pub(super) enum Framed {
 /// Bounded and resynchronising — see [`Framed`] for why neither property is
 /// optional here.
 pub(super) async fn read_frame<R>(r: &mut R) -> std::io::Result<Framed>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    read_frame_within(r, MAX_FRAME_BYTES).await
+}
+
+/// [`read_frame`] with a frame cap of `cap` bytes instead of
+/// [`MAX_FRAME_BYTES`].
+pub(super) async fn read_frame_within<R>(r: &mut R, cap: usize) -> std::io::Result<Framed>
 where
     R: tokio::io::AsyncBufRead + Unpin,
 {
@@ -80,7 +98,7 @@ where
                 Some(i) => (i, true),
                 None => (available.len(), false),
             };
-            if over > 0 || buf.len() + take > MAX_FRAME_BYTES {
+            if over > 0 || buf.len() + take > cap {
                 over += take;
             } else {
                 buf.extend_from_slice(&available[..take]);

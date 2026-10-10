@@ -91,7 +91,7 @@ pub(crate) use forwarding::INFLIGHT_DEPTH_WARN;
 use dialing::Dialled;
 use disconnect::client_gone;
 use forwarding::{request_id, response_id, FromHub, Step};
-use framing::{read_frame, Framed, MAX_FRAME_BYTES};
+use framing::{read_frame_within, Framed, MAX_CLIENT_FRAME_BYTES};
 use handshake::Handshake;
 
 /// Forward this process's stdio to the session holder, for as long as its client
@@ -284,7 +284,7 @@ impl HubProxy {
         let client_reader = tokio::spawn(async move {
             let mut stdin = BufReader::new(tokio::io::stdin());
             loop {
-                match read_frame(&mut stdin).await {
+                match read_frame_within(&mut stdin, MAX_CLIENT_FRAME_BYTES).await {
                     Ok(Framed::Line(line)) => {
                         if client_tx.send(line).await.is_err() {
                             break;
@@ -304,7 +304,7 @@ impl HubProxy {
                     }
                     Ok(Framed::Oversize(bytes)) => tracing::warn!(
                         bytes,
-                        cap = MAX_FRAME_BYTES,
+                        cap = MAX_CLIENT_FRAME_BYTES,
                         "lambo serve: the proxy's client sent a frame over the size cap — dropped \
                          (no reply is possible: the frame was discarded before any id could be \
                          read from it)"

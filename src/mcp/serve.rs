@@ -96,6 +96,7 @@ mod admin;
 mod authority;
 mod builder;
 mod frames;
+pub(crate) use frames::MAX_MCP_FRAME_BYTES;
 mod heartbeat;
 mod http_guards;
 mod hub;

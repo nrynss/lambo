@@ -186,3 +186,36 @@ async fn an_oversize_frame_is_dropped_and_the_stream_resynchronises() {
         Framed::Line(r#"{"after":1}"#.to_string())
     );
 }
+
+/// #101: the client's side of the proxy reads under the holder's own
+/// request cap, which is narrower than the response cap, and the reader
+/// honours the cap it is given: one byte over is dropped, exactly at the cap
+/// passes.
+///
+/// Mutation: compare against `MAX_FRAME_BYTES` in `read_frame_within`
+/// instead of `cap` and the over-cap frame comes back as a line. (Which cap
+/// `HubProxy::run` passes for its client is not observable here: the holder
+/// discards the same frame unread, so a client sees no difference.)
+#[tokio::test]
+async fn a_client_frame_over_the_holders_cap_is_dropped_at_the_proxy() {
+    assert!(MAX_CLIENT_FRAME_BYTES < MAX_FRAME_BYTES);
+    let mut bytes = vec![b'x'; MAX_CLIENT_FRAME_BYTES + 1];
+    bytes.push(b'\n');
+    bytes.extend(std::iter::repeat_n(b'y', MAX_CLIENT_FRAME_BYTES));
+    bytes.push(b'\n');
+    let mut read = BufReader::new(std::io::Cursor::new(bytes));
+    let first = read_frame_within(&mut read, MAX_CLIENT_FRAME_BYTES)
+        .await
+        .unwrap();
+    assert!(
+        first == Framed::Oversize(MAX_CLIENT_FRAME_BYTES + 1),
+        "one byte over the cap must be dropped"
+    );
+    let second = read_frame_within(&mut read, MAX_CLIENT_FRAME_BYTES)
+        .await
+        .unwrap();
+    assert!(
+        matches!(&second, Framed::Line(line) if line.len() == MAX_CLIENT_FRAME_BYTES),
+        "a frame exactly at the cap must pass"
+    );
+}
