@@ -157,6 +157,30 @@ async fn pages_carry_the_exact_csp_and_every_response_is_nosniff() {
     handle.abort();
 }
 
+/// A request line hyper cannot parse (a control byte in the method) is
+/// answered by hyper itself, before any layer, so it carries neither header.
+/// `NOT / HTTP/1.1` would not do: an unknown method is a valid token and
+/// reaches the router. A `431` takes the same hyper path and is not sent.
+#[tokio::test]
+async fn a_malformed_request_gets_no_security_headers() {
+    let store = seed("csp92").await;
+    let (addr, handle) = spawn(state_on(store, "csp92")).await;
+
+    let mut sock = tokio::net::TcpStream::connect(addr).await.expect("connect");
+    sock.write_all(b"GE\x01T / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+        .await
+        .expect("write");
+    let mut raw = Vec::new();
+    let read = tokio::time::timeout(Duration::from_secs(5), sock.read_to_end(&mut raw)).await;
+    assert!(read.is_ok(), "hyper must close the connection");
+    let raw = String::from_utf8_lossy(&raw).to_ascii_lowercase();
+    assert!(raw.starts_with("http/1.1 400 "), "{raw}");
+    assert!(!raw.contains("nosniff"), "{raw}");
+    assert!(!raw.contains("content-security-policy"), "{raw}");
+
+    handle.abort();
+}
+
 /// A configured bearer: a missing token and a wrong one are both `401`,
 /// with `nosniff` and no page policy. The token is not part of the answer.
 #[tokio::test]
