@@ -2902,6 +2902,86 @@ mod tests {
         );
     }
 
+    /// #60 review T-2, the degrade site: a degraded session drops what it
+    /// drains, so those concepts never reach the store and must stay in the
+    /// unflushed set even past a later successful stamp (the stand-in here
+    /// for any later commit, such as a builder relabel's).
+    #[tokio::test(start_paused = true)]
+    async fn a_degrade_dropped_concept_stays_unflushed_past_a_later_stamp() {
+        let _quiet = quiet_logs();
+        let inner: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+        let store = Arc::new(FlakyStore::new(inner));
+        let graph = new_graph();
+        let task = FlushTask::new(
+            graph.clone(),
+            store.clone(),
+            params(Duration::from_secs(1), 100, 1, 4),
+        );
+        let _handle = task.spawn();
+        let_task_arm().await;
+
+        // As in `degrades_past_log_max_and_stops_flushing`: a retained batch
+        // plus later writes pass log_max = 4, and the next cycle drops them.
+        store.fail_forever();
+        let iid = add_interaction(&graph, 1, None);
+        let retained = add_concept(&graph, 1, iid); // 3 mutations
+        tokio::time::advance(Duration::from_secs(1)).await;
+        wait_until(|| store.flush_calls() >= 1).await;
+        tokio::time::advance(Duration::from_millis(100)).await;
+        wait_until(|| store.flush_calls() >= 2).await;
+        let pushed = add_concept(&graph, 2, iid); // pending 5 > 4
+        tokio::time::advance(Duration::from_secs(1)).await;
+        wait_until(|| task.degraded()).await;
+        tokio::time::advance(Duration::from_millis(100)).await;
+        wait_until(|| task.stats().depth == 0).await;
+
+        let dropped = add_concept(&graph, 3, iid);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        wait_until(|| graph.read().log_len() == 0).await;
+
+        let later = graph.read().epoch();
+        graph.write().mark_durable_through(later);
+        for id in [retained, pushed, dropped] {
+            assert!(
+                graph.read().is_unflushed(&id),
+                "a concept dropped while degraded was counted as durable"
+            );
+        }
+    }
+
+    /// #60 review T-2, the fence site: a holder that lost its lease drops its
+    /// pending batch, so those concepts must stay in the unflushed set even
+    /// past a later successful stamp.
+    #[tokio::test(start_paused = true)]
+    async fn a_fence_dropped_concept_stays_unflushed_past_a_later_stamp() {
+        let _quiet = quiet_logs();
+        let store: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+        let graph = new_graph();
+        let fence = Arc::new(AtomicBool::new(false));
+        let task = FlushTask::new(
+            graph.clone(),
+            store.clone(),
+            params(Duration::from_secs(1), 100, 3, 1_000),
+        )
+        .with_fence(fence.clone());
+        let handle = task.spawn();
+        let_task_arm().await;
+
+        let iid = add_interaction(&graph, 1, None);
+        let dropped = add_concept(&graph, 1, iid);
+        fence.store(true, Ordering::Release);
+        tokio::time::advance(Duration::from_millis(100)).await;
+        handle.await.expect("fenced loop exits");
+        assert_eq!(graph.read().log_len(), 0, "the fenced loop drained");
+
+        let later = graph.read().epoch();
+        graph.write().mark_durable_through(later);
+        assert!(
+            graph.read().is_unflushed(&dropped),
+            "a concept dropped by the fence was counted as durable"
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn transient_failures_keep_the_retain_path_untouched() {
         // STORE-4 contrast: transient (Backend) failures keep the EXISTING
