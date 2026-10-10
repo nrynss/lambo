@@ -93,6 +93,10 @@ pub struct LamboServer {
     ledger: Option<Arc<Ledger>>,
     /// When this process's server handle was created — the heartbeat's uptime.
     started_at: Instant,
+    /// The session's use, for the serve's idle detach and eviction (#32 PR
+    /// 6): every tool call holds an in-flight guard on it. `None` outside
+    /// `lambo serve`.
+    activity: Option<Arc<crate::mcp::serve::activity::SessionActivity>>,
 }
 
 impl std::fmt::Debug for LamboServer {
@@ -119,6 +123,20 @@ impl LamboServer {
             tool_router,
             ledger: None,
             started_at: Instant::now(),
+            activity: None,
+        }
+    }
+
+    /// The same handle, recording the session's use on `activity` (#32 PR
+    /// 6): each tool call is in flight on it from start to end, whichever
+    /// transport it arrived on. Clones share it.
+    pub(crate) fn with_activity(
+        self,
+        activity: Arc<crate::mcp::serve::activity::SessionActivity>,
+    ) -> Self {
+        Self {
+            activity: Some(activity),
+            ..self
         }
     }
 
@@ -375,6 +393,9 @@ impl ServerHandler for LamboServer {
             .get::<axum::http::request::Parts>()
             .and_then(|parts| parts.extensions.get::<CallCredential>())
             .map(|credential| Arc::clone(&credential.0));
+        // In flight to the end of the call, so neither the idle sweeper nor
+        // an eviction takes the session down under it (#32 PR 6).
+        let _in_flight = self.activity.as_ref().map(|activity| activity.enter());
         let call = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
         trace::with_caller(caller, self.tool_router.call(call)).await
     }

@@ -55,6 +55,19 @@
   (`sessions: vec![session.clone()]` keeps one session);
   `ServeOptions::new` fills it. `lambo serve --session` is now a repeatable
   flag.
+- `ServeOptions` gains a public `bounds: SessionBounds` field (#32, sixth
+  part): the `[serve]` bounds on attached sessions. Code that builds
+  `ServeOptions` with a struct literal must add `bounds:
+  SessionBounds::default()` (or `SessionBounds::from_config(&file.serve)`);
+  `ServeOptions::new` fills the defaults.
+- An HTTP `lambo serve` with a credential that reaches past its pinned
+  sessions (a `session_prefix`, or an unpinned name) now attaches those
+  sessions on demand (#32, sixth part), where before such a request got
+  the `404`. Such a serve, even with one pinned session, no longer runs the
+  startup election and does not exit on a lost lease: only the session that
+  lost it is detached. A serve whose credentials reach only the pinned
+  sessions (the legacy token, the implicit `local`, or exact pinned names)
+  is unchanged.
 - `lambo serve --transport http` serves exactly `/mcp` and
   `/mcp/s/{session}` (#32). A request to any other path under `/mcp/`
   (which reached the one session before, because the service ignored the
@@ -232,6 +245,24 @@
   kept), so the relative URLs resolve under it. The page has no session
   picker yet (#4 PR 4). With a token configured a browser still cannot
   present it without a proxy that adds the header.
+- `lambo.toml` `[serve]` `attach_concurrency`, `idle_detach_secs` and
+  `per_session_rps` are enforced by an HTTP `lambo serve` (#32, sixth
+  part), so the startup notice no longer names them; none applies to a
+  stdio serve, which does not name them either. The notice is now logged
+  only by an HTTP serve whose table sets `[[serve.projects]]`.
+- The startup warning about credentials (#32, fifth part) now names a
+  credential without `create` that reaches sessions the serve does not pin
+  (#32, sixth part): it attaches one only once the session exists. The
+  warnings about unpinned names being unreachable are gone, since they are
+  reachable on demand.
+- Every session of an HTTP serve with several sessions, or with sessions
+  attached on demand, draws its own request bucket at `[serve]
+  per_session_rps` (default `--rate-limit-rps`, burst twice that) after the
+  credential's (#32, sixth part); a request over it gets `429` with
+  `Retry-After: 1`, as the credential's limit answers. A serve of one
+  session that attaches nothing on demand draws one only when
+  `per_session_rps` is set, so it answers as before, each credential at its
+  full `--rate-limit-rps`.
 - `lambo serve-web` reads its session through a shared per-session view
   (#4 PR 1). Every request and every open tab reads one load of the session
   until it is older than `[web] view_ttl_ms` (1.5 s by default, the page's
@@ -499,6 +530,36 @@
   host is quoted (neither is a secret); an empty, repeated or
   control-character session name and a host that is not an HTTP authority
   are refused when the file is read.
+- On-demand sessions for `lambo serve --transport http` (#32, sixth part).
+  A request for an unattached session inside a credential's scope attaches
+  it: always for a credential with `create = true`, and for one without
+  only once the session exists (it has a lease row); otherwise the `404`.
+  Concurrent first requests share one attach. An erased session answers
+  `410` and is never recreated. At most `[serve] max_attached` sessions are
+  attached: at the cap the least recently used on-demand session with no
+  tool call running is detached to make room, else `503` with `Retry-After:
+  5`. A session idle (no tool call) for `idle_detach_secs` is detached. A
+  detach flushes and releases the lease, keeping the fencing token, so a
+  reattach takes the next one. A session another writer holds answers `503`
+  with a `Retry-After` of when its lease could lapse. At most
+  `attach_concurrency` attaches run at once (one on SQLite). Pinned
+  sessions are never evicted or idle-detached, and the shutdown closes and
+  releases on-demand sessions with the pinned ones. An attach checks that
+  the session exists, is not erased and is not held by another writer
+  before it detaches anything to make room; a session with a request or
+  call running, or used in the last 2 seconds, is never the one detached.
+  The on-demand places are shared among the credentials that reach them
+  (the places divided by their number, rounded down, at least 1): at the
+  cap a credential at its share detaches only its own sessions. A `404`,
+  `410` or failed attach is remembered for 30 seconds (at most 1,024
+  sessions), never stopping a credential with `create`. A request waits at
+  most 15 seconds for an attach, and an attach is abandoned (its lease
+  released) after 60 seconds, as is a pinned session's background retry;
+  both answer `503` with `Retry-After: 5`. At most twice `max_attached`
+  attaches wait to start; past that a request for another unattached
+  session gets `503` with `Retry-After: 5`. A startup warning names a
+  `max_attached` that leaves no on-demand place, and a library
+  `idle_detach` under a second is refused.
 - `[web]` in `lambo.toml` (#4 PR 1): `view_ttl_ms` (1500, 0 to 60000),
   `max_loaded_sessions` (4), `load_concurrency` (2, 1 to 1024, always 1 on
   SQLite) and `recall_concurrency` (4, 1 to 1024) bound the read-only
@@ -859,6 +920,13 @@
   headers, gets one fixed `403` before any other check. With a token configured any
   `Host` is accepted, as `lambo serve` does (a rebound page cannot present
   the token).
+- The multi-session refusal poller kept a ledger cursor only for pinned
+  sessions, so an on-demand session's cursor would have been rebuilt every
+  round and re-booked the last `LEASE_TTL` of lease refusals each time (#32,
+  sixth part; caught before release). A cursor is now kept while its
+  session is pinned or attached, and for `LEASE_TTL` after an on-demand
+  session is detached (at most 1,024 such), so a reattach inside that
+  window does not book its refusals again either.
 - `lambo serve-web`'s `/api/pulse`, polled every 1.5 s by every open tab,
   loaded the whole session twice: once for the event feed and again for the
   counts (#4 PR 1). `/api/stats` did the same. Each now costs one load (and
