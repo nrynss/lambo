@@ -503,8 +503,9 @@ fn the_attribute_ban_catches_markup_spellings() {
 /// `style` element (reported as `<style>`) and each `style` or `on…`
 /// attribute (reported by name). Tags are tokenized as HTML does it: an
 /// attribute name ends at whitespace, `/`, `=`, or `>`; whitespace may
-/// surround `=`; a quoted value may hold `>`; comments end at `-->`, and
-/// the abruptly closed empty comments `<!-->` and `<!--->` end at once.
+/// surround `=`; a quoted value may hold `>`; comments end at `-->` or
+/// `--!>`, and the abruptly closed empty comments `<!-->` and `<!--->`
+/// end at once.
 fn inline_markup(html: &str) -> Vec<String> {
     let bytes = html.as_bytes();
     let mut found = Vec::new();
@@ -519,8 +520,17 @@ fn inline_markup(html: &str) -> Vec<String> {
             } else if html[body..].starts_with("->") {
                 i = body + 2;
             } else {
-                let Some(end) = find(body, "-->") else { break };
-                i = end + 3;
+                let plain = find(body, "-->");
+                let bang = find(body, "--!>");
+                let Some((end, len)) = (match (plain, bang) {
+                    (Some(plain_at), Some(bang_at)) if bang_at < plain_at => Some((bang_at, 4)),
+                    (Some(plain_at), _) => Some((plain_at, 3)),
+                    (None, Some(bang_at)) => Some((bang_at, 4)),
+                    (None, None) => None,
+                }) else {
+                    break;
+                };
+                i = end + len;
             }
             continue;
         }
@@ -612,6 +622,7 @@ fn the_inline_markup_scanner_reports_style_and_handlers_only() {
         ("<!--><a onclick=x>", &["onclick"]),
         ("<!---><a onclick=x>", &["onclick"]),
         ("<!----><a onclick=x>", &["onclick"]),
+        ("<!-- clicked --!><a onclick=x>", &["onclick"]),
         (r#"<a 日本="x" onclick=y>"#, &["onclick"]),
     ];
     for (html, expect) in report {
@@ -625,6 +636,7 @@ fn the_inline_markup_scanner_reports_style_and_handlers_only() {
         r#"<a title="x onclick=go()">"#,
         r#"<a title="a > onclick=go()" href="/">"#,
         "<!-- <a onclick=go()> -->",
+        "<!-- <a onclick=go()> --!>",
         "<!doctype html><p>a < b onclick=c</p>",
         r#"<div data-onclick="x" on="2">"#,
         r#"<link rel="stylesheet" href="/app.css">"#,

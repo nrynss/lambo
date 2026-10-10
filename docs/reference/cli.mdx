@@ -509,7 +509,7 @@ sessions = ["lambo", "rustydocs", "general"]
 list_sessions = true   # optional: the picker lists the names instead of asking for one
 ```
 
-The rest of this section holds for one session as for several. A window that serves one session is reached, and answers, as it always did, apart from the security headers described below.
+The rest of this section holds for one session as for several. A window that serves one session is reached as before, and answers the same routes and statuses, apart from the security headers described below.
 
 The page reads its session through read-only `GET` routes: `/api/session`, `/api/graph`, `/api/inspect` and `/api/recall`, polls `/api/pulse` at the poll interval, and reloads `/api/graph` every 20 seconds. `/api/events` and `/api/stats` serve the feed and the counts to scripts. None of them writes. A non-loopback window still needs a credential, because reading exposes every served session in its scope to whoever can reach the port.
 
