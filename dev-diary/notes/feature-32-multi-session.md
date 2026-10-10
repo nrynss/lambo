@@ -58,8 +58,9 @@ One related PR outside #32: [#90](https://github.com/nrynss/lambo/pull/90)
   watchdog, the ledger file and the calibration probe.
 - **Authority.** `[[serve.credential]]` entries each have a `token_env`, a
   scope (`sessions` and/or `session_prefix`) and the flags `create`, `erase`
-  and `admin`. Authorization happens in memory before any store call. Any
-  refusal gets one uniform 404.
+  and `admin`. Authorization happens in memory before any store call. A
+  missing or invalid bearer token (or two `Authorization` headers) gets 401.
+  A refused id shape, scope or capability gets one uniform 404.
 - **Lease loss.** A one-session serve keeps `ExitProcess`. Any other serve
   uses `DetachSession`: only the session that lost its lease is detached and
   re-elected, and the other sessions keep serving.
@@ -298,11 +299,11 @@ deviation in one place.
 
 - **Authorization comes before anything else.** The order is shape, then
   scope, then the `erase` capability, all in memory, and the body is not
-  read before that. Any refusal is the uniform 404. Inside scope only, the
-  route answers 405, 400 (bad body, a confirm mismatch, or more than
-  `MAX_ADMIN_BODY_BYTES`, 1 KiB), 408, 409, 500 and 503. `/admin/` requests
-  are never MCP-session openers, so an erase is never refused at the
-  MCP-session cap.
+  read before that. Each of these refusals is the uniform 404; the bearer
+  check before them answers 401. Inside scope only, the route answers 405,
+  400 (bad body, a confirm mismatch, or more than `MAX_ADMIN_BODY_BYTES`,
+  1 KiB), 408, 409, 500 and 503. `/admin/` requests are never MCP-session
+  openers, so an erase is never refused at the MCP-session cap.
 - **Deviation: fence first, then erase as the holder (§6.3 step 2).** The
   design ends the MCP sessions, erases as the holder, then fences and tears
   down. The shipped order:

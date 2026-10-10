@@ -34,14 +34,15 @@ parallel; see "For the merge with PR 6").
 **Authorization before anything, through PR 5's authority.** The erase
 route runs `SessionAuthority::authorize(grant, raw, SessionNeed::Erase)`:
 the raw path segment's shape (never percent-decoded), then the scope, then
-the capability, in memory. Any refusal is the uniform 404, byte for byte the
-unrouted path, and the store is not called; the body is not even read. Only
-inside scope do 405, 400, 409, 410 and 503 appear. `/admin/sessions` needs
-`admin`, then filters its rows by the same scope test (`SessionNeed::Admin`),
-with a loose-named pinned session (one-session serve) visible only to a
-scope over every pinned session, as `/mcp` authorizes it. The implicit
-`local` and legacy `default` credentials carry neither flag, so wire erase
-always needs a configured credential, loopback included (Q5).
+the capability, in memory. Each of these refusals is the uniform 404, byte
+for byte the unrouted path (the bearer check before them answers 401), and
+the store is not called; the body is not even read. Only inside scope do
+405, 400, 409, 410 and 503 appear. `/admin/sessions` needs `admin`, then
+filters its rows by the same scope test (`SessionNeed::Admin`), with a
+loose-named pinned session (one-session serve) visible only to a scope
+over every pinned session, as `/mcp` authorizes it. The implicit `local`
+and legacy `default` credentials carry neither flag, so wire erase always
+needs a configured credential, loopback included (Q5).
 
 **Order of the attached erase: fence and quiesce first, then erase as the
 holder.** Design §6.3 step 2 says: end the MCP sessions, erase as the
