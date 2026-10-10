@@ -36,7 +36,7 @@
 //! | [`Slot::Detaching`] | 503, `Retry-After: 1` | the detach ends: `HeldElsewhere` (pinned) or removed (on-demand) |
 //! | [`Slot::HeldElsewhere`] (pinned) | 503, `Retry-After` until the next retry | the background retry wins the lease |
 //! | [`Slot::Failed`] (pinned) | 503, no `Retry-After` | never: an operator restarts the serve |
-//! | [`Slot::Erasing`] | 410 (in scope) | the erase ends: `Erased`, or back to the state it had |
+//! | [`Slot::Erasing`] | 503, `Retry-After: 1`; never attached | the erase ends: `Erased` (pinned) or removed (on-demand, the negative cache answers 410), or back to the state it had |
 //! | [`Slot::Erased`] (pinned) | 410 (in scope) | never: the store's tombstone refuses every attach |
 //! | absent, pinned | 503, `Retry-After: 1` (between states) | |
 //! | absent, not pinned | a cached negative outcome; else an on-demand attach, when the serve attaches on demand (503 `Retry-After` while `2 × max_attached` attaches wait for their probe); else the uniform 404 (`surface::session`) | |
@@ -272,7 +272,10 @@ enum Slot {
     /// (#32 PR 7).
     Failed,
     /// Being erased by this process (#32 PR 7, design §6.3): requests get
-    /// the erased refusal, and no attach or retry starts for it.
+    /// 503 with `Retry-After: 1` until the erase ends (#32 PR 7 review L3:
+    /// an erase that does not commit serves the session again, so the
+    /// permanent 410 waits for `Erased`), and no attach or retry starts for
+    /// it.
     Erasing,
     /// Erased: the store holds the #23 tombstone, which refuses every
     /// acquire, so nothing in this process attaches it again. Requests get
@@ -304,6 +307,7 @@ pub(super) enum ForcedState {
     Detaching,
     HeldElsewhere,
     Failed,
+    Erasing,
     Erased,
 }
 
@@ -320,8 +324,10 @@ pub(super) enum Lookup {
     /// again.
     Failed,
     /// Erased: an on-demand session found tombstoned (#23), or a session
-    /// erased, or being erased, by this process (#32 PR 7). It is never
-    /// attached or recreated again. Reached only inside the caller's scope.
+    /// erased by this process (#32 PR 7). It is never attached or recreated
+    /// again. Reached only inside the caller's scope. A session still being
+    /// erased is [`Lookup::Unavailable`] until the erase commits (#32 PR 7
+    /// review L3).
     Erased,
     /// Not a session this serve hosts, or an on-demand session that does
     /// not exist and that the caller may not create: the uniform 404.
@@ -1052,6 +1058,7 @@ impl SessionRegistry {
                 warned: false,
             },
             ForcedState::Failed => Slot::Failed,
+            ForcedState::Erasing => Slot::Erasing,
             ForcedState::Erased => Slot::Erased,
         };
         self.slots.lock().insert(id.to_string(), slot);
@@ -1845,7 +1852,13 @@ fn answer_for(slot: &Slot) -> Lookup {
                 .max(Duration::from_secs(1)),
         },
         Slot::Failed => Lookup::Failed,
-        Slot::Erasing | Slot::Erased => Lookup::Erased,
+        // Not yet erased: an erase that ends in 409 or fails before its
+        // commit serves the session again, so the permanent 410 waits for
+        // the commit (#32 PR 7 review L3). Not attachable meanwhile.
+        Slot::Erasing => Lookup::Unavailable {
+            retry_after: Duration::from_secs(1),
+        },
+        Slot::Erased => Lookup::Erased,
     }
 }
 

@@ -787,6 +787,26 @@ async fn a_retry_that_finds_its_slot_changed_releases_what_it_took() {
     );
 }
 
+/// #32 PR 7 review L3: a session still being erased answers 503 with
+/// `Retry-After: 1` (the erase may yet end in 409 or fail before its
+/// commit, and serve it again); only an erased one answers the permanent
+/// 410.
+///
+/// Mutation: answer `Erasing` with 410 again.
+#[tokio::test]
+async fn an_erasing_session_is_503_and_only_an_erased_one_is_410() {
+    let w = wire().await;
+    let ops = bearer("ops");
+    w.registry.force_state(B, ForcedState::Erasing);
+    let erasing = http_as(w.addr, "GET", "/mcp/s/er-b", Some(&ops), None, "").await;
+    assert_eq!(erasing.status, 503, "{}", erasing.body);
+    assert_eq!(erasing.header("retry-after").as_deref(), Some("1"));
+    w.registry.force_state(B, ForcedState::Erased);
+    let erased = http_as(w.addr, "GET", "/mcp/s/er-b", Some(&ops), None, "").await;
+    assert_eq!(erased.status, 410, "{}", erased.body);
+    assert!(erased.header("retry-after").is_none());
+}
+
 /// #32 PR 7 review, PR 6 reconciliation 2: an erase of a session whose
 /// on-demand attach is in flight is 503 with `Retry-After`; the slot is
 /// left to the attach, and nothing is touched.
