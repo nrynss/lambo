@@ -1,6 +1,7 @@
 //! The one rule for a `lambo.toml` key that names the environment variable
-//! holding a secret: `[[serve.credential]] token_env` (#32) and
-//! `[embedder] api_key_env` (#21). Neither may name a variable lambo reads its
+//! holding a secret: `[[serve.credential]] token_env` (#32),
+//! `[[web.credential]] token_env` (#4 PR 3) and `[embedder] api_key_env`
+//! (#21). Neither may name a variable lambo reads its
 //! own credentials from ([`SERVE_AUTH_TOKEN_ENV`], [`LAMBO_CREDENTIAL_ENVS`]).
 //!
 //! Such a key is where a token is most likely to be pasted by mistake, so its
@@ -154,6 +155,29 @@ pub(crate) fn check_not_a_serve_credential<'a>(
         Some((credential, _)) => Err(format!(
             "{subject} names {}, which is also the token_env of [[serve.credential]] \
              {credential:?}: one variable must not hold both lambo serve's credential and \
+             another secret. Give {key} a variable of its own",
+            shown(name)
+        )),
+        None => Ok(()),
+    }
+}
+
+/// [`check_not_a_serve_credential`] for `lambo serve-web`'s
+/// `[[web.credential]]` entries (#4 PR 3): one variable must not hold both a
+/// portal credential and another secret either.
+pub(crate) fn check_not_a_web_credential<'a>(
+    name: &str,
+    subject: &str,
+    key: &str,
+    web_credentials: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> Result<(), String> {
+    match web_credentials
+        .into_iter()
+        .find(|(_, token_env)| *token_env == name)
+    {
+        Some((credential, _)) => Err(format!(
+            "{subject} names {}, which is also the token_env of [[web.credential]] \
+             {credential:?}: one variable must not hold both lambo serve-web's credential and \
              another secret. Give {key} a variable of its own",
             shown(name)
         )),

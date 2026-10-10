@@ -54,6 +54,12 @@ fn authorize_bind_web_fails_closed_off_loopback() {
             authorize_bind_web(bind, None).expect_err("{bind} without a token must not start");
         let msg = err.to_string();
         assert!(msg.contains("refusing to start"), "{msg}");
+        // Review L2: any configured credential satisfies the rule, so the
+        // refusal names the scoped route beside the legacy token.
+        assert!(
+            msg.contains("LAMBO_AUTH_TOKEN") && msg.contains("[[web.credential]]"),
+            "{msg}"
+        );
 
         let token = AuthToken::new("s3cret").expect("valid");
         authorize_bind_web(bind, Some(&token)).expect("a token satisfies the rule");
@@ -81,7 +87,7 @@ fn an_auth_token_over_the_presented_cap_is_refused() {
     let max = crate::surface::bearer::MAX_BEARER_CREDENTIAL_BYTES;
     let at_cap = "k".repeat(max);
     let token = AuthToken::new(at_cap.as_str()).expect("the cap itself");
-    let authority = portal_authority(Some(token), &[SessionId::new("t4-cap")]);
+    let authority = portal_authority(Some(token), Vec::new(), &[SessionId::new("t4-cap")]);
     assert!(
         authority
             .authenticate(Some(&format!("Bearer {at_cap}")))
@@ -162,7 +168,7 @@ fn a_non_utf8_auth_token_variable_is_refused_not_treated_as_unset() {
 fn bearer_header_is_parsed_strictly() {
     let secret = ["s3", "cret"].concat();
     let expected = AuthToken::new(secret.as_str()).expect("valid");
-    let authority = portal_authority(Some(expected), &[SessionId::new("t4-parse")]);
+    let authority = portal_authority(Some(expected), Vec::new(), &[SessionId::new("t4-parse")]);
     let ok = |header: Option<&str>| authority.authenticate(header).is_some();
     assert!(ok(Some(&format!("Bearer {secret}"))));
     assert!(ok(Some(&format!("bearer {secret}"))), "RFC 7235 §2.1");

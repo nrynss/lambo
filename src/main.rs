@@ -114,18 +114,20 @@ enum Commands {
         #[arg(long, default_value_t = 7710, help = "HTTP port to listen on.")]
         port: u16,
         /// Bind address. Loopback by default — unauthenticated. A non-loopback
-        /// bind REQUIRES --auth-token (or LAMBO_AUTH_TOKEN) and refuses to start
-        /// without one.
+        /// bind REQUIRES a credential (--auth-token, LAMBO_AUTH_TOKEN or
+        /// lambo.toml [[web.credential]]) and refuses to start without one.
         #[arg(
             long,
             default_value = "127.0.0.1",
-            help = "Bind address. Loopback by default. A non-loopback bind requires a bearer token (--auth-token or LAMBO_AUTH_TOKEN)."
+            help = "Bind address. Loopback by default. A non-loopback bind requires a bearer token (--auth-token, LAMBO_AUTH_TOKEN or lambo.toml [[web.credential]])."
         )]
         bind: std::net::IpAddr,
         /// Bearer token required on every request. Prefer the LAMBO_AUTH_TOKEN
         /// env var, which overrides this flag — a token in argv is visible in
         /// `ps` and shell history. Optional on loopback, mandatory on any other
-        /// bind.
+        /// bind unless lambo.toml [[web.credential]] configures one. It reads
+        /// every served session; [[web.credential]] entries read only their
+        /// own.
         #[arg(long, value_name = "TOKEN")]
         auth_token: Option<lambo::cli::serve_web::AuthToken>,
         /// A Host (name or address, optionally :port) the portal also
@@ -970,12 +972,21 @@ fn main() -> ExitCode {
         Commands::ServeWeb {
             session,
             allowed_host,
+            auth_token,
             ..
         } => match LamboFile::load_resolved(config) {
             Ok(file) => {
                 web = file.web.clone();
+                // #4 PR 3: the credentials too, so an unset variable or a
+                // shared token costs no model load.
                 let planned = lambo::cli::serve_web::plan_sessions(session, &web).and_then(|s| {
-                    lambo::cli::serve_web::plan_allowed_hosts(allowed_host, &web).map(|h| (s, h))
+                    let h = lambo::cli::serve_web::plan_allowed_hosts(allowed_host, &web)?;
+                    let c = lambo::cli::serve_web::plan_credentials(
+                        auth_token.as_ref(),
+                        &web,
+                        &file.serve,
+                    )?;
+                    Ok((s, h, c))
                 });
                 match planned {
                     Ok(plan) => served_web = Some(plan),
@@ -1118,13 +1129,17 @@ fn main() -> ExitCode {
                     // Planned before the backends, above.
                     session: served_web
                         .as_ref()
-                        .map(|(p, _)| p.default.clone())
+                        .map(|(p, _, _)| p.default.clone())
                         .unwrap_or_default(),
                     sessions: served_web
                         .as_ref()
-                        .map(|(p, _)| p.sessions.clone())
+                        .map(|(p, _, _)| p.sessions.clone())
                         .unwrap_or_default(),
-                    allowed_hosts: served_web.map(|(_, h)| h).unwrap_or_default(),
+                    allowed_hosts: served_web
+                        .as_ref()
+                        .map(|(_, h, _)| h.clone())
+                        .unwrap_or_default(),
+                    credentials: served_web.map(|(_, _, c)| c).unwrap_or_default(),
                     port,
                     bind,
                     auth_token,
