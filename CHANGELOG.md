@@ -204,12 +204,14 @@
   (#32, sixth part): it attaches one only once the session exists. The
   warnings about unpinned names being unreachable are gone, since they are
   reachable on demand.
-- Every HTTP session draws its own request bucket at `[serve]
+- Every session of an HTTP serve with several sessions, or with sessions
+  attached on demand, draws its own request bucket at `[serve]
   per_session_rps` (default `--rate-limit-rps`, burst twice that) after the
   credential's (#32, sixth part); a request over it gets `429` with
-  `Retry-After: 1`, as the credential's limit answers. With one session and
-  one credential at the default rate the two buckets drain together, so a
-  single-session serve answers as before.
+  `Retry-After: 1`, as the credential's limit answers. A serve of one
+  session that attaches nothing on demand draws one only when
+  `per_session_rps` is set, so it answers as before, each credential at its
+  full `--rate-limit-rps`.
 - `lambo serve-web` reads its session through a shared per-session view
   (#4 PR 1). Every request and every open tab reads one load of the session
   until it is older than `[web] view_ttl_ms` (1.5 s by default, the page's
@@ -464,7 +466,20 @@
   with a `Retry-After` of when its lease could lapse. At most
   `attach_concurrency` attaches run at once (one on SQLite). Pinned
   sessions are never evicted or idle-detached, and the shutdown closes and
-  releases on-demand sessions with the pinned ones.
+  releases on-demand sessions with the pinned ones. An attach checks that
+  the session exists, is not erased and is not held by another writer
+  before it detaches anything to make room; a session with a request or
+  call running, or used in the last 2 seconds, is never the one detached.
+  The on-demand places are shared among the credentials that reach them
+  (the places divided by their number, rounded down, at least 1): at the
+  cap a credential at its share detaches only its own sessions. A `404`,
+  `410` or failed attach is remembered for 30 seconds (at most 1,024
+  sessions), never stopping a credential with `create`. A request waits at
+  most 15 seconds for an attach, and an attach is abandoned (its lease
+  released) after 60 seconds, as is a pinned session's background retry;
+  both answer `503` with `Retry-After: 5`. A startup warning names a
+  `max_attached` that leaves no on-demand place, and a library
+  `idle_detach` under a second is refused.
 - `[web]` in `lambo.toml` (#4 PR 1): `view_ttl_ms` (1500, 0 to 60000),
   `max_loaded_sessions` (4), `load_concurrency` (2, 1 to 1024, always 1 on
   SQLite) and `recall_concurrency` (4, 1 to 1024) bound the read-only
@@ -819,7 +834,10 @@
 - The multi-session refusal poller kept a ledger cursor only for pinned
   sessions, so an on-demand session's cursor would have been rebuilt every
   round and re-booked the last `LEASE_TTL` of lease refusals each time (#32,
-  sixth part; caught before release).
+  sixth part; caught before release). A cursor is now kept while its
+  session is pinned or attached, and for `LEASE_TTL` after an on-demand
+  session is detached (at most 1,024 such), so a reattach inside that
+  window does not book its refusals again either.
 - `lambo serve-web`'s `/api/pulse`, polled every 1.5 s by every open tab,
   loaded the whole session twice: once for the event feed and again for the
   counts (#4 PR 1). `/api/stats` did the same. Each now costs one load (and

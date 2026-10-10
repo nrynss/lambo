@@ -168,3 +168,50 @@ its session is pinned or attached (own `fix` commit).
   (`attach_outcome`'s `is_tombstone` arm) and choose the MCP-route answer.
 - `attach_permits` is the attach gate; an in-serve erase of an unattached
   session should take a permit too if it reads the store the same way.
+
+## Review remediation (Opus review, 2026-10-10)
+
+Base after merging `origin/main` (#81, #82, #83): `08ea85a2`.
+
+| finding | fix | test |
+|---|---|---|
+| H1 eviction before the probe | `route_or_start` inserts `Attaching { placed: false }` and evicts nothing. The attach task takes a permit, probes the lease row (erased, absent without `create`, held by another live writer each end it here), and only then `reserve_place` re-checks capacity under the slots' lock and picks a victim. At the cap an absent id is now the uniform 404 (one probe) rather than 503. | `requests_that_will_not_attach_never_evict` (absent x4, erased, held: no eviction, no `release_lease`; an existing id then does evict). The old "refused before any store call" assertion is now "one probe, no acquire". Mutation: reserving before the probe fails two tests. |
+| M1 routing TOCTOU | `get_or_attach` returns `Routed { lookup, in_flight }`; the `Live` arm enters the session's `InFlight` under the slots' lock and `serve_session` holds it until `serve_live` returns. rmcp dispatches a tool call just after the POST handler answers, so `EVICT_MIN_IDLE` (2 s) covers that hand-off (a body wrapper would need `http-body`, not a direct dependency). | `a_routed_request_holds_its_session_against_eviction`, `a_session_used_just_now_is_not_evicted`, `the_idle_sweep_skips_a_session_in_use`. Mutation: no guard fails two. |
+| M2 no timeouts | `ATTACH_TIMEOUT` 60 s on the whole on-demand attach (permit wait to admission; a lease taken is released by holder, the slot removed, waiters get 503 `Retry-After: 5`), `PROBE_TIMEOUT` 5 s, `ATTACH_WAIT` 15 s for a waiter (`ATTACH_BUSY_RETRY` 5 s). The pinned background retry's acquire is bounded by `ATTACH_TIMEOUT` too (a transient failure, retried). | `an_attach_that_hangs_times_out_and_does_not_stick` (paused clock). |
+| M3 negative cache | `registry/on_demand.rs` `NegativeCache`: `Absent` (only from a flight without `create`; a `create` request ignores it), `Erased`, `Failed`; TTL `NEGATIVE_TTL` 30 s, `NEGATIVE_CACHE_MAX` 1024, oldest out first; forgotten when the id attaches. Held-elsewhere and transient errors are never cached. Cached entries take no place. | `negative_outcomes_are_cached_and_create_is_not_blocked`, unit test in `on_demand`. |
+| M4 fairness | `share = credential_share(places, on_demand_credentials)` (PR 5's floor rule, min 1; floor so the shares never exceed the places and each credential can always reach its share). The share bounds eviction only: a free place goes to anyone; at the cap a credential at or over its share evicts only its own LRU idle session, one under it may also evict from a credential over its share. A session is attributed to the credential whose request attached it (`owners`). Evictions log the credential and the owner. | `a_credential_at_its_share_evicts_only_its_own_sessions`, the H1 test's last leg, `the_on_demand_credentials_are_those_reaching_past_the_pinned_sessions`. |
+| L1 panic | `Flight` (drop guard): removes its own `Attaching` slot, caches `Failed`, wakes waiters with `Failed`, and spawns a tracked holder-scoped lease release. | `an_attach_that_dies_answers_its_waiters_and_frees_its_place` (abort, same drop path as a panic). |
+| L2 cursor | `process::RefusalCursors`: kept while pinned or attached, and for `LEASE_TTL` after a detach, at most 1024 detached. | two unit tests in `process`. |
+| L3 single-session bucket | the one-session path passes `per_session_rps.unwrap_or(0)`. | (behaviour restored to PR 5's; CHANGELOG reworded) |
+| L4 sweep vs close | `sweep_idle` checks `closing` and tracks its detaches under the slots' lock; `close_set` aborts the sweeper before taking the set; `route_or_start` tracks its attach task under the lock too. | covered by the shutdown tests |
+| L5 idle 0 | `serve` refuses `bounds.idle_detach` under 1 s; the registry raises it to `MIN_IDLE_DETACH` and the sweeper interval never goes below it. | `serve_refuses_a_zero_idle_detach` |
+| L6 warning | `startup_warnings` names a `max_attached` leaving no place beside the pinned sessions when a credential reaches past them. | `startup_warns_when_max_attached_leaves_no_on_demand_place` |
+| L7 tests | the tests above plus `out_of_scope_requests_make_no_store_call_on_demand` (reader outside its prefix, a pinned-only credential inside it: byte-identical 404, zero store calls), `the_shutdown_during_an_on_demand_attach_releases_its_lease`, and the concurrent-attach test now stalls the load until all eight requests have arrived. | |
+
+## For PR 7 (reconciler)
+
+- `Slot::Attaching` gained a field, `placed: bool` (match it with `{ .. }`).
+  An attach with `placed: false` has not passed its probe and takes no
+  place; `on_demand::takes_a_place` is the one definition of "counts
+  against `max_attached`". `Slot::Erasing` must not count as evictable
+  (`choose_victim` takes only `Live`), and PR 7 should decide whether it
+  takes a place (add it to `takes_a_place`).
+- `get_or_attach(id, Requester { credential, create }) -> Routed { lookup,
+  in_flight }` replaces `get_or_attach(id, create) -> Lookup`. `Lookup`
+  itself is unchanged apart from PR 6's `Erased`.
+- New registry fields: `owners` (session to attaching credential) and
+  `negative` (`NegativeCache`), both locked after `slots`, never before.
+  PR 7's own bounded negative cache for erased ids outside the hosted set
+  should merge with `NegativeCache` (`Negative::Erased`) rather than add a
+  second one; an in-serve erase should `put` `Erased` (or forget the id on
+  undo) and drop the id from `owners`.
+- New module `registry/on_demand.rs` (constants `ATTACH_TIMEOUT` 60 s,
+  `PROBE_TIMEOUT` 5 s, `ATTACH_WAIT` 15 s, `ATTACH_BUSY_RETRY` 5 s,
+  `EVICT_MIN_IDLE` 2 s, `NEGATIVE_TTL` 30 s, `NEGATIVE_CACHE_MAX` 1024;
+  `Requester`, `Routed`, `Flight`, `NegativeCache`, `choose_victim`,
+  `place_share`). `registry.rs` keeps `AT_CAPACITY_RETRY` and gains
+  `MIN_IDLE_DETACH` (1 s) and `OnDemandBounds { share_among,
+  min_idle_to_evict }`.
+- `release_abandoned` now also runs for a timed-out or dead on-demand
+  attach (its log lines say "shutdown or timeout").
+- `process::RefusalCursors` replaces the poller's bare map.
