@@ -1012,17 +1012,33 @@
 - A freshly derived text or image concept ranks by query relevance before
   the daemon scores it (#79). Previously its missing daemon score counted as
   0 inside the 0.5/0.5 blend, so a fresh relevant EG2 image (0.3616) ranked
-  below older, daemon-scored noise (about 0.655). Now, while any keyword- or
-  vector-backed phase-1 concept has no score-table entry, that recall scores
-  every hit `w_query × query relevance`, old hits included. Applying the
-  query score only to the new concept would instead lift fresh noise over an
-  established relevant hit with a low daemon score. A recent-only hit, a
-  traversal or sibling member, a stale vector id and an explicit daemon 0 do
-  not start this mode; `w_query = 0` keeps daemon-only ranking. The window
-  is short: derive wakes the daemon, and rescoring takes about 4.5 ms at
-  dogfood scale. Replaying the dogfood ledger, at most 1.2% of recalls could
-  overlap one. Once the daemon scores the concept, the normal blend returns
-  and ranks can change.
+  below older, daemon-scored noise (about 0.655). Now, while a keyword- or
+  vector-backed phase-1 concept that query relevance alone would show
+  (within `top_k`, or force-included as hot) has no score-table entry, that
+  recall scores every hit `w_query × query relevance`, old hits included. A
+  fresh concept that could not make the result leaves the blend alone.
+  Applying the query score only to the new concept would instead lift fresh
+  noise over an established relevant hit with a low daemon score. A
+  recent-only hit, a traversal or sibling member, a stale vector id and an
+  explicit daemon 0 do not start this mode; `w_query = 0` keeps daemon-only
+  ranking. While cold, traversal and sibling members score 0 and rank last,
+  and a reservation holder the blend would have shown is kept with its
+  warning. The recall's `serve --ledger` line carries a new `cold_start`
+  boolean (additive; `v` stays 1).
+  The window lasts until the daemon's next completed cycle, not just the
+  rescore. On a dogfood-scale fixture graph (6,466 nodes, 11,600 edges,
+  release) a cycle takes about 9 ms (rescore about 5 ms, detectors about
+  6 ms), a GC sweep about 11 ms more, and an isolated derive is scored in
+  6 ms median, 23 ms worst of 60. It persists through sustained write
+  bursts: with a derive every 2 ms some concept stayed unscored for the
+  whole 3 s burst. Replaying the dogfood ledger, whose write rate is low
+  (about 20 derives a day), 1.18% (window up to 50 ms) to 1.55% (1 s) of
+  recalls could overlap a window; a write-heavy multi-agent session will
+  see more, which `cold_start` now makes measurable. Once the daemon scores
+  the concept, the normal blend returns and ranks can change.
+- A daemon rescore that panicked no longer leaves the score table stale
+  until the next write: the cycle marks its epoch done only after
+  publishing, so the next cycle retries (#79 review).
   Expected-output change: the assembly test fixture with a deliberately
   unscored phase-1 member (c2) now orders `c1,c2,c5,c3,c4,c6`
   (`.75,.375,.15,0,0,0`) instead of `c1,c2,c5,c6,c4,c3`
