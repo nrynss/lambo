@@ -97,6 +97,12 @@ fn caller() -> Option<Arc<str>> {
 /// warning fired over without a store join. It is truncated rather than whole
 /// so one recall of `MAX_TOP_K` long concepts cannot turn into a megabyte line.
 ///
+/// `cold_start` (#79) says the recall was ranked in cold mode: a fresh concept
+/// the daemon had not scored yet would be shown, so every hit's `score` is
+/// `w_query × q` with no daemon share. It is always present on a recall line
+/// (an additive key; `v` stays 1), so a ledger written by a binary with it
+/// tells `false` apart from "not recorded", which a line without the key is.
+///
 /// # What the five set-level flags mean, and why they are not all computed alike
 ///
 /// The spec's word is **rendered**, and the honest answer differs by kind
@@ -218,6 +224,7 @@ pub(super) fn recall_facts(
         "reservation_warning": reservation_warning,
         "response_annotations": response_kinds,
         "warning_count": detailed.warnings.len(),
+        "cold_start": detailed.cold_start,
     })
 }
 

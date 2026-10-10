@@ -700,7 +700,8 @@ async fn sqlite_cold_text_recall_orders_vector_keyword_and_recent_legs_on_one_sc
     );
 
     // Cold mode: every hit is w_query × q, the daemon share withheld even
-    // for the high-daemon recent concept.
+    // for the high-daemon recent concept. The result says so (M2).
+    assert!(detailed.cold_start, "the recall reports cold mode");
     for hit in &detailed.hits {
         let expected = detailed.legs.get(&hit.node_id).map_or(0.0, |l| 0.5 * q(*l));
         assert!(

@@ -406,6 +406,7 @@ where
         // assembly ran over. Assembly itself sees only the expanded member
         // list, so inventing legs here would mean guessing.
         legs: Default::default(),
+        cold_start: cold,
         detailed,
         response_annotations: Vec::new(),
     }
@@ -1885,6 +1886,7 @@ mod tests {
         };
         let cold = run(&old_scores, RecallWeights::default());
         assert_eq!(ids_of(&cold), vec![uid(3), uid(2), uid(4), uid(1)]);
+        assert!(cold.cold_start);
         let cold_scores: Vec<f64> = cold.hits.iter().map(|hit| hit.score).collect();
         for (actual, expected) in cold_scores.iter().zip([0.40, 0.375, 0.34, 0.30]) {
             assert!(approx(*actual, expected));
@@ -1917,6 +1919,7 @@ mod tests {
         };
         let settled = run(&settled_scores, RecallWeights::default());
         assert_eq!(ids_of(&settled), vec![uid(1), uid(4), uid(2), uid(3)]);
+        assert!(!settled.cold_start);
         assert!(approx(settled.hits[0].score, 0.75));
         assert!(approx(settled.hits[1].score, 0.64));
     }
@@ -2146,12 +2149,14 @@ mod tests {
         assert_eq!(ids_of(&below), vec![uid(2), uid(1)]);
         assert!(approx(below.hits[0].score, 0.80)); // 0.5 × 0.90 + 0.5 × 0.70
         assert!(approx(below.hits[1].score, 0.45)); // 0.5 × 0.10 + 0.5 × 0.80
+        assert!(!below.cold_start, "nothing unscored is shown");
 
         // Rank 1 by q: the fresh hit could be shown, so the recall is cold.
         let inside = run(0.95);
         assert_eq!(ids_of(&inside), vec![uid(4), uid(1)]);
         assert!(approx(inside.hits[0].score, 0.475));
         assert!(approx(inside.hits[1].score, 0.40));
+        assert!(inside.cold_start, "the result reports cold mode (M2)");
     }
 
     /// M1, the force-included edge: a hot-listed fresh hit is emitted past

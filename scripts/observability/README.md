@@ -295,7 +295,12 @@ per ledger file when quoting them.
 lambo_recall        query (≤2000 chars, then "…[truncated]"), top_k, hit_count,
                     hits[], canonical_marker, blast_radius_warning,
                     conflict_line, hot_warning, reservation_warning,
-                    response_annotations[], warning_count
+                    response_annotations[], warning_count, cold_start
+  cold_start        (#79) true when assembly ranked the recall in cold mode:
+                    a fresh concept the daemon had not scored yet would be
+                    shown, so every hit's score is w_query × q with no daemon
+                    share. Additive (v stays 1); a line without the key was
+                    written before it existed, not "false".
   hits[i]           node_id, content (≤200 chars, then "…[truncated]"), score,
                     legs{}, is_canonical, blast_radius, included_in_context,
                     annotations[]

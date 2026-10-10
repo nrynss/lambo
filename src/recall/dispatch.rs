@@ -381,6 +381,8 @@ pub(crate) fn try_structural(
         // phase-1 blend entirely (T9-R1-3), so there are no leg scores to
         // report. Empty here means "no leg ran", not "the legs were dropped".
         legs: Default::default(),
+        // No blend ran, so there is no daemon share to withhold.
+        cold_start: false,
         detailed,
         response_annotations: vec![Annotation::new(AnnotationKind::Traversal, traversal)],
     })
