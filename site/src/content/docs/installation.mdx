@@ -212,5 +212,6 @@ Cargo features select which adapters are compiled in. List fewer to get a smalle
 | `embed-candle-accelerate` | `embed-candle` plus Apple's Accelerate framework for the CPU backend. macOS only. |
 | `embed-candle-cuda` | `embed-candle` plus the CUDA GPU backend. Needs a CUDA toolkit at build time and an NVIDIA GPU at runtime. |
 | `embed-bedrock` | Reserved for Amazon Titan embeddings through Bedrock. Not implemented, so it fails at startup if selected. |
+| `recall-elastic` | Optional Elasticsearch recall tier, selected by a top-level `[recall]` section (`kind = "elastic"`). The index serves recall's vector leg; the store stays the source of truth. Needs a reachable Elasticsearch cluster at runtime. |
 
-The `ship` feature turns on every store and embedder above except `embed-bedrock` and the `embed-candle` family. Choosing features only changes what the binary *can* do. Which store and embedder it *does* use is still a `lambo.toml` decision.
+The `ship` feature turns on every store and embedder above except `embed-bedrock` and the `embed-candle` family, plus `recall-elastic`. Choosing features only changes what the binary *can* do. Which store and embedder it *does* use is still a `lambo.toml` decision.
