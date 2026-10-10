@@ -40,7 +40,10 @@
 //!
 //! `{"sessions": [...]}`: one row per session in the credential's scope
 //! (`registry::SlotView`), the only enumeration this serve offers, and only
-//! to a credential with `admin`. Reads RAM only.
+//! to a credential with `admin`. Reads RAM only, but not for free: each live
+//! session's size is a scan of its concepts under its graph's read lock, so
+//! it runs on the blocking pool, not on a runtime worker (#32 PR 7 review
+//! L5). An operator-only cost, bounded by the credential's request rate.
 //!
 //! `POST /admin/s/{s}/detach` (design §6.3, for #33's cut-over) is not
 //! served yet: a pinned session's detach is re-elected by the background
@@ -147,9 +150,18 @@ async fn list_sessions(
     if req.method() != axum::http::Method::GET {
         return wrong_method("GET");
     }
-    let sessions: Vec<_> = admin
-        .registry
-        .slot_views()
+    // Off the runtime's workers (#32 PR 7 review L5): each live session's
+    // size is a scan of its concepts under its graph's read lock, which a
+    // writer can hold, so many large sessions would otherwise pin a worker
+    // that every other request needs.
+    let registry = Arc::clone(&admin.registry);
+    let Ok(views) = tokio::task::spawn_blocking(move || registry.slot_views()).await else {
+        return text(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "the session listing failed (see the serve log)",
+        );
+    };
+    let sessions: Vec<_> = views
         .into_iter()
         .filter(|view| in_admin_scope(&admin.authority, &grant, &view.session, view.pinned))
         .collect();
