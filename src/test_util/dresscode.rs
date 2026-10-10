@@ -218,16 +218,15 @@ async fn derive_look_vector(mem: &Memory, caption: &str, id: &str, values: Vec<f
 /// one text concept, then the two unrelated looks (stored as `n_4`, `n_5`:
 /// cosine 0), so the three most recent interactions hold no graded look.
 ///
-/// The graded looks are derived **worst first** (0.3, 0.5, 0.8). The
-/// daemon's recency dimension is the concept's position in the session's
-/// wall-clock span, truncated to whole milliseconds, and this session lasts
-/// about 2 ms. Derived best first, a scheduler stall before the 0.3 look
-/// gave it recency near 1 while the 0.5 look kept 0: under the default
-/// 0.5/0.5 blend that is +0.104 of final score against the 0.1 query gap, so
-/// the 0.3 look intermittently outranked the 0.5 look (the #79 flake).
-/// Worst first, a later look is never less recent than an earlier one, and
-/// the looks differ in no other daemon dimension, so the daemon score can
-/// only widen the cosine order, however the scheduler spaces the derives.
+/// The graded looks are derived **worst first** (0.3, 0.5, 0.8). This
+/// session's wall-clock span is a few milliseconds, under
+/// [`crate::daemon::score::MIN_RECENCY_SPAN`], so recency sits near 1 for
+/// every look and a stall cannot reorder them (#95). Worst first remains:
+/// before that floor, a scheduler stall before the 0.3 look gave it recency
+/// near 1 while the 0.5 look kept 0, and under the default 0.5/0.5 blend
+/// that was enough to outrank the 0.5 look (the #79 flake). The looks differ
+/// in no other daemon dimension, so a later look is never less recent than
+/// an earlier one.
 pub async fn derive_graded_looks(mem: &Memory) -> GradedLooks {
     derive_graded_looks_stalled(mem, std::time::Duration::ZERO).await
 }
@@ -278,6 +277,45 @@ pub async fn derive_graded_looks_stalled(mem: &Memory, stall: std::time::Duratio
         query: to_f32(d.iter().map(|x| x * 2.5).collect()),
         graded,
         unrelated: [a, b],
+    }
+}
+
+/// The 0.5 look, then a stall, then the 0.3 look. Nothing else is derived,
+/// so the two differ only in cosine and in where the stall put them in the
+/// session. On a session younger than the recency floor the 0.5 look stays
+/// ahead; on the historical formula the stall flips them.
+pub struct QueryGap {
+    pub query: Vec<f32>,
+    /// Cosine 0.5, derived before [`QueryGap::later`].
+    pub earlier: NodeId,
+    /// Cosine 0.3, derived after the stall.
+    pub later: NodeId,
+}
+
+pub async fn derive_half_then_point_three_after(
+    mem: &Memory,
+    stall: std::time::Duration,
+) -> QueryGap {
+    let mut basis = Vec::new();
+    let d = orthonormal(&mut basis, "gap query", 1).remove(0);
+    let noise = orthonormal(&mut basis, "gap noise", 2);
+    let to_f32 = |v: Vec<f64>| v.into_iter().map(|x| x as f32).collect::<Vec<f32>>();
+    let store = |c: f64, n: &[f64], id: &str| {
+        let s = (1.0 - c * c).sqrt();
+        let v: Vec<f64> = d.iter().zip(n).map(|(x, y)| c * x + s * y).collect();
+        (c, id.to_string(), to_f32(v))
+    };
+    let (c, id, values) = store(0.5, &noise[0], "gaphalf");
+    let earlier = derive_look_vector(mem, &format!("graded look {c}"), &id, values).await;
+    if !stall.is_zero() {
+        tokio::time::sleep(stall).await;
+    }
+    let (c, id, values) = store(0.3, &noise[1], "gappointthree");
+    let later = derive_look_vector(mem, &format!("graded look {c}"), &id, values).await;
+    QueryGap {
+        query: to_f32(d.iter().map(|x| x * 2.5).collect()),
+        earlier,
+        later,
     }
 }
 

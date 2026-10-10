@@ -20,7 +20,7 @@ The four weighted dimensions are session-relative, so the same graph scores iden
 
 | Term | Meaning | Definition |
 |---|---|---|
-| $R$ | recency | $\dfrac{t_{\text{last}} - t_{\text{start}}}{t_{\text{end}} - t_{\text{start}}}$ over the session's own temporal extent |
+| $R$ | recency | $1 - \dfrac{t_{\text{end}} - t_{\text{last}}}{\max(t_{\text{end}} - t_{\text{start}},\ 10\text{ min})}$, clamped to $[0,1]$, in integer milliseconds. A session of at least 10 minutes uses its own span, and those scores match the historical ratio. A younger session scores every concept near 1, so a few milliseconds between derives cannot sweep the dimension. |
 | $F$ | frequency | $\min\!\left(1,\ \dfrac{\text{access count}}{10}\right)$ |
 | $A$ | session activity | share of the session's interactions that derived this concept |
 | $D$ | density | incident edge count normalized by the most connected concept in the session |
