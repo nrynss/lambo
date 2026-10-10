@@ -14,16 +14,28 @@ untouched here.
 ## The rule
 
 In `recall::assemble::assemble_with_legs`, a recall is **cold** when
-`w_query > 0` and at least one phase-1 candidate meets all three conditions:
+`w_query > 0` and at least one expanded phase-1 candidate meets all four
+conditions:
 
 - it is backed by the keyword or vector leg (`LegScores`), not only by the
   recent leg;
 - it is a concept present in the graph;
 - it has **no** entry in the score table (an explicit `0.0` counts as
-  scored).
+  scored);
+- query-only order would **emit** it: within `top_k`, or force-included as
+  a hot member (review M1, added in remediation). Its `d` is 0, so the
+  blend never ranks it higher than query-only order does; a fresh concept
+  query-only order cannot show cannot be shown at all, and it no longer
+  withholds the daemon share from the hits that are shown.
+
+The result reports the mode as `DetailedRecall::cold_start`, and the
+`serve --ledger` recall line carries it as `cold_start` (review M2).
 
 In a cold recall every expanded member scores `w_query × q`, older scored
-members included. Traversal and sibling members have `q = 0`. Canonical-first
+members included. Traversal and sibling members have `q = 0`, so they rank
+after every phase-1 hit. A member with an active reservation that the
+blended order would have emitted is force-included while cold, so its
+Reservation warning survives the window (review L4). Canonical-first
 order, hot-list force-inclusion and the key/id tie-break are unchanged. Once
 the daemon publishes a table that holds the concept, the normal blend
 returns, and ranks may change at that transition. The user accepted that
@@ -83,7 +95,49 @@ unscored. Measured here instead:
 
 **Decision: keep the global rule.** At about 1% of recalls, a narrower
 variant would only add complexity, and it would reintroduce the A/B/F
-impossibility for exactly the recalls it targets.
+impossibility for exactly the recalls it targets. (Remediation narrowed
+only the trigger, per M1: a fresh concept that cannot be shown no longer
+starts cold mode. Once it starts, it is still global.)
+
+### The real window (review M2, measured in remediation)
+
+The 4.5 ms above timed `rescore()` alone. The window runs from the apply
+to the publish of the next completed cycle: wake latency, the rest of any
+cycle already running (access apply, four detectors, GC drain or sweep),
+then the next rescore. Measured with a temporary, uncommitted release test
+on a synthetic graph at dogfood scale (2,000 interactions, 4,466 concepts,
+6,466 nodes, 11,600 edges, six agents, 51 days, 1-in-90 canonical), never
+the live rig. The test file is kept at
+`scratchpad/79r/window_bench.rs`, its output at `79r/window-bench.log`.
+
+| step (30 runs) | p50 | p90 | max |
+|---|---:|---:|---:|
+| `rescore` | 4.69 ms | 4.91 ms | 5.60 ms |
+| four detectors | 5.58 ms | 5.70 ms | 6.65 ms |
+| `gc::run`, full sweep | 11.10 ms | 11.27 ms | 12.10 ms |
+| `run_cycle`, no GC | 9.17 ms | 9.65 ms | 11.44 ms |
+
+Apply to publish through the real loop (`Daemon::from_config`, 4 worker
+threads, derive under one write guard then wake, as `Memory` does):
+
+| load | derive → published | some concept unscored | longest unscored stretch |
+|---|---|---:|---:|
+| 60 isolated derives | p50 6.4 ms, p99 9.0 ms, max 23.0 ms | — | — |
+| a derive every 50 ms, 3 s | p50 15.3 ms, max 17.0 ms | 4.5% of samples | 16.9 ms |
+| every 10 ms | p50 9.6 ms, max 11.8 ms | 44.4% | 43.7 ms |
+| every 2 ms | p50 7.6 ms, max 13.9 ms | 99.9% | the whole 3 s |
+
+So each concept is scored within one or two cycles, but under a burst
+faster than a cycle (about 10 ms here) some concept is always unscored.
+"Some concept unscored" is an upper bound on cold recalls: with M1 a
+recall goes cold only when that concept would be shown. While GC sweeps it
+holds `graph.write()`, so a recall blocks for it rather than going cold.
+`cold_start` on the ledger line makes the real rate measurable.
+
+A rescore that panicked used to mark its epoch done before running, so the
+table stayed stale until the next write, which in an idle session kept
+such recalls cold indefinitely. `last_epoch` is now set after the publish,
+and the next cycle retries (review L1).
 
 Rejected narrower variants:
 
@@ -173,7 +227,38 @@ sessions span minutes, so the quantum is negligible. Switching to
 microseconds would not have fixed the test, because a stall still moves
 recency by the same fraction.
 
-## Live EG2 before/after (Q8_0 model and mmproj, llama.cpp b11517)
+## Live EG2 through the real cold path (remediation, review M3)
+
+The original live test computed its cold column as `w_query × q` in the
+test, so it could not fail on a regression of the rule. It is replaced by
+`memory::tests::live_eg2_cold::live_eg2_cold_start_ranks_the_fresh_matching_image_first`,
+in the crate so that `stop_daemon_for_cold_start` can hold the daemon
+back. It derives the older images, settles and stops the daemon, derives
+the fresh ones, and recalls by the query vector. It asserts `cold_start`,
+that every hit scores `w_query × cosine`, that the fresh red image is #1,
+and that every relevant image ranks above every noise image. With cold
+mode disabled it fails (`cold_start` is false and the order is the old
+blend's). Run against my own `llama-server` on port 18311 (stopped after):
+
+| concept | relevant | q | d frozen | old blend (calc) | #79 recall |
+|---|---|---:|---:|---:|---:|
+| old dark red | yes | 0.7011 | 0.4167 | 0.5589 (#2) | 0.3506 (#2) |
+| old blue | no | 0.6486 | 0.4167 | 0.5326 (#3) | 0.3243 (#3) |
+| old green | no | 0.6440 | 0.6667 | 0.6554 (#1) | 0.3220 (#4) |
+| fresh red | yes | 0.7233 | missing | 0.3616 (#4) | 0.3616 (#1) |
+| fresh gray | no | 0.6186 | missing | 0.3093 (#5) | 0.3093 (#5) |
+
+The `d` values differ from the first run's because these are read from the
+frozen table directly, and recency follows derive order. The other three
+live tests also pass. The live command is now
+`cargo test --features embed-eg2,store-sqlite --lib --test live_eg2 --
+--ignored --nocapture live_eg2`. Without `store-sqlite`,
+`tests/live_eg2.rs::live_eg2_cold_start_needs_store_sqlite` fails and names
+that command when a server is configured (review L5), instead of the
+cold-path test compiling out unnoticed. The `evidence/issue-22-eg2/` files
+are records of the #22 run and keep the command that run used.
+
+## Live EG2 before/after, first run (Q8_0 model and mmproj, llama.cpp b11517)
 
 I ran `tests/live_eg2.rs` against my own `llama-server` on port 18300, with
 the flags from `lambo.example.toml`, query "a red square", and default
@@ -199,9 +284,10 @@ max 0.3388, and text→text relevant min 0.4114 beats irrelevant max 0.3328.
 Running the new test beside `live_eg2_size_invariance` made that test's
 bit-identity assertion fail 3/3. llama-server batches concurrent requests
 across its four slots, and a batched embedding is not bit-identical to a
-lone one. The live tests now share one async lock, and all four pass 3/3.
-The table needs `--features embed-eg2,store-sqlite`; the documented
-`embed-eg2` command runs the other three.
+lone one. The live tests share one async lock. It serializes only within
+the `live_eg2` binary; the in-crate cold-path test runs in the lib binary,
+which cargo never runs beside it, but another client of the same server
+still batches.
 
 ## What the wip changed after its report
 
@@ -246,3 +332,43 @@ pass.
 | cold score `q` without `w_query` | 5 tests |
 | `w_query = 0` enters cold mode | daemon-only unit test |
 | graded looks best first, with stall | stall regression test (3/3) |
+
+## Opus review remediation (2026-10-10)
+
+Review: `scratchpad/79/review-opus.md` (no High; M1-M3, L1-L5, I1-I5).
+Merged origin/main first (#91, #93, #94; no conflicts) and re-baselined.
+
+| finding | fix | test (mutation-checked: fails without the fix) |
+|---|---|---|
+| M1 trigger on unshowable candidates | trigger only when query-only order would emit the fresh concept; `rank_members` and `emitted` shared with assembly | `unscored_hit_below_the_top_k_cut_keeps_the_blend` (both directions), `unscored_hot_hit_below_the_top_k_cut_still_starts_cold_mode` |
+| M2(a) unobservable | `DetailedRecall::cold_start` (serde-skipped like `legs`), ledger key `cold_start`, always present; additive per the ledger rule that consumers ignore unknown keys, `v` stays 1 | `i1_the_recall_line_reports_cold_start`, live ledger line asserts a boolean, assemble and public SQLite tests assert the flag |
+| M2(b) / L1 rescore panic | `last_epoch` set after the publish; test-only `Daemon::fail_next_rescores` | `a_failed_rescore_is_retried_on_the_next_cycle` |
+| M2(c) / I5 window | measured (above); api.mdx (both copies) and CHANGELOG corrected, 1.18-1.55% range | docs |
+| M3 live test cannot fail | in-crate live test through the real cold path | fails with cold mode disabled (run live) |
+| L2 text test passed without the fix | recent noise derived before the freeze, hazard asserted | fails with cold mode disabled (ordering, not only the flag) |
+| L3 stale comment | reworded to the abort-and-join | — |
+| L4 reservation and traversal | blend-shown reservation holders force-included while cold; traversal/sibling behaviour documented | `cold_mode_keeps_a_reservation_holder_the_blend_would_show` (two mutations) |
+| L5 / open question | live command `embed-eg2,store-sqlite` everywhere it is documented; loud stand-in without `store-sqlite`; #22 note row updated | stand-in fails with a server set, skips without |
+
+I2 (recency normalised over the session span) is left for its own issue.
+#87 is untouched.
+
+### Gates (base: origin/main merged into the branch, before remediation)
+
+| row | before | after | delta |
+|---|---|---|---|
+| `store-sqlite,fixtures` | 1975/0/4 | 1980/0/4 | +5 |
+| `--all --features fixtures` | 1789/0/4 | 1794/0/4 | +5 |
+| `--no-default-features --features store-sqlite` | 1049/0/0 | 1053/0/0 | +4 |
+| `--no-default-features --features store-postgres` | 1007/0/14 | 1011/0/14 | +4 |
+| `embed-eg2` | 1782/0/7 | 1787/0/8 | +5, +1 ignored |
+| `recall-elastic,store-sqlite,fixtures` | 2059/0/4 | 2064/0/4 | +5 |
+
+The +5 are the three assemble tests, the rescore-retry test and the ledger
+test; the no-default rows do not build the MCP ledger test. The +1 ignored
+is `live_eg2_cold_start_needs_store_sqlite`. fmt, clippy `-D warnings` on
+default, `store-sqlite,fixtures`, `ship,fixtures`, `embed-eg2`,
+`embed-eg2,store-sqlite`, no-default `store-postgres,store-sqlite,fixtures`
+and `recall-elastic,store-sqlite,fixtures`, the docs mirror check, the CI
+vector row, and the graded `image_e2e` tests 20/20 all pass. The live EG2
+run passes (4 tests). Postgres and Cockroach live legs were not run.
