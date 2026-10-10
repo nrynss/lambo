@@ -100,12 +100,16 @@ enum Commands {
     /// Loopback is unauthenticated by default; a non-loopback bind requires a
     /// bearer token (LAMBO_AUTH_TOKEN or --auth-token) and fails closed without one.
     ServeWeb {
-        /// Session to open a read-only window onto (reader process; does not take the writer lease).
+        /// Session to open a read-only window onto (reader process; does not
+        /// take the writer lease). Repeatable, beside lambo.toml [web]
+        /// sessions: each served session is read at /s/<session>/, and the
+        /// first is also served at /. With more than one, every name must be
+        /// 1 to 128 bytes of [A-Za-z0-9._:-].
         #[arg(
             long,
-            help = "Session to open a read-only window onto (reader process; does not take the writer lease)."
+            help = "Session to open a read-only window onto (reader process; does not take the writer lease). Repeatable, beside lambo.toml [web] sessions: each is served at /s/<session>/, the first also at /."
         )]
-        session: String,
+        session: Vec<String>,
         /// HTTP port to listen on.
         #[arg(long, default_value_t = 7710, help = "HTTP port to listen on.")]
         port: u16,
@@ -124,6 +128,17 @@ enum Commands {
         /// bind.
         #[arg(long, value_name = "TOKEN")]
         auth_token: Option<lambo::cli::serve_web::AuthToken>,
+        /// A Host (name or address, optionally :port) the portal also
+        /// answers while no token is configured, beside localhost,
+        /// 127.0.0.1 and [::1] and lambo.toml [web] allowed_hosts. Needed
+        /// behind a proxy that forwards its public name (DNS-rebinding
+        /// defence). Repeatable; ignored once a token is configured.
+        #[arg(
+            long = "allowed-host",
+            value_name = "HOST",
+            help = "A Host (name or address, optionally :port) the portal also answers while no token is configured, beside localhost, 127.0.0.1 and [::1]. Needed behind a proxy that forwards its public name. Repeatable."
+        )]
+        allowed_host: Vec<String>,
     },
     /// Scripted two-agent demo scenario (spec §13): two agents build one REST API, `user schema` earns Canonical, and the second agent's recall carries the blast-radius and conflict warnings.
     Demo {
@@ -152,9 +167,13 @@ enum Commands {
             help = "Session to recall against (reader process; does not take the writer lease)."
         )]
         session: String,
-        /// Natural-language query.
-        #[arg(long, help = "Natural-language query.")]
-        query: String,
+        /// Natural-language query. Optional with --image or --query-vector-json.
+        #[arg(
+            long,
+            required_unless_present_any = ["image", "query_vector_json"],
+            help = "Natural-language query. Optional with --image or --query-vector-json."
+        )]
+        query: Option<String>,
         /// Hits to return. Defaults to the session config's default_top_k.
         #[arg(
             long,
@@ -167,6 +186,28 @@ enum Commands {
         /// Graph traversal depth for phase 2 expansion.
         #[arg(long, help = "Graph traversal depth for phase 2 expansion.")]
         traversal_depth: Option<usize>,
+        /// Recall what is close to this PNG, JPEG or WebP file (at most 2 MiB, 4096 px a side), embedded by the configured embedder (#22). Not stored.
+        #[arg(
+            long,
+            value_name = "PATH",
+            conflicts_with = "query_vector_json",
+            help = "Recall what is close to this PNG, JPEG or WebP file (at most 2 MiB, 4096 px a side), embedded by the configured embedder. Not stored."
+        )]
+        image: Option<PathBuf>,
+        /// The --image file's MIME type (image/png, image/jpeg, image/webp). Default: read from the file; a mismatch is refused.
+        #[arg(
+            long,
+            requires = "image",
+            help = "The --image file's MIME type (image/png, image/jpeg, image/webp). Default: read from the file; a mismatch is refused."
+        )]
+        mime: Option<String>,
+        /// Recall what is close to a vector: a JSON file {"values": [...], "contract": {"kind", "model", "dim"}} in this session's space. Needs [embedder] accept_client_vectors = true.
+        #[arg(
+            long = "query-vector-json",
+            value_name = "PATH",
+            help = "Recall what is close to a vector: a JSON file {\"values\": [...], \"contract\": {\"kind\", \"model\", \"dim\"}} in this session's space. Needs [embedder] accept_client_vectors = true."
+        )]
+        query_vector_json: Option<PathBuf>,
     },
     /// List the session's canonical memories — concepts that earned Canonical status through the audited transition path.
     Saints {
@@ -580,6 +621,9 @@ struct ServePlan {
     auth_token: Option<lambo::mcp::SecretToken>,
     /// The resolved `[[serve.credential]]` entries (#32 PR 5); HTTP only.
     credentials: Vec<lambo::config::ServeCredential>,
+    /// The `[serve]` bounds on attached sessions (#32 PR 6), read here
+    /// because `file` is handed to the resolve before the serve starts.
+    bounds: lambo::mcp::SessionBounds,
 }
 
 /// `lambo serve`'s checks that need no backend (#32 PR 4), run before the
@@ -679,9 +723,11 @@ fn serve_preflight(
     // `[serve]`: the keys this serve does not enforce yet are named once
     // (#32 PR 1 review L3); never a value.
     file.serve.warn_if_unenforced(transport == Transport::Stdio);
+    let bounds = lambo::mcp::SessionBounds::from_config(&file.serve);
     Ok(ServePlan {
         transport,
         pinned,
+        bounds,
         file,
         auth_token,
         credentials,
@@ -915,12 +961,29 @@ fn main() -> ExitCode {
         _ => None,
     };
     // `serve-web` takes `[web]` (#4) from the same single read of
-    // `lambo.toml` that builds its backends, as `serve` takes `[serve]`.
+    // `lambo.toml` that builds its backends, as `serve` takes `[serve]`. Its
+    // served sessions are planned here, before any backend or model is
+    // built, so an empty or bad set is exit 2 at once (#4 PR 2).
     let mut web = lambo::config::WebConfig::default();
+    let mut served_web = None;
     let loaded = match &cmd {
-        Commands::ServeWeb { .. } => match LamboFile::load_resolved(config) {
+        Commands::ServeWeb {
+            session,
+            allowed_host,
+            ..
+        } => match LamboFile::load_resolved(config) {
             Ok(file) => {
                 web = file.web.clone();
+                let planned = lambo::cli::serve_web::plan_sessions(session, &web).and_then(|s| {
+                    lambo::cli::serve_web::plan_allowed_hosts(allowed_host, &web).map(|h| (s, h))
+                });
+                match planned {
+                    Ok(plan) => served_web = Some(plan),
+                    Err(e) => {
+                        eprintln!("lambo serve-web: {e}");
+                        return ExitCode::from(e.exit_code());
+                    }
+                }
                 Some(file)
             }
             Err(e) => {
@@ -979,6 +1042,7 @@ fn main() -> ExitCode {
                 pinned,
                 auth_token,
                 credentials,
+                bounds,
                 ..
             } = serve_plan.expect("serve_preflight ran for serve");
             // A zero `--ledger-heartbeat` would spin the heartbeat loop as fast
@@ -1002,6 +1066,7 @@ fn main() -> ExitCode {
                 rate_limit_rps,
                 ledger,
                 ledger_heartbeat: ledger_heartbeat.map(std::time::Duration::from_secs),
+                bounds,
             };
 
             // `backends` is the single resolve from `resolve_for_command` above
@@ -1038,10 +1103,11 @@ fn main() -> ExitCode {
         // the single `ResolvedBackends` from `resolve_for_command` above.
         (
             Commands::ServeWeb {
-                session,
+                session: _,
                 port,
                 bind,
                 auth_token,
+                allowed_host: _,
             },
             Resolved::Full(backends),
         ) => run_async(
@@ -1049,7 +1115,16 @@ fn main() -> ExitCode {
             lambo::cli::serve_web::run(
                 *backends,
                 lambo::cli::serve_web::Args {
-                    session,
+                    // Planned before the backends, above.
+                    session: served_web
+                        .as_ref()
+                        .map(|(p, _)| p.default.clone())
+                        .unwrap_or_default(),
+                    sessions: served_web
+                        .as_ref()
+                        .map(|(p, _)| p.sessions.clone())
+                        .unwrap_or_default(),
+                    allowed_hosts: served_web.map(|(_, h)| h).unwrap_or_default(),
                     port,
                     bind,
                     auth_token,
@@ -1075,19 +1150,45 @@ fn main() -> ExitCode {
                 top_k,
                 max_tokens,
                 traversal_depth,
+                image,
+                mime,
+                query_vector_json,
             },
             Resolved::Full(backends),
-        ) => run_async(
-            "recall",
-            lambo::cli::recall::run(
-                &backends,
-                &session,
-                &query,
-                top_k,
-                max_tokens,
-                traversal_depth,
-            ),
-        ),
+        ) => {
+            let query = query.unwrap_or_default();
+            if image.is_none() && query_vector_json.is_none() {
+                run_async(
+                    "recall",
+                    lambo::cli::recall::run(
+                        &backends,
+                        &session,
+                        &query,
+                        top_k,
+                        max_tokens,
+                        traversal_depth,
+                    ),
+                )
+            } else {
+                let by = lambo::cli::recall::RecallBy {
+                    image,
+                    mime,
+                    query_vector_json,
+                };
+                run_async(
+                    "recall",
+                    lambo::cli::recall::run_by(
+                        &backends,
+                        &session,
+                        &query,
+                        &by,
+                        top_k,
+                        max_tokens,
+                        traversal_depth,
+                    ),
+                )
+            }
+        }
         (Commands::Saints { session }, Resolved::StoreOnly { store, .. }) => {
             run_async("saints", lambo::cli::saints::run(store.as_ref(), &session))
         }
@@ -1497,6 +1598,33 @@ mod tests {
                 "provision --help must name {kind}: {about}"
             );
         }
+    }
+
+    /// #22 PR 6: `--query` is required unless `--image` or
+    /// `--query-vector-json` is given; the two are exclusive, and `--mime`
+    /// needs `--image`.
+    #[test]
+    fn recall_query_is_optional_only_beside_an_image_or_a_vector() {
+        let parse = |args: &[&str]| {
+            let mut all = vec!["lambo", "recall", "--session", "s"];
+            all.extend_from_slice(args);
+            Cli::try_parse_from(all)
+        };
+        assert!(parse(&[]).is_err(), "no query, no image, no vector");
+        assert!(parse(&["--query", "q"]).is_ok());
+        assert!(parse(&["--image", "a.png"]).is_ok());
+        assert!(parse(&["--image", "a.png", "--mime", "image/png", "--query", "q"]).is_ok());
+        assert!(parse(&["--query-vector-json", "v.json"]).is_ok());
+        assert!(parse(&["--image", "a.png", "--query-vector-json", "v.json"]).is_err());
+        assert!(parse(&["--query", "q", "--mime", "image/png"]).is_err());
+        assert!(
+            parse(&["--image", "a.png"])
+                .unwrap()
+                .command
+                .unwrap()
+                .needs_embedder(),
+            "a recall by image embeds"
+        );
     }
 
     #[test]

@@ -13,8 +13,9 @@ use super::{SessionRegistry, Slot};
 pub(in crate::mcp::serve) struct SlotView {
     /// The session id.
     pub(in crate::mcp::serve) session: String,
-    /// `live`, `detaching`, `held_elsewhere`, `failed`, `erasing`,
-    /// `erased`, or `unattached` (hosted, in no slot: between states).
+    /// `attaching` (on demand, #32 PR 6), `live`, `detaching`,
+    /// `held_elsewhere`, `failed`, `erasing`, `erased`, or `unattached`
+    /// (pinned, in no slot: between states).
     pub(in crate::mcp::serve) state: &'static str,
     /// Whether the serve pins it (attached at startup, never evicted).
     pub(in crate::mcp::serve) pinned: bool,
@@ -58,6 +59,7 @@ impl SessionRegistry {
                     Some(Slot::Live(session)) => {
                         (id.clone(), "live", Some(std::sync::Arc::clone(session)))
                     }
+                    Some(Slot::Attaching { .. }) => (id.clone(), "attaching", None),
                     Some(Slot::Detaching) => (id.clone(), "detaching", None),
                     Some(Slot::HeldElsewhere { .. }) => (id.clone(), "held_elsewhere", None),
                     Some(Slot::Failed) => (id.clone(), "failed", None),

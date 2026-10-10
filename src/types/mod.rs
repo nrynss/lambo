@@ -405,8 +405,11 @@ pub struct EmbeddingSource {
     pub modality: SourceModality,
     /// Which side computed the vector.
     pub origin: VectorOrigin,
-    /// Lowercase hex sha256 of the bytes the server embedded. `None` for a
-    /// client-submitted vector, where the server never saw the bytes.
+    /// Lowercase hex sha256 of the image bytes the client submitted to the
+    /// server. An embedder may send its backend a canonical form of them
+    /// instead (EmbeddingGemma 2 sends every image as a lossless PNG with a
+    /// 768 px longer side); this still names the submitted bytes. `None`
+    /// for a client-submitted vector, where the server never saw the bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
     /// The source's MIME type, when known.
@@ -1608,6 +1611,23 @@ impl StoreError {
     /// Every other error keeps the existing retry / retain semantics.
     pub fn is_retryable(&self) -> bool {
         !matches!(self, StoreError::Constraint(_) | StoreError::StaleWrite(_))
+    }
+
+    /// Whether this is a checked vector read refusing its probe because the
+    /// session's embedding space is not the caller's: the durable contract
+    /// changed under the read (the E2E-6 race), or the probe's width is not
+    /// the session's.
+    ///
+    /// Every store and the holder's graph source word these two refusals
+    /// alike (the parity tests compare them), so the prefixes identify them.
+    /// Used only to word a model-facing message: neither refusal carries a
+    /// detail N4 hides, and both are fixed by re-reading the contract and
+    /// retrying, which a bare "store error" does not say (#22 PR 6 review
+    /// Low 1). The class stays `store error`.
+    pub fn is_embedding_contract_refusal(&self) -> bool {
+        matches!(self, StoreError::Invariant(m)
+            if m.starts_with("vector candidate lookup refused after embedding contract changed")
+                || m.starts_with("query embedding has "))
     }
 }
 

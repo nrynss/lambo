@@ -123,13 +123,14 @@ Erasing a session also removes it from the index, and reports success only once 
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
-| `kind` | string | `bge_m3` | `bge_m3` (an OpenAI-compatible embeddings API: local `llama-server` or a hosted endpoint), `candle` (in-process BGE-M3), `gemini` (Vertex AI), or `fixture` (tests). `openai` is an alias of `bge_m3`. `bedrock` parses but is not implemented, so it fails at startup. |
-| `dim` | integer | `1024` | The width you expect the embedder to emit. |
-| `url` | string | none | The `llama-server` base URL, used when `kind` is `bge_m3`. Also accepted as `llama_url`. |
-| `model` | string | none | The model id sent to `llama-server`. Empty means the server's own default. Also accepted as `llama_model`. |
-| `api_key_env` | string | none | The name of the environment variable that holds a bearer token, for a hosted OpenAI-compatible endpoint. Used when `kind` is `bge_m3`; any other kind refuses it. See [Hosted endpoints](#hosted-endpoints). |
+| `kind` | string | `bge_m3` | `bge_m3` (an OpenAI-compatible embeddings API: local `llama-server` or a hosted endpoint), `candle` (in-process BGE-M3), `gemini` (Vertex AI), `embeddinggemma2` (EmbeddingGemma 2 text and images through `llama-server`, see [EmbeddingGemma 2](#embeddinggemma-2)), or `fixture` (tests). `openai` is an alias of `bge_m3`. `bedrock` parses but is not implemented, so it fails at startup. |
+| `dim` | integer | `1024` | The width you expect the embedder to emit. For `embeddinggemma2` it must be `768`, `512`, `256` or `128`, so set it: the default `1024` is refused. |
+| `url` | string | none | The `llama-server` base URL, used when `kind` is `bge_m3` or `embeddinggemma2`. Also accepted as `llama_url`. |
+| `model` | string | none | The model id sent to `llama-server`. Empty means the server's own default. For `embeddinggemma2` it names the weights artifact and defaults to `ggml-org/embeddinggemma-2-GGUF@bfcd2987/Q8_0`. Also accepted as `llama_model`. |
+| `api_key_env` | string | none | The name of the environment variable that holds a bearer token, for a hosted OpenAI-compatible endpoint. Used when `kind` is `bge_m3` or `embeddinggemma2`; any other kind refuses it. See [Hosted endpoints](#hosted-endpoints). |
+| `images` | bool | `true` | Whether `embeddinggemma2` embeds images. `false` makes it text-only: it never sends an image, and `lambo_derive_image` takes only client vectors. Any other kind refuses the key. |
 | `keep_warm_secs` | integer | auto | Seconds between `lambo serve` keep-warm touches. Omitted means auto: every 10 seconds for the in-process candle embedder on a Metal device, off for everything else. `0` turns it off; any other value applies to every kind. For `gemini`, each touch is a billed Vertex AI embedding request and keeps nothing local warm, so leave it off there. On a battery-powered laptop the default wakes the GPU every 10 seconds (about 0.2% GPU duty); set `keep_warm_secs = 0` to opt out. |
-| `accept_client_vectors` | bool | `false` | Accept an image vector a client computed (`lambo_derive_image` with `vector`, `lambo derive-image --vector-json`). Off by default: such a call is refused and the refusal names this key. Lambo checks that the vector's declared contract (kind, model, dim) is exactly the session's and that the vector has the right width and a real direction, but it cannot check that the vector came from that model, so turning this on trusts the client's label. One setting for the whole process: every session a `lambo serve` holds gets the same value. |
+| `accept_client_vectors` | bool | `false` | Accept a vector a client computed: an image's (`lambo_derive_image` with `vector`, `lambo derive-image --vector-json`) or a query's (`lambo_recall` with `query_vector`, `lambo recall --query-vector-json`). Off by default: such a call is refused and the refusal names this key. Lambo checks that the vector's declared contract (kind, model, dim) is exactly the session's and that the vector has the right width and a real direction, but it cannot check that the vector came from that model, so turning this on trusts the client's label. One setting for the whole process: every session a `lambo serve` holds gets the same value. |
 
 `kind` also accepts `bge`, `bge-m3` and `openai` for `bge_m3`, `vertex` for `gemini`, `titan` for `bedrock`, and `fake` for `fixture`. An alias changes nothing but the spelling: the kind is still reported and stamped as `bge_m3`.
 
@@ -163,6 +164,46 @@ api_key_env = "CLOUDFLARE_API_TOKEN"
 - A `401` or `403` from the endpoint fails the write as a configuration error, the same as a wrong URL.
 
 The same model behind a different server is a different embedding contract, because the two can differ numerically. Set `model` to the hosted id (as above) so a hosted session's contract differs from a local one, and start a fresh session or run `lambo re-embed` rather than mixing the two.
+
+### EmbeddingGemma 2
+
+`kind = "embeddinggemma2"` embeds text and images into one space with Google's EmbeddingGemma 2, served by llama.cpp's `llama-server`. It needs llama.cpp build b11452 or later; older builds refuse the model with `unknown model architecture: 'gemma-embedding2'`. Download the Q8_0 GGUF and its vision projector from `ggml-org/embeddinggemma-2-GGUF` and start the server like this:
+
+```bash
+llama-server --host 127.0.0.1 --port 8191 \
+  -m embeddinggemma-2-Q8_0.gguf \
+  --mmproj mmproj-embeddinggemma-2-Q8_0.gguf \
+  --embeddings --pooling mean \
+  --image-min-tokens 280 --image-max-tokens 280 \
+  --ctx-size 8192 --batch-size 8192 --ubatch-size 8192
+```
+
+```toml
+[embedder]
+kind = "embeddinggemma2"
+url = "http://127.0.0.1:8191"
+dim = 768
+```
+
+- Lambo adds the model card's task prefixes itself: a stored concept is embedded as `title: none | text: ...`, a recall query as `task: search result | query: ...`, and an image with no prefix. A server, or a client computing vectors, that uses other prefixes is in a different space.
+- `dim` can be `768`, `512`, `256` or `128`. Lambo takes the first `dim` of the 768 values and re-normalizes them.
+- The session's contract records the weights and the prompt profile, for example `ggml-org/embeddinggemma-2-GGUF@bfcd2987/Q8_0;prompts=lambo-eg2-v2`, because `llama-server` ignores the model name in a request. Set `model` to the artifact your server actually runs. A different artifact or profile is a different contract: start a fresh session or run `lambo re-embed`.
+- The profile also fixes the form an image is sent in. At a fixed budget llama.cpp still puts an image larger than about 768 px a side on a coarser patch grid than a smaller one, and resamples every image from whatever resolution it was given, so the same picture sent at 512 and at 1024 px embedded up to about 0.01 apart (cosine). Lambo therefore decodes every PNG, JPEG and WebP and sends it as a lossless PNG whose longer side is exactly 768 px: larger images are scaled down (Lanczos3), smaller ones scaled up (Catmull-Rom), aspect ratio kept. Measured on b11517 for pictures submitted at 128 to 3000 px: a flat image embeds bit-identically at every size; a patterned one does not, because a picture scaled to 768 px is not the same pixels as one drawn at 768 px. Renders at 768 px and above agree to a cosine of at least 0.9991 (checkerboard) and 0.9995 (smooth gradient); a 128 px checkerboard is 0.982 from the 768 px one, since enlarging cannot restore detail that was never sent. What Lambo stores about the image (its id, hash and type) describes the bytes you sent; only the request to the server carries the converted form. Images are decoded only up to 4096 px a side, two at a time.
+- A client that computes image vectors itself is in the same space only if it sends the server the same canonical form: decode without applying EXIF orientation or colour profiles (a palette PNG becomes RGB or RGBA, a CMYK JPEG becomes RGB, alpha is kept straight, 16-bit samples are kept); resize in one step so the longer side `L` becomes 768 and the shorter side `s` becomes `max(1, floor((s * 768 + floor(L / 2)) / L))` (integer arithmetic, halves rounded up), with Lanczos3 when shrinking and Catmull-Rom when enlarging, on the stored channel values; skip the resize when `L` is already 768; encode as PNG with no ancillary chunks. The deflate settings do not matter, only the pixels. Lambo uses the Rust `image` crate 0.25 for this; another resampler gives close but not bit-identical pixels. If an update of that crate ever changes the canonical pixels for the same input, Lambo's tests fail and the change ships as a new profile name, never under `lambo-eg2-v2`.
+- The profile fixes the image budget at 280 tokens. The two image flags set it, and the batch flags let a whole image fit: at the server's default ubatch of 512 the budget is silently cut to 256 tokens, a different space. The budget bounds an image's area, so an image's token count still depends on its size and shape (on b11517, 293 for a square up to 768 px, 260 for a larger one, anywhere from 236 to 540 for other shapes). Because no single image's count shows the budget, Lambo checks it with a reference image of its own: before the first image it embeds for a server that passed the `/props` check, and again every 60 seconds, it embeds a 1x1 picture and refuses image embeds, naming the flags, unless the server reports the 293 tokens b11517 reports at the 280 budget (within 8). A response to it without a token count refuses image embeds too, since `llama-server` always sends one. A server that does not answer `/props` gets no reference check, so its image budget, like the `--pooling mean` setting of any server (which `/props` does not report), rests on your word; the log says so once.
+- Before its first embed, Lambo asks the server's `/props` which file it loaded, its quantization and whether it has a vision projector. It refuses to embed with a file whose name does not mention EmbeddingGemma 2 or a quantization other than the one `model` names (llama.cpp's own names are matched to the file names' tokens, so `Q4_K - Medium` is `Q4_K_M` and `all F32` is `F32`), and refuses images when the server has no vision projector. A server that does not answer `/props` (a hosted endpoint, Ollama) is used without the check, and the log says so once. If `/props` cannot be reached or answers with a server error, the log says so once and Lambo asks again after a wait that doubles from 1 second up to 30 seconds, not on every embed. Until a server has passed the check once, text and images embedded in that window (at most about 30 seconds per failed check, typically at startup) go to it unchecked, with no reference image check, the same as a server without `/props`; they are stamped with the configured contract, so if the server could be the wrong one, keep Lambo's writes stopped until the log shows the check passed. The answer is asked again every 60 seconds and right after an embed request gets no answer at all (connection refused or reset) or a 503 "Loading model", so a server restarted with another model or quantization is refused before Lambo writes more vectors under the old contract. Any other 503 (a busy server) is retried without asking again. If the server refuses Lambo's reference image itself, the error names the reference image check as a server or configuration problem, not a fault in your image. Once a server has passed the check, embeds wait (and are retried) while `/props` cannot be reached, and a server that stops answering `/props` is refused: restart Lambo if you replaced it on purpose.
+- Some of these checks rest on facts measured on llama.cpp b11517 and may change with the build: the 293-token count of the reference image, and the text of the HTTP 500 for an input larger than the physical batch ("increase the physical batch size"), which Lambo settles as a failed input naming `--ubatch-size`. After upgrading llama.cpp, re-measure them (`evidence/issue-22-eg2/` records how): a build that frames images differently refuses every image with a message naming b11517 and the flags (set `images = false` meanwhile), and a build that rewords the 500 makes an oversized input a retried server error again.
+- An image sent to a server started without `--mmproj` fails as a configuration error naming `--mmproj`, not as a retryable server error. Without `--mmproj`, set `images = false`.
+
+#### Size invariance
+
+Every image is resized to a 768 px longer side before it is embedded. That makes its vector largely, but not fully, independent of the size you send:
+
+- A flat image (one colour) gives a bit-identical vector at any size.
+- Real images sent at 768 px or larger agree to a cosine of at least 0.999.
+- Small images with sharp detail can drift by up to about 2% (a cosine of 0.98 for a checkerboard sent at 128 px), because enlarging cannot restore detail that was never sent.
+
+If bit-identical vectors matter, for example when you compare vectors directly or deduplicate on them, always send the same rendition of an image, such as the original file.
 
 <Warning>
 Do not switch embedder models in the middle of a session without re-embedding, because vectors from different models are not comparable. The kind, the model, and the width together form the session's embedding contract.
@@ -207,11 +248,11 @@ GC also sweeps on time. When `gc_max_interval_secs` has passed since a session's
 
 `[serve]` configures one `lambo serve` process that holds several sessions. It is optional: omit it and `lambo serve` behaves exactly as it always has.
 
-An HTTP `lambo serve` reads `sessions`, `default_session` and `max_attached`: it pins every session in `sessions` beside its `--session` values, serves `default_session` at `/mcp`, and refuses to start when the pinned sessions together exceed `max_attached` or `default_session` is not one of them (this release serves pinned sessions only). See [Several sessions in one serve](/cli#several-sessions-in-one-serve). A stdio serve owns one session and ignores `sessions` and `max_attached`: its `--session`, or, without one, the session `[[serve.projects]]` or `default_session` chooses ([below](#choosing-a-stdio-serves-session)).
+An HTTP `lambo serve` reads `sessions`, `default_session` and `max_attached`: it pins every session in `sessions` beside its `--session` values, serves `default_session` at `/mcp`, and refuses to start when the pinned sessions together exceed `max_attached` or `default_session` is not one of them (the default session must be pinned). See [Several sessions in one serve](/cli#several-sessions-in-one-serve). A stdio serve owns one session and ignores `sessions` and `max_attached`: its `--session`, or, without one, the session `[[serve.projects]]` or `default_session` chooses ([below](#choosing-a-stdio-serves-session)).
 
 An HTTP `lambo serve` also enforces `[[serve.credential]]`; see [Credentials](#credentials). A stdio serve authenticates nobody (its client owns the process), so it ignores the credentials and never reads their variables.
 
-The rest of the table is **parsed and validated only**: `attach_concurrency`, `idle_detach_secs` and `per_session_rps` arrive in later releases, and an HTTP serve never reads `[[serve.projects]]`, which is a stdio serve's only. A malformed table is still refused when the file is read, so it stops every command, like an unknown key. When the table sets any of those keys (or, for an HTTP serve, `[[serve.projects]]`), `lambo serve` logs one warning at startup (`[serve] is parsed but not yet enforced for some keys`) that names the keys and no value from them.
+An HTTP `lambo serve` enforces `attach_concurrency`, `idle_detach_secs` and `per_session_rps` too. `per_session_rps` gives every session its own request bucket; the other two bound the sessions a serve attaches on demand, which it does once a credential reaches past the pinned sessions (a `session_prefix`, or an unpinned name). A stdio serve owns one session, so none of the three applies to it. An HTTP serve never reads `[[serve.projects]]`, which is a stdio serve's only: when an HTTP serve's table sets it, `lambo serve` logs one warning at startup (`[serve] is parsed but not yet enforced for some keys`) that names the key and no value from it. A malformed table is still refused when the file is read, so it stops every command, like an unknown key.
 
 ```toml
 [serve]
@@ -243,10 +284,10 @@ erase = true
 |---|---|---|
 | `sessions` | none | Pinned sessions, attached at startup and never idle-detached. Served by an HTTP `lambo serve`, beside its `--session` values. |
 | `default_session` | none | The session `/mcp` serves, and the one a stdio serve without `--session` uses when no `[[serve.projects]]` entry covers its working directory. |
-| `max_attached` | `16` | Cap on attached sessions, pinned plus on-demand. At least 1, and at least the number of pinned sessions. |
-| `attach_concurrency` | `2` | Sessions that may attach at once. At least 1. |
-| `idle_detach_secs` | `900` | Seconds an on-demand session may sit idle before it is detached. At least 1. |
-| `per_session_rps` | `--rate-limit-rps` | Request rate for each session. `0` turns the per-session limit off. |
+| `max_attached` | `16` | Cap on attached sessions, pinned plus on-demand. At least 1, and at least the number of pinned sessions. At the cap, an on-demand attach detaches the least recently used idle on-demand session that the asking credential's share allows, or is refused with `503` and `Retry-After` when there is none. A credential reaching past the pinned sessions with no place left beside them is warned of at startup. |
+| `attach_concurrency` | `2` | Sessions that may attach at once, on demand or retried in the background. At least 1. Always 1 on SQLite, whose one connection serializes attaches with every flush. |
+| `idle_detach_secs` | `900` | Seconds an on-demand session may go without a tool call before it is detached (its tail flushed, its lease released). At least 1. Pinned sessions are never idle-detached. |
+| `per_session_rps` | `--rate-limit-rps` | Request rate for each attached session (burst twice that), drawn after the credential's; a request over it gets `429`. `0` turns the per-session limit off. A serve of one session that attaches nothing on demand applies it only when it is set. |
 | `[[serve.projects]]` | none | `path` and `session`: a stdio serve started without `--session` under `path` uses `session`. `path` must be absolute or start with `~/`. An HTTP serve does not read it. |
 | `[[serve.credential]]` | none | A bearer credential and the sessions it may reach (below). |
 
@@ -269,7 +310,7 @@ Once any credential is configured, the implicit `local` credential is gone, so a
 
 The presented token is compared with every configured token in constant time, so response timing does not say which credential a guess nearly matched. A request without a valid token gets `401`, whatever it asked for. A request with a valid token for a session outside that credential's reach gets the same empty `404` as an unknown session or an unrouted path, whether that session exists, is held by another writer, is being detached or failed, and the serve consults no store to answer it. Only inside its reach can a caller see a `503`. `/mcp` serves the default session to a credential that reaches it.
 
-This release serves pinned sessions only: a session inside a credential's `session_prefix` that is not pinned gets the `404`, even with `create = true`. `lambo serve` logs a warning at startup for a credential that names sessions it does not pin, or reaches none of them, and for `LAMBO_AUTH_TOKEN` (or `--auth-token`) set beside `[[serve.credential]]`: that token stays the `default` credential, reaching every pinned session, until you unset it.
+A session inside a credential's `session_prefix`, or named in its `sessions` but not pinned, is attached on demand by the first request for it: always with `create = true`, and without it only once the session exists (a writer has used it); otherwise the request gets the `404`. See [Several sessions in one serve](/cli#several-sessions-in-one-serve). `lambo serve` logs a warning at startup for a credential without `create` that reaches sessions it does not pin, and for `LAMBO_AUTH_TOKEN` (or `--auth-token`) set beside `[[serve.credential]]`: that token stays the `default` credential, reaching every pinned session, until you unset it.
 
 A token must be printable ASCII with no leading or trailing whitespace, and at most 4096 bytes. A token that breaks this (a trailing newline from an env file, say) refuses the start with exit 2, naming the credential and never quoting the token. A presented token over 4096 bytes, or a request carrying two `Authorization` headers, gets the ordinary `401`.
 
@@ -295,12 +336,14 @@ The map is read from the `lambo.toml` the serve loads: `--config`, then `LAMBO_C
 
 ## Read-only window views
 
-`[web]` bounds how `lambo serve-web` reads its session. It is optional: omit it and the defaults below apply.
+`[web]` sets which sessions `lambo serve-web` serves, which `Host` names it answers without a token, and how it reads each session. It is optional: omit it and the defaults below apply.
 
-The window reads the store through a **view**: one load of the session that every request and every open tab shares until it is older than `view_ttl_ms`. The next request after that reloads it, and requests that arrive while a load is running wait for that one load instead of starting their own. A failed load is not kept: the requests waiting on it get the error, and the next request tries again. So the store sees about one load per `view_ttl_ms` however many tabs are open, and the page shows durable state up to `view_ttl_ms` older than the store. The writer-published flush lag is still read on every poll.
+The window reads the store through a **view**: one load of a session that every request and every open tab shares until it is older than `view_ttl_ms`. The next request after that reloads it, and requests that arrive while a load is running wait for that one load instead of starting their own. A failed load is not kept: the requests waiting on it get the error, and the next request tries again. So the store sees about one load per session per `view_ttl_ms` however many tabs are open, and the page shows durable state up to `view_ttl_ms` older than the store. The writer-published flush lag is still read on every poll.
 
 ```toml
 [web]
+sessions = ["lambo", "rustydocs"]
+allowed_hosts = ["lambo.example.com"]
 view_ttl_ms = 1500
 max_loaded_sessions = 4
 load_concurrency = 2
@@ -309,12 +352,14 @@ recall_concurrency = 4
 
 | Key | Default | What it sets |
 |---|---|---|
+| `sessions` | none | Sessions to serve, after any `--session` flags. The first one overall is the default, served at `/`; each is served at `/s/<session>/`. With more than one in total, each name must be 1 to 128 bytes of `[A-Za-z0-9._:-]`, not starting with `.`. |
+| `allowed_hosts` | none | `Host` values answered while no token is configured, beside `localhost`, `127.0.0.1` and `[::1]`, after any `--allowed-host` flags. A name, or `name:port` for that port only. |
 | `view_ttl_ms` | `1500` | Milliseconds a view is reused, the page's poll interval. `0` reloads on every request, still one load for requests that arrive together. At most `60000`. |
 | `max_loaded_sessions` | `4` | Views kept in memory at once. The least recently used is dropped beyond it. At least 1. |
 | `load_concurrency` | `2` | Session loads that may run at once. 1 to 1024. Always `1` on SQLite. |
 | `recall_concurrency` | `4` | Recalls that may run at once. A recall that waits 2 seconds for a slot gets `503` with `Retry-After: 1`. 1 to 1024. |
 
-An unknown key or an out-of-range value is refused when the file is read, so it stops every command, like any other invalid key. The refusal names the key and its bound, never the value. At startup `lambo serve-web` prints the bounds it runs with. It checks the store's schema at startup and loads the session on the first request that needs it. See [Watch a session in a browser](/cli#watch-a-session-in-a-browser).
+An unknown key, an out-of-range value, an empty or repeated session name and a malformed host are refused when the file is read, so they stop every command, like any other invalid key. A numeric refusal names the key and its bound, never the value. At startup `lambo serve-web` prints the sessions and bounds it runs with. It checks the store's schema at startup and loads each session on the first request that needs it. See [Watch a session in a browser](/cli#watch-a-session-in-a-browser).
 
 ## Environment variables
 
@@ -352,6 +397,7 @@ Cargo features decide which stores and embedders exist in your binary, and `lamb
 | `recall-elastic` | The Elasticsearch recall tier (`[recall]`). Released binaries include it. |
 | `embed-fixture` | The deterministic fixture embedder. |
 | `embed-bge` | BGE-M3 embeddings through `llama-server`. |
+| `embed-eg2` | EmbeddingGemma 2 text and image embeddings through `llama-server` (`kind = "embeddinggemma2"`). Builds on `embed-bge`. Released binaries include it. |
 | `embed-bedrock` | Reserved for Amazon Titan embeddings through Bedrock. Not implemented yet. |
 | `fixtures` | Committed fixture graphs, which also enables `store-memory`. |
 | `demo` | A convenience profile covering the memory and CockroachDB stores, both local embedders, and the fixtures. |
@@ -380,7 +426,7 @@ A request whose declared `Content-Length` exceeds `4 MiB` is refused with `413` 
 
 ### The read-only window
 
-`lambo serve-web` opens a read-only browser window onto a session on port `7710` and never takes the writer lease, so it runs safely beside the `lambo serve` writer. It shares the same auth posture: loopback is unauthenticated by default, and a non-loopback bind requires `LAMBO_AUTH_TOKEN` or `--auth-token` and fails closed without one. It reads through a short-lived per-session view bounded by [`[web]`](#read-only-window-views). See [Command line](/cli).
+`lambo serve-web` opens a read-only browser window onto one or more sessions on port `7710` and never takes the writer lease, so it runs safely beside the `lambo serve` writer. It shares the same auth posture: loopback is unauthenticated by default, and a non-loopback bind requires `LAMBO_AUTH_TOKEN` or `--auth-token` and fails closed without one; without a token it answers only loopback `Host` names and `[web] allowed_hosts`. It reads through a short-lived per-session view bounded by [`[web]`](#read-only-window-views). See [Command line](/cli).
 
 ## Provisioning a durable store
 

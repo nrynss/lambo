@@ -8,7 +8,7 @@ import Warning from '../../components/MdxWarning.astro';
 
 Lambo ships as a single `lambo` binary that carries both runtime surfaces: the MCP server (`lambo serve`) and the command line verbs. You deploy it in two steps. Install the binary, then write a `lambo.toml` that says which store and which embedder to use.
 
-That is the whole deployment model. Every released binary carries the full `ship` adapter set. You move between the in-memory store, SQLite, CockroachDB, and PostgreSQL, or between the fixture, BGE-M3, and Gemini embedders, by editing config, not by downloading a different build. The one exception is the in-process candle embedder: it ships only in the Metal build for Apple silicon, described below.
+That is the whole deployment model. Every released binary carries the full `ship` adapter set. You move between the in-memory store, SQLite, CockroachDB, and PostgreSQL, or between the fixture, BGE-M3, Gemini, and EmbeddingGemma 2 embedders, by editing config, not by downloading a different build. The one exception is the in-process candle embedder: it ships only in the Metal build for Apple silicon, described below.
 
 ## Install the binary
 
@@ -206,6 +206,7 @@ Cargo features select which adapters are compiled in. List fewer to get a smalle
 | `embed-fixture` | Deterministic fixture embedder for tests and quick starts. |
 | `embed-bge` | BGE-M3 embeddings served by `llama-server`. |
 | `embed-gemini` | Vertex AI Gemini embeddings (`gemini-embedding-001`), authenticated with a service account. |
+| `embed-eg2` | EmbeddingGemma 2 text and image embeddings served by `llama-server` b11452 or later (`kind = "embeddinggemma2"`). Builds on `embed-bge`. |
 | `embed-candle` | In-process BGE-M3 through candle (`kind = "candle"`), CPU backend only. Builds anywhere. |
 | `embed-candle-metal` | `embed-candle` plus the Metal GPU backend. Apple silicon only. This is what the Metal release asset adds to `ship`. |
 | `embed-candle-accelerate` | `embed-candle` plus Apple's Accelerate framework for the CPU backend. macOS only. |

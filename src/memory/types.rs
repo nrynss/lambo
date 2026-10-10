@@ -106,7 +106,10 @@ pub struct MemoryStats {
     pub log_depth: usize,
     /// The flush task's own not-yet-durable count: its pending batch plus the
     /// log length **as of its last poll** (it refreshes once per cycle, so
-    /// between cycles this lags the log by up to `POLL_QUANTUM`).
+    /// between cycles this lags the log by up to `POLL_QUANTUM`). Each drain
+    /// publishes it under the graph write lock, and [`crate::memory::Memory::stats`]
+    /// reads both fields under the graph lock, so `log_depth + flush_depth`
+    /// never under-reports the not-yet-durable count.
     ///
     /// Neither field alone is the whole loss window, because the flush task's
     /// `pending` buffer is task-owned and has no accessor:

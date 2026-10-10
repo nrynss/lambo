@@ -4,6 +4,14 @@
 
 ### Breaking
 
+- `RecallParams` (the `lambo_recall` parameters, re-exported from
+  `lambo::mcp::server`) gains two public fields, `image: Option<WireImage>`
+  and `query_vector: Option<WireQueryVector>` (#22 PR 6), so code that
+  builds it with a struct literal must add `image: None, query_vector:
+  None`, or end the literal with `..Default::default()`: `RecallParams`
+  now derives `Default`, so the next optional field will not break such a
+  literal again. Deserializing it, and its published schema, are
+  unaffected.
 - `Concept` gains a public field, `embedding_source: Option<EmbeddingSource>`
   (#22). Code that builds a `Concept` with a struct literal must add
   `embedding_source: None`; code that reads or deserializes one is
@@ -47,6 +55,19 @@
   (`sessions: vec![session.clone()]` keeps one session);
   `ServeOptions::new` fills it. `lambo serve --session` is now a repeatable
   flag.
+- `ServeOptions` gains a public `bounds: SessionBounds` field (#32, sixth
+  part): the `[serve]` bounds on attached sessions. Code that builds
+  `ServeOptions` with a struct literal must add `bounds:
+  SessionBounds::default()` (or `SessionBounds::from_config(&file.serve)`);
+  `ServeOptions::new` fills the defaults.
+- An HTTP `lambo serve` with a credential that reaches past its pinned
+  sessions (a `session_prefix`, or an unpinned name) now attaches those
+  sessions on demand (#32, sixth part), where before such a request got
+  the `404`. Such a serve, even with one pinned session, no longer runs the
+  startup election and does not exit on a lost lease: only the session that
+  lost it is detached. A serve whose credentials reach only the pinned
+  sessions (the legacy token, the implicit `local`, or exact pinned names)
+  is unchanged.
 - `lambo serve --transport http` serves exactly `/mcp` and
   `/mcp/s/{session}` (#32). A request to any other path under `/mcp/`
   (which reached the one session before, because the service ignored the
@@ -145,9 +166,103 @@
   `accept_client_vectors: bool` (#22 PR 4). Code that builds either with a
   struct literal must add it (or use `..Default::default()`); both default to
   `false`, and `lambo.toml` files are unaffected.
+- `EmbedderKind` gains a variant, `EmbeddingGemma2` (#22 PR 5), so library
+  code that matches it exhaustively needs the new arm. `EmbedderConfig`
+  gains a public field, `images: Option<bool>`; code that builds one with a
+  struct literal must add `images: None` (or use `..Default::default()`).
+  `lambo.toml` files are unaffected.
+
+- `lambo serve-web` checks `Host` while no token is configured (#4 PR 2,
+  a DNS-rebinding fix, see Fixed). A loopback window reached under any name
+  other than `localhost`, `127.0.0.1` or `[::1]` now answers `403`: a reverse
+  proxy that forwards its public name as `Host` (Caddy's default) must pass
+  that name with `--allowed-host` (or `[web] allowed_hosts`).
+  `scripts/aws-infra/launch_exhibit_ec2.py` now does: with `--hostname` the
+  service passes `--allowed-host <hostname>`, and with `--self-signed` Caddy
+  sends the upstream address as `Host`. An exhibit launched before this
+  change keeps its old user data, so before it runs a build with the check,
+  add `--allowed-host <hostname>` to the `exec` line of
+  `/usr/local/bin/lambo-serve-web` (self-signed: add
+  `header_up Host {upstream_hostport}` under `reverse_proxy` in
+  `/etc/caddy/Caddyfile`), or relaunch it.
+- `lambo::cli::serve_web::Args` gains `sessions: Vec<String>` and
+  `allowed_hosts: Vec<String>` (#4 PR 2). Code that builds it with a struct
+  literal must add both (`Vec::new()` keeps one session and no extra host).
+  `lambo serve-web --session` is now repeatable and no longer required when
+  `[web] sessions` names one; with neither it still exits `2`, after reading
+  `lambo.toml`.
+- A `LAMBO_AUTH_TOKEN` or `--auth-token` longer than 4 KiB refuses the start
+  of `lambo serve-web` (exit 2, naming the bound, never the value) (#4 PR 2).
+  The window now authenticates through the shared credential set, which
+  refuses a longer presented token before comparing, so such a token could
+  never have been accepted. So does one with leading or trailing whitespace
+  or a byte outside printable ASCII, which no request can present (the
+  presented credential is trimmed, and such a header value is unreadable),
+  so the window used to answer every request `401` with no hint why. The
+  rule and its messages are now one validator shared with `lambo serve`.
+  A request carrying two `Authorization` headers now gets the `401`, as
+  `lambo serve` answers it; before, the first header decided.
 
 ### Changed
 
+- A tool call that fails because a vector read refused its probe (the
+  session's embedding contract changed mid-query, or the vector width
+  differs) now tells the caller to re-check the session's embedding
+  contract (`lambo_stats`) and retry, instead of a bare `store error (the
+  detail was logged server-side)` (#22 PR 6 review). The text is fixed and
+  echoes nothing from the refusal; the class, and the ledger's
+  `error_kind`, stay `store error`. A recall by image or query vector is
+  where this is usually seen, since it fails rather than degrade.
+
+- `lambo_recall`'s published schema changes additively (#22 PR 6): two
+  optional properties, `image` and `query_vector`, and `query` is no longer
+  in `required` (it gains `"default": ""` and a description saying it is
+  required unless an image or a query vector is sent; the server still
+  refuses a call with none of the three). The tool-list golden is updated
+  for `lambo_recall` only; the other seven schemas are byte-identical.
+  `lambo recall --query` is likewise optional beside `--image` or
+  `--query-vector-json`. A `lambo_recall` call with no `query` (and neither
+  of the two) now gets a tool error (`isError`), `query must be a
+  non-empty string (or send image or query_vector)`, where before serde
+  refused it as a JSON-RPC invalid-params error (`missing field query`).
+- `lambo serve-web` serves an allowlist of sessions (#4 PR 2): the ordered
+  union of the repeatable `--session` and `[web] sessions`, each at
+  `/s/<session>/` (data routes under `/s/<session>/api/...`), the first also
+  at the unscoped `/` and `/api/...`, which answer exactly as before. There
+  is no store discovery. With more than one session every name must be 1 to
+  128 bytes of `[A-Za-z0-9._:-]` (exit 2 naming the one that is not); one
+  session keeps `--session`'s looser rule. A session that is not served, a
+  malformed, percent-encoded or oversized id and an unrouted path answer the
+  same empty `404` on every method, before any store read; under a token the
+  `401` comes first and is the same for every id. A non-`GET` on a served
+  session's route is `405`. A served session never written, or erased, is an
+  empty page (`200`). The scoped page carries `no-store` and
+  `Referrer-Policy: same-origin`. Startup prints one more line, naming the
+  credential and how many sessions it reads. The page's script fetches
+  relative `api/...` URLs, so the page at `/s/<session>/` reads that
+  session and the page at `/` the default; `GET` or `HEAD` of
+  `/s/<session>` without the slash is a `308` to `/s/<session>/` (the query
+  kept), so the relative URLs resolve under it. The page has no session
+  picker yet (#4 PR 4). With a token configured a browser still cannot
+  present it without a proxy that adds the header.
+- `lambo.toml` `[serve]` `attach_concurrency`, `idle_detach_secs` and
+  `per_session_rps` are enforced by an HTTP `lambo serve` (#32, sixth
+  part), so the startup notice no longer names them; none applies to a
+  stdio serve, which does not name them either. The notice is now logged
+  only by an HTTP serve whose table sets `[[serve.projects]]`.
+- The startup warning about credentials (#32, fifth part) now names a
+  credential without `create` that reaches sessions the serve does not pin
+  (#32, sixth part): it attaches one only once the session exists. The
+  warnings about unpinned names being unreachable are gone, since they are
+  reachable on demand.
+- Every session of an HTTP serve with several sessions, or with sessions
+  attached on demand, draws its own request bucket at `[serve]
+  per_session_rps` (default `--rate-limit-rps`, burst twice that) after the
+  credential's (#32, sixth part); a request over it gets `429` with
+  `Retry-After: 1`, as the credential's limit answers. A serve of one
+  session that attaches nothing on demand draws one only when
+  `per_session_rps` is set, so it answers as before, each credential at its
+  full `--rate-limit-rps`.
 - A multi-session `lambo serve` whose pinned session was erased now starts
   and serves the other sessions, answering the erased one with `410`; it
   used to refuse to start. A pinned session found erased on a background
@@ -341,6 +456,115 @@
 
 ### Added
 
+- EmbeddingGemma 2 embedder over llama.cpp (#22 PR 5): `[embedder] kind =
+  "embeddinggemma2"` (aliases `embeddinggemma-2`, `eg2`), feature
+  `embed-eg2`, which released binaries (`ship`) now carry. One
+  `llama-server` (b11452 or later) embeds text and, when started with
+  `--mmproj`, images into one space, so `lambo_derive_image` can send the
+  image itself. Lambo adds the model card's task prefixes (documents
+  `title: none | text: `, recall queries `task: search result | query: `,
+  images none), truncates to `dim` (768, 512, 256 or 128) and
+  re-normalizes. The contract `model` is the weights artifact plus the
+  prompt profile, by default
+  `ggml-org/embeddinggemma-2-GGUF@bfcd2987/Q8_0;prompts=lambo-eg2-v2`, since
+  `llama-server` ignores the request's model name. The profile sends every
+  image in a canonical form: Lambo decodes each PNG, JPEG or WebP and sends
+  a lossless PNG whose longer side is exactly 768 px (Lanczos3 down,
+  Catmull-Rom up, aspect ratio kept; the exact rule is in the
+  configuration reference). A flat image then embeds bit-identically at
+  any submitted size from 128 to 3000 px; a patterned one stays close but
+  not identical (measured on b11517: at least 0.9991 cosine between renders
+  at 768 px and above, 0.982 for a checkerboard submitted at 128 px), since
+  resampling changes its pixels. **Size invariance has a limit:** small
+  images with sharp detail can drift by up to about 2%, so if bit-identical
+  vectors matter (comparing vectors directly, deduplicating), always send
+  the same rendition of an image, such as the original file. A WebP is
+  never sent as WebP (`llama-server` decodes it only through an external
+  `ffmpeg`). Decoding is
+  bounded (4096 px a side, two at a time), and an image Lambo cannot decode
+  is refused as unreadable before the server sees it. The canonical pixels
+  are pinned by golden tests: if a dependency update moves them, that ships
+  as a new profile name. Downscaled and JPEG cases are pinned to within one
+  step per sample, since they are not bit-exact across platforms; that
+  wobble is not a new profile. The `embed-eg2` feature now pulls in the `image`
+  crate (PNG, JPEG and WebP only) for this. The profile was `lambo-eg2-v1` during
+  development, without the canonical form; nothing was released with it, so
+  there is no migration. The profile fixes the
+  image budget at 280 tokens: start the server with `--image-min-tokens 280
+  --image-max-tokens 280 --batch-size 8192 --ubatch-size 8192` (at the
+  default ubatch of 512 the server silently caps the budget to 256). Lambo
+  checks the budget by embedding a reference image of its own and refuses
+  images when the server reports another token count for it. Before its
+  first embed, and again every 60 seconds and after a failed embed request,
+  the adapter asks `/props` which file the server loaded and whether it has
+  vision, and refuses a file that is not EmbeddingGemma 2, another
+  quantization than the artifact names (llama.cpp's `Q4_K - Medium` matches
+  `Q4_K_M`), or images on a server without a vision projector. An image
+  sent to such a server anyway is a permanent configuration error naming
+  `--mmproj`, and an image the server cannot decode a content refusal, not
+  the transient error their HTTP 500 used to mean. `[embedder] images =
+  false` (default on) makes it text-only. `api_key_env` works with this
+  kind as with `bge_m3`. See `lambo.example.toml` for the full server
+  command line.
+- Recall by image or by a client query vector (#22 PR 6, the Dresscode
+  "close to the one you dismissed" path). `lambo_recall` takes an optional
+  `image` (mime and base64, embedded by the server with
+  `Embedder::embed_image`, no prompt) or `query_vector` (values and the
+  contract they are in), at most one; with either, `query` is optional and
+  still feeds the keyword leg, and the vector leg searches by the image or
+  vector. With no text the recent-interactions leg is skipped: its flat
+  0.35 was calibrated on text and would rank whatever was derived last
+  above a true image match scoring lower; with text it runs as for any
+  recall. The same checks as `lambo_derive_image`: base64 capped before it
+  is decoded, MIME matched to the magic bytes, a client vector accepted
+  only with `[embedder] accept_client_vectors = true` and only in exactly
+  the session's contract, refused with no echo. Not cached (the #14 query
+  cache holds text queries only), never logged; the ledger line gains only
+  `by: "image" | "vector"`. A store without vector search, an image the
+  embedder cannot embed, or a failed vector read is an error rather than an
+  answer without the vector leg, and
+  a structural phrasing beside an image is not dispatched to traversal.
+  Library: `Memory::recall_by` with `recall::query_vector::QueryBy`;
+  `surface::image::check_submitted_vector_as`; CLI `lambo recall --image
+  PATH [--mime M] | --query-vector-json PATH`, under derive-image's file
+  caps. Works over every vector source (#8's holder graph, the store's
+  checked read on SQLite, Postgres and Cockroach, and #18's tier); no store
+  contract changed.
+- `[web] sessions` and `[web] allowed_hosts`, and the repeatable
+  `lambo serve-web --allowed-host` flag (#4 PR 2). A refused session name or
+  host is quoted (neither is a secret); an empty, repeated or
+  control-character session name and a host that is not an HTTP authority
+  are refused when the file is read.
+- On-demand sessions for `lambo serve --transport http` (#32, sixth part).
+  A request for an unattached session inside a credential's scope attaches
+  it: always for a credential with `create = true`, and for one without
+  only once the session exists (it has a lease row); otherwise the `404`.
+  Concurrent first requests share one attach. An erased session answers
+  `410` and is never recreated. At most `[serve] max_attached` sessions are
+  attached: at the cap the least recently used on-demand session with no
+  tool call running is detached to make room, else `503` with `Retry-After:
+  5`. A session idle (no tool call) for `idle_detach_secs` is detached. A
+  detach flushes and releases the lease, keeping the fencing token, so a
+  reattach takes the next one. A session another writer holds answers `503`
+  with a `Retry-After` of when its lease could lapse. At most
+  `attach_concurrency` attaches run at once (one on SQLite). Pinned
+  sessions are never evicted or idle-detached, and the shutdown closes and
+  releases on-demand sessions with the pinned ones. An attach checks that
+  the session exists, is not erased and is not held by another writer
+  before it detaches anything to make room; a session with a request or
+  call running, or used in the last 2 seconds, is never the one detached.
+  The on-demand places are shared among the credentials that reach them
+  (the places divided by their number, rounded down, at least 1): at the
+  cap a credential at its share detaches only its own sessions. A `404`,
+  `410` or failed attach is remembered for 30 seconds (at most 1,024
+  sessions), never stopping a credential with `create`. A request waits at
+  most 15 seconds for an attach, and an attach is abandoned (its lease
+  released) after 60 seconds, as is a pinned session's background retry;
+  both answer `503` with `Retry-After: 5`. At most twice `max_attached`
+  attaches wait to start; past that a request for another unattached
+  session gets `503` with `Retry-After: 5`. A startup warning names a
+  `max_attached` that leaves no on-demand place, and a library
+  `idle_detach` under a second is refused.
 - `[web]` in `lambo.toml` (#4 PR 1): `view_ttl_ms` (1500, 0 to 60000),
   `max_loaded_sessions` (4), `load_concurrency` (2, 1 to 1024, always 1 on
   SQLite) and `recall_concurrency` (4, 1 to 1024) bound the read-only
@@ -351,7 +575,6 @@
   `recall_concurrency` slots with `503`, `Retry-After: 1` and `no-store`
   (#4 PR 1), and keeps a per-session query-embedding cache (#14's, 128
   entries or 1 MiB), so a repeated recall query skips the embed.
-
 - MCP tool `lambo_derive_image` (#22 PR 4): one image concept per call, a
   caption plus either the image (`image`: mime and base64, embedded by the
   server on the call path) or a client-computed vector (`vector`: values and
@@ -691,6 +914,42 @@
 
 ### Fixed
 
+- A `bge_m3` or `embeddinggemma2` input longer than the llama-server's
+  physical batch is now a content refusal, settled as failed with a hint
+  naming `--ubatch-size`. llama-server answers it with HTTP 500 ("increase
+  the physical batch size"), which Lambo read as a busy server, so such a
+  concept was retried forever.
+- The `embeddinggemma2` embedder no longer drops its `/props` and image
+  budget checks on a 503 "busy" (each retried image cost an extra `/props`
+  GET and reference embed); only no answer at all or a 503 "Loading model"
+  reads as a restart. A server that refuses Lambo's reference image is
+  reported as a server problem, not a decode failure of the user's image.
+  `/props` strings (file name, `model_ftype`) in messages and logs are cut
+  to 128 printable ASCII characters.
+- A text recall whose vector read fails (a backend error, a timeout, a tier
+  whose durable fallback failed too) still answers from its keyword and
+  recent legs, but no longer silently: the result carries a
+  `vector_degraded` annotation and the same line in `warnings`, so
+  `Memory::recall`, `lambo_recall` and `lambo recall` all say the vector leg
+  was skipped. The line names no backend detail (that is logged). The
+  embedding-contract race's `vector_degraded` line (E2E-6) now reaches
+  `warnings` too, where before only the CLI and the portal showed it.
+- `lambo serve-web` validated no `Host` header (#4 PR 2), so with no token
+  configured any web page the local user visited could rebind its own name
+  to `127.0.0.1` and read every served session same-origin. Without a token
+  it now answers only `localhost`, `127.0.0.1`, `[::1]` (any port) and the
+  allowed hosts, and anything else, including a missing or malformed `Host`
+  (user info, an empty or non-numeric port) and a request with two `Host`
+  headers, gets one fixed `403` before any other check. With a token configured any
+  `Host` is accepted, as `lambo serve` does (a rebound page cannot present
+  the token).
+- The multi-session refusal poller kept a ledger cursor only for pinned
+  sessions, so an on-demand session's cursor would have been rebuilt every
+  round and re-booked the last `LEASE_TTL` of lease refusals each time (#32,
+  sixth part; caught before release). A cursor is now kept while its
+  session is pinned or attached, and for `LEASE_TTL` after an on-demand
+  session is detached (at most 1,024 such), so a reattach inside that
+  window does not book its refusals again either.
 - A close on a handle whose lease was lost aborted its flush,
   canonization and daemon tasks without waiting for them to stop, so a
   flush already past its store commit could still mirror into the recall
@@ -709,6 +968,12 @@
 - An MCP session id answered any credential that presented it; it now
   answers only the credential that opened it, and another gets rmcp's
   unknown-session answer (#32, fifth part).
+- `lambo_stats` and the ledger's stats heartbeat no longer under-report a writer's not-yet-durable mutations. The flush task
+  drained the graph's log into its pending batch and updated its depth only
+  after releasing the graph lock, so `log_depth + flush_depth` could read 0
+  for a session that was still dirty. The depth is now published under the
+  same write lock as the drain, and `Memory::stats` reads both under the graph
+  lock. Observability only: nothing was ever lost.
 - The ledger's applied `completion` lines (`applied` and
   `applied_after_restart`) now carry `semantic_merged`, `reinforced`, `edges`
   and `embedded` beside `created_count` / `matched_count` (#12), so the

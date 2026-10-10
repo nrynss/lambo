@@ -247,6 +247,14 @@ jobs:
               cargo clippy --all-targets --features recall-elastic,store-sqlite,fixtures -- -D warnings
               cargo clippy --all-targets --no-default-features --features recall-elastic -- -D warnings
               cargo test --features recall-elastic,store-sqlite,fixtures
+          # #22 PR 5: the EmbeddingGemma 2 embedder over llama.cpp, against
+          # httpmock only (no model, no server). The live test stays
+          # `#[ignore]`d and operator-run (evidence/issue-22-eg2/).
+          - name: embed-eg2
+            command: |
+              set -o pipefail
+              cargo clippy --all-targets --features embed-eg2 -- -D warnings
+              cargo test --features embed-eg2
           # Ship profile (cockroach + memory + embedders + fixtures).
           - name: demo
             command: cargo check --features demo

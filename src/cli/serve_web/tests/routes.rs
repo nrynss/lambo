@@ -30,7 +30,7 @@ async fn serves_the_page_and_its_embedded_assets() {
 
     let js = request(addr, "GET", "/app.js").await;
     assert_eq!(js.status, 200);
-    assert!(js.body.contains("/api/pulse"), "script body: {}", js.body);
+    assert!(js.body.contains("\"api/pulse"), "script body: {}", js.body);
 
     let health = request(addr, "GET", "/healthz").await;
     assert_eq!(health.status, 200);

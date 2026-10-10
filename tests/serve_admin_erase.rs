@@ -6,7 +6,8 @@
 //!   tombstone, MCP requests for it are refused with 410, the other session
 //!   keeps serving, and after SIGTERM nothing of it came back.
 //! * A one-session hub (the dogfood rig's shape plus an operator
-//!   credential): erasing its only session answers 200 and the process
+//!   credential scoped to the one session, so nothing attaches on demand,
+//!   #32 PR 6): erasing its only session answers 200 and the process
 //!   then exits on its own; a restart on the erased session refuses.
 //!
 //! Tokens are built at runtime. Every spawned serve gets `XDG_RUNTIME_DIR`
@@ -37,6 +38,17 @@ fn token(label: &str) -> String {
 /// A scratch SQLite store and a `lambo.toml` over it with two credentials:
 /// `agents` (both sessions, no flags) and `operator` (`"*"`, erase, admin).
 fn scratch() -> (ScratchDir, std::path::PathBuf, std::path::PathBuf) {
+    scratch_scoped(&format!(r#"["{A}", "{B}"]"#), r#"["*"]"#)
+}
+
+/// [`scratch`] with each credential's `sessions` given. A serve whose
+/// credentials reach no session past the pinned ones attaches nothing on
+/// demand (#32 PR 6), so pinning only `A` with both scoped to `["A"]` is
+/// a one-session serve, which exits when its session is erased.
+fn scratch_scoped(
+    agents: &str,
+    operator: &str,
+) -> (ScratchDir, std::path::PathBuf, std::path::PathBuf) {
     let dir = ScratchDir::new("lambo-i32g");
     let db = dir.join("erase.sqlite");
     let cfg = dir.join("lambo.toml");
@@ -44,8 +56,8 @@ fn scratch() -> (ScratchDir, std::path::PathBuf, std::path::PathBuf) {
         &cfg,
         format!(
             "[store]\nkind = \"sqlite\"\npath = \"{}\"\n\n[embedder]\nkind = \"fixture\"\ndim = 1024\n\n\
-             [[serve.credential]]\nname = \"agents\"\ntoken_env = \"{AGENT_ENV}\"\nsessions = [\"{A}\", \"{B}\"]\n\n\
-             [[serve.credential]]\nname = \"operator\"\ntoken_env = \"{OPS_ENV}\"\nsessions = [\"*\"]\nerase = true\nadmin = true\n",
+             [[serve.credential]]\nname = \"agents\"\ntoken_env = \"{AGENT_ENV}\"\nsessions = {agents}\n\n\
+             [[serve.credential]]\nname = \"operator\"\ntoken_env = \"{OPS_ENV}\"\nsessions = {operator}\nerase = true\nadmin = true\n",
             db.display()
         ),
     )
@@ -400,7 +412,8 @@ fn an_attached_session_is_erased_over_the_admin_route_and_stays_erased() {
 
 #[test]
 fn erasing_the_only_session_answers_then_ends_the_process_and_a_restart_refuses() {
-    let (_dir, cfg, db) = scratch();
+    let only_a = format!(r#"["{A}"]"#);
+    let (_dir, cfg, db) = scratch_scoped(&only_a, &only_a);
     let rt = RuntimeDir::new();
     let hub = Hub::spawn(serve_command(&cfg, &rt, &[A]));
     let addr = hub.addr;

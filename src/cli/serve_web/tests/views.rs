@@ -258,7 +258,7 @@ fn web_ttl_ms(ms: u64) -> crate::config::WebConfig {
 async fn until_queued(state: &AppState, n: u64) {
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     loop {
-        let queued = state.views.queued(&state.session);
+        let queued = state.views.queued(&state.default_session);
         if queued >= n {
             assert_eq!(queued, n, "more requests queued than were sent");
             return;
@@ -587,9 +587,11 @@ async fn a_failing_schema_preflight_still_fails_startup() {
         backends_with_store(Box::new(NoSchema(counting.clone()))),
         Args {
             session: "t4-preflight".into(),
+            sessions: Vec::new(),
             port: 0,
             bind: Ipv4Addr::LOCALHOST.into(),
             auth_token: None,
+            allowed_hosts: Vec::new(),
             web: crate::config::WebConfig::default(),
         },
     )

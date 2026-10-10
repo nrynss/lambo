@@ -2,9 +2,9 @@
 //! the ordered union of the repeatable `--session` and `[serve] sessions`,
 //! and the default session `/mcp` serves.
 //!
-//! PR 4 serves pinned sessions only: every session a serve hosts is attached
-//! at startup and stays attached. On-demand sessions (PR 6) and credentials
-//! (PR 5) build on this. The stdio cwd map (PR 8) chooses a stdio serve's one
+//! Pinned sessions are attached at startup and stay attached. On-demand
+//! sessions (PR 6, `registry`) are attached by a request instead, and never
+//! named here. Credentials (PR 5) build on this. The stdio cwd map (PR 8) chooses a stdio serve's one
 //! session before this runs (`ServeConfig::select_stdio_session`).
 
 use super::Transport;
@@ -30,8 +30,8 @@ pub struct PinnedSessions {
 ///   (`--session`, else PR 8's cwd map, else `default_session`) and passes
 ///   it here as the one value; a library caller that passes none is refused.
 /// * **HTTP** pins the ordered union of `--session` and `[serve] sessions`,
-///   and needs at least one. The default must be pinned (PR 4 hosts nothing
-///   else), and the union must fit `max_attached`, which `[serve]`'s own
+///   and needs at least one. The default must be pinned (`/mcp` never
+///   attaches on demand, #32 PR 6), and the union must fit `max_attached`, which `[serve]`'s own
 ///   validation could only check for its own list (PR 1 review).
 ///
 /// The result then meets `serve`'s own rules (`check_pinned`: with more
@@ -92,8 +92,8 @@ fn plan_sessions(
             if !sessions.contains(&default) {
                 return Err(LamboError::Config(format!(
                     "lambo.toml [serve] default_session {default:?} is not one of the sessions \
-                     this serve pins: list it in [serve] sessions (this release serves pinned \
-                     sessions only)"
+                     this serve pins: list it in [serve] sessions (/mcp serves a pinned \
+                     session, never one attached on demand)"
                 )));
             }
             if sessions.len() > cfg.max_attached() {

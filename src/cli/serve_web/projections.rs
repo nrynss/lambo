@@ -15,6 +15,7 @@ use crate::graph::Graph;
 use crate::store::SessionFlushStats;
 use crate::types::{
     tie_break_by_key, CanonizationEvent, CanonizationStatus, Concept, EdgeType, Node, NodeId,
+    SessionId,
 };
 
 /// The structural edge types the page may show. Mirrors
@@ -152,6 +153,7 @@ pub(super) fn slice_events(all: &[WebEvent], since: usize) -> EventsPayload {
 
 pub(super) fn stats_from(
     state: &AppState,
+    session: &SessionId,
     view: &SessionView,
     flush: Option<SessionFlushStats>,
 ) -> WebStats {
@@ -180,7 +182,7 @@ pub(super) fn stats_from(
     };
 
     WebStats {
-        session: state.session.as_str().to_string(),
+        session: session.as_str().to_string(),
         nodes,
         edges,
         concepts,
@@ -188,7 +190,7 @@ pub(super) fn stats_from(
         canonization_events: event_total,
         flush_lag_ms,
         log_depth,
-        durable_change_age_ms: state.observe(fingerprint).as_millis() as u64,
+        durable_change_age_ms: state.observe(session, fingerprint).as_millis() as u64,
         mode: "reader",
         writer_only: WRITER_ONLY,
     }
@@ -202,14 +204,15 @@ pub(super) fn stats_from(
 /// fresh as before (design section 7, #16).
 pub(super) async fn read_feed_and_stats(
     state: &AppState,
+    session: &SessionId,
     since: usize,
 ) -> Result<(EventsPayload, StatsRead), CliError> {
-    let view = state.view().await?;
+    let view = state.view(session).await?;
     // T85-3: fetch the writer-published flush stats from the shared store when
     // available. A read failure degrades to `n/a` (None) rather than failing
     // the whole stats endpoint — the session/counts payload is the load-bearing
     // part, and a transient stats read must not take the page down.
-    let flush = match state.store().read_flush_stats(&state.session).await {
+    let flush = match state.store().read_flush_stats(session).await {
         Ok(f) => f,
         Err(e) => {
             tracing::warn!(
@@ -222,7 +225,7 @@ pub(super) async fn read_feed_and_stats(
     Ok((
         view.events_since(since),
         StatsRead {
-            stats: stats_from(state, &view, flush),
+            stats: stats_from(state, session, &view, flush),
             embedding_status: view.embedding.clone(),
         },
     ))

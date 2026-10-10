@@ -230,9 +230,8 @@ fn addressed(field: &str, value: &str) -> Result<AddressedSessionId, LamboError>
 }
 
 /// What `lambo serve` logs once at startup when the file sets a `[serve]`
-/// key this release does not enforce yet (the on-demand bounds, and over
-/// HTTP the stdio-only cwd map): an operator who configured one must not
-/// think it is active. Followed by the key names that are set
+/// key this serve does not enforce (over HTTP, the stdio-only cwd map): an
+/// operator who configured one must not think it is active. Followed by the key names that are set
 /// ([`ServeConfig::unenforced_keys`]); it quotes no value from the table.
 pub const SERVE_UNENFORCED_NOTICE: &str = "lambo.toml [serve] is parsed but not yet enforced \
      for some keys in this release; they have no effect yet (#32)";
@@ -252,27 +251,19 @@ impl ServeConfig {
     /// does not enforce yet, by name, each its own entry.
     ///
     /// An HTTP serve enforces `sessions`, `default_session` and
-    /// `max_attached` (#32 PR 4) and `[[serve.credential]]` (PR 5), which
-    /// never apply to stdio (a stdio serve authenticates nobody, as
-    /// `--auth-token` is ignored there). A stdio serve enforces
-    /// `default_session` and `[[serve.projects]]`, which choose its session
-    /// when `--session` is absent (#32 PR 8); `sessions` and `max_attached`
-    /// do not apply to stdio. The cwd map is stdio's only, so an HTTP serve
+    /// `max_attached` (#32 PR 4), `[[serve.credential]]` (PR 5), and
+    /// `attach_concurrency`, `idle_detach_secs` and `per_session_rps` (PR 6),
+    /// none of which but `default_session` apply to stdio (a stdio serve owns
+    /// one session and authenticates nobody, as `--auth-token` is ignored
+    /// there). A stdio serve enforces `default_session` and
+    /// `[[serve.projects]]`, which choose its session when `--session` is
+    /// absent (#32 PR 8). The cwd map is stdio's only, so an HTTP serve
     /// still lists `[[serve.projects]]`: nothing over HTTP reads it (design
     /// §2.3), and an operator must not think it steers HTTP clients.
     pub fn unenforced_keys(&self, stdio: bool) -> Vec<&'static str> {
         let mut keys = Vec::new();
         if !stdio && !self.projects.is_empty() {
             keys.push("[[serve.projects]]");
-        }
-        if self.attach_concurrency.is_some() {
-            keys.push("attach_concurrency");
-        }
-        if self.idle_detach_secs.is_some() {
-            keys.push("idle_detach_secs");
-        }
-        if self.per_session_rps.is_some() {
-            keys.push("per_session_rps");
         }
         keys
     }
@@ -287,7 +278,8 @@ impl ServeConfig {
         self.max_attached.unwrap_or(DEFAULT_MAX_ATTACHED)
     }
 
-    /// The effective concurrent-attach bound (before PR 6's SQLite clamp).
+    /// The effective concurrent-attach bound (before the serve's SQLite
+    /// clamp to one, `SessionBounds::attach_permits`).
     pub fn attach_concurrency(&self) -> usize {
         self.attach_concurrency
             .unwrap_or(DEFAULT_ATTACH_CONCURRENCY)

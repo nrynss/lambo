@@ -74,7 +74,12 @@ impl From<WireConceptType> for ConceptType {
     }
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+/// `Default` is for library callers that build one with a struct literal:
+/// `RecallParams { agent_id, query, ..Default::default() }` keeps compiling
+/// when an optional field is added (as `image` and `query_vector` were, #22
+/// PR 6). It is not a wire default: `agent_id` is still required, and an
+/// empty `query` alone is still refused.
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RecallParams {
     /// Id of the agent making this call. Caller-asserted and unverified: work
@@ -82,8 +87,11 @@ pub struct RecallParams {
     /// callers sharing an id share its memory attribution and its soft locks.
     #[schemars(length(max = 16_384))]
     pub agent_id: String,
-    /// Natural-language query.
+    /// Natural-language query. Required, unless you send `image` or
+    /// `query_vector`; beside either it is optional and its words still
+    /// match concept text.
     #[schemars(length(max = 16_384))]
+    #[serde(default)]
     pub query: String,
     /// Hits to return. Defaults to the session config's `default_top_k`.
     #[schemars(range(min = 1, max = 100))]
@@ -94,6 +102,30 @@ pub struct RecallParams {
     /// Graph traversal depth for phase 2 expansion.
     #[schemars(range(min = 0, max = 5))]
     pub traversal_depth: Option<usize>,
+    /// Optional: recall what is close to this image, for this server to
+    /// embed (when its embedder embeds images). Send at most one of `image`
+    /// and `query_vector`. Not stored. The embedder may resize it
+    /// (EmbeddingGemma 2: to a 768 px longer side); send the same rendition
+    /// of an image when you need identical vectors.
+    pub image: Option<WireImage>,
+    /// Optional: recall what is close to a vector you computed, in this
+    /// session's embedding space (accepted only when the operator enabled
+    /// client vectors). Send at most one of `image` and `query_vector`. Not
+    /// stored.
+    pub query_vector: Option<WireQueryVector>,
+}
+
+/// A query vector you computed, in this session's embedding space.
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WireQueryVector {
+    /// The components, `dim` of them. Lambo normalizes the vector to unit
+    /// length.
+    #[schemars(length(max = 4_096))]
+    pub values: Vec<f32>,
+    /// The embedding space the vector was computed in. It must equal this
+    /// session's `embedding_contract` exactly.
+    pub contract: WireEmbeddingContract,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -366,7 +398,9 @@ pub struct DeriveImageParams {
     #[schemars(length(max = 64), regex(pattern = r"^[a-z0-9]{1,64}$"))]
     pub image_id: Option<String>,
     /// The image itself, for this server to embed. Send exactly one of
-    /// `image` and `vector`.
+    /// `image` and `vector`. The embedder may resize it (EmbeddingGemma 2:
+    /// to a 768 px longer side); send the same rendition of an image when
+    /// you need identical vectors.
     pub image: Option<WireImage>,
     /// A vector you computed for the image instead (accepted only when the
     /// operator enabled client vectors). Send exactly one of `image` and
@@ -411,6 +445,15 @@ impl std::fmt::Debug for WireEmbeddingContract {
 impl std::fmt::Debug for WireVector {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WireVector")
+            .field("len", &self.values.len())
+            .field("contract", &self.contract)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for WireQueryVector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WireQueryVector")
             .field("len", &self.values.len())
             .field("contract", &self.contract)
             .finish()

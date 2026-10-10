@@ -92,10 +92,13 @@ The in-crate candle embedder (`kind = "candle"`) runs BGE-M3 locally with no lla
 | Flag | Required | Default |
 |---|---|---|
 | `--session <SESSION>` | Yes | |
-| `--query <QUERY>` | Yes | |
+| `--query <QUERY>` | Yes, unless `--image` or `--query-vector-json` is given | |
 | `--top-k <TOP_K>` | No | The session's `default_top_k`, which is `5`. |
 | `--max-tokens <MAX_TOKENS>` | No | The session's `default_max_tokens`, which is `500`. |
 | `--traversal-depth <TRAVERSAL_DEPTH>` | No | The session's `default_traversal_depth`, which is `2`. |
+| `--image <PATH>` | No; at most one of `--image`, `--query-vector-json` | Recall what is close to this PNG, JPEG or WebP file (at most 2 MiB and 4096 pixels a side), embedded by the configured embedder. Needs an embedder that embeds images. |
+| `--mime <MIME>` | No | With `--image`, as for `derive-image`. |
+| `--query-vector-json <PATH>` | No; at most one of `--image`, `--query-vector-json` | Recall what is close to a vector: a JSON file in the shape `derive-image --vector-json` takes. Needs `[embedder] accept_client_vectors = true`, and the contract must equal the session's exactly. |
 
 ```bash
 $ lambo recall --session demo --query "update user schema" --top-k 5
@@ -104,6 +107,12 @@ user schema [Entity] (score 1.44, id 3f9c2a10)
 auth middleware [Entity] (score 0.25, id 71b0e4c2)
 
 migrations/003.sql [Resource] (score 0.25, id 9d44f8b1)
+```
+
+**Recall by image or by vector.** With `--image` or `--query-vector-json`, the vector leg searches by that image's or vector's embedding instead of the query text's, with the same rules as `lambo_recall`'s `image` and `query_vector`. `--query` is then optional and still matches words through the keyword leg; without it, recent interactions are left out, as for `lambo_recall`. The files are read under the same size caps as `derive-image`'s and are never printed, stored or cached. A store without vector search, or a vector search that fails, is an error rather than a keyword-only answer, since the vector leg is the point.
+
+```bash
+$ lambo recall --session dresscode --image ./photos/today.png --top-k 3
 ```
 
 ### lambo saints
@@ -348,7 +357,9 @@ A request for a session this process does not host gets a plain `404` with an em
 
 If another writer already holds one of the sessions at startup, the server does not wait for it: it serves the others, answers requests for that session with `503` and a `Retry-After` header, and tries to take it every 5 seconds. If a running session loses its lease to another writer, only that session is detached (its unflushed tail is discarded, as a crash would discard it, and a `lease` `lost` line goes to the ledger); the other sessions keep serving, and the lost session is retried the same way. If a retry fails with an error that will not clear on its own (its embedding contract no longer matches, or the store is not provisioned), the error is logged once and the session is not retried again: requests for it get `503` with no `Retry-After` until the server is restarted. A session that turns out to be erased (at startup or on a retry) is not retried either, and its requests get `410`; the other sessions start and serve as usual. A store or embedder that cannot be reached is retried, and logged once per outage. A serve with one session behaves as it always has: losing the lease ends the process, so its client respawns into a proxy to the new holder.
 
-On shutdown every session is drained and closed concurrently inside the same budget as a single session, and every lease is released. Each shutdown stage line is logged once for the whole set, and each session's close outcome names its session. With `--ledger`, every line carries its `session`, and the heartbeat writes one `stats` line per session. On-demand sessions are not part of this release: a credential with `create` still reaches only the pinned sessions. A running serve can erase one of its sessions, and list them, over HTTP: see [Erase from a running serve](#erase-from-a-running-serve).
+**Sessions attached on demand.** A credential whose scope reaches past the pinned sessions (a `session_prefix`, or a name in its `sessions` that is not pinned) makes the serve attach those sessions when they are first asked for. A request for such a session that is not attached attaches it, then is served: with `create = true` the session is created if it does not exist; without it, the session is attached only if it already exists (a writer has used it), and a session that does not exist gets the plain `404`. Concurrent first requests for one session wait for the same single attach. An erased session answers `410` and is never recreated. A `404`, `410` or failed attach is remembered for 30 seconds, so repeating the request does not reach the store again; a credential with `create` is not held back by a `404` remembered for one without it. These sessions are detached again after `[serve] idle_detach_secs` with no tool call (default 900 seconds; an open SSE stream does not count as use), or when an attach finds `max_attached` sessions attached: the least recently used on-demand session with no request or call running, and unused for at least 2 seconds, is detached to make room. Nothing is detached for a request that will not attach (a session that does not exist, is erased, or another writer holds). The on-demand places are shared among the credentials that reach on-demand sessions: each may hold its share (the places divided by the number of such credentials, rounded down, at least 1) whatever the others hold. A free place goes to whoever asks; at the cap, a credential at or over its share makes room only by detaching one of its own sessions, and one under its share may also detach a session of a credential over its share. A session counts against the credential whose request attached it. If no session can be detached, the request gets `503` with `Retry-After: 5`. A request waits at most 15 seconds for an attach in flight, and an attach is abandoned after 60 seconds (its lease released); either way the request gets `503` with `Retry-After: 5`. A detach flushes the session and releases its lease, keeping its fencing token, so attaching it again takes the next token and recalls what it held. A session another writer holds answers `503` with a `Retry-After` of the time that writer's lease could lapse, and is not retried in the background. Pinned sessions are never evicted or idle-detached. At most `[serve] attach_concurrency` sessions attach at once (one on SQLite). While twice `max_attached` attaches are waiting to start, a request that would start another gets `503` with `Retry-After: 5` and starts nothing. Each session also has its own request rate, `[serve] per_session_rps` (default `--rate-limit-rps`, burst twice that), on top of the credential's, so a flood on one session is answered `429` without spending another's. A serve of one session that attaches nothing on demand applies it only when `per_session_rps` is set. A serve with on-demand sessions treats a lost lease like a multi-session serve does, even with one pinned session: only that session is detached. A serve whose credentials reach only the pinned sessions, such as a single `--session` with `LAMBO_AUTH_TOKEN`, behaves exactly as before.
+
+On shutdown every session, pinned and on-demand, is drained and closed concurrently inside the same budget as a single session, and every lease is released. Each shutdown stage line is logged once for the whole set, and each session's close outcome names its session. With `--ledger`, every line carries its `session`, and the heartbeat writes one `stats` line per session. A running serve can erase one of its sessions, and list them, over HTTP: see [Erase from a running serve](#erase-from-a-running-serve).
 
 ### Stopping a writer
 
@@ -364,22 +375,30 @@ Under a supervisor (launchd, systemd, Kubernetes), give the server more than 20 
 
 ### Watch a session in a browser
 
-`lambo serve-web` opens a read-only browser window onto a session. It is a **reader**: it never takes the writer lease and exposes no mutating route, so it runs safely beside a `lambo serve` writer on the same session. Point it at the same store so it reads the same data.
+`lambo serve-web` opens a read-only browser window onto one or more sessions. It is a **reader**: it never takes the writer lease and exposes no mutating route, so it runs safely beside a `lambo serve` writer on the same session. Point it at the same store so it reads the same data.
 
 | Flag | Required | Default |
 |---|---|---|
-| `--session <SESSION>` | Yes | |
+| `--session <SESSION>` | Yes, unless `[web] sessions` names one | Repeatable. Every session given, then `[web] sessions`, is served; the first is the default. |
 | `--port <PORT>` | No | `7710` |
 | `--bind <BIND>` | No | `127.0.0.1` |
-| `--auth-token <TOKEN>` | No | Bearer token. Loopback is unauthenticated by default. A non-loopback bind requires it and fails closed without one. `LAMBO_AUTH_TOKEN` overrides it. |
+| `--auth-token <TOKEN>` | No | Bearer token. Loopback is unauthenticated by default. A non-loopback bind requires it and fails closed without one. `LAMBO_AUTH_TOKEN` overrides it. The token must be printable ASCII with no leading or trailing whitespace, and at most 4096 bytes, as for `lambo serve`; otherwise the start exits `2`, never quoting the token. A request carrying two `Authorization` headers gets `401`. |
+| `--allowed-host <HOST>` | No | Repeatable. A `Host` the unauthenticated window also answers, beside `localhost`, `127.0.0.1` and `[::1]`. A name, or `name:port` to accept only that port. Ignored once a token is configured. |
 
 ```bash
 lambo serve-web --config lambo.toml --session demo
+lambo serve-web --config lambo.toml --session lambo --session rustydocs
 ```
 
-The page polls read-only `GET` endpoints, `/api/session`, `/api/recall`, `/api/events`, `/api/stats`, `/api/pulse`. Those let it show live recall, the canonization feed, and durable counts without ever writing. A non-loopback reader still needs the token, because reading exposes the whole session to whoever can reach the port.
+The page polls read-only `GET` endpoints, `/api/session`, `/api/recall`, `/api/events`, `/api/stats`, `/api/pulse`. Those let it show live recall, the canonization feed, and durable counts without ever writing. A non-loopback reader still needs the token, because reading exposes every served session to whoever can reach the port.
 
-Every request and every open tab reads one shared view of the session, loaded at most once per `view_ttl_ms` (1.5 seconds by default), so the page can be up to that much older than the store and the store load does not grow with the number of tabs. The session is loaded on the first request, not at startup; startup still checks the store's schema and fails if it is not provisioned. A recall that cannot start within 2 seconds because `recall_concurrency` recalls are already running gets `503` with `Retry-After: 1`. The `[web]` keys set these bounds; see [Read-only window views](/lambo/config/#read-only-window-views).
+**Which sessions.** The window serves exactly the sessions you name, the ordered union of `--session` and `[web] sessions`, and never looks for others in the store. Each is read at `/s/<session>/` (the page there shows that session; `/s/<session>` without the slash redirects to it), with its data routes under `/s/<session>/api/...`. The unscoped `/` and `/api/...` serve the first, so a one-session window is reached exactly as before. With more than one session, every name must be 1 to 128 bytes of `[A-Za-z0-9._:-]` and must not start with `.`, or startup exits `2` naming it; a single session keeps the looser `--session` rule and is reached at `/`. A session that is not served, a malformed or percent-encoded name, and a path that does not exist all answer the same empty `404`, before the store is read. A served session that has never been written, or was erased, is an empty page; remove an erased session from the list. A non-`GET` request to a served session's route gets `405`, as on `/`.
+
+**The `Host` check.** With no token configured, the window answers only requests whose `Host` is `localhost`, `127.0.0.1` or `[::1]` (any port), or a host named with `--allowed-host` or `[web] allowed_hosts`. Anything else gets `403`, as does a malformed `Host` (user info, an empty or non-numeric port) and a request with two `Host` headers. This stops a web page you visit from reading the window by pointing its own name at `127.0.0.1` (DNS rebinding). A reverse proxy that forwards its public name as `Host`, as Caddy does by default, needs that name in `--allowed-host`. With a token configured any `Host` is accepted, because a page cannot present a token it does not know.
+
+**Tokens and browsers.** One token reads every served session. The page sends no `Authorization` header itself, so with a token configured a plain browser cannot open it: put it behind a proxy that adds the header, or read the JSON routes from a script.
+
+Every request and every open tab reads one shared view of each session, loaded at most once per `view_ttl_ms` (1.5 seconds by default), so the page can be up to that much older than the store and the store load does not grow with the number of tabs. A session is loaded on the first request for it, not at startup; startup still checks the store's schema and fails if it is not provisioned. A recall that cannot start within 2 seconds because `recall_concurrency` recalls are already running gets `503` with `Retry-After: 1`. The `[web]` keys set these bounds; see [Read-only window views](/lambo/config/#read-only-window-views).
 
 ## Provision a store
 

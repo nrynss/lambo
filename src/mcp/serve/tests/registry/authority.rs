@@ -303,8 +303,10 @@ async fn a_wrong_or_missing_token_is_the_same_401_for_every_id() {
 
 /// Design §8 PR 5: a credential without `create` is refused on an absent
 /// session inside its scope with the same 404, and served on an existing
-/// one. Until PR 6 nothing attaches on demand, so a credential *with*
-/// `create` gets the 404 for an absent id too (pinned sessions only).
+/// one. This registry attaches nothing on demand (PR 4's pinned-only
+/// bounds), so a credential *with* `create` gets the 404 for an absent id
+/// too, with no store call; the on-demand answers are in
+/// `registry::on_demand` (#32 PR 6).
 #[tokio::test]
 async fn a_create_less_credential_is_refused_on_an_absent_session_and_served_on_an_existing_one() {
     let wire = wire().await;

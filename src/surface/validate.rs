@@ -112,9 +112,19 @@ pub fn check_size(field: &str, value: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether `value` is blank: empty after trimming whitespace.
+///
+/// The one definition of "blank" for every surface: [`require_nonempty`]
+/// refuses a blank required string, and a recall by image or vector reads
+/// blank text as no text (the MCP and CLI surfaces, and the daemon's choice
+/// to skip the recent leg), so the two can never disagree about a value.
+pub fn is_blank(value: &str) -> bool {
+    value.trim().is_empty()
+}
+
 /// Refuse an empty (after trim) required string.
 pub fn require_nonempty(field: &str, value: &str) -> Result<(), String> {
-    if value.trim().is_empty() {
+    if is_blank(value) {
         return Err(format!("{field} must be a non-empty string"));
     }
     Ok(())

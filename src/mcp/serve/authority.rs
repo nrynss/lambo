@@ -29,8 +29,8 @@ use super::http_guards::SecretToken;
 use super::{ServeOptions, Transport};
 use crate::config::ServeCredential;
 use crate::surface::session::{
-    parse_addressed, BearerSecret, HostedSessions, RefusalReason, SessionAuthority, SessionGrant,
-    SessionNeed, SessionRefusal, LEGACY_CREDENTIAL_NAME, LOCAL_CREDENTIAL_NAME,
+    parse_addressed, BearerSecret, HostedSessions, SessionAuthority, SessionGrant, SessionRefusal,
+    LEGACY_CREDENTIAL_NAME, LOCAL_CREDENTIAL_NAME,
 };
 use crate::types::LamboError;
 
@@ -150,6 +150,36 @@ pub(super) fn serve_authority(opts: &ServeOptions) -> Result<ServeAuthority, Lam
     ))
 }
 
+/// Does any configured credential reach a session this serve does not pin
+/// (#32 PR 6)? A `session_prefix`, or an exact name that is not pinned. Such
+/// a serve attaches those sessions on demand, so it runs as a registry
+/// under `DetachSession` even with one pinned session. The legacy `default`
+/// and implicit `local` credentials cover the pinned sessions only, and a
+/// `"*"` reaches past them only through another credential's prefix, so
+/// neither changes the answer. HTTP only: stdio authenticates nobody.
+pub(super) fn reaches_past_pinned(opts: &ServeOptions) -> bool {
+    on_demand_credentials(opts) > 0
+}
+
+/// How many configured credentials reach a session this serve does not pin
+/// (see [`reaches_past_pinned`]); 0 over stdio. The on-demand places are
+/// shared among them for eviction (#32 PR 6 review M4).
+pub(super) fn on_demand_credentials(opts: &ServeOptions) -> usize {
+    if opts.transport != Transport::Http {
+        return 0;
+    }
+    opts.credentials
+        .iter()
+        .filter(|cred| {
+            let scope = cred.grant.scope();
+            scope.prefix().is_some()
+                || scope
+                    .names()
+                    .any(|name| !opts.sessions.iter().any(|pinned| pinned == name.as_str()))
+        })
+        .count()
+}
+
 /// What an operator should hear about a serve's credentials at startup
 /// (#32 PR 5 review I3 and I5), one line each. Names credentials and
 /// sessions, never a token.
@@ -158,10 +188,13 @@ pub(super) fn serve_authority(opts: &ServeOptions) -> Result<ServeAuthority, Lam
 ///   left exported (in a plist, a unit file) after `[[serve.credential]]`
 ///   was added keeps the `default` credential, and with it every pinned
 ///   session, reachable by whoever holds that token.
-/// * A configured credential naming sessions this serve does not pin: until
-///   sessions attach on demand (#32 PR 6) those names cannot be reached,
-///   and a credential whose scope covers no pinned session at all reaches
-///   nothing.
+/// * A configured credential without `create` whose scope reaches past the
+///   pinned sessions (#32 PR 6): it attaches such a session on demand only
+///   once the session exists (it has a lease row, design decision 3), so a
+///   name nobody has created yet is the uniform 404 to it.
+/// * A credential reaching past the pinned sessions while `max_attached`
+///   leaves no place beside them (#32 PR 6 review L6): every on-demand
+///   request would get 503.
 pub(super) fn startup_warnings(opts: &ServeOptions) -> Vec<String> {
     let mut out = Vec::new();
     if opts.transport != Transport::Http {
@@ -174,59 +207,53 @@ pub(super) fn startup_warnings(opts: &ServeOptions) -> Vec<String> {
              Unset it if the configured credentials replace it."
         ));
     }
-    let pinned: Vec<_> = opts
-        .sessions
-        .iter()
-        .filter_map(|s| parse_addressed(s).ok())
-        .collect();
-    let hosted = HostedSessions::new(pinned.iter().cloned(), std::iter::empty());
     for cred in &opts.credentials {
+        if cred.grant.capabilities().create {
+            continue;
+        }
         let scope = cred.grant.scope();
         let unpinned: Vec<&str> = scope
             .names()
-            .filter(|name| !pinned.contains(name))
+            .filter(|name| !opts.sessions.iter().any(|pinned| pinned == name.as_str()))
             .map(|name| name.as_str())
             .collect();
-        if !unpinned.is_empty() {
-            out.push(format!(
-                "credential {:?} names sessions this serve does not pin ({}): they cannot be \
-                 reached until sessions attach on demand; pin them with --session or [serve] \
-                 sessions",
-                cred.grant.name(),
-                unpinned.join(", ")
-            ));
+        let mut reach = unpinned.join(", ");
+        if let Some(prefix) = scope.prefix() {
+            if !reach.is_empty() {
+                reach.push_str(", ");
+            }
+            reach.push_str(&format!("prefix {:?}", prefix.as_str()));
         }
-        if !pinned.iter().any(|id| scope.covers(id, &hosted)) {
+        if !reach.is_empty() {
             out.push(format!(
-                "credential {:?} covers no session this serve pins, so it reaches nothing yet",
+                "credential {:?} reaches sessions this serve does not pin ({reach}) without \
+                 create = true: it attaches one on demand only once it exists (a writer has \
+                 used it), and gets the uniform 404 for one that does not",
                 cred.grant.name()
             ));
         }
+    }
+    if reaches_past_pinned(opts) && opts.bounds.max_attached <= opts.sessions.len() {
+        out.push(format!(
+            "[serve] max_attached ({}) leaves no place beside the {} pinned session(s), but a \
+             credential reaches sessions this serve does not pin: every on-demand request will \
+             get 503. Raise max_attached.",
+            opts.bounds.max_attached,
+            opts.sessions.len()
+        ));
     }
     out
 }
 
 /// May `grant` use the default session `default` (what `/mcp` serves)?
+/// [`SessionAuthority::authorize_default`], shared with the portal's
+/// unscoped aliases (#4 PR 2).
 ///
-/// A default whose name passes the strict charset is authorized exactly as
-/// `/mcp/s/{default}` would be. One that does not (a one-session serve keeps
-/// `--session`'s looser rule, and such a session is reachable only at
-/// `/mcp`) can be covered by no exact name or prefix, so only a scope over
-/// every pinned session reaches it: `"*"`, and the `default` and `local`
-/// grants.
+/// [`SessionAuthority::authorize_default`]: crate::surface::session::SessionAuthority::authorize_default
 pub(super) fn authorize_default(
     authority: &ServeAuthority,
     grant: &SessionGrant,
     default: &str,
 ) -> Result<(), SessionRefusal> {
-    if parse_addressed(default).is_ok() {
-        return authority
-            .authorize(grant, default, SessionNeed::Use)
-            .map(|_| ());
-    }
-    if grant.scope().covers_every_pinned() {
-        Ok(())
-    } else {
-        Err(SessionRefusal::new(RefusalReason::OutOfScope))
-    }
+    authority.authorize_default(grant, default)
 }

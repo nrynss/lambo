@@ -649,7 +649,7 @@ fn contract(kind: &str, model: Option<&str>, dim: usize) -> crate::types::Embedd
 fn a_submitted_vector_is_checked_without_echoing_it() {
     let live = contract(
         "embeddinggemma2",
-        Some("ggml-org/eg2@x/Q8_0;prompts=lambo-eg2-v1"),
+        Some("ggml-org/eg2@x/Q8_0;prompts=lambo-eg2-v2"),
         4,
     );
     let unit = [0.5f32, 0.5, 0.5, 0.5];
@@ -659,7 +659,7 @@ fn a_submitted_vector_is_checked_without_echoing_it() {
     let err = check_submitted_vector(&unit, &declared, &live).unwrap_err();
     assert!(err.contains("(model differs)"), "{err}");
     assert!(
-        err.contains("prompts=lambo-eg2-v1"),
+        err.contains("prompts=lambo-eg2-v2"),
         "the live model is shown whole: {err}"
     );
     assert!(!err.contains("SECRET-MODEL-LABEL"), "{err}");

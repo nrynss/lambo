@@ -111,3 +111,110 @@ impl GraphStore for VectorSearchable {
         self.0.release_lease(session, holder).await
     }
 }
+
+/// [`VectorSearchable`] declaring its checked read an exact scan, so a
+/// session holder ranks recall's vector leg in its own graph (#8's
+/// `VectorCandidates::Graph`) instead of the (always empty) checked read:
+/// the MCP recall-by-image tests (#22 PR 6) need a vector leg that fires
+/// without a flush.
+pub struct GraphRanked(pub VectorSearchable);
+
+#[async_trait]
+impl GraphStore for GraphRanked {
+    fn capabilities(&self) -> Capabilities {
+        self.0.capabilities()
+    }
+    fn exact_vector_scan(&self) -> bool {
+        true
+    }
+    async fn init_schema(&self) -> Result<(), StoreError> {
+        self.0.init_schema().await
+    }
+    async fn flush(&self, batch: &MutationBatch, token: Option<u64>) -> Result<(), StoreError> {
+        self.0.flush(batch, token).await
+    }
+    async fn load_session(&self, session: &SessionId) -> Result<GraphSnapshot, StoreError> {
+        self.0.load_session(session).await
+    }
+    async fn keyword_candidates(
+        &self,
+        session: &SessionId,
+        tokens: &[String],
+        limit: usize,
+    ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+        self.0.keyword_candidates(session, tokens, limit).await
+    }
+    async fn vector_candidates(
+        &self,
+        session: &SessionId,
+        embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+        self.0.vector_candidates(session, embedding, limit).await
+    }
+    async fn vector_candidates_checked(
+        &self,
+        session: &SessionId,
+        embedding: &[f32],
+        expected_contract: &EmbeddingContract,
+        limit: usize,
+    ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+        self.0
+            .vector_candidates_checked(session, embedding, expected_contract, limit)
+            .await
+    }
+    async fn blast_radius(
+        &self,
+        session: &SessionId,
+        node: NodeId,
+        min_edge_age: Duration,
+        now: DateTime<Utc>,
+    ) -> Result<u64, StoreError> {
+        self.0.blast_radius(session, node, min_edge_age, now).await
+    }
+    async fn interaction_span(
+        &self,
+        session: &SessionId,
+        node: NodeId,
+        min_age: Duration,
+        now: DateTime<Utc>,
+    ) -> Result<crate::types::InteractionSpan, StoreError> {
+        self.0.interaction_span(session, node, min_age, now).await
+    }
+    async fn record_canonization(
+        &self,
+        event: &crate::types::CanonizationEvent,
+        token: Option<u64>,
+    ) -> Result<(), StoreError> {
+        self.0.record_canonization(event, token).await
+    }
+    async fn acquire_lease(
+        &self,
+        session: &SessionId,
+        holder: &crate::store::LeaseHolder,
+        ttl: Duration,
+    ) -> Result<crate::store::LeaseOutcome, StoreError> {
+        self.0.acquire_lease(session, holder, ttl).await
+    }
+    async fn read_lease(
+        &self,
+        session: &SessionId,
+    ) -> Result<Option<crate::store::LeaseInfo>, StoreError> {
+        self.0.read_lease(session).await
+    }
+    async fn refresh_lease(
+        &self,
+        session: &SessionId,
+        holder: &crate::store::LeaseHolder,
+        ttl: Duration,
+    ) -> Result<crate::store::LeaseOutcome, StoreError> {
+        self.0.refresh_lease(session, holder, ttl).await
+    }
+    async fn release_lease(
+        &self,
+        session: &SessionId,
+        holder: &crate::store::LeaseHolder,
+    ) -> Result<(), StoreError> {
+        self.0.release_lease(session, holder).await
+    }
+}

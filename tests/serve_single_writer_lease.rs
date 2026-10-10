@@ -92,6 +92,10 @@ fn serve_cmd_on(
         agent,
         "--transport",
         transport,
+        // Never the default 7700: a serve that wins the lease when the test
+        // expects a refusal would bind the developer's live writer's port.
+        "--port",
+        "0",
     ]);
     cmd
 }
@@ -161,8 +165,8 @@ fn a_second_process_on_one_session_is_refused_by_the_lease() {
     // transport where losing the lease is still terminal (see the module doc —
     // an http serve has no line-framed client wire to proxy over, so J2 leaves
     // its refusal exactly as it was). It must fail closed at build time, before
-    // it ever serves. A free port is not needed: the refusal happens before any
-    // bind.
+    // it ever serves. The refusal happens before any bind; `serve_cmd_on`
+    // still passes `--port 0` so a regression cannot reach port 7700.
     let mut b = ServeChild::new(
         serve_cmd_on(&cfg_path, "agent-b", "http", &runtime)
             .stdin(Stdio::null())

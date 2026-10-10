@@ -495,6 +495,8 @@ mod tests {
                 top_k: Some(5),
                 max_tokens: Some(500),
                 traversal_depth: Some(2),
+                image: None,
+                query_vector: None,
             })
             .await;
         assert_eq!(mcp_recall.is_error, Some(false), "{mcp_recall:?}");

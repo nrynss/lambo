@@ -195,6 +195,55 @@ declared path.
 
 ---
 
+## EmbeddingGemma 2 on llama.cpp (#22, text and images)
+
+**Decision (2026-10-09, #22 PR 5):** EmbeddingGemma 2 (`kind = "embeddinggemma2"`,
+feature `embed-eg2`) is served by the same `llama-server` Lambo already talks to, for
+text and images in one space. Decisions: `feature-22-image-embeddings.md`; live
+evidence: `evidence/issue-22-eg2/`.
+
+- **Version floor: llama.cpp b11452** (PR #30054 added the `gemma-embedding2`
+  architecture). Older builds refuse with `unknown model architecture:
+  'gemma-embedding2'`. Verified on the upstream release **b11517**. Homebrew's stable
+  formula was pinned to b11429 when this was written, and its `--HEAD` build failed
+  until ggml-org/ggml syncs `ggml_backend_sched_set_copy_callback`, so use an upstream
+  release binary (or a source build) until Homebrew catches up.
+- **Weights:** `ggml-org/embeddinggemma-2-GGUF` at revision `bfcd2987`, converted from
+  `google/embeddinggemma-2` at `914f7f89`: `embeddinggemma-2-Q8_0.gguf` (310 MB, sha256
+  `2188ac1d…`) and the vision and audio projector `mmproj-embeddinggemma-2-Q8_0.gguf`
+  (555 MB, `c4a8a526…`). Outside the repo, like every model.
+- **Server:**
+
+  ```bash
+  llama-server --host 127.0.0.1 --port 8191 \
+    -m embeddinggemma-2-Q8_0.gguf --mmproj mmproj-embeddinggemma-2-Q8_0.gguf \
+    --embeddings --pooling mean \
+    --image-min-tokens 280 --image-max-tokens 280 \
+    --ctx-size 8192 --batch-size 8192 --ubatch-size 8192
+  ```
+
+  The image flags fix the 280-token budget of the `lambo-eg2-v2` profile (the server's
+  default sizes images at 85 to 125 tokens, and the budget changes the vectors). The
+  batch flags let a whole image fit one ubatch: at the default 512 the server caps the
+  budget to 256 without failing, and Lambo then refuses every image. Leave out
+  `--mmproj` for a text-only server and set `[embedder] images = false`.
+- **What Lambo does, not the server:** the task prefixes (`title: none | text: ` for
+  stored text, `task: search result | query: ` for recall queries, none for images),
+  the canonical image form (every image decoded and resized to a 768 px longer side,
+  sent as lossless PNG), MRL truncation to `dim` (768, 512, 256 or 128)
+  with re-normalization, and the contract string `<artifact>;prompts=lambo-eg2-v2`.
+- **Startup check:** before its first embed Lambo reads `/props` (`model_path`,
+  `model_ftype`, `modalities.vision`) and refuses a file that is not EmbeddingGemma 2,
+  another quantization than `model` names, or images on a server without a projector.
+- **Cost on this Mac (Metal, b11517):** text about 7 ms warm; an image at the 280
+  budget about 370 ms server-side.
+
+| Backend | `kind` | Dim | When |
+|---------|--------|-----|------|
+| EmbeddingGemma 2 via llama.cpp | `embeddinggemma2` | 768 (MRL 512/256/128) | Text and images in one space; llama.cpp b11452+ |
+
+---
+
 ## Handoff
 
 - Default embedder for development and demo: **BGE-M3 + llama.cpp** (HF weights).

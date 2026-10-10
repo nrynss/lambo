@@ -52,3 +52,19 @@ async fn serve_refuses_an_unauthenticated_non_loopback_bind() {
 // `Runtime::drop` then waits for, hanging the suite on any machine where
 // stdin is a TTY instead of EOF. Neither risk buys coverage the unit
 // tests do not already give.
+
+/// #32 PR 6 review L5: a library caller's `idle_detach` of zero is refused
+/// before any lease, as `[serve] idle_detach_secs = 0` is.
+#[tokio::test]
+async fn serve_refuses_a_zero_idle_detach() {
+    let mut opts = ServeOptions {
+        transport: Transport::Http,
+        port: 0,
+        ..ServeOptions::new("pr6-l5-refuse", "agent-a")
+    };
+    opts.bounds.idle_detach = Duration::ZERO;
+    let err = serve(opts, backends())
+        .await
+        .expect_err("a zero idle_detach is refused");
+    assert!(err.to_string().contains("idle_detach"), "{err}");
+}

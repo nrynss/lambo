@@ -269,7 +269,7 @@ impl SessionRegistry {
         // A background attach of this id (the pinned retry) cannot run in
         // between: it takes the same lock, and finds the slot `Erasing`.
         let outcome = {
-            let _no_attach = self.attach_lock.lock().await;
+            let _no_attach = self.attach_permits.acquire_many(self.permit_count).await;
             store.erase_session(&sid, &eraser).await
         };
         match outcome {

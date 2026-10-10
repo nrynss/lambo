@@ -14,6 +14,7 @@
 
 use async_trait::async_trait;
 use reqwest::header::{HeaderValue, AUTHORIZATION};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -88,6 +89,59 @@ pub(crate) fn classify_status(code: u16) -> EmbedStatusClass {
         code if (500..=599).contains(&code) => EmbedStatusClass::Transient,
         // Everything else: no rule, so conservatively transient AND logged.
         _ => EmbedStatusClass::Unclassified,
+    }
+}
+
+/// What a status rule decided about one non-success response (#22 PR 5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StatusVerdict {
+    pub(crate) class: EmbedStatusClass,
+    /// Operator guidance appended to the error, for a response whose body
+    /// names a known deployment or content fault.
+    pub(crate) hint: Option<&'static str>,
+}
+
+/// A status rule: the status code and the (scrubbed, capped) error body in,
+/// the class out. The class is still decided at the site that read the
+/// response and carried out as an [`EmbedError`] variant (J1-R2-2); a rule
+/// only lets an adapter that knows its server's bodies refine the table for
+/// a request shape the table was not written for (the EmbeddingGemma 2
+/// image call, whose `500` can be a permanent deployment fault).
+/// How [`BgeM3LlamaCppEmbedder::post_json`] begins the message of a request that never
+/// got an HTTP answer (refused, reset, timed out). A caller that must tell a
+/// connection-level failure from a transient HTTP status (a 503 "busy")
+/// matches on it.
+pub(crate) const LLAMA_UNREACHABLE: &str = "llama.cpp unreachable at ";
+
+pub(crate) type StatusRule = fn(u16, &str) -> StatusVerdict;
+
+/// The body `llama-server` (checked on b11517) sends with `500` for a
+/// non-causal input (an embedding) longer than its physical batch:
+/// `input (N tokens) is too large to process. increase the physical batch
+/// size (current batch size: M)`.
+const UBATCH_TOO_SMALL: &str = "too large to process. increase the physical batch size";
+
+/// Appended to the error for an input longer than the server's ubatch.
+const UBATCH_HINT: &str = " (this input is longer than the llama-server's physical batch, which \
+    an embedding must fit in whole: raise it, e.g. --batch-size 8192 --ubatch-size 8192, to embed \
+    inputs this long)";
+
+/// The J3 table, as a [`StatusRule`], with one body-named exception: a `500`
+/// whose body says the input is too large for the physical batch is a fact
+/// about this input on this deployment, not a busy server, so it is
+/// `Content` (settled as failed, with a `--ubatch-size` hint) instead of
+/// transient. Retrying it can never succeed, and before this rule it was
+/// retried forever. Every other body is ignored.
+pub(crate) fn default_status_rule(code: u16, body: &str) -> StatusVerdict {
+    if code == 500 && body.contains(UBATCH_TOO_SMALL) {
+        return StatusVerdict {
+            class: EmbedStatusClass::Content,
+            hint: Some(UBATCH_HINT),
+        };
+    }
+    StatusVerdict {
+        class: classify_status(code),
+        hint: None,
     }
 }
 
@@ -309,6 +363,28 @@ impl BgeM3LlamaCppEmbedder {
         Ok(self)
     }
 
+    /// A GET of `path` under the base URL, carrying the bearer header when one
+    /// is configured: the EmbeddingGemma 2 layer's `/props` check (#22 PR 5).
+    /// It goes through the same client, so redirects are not followed and the
+    /// loopback proxy rule holds.
+    #[cfg(feature = "embed-eg2")]
+    pub(crate) fn authorized_get(&self, path: &str, timeout: Duration) -> reqwest::RequestBuilder {
+        let mut req = self
+            .client
+            .get(format!("{}{path}", self.base_url))
+            .timeout(timeout);
+        if let Some(auth) = &self.authorization {
+            req = req.header(AUTHORIZATION, auth.clone());
+        }
+        req
+    }
+
+    /// The base URL as logs and errors may print it ([`url_for_log`]).
+    #[cfg(feature = "embed-eg2")]
+    pub(crate) fn log_base_url(&self) -> String {
+        url_for_log(&self.base_url)
+    }
+
     /// Override connect/request timeouts (most users can rely on the defaults).
     pub fn with_timeouts(
         mut self,
@@ -406,13 +482,34 @@ impl BgeM3LlamaCppEmbedder {
             model: model.to_string(),
             input: text.to_string(),
         };
-        let mut req = self.client.post(&self.url).json(&body);
+        self.post_json(&body, model, default_status_rule).await
+    }
+
+    /// POST `body` as JSON to the embeddings endpoint and parse a success
+    /// response as `R`; the transport half of [`Self::request_embedding`],
+    /// shared with the EmbeddingGemma 2 layer (#22 PR 5), which sends its own
+    /// request shapes over this client. Everything #21 promises holds here:
+    /// the bearer header, no redirects, the capped and scrubbed error body,
+    /// URLs printed without userinfo or query. `model` only labels messages.
+    /// `rule` classifies a non-success status (normally
+    /// [`default_status_rule`]).
+    pub(crate) async fn post_json<B, R>(
+        &self,
+        body: &B,
+        model: &str,
+        rule: StatusRule,
+    ) -> Result<R, EmbedError>
+    where
+        B: Serialize + ?Sized,
+        R: DeserializeOwned,
+    {
+        let mut req = self.client.post(&self.url).json(body);
         if let Some(auth) = &self.authorization {
             req = req.header(AUTHORIZATION, auth.clone());
         }
         let resp = req.send().await.map_err(|e| {
             EmbedError::Unavailable(format!(
-                "llama.cpp unreachable at {}: {}",
+                "{LLAMA_UNREACHABLE}{}: {}",
                 self.log_url,
                 e.without_url()
             ))
@@ -449,9 +546,11 @@ impl BgeM3LlamaCppEmbedder {
             let (body, truncated) = self.capped_error_body(resp).await;
             self.without_token(&body, truncated)
         };
-        match classify_status(code) {
+        let verdict = rule(code, &text_body);
+        let hint = verdict.hint.unwrap_or("");
+        match verdict.class {
             EmbedStatusClass::Transient => Err(EmbedError::Unavailable(format!(
-                "llama.cpp is momentarily unwilling ({status}) for model {model:?}: {text_body}"
+                "llama.cpp is momentarily unwilling ({status}) for model {model:?}: {text_body}{hint}"
             ))),
             EmbedStatusClass::Unclassified => {
                 // The table does not name this status. Conservative: treat it
@@ -466,7 +565,7 @@ impl BgeM3LlamaCppEmbedder {
                 );
                 Err(EmbedError::Unavailable(format!(
                     "llama.cpp answered {status} (unclassified by the J3 status rule table) for \
-                     model {model:?}: {text_body}"
+                     model {model:?}: {text_body}{hint}"
                 )))
             }
             EmbedStatusClass::Content => {
@@ -477,7 +576,8 @@ impl BgeM3LlamaCppEmbedder {
                     "llama.cpp refused this content ({status}); not retrying (CON-2)"
                 );
                 Err(EmbedError::Backend(format!(
-                    "llama.cpp refused this content with {status} for model {model:?}: {text_body}"
+                    "llama.cpp refused this content with {status} for model {model:?}: \
+                     {text_body}{hint}"
                 )))
             }
             EmbedStatusClass::PermanentConfig => {
@@ -494,7 +594,7 @@ impl BgeM3LlamaCppEmbedder {
                 );
                 Err(EmbedError::Backend(format!(
                     "llama.cpp answered {status} (permanent configuration error) for model \
-                     {model:?}: {text_body}"
+                     {model:?}: {text_body}{hint}"
                 )))
             }
         }
@@ -628,6 +728,44 @@ mod tests {
         let err = e.embed("anything").await.unwrap_err();
         assert!(matches!(err, EmbedError::Unavailable(_)), "{err:?}");
         assert!(err.to_string().contains("500"));
+    }
+
+    /// A `500` whose body is llama-server's "increase the physical batch
+    /// size" (b11517's exact text) is a content refusal with a ubatch hint,
+    /// not a transient: the same input can never fit the same server, so
+    /// retrying it would loop forever. A `500` with any other body stays
+    /// transient.
+    ///
+    /// Mutation: drop the body check in `default_status_rule` -> red.
+    #[tokio::test]
+    async fn a_500_for_an_input_over_the_ubatch_is_a_content_refusal() {
+        const BODY: &str = r#"{"error":{"code":500,"message":"input (3002 tokens) is too large to process. increase the physical batch size (current batch size: 512)","type":"server_error"}}"#;
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST).path("/v1/embeddings");
+            then.status(500).body(BODY);
+        });
+        let e = BgeM3LlamaCppEmbedder::new(server.base_url(), "", 1024).unwrap();
+        let err = e.embed("a long concept").await.unwrap_err();
+        assert!(matches!(err, EmbedError::Backend(_)), "{err:?}");
+        assert!(!err.is_transient(), "{err:?}");
+        let msg = err.to_string();
+        assert!(msg.contains("refused this content"), "{msg}");
+        assert!(msg.contains("--ubatch-size"), "{msg}");
+
+        assert_eq!(
+            default_status_rule(500, BODY).class,
+            EmbedStatusClass::Content
+        );
+        assert_eq!(
+            default_status_rule(500, "internal error").class,
+            EmbedStatusClass::Transient
+        );
+        // Only a 500 carries this meaning.
+        assert_eq!(
+            default_status_rule(503, BODY).class,
+            EmbedStatusClass::Transient
+        );
     }
 
     /// J3-R2R-1 algorithm unit test: the rule table itself, exhaustive and
