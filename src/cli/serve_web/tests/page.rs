@@ -376,11 +376,16 @@ fn the_script_renders_names_as_text_and_builds_relative_urls() {
     // Names reach the DOM as text: the picker's options and message.
     assert!(APP_JS.contains("var o = el(\"option\", null, name);"));
     assert!(APP_JS.contains("$(\"session-picker-msg\").textContent = text"));
-    // The page's own markup stays free of inline script, style, and HTML
-    // event-handler attributes, so `script-src 'self'` / `style-src 'self'`
-    // need no `'unsafe-inline'`. `element.onclick =` and `element.style.x =`
-    // in app.js are property writes from the external script, not markup;
-    // `setAttribute` with a `style` or `on…` name would be markup.
+}
+
+/// The page's own markup stays free of inline script, style, and HTML
+/// event-handler attributes, so `script-src 'self'` / `style-src 'self'`
+/// need no `'unsafe-inline'`, and it loads nothing `img-src 'self'` (no
+/// `data:`) would refuse. `element.onclick =` and `element.style.x =` in
+/// app.js are property writes from the external script, not markup;
+/// `setAttribute` with a `style` or `on…` name would be markup.
+#[test]
+fn the_page_has_no_inline_script_or_style() {
     assert_eq!(INDEX_HTML.matches("<script").count(), 1, "{INDEX_HTML}");
     assert!(INDEX_HTML.contains(r#"<script src="/app.js"></script>"#));
     let inline = inline_markup(INDEX_HTML);
@@ -388,18 +393,109 @@ fn the_script_renders_names_as_text_and_builds_relative_urls() {
         inline.is_empty(),
         "index.html has inline style or event-handler markup: {inline:?}"
     );
-    let js: String = APP_JS
-        .chars()
+    let calls = markup_attribute_calls(APP_JS);
+    assert!(calls.is_empty(), "app.js sets markup attributes: {calls:?}");
+    // Every call survives the comment strip, so it swallowed no code.
+    assert_eq!(
+        js_for_attribute_scan(APP_JS)
+            .matches("setattribute(")
+            .count(),
+        APP_JS.matches("setAttribute(").count()
+    );
+    // Property writes stay legal, and the script really makes them.
+    assert!(APP_JS.contains("row.style.paddingLeft"));
+    assert!(APP_JS.contains(".onclick ="));
+
+    assert!(!INDEX_HTML.contains("<img"), "index.html has an <img>");
+    assert!(!APP_JS.contains("data:"), "app.js has a data: URL");
+    assert!(!APP_CSS.contains("url("), "app.css has a url(");
+}
+
+/// `js` with `/* … */` comments and whitespace removed, lowercased: the
+/// text [`markup_attribute_calls`] scans. Not a JS parser.
+fn js_for_attribute_scan(js: &str) -> String {
+    let mut out = String::new();
+    let mut rest = js;
+    while let Some(at) = rest.find("/*") {
+        out.push_str(&rest[..at]);
+        rest = rest[at + 2..]
+            .split_once("*/")
+            .map_or("", |(_, after)| after);
+    }
+    out.push_str(rest);
+    out.chars()
         .filter(|c| !c.is_whitespace())
         .collect::<String>()
-        .to_ascii_lowercase();
-    for banned in [
-        r#"setattribute("style""#,
-        "setattribute('style'",
-        r#"setattribute("on"#,
-        "setattribute('on",
+        .to_ascii_lowercase()
+}
+
+/// Each `setAttribute` / `setAttributeNS` call in `js` whose name argument
+/// is a `style` or `on…` literal in any quote style, reached by `.` or by
+/// bracket access (`el["setAttribute"](`). For the NS form the name is the
+/// argument after the first comma. Reported as the scanned text from the
+/// method name on.
+fn markup_attribute_calls(js: &str) -> Vec<String> {
+    let text = js_for_attribute_scan(js);
+    let mut found = Vec::new();
+    for (at, _) in text.match_indices("setattribute") {
+        let call = &text[at..];
+        let mut rest = &call["setattribute".len()..];
+        let ns = rest.starts_with("ns");
+        if ns {
+            rest = &rest[2..];
+        }
+        for quote in ['"', '\'', '`'] {
+            if let Some(after) = rest.strip_prefix(quote).and_then(|r| r.strip_prefix(']')) {
+                rest = after;
+            }
+        }
+        let Some(mut args) = rest.strip_prefix('(') else {
+            continue;
+        };
+        if ns {
+            let Some((_, name)) = args.split_once(',') else {
+                continue;
+            };
+            args = name;
+        }
+        let markup = ['"', '\'', '`'].iter().any(|&quote| {
+            args.strip_prefix(quote)
+                .is_some_and(|name| name.starts_with("style") || name.starts_with("on"))
+        });
+        if markup {
+            found.push(call.chars().take(40).collect());
+        }
+    }
+    found
+}
+
+#[test]
+fn the_attribute_ban_catches_markup_spellings() {
+    for js in [
+        r#"el.setAttribute("style", x)"#,
+        "el.setAttribute( 'onclick' , x)",
+        "el.setAttribute(`style`, x)",
+        "el.setAttribute(`onload`, x)",
+        r#"el.setAttribute(/*x*/"style", x)"#,
+        r#"el.setAttribute( /* a */ 'onclick', x)"#,
+        r#"el["setAttribute"]("style", x)"#,
+        "el['setAttribute']('onerror', x)",
+        r#"el.setAttributeNS(null, "style", x)"#,
+        "el.setAttributeNS(null, 'onclick', x)",
+        r#"el["setAttributeNS"]("http://www.w3.org/1999/xhtml", "style", x)"#,
+        r#"el.SETATTRIBUTE("STYLE", x)"#,
     ] {
-        assert!(!js.contains(banned), "app.js must not call {banned}");
+        assert_eq!(markup_attribute_calls(js).len(), 1, "{js}");
+    }
+    for js in [
+        r#"el.setAttribute("aria-label", x)"#,
+        r#"el.setAttribute("data-theme", "on")"#,
+        r#"el.setAttributeNS(null, "href", "style")"#,
+        "row.style.paddingLeft = 1;",
+        "btn.onclick = f;",
+        r#"/* el.setAttribute("style", x) */ el.title = 1;"#,
+    ] {
+        assert!(markup_attribute_calls(js).is_empty(), "{js}");
     }
 }
 
@@ -407,7 +503,8 @@ fn the_script_renders_names_as_text_and_builds_relative_urls() {
 /// `style` element (reported as `<style>`) and each `style` or `on…`
 /// attribute (reported by name). Tags are tokenized as HTML does it: an
 /// attribute name ends at whitespace, `/`, `=`, or `>`; whitespace may
-/// surround `=`; a quoted value may hold `>`; comments end at `-->`.
+/// surround `=`; a quoted value may hold `>`; comments end at `-->`, and
+/// the abruptly closed empty comments `<!-->` and `<!--->` end at once.
 fn inline_markup(html: &str) -> Vec<String> {
     let bytes = html.as_bytes();
     let mut found = Vec::new();
@@ -416,8 +513,15 @@ fn inline_markup(html: &str) -> Vec<String> {
     while let Some(lt) = find(i, "<") {
         i = lt + 1;
         if html[i..].starts_with("!--") {
-            let Some(end) = find(i + 3, "-->") else { break };
-            i = end + 3;
+            let body = i + 3;
+            if html[body..].starts_with('>') {
+                i = body + 1;
+            } else if html[body..].starts_with("->") {
+                i = body + 2;
+            } else {
+                let Some(end) = find(body, "-->") else { break };
+                i = end + 3;
+            }
             continue;
         }
         if !bytes.get(i).is_some_and(u8::is_ascii_alphabetic) {
@@ -449,9 +553,10 @@ fn inline_markup(html: &str) -> Vec<String> {
                 i += 1;
             }
             let attr = &html[attr_at..i];
-            let handler = attr.len() > 2
-                && attr[..2].eq_ignore_ascii_case("on")
-                && attr.as_bytes()[2].is_ascii_alphabetic();
+            let name = attr.as_bytes();
+            let handler = name.len() > 2
+                && name[..2].eq_ignore_ascii_case(b"on")
+                && name[2].is_ascii_alphabetic();
             if handler || attr.eq_ignore_ascii_case("style") {
                 found.push(attr.to_string());
             }
@@ -499,6 +604,15 @@ fn the_inline_markup_scanner_reports_style_and_handlers_only() {
         ("<body onload>", &["onload"]),
         ("<style>p{}</style>", &["<style>"]),
         (r#"<p><b style="x" onfocus="y">"#, &["style", "onfocus"]),
+        ("<a ONCLICK=x>", &["ONCLICK"]),
+        ("<STYLE>p{}</STYLE>", &["<style>"]),
+        (r#"<div STYLE="color:red">"#, &["STYLE"]),
+        ("<a\tonclick=x>", &["onclick"]),
+        (r#"<a title="x"onclick=y>"#, &["onclick"]),
+        ("<!--><a onclick=x>", &["onclick"]),
+        ("<!---><a onclick=x>", &["onclick"]),
+        ("<!----><a onclick=x>", &["onclick"]),
+        (r#"<a 日本="x" onclick=y>"#, &["onclick"]),
     ];
     for (html, expect) in report {
         assert_eq!(inline_markup(html), *expect, "{html}");
@@ -514,6 +628,7 @@ fn the_inline_markup_scanner_reports_style_and_handlers_only() {
         "<!doctype html><p>a < b onclick=c</p>",
         r#"<div data-onclick="x" on="2">"#,
         r#"<link rel="stylesheet" href="/app.css">"#,
+        r#"<a aé="x" 日本=y on日="z">"#,
     ] {
         assert!(
             inline_markup(html).is_empty(),
