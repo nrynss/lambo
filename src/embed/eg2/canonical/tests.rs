@@ -386,3 +386,71 @@ fn a_truncated_large_image_is_a_backend_error() {
         assert_eq!((img.width(), img.height()), (768, 768));
     }
 }
+
+// ------------------------------------------------------- concurrent decodes
+
+/// A large PNG that takes a while to decode and resample in a test build.
+fn slow_png() -> Vec<u8> {
+    png_rgb(2048, 2048)
+}
+
+/// A decode runs only with a permit: while every permit is held, a request
+/// waits rather than decoding, and goes ahead once one is released.
+///
+/// Mutation: skip the `acquire` -> red.
+#[tokio::test]
+async fn a_decode_waits_for_a_permit() {
+    static LIMIT: Semaphore = Semaphore::const_new(1);
+    let png = png_rgb(64, 64);
+    let held = LIMIT.acquire().await.unwrap();
+    let waited = tokio::time::timeout(
+        std::time::Duration::from_millis(200),
+        canonicalize_with(&LIMIT, &png, ImageMime::Png),
+    )
+    .await;
+    assert!(waited.is_err(), "decoded without a permit");
+    drop(held);
+    let out = canonicalize_with(&LIMIT, &png, ImageMime::Png)
+        .await
+        .unwrap();
+    assert_eq!(out, to_canonical_png(&png, ImageMime::Png).unwrap());
+    assert_eq!(LIMIT.available_permits(), 1, "the permit came back");
+}
+
+/// A request that times out while its decode runs keeps the permit until
+/// the decode finishes, so a retry cannot start a second decode beyond the
+/// bound.
+///
+/// Mutation: release the permit in the async caller (drop it before or
+/// after `spawn_blocking` returns) -> red.
+#[tokio::test]
+async fn a_timed_out_decode_holds_its_permit_until_it_finishes() {
+    static LIMIT: Semaphore = Semaphore::const_new(1);
+    let png = slow_png();
+    let started = std::time::Instant::now();
+    let timed_out = tokio::time::timeout(
+        std::time::Duration::from_millis(5),
+        canonicalize_with(&LIMIT, &png, ImageMime::Png),
+    )
+    .await;
+    assert!(timed_out.is_err(), "the decode finished within 5 ms");
+    assert_eq!(
+        LIMIT.available_permits(),
+        0,
+        "the abandoned decode still holds its permit"
+    );
+    // A retry waits for it rather than running beside it.
+    let retry = canonicalize_with(&LIMIT, &png, ImageMime::Png)
+        .await
+        .unwrap();
+    assert_eq!(decode_png(&retry).width(), 768);
+    assert_eq!(LIMIT.available_permits(), 1);
+    assert!(started.elapsed() < std::time::Duration::from_secs(120));
+}
+
+/// The production bound is the documented one.
+#[test]
+fn the_process_wide_bound_is_two() {
+    assert_eq!(MAX_CONCURRENT_DECODES, 2);
+    assert!(DECODES.available_permits() <= MAX_CONCURRENT_DECODES);
+}

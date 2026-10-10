@@ -67,9 +67,10 @@
 //! [`MAX_DECODE_PIXELS`] in all (the validator already enforces the side, so
 //! this is a second line against a decompression bomb), and the decoder runs
 //! under the same limits plus [`MAX_DECODE_ALLOC`] bytes. The input is at
-//! most `crate::surface::image::MAX_IMAGE_BYTES`. A decode failure is
-//! [`EmbedError::Unreadable`] (permanent for this input, and no backend was
-//! asked), never a panic.
+//! most `crate::surface::image::MAX_IMAGE_BYTES`, and at most
+//! [`MAX_CONCURRENT_DECODES`] decodes run at once in the process. A decode
+//! failure is [`EmbedError::Unreadable`] (permanent for this input, and no
+//! backend was asked), never a panic.
 //!
 //! What is stored about an image (its id, its SHA-256, its MIME type) keeps
 //! describing the bytes the client sent; only the embed request carries the
@@ -82,6 +83,8 @@ use image::{
     imageops::FilterType,
     DynamicImage, ImageFormat, ImageReader, Limits,
 };
+
+use tokio::sync::Semaphore;
 
 use crate::embed::{EmbedError, ImageMime};
 use crate::surface::image::MAX_IMAGE_SIDE_PX;
@@ -241,13 +244,51 @@ pub(crate) fn to_canonical_png(bytes: &[u8], mime: ImageMime) -> Result<Vec<u8>,
     Ok(out)
 }
 
+/// How many canonical decodes may run at once in this process.
+///
+/// One decode of a worst-case image (a 4096 px square of 16-bit RGBA, which
+/// compresses to well under the 2 MiB input cap when it is flat) holds about
+/// 128 MiB of decoded pixels plus a 48 MiB resampling buffer and the
+/// output, and takes about a quarter of a second of CPU in a release build.
+/// Two bound the peak at roughly 400 MiB, whatever the number of concurrent
+/// derives and recalls, while still overlapping one decode with the other's
+/// encode. More would not raise throughput: every canonical image then
+/// waits on the one `llama-server`, which embeds an image in about 370 ms
+/// on the measured Mac.
+pub(crate) const MAX_CONCURRENT_DECODES: usize = 2;
+
+/// The process-wide bound on concurrent canonical decodes.
+static DECODES: Semaphore = Semaphore::const_new(MAX_CONCURRENT_DECODES);
+
 /// [`to_canonical_png`] on a blocking thread (a 4096 px image takes long
-/// enough to stall other tasks).
+/// enough to stall other tasks), at most [`MAX_CONCURRENT_DECODES`] at a
+/// time process-wide.
 pub(crate) async fn canonicalize(bytes: &[u8], mime: ImageMime) -> Result<Vec<u8>, EmbedError> {
-    let owned = bytes.to_vec();
-    tokio::task::spawn_blocking(move || to_canonical_png(&owned, mime))
+    canonicalize_with(&DECODES, bytes, mime).await
+}
+
+/// [`canonicalize`] under `limit`. The permit is taken before the input is
+/// copied and moved into the blocking task, so it is released when the
+/// decode finishes, not when the caller stops waiting: a request that times
+/// out or is cancelled keeps its permit until its decode is done, and a
+/// client that retries cannot stack decodes beyond the bound.
+async fn canonicalize_with(
+    limit: &'static Semaphore,
+    bytes: &[u8],
+    mime: ImageMime,
+) -> Result<Vec<u8>, EmbedError> {
+    let permit = limit
+        .acquire()
         .await
-        .map_err(|e| EmbedError::Backend(format!("canonicalizing an image failed: {e}")))?
+        .map_err(|_| EmbedError::Backend("the image decode limiter is closed".into()))?;
+    let owned = bytes.to_vec();
+    tokio::task::spawn_blocking(move || {
+        let canonical = to_canonical_png(&owned, mime);
+        drop(permit);
+        canonical
+    })
+    .await
+    .map_err(|e| EmbedError::Backend(format!("canonicalizing an image failed: {e}")))?
 }
 
 #[cfg(test)]
