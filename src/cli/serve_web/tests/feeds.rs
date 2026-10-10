@@ -180,14 +180,14 @@ async fn pulse_returns_stats_and_events_in_one_round_trip() {
 #[test]
 fn durable_change_age_resets_only_when_the_counts_move() {
     let state = state_on(Arc::new(MemoryStore::new()), "t85-freshness");
-    let first = state.observe(7);
+    let first = state.observe(&state.default_session, 7);
     std::thread::sleep(Duration::from_millis(12));
-    let same = state.observe(7);
+    let same = state.observe(&state.default_session, 7);
     assert!(
         same > first,
         "an unchanged snapshot must keep ageing: {first:?} -> {same:?}"
     );
-    let moved = state.observe(8);
+    let moved = state.observe(&state.default_session, 8);
     assert!(
         moved < same,
         "a changed snapshot must reset the age: {same:?} -> {moved:?}"

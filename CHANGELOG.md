@@ -159,6 +159,37 @@
   struct literal must add `images: None` (or use `..Default::default()`).
   `lambo.toml` files are unaffected.
 
+- `lambo serve-web` checks `Host` while no token is configured (#4 PR 2,
+  a DNS-rebinding fix, see Fixed). A loopback window reached under any name
+  other than `localhost`, `127.0.0.1` or `[::1]` now answers `403`: a reverse
+  proxy that forwards its public name as `Host` (Caddy's default) must pass
+  that name with `--allowed-host` (or `[web] allowed_hosts`).
+  `scripts/aws-infra/launch_exhibit_ec2.py` now does: with `--hostname` the
+  service passes `--allowed-host <hostname>`, and with `--self-signed` Caddy
+  sends the upstream address as `Host`. An exhibit launched before this
+  change keeps its old user data, so before it runs a build with the check,
+  add `--allowed-host <hostname>` to the `exec` line of
+  `/usr/local/bin/lambo-serve-web` (self-signed: add
+  `header_up Host {upstream_hostport}` under `reverse_proxy` in
+  `/etc/caddy/Caddyfile`), or relaunch it.
+- `lambo::cli::serve_web::Args` gains `sessions: Vec<String>` and
+  `allowed_hosts: Vec<String>` (#4 PR 2). Code that builds it with a struct
+  literal must add both (`Vec::new()` keeps one session and no extra host).
+  `lambo serve-web --session` is now repeatable and no longer required when
+  `[web] sessions` names one; with neither it still exits `2`, after reading
+  `lambo.toml`.
+- A `LAMBO_AUTH_TOKEN` or `--auth-token` longer than 4 KiB refuses the start
+  of `lambo serve-web` (exit 2, naming the bound, never the value) (#4 PR 2).
+  The window now authenticates through the shared credential set, which
+  refuses a longer presented token before comparing, so such a token could
+  never have been accepted. So does one with leading or trailing whitespace
+  or a byte outside printable ASCII, which no request can present (the
+  presented credential is trimmed, and such a header value is unreadable),
+  so the window used to answer every request `401` with no hint why. The
+  rule and its messages are now one validator shared with `lambo serve`.
+  A request carrying two `Authorization` headers now gets the `401`, as
+  `lambo serve` answers it; before, the first header decided.
+
 ### Changed
 
 - A tool call that fails because a vector read refused its probe (the
@@ -181,6 +212,26 @@
   of the two) now gets a tool error (`isError`), `query must be a
   non-empty string (or send image or query_vector)`, where before serde
   refused it as a JSON-RPC invalid-params error (`missing field query`).
+- `lambo serve-web` serves an allowlist of sessions (#4 PR 2): the ordered
+  union of the repeatable `--session` and `[web] sessions`, each at
+  `/s/<session>/` (data routes under `/s/<session>/api/...`), the first also
+  at the unscoped `/` and `/api/...`, which answer exactly as before. There
+  is no store discovery. With more than one session every name must be 1 to
+  128 bytes of `[A-Za-z0-9._:-]` (exit 2 naming the one that is not); one
+  session keeps `--session`'s looser rule. A session that is not served, a
+  malformed, percent-encoded or oversized id and an unrouted path answer the
+  same empty `404` on every method, before any store read; under a token the
+  `401` comes first and is the same for every id. A non-`GET` on a served
+  session's route is `405`. A served session never written, or erased, is an
+  empty page (`200`). The scoped page carries `no-store` and
+  `Referrer-Policy: same-origin`. Startup prints one more line, naming the
+  credential and how many sessions it reads. The page's script fetches
+  relative `api/...` URLs, so the page at `/s/<session>/` reads that
+  session and the page at `/` the default; `GET` or `HEAD` of
+  `/s/<session>` without the slash is a `308` to `/s/<session>/` (the query
+  kept), so the relative URLs resolve under it. The page has no session
+  picker yet (#4 PR 4). With a token configured a browser still cannot
+  present it without a proxy that adds the header.
 - `lambo serve-web` reads its session through a shared per-session view
   (#4 PR 1). Every request and every open tab reads one load of the session
   until it is older than `[web] view_ttl_ms` (1.5 s by default, the page's
@@ -443,6 +494,11 @@
   caps. Works over every vector source (#8's holder graph, the store's
   checked read on SQLite, Postgres and Cockroach, and #18's tier); no store
   contract changed.
+- `[web] sessions` and `[web] allowed_hosts`, and the repeatable
+  `lambo serve-web --allowed-host` flag (#4 PR 2). A refused session name or
+  host is quoted (neither is a secret); an empty, repeated or
+  control-character session name and a host that is not an HTTP authority
+  are refused when the file is read.
 - `[web]` in `lambo.toml` (#4 PR 1): `view_ttl_ms` (1500, 0 to 60000),
   `max_loaded_sessions` (4), `load_concurrency` (2, 1 to 1024, always 1 on
   SQLite) and `recall_concurrency` (4, 1 to 1024) bound the read-only
@@ -794,7 +850,15 @@
   was skipped. The line names no backend detail (that is logged). The
   embedding-contract race's `vector_degraded` line (E2E-6) now reaches
   `warnings` too, where before only the CLI and the portal showed it.
-
+- `lambo serve-web` validated no `Host` header (#4 PR 2), so with no token
+  configured any web page the local user visited could rebind its own name
+  to `127.0.0.1` and read every served session same-origin. Without a token
+  it now answers only `localhost`, `127.0.0.1`, `[::1]` (any port) and the
+  allowed hosts, and anything else, including a missing or malformed `Host`
+  (user info, an empty or non-numeric port) and a request with two `Host`
+  headers, gets one fixed `403` before any other check. With a token configured any
+  `Host` is accepted, as `lambo serve` does (a rebound page cannot present
+  the token).
 - `lambo serve-web`'s `/api/pulse`, polled every 1.5 s by every open tab,
   loaded the whole session twice: once for the event feed and again for the
   counts (#4 PR 1). `/api/stats` did the same. Each now costs one load (and

@@ -62,6 +62,13 @@ const PRODUCTION_SOURCES: &[(&str, &str)] = &[
         )),
     ),
     (
+        "serve_web/scope.rs",
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/cli/serve_web/scope.rs"
+        )),
+    ),
+    (
         "serve_web/state.rs",
         include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -114,9 +121,11 @@ fn router_source() -> &'static str {
 mod auth;
 mod feeds;
 mod graph;
+mod host;
 mod inspect;
 mod recall;
 mod routes;
+mod routing;
 mod session;
 mod shutdown;
 mod views;
@@ -431,9 +440,11 @@ fn state_with_web(
     let exposed = auth.is_some();
     Arc::new(AppState::new(
         SessionId::new(session),
+        [],
         backends,
         exposed,
         auth,
+        &[],
         web,
     ))
 }
@@ -669,10 +680,16 @@ struct HttpResponse {
 }
 
 async fn request(addr: SocketAddr, method: &str, path: &str) -> HttpResponse {
-    let mut sock = tokio::net::TcpStream::connect(addr).await.expect("connect");
     let req = format!(
         "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
     );
+    send_raw(addr, &req).await
+}
+
+/// Send `req` verbatim (a whole request head, ending in a blank line) and
+/// read the response to EOF.
+async fn send_raw(addr: SocketAddr, req: &str) -> HttpResponse {
+    let mut sock = tokio::net::TcpStream::connect(addr).await.expect("connect");
     sock.write_all(req.as_bytes()).await.expect("write");
     sock.flush().await.expect("flush");
     let mut raw = Vec::new();

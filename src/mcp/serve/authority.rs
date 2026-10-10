@@ -29,8 +29,8 @@ use super::http_guards::SecretToken;
 use super::{ServeOptions, Transport};
 use crate::config::ServeCredential;
 use crate::surface::session::{
-    parse_addressed, BearerSecret, HostedSessions, RefusalReason, SessionAuthority, SessionGrant,
-    SessionNeed, SessionRefusal, LEGACY_CREDENTIAL_NAME, LOCAL_CREDENTIAL_NAME,
+    parse_addressed, BearerSecret, HostedSessions, SessionAuthority, SessionGrant, SessionRefusal,
+    LEGACY_CREDENTIAL_NAME, LOCAL_CREDENTIAL_NAME,
 };
 use crate::types::LamboError;
 
@@ -207,26 +207,14 @@ pub(super) fn startup_warnings(opts: &ServeOptions) -> Vec<String> {
 }
 
 /// May `grant` use the default session `default` (what `/mcp` serves)?
+/// [`SessionAuthority::authorize_default`], shared with the portal's
+/// unscoped aliases (#4 PR 2).
 ///
-/// A default whose name passes the strict charset is authorized exactly as
-/// `/mcp/s/{default}` would be. One that does not (a one-session serve keeps
-/// `--session`'s looser rule, and such a session is reachable only at
-/// `/mcp`) can be covered by no exact name or prefix, so only a scope over
-/// every pinned session reaches it: `"*"`, and the `default` and `local`
-/// grants.
+/// [`SessionAuthority::authorize_default`]: crate::surface::session::SessionAuthority::authorize_default
 pub(super) fn authorize_default(
     authority: &ServeAuthority,
     grant: &SessionGrant,
     default: &str,
 ) -> Result<(), SessionRefusal> {
-    if parse_addressed(default).is_ok() {
-        return authority
-            .authorize(grant, default, SessionNeed::Use)
-            .map(|_| ());
-    }
-    if grant.scope().covers_every_pinned() {
-        Ok(())
-    } else {
-        Err(SessionRefusal::new(RefusalReason::OutOfScope))
-    }
+    authority.authorize_default(grant, default)
 }

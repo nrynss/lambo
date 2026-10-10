@@ -31,6 +31,17 @@ writer lease, and on a non-loopback bind it refuses to start without a bearer
 token. Caddy is the only thing that talks to it, over 127.0.0.1, which keeps the
 public portal token-free without weakening anything.
 
+**The portal checks `Host` (lambo #4 PR 2).** An unauthenticated serve-web
+answers only `localhost`, `127.0.0.1` and `[::1]`, plus `--allowed-host` names,
+as a DNS-rebinding defence. Caddy forwards the visitor's `Host` by default, so
+with `--hostname` the service passes `--allowed-host <hostname>`. With
+`--self-signed` the public address is not known when the user data is written
+(the Elastic IP is allocated after launch), so Caddy instead sends the upstream
+address (`header_up Host {upstream_hostport}`, i.e. `127.0.0.1:7710`), which the
+loopback rule accepts. The service wrapper passes `--allowed-host` only to a
+lambo build whose `serve-web --help` lists it, so an older `--lambo-version`
+(which has no Host check) still starts.
+
 Usage:
 
     python3 scripts/aws-infra/launch_exhibit_ec2.py \\
@@ -46,8 +57,10 @@ from __future__ import annotations
 import argparse
 import base64
 import http.client
+import ipaddress
 import json
 import pathlib
+import re
 import ssl
 import sys
 import time
@@ -269,6 +282,71 @@ def known_llama_cpp_ref(value: str) -> str:
     return value
 
 
+# One DNS label: letters, digits and inner hyphens, 1 to 63 characters.
+_DNS_LABEL = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+_DNS_NAME = re.compile(rf"{_DNS_LABEL}(?:\.{_DNS_LABEL})*")
+# Lambo's addressed-session charset (`surface::session::parse_addressed`).
+_SESSION_ID = re.compile(r"[A-Za-z0-9_:-][A-Za-z0-9._:-]{0,127}")
+_EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@" + _DNS_LABEL + r"(?:\." + _DNS_LABEL + r")+")
+
+
+def dns_hostname(value: str) -> str:
+    """Refuse a `--hostname` that is not a plain DNS name (#4 PR 2 review L4).
+
+    The value is written into the root bootstrap script (a double-quoted bash
+    assignment), the systemd unit (`Environment=LAMBO_ALLOWED_HOST=...`) and
+    the Caddyfile, so a quote, `$(...)`, a space or a newline would run as
+    root at first boot or split the unit line. Only DNS labels joined by
+    dots (no trailing dot, at most 253 characters) pass. An IP address is
+    refused too: no public CA issues it a certificate (use --self-signed).
+    """
+    try:
+        ipaddress.ip_address(value)
+    except ValueError:
+        pass
+    else:
+        raise argparse.ArgumentTypeError(
+            "--hostname must be a DNS name you control, not an IP address: no public "
+            "CA issues a certificate for an IP. Use --self-signed to serve on the IP."
+        )
+    if len(value) > 253 or not _DNS_NAME.fullmatch(value):
+        raise argparse.ArgumentTypeError(
+            "--hostname must be a DNS name: labels of letters, digits and inner "
+            "hyphens (1 to 63 characters each) joined by dots, no trailing dot, at "
+            "most 253 characters"
+        )
+    return value
+
+
+def exhibit_session(value: str) -> str:
+    """Refuse a `--session` outside Lambo's addressed-session charset.
+
+    Like `--hostname`, the session is written into the root bootstrap script
+    and the service unit, so the same quoting hazard applies (#4 PR 2 review
+    L4). The charset is the one `lambo serve-web` requires of every session
+    once it serves more than one: 1 to 128 bytes of `[A-Za-z0-9._:-]`, not
+    starting with `.`.
+    """
+    if not _SESSION_ID.fullmatch(value):
+        raise argparse.ArgumentTypeError(
+            "--session must be 1 to 128 characters of letters, digits, '.', '_', ':' "
+            "or '-', not starting with '.'"
+        )
+    return value
+
+
+def acme_email(value: str) -> str:
+    """Refuse an `--acme-email` that is not a plain address: it is written
+    into the Caddyfile's global block, where a brace, space or newline would
+    change the configuration (#4 PR 2 review L4, the same sink class)."""
+    if len(value) > 254 or not _EMAIL.fullmatch(value):
+        raise argparse.ArgumentTypeError(
+            "--acme-email must be a plain address (local@domain.tld) with no spaces, "
+            "quotes or braces"
+        )
+    return value
+
+
 def effective_bge_model_sha256(args: argparse.Namespace) -> str:
     """The hash to verify the model against: the explicit one, or the default.
 
@@ -301,6 +379,7 @@ LAMBO_REPO="@@LAMBO_REPO@@"
 LAMBO_VERSION="@@LAMBO_VERSION@@"
 CADDY_VERSION="@@CADDY_VERSION@@"
 SESSION="@@SESSION@@"
+ALLOWED_HOST="@@ALLOWED_HOST@@"
 SECRET_ID="@@SECRET_ID@@"
 WEB_PORT="@@WEB_PORT@@"
 
@@ -431,8 +510,16 @@ if [ -n "${LAMBO_LLAMA_HEALTH:-}" ]; then
         sleep 5
     done
 fi
-exec /usr/local/bin/lambo --config /etc/lambo/lambo.toml serve-web \
-    --session "$LAMBO_SESSION" --port "$LAMBO_PORT" --bind 127.0.0.1
+set -- --session "$LAMBO_SESSION" --port "$LAMBO_PORT" --bind 127.0.0.1
+# --allowed-host: the public name Caddy forwards as Host (lambo #4 PR 2's
+# DNS-rebinding check). Empty under --self-signed, where Caddy sends the
+# loopback upstream address instead. Passed only to a build that has the flag:
+# an older one has no Host check and would refuse the unknown argument.
+if [ -n "${LAMBO_ALLOWED_HOST:-}" ] && \
+   /usr/local/bin/lambo serve-web --help 2>/dev/null | grep -q -e '--allowed-host'; then
+    set -- "$@" --allowed-host "$LAMBO_ALLOWED_HOST"
+fi
+exec /usr/local/bin/lambo --config /etc/lambo/lambo.toml serve-web "$@"
 WRAPPER
 chmod 0755 /usr/local/bin/lambo-serve-web
 
@@ -450,6 +537,7 @@ Environment=HOME=/var/lib/lambo
 Environment=LAMBO_REGION=${REGION}
 Environment=LAMBO_SECRET_ID=${SECRET_ID}
 Environment=LAMBO_SESSION=${SESSION}
+Environment=LAMBO_ALLOWED_HOST=${ALLOWED_HOST}
 Environment=LAMBO_PORT=${WEB_PORT}
 Environment=LAMBO_LLAMA_SERVICE=@@LLAMA_SERVICE@@
 Environment=LAMBO_LLAMA_HEALTH=@@LLAMA_HEALTH@@
@@ -695,8 +783,15 @@ def render_lambo_toml(embedder_kind: str, llama_url: str | None) -> str:
 
 
 def render_caddyfile(hostname: str | None, acme_email: str | None) -> str:
+    # With a hostname, Caddy forwards it as Host and serve-web is started with
+    # `--allowed-host <hostname>`. Without one (self-signed), the public
+    # address is unknown when this is rendered, so Caddy sends the loopback
+    # upstream address as Host, which serve-web's DNS-rebinding check accepts.
+    upstream = f"reverse_proxy 127.0.0.1:{LAMBO_WEB_PORT}"
+    if not hostname:
+        upstream += " {\n        header_up Host {upstream_hostport}\n    }"
     proxy = f"""    encode zstd gzip
-    reverse_proxy 127.0.0.1:{LAMBO_WEB_PORT}"""
+    {upstream}"""
     if hostname:
         head = f"{{\n    email {acme_email}\n}}\n\n" if acme_email else ""
         return (
@@ -726,6 +821,10 @@ def render_user_data(args: argparse.Namespace, caddyfile: str, lambo_toml: str) 
         "@@LAMBO_ASSET_ARCH@@": ASSET_NAMES[arch_for_instance_type(args.instance_type)]["lambo"],
         "@@CADDY_ASSET_ARCH@@": ASSET_NAMES[arch_for_instance_type(args.instance_type)]["caddy"],
         "@@SESSION@@": args.session,
+        # serve-web's DNS-rebinding check (lambo #4 PR 2): the public name
+        # Caddy forwards as Host. Empty under --self-signed (see
+        # render_caddyfile).
+        "@@ALLOWED_HOST@@": args.hostname or "",
         "@@SECRET_ID@@": SECRET_NAME,
         "@@WEB_PORT@@": str(LAMBO_WEB_PORT),
         "@@CADDYFILE@@": caddyfile.rstrip("\n"),
@@ -1127,6 +1226,7 @@ def _plan(args: argparse.Namespace, caddyfile: str, lambo_toml: str) -> int:
     if args.hostname:
         note(f"Caddy will request a public certificate for {args.hostname}")
         note(f"create an A record {args.hostname} -> the Elastic IP this script allocates")
+        note(f"serve-web runs with --allowed-host {args.hostname} (its Host check)")
     else:
         warn("SELF-SIGNED: Caddy's internal CA will issue the certificate.")
         warn("Every browser will show a security warning. Judges will see it.")
@@ -1295,15 +1395,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_common_args(parser)
     parser.add_argument(
-        "--session", required=True, help="Lambo session id that serve-web opens a window onto."
+        "--session",
+        required=True,
+        type=exhibit_session,
+        help=(
+            "Lambo session id that serve-web opens a window onto: 1 to 128 characters "
+            "of letters, digits, '.', '_', ':' or '-', not starting with '.'."
+        ),
     )
     tls = parser.add_argument_group("TLS (plan §8 - one of these is required)")
     tls.add_argument(
         "--hostname",
         default=None,
+        type=dns_hostname,
         help=(
-            "Public hostname you control. Caddy issues and renews a real certificate "
-            "for it. Point an A record at the Elastic IP this script allocates."
+            "Public hostname you control (a DNS name, not an IP). Caddy issues and "
+            "renews a real certificate for it. Point an A record at the Elastic IP "
+            "this script allocates."
         ),
     )
     tls.add_argument(
@@ -1318,6 +1426,7 @@ def build_parser() -> argparse.ArgumentParser:
     tls.add_argument(
         "--acme-email",
         default=None,
+        type=acme_email,
         help="Contact address for the ACME account (expiry notices). Optional.",
     )
     parser.add_argument(

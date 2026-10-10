@@ -176,6 +176,19 @@ script deliberately never enables `set -x`. Rotating the secret needs only
 it. That is deliberate: a non-loopback bind refuses to start without a bearer
 token, and the public portal is meant to be readable without one.
 
+An unauthenticated `serve-web` also checks `Host` (DNS-rebinding defence, lambo
+#4 PR 2): it answers only `localhost`, `127.0.0.1`, `[::1]` and names passed
+with `--allowed-host`. With `--hostname` the service runs with
+`--allowed-host <hostname>`, the name Caddy forwards. With `--self-signed`
+Caddy sends the upstream address (`header_up Host {upstream_hostport}`) instead,
+since the public IP is not known when the user data is written. **An exhibit
+launched before this change** keeps its old user data (it is read at first boot
+only): before it runs a lambo build with the Host check, add
+`--allowed-host <hostname>` to the `exec` line in
+`/usr/local/bin/lambo-serve-web` (or, for a self-signed exhibit, the
+`header_up` line to `/etc/caddy/Caddyfile`), or terminate and relaunch.
+Otherwise every page answers 403.
+
 #### TLS — you must choose (plan §8)
 
 `https://<EC2-IP>` **cannot** get a trusted certificate; public CAs do not issue
@@ -183,7 +196,13 @@ for bare IP addresses. The script refuses to run without a decision:
 
 * `--hostname lambo.example.com` — Caddy issues and renews automatically. After
   the script prints the Elastic IP, create an `A` record pointing at it; Caddy
-  retries the ACME order until it resolves. **Recommended.**
+  retries the ACME order until it resolves. **Recommended.** The name must be
+  a plain DNS name (labels of letters, digits and inner hyphens joined by
+  dots, no trailing dot, no IP address); anything else is refused before any
+  AWS call, because it is written into the root bootstrap script, the
+  systemd unit and the Caddyfile. `--session` (Lambo's addressed charset,
+  `[A-Za-z0-9._:-]`, 1 to 128 characters, not starting with `.`) and
+  `--acme-email` are checked the same way.
 * `--self-signed` — Caddy's internal CA. Works instantly, and **every visitor
   including every judge sees a browser security warning**. The script says so in
   the plan output and again at the end. There is no silent fallback.

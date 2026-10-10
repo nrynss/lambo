@@ -100,12 +100,16 @@ enum Commands {
     /// Loopback is unauthenticated by default; a non-loopback bind requires a
     /// bearer token (LAMBO_AUTH_TOKEN or --auth-token) and fails closed without one.
     ServeWeb {
-        /// Session to open a read-only window onto (reader process; does not take the writer lease).
+        /// Session to open a read-only window onto (reader process; does not
+        /// take the writer lease). Repeatable, beside lambo.toml [web]
+        /// sessions: each served session is read at /s/<session>/, and the
+        /// first is also served at /. With more than one, every name must be
+        /// 1 to 128 bytes of [A-Za-z0-9._:-].
         #[arg(
             long,
-            help = "Session to open a read-only window onto (reader process; does not take the writer lease)."
+            help = "Session to open a read-only window onto (reader process; does not take the writer lease). Repeatable, beside lambo.toml [web] sessions: each is served at /s/<session>/, the first also at /."
         )]
-        session: String,
+        session: Vec<String>,
         /// HTTP port to listen on.
         #[arg(long, default_value_t = 7710, help = "HTTP port to listen on.")]
         port: u16,
@@ -124,6 +128,17 @@ enum Commands {
         /// bind.
         #[arg(long, value_name = "TOKEN")]
         auth_token: Option<lambo::cli::serve_web::AuthToken>,
+        /// A Host (name or address, optionally :port) the portal also
+        /// answers while no token is configured, beside localhost,
+        /// 127.0.0.1 and [::1] and lambo.toml [web] allowed_hosts. Needed
+        /// behind a proxy that forwards its public name (DNS-rebinding
+        /// defence). Repeatable; ignored once a token is configured.
+        #[arg(
+            long = "allowed-host",
+            value_name = "HOST",
+            help = "A Host (name or address, optionally :port) the portal also answers while no token is configured, beside localhost, 127.0.0.1 and [::1]. Needed behind a proxy that forwards its public name. Repeatable."
+        )]
+        allowed_host: Vec<String>,
     },
     /// Scripted two-agent demo scenario (spec §13): two agents build one REST API, `user schema` earns Canonical, and the second agent's recall carries the blast-radius and conflict warnings.
     Demo {
@@ -941,12 +956,29 @@ fn main() -> ExitCode {
         _ => None,
     };
     // `serve-web` takes `[web]` (#4) from the same single read of
-    // `lambo.toml` that builds its backends, as `serve` takes `[serve]`.
+    // `lambo.toml` that builds its backends, as `serve` takes `[serve]`. Its
+    // served sessions are planned here, before any backend or model is
+    // built, so an empty or bad set is exit 2 at once (#4 PR 2).
     let mut web = lambo::config::WebConfig::default();
+    let mut served_web = None;
     let loaded = match &cmd {
-        Commands::ServeWeb { .. } => match LamboFile::load_resolved(config) {
+        Commands::ServeWeb {
+            session,
+            allowed_host,
+            ..
+        } => match LamboFile::load_resolved(config) {
             Ok(file) => {
                 web = file.web.clone();
+                let planned = lambo::cli::serve_web::plan_sessions(session, &web).and_then(|s| {
+                    lambo::cli::serve_web::plan_allowed_hosts(allowed_host, &web).map(|h| (s, h))
+                });
+                match planned {
+                    Ok(plan) => served_web = Some(plan),
+                    Err(e) => {
+                        eprintln!("lambo serve-web: {e}");
+                        return ExitCode::from(e.exit_code());
+                    }
+                }
                 Some(file)
             }
             Err(e) => {
@@ -1064,10 +1096,11 @@ fn main() -> ExitCode {
         // the single `ResolvedBackends` from `resolve_for_command` above.
         (
             Commands::ServeWeb {
-                session,
+                session: _,
                 port,
                 bind,
                 auth_token,
+                allowed_host: _,
             },
             Resolved::Full(backends),
         ) => run_async(
@@ -1075,7 +1108,16 @@ fn main() -> ExitCode {
             lambo::cli::serve_web::run(
                 *backends,
                 lambo::cli::serve_web::Args {
-                    session,
+                    // Planned before the backends, above.
+                    session: served_web
+                        .as_ref()
+                        .map(|(p, _)| p.default.clone())
+                        .unwrap_or_default(),
+                    sessions: served_web
+                        .as_ref()
+                        .map(|(p, _)| p.sessions.clone())
+                        .unwrap_or_default(),
+                    allowed_hosts: served_web.map(|(_, h)| h).unwrap_or_default(),
                     port,
                     bind,
                     auth_token,
