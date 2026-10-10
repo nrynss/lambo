@@ -1140,7 +1140,7 @@ fn run_cycle(
             #[cfg(test)]
             if state
                 .rescore_faults
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
                 .is_ok()
             {
                 panic!("injected rescore failure");
