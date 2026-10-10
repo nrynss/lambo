@@ -211,8 +211,10 @@ in each PR note's remediation section.
   set. A single-token portal resolves its token exactly as before.
 - **No per-credential recall shares (PR 3 review L4).** `recall_concurrency`
   is process-wide (Q13), so one credential's script can hold every recall
-  permit. Left as a follow-up; it needs its own design (a floor of 1 and an
-  oversubscription rule).
+  permit. Left as a follow-up; it needs its own design. Serve's share,
+  `floor(n / k)` at least 1, lets the shares add up to more than the pool
+  when credentials outnumber permits, so the portal would need its own
+  oversubscription rule.
 
 ### The listing (PR 3)
 
@@ -319,8 +321,9 @@ non-printable bytes, refuses the start; two `Authorization` headers are a
 
 - **CSP and `nosniff` for the page:** [#92](https://github.com/nrynss/lambo/issues/92).
 - **Per-credential recall fairness** (PR 3 review L4): not filed. Needs a
-  design: Q13 settled process-wide semaphores, and serve's `floor(n / k)`
-  gives 0 when credentials outnumber permits.
+  design: Q13 settled process-wide semaphores, and serve's share,
+  `floor(n / k)` at least 1, adds up to more than the pool when credentials
+  outnumber permits, so the portal would need its own oversubscription rule.
 - **The holder-backed portal mounted in `lambo serve`** (design 2.4): not
   filed. Its three prerequisites are above.
 - **A request-rate limit on the portal** (Q13's alternative), a byte budget
