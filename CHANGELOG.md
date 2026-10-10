@@ -935,23 +935,38 @@
 
 ### Fixed
 
-- Fresh text and image concepts can rank by query relevance immediately after
-  derive (#79). When any real phase-1 concept lacks a daemon score, that recall
-  temporarily uses the query score for every expanded hit, scaled by the
-  configured query weight. This keeps fresh noise below an established hit
-  with stronger query evidence, regardless of its older daemon score. An
-  explicit daemon zero does not trigger the mode, and a daemon-only weighting
-  keeps its configured behavior. Canonical and hot-list rules still apply.
-  After the daemon scores the new concept, normal blended scores return and
-  the rank can change. Only keyword- or vector-backed unscored phase-1 hits
-  trigger this mode; a recent-only hit does not. The existing planted
-  assembly fixture's order changes from `c1,c2,c5,c6,c4,c3` to
-  `c1,c2,c5,c3,c4,c6` because its three structural-only members tie at zero.
-  The SQLite graded-cosine test now uses query-only weights so it tests cosine
-  order independently of daemon scores; #79 cannot change a fully scored
-  blend's rank. BGE-M3 golden fixture bytes and all per-embedder thresholds,
-  merge rules, and cosine scales are unchanged.
-
+- A freshly derived text or image concept ranks by query relevance before
+  the daemon scores it (#79). Previously its missing daemon score counted as
+  0 inside the 0.5/0.5 blend, so a fresh relevant EG2 image (0.3616) ranked
+  below older, daemon-scored noise (about 0.655). Now, while any keyword- or
+  vector-backed phase-1 concept has no score-table entry, that recall scores
+  every hit `w_query × query relevance`, old hits included. Applying the
+  query score only to the new concept would instead lift fresh noise over an
+  established relevant hit with a low daemon score. A recent-only hit, a
+  traversal or sibling member, a stale vector id and an explicit daemon 0 do
+  not start this mode; `w_query = 0` keeps daemon-only ranking. The window
+  is short: derive wakes the daemon, and rescoring takes about 4.5 ms at
+  dogfood scale. Replaying the dogfood ledger, at most 1.2% of recalls could
+  overlap one. Once the daemon scores the concept, the normal blend returns
+  and ranks can change.
+  Expected-output change: the assembly test fixture with a deliberately
+  unscored phase-1 member (c2) now orders `c1,c2,c5,c3,c4,c6`
+  (`.75,.375,.15,0,0,0`) instead of `c1,c2,c5,c6,c4,c3`
+  (`.95,.375,.30,.15,.10,.05`): its structural-only members lose their
+  daemon share and tie at zero. The blended-formula golden is kept byte for
+  byte with an explicit daemon 0 for c2. No fixture file changed, and every
+  golden test passes with the cold mode made to panic, so fully scored
+  goldens (recall, context and H3 payload goldens) are unchanged.
+  `RECENT_SCORE`, merge thresholds and cosine scales are untouched (#87).
+- `graded_similarity_ranks_by_cosine_not_recency_on_sqlite` no longer fails
+  intermittently. The daemon's recency is a concept's millisecond position
+  in the session's wall-clock span, and the fixture's session lasts about
+  2 ms. A scheduler stall before the 0.3 look's derive gave it recency near
+  1 against 0 for the 0.5 look, enough under the 0.5/0.5 blend to flip
+  them. The graded looks are now derived worst first, so recency can only
+  widen the cosine order; a stalled variant pins it. The holder and tier
+  tests that share the fixture had the same latent flake. #79's rule is not
+  the fix: every look is daemon-scored when the test reads.
 
 - A `bge_m3` or `embeddinggemma2` input longer than the llama-server's
   physical batch is now a content refusal, settled as failed with a hint
