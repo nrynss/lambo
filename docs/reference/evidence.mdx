@@ -25,7 +25,7 @@ We measured recall across 3,000 vectors on a live CockroachDB cluster. We evalua
 
 ### What this measurement teaches you
 
-1. At the engine default beam of 32, you lose roughly 6% to 7% of true nearest neighbours. In Lambo, a missed neighbour causes a near-duplicate concept rather than an error.
+1. At the engine default beam of 32, you lose roughly 6% to 7% of true nearest neighbours. In Lambo, a missed neighbour drops out of that recall's vector results rather than causing an error. Deduplication uses the index for concepts already flushed: the writer compares a new concept against its own in-memory copy of the concepts it has not flushed yet and asks the database for the rest, so a flushed neighbour the index misses can become a near-duplicate concept.
 2. Higher beam sizes do not always improve recall. Beam 256 degraded recall compared to beam 64 in both datasets.
 3. Setting `DEFAULT_VECTOR_BEAM_SIZE = 64` raises recall@50 to 0.990 with negligible query overhead.
 

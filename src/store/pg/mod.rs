@@ -53,6 +53,18 @@
 //! width + hnsw from init (B2), cosine-distance ranking (B3: `<=>` and
 //! score `1 - d`). It does not copy Cockroach SQL.
 //!
+//! # A holder's two vector sources (#8, #60)
+//!
+//! `exact_vector_scan` stays `false`: the database scores by its own
+//! distance and Cockroach may answer from an approximate index, so a session
+//! holder's **recall** keeps the database search (#8). `holder_derive_source`
+//! is `StoreAndUnflushed`: the database sees only flushed rows, so a holder's
+//! **hybrid derive** asks it for the durable concepts and ranks its own
+//! not-yet-flushed concepts in RAM, on the purpose split #18 made for the
+//! Elastic tier. Candidates are re-scored by exact cosine on the graph's
+//! vectors, not the database's distance; the accepted differences are
+//! recorded in `merge_freshness`, which also holds the tests.
+//!
 //! # Dialect-aware as of B2, still recorded where B3 owns the rest
 //!
 //! B0 shipped **one** working dialect. B2 splits the two over-merged
@@ -127,6 +139,11 @@ mod lease_race;
     )
 ))]
 pub(crate) mod embedding_source_live;
+// #60: a holder's hybrid derive merges into concepts the database has not
+// seen yet (offline tests over a lagging double, the Postgres live test here,
+// the Cockroach leg in its conformance suite).
+#[cfg(test)]
+pub(crate) mod merge_freshness;
 
 // T3.2 — CockroachDB durable adapter (spec §3.2/§3.3, §4), the family's first
 // dialect. Feature: store-cockroach.
@@ -404,6 +421,24 @@ impl<D: Dialect> GraphStore for PgStore<D> {
             limit,
         )
         .await
+    }
+
+    // `exact_vector_scan` keeps its default `false` (#8): the database ranks
+    // by its own distance, and Cockroach may answer from an approximate
+    // index, so a holder's **recall** keeps asking the database.
+
+    /// A holder's hybrid derive asks the database for what the flush has
+    /// made durable and ranks only its own unflushed concepts in RAM (#60,
+    /// on the purpose split #18 introduced). The database sees only flushed
+    /// rows, and the write-behind flush lags by seconds to minutes, so a
+    /// paraphrase derived right after the original would otherwise miss it
+    /// and become a permanent near-duplicate; ranking the whole graph instead
+    /// would cost O(n * dim) per probe on large sessions. Candidates are
+    /// re-scored by exact cosine on the graph's vectors, so merges at the
+    /// threshold edge may decide differently from the database's distance,
+    /// which is accepted (see `merge_freshness`).
+    fn holder_derive_source(&self) -> crate::store::HolderDeriveSource {
+        crate::store::HolderDeriveSource::StoreAndUnflushed
     }
 
     async fn blast_radius(

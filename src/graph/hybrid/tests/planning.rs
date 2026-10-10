@@ -661,6 +661,45 @@ async fn an_ends_only_call_checks_the_contract_before_any_embed() {
     assert_eq!(g.embedding().unwrap().kind, "fixture", "stamp preserved");
 }
 
+/// #60 review L3: the `parent_of` ends' refusal probe asks only a source
+/// that can refuse. The holder's graph always answers, so an ends-only call
+/// over it embeds both ends and scans nothing.
+#[tokio::test]
+async fn an_ends_only_call_does_not_probe_a_graph_source() {
+    use crate::graph::vector_source::{whole_graph_scans, GraphVectorSource};
+    use crate::store::vector_source::VectorCandidates;
+    let (graph, interaction) = graph_with_interaction("hybrid-probe-graph", 1, 0, "ingest context");
+    graph
+        .write()
+        .stamp_embedding(contract("fixture", 1024))
+        .unwrap();
+    let embedder = RecordingEmbedder::new();
+    let pairs = [("new parent", "new child")];
+    let scans = whole_graph_scans();
+    let out = derive_with(
+        graph.clone(),
+        VectorCandidates::Graph(GraphVectorSource::new(&graph)),
+        &embedder,
+        &contract("fixture", 1024),
+        interaction,
+        &agent(),
+        &[],
+        &ParentOf::from_pairs(&pairs),
+        10,
+        SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(out.embedded, 2, "both ends are embedded: {out:?}");
+    assert_eq!(
+        whole_graph_scans() - scans,
+        0,
+        "the refusal probe scanned the graph"
+    );
+}
+
 #[test]
 fn context_len_is_the_length_of_the_context_text() {
     for (content, origin) in [

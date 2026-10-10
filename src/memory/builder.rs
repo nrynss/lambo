@@ -649,6 +649,9 @@ impl MemoryBuilder {
                                          be made durable before the first write: {e}"
                                     )))
                                 })?;
+                            // #60: the relabel is durable; keep the graph's
+                            // unflushed set exact.
+                            graph.mark_durable_through(relabel.mutation_epoch);
                         }
                     }
                 }

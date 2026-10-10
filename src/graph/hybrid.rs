@@ -63,8 +63,12 @@
 //!    context, `embedder.embed`, then the checked candidate read of the source
 //!    this call was handed (`VectorCandidates`): the holder's graph, ranked in
 //!    RAM under a brief read lock with no await, when the store ranks by an
-//!    exact scan (#8), else `store.vector_candidates_checked` through the
-//!    [`GraphStore`] trait only. A capability-miss marks the concept
+//!    exact scan (#8) or lags the holder past its flush (the Elastic tier,
+//!    #18); the store for flushed concepts plus the holder's unflushed ones
+//!    ranked in RAM, when the store's search sees each flush commit (the
+//!    Postgres family, #60); both per `GraphStore::holder_derive_source`.
+//!    Otherwise `store.vector_candidates_checked` through the [`GraphStore`]
+//!    trait only. A capability-miss marks the concept
 //!    for the canonical fallback (logged once per session); an embed failure or
 //!    timeout fails the whole call before anything is written (J3-R3-1); a
 //!    genuine backend `StoreError` (not a `Capability` miss) propagates. The
@@ -149,7 +153,7 @@
 //!    Persisting a vector lowers nothing.
 //! 3. **A vector minted in this call can never drive a merge in this call.**
 //!    Candidates come from the live graph (on a holder whose store ranks
-//!    exactly, #8) or from the store, and neither can see this call's staged
+//!    exactly, #8, or lags it, #18 and #60) or from the store, and neither can see this call's staged
 //!    writes: they live on a private clone until the commit swaps it in;
 //!    `*target != id` is the defence in depth.
 //!
@@ -157,8 +161,9 @@
 //!
 //! Once committed, a fresh vector **is** a legal merge *target* for a later
 //! derive (`Resolution::HybridMerge { targets }`): at once on a holder that ranks
-//! in its graph (#8, which is why an unflushed concept can be merged into), after
-//! the next flush on one that reads the store. That is unavoidable here:
+//! in its graph for derive (SQLite since #8, the Elastic tier since #18, the
+//! Postgres family since #60, which is why an unflushed concept can be merged
+//! into), after the next flush on one that reads the store. That is unavoidable here:
 //! the checked candidate read targets `embedding IS NOT NULL` and cannot
 //! tell the merge leg from the recall leg apart. A strict target-exclusion would
 //! need durable per-vector provenance (a new `concepts` column plus a migration
@@ -527,6 +532,17 @@ fn reject_empty_key(content: &str, key: &str) -> Result<(), LamboError> {
 /// embedder (from `ResolvedBackends`); it is stamped on the graph at first embed
 /// and checked via [`EmbeddingContract::ensure_compatible`] on later hybrid
 /// writes — a mid-session kind/model/dim swap is refused without re-embedding.
+///
+/// **Vector source: always the store** (`GraphStore::vector_candidates_checked`),
+/// whatever the store declares (decided in #60's review, I-2). A session
+/// holder's derive (`Memory`, the write queue) ranks part or all of its merge
+/// candidates in its graph instead (#8, #18, #60), because it knows two things
+/// this function cannot: that `graph` is the session's complete copy, loaded
+/// from `store`, and that its own flush keeps the graph's unflushed set exact,
+/// which the Postgres family's union relies on. A caller here may hold a
+/// partial graph or flush by hand, so it keeps the store's answer, which on a
+/// lagging store misses what was written since the last flush. A library
+/// caller that owns a session should derive through [`crate::Memory`].
 #[allow(clippy::too_many_arguments)]
 pub async fn derive(
     graph: Arc<RwLock<Graph>>,
@@ -1195,12 +1211,15 @@ async fn derive_planned(
                 // capability-miss rule above would depend on what else is
                 // in the call. Ask once with the first end's vector (one
                 // candidate, result discarded): a refusal leaves every end
-                // keyword-only, exactly as it leaves a concept.
+                // keyword-only, exactly as it leaves a concept. A source that
+                // cannot refuse (the holder's graph) is not asked: the answer
+                // is known, and asking would scan the whole graph (#60 L3).
                 if !probed_store {
                     probed_store = true;
-                    if checked_candidates(vectors, &session_id, &emb, embedding, 1, io_deadline)
-                        .await?
-                        .is_none()
+                    if vectors.can_refuse()
+                        && checked_candidates(vectors, &session_id, &emb, embedding, 1, io_deadline)
+                            .await?
+                            .is_none()
                     {
                         // `parent_vectors` is still empty: this is the first end.
                         note_store_refused_vectors(&session_id);

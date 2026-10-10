@@ -92,12 +92,21 @@
 //! either.
 //!
 //! **Derive is the exception** (#18 review M6, amending #8's "one
-//! constructor, two callers"): the store declares `holder_derives_from_graph`,
-//! so a holder's hybrid derive takes its semantic-merge candidates from its
-//! in-memory graph (`VectorCandidates::for_holder_derive`). The index lags
-//! (unflushed concepts, the refresh interval, everything while stale), and
-//! derive's dedupe of a fact written seconds ago must not miss it and mint a
+//! constructor, two callers"): the store declares
+//! `holder_derive_source() == HolderDeriveSource::Graph`, so a holder's hybrid
+//! derive takes its semantic-merge candidates from its in-memory graph
+//! (`VectorCandidates::for_holder_derive`). The index lags (unflushed
+//! concepts, the refresh interval, everything while stale), and derive's
+//! dedupe of a fact written seconds ago must not miss it and mint a
 //! paraphrased duplicate; it also keeps index latency off the write path.
+//!
+//! It does not take the Postgres family's cheaper union of the store and the
+//! holder's unflushed concepts (`HolderDeriveSource::StoreAndUnflushed`, #60):
+//! that union is exact only when the store's search sees a row as soon as the
+//! flush commits it, and the index lags past the commit (refresh interval,
+//! stale-tier windows), so a concept could be in neither half. The cost is an
+//! O(n * dim) scan per probe on large tiered sessions; a refresh-aware
+//! watermark would be needed to lift it.
 
 pub(crate) mod elastic;
 pub(crate) mod index;
@@ -1549,8 +1558,8 @@ impl GraphStore for TieredStore {
 
     /// A holder's hybrid derive ranks in its graph, not in this lagging
     /// tier (#18 amending #8): see the module docs.
-    fn holder_derives_from_graph(&self) -> bool {
-        true
+    fn holder_derive_source(&self) -> crate::store::HolderDeriveSource {
+        crate::store::HolderDeriveSource::Graph
     }
 
     async fn blast_radius(

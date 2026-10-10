@@ -507,7 +507,14 @@ async fn a_shut_down_calibration_starts_no_probe() {
 /// Review L2: the re-probe backoff counts from when the last probe ended,
 /// not from when it started, so a probe that ran longer than the backoff
 /// before failing is not re-run the moment it ends.
-#[tokio::test]
+///
+/// On a paused clock (#60 review L4): the backoff and the probe's end are
+/// `tokio::time::Instant`s, so the windows below are exact and a loaded
+/// runner cannot stretch the time between the probe's end and `b`'s attach
+/// past the backoff (at 300 ms of wall clock the full parallel suite once
+/// did, on the recall-elastic row, 2026-10-10). Nothing here blocks outside
+/// the runtime, so auto-advance moves the clock only when every task waits.
+#[tokio::test(start_paused = true)]
 async fn the_reprobe_backoff_counts_from_the_probes_end() {
     let backoff = Duration::from_millis(300);
     let counting = CountingEmbedder::gated();

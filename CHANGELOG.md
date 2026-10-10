@@ -999,11 +999,16 @@
   while it reads as a variable name.
 - `lambo recall-index backfill --session <s>`: rebuild one session's recall
   index from the store under the session's lease (#18).
-- `GraphStore::holder_derives_from_graph()` (default `false`): a store whose
-  checked vector read is a lagging tier declares that a session holder's
-  hybrid derive should rank its semantic-merge candidates in its in-memory
-  graph while recall keeps reading the store (#18 review M6, amending #8's
-  single constructor). `TieredStore` declares it. Additive.
+- `GraphStore::holder_derive_source()` (default `HolderDeriveSource::Store`)
+  and the `HolderDeriveSource` enum: a store whose checked vector read lags
+  the session holder declares where the holder's hybrid derive takes its
+  semantic-merge candidates, while recall keeps reading the store (#18 review
+  M6, amending #8's single constructor; #60). `HolderDeriveSource::Graph`
+  ranks every vector in the holder's in-memory graph; `TieredStore` declares
+  it, because its index lags past the flush. `HolderDeriveSource::StoreAndUnflushed`
+  asks the store for what the flush has made durable and ranks only the
+  holder's unflushed concepts in memory; the Postgres family's `PgStore`
+  declares it. The enum is `#[non_exhaustive]`. Additive.
 - `GraphStore::backfill_recall_index()` (default `Ok(None)`): the hook the
   backfill verb calls; only a store with a recall tier overrides it. Additive.
 - `GraphStore::exact_vector_scan()` (default `false`): an adapter declares its
@@ -1094,6 +1099,42 @@
   above, as HTTP already refused them with `413`. Split such a batch into
   calls under 4 MiB. The `parent_of` limit (256 pairs, 512 concepts and
   pairs combined) is now in the MCP reference's limits table.
+- On PostgreSQL and CockroachDB, a paraphrase derived seconds after the
+  original now merges into it instead of becoming a permanent near-duplicate
+  (#60). The database's vector search sees only flushed rows, and the
+  write-behind flush can lag by minutes. The process that holds a session
+  (`lambo serve`, or an embedded `Memory`) now asks the database for the
+  concepts already flushed and compares the new concept against its own
+  in-memory copy of the ones it has not flushed yet, then ranks the union by
+  exact cosine similarity on its own vectors. A concept stays in that
+  unflushed set until the flush that carries it has committed (one the flush
+  drops stays in it for good), so nothing is in neither place. The cost stays
+  flat in the session's size: the database's indexed search plus about
+  0.8 µs per unflushed concept per new concept (about 0.8 ms with 1,000
+  unflushed, measured in a release build at 1,024 dimensions), where
+  comparing against every concept in memory took 8.5 ms per new concept at
+  10,000 concepts, 46 ms at 50,000 and 98 ms at 100,000. Until a session's
+  first flush (or after a re-embed, until it is flushed), the database cannot
+  answer under the session's embedding contract, so the holder compares
+  against every concept it holds; it does the same while about 2,000
+  concepts are unflushed (2,048 minus the derive's limit, counting distinct
+  concepts and pending deletes rather than writes), the most the database's
+  read can over-fetch for. This is the per-purpose split #18 made for
+  the Elasticsearch tier: `PgStore` declares
+  `HolderDeriveSource::StoreAndUnflushed`. Recall is unchanged and still
+  ranks vectors in the database. Merge scores are now exact cosine instead of
+  the database's distance (`1 - d` on Postgres, `1 - d²/2` on Cockroach), so
+  a pair whose similarity sits right at `semantic_match_threshold` can decide
+  differently than before; a flushed concept the Cockroach approximate index
+  misses is still missed, as before. The library function
+  `graph::hybrid::derive` keeps asking the database only (see its docs).
+  A batch the flush drops instead of committing (a dead-lettered constraint
+  violation, a degraded session's drop, a lost lease) keeps its concepts in
+  the unflushed set until the process restarts, since they never reached
+  the database. A degraded session, or one dead-lettered batch of about
+  2,000 concepts, therefore derives by comparing against every concept in
+  memory for the rest of the process; the holder logs a warning the first
+  time that happens.
 - A freshly derived text or image concept ranks by query relevance before
   the daemon scores it (#79). Previously its missing daemon score counted as
   0 inside the 0.5/0.5 blend, so a fresh relevant EG2 image (0.3616) ranked

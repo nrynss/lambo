@@ -11,6 +11,7 @@ mod root_goal;
 mod snapshot;
 mod structure;
 mod transitions;
+mod unflushed;
 
 fn ts(minutes: i64) -> DateTime<Utc> {
     let base = Utc.timestamp_opt(1_752_000_000, 0).unwrap();

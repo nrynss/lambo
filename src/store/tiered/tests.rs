@@ -494,7 +494,10 @@ async fn the_tier_is_never_an_exact_scan_and_always_offers_vectors() {
         crate::store::vector_source::VectorCandidates::Store(_)
     ));
     // #18 amending #8: a holder's derive ranks in its graph instead.
-    assert!(store.holder_derives_from_graph());
+    assert_eq!(
+        store.holder_derive_source(),
+        crate::store::HolderDeriveSource::Graph
+    );
     assert!(matches!(
         crate::store::vector_source::VectorCandidates::for_holder_derive(&store, &graph),
         crate::store::vector_source::VectorCandidates::Graph(_)
