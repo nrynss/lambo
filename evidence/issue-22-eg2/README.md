@@ -15,7 +15,7 @@ images. Local paths read `<HOME>`, scratch paths `<SCRATCH>` (this run) and `<EV
 | [`ubatch-cap.txt`](ubatch-cap.txt) | The finding below: the default ubatch silently caps the 280 image budget to 256, and the adapter refuses those images. |
 | [`bad-images.txt`](bad-images.txt) | How b11517 answers a WebP and two undecodable images. |
 | [`image-latency.txt`](image-latency.txt) | Server-side time per image at the fixed 280 budget. |
-| [`size-invariance.txt`](size-invariance.txt) | 22g, profile `lambo-eg2-v2`: cosine per picture and size before and after the canonical image form, the filter comparison, and why WebP is always sent as PNG. |
+| [`size-invariance.txt`](size-invariance.txt) | 22g, profile `lambo-eg2-v2`: cosine per picture and size (128 to 3000 px) before and after the canonical image form (every image resized to a 768 px longer side), the downscale and upscale filter comparisons, and why WebP is never sent as WebP. |
 
 ## How the servers ran
 
@@ -67,7 +67,7 @@ LAMBO_EG2_URL=http://127.0.0.1:8191 LAMBO_EG2_TEXT_ONLY_URL=http://127.0.0.1:819
    "Failed to load image or audio file" (undecodable bytes). The J3 table reads a 500
    as transient, which would retry those writes forever. Image calls use a refined
    rule: the first is a permanent configuration error, the second a content refusal;
-   any other 500 stays transient. WebP decodes on b11517 only when an `ffmpeg`/`ffprobe` is on the server's `PATH` (22g, [size-invariance.txt](size-invariance.txt)); `lambo-eg2-v2` therefore always sends WebP as PNG.
+   any other 500 stays transient. WebP decodes on b11517 only when an `ffmpeg`/`ffprobe` is on the server's `PATH` (22g, [size-invariance.txt](size-invariance.txt)); `lambo-eg2-v2` sends every image, WebP included, as its canonical PNG.
 3. **Image latency at the 280 budget is about 370 ms per image** server-side on this
    Mac, in this run and in the eval's own 280-budget server log. The amendment's 95 to
    160 ms was measured at llama.cpp's dynamic budget (85 to 125 tokens). Text stays

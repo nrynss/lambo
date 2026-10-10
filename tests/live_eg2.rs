@@ -546,15 +546,17 @@ async fn raw_image(url: &str, png: &[u8]) -> Vec<f32> {
         .collect()
 }
 
-/// 22g: with the `lambo-eg2-v2` canonical form, a picture's vector does not
-/// depend on the size it was submitted at. Prints, per picture and size, the
-/// cosine to the native 768 px render, before (the submitted bytes as they
-/// are, `lambo-eg2-v1`) and after (through the adapter). Asserts that above
-/// 768 px every pair of renders agrees to >= 0.999. The cosine to the native
-/// 768 px render is printed, not asserted: a downscaled hard edge is not the
-/// crisp edge drawn at 768 px. Renders at or under 768 px are sent unchanged
-/// and are only printed: the server's own resampling makes a patterned
-/// picture's small renders differ, which no downscale can change.
+/// 22g: with the `lambo-eg2-v2` canonical form every image is sent with its
+/// longer side at exactly 768 px, so a picture's vector does not depend on
+/// the size it was submitted at beyond what resampling changes. Prints, per
+/// picture and size, the cosine to the native 768 px render, before (the
+/// submitted bytes as they are, as `lambo-eg2-v1` sent them) and after
+/// (through the adapter), and the worst pair of sizes. Asserts that a solid
+/// colour embeds bit-identically at every size, and that every pair of
+/// renders of a patterned picture agrees to at least 0.975 (the measured
+/// floor, 0.9818 for a checkerboard drawn at 128 px, is in
+/// `evidence/issue-22-eg2/size-invariance.txt`; this bound is looser so a
+/// rebuilt server does not fail the run on noise).
 #[tokio::test]
 #[ignore = "needs a live llama-server with EmbeddingGemma 2 (LAMBO_EG2_URL)"]
 async fn live_eg2_size_invariance() {
@@ -564,7 +566,7 @@ async fn live_eg2_size_invariance() {
     };
     let e = EmbeddingGemma2Embedder::new(&url, EG2_DEFAULT_MODEL, 768).unwrap();
     println!("contract model: {}", e.model_identity());
-    let sizes = [256u32, 512, 768, 1024, 1536, 2048, 3000];
+    let sizes = [128u32, 256, 512, 768, 1024, 1536, 2048, 3000];
     type Gen = fn(u32) -> Vec<u8>;
     let pictures: [(&str, Gen); 3] = [
         ("solid", |s| png_compressed(s, |_, _| [200, 40, 40])),
@@ -577,7 +579,8 @@ async fn live_eg2_size_invariance() {
         let base_png = make(768);
         let base = image(&e, &base_png).await.unwrap();
         let base_raw = raw_image(&url, &base_png).await;
-        let mut above = Vec::new();
+        let mut all = Vec::new();
+        let mut worst_to_768 = 1.0f32;
         for side in sizes {
             let png = make(side);
             let after = image(&e, &png).await.unwrap();
@@ -590,28 +593,35 @@ async fn live_eg2_size_invariance() {
                 png.len(),
                 after == base
             );
-            // At or under 768 px the bytes go as they are and the server
-            // resamples them to its grid itself, so a patterned picture's
-            // renders differ there (measured on b11517: checkerboard 256 px
-            // 0.985 to the 768 px one); only the sizes above are asserted.
-            if side > 768 {
-                above.push((side, after));
+            if name == "solid" {
+                assert_eq!(after, base, "solid at {side} px must embed bit-identically");
             }
+            worst_to_768 = worst_to_768.min(cos_after);
+            all.push((side, after));
         }
-        let mut worst = 1.0f32;
-        for (i, (a_side, a)) in above.iter().enumerate() {
-            for (b_side, b) in &above[i + 1..] {
+        let mut worst = (f32::INFINITY, 0, 0);
+        let mut worst_down = 1.0f32;
+        for (i, (a_side, a)) in all.iter().enumerate() {
+            for (b_side, b) in &all[i + 1..] {
                 let c = cosine(a, b);
-                println!("{name:<12} | {a_side} vs {b_side}: {c:.6}");
-                worst = worst.min(c);
+                if c < worst.0 {
+                    worst = (c, *a_side, *b_side);
+                }
+                if *a_side >= 768 && *b_side >= 768 {
+                    worst_down = worst_down.min(c);
+                }
             }
         }
-        println!("{name:<12} | worst pair above 768 px: {worst:.6}");
-        assert!(worst >= 0.999, "{name}: {worst}");
+        println!(
+            "{name:<12} | worst to 768: {worst_to_768:.6}; worst pair {:.6} ({} vs {}); \
+             worst pair at 768 px and above: {worst_down:.6}",
+            worst.0, worst.1, worst.2
+        );
+        assert!(worst.0 >= 0.975, "{name}: {worst:?}");
     }
 
-    // A WebP is converted to PNG: the same pixels as a PNG embed to the
-    // same vector, whatever ffmpeg the server has or lacks.
+    // A WebP is sent as its canonical PNG: the same pixels as a PNG embed to
+    // the same vector, whatever ffmpeg the server has or lacks.
     let side = 512;
     let img = image::RgbImage::from_fn(side, side, |x, y| image::Rgb([x as u8, y as u8, 90]));
     let mut webp = Vec::new();
@@ -631,5 +641,6 @@ async fn live_eg2_size_invariance() {
         "cos(webp 512, png 512, same pixels) = {:.6}",
         cosine(&wv, &pv)
     );
-    assert!(cosine(&wv, &pv) > 0.9999);
+    // Same pixels, same canonical PNG: the same vector, bit for bit.
+    assert_eq!(wv, pv);
 }
