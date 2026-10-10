@@ -459,19 +459,55 @@ async fn serve_session(
         // In scope and erased (#23): erased by this process (#32 PR 7), or
         // found tombstoned by the on-demand probe (#32 PR 6). Never attached
         // or recreated again. Inside scope the caller may know it (design
-        // §6.2); 410, as the admin routes answer an erased session. An HTTP
-        // status rather than an MCP error, like the 503s beside it: the
-        // request may carry no JSON-RPC id to answer, and no MCP session of
-        // an erased session survives. A call already inside the session when
-        // it was fenced gets the #23 erased error.
-        Lookup::Erased => (
-            axum::http::StatusCode::GONE,
-            "this session was erased and cannot be used or created again\n",
-        )
-            .into_response(),
+        // §6.2): the #23 erased error.
+        Lookup::Erased => erased_answer(req).await,
         // In scope but absent, and the caller may not create it (or the
         // serve attaches nothing on demand): the uniform 404.
         Lookup::NotHosted => refused(Some(grant), SessionRefusal::new(RefusalReason::Absent)),
+    }
+}
+
+/// What a session that is erased answers (design §6.2, #32 PR 7): the #23
+/// erased error, MCP error `-32003` (the frame `lambo serve`'s proxy
+/// answers a call to an erased session with), to a `POST` that carries one
+/// JSON-RPC request; `410` to everything else, which has no request id to
+/// answer: a `GET` or `DELETE`, a notification or a response, a batch, or a
+/// body that cannot be read. Never handed to rmcp: no MCP session of an
+/// erased session survives, and none is opened. A call already inside the
+/// session when it was fenced gets the same error from the tool layer.
+async fn erased_answer(req: axum::extract::Request) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let gone = || {
+        (
+            axum::http::StatusCode::GONE,
+            "this session was erased and cannot be used or created again\n",
+        )
+            .into_response()
+    };
+    if req.method() != axum::http::Method::POST {
+        return gone();
+    }
+    // Bounded as every MCP body is (the guard's ceiling and timeout).
+    let limit = usize::try_from(super::http_guards::MAX_HTTP_BODY_BYTES).unwrap_or(usize::MAX);
+    let body = tokio::time::timeout(
+        super::http_guards::REQUEST_BODY_TIMEOUT,
+        axum::body::to_bytes(req.into_body(), limit),
+    )
+    .await;
+    let Ok(Ok(body)) = body else {
+        return gone();
+    };
+    match std::str::from_utf8(&body)
+        .ok()
+        .and_then(crate::mcp::proxy::erased_reply)
+    {
+        Some(reply) => (
+            axum::http::StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, "application/json")],
+            reply,
+        )
+            .into_response(),
+        None => gone(),
     }
 }
 

@@ -220,6 +220,25 @@ async fn assert_only_the_tombstone(store: &MemoryStore, id: &str) {
     );
 }
 
+/// Assert `reply` is the #23 erased error for request `id`: MCP error
+/// -32003, the frame the proxy answers a call to an erased session with.
+fn assert_erased_error(reply: &Reply, id: u64) {
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(
+        reply.header("content-type").as_deref(),
+        Some("application/json")
+    );
+    let message = reply.message();
+    assert_eq!(message["id"], id, "{message}");
+    assert_eq!(message["error"]["code"], -32003, "{message}");
+    assert!(
+        message["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("erased")),
+        "{message}"
+    );
+}
+
 /// The registry's row for `id` in its admin view.
 fn state_of(registry: &SessionRegistry, id: &str) -> &'static str {
     registry
@@ -348,8 +367,9 @@ async fn erasing_an_attached_session_leaves_only_the_tombstone_and_nothing_recre
         &during[erase_at..]
     );
 
-    // Refused from now on, in scope: 410, for a new client and for the MCP
-    // session opened before the erase.
+    // Refused from now on, in scope, with the #23 erased error (MCP error
+    // -32003, design §6.2) for a new client and for the MCP session opened
+    // before the erase.
     let refused = http_as(
         addr,
         "POST",
@@ -359,7 +379,7 @@ async fn erasing_an_attached_session_leaves_only_the_tombstone_and_nothing_recre
         r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"x","version":"1"}}}"#,
     )
     .await;
-    assert_eq!(refused.status, 410, "{}", refused.body);
+    assert_erased_error(&refused, 1);
     let stale = http_as(
         addr,
         "POST",
@@ -369,7 +389,18 @@ async fn erasing_an_attached_session_leaves_only_the_tombstone_and_nothing_recre
         r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
     )
     .await;
-    assert_eq!(stale.status, 410, "{}", stale.body);
+    assert_erased_error(&stale, 2);
+    // A notification has no id to answer, and a GET opens no call: 410.
+    let note = http_as(
+        addr,
+        "POST",
+        "/mcp/s/er-a",
+        Some(&agent),
+        Some(&mcp_a),
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+    )
+    .await;
+    assert_eq!(note.status, 410, "{}", note.body);
     // `/mcp` is er-a too (the default).
     assert_eq!(
         http_as(addr, "GET", "/mcp", Some(&agent), None, "")

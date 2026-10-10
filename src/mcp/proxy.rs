@@ -84,11 +84,12 @@ mod handshake;
 
 pub(crate) use dialing::{connect, dial_dir};
 pub use dialing::{proxyable, NotProxyable};
+pub(crate) use disconnect::erased_reply;
 pub use disconnect::unreachable_reply;
 pub(crate) use forwarding::INFLIGHT_DEPTH_WARN;
 
 use dialing::Dialled;
-use disconnect::{client_gone, erased_reply};
+use disconnect::client_gone;
 use forwarding::{request_id, response_id, FromHub, Step};
 use framing::{read_frame, Framed, MAX_FRAME_BYTES};
 use handshake::Handshake;

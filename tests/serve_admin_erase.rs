@@ -3,8 +3,9 @@
 //! * A two-session HTTP hub: a session written over MCP (and flushed) is
 //!   erased through `POST /admin/s/{s}/erase` by an operator credential;
 //!   every table of the shipped DDL then holds no row of it but the
-//!   tombstone, MCP requests for it are refused with 410, the other session
-//!   keeps serving, and after SIGTERM nothing of it came back.
+//!   tombstone, MCP requests for it are refused with the erased error
+//!   (MCP error -32003), the other session keeps serving, and after
+//!   SIGTERM nothing of it came back.
 //! * A one-session hub (the dogfood rig's shape plus an operator
 //!   credential scoped to the one session, so nothing attaches on demand,
 //!   #32 PR 6): erasing its only session answers 200 and the process
@@ -362,9 +363,11 @@ fn an_attached_session_is_erased_over_the_admin_route_and_stays_erased() {
     assert!(raw.contains(r#""already_absent":false"#), "{raw}");
     assert_only_the_tombstone(&db, A);
 
-    // Refused from now on; B serves on.
+    // Refused from now on, with the #23 erased error (MCP error -32003);
+    // B serves on.
     let (status, raw) = exchange(addr, "POST", &path_a, &agents, None, INITIALIZE);
-    assert_eq!(status, 410, "{raw}");
+    assert_eq!(status, 200, "{raw}");
+    assert!(raw.contains("-32003") && raw.contains("erased"), "{raw}");
     call(
         addr,
         &path_b,
