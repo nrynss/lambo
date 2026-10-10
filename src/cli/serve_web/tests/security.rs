@@ -45,6 +45,30 @@ fn assert_no_csp(response: &HttpResponse, what: &str) {
     );
 }
 
+#[test]
+fn only_text_html_counts_as_html() {
+    use super::super::headers::content_type_is_html;
+    use axum::http::HeaderValue;
+    for (value, html) in [
+        ("text/html", true),
+        ("text/html; charset=utf-8", true),
+        ("TEXT/HTML;charset=UTF-8", true),
+        (" text/html ; charset=utf-8", true),
+        ("text/htmlx", false),
+        ("text/html-foo", false),
+        ("application/xhtml+xml", false),
+        ("text/plain", false),
+        ("text/plain; note=text/html", false),
+        ("", false),
+    ] {
+        let header = HeaderValue::from_str(value).expect("header value");
+        assert_eq!(content_type_is_html(&header), html, "{value:?}");
+    }
+    let not_utf8 = HeaderValue::from_bytes(b"text/html; charset=\xff").expect("opaque bytes");
+    assert!(not_utf8.to_str().is_err());
+    assert!(!content_type_is_html(&not_utf8));
+}
+
 /// A bearer built at runtime. Never interpolated into an assertion.
 fn bearer(label: &str) -> String {
     ["csp92", label, "token"].join("-")

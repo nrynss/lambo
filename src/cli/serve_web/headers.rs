@@ -51,38 +51,11 @@ pub(super) async fn security_headers(req: Request, next: Next) -> Response {
 }
 
 /// `text/html` or `text/html; charset=utf-8`, and not a lookalike type.
-fn content_type_is_html(value: &HeaderValue) -> bool {
+pub(super) fn content_type_is_html(value: &HeaderValue) -> bool {
     let Ok(raw) = value.to_str() else {
         return false;
     };
     raw.split(';')
         .next()
         .is_some_and(|media| media.trim().eq_ignore_ascii_case("text/html"))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn only_text_html_counts_as_html() {
-        for (value, html) in [
-            ("text/html", true),
-            ("text/html; charset=utf-8", true),
-            ("TEXT/HTML;charset=UTF-8", true),
-            (" text/html ; charset=utf-8", true),
-            ("text/htmlx", false),
-            ("text/html-foo", false),
-            ("application/xhtml+xml", false),
-            ("text/plain", false),
-            ("text/plain; note=text/html", false),
-            ("", false),
-        ] {
-            let header = HeaderValue::from_str(value).expect("header value");
-            assert_eq!(content_type_is_html(&header), html, "{value:?}");
-        }
-        let not_utf8 = HeaderValue::from_bytes(b"text/html; charset=\xff").expect("opaque bytes");
-        assert!(not_utf8.to_str().is_err());
-        assert!(!content_type_is_html(&not_utf8));
-    }
 }

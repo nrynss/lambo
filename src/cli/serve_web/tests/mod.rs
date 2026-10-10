@@ -104,10 +104,53 @@ fn production_source() -> String {
                 "{name}: only serve_web.rs may carry `#[cfg(all(test`; the scans \
                  stop reading a file there"
             );
+            // Test-only items (`views.rs`'s counters) are production text
+            // with a gate; a test module is not, and nothing cuts it.
+            assert!(
+                !gates_a_module(src, "#[cfg(test)]"),
+                "{name}: a `#[cfg(test)]` module in a production source is not cut, \
+                 so its text would feed the production scans; put it under tests/"
+            );
             src.split("#[cfg(all(test").next().unwrap_or(src)
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Whether some `attr` in `src` is followed, past any further attribute
+/// lines, by a `mod` item.
+fn gates_a_module(src: &str, attr: &str) -> bool {
+    src.match_indices(attr).any(|(at, _)| {
+        let mut rest = src[at + attr.len()..].trim_start();
+        while rest.starts_with("#[") {
+            rest = rest
+                .split_once('\n')
+                .map_or("", |(_, next)| next)
+                .trim_start();
+        }
+        let item = rest
+            .strip_prefix("pub")
+            .map_or(rest, |r| r.trim_start_matches(|c| c != ' ' && c != '\n'))
+            .trim_start();
+        item.starts_with("mod ")
+    })
+}
+
+#[test]
+fn a_test_module_in_a_production_source_is_caught() {
+    assert!(gates_a_module("#[cfg(test)]\nmod tests {}", "#[cfg(test)]"));
+    assert!(gates_a_module(
+        "#[cfg(test)]\n#[allow(dead_code)]\npub(super) mod t;",
+        "#[cfg(test)]"
+    ));
+    assert!(!gates_a_module(
+        "#[cfg(test)]\nqueued: AtomicU64,\nmod real;",
+        "#[cfg(test)]"
+    ));
+    assert!(!gates_a_module(
+        "#[cfg(test)]\npub(super) fn is_loaded() {}",
+        "#[cfg(test)]"
+    ));
 }
 
 /// The file that holds `fn router(`. Exactly one must.
