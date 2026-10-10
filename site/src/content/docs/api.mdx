@@ -90,6 +90,9 @@ let mem = Memory::builder()
 | `scoring` | `0.25`, `0.20`, `0.20`, `0.35` | Recency, frequency, session activity, and density weights. |
 | `recall_weights` | `0.5`, `0.5` | How much the background score and the query relevance each contribute. |
 
+Until the daemon scores a newly derived keyword- or vector-backed phase-1 match, recall temporarily ranks all expanded hits by their query relevance at the configured query weight. This puts a fresh text or image match on the same scale as older hits and keeps a fresh weak match below a stronger established match. The temporary rule also applies to older hits in that recall; canonical hits remain first and live hot-list warnings are still force-included. A recent-only hit cannot trigger this mode, and an explicit daemon score of zero counts as scored. Every query leg keeps its existing scale before the shared query weight is applied; for example, at the default weight a recent-only score of 0.35 becomes 0.175, below a vector similarity of 0.75 at 0.375. A recall by vector with no text skips the recent leg. Sustained derives or a scoring backlog can extend this mode beyond one daemon tick. Once the daemon publishes the next score table, the normal background-plus-query blend returns, so hit scores and order can change. With `w_query = 0`, recall continues to use daemon scores even during this interval.
+
+
 `Config::validate()` checks the settings that must fail closed rather than quietly poison selection. A scoring weight that is negative or not a number drops that one dimension to zero instead of failing the session.
 
 ### Shut down

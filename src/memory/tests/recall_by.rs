@@ -388,3 +388,188 @@ async fn a_contract_race_fails_a_recall_by_image_and_annotates_only_text() {
     );
     mem.close().await.unwrap();
 }
+
+// #79: keep the daemon's public score-table read handle across fresh derives.
+// The daemon can wake, but cannot publish its new table until the assertions
+// finish. This tests the actual Memory route without a scheduler race.
+#[cfg(feature = "store-sqlite")]
+fn cold_vector(probe: &[f32], seed: &[f32], cosine: f32) -> Vec<f32> {
+    let dot: f32 = probe.iter().zip(seed).map(|(a, b)| a * b).sum();
+    let mut orth: Vec<f32> = seed.iter().zip(probe).map(|(n, q)| n - dot * q).collect();
+    let norm = orth.iter().map(|x| x * x).sum::<f32>().sqrt();
+    for x in &mut orth {
+        *x /= norm;
+    }
+    let sine = (1.0 - cosine * cosine).sqrt();
+    probe
+        .iter()
+        .zip(orth)
+        .map(|(q, n)| cosine * q + sine * n)
+        .collect()
+}
+
+#[cfg(feature = "store-sqlite")]
+async fn cold_sqlite_memory(session: &str) -> (crate::test_util::ScratchDir, Memory) {
+    use crate::store::SqliteStore;
+    let dir = crate::test_util::ScratchDir::new("lambo-79-cold");
+    let path = dir.join("cold.db");
+    let store = Arc::new(SqliteStore::connect(path.to_str().unwrap()).unwrap());
+    store.init_schema().await.unwrap();
+    let mem = Memory::builder()
+        .session(session)
+        .agent("agent-a")
+        .flush_interval(Duration::from_millis(10))
+        .match_strategy(MatchStrategy::Hybrid)
+        .store(store as Arc<dyn GraphStore>)
+        .embedder(Arc::new(ContextTolerantEmbedder(FixtureEmbedder::new())) as Arc<dyn Embedder>)
+        .embedding_contract(contract("fixture", 1024))
+        .build()
+        .await
+        .unwrap();
+    (dir, mem)
+}
+
+#[cfg(feature = "store-sqlite")]
+async fn cold_image(mem: &Memory, caption: &str, image_id: &str, values: Vec<f32>) -> NodeId {
+    use crate::graph::image::{ImageDerive, ImagePayload};
+    let out = mem
+        .derive_image_as(
+            &AgentId::from("agent-a"),
+            ImageDerive {
+                caption,
+                concept_type: ConceptType::Resource,
+                image_id: Some(image_id),
+                payload: ImagePayload::Vector {
+                    values,
+                    declared: contract("fixture", 1024),
+                },
+                parent_of: &[],
+                event_time: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(out.created.len(), 1);
+    out.created[0]
+}
+
+#[cfg(feature = "store-sqlite")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sqlite_public_recall_by_ranks_fresh_supplied_image_and_guards_noise() {
+    let _quiet = crate::test_util::quiet_logs();
+    let (_dir, mem) = cold_sqlite_memory("issue-79-public-image").await;
+    let probe = FixtureEmbedder::new().embed_sync("cold image probe");
+    let seed = FixtureEmbedder::new().embed_sync("cold image orthogonal");
+    let old_relevant = cold_image(
+        &mem,
+        "old relevant",
+        "oldrelevant",
+        cold_vector(&probe, &seed, 0.75),
+    )
+    .await;
+    let old_noise = cold_image(
+        &mem,
+        "old noise",
+        "oldnoise",
+        cold_vector(&probe, &seed, 0.61),
+    )
+    .await;
+    flushed(&mem).await;
+    mem.settle_daemon().await;
+    stop_daemon_for_cold_start(&mem).await;
+    let scores = mem.daemon.scores();
+    assert!(scores.ranked.iter().any(|hit| hit.item == old_relevant));
+    assert!(scores.ranked.iter().any(|hit| hit.item == old_noise));
+    let fresh_relevant = cold_image(
+        &mem,
+        "fresh relevant",
+        "freshrelevant",
+        cold_vector(&probe, &seed, 0.85),
+    )
+    .await;
+    let fresh_noise = cold_image(
+        &mem,
+        "fresh noise",
+        "freshnoise",
+        cold_vector(&probe, &seed, 0.68),
+    )
+    .await;
+    flushed(&mem).await;
+    assert!(scores
+        .ranked
+        .iter()
+        .all(|hit| hit.item != fresh_relevant && hit.item != fresh_noise));
+    let query = RecallQuery {
+        query: String::new(),
+        top_k: 4,
+        max_tokens: 10_000,
+        traversal_depth: 0,
+    };
+    let result = mem
+        .recall_by(query.clone(), vector_query(probe.clone()))
+        .await
+        .unwrap();
+    assert_eq!(
+        result
+            .hits
+            .iter()
+            .map(|hit| hit.node_id)
+            .collect::<Vec<_>>(),
+        vec![fresh_relevant, old_relevant, fresh_noise, old_noise]
+    );
+    let detailed = mem
+        .recall_by_detailed(query, vector_query(probe))
+        .await
+        .unwrap();
+    assert!(detailed.legs.values().all(|leg| leg.recent.is_none()));
+    mem.close().await.unwrap();
+}
+
+#[cfg(feature = "store-sqlite")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sqlite_public_text_recall_keeps_strong_fresh_vector_above_recent_noise() {
+    let _quiet = crate::test_util::quiet_logs();
+    let (_dir, mem) = cold_sqlite_memory("issue-79-public-text").await;
+    mem.derive(
+        &[("create account guidance", ConceptType::Entity)],
+        &ParentOf::none(),
+    )
+    .await
+    .unwrap();
+    flushed(&mem).await;
+    mem.settle_daemon().await;
+    stop_daemon_for_cold_start(&mem).await;
+    let scores = mem.daemon.scores();
+    let fresh = mem
+        .derive(&[("register user", ConceptType::Entity)], &ParentOf::none())
+        .await
+        .unwrap()
+        .created[0];
+    let recent = mem
+        .derive(
+            &[("orbital neutrino mechanics", ConceptType::Entity)],
+            &ParentOf::none(),
+        )
+        .await
+        .unwrap()
+        .created[0];
+    flushed(&mem).await;
+    assert!(scores
+        .ranked
+        .iter()
+        .all(|hit| hit.item != fresh && hit.item != recent));
+    let query = RecallQuery {
+        query: "create account".into(),
+        top_k: 5,
+        max_tokens: 10_000,
+        traversal_depth: 0,
+    };
+    let detailed = mem.recall_detailed(query).await.unwrap();
+    let fresh_leg = detailed.legs.get(&fresh).unwrap();
+    let recent_leg = detailed.legs.get(&recent).unwrap();
+    assert!(fresh_leg.vector.unwrap() > 0.90);
+    assert!(recent_leg.recent.is_some());
+    let ids: Vec<NodeId> = detailed.hits.iter().map(|hit| hit.node_id).collect();
+    assert!(ids.iter().position(|id| *id == fresh) < ids.iter().position(|id| *id == recent));
+    mem.close().await.unwrap();
+}

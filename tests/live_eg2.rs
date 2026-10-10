@@ -378,23 +378,24 @@ async fn live_eg2_text_and_image() {
         w.w_daemon, w.w_query
     );
     let mean = |xs: &[f32]| f64::from(xs.iter().sum::<f32>() / xs.len() as f32);
-    for (label, xs) in [("text->image", &t2i_rel), ("text->text ", &t2t_rel)] {
-        let m = mean(xs);
+    for (label, relevant, irrelevant) in [
+        ("text->image", &t2i_rel, &t2i_irr),
+        ("text->text ", &t2t_rel, &t2t_irr),
+    ] {
+        let relevant_min = f64::from(relevant.iter().copied().fold(f32::INFINITY, f32::min));
+        let irrelevant_max =
+            f64::from(irrelevant.iter().copied().fold(f32::NEG_INFINITY, f32::max));
+        let old_fresh = w.w_query * mean(relevant);
+        let cold_relevant = w.w_query * relevant_min;
+        let cold_noise = w.w_query * irrelevant_max;
         println!(
-            "{label} relevant mean {m:.4}: phase-1 leg {} RECENT_SCORE {RECENT_SCORE}; fresh \
-             (no daemon score yet) final {:.4} vs a daemon-scored older concept at 0.533 \
-             (PR 3's run): {}",
-            if m > RECENT_SCORE {
-                "beats"
-            } else {
-                "loses to"
-            },
-            w.w_query * m,
-            if w.w_query * m > 0.533 {
-                "wins"
-            } else {
-                "loses"
-            }
+            "{label}: old fresh mean {old_fresh:.4} vs older noise 0.533; \
+             cold query-only relevant min {cold_relevant:.4} vs irrelevant max {cold_noise:.4}"
+        );
+        assert!(
+            cold_relevant > cold_noise,
+            "{label}: the measured reference set must separate relevant from noise \
+             before query-only cold-start ranking can use it"
         );
     }
 
@@ -643,4 +644,138 @@ async fn live_eg2_size_invariance() {
     );
     // Same pixels, same canonical PNG: the same vector, bit for bit.
     assert_eq!(wv, pv);
+}
+
+/// Real EG2 vectors through the SQLite-backed public recall route. The
+/// daemon may finish a cycle during the network-backed derive; the deterministic
+/// frozen-score cold assertion lives in Memory's fixture test. We record the
+/// cycle delta here instead of pretending wall-clock timing proves cold mode.
+#[cfg(feature = "store-sqlite")]
+#[tokio::test]
+#[ignore = "needs an owned live llama-server with EG2 and LAMBO_EG2_URL"]
+async fn live_eg2_public_recall_ranks_a_new_matching_image_above_old_noise() {
+    use lambo::graph::image::{ImageDerive, ImagePayload};
+    use lambo::recall::query_vector::QueryBy;
+    use lambo::store::SqliteStore;
+    use lambo::{
+        AgentId, ConceptType, EmbeddingContract, GraphStore, MatchStrategy, Memory, RecallQuery,
+    };
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    let Some(url) = env_url("LAMBO_EG2_URL") else {
+        eprintln!("live_eg2: LAMBO_EG2_URL not set; skipping");
+        return;
+    };
+    let e = EmbeddingGemma2Embedder::new(&url, EG2_DEFAULT_MODEL, 768).unwrap();
+    assert!(matches!(
+        e.check_server().await,
+        Eg2ServerCheck::Verified { .. }
+    ));
+    let contract = EmbeddingContract {
+        kind: "embeddinggemma2".into(),
+        model: Some(e.model_identity().to_string()),
+        dim: 768,
+    };
+    let query_vector = e.embed_query("a red square").await.unwrap();
+    let red_vector = image(&e, &solid(64, [255, 0, 0])).await.unwrap();
+    let blue_vector = image(&e, &solid(64, [0, 0, 255])).await.unwrap();
+    assert!(cosine(&query_vector, &red_vector) > cosine(&query_vector, &blue_vector));
+
+    let dir = std::env::temp_dir().join(format!("lambo-79-live-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("live.db");
+    let store = Arc::new(SqliteStore::connect(path.to_str().unwrap()).unwrap());
+    store.init_schema().await.unwrap();
+    let mem = Memory::builder()
+        .session(format!("eg2-cold-{}", uuid::Uuid::new_v4()))
+        .agent("live-eg2")
+        .flush_interval(Duration::from_millis(10))
+        .match_strategy(MatchStrategy::Hybrid)
+        .store(store as Arc<dyn GraphStore>)
+        .embedder(Arc::new(e) as Arc<dyn Embedder>)
+        .embedding_contract(contract.clone())
+        .build()
+        .await
+        .unwrap();
+    let agent = AgentId::from("live-eg2");
+    let old = mem
+        .derive_image_as(
+            &agent,
+            ImageDerive {
+                caption: "old unrelated blue image",
+                concept_type: ConceptType::Resource,
+                image_id: Some("oldblue"),
+                payload: ImagePayload::Vector {
+                    values: blue_vector,
+                    declared: contract.clone(),
+                },
+                parent_of: &[],
+                event_time: None,
+            },
+        )
+        .await
+        .unwrap()
+        .created[0];
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while mem.stats().daemon_cycles == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let before = mem.stats().daemon_cycles;
+    let fresh = mem
+        .derive_image_as(
+            &agent,
+            ImageDerive {
+                caption: "fresh matching red image",
+                concept_type: ConceptType::Resource,
+                image_id: Some("freshred"),
+                payload: ImagePayload::Vector {
+                    values: red_vector,
+                    declared: contract.clone(),
+                },
+                parent_of: &[],
+                event_time: None,
+            },
+        )
+        .await
+        .unwrap()
+        .created[0];
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let stats = mem.stats();
+            if stats.log_depth == 0 && stats.flush_depth == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let result = mem
+        .recall_by(
+            RecallQuery {
+                query: String::new(),
+                top_k: 2,
+                max_tokens: 10_000,
+                traversal_depth: 0,
+            },
+            QueryBy::Vector {
+                values: query_vector,
+                declared: contract,
+            },
+        )
+        .await
+        .unwrap();
+    println!(
+        "EG2 public recall: daemon cycles before fresh={before}, after read={}; hits={:?}",
+        mem.stats().daemon_cycles,
+        result.hits.iter().map(|h| h.node_id).collect::<Vec<_>>()
+    );
+    assert_eq!(result.hits.first().map(|h| h.node_id), Some(fresh));
+    assert!(result.hits.iter().any(|hit| hit.node_id == old));
+    mem.close().await.unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
 }

@@ -935,6 +935,24 @@
 
 ### Fixed
 
+- Fresh text and image concepts can rank by query relevance immediately after
+  derive (#79). When any real phase-1 concept lacks a daemon score, that recall
+  temporarily uses the query score for every expanded hit, scaled by the
+  configured query weight. This keeps fresh noise below an established hit
+  with stronger query evidence, regardless of its older daemon score. An
+  explicit daemon zero does not trigger the mode, and a daemon-only weighting
+  keeps its configured behavior. Canonical and hot-list rules still apply.
+  After the daemon scores the new concept, normal blended scores return and
+  the rank can change. Only keyword- or vector-backed unscored phase-1 hits
+  trigger this mode; a recent-only hit does not. The existing planted
+  assembly fixture's order changes from `c1,c2,c5,c6,c4,c3` to
+  `c1,c2,c5,c3,c4,c6` because its three structural-only members tie at zero.
+  The SQLite graded-cosine test now uses query-only weights so it tests cosine
+  order independently of daemon scores; #79 cannot change a fully scored
+  blend's rank. BGE-M3 golden fixture bytes and all per-embedder thresholds,
+  merge rules, and cosine scales are unchanged.
+
+
 - A `bge_m3` or `embeddinggemma2` input longer than the llama-server's
   physical batch is now a content refusal, settled as failed with a hint
   naming `--ubatch-size`. llama-server answers it with HTTP 500 ("increase

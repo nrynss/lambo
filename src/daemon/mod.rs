@@ -729,10 +729,11 @@ impl Daemon {
                 .map(|s| s.item),
             now,
         );
-        let mut result = assemble::assemble(
+        let mut result = assemble::assemble_with_legs(
             &graph,
             &pipeline.expanded,
             &pipeline.phase1,
+            Some(&pipeline.legs),
             &scores,
             &hot_payloads,
             &query,

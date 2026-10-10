@@ -169,3 +169,56 @@ async fn a_closed_session_reloads_with_its_graph_and_index() {
 
     reloaded.close().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unrelated_recent_only_unscored_hit_keeps_keyword_recall_blended() {
+    let store: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+    let mem = memory_on(store, "issue-79-recent-only").await;
+    let old = mem
+        .derive(
+            &[("needle keyword", ConceptType::Entity)],
+            &ParentOf::none(),
+        )
+        .await
+        .unwrap()
+        .created[0];
+    mem.settle_daemon().await;
+    stop_daemon_for_cold_start(&mem).await;
+    let scores = mem.daemon.scores();
+    let old_daemon = scores
+        .ranked
+        .iter()
+        .find(|hit| hit.item == old)
+        .unwrap()
+        .score;
+    assert!(old_daemon > 0.0);
+    let recent = mem
+        .derive(
+            &[("distant galaxy", ConceptType::Entity)],
+            &ParentOf::none(),
+        )
+        .await
+        .unwrap()
+        .created[0];
+    let query = RecallQuery {
+        query: "needle".into(),
+        top_k: 3,
+        max_tokens: 10_000,
+        traversal_depth: 0,
+    };
+    for _ in 0..2 {
+        let result = mem.recall_detailed(query.clone()).await.unwrap();
+        let old_leg = result.legs.get(&old).unwrap();
+        let recent_leg = result.legs.get(&recent).unwrap();
+        assert!(old_leg.keyword.is_some());
+        assert_eq!(recent_leg.keyword, None);
+        assert_eq!(recent_leg.vector, None);
+        assert!(recent_leg.recent.is_some());
+        let old_hit = result.hits.iter().find(|hit| hit.node_id == old).unwrap();
+        let expected = 0.5 * (old_daemon + old_leg.keyword.unwrap());
+        assert!((old_hit.score - expected).abs() < 1e-9);
+    }
+    // A lagged score epoch deliberately prevents pipeline cache insertion;
+    // the repeated public read above still cannot misclassify recent-only.
+    mem.close().await.unwrap();
+}

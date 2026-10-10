@@ -13,6 +13,16 @@
 //! final_score = daemon_score × w_daemon + query_relevance × w_query
 //! ```
 //!
+//! While a query-backed phase-1 concept is absent from the daemon score table, all
+//! expanded members use `query_relevance × w_query` for this recall. Ranking
+//! only the new member by its query score would promote fresh noise above an
+//! established relevant concept with a low structural score. The temporary
+//! query-only mode gives both the same ordering rule until the daemon scores
+//! the new concept. An explicit daemon score of zero is present, not missing.
+//! A daemon-only configuration (`w_query == 0`) continues to use daemon scores.
+//! Once the daemon catches up, normal blended scoring resumes and ranks may
+//! change. Canonical-first and hot-list force-inclusion still apply.
+//!
 //! * **query_relevance** — the member's phase-1 candidate score (BM25 for
 //!   keyword hits, the max-merged score otherwise). Members that were never
 //!   phase-1 candidates — BFS-reached concepts and force-included
@@ -21,9 +31,9 @@
 //!   daemon score. Siblings are deliberately scored this way (spec §8
 //!   "force-included, scored independently"), not silently dropped.
 //! * **daemon_score** — the [`ScoreTable`] lookup by node id. A node missing
-//!   from the table scores **0.0** (the daemon rescored a different epoch, or
-//!   the node was born after the table was computed; a missing entry must not
-//!   poison the mix).
+//!   from the table scores **0.0** in normal blended mode. If a query-backed phase-1
+//!   candidate lacks an entry, the temporary query-only rule above applies
+//!   to every expanded member until the next daemon score table arrives.
 //! * **weights** — [`RecallWeights`], sanitized like `ScoringWeights`
 //!   (ALGO-10): a non-finite or negative weight becomes `0.0`, so the final
 //!   score is finite for every input.
@@ -106,6 +116,7 @@ use chrono::{DateTime, Utc};
 use crate::config::RecallWeights;
 use crate::graph::reserve::active_reservation;
 use crate::graph::Graph;
+use crate::recall::candidates::LegScores;
 use crate::recall::detail::{Annotation, AnnotationKind, DetailedHit, DetailedRecall};
 use crate::recall::expand::ExpandedSet;
 use crate::recall::format;
@@ -126,7 +137,8 @@ pub use crate::recall::format::default_token_count;
 /// `max_tokens`, and `now` is the caller's clock — pass the same instant the
 /// hot list was re-validated at, and that every other time-sensitive read in
 /// the recall uses (reservations).
-#[allow(clippy::too_many_arguments)] // pipeline deps; bundled into the recall entry at Wave D
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)] // test and direct callers supply query-backed phase-1 hits
 pub(crate) fn assemble<F>(
     graph: &Graph,
     expanded: &ExpandedSet,
@@ -141,9 +153,57 @@ pub(crate) fn assemble<F>(
 where
     F: Fn(&str) -> usize,
 {
+    assemble_with_legs(
+        graph,
+        expanded,
+        phase1,
+        None,
+        scores,
+        hot_payloads,
+        query,
+        weights,
+        now,
+        token_fn,
+    )
+}
+
+/// Production assembly also receives phase-1 leg provenance. A recent-only
+/// unscored hit is not evidence of a fresh match and cannot switch the whole
+/// result to query-only ordering. `None` is for direct callers that already
+/// supplied query-backed phase-1 hits.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn assemble_with_legs<F>(
+    graph: &Graph,
+    expanded: &ExpandedSet,
+    phase1: &[Scored<NodeId>],
+    legs: Option<&HashMap<NodeId, LegScores>>,
+    scores: &ScoreTable,
+    hot_payloads: &HashMap<NodeId, Vec<HotListPayload>>,
+    query: &RecallQuery,
+    weights: RecallWeights,
+    now: DateTime<Utc>,
+    token_fn: F,
+) -> DetailedRecall
+where
+    F: Fn(&str) -> usize,
+{
     let (w_daemon, w_query) = (sane_weight(weights.w_daemon), sane_weight(weights.w_query));
     let relevance: HashMap<NodeId, f64> = phase1.iter().map(|s| (s.item, s.score)).collect();
     let daemon: HashMap<NodeId, f64> = scores.ranked.iter().map(|s| (s.item, s.score)).collect();
+    // Only a real query-backed phase-1 concept can put recall in cold mode.
+    // The recent-only leg is a flat floor, not evidence of a new match. BFS
+    // members, siblings and stale vector ids do not trigger it either.
+    // Presence matters: an explicit daemon zero has already been scored.
+    let cold = w_query > 0.0
+        && phase1.iter().any(|candidate| {
+            let query_backed = legs.is_none_or(|legs| {
+                legs.get(&candidate.item)
+                    .is_some_and(|leg| leg.keyword.is_some() || leg.vector.is_some())
+            });
+            query_backed
+                && matches!(graph.node(candidate.item), Some(Node::Concept(_)))
+                && !daemon.contains_key(&candidate.item)
+        });
 
     // Score every member independently; sort by final score desc, id asc.
     let mut members: Vec<Scored<NodeId>> = expanded
@@ -159,7 +219,8 @@ where
         // P1-4 / deep-review F3).
         let d = sane_weight(daemon.get(&s.item).copied().unwrap_or(0.0));
         let r = sane_weight(relevance.get(&s.item).copied().unwrap_or(0.0));
-        s.score = d * w_daemon + r * w_query;
+        let daemon_part = if cold { 0.0 } else { d * w_daemon };
+        s.score = daemon_part + r * w_query;
         // T9 instrumentation (default-invisible trace): attribute the final
         // score to its arms. A member with `r == 0` was never a phase-1
         // candidate — it reached the assembled block purely by structural
@@ -190,7 +251,8 @@ where
                 relevance = r,
                 w_daemon = w_daemon,
                 w_query = w_query,
-                contrib_daemon = d * w_daemon,
+                cold = cold,
+                contrib_daemon = daemon_part,
                 contrib_query = r * w_query,
                 final = s.score,
                 "recall arm {arm}: {content} daemon={d}*{w_daemon} relevance={r}*{w_query} final={}",
@@ -532,16 +594,14 @@ mod tests {
         );
 
         // c1: 0.8×0.25 + 1.0×0.75 = 0.95
-        // c2: 0.0×0.25 + 0.5×0.75 = 0.375 (missing daemon score -> 0.0)
+        // c2 lacks a daemon entry, so all members use query-only scores.
         // c3: 0.2×0.25 + 0.0×0.75 = 0.05  (BFS member, no relevance)
         // c4: 0.4×0.25 + 0.0×0.75 = 0.10  (sibling, no relevance)
         // c5: 0.6×0.25 + 0.2×0.75 = 0.30
         // c6: 0.6×0.25 + 0.0×0.75 = 0.15
-        let want_order = vec![uid(1), uid(2), uid(5), uid(6), uid(4), uid(3)];
-        // Score desc; the six planted finals are all distinct, so the tie
-        // arms below the score (canonical-first, then canonical key, then id)
-        // do not fire in this test — the chain itself is pinned by
-        // `final_score_ties_break_by_canonical_key_ahead_of_node_id`.
+        let want_order = vec![uid(1), uid(2), uid(5), uid(3), uid(4), uid(6)];
+        // In cold mode the three structural-only members tie at zero; their
+        // canonical keys make that tail deterministic.
         assert_eq!(ids_of(&result), want_order);
         let score = |id: NodeId| {
             result
@@ -551,12 +611,12 @@ mod tests {
                 .expect("hit present")
                 .score
         };
-        assert!(approx(score(uid(1)), 0.95));
+        assert!(approx(score(uid(1)), 0.75));
         assert!(approx(score(uid(2)), 0.375));
-        assert!(approx(score(uid(5)), 0.30));
-        assert!(approx(score(uid(6)), 0.15));
-        assert!(approx(score(uid(4)), 0.10));
-        assert!(approx(score(uid(3)), 0.05));
+        assert!(approx(score(uid(5)), 0.15));
+        assert!(approx(score(uid(6)), 0.0));
+        assert!(approx(score(uid(4)), 0.0));
+        assert!(approx(score(uid(3)), 0.0));
         // The id-asc tie-break is exercised in the dedicated test below.
         assert!(result.warnings.is_empty());
     }
@@ -1656,5 +1716,192 @@ mod tests {
             actual, golden["blended"],
             "blended structured payload must match the golden"
         );
+    }
+
+    #[test]
+    fn cold_start_uses_one_query_scale_for_old_and_new_candidates() {
+        let g = graph_with(4);
+        let phase1 = vec![
+            Scored::new(uid(1), 0.60), // old noise, high daemon score
+            Scored::new(uid(2), 0.75), // established relevant, low daemon score
+            Scored::new(uid(3), 0.80), // fresh relevant text/image
+            Scored::new(uid(4), 0.68), // fresh irrelevant image
+        ];
+        let expanded = ExpandedSet {
+            required: phase1.clone(),
+            siblings: Vec::new(),
+        };
+        let old_scores = ScoreTable {
+            epoch: 1,
+            ranked: vec![Scored::new(uid(1), 0.90), Scored::new(uid(2), 0.20)],
+        };
+        let run = |scores: &ScoreTable, weights| {
+            assemble(
+                &g,
+                &expanded,
+                &phase1,
+                scores,
+                &HashMap::new(),
+                &query(4, 10_000),
+                weights,
+                ts(0),
+                default_token_count,
+            )
+        };
+        let cold = run(&old_scores, RecallWeights::default());
+        assert_eq!(ids_of(&cold), vec![uid(3), uid(2), uid(4), uid(1)]);
+        let cold_scores: Vec<f64> = cold.hits.iter().map(|hit| hit.score).collect();
+        for (actual, expected) in cold_scores.iter().zip([0.40, 0.375, 0.34, 0.30]) {
+            assert!(approx(*actual, expected));
+        }
+
+        // Keep the configured query weight as a common factor. The daemon
+        // share is withheld until it is available for every phase-1 concept.
+        let weighted = run(
+            &old_scores,
+            RecallWeights {
+                w_daemon: 0.25,
+                w_query: 0.75,
+            },
+        );
+        assert_eq!(ids_of(&weighted), ids_of(&cold));
+        for (hit, expected) in weighted.hits.iter().zip([0.60, 0.5625, 0.51, 0.45]) {
+            assert!(approx(hit.score, expected));
+        }
+
+        // A later daemon table restores the ordinary mix for every member.
+        // The resulting rank change is accepted and documented.
+        let settled_scores = ScoreTable {
+            epoch: 2,
+            ranked: vec![
+                Scored::new(uid(1), 0.90),
+                Scored::new(uid(2), 0.20),
+                Scored::new(uid(3), 0.10),
+                Scored::new(uid(4), 0.60),
+            ],
+        };
+        let settled = run(&settled_scores, RecallWeights::default());
+        assert_eq!(ids_of(&settled), vec![uid(1), uid(4), uid(2), uid(3)]);
+        assert!(approx(settled.hits[0].score, 0.75));
+        assert!(approx(settled.hits[1].score, 0.64));
+    }
+
+    #[test]
+    fn explicit_daemon_zero_and_structural_absence_do_not_start_cold_mode() {
+        let g = graph_with(3);
+        let phase1 = vec![Scored::new(uid(1), 0.60), Scored::new(uid(2), 0.80)];
+        let expanded = ExpandedSet {
+            required: vec![
+                Scored::new(uid(1), 0.0),
+                Scored::new(uid(2), 0.0),
+                Scored::new(uid(3), 0.0), // BFS-only, absent from score table
+            ],
+            siblings: Vec::new(),
+        };
+        let scores = ScoreTable {
+            epoch: 1,
+            ranked: vec![Scored::new(uid(1), 0.90), Scored::new(uid(2), 0.0)],
+        };
+        let result = assemble(
+            &g,
+            &expanded,
+            &phase1,
+            &scores,
+            &HashMap::new(),
+            &query(3, 10_000),
+            RecallWeights::default(),
+            ts(0),
+            default_token_count,
+        );
+        assert_eq!(ids_of(&result), vec![uid(1), uid(2), uid(3)]);
+        assert!(approx(result.hits[0].score, 0.75));
+        assert!(approx(result.hits[1].score, 0.40));
+        assert!(approx(result.hits[2].score, 0.0));
+    }
+
+    #[test]
+    fn recent_only_unscored_hit_does_not_switch_query_order() {
+        let g = graph_with(2);
+        let phase1 = vec![Scored::new(uid(1), 0.80), Scored::new(uid(2), 0.35)];
+        let expanded = ExpandedSet {
+            required: phase1.clone(),
+            siblings: Vec::new(),
+        };
+        let scores = ScoreTable {
+            epoch: 1,
+            ranked: vec![Scored::new(uid(1), 0.80)],
+        };
+        let mut legs = HashMap::new();
+        legs.insert(
+            uid(1),
+            LegScores {
+                keyword: Some(0.80),
+                ..LegScores::default()
+            },
+        );
+        legs.insert(
+            uid(2),
+            LegScores {
+                recent: Some(0.35),
+                ..LegScores::default()
+            },
+        );
+        let run = |legs: &HashMap<NodeId, LegScores>| {
+            assemble_with_legs(
+                &g,
+                &expanded,
+                &phase1,
+                Some(legs),
+                &scores,
+                &HashMap::new(),
+                &query(2, 10_000),
+                RecallWeights::default(),
+                ts(0),
+                default_token_count,
+            )
+        };
+        let ordinary = run(&legs);
+        assert_eq!(ids_of(&ordinary), vec![uid(1), uid(2)]);
+        assert!(approx(ordinary.hits[0].score, 0.80));
+        assert!(approx(ordinary.hits[1].score, 0.175));
+
+        // A vector score equal to RECENT_SCORE is still query evidence: the
+        // leg's presence, not its numeric value, controls cold mode.
+        legs.get_mut(&uid(2)).unwrap().vector = Some(0.35);
+        let cold = run(&legs);
+        assert_eq!(ids_of(&cold), vec![uid(1), uid(2)]);
+        assert!(approx(cold.hits[0].score, 0.40));
+        assert!(approx(cold.hits[1].score, 0.175));
+    }
+
+    #[test]
+    fn daemon_only_weight_does_not_switch_to_query_order() {
+        let g = graph_with(2);
+        let phase1 = vec![Scored::new(uid(1), 0.60), Scored::new(uid(2), 0.80)];
+        let expanded = ExpandedSet {
+            required: phase1.clone(),
+            siblings: Vec::new(),
+        };
+        let scores = ScoreTable {
+            epoch: 1,
+            ranked: vec![Scored::new(uid(1), 0.90)],
+        };
+        let result = assemble(
+            &g,
+            &expanded,
+            &phase1,
+            &scores,
+            &HashMap::new(),
+            &query(2, 10_000),
+            RecallWeights {
+                w_daemon: 1.0,
+                w_query: 0.0,
+            },
+            ts(0),
+            default_token_count,
+        );
+        assert_eq!(ids_of(&result), vec![uid(1), uid(2)]);
+        assert!(approx(result.hits[0].score, 0.90));
+        assert!(approx(result.hits[1].score, 0.0));
     }
 }
