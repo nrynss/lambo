@@ -242,7 +242,7 @@
               "type": "null"
             }
           ],
-          "description": "The image itself, for this server to embed. Send exactly one of\n`image` and `vector`."
+          "description": "The image itself, for this server to embed. Send exactly one of\n`image` and `vector`. The embedder may resize it (EmbeddingGemma 2:\nto a 768 px longer side); send the same rendition of an image when\nyou need identical vectors."
         },
         "image_id": {
           "description": "Your id for this image: 1 to 64 lowercase letters and digits. The\nconcept's content is the caption plus `[image:<image_id>]`; the same\ncaption and id derived again is the same concept. Omit it for an id\nmade from a digest of what you send: the image's bytes, or the\nnormalized vector.",
@@ -419,7 +419,7 @@
               "type": "null"
             }
           ],
-          "description": "Optional: recall what is close to this image, for this server to\nembed (when its embedder embeds images). Send at most one of `image`\nand `query_vector`. Not stored."
+          "description": "Optional: recall what is close to this image, for this server to\nembed (when its embedder embeds images). Send at most one of `image`\nand `query_vector`. Not stored. The embedder may resize it\n(EmbeddingGemma 2: to a 768 px longer side); send the same rendition\nof an image when you need identical vectors."
         },
         "max_tokens": {
           "description": "Token budget for the rendered context block.",

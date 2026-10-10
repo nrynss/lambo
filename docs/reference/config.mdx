@@ -195,6 +195,16 @@ dim = 768
 - Some of these checks rest on facts measured on llama.cpp b11517 and may change with the build: the 293-token count of the reference image, and the text of the HTTP 500 for an input larger than the physical batch ("increase the physical batch size"), which Lambo settles as a failed input naming `--ubatch-size`. After upgrading llama.cpp, re-measure them (`evidence/issue-22-eg2/` records how): a build that frames images differently refuses every image with a message naming b11517 and the flags (set `images = false` meanwhile), and a build that rewords the 500 makes an oversized input a retried server error again.
 - An image sent to a server started without `--mmproj` fails as a configuration error naming `--mmproj`, not as a retryable server error. Without `--mmproj`, set `images = false`.
 
+#### Size invariance
+
+Every image is resized to a 768 px longer side before it is embedded. That makes its vector largely, but not fully, independent of the size you send:
+
+- A flat image (one colour) gives a bit-identical vector at any size.
+- Real images sent at 768 px or larger agree to a cosine of at least 0.999.
+- Small images with sharp detail can drift by up to about 2% (a cosine of 0.98 for a checkerboard sent at 128 px), because enlarging cannot restore detail that was never sent.
+
+If bit-identical vectors matter, for example when you compare vectors directly or deduplicate on them, always send the same rendition of an image, such as the original file.
+
 <Warning>
 Do not switch embedder models in the middle of a session without re-embedding, because vectors from different models are not comparable. The kind, the model, and the width together form the session's embedding contract.
 </Warning>

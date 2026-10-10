@@ -196,6 +196,16 @@ dim = 768
 - Before its first embed, Lambo asks the server's `/props` which file it loaded, its quantization and whether it has a vision projector. It refuses to embed with a file whose name does not mention EmbeddingGemma 2 or a quantization other than the one `model` names (llama.cpp's own names are matched to the file names' tokens, so `Q4_K - Medium` is `Q4_K_M` and `all F32` is `F32`), and refuses images when the server has no vision projector. A server that does not answer `/props` (a hosted endpoint, Ollama) is used without the check, and the log says so once. If `/props` cannot be reached or answers with a server error, the log says so once and Lambo asks again after a wait that doubles from 1 second up to 30 seconds, not on every embed. The answer is asked again every 60 seconds and right after an embed request fails as unavailable, so a server restarted with another model or quantization is refused before Lambo writes more vectors under the old contract. Once a server has passed the check, embeds wait (and are retried) while `/props` cannot be reached, and a server that stops answering `/props` is refused: restart Lambo if you replaced it on purpose.
 - An image sent to a server started without `--mmproj` fails as a configuration error naming `--mmproj`, not as a retryable server error. Without `--mmproj`, set `images = false`.
 
+#### Size invariance
+
+Every image is resized to a 768 px longer side before it is embedded. That makes its vector largely, but not fully, independent of the size you send:
+
+- A flat image (one colour) gives a bit-identical vector at any size.
+- Real images sent at 768 px or larger agree to a cosine of at least 0.999.
+- Small images with sharp detail can drift by up to about 2% (a cosine of 0.98 for a checkerboard sent at 128 px), because enlarging cannot restore detail that was never sent.
+
+If bit-identical vectors matter, for example when you compare vectors directly or deduplicate on them, always send the same rendition of an image, such as the original file.
+
 <Warning>
 Do not switch embedder models in the middle of a session without re-embedding, because vectors from different models are not comparable. The kind, the model, and the width together form the session's embedding contract.
 </Warning>
