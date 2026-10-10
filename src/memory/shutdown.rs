@@ -403,6 +403,45 @@ pub(super) async fn final_flush(
 }
 
 impl Memory {
+    /// Abort **and join** the canonization, daemon and flush tasks (#32 PR
+    /// 7): `abort()` returns before a task has stopped, and only the join
+    /// proves it (R3-1). Each handle travels in a [`HandleCustody`], so a
+    /// caller dropped mid-join hands it back to its slot. Idempotent: a slot
+    /// already reaped is skipped.
+    async fn abort_and_join_tasks(&self) {
+        for slot in [&self.canon_handle, &self.daemon_handle, &self.flush_handle] {
+            let mut task = HandleCustody::take(slot);
+            task.abort();
+            let _ = task.join().await;
+            drop(task);
+        }
+    }
+
+    /// Stop a handle fenced for an in-process erase (#32 PR 7 review M1)
+    /// whose [`Memory::close`] was abandoned before its fenced branch: stuck
+    /// behind a write that holds the writers gate, or cut short by a second
+    /// shutdown signal. The fenced branch is what aborts and joins the
+    /// background tasks, so without this a flush already past its store
+    /// commit could still mirror into the recall index after the erase
+    /// swept it.
+    ///
+    /// The heartbeat, the intent replay and the canonization, daemon and
+    /// flush tasks are stopped, each aborted and joined, without the
+    /// writers gate or the close's lock (either may be what the abandoned
+    /// close was stuck on). The tail is not drained: the handle is fenced,
+    /// and its tail is being erased. Idempotent, and a no-op on a handle
+    /// whose fenced close already ran.
+    pub(crate) async fn stop_tasks_for_erase(&self) {
+        debug_assert!(
+            self.lease_lost(),
+            "only a fenced handle's tasks are stopped this way"
+        );
+        self.abort_heartbeat();
+        self.pipeline.abort_probe();
+        self.pipeline.stop_replay().await;
+        self.abort_and_join_tasks().await;
+    }
+
     /// Final flush + clean shutdown (spec §6.1): the write queue, the lease
     /// heartbeat, and the three background tasks (daemon, flush,
     /// canonization). The module doc lists the stages in order.
@@ -671,12 +710,7 @@ impl Memory {
             // otherwise mirror into the index after the erase swept it. The
             // custody guard hands a handle back to its slot if this future
             // is dropped mid-join, so a retried close finds it again.
-            for slot in [&self.canon_handle, &self.daemon_handle, &self.flush_handle] {
-                let mut task = HandleCustody::take(slot);
-                task.abort();
-                let _ = task.join().await;
-                drop(task);
-            }
+            self.abort_and_join_tasks().await;
             let undrained = self.graph.read().log_len();
             if self.erased() {
                 tracing::warn!(

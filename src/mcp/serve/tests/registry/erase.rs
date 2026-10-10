@@ -691,6 +691,72 @@ async fn an_erase_of_a_detaching_session_is_503() {
         .is_some_and(|l| !crate::store::erase::is_tombstone(&l)));
 }
 
+/// #32 PR 7 review M1: the erase's fenced close is abandoned before its
+/// fenced branch (a write holds the writers gate, and a second shutdown
+/// signal cuts the close short), so the close joined nothing. The erase
+/// stops and joins the session's tasks itself before it reaches the
+/// store: the flush parked in the store is gone by then, and none
+/// completes after the erase. The lease is not released on the way.
+///
+/// Mutation: ignore the abandoned close (go straight to the erase) and the
+/// parked flush is still in flight when `erase_session` is entered.
+#[tokio::test]
+async fn an_abandoned_close_still_stops_the_flush_before_the_erase() {
+    let w = wire().await;
+    let addr = w.addr;
+    let agent = bearer("agent");
+    let (mcp_a, _) = initialize_as(addr, "/mcp/s/er-a", Some(&agent)).await;
+    w.calls.park_flushes_of(A);
+    derive_as(
+        addr,
+        &agent,
+        "/mcp/s/er-a",
+        &mcp_a,
+        &["parked in the store"],
+    )
+    .await;
+    eventually("a flush is parked in flight", || {
+        w.calls.parked_flushes() > 0
+    })
+    .await;
+    let mem = Arc::clone(&w.registry.attached()[0].mem);
+    assert_eq!(mem.session().as_str(), A);
+    // A write in progress holds the gate, so the close stalls at its
+    // `writers_gate` step; two signals make it give up at once.
+    let gate = mem.hold_writers_gate().await;
+    w.registry.early().simulate_signal();
+    w.registry.early().simulate_signal();
+
+    let before = w.calls.len();
+    let reply = erase_as(addr, "ops", A, &confirm(A)).await;
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    drop(gate);
+    w.calls.release_flushes();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        w.calls.parked_at_erase(),
+        vec![0],
+        "a flush was still in flight when the erase reached the store"
+    );
+    let during = w.calls.since(before);
+    let erase_at = during
+        .iter()
+        .position(|(m, s)| *m == "erase_session" && s == A)
+        .expect("the store erase ran");
+    assert!(
+        !during[erase_at..]
+            .iter()
+            .any(|(m, s)| *m == "flushed" && s == A),
+        "a flush completed after the erase: {during:?}"
+    );
+    assert!(
+        !during.iter().any(|(m, s)| *m == "release_lease" && s == A),
+        "the lease is never released on the way: {during:?}"
+    );
+    assert_only_the_tombstone(&w.store, A).await;
+    drop(mem);
+}
+
 /// #32 PR 7 review H1: an erase that arrives while the pinned retry of the
 /// same session is between its acquire and its admission (parked in its
 /// load, the lease already taken). The erase waits for the retry's attach

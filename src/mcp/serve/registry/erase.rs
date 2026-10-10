@@ -22,7 +22,11 @@
 //! 4. Its MCP sessions end (the detach's stage 1), it is closed (stages 3
 //!    and 4: the write pipeline quiesced, the writers gate drained, every
 //!    background task aborted **and joined**, the in-RAM tail discarded),
-//!    its watcher stopped (5) and its endpoint released (6).
+//!    its watcher stopped (5) and its endpoint released (6). A close
+//!    abandoned before its fenced branch (a write holding the writers gate
+//!    past `CLOSE_FLUSH_GRACE`, or a second signal) has joined nothing, so
+//!    the tasks are then stopped and joined without the gate
+//!    (`Memory::stop_tasks_for_erase`, #32 PR 7 review M1).
 //! 5. `store.erase_session(id, mem.lease_holder())`: the #23 gate admits
 //!    the eraser's own live lease, the transaction deletes every row and
 //!    writes the tombstone, and the recall tier (#18) sweeps the index.
@@ -77,7 +81,7 @@ use crate::mcp::serve::stages::{ShutdownProgress, Stage};
 use crate::memory::Memory;
 use crate::store::lease::LeaseHolder;
 use crate::store::{EraseOutcome, EraseReport, GraphStore};
-use crate::types::{AgentId, SessionId, StoreError};
+use crate::types::{AgentId, LamboError, SessionId, StoreError};
 
 /// What [`SessionRegistry::erase`] answers. The admin route maps each to its
 /// HTTP status.
@@ -201,8 +205,23 @@ impl SessionRegistry {
         progress.end(Stage::TransportDrain);
         progress.begin(Stage::SessionClose);
         // A fenced close always errs (it refuses to flush): that refusal
-        // is the point here, and `Memory::close` has logged it.
-        let _ = close_bounded(&session.mem, &self.early).await;
+        // is the point here, and `Memory::close` has logged it. Its fenced
+        // branch aborted and joined the background tasks. An abandoned
+        // close (`close_bounded`'s `Config` error: stuck behind a write
+        // holding the writers gate past `CLOSE_FLUSH_GRACE`, or a second
+        // signal) never reached that branch, so its tasks are stopped and
+        // joined here before the erase (#32 PR 7 review M1): a flush past
+        // its store commit must not mirror into the recall index after the
+        // erase swept it.
+        if let Err(LamboError::Config(why)) = close_bounded(&session.mem, &self.early).await {
+            tracing::warn!(
+                session = %id,
+                reason = %why,
+                "lambo serve: the erase's close was abandoned; stopping the session's tasks \
+                 before erasing it"
+            );
+            session.mem.stop_tasks_for_erase().await;
+        }
         progress.end(Stage::SessionClose);
         progress.run(Stage::EventPumpAbort, || session.tasks.event_pump.abort());
         progress.run(Stage::BackgroundTasks, || session.tasks.stop());

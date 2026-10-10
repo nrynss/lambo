@@ -1064,6 +1064,14 @@ impl SessionRegistry {
         self.slots.lock().insert(id.to_string(), slot);
     }
 
+    /// The process's J6 pre-arm, so a test can record shutdown signals on
+    /// it (`EarlyShutdown::simulate_signal`). Gated like its reader, the
+    /// registry tests.
+    #[cfg(all(test, unix, feature = "store-memory", feature = "embed-fixture"))]
+    pub(super) fn early(&self) -> &EarlyShutdown {
+        &self.early
+    }
+
     /// Abort every on-demand attach and detach task in flight, which ends
     /// an attach as a panic in it would (#32 PR 6 review L1). Gated like
     /// its reader, the registry tests.
