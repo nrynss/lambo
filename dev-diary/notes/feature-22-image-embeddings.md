@@ -175,7 +175,7 @@ tokens); a larger one rounds down (a square of 792 px or more becomes 768x768, 2
 tokens). No flag or request field picks the branch, so the fix is client-side
 (`src/embed/eg2/canonical.rs`). The first cut passed images of at most 768 px through
 unchanged; the Opus review (M1) showed the server's own resampling still left a 512 px
-and a 1024 px render about 0.01 apart, so the remediation resizes **every** image: decode
+and a 1024 px render up to about 0.01 apart, so the remediation resizes **every** image: decode
 (no EXIF orientation, no colour management), resize in one step to a longer side of
 exactly 768 px (shorter side rounded half up, at least 1; Lanczos3 down, Catmull-Rom up,
 because Lanczos3 rang on enlarged hard edges: checkerboard at 256 px 0.9796 against

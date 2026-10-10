@@ -107,7 +107,7 @@ pub(crate) const DOWNSCALE_FILTER: FilterType = FilterType::Lanczos3;
 /// out at cosine 0.9796 to the one drawn at 768 px with Lanczos3, 0.9848
 /// with Catmull-Rom (the server's own resampling of the raw 256 px image gave
 /// 0.9848); Triangle matched Catmull-Rom at 128 and 256 px but was worse at
-/// 512 (0.9870 against 0.9918). A smooth picture was within 0.0004 with all
+/// 512 (0.9870 against 0.9918). A smooth picture was within 0.0005 with all
 /// three.
 pub(crate) const UPSCALE_FILTER: FilterType = FilterType::CatmullRom;
 
