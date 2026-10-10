@@ -7,7 +7,10 @@
 use super::routing::{portal, two_sessions};
 use super::*;
 use crate::config::WebConfig;
-use crate::surface::session::{parse_addressed, MAX_ADDRESSED_LEN};
+use crate::surface::session::{
+    parse_addressed, SessionCapabilities, SessionGrant, SessionPrefix, SessionScope,
+    MAX_ADDRESSED_LEN,
+};
 
 /// A token built at runtime, never printed.
 fn solo_token() -> String {
@@ -24,6 +27,82 @@ async fn get_with(addr: SocketAddr, path: &str, token: &str) -> HttpResponse {
         ),
     )
     .await
+}
+
+/// `method path` presenting `token` (none: no header), `Host` loopback.
+async fn as_caller(
+    addr: SocketAddr,
+    method: &str,
+    path: &str,
+    token: Option<&str>,
+) -> HttpResponse {
+    let auth = token
+        .map(|t| format!("Authorization: Bearer {t}\r\n"))
+        .unwrap_or_default();
+    send_raw(
+        addr,
+        &format!(
+            "{method} {path} HTTP/1.1\r\nHost: {addr}\r\n{auth}Accept: application/json\r\n\
+             Connection: close\r\n\r\n"
+        ),
+    )
+    .await
+}
+
+/// A token for credential `name`, built at runtime, never printed.
+fn cred_token(name: &str) -> String {
+    ["t4d", "-", name, "-", "k", "e", "y"].concat()
+}
+
+/// A read credential called `name` over the exact `names` and an optional
+/// `prefix`.
+fn credential(name: &str, names: &[&str], prefix: Option<&str>) -> WebCredential {
+    WebCredential {
+        grant: SessionGrant::new(
+            name,
+            SessionScope::new(
+                names.iter().map(|n| parse_addressed(n).expect("name")),
+                false,
+                prefix.map(|p| SessionPrefix::new(p).expect("prefix")),
+            ),
+            SessionCapabilities::default(),
+        ),
+        token: AuthToken::new(cred_token(name)).expect("token"),
+    }
+}
+
+/// The sessions [`credentialed`] serves, the default first. `t4q-1` holds
+/// nothing: it is served as an empty session.
+const SERVED: &[&str] = &["t4-a", "t4-b", "t4q-1"];
+
+/// A portal over [`SERVED`] with three prefix credentials:
+///
+/// | credential | scope | reads |
+/// |---|---|---|
+/// | `pre-two` | prefix `t4-` | `t4-a`, `t4-b` |
+/// | `pre-one` | prefix `t4q-` | `t4q-1` |
+/// | `mixed` | `t4-a` and prefix `t4q-` | `t4-a`, `t4q-1` |
+async fn credentialed(list: bool) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+    let ids: Vec<SessionId> = SERVED.iter().map(|s| SessionId::new(*s)).collect();
+    let web = WebConfig {
+        list_sessions: list,
+        ..Default::default()
+    };
+    let state = Arc::new(AppState::new(
+        ids[0].clone(),
+        ids,
+        backends_on(two_sessions().await),
+        true,
+        None,
+        vec![
+            credential("pre-two", &[], Some("t4-")),
+            credential("pre-one", &[], Some("t4q-")),
+            credential("mixed", &["t4-a"], Some("t4q-")),
+        ],
+        &[],
+        &web,
+    ));
+    spawn(state).await
 }
 
 /// Acceptance: the picker is hidden in single-session mode. One served
@@ -317,4 +396,57 @@ fn an_empty_session_says_so() {
     assert!(APP_JS.contains("return state.graph.nodes.length === 0;"));
     assert!(APP_JS.contains("return state.concepts === 0;"));
     assert!(INDEX_HTML.contains(r#"<h1 id="hero-empty-heading">Nothing relied on yet</h1>"#));
+}
+
+/// Review L1: the picker's `HEAD` probe drops a name from the history only
+/// on the portal's uniform 404, the one answer that means "this caller
+/// cannot read that name". On the wire: a name out of the credential's
+/// scope and one not served are that 404, byte for byte an unrouted path's;
+/// a missing or wrong bearer is a 401, which the script keeps the name on
+/// and reports as retryable (as it does a 5xx or a network failure).
+#[tokio::test]
+async fn only_the_probes_404_means_a_name_cannot_be_read() {
+    let (addr, handle) = credentialed(false).await;
+    let token = cred_token("pre-one");
+    let wrong = cred_token("nobody");
+    let r = as_caller(addr, "HEAD", "/s/t4q-1/", Some(&token)).await;
+    assert_eq!(r.status, 200, "a session in reach");
+    let unrouted = as_caller(addr, "HEAD", "/no/such/path", Some(&token)).await;
+    for target in ["/s/t4-a/", "/s/t4q-2/", "/s/.x/"] {
+        let r = as_caller(addr, "HEAD", target, Some(&token)).await;
+        assert_eq!(r.status, 404, "{target}");
+        assert_eq!(
+            super::routing::wire(&r),
+            super::routing::wire(&unrouted),
+            "{target}: the uniform 404"
+        );
+    }
+    for presented in [None, Some(wrong.as_str())] {
+        for target in ["/s/t4q-1/", "/s/t4-a/", "/s/t4q-2/"] {
+            let r = as_caller(addr, "HEAD", target, presented).await;
+            assert_eq!(r.status, 401, "{target} without a valid bearer");
+        }
+    }
+    handle.abort();
+
+    // The script: the forget and the "cannot be read" message sit under
+    // `r.status === 404` alone; anything else keeps the name.
+    let probe = APP_JS
+        .split("send(target, { method: \"HEAD\"")
+        .nth(1)
+        .and_then(|rest| rest.split("function initPicker").next())
+        .expect("the probe");
+    let on_404 = probe
+        .split("if (r.status === 404) {")
+        .nth(1)
+        .and_then(|rest| rest.split("return;").next())
+        .expect("a 404 branch");
+    assert!(on_404.contains("forgetSession(name);"), "{on_404}");
+    assert!(on_404.contains("can be read here."), "{on_404}");
+    assert_eq!(probe.matches("forgetSession(").count(), 1, "{probe}");
+    assert_eq!(probe.matches("can be read here.").count(), 1, "{probe}");
+    assert!(probe.contains(
+        r#"pickerMessage("Could not open " + name + " (HTTP " + r.status + "). Try again.");"#
+    ));
+    assert!(probe.contains(r#"pickerMessage("Could not reach the server. Try again.");"#));
 }

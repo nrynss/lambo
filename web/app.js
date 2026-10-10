@@ -295,8 +295,18 @@
     // by landing on an empty 404. The page itself never touches the store.
     send(target, { method: "HEAD", cache: "no-store" }).then(function (r) {
       if (r.ok) { window.location.assign(target); return; }
-      if (picker.mode === "entry") { forgetSession(name); fillKnownSessions(); }
-      pickerMessage("No session called " + name + " can be read here.");
+      // Only the portal's uniform 404 means "this caller cannot read that
+      // name" (design 6.2 drops a name on that answer alone). A 401 or 403
+      // (an expired proxy session), a 5xx (the store is down) or anything
+      // else is transient: the name stays in the history and the message
+      // says to try again.
+      if (r.status === 404) {
+        forgetSession(name);
+        fillKnownSessions();
+        pickerMessage("No session called " + name + " can be read here.");
+        return;
+      }
+      pickerMessage("Could not open " + name + " (HTTP " + r.status + "). Try again.");
     }).catch(function () {
       pickerMessage("Could not reach the server. Try again.");
     });
