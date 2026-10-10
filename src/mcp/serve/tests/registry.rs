@@ -138,6 +138,7 @@ fn new_registry_ledgered(
         }),
         early,
         RegistryBounds::pinned_only(),
+        None,
     )
 }
 

@@ -669,6 +669,7 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
         None,
         early.clone(),
         RegistryBounds::pinned_only(),
+        Some(Arc::clone(mem.store())),
     );
     // The holder startup, below the arming, in the order it has always run:
     // the session's server, the process-wide tasks (which read it), then the
@@ -835,6 +836,7 @@ async fn serve_pinned_with(
         }),
         early.clone(),
         bounds,
+        None,
     );
 
     // The pinned acquires, in order. The registry is the only long-lived

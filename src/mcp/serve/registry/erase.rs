@@ -528,13 +528,10 @@ impl SessionRegistry {
         }
     }
 
-    /// The store every session shares: the template builder's, else the
-    /// one the first admitted session brought.
+    /// The store every session shares, set at construction (#32 PR 7
+    /// review L4).
     fn shared_store(&self) -> Option<Arc<dyn GraphStore>> {
-        self.attacher
-            .as_ref()
-            .and_then(|attacher| attacher.template.shared_store())
-            .or_else(|| self.store.get().cloned())
+        self.store.clone()
     }
 }
 

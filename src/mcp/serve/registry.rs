@@ -421,11 +421,11 @@ pub(super) struct SessionRegistry {
     /// shutdown. An in-serve erase (#32 PR 7) runs here too, so the
     /// shutdown waits for it.
     detaches: parking_lot::Mutex<Vec<tokio::task::JoinHandle<()>>>,
-    /// The store every session shares (one `GraphStore`, Level B), taken
-    /// from the first session admitted: what an erase of a session that is
-    /// not attached runs against when no template builder is at hand (a
-    /// one-session registry, #32 PR 7).
-    store: std::sync::OnceLock<Arc<dyn crate::store::GraphStore>>,
+    /// The store every session shares (one `GraphStore`, Level B), from
+    /// construction (#32 PR 7 review L4): the template builder's, else the
+    /// one the caller hands a one-session registry. What an erase of a
+    /// session that is not attached runs against.
+    store: Option<Arc<dyn crate::store::GraphStore>>,
     /// Set by a test to make the next on-demand attach panic right after
     /// it is admitted (#32 PR 6 Sonnet review L-a).
     #[cfg(test)]
@@ -439,6 +439,10 @@ impl SessionRegistry {
     /// `bounds` sets how many attaches run at once and whether, and within
     /// which bounds, sessions attach on demand. On-demand attach needs an
     /// attacher; without one it is off.
+    ///
+    /// `store` is the store every session shares, for a registry with no
+    /// attacher (whose sessions come from the election); one with an
+    /// attacher uses its template's, and may pass `None`.
     pub(super) fn new(
         order: Vec<String>,
         default: Option<String>,
@@ -446,7 +450,12 @@ impl SessionRegistry {
         attacher: Option<SessionAttacher>,
         early: EarlyShutdown,
         bounds: RegistryBounds,
+        store: Option<Arc<dyn crate::store::GraphStore>>,
     ) -> Arc<Self> {
+        let store = attacher
+            .as_ref()
+            .and_then(|attacher| attacher.template.shared_store())
+            .or(store);
         let permit_count = u32::try_from(bounds.attach_permits.max(1)).unwrap_or(u32::MAX);
         let on_demand = bounds
             .on_demand
@@ -474,7 +483,7 @@ impl SessionRegistry {
             retry: parking_lot::Mutex::new(None),
             sweeper: parking_lot::Mutex::new(None),
             detaches: parking_lot::Mutex::new(Vec::new()),
-            store: std::sync::OnceLock::new(),
+            store,
             #[cfg(test)]
             panic_after_admit: std::sync::atomic::AtomicBool::new(false),
         })
@@ -1149,9 +1158,6 @@ impl SessionRegistry {
             }
             slots.insert(id, Slot::Live(Arc::clone(&session)));
         }
-        // Every session shares the one store; the first one in leaves it
-        // for an erase of a session that is not attached (#32 PR 7).
-        let _ = self.store.set(Arc::clone(session.mem.store()));
         if self.policy == LeaseLossPolicy::DetachSession {
             let watcher = tokio::spawn(watch_lease(
                 Arc::downgrade(self),

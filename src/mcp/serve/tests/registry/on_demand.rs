@@ -156,6 +156,7 @@ impl OnDemand {
                     min_idle_to_evict,
                 }),
             },
+            None,
         );
         attach_or_hold(&registry, PINNED).await;
         registry.mark_started();

@@ -861,6 +861,33 @@ async fn an_erase_hanging_at_the_shutdown_is_cut_short_inside_the_close_grace() 
     }
 }
 
+/// #32 PR 7 review L4: a registry with no attacher (a one-session serve's)
+/// has the shared store from construction, so it can erase a session it
+/// never admitted, as the CLI would, instead of answering that it has no
+/// store.
+///
+/// Mutation: seed the store from the first admitted session only and the
+/// erase fails with a capability error.
+#[tokio::test]
+async fn a_registry_that_admitted_nothing_still_erases_as_the_cli_would() {
+    use crate::mcp::serve::registry::{EraseAnswer, RegistryBounds};
+    let store = Arc::new(MemoryStore::new());
+    let registry = SessionRegistry::new(
+        vec!["er-solo".to_string()],
+        Some("er-solo".to_string()),
+        LeaseLossPolicy::ExitProcess,
+        None,
+        EarlyShutdown::unarmed(),
+        RegistryBounds::pinned_only(),
+        Some(Arc::clone(&store) as Arc<dyn GraphStore>),
+    );
+    match registry.erase("er-u-never").await {
+        EraseAnswer::Erased(report) => assert!(report.already_absent, "{report:?}"),
+        other => panic!("the erase answered {other:?}"),
+    }
+    assert_only_the_tombstone(&store, "er-u-never").await;
+}
+
 /// #32 PR 7 review H1: an erase that arrives while the pinned retry of the
 /// same session is between its acquire and its admission (parked in its
 /// load, the lease already taken). The erase waits for the retry's attach
