@@ -513,3 +513,315 @@ fn an_image_at_the_exact_cap_decodes() {
     assert_eq!((img.width(), img.height()), (768, 768));
     assert_eq!(img.color(), ColorType::Rgba16);
 }
+
+// ---------------------------------------------------------------- formats
+
+/// A tiny CMYK JPEG (24x16, Adobe APP14 marker), made with Pillow; the
+/// `image` crate cannot encode CMYK.
+const CMYK_JPEG: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/fixtures/images/cmyk-24x16.jpg"
+));
+
+/// A zlib stream of `raw` in stored (uncompressed) deflate blocks.
+fn zlib_stored(raw: &[u8]) -> Vec<u8> {
+    let mut out = vec![0x78, 0x01];
+    let mut chunks = raw.chunks(65_535).peekable();
+    if chunks.peek().is_none() {
+        out.extend_from_slice(&[1, 0, 0, 0xFF, 0xFF]);
+    }
+    while let Some(block) = chunks.next() {
+        out.push(u8::from(chunks.peek().is_none()));
+        let len = u16::try_from(block.len()).unwrap();
+        out.extend_from_slice(&len.to_le_bytes());
+        out.extend_from_slice(&(!len).to_le_bytes());
+        out.extend_from_slice(block);
+    }
+    let (mut a, mut b) = (1u32, 0u32);
+    for &x in raw {
+        a = (a + u32::from(x)) % 65_521;
+        b = (b + a) % 65_521;
+    }
+    out.extend_from_slice(&((b << 16) | a).to_be_bytes());
+    out
+}
+
+fn png_chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+    out.extend_from_slice(&u32::try_from(data.len()).unwrap().to_be_bytes());
+    let start = out.len();
+    out.extend_from_slice(kind);
+    out.extend_from_slice(data);
+    let crc = crc32(&out[start..]);
+    out.extend_from_slice(&crc.to_be_bytes());
+}
+
+/// An 8-bit palette PNG of `width` x `height` with four colours, the second
+/// fully transparent and the third half transparent through `tRNS`.
+fn palette_png(width: u32, height: u32) -> Vec<u8> {
+    let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+    let mut ihdr = Vec::new();
+    ihdr.extend_from_slice(&width.to_be_bytes());
+    ihdr.extend_from_slice(&height.to_be_bytes());
+    ihdr.extend_from_slice(&[8, 3, 0, 0, 0]);
+    png_chunk(&mut out, b"IHDR", &ihdr);
+    png_chunk(
+        &mut out,
+        b"PLTE",
+        &[255, 0, 0, 0, 255, 0, 0, 0, 255, 250, 250, 250],
+    );
+    png_chunk(&mut out, b"tRNS", &[255, 0, 128]);
+    let mut raw = Vec::new();
+    for y in 0..height {
+        raw.push(0);
+        for x in 0..width {
+            raw.push(((x / 3 + y / 2) % 4) as u8);
+        }
+    }
+    png_chunk(&mut out, b"IDAT", &zlib_stored(&raw));
+    png_chunk(&mut out, b"IEND", &[]);
+    out
+}
+
+/// An 8-bit greyscale PNG.
+fn grey_png(width: u32, height: u32) -> Vec<u8> {
+    let img = image::GrayImage::from_fn(width, height, |x, y| {
+        image::Luma([((x * 7 + y * 3) % 256) as u8])
+    });
+    let mut out = Vec::new();
+    PngEncoder::new(&mut out)
+        .write_image(img.as_raw(), width, height, ColorType::L8.into())
+        .unwrap();
+    out
+}
+
+/// A JPEG whose EXIF says "rotate 90 degrees clockwise" (orientation 6).
+fn jpeg_with_orientation_6(width: u32, height: u32) -> Vec<u8> {
+    // Big-endian TIFF header, one IFD entry: 0x0112 Orientation, SHORT, 1, 6.
+    let exif = vec![
+        b'M', b'M', 0, 42, 0, 0, 0, 8, // header, IFD at 8
+        0, 1, // one entry
+        0x01, 0x12, 0, 3, 0, 0, 0, 1, 0, 6, 0, 0, // orientation = 6
+        0, 0, 0, 0, // no next IFD
+    ];
+    let mut out = Vec::new();
+    let mut encoder = JpegEncoder::new_with_quality(&mut out, 90);
+    encoder.set_exif_metadata(exif).unwrap();
+    encoder
+        .write_image(
+            picture(width, height).as_raw(),
+            width,
+            height,
+            ColorType::Rgb8.into(),
+        )
+        .unwrap();
+    out
+}
+
+/// A CMYK JPEG is converted to RGB by the decoder and canonicalized like
+/// any other.
+#[test]
+fn a_cmyk_jpeg_becomes_an_rgb_png() {
+    let input = validate(CMYK_JPEG, "image/jpeg").expect("the validator accepts CMYK");
+    let out = to_canonical_png(input.bytes(), input.mime()).unwrap();
+    let img = decode_png(&out);
+    assert_eq!((img.width(), img.height()), (768, 512));
+    assert_eq!(img.color(), ColorType::Rgb8);
+}
+
+/// A greyscale PNG stays greyscale (one channel): the server expands it to
+/// RGB itself, as it would have the original.
+#[test]
+fn a_greyscale_png_stays_greyscale() {
+    let img = decode_png(&canonical_of(&grey_png(100, 60), "image/png").unwrap());
+    assert_eq!((img.width(), img.height()), (768, 461));
+    assert_eq!(img.color(), ColorType::L8);
+}
+
+/// A palette PNG with `tRNS` is expanded to RGBA, the transparency kept as
+/// alpha, before it is resampled.
+#[test]
+fn a_palette_png_with_trns_becomes_rgba() {
+    let png = palette_png(48, 24);
+    let small = image::load_from_memory_with_format(&png, ImageFormat::Png).unwrap();
+    assert_eq!(small.color(), ColorType::Rgba8, "the decoder expands it");
+    let img = decode_png(&canonical_of(&png, "image/png").unwrap());
+    assert_eq!((img.width(), img.height()), (768, 384));
+    assert_eq!(img.color(), ColorType::Rgba8);
+    // Index 0 (opaque red) at the top-left corner, still opaque red.
+    assert_eq!(img.to_rgba8().get_pixel(0, 0).0, [255, 0, 0, 255]);
+    let alphas: std::collections::BTreeSet<u8> = img.to_rgba8().pixels().map(|p| p[3]).collect();
+    assert!(alphas.contains(&0) && alphas.contains(&255), "{alphas:?}");
+}
+
+/// EXIF orientation is not applied: a JPEG tagged "rotate 90" keeps its
+/// stored width and height, as `llama-server`'s decoder would read it.
+///
+/// Mutation: apply the orientation -> red.
+#[test]
+fn exif_orientation_is_ignored() {
+    use image::ImageDecoder;
+    let jpg = jpeg_with_orientation_6(400, 200);
+    let mut decoder = image::ImageReader::with_format(Cursor::new(&jpg[..]), ImageFormat::Jpeg)
+        .into_decoder()
+        .unwrap();
+    assert_eq!(
+        decoder.orientation().unwrap(),
+        image::metadata::Orientation::Rotate90,
+        "the fixture carries the tag"
+    );
+    let img = decode_png(&canonical_of(&jpg, "image/jpeg").unwrap());
+    assert_eq!((img.width(), img.height()), (768, 384), "not rotated");
+}
+
+// ----------------------------------------------------------------- goldens
+
+fn sha_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// **The canonical form is pinned.** For fixed inputs: the SHA-256 of the
+/// input, of the canonical PNG bytes, and of the canonical pixels (width,
+/// height, colour type and raw samples).
+///
+/// If this test fails after a dependency update (`image`, `png`,
+/// `zune-jpeg`, `image-webp`, `fdeflate`, ...):
+///
+/// - **pixels changed**: the canonical image is different, so vectors are
+///   different. That is a new prompt profile: bump `EG2_PROMPT_PROFILE`
+///   (`lambo-eg2-v3`), note it in the CHANGELOG, then re-pin. Never re-pin
+///   the pixel golden under the same profile name.
+/// - **only the PNG bytes changed** (pixels equal): the encoder compresses
+///   differently. The server decodes the same pixels, so vectors are
+///   unchanged; re-pin the PNG golden without a profile bump.
+/// - **an input changed**: the in-test generator (an encoder) moved; this
+///   says nothing about the canonical form. Re-pin the input and check the
+///   other two against a run on the previous version.
+#[test]
+fn the_canonical_form_matches_its_golden() {
+    let mut rgba16 = Vec::new();
+    DynamicImage::ImageRgba16(image::ImageBuffer::from_fn(900, 700, |x, y| {
+        Rgba([
+            (x * 73) as u16,
+            (y * 91) as u16,
+            ((x ^ y) * 37) as u16,
+            50_000,
+        ])
+    }))
+    .write_with_encoder(PngEncoder::new_with_quality(
+        &mut rgba16,
+        CompressionType::Fast,
+        PngFilter::Adaptive,
+    ))
+    .unwrap();
+    let cases: [(&str, Vec<u8>, &str, [&str; 3]); 8] = [
+        (
+            "png rgb 1536x1024",
+            png_rgb(1536, 1024),
+            "image/png",
+            GOLDEN[0],
+        ),
+        ("jpeg 1000x3000", jpeg(1000, 3000), "image/jpeg", GOLDEN[1]),
+        ("webp rgba 64x48", webp(64, 48).0, "image/webp", GOLDEN[2]),
+        (
+            "webp rgba 2000x1000",
+            webp(2000, 1000).0,
+            "image/webp",
+            GOLDEN[3],
+        ),
+        ("png rgba16 900x700", rgba16, "image/png", GOLDEN[4]),
+        ("png grey 100x60", grey_png(100, 60), "image/png", GOLDEN[5]),
+        (
+            "png palette+tRNS 48x24",
+            palette_png(48, 24),
+            "image/png",
+            GOLDEN[6],
+        ),
+        (
+            "jpeg cmyk 24x16",
+            CMYK_JPEG.to_vec(),
+            "image/jpeg",
+            GOLDEN[7],
+        ),
+    ];
+    let mut report = String::new();
+    let mut ok = true;
+    for (name, input, mime, [want_in, want_png, want_px]) in &cases {
+        let out = canonical_of(input, mime).unwrap();
+        // Same input, same output, run to run.
+        assert_eq!(out, canonical_of(input, mime).unwrap(), "{name}");
+        let img = decode_png(&out);
+        let mut px = Vec::new();
+        px.extend_from_slice(&img.width().to_be_bytes());
+        px.extend_from_slice(&img.height().to_be_bytes());
+        px.extend_from_slice(format!("{:?}", img.color()).as_bytes());
+        px.extend_from_slice(img.as_bytes());
+        let got = [sha_hex(input), sha_hex(&out), sha_hex(&px)];
+        report.push_str(&format!(
+            "    [\"{}\", \"{}\", \"{}\"], // {name}\n",
+            got[0], got[1], got[2]
+        ));
+        for (what, g, w) in [
+            ("input", &got[0], want_in),
+            ("png", &got[1], want_png),
+            ("pixels", &got[2], want_px),
+        ] {
+            if g != w {
+                ok = false;
+                eprintln!("{name}: {what} golden moved: {g} (pinned {w})");
+            }
+        }
+    }
+    assert!(
+        ok,
+        "canonical goldens moved; see the comment above. Now:\n{report}"
+    );
+}
+
+/// Pinned on image 0.25.10 (png 0.18.1, zune-jpeg 0.5.15, image-webp
+/// 0.2.4). Per case: input, canonical PNG bytes, canonical pixels.
+const GOLDEN: [[&str; 3]; 8] = [
+    [
+        "6765154854a0b748f4426fc72d0027d2652634318ce3098c629f568a0993e9ef",
+        "da844357676726c98cd4254095d188b592e3fdbb181b7686389dd9589c5a9663",
+        "37f6088099e09dd6c5c412db56d38e95502da9b82a395eede0852f73b6700bd7",
+    ], // png rgb 1536x1024
+    [
+        "e9e36f9a9c840207405b307d94c75e922e952eb36c94c43426d47c6d02fb74b6",
+        "3fb45f2f3a32495781ca8f40a4194daf417ba9f2e13ac134ef742a774812fa68",
+        "13dc7ae0acb1726d1431b9d8be0c814dd547cb8fb2b374d216b2be624f1f81b4",
+    ], // jpeg 1000x3000
+    [
+        "729b4edd4c13dd43d239c8acf690f02bd47e4e1af9d34212c7a92b44f578d780",
+        "0dee3ba2dc6ab91c0fbe72993b112384328d5d4c6508292a3175f7c0ada0721a",
+        "6b7a33094e24651d4f79b54e7a3b93bbf0553d5b2dff5b94f3ca94e92bead091",
+    ], // webp rgba 64x48
+    [
+        "0c48aeecb64afcb64568b100fc8a864283f75f54027bda5c99184b78d4b288de",
+        "e7dc16a22b0b1c7f95d453c8e059503e7ff926deca5376e77f7f849d5f67f923",
+        "1151f666955fac9bfda45b306ceaa104fd3b807c99ea643b8ee5adbd06bbd5a5",
+    ], // webp rgba 2000x1000
+    [
+        "f43e8c80fbad6357f0f777f8d7be32d4f237e03adaed060633446456c5bf4072",
+        "f641cfd2d760834efbfc98e464ed7e724be7b45107203b1d311756efafd088db",
+        "45cc66f30bc51f149ed060e86b23f3251b76d0e9e6f9caac82c7824cb2acac4c",
+    ], // png rgba16 900x700
+    [
+        "75093ae433cc0b6fcbe7bb7bff61523e6601da17278981238a2149c8ef03cba2",
+        "6e7b7e6536bec0884bc68f860c6d3410671da492167356483b0a0ea2b671917d",
+        "f63d8f9b7b90553a1e7b15ef2a92173c3721eb30d8b105d92a74a04a0e14c374",
+    ], // png grey 100x60
+    [
+        "cd6f60839fde313dad5ab388e11d2fea7c878d9aa154ce6a1f09ebecefdfeba2",
+        "f355a86bb49bf95a5b9321e45f93a330f98af846102ffe90ae24e36fbcc05c87",
+        "85730fb58151cc1671bc118a9a408af384f574fc449195561362d78259c36bd2",
+    ], // png palette+tRNS 48x24
+    [
+        "6af90f38046d7b0e06a558b043575a1158637c5f69d47b24298623dc33718b01",
+        "ac91c5ca02a8d0ada537e00a93337e8daa48c5949299b536c9f848ea2cf8a27d",
+        "e260aaa9d556f9ab225bdde53fb52db3fd1e5a354c686651f3789c6a3e59d4b3",
+    ], // jpeg cmyk 24x16
+];
