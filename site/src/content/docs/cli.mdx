@@ -293,15 +293,15 @@ reservations are advisory and RAM-local: this reservation ends when this process
 
 | Flag | Required | Default |
 |---|---|---|
-| `--session <SESSION>` | Unless `lambo.toml` names the session: `[serve] sessions` over `http`, the cwd map or `default_session` over `stdio` (below) | |
+| `--session <SESSION>` | Unless `lambo.toml` names the session: `[serve] sessions` over `http`, the cwd map or `default_session` over `stdio` (below) | Repeatable over `http`: every value is pinned and the first is the default. `stdio` takes at most one. |
 | `--agent <AGENT>` | No | `lambo-serve` |
 | `--transport <TRANSPORT>` | No | `stdio`, or `http` |
 | `--port <PORT>` | No | `7700`, used when the transport is `http`. |
 | `--bind <BIND>` | No | `127.0.0.1`, used when the transport is `http`. Any other bind requires a credential: `--auth-token` (or `LAMBO_AUTH_TOKEN`) or a `[[serve.credential]]`. |
 | `--auth-token <TOKEN>` | No | Bearer token for the HTTP transport: the credential named `default`, which reaches every pinned session. Loopback runs unauthenticated by default while no credential is configured. A non-loopback bind fails closed without a credential (this token or a `[[serve.credential]]`). Ignored on `stdio`. `LAMBO_AUTH_TOKEN` overrides it. See [Credentials](/lambo/config/#credentials). |
-| `--max-sessions <N>` | No | `32`. Ceiling on concurrently live HTTP MCP sessions. With several credentials, each may hold an even share: this divided by the number of credentials, rounded down, at least 1. |
+| `--max-sessions <N>` | No | `32`. Ceiling on concurrently live HTTP MCP sessions, counted across every session the process holds. With several credentials, each may hold an even share: this divided by the number of credentials, rounded down, at least 1. |
 | `--rate-limit-rps <N>` | No | `50`. Sustained HTTP request rate, per credential. Burst allowance is double. `0` disables it. |
-| `--ledger <PATH>` | No | Off by default. Append JSONL records of what this serve did to `PATH` (append-only, created if absent). **Five line kinds, not one:** `call` (one per MCP tool call), `completion` (one per background write's outcome, carrying the receipt id that joins it back to the `call` line that acked it, plus, for an applied write, the counts the receipt reports: `created_count` and `matched_count`, `semantic_merged` and `reinforced` for a derive, `edges` for a record_action, and `embedded` under the hybrid strategy, each present only for the write kind that has it and never payload text), `startup` (this serve's intent to acquire the single-writer lease, written *before* the attempt, so a serve that loses it still leaves a record), and `lease` (a refused acquisition from both sides, and a proxy starting or losing its connection to the holder). `stats` is the fifth and arrives only with `--ledger-heartbeat`. Every line carries `session`, the session it is about, so one file can later hold several (#32). Never affects a tool call: the write is buffered onto a dedicated writer thread, and a stalled or unwritable path drops lines rather than failing or delaying anything, counting them in `lambo_stats` as `ledger_dropped_lines`, split by cause into `ledger_dropped_channel_full` (backpressure) and `ledger_dropped_write_failed` (a broken path), alongside `ledger_queued_lines` (accepted but not yet on disk — the one key that moves when a blocked `open` parks the writer before it has dropped anything). Rotation is the operator's (`logrotate`, or just `mv` it — the writer recreates the path on the next line). |
+| `--ledger <PATH>` | No | Off by default. Append JSONL records of what this serve did to `PATH` (append-only, created if absent). **Five line kinds, not one:** `call` (one per MCP tool call), `completion` (one per background write's outcome, carrying the receipt id that joins it back to the `call` line that acked it, plus, for an applied write, the counts the receipt reports: `created_count` and `matched_count`, `semantic_merged` and `reinforced` for a derive, `edges` for a record_action, and `embedded` under the hybrid strategy, each present only for the write kind that has it and never payload text), `startup` (this serve's intent to acquire the single-writer lease, written *before* the attempt, so a serve that loses it still leaves a record), and `lease` (a refused acquisition from both sides, and a proxy starting or losing its connection to the holder). `stats` is the fifth and arrives only with `--ledger-heartbeat`. Every line carries `session`, the session it is about, so one file can hold every session of a serve that holds several; a `call` line made through a configured `[[serve.credential]]` also carries `credential`, its name. Never affects a tool call: the write is buffered onto a dedicated writer thread, and a stalled or unwritable path drops lines rather than failing or delaying anything, counting them in `lambo_stats` as `ledger_dropped_lines`, split by cause into `ledger_dropped_channel_full` (backpressure) and `ledger_dropped_write_failed` (a broken path), alongside `ledger_queued_lines` (accepted but not yet on disk — the one key that moves when a blocked `open` parks the writer before it has dropped anything). Rotation is the operator's (`logrotate`, or just `mv` it — the writer recreates the path on the next line). |
 | `--ledger-heartbeat <SECS>` | No | Off by default; requires `--ledger`, and `SECS` must be at least 1. Also append a `stats` line every `SECS`: the `lambo_stats` payload plus process uptime and the binary's version and git sha, so a stretch of ledger can be attributed to the binary that produced it. Build with `LAMBO_GIT_SHA=$(git rev-parse --short HEAD)` for a real sha; it reports `unknown` otherwise. |
 
 ```bash
@@ -340,7 +340,38 @@ The ledger is the input to the report generators in `scripts/observability/`, wh
 
 ### Several sessions in one serve
 
-One `lambo serve --transport http` can hold several sessions at once. Each session is still owned by exactly one process, and that process may own many. Name the sessions with a repeated `--session`, with `sessions` in the `[serve]` table of `lambo.toml`, or both; the process pins all of them (`--session` values first, then the table's, each once), attaches every one at startup, and keeps them attached until it exits.
+One `lambo serve --transport http` can hold several sessions at once. Each session is still owned by exactly one process, and that process may own many: the single-writer rule holds per session. A session joins the serve in one of two ways.
+
+| | Pinned | Attached on demand |
+|---|---|---|
+| Named by | A repeated `--session`, `[serve] sessions`, or both. | A credential's `session_prefix`, or a name in its `sessions` that is not pinned. |
+| Attached | At startup. Kept until the serve exits. | By the first request for it that its credential may make. |
+| Created | By being listed. | Only by a credential with `create = true`. Without `create`, only a session that already exists is attached. |
+| Detached | Only when it loses its lease, is erased, or the serve stops. Never for being idle, never evicted. | After `idle_detach_secs` without a tool call, to make room at `max_attached`, on a lost lease, when erased, or when the serve stops. |
+| Typical use | A few project sessions for agents. | One session per user of an app. |
+
+A serve attaches sessions on demand only when some `[[serve.credential]]` reaches past the pinned sessions. A serve configured with nothing more than `--session` flags, `[serve] sessions`, `LAMBO_AUTH_TOKEN`, or no credential at all serves its pinned sessions and nothing else. The keys are in [Multi-session serving](/lambo/config/#multi-session-serving). A minimal file with both kinds:
+
+```toml
+[serve]
+sessions = ["lambo", "general"]   # pinned
+default_session = "general"       # what /mcp serves
+
+[[serve.credential]]              # agents: the pinned sessions
+name = "agents"
+token_env = "LAMBO_AGENTS_TOKEN"
+sessions = ["lambo", "general"]
+
+[[serve.credential]]              # an app: one session per user, on demand
+name = "app"
+token_env = "LAMBO_APP_TOKEN"
+session_prefix = "app-u-"
+create = true
+```
+
+#### Pinned sessions and their URLs
+
+The process pins every name from `--session` and `[serve] sessions`: the `--session` values first, then the table's, each once. It attaches every one at startup and keeps them attached until it exits.
 
 ```bash
 lambo serve --config lambo.toml --transport http --session lambo --session general
@@ -349,17 +380,88 @@ lambo serve --config lambo.toml --transport http --session lambo --session gener
 | URL | Reaches |
 |---|---|
 | `http://127.0.0.1:7700/mcp/s/<session>` | That session. Point each project's client at its own session's URL. |
-| `http://127.0.0.1:7700/mcp` | The default session: the first `--session`, else `[serve] default_session`, else the first pinned session. A client configured for a single-session serve keeps working unchanged. |
+| `http://127.0.0.1:7700/mcp` | The default session: the first `--session`, else `[serve] default_session`, else the first pinned session. The default must be pinned: `/mcp` never attaches a session on demand. A client configured for a single-session serve keeps working unchanged. |
 
-Each session is a full writer of its own: its own lease and fencing token, its own graph, caches, write queue and local endpoint, so a stdio `lambo serve --session <name>` on the same machine forwards to this process for that session. Nothing crosses between sessions: recall, inspect, saints, stats and GC each see only the session the request addressed, and an MCP session opened on one session's URL is unknown at another's. The embedder, the store connection and the HTTP listener are shared. `--max-sessions` caps the MCP sessions of the whole process, counted across every session.
+Each session is a full writer of its own. It has its own lease and fencing token, graph, caches, write queue and local endpoint. So a stdio `lambo serve --session <name>` on the same machine forwards to this process for that session.
 
-A request for a session this process does not host gets a plain `404` with an empty body, the same answer as any path the server does not route. So does a request for a session the caller's credential does not reach, whatever state that session is in: the credential is checked before the session is looked up, and no store is consulted for a refused request. Only a caller whose credential reaches a session can see that it is not serving right now (held by another writer, being detached, or failed), which answers `503`. Credentials are configured with `[[serve.credential]]`; see [Credentials](/lambo/config/#credentials). With more than one session, every name must be addressable by URL: 1 to 128 bytes of `A-Z`, `a-z`, `0-9`, `.`, `_`, `:` and `-`, not starting with `.`. A single session keeps `--session`'s looser rule and is served at `/mcp`.
+Nothing crosses between sessions. Recall, inspect, saints, stats and GC each see only the session the request addressed. An MCP session opened on one session's URL is unknown at another's.
 
-If another writer already holds one of the sessions at startup, the server does not wait for it: it serves the others, answers requests for that session with `503` and a `Retry-After` header, and tries to take it every 5 seconds. If a running session loses its lease to another writer, only that session is detached (its unflushed tail is discarded, as a crash would discard it, and a `lease` `lost` line goes to the ledger); the other sessions keep serving, and the lost session is retried the same way. If a retry fails with an error that will not clear on its own (the session was erased, its embedding contract no longer matches, or the store is not provisioned), the error is logged once and the session is not retried again: requests for it get `503` with no `Retry-After` until the server is restarted. A store or embedder that cannot be reached is retried, and logged once per outage. A serve with one session behaves as it always has: losing the lease ends the process, so its client respawns into a proxy to the new holder.
+The embedder, the store connection and the HTTP listener are shared. With more than one session, every name must be addressable by URL: 1 to 128 bytes of `A-Z`, `a-z`, `0-9`, `.`, `_`, `:` and `-`, not starting with `.`. A single session keeps `--session`'s looser rule and is served at `/mcp`.
 
-**Sessions attached on demand.** A credential whose scope reaches past the pinned sessions (a `session_prefix`, or a name in its `sessions` that is not pinned) makes the serve attach those sessions when they are first asked for. A request for such a session that is not attached attaches it, then is served: with `create = true` the session is created if it does not exist; without it, the session is attached only if it already exists (a writer has used it), and a session that does not exist gets the plain `404`. Concurrent first requests for one session wait for the same single attach. An erased session answers `410` and is never recreated. A `404`, `410` or failed attach is remembered for 30 seconds, so repeating the request does not reach the store again; a credential with `create` is not held back by a `404` remembered for one without it. These sessions are detached again after `[serve] idle_detach_secs` with no tool call (default 900 seconds; an open SSE stream does not count as use), or when an attach finds `max_attached` sessions attached: the least recently used on-demand session with no request or call running, and unused for at least 2 seconds, is detached to make room. Nothing is detached for a request that will not attach (a session that does not exist, is erased, or another writer holds). The on-demand places are shared among the credentials that reach on-demand sessions: each may hold its share (the places divided by the number of such credentials, rounded down, at least 1) whatever the others hold. A free place goes to whoever asks; at the cap, a credential at or over its share makes room only by detaching one of its own sessions, and one under its share may also detach a session of a credential over its share. A session counts against the credential whose request attached it. If no session can be detached, the request gets `503` with `Retry-After: 5`. A request waits at most 15 seconds for an attach in flight, and an attach is abandoned after 60 seconds (its lease released); either way the request gets `503` with `Retry-After: 5`. A detach flushes the session and releases its lease, keeping its fencing token, so attaching it again takes the next token and recalls what it held. A session another writer holds answers `503` with a `Retry-After` of the time that writer's lease could lapse, and is not retried in the background. Pinned sessions are never evicted or idle-detached. At most `[serve] attach_concurrency` sessions attach at once (one on SQLite). While twice `max_attached` attaches are waiting to start, a request that would start another gets `503` with `Retry-After: 5` and starts nothing. Each session also has its own request rate, `[serve] per_session_rps` (default `--rate-limit-rps`, burst twice that), on top of the credential's, so a flood on one session is answered `429` without spending another's. A serve of one session that attaches nothing on demand applies it only when `per_session_rps` is set. A serve with on-demand sessions treats a lost lease like a multi-session serve does, even with one pinned session: only that session is detached. A serve whose credentials reach only the pinned sessions, such as a single `--session` with `LAMBO_AUTH_TOKEN`, behaves exactly as before.
+If another writer already holds one of the sessions at startup, the server does not wait for it. It serves the others, answers requests for that session with `503` and a `Retry-After` header, and tries to take it again 5 to 6 seconds after each failed attempt.
 
-On shutdown every session, pinned and on-demand, is drained and closed concurrently inside the same budget as a single session, and every lease is released. Each shutdown stage line is logged once for the whole set, and each session's close outcome names its session. With `--ledger`, every line carries its `session`, and the heartbeat writes one `stats` line per session. The operator surface is not part of this release.
+If a running session loses its lease to another writer, only that session is detached. Its unflushed tail is discarded, as a crash would discard it, and a `lease` `lost` line goes to the ledger. The other sessions keep serving, and the lost session is retried the same way.
+
+Some retry errors will not clear on their own: the embedding contract no longer matches, or the store is not provisioned. Such an error is logged once and the session is not retried again. Requests for it get `503` with no `Retry-After` until the server is restarted.
+
+A session found erased, at startup or on a retry, is not retried either. It gets the erased answer described below. The other sessions start and serve as usual.
+
+A store or embedder that cannot be reached is retried, and logged once per outage.
+
+A serve with one session and nothing on demand behaves as it always has: losing the lease ends the process, so its client respawns into a proxy to the new holder.
+
+#### Who reaches which session
+
+A request's credential decides which sessions it reaches.
+
+- **No credential.** On loopback, a serve accepts every request as the implicit credential `local`, which reaches the pinned sessions only.
+- **The legacy token.** `--auth-token` or `LAMBO_AUTH_TOKEN` is the credential `default`, with the same reach.
+- **Configured credentials.** `[[serve.credential]]` entries add credentials, each with its own scope and the flags `create`, `erase` and `admin`. Once one exists, every request needs a token, on loopback too.
+
+Neither `local` nor `default` attaches on demand, erases or lists. See [Credentials](/lambo/config/#credentials).
+
+A request without a valid token gets `401`, whatever it asked for.
+
+A request for a session this process does not host gets a plain `404` with an empty body. That is the same answer as any path the server does not route. A request for a session the caller's credential does not reach gets the same `404`, whatever state that session is in. The credential is checked before the session is looked up, and no store is consulted for a refused request.
+
+Only a caller whose credential reaches a session can learn its state:
+
+- `503`: the session is held by another writer, being attached, detached or erased, or failed;
+- erased: a `POST` whose body is one JSON-RPC request with a `method` and a non-null `id` (`initialize` included) gets `200` with the erased error (MCP error `-32003`). Anything else gets `410`: a `GET` or `DELETE`, a notification, a response, a batch, or a body that cannot be read or parsed.
+
+#### Sessions attached on demand
+
+- **Attach.** A request for an unattached session inside its credential's scope attaches the session, then is served. With `create = true` the session is created if it does not exist. Without it, the session is attached only if it already exists (a writer has used it). A session that does not exist gets the plain `404`.
+- **One attach at a time.** Concurrent first requests for one session wait for the same single attach. An attach first checks that the session exists, is not erased and is not held by another writer. It detaches nothing to make room for a request that will not attach.
+- **Erased.** An erased session gets the erased answer above: the erased error (MCP error `-32003`) to a `POST` of one JSON-RPC request with an `id`, and `410` to anything else. An erased session is never recreated.
+- **Remembered refusals.** A `404`, `410` or failed attach is remembered for 30 seconds, for at most 1,024 sessions, so repeating the request does not reach the store again. A `404` remembered for a credential without `create` does not hold back one that has `create`.
+- **Held elsewhere.** A session another writer holds answers `503`, with a `Retry-After` of the time that writer's lease could lapse. It is not retried in the background.
+- **Idle detach.** A session is detached after `[serve] idle_detach_secs` with no tool call (default 900 seconds). An open SSE stream does not count as use.
+- **Eviction at the cap.** When an attach finds `max_attached` sessions attached, the least recently used on-demand session is detached to make room. That session must have no request or call running and must have been unused for at least 2 seconds. If no session can be detached, the request gets `503` with `Retry-After: 5`.
+- **Fair shares of the places.** The on-demand places (`max_attached` minus the pinned sessions) are shared among the credentials that reach on-demand sessions. Each credential's share is the places divided by the number of such credentials, rounded down, at least 1. A free place goes to whoever asks. At the cap, a credential at or over its share makes room only by detaching one of its own sessions. One under its share may also detach a session of a credential over its share. A session counts against the credential whose request attached it.
+- **A detach keeps the token.** A detach flushes the session and releases its lease, keeping its fencing token. Attaching it again takes the next token and recalls what it held.
+- **Lost leases.** A serve with on-demand sessions treats a lost lease like a multi-session serve does, even with one pinned session: only that session is detached.
+
+Pinned sessions are never evicted or idle-detached. A serve whose credentials reach only the pinned sessions behaves exactly as before. That includes a single `--session` with `LAMBO_AUTH_TOKEN`.
+
+#### Bounds
+
+| Bound | Default | Counts | When it is reached |
+|---|---|---|---|
+| `--max-sessions` | `32` | MCP sessions across the whole process. With several credentials, each may hold its share: this divided by the number of credentials, rounded down, at least 1. | A new `initialize` gets `503` with `Retry-After: 5`. |
+| `--rate-limit-rps` | `50`, burst `100` | Requests per credential. | `429` with `Retry-After: 1`. |
+| `[serve] per_session_rps` | `--rate-limit-rps` | Requests per attached session, drawn after the credential's. A serve of one session that attaches nothing on demand applies it only when it is set. `0` turns it off. | `429` with `Retry-After: 1`, without spending another session's rate. |
+| `[serve] max_attached` | `16` | Attached sessions, pinned plus on-demand. | An on-demand session is evicted as above, else `503` with `Retry-After: 5`. |
+| `[serve] attach_concurrency` | `2`, always `1` on SQLite | Attaches running at once, on demand or retried in the background. | The attach waits for a turn. |
+| `[serve] idle_detach_secs` | `900` | Seconds an on-demand session goes without a tool call. | The session is detached. |
+| Attach wait | 15 seconds | How long a request waits for an attach in flight. | `503` with `Retry-After: 5`; the attach goes on. |
+| Attach time | 60 seconds | How long one attach may take. | The attach is abandoned, its lease released, and its requests get `503` with `Retry-After: 5`. |
+| Attaches waiting to start | twice `max_attached` | On-demand attaches that have not yet checked their session. | A request that would start another gets `503` with `Retry-After: 5` and starts nothing. |
+
+#### Erase and list from a running serve
+
+Two credential flags open the admin routes:
+
+- `erase`: erase a session in the credential's reach without stopping the serve, with `POST /admin/s/<session>/erase`;
+- `admin`: list the sessions in the credential's reach, with their state and size, with `GET /admin/sessions`.
+
+Neither route is an MCP tool. An agent's client, which holds no such credential, cannot reach them. To any other credential, both routes answer the plain `404`. See [Erase from a running serve](#erase-from-a-running-serve). There is no route to detach a session by hand.
+
+#### Shutdown and the ledger
+
+On shutdown every session, pinned and on-demand, is drained and closed concurrently, inside the same budget as a single session, and every lease is released. Each shutdown stage line is logged once for the whole set, and each session's close outcome names its session.
+
+With `--ledger`, every line carries its `session`. A call made through a configured credential also carries `credential`. The heartbeat writes one `stats` line per session.
 
 ### Stopping a writer
 
@@ -400,7 +502,9 @@ The page polls read-only `GET` endpoints, `/api/session`, `/api/recall`, `/api/e
 
 **Session list.** With `[web] list_sessions = true`, `GET /api/sessions` returns `{"sessions": [...]}`: the served sessions the presenting credential names exactly, in served order, or every served session for `default`, `"*"` and the unauthenticated window. It never expands a prefix and never shows another credential's names. Without the key the route does not exist and answers the same empty `404` as any unknown path.
 
-**Tokens and browsers.** The page sends no `Authorization` header itself, so with any credential configured a plain browser cannot open it: put it behind a proxy that adds the header for each user, or read the JSON routes from a script. Per-credential scope is for such a proxy and for scripts.
+**Switching sessions.** When the caller reads more than one served session, the page shows a session picker beside the session's name, and `/api/session` carries `"switchable": true`. The field is absent otherwise, so for a one-session window the `/api/session` JSON and every response header are unchanged and the page looks the same; the page's HTML did gain the picker's markup, hidden. With `list_sessions` on the picker offers the listed names plus "Other session…", which opens a text field for a session the listing does not name (it names a credential's exact sessions, never a `session_prefix` expansion). Otherwise it is a text field that suggests the sessions this browser has opened, kept in the browser's `localStorage` under `lambo-sessions`, names only. That history belongs to the browser profile, not to a credential: behind a proxy where several people share one profile, one person's names are suggested to the next (names only, and a name nobody there can read is dropped on its first `404`). Opening a session goes to its own page, `/s/<session>/`, so nothing from one session carries into another, and links such as `/s/<session>/?focus=user%20schema` reopen a focus. A name the caller cannot read (the portal's `404`) is reported in the picker and dropped from the suggestions; any other failure (a `401` from an expired proxy session, a `5xx`, no answer) keeps the name and says to try again. A long session name is cut with an ellipsis on a narrow screen, with the full name in its tooltip. A session with nothing in it says "No memory in this session yet", within one poll of being erased, and stops saying so within one poll of its first write.
+
+**Tokens and browsers.** The page sends no `Authorization` header itself, so with any credential configured a plain browser cannot open it: put it behind a proxy that adds the header for each user, or read the JSON routes from a script. Per-credential scope is for such a proxy and for scripts; behind one, the picker follows the scope of the token the proxy adds.
 
 Every request and every open tab reads one shared view of each session, loaded at most once per `view_ttl_ms` (1.5 seconds by default), so the page can be up to that much older than the store and the store load does not grow with the number of tabs. A session is loaded on the first request for it, not at startup; startup still checks the store's schema and fails if it is not provisioned. A recall that cannot start within 2 seconds because `recall_concurrency` recalls are already running gets `503` with `Retry-After: 1`. The `[web]` keys set these bounds; see [Read-only window views](/lambo/config/#read-only-window-views).
 
@@ -431,7 +535,7 @@ $ lambo --config lambo.toml erase-session --session user-42 --confirm user-42
 
 The report is printed only after the store has committed the deletion, so a script can treat exit `0` as done. Running it again is safe: a repeat reports `"already_absent":true`. A run that fails part way, for example on a lost connection, changes nothing, and the next run completes.
 
-It never interrupts a live writer. While a `lambo serve` or another writer holds the session, the command exits `1` and names the holder. Stop that writer first: a clean stop flushes its tail and releases the session, and the erase then removes everything, the flushed tail included.
+It never interrupts a live writer. While a `lambo serve` or another writer holds the session, the command exits `1` and names the holder. Stop that writer first: a clean stop flushes its tail and releases the session, and the erase then removes everything, the flushed tail included. Or erase it through the HTTP `lambo serve` that holds it, without stopping it ([below](#erase-from-a-running-serve)).
 
 An erased id stays erased. Lambo keeps one marker row for it in `session_leases`, holding only the id, and refuses every later write to it, whatever fencing token the writer holds: `derive`, `record-action` and `serve` exit with an error that says the session was erased, and nothing is recreated. A writer that was cut off before the erase cannot write either. A running `serve` that had lost its lease stops at its first refused write or its next heartbeat, whichever comes first, and a `serve` that was forwarding calls to the session's holder answers the next call with the erased error and exits. Edges in other sessions that point at the erased session's concepts or interactions are removed with it.
 
@@ -448,7 +552,39 @@ Never delete the row. Deleting it starts the session's fencing tokens again, so 
 Erasing reaches the store, and the recall index when one is configured: the command reports success only after the index has dropped the session too, and a run that could not reach the index exits `1` and is safe to repeat. Backups and snapshots taken before the erase still hold the session, and so does a call ledger file written by `lambo serve --ledger`, which can contain recall queries and concept text. Your backup and log retention policy governs those copies.
 </Warning>
 
-Only someone with access to the store can erase a session. There is no MCP tool for it, so an agent cannot erase memory it was asked to keep.
+Only someone with access to the store, or an HTTP `lambo serve` credential with `erase`, can erase a session. There is no MCP tool for it, so an agent cannot erase memory it was asked to keep.
+
+### Erase from a running serve
+
+An HTTP `lambo serve` erases a session it can reach without being stopped, for a credential that carries `erase` and reaches that session (see [Credentials](/lambo/config/#credentials)). The request repeats the id in its body, as `--confirm` does:
+
+```sh
+$ curl -sS -X POST http://127.0.0.1:7700/admin/s/user-42/erase \
+    -H "Authorization: Bearer $OPERATOR_TOKEN" \
+    -d '{"confirm": "user-42"}'
+{"session":"user-42","already_absent":false,"removed":{...},"fence_token":5}
+```
+
+| Status | Meaning |
+|---|---|
+| `200` | Erased. The body is the same JSON report `lambo erase-session` prints. A repeat reports `"already_absent":true`. |
+| `400` | The body is not `{"confirm": "<session>"}` (at most 1 KiB), or `confirm` does not repeat the id in the path exactly. Nothing was erased. |
+| `404` | The credential lacks `erase`, or does not reach the session: the same empty `404` as an unrouted path. No store is consulted. |
+| `405` | The method is not `POST`. Only a credential that may erase the session sees it. |
+| `408` | The body did not arrive within 30 seconds. Nothing was erased. |
+| `409` | Another process holds the session's lease. Nothing was erased; stop that writer and retry. |
+| `500` | The store failed. The body says which of three things happened: the session is erased from the durable store and a later step failed (repeat the request to finish it); nothing was erased; or the outcome is unknown, because the store could not be read back either (repeat the request). Repeating is always safe. |
+| `503` | The session is being erased, attached or detached, another session's attach did not finish within 10 seconds, or the serve is shutting down. Retry after `Retry-After`. |
+
+When the serve holds the session, it stops accepting requests for it, ends its MCP sessions, and closes it without flushing its unflushed tail or releasing its lease, so no other writer can take the session in between. It then erases the session as the holder of that lease. Calls already in progress get the erased error. While the erase runs, requests for the session get `503` with `Retry-After: 1`. Once it is erased, a `POST` of one JSON-RPC request with an `id` (`initialize` included) gets the erased error (MCP error `-32003`, as a proxy to an erased session answers), anything else gets `410` (a `GET` or `DELETE`, a notification, a response, a batch, or an unreadable body), and nothing in the serve attaches it again. If the erase fails before the store commits, the session is served again from what is durable, and the writes it had acknowledged but not yet flushed are lost. A serve that holds only that session answers the request and then exits, because it has nothing left to serve; a restart on the erased session refuses to start. If a supervisor restarts that serve (launchd `KeepAlive`, systemd `Restart=`), remove the session from its unit too, or every restart refuses and is restarted again. A session the serve does not hold is erased exactly as `lambo erase-session` erases it.
+
+A serve that is shut down while an erase runs waits for it within its close budget. An erase still running 8 seconds after the shutdown began closing the sessions is cut short and answers `500` with an unknown outcome: the store's erase is one transaction, so repeat it with `lambo erase-session`.
+
+A credential with `erase` over a `session_prefix` can erase any id under that prefix, including one that was never used. As with `lambo erase-session`, the erase leaves its marker row, and that id can never be used again.
+
+`GET /admin/sessions`, for a credential with `admin`, returns `{"sessions": [...]}`: the sessions in that credential's reach, each with `session`, `pinned`, `default` (whether `/mcp` serves it) and `state` (`attaching`, `live`, `held_elsewhere`, `detaching`, `failed`, `erasing`, `erased`, or `unattached` for a pinned session caught between states). A live session also has `attached`: its node, edge, concept and embedded-concept counts, its unflushed `log_depth`, and `estimated_vector_bytes`, the bytes of its in-memory vectors. The sizes are counted on each request, which costs a pass over each live session's concepts. A credential without `admin` gets the empty `404`, and any method but `GET` from one with it gets `405`. Neither admin route counts against `--max-sessions`.
+
+The same warning applies as for the command: backups and the `--ledger` file are not reached.
 
 ## Rebuild the recall index
 

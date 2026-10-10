@@ -693,6 +693,43 @@ async fn the_listing_names_only_the_callers_exact_scope() {
     handle.abort();
 }
 
+/// #4 PR 4: `/api/session`'s `switchable` is the caller's own reach, never
+/// the allowlist's size: a credential that reads one served session gets no
+/// key at all (so its page shows no picker), one that reads more gets
+/// `true`, at the alias and at every scoped path it may read.
+#[tokio::test]
+async fn switchable_follows_the_callers_reach() {
+    let (web, creds) = resolve(&config(false, true), &env()).expect("resolve");
+    let legacy = AuthToken::new(tok("default")).expect("token");
+    let (addr, handle, _) = portal(Some(legacy), creds, &web).await;
+    for (cred, expected) in [
+        ("viewers", false),
+        ("pre", false),
+        ("agents", false),
+        ("star", true),
+        ("default", true),
+    ] {
+        let token = tok(cred);
+        let mut paths: Vec<String> = scope_of(cred)
+            .iter()
+            .map(|s| format!("/s/{s}/api/session"))
+            .collect();
+        if scope_of(cred).contains(&SERVED[0]) {
+            paths.push("/api/session".to_string());
+        }
+        for path in paths {
+            let r = as_caller(addr, "GET", &path, Some(&token)).await;
+            assert_eq!(r.status, 200, "{cred} {path}");
+            let v: serde_json::Value = serde_json::from_str(&r.body).expect("json");
+            match expected {
+                true => assert_eq!(v["switchable"], true, "{cred} {path}"),
+                false => assert!(v.get("switchable").is_none(), "{cred} {path}: {v}"),
+            }
+        }
+    }
+    handle.abort();
+}
+
 /// Acceptance: a sweep proves no response names a session outside the
 /// request's scope, by name or by content. Every caller, every alias and
 /// scoped data route for every id (served or not), the page, and the

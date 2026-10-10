@@ -1057,6 +1057,48 @@ impl GraphStore for MemoryStore {
     }
 }
 
+/// What erasure must leave behind, counted (#23; #32 PR 7's serve tests
+/// read it too).
+#[cfg(test)]
+impl MemoryStore {
+    /// Rows of every kind this store keeps for `sid`, by the store's own
+    /// fields. Destructured exhaustively: a new field on `MemoryStore`
+    /// stops this compiling until erasure (and this census) covers it.
+    pub(crate) fn erase_census(&self, sid: &SessionId) -> Vec<(&'static str, usize)> {
+        let MemoryStore {
+            inner,
+            leases,
+            flush_stats,
+            refusals,
+        } = self;
+        let inner = inner.read();
+        let snap = inner.get(&sid.0).map(|d| &d.snapshot);
+        let n = |f: fn(&GraphSnapshot) -> usize| snap.map_or(0, f);
+        vec![
+            ("sessions", usize::from(snap.is_some())),
+            ("interactions", n(|s| s.interactions.len())),
+            ("concepts", n(|s| s.concepts.len())),
+            ("edges", n(|s| s.edges.len())),
+            ("synonyms", n(|s| s.synonyms.len())),
+            ("canonization_events", n(|s| s.canonization_events.len())),
+            ("reservations", n(|s| s.reservations.len())),
+            ("write_intents", n(|s| s.write_intents.len())),
+            (
+                "session_leases",
+                usize::from(leases.read().contains_key(&sid.0)),
+            ),
+            (
+                "session_stats",
+                usize::from(flush_stats.read().contains_key(&sid.0)),
+            ),
+            (
+                "lease_refusals",
+                refusals.read().iter().filter(|r| r.session == *sid).count(),
+            ),
+        ]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2660,41 +2702,10 @@ mod tests {
 
         const DIM: usize = 8;
 
-        /// Rows of every kind this store keeps for `sid`, by the store's own
-        /// fields. Destructured exhaustively: a new field on `MemoryStore`
-        /// stops this compiling until erasure (and this census) covers it.
+        /// Rows of every kind this store keeps for `sid`
+        /// ([`MemoryStore::erase_census`]).
         fn census(store: &MemoryStore, sid: &SessionId) -> Vec<(&'static str, usize)> {
-            let MemoryStore {
-                inner,
-                leases,
-                flush_stats,
-                refusals,
-            } = store;
-            let inner = inner.read();
-            let snap = inner.get(&sid.0).map(|d| &d.snapshot);
-            let n = |f: fn(&GraphSnapshot) -> usize| snap.map_or(0, f);
-            vec![
-                ("sessions", usize::from(snap.is_some())),
-                ("interactions", n(|s| s.interactions.len())),
-                ("concepts", n(|s| s.concepts.len())),
-                ("edges", n(|s| s.edges.len())),
-                ("synonyms", n(|s| s.synonyms.len())),
-                ("canonization_events", n(|s| s.canonization_events.len())),
-                ("reservations", n(|s| s.reservations.len())),
-                ("write_intents", n(|s| s.write_intents.len())),
-                (
-                    "session_leases",
-                    usize::from(leases.read().contains_key(&sid.0)),
-                ),
-                (
-                    "session_stats",
-                    usize::from(flush_stats.read().contains_key(&sid.0)),
-                ),
-                (
-                    "lease_refusals",
-                    refusals.read().iter().filter(|r| r.session == *sid).count(),
-                ),
-            ]
+            store.erase_census(sid)
         }
 
         async fn plant_everything(store: &MemoryStore, sid: &SessionId, owner: &LeaseHolder) {

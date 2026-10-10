@@ -118,7 +118,11 @@ pub fn unreachable_reply(client_frame: &str) -> Option<String> {
 
 /// The error a client gets for a call made to an erased session (#23 review
 /// L3), or `None` when the frame needs no answer.
-pub(super) fn erased_reply(client_frame: &str) -> Option<String> {
+///
+/// `lambo serve` answers a call to a session it erased with the same frame
+/// (#32 PR 7, design §6.2), so a client sees one erased error whichever way
+/// it reached the session.
+pub(crate) fn erased_reply(client_frame: &str) -> Option<String> {
     request_id(client_frame).map(|id| error_frame(&id, HUB_ERASED_CODE, HUB_ERASED_MESSAGE))
 }
 

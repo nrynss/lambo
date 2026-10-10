@@ -271,12 +271,18 @@ pub(super) fn held_by(
 
 /// Whether an on-demand slot counts against `max_attached`: it holds a
 /// `Memory`, or is about to (an attach that has reserved its place), or is
-/// still giving one up (a detach in flight). An attach that has not yet
-/// passed its existence probe takes no place.
+/// still giving one up (a detach in flight, or an erase, #32 PR 7: an
+/// erased session's handle is closed only after the claim). An attach
+/// that has not yet passed its existence probe takes no place.
+///
+/// An `Erasing` slot of an id that was not attached holds no `Memory`, but
+/// counts all the same for the few store round trips its erase takes:
+/// over-counting for that long only refuses an attach, never lets one past
+/// the cap.
 pub(super) fn takes_a_place(slot: &Slot) -> bool {
     matches!(
         slot,
-        Slot::Live(_) | Slot::Detaching | Slot::Attaching { placed: true, .. }
+        Slot::Live(_) | Slot::Detaching | Slot::Erasing | Slot::Attaching { placed: true, .. }
     )
 }
 

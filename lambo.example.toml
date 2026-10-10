@@ -258,9 +258,13 @@ url = "http://127.0.0.1:8080"
 # sessions. A stdio `lambo serve` ignores the credentials; started without
 # --session it takes its session from [[serve.projects]], then
 # default_session (--session always wins; an http serve never reads
-# [[serve.projects]]). The on-demand bounds are PARSED AND VALIDATED ONLY
-# (they arrive in a later release), but a malformed table already stops every
-# command, like any unknown key.
+# [[serve.projects]]). A credential that reaches past the pinned sessions
+# (a session_prefix, or an unpinned name) makes an http serve attach those
+# sessions on demand, within max_attached, attach_concurrency (1 on SQLite),
+# idle_detach_secs and per_session_rps; pinned sessions are never evicted or
+# idle-detached. A credential with erase or admin may use POST
+# /admin/s/<session>/erase or GET /admin/sessions. A malformed table stops
+# every command, like any unknown key.
 # A [[serve.projects]] path is absolute or starts with ~/; it and the working
 # directory are compared as real paths (symlinks resolved). With HOME unset
 # (or relative), ~ entries are skipped with one warning. One global map for

@@ -116,6 +116,23 @@ pub(crate) struct LeaseLostSignal {
 }
 
 impl LeaseLostSignal {
+    /// Record the winner **without** waking anyone (#32 PR 7 review L1):
+    /// what [`Memory::fence_for_erase`] latches, so the serve's wind-down
+    /// does not start before the erase has its answer. [`Self::wake`] wakes
+    /// the waiters later. The first winner recorded is kept, as in
+    /// [`Self::latch`].
+    pub(super) fn record(&self, winner: &str) {
+        let mut slot = self.winner.lock();
+        if slot.is_none() {
+            *slot = Some(winner.to_string());
+        }
+    }
+
+    /// Wake every waiter (a latch [`Self::record`] made quietly).
+    pub(super) fn wake(&self) {
+        self.woken.notify_waiters();
+    }
+
     /// Record the winner and wake every waiter. Idempotent, like the fence
     /// beside it — the heartbeat keeps beating after a loss and may call this
     /// again; the first winner recorded is kept, because it is the one that was
@@ -388,6 +405,48 @@ impl Memory {
                 .lease_lost_signal
                 .winner()
                 .is_some_and(|w| crate::store::erase::is_erased_holder(&w))
+    }
+
+    /// This handle's single-writer lease identity: the holder an in-process
+    /// erase presents to the store (#32 PR 7), which the #23 gate admits as
+    /// the eraser's own live lease, so no other process can take the
+    /// session between this handle's fence and the erase.
+    pub(crate) fn lease_holder(&self) -> &LeaseHolder {
+        &self.lease_holder
+    }
+
+    /// Fence this handle for an erase of its own session by its own process
+    /// (#32 PR 7, design §6.3), exactly as the store's tombstone would fence
+    /// it at the next heartbeat or refused flush (#23 L2): the lease-lost
+    /// flag is latched first, then the wake-up, with the tombstone holder as
+    /// the winner.
+    ///
+    /// From here [`Memory::erased`] holds: every read and write is refused
+    /// with the erased error, the flush loop stops and drops its tail, and
+    /// [`Memory::close`] takes its fenced branch (no final flush, **no lease
+    /// release**). The store is not touched: the lease row stays this
+    /// handle's until the erase replaces it with the tombstone, so no other
+    /// writer can acquire in between. Idempotent, like every latch of the
+    /// fence.
+    ///
+    /// The fence latches **quietly** (#32 PR 7 review L1): a serve waiting on
+    /// [`Memory::lease_lost_latched`] is not woken until
+    /// [`Memory::announce_fence`]. A one-session serve winds down on that
+    /// wake-up, and its transport drain must not start before the erase has
+    /// answered the request that asked for it. The flag is set before the
+    /// winner, and both before anything returns, so every read and write is
+    /// refused from here all the same.
+    pub(crate) fn fence_for_erase(&self) {
+        self.lease_lost.store(true, Ordering::Release);
+        self.lease_lost_signal
+            .record(crate::store::erase::ERASED_HOLDER);
+    }
+
+    /// Wake whatever waits on this handle's fence
+    /// ([`Memory::lease_lost_latched`]) after a quiet
+    /// [`Memory::fence_for_erase`]. Idempotent.
+    pub(crate) fn announce_fence(&self) {
+        self.lease_lost_signal.wake();
     }
 
     /// The honest refusal a fenced handle returns (T86-2): another writer owns

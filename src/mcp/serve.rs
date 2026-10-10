@@ -92,6 +92,7 @@ use crate::types::LamboError;
 use crate::writeq::EmbedderCalibration;
 
 pub(crate) mod activity;
+mod admin;
 mod authority;
 mod builder;
 mod heartbeat;
@@ -668,6 +669,7 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
         None,
         early.clone(),
         RegistryBounds::pinned_only(),
+        Some(Arc::clone(mem.store())),
     );
     // The holder startup, below the arming, in the order it has always run:
     // the session's server, the process-wide tasks (which read it), then the
@@ -834,6 +836,7 @@ async fn serve_pinned_with(
         }),
         early.clone(),
         bounds,
+        None,
     );
 
     // The pinned acquires, in order. The registry is the only long-lived
@@ -845,6 +848,11 @@ async fn serve_pinned_with(
         match registry.acquire(id).await {
             Ok(Acquired::Attached(mem, endpoint)) => acquired.push((mem, endpoint)),
             Ok(Acquired::Held(held)) => registry.mark_held(id, &held).await,
+            // #32 PR 7: an erased pinned session is served as erased (the
+            // tombstone, read back on the lease row, refuses every attach);
+            // the other sessions start. Decided on typed data, never the
+            // error's message.
+            Err(_) if registry.is_tombstoned(id).await => registry.mark_erased_at_start(id),
             Err(e) => {
                 // Fail closed, but release what this start already took:
                 // a refused start must not hold leases until they lapse.

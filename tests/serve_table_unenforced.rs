@@ -1,7 +1,10 @@
-//! #32 PR 1 review L3: a `[serve]` table is parsed and validated but nothing
-//! enforces it until #32's later PRs. A `lambo serve` that reads one says so,
-//! once, at startup, without quoting any value from the table; a serve
-//! without one says nothing.
+//! The `[serve]` startup notice. #32 PR 1 review L3 added it while the table
+//! was parsed but not enforced; #32's later PRs enforced every key on the
+//! transport it applies to. What is left is one key an HTTP serve ignores by
+//! design: `[[serve.projects]]`, the stdio project map. A `lambo serve` that
+//! reads it over HTTP says so, once, at startup, without quoting any value
+//! from the table; a serve without it says nothing. (The file name predates
+//! that change.)
 //!
 //! #32 PR 5: `[[serve.credential]]` is enforced (over HTTP; a stdio serve
 //! authenticates nobody), so it no longer raises the notice, and a stdio
@@ -10,8 +13,7 @@
 //!
 //! #32 PR 6: the bounds (`attach_concurrency`, `idle_detach_secs`,
 //! `per_session_rps`) are enforced over HTTP and do not apply to a stdio
-//! serve, so neither names them. The one key left is `[[serve.projects]]`
-//! over HTTP, which only a stdio serve reads.
+//! serve, so neither names them.
 //!
 //! Gated on `store-sqlite,embed-fixture` like the other serve integration
 //! tests; run with `--features store-sqlite,embed-fixture`.
@@ -27,7 +29,7 @@ use lambo::store::{GraphStore, SqliteStore};
 mod common;
 use common::{RuntimeDir, ScratchDir, ServeChild};
 
-const NOTICE: &str = "[serve] is parsed but not yet enforced";
+const NOTICE: &str = "[serve] sets keys this serve ignores";
 /// Values from the table that must never appear in the notice.
 const PINNED: &str = "i32-pinned-marker";
 const CRED_NAME: &str = "i32-cred-marker";
@@ -160,7 +162,7 @@ fn write_config(serve_table: &str) -> (ScratchDir, std::path::PathBuf) {
 /// and nothing from the table is quoted; the enforced bounds and the
 /// credential are not named.
 #[test]
-fn a_serve_table_is_reported_as_not_yet_enforced_without_its_values() {
+fn an_http_serve_reports_the_ignored_cwd_map_without_its_values() {
     let stderr = http_serve_stderr(&format!(
         "[serve]\nsessions = [\"{PINNED}\"]\nper_session_rps = 5\nattach_concurrency = 1\n\
          idle_detach_secs = 60\n\n\

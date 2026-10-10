@@ -70,13 +70,14 @@ the legacy token alone fails two tests.
 
 **Scope enforcement is PR 2's order, per grant.** Bearer, shape, the grant's
 scope, then the allowlist (`is_pinned`), all in memory before any store
-call; every refusal is the uniform 404. The portal's `HostedSessions` holds
-the allowlist and no prefixes, so `"*"` is the allowlist and a prefix grant
-reaches only allowlisted ids under it (Q8): an id under the prefix that has
-data in the store but is not served is the 404 with no load. The aliases
-use `authorize_default`, so they serve the default only to a grant that may
-read it; others get the uniform 404 on the data routes (the page, assets
-and `/healthz` name no session and stay 200).
+call; a failed bearer check is the 401, and every later refusal is the
+uniform 404. The portal's `HostedSessions` holds the allowlist and no
+prefixes, so `"*"` is the allowlist and a prefix grant reaches only
+allowlisted ids under it (Q8): an id under the prefix that has data in the
+store but is not served is the 404 with no load. The aliases use
+`authorize_default`, so they serve the default only to a grant that may read
+it; others get the uniform 404 on the data routes (the page, assets and
+`/healthz` name no session and stay 200).
 
 **The listing (design 6.2, Q7).**
 
