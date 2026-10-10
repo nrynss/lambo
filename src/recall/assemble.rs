@@ -1904,4 +1904,55 @@ mod tests {
         assert!(approx(result.hits[0].score, 0.90));
         assert!(approx(result.hits[1].score, 0.0));
     }
+
+    #[test]
+    fn stale_vector_id_absent_from_the_graph_does_not_start_cold_mode() {
+        // The vector leg can return an id the graph no longer holds (a store
+        // row whose concept was removed); `rank` keeps it in phase 1. It is
+        // unscored by construction, but it is not a fresh concept, so it
+        // must not withhold the daemon share from everything else.
+        let g = graph_with(1);
+        let stale = uid(9);
+        let phase1 = vec![Scored::new(stale, 0.90), Scored::new(uid(1), 0.80)];
+        let expanded = ExpandedSet {
+            required: vec![Scored::new(uid(1), 0.80)],
+            siblings: Vec::new(),
+        };
+        let scores = ScoreTable {
+            epoch: 1,
+            ranked: vec![Scored::new(uid(1), 0.60)],
+        };
+        let mut legs = HashMap::new();
+        legs.insert(
+            stale,
+            LegScores {
+                vector: Some(0.90),
+                ..LegScores::default()
+            },
+        );
+        legs.insert(
+            uid(1),
+            LegScores {
+                vector: Some(0.80),
+                ..LegScores::default()
+            },
+        );
+        for legs in [None, Some(&legs)] {
+            let result = assemble_with_legs(
+                &g,
+                &expanded,
+                &phase1,
+                legs,
+                &scores,
+                &HashMap::new(),
+                &query(2, 10_000),
+                RecallWeights::default(),
+                ts(0),
+                default_token_count,
+            );
+            assert_eq!(ids_of(&result), vec![uid(1)]);
+            // Blended: 0.5 × 0.60 + 0.5 × 0.80, not cold 0.5 × 0.80.
+            assert!(approx(result.hits[0].score, 0.70));
+        }
+    }
 }

@@ -474,12 +474,24 @@ async fn sqlite_public_recall_by_ranks_fresh_supplied_image_and_guards_noise() {
         cold_vector(&probe, &seed, 0.61),
     )
     .await;
+    // A recent, daemon-scored text concept: with text it would join the
+    // recent leg at RECENT_SCORE; with no text that leg is skipped (#22 PR 6),
+    // so cold mode must not let it in on the floor.
+    let recent_text = mem
+        .derive(
+            &[("orbital neutrino mechanics", ConceptType::Entity)],
+            &ParentOf::none(),
+        )
+        .await
+        .unwrap()
+        .created[0];
     flushed(&mem).await;
     mem.settle_daemon().await;
     stop_daemon_for_cold_start(&mem).await;
     let scores = mem.daemon.scores();
     assert!(scores.ranked.iter().any(|hit| hit.item == old_relevant));
     assert!(scores.ranked.iter().any(|hit| hit.item == old_noise));
+    assert!(scores.ranked.iter().any(|hit| hit.item == recent_text));
     let fresh_relevant = cold_image(
         &mem,
         "fresh relevant",
@@ -522,6 +534,18 @@ async fn sqlite_public_recall_by_ranks_fresh_supplied_image_and_guards_noise() {
         .await
         .unwrap();
     assert!(detailed.legs.values().all(|leg| leg.recent.is_none()));
+    // Cold mode on the vector leg alone: every hit is 0.5 × its cosine, and
+    // the recent text concept gains nothing from recency or its daemon score.
+    for hit in &detailed.hits {
+        let v = detailed.legs.get(&hit.node_id).and_then(|l| l.vector);
+        let expected = 0.5 * v.unwrap_or(0.0).max(0.0);
+        assert!((hit.score - expected).abs() < 1e-6, "{hit:?} vs {v:?}");
+    }
+    assert!(
+        detailed.hits.iter().all(|hit| hit.node_id != recent_text),
+        "top_k 4 is the four images: {:?}",
+        detailed.hits
+    );
     mem.close().await.unwrap();
 }
 
@@ -571,5 +595,132 @@ async fn sqlite_public_text_recall_keeps_strong_fresh_vector_above_recent_noise(
     assert!(recent_leg.recent.is_some());
     let ids: Vec<NodeId> = detailed.hits.iter().map(|hit| hit.node_id).collect();
     assert!(ids.iter().position(|id| *id == fresh) < ids.iter().position(|id| *id == recent));
+    mem.close().await.unwrap();
+}
+
+/// #79 leg scale, text recall: in cold mode every member scores
+/// `w_query × q`, where `q` is the max-merged phase-1 score. The recent
+/// leg's flat `RECENT_SCORE` floor is on the same `q` scale as the vector
+/// cosine and the keyword BM25, so cold mode orders the three legs exactly
+/// as phase 1 does. The planted hazard is a recent-only concept: being
+/// recent, it has a high daemon recency (d = 0.7 here), so under the
+/// ordinary blend it would sit at `0.5 × d + 0.175 = 0.525`, above a fresh
+/// unscored strong vector hit at `0.5 × 0.80 = 0.40`.
+/// Cold mode must keep the fresh vector hit above it, and keyword hits in
+/// BM25 order above the recency floor.
+#[cfg(feature = "store-sqlite")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sqlite_cold_text_recall_orders_vector_keyword_and_recent_legs_on_one_scale() {
+    use crate::recall::candidates::RECENT_SCORE;
+    let _quiet = crate::test_util::quiet_logs();
+    let (_dir, mem) = cold_sqlite_memory("issue-79-leg-scale").await;
+    let text = "create account";
+    let probe = ContextTolerantEmbedder(FixtureEmbedder::new())
+        .embed_query(text)
+        .await
+        .unwrap();
+    let seed = FixtureEmbedder::new().embed_sync("leg scale orthogonal");
+    let derive_one = |content: &'static str| {
+        let mem = &mem;
+        async move {
+            mem.derive(&[(content, ConceptType::Entity)], &ParentOf::none())
+                .await
+                .unwrap()
+                .created[0]
+        }
+    };
+    // Older, daemon-scored concepts: two keyword hits of different BM25,
+    // a filler, then the planted recent-only concept.
+    let strong_keyword = derive_one("create account guidance").await;
+    let weak_keyword = derive_one("account settings page").await;
+    derive_one("lunar tide tables").await;
+    let planted = derive_one("orbital neutrino mechanics").await;
+    flushed(&mem).await;
+    mem.settle_daemon().await;
+    stop_daemon_for_cold_start(&mem).await;
+    let scores = mem.daemon.scores();
+    let daemon = |id: NodeId| scores.ranked.iter().find(|s| s.item == id).map(|s| s.score);
+    let planted_d = daemon(planted).expect("the planted concept is scored");
+
+    // The fresh strong vector hit, after the table froze.
+    let fresh = cold_image(
+        &mem,
+        "fresh vector match",
+        "freshvector",
+        cold_vector(&probe, &seed, 0.80),
+    )
+    .await;
+    flushed(&mem).await;
+    assert_eq!(daemon(fresh), None, "the fresh hit is not yet scored");
+    // The hazard is real: under the ordinary blend the planted recent-only
+    // hit would outrank the fresh strong vector hit.
+    assert!(
+        0.5 * planted_d + 0.5 * RECENT_SCORE > 0.5 * 0.80,
+        "planted daemon score {planted_d} too low to test the hazard"
+    );
+
+    let query = RecallQuery {
+        query: text.into(),
+        top_k: 8,
+        max_tokens: 10_000,
+        traversal_depth: 0,
+    };
+    let detailed = mem.recall_detailed(query).await.unwrap();
+    let leg = |id: NodeId| {
+        *detailed
+            .legs
+            .get(&id)
+            .unwrap_or_else(|| panic!("{id:?} in phase 1"))
+    };
+    let q = |l: crate::recall::candidates::LegScores| {
+        [l.keyword, l.recent, l.vector]
+            .into_iter()
+            .flatten()
+            .fold(f64::NEG_INFINITY, f64::max)
+    };
+    let pos = |id: NodeId| {
+        detailed
+            .hits
+            .iter()
+            .position(|h| h.node_id == id)
+            .unwrap_or_else(|| panic!("{id:?} returned: {:?}", detailed.hits))
+    };
+
+    // Provenance: each leg is what the case says it is.
+    assert!((leg(fresh).vector.unwrap() - 0.80).abs() < 1e-3);
+    assert_eq!(leg(fresh).recent, Some(RECENT_SCORE), "fresh is recent too");
+    assert!(leg(strong_keyword).keyword.unwrap() > leg(weak_keyword).keyword.unwrap());
+    assert_eq!(leg(strong_keyword).recent, None);
+    assert_eq!(leg(planted).keyword, None);
+    assert_eq!(leg(planted).recent, Some(RECENT_SCORE));
+    assert_eq!(
+        q(leg(planted)),
+        RECENT_SCORE,
+        "planted is on the recency floor"
+    );
+
+    // Cold mode: every hit is w_query × q, the daemon share withheld even
+    // for the high-daemon recent concept.
+    for hit in &detailed.hits {
+        let expected = detailed.legs.get(&hit.node_id).map_or(0.0, |l| 0.5 * q(*l));
+        assert!(
+            (hit.score - expected).abs() < 1e-9,
+            "{}: {} != 0.5 × q {expected}",
+            hit.content,
+            hit.score
+        );
+    }
+    // One scale: the fresh strong vector hit and both keyword hits outrank
+    // the planted recent-only hit; keyword hits keep BM25 order.
+    assert!(pos(fresh) < pos(planted));
+    assert!(pos(strong_keyword) < pos(weak_keyword));
+    assert!(pos(weak_keyword) < pos(planted));
+    // And the whole list is in non-increasing q order.
+    let qs: Vec<f64> = detailed
+        .hits
+        .iter()
+        .map(|h| detailed.legs.get(&h.node_id).map_or(0.0, |l| q(*l)))
+        .collect();
+    assert!(qs.windows(2).all(|w| w[0] >= w[1]), "q order: {qs:?}");
     mem.close().await.unwrap();
 }
