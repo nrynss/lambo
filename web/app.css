@@ -110,6 +110,10 @@ body {
 .session-name { font-family: var(--mono); font-size: 13px; }
 
 .session-picker { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+/* With the picker beside it, a narrow screen wraps the picker onto its own
+   line rather than breaking the session's name. Inert without the picker. */
+.topbar-left:has(.session-picker:not(.hidden)) { flex-wrap: wrap; }
+.topbar-left:has(.session-picker:not(.hidden)) .session-name { white-space: nowrap; }
 .picker-control {
   font: inherit; font-family: var(--mono); font-size: 12px;
   padding: 3px 8px; border-radius: 5px; max-width: 14rem;
