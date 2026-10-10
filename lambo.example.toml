@@ -117,9 +117,9 @@ url = "http://127.0.0.1:8080"
 # side, truncate-then-normalize). llama-server ignores the model
 # name, so name the weights it runs; a different artifact is a different contract.
 # Lambo checks llama-server's /props (loaded file name, quantization, vision)
-# against it and refuses a mismatch. If /props cannot be reached at startup,
-# embeds go unchecked until the first check passes (the log says so); keep
-# writes stopped until then if the server's model is in doubt.
+# against it and refuses a mismatch. The check runs before the first embed; if
+# it cannot reach /props, embeds go unchecked until a check passes (the log
+# says so), so keep writes stopped until then if the server's model is in doubt.
 #   model = "ggml-org/embeddinggemma-2-GGUF@bfcd2987/Q8_0"   # the default
 #   images = true    # false: text only, never send an image (server without --mmproj)
 #
