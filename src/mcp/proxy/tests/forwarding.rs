@@ -198,7 +198,7 @@ async fn an_oversize_frame_is_dropped_and_the_stream_resynchronises() {
 /// discards the same frame unread, so a client sees no difference.)
 #[tokio::test]
 async fn a_client_frame_over_the_holders_cap_is_dropped_at_the_proxy() {
-    assert!(MAX_CLIENT_FRAME_BYTES < MAX_FRAME_BYTES);
+    const { assert!(MAX_CLIENT_FRAME_BYTES < MAX_FRAME_BYTES) };
     let mut bytes = vec![b'x'; MAX_CLIENT_FRAME_BYTES + 1];
     bytes.push(b'\n');
     bytes.extend(std::iter::repeat_n(b'y', MAX_CLIENT_FRAME_BYTES));
