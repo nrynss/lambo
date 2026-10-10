@@ -389,9 +389,10 @@ async fn a_contract_race_fails_a_recall_by_image_and_annotates_only_text() {
     mem.close().await.unwrap();
 }
 
-// #79: keep the daemon's public score-table read handle across fresh derives.
-// The daemon can wake, but cannot publish its new table until the assertions
-// finish. This tests the actual Memory route without a scheduler race.
+// #79: these tests freeze the daemon's score table with
+// `stop_daemon_for_cold_start`, which aborts the daemon task and joins it
+// before the fresh derives. Nothing can publish a newer table, so the cold
+// read goes through the actual Memory route without a scheduler race.
 #[cfg(feature = "store-sqlite")]
 fn cold_vector(probe: &[f32], seed: &[f32], cosine: f32) -> Vec<f32> {
     let dot: f32 = probe.iter().zip(seed).map(|(a, b)| a * b).sum();
