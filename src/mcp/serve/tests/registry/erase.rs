@@ -268,7 +268,7 @@ async fn erasing_an_attached_session_leaves_only_the_tombstone_and_nothing_recre
     })
     .await;
     // A second write, applied in RAM, whose flush is parked in the store.
-    w.calls.park_flushes();
+    w.calls.park_flushes_of(A);
     derive_as(addr, &agent, "/mcp/s/er-a", &mcp_a, &["erase me too"]).await;
     eventually("a flush is parked in flight", || {
         w.calls.parked_flushes() > 0
@@ -324,6 +324,22 @@ async fn erasing_an_attached_session_leaves_only_the_tombstone_and_nothing_recre
         .iter()
         .position(|(m, s)| *m == "erase_session" && s == A)
         .expect("the store erase ran");
+    // #32 PR 7 review M2: the fence and the close come first, so the
+    // parked flush was aborted and joined before the store erase was
+    // entered, and no flush got past the store after it (where a recall
+    // index mirror would run).
+    assert_eq!(
+        w.calls.parked_at_erase(),
+        vec![0],
+        "a flush was still in flight when the erase reached the store"
+    );
+    assert!(
+        !during[erase_at..]
+            .iter()
+            .any(|(m, s)| *m == "flushed" && s == A),
+        "a flush completed after the erase: {:?}",
+        &during[erase_at..]
+    );
     assert!(
         !during[erase_at..]
             .iter()

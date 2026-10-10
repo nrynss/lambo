@@ -76,6 +76,9 @@ pub(super) enum EraseFault {
 #[derive(Default)]
 pub(super) struct FlushGate {
     closed: std::sync::atomic::AtomicBool,
+    /// When set, only a flush whose batch names this string parks (its
+    /// session's id: another session's flushes pass).
+    only: parking_lot::Mutex<Option<String>>,
     parked: std::sync::atomic::AtomicUsize,
     opened: tokio::sync::Notify,
 }
@@ -87,6 +90,13 @@ impl StoreCalls {
         self.1
             .closed
             .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// [`StoreCalls::park_flushes`] for the flushes of one session only:
+    /// those whose batch names `session`.
+    pub(super) fn park_flushes_of(&self, session: &str) {
+        *self.1.only.lock() = Some(session.to_string());
+        self.park_flushes();
     }
 
     /// Let every parked `flush` (and every later one) through.
@@ -104,7 +114,7 @@ impl StoreCalls {
 
     /// Park while the gate is closed. The count goes down however the wait
     /// ends, a drop of the flush included.
-    async fn pass_flush_gate(&self) {
+    async fn pass_flush_gate(&self, batch: &MutationBatch) {
         use std::sync::atomic::Ordering;
         struct Parked<'a>(&'a std::sync::atomic::AtomicUsize);
         impl Drop for Parked<'_> {
@@ -113,6 +123,9 @@ impl StoreCalls {
             }
         }
         if !self.1.closed.load(Ordering::SeqCst) {
+            return;
+        }
+        if self.1.only.lock().is_some() && self.watched(batch).is_empty() {
             return;
         }
         self.1.parked.fetch_add(1, Ordering::SeqCst);
@@ -146,6 +159,21 @@ impl StoreCalls {
     /// entry, in order.
     pub(super) fn parked_at_erase(&self) -> Vec<usize> {
         self.2.parked_at_erase.lock().clone()
+    }
+
+    /// The session [`StoreCalls::park_flushes_of`] watches, when `batch`
+    /// names it; else empty.
+    fn watched(&self, batch: &MutationBatch) -> String {
+        let only = self.1.only.lock().clone();
+        match only {
+            Some(session)
+                if serde_json::to_string(batch)
+                    .is_ok_and(|json| json.contains(&format!("\"{session}\""))) =>
+            {
+                session
+            }
+            _ => String::new(),
+        }
     }
 
     fn note(&self, method: &'static str, session: &str) {
@@ -210,11 +238,12 @@ impl GraphStore for Shared {
     }
     async fn flush(&self, batch: &MutationBatch, token: Option<u64>) -> Result<(), StoreError> {
         self.2.note("flush", "");
-        self.2.pass_flush_gate().await;
+        self.2.pass_flush_gate(batch).await;
         let flushed = self.0.flush(batch, token).await;
         // Past the store: where a recall-tier mirror would run (#18), so a
-        // test can tell one that lands after an erase.
-        self.2.note("flushed", "");
+        // test can tell one that lands after an erase. Named by the session
+        // `park_flushes_of` watches, when the batch is that session's.
+        self.2.note("flushed", &self.2.watched(batch));
         flushed
     }
     async fn load_session(&self, session: &SessionId) -> Result<GraphSnapshot, StoreError> {
