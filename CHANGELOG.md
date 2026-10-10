@@ -932,7 +932,7 @@
   rather than left without a vector. A text query reaches image concepts
   through the ordinary vector leg. A durable image intent replayed under a different live contract settles
   `failed`. Its receipt kind is `lambo_derive_image`; the MCP tool and CLI
-  verb arrive in a later release.
+  verb are `lambo_derive_image` and `lambo derive-image` (#22 PR 4, above).
 - `lambo re-embed` handles image concepts (#22): a full migration refuses
   while an image concept still carries a vector (it cannot be recomputed
   from a caption), unless `--drop-image-vectors`, which nulls those vectors
@@ -952,8 +952,8 @@
   the declared type (a mismatch is refused, never corrected); and the header
   must declare each side between 1 and 4096 px (`MAX_IMAGE_SIDE_PX`), read
   from the PNG, JPEG or WebP header without decoding pixels. Refusals never
-  quote the bytes or the declared type. Nothing calls it yet: images reach
-  no CLI verb or MCP tool in this release.
+  quote the bytes or the declared type. `lambo_derive_image`,
+  `lambo derive-image` and recall by image (above) call it.
 - An optional `[serve]` table in `lambo.toml` for multi-session serving
   (#32, first part): pinned `sessions`, `default_session`, `max_attached`,
   `attach_concurrency`, `idle_detach_secs`, `per_session_rps`, a
@@ -1069,7 +1069,7 @@
   shutdown stage 2, beside the keep-warm.
 - `lambo::surface::session`: session-id validation for ids taken from a
   request (`parse_addressed`: `[A-Za-z0-9._:-]`, 1 to 128 bytes, no leading
-  `.`, no percent-decoding), the in-memory authorization types the coming
+  `.`, no percent-decoding), the in-memory authorization types the
   multi-session routes and the web portal share, and their one uniform 404.
   `--session` keeps its looser rule.
 - `Ledger::for_session`, a handle onto the same ledger that stamps `session`
@@ -1223,8 +1223,10 @@
   fails closed instead of reporting a deletion it did not do. `EraseCounts`
   and `EraseReport` are `#[non_exhaustive]`.
 - Decisions for #23: erasure is CLI-only (an MCP or portal surface waits for
-  #32's authority design), the tombstone keeps the plain session id, and the
-  `serve --ledger` file and backups are operator-owned and not scrubbed.
+  #32's authority design; #32's seventh part then added the HTTP admin
+  erase, above, and there is still no MCP tool or portal surface), the
+  tombstone keeps the plain session id, and the `serve --ledger` file and
+  backups are operator-owned and not scrubbed.
 
 ### Fixed
 
