@@ -90,7 +90,7 @@ pub(crate) use forwarding::INFLIGHT_DEPTH_WARN;
 
 use dialing::Dialled;
 use disconnect::client_gone;
-use forwarding::{request_id, response_id, FromHub, Step};
+use forwarding::{request_id, response_id, ClientInput, FromHub, Step};
 use framing::{read_frame_within, Framed, MAX_CLIENT_FRAME_BYTES};
 use handshake::Handshake;
 
@@ -280,13 +280,13 @@ impl HubProxy {
 
         // stdin is read on its own task: a blocking read must not stop this loop
         // from noticing that the holder went away.
-        let (client_tx, mut client_rx) = tokio::sync::mpsc::channel::<String>(64);
+        let (client_tx, mut client_rx) = tokio::sync::mpsc::channel::<ClientInput>(64);
         let client_reader = tokio::spawn(async move {
             let mut stdin = BufReader::new(tokio::io::stdin());
             loop {
                 match read_frame_within(&mut stdin, MAX_CLIENT_FRAME_BYTES).await {
                     Ok(Framed::Line(line)) => {
-                        if client_tx.send(line).await.is_err() {
+                        if client_tx.send(ClientInput::Frame(line)).await.is_err() {
                             break;
                         }
                     }
@@ -302,13 +302,32 @@ impl HubProxy {
                         );
                         break;
                     }
-                    Ok(Framed::Oversize(bytes)) => tracing::warn!(
+                    Ok(Framed::Oversize {
                         bytes,
-                        cap = MAX_CLIENT_FRAME_BYTES,
-                        "lambo serve: the proxy's client sent a frame over the size cap — dropped \
-                         (no reply is possible: the frame was discarded before any id could be \
-                         read from it)"
-                    ),
+                        id,
+                        terminated,
+                    }) => {
+                        // The holder would discard it unread, so it is
+                        // dropped here, and answered here, as the holder
+                        // answers it: a request-too-large error keyed to the
+                        // id recovered from the frame's two ends, or to null
+                        // (#101 review M2). One cut off by end of input is
+                        // not answered: the client has stopped sending.
+                        tracing::warn!(
+                            bytes,
+                            cap = MAX_CLIENT_FRAME_BYTES,
+                            terminated,
+                            id_recovered = id.is_some(),
+                            "lambo serve: the proxy's client sent a frame over the size cap — \
+                             dropped unforwarded and answered with a request-too-large error"
+                        );
+                        if terminated {
+                            let reply = crate::mcp::serve::too_large_reply(id.as_ref());
+                            if client_tx.send(ClientInput::TooLarge(reply)).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
                     Ok(Framed::NotUtf8(bytes)) => tracing::warn!(
                         bytes,
                         "lambo serve: the proxy's client sent a frame that is not UTF-8, so it \
@@ -394,6 +413,13 @@ impl HubProxy {
                         // proxy exists for exactly one client.
                         tracing::info!("lambo serve: proxy client disconnected");
                         break;
+                    };
+                    let frame = match frame {
+                        ClientInput::Frame(frame) => frame,
+                        ClientInput::TooLarge(reply) => {
+                            Self::send(&mut stdout, &reply).await.map_err(client_gone)?;
+                            continue;
+                        }
                     };
                     // Recorded BEFORE forwarding, so a reconnect triggered by
                     // this very frame already has the handshake to replay.

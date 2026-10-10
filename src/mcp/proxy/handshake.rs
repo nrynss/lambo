@@ -198,7 +198,7 @@ impl Handshake {
                         "holder closed the connection during handshake replay",
                     ))
                 }
-                Framed::Oversize(bytes) | Framed::NotUtf8(bytes) => {
+                Framed::Oversize { bytes, .. } | Framed::NotUtf8(bytes) => {
                     tracing::warn!(
                         bytes,
                         "lambo serve: the holder sent an unusable frame during the handshake \

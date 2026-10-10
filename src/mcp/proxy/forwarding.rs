@@ -101,8 +101,17 @@ pub(super) enum FromHub {
 /// — every await that could be cut short lives in the outer arm body — so the
 /// nesting costs no cancellation safety.
 pub(super) enum Step {
-    FromClient(Option<String>),
+    FromClient(Option<ClientInput>),
     FromHub(Option<(u64, FromHub)>),
+}
+
+/// What the proxy's stdin reader hands the pump.
+pub(super) enum ClientInput {
+    /// A frame to forward to the holder.
+    Frame(String),
+    /// The reply to a frame over the client cap, which was dropped here:
+    /// written to the client, never forwarded (#101 review M2).
+    TooLarge(String),
 }
 
 impl HubProxy {
@@ -143,7 +152,7 @@ impl HubProxy {
                         );
                         break;
                     }
-                    Ok(Framed::Oversize(bytes)) => tracing::warn!(
+                    Ok(Framed::Oversize { bytes, .. }) => tracing::warn!(
                         generation,
                         bytes,
                         cap = MAX_FRAME_BYTES,

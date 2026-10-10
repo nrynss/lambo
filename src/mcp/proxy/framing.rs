@@ -51,9 +51,17 @@ pub(super) enum Framed {
     /// deliver — and always followed by end-of-stream.
     Torn(usize),
     /// A frame past the cap ([`MAX_FRAME_BYTES`] unless the reader was given
-    /// another), discarded through its newline. The
-    /// stream is still usable.
-    Oversize(usize),
+    /// another), `bytes` long, discarded through its newline. The stream is
+    /// still usable. `id` is its request id, recovered from the bytes seen
+    /// (its head and a small ring of its tail, #101 review M2; see
+    /// `crate::mcp::serve`'s `frame_id`), and `None` when there is no
+    /// confident one. `terminated` is false for a frame cut off by end of
+    /// stream, which is always followed by [`Framed::Eof`].
+    Oversize {
+        bytes: usize,
+        id: Option<serde_json::Value>,
+        terminated: bool,
+    },
     /// A complete frame that is not UTF-8, so it cannot be JSON-RPC. Discarded;
     /// the stream is still usable.
     NotUtf8(usize),
@@ -81,13 +89,19 @@ where
     let mut buf: Vec<u8> = Vec::new();
     // Set once the frame passes the cap: from then on bytes are counted and
     // thrown away rather than buffered, up to the newline that ends the frame.
+    // `buf` keeps the head (at most `cap` bytes), which the id is read from.
     let mut over = 0usize;
+    let mut probe: Option<crate::mcp::serve::IdProbe> = None;
     loop {
         let (consume, terminated) = {
             let available = r.fill_buf().await?;
             if available.is_empty() {
                 return Ok(if over > 0 {
-                    Framed::Oversize(buf.len() + over)
+                    Framed::Oversize {
+                        bytes: buf.len() + over,
+                        id: None,
+                        terminated: false,
+                    }
                 } else if buf.is_empty() {
                     Framed::Eof
                 } else {
@@ -98,8 +112,16 @@ where
                 Some(i) => (i, true),
                 None => (available.len(), false),
             };
-            if over > 0 || buf.len() + take > cap {
+            if let Some(probe) = probe.as_mut() {
                 over += take;
+                probe.feed(&available[..take]);
+            } else if buf.len() + take > cap {
+                let room = cap - buf.len();
+                buf.extend_from_slice(&available[..room]);
+                let mut started = crate::mcp::serve::IdProbe::new(&buf);
+                started.feed(&available[room..take]);
+                probe = Some(started);
+                over = take - room;
             } else {
                 buf.extend_from_slice(&available[..take]);
             }
@@ -107,8 +129,12 @@ where
         };
         r.consume(consume);
         if terminated {
-            if over > 0 {
-                return Ok(Framed::Oversize(buf.len() + over));
+            if let Some(probe) = probe {
+                return Ok(Framed::Oversize {
+                    bytes: buf.len() + over,
+                    id: probe.finish(),
+                    terminated: true,
+                });
             }
             // `\r\n` is legal on the wire; `Lines` strips it, so this does too.
             if buf.last() == Some(&b'\r') {

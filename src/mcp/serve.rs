@@ -97,6 +97,7 @@ mod authority;
 mod builder;
 mod frame_id;
 mod frames;
+pub(crate) use frame_id::{too_large_reply, IdProbe};
 pub(crate) use frames::MAX_MCP_FRAME_BYTES;
 mod heartbeat;
 mod http_guards;

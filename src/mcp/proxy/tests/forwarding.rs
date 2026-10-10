@@ -178,7 +178,7 @@ async fn an_oversize_frame_is_dropped_and_the_stream_resynchronises() {
     bytes.extend_from_slice(b"{\"after\":1}\n");
     let mut read = BufReader::new(std::io::Cursor::new(bytes));
     match read_frame(&mut read).await.unwrap() {
-        Framed::Oversize(bytes) => assert_eq!(bytes, MAX_FRAME_BYTES + 10),
+        Framed::Oversize { bytes, .. } => assert_eq!(bytes, MAX_FRAME_BYTES + 10),
         other => panic!("expected Oversize, got {other:?}"),
     }
     assert_eq!(
@@ -208,7 +208,7 @@ async fn a_client_frame_over_the_holders_cap_is_dropped_at_the_proxy() {
         .await
         .unwrap();
     assert!(
-        first == Framed::Oversize(MAX_CLIENT_FRAME_BYTES + 1),
+        matches!(first, Framed::Oversize { bytes, .. } if bytes == MAX_CLIENT_FRAME_BYTES + 1),
         "one byte over the cap must be dropped"
     );
     let second = read_frame_within(&mut read, MAX_CLIENT_FRAME_BYTES)
@@ -217,5 +217,81 @@ async fn a_client_frame_over_the_holders_cap_is_dropped_at_the_proxy() {
     assert!(
         matches!(&second, Framed::Line(line) if line.len() == MAX_CLIENT_FRAME_BYTES),
         "a frame exactly at the cap must pass"
+    );
+}
+
+/// #101 review M2: the proxy's reader recovers the request id of a frame
+/// over its cap from the frame's head or tail, for the proxy to answer it
+/// with, and never takes an id nested inside the frame; an over-cap frame
+/// cut off by end of input is marked unterminated, so it is not answered.
+///
+/// Mutation: drop the tail probe in `read_frame_within` (feed nothing after
+/// the head) and the id written after `params` is lost.
+#[tokio::test]
+async fn an_oversize_client_frame_carries_the_id_recovered_from_its_ends() {
+    const CAP: usize = 1024;
+    let filler = "A".repeat(4 * CAP);
+    let cases = [
+        (
+            format!(
+                r#"{{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{{"x":"{filler}"}}}}"#
+            ),
+            Some(serde_json::json!(7)),
+        ),
+        (
+            format!(
+                r#"{{"method":"tools/call","params":{{"x":"{filler}"}},"jsonrpc":"2.0","id":8}}"#
+            ),
+            Some(serde_json::json!(8)),
+        ),
+        (
+            format!(
+                r#"{{"jsonrpc":"2.0","id":"s-9","method":"tools/call","params":{{"x":"{filler}"}}}}"#
+            ),
+            Some(serde_json::json!("s-9")),
+        ),
+        (
+            format!(r#"{{"jsonrpc":"2.0","method":"tools/call","params":{{"x":"{filler}"}}}}"#),
+            None,
+        ),
+        (
+            format!(
+                r#"{{"jsonrpc":"2.0","method":"tools/call","params":{{"id":10,"x":"{filler}","id":11}}}}"#
+            ),
+            None,
+        ),
+    ];
+    for (frame, want) in cases {
+        let bytes = format!("{frame}\r\n{{\"after\":1}}\n");
+        let mut read = BufReader::new(std::io::Cursor::new(bytes.into_bytes()));
+        let got = read_frame_within(&mut read, CAP).await.unwrap();
+        assert_eq!(
+            got,
+            Framed::Oversize {
+                bytes: frame.len() + 1,
+                id: want,
+                terminated: true,
+            },
+            "{:.80}",
+            frame
+        );
+        assert_eq!(
+            read_frame_within(&mut read, CAP).await.unwrap(),
+            Framed::Line(r#"{"after":1}"#.to_string())
+        );
+    }
+    let cut = format!(r#"{{"jsonrpc":"2.0","id":7,"method":"tools/call","params":"{filler}"#);
+    let mut read = BufReader::new(std::io::Cursor::new(cut.clone().into_bytes()));
+    assert_eq!(
+        read_frame_within(&mut read, CAP).await.unwrap(),
+        Framed::Oversize {
+            bytes: cut.len(),
+            id: None,
+            terminated: false,
+        }
+    );
+    assert_eq!(
+        read_frame_within(&mut read, CAP).await.unwrap(),
+        Framed::Eof
     );
 }

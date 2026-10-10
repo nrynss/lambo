@@ -1429,3 +1429,112 @@ fn a_recall_through_the_proxy_counts_once_in_the_holder() {
         "nothing else was returned, so nothing else counts"
     );
 }
+
+/// #101 review M2 through the proxy: a request over the 4 MiB request cap is
+/// dropped by the proxy, never forwarded, and answered there with the
+/// holder's own refusal: `-32600`, "request too large (over 4 MiB)", keyed
+/// to the id recovered from the frame's head or tail, or to `null` when it
+/// has none at the top level. The proxy keeps serving after each one.
+///
+/// Mutation: drop the `ClientInput::TooLarge` send in the proxy's
+/// oversized-frame branch and no reply arrives (the call hangs, as before
+/// the review).
+#[test]
+fn an_oversized_request_through_the_proxy_is_answered_with_its_id() {
+    let (_dir, cfg, db) = scratch("toolarge");
+    let runtime = RuntimeDir::new();
+    provision(&db);
+
+    let mut a = Serve::spawn(&cfg, "agent-a", &runtime);
+    a.initialize(1);
+    let mut b = Serve::spawn(&cfg, "agent-b", &runtime);
+    b.initialize(1);
+    assert!(
+        lease_row(&db).is_some_and(|row| row.holder.starts_with("agent-a@")),
+        "A holds the session, so B is the proxy"
+    );
+
+    let data = "QUJD".repeat(5 * 1024 * 1024 / 4);
+    let args = format!(
+        r#""name":"lambo_derive_image","arguments":{{"agent_id":"agent-b","caption":"c","concept_type":"resource","image":{{"mime":"image/png","data":"{data}"}}"#
+    );
+    let cases = [
+        (
+            "id before params",
+            format!(r#"{{"jsonrpc":"2.0","id":40,"method":"tools/call","params":{{{args}}}}}"#),
+            serde_json::json!(40),
+        ),
+        (
+            "id after params",
+            format!(r#"{{"method":"tools/call","params":{{{args}}},"jsonrpc":"2.0","id":41}}"#),
+            serde_json::json!(41),
+        ),
+        (
+            "no id",
+            format!(r#"{{"jsonrpc":"2.0","method":"tools/call","params":{{{args}}}}}"#),
+            serde_json::Value::Null,
+        ),
+        (
+            "string id",
+            format!(
+                r#"{{"jsonrpc":"2.0","id":"big-42","method":"tools/call","params":{{{args}}}}}"#
+            ),
+            serde_json::json!("big-42"),
+        ),
+        (
+            "id only nested",
+            format!(
+                r#"{{"jsonrpc":"2.0","method":"tools/call","params":{{"id":43,{args},"id":44}}}}"#
+            ),
+            serde_json::Value::Null,
+        ),
+    ];
+    for (n, (case, frame, id)) in (50u64..).zip(cases) {
+        assert!(frame.len() > 4 * 1024 * 1024, "{case}: over the cap");
+        b.send(&frame);
+        b.send(&format!(r#"{{"jsonrpc":"2.0","id":{n},"method":"ping"}}"#));
+        // Everything up to the ping's answer, then a quiet second in case a
+        // forwarded frame is answered late.
+        let mut seen = Vec::new();
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            let line =
+                b.rx.recv_timeout(remaining)
+                    .unwrap_or_else(|e| panic!("{case}: the proxy stopped answering: {e}"));
+            let v: serde_json::Value = serde_json::from_str(&line).expect("JSON out");
+            let done = v.get("id").and_then(serde_json::Value::as_u64) == Some(n);
+            seen.push(v);
+            if done {
+                break;
+            }
+        }
+        while let Ok(line) = b.rx.recv_timeout(Duration::from_secs(1)) {
+            seen.push(serde_json::from_str(&line).expect("JSON out"));
+        }
+        let refusals: Vec<&serde_json::Value> = seen
+            .iter()
+            .filter(|v| v["error"]["code"] == serde_json::json!(-32600))
+            .collect();
+        assert_eq!(refusals.len(), 1, "{case}: one refusal: {seen:?}");
+        assert_eq!(refusals[0].get("id"), Some(&id), "{case}: {}", refusals[0]);
+        assert_eq!(
+            refusals[0]["error"]["message"],
+            serde_json::json!("request too large (over 4 MiB)"),
+            "{case}"
+        );
+    }
+
+    // Still a working proxy.
+    let listed = b.call(
+        60,
+        "lambo_stats",
+        serde_json::json!({"agent_id": "agent-b"}),
+    );
+    assert!(listed["error"].is_null(), "{}", text_of(&listed));
+
+    b.sigterm();
+    let _ = b.child.wait();
+    a.sigterm();
+    let _ = a.child.wait();
+}
