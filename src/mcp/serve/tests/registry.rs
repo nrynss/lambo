@@ -1158,6 +1158,8 @@ mod authority;
 mod erase;
 /// #32 PR 6: sessions attached on demand.
 mod on_demand;
+/// #101: an oversized tool-call body is refused before it is read.
+mod oversized_body;
 mod pinned_serve;
 
 /// Sonnet review L-C: which background-attach errors keep a pinned session
