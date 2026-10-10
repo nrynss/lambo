@@ -526,6 +526,84 @@ async fn an_oversized_frame_cut_off_by_end_of_input_gets_no_reply() {
     assert!(out.is_empty(), "{}", String::from_utf8_lossy(&out));
 }
 
+/// A writer that fails every write, and says when it has been written to.
+struct FailingWriter(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl AsyncWrite for FailingWriter {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+        _: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        self.0.store(true, Ordering::SeqCst);
+        std::task::Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()))
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+}
+
+/// #101 review 3 I1: end of input after the reply task has already ended
+/// (here its writer failed) is reported without making the drain timer.
+/// The runtime has no time driver, so making one panics.
+///
+/// Mutation: make the deadline before polling the task (or whatever the
+/// task's state) and the reader panics at end of input.
+#[test]
+fn end_of_input_after_the_reply_task_has_ended_makes_no_timer() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()
+        .expect("runtime");
+    rt.block_on(async {
+        let written = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (mut client_in, server_in) = tokio::io::duplex(4096);
+        let (mut reader, _writer) = crate::mcp::serve::frames::capped_transport_with_cap(
+            server_in,
+            FailingWriter(std::sync::Arc::clone(&written)),
+            "stdio",
+            16,
+        );
+        let reads = tokio::spawn(async move {
+            let mut sink = Vec::new();
+            reader.read_to_end(&mut sink).await.expect("read");
+            sink
+        });
+        client_in
+            .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"over the cap\"}\n")
+            .await
+            .expect("write");
+        // The reply is queued and the reply task's write fails, which ends
+        // the task in the same poll.
+        for _ in 0..1000 {
+            if written.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(written.load(Ordering::SeqCst), "the reply task wrote");
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        drop(client_in);
+        let sink = reads
+            .await
+            .expect("end of input is reported without a drain timer");
+        assert!(sink.is_empty(), "the request was over the cap");
+    });
+}
+
 /// The real tool path: rmcp's stdio transport over [`CappedFrames`] (what
 /// `capped_stdio` builds, with in-memory pipes in place of stdin and stdout)
 /// in front of a `LamboServer` that serves all three fields.

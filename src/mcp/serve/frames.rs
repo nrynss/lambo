@@ -274,11 +274,16 @@ impl<R: AsyncRead + Unpin> CappedFrames<R> {
         // once it has written what is on the queue.
         self.replies = None;
         if let Some(task) = self.reply_task.as_mut() {
-            let deadline = self
-                .drain_deadline
-                .get_or_insert_with(|| Box::pin(tokio::time::sleep(REPLY_DRAIN_LIMIT)));
-            if Pin::new(task).poll(cx).is_pending() && deadline.as_mut().poll(cx).is_pending() {
-                return Poll::Pending;
+            // The task is polled first, and the deadline made only if it is
+            // still running: a task that has already ended (its writer
+            // failed, or it drained the queue) needs no timer.
+            if Pin::new(task).poll(cx).is_pending() {
+                let deadline = self
+                    .drain_deadline
+                    .get_or_insert_with(|| Box::pin(tokio::time::sleep(REPLY_DRAIN_LIMIT)));
+                if deadline.as_mut().poll(cx).is_pending() {
+                    return Poll::Pending;
+                }
             }
             self.reply_task = None;
             self.drain_deadline = None;
