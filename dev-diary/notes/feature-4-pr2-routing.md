@@ -159,3 +159,22 @@ PR 3: `[[web.credential]]`, prefix scopes, `inherit_serve_credentials`,
 `list_sessions`. PR 4: the page's session picker. (The page's base path
 landed here, review M1: the script fetches relative `api/...` URLs, and
 `/s/{b}` redirects to `/s/{b}/` so they resolve under `b`.) PR 5: H7 closure and the remaining docs.
+
+## Review remediation (Opus review, 2026-10-10)
+
+After merging main (#81, #82, #83; CHANGELOG conflicts kept both sides,
+main's first).
+
+| finding | fix | test |
+|---|---|---|
+| M1 page at `/s/{b}/` showed the default session | `web/app.js` fetches relative `api/...`; `GET`/`HEAD` `/s/{b}` is a `308` to `/s/{b}/` (query kept, `no-store`, `Referrer-Policy`), only after bearer, scope and allowlist; other methods keep the 405 | `routing::the_scoped_page_reads_its_own_session` (no absolute `/api` fetch; every fetched path resolved against `/`, `/s/t4-a/`, `/s/t4-b/` answers that session), `routing::the_bare_scoped_page_redirects_to_its_slash` |
+| M2 `AuthToken` lacked serve's whitespace and printable-ASCII refusals | one validator, `surface::bearer::check_configured_token`, behind `SecretToken::new` and `AuthToken::new`; serve's messages unchanged | `auth::an_auth_token_no_request_could_present_is_refused_as_serve_refuses_it` (both types, same message) |
+| L1 malformed Host with a loopback host part answered | the presented Host (or target authority) is parsed by `AllowedHost::parse` | eight shapes added to the refused matrix; `host::a_malformed_target_authority_is_refused` |
+| L2 two Host headers: first won | more than one is the fixed 403 | `host::two_host_headers_are_refused` |
+| L3 two Authorization headers: first won | serve's extraction moved to `surface::bearer::presented_authorization`, called by both; the portal's sits in `auth::authenticate`, so the 401 stays `unauthorized()`'s | `routing::two_authorization_headers_are_401_in_either_order` |
+| L4 launcher wrote `--hostname` unchecked into root bash, the unit and the Caddyfile | argparse types for `--hostname` (DNS name, no IP), `--session` (addressed charset) and `--acme-email` | `--dry-run` checks (scripts have no unit harness), listed in the commit |
+| L5 skip-on-400 in the Host matrix | removed; every shape is compared | the matrix itself |
+
+Moving M1 here rather than serving the scoped page only for the default
+session: the relative-URL approach is one line per fetch plus the redirect,
+and it leaves PR 4 only the picker.
