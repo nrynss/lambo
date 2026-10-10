@@ -1039,7 +1039,8 @@
   tool refused it. A longer request line is now discarded unread up to its
   newline and logged at WARN with its size, never its content; it gets no
   reply, because no request id was read from it, and the session goes on
-  serving. Requests under 4 MiB reach rmcp byte for byte, so a field over
+  serving. A proxying serve drops such a request from its client itself
+  instead of forwarding it to the holder. Requests under 4 MiB reach rmcp byte for byte, so a field over
   its own cap inside one is refused by the tool exactly as before (same
   message, still a tool error), and the tool schemas are unchanged. The
   HTTP service now sets rmcp's body ceiling from Lambo's constant instead
