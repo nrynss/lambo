@@ -26,8 +26,8 @@ pub use serve::{
     RESERVED_CREDENTIAL_NAMES, SERVE_UNENFORCED_NOTICE, SESSION_REQUIRED,
 };
 pub use web::{
-    AllowedHost, WebConfig, DEFAULT_LOAD_CONCURRENCY, DEFAULT_MAX_LOADED_SESSIONS,
-    DEFAULT_RECALL_CONCURRENCY, DEFAULT_VIEW_TTL_MS, MAX_VIEW_TTL_MS,
+    AllowedHost, WebConfig, WebCredentialConfig, DEFAULT_LOAD_CONCURRENCY,
+    DEFAULT_MAX_LOADED_SESSIONS, DEFAULT_RECALL_CONCURRENCY, DEFAULT_VIEW_TTL_MS, MAX_VIEW_TTL_MS,
 };
 
 /// Scoring weights for daemon composite (spec §9): recency / frequency / session_activity / density.
@@ -586,15 +586,17 @@ impl LamboFile {
         let file: Self = toml::from_str(s).map_err(|e| toml_error(s, &e))?;
         file.serve.validate()?;
         file.web.validate()?;
+        file.web.validate_with_serve(&file.serve)?;
         file.check_api_key_env_is_not_a_serve_credential()?;
         Ok(file)
     }
 
     /// Refuse an `[embedder] api_key_env` that is also a `[[serve.credential]]`
-    /// `token_env`: the embeddings endpoint would be handed serve's own token.
-    /// Run on the file and again after the environment overlay, since
-    /// `LAMBO_EMBED_API_KEY_ENV` can name the variable too. The rule is
-    /// [`secret_env::check_not_a_serve_credential`].
+    /// or `[[web.credential]]` `token_env`: the embeddings endpoint would be
+    /// handed a serve or portal token. Run on the file and again after the
+    /// environment overlay, since `LAMBO_EMBED_API_KEY_ENV` can name the
+    /// variable too. The rule is [`secret_env::check_not_a_serve_credential`]
+    /// and its portal twin [`secret_env::check_not_a_web_credential`].
     fn check_api_key_env_is_not_a_serve_credential(&self) -> Result<(), LamboError> {
         let Some(name) = self.embedder.api_key_env.as_deref() else {
             return Ok(());
@@ -610,7 +612,14 @@ impl LamboFile {
             "api_key_env",
             credentials,
         )
-        .map_err(LamboError::Config)
+        .map_err(LamboError::Config)?;
+        let web = self
+            .web
+            .credentials
+            .iter()
+            .filter_map(|c| Some((c.name.as_str(), c.token_env.as_deref()?)));
+        secret_env::check_not_a_web_credential(name, "embedder.api_key_env", "api_key_env", web)
+            .map_err(LamboError::Config)
     }
 
     /// Load from a path.

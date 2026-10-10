@@ -161,6 +161,29 @@ pub(crate) fn check_not_a_serve_credential<'a>(
     }
 }
 
+/// [`check_not_a_serve_credential`] for `lambo serve-web`'s
+/// `[[web.credential]]` entries (#4 PR 3): one variable must not hold both a
+/// portal credential and another secret either.
+pub(crate) fn check_not_a_web_credential<'a>(
+    name: &str,
+    subject: &str,
+    key: &str,
+    web_credentials: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> Result<(), String> {
+    match web_credentials
+        .into_iter()
+        .find(|(_, token_env)| *token_env == name)
+    {
+        Some((credential, _)) => Err(format!(
+            "{subject} names {}, which is also the token_env of [[web.credential]] \
+             {credential:?}: one variable must not hold both lambo serve-web's credential and \
+             another secret. Give {key} a variable of its own",
+            shown(name)
+        )),
+        None => Ok(()),
+    }
+}
+
 /// Accept `name` only if it is a quotable variable name other than
 /// [`SERVE_AUTH_TOKEN_ENV`] and the [`LAMBO_CREDENTIAL_ENVS`].
 pub(crate) fn check(name: &str) -> Result<(), SecretEnvRefusal> {

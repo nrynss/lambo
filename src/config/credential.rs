@@ -57,6 +57,13 @@ pub(crate) const SERVE_TABLE: CredentialTable = CredentialTable {
     command: "lambo serve",
 };
 
+/// `[[web.credential]]`.
+pub(crate) const WEB_TABLE: CredentialTable = CredentialTable {
+    table: "[web]",
+    entry: "[[web.credential]]",
+    command: "lambo serve-web",
+};
+
 impl CredentialTable {
     /// A config error prefixed with the file and this table.
     pub(crate) fn err(&self, msg: impl std::fmt::Display) -> LamboError {
