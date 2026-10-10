@@ -148,12 +148,62 @@ async fn a_bearer_refusal_carries_nosniff_and_no_csp() {
     let (addr, handle) = spawn(state).await;
     let wrong = bearer("other");
 
-    for (path, presented) in [("/api/stats", None), ("/s/csp92/", Some(wrong.as_str()))] {
+    for (path, presented) in [
+        ("/api/stats", None),
+        ("/s/csp92/", Some(wrong.as_str())),
+        ("/no/such/path", None),
+        ("/no/such/path", Some(wrong.as_str())),
+    ] {
         let response = with_bearer(addr, "GET", path, presented).await;
         assert_eq!(response.status, 401, "{path}");
         assert_nosniff(&response, path);
         assert_no_csp(&response, path);
     }
+
+    handle.abort();
+}
+
+/// JSON a handler answers, scoped or not, and its refusals (a bad query is
+/// `400`, a saturated recall bound `503`): `nosniff` and no page policy.
+#[tokio::test]
+async fn handler_json_and_its_refusals_carry_nosniff_and_no_csp() {
+    let store = seed("csp92").await;
+    let state = state_with_web(
+        backends_on(store),
+        "csp92",
+        None,
+        &WebConfig {
+            recall_concurrency: Some(1),
+            ..Default::default()
+        },
+    );
+    let (addr, handle) = spawn(state.clone()).await;
+
+    for (path, expect) in [
+        ("/s/csp92/api/stats", 200),
+        ("/s/csp92/api/session", 200),
+        ("/api/recall?q=", 400),
+        ("/s/csp92/api/recall?q=", 400),
+        ("/s/csp92/api/recall", 400),
+    ] {
+        let response = request(addr, "GET", path).await;
+        assert_eq!(response.status, expect, "{path}: {}", response.body);
+        assert!(
+            header_values(&response, "content-type")
+                .iter()
+                .any(|value| value.starts_with("application/json")),
+            "{path} content-type"
+        );
+        assert_nosniff(&response, path);
+        assert_no_csp(&response, path);
+    }
+
+    let held = state.views.recall_permit().await.expect("the one permit");
+    let busy = request(addr, "GET", "/s/csp92/api/recall?q=user%20schema").await;
+    assert_eq!(busy.status, 503, "{}", busy.body);
+    assert_nosniff(&busy, "recall 503");
+    assert_no_csp(&busy, "recall 503");
+    drop(held);
 
     handle.abort();
 }
