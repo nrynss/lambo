@@ -259,7 +259,7 @@ fn each_credential_reaches_only_its_own_session() {
         assert!(!all.contains(secret.as_str()), "a token reached the log");
     }
     assert!(
-        !all.contains("parsed but not yet enforced"),
+        !all.contains("[serve] sets keys this serve ignores"),
         "credentials are enforced: {all}"
     );
 }

@@ -34,14 +34,15 @@ parallel; see "For the merge with PR 6").
 **Authorization before anything, through PR 5's authority.** The erase
 route runs `SessionAuthority::authorize(grant, raw, SessionNeed::Erase)`:
 the raw path segment's shape (never percent-decoded), then the scope, then
-the capability, in memory. Any refusal is the uniform 404, byte for byte the
-unrouted path, and the store is not called; the body is not even read. Only
-inside scope do 405, 400, 409, 410 and 503 appear. `/admin/sessions` needs
-`admin`, then filters its rows by the same scope test (`SessionNeed::Admin`),
-with a loose-named pinned session (one-session serve) visible only to a
-scope over every pinned session, as `/mcp` authorizes it. The implicit
-`local` and legacy `default` credentials carry neither flag, so wire erase
-always needs a configured credential, loopback included (Q5).
+the capability, in memory. Each of these refusals is the uniform 404, byte
+for byte the unrouted path (the bearer check before them answers 401), and
+the store is not called; the body is not even read. Only inside scope do
+405, 400, 409, 410 and 503 appear. `/admin/sessions` needs `admin`, then
+filters its rows by the same scope test (`SessionNeed::Admin`), with a
+loose-named pinned session (one-session serve) visible only to a scope
+over every pinned session, as `/mcp` authorizes it. The implicit `local`
+and legacy `default` credentials carry neither flag, so wire erase always
+needs a configured credential, loopback included (Q5).
 
 **Order of the attached erase: fence and quiesce first, then erase as the
 holder.** Design §6.3 step 2 says: end the MCP sessions, erase as the
@@ -138,9 +139,9 @@ authorization.
 
 **`POST /admin/s/{s}/detach` is not served.** Design §6.3 lists it for
 #33's cut-over. A pinned session's detach ends in `HeldElsewhere` and the
-retry loop takes it back within 5 s, which makes an operator detach
-pointless until PR 6 changes detach semantics (an on-demand detach removes
-the slot). Left to PR 6 or 9.
+retry loop takes it back a few seconds later, which makes an operator
+detach pointless until PR 6 changes detach semantics (an on-demand detach
+removes the slot). Left to PR 6 or 9.
 
 **`/admin/sessions` fields.** `session`, `state` (`live`, `detaching`,
 `held_elsewhere`, `failed`, `erasing`, `erased`, `unattached`), `pinned`,
@@ -275,9 +276,11 @@ Findings:
   winner already says it was an erase.
 - **MCP error -32003** (design §6.2). It fits: the erased answer never
   reaches rmcp, so `transport::erased_answer` reads the body (the guard's
-  ceiling and timeout) and answers a POST carrying one JSON-RPC request
-  with the proxy's own erased frame (`proxy::erased_reply`, 200, JSON);
-  everything else with no id to answer keeps 410.
+  ceiling and timeout) and answers a POST whose body is one JSON-RPC
+  request with a `method` and a non-null `id` (`initialize` included) with
+  the proxy's own erased frame (`proxy::erased_reply`, 200, JSON);
+  everything else with no id to answer (GET, DELETE, a notification, a
+  response, a batch, an unreadable body) keeps 410.
 
 ## Not run here
 

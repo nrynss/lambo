@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Fail if any hand-maintained mirror pair of docs has drifted.
 #
-# Three pages exist in two copies each:
+# Four pages exist in two copies each:
 #   docs/reference/cli.mdx          <-> site/src/content/docs/cli.mdx
 #   docs/reference/mcp.mdx          <-> site/src/content/docs/mcp.mdx
 #   docs/reference/installation.mdx <-> site/src/content/docs/installation.mdx
+#   docs/reference/config.mdx       <-> site/src/content/docs/config.mdx
 # The two copies of each pair are meant to carry the SAME shared prose, but they
 # are deliberately NOT byte-identical files: the site copies add Astro component
 # imports and a `/lambo/...` link prefix, and mcp.mdx's site copy carries a whole
@@ -21,6 +22,8 @@
 # copy gained the Cursor client sentence, the reference did not); its one
 # site-only line, the link to mcp.mdx's site-only "Verified clients" section, sits
 # in the same lambo-site-only markers.
+# config.mdx joined it with #32 PR 9: it carries most of the multi-session
+# reference, both copies already agreed, and nothing kept them that way.
 #
 # ## The normalisation's one asymmetric input (JE2E-10)
 #
@@ -121,7 +124,7 @@ check_pair() {
   check_no_site_prefix "$name" "$ref" || true
   if ! diff -u <(canon "$repo/$ref") <(canon "$repo/$site") >/dev/null; then
     printf '\nFAIL %s: shared prose has drifted between %s and %s\n' "$name" "$ref" "$site"
-    diff -u <(canon "$repo/$ref") <(canon "$repo/$site") | sed -n '1,40p'
+    diff -u <(canon "$repo/$ref") <(canon "$repo/$site") | sed -n '1,40p' || true
     fail=1
   else
     printf 'ok    %s: reference and site copies agree on the shared prose\n' "$name"
@@ -131,6 +134,7 @@ check_pair() {
 check_pair cli docs/reference/cli.mdx site/src/content/docs/cli.mdx
 check_pair mcp docs/reference/mcp.mdx site/src/content/docs/mcp.mdx
 check_pair installation docs/reference/installation.mdx site/src/content/docs/installation.mdx
+check_pair config docs/reference/config.mdx site/src/content/docs/config.mdx
 
 printf '\n'
 if [ "$fail" -eq 0 ]; then

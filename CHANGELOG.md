@@ -276,7 +276,8 @@
   full `--rate-limit-rps`.
 - A multi-session `lambo serve` whose pinned session was erased now starts
   and serves the other sessions, answering the erased one with the erased
-  error (MCP error `-32003` to a call, `410` to any other request); it used
+  error (MCP error `-32003` to a `POST` of one JSON-RPC request with an
+  `id`, `initialize` included; `410` to anything else); it used
   to refuse to start. A pinned session found erased on a background retry
   answers the same, instead of the `503` for a session that needs an
   operator (#32, seventh part). An on-demand session found erased (#32,
@@ -345,15 +346,13 @@
   quoted only when it is a short word. A DSN or token pasted under the wrong
   key no longer reaches a startup log.
 - `lambo.toml` `[serve]` `sessions`, `default_session` and `max_attached`
-  are enforced by an HTTP `lambo serve` (#32, fourth part), so the startup
-  notice now names only the keys still parsed but not enforced
-  (`attach_concurrency`, `idle_detach_secs`, `per_session_rps`, and for an
-  HTTP serve `[[serve.projects]]`, which only a stdio serve reads, #32
-  eighth part; `[[serve.credential]]` is enforced since the fifth part),
-  reads `[serve] is parsed but not
-  yet enforced for some keys`, and is not logged for a table that sets none
-  of them. With several sessions, `--ledger-heartbeat` writes one `stats`
-  line per session per interval.
+  are enforced by an HTTP `lambo serve` (#32, fourth part). The startup
+  notice reads `[serve] sets keys this serve ignores` and
+  names only keys the serve does not act on; after the sixth part that is
+  `[[serve.projects]]` on an HTTP serve (only a stdio serve reads it, #32
+  eighth part), and it is not logged for a table that does not set it.
+  With several sessions, `--ledger-heartbeat` writes one `stats` line per
+  session per interval.
 - The `[serve]` startup notice no longer lists `[[serve.credential]]`, which
   an HTTP serve enforces (#32, fifth part); a stdio serve authenticates
   nobody, ignores the credentials and does not read their variables. The
@@ -370,8 +369,9 @@
   `lambo serve` builds its backends, so the refusal no longer waits for a
   model to load.
 - `lambo serve` warns at startup when `LAMBO_AUTH_TOKEN` (or
-  `--auth-token`) is set beside `[[serve.credential]]`, and for a credential
-  naming sessions the serve does not pin or reaching none (#32, fifth part).
+  `--auth-token`) is set beside `[[serve.credential]]` (#32, fifth part);
+  the warnings about credentials that reach unpinned sessions are the sixth
+  part's, above.
   A refused bearer token is logged at WARN once per 10 seconds, with a
   count of those held back, and at DEBUG otherwise.
 - With `--ledger`, a `call` line made through a configured credential
@@ -379,8 +379,8 @@
   legacy `default`, the implicit `local` and stdio are unchanged.
 - Every `serve --ledger` line now carries `session` (#32). `startup` and
   `lease` lines always did; `call`, `completion` and `stats` lines gain it so
-  one ledger file can hold several sessions later. Additive: `v` stays `1`
-  and no existing key changes.
+  one ledger file can hold every session of a multi-session serve.
+  Additive: `v` stays `1` and no existing key changes.
 - The write queue's startup probe now times a representative write instead
   of one embed (#11), so `write_queue_probe_serial_items_per_sec` and
   `write_queue_items_per_sec` read in writes per second, the unit
@@ -468,6 +468,23 @@
   - `lambo recall` (one recall per process) is unchanged.
 
 ### Added
+
+- Documentation for multi-session serving (#32, ninth part). The command
+  line reference's "Several sessions in one serve" is now one overview:
+  pinned vs on-demand sessions, who reaches which session, one table of
+  every bound with its default and its answer, the admin routes and
+  shutdown. The configuration reference gains a `[[serve.credential]]` key
+  table and corrects the HTTP transport's limits (the rate limit is per
+  credential; the MCP-session cap spans every session, has a
+  per-credential share and answers `Retry-After: 5`).
+  `dev-diary/notes/feature-32-multi-session.md` records the design and
+  every decision and deviation across the parts. The spec's single-writer
+  rule now reads "one writer per session; a process may hold many"
+  (`dev-diary/notes/spec-deviation-2-2-many-leases.md`; the spec itself is
+  frozen). The dogfood runbook describes the move to several sessions,
+  which the rig has not made. `scripts/docs/check-mirror-drift.sh` now also
+  gates `config.mdx`, and reports every drifted page rather than stopping
+  at the first.
 
 - EmbeddingGemma 2 embedder over llama.cpp (#22 PR 5): `[embedder] kind =
   "embeddinggemma2"` (aliases `embeddinggemma-2`, `eg2`), feature
@@ -598,36 +615,38 @@
   host is quoted (neither is a secret); an empty, repeated or
   control-character session name and a host that is not an HTTP authority
   are refused when the file is read.
-- On-demand sessions for `lambo serve --transport http` (#32, sixth part).
-  A request for an unattached session inside a credential's scope attaches
-  it: always for a credential with `create = true`, and for one without
-  only once the session exists (it has a lease row); otherwise the `404`.
-  Concurrent first requests share one attach. An erased session answers
-  `410` and is never recreated. At most `[serve] max_attached` sessions are
-  attached: at the cap the least recently used on-demand session with no
-  tool call running is detached to make room, else `503` with `Retry-After:
-  5`. A session idle (no tool call) for `idle_detach_secs` is detached. A
-  detach flushes and releases the lease, keeping the fencing token, so a
-  reattach takes the next one. A session another writer holds answers `503`
-  with a `Retry-After` of when its lease could lapse. At most
-  `attach_concurrency` attaches run at once (one on SQLite). Pinned
-  sessions are never evicted or idle-detached, and the shutdown closes and
-  releases on-demand sessions with the pinned ones. An attach checks that
-  the session exists, is not erased and is not held by another writer
-  before it detaches anything to make room; a session with a request or
-  call running, or used in the last 2 seconds, is never the one detached.
-  The on-demand places are shared among the credentials that reach them
-  (the places divided by their number, rounded down, at least 1): at the
-  cap a credential at its share detaches only its own sessions. A `404`,
+- On-demand sessions for `lambo serve --transport http` (#32, sixth part). A
+  request for an unattached session inside a credential's scope attaches it:
+  always for a credential with `create = true`, and for one without only
+  once the session exists (it has a lease row); otherwise the `404`.
+  Concurrent first requests share one attach. An erased session answers a
+  `POST` of one JSON-RPC request with an `id` (`initialize` included) with
+  the erased error (MCP error `-32003`) and anything else with `410`
+  (seventh part), and is never recreated. At most `[serve]
+  max_attached` sessions are attached: at the cap the least recently used
+  on-demand session with no tool call running is detached to make room, else
+  `503` with `Retry-After: 5`. A session idle (no tool call) for
+  `idle_detach_secs` is detached. A detach flushes and releases the lease,
+  keeping the fencing token, so a reattach takes the next one. A session
+  another writer holds answers `503` with a `Retry-After` of when its lease
+  could lapse. At most `attach_concurrency` attaches run at once (one on
+  SQLite). Pinned sessions are never evicted or idle-detached, and the
+  shutdown closes and releases on-demand sessions with the pinned ones. An
+  attach checks that the session exists, is not erased and is not held by
+  another writer before it detaches anything to make room; a session with a
+  request or call running, or used in the last 2 seconds, is never the one
+  detached. The on-demand places are shared among the credentials that reach
+  them (the places divided by their number, rounded down, at least 1): at
+  the cap a credential at its share detaches only its own sessions. A `404`,
   `410` or failed attach is remembered for 30 seconds (at most 1,024
   sessions), never stopping a credential with `create`. A request waits at
   most 15 seconds for an attach, and an attach is abandoned (its lease
   released) after 60 seconds, as is a pinned session's background retry;
   both answer `503` with `Retry-After: 5`. At most twice `max_attached`
-  attaches wait to start; past that a request for another unattached
-  session gets `503` with `Retry-After: 5`. A startup warning names a
-  `max_attached` that leaves no on-demand place, and a library
-  `idle_detach` under a second is refused.
+  attaches wait to start; past that a request for another unattached session
+  gets `503` with `Retry-After: 5`. A startup warning names a `max_attached`
+  that leaves no on-demand place, and a library `idle_detach` under a second
+  is refused.
 - `[web]` in `lambo.toml` (#4 PR 1): `view_ttl_ms` (1500, 0 to 60000),
   `max_loaded_sessions` (4), `load_concurrency` (2, 1 to 1024, always 1 on
   SQLite) and `recall_concurrency` (4, 1 to 1024) bound the read-only
@@ -725,12 +744,12 @@
   (#32, first part): pinned `sessions`, `default_session`, `max_attached`,
   `attach_concurrency`, `idle_detach_secs`, `per_session_rps`, a
   `[[serve.projects]]` cwd map and `[[serve.credential]]` entries that name
-  the environment variable holding their token. It is parsed and validated
-  only; nothing reads it at runtime yet, so a serve with or without it
-  behaves as before, and `lambo serve` logs one warning at startup when the
-  table is present (`[serve] is parsed but not yet enforced in this
-  release`). `token_env` must be an upper-case variable name and must not
-  look like a token; a value that fails is refused without being quoted. A
+  the environment variable holding their token. The first part parsed and
+  validated it only; the later parts enforce every key, and the one
+  startup warning left (`[serve] sets keys this serve ignores`) names `[[serve.projects]]` when an HTTP serve's table sets it,
+  since only a stdio serve reads the map. `token_env` must be an upper-case
+  variable name and must not look like a token; a value that fails is
+  refused without being quoted. A
   malformed table, a session name that cannot be
   addressed by URL, an inline token, or more pinned sessions than
   `max_attached` stops every command. An older binary refuses a file that
@@ -769,12 +788,12 @@
   shared, and `--max-sessions` counts MCP sessions across the process. An
   unhosted or malformed id gets the same empty 404 as an unrouted path. A
   session held by another writer at startup is answered with 503 and
-  `Retry-After` and retried every 5 s; a session that loses its lease is
-  detached and retried while the others keep serving. A one-session serve
-  is unchanged, including exiting when it loses its lease. Shutdown closes
-  every session concurrently inside the existing budget and releases every
-  lease. Credentials per session, on-demand sessions and the operator
-  surface come later.
+  `Retry-After` and retried 5 to 6 s after each failed attempt; a session
+  that loses its lease is detached and retried while the others keep serving.
+  A one-session serve is unchanged, including exiting when it loses its
+  lease. Shutdown closes every session concurrently inside the existing
+  budget and releases every lease. Credentials and the operator surface are
+  the fifth and seventh parts below; on-demand sessions are the sixth, above.
 - Credentials for `lambo serve --transport http` (#32, fifth part).
   `[[serve.credential]]` entries are enforced: each names the variable
   holding its token (read at startup; an unset, empty or non-UTF-8 one
@@ -788,9 +807,9 @@
   time, with no early exit. A configured token equal to the legacy one, or
   shared by two credentials, refuses the start without quoting either.
   `lambo::mcp::check_serve_credentials` runs those checks for a library
-  caller. `create` is parsed and carried, but this release serves pinned
-  sessions only, so it changes no answer; `erase` and `admin` open the
-  operator surface below.
+  caller. `create` lets a credential attach a session that does not exist
+  yet (the on-demand sessions above, sixth part); `erase` and `admin` open
+  the operator surface below.
 - Erase a session from a running HTTP `lambo serve` (#32, seventh part):
   `POST /admin/s/<session>/erase` with `{"confirm": "<session>"}`, for a
   credential with `erase` that reaches the session. The answer is the same
@@ -809,11 +828,14 @@
   and joined) without flushing or releasing the lease, then erased as the
   lease's holder, so no other writer can take it in between. While the
   erase runs its requests get `503` with `Retry-After: 1`; once erased, a
-  call gets the erased error (MCP error `-32003`, as a proxy to an erased
-  session answers) and any other request `410`, and nothing recreates it.
-  An erased on-demand session is remembered like PR 6's other negative
-  outcomes. A one-session serve answers the erase and then exits. The
-  shutdown waits for an erase in flight within its close budget, and cuts
+  `POST` of one JSON-RPC request with an `id` (`initialize` included) gets
+  the erased error (MCP error `-32003`, as a proxy to an erased session
+  answers), anything else (a `GET` or `DELETE`, a notification, a
+  response, a batch, an unreadable body) gets `410`, and nothing recreates
+  it.
+  An erased on-demand session is remembered like the sixth part's other
+  negative outcomes. A one-session serve answers the erase and then exits.
+  The shutdown waits for an erase in flight within its close budget, and cuts
   one still running 8 seconds after it began closing the sessions short
   with an unknown outcome. Not an MCP tool: the tool list is unchanged. `GET
   /admin/sessions`, for a credential with `admin`, lists the sessions in

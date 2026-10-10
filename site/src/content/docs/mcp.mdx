@@ -14,7 +14,7 @@ Lambo serves over stdio by default, and over HTTP when you ask for it.
 | stdio | `lambo serve --session demo` | The default. Works with any MCP client through the standard `mcpServers` configuration. |
 | HTTP | `lambo serve --session demo --transport http` | Streamable HTTP on port `7700`, bound to `127.0.0.1`. Change them with `--port` and `--bind`. |
 
-On loopback the HTTP transport is unauthenticated by default. Binding anywhere else fails closed and requires a bearer token (`--auth-token` or `LAMBO_AUTH_TOKEN`). It also applies a global rate limit, a ceiling on concurrently live sessions, and a request-body limit. See [Configuration](/lambo/config/#http-transport) for the knobs.
+On loopback the HTTP transport is unauthenticated by default. Binding anywhere else fails closed and requires a credential: a bearer token (`--auth-token` or `LAMBO_AUTH_TOKEN`) or a `[[serve.credential]]`. It also applies a rate limit per credential, a ceiling on concurrently live MCP sessions, and a request-body limit. See [Configuration](/lambo/config/#http-transport) for the knobs. One HTTP serve can also hold several sessions, each at its own URL, `/mcp/s/<session>`; `/mcp` serves the default one. See [Several sessions in one serve](/lambo/cli/#several-sessions-in-one-serve).
 
 <Warning>
 The process behind the HTTP endpoint is a session writer, and it is not open to the world. Unless you bind only to loopback, configure a bearer token or `lambo serve` refuses to start, and once you do, every request must carry `Authorization: Bearer <token>`. Protect it as a writer, not as a read-only service.

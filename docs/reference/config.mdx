@@ -248,11 +248,13 @@ GC also sweeps on time. When `gc_max_interval_secs` has passed since a session's
 
 `[serve]` configures one `lambo serve` process that holds several sessions. It is optional: omit it and `lambo serve` behaves exactly as it always has.
 
+This section is the key reference. For how pinned and on-demand sessions, credentials, bounds and the admin routes fit together, read [Several sessions in one serve](/cli#several-sessions-in-one-serve) first.
+
 An HTTP `lambo serve` reads `sessions`, `default_session` and `max_attached`: it pins every session in `sessions` beside its `--session` values, serves `default_session` at `/mcp`, and refuses to start when the pinned sessions together exceed `max_attached` or `default_session` is not one of them (the default session must be pinned). See [Several sessions in one serve](/cli#several-sessions-in-one-serve). A stdio serve owns one session and ignores `sessions` and `max_attached`: its `--session`, or, without one, the session `[[serve.projects]]` or `default_session` chooses ([below](#choosing-a-stdio-serves-session)).
 
 An HTTP `lambo serve` also enforces `[[serve.credential]]`; see [Credentials](#credentials). A stdio serve authenticates nobody (its client owns the process), so it ignores the credentials and never reads their variables.
 
-An HTTP `lambo serve` enforces `attach_concurrency`, `idle_detach_secs` and `per_session_rps` too. `per_session_rps` gives every session its own request bucket; the other two bound the sessions a serve attaches on demand, which it does once a credential reaches past the pinned sessions (a `session_prefix`, or an unpinned name). A stdio serve owns one session, so none of the three applies to it. An HTTP serve never reads `[[serve.projects]]`, which is a stdio serve's only: when an HTTP serve's table sets it, `lambo serve` logs one warning at startup (`[serve] is parsed but not yet enforced for some keys`) that names the key and no value from it. A malformed table is still refused when the file is read, so it stops every command, like an unknown key.
+An HTTP `lambo serve` enforces `attach_concurrency`, `idle_detach_secs` and `per_session_rps` too. `per_session_rps` gives every session its own request bucket; the other two bound the sessions a serve attaches on demand, which it does once a credential reaches past the pinned sessions (a `session_prefix`, or an unpinned name). A stdio serve owns one session, so none of the three applies to it. An HTTP serve never reads `[[serve.projects]]`, which is a stdio serve's only: when an HTTP serve's table sets it, `lambo serve` logs one warning at startup (`[serve] sets keys this serve ignores`) that names the key and no value from it. A malformed table is still refused when the file is read, so it stops every command, like an unknown key.
 
 ```toml
 [serve]
@@ -295,9 +297,21 @@ Every session named in `[serve]` must be addressable by URL: 1 to 128 bytes of `
 
 A credential never holds its token. `token_env` names the environment variable that does, and an HTTP `lambo serve` reads it at startup: an unset, empty or non-UTF-8 variable refuses the start (exit `2`, before any model is loaded), naming the credential and the variable and never a value. An inline `token = "..."` is refused, and the refusal does not quote it. A credential reaches the sessions in `sessions` (exact names, or `"*"` for every pinned session plus every session under any credential's prefix) and those under `session_prefix` (ids that start with the prefix and are longer than it). It may carry `create` (attach a session that does not exist yet), `erase` (erase a session in its reach with `POST /admin/s/<session>/erase`) and `admin` (list the sessions in its reach with `GET /admin/sessions`). A request to either route without the flag, or for a session outside the credential's reach, gets the empty `404`. The names `default` and `local` are reserved, and `token_env` may not be `LAMBO_AUTH_TOKEN`. `token_env` must be a conventional variable name (`[A-Z_][A-Z0-9_]*`, at most 64 bytes) and must not look like a token (an AWS key id, or a 20-plus character run of letters and digits with no `_`), because it is the key a token is most likely to be pasted into by mistake. A value that fails is refused without being quoted.
 
+Each `[[serve.credential]]` entry takes these keys:
+
+| Key | Required | What it sets |
+|---|---|---|
+| `name` | Yes | A name for logs, refusals and the ledger's `credential` field: 1 to 128 bytes of `[A-Za-z0-9._:-]`, not starting with `.`. `default` and `local` are reserved. |
+| `token_env` | Yes | The environment variable holding the token, read at startup by an HTTP serve. Not `LAMBO_AUTH_TOKEN`. |
+| `sessions` | `sessions`, `session_prefix` or both | Exact session names, or `"*"` for every pinned session plus every session under any credential's prefix. A name that is not pinned is attached on demand. |
+| `session_prefix` | | Every session whose id starts with this and is longer. Attached on demand. |
+| `create` | No (`false`) | May attach a session that does not exist yet. |
+| `erase` | No (`false`) | May erase a session in its reach with `POST /admin/s/<session>/erase`. |
+| `admin` | No (`false`) | May list the sessions in its reach with `GET /admin/sessions`. |
+
 ### Credentials
 
-Every HTTP request to `lambo serve` presents a bearer token (`Authorization: Bearer <token>`), and the token decides which sessions the request may reach. The credentials a serve has:
+Every HTTP request to `lambo serve` is made as one credential, and that credential decides which sessions the request may reach. A request presents its token as `Authorization: Bearer <token>`; only a loopback serve with no credential configured needs none. The credentials a serve has:
 
 | Configured | Credentials |
 |---|---|
@@ -308,7 +322,7 @@ Every HTTP request to `lambo serve` presents a bearer token (`Authorization: Bea
 
 Once any credential is configured, the implicit `local` credential is gone, so a loopback serve with a `[[serve.credential]]` requires a token on every request. Neither `default` nor `local` carries `create`, `erase` or `admin`. A configured token equal to the legacy one, or two credentials with the same token, refuse the start without quoting either token.
 
-The presented token is compared with every configured token in constant time, so response timing does not say which credential a guess nearly matched. A request without a valid token gets `401`, whatever it asked for. A request with a valid token for a session outside that credential's reach gets the same empty `404` as an unknown session or an unrouted path, whether that session exists, is held by another writer, is being detached or failed, and the serve consults no store to answer it. Only inside its reach can a caller see a `503`. `/mcp` serves the default session to a credential that reaches it.
+The presented token is compared with every configured token in constant time, so response timing does not say which credential a guess nearly matched. A request without a valid token gets `401`, whatever it asked for. A request with a valid token for a session outside that credential's reach gets the same empty `404` as an unknown session or an unrouted path, whether that session exists, is held by another writer, is being detached or failed, and the serve consults no store to answer it. Only inside its reach can a caller see a `503`, or the erased answer (MCP error `-32003` to a `POST` of one JSON-RPC request with an `id`, `initialize` included, and `410` to anything else). `/mcp` serves the default session to a credential that reaches it.
 
 A session inside a credential's `session_prefix`, or named in its `sessions` but not pinned, is attached on demand by the first request for it: always with `create = true`, and without it only once the session exists (a writer has used it); otherwise the request gets the `404`. See [Several sessions in one serve](/cli#several-sessions-in-one-serve). `lambo serve` logs a warning at startup for a credential without `create` that reaches sessions it does not pin, and for `LAMBO_AUTH_TOKEN` (or `--auth-token`) set beside `[[serve.credential]]`: that token stays the `default` credential, reaching every pinned session, until you unset it.
 
@@ -317,7 +331,7 @@ A token must be printable ASCII with no leading or trailing whitespace, and at m
 Further rules once credentials are in play:
 
 - **Host.** A loopback serve with no credential refuses a request whose `Host` is not `localhost`, `127.0.0.1` or `::1`, as protection against DNS rebinding. A serve that requires a token accepts any `Host`, because a rebound page cannot present a token it does not know, and a serve bound beyond loopback is reached under its own address or name.
-- **Fair shares.** `--rate-limit-rps` applies per credential: each has its own bucket, so one credential's flood never rate-limits another. `--max-sessions` caps the MCP sessions of the whole process, and each credential may hold at most an even share of it, `--max-sessions` divided by the number of credentials, rounded down and at least 1. The shares fit inside the cap, so no credential can lock the others (the operator's included) out. With one credential the share is the whole cap.
+- **Fair shares.** `--rate-limit-rps` applies per credential: each has its own bucket, so one credential's flood never rate-limits another. `--max-sessions` caps the MCP sessions of the whole process, and each credential may hold at most an even share of it, `--max-sessions` divided by the number of credentials, rounded down and at least 1. While `--max-sessions` is at least the number of credentials, the shares fit inside the cap, so no credential can lock the others (the operator's included) out. With more credentials than that, each share is 1, and a credential can be refused at the process-wide cap while it holds no session. With one credential the share is the whole cap.
 - **MCP sessions belong to their opener.** An MCP session id answers only the credential whose `initialize` opened it. Another credential naming it, even one that reaches the same session, gets exactly what an unknown or expired id gets.
 - **Attribution.** With `--ledger`, each `call` line made through a configured credential carries `credential`, that credential's name. Calls as `default` or `local` carry no such field.
 - **What a token does not guard.** The credential count is not secret: response timing scales with it. A stdio `lambo serve --session <name>` run by the same OS user forwards to the HTTP serve's per-session Unix socket (a directory only that user can enter) and reaches that session whatever the credentials say. Credentials guard the network; the OS user is the boundary on the machine.
@@ -445,11 +459,11 @@ On loopback the HTTP transport is unauthenticated by default, so a local client 
 
 ### Rate limit
 
-The HTTP transport enforces a global sustained request rate, `50` requests per second by default with a burst allowance of twice that. A request over the limit is refused with `429` and `Retry-After: 1`. Adjust it with `--rate-limit-rps`.
+The HTTP transport enforces a sustained request rate for each credential, `50` requests per second by default with a burst allowance of twice that, so one credential's flood never rate-limits another. A request over the limit is refused with `429` and `Retry-After: 1`. Adjust it with `--rate-limit-rps`; `0` turns it off. With several sessions, each session also has its own bucket, `[serve] per_session_rps`; see [Multi-session serving](#multi-session-serving).
 
 ### Concurrent sessions
 
-The HTTP transport mints one MCP session per `initialize` and refuses to exceed a ceiling of `32` concurrently live sessions by default. At the cap, a new `initialize` is refused with a `503` that tells you to close an idle session or raise `--max-sessions`.
+The HTTP transport mints one MCP session per `initialize` and refuses to exceed a ceiling of `32` concurrently live MCP sessions by default, counted across every Lambo session the process holds. With several credentials, each may hold at most its share: the ceiling divided by the number of credentials, rounded down, at least 1. At the cap, or at a credential's share, a new `initialize` is refused with `503`, `Retry-After: 5` and a message that tells you to close an idle session or raise `--max-sessions`. An MCP session answers only the credential that opened it.
 
 ### Request body limit
 
