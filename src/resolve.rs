@@ -333,6 +333,12 @@ pub fn resolve_backends(file: LamboFile) -> Result<ResolvedBackends, LamboError>
         crate::embed::EmbedderKind::Candle => crate::embed::candle_identity(embedder.as_ref()),
         // A3: the Gemini adapter stamps its real model id (`gemini-embedding-001`).
         crate::embed::EmbedderKind::Gemini => crate::embed::gemini_identity(embedder.as_ref()),
+        // #22 PR 5: the weights artifact plus the prompt profile, because
+        // llama-server ignores the request's model name and EG2's text
+        // vectors depend on the task prefixes.
+        crate::embed::EmbedderKind::EmbeddingGemma2 => {
+            crate::embed::eg2_identity(embedder.as_ref())
+        }
         _ => embedder_cfg.llama_model.clone().filter(|s| !s.is_empty()),
     };
     let embedding = EmbeddingContract {

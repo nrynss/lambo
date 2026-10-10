@@ -31,6 +31,7 @@ mod derive_image;
 mod errors;
 mod inspect;
 mod ledger;
+mod recall_image;
 mod receipts;
 mod schemas;
 mod stats;

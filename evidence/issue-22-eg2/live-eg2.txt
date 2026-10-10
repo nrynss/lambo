@@ -1,0 +1,39 @@
+
+running 2 tests
+test live_eg2_text_and_image ... server: http://127.0.0.1:8191
+contract model: ggml-org/embeddinggemma-2-GGUF@bfcd2987/Q8_0;prompts=lambo-eg2-v1
+/props check: Verified { vision: Some(true) }
+cos(same sentence as query, as document) = 0.9770
+MRL 256: norm of the 768 vector's head before re-normalizing = 0.6723
+cos(red 64px, red 512px) = 1.000000
+
+text query (rows: images) -> image cosine, columns: ["a solid red square", "a solid blue square", "a green and white checkerboard", "a bicycle"]
+  red 64px           0.7500  0.6635  0.5790  0.5663  best: a solid red square
+  blue 64px          0.6776  0.7549  0.5721  0.5716  best: a solid blue square
+  checkerboard 64px  0.6381  0.6165  0.7943  0.5848  best: a green and white checkerboard
+
+text query (rows) -> text document (columns) cosine
+  q0 0.8228  0.6403  0.5998  0.6052
+  q1 0.5913  0.8454  0.5685  0.6327
+  q2 0.5904  0.5458  0.8665  0.5720
+  q3 0.6656  0.6521  0.6299  0.8440
+
+== design 7.3 ranking parity (EG2 Q8_0, profile lambo-eg2-v1, dim 768) ==
+text->image relevant    n=3  min=0.7500 mean=0.7664 max=0.7943
+text->image irrelevant  n=9  min=0.5663 mean=0.6077 max=0.6776
+text->text  relevant    n=4  min=0.8228 mean=0.8447 max=0.8665
+text->text  irrelevant  n=12 min=0.5458 mean=0.6078 max=0.6656
+doc<->doc   paraphrase  n=4  min=0.7461 mean=0.8277 max=0.8659
+doc<->doc   distinct    n=4  min=0.6554 mean=0.7247 max=0.7554
+recall: final = 0.5 x daemon + 0.5 x query; RECENT_SCORE = 0.35
+text->image relevant mean 0.7664: phase-1 leg beats RECENT_SCORE 0.35; fresh (no daemon score yet) final 0.3832 vs a daemon-scored older concept at 0.533 (PR 3's run): loses
+text->text  relevant mean 0.8447: phase-1 leg beats RECENT_SCORE 0.35; fresh (no daemon score yet) final 0.4223 vs a daemon-scored older concept at 0.533 (PR 3's run): loses
+warm median latency: text 6.9 ms, image 370.2 ms (through Lambo's client)
+ok
+test live_eg2_text_only_server_refuses_images_permanently ... /props check: Verified { vision: Some(false) }
+refused by the check: backend: the llama-server at http://127.0.0.1:8192/ reports no vision support, but [embedder] images is on: image embeds are refused (this llama-server has no vision projector: restart it with --mmproj <mmproj-embeddinggemma-2-*.gguf> --image-min-tokens 280 --image-max-tokens 280, or set [embedder] images = false)
+refused by the server: backend: llama.cpp answered 500 Internal Server Error (permanent configuration error) for model "ggml-org/embeddinggemma-2-GGUF@bfcd2987/Q8_0": {"error":{"code":500,"message":"image input is not supported - hint: if this is unexpected, you may need to provide the mmproj","type":"server_error"}} (this llama-server has no vision projector: restart it with --mmproj <mmproj-embeddinggemma-2-*.gguf> --image-min-tokens 280 --image-max-tokens 280, or set [embedder] images = false)
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.80s
+

@@ -1,0 +1,24 @@
+{
+  "id": "<HOME>/models/embeddinggemma-2-gguf/embeddinggemma-2-Q8_0.gguf",
+  "architecture": {
+    "input_modalities": [
+      "text",
+      "image",
+      "audio",
+      "video"
+    ],
+    "output_modalities": [
+      "text"
+    ]
+  },
+  "meta": {
+    "vocab_type": 2,
+    "n_vocab": 262144,
+    "n_ctx": 8192,
+    "n_ctx_train": 262144,
+    "n_embd": 512,
+    "n_params": 271002648,
+    "size": 294064224,
+    "ftype": "Q8_0"
+  }
+}

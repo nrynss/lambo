@@ -91,6 +91,39 @@ pub struct RecallPipeline {
     expanded: expand::ExpandedSet,
 }
 
+/// What kind of recall `Daemon::recall_routed` runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Route {
+    /// A text recall: a structural phrasing may dispatch to traversal (T9),
+    /// and a failed vector read degrades to the other legs with a warning.
+    Text,
+    /// A recall by an image or a client vector (#22 PR 6): never dispatched
+    /// to traversal (it would skip the vector leg), and the vector leg is
+    /// required, so a failed vector read fails the recall.
+    ByVector,
+}
+
+impl Route {
+    fn routes_structural(self) -> bool {
+        self == Route::Text
+    }
+
+    fn vector_required(self) -> bool {
+        self == Route::ByVector
+    }
+
+    /// Whether phase 1 runs the recent leg for `text`: always on a text
+    /// recall, and on a recall by vector only beside text (see
+    /// [`candidates::RecentLeg`]).
+    fn recent_leg(self, text: &str) -> candidates::RecentLeg {
+        if self == Route::ByVector && crate::surface::validate::is_blank(text) {
+            candidates::RecentLeg::Skip
+        } else {
+            candidates::RecentLeg::Run
+        }
+    }
+}
+
 /// The daemon cycle's `now` source (T4.6 finding-1 regression seam).
 ///
 /// Production uses [`Utc::now`]; tests swap in a controllable clock
@@ -434,8 +467,87 @@ impl Daemon {
         weights: RecallWeights,
         cache: &mut RecallCache<RecallPipeline>,
     ) -> DetailedRecall {
+        match self
+            .recall_routed(
+                session,
+                query,
+                vectors,
+                embedding,
+                weights,
+                cache,
+                Route::Text,
+            )
+            .await
+        {
+            Ok(result) => result,
+            // Unreachable: a text recall degrades a failed vector read to a
+            // warning and never returns `Err`. Kept total rather than a panic,
+            // and the detail stays in the log.
+            Err(err) => {
+                tracing::warn!(target: "lambo::recall", "recall: {err}");
+                DetailedRecall::warn_only("recall: the vector read failed".into())
+            }
+        }
+    }
+
+    /// Recall by a query vector the caller already holds (#22 PR 6: recall
+    /// by image or by a client vector), instead of the query text's
+    /// embedding.
+    ///
+    /// The blended pipeline always runs: a structural phrasing in the
+    /// (optional) text is **not** dispatched to traversal, because that
+    /// path skips the vector leg and would silently drop the image the
+    /// caller asked about. The keyword leg reads the text as usual (an
+    /// empty text finds nothing), the recent leg runs only beside text
+    /// (with no text its flat score would outrank true image matches, see
+    /// [`candidates::RecentLeg`]), and the vector leg searches with
+    /// `embedding`. Nothing is cached: a
+    /// vector-dependent pipeline never is (P1-2), and the caller passes a
+    /// cache of its own for the signature's sake.
+    ///
+    /// **The vector leg is required.** A store error on the vector read
+    /// (a backend failure, a timeout, a tier whose durable fallback also
+    /// failed, an embedding-contract race) is returned as `Err` instead of
+    /// degrading to the other legs: with no text, those legs would answer
+    /// "what is near this image" with whatever was derived last. This is
+    /// the same rule as a failed image embed (`query_vector::resolve`).
+    pub(crate) async fn recall_by_vector_with(
+        &self,
+        session: &SessionId,
+        query: RecallQuery,
+        vectors: crate::store::vector_source::VectorCandidates<'_>,
+        embedding: (&[f32], &crate::types::EmbeddingContract),
+        weights: RecallWeights,
+        cache: &mut RecallCache<RecallPipeline>,
+    ) -> Result<DetailedRecall, StoreError> {
+        self.recall_routed(
+            session,
+            query,
+            vectors,
+            Some(embedding),
+            weights,
+            cache,
+            Route::ByVector,
+        )
+        .await
+    }
+
+    /// [`Daemon::recall_with`] or [`Daemon::recall_by_vector_with`], as
+    /// `route` says. `Err` only on [`Route::ByVector`], whose vector leg is
+    /// required.
+    #[allow(clippy::too_many_arguments)]
+    async fn recall_routed(
+        &self,
+        session: &SessionId,
+        query: RecallQuery,
+        vectors: crate::store::vector_source::VectorCandidates<'_>,
+        embedding: Option<(&[f32], &crate::types::EmbeddingContract)>,
+        weights: RecallWeights,
+        cache: &mut RecallCache<RecallPipeline>,
+        route: Route,
+    ) -> Result<DetailedRecall, StoreError> {
         if let Err(err) = crate::store::validate_vector_candidate_limit(query.top_k) {
-            return DetailedRecall::warn_only(format!("recall: {err}"));
+            return Ok(DetailedRecall::warn_only(format!("recall: {err}")));
         }
         // P2-8: the caller's `session` must match the graph's authoritative
         // session — the keyword/recent/expansion legs come from the daemon's
@@ -444,16 +556,17 @@ impl Daemon {
         // vector-session B. On mismatch, refuse (warn), never mix.
         let graph_session = self.graph.read().session_id().clone();
         if session != &graph_session {
-            return DetailedRecall::warn_only(format!(
+            return Ok(DetailedRecall::warn_only(format!(
                 "recall: caller session {session} != graph session {graph_session}; \
                  refusing to mix graph and vector namespaces"
-            ));
+            )));
         }
         // T9: route by query kind. A structural/dependency question is answered
         // by traversal below; the gather and the blended pipeline are skipped
         // only for a DISPATCHED structural query (N2) - one that actually resolves
         // an anchor with structural dependents.
-        let structural = dispatch::classify(&query.query) == RecallKind::Structural;
+        let structural =
+            route.routes_structural() && dispatch::classify(&query.query) == RecallKind::Structural;
 
         // Cheap in-memory dispatch check (no store I/O) under a brief graph read:
         // does the query resolve an anchor WITH structural dependents? Only then
@@ -480,6 +593,15 @@ impl Daemon {
         } else {
             match candidates::gather_from(vectors, &graph_session, embedding, query.top_k).await {
                 Ok(input) => input,
+                // #22 PR 6: a recall by image or vector has nothing to
+                // degrade to; its vector leg is the question.
+                Err(err) if route.vector_required() => {
+                    tracing::warn!(
+                        target: "lambo::recall",
+                        "recall by vector failed: the vector read failed: {err}"
+                    );
+                    return Err(err);
+                }
                 Err(err) => {
                     tracing::warn!(target: "lambo::recall", "phase-1 gather degraded: {err}");
                     // E2E-6: a mid-flight refusal of the checked vector read
@@ -493,14 +615,21 @@ impl Daemon {
                     // CLI-side embed-failure annotation (that path has no
                     // query embedding, so `gather` returns early and never
                     // reaches the store), so the two never duplicate.
-                    if matches!(&err, StoreError::Invariant(msg) if msg.contains("embedding contract changed"))
+                    //
+                    // Any other failure of the vector read (a backend error,
+                    // a timeout, a tier whose durable fallback failed too)
+                    // drops the same leg, so it says so the same way; its
+                    // text names no detail (that can carry a store URL or a
+                    // driver string), the log above has it.
+                    let text = if matches!(&err, StoreError::Invariant(msg) if msg.contains("embedding contract changed"))
                     {
-                        vector_leg_refused.push(Annotation::new(
-                            AnnotationKind::VectorDegraded,
-                            "recall: vector leg refused because the embedding contract changed \
-                             mid-query; results are keyword-only",
-                        ));
-                    }
+                        "recall: vector leg refused because the embedding contract changed \
+                         mid-query; results are keyword-only"
+                    } else {
+                        "recall: the store's vector read failed (detail logged); vector leg \
+                         skipped, results are keyword-only"
+                    };
+                    vector_leg_refused.push(Annotation::new(AnnotationKind::VectorDegraded, text));
                     candidates::Phase1Input::default()
                 }
             }
@@ -528,7 +657,7 @@ impl Daemon {
             && let Some(result) =
                 dispatch::try_structural(&graph, &query.query, query.top_k, query.max_tokens)
         {
-            return result;
+            return Ok(result);
         }
 
         let scores = self.scores.read().clone();
@@ -547,11 +676,17 @@ impl Daemon {
                               query: &RecallQuery| {
             // P2-6: without an index, the independently gathered recent and
             // vector legs still yield candidates (only lexical lookup is lost).
+            let recent = route.recent_leg(&query.query);
             let (phase1, legs) = match index {
-                Some(index) => {
-                    candidates::candidates_with_legs(graph, index, input, &query.query, query.top_k)
-                }
-                None => candidates::candidates_without_keyword_with_legs(graph, input),
+                Some(index) => candidates::candidates_with_legs_as(
+                    graph,
+                    index,
+                    input,
+                    &query.query,
+                    query.top_k,
+                    recent,
+                ),
+                None => candidates::candidates_without_keyword_with_legs_as(graph, input, recent),
             };
             let expanded = expand::expand(graph, phase1.clone(), query.traversal_depth);
             RecallPipeline {
@@ -627,8 +762,17 @@ impl Daemon {
         // other response annotation on this path is `traversal`, which is
         // produced by a dispatched structural query that skips `gather`
         // entirely — the two never coexist.
-        result.response_annotations.extend(vector_leg_refused);
+        //
+        // The same line also goes to `warnings`, which is what `Memory::recall`
+        // and `lambo_recall` hand a caller (as the query-embed failure's line
+        // is): without it a library or MCP caller saw a recall that had
+        // silently dropped its vector leg. The CLI renderer skips a warning an
+        // annotation already rendered, so the header shows it once.
         result
+            .warnings
+            .extend(vector_leg_refused.iter().map(|a| a.text.clone()));
+        result.response_annotations.extend(vector_leg_refused);
+        Ok(result)
     }
 
     /// Cycles completed since [`Daemon::spawn`] (XP-6).

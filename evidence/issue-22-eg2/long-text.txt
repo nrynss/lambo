@@ -1,0 +1,10 @@
+# llama.cpp b11517, EmbeddingGemma 2 Q8_0, started with the documented command line
+# (--ctx-size 8192 --batch-size 8192 --ubatch-size 8192, 4 slots).
+# The server log: load_model: initializing, n_slots = 4, n_ctx_slot = 8192, kv_unified = 'true'
+# Document-role text of N words (python urllib, POST /v1/embeddings), 2026-10-09:
+words prompt_tokens result
+1000 2808 200, 768 dims
+2500 7008 200, 768 dims
+3500 9808 500 input is too large to process. increase the physical batch size (current batch size: 8192)
+4000 11208 500 input is too large to process. increase the physical batch size (current batch size: 8192)
+7000 19608 500 input is too large to process. increase the physical batch size (current batch size: 8192)

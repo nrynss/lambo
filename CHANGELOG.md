@@ -4,6 +4,14 @@
 
 ### Breaking
 
+- `RecallParams` (the `lambo_recall` parameters, re-exported from
+  `lambo::mcp::server`) gains two public fields, `image: Option<WireImage>`
+  and `query_vector: Option<WireQueryVector>` (#22 PR 6), so code that
+  builds it with a struct literal must add `image: None, query_vector:
+  None`, or end the literal with `..Default::default()`: `RecallParams`
+  now derives `Default`, so the next optional field will not break such a
+  literal again. Deserializing it, and its published schema, are
+  unaffected.
 - `Concept` gains a public field, `embedding_source: Option<EmbeddingSource>`
   (#22). Code that builds a `Concept` with a struct literal must add
   `embedding_source: None`; code that reads or deserializes one is
@@ -145,6 +153,11 @@
   `accept_client_vectors: bool` (#22 PR 4). Code that builds either with a
   struct literal must add it (or use `..Default::default()`); both default to
   `false`, and `lambo.toml` files are unaffected.
+- `EmbedderKind` gains a variant, `EmbeddingGemma2` (#22 PR 5), so library
+  code that matches it exhaustively needs the new arm. `EmbedderConfig`
+  gains a public field, `images: Option<bool>`; code that builds one with a
+  struct literal must add `images: None` (or use `..Default::default()`).
+  `lambo.toml` files are unaffected.
 
 - `lambo serve-web` checks `Host` while no token is configured (#4 PR 2,
   a DNS-rebinding fix, see Fixed). A loopback window reached under any name
@@ -173,6 +186,26 @@
 
 ### Changed
 
+- A tool call that fails because a vector read refused its probe (the
+  session's embedding contract changed mid-query, or the vector width
+  differs) now tells the caller to re-check the session's embedding
+  contract (`lambo_stats`) and retry, instead of a bare `store error (the
+  detail was logged server-side)` (#22 PR 6 review). The text is fixed and
+  echoes nothing from the refusal; the class, and the ledger's
+  `error_kind`, stay `store error`. A recall by image or query vector is
+  where this is usually seen, since it fails rather than degrade.
+
+- `lambo_recall`'s published schema changes additively (#22 PR 6): two
+  optional properties, `image` and `query_vector`, and `query` is no longer
+  in `required` (it gains `"default": ""` and a description saying it is
+  required unless an image or a query vector is sent; the server still
+  refuses a call with none of the three). The tool-list golden is updated
+  for `lambo_recall` only; the other seven schemas are byte-identical.
+  `lambo recall --query` is likewise optional beside `--image` or
+  `--query-vector-json`. A `lambo_recall` call with no `query` (and neither
+  of the two) now gets a tool error (`isError`), `query must be a
+  non-empty string (or send image or query_vector)`, where before serde
+  refused it as a JSON-RPC invalid-params error (`missing field query`).
 - `lambo serve-web` serves an allowlist of sessions (#4 PR 2): the ordered
   union of the repeatable `--session` and `[web] sessions`, each at
   `/s/<session>/` (data routes under `/s/<session>/api/...`), the first also
@@ -379,6 +412,58 @@
 
 ### Added
 
+- EmbeddingGemma 2 embedder over llama.cpp (#22 PR 5): `[embedder] kind =
+  "embeddinggemma2"` (aliases `embeddinggemma-2`, `eg2`), feature
+  `embed-eg2`, which released binaries (`ship`) now carry. One
+  `llama-server` (b11452 or later) embeds text and, when started with
+  `--mmproj`, images into one space, so `lambo_derive_image` can send the
+  image itself. Lambo adds the model card's task prefixes (documents
+  `title: none | text: `, recall queries `task: search result | query: `,
+  images none), truncates to `dim` (768, 512, 256 or 128) and
+  re-normalizes. The contract `model` is the weights artifact plus the
+  prompt profile, by default
+  `ggml-org/embeddinggemma-2-GGUF@bfcd2987/Q8_0;prompts=lambo-eg2-v1`, since
+  `llama-server` ignores the request's model name. The profile fixes the
+  image budget at 280 tokens: start the server with `--image-min-tokens 280
+  --image-max-tokens 280 --batch-size 8192 --ubatch-size 8192` (at the
+  default ubatch of 512 the server silently caps the budget to 256). Lambo
+  checks the budget by embedding a reference image of its own and refuses
+  images when the server reports another token count for it. Before its
+  first embed, and again every 60 seconds and after a failed embed request,
+  the adapter asks `/props` which file the server loaded and whether it has
+  vision, and refuses a file that is not EmbeddingGemma 2, another
+  quantization than the artifact names (llama.cpp's `Q4_K - Medium` matches
+  `Q4_K_M`), or images on a server without a vision projector. An image
+  sent to such a server anyway is a permanent configuration error naming
+  `--mmproj`, and an image the server cannot decode a content refusal, not
+  the transient error their HTTP 500 used to mean. `[embedder] images =
+  false` (default on) makes it text-only. `api_key_env` works with this
+  kind as with `bge_m3`. See `lambo.example.toml` for the full server
+  command line.
+- Recall by image or by a client query vector (#22 PR 6, the Dresscode
+  "close to the one you dismissed" path). `lambo_recall` takes an optional
+  `image` (mime and base64, embedded by the server with
+  `Embedder::embed_image`, no prompt) or `query_vector` (values and the
+  contract they are in), at most one; with either, `query` is optional and
+  still feeds the keyword leg, and the vector leg searches by the image or
+  vector. With no text the recent-interactions leg is skipped: its flat
+  0.35 was calibrated on text and would rank whatever was derived last
+  above a true image match scoring lower; with text it runs as for any
+  recall. The same checks as `lambo_derive_image`: base64 capped before it
+  is decoded, MIME matched to the magic bytes, a client vector accepted
+  only with `[embedder] accept_client_vectors = true` and only in exactly
+  the session's contract, refused with no echo. Not cached (the #14 query
+  cache holds text queries only), never logged; the ledger line gains only
+  `by: "image" | "vector"`. A store without vector search, an image the
+  embedder cannot embed, or a failed vector read is an error rather than an
+  answer without the vector leg, and
+  a structural phrasing beside an image is not dispatched to traversal.
+  Library: `Memory::recall_by` with `recall::query_vector::QueryBy`;
+  `surface::image::check_submitted_vector_as`; CLI `lambo recall --image
+  PATH [--mime M] | --query-vector-json PATH`, under derive-image's file
+  caps. Works over every vector source (#8's holder graph, the store's
+  checked read on SQLite, Postgres and Cockroach, and #18's tier); no store
+  contract changed.
 - `[web] sessions` and `[web] allowed_hosts`, and the repeatable
   `lambo serve-web --allowed-host` flag (#4 PR 2). A refused session name or
   host is quoted (neither is a secret); an empty, repeated or
@@ -394,7 +479,6 @@
   `recall_concurrency` slots with `503`, `Retry-After: 1` and `no-store`
   (#4 PR 1), and keeps a per-session query-embedding cache (#14's, 128
   entries or 1 MiB), so a repeated recall query skips the embed.
-
 - MCP tool `lambo_derive_image` (#22 PR 4): one image concept per call, a
   caption plus either the image (`image`: mime and base64, embedded by the
   server on the call path) or a client-computed vector (`vector`: values and
@@ -716,6 +800,26 @@
 
 ### Fixed
 
+- A `bge_m3` or `embeddinggemma2` input longer than the llama-server's
+  physical batch is now a content refusal, settled as failed with a hint
+  naming `--ubatch-size`. llama-server answers it with HTTP 500 ("increase
+  the physical batch size"), which Lambo read as a busy server, so such a
+  concept was retried forever.
+- The `embeddinggemma2` embedder no longer drops its `/props` and image
+  budget checks on a 503 "busy" (each retried image cost an extra `/props`
+  GET and reference embed); only no answer at all or a 503 "Loading model"
+  reads as a restart. A server that refuses Lambo's reference image is
+  reported as a server problem, not a decode failure of the user's image.
+  `/props` strings (file name, `model_ftype`) in messages and logs are cut
+  to 128 printable ASCII characters.
+- A text recall whose vector read fails (a backend error, a timeout, a tier
+  whose durable fallback failed too) still answers from its keyword and
+  recent legs, but no longer silently: the result carries a
+  `vector_degraded` annotation and the same line in `warnings`, so
+  `Memory::recall`, `lambo_recall` and `lambo recall` all say the vector leg
+  was skipped. The line names no backend detail (that is logged). The
+  embedding-contract race's `vector_degraded` line (E2E-6) now reaches
+  `warnings` too, where before only the CLI and the portal showed it.
 - `lambo serve-web` validated no `Host` header (#4 PR 2), so with no token
   configured any web page the local user visited could rebind its own name
   to `127.0.0.1` and read every served session same-origin. Without a token
@@ -737,6 +841,12 @@
 - An MCP session id answered any credential that presented it; it now
   answers only the credential that opened it, and another gets rmcp's
   unknown-session answer (#32, fifth part).
+- `lambo_stats` and the ledger's stats heartbeat no longer under-report a writer's not-yet-durable mutations. The flush task
+  drained the graph's log into its pending batch and updated its depth only
+  after releasing the graph lock, so `log_depth + flush_depth` could read 0
+  for a session that was still dirty. The depth is now published under the
+  same write lock as the drain, and `Memory::stats` reads both under the graph
+  lock. Observability only: nothing was ever lost.
 - The ledger's applied `completion` lines (`applied` and
   `applied_after_restart`) now carry `semantic_merged`, `reinforced`, `edges`
   and `embedded` beside `created_count` / `matched_count` (#12), so the
