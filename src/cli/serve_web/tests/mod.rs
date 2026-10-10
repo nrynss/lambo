@@ -680,10 +680,16 @@ struct HttpResponse {
 }
 
 async fn request(addr: SocketAddr, method: &str, path: &str) -> HttpResponse {
-    let mut sock = tokio::net::TcpStream::connect(addr).await.expect("connect");
     let req = format!(
         "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
     );
+    send_raw(addr, &req).await
+}
+
+/// Send `req` verbatim (a whole request head, ending in a blank line) and
+/// read the response to EOF.
+async fn send_raw(addr: SocketAddr, req: &str) -> HttpResponse {
+    let mut sock = tokio::net::TcpStream::connect(addr).await.expect("connect");
     sock.write_all(req.as_bytes()).await.expect("write");
     sock.flush().await.expect("flush");
     let mut raw = Vec::new();

@@ -21,29 +21,6 @@ async fn request_with(
     send_raw(addr, &req).await
 }
 
-/// Send `req` verbatim (a whole request head, ending in a blank line) and
-/// read the response to EOF.
-async fn send_raw(addr: SocketAddr, req: &str) -> HttpResponse {
-    let mut sock = tokio::net::TcpStream::connect(addr).await.expect("connect");
-    sock.write_all(req.as_bytes()).await.expect("write");
-    sock.flush().await.expect("flush");
-    let mut raw = Vec::new();
-    sock.read_to_end(&mut raw).await.expect("read");
-    let raw = String::from_utf8_lossy(&raw).into_owned();
-    let (head, body) = raw.split_once("\r\n\r\n").unwrap_or((raw.as_str(), ""));
-    let status = head
-        .lines()
-        .next()
-        .and_then(|l| l.split_whitespace().nth(1))
-        .and_then(|c| c.parse::<u16>().ok())
-        .unwrap_or_else(|| panic!("no status line in: {head}"));
-    HttpResponse {
-        status,
-        headers: head.to_string(),
-        body: body.to_string(),
-    }
-}
-
 fn without_date(r: &HttpResponse) -> (String, String) {
     (
         r.headers
