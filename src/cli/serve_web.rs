@@ -23,14 +23,15 @@
 //!
 //! # Host check (#4 PR 2, DNS rebinding)
 //!
-//! While no bearer token is configured (the loopback default), the portal
+//! While no credential is configured (the loopback default), the portal
 //! answers only requests whose `Host` is `localhost`, `127.0.0.1` or `[::1]`
 //! (any port), or a name given with `--allowed-host` / `[web] allowed_hosts`;
 //! anything else gets one fixed 403. Otherwise a web page the local user
 //! visits could rebind its own name to 127.0.0.1 and read every served
 //! session. A proxy that forwards a public `Host` (Caddy's default) must
-//! name it with `--allowed-host`. With a token configured, any `Host` is
-//! accepted: a rebound page cannot present the token.
+//! name it with `--allowed-host`. With any credential configured (legacy,
+//! `[[web.credential]]` or inherited), any `Host` is accepted: a rebound
+//! page cannot present a token it does not know.
 //!
 //! # Read-only, by construction
 //!
@@ -46,14 +47,15 @@
 //!    later edit adds one.
 //! 2. **Loopback is unauthenticated by default; anywhere else fails closed.**
 //!    Reading still leaks the whole session to whoever can reach the port, so
-//!    `--bind` defaults to loopback and needs **no token** — a judge's browser
-//!    just works. A non-loopback bind (LAN or public) is refused at startup
-//!    unless a bearer token is configured (`LAMBO_AUTH_TOKEN` env or
-//!    `--auth-token`); when a token is set, every request must send
-//!    `Authorization: Bearer <token>` (mirrors `crate::mcp::serve`'s
-//!    `authorize_bind`). The surface stays read-only either way, and a
-//!    token-protected bind should still sit behind a private network or an
-//!    authenticating proxy.
+//!    `--bind` defaults to loopback and needs **no credential** — a judge's
+//!    browser just works. A non-loopback bind (LAN or public) is refused at
+//!    startup unless a credential is configured (`LAMBO_AUTH_TOKEN` env,
+//!    `--auth-token`, a `[[web.credential]]` or an inherited
+//!    `[[serve.credential]]`); once any credential is set, every request
+//!    must send `Authorization: Bearer <token>` (mirrors
+//!    `crate::mcp::serve`'s `authorize_bind`). The surface stays read-only
+//!    either way, and a credential-protected bind should still sit behind a
+//!    private network or an authenticating proxy.
 //!
 //! # Reader, not writer (spec §2.2)
 //!
@@ -205,8 +207,8 @@ pub struct Args {
     pub sessions: Vec<String>,
     /// TCP port to listen on.
     pub port: u16,
-    /// Bind address. Loopback by default — no token required. A non-loopback
-    /// bind requires a token (see `authorize_bind_web`).
+    /// Bind address. Loopback by default — no credential required. A
+    /// non-loopback bind requires a credential (see `authorize_bind_web`).
     pub bind: IpAddr,
     /// Optional bearer token required on every request. Prefer the
     /// [`AUTH_TOKEN_ENV`] env var, which overrides this flag — a token in argv
