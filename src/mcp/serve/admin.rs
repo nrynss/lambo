@@ -35,7 +35,7 @@
 //! | 408 | the body did not arrive within `REQUEST_BODY_TIMEOUT`; nothing was erased |
 //! | 409 | a live writer in another process holds the session; nothing was erased (the CLI's exit 1) |
 //! | 500 | the store failed; the body says whether the session is durably erased (repeat the request), untouched (an attached session's unflushed writes are discarded all the same), or unknown (repeat the request) |
-//! | 503 | the session is being erased, attached or detached, or the serve is shutting down; `Retry-After` |
+//! | 503 | the session is being erased, attached or detached, an attach in flight kept the attach permits past `ERASE_PERMIT_WAIT` (10 s), or the serve is shutting down; `Retry-After` |
 //!
 //! # `GET /admin/sessions`
 //!
@@ -296,8 +296,8 @@ async fn erase_session(
                 header::RETRY_AFTER,
                 retry_after.as_secs().max(1).to_string(),
             )],
-            "this session is being erased, attached or detached, or the server is shutting \
-             down: retry later\n",
+            "this session is being erased, attached or detached, another attach is still \
+             running, or the server is shutting down: retry later\n",
         )
             .into_response(),
         EraseAnswer::Failed {

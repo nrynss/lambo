@@ -978,6 +978,75 @@ async fn an_erase_racing_the_pinned_retry_waits_for_it_then_erases_what_it_attac
     );
 }
 
+/// #32 PR 7 review L1: an erase waits at most `ERASE_PERMIT_WAIT` for the
+/// attach permits. With a pinned retry parked in its load (its permit held),
+/// the erase answers 503 `Retry-After: 1` after that wait, having claimed
+/// nothing and erased nothing; its dropped acquire holds no permit and no
+/// queue place, so the retry then admits the session, and a later erase
+/// takes every permit and erases it. Paused clock.
+///
+/// Mutation: drop the timeout and the first erase is still waiting at
+/// twice `ERASE_PERMIT_WAIT`.
+#[tokio::test]
+async fn an_erase_that_cannot_get_the_permits_in_time_is_503_and_claims_nothing() {
+    use crate::mcp::serve::registry::{EraseAnswer, ERASE_PERMIT_WAIT};
+    let stall = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let w = wire_stalling(Arc::clone(&stall)).await;
+    w.store
+        .release_lease(&SessionId::new(HELD), &elsewhere())
+        .await
+        .unwrap();
+    stall.store(true, std::sync::atomic::Ordering::SeqCst);
+    let before = w.calls.len();
+    w.registry.spawn_retry_loop();
+    eventually("the retry took the lease and parked in its load", || {
+        w.calls
+            .since(before)
+            .iter()
+            .any(|(m, s)| *m == "load_session" && s == HELD)
+    })
+    .await;
+
+    tokio::time::pause();
+    let started = tokio::time::Instant::now();
+    let answer = tokio::time::timeout(ERASE_PERMIT_WAIT * 2, w.registry.erase(HELD))
+        .await
+        .expect("the erase gives up on the permits inside its wait");
+    let waited = started.elapsed();
+    tokio::time::resume();
+    match answer {
+        EraseAnswer::Busy { retry_after } => assert_eq!(retry_after, Duration::from_secs(1)),
+        other => panic!("the erase answered {other:?}"),
+    }
+    assert!(waited >= ERASE_PERMIT_WAIT, "answered after {waited:?}");
+    assert_eq!(
+        state_of(&w.registry, HELD),
+        "held_elsewhere",
+        "the slot was not claimed"
+    );
+    assert!(
+        !w.calls
+            .since(before)
+            .iter()
+            .any(|(m, _)| *m == "erase_session"),
+        "nothing was erased"
+    );
+
+    // The retry was not held back: it admits the session.
+    stall.store(false, std::sync::atomic::Ordering::SeqCst);
+    eventually("the retry admitted the session", || {
+        state_of(&w.registry, HELD) == "live"
+    })
+    .await;
+    // And a later erase gets every permit and erases it.
+    match w.registry.erase(HELD).await {
+        EraseAnswer::Erased(report) => assert!(!report.already_absent, "{report:?}"),
+        other => panic!("the second erase answered {other:?}"),
+    }
+    assert_only_the_tombstone(&w.store, HELD).await;
+    assert_eq!(state_of(&w.registry, HELD), "erased");
+}
+
 /// #32 PR 7 review H1, belt and braces: a pinned retry whose slot changed
 /// while it acquired (forced here, as nothing in the serve now changes it
 /// then) does not overwrite it. The session it attached is taken down and

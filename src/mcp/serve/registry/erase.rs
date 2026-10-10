@@ -11,7 +11,9 @@
 //!    permit is held (#32 PR 7 review H1), so no attach is between its
 //!    acquire and its admission: new requests get 503 (#32 PR 7 review L3)
 //!    and no attach or background retry starts for the id. An on-demand
-//!    attach in flight (`Slot::Attaching`) is answered 503, like a detach.
+//!    attach in flight (`Slot::Attaching`) is answered 503, like a detach,
+//!    and so is an erase that waited [`ERASE_PERMIT_WAIT`] for the permits
+//!    without getting them (an attach of another session still in flight).
 //! 2. The session's lease watcher is stopped, so the fence below is not
 //!    booked as a lost lease and does not spawn a detach.
 //! 3. The handle is fenced **in this process only**
@@ -101,6 +103,14 @@ const _: () = assert!(
     "an erase cut short by the shutdown must end inside the shutdown's CLOSE_GRACE wait"
 );
 
+/// How long an erase waits for every attach permit before it claims the
+/// slot (#32 PR 7 review L1). An attach in flight holds its permit for up
+/// to `ATTACH_TIMEOUT` (60 s), and the permits are a FIFO semaphore, so an
+/// unbounded wait would stall the admin request and queue every later
+/// attach of any session behind it. Past this the erase answers 503 with
+/// `Retry-After` and has claimed nothing.
+pub(in crate::mcp::serve) const ERASE_PERMIT_WAIT: Duration = Duration::from_secs(10);
+
 /// What [`SessionRegistry::erase`] answers. The admin route maps each to its
 /// HTTP status.
 #[derive(Debug)]
@@ -110,8 +120,9 @@ pub(in crate::mcp::serve) enum EraseAnswer {
     /// A live writer in another process holds the session (409); nothing
     /// was touched.
     HeldElsewhere { holder: String, age: Duration },
-    /// The session is being erased or detached right now, or the serve is
-    /// shutting down (503 with `Retry-After`).
+    /// The session is being erased, attached or detached right now, an
+    /// attach in flight kept the permits past [`ERASE_PERMIT_WAIT`], or the
+    /// serve is shutting down (503 with `Retry-After`).
     Busy { retry_after: Duration },
     /// The store refused or failed (500). `erased` is what the lease row
     /// read back says: [`Tombstone::Yes`] when the session is durably erased
@@ -192,13 +203,28 @@ impl SessionRegistry {
         // shutdown takes them before its close set: no attach of any id is
         // then between its acquire and its admission, so none can admit
         // over the claim below, or leave a lease this erase would meet as
-        // another holder's. Raced against the shutdown, which wants them too.
+        // another holder's. Raced against the shutdown, which wants them too,
+        // and bounded by `ERASE_PERMIT_WAIT` (#32 PR 7 review L1): the
+        // semaphore is FIFO, so while this waits every later attach queues
+        // behind it. Timed out, the pending acquire is dropped, which takes
+        // no permit and gives its queue place back, and nothing is claimed.
         let permits = tokio::select! {
             biased;
             () = self.closed() => return busy,
-            permits = self.attach_permits.acquire_many(self.permit_count) => permits,
+            permits = tokio::time::timeout(
+                ERASE_PERMIT_WAIT,
+                self.attach_permits.acquire_many(self.permit_count),
+            ) => permits,
         };
-        let Ok(permits) = permits else {
+        let Ok(Ok(permits)) = permits else {
+            if permits.is_err() {
+                tracing::warn!(
+                    session = %id,
+                    wait_secs = ERASE_PERMIT_WAIT.as_secs(),
+                    "lambo serve: an attach in flight held its permit past the erase's wait; \
+                     answering 503 (nothing was claimed or erased)"
+                );
+            }
             return busy;
         };
         if self.is_closing() {

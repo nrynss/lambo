@@ -65,6 +65,8 @@ mod views;
 
 pub(super) use erase::EraseAnswer;
 #[cfg(all(test, unix, feature = "store-memory", feature = "embed-fixture"))]
+pub(super) use erase::ERASE_PERMIT_WAIT;
+#[cfg(all(test, unix, feature = "store-memory", feature = "embed-fixture"))]
 pub(super) use on_demand::NEGATIVE_TTL;
 use on_demand::{
     choose_victim, place_share, takes_a_place, unplaced_cap, Flight, Negative, NegativeCache,

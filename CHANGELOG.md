@@ -737,9 +737,11 @@
   `already_absent`), `400` for a bad body or a confirm that does not repeat
   the id, `408` for a body that does not arrive in time, `409` when another
   process holds the session, `503` while it is being erased, attached or
-  detached, or the serve is shutting down, and `500` when the store fails,
-  saying whether the session is durably erased, untouched, or in an unknown
-  state (a repeat is always safe). A credential without `erase`, or one
+  detached, when another session's attach does not finish within 10
+  seconds (the erase waits no longer for it), or the serve is shutting
+  down, and `500` when the store fails, saying whether the session is
+  durably erased, untouched, or in an unknown state (a repeat is always
+  safe). A credential without `erase`, or one
   that does not reach the session, gets the empty `404` of an unrouted path,
   and no store is consulted. A session the serve holds is fenced in the
   process, its MCP sessions ended and its handle closed (its tasks stopped
