@@ -210,12 +210,13 @@ pub struct Args {
     pub bind: IpAddr,
     /// Optional bearer token required on every request. Prefer the
     /// [`AUTH_TOKEN_ENV`] env var, which overrides this flag — a token in argv
-    /// is visible in `ps` and shell history. Mandatory on any non-loopback bind.
+    /// is visible in `ps` and shell history. A non-loopback bind needs it or a
+    /// configured credential (`credentials`).
     pub auth_token: Option<AuthToken>,
-    /// Extra `Host` values accepted while no token is configured, beside
+    /// Extra `Host` values accepted while no credential is configured, beside
     /// the loopback names (#4 PR 2): the CLI passes the union of
     /// `--allowed-host` and `[web] allowed_hosts` ([`plan_allowed_hosts`]).
-    /// Ignored, with a startup note, once a token is configured.
+    /// Ignored, with a startup note, once any credential is configured.
     pub allowed_hosts: Vec<String>,
     /// The configured read credentials (#4 PR 3): `[[web.credential]]`,
     /// then the `[[serve.credential]]` entries `[web]
