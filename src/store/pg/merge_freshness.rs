@@ -885,6 +885,45 @@ async fn the_graph_overrides_the_database_for_unflushed_rewrites() {
     for_each_dialect!(check);
 }
 
+/// **#60 review L2.** Image derive takes derive's source, not recall's: on a
+/// fresh session its `parent_of` probe asks nothing of the database (the
+/// union has no durable contract to ask under), where recall's source would.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn image_derive_takes_the_derive_source() {
+    async fn check<D: Dialect>(kind: StoreKind, name: &str) {
+        let store = Arc::new(LaggingDatabase::<D>::new(kind));
+        let embedder = Arc::new(LabelVectors::new(DIM));
+        let session = format!("pg-image-{name}");
+        let mem = open_holder(store.clone(), &session, embedder.clone(), None).await;
+        let parents = [("a diagram", "a whiteboard photo")];
+        let outcome = mem
+            .derive_image_as(
+                &crate::types::AgentId::from("agent-a"),
+                crate::graph::image::ImageDerive {
+                    caption: "a whiteboard photo",
+                    concept_type: ConceptType::Resource,
+                    image_id: Some("img1"),
+                    payload: crate::graph::image::ImagePayload::Vector {
+                        values: embedder.vector("a whiteboard photo"),
+                        declared: embedder.contract(),
+                    },
+                    parent_of: &parents,
+                    event_time: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(!outcome.created.is_empty(), "{name}: {outcome:?}");
+        assert_eq!(
+            store.vector_calls(),
+            0,
+            "{name}: image derive asked the database (recall's source)"
+        );
+        mem.close().await.unwrap();
+    }
+    for_each_dialect!(check);
+}
+
 /// **#60, the threshold comparison.** The merge decision is exact `f32`
 /// cosine against the threshold, inclusive: the pair merges at a threshold
 /// equal to its cosine and not one ulp above. This pins only the comparison;
