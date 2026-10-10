@@ -120,8 +120,9 @@ thread_local! {
     static WHOLE_GRAPH_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// How many whole-graph scans this thread has run (tests only).
-#[cfg(test)]
+/// How many whole-graph scans this thread has run (tests only; read by the
+/// hybrid tests, which need the fixture embedder).
+#[cfg(all(test, feature = "embed-fixture"))]
 pub(crate) fn whole_graph_scans() -> usize {
     WHOLE_GRAPH_SCANS.with(std::cell::Cell::get)
 }
