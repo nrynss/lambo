@@ -44,6 +44,8 @@ is axum's own 404. There is no `any(` in the portal at all; the source pin
 no `route_service(` and no `Path<` extractor (which would percent-decode).
 `ROUTES` and the read-only sweep are unchanged, because no route was added.
 
+> Later: #92 added `security_headers` as the outermost layer, outside `host_guard`, so the pin now counts four `.layer(` calls. See `dev-diary/notes/feature-92-portal-csp.md`.
+
 **The order (design 3.3).** `host_guard` (outermost, before routing, every
 request) → for `/s/...` in `scope::resolve_session`: bearer
 (`SessionAuthority::authenticate`), shape (`parse_addressed` on the raw

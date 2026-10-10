@@ -277,10 +277,10 @@ in each PR note's remediation section.
   it. It works behind a proxy that adds the header per user, and from
   scripts; behind such a proxy, the picker follows the injected token's
   scope.
-- **CSP deferred to #92.** A `Content-Security-Policy` (and `nosniff`) would
-  change every single-session response's headers, against the
-  byte-identity rule the earlier PRs held, so it needs its own decision.
-  The owner deferred it to [#92](https://github.com/nrynss/lambo/issues/92).
+- **CSP and `nosniff` shipped in #92.** Response headers, not a `<meta>`
+  tag. The single-session byte-identity rule is relaxed for those two
+  headers only. See
+  [`feature-92-portal-csp.md`](feature-92-portal-csp.md).
 
 ## Single-session compatibility, as checked
 
@@ -321,7 +321,8 @@ non-printable bytes, refuses the start; two `Authorization` headers are a
 
 ## Not done, and where it goes
 
-- **CSP and `nosniff` for the page:** [#92](https://github.com/nrynss/lambo/issues/92).
+- **CSP and `nosniff` for the page:** done in #92. See
+  [`feature-92-portal-csp.md`](feature-92-portal-csp.md).
 - **Per-credential recall fairness** (PR 3 review L4): not filed. Needs a
   design: Q13 settled process-wide semaphores, and serve's share,
   `floor(n / k)` at least 1, adds up to more than the pool when credentials
