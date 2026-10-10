@@ -401,3 +401,22 @@ fn the_on_demand_credentials_are_those_reaching_past_the_pinned_sessions() {
         0
     );
 }
+
+/// #32 PR 6 review L6: a credential reaching past the pinned sessions with
+/// `max_attached` leaving no place beside them is warned of at startup.
+#[test]
+fn startup_warns_when_max_attached_leaves_no_on_demand_place() {
+    let mut opts = http_opts(&["pin-a"], "127.0.0.1");
+    opts.credentials = vec![credential("prefixed", &[], Some("dc-u-"))];
+    let full = |opts: &ServeOptions| {
+        startup_warnings(opts)
+            .iter()
+            .any(|w| w.contains("max_attached (1) leaves no place"))
+    };
+    opts.bounds.max_attached = 2;
+    assert!(!full(&opts), "one place left");
+    opts.bounds.max_attached = 1;
+    assert!(full(&opts), "{:?}", startup_warnings(&opts));
+    opts.credentials = vec![credential("pinned-only", &["pin-a"], None)];
+    assert!(!full(&opts), "nothing on demand");
+}

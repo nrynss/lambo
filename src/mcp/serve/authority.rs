@@ -192,6 +192,9 @@ pub(super) fn on_demand_credentials(opts: &ServeOptions) -> usize {
 ///   pinned sessions (#32 PR 6): it attaches such a session on demand only
 ///   once the session exists (it has a lease row, design decision 3), so a
 ///   name nobody has created yet is the uniform 404 to it.
+/// * A credential reaching past the pinned sessions while `max_attached`
+///   leaves no place beside them (#32 PR 6 review L6): every on-demand
+///   request would get 503.
 pub(super) fn startup_warnings(opts: &ServeOptions) -> Vec<String> {
     let mut out = Vec::new();
     if opts.transport != Transport::Http {
@@ -229,6 +232,15 @@ pub(super) fn startup_warnings(opts: &ServeOptions) -> Vec<String> {
                 cred.grant.name()
             ));
         }
+    }
+    if reaches_past_pinned(opts) && opts.bounds.max_attached <= opts.sessions.len() {
+        out.push(format!(
+            "[serve] max_attached ({}) leaves no place beside the {} pinned session(s), but a \
+             credential reaches sessions this serve does not pin: every on-demand request will \
+             get 503. Raise max_attached.",
+            opts.bounds.max_attached,
+            opts.sessions.len()
+        ));
     }
     out
 }
