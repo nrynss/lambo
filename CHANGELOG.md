@@ -219,6 +219,41 @@
 
 ### Changed
 
+- `lambo serve-web` sends two security headers (#92). Every response the
+  router answers, including a Host `403`, a bearer `401`, the uniform
+  `404`, a `405`, a `308`, `/healthz`, JSON and the assets, carries
+  `X-Content-Type-Options: nosniff`. Hyper's own replies to a request it
+  cannot parse (a malformed request line, a `431` for oversized headers)
+  never reach the router and carry neither header. The HTML page (`GET`
+  and `HEAD` of `/` and `/s/<session>/`) also carries
+  `Content-Security-Policy: default-src 'none'; script-src
+  'self'; style-src 'self'; connect-src 'self'; img-src 'self'; font-src
+  'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none';
+  object-src 'none'`. `img-src` is `'self'` only: the page has no image,
+  no CSS `url(` and no `data:` URL, so the draft's `data:` is not in the
+  policy. There is no `'unsafe-inline'` and no `'unsafe-eval'`. JSON, the
+  assets, `/healthz`, redirects and errors do not carry the policy.
+  Relative to the commit this change is based on, the responses compared
+  in `dev-diary/notes/feature-92-portal-csp.md` match apart from these two
+  headers, and the layer does not rewrite bodies.
+- Daemon recency in a session younger than 10 minutes no longer treats that
+  short span as the whole `[0, 1]` range (#95). The denominator is
+  `max(span, 10 minutes)` in integer milliseconds, clamped to `[0, 1]`, so a
+  stall of tens of milliseconds cannot flip a real query gap. A session at
+  least 10 minutes long scores bit-for-bit as before, including one whose
+  span is exactly 10 minutes. Garbage-collection eviction recency is
+  unchanged. A session with no interactions scores recency `1.0`, as
+  before. `lambo demo` keeps a 10ms wall pause and widens its script clock
+  to 60 seconds a step. Each close also reads that clock, and two closes
+  come before act III, so the twelve interactions are calls 0–8, 10, 11
+  and 13: a 13-minute span, above the floor, with the positions the old
+  10ms step gave them. The demo's recency values, P90 candidate set,
+  printed GC headroom and recall output are what they were. Because the
+  script clock now spans minutes, the demo's `conflict_recency_window` is
+  30 seconds plus that span (810 seconds), so agent B's recall still
+  carries all eight warnings, including its own conflict lines on `redis
+  backend` and `middleware/session.rs`.
+
 - A tool call that fails because a vector read refused its probe (the
   session's embedding contract changed mid-query, or the vector width
   differs) now tells the caller to re-check the session's embedding

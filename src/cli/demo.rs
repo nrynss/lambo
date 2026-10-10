@@ -38,11 +38,14 @@
 //!    its low decimals — enough to swap two near-tied concepts in the rendered
 //!    order about one run in ten. The demo therefore stamps its interactions
 //!    from a monotone script clock ([`script_clock`]): interaction *k* lands
-//!    exactly `k ×` [`STEP_PACING`] into the session, so the extent is the
-//!    script's and the score table is a pure function of the graph. This
-//!    changes which clock the *process* reads, not who may supply a timestamp
-//!    — the no-caller-timestamps invariant (F18) is untouched and the seam is
-//!    crate-private.
+//!    exactly `k ×` [`SCRIPT_STEP`] into the session. The twelve interactions
+//!    are [`INTERACTION_CALLS`] (see [`SCRIPT_LAST_EDIT_INDEX`]), a 13-minute
+//!    span, above the recency floor in `score`. The extent is the
+//!    script's and the score table is a pure function of the graph. The wall
+//!    pause between writes stays [`STEP_PACING`] (10ms): the script step is
+//!    not a sleep. This changes which clock the *process* reads, not who may
+//!    supply a timestamp — the no-caller-timestamps invariant (F18) is
+//!    untouched and the seam is crate-private.
 //! 4. **The canonization state machine is driven to a unique fixed point.**
 //!    See "Why the fixed point is unique" below — this is the part that a
 //!    naive scripted demo gets wrong, and it is why the demo settles
@@ -54,7 +57,10 @@
 //!    `1`; spec §13's "eleven seconds" is the age at the instant the video's
 //!    agent B asks. [`DemoOutcome`] therefore carries the conflict line with
 //!    the integer replaced by `<n>` ([`normalize_conflict_age`]) — the rest of
-//!    the context block is compared byte for byte.
+//!    the context block is compared byte for byte. Agent B's own conflict
+//!    lines (its act II writes) render about 120 seconds: their stamps are
+//!    two [`SCRIPT_STEP`]s before agent A's last edit. They are normalized
+//!    the same way.
 //!
 //! ## Why the fixed point is unique
 //!
@@ -92,7 +98,8 @@
 //!
 //! Two [`Config`]s are used, and **no threshold is weakened by either** — only
 //! intervals and one age floor are compressed, because the demo has to fit in
-//! a three-minute video rather than an afternoon.
+//! a three-minute video rather than an afternoon, and the conflict window is
+//! widened to the script clock's span (below).
 //!
 //! | Knob | Spec default | Build phase (acts I–III) | Canonization phase |
 //! |---|---|---|---|
@@ -102,15 +109,36 @@
 //! | `gc_interval` | 10 000 mutations | 10 000 (no sweep runs) | **1 mutation** |
 //! | `backend_flush_interval` | 1s | **5ms** | **5ms** |
 //! | `match_strategy` | Hybrid | **Canonical** | **Canonical** |
+//! | `conflict_recency_window` | 30s | **810s** | **810s** |
 //!
 //! `canonization_edge_min_age` is the knob the T8.4 brief names. It is the age
 //! floor Stage 2 applies to inbound structural edges (`interaction_span`) and
 //! Stage 3 applies to the blast-radius query — the guard that stops a burst of
 //! same-tick edges from inflating either measure. Compressing it from 60s to
-//! 10ms keeps the guard **live** (an edge written in this cycle still does not
-//! count; the engine genuinely waits for it to age) while letting a session
-//! that is minutes old in demo time behave like one that is an hour old in
-//! spec time.
+//! 10ms keeps the guard **live**: every cycle still applies it, and an edge
+//! younger than 10ms would not count. Cycles are frozen during the build, so
+//! the floor is not applied then. The newest script-clock edge is agent A's
+//! last edit, stamped at the clock's construction instant. By the first
+//! canonization cycle it is at least the twelve wall pauses behind that
+//! instant (`12 ×` [`STEP_PACING`], 120ms), which is well over 10ms, so the
+//! floor does not filter the script-clock build edges. Earlier acts are
+//! minutes older. Edges created while settling (the synonym declarations)
+//! are wall-stamped and can be younger than 10ms; this does not claim the
+//! floor ignores them.
+//!
+//! `conflict_recency_window` is widened to [`DEMO_CONFLICT_RECENCY_WINDOW`]
+//! because the script clock is not the wall clock. The daemon measures a
+//! write's age against the wall clock, and the script stamps act I's first
+//! write [`SCRIPT_LAST_EDIT_INDEX`] steps (13 minutes) before agent A's last
+//! edit, which lands on the wall clock's present. The real run takes about a
+//! second, so with the spec's 30s every write was inside the window. The
+//! demo window is that 30s plus the script's 13 minutes, so every scripted
+//! write is still inside it and agent B is told what the spec window would
+//! tell it about a session that really took one second. Do not put it back
+//! to 30s: agent B's own conflict lines on `redis backend` and
+//! `middleware/session.rs` (act II writes, minutes back on the script clock)
+//! leave the recall block. The high-risk modification line reads its own
+//! fixed 30s window and is not affected.
 //!
 //! Freezing `canonization_eval_interval` during the build is not cosmetic
 //! either: it guarantees no cycle ever evaluates a half-built graph, so the
@@ -121,8 +149,8 @@
 //! Left at spec defaults, deliberately, because they are the thresholds the
 //! demo is claiming to satisfy: `canonization_min_peer_count` (20),
 //! `canonization_eval_batch_size` (50), `canonization_repromotion_cooldown`
-//! (300s), `max_canonical_nodes` (1000), `conflict_recency_window` (30s), the
-//! scoring and recall weights, and every stage constant in `src/canon`
+//! (300s), `max_canonical_nodes` (1000), the scoring and recall weights, and
+//! every stage constant in `src/canon`
 //! (`gc_survived >= 3`, strictly above P90, `distinct >= 3`,
 //! `coverage >= 0.3`, `blast_radius > 5`).
 //!
@@ -210,30 +238,64 @@ pub const STEP_DEADLINE: Duration = Duration::from_secs(60);
 /// Poll period inside `wait_until`.
 pub const POLL_INTERVAL: Duration = Duration::from_millis(2);
 
-/// Spacing between scripted interactions — in **both** clocks.
+/// Wall-clock pause `play` sleeps between writes.
 ///
-/// It is the step of [`script_clock`] (the interval every interaction's
-/// `created_at` advances by, exactly) and the real delay `play` sleeps
-/// between writes. Two separate reasons, both load-bearing:
-///
-/// * **Determinism** — the script clock. The `recency` scoring dimension is
-///   each concept's position within the session's temporal extent, so if that
-///   extent is measured by the wall clock then every score carries the
-///   scheduler's jitter, and two concepts whose composites sit within that
-///   margin swap places run to run. Advancing the stamp by a fixed step makes
-///   the extent a property of the script: interaction *k* is always exactly
-///   `k × STEP_PACING` into the session, so `recency` — and every score, cut
-///   and ordering downstream of it — is a pure function of the graph.
-/// * **It is a video** — the real sleep. Twelve interactions in 300µs is a
-///   flicker; a human has to be able to read the narration as it scrolls.
-///
-/// Sleeping the same amount the stamp advances is what keeps the script clock
-/// *behind* the wall clock (see [`script_clock`]).
-///
-/// The whole script costs [`EXPECT_INTERACTIONS`] × this — about a tenth of a
-/// second, comfortably inside the 30s conflict-recency window agent B's
-/// warning depends on.
+/// Twelve interactions in 300µs is a flicker; a human has to be able to read
+/// the narration as it scrolls. The whole script therefore costs about a
+/// tenth of a second of wall time. This is **not** the script clock's step
+/// — that is [`SCRIPT_STEP`] — and it spaces nothing on the script clock.
+/// Sleeping 60s a write would make every test of the scenario take minutes.
 pub const STEP_PACING: Duration = Duration::from_millis(10);
+
+/// Step of [`script_clock`]: call *k* is stamped `k ×` this into the session.
+///
+/// Which calls are interactions is [`INTERACTION_CALLS`]. The session spans
+/// [`SCRIPT_LAST_EDIT_INDEX`] steps (13 minutes), above
+/// [`crate::daemon::score::MIN_RECENCY_SPAN`]. Recency is a position inside
+/// that span, so the values match the old 10ms step. A span shorter than the
+/// floor would collapse those positions toward 1.
+pub const SCRIPT_STEP: Duration = Duration::from_secs(60);
+
+/// Call index of agent A's last edit on [`script_clock`].
+///
+/// This is the one place the script clock's call indices are explained.
+///
+/// The counter advances on each `begin_interaction` (twelve, one per scripted
+/// write) and once at every `Memory::close`, where the write pipeline stamps
+/// any receipt still pending. Traced order: the interactions are
+/// [`INTERACTION_CALLS`], the closes before act III are calls 9 and 12, and
+/// [`POST_EDIT_CLOCK_READS`] closes after this index are calls 14–16. Those
+/// later closes land one [`SCRIPT_STEP`] further ahead of the wall clock
+/// each, so the lead is `POST_EDIT_CLOCK_READS × SCRIPT_STEP`. They stamp
+/// nothing in this script, and that lead is inside
+/// [`crate::writeq::RECEIPT_RETENTION`]. The closes before act III stay on
+/// this clock: dropping them moves the printed GC headroom.
+///
+/// [`script_clock`] backdates by this many steps, so the last edit lands on
+/// the wall clock's present. `assert_shape` checks that every interaction's
+/// stamp is one of [`INTERACTION_CALLS`], so a change to the number of reads
+/// before act III fails with the landed indices.
+pub const SCRIPT_LAST_EDIT_INDEX: i64 = 13;
+
+/// Script-clock reads after [`SCRIPT_LAST_EDIT_INDEX`]. See that constant.
+///
+/// Hand-counted on 2026-10-10: the closes after act III, canonization, and
+/// agent B's recall. The demo does not re-count these reads. The unit test
+/// only checks that this count times [`SCRIPT_STEP`] is inside
+/// [`crate::writeq::RECEIPT_RETENTION`].
+pub const POST_EDIT_CLOCK_READS: i64 = 3;
+
+/// The demo's `conflict_recency_window`: the spec's 30s plus the script
+/// clock's span ([`SCRIPT_LAST_EDIT_INDEX`] × [`SCRIPT_STEP`]).
+///
+/// The daemon ages writes on the wall clock, and the script puts act I's
+/// first write 13 minutes before the last edit. This keeps every write that
+/// the spec window covered when the whole session took a second of wall time
+/// inside the window. See the module docs, "The knobs".
+pub const DEMO_CONFLICT_RECENCY_WINDOW: Duration = Duration::from_secs(
+    crate::daemon::conflict::CONFLICT_RECENCY_WINDOW.as_secs()
+        + SCRIPT_LAST_EDIT_INDEX as u64 * SCRIPT_STEP.as_secs(),
+);
 
 /// Session aliases agent A declares while settling `gc_survived`. Each is a
 /// real spec §7.1 synonym for `user schema`; each also advances the mutation
@@ -268,6 +330,11 @@ pub const EXPECT_CONFLICT_LINE: &str = "Agent A wrote to it <n> seconds ago";
 pub const EXPECT_BLAST_RADIUS: u64 = 9;
 /// Interactions the script opens (one per write call, server-stamped).
 pub const EXPECT_INTERACTIONS: usize = 12;
+
+/// Script-clock call indices of the twelve interactions.
+///
+/// The gaps are `Memory::close` reads. See [`SCRIPT_LAST_EDIT_INDEX`].
+pub const INTERACTION_CALLS: [i64; EXPECT_INTERACTIONS] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 13];
 /// Concepts the script creates. Asserted so a GC eviction or a canonicalizer
 /// collision is a loud failure rather than a quietly different demo.
 pub const EXPECT_CONCEPTS: usize = 27;
@@ -724,7 +791,10 @@ async fn run_scenario_with_override(
     // The seam that makes the OUTCOME reproducible. Minted once and shared by
     // every handle below, so the session's temporal extent is the script's and
     // not the scheduler's — see `script_clock`.
-    let clock = script_clock();
+    let ScriptClock {
+        clock,
+        last_edit_at,
+    } = script_clock();
 
     store.init_schema().await.map_err(|e| {
         CliError::Runtime(format!(
@@ -803,7 +873,7 @@ async fn run_scenario_with_override(
 
     // Check the facts the whole demo rests on before waiting on anything, so a
     // broken script fails here with a diagnosis instead of timing out.
-    assert_shape(mem.graph(), &mut n)?;
+    assert_shape(mem.graph(), last_edit_at, &mut n)?;
 
     n.banner("CANONIZATION — the engine, not the script, promotes user schema");
     settle_gc_survived(&mem, &mut n).await?;
@@ -895,7 +965,8 @@ async fn run_scenario_with_override(
 // ---------------------------------------------------------------------------
 
 /// Acts I–III: canonization frozen, GC at its spec default (no sweep can run),
-/// flush and daemon compressed so the build is not paced by 1s timers.
+/// flush and daemon compressed so the build is not paced by 1s timers, and the
+/// conflict window spanning the script clock ([`DEMO_CONFLICT_RECENCY_WINDOW`]).
 ///
 /// The demo deliberately does not honour a user `[daemon]` — its own compressed
 /// cadence and scripted clock (see [`script_clock`]) are required for the
@@ -914,6 +985,7 @@ pub fn build_config() -> Config {
         daemon_tick_interval: DEMO_TICK_INTERVAL,
         backend_flush_interval: DEMO_FLUSH_INTERVAL,
         canonization_eval_interval: BUILD_EVAL_INTERVAL,
+        conflict_recency_window: DEMO_CONFLICT_RECENCY_WINDOW,
         ..Config::default()
     }
 }
@@ -933,7 +1005,7 @@ pub fn fresh_session_id() -> String {
     format!("demo-{SCENARIO_REST_API}-{}", uuid::Uuid::new_v4())
 }
 
-/// The demo's interaction clock: stamp *k* is `base + k ×` [`STEP_PACING`].
+/// The demo's interaction clock: stamp *k* is `base + k ×` [`SCRIPT_STEP`].
 ///
 /// Interactions are server-stamped and there is deliberately no way for a
 /// *caller* to supply a timestamp — this does not change that (see
@@ -948,33 +1020,47 @@ pub fn fresh_session_id() -> String {
 /// Three properties are deliberate:
 ///
 /// * **Anchored to real time, not to a fixed epoch.** `base` is a real
-///   `Utc::now`, so the session is genuinely as old as it looks. Only the
-///   *interior spacing* is synthetic, and every consumer of absolute age —
-///   `canonization_edge_min_age`, the 30s conflict-recency window, the lease
-///   TTL — still sees an honest session. Pinning `base` to a constant would
-///   have made the whole graph decades old and turned the Stage 2 / Stage 3
-///   age floors into no-ops, which is exactly the guard the compressed knob
-///   table promises is still live.
-/// * **Monotone, and never ahead of the wall clock.** `play` sleeps
-///   `STEP_PACING` *before* each write, so real elapsed time at stamp *k* is
-///   always at least `k × STEP_PACING`. The script clock therefore trails the
-///   wall clock; it never claims a write happened in the future.
-/// * **Shared across the acts.** Agent A, agent B and agent A again each open
-///   their own [`Memory`], and the counter runs across all of them, so the
-///   twelve interactions of the one session are `base + 0ms … base + 110ms`
-///   regardless of how the handles were split.
+///   `Utc::now` minus [`SCRIPT_LAST_EDIT_INDEX`] steps, so agent A's last
+///   edit is that instant ([`ScriptClock::last_edit_at`]) and act I's first
+///   write is 13 minutes earlier. Only the *interior spacing* is synthetic.
+///   Pinning `base` to a constant epoch would have made the whole graph
+///   decades old and turned the Stage 2 / Stage 3 age floors into no-ops.
+/// * **Monotone through the last edit, and ahead of the wall clock after it.**
+///   Every interaction is at or before the construction instant. Reads after
+///   [`SCRIPT_LAST_EDIT_INDEX`] land ahead of the wall clock; what those
+///   reads are, and why they write nothing, is on that constant. The daemon,
+///   canonization and recall read the wall clock, not this one.
+/// * **Shared across the acts, and with the write pipeline.** Agent A, agent
+///   B and agent A again each open their own [`Memory`] on this one counter,
+///   and each close reads it once. `declare_synonym` and `recall` open no
+///   interaction.
 ///
-/// The counter is only ever advanced by `Memory::begin_interaction`, which the
-/// script calls exactly [`EXPECT_INTERACTIONS`] times (`declare_synonym` and
-/// `recall` open no interaction).
-pub fn script_clock() -> crate::daemon::Clock {
-    let base = chrono::Utc::now();
+/// Positions are the old 10ms positions scaled by the step, so every recency
+/// value is unchanged. The daemon ages writes on the wall clock, so act I and
+/// II writes sit minutes back; [`DEMO_CONFLICT_RECENCY_WINDOW`] spans that.
+pub fn script_clock() -> ScriptClock {
+    use chrono::SubsecRound as _;
+    let step = SCRIPT_STEP.as_millis() as i64;
+    // Whole milliseconds, so every stamp survives a store that keeps no finer
+    // precision (SQLite) and `assert_shape` can compare it exactly.
+    let last_edit_at = chrono::Utc::now().trunc_subsecs(3);
+    let base = last_edit_at - chrono::Duration::milliseconds(SCRIPT_LAST_EDIT_INDEX * step);
     let stamps = Arc::new(std::sync::atomic::AtomicI64::new(0));
-    let step = STEP_PACING.as_millis() as i64;
-    Arc::new(move || {
-        let k = stamps.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        base + chrono::Duration::milliseconds(k * step)
-    })
+    ScriptClock {
+        clock: Arc::new(move || {
+            let k = stamps.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            base + chrono::Duration::milliseconds(k * step)
+        }),
+        last_edit_at,
+    }
+}
+
+/// [`script_clock`]'s clock and the instant it stamps agent A's last edit.
+pub struct ScriptClock {
+    pub clock: crate::daemon::Clock,
+    /// Call [`SCRIPT_LAST_EDIT_INDEX`]'s stamp: the wall clock when the
+    /// script clock was minted.
+    pub last_edit_at: chrono::DateTime<chrono::Utc>,
 }
 
 // ---------------------------------------------------------------------------
@@ -982,8 +1068,8 @@ pub fn script_clock() -> crate::daemon::Clock {
 // ---------------------------------------------------------------------------
 
 /// Attach one act's handle. Every handle of a run shares the same
-/// [`script_clock`], so the session's twelve interactions are evenly spaced
-/// however the acts split them.
+/// [`script_clock`], so the session's twelve interactions land on
+/// [`INTERACTION_CALLS`] however the acts split them.
 async fn open(
     store: &Arc<dyn GraphStore>,
     embedder: &Arc<dyn Embedder>,
@@ -1016,9 +1102,8 @@ async fn play(
 ) -> Result<(), CliError> {
     for (offset, step) in steps.iter().enumerate() {
         let index = first_index + offset;
-        // Pace the script (see `STEP_PACING`) before the write, so the very
-        // first interaction of an act is spaced from the last one of the act
-        // before it too.
+        // Pace the narration (see `STEP_PACING`). Wall time only: the script
+        // clock's spacing is `SCRIPT_STEP`, whatever this sleeps.
         tokio::time::sleep(STEP_PACING).await;
         match step {
             Step::Derive {
@@ -1069,11 +1154,30 @@ async fn play(
 
 /// The two structural facts the demo claims, checked the moment the graph is
 /// complete: exactly [`EXPECT_CONCEPTS`] concepts, and exactly
-/// [`EXPECT_BLAST_RADIUS`] dependents under `user schema`.
-fn assert_shape(graph: &Arc<RwLock<Graph>>, n: &mut Narrator) -> Result<(), CliError> {
+/// [`EXPECT_BLAST_RADIUS`] dependents under `user schema`. Also that every
+/// interaction's script-clock call is in [`INTERACTION_CALLS`], so agent A's
+/// last edit is call [`SCRIPT_LAST_EDIT_INDEX`].
+fn assert_shape(
+    graph: &Arc<RwLock<Graph>>,
+    last_edit_at: chrono::DateTime<chrono::Utc>,
+    n: &mut Narrator,
+) -> Result<(), CliError> {
     let g = graph.read();
     let concepts = g.concepts().count();
     let interactions = g.interactions().count();
+    let newest = g.interactions().map(|i| i.created_at).max();
+    let step = SCRIPT_STEP.as_millis() as i64;
+    let base = last_edit_at - chrono::Duration::milliseconds(SCRIPT_LAST_EDIT_INDEX * step);
+    let mut landed = Vec::with_capacity(interactions);
+    let mut off_step = false;
+    for created_at in g.interactions().map(|i| i.created_at) {
+        let delta = (created_at - base).num_milliseconds();
+        if delta.rem_euclid(step) != 0 {
+            off_step = true;
+        }
+        landed.push(delta.div_euclid(step));
+    }
+    landed.sort_unstable();
     let node = concept_id(&g, USER_SCHEMA).ok_or_else(|| {
         CliError::Runtime(format!("demo: '{USER_SCHEMA}' is missing from the graph"))
     })?;
@@ -1100,6 +1204,15 @@ fn assert_shape(graph: &Arc<RwLock<Graph>>, n: &mut Narrator) -> Result<(), CliE
     if interactions != EXPECT_INTERACTIONS {
         return Err(CliError::Runtime(format!(
             "demo: expected {EXPECT_INTERACTIONS} interactions, found {interactions}"
+        )));
+    }
+    if off_step || landed.as_slice() != INTERACTION_CALLS {
+        return Err(CliError::Runtime(format!(
+            "demo: script-clock calls of the interactions are {landed:?}, expected \
+             {INTERACTION_CALLS:?} (newest stamp {newest:?}, last edit {last_edit_at}). \
+             Each `Memory::close` reads the script clock once. An interaction on a close \
+             index, or a close on an interaction index, means the number of reads before \
+             act III changed. Update SCRIPT_LAST_EDIT_INDEX and INTERACTION_CALLS."
         )));
     }
     if radius != EXPECT_BLAST_RADIUS {
@@ -1384,10 +1497,12 @@ async fn wait_until<F: FnMut() -> bool>(label: &str, mut cond: F) -> Result<(), 
 /// plus each concept's own frequency term, issue #29) and its per-type bar
 /// (ALGO-11). Recency is the span-relative one, not GC's time-anchored one
 /// ([`crate::daemon::gc::GC_RECENCY_WINDOW`], 365 days): for a session no
-/// older than the window, read near its last write (the demo), span-relative
-/// recency `1 − x/span` is never above GC's `1 − x/window` (`span ≤ window`), so
-/// the headroom printed here is a lower bound on GC's, and a wider window only
-/// widens it. Every concept is measured, including the types the score cut
+/// older than the window, read near its last write (the demo), session
+/// recency `1 − x/max(span, MIN_RECENCY_SPAN)` is never above GC's
+/// `1 − x/window`, because both terms of that `max` are at most the window:
+/// the span by assumption, and the 10-minute recency floor is far under 365
+/// days. So the headroom printed here is a lower bound on GC's, and a wider
+/// window only widens it. Every concept is measured, including the types the score cut
 /// exempts, which makes the bound conservative rather than exact.
 pub fn gc_headroom(graph: &Graph) -> Vec<(String, f64)> {
     use crate::daemon::gc::MIN_CONCEPT_SCORE;
@@ -1644,7 +1759,10 @@ fn header(n: &mut Narrator, scenario: &str, session: &str, store: &dyn GraphStor
         "  agents       {AGENT_A} (builds the API) · {AGENT_B} (separate feature)"
     ));
     n.blank();
-    n.say("  Compressed for a fast run — intervals only, no threshold weakened:".to_string());
+    n.say(
+        "  Compressed for a fast run — intervals and one window, no threshold weakened:"
+            .to_string(),
+    );
     n.say(format!(
         "    canonization_edge_min_age   60s     → {DEMO_EDGE_MIN_AGE:?}"
     ));
@@ -1662,11 +1780,17 @@ fn header(n: &mut Narrator, scenario: &str, session: &str, store: &dyn GraphStor
         "    gc_interval                 10000   → {DEMO_GC_INTERVAL} mutation \
          (spec default during the build)"
     ));
+    n.say(format!(
+        "    conflict_recency_window     30s     → {}s  (30s plus the script clock's \
+         {} min)",
+        DEMO_CONFLICT_RECENCY_WINDOW.as_secs(),
+        SCRIPT_LAST_EDIT_INDEX as u64 * SCRIPT_STEP.as_secs() / 60
+    ));
     n.say(
         "  Untouched: min_peer_count 20, gc_survived ≥ 3, strictly > P90, distinct ≥ 3,"
             .to_string(),
     );
-    n.say("  coverage ≥ 0.3, blast radius > 5, conflict window 30s.".to_string());
+    n.say("  coverage ≥ 0.3, blast radius > 5.".to_string());
 }
 
 // ---------------------------------------------------------------------------
@@ -1676,6 +1800,76 @@ fn header(n: &mut Narrator, scenario: &str, session: &str, store: &dyn GraphStor
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The interactions span 13 steps, which clears the 10-minute recency
+    /// floor, and each one's position in that span is the `f64` the old 10ms
+    /// step gave it. This loop is the scaling identity. Which calls the demo
+    /// actually stamps is `assert_shape`, on a real run.
+    #[test]
+    fn script_step_clears_the_recency_floor_without_moving_relative_recency() {
+        assert_eq!(INTERACTION_CALLS.len(), EXPECT_INTERACTIONS);
+        assert_eq!(*INTERACTION_CALLS.last().unwrap(), SCRIPT_LAST_EDIT_INDEX);
+        let step = SCRIPT_STEP.as_millis() as i64;
+        let span = SCRIPT_LAST_EDIT_INDEX * step;
+        assert!(
+            span >= crate::daemon::score::MIN_RECENCY_SPAN,
+            "the last edit has to sit at or above the recency floor"
+        );
+        let old_step = 10i64;
+        let old_span = SCRIPT_LAST_EDIT_INDEX * old_step;
+        for k in INTERACTION_CALLS {
+            let widened = (k * step) as f64 / span as f64;
+            let historical = (k * old_step) as f64 / old_span as f64;
+            assert_eq!(widened.to_bits(), historical.to_bits(), "call {k}");
+        }
+
+        let ScriptClock {
+            clock,
+            last_edit_at,
+        } = script_clock();
+        // Consecutive counter reads, not the interaction subset. Call
+        // `SCRIPT_LAST_EDIT_INDEX` is the backdate anchor.
+        let stamps: Vec<_> = (0..=SCRIPT_LAST_EDIT_INDEX).map(|_| clock()).collect();
+        assert_eq!(stamps[SCRIPT_LAST_EDIT_INDEX as usize], last_edit_at);
+        assert_eq!(
+            (last_edit_at - stamps[0]).num_milliseconds(),
+            span,
+            "act I's first write is the whole span before the last edit"
+        );
+        assert!(
+            SCRIPT_STEP * (POST_EDIT_CLOCK_READS as u32) < crate::writeq::RECEIPT_RETENTION,
+            "the hand-counted post-edit lead must stay inside receipt retention; \
+             this does not re-count the closes in a run"
+        );
+    }
+
+    /// The daemon ages writes on the wall clock and act I's first write is
+    /// the script's whole span before the last edit, which is the wall
+    /// clock's present. The demo's conflict window has to cover that, plus
+    /// the spec's 30s for the wall time the run itself takes.
+    #[test]
+    fn the_conflict_window_spans_every_scripted_write() {
+        let span = SCRIPT_STEP * SCRIPT_LAST_EDIT_INDEX as u32;
+        assert_eq!(
+            DEMO_CONFLICT_RECENCY_WINDOW,
+            crate::daemon::conflict::CONFLICT_RECENCY_WINDOW + span
+        );
+        assert_eq!(DEMO_CONFLICT_RECENCY_WINDOW, Duration::from_secs(810));
+        assert_eq!(
+            build_config().conflict_recency_window,
+            DEMO_CONFLICT_RECENCY_WINDOW
+        );
+        assert_eq!(
+            canonization_config().conflict_recency_window,
+            DEMO_CONFLICT_RECENCY_WINDOW
+        );
+        assert!(
+            STEP_PACING * (EXPECT_INTERACTIONS as u32)
+                <= crate::daemon::conflict::CONFLICT_RECENCY_WINDOW,
+            "wall pacing must stay inside the 30s slack past the script span; \
+             this is that bound, not a pin of the 10ms pause"
+        );
+    }
 
     #[test]
     fn normalizes_the_conflict_age_and_nothing_else() {
@@ -2019,7 +2213,13 @@ mod tests {
                 spec.canonization_repromotion_cooldown
             );
             assert_eq!(cfg.max_canonical_nodes, spec.max_canonical_nodes);
-            assert_eq!(cfg.conflict_recency_window, spec.conflict_recency_window);
+            // Widened, not the spec's 30s: the window has to span the script
+            // clock (module docs, "The knobs").
+            assert_eq!(cfg.conflict_recency_window, DEMO_CONFLICT_RECENCY_WINDOW);
+            assert_eq!(
+                cfg.conflict_recency_window,
+                spec.conflict_recency_window + SCRIPT_STEP * SCRIPT_LAST_EDIT_INDEX as u32
+            );
             assert_eq!(cfg.scoring, spec.scoring);
             assert_eq!(cfg.recall_weights, spec.recall_weights);
             // Determinism: the write path must resolve concepts identically on

@@ -39,7 +39,8 @@ different demo.
 
 Two `Config`s are used. **No threshold is weakened by either** — only
 intervals, and one age floor, are compressed, because the demo has to fit in a
-three-minute video rather than an afternoon.
+three-minute video rather than an afternoon, and the conflict window is widened
+to the script clock's span (below).
 
 | Knob | Spec default | Build phase (acts I–III) | Canonization phase |
 |---|---|---|---|
@@ -49,14 +50,30 @@ three-minute video rather than an afternoon.
 | `gc_interval` | 10 000 mutations | 10 000 (no sweep runs) | **1 mutation** |
 | `backend_flush_interval` | 1s | **5ms** | **5ms** |
 | `match_strategy` | Hybrid | **Canonical** | **Canonical** |
+| `conflict_recency_window` | 30s | **810s** | **810s** |
+
+`conflict_recency_window` is 30 seconds plus the script clock's 13 minutes
+(`DEMO_CONFLICT_RECENCY_WINDOW`). The daemon ages a write on the wall clock,
+and the script clock stamps act I's first write 13 minutes before agent A's
+last edit, which lands on the wall clock's present. The run itself takes about
+a second, so under the spec's 30 seconds every write was inside the window;
+the wider window keeps every scripted write inside it. Do not put it back to
+30 seconds: agent B's conflict lines on `redis backend` and
+`middleware/session.rs` leave the recall block. The high-risk modification line
+has its own fixed 30-second window and is unaffected.
 
 `canonization_edge_min_age` is the knob T8.4 names. It is the age floor Stage 2
 applies to inbound structural edges and Stage 3 applies to the blast-radius
 query — the guard that stops a burst of same-tick edges from inflating either
-measure. Compressing it from 60s to 10ms keeps the guard **live** (an edge
-written in this cycle still does not count; the engine genuinely waits for it to
-age) while letting a session that is seconds old in demo time behave like one
-that is an hour old in spec time.
+measure. Compressing it from 60s to 10ms keeps the guard **live**: every cycle
+still applies it, and an edge younger than 10ms would not count. Cycles are
+frozen during the build, so the floor is not applied then. The newest
+script-clock edge is agent A's last edit, stamped when the script clock is
+built. By the first canonization cycle it is at least the twelve wall pauses
+behind that instant (12 × `STEP_PACING`, 120ms), which is well over 10ms, so
+the floor does not filter the script-clock build edges. Earlier acts are
+minutes older. Edges created while settling are wall-stamped and can be
+younger than 10ms; this does not claim the floor ignores them.
 
 Freezing `canonization_eval_interval` during the build is not cosmetic: it
 guarantees no cycle ever evaluates a half-built graph, so the state machine
@@ -72,10 +89,10 @@ configured. Recall still runs its vector leg when the store claims
 
 **Left at spec defaults, deliberately**, because they are the thresholds the
 demo is claiming to satisfy: `canonization_min_peer_count` (20),
-`canonization_eval_batch_size` (50), `canonization_repromotion_cooldown` (300s),
-`max_canonical_nodes` (1000), `conflict_recency_window` (30s), the scoring and
-recall weights, and every stage constant in `src/canon` (`gc_survived >= 3`,
-strictly above P90, `distinct >= 3`, `coverage >= 0.3`, `blast_radius > 5`).
+`canonization_eval_batch_size` (50), `canonization_repromotion_cooldown`
+(300s), `max_canonical_nodes` (1000), the scoring and recall weights, and
+every stage constant in `src/canon` (`gc_survived >= 3`, strictly above P90,
+`distinct >= 3`, `coverage >= 0.3`, `blast_radius > 5`).
 
 ### Why GC cannot simply be turned off
 
@@ -116,11 +133,15 @@ a **fixed point**, not a snapshot taken at a lucky instant:
 4. **Sibling concepts derived in one interaction carry distinct concept types**,
    so structurally identical siblings never score exactly equal. An exact tie is
    broken by `NodeId`, and node ids are random UUIDs.
-5. **The script is paced** (`STEP_PACING`, 10ms between interactions). The
-   `recency` dimension is each concept's position inside the session's real
-   temporal extent; twelve writes issued back to back land microseconds apart,
-   so their interior spacing would be scheduler jitter. Pacing makes the extent
-   a property of the script. It also makes the narration readable on screen.
+5. **The script is paced on two clocks.** The wall pause (`STEP_PACING`, 10ms
+   between interactions) keeps the narration readable. The script clock steps
+   60 seconds (`SCRIPT_STEP`). The twelve interactions are `INTERACTION_CALLS`
+   (see `SCRIPT_LAST_EDIT_INDEX` in `src/cli/demo.rs`). The session spans 13
+   minutes, above the 10-minute recency floor, and recency positions match
+   the old 10ms step. The demo checks the stamp indices, and the conflict
+   window spans the rest (see the knobs). Twelve writes issued back to back
+   would land microseconds apart,
+   and that jitter would be the span.
 
 ### What is normalized, and why
 
@@ -141,7 +162,8 @@ comparison sees the placeholders.
 Spec §13 narrates "eleven seconds ago". That is the age at the instant the
 video's agent B asks. On a laptop the whole session replays in about a second,
 so the real line reads `Agent A wrote to it 0 seconds ago`. It is not padded to
-match the prose.
+match the prose. Agent B's own conflict lines read about 120 seconds: their
+writes are stamped two script-clock steps before agent A's last edit.
 
 ---
 

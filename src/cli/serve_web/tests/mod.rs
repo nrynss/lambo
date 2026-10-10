@@ -48,6 +48,13 @@ const PRODUCTION_SOURCES: &[(&str, &str)] = &[
         )),
     ),
     (
+        "serve_web/headers.rs",
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/cli/serve_web/headers.rs"
+        )),
+    ),
+    (
         "serve_web/projections.rs",
         include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -97,10 +104,85 @@ fn production_source() -> String {
                 "{name}: only serve_web.rs may carry `#[cfg(all(test`; the scans \
                  stop reading a file there"
             );
+            // Test-only items (`views.rs`'s counters) are production text
+            // with a gate; a test module is not, and nothing cuts it.
+            assert!(
+                !gates_a_module(src, "#[cfg(test)]"),
+                "{name}: a `#[cfg(test)]` module in a production source is not cut, \
+                 so its text would feed the production scans; put it under tests/"
+            );
             src.split("#[cfg(all(test").next().unwrap_or(src)
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Whether some `attr` in `src` is followed, past further attributes and
+/// comments, by a `mod` item. An attribute may span lines; it ends at its
+/// `]`. A `//` line or a `/* … */` block between the attribute and `mod`
+/// does not hide the module.
+fn gates_a_module(src: &str, attr: &str) -> bool {
+    src.match_indices(attr).any(|(at, _)| {
+        let mut rest = src[at + attr.len()..].trim_start();
+        loop {
+            if rest.starts_with("//") {
+                rest = rest
+                    .split_once('\n')
+                    .map_or("", |(_, next)| next)
+                    .trim_start();
+                continue;
+            }
+            if rest.starts_with("/*") {
+                let Some(end) = rest.find("*/") else {
+                    return false;
+                };
+                rest = rest[end + 2..].trim_start();
+                continue;
+            }
+            if rest.starts_with("#[") {
+                let Some(end) = rest.find(']') else {
+                    return false;
+                };
+                rest = rest[end + 1..].trim_start();
+                continue;
+            }
+            break;
+        }
+        let item = rest
+            .strip_prefix("pub")
+            .map_or(rest, |r| r.trim_start_matches(|c| c != ' ' && c != '\n'))
+            .trim_start();
+        item.starts_with("mod ")
+    })
+}
+
+#[test]
+fn a_test_module_in_a_production_source_is_caught() {
+    assert!(gates_a_module("#[cfg(test)]\nmod tests {}", "#[cfg(test)]"));
+    assert!(gates_a_module(
+        "#[cfg(test)]\n#[allow(dead_code)]\npub(super) mod t;",
+        "#[cfg(test)]"
+    ));
+    assert!(!gates_a_module(
+        "#[cfg(test)]\nqueued: AtomicU64,\nmod real;",
+        "#[cfg(test)]"
+    ));
+    assert!(!gates_a_module(
+        "#[cfg(test)]\npub(super) fn is_loaded() {}",
+        "#[cfg(test)]"
+    ));
+    assert!(gates_a_module(
+        "#[cfg(test)]\n// kept out of the binary\nmod tests {}",
+        "#[cfg(test)]"
+    ));
+    assert!(gates_a_module(
+        "#[cfg(test)]\n/* kept out */\nmod tests {}",
+        "#[cfg(test)]"
+    ));
+    assert!(gates_a_module(
+        "#[cfg(test)]\n#[allow(\n    dead_code,\n)]\nmod tests {}",
+        "#[cfg(test)]"
+    ));
 }
 
 /// The file that holds `fn router(`. Exactly one must.
@@ -128,6 +210,7 @@ mod page;
 mod recall;
 mod routes;
 mod routing;
+mod security;
 mod session;
 mod shutdown;
 mod views;
