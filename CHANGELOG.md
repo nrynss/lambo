@@ -276,7 +276,8 @@
   full `--rate-limit-rps`.
 - A multi-session `lambo serve` whose pinned session was erased now starts
   and serves the other sessions, answering the erased one with the erased
-  error (MCP error `-32003` to a call, `410` to any other request); it used
+  error (MCP error `-32003` to a `POST` of one JSON-RPC request with an
+  `id`, `initialize` included; `410` to anything else); it used
   to refuse to start. A pinned session found erased on a background retry
   answers the same, instead of the `503` for a session that needs an
   operator (#32, seventh part). An on-demand session found erased (#32,
@@ -602,8 +603,9 @@
   always for a credential with `create = true`, and for one without only
   once the session exists (it has a lease row); otherwise the `404`.
   Concurrent first requests share one attach. An erased session answers a
-  call with the erased error (MCP error `-32003`) and any other request with
-  `410` (seventh part), and is never recreated. At most `[serve]
+  `POST` of one JSON-RPC request with an `id` (`initialize` included) with
+  the erased error (MCP error `-32003`) and anything else with `410`
+  (seventh part), and is never recreated. At most `[serve]
   max_attached` sessions are attached: at the cap the least recently used
   on-demand session with no tool call running is detached to make room, else
   `503` with `Retry-After: 5`. A session idle (no tool call) for
@@ -809,8 +811,11 @@
   and joined) without flushing or releasing the lease, then erased as the
   lease's holder, so no other writer can take it in between. While the
   erase runs its requests get `503` with `Retry-After: 1`; once erased, a
-  call gets the erased error (MCP error `-32003`, as a proxy to an erased
-  session answers) and any other request `410`, and nothing recreates it.
+  `POST` of one JSON-RPC request with an `id` (`initialize` included) gets
+  the erased error (MCP error `-32003`, as a proxy to an erased session
+  answers), anything else (a `GET` or `DELETE`, a notification, a
+  response, a batch, an unreadable body) gets `410`, and nothing recreates
+  it.
   An erased on-demand session is remembered like the sixth part's other
   negative outcomes. A one-session serve answers the erase and then exits.
   The shutdown waits for an erase in flight within its close budget, and cuts

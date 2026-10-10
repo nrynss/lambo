@@ -359,10 +359,12 @@ deviation in one place.
   whatever it built.
 - **Deviation: the -32003 vs 410 split (§6.2).** The design said an erased
   session answers MCP error `-32003`, or HTTP 410 on admin routes. Shipped:
-  - a POST carrying exactly one JSON-RPC request gets 200 with the proxy's
-    own erased frame (`proxy::erased_reply`, code `-32003`);
-  - a GET, a DELETE, a notification, a response, a batch, or an unreadable
-    body gets 410, because none of them has a request id to answer;
+  - a POST whose body is one JSON-RPC request, with a string `method` and
+    a non-null `id` (`initialize` included), gets 200 with the proxy's own
+    erased frame (`proxy::erased_reply`, code `-32003`);
+  - a GET, a DELETE, a notification, a request whose `id` is null, a
+    response, a batch, or a body that cannot be read or parsed gets 410,
+    because none of them has a request id to answer;
   - a tool call already inside the session when it was fenced gets the
     #23 erased error from the tool layer.
 
@@ -540,7 +542,7 @@ its file name predates the rewording.
 | §3.6 | `per_session_rps` defaults to the global rate everywhere | a one-session serve with nothing on demand draws a per-session bucket only when the key is set | a one-session serve answers exactly as before | 6 |
 | §6.3 step 2 | end the MCP sessions, erase as the holder, then fence and tear down | fence, close without flush or release, join the tasks, then erase as the holder | nothing of the session runs during the erase; closes the recall-index mirror window | 7 |
 | §6.3 | (none) | the erase takes every attach permit within `ERASE_PERMIT_WAIT` (10 s) before it claims the slot | no retry can admit over `Erasing`; a FIFO semaphore must not stall the admin request | 7 |
-| §6.2 | erased: `-32003`, or 410 on admin routes | `-32003` to a POST with one JSON-RPC request; 410 to everything else; `Erasing` is 503 | only a request with an id can take a JSON-RPC error | 7 |
+| §6.2 | erased: `-32003`, or 410 on admin routes | `-32003` to a POST of one JSON-RPC request with a method and a non-null id; 410 to everything else; `Erasing` is 503 | only a request with an id can take a JSON-RPC error | 7 |
 | §6.3 | `POST /admin/s/{s}/detach` | not served | a pinned detach is re-elected within 5 s; it needs operator-detach semantics first | 7 |
 | §6.3 | `/admin/sessions` reports `last_used` | not reported; sizes and `log_depth` are | not added when PR 6's activity tracking landed | 7 |
 | §2.2 (spec) | one process owns a session | one process may own many sessions, each with exactly one writer | see the deviation note | 4 to 7 |

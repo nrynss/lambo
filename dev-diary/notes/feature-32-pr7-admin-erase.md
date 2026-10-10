@@ -276,9 +276,11 @@ Findings:
   winner already says it was an erase.
 - **MCP error -32003** (design §6.2). It fits: the erased answer never
   reaches rmcp, so `transport::erased_answer` reads the body (the guard's
-  ceiling and timeout) and answers a POST carrying one JSON-RPC request
-  with the proxy's own erased frame (`proxy::erased_reply`, 200, JSON);
-  everything else with no id to answer keeps 410.
+  ceiling and timeout) and answers a POST whose body is one JSON-RPC
+  request with a `method` and a non-null `id` (`initialize` included) with
+  the proxy's own erased frame (`proxy::erased_reply`, 200, JSON);
+  everything else with no id to answer (GET, DELETE, a notification, a
+  response, a batch, an unreadable body) keeps 410.
 
 ## Not run here
 

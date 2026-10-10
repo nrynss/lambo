@@ -392,7 +392,7 @@ If a running session loses its lease to another writer, only that session is det
 
 Some retry errors will not clear on their own: the embedding contract no longer matches, or the store is not provisioned. Such an error is logged once and the session is not retried again. Requests for it get `503` with no `Retry-After` until the server is restarted.
 
-A session found erased, at startup or on a retry, is not retried either. A call to it gets the erased error, and any other request gets `410`. The other sessions start and serve as usual.
+A session found erased, at startup or on a retry, is not retried either. It gets the erased answer described below. The other sessions start and serve as usual.
 
 A store or embedder that cannot be reached is retried, and logged once per outage.
 
@@ -415,13 +415,13 @@ A request for a session this process does not host gets a plain `404` with an em
 Only a caller whose credential reaches a session can learn its state:
 
 - `503`: the session is held by another writer, being attached, detached or erased, or failed;
-- erased: a call gets the erased error (MCP error `-32003`), and any other request gets `410`.
+- erased: a `POST` whose body is one JSON-RPC request with a `method` and a non-null `id` (`initialize` included) gets `200` with the erased error (MCP error `-32003`). Anything else gets `410`: a `GET` or `DELETE`, a notification, a response, a batch, or a body that cannot be read or parsed.
 
 #### Sessions attached on demand
 
 - **Attach.** A request for an unattached session inside its credential's scope attaches the session, then is served. With `create = true` the session is created if it does not exist. Without it, the session is attached only if it already exists (a writer has used it). A session that does not exist gets the plain `404`.
 - **One attach at a time.** Concurrent first requests for one session wait for the same single attach. An attach first checks that the session exists, is not erased and is not held by another writer. It detaches nothing to make room for a request that will not attach.
-- **Erased.** A call to an erased session gets the erased error (MCP error `-32003`), and any other request gets `410`. An erased session is never recreated.
+- **Erased.** An erased session gets the erased answer above: the erased error (MCP error `-32003`) to a `POST` of one JSON-RPC request with an `id`, and `410` to anything else. An erased session is never recreated.
 - **Remembered refusals.** A `404`, `410` or failed attach is remembered for 30 seconds, for at most 1,024 sessions, so repeating the request does not reach the store again. A `404` remembered for a credential without `create` does not hold back one that has `create`.
 - **Held elsewhere.** A session another writer holds answers `503`, with a `Retry-After` of the time that writer's lease could lapse. It is not retried in the background.
 - **Idle detach.** A session is detached after `[serve] idle_detach_secs` with no tool call (default 900 seconds). An open SSE stream does not count as use.
@@ -572,7 +572,7 @@ $ curl -sS -X POST http://127.0.0.1:7700/admin/s/user-42/erase \
 | `500` | The store failed. The body says which of three things happened: the session is erased from the durable store and a later step failed (repeat the request to finish it); nothing was erased; or the outcome is unknown, because the store could not be read back either (repeat the request). Repeating is always safe. |
 | `503` | The session is being erased, attached or detached, another session's attach did not finish within 10 seconds, or the serve is shutting down. Retry after `Retry-After`. |
 
-When the serve holds the session, it stops accepting requests for it, ends its MCP sessions, and closes it without flushing its unflushed tail or releasing its lease, so no other writer can take the session in between. It then erases the session as the holder of that lease. Calls already in progress get the erased error. While the erase runs, requests for the session get `503` with `Retry-After: 1`. Once it is erased, a call gets the erased error (MCP error `-32003`, as a proxy to an erased session answers) and any other request `410`, and nothing in the serve attaches it again. If the erase fails before the store commits, the session is served again from what is durable, and the writes it had acknowledged but not yet flushed are lost. A serve that holds only that session answers the request and then exits, because it has nothing left to serve; a restart on the erased session refuses to start. If a supervisor restarts that serve (launchd `KeepAlive`, systemd `Restart=`), remove the session from its unit too, or every restart refuses and is restarted again. A session the serve does not hold is erased exactly as `lambo erase-session` erases it.
+When the serve holds the session, it stops accepting requests for it, ends its MCP sessions, and closes it without flushing its unflushed tail or releasing its lease, so no other writer can take the session in between. It then erases the session as the holder of that lease. Calls already in progress get the erased error. While the erase runs, requests for the session get `503` with `Retry-After: 1`. Once it is erased, a `POST` of one JSON-RPC request with an `id` (`initialize` included) gets the erased error (MCP error `-32003`, as a proxy to an erased session answers), anything else gets `410` (a `GET` or `DELETE`, a notification, a response, a batch, or an unreadable body), and nothing in the serve attaches it again. If the erase fails before the store commits, the session is served again from what is durable, and the writes it had acknowledged but not yet flushed are lost. A serve that holds only that session answers the request and then exits, because it has nothing left to serve; a restart on the erased session refuses to start. If a supervisor restarts that serve (launchd `KeepAlive`, systemd `Restart=`), remove the session from its unit too, or every restart refuses and is restarted again. A session the serve does not hold is erased exactly as `lambo erase-session` erases it.
 
 A serve that is shut down while an erase runs waits for it within its close budget. An erase still running 8 seconds after the shutdown began closing the sessions is cut short and answers `500` with an unknown outcome: the store's erase is one transaction, so repeat it with `lambo erase-session`.
 
