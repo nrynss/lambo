@@ -9,7 +9,7 @@
 # standard tools found on any macOS or Linux box.
 #
 # Overrides (all optional):
-#   LAMBO_VERSION    the release version to install, e.g. "0.3.0" (default:
+#   LAMBO_VERSION    the release version to install, e.g. "0.4.0" (default:
 #                    the latest release). Use it to pin a specific version.
 #   LAMBO_FLAVOR     which build of the binary to install (default: the stock
 #                    build). "metal" picks the macOS arm64 asset that also

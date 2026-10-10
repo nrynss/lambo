@@ -123,7 +123,7 @@ jobs:
           # silicon users are served by macos-arm64 below. Restore this entry if
           # that changes; nothing else in the workflow assumes five targets.
           #
-          # Windows (x86_64-pc-windows-msvc) is not built for 0.3.0: the shared
+          # Windows (x86_64-pc-windows-msvc) is not built (since 0.3.0): the shared
           # session endpoint uses Unix sockets and Unix file metadata with no
           # platform gate, so the crate does not compile there (#39). Restore
           #   - os: windows-latest
