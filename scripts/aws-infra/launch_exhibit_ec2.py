@@ -57,8 +57,10 @@ from __future__ import annotations
 import argparse
 import base64
 import http.client
+import ipaddress
 import json
 import pathlib
+import re
 import ssl
 import sys
 import time
@@ -276,6 +278,71 @@ def known_llama_cpp_ref(value: str) -> str:
             f"Supported: {', '.join(sorted(LLAMA_TARBALLS))}. Add the ref (and its "
             "per-architecture sha256, computed from the downloaded artifact) to "
             "LLAMA_TARBALLS to use it."
+        )
+    return value
+
+
+# One DNS label: letters, digits and inner hyphens, 1 to 63 characters.
+_DNS_LABEL = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+_DNS_NAME = re.compile(rf"{_DNS_LABEL}(?:\.{_DNS_LABEL})*")
+# Lambo's addressed-session charset (`surface::session::parse_addressed`).
+_SESSION_ID = re.compile(r"[A-Za-z0-9_:-][A-Za-z0-9._:-]{0,127}")
+_EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@" + _DNS_LABEL + r"(?:\." + _DNS_LABEL + r")+")
+
+
+def dns_hostname(value: str) -> str:
+    """Refuse a `--hostname` that is not a plain DNS name (#4 PR 2 review L4).
+
+    The value is written into the root bootstrap script (a double-quoted bash
+    assignment), the systemd unit (`Environment=LAMBO_ALLOWED_HOST=...`) and
+    the Caddyfile, so a quote, `$(...)`, a space or a newline would run as
+    root at first boot or split the unit line. Only DNS labels joined by
+    dots (no trailing dot, at most 253 characters) pass. An IP address is
+    refused too: no public CA issues it a certificate (use --self-signed).
+    """
+    try:
+        ipaddress.ip_address(value)
+    except ValueError:
+        pass
+    else:
+        raise argparse.ArgumentTypeError(
+            "--hostname must be a DNS name you control, not an IP address: no public "
+            "CA issues a certificate for an IP. Use --self-signed to serve on the IP."
+        )
+    if len(value) > 253 or not _DNS_NAME.fullmatch(value):
+        raise argparse.ArgumentTypeError(
+            "--hostname must be a DNS name: labels of letters, digits and inner "
+            "hyphens (1 to 63 characters each) joined by dots, no trailing dot, at "
+            "most 253 characters"
+        )
+    return value
+
+
+def exhibit_session(value: str) -> str:
+    """Refuse a `--session` outside Lambo's addressed-session charset.
+
+    Like `--hostname`, the session is written into the root bootstrap script
+    and the service unit, so the same quoting hazard applies (#4 PR 2 review
+    L4). The charset is the one `lambo serve-web` requires of every session
+    once it serves more than one: 1 to 128 bytes of `[A-Za-z0-9._:-]`, not
+    starting with `.`.
+    """
+    if not _SESSION_ID.fullmatch(value):
+        raise argparse.ArgumentTypeError(
+            "--session must be 1 to 128 characters of letters, digits, '.', '_', ':' "
+            "or '-', not starting with '.'"
+        )
+    return value
+
+
+def acme_email(value: str) -> str:
+    """Refuse an `--acme-email` that is not a plain address: it is written
+    into the Caddyfile's global block, where a brace, space or newline would
+    change the configuration (#4 PR 2 review L4, the same sink class)."""
+    if len(value) > 254 or not _EMAIL.fullmatch(value):
+        raise argparse.ArgumentTypeError(
+            "--acme-email must be a plain address (local@domain.tld) with no spaces, "
+            "quotes or braces"
         )
     return value
 
@@ -1328,15 +1395,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_common_args(parser)
     parser.add_argument(
-        "--session", required=True, help="Lambo session id that serve-web opens a window onto."
+        "--session",
+        required=True,
+        type=exhibit_session,
+        help=(
+            "Lambo session id that serve-web opens a window onto: 1 to 128 characters "
+            "of letters, digits, '.', '_', ':' or '-', not starting with '.'."
+        ),
     )
     tls = parser.add_argument_group("TLS (plan §8 - one of these is required)")
     tls.add_argument(
         "--hostname",
         default=None,
+        type=dns_hostname,
         help=(
-            "Public hostname you control. Caddy issues and renews a real certificate "
-            "for it. Point an A record at the Elastic IP this script allocates."
+            "Public hostname you control (a DNS name, not an IP). Caddy issues and "
+            "renews a real certificate for it. Point an A record at the Elastic IP "
+            "this script allocates."
         ),
     )
     tls.add_argument(
@@ -1351,6 +1426,7 @@ def build_parser() -> argparse.ArgumentParser:
     tls.add_argument(
         "--acme-email",
         default=None,
+        type=acme_email,
         help="Contact address for the ACME account (expiry notices). Optional.",
     )
     parser.add_argument(

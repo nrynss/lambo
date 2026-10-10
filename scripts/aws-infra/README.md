@@ -196,7 +196,13 @@ for bare IP addresses. The script refuses to run without a decision:
 
 * `--hostname lambo.example.com` — Caddy issues and renews automatically. After
   the script prints the Elastic IP, create an `A` record pointing at it; Caddy
-  retries the ACME order until it resolves. **Recommended.**
+  retries the ACME order until it resolves. **Recommended.** The name must be
+  a plain DNS name (labels of letters, digits and inner hyphens joined by
+  dots, no trailing dot, no IP address); anything else is refused before any
+  AWS call, because it is written into the root bootstrap script, the
+  systemd unit and the Caddyfile. `--session` (Lambo's addressed charset,
+  `[A-Za-z0-9._:-]`, 1 to 128 characters, not starting with `.`) and
+  `--acme-email` are checked the same way.
 * `--self-signed` — Caddy's internal CA. Works instantly, and **every visitor
   including every judge sees a browser security warning**. The script says so in
   the plan output and again at the end. There is no silent fallback.
