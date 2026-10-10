@@ -124,7 +124,7 @@ check_pair() {
   check_no_site_prefix "$name" "$ref" || true
   if ! diff -u <(canon "$repo/$ref") <(canon "$repo/$site") >/dev/null; then
     printf '\nFAIL %s: shared prose has drifted between %s and %s\n' "$name" "$ref" "$site"
-    diff -u <(canon "$repo/$ref") <(canon "$repo/$site") | sed -n '1,40p'
+    diff -u <(canon "$repo/$ref") <(canon "$repo/$site") | sed -n '1,40p' || true
     fail=1
   else
     printf 'ok    %s: reference and site copies agree on the shared prose\n' "$name"
