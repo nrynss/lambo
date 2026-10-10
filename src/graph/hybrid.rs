@@ -1200,12 +1200,15 @@ async fn derive_planned(
                 // capability-miss rule above would depend on what else is
                 // in the call. Ask once with the first end's vector (one
                 // candidate, result discarded): a refusal leaves every end
-                // keyword-only, exactly as it leaves a concept.
+                // keyword-only, exactly as it leaves a concept. A source that
+                // cannot refuse (the holder's graph) is not asked: the answer
+                // is known, and asking would scan the whole graph (#60 L3).
                 if !probed_store {
                     probed_store = true;
-                    if checked_candidates(vectors, &session_id, &emb, embedding, 1, io_deadline)
-                        .await?
-                        .is_none()
+                    if vectors.can_refuse()
+                        && checked_candidates(vectors, &session_id, &emb, embedding, 1, io_deadline)
+                            .await?
+                            .is_none()
                     {
                         // `parent_vectors` is still empty: this is the first end.
                         note_store_refused_vectors(&session_id);

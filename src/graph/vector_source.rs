@@ -108,7 +108,22 @@ pub(crate) fn graph_vector_candidates(
     let Some(dim) = checked_scan_width(graph, session, probe, expected_contract, limit)? else {
         return Ok(Vec::new());
     };
+    #[cfg(test)]
+    WHOLE_GRAPH_SCANS.with(|n| n.set(n.get() + 1));
     rank_concepts(session, probe, dim, graph.concepts(), limit)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Whole-graph scans [`graph_vector_candidates`] ran on this thread
+    /// (tests only: #60 review L3 counts them).
+    static WHOLE_GRAPH_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many whole-graph scans this thread has run (tests only).
+#[cfg(test)]
+pub(crate) fn whole_graph_scans() -> usize {
+    WHOLE_GRAPH_SCANS.with(std::cell::Cell::get)
 }
 
 /// Steps 1 to 4 of [`graph_vector_candidates`]: the checks every graph-side

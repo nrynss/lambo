@@ -161,6 +161,14 @@ impl<'a> VectorCandidates<'a> {
         }
     }
 
+    /// Whether a checked read can come back as a capability refusal, the
+    /// signal hybrid derive degrades on. Only the store can refuse: the
+    /// holder's graph always answers, so asking it just to learn that costs a
+    /// whole scan for nothing (#60 review L3). Synchronous and I/O-free.
+    pub(crate) fn can_refuse(&self) -> bool {
+        !matches!(self, Self::Graph(_))
+    }
+
     /// Checked candidates for `probe`, under the contract of
     /// [`VectorCandidateSource::checked_vector_candidates`].
     pub(crate) async fn checked(
