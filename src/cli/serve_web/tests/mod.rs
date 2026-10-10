@@ -119,6 +119,7 @@ fn router_source() -> &'static str {
 }
 
 mod auth;
+mod credentials;
 mod feeds;
 mod graph;
 mod host;
@@ -145,6 +146,8 @@ const ROUTES: &[&str] = &[
     "/api/events",
     "/api/stats",
     "/api/pulse",
+    // Registered only with `[web] list_sessions` (#4 PR 3).
+    "/api/sessions",
 ];
 
 /// `Arc<MemoryStore>` as a `GraphStore`, so the seeding CLI writes and the
@@ -444,6 +447,7 @@ fn state_with_web(
         backends,
         exposed,
         auth,
+        Vec::new(),
         &[],
         web,
     ))

@@ -217,6 +217,29 @@ fn a_scope_covers_its_names_its_prefix_and_with_star_every_hosted_session() {
     assert!(!agents.is_empty() && !app.is_empty() && !star.is_empty());
 }
 
+/// `star_within` pins `"*"` to the writer's hosted set (#4 PR 3 review
+/// M1): judged against a wider set (the portal's allowlist), it still
+/// covers only the writer's pinned names and prefixes, names exactly only
+/// the pinned ones, and no longer covers every pinned session of the
+/// judging set. A scope without `"*"` is unchanged.
+#[test]
+fn a_star_pinned_to_its_hosted_set_never_widens() {
+    let serve = HostedSessions::new([id("lambo")], [prefix("dc-u-")]);
+    let portal = HostedSessions::new([id("lambo"), id("hr-private"), id("dc-u-1")], []);
+    let star = SessionScope::new([], true, None).star_within(serve);
+    for inside in ["lambo", "dc-u-1", "dc-u-9"] {
+        assert!(star.covers(&id(inside), &portal), "{inside}");
+    }
+    assert!(!star.covers(&id("hr-private"), &portal));
+    assert!(!star.covers_every_pinned());
+    assert!(star.names_exactly(&id("lambo")));
+    assert!(!star.names_exactly(&id("dc-u-1")), "never a prefix match");
+    assert!(!star.is_empty());
+    assert!(SessionScope::new([], true, None).covers(&id("hr-private"), &portal));
+    let app = SessionScope::new([id("x")], false, Some(prefix("dc-u-")));
+    assert_eq!(app.clone().star_within(hosted()), app);
+}
+
 /// Capabilities gate `create`, `erase` and `admin`; plain use needs none.
 #[test]
 fn capabilities_gate_create_erase_and_admin() {

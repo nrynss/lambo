@@ -159,7 +159,7 @@ mod scope;
 mod state;
 mod views;
 
-pub use auth::AuthToken;
+pub use auth::{check_web_credentials, resolve_web_credentials, AuthToken, WebCredential};
 
 use auth::{authorize_bind_web, resolve_auth_token};
 use routes::router;
@@ -217,6 +217,14 @@ pub struct Args {
     /// `--allowed-host` and `[web] allowed_hosts` ([`plan_allowed_hosts`]).
     /// Ignored, with a startup note, once a token is configured.
     pub allowed_hosts: Vec<String>,
+    /// The configured read credentials (#4 PR 3): `[[web.credential]]`,
+    /// then the `[[serve.credential]]` entries `[web]
+    /// inherit_serve_credentials` imports, resolved by the CLI with
+    /// [`resolve_web_credentials`] before any backend is built. [`run`]
+    /// re-checks the set ([`check_web_credentials`]) but reads no
+    /// credential from [`Args::web`] itself. Empty: only the legacy token
+    /// (or, without one, the implicit loopback grant).
+    pub credentials: Vec<WebCredential>,
     /// `[web]` from `lambo.toml`: the view TTL and the load and recall
     /// bounds (#4). [`WebConfig::default`] when the file has no table.
     pub web: WebConfig,
@@ -269,6 +277,26 @@ pub fn plan_allowed_hosts(cli: &[String], web: &WebConfig) -> Result<Vec<String>
         }
     }
     Ok(hosts)
+}
+
+/// The configured read credentials (#4 PR 3), resolved from the
+/// environment and checked as a set against the legacy token
+/// (`auth_token`, with `LAMBO_AUTH_TOKEN` over it as [`run`] resolves it).
+/// The CLI runs this before any backend is built, so an unset variable or
+/// a shared token is exit 2 at once, naming the credential, never a value.
+/// With no credential configured it reads nothing, not even the legacy
+/// token, so a single-token portal starts exactly as before.
+pub fn plan_credentials(
+    auth_token: Option<&AuthToken>,
+    web: &WebConfig,
+    serve: &crate::config::ServeConfig,
+) -> Result<Vec<WebCredential>, CliError> {
+    let credentials = resolve_web_credentials(web, serve)?;
+    if !credentials.is_empty() {
+        let legacy = resolve_auth_token(auth_token.cloned())?;
+        check_web_credentials(legacy.as_ref(), &credentials)?;
+    }
+    Ok(credentials)
 }
 
 fn parse_allowed_host(host: &str) -> Result<AllowedHost, CliError> {
@@ -371,9 +399,23 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
             return Err(e);
         }
     };
-    // Fail closed: a non-loopback bind with no token is a config error, not a
-    // warning (same posture as `mcp::serve::authorize_bind`).
-    authorize_bind_web(args.bind, auth.as_ref())?;
+    // The whole set, legacy token included (#4 PR 3): reserved names, a
+    // name or token used twice, a configured token equal to the legacy one.
+    if let Err(e) = check_web_credentials(auth.as_ref(), &args.credentials) {
+        eprintln!("lambo serve-web: {e}");
+        return Err(e);
+    }
+    // Fail closed: a non-loopback bind with no credential is a config
+    // error, not a warning (same posture as `mcp::serve::authorize_bind`,
+    // which also counts any credential, legacy or configured).
+    authorize_bind_web(
+        args.bind,
+        auth.as_ref()
+            .or_else(|| args.credentials.first().map(|c| &c.token)),
+    )?;
+    let configured = args.credentials.len();
+    let legacy_beside_configured = auth.is_some() && configured > 0;
+    let inherit_note = inherit_note(&args.web, auth.is_some(), &args.credentials);
 
     // Fail fast on an unprovisioned or unreachable store, as the startup load
     // used to. Sessions themselves load lazily, on the first request that
@@ -395,6 +437,7 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
         backends,
         exposed,
         auth,
+        args.credentials,
         &allowed_hosts,
         &args.web,
     ));
@@ -421,14 +464,16 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
         );
     }
     println!("lambo serve-web: reader process — no writer lease, no write routes");
-    // The count line (#4 design 4.1): which credential reaches how many
-    // sessions. Names a credential, never a token.
-    println!(
-        "lambo serve-web: credential '{}' reads {} session{}",
-        auth::credential_label(&state.authority),
-        served.len(),
-        if served.len() == 1 { "" } else { "s" }
-    );
+    // The count lines (#4 design 4.1): which credential reaches how many
+    // sessions, one line each, in scan order. Names a credential, never a
+    // token.
+    let reach = auth::credential_reach(&state.authority, &state.sessions);
+    for (name, count) in &reach {
+        println!(
+            "lambo serve-web: credential '{name}' reads {count} session{}",
+            if *count == 1 { "" } else { "s" }
+        );
+    }
     let bounds = state.views.bounds();
     println!(
         "lambo serve-web: session views — refreshed after {} ms, at most {} loaded, {} load(s) \
@@ -438,13 +483,23 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
         bounds.load_concurrency,
         bounds.recall_concurrency,
     );
-    // A non-loopback bind always carries a token (`authorize_bind_web`), so
-    // the two branches below are exhaustive: token configured, or loopback.
+    // A non-loopback bind always carries a credential (`authorize_bind_web`),
+    // so the two branches below are exhaustive: credential configured, or
+    // loopback.
     if state.authority.requires_bearer() {
-        eprintln!(
-            "⚑ lambo serve-web: authentication is ON — every request must send \
-             'Authorization: Bearer <token>' (from {AUTH_TOKEN_ENV} or --auth-token)."
-        );
+        if configured == 0 {
+            eprintln!(
+                "⚑ lambo serve-web: authentication is ON — every request must send \
+                 'Authorization: Bearer <token>' (from {AUTH_TOKEN_ENV} or --auth-token)."
+            );
+        } else {
+            eprintln!(
+                "⚑ lambo serve-web: authentication is ON — every request must send \
+                 'Authorization: Bearer <token>' with one of the {} configured credentials, \
+                 and reads only the sessions in that credential's scope.",
+                reach.len()
+            );
+        }
     } else {
         eprintln!(
             "⚑ lambo serve-web: bound to {} — no auth token configured, so the surface is \
@@ -460,6 +515,17 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
              the token."
         );
     }
+    let implicit = !state.authority.requires_bearer();
+    let unserved = auth::unserved_names(&state.authority, &state.sessions);
+    for warning in startup_warnings(
+        legacy_beside_configured,
+        &reach,
+        &unserved,
+        implicit && state.list_sessions,
+        inherit_note,
+    ) {
+        eprintln!("⚑ lambo serve-web: {warning}");
+    }
     if state.backends.store_cfg.kind == StoreKind::Memory {
         eprintln!(
             "⚑ lambo serve-web: the 'memory' store is process-local — this reader has its own \
@@ -469,6 +535,115 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
     }
 
     serve_bounded(listener, router(state), shutdown_signal(), SHUTDOWN_GRACE).await
+}
+
+/// What an operator should hear about the credentials at startup (#4 PR 3),
+/// one line each, never a token:
+///
+/// * the legacy token beside configured credentials (`[[web.credential]]`
+///   or inherited ones; review L1: the line names both, since either may be
+///   the only kind): a `LAMBO_AUTH_TOKEN`
+///   left exported after credentials were configured keeps `default`, and
+///   with it every served session, readable by whoever holds it (as
+///   `lambo serve` warns, #32 PR 5 review I3);
+/// * a credential that names sessions not on the allowlist (`unserved`):
+///   they are never read, whatever the credential says;
+/// * a credential that reads no served session (its names are not on the
+///   allowlist, or its prefix covers none): it authenticates and then sees
+///   only the uniform 404;
+/// * the listing under the implicit grant (`listing_unauthenticated`):
+///   every served name to anyone who reaches the port (design 6.2, R5);
+/// * `inherit_serve_credentials` on with nothing to import (`inherit`,
+///   review L3): the operator expects agent tokens to work, and with no
+///   other credential the portal is in fact unauthenticated on loopback.
+fn startup_warnings(
+    legacy_beside_configured: bool,
+    reach: &[(&str, usize)],
+    unserved: &[(&str, Vec<&str>)],
+    listing_unauthenticated: bool,
+    inherit: Option<InheritNote>,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    match inherit {
+        Some(InheritNote::NothingImportedUnauthenticated) => out.push(
+            "[web] inherit_serve_credentials is on but [serve] has no [[serve.credential]]: \
+             nothing was imported, and no other credential is configured, so this portal is \
+             UNAUTHENTICATED on loopback: anyone who can reach the port reads every served \
+             session"
+                .to_string(),
+        ),
+        Some(InheritNote::NothingImported) => out.push(
+            "[web] inherit_serve_credentials is on but [serve] has no [[serve.credential]]: \
+             nothing was imported, so no agent token authenticates here"
+                .to_string(),
+        ),
+        None => {}
+    }
+    if legacy_beside_configured {
+        out.push(format!(
+            "{AUTH_TOKEN_ENV} / --auth-token is set beside configured credentials \
+             ([[web.credential]], or [[serve.credential]] imported by [web] \
+             inherit_serve_credentials): it is the \"default\" credential and reads every \
+             served session. Unset it if the configured credentials replace it."
+        ));
+    }
+    for (name, missing) in unserved {
+        out.push(format!(
+            "credential '{name}' names sessions this window does not serve ({}): they are never \
+             read; serve them with --session or [web] sessions",
+            missing.join(", ")
+        ));
+    }
+    for (name, count) in reach {
+        if *count == 0 {
+            out.push(format!(
+                "credential '{name}' reads no served session: its sessions are not on the \
+                 allowlist (--session / [web] sessions), so every scoped request it makes is \
+                 the 404"
+            ));
+        }
+    }
+    if listing_unauthenticated {
+        out.push(
+            "[web] list_sessions is on with no credential configured: GET /api/sessions names \
+             every served session to anyone who can reach this port"
+                .to_string(),
+        );
+    }
+    out
+}
+
+/// Why `inherit_serve_credentials` imported nothing, for
+/// [`startup_warnings`] (review L3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InheritNote {
+    /// Nothing imported; other credentials still require a bearer.
+    NothingImported,
+    /// Nothing imported and nothing else configured: the implicit
+    /// loopback grant, no authentication.
+    NothingImportedUnauthenticated,
+}
+
+/// [`InheritNote`] for a portal over `credentials` (review L3): `None`
+/// unless `[web] inherit_serve_credentials` is on and no credential came
+/// from `[serve]`. Names are unique across both tables, so an imported
+/// credential is any that `[[web.credential]]` does not name.
+fn inherit_note(
+    web: &WebConfig,
+    legacy: bool,
+    credentials: &[WebCredential],
+) -> Option<InheritNote> {
+    let imported = credentials
+        .iter()
+        .any(|c| !web.credentials.iter().any(|w| w.name == c.grant.name()));
+    if !web.inherit_serve_credentials || imported {
+        return None;
+    }
+    Some(if !legacy && credentials.is_empty() {
+        InheritNote::NothingImportedUnauthenticated
+    } else {
+        InheritNote::NothingImported
+    })
 }
 
 /// `axum::serve` under a shutdown signal, with the grace window applied to the

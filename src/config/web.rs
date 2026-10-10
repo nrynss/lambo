@@ -37,15 +37,44 @@
 //! host is quoted, as `[serve]` quotes session names, since neither is a
 //! secret.
 //!
-//! The strict addressed-id charset is not checked here: it applies only once
-//! the union with `--session` serves more than one session (#4 Q12), which
-//! `lambo serve-web` checks at startup. The approved design adds
-//! `list_sessions` and `[[web.credential]]` in a later PR.
+//! The strict addressed-id charset is not checked on `sessions` here: it
+//! applies only once the union with `--session` serves more than one session
+//! (#4 Q12), which `lambo serve-web` checks at startup.
+//!
+//! # Credentials (#4 PR 3, design 4.1)
+//!
+//! ```toml
+//! [web]
+//! sessions = ["lambo", "rustydocs", "general"]
+//! list_sessions = true              # GET /api/sessions: the caller's names
+//! inherit_serve_credentials = false # true: [[serve.credential]] read too
+//!
+//! [[web.credential]]
+//! name = "lambo-viewers"
+//! token_env = "LAMBO_WEB_LAMBO_TOKEN"
+//! sessions = ["lambo"]              # exact names, "*" = the allowlist
+//! # session_prefix = "dc-u-"        # allowlisted ids under the prefix
+//! ```
+//!
+//! A `[[web.credential]]` is a **read** grant over the allowlist: the
+//! grammar of `[[serve.credential]]` ([`super::credential`], shared), minus
+//! the write capabilities. `create`, `erase` and `admin` are refused by name
+//! (an accepted-but-ignored `erase = true` would be a lie), and an inline
+//! `token` is refused as `[serve]` refuses it, its value discarded at parse
+//! time. `inherit_serve_credentials = true` imports every
+//! `[[serve.credential]]` as a read grant with the same scope and no
+//! capability (write implies read); a name or `token_env` may then not
+//! appear in both tables. An inherited `"*"` keeps serve's meaning, the
+//! `[serve] sessions` plus every name under a `[[serve.credential]]`
+//! prefix, never this allowlist (#4 PR 3 review M1). Tokens are read from the environment by
+//! `lambo serve-web` at startup, never here.
 
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use super::credential::{self, CredentialEntry, WEB_TABLE};
+use super::serve::{InlineToken, ServeConfig};
 use crate::types::LamboError;
 
 /// A `Host` the portal accepts under the implicit loopback grant: a host
@@ -156,6 +185,80 @@ pub struct WebConfig {
     /// [`DEFAULT_RECALL_CONCURRENCY`]; 1 to [`MAX_CONCURRENCY`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recall_concurrency: Option<usize>,
+    /// Answer `GET /api/sessions` with the names the presenting credential
+    /// may read (#4 PR 3, design 6.2). Off by default: the route is then not
+    /// registered at all, so it is the uniform 404.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub list_sessions: bool,
+    /// Import every `[[serve.credential]]` as a read grant with its scope
+    /// and no capability (#4 design 4.1, Q5). Off by default: agents' write
+    /// tokens are not portal tokens unless the operator says so.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub inherit_serve_credentials: bool,
+    /// The portal's own read credentials, `[[web.credential]]` (#4 PR 3).
+    #[serde(default, rename = "credential", skip_serializing_if = "Vec::is_empty")]
+    pub credentials: Vec<WebCredentialConfig>,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+/// One `[[web.credential]]` entry, as written in the file: a read grant.
+/// Holds no secret, only the *name* of the environment variable that does.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct WebCredentialConfig {
+    /// A name for logs and refusals. Never the secret.
+    #[serde(default)]
+    pub name: String,
+    /// The environment variable holding the bearer token: `[A-Z_][A-Z0-9_]*`,
+    /// at most 64 bytes, not token-shaped, and not `LAMBO_AUTH_TOKEN`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_env: Option<String>,
+    /// An inline `token` key: refused, its value discarded while parsing.
+    #[serde(default, skip_serializing)]
+    pub token: Option<InlineToken>,
+    /// Exact session names, or `"*"` for every allowlisted session.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sessions: Vec<String>,
+    /// Every allowlisted session whose id starts with this and is longer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_prefix: Option<String>,
+    /// `create`: a `[[serve.credential]]` key, refused here by name.
+    #[serde(default, skip_serializing)]
+    pub create: Option<InlineToken>,
+    /// `erase`: refused by name.
+    #[serde(default, skip_serializing)]
+    pub erase: Option<InlineToken>,
+    /// `admin`: refused by name.
+    #[serde(default, skip_serializing)]
+    pub admin: Option<InlineToken>,
+}
+
+impl WebCredentialConfig {
+    /// The fields the shared grammar checks ([`credential`]).
+    pub(crate) fn entry(&self) -> CredentialEntry<'_> {
+        CredentialEntry {
+            name: &self.name,
+            token_env: self.token_env.as_deref(),
+            inline_token: self.token.is_some(),
+            sessions: &self.sessions,
+            session_prefix: self.session_prefix.as_deref(),
+        }
+    }
+
+    /// The write capability keys this entry carries, by name.
+    fn write_keys(&self) -> Vec<&'static str> {
+        [
+            ("create", self.create.is_some()),
+            ("erase", self.erase.is_some()),
+            ("admin", self.admin.is_some()),
+        ]
+        .into_iter()
+        .filter_map(|(key, set)| set.then_some(key))
+        .collect()
+    }
 }
 
 fn web_err(msg: impl std::fmt::Display) -> LamboError {
@@ -200,6 +303,63 @@ impl WebConfig {
                 return Err(web_err(format!(
                     "{key} must be between 1 and {MAX_CONCURRENCY}"
                 )));
+            }
+        }
+        // Read-only by grammar (design 4.1): the write capabilities are
+        // refused by name, before the shared checks, so `erase = true` is
+        // never silently accepted.
+        for cred in &self.credentials {
+            let keys = cred.write_keys();
+            if !keys.is_empty() {
+                let name = if cred.name.is_empty() {
+                    "a [[web.credential]] entry".to_string()
+                } else {
+                    format!("credential {:?}", cred.name)
+                };
+                return Err(web_err(format!(
+                    "{name} sets {}, which [[web.credential]] does not accept: the portal is \
+                     read-only, so a web credential can only read the sessions in its scope. \
+                     Remove the key (create, erase and admin belong to [[serve.credential]])",
+                    keys.join(", ")
+                )));
+            }
+        }
+        credential::validate_set(
+            self.credentials.iter().map(WebCredentialConfig::entry),
+            &WEB_TABLE,
+        )
+    }
+
+    /// The checks that need `[serve]` too, with `inherit_serve_credentials`
+    /// on: an imported `[[serve.credential]]` may not share a name or a
+    /// `token_env` with a `[[web.credential]]`, or a request could not be
+    /// attributed to one grant. Run by `LamboFile::from_toml_str` after both
+    /// tables validated.
+    pub(crate) fn validate_with_serve(&self, serve: &ServeConfig) -> Result<(), LamboError> {
+        if !self.inherit_serve_credentials {
+            return Ok(());
+        }
+        for imported in &serve.credentials {
+            for own in &self.credentials {
+                if own.name == imported.name {
+                    return Err(web_err(format!(
+                        "[[web.credential]] {:?} has the name of a [[serve.credential]], which \
+                         inherit_serve_credentials imports too; rename one",
+                        own.name
+                    )));
+                }
+                if let (Some(a), Some(b)) = (&own.token_env, &imported.token_env)
+                    && a == b
+                {
+                    return Err(web_err(format!(
+                        "[[web.credential]] {:?} and the imported [[serve.credential]] {:?} \
+                         both read token_env {}; each credential needs its own token, or a \
+                         request could not be attributed to one",
+                        own.name,
+                        imported.name,
+                        super::secret_env::shown(a)
+                    )));
+                }
             }
         }
         Ok(())
@@ -351,6 +511,220 @@ mod tests {
         assert!(v6.matches(&presented("[::1]", Some(7710))));
     }
 
+    /// `[[web.credential]]` in the file, with `body` as its keys.
+    fn web_credential(body: &str) -> String {
+        format!("[web]\nsessions = [\"lambo\"]\n\n[[web.credential]]\n{body}\n")
+    }
+
+    fn refused(toml: &str) -> String {
+        LamboFile::from_toml_str(toml).expect_err(toml).to_string()
+    }
+
+    const VIEWERS_ENV: &str = "LAMBO_TEST_4C_VIEWERS";
+
+    /// #4 PR 3: the credential table, `list_sessions` and
+    /// `inherit_serve_credentials` parse; the defaults are off.
+    #[test]
+    fn credentials_and_the_listing_switch_parse() {
+        let file = LamboFile::from_toml_str(&format!(
+            "[web]\nsessions = [\"lambo\", \"rustydocs\"]\nlist_sessions = true\n\
+             inherit_serve_credentials = true\n\n[[web.credential]]\nname = \"viewers\"\n\
+             token_env = \"{VIEWERS_ENV}\"\nsessions = [\"lambo\", \"*\"]\n\n\
+             [[web.credential]]\nname = \"users\"\ntoken_env = \"LAMBO_TEST_4C_USERS\"\n\
+             session_prefix = \"dc-u-\"\n"
+        ))
+        .expect("valid [web]");
+        assert!(file.web.list_sessions && file.web.inherit_serve_credentials);
+        assert_eq!(file.web.credentials.len(), 2);
+        assert_eq!(file.web.credentials[0].name, "viewers");
+        assert_eq!(
+            file.web.credentials[1].session_prefix.as_deref(),
+            Some("dc-u-")
+        );
+        let off = LamboFile::from_toml_str("[web]\nsessions = [\"lambo\"]\n").expect("off");
+        assert!(!off.web.list_sessions && !off.web.inherit_serve_credentials);
+        assert!(off.web.credentials.is_empty());
+    }
+
+    /// Design 4.1: read-only by grammar. `create`, `erase` and `admin` are
+    /// refused by name whatever their value (`false` included: the key does
+    /// not exist here), and the value is never quoted.
+    #[test]
+    fn write_capabilities_are_refused_by_name() {
+        for key in ["create", "erase", "admin"] {
+            for value in ["true", "false", "\"yes-xyzzy\""] {
+                let err = refused(&web_credential(&format!(
+                    "name = \"viewers\"\ntoken_env = \"{VIEWERS_ENV}\"\n\
+                     sessions = [\"lambo\"]\n{key} = {value}"
+                )));
+                assert!(
+                    err.contains("[web]")
+                        && err.contains(key)
+                        && err.contains("read-only")
+                        && err.contains("\"viewers\""),
+                    "{key} = {value}: {err}"
+                );
+                assert!(!err.contains("xyzzy"), "the value leaked: {err}");
+            }
+        }
+        // Several at once are all named.
+        let err = refused(&web_credential(&format!(
+            "name = \"v\"\ntoken_env = \"{VIEWERS_ENV}\"\nsessions = [\"lambo\"]\n\
+             create = true\nerase = true\nadmin = true"
+        )));
+        assert!(err.contains("create, erase, admin"), "{err}");
+    }
+
+    /// The inline `token` key is refused as `[serve]` refuses it, naming
+    /// `token_env` as the fix, never echoing the value, never holding it.
+    #[test]
+    fn an_inline_token_is_refused_without_echoing_it() {
+        for value in [
+            "\"fake-inline-xyzzy\"",
+            "12345",
+            "{ v = \"fake-inline-xyzzy\" }",
+        ] {
+            let err = refused(&web_credential(&format!(
+                "name = \"viewers\"\ntoken = {value}\nsessions = [\"lambo\"]"
+            )));
+            assert!(
+                err.contains("[web]") && err.contains("inline token") && err.contains("token_env"),
+                "{err}"
+            );
+            assert!(!err.contains("xyzzy") && !err.contains("12345"), "{err}");
+        }
+        let raw: LamboFile =
+            toml::from_str("[[web.credential]]\nname = \"v\"\ntoken = \"fake-inline-xyzzy\"\n")
+                .expect("raw parse");
+        assert!(!format!("{raw:?}").contains("xyzzy"));
+        assert!(!toml::to_string(&raw).expect("serialize").contains("xyzzy"));
+    }
+
+    /// The shared grammar's refusals, worded for `[web]`: reserved names,
+    /// `LAMBO_AUTH_TOKEN`, a missing or malformed `token_env`, an empty
+    /// scope, a bad scope entry, duplicate names and duplicate variables.
+    #[test]
+    fn the_shared_grammar_refuses_for_web() {
+        let env = format!("token_env = \"{VIEWERS_ENV}\"");
+        for (body, needle) in [
+            (
+                format!("name = \"default\"\n{env}\nsessions = [\"lambo\"]"),
+                "reserved",
+            ),
+            (
+                format!("name = \"local\"\n{env}\nsessions = [\"lambo\"]"),
+                "reserved",
+            ),
+            (
+                "name = \"v\"\ntoken_env = \"LAMBO_AUTH_TOKEN\"\nsessions = [\"lambo\"]"
+                    .to_string(),
+                "LAMBO_AUTH_TOKEN",
+            ),
+            (
+                "name = \"v\"\nsessions = [\"lambo\"]".to_string(),
+                "no token_env",
+            ),
+            (format!("{env}\nsessions = [\"lambo\"]"), "has no name"),
+            (format!("name = \"v\"\n{env}"), "covers no session"),
+            (
+                format!("name = \"v\"\n{env}\nsessions = [\"a/b\"]"),
+                "cannot be addressed",
+            ),
+            (
+                format!("name = \"v\"\n{env}\nsessions = [\"a\", \"a\"]"),
+                "twice",
+            ),
+            (
+                format!("name = \"v\"\n{env}\nsession_prefix = \".x\""),
+                "session_prefix",
+            ),
+        ] {
+            let err = refused(&web_credential(&body));
+            assert!(
+                err.contains("lambo.toml [web]") && err.contains(needle),
+                "{body:?} must name {needle:?}: {err}"
+            );
+        }
+        let addressed = refused(&web_credential(&format!(
+            "name = \"v\"\n{env}\nsessions = [\"a/b\"]"
+        )));
+        assert!(
+            addressed.contains("lambo serve-web --session"),
+            "{addressed}"
+        );
+        let two = |a: &str, b: &str| {
+            format!(
+                "[web]\nsessions = [\"lambo\"]\n\n[[web.credential]]\n{a}\n\
+                 sessions = [\"lambo\"]\n\n[[web.credential]]\n{b}\nsessions = [\"lambo\"]\n"
+            )
+        };
+        let err = refused(&two(
+            &format!("name = \"v\"\n{env}"),
+            "name = \"v\"\ntoken_env = \"LAMBO_TEST_4C_OTHER\"",
+        ));
+        assert!(
+            err.contains("[[web.credential]] entries are named \"v\""),
+            "{err}"
+        );
+        let err = refused(&two(
+            &format!("name = \"v\"\n{env}"),
+            &format!("name = \"w\"\n{env}"),
+        ));
+        assert!(
+            err.contains("[[web.credential]] entries read token_env"),
+            "{err}"
+        );
+    }
+
+    /// An unknown key in an entry is refused by name (Level B).
+    #[test]
+    fn an_unknown_credential_key_is_refused() {
+        let err = refused(&web_credential(&format!(
+            "name = \"v\"\ntoken_env = \"{VIEWERS_ENV}\"\nsessions = [\"lambo\"]\n\
+             sesions = [\"x\"]"
+        )));
+        assert!(err.contains("unknown field `sesions`"), "{err}");
+    }
+
+    /// With `inherit_serve_credentials`, an imported `[[serve.credential]]`
+    /// may not share a name or a variable with a `[[web.credential]]`;
+    /// without it, the two tables are independent.
+    #[test]
+    fn inherited_credentials_may_not_collide_with_web_ones() {
+        let file = |inherit: bool, web_name: &str, web_env: &str| {
+            format!(
+                "[serve]\nsessions = [\"lambo\"]\n\n[[serve.credential]]\nname = \"agents\"\n\
+                 token_env = \"LAMBO_TEST_4C_AGENTS\"\nsessions = [\"lambo\"]\n\n\
+                 [web]\nsessions = [\"lambo\"]\ninherit_serve_credentials = {inherit}\n\n\
+                 [[web.credential]]\nname = \"{web_name}\"\ntoken_env = \"{web_env}\"\n\
+                 sessions = [\"lambo\"]\n"
+            )
+        };
+        let err = refused(&file(true, "agents", VIEWERS_ENV));
+        assert!(err.contains("[web]") && err.contains("rename one"), "{err}");
+        let err = refused(&file(true, "viewers", "LAMBO_TEST_4C_AGENTS"));
+        assert!(err.contains("both read token_env"), "{err}");
+        LamboFile::from_toml_str(&file(true, "viewers", VIEWERS_ENV)).expect("distinct");
+        LamboFile::from_toml_str(&file(false, "agents", "LAMBO_TEST_4C_AGENTS"))
+            .expect("independent tables without inherit");
+    }
+
+    /// `[embedder] api_key_env` may not name a `[[web.credential]]`
+    /// variable: the embeddings endpoint would be handed a portal token.
+    #[test]
+    fn api_key_env_may_not_be_a_web_credential() {
+        let err = refused(&format!(
+            "[embedder]\nkind = \"fixture\"\napi_key_env = \"{VIEWERS_ENV}\"\n\n{}",
+            web_credential(&format!(
+                "name = \"viewers\"\ntoken_env = \"{VIEWERS_ENV}\"\nsessions = [\"lambo\"]"
+            ))
+        ));
+        assert!(
+            err.contains("api_key_env") && err.contains("[[web.credential]] \"viewers\""),
+            "{err}"
+        );
+    }
+
     #[test]
     fn a_wrong_typed_value_is_not_quoted() {
         let err = LamboFile::from_toml_str("[web]\nview_ttl_ms = \"a-pasted-value\"\n")
@@ -391,6 +765,11 @@ mod tests {
         assert_eq!(web.max_loaded_sessions, Some(DEFAULT_MAX_LOADED_SESSIONS));
         assert_eq!(web.load_concurrency, Some(DEFAULT_LOAD_CONCURRENCY));
         assert_eq!(web.recall_concurrency, Some(DEFAULT_RECALL_CONCURRENCY));
+        assert!(!web.list_sessions && !web.inherit_serve_credentials);
+        assert_eq!(web.credentials.len(), 1);
+        assert_eq!(web.credentials[0].name, "lambo-viewers");
+        assert_eq!(web.credentials[0].sessions, ["lambo"]);
+        assert_eq!(web.credentials[0].session_prefix, None);
         assert!(LamboFile::from_toml_str(raw)
             .expect("example")
             .web

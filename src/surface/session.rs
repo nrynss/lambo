@@ -283,6 +283,9 @@ pub struct SessionScope {
     every_hosted: bool,
     prefix: Option<SessionPrefix>,
     every_pinned: bool,
+    /// `"*"` judged against this fixed hosted set instead of the
+    /// authority's ([`SessionScope::star_within`]).
+    star_within: Option<HostedSessions>,
 }
 
 impl SessionScope {
@@ -297,7 +300,39 @@ impl SessionScope {
             every_hosted,
             prefix,
             every_pinned: false,
+            star_within: None,
         }
+    }
+
+    /// This scope with its `"*"` pinned to `hosted`, the sessions the
+    /// configuration that wrote it hosts, instead of whatever set the
+    /// authority judging it hosts (#4 PR 3 review M1). The portal imports
+    /// a `[[serve.credential]]` this way: on serve, `"*"` means serve's
+    /// pinned sessions plus every credential prefix, and the token must not
+    /// read a session on the portal it could not use on serve, however
+    /// wide the portal's allowlist is. A scope without `"*"` is unchanged.
+    ///
+    /// A pinned `"*"` no longer covers every pinned session of the judging
+    /// authority ([`SessionScope::covers_every_pinned`] is false), so it
+    /// never reaches a loose single session no exact name can spell.
+    pub fn star_within(mut self, hosted: HostedSessions) -> Self {
+        if self.every_hosted {
+            self.every_hosted = false;
+            self.star_within = Some(hosted);
+        }
+        self
+    }
+
+    /// Does this scope name `id` exactly: one of its names, or a pinned
+    /// session of the set its `"*"` is pinned to
+    /// ([`SessionScope::star_within`]). Never a prefix match. The portal's
+    /// listing shows only such names.
+    pub fn names_exactly(&self, id: &AddressedSessionId) -> bool {
+        self.names.contains(id)
+            || self
+                .star_within
+                .as_ref()
+                .is_some_and(|hosted| hosted.is_pinned(id))
     }
 
     /// Every pinned session and nothing else (#32 §6.1): the scope of the
@@ -313,7 +348,11 @@ impl SessionScope {
 
     /// Does this scope cover nothing at all?
     pub fn is_empty(&self) -> bool {
-        self.names.is_empty() && !self.every_hosted && self.prefix.is_none() && !self.every_pinned
+        self.names.is_empty()
+            && !self.every_hosted
+            && self.prefix.is_none()
+            && !self.every_pinned
+            && self.star_within.is_none()
     }
 
     /// Does this scope cover every pinned session, whatever its name? True
@@ -342,6 +381,10 @@ impl SessionScope {
             || self.prefix.as_ref().is_some_and(|p| p.covers(id))
             || (self.every_hosted && hosted.contains(id))
             || (self.every_pinned && hosted.is_pinned(id))
+            || self
+                .star_within
+                .as_ref()
+                .is_some_and(|within| within.contains(id))
     }
 }
 
@@ -558,6 +601,16 @@ impl<T: BearerSecret> SessionAuthority<T> {
     /// never a secret). Empty under an implicit grant.
     pub(crate) fn credential_names(&self) -> Vec<&str> {
         self.credentials.iter().map(|(_, g)| g.name()).collect()
+    }
+
+    /// Every grant a request can arrive as, in order: the configured
+    /// credentials', or the implicit one (for a surface's startup lines and
+    /// per-credential bounds; never a secret).
+    pub(crate) fn grants(&self) -> Vec<&SessionGrant> {
+        match &self.implicit {
+            Some(grant) => vec![grant.as_ref()],
+            None => self.credentials.iter().map(|(_, g)| g.as_ref()).collect(),
+        }
     }
 
     /// The grant for an `Authorization` header value, or `None` (the

@@ -336,7 +336,7 @@ The map is read from the `lambo.toml` the serve loads: `--config`, then `LAMBO_C
 
 ## Read-only window views
 
-`[web]` sets which sessions `lambo serve-web` serves, which `Host` names it answers without a token, and how it reads each session. It is optional: omit it and the defaults below apply.
+`[web]` sets which sessions `lambo serve-web` serves, which `Host` names it answers without a credential, who may read which session, and how it reads each session. It is optional: omit it and the defaults below apply.
 
 The window reads the store through a **view**: one load of a session that every request and every open tab shares until it is older than `view_ttl_ms`. The next request after that reloads it, and requests that arrive while a load is running wait for that one load instead of starting their own. A failed load is not kept: the requests waiting on it get the error, and the next request tries again. So the store sees about one load per session per `view_ttl_ms` however many tabs are open, and the page shows durable state up to `view_ttl_ms` older than the store. The writer-published flush lag is still read on every poll.
 
@@ -348,18 +348,49 @@ view_ttl_ms = 1500
 max_loaded_sessions = 4
 load_concurrency = 2
 recall_concurrency = 4
+list_sessions = false
+inherit_serve_credentials = false
 ```
 
 | Key | Default | What it sets |
 |---|---|---|
 | `sessions` | none | Sessions to serve, after any `--session` flags. The first one overall is the default, served at `/`; each is served at `/s/<session>/`. With more than one in total, each name must be 1 to 128 bytes of `[A-Za-z0-9._:-]`, not starting with `.`. |
-| `allowed_hosts` | none | `Host` values answered while no token is configured, beside `localhost`, `127.0.0.1` and `[::1]`, after any `--allowed-host` flags. A name, or `name:port` for that port only. |
+| `allowed_hosts` | none | `Host` values answered while no credential is configured, beside `localhost`, `127.0.0.1` and `[::1]`, after any `--allowed-host` flags. A name, or `name:port` for that port only. |
 | `view_ttl_ms` | `1500` | Milliseconds a view is reused, the page's poll interval. `0` reloads on every request, still one load for requests that arrive together. At most `60000`. |
 | `max_loaded_sessions` | `4` | Views kept in memory at once. The least recently used is dropped beyond it. At least 1. |
 | `load_concurrency` | `2` | Session loads that may run at once. 1 to 1024. Always `1` on SQLite. |
 | `recall_concurrency` | `4` | Recalls that may run at once. A recall that waits 2 seconds for a slot gets `503` with `Retry-After: 1`. 1 to 1024. |
+| `list_sessions` | `false` | Answer `GET /api/sessions` with the served sessions the presenting credential may list. Off, the route does not exist. With no credential configured it names every served session to anyone who reaches the port, and startup warns about it. |
+| `inherit_serve_credentials` | `false` | Also accept every `[[serve.credential]]` as a read credential with the same scope as on `lambo serve`, so its `"*"` is serve's, not every served session (see below). Its `create`, `erase` and `admin` are dropped: the window only reads. With no `[[serve.credential]]` nothing is imported, and startup says so; with no other credential either, the window stays unauthenticated on loopback. |
 
 An unknown key, an out-of-range value, an empty or repeated session name and a malformed host are refused when the file is read, so they stop every command, like any other invalid key. A numeric refusal names the key and its bound, never the value. At startup `lambo serve-web` prints the sessions and bounds it runs with. It checks the store's schema at startup and loads each session on the first request that needs it. See [Watch a session in a browser](/cli#watch-a-session-in-a-browser).
+
+### Portal credentials
+
+`[[web.credential]]` gives a bearer token its own read scope on `lambo serve-web`. It has the grammar of `[[serve.credential]]` without the write capabilities, and its tokens are separate: an agent's write token is not a window token unless you set `inherit_serve_credentials`.
+
+```toml
+[web]
+sessions = ["lambo", "rustydocs", "general"]
+
+[[web.credential]]
+name = "lambo-viewers"
+token_env = "LAMBO_WEB_LAMBO_TOKEN"
+sessions = ["lambo"]
+```
+
+| Key | What it sets |
+|---|---|
+| `name` | A name for logs and refusals. `default` and `local` are reserved. |
+| `token_env` | The environment variable holding the token. The token itself never goes in the file. Not `LAMBO_AUTH_TOKEN`. |
+| `sessions` | Exact session names, or `"*"` for every served session. |
+| `session_prefix` | Every served session whose name starts with this and is longer. A session that is not served is never read, whatever its name. |
+
+Each credential reads only the served sessions in its scope, beside the `default` credential from `--auth-token` or `LAMBO_AUTH_TOKEN`, which reads them all. Once any credential is configured, every request needs a bearer, on loopback too, and the `Host` check is off. `create`, `erase` and `admin` are refused by name, as is an inline `token`, a credential without `token_env` or scope, and a name or `token_env` used twice. `lambo serve-web` reads each variable at startup and exits `2`, naming the credential and never a value, when one is unset, holds a token no request could present, or holds the same token as another credential or as `LAMBO_AUTH_TOKEN`. `[embedder] api_key_env` may not name a `token_env`.
+
+An inherited `[[serve.credential]]` reads what it reaches on `lambo serve`, within the served sessions: its exact names, its prefix, and for `"*"` the `[serve] sessions` of the same `lambo.toml` plus every session under any `[[serve.credential]]` prefix. That is what `"*"` means to `lambo serve`, which attaches those sessions on demand. It never means every session `[web]` serves: with `[serve] sessions = ["lambo"]` and `[web] sessions = ["lambo", "hr-private"]`, an inherited `"*"` reads `lambo` and gets the `404` for `hr-private`. A session that `lambo serve` pins only with a `--session` flag is not in the file, so an inherited `"*"` does not reach it; name it in `[serve] sessions` or give the window its own `[[web.credential]]`. With `list_sessions`, an inherited `"*"` lists the served sessions in `[serve] sessions`, never one it reaches only through a prefix.
+
+A browser cannot send the header itself; see [Watch a session in a browser](/cli#watch-a-session-in-a-browser).
 
 ## Environment variables
 
@@ -426,7 +457,7 @@ A request whose declared `Content-Length` exceeds `4 MiB` is refused with `413` 
 
 ### The read-only window
 
-`lambo serve-web` opens a read-only browser window onto one or more sessions on port `7710` and never takes the writer lease, so it runs safely beside the `lambo serve` writer. It shares the same auth posture: loopback is unauthenticated by default, and a non-loopback bind requires `LAMBO_AUTH_TOKEN` or `--auth-token` and fails closed without one; without a token it answers only loopback `Host` names and `[web] allowed_hosts`. It reads through a short-lived per-session view bounded by [`[web]`](#read-only-window-views). See [Command line](/cli).
+`lambo serve-web` opens a read-only browser window onto one or more sessions on port `7710` and never takes the writer lease, so it runs safely beside the `lambo serve` writer. It shares the same auth posture: loopback is unauthenticated by default, and a non-loopback bind requires `LAMBO_AUTH_TOKEN`, `--auth-token` or a [`[[web.credential]]`](#portal-credentials) and fails closed without one; without a credential it answers only loopback `Host` names and `[web] allowed_hosts`. It reads through a short-lived per-session view bounded by [`[web]`](#read-only-window-views). See [Command line](/cli).
 
 ## Provisioning a durable store
 

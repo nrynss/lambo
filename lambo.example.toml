@@ -116,8 +116,10 @@ url = "http://127.0.0.1:8080"
 # the 280-token image budget, every image sent as a lossless PNG with a 768 px longer
 # side, truncate-then-normalize). llama-server ignores the model
 # name, so name the weights it runs; a different artifact is a different contract.
-# Before the first embed Lambo checks llama-server's /props (loaded file name,
-# quantization, vision) against it and refuses a mismatch.
+# Lambo checks llama-server's /props (loaded file name, quantization, vision)
+# against it and refuses a mismatch. The check runs before the first embed; if
+# it cannot reach /props, embeds go unchecked until a check passes (the log
+# says so), so keep writes stopped until then if the server's model is in doubt.
 #   model = "ggml-org/embeddinggemma-2-GGUF@bfcd2987/Q8_0"   # the default
 #   images = true    # false: text only, never send an image (server without --mmproj)
 #
@@ -315,7 +317,7 @@ url = "http://127.0.0.1:8080"
 # Optional. The read-only window (`lambo serve-web`, #4). `sessions` joins the
 # repeatable --session: every one is served at /s/<session>/ and the first also
 # at / (with more than one, names must be [A-Za-z0-9._:-]). `allowed_hosts`
-# joins --allowed-host: Host names the window answers while no token is set,
+# joins --allowed-host: Host names the window answers while no credential is set,
 # beside localhost, 127.0.0.1 and [::1] (the DNS-rebinding check; a proxy
 # forwarding its public name needs it). The window
 # reads one shared view of each session, reloaded at most once per
@@ -327,9 +329,18 @@ url = "http://127.0.0.1:8080"
 # --- [web] example begins ---
 # [web]
 # sessions = ["lambo", "rustydocs"]        # beside --session; the first is the default
-# allowed_hosts = ["lambo.example.com"]    # beside --allowed-host; Host names answered without a token
+# allowed_hosts = ["lambo.example.com"]    # beside --allowed-host; Host names answered without a credential
 # view_ttl_ms = 1500           # 0 to 60000
 # max_loaded_sessions = 4      # views kept in memory, least recently used dropped
 # load_concurrency = 2         # session loads at once (1 on SQLite)
 # recall_concurrency = 4       # recalls at once
+# list_sessions = false        # true: GET /api/sessions names the caller's sessions
+# inherit_serve_credentials = false  # true: [[serve.credential]] tokens read too (no write);
+#                                    # their "*" is serve's sessions + prefixes, not this list
+#
+# [[web.credential]]           # a read-only token for some sessions; none = LAMBO_AUTH_TOKEN reads all
+# name = "lambo-viewers"
+# token_env = "LAMBO_WEB_LAMBO_TOKEN"   # the variable holding the token, never the token
+# sessions = ["lambo"]         # exact names, "*" = every served session
+# # session_prefix = "dc-u-"   # served sessions under a prefix
 # --- [web] example ends ---

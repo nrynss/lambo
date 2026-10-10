@@ -13,9 +13,11 @@
 //! | `/s/{session}` | `GET`/`HEAD`: a `308` to `/s/{session}/` (query kept), so the page's relative `api/...` URLs resolve under the session; other methods: the page route's 405 |
 //! | `/s/{session}/` | `{session}`'s page (the same `INDEX_HTML`, plus `no-store` and `Referrer-Policy: same-origin`) |
 //! | `/s/{session}/api/{route}` | `{session}`, served by the same `GET`-only route as the alias |
+//! | `/s/{session}/api/sessions` | none: the uniform 404 (the listing is unscoped, #4 PR 3) |
 //! | `/s/{session}/{anything else}` | none: the uniform 404 |
 //! | `/`, `/api/{route}` | the default session (aliases, design Q10), authorized as `SessionAuthority::authorize_default` rules |
 //! | `/app.css`, `/app.js`, `/healthz` | none needed |
+//! | `/api/sessions` | none: the caller's own listing, when `[web] list_sessions` registers it |
 //!
 //! For a scoped path the order is design 3.3's, after the guard's bearer
 //! check: the id is the **raw** path segment (never percent-decoded), its
@@ -45,6 +47,9 @@ use crate::types::SessionId;
 
 /// The scoped paths' prefix: `/s/{session}/...`.
 const SCOPE_PREFIX: &str = "/s/";
+
+/// The listing route, as it would follow `/s/{session}/`: refused there.
+const LISTING: &str = "api/sessions";
 
 /// The session a request was authorized to read. Inserted by
 /// [`resolve_session`] only; a handler extracts it.
@@ -200,6 +205,10 @@ fn scoped(state: &AppState, grant: &SessionGrant, after: &str) -> Option<Scoped>
     }
     let target = if rest.is_empty() {
         "/".to_string()
+    } else if rest == LISTING {
+        // The listing is the caller's, not a session's (design 3.2): only
+        // at `/api/sessions`, never under `/s/{session}/`.
+        return None;
     } else if rest.starts_with("api/") {
         format!("/{rest}")
     } else {

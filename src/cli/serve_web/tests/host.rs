@@ -49,6 +49,7 @@ async fn portal_with(
         backends_with_store(Box::new(CountLoads(Shared(store), loads.clone()))),
         auth.is_some(),
         auth,
+        Vec::new(),
         &allowed,
         &WebConfig::default(),
     ));
@@ -348,13 +349,13 @@ async fn a_configured_token_accepts_any_host() {
 fn the_host_check_follows_the_credential_set() {
     let sessions = [SessionId::new("t4-a")];
     let extra = [AllowedHost::parse("lambo.example.com").expect("host")];
-    let implicit = portal_authority(None, &sessions);
+    let implicit = portal_authority(None, Vec::new(), &sessions);
     let HostCheck::Only(hosts) = HostCheck::for_authority(&implicit, &extra) else {
         panic!("the implicit grant checks Host");
     };
     assert_eq!(hosts.len(), LOOPBACK_HOSTS.len() + 1);
     let token = AuthToken::new(["t4", "k"].concat()).expect("token");
-    let bearer = portal_authority(Some(token), &sessions);
+    let bearer = portal_authority(Some(token), Vec::new(), &sessions);
     assert_eq!(HostCheck::for_authority(&bearer, &extra), HostCheck::Any);
 }
 

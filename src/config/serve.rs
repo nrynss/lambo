@@ -69,13 +69,15 @@ use std::ffi::OsString;
 
 use serde::{Deserialize, Serialize};
 
-use super::secret_env;
+use super::credential::{self, CredentialEntry, SERVE_TABLE};
 use crate::mcp::SecretToken;
 use crate::surface::session::{
     parse_addressed, AddressedSessionId, HostedSessions, SessionCapabilities, SessionGrant,
-    SessionPrefix, SessionScope, LEGACY_CREDENTIAL_NAME, LOCAL_CREDENTIAL_NAME, MAX_ADDRESSED_LEN,
+    SessionPrefix,
 };
 use crate::types::LamboError;
+
+pub use super::credential::{EVERY_HOSTED_SESSION, RESERVED_CREDENTIAL_NAMES};
 
 mod projects;
 pub use projects::{
@@ -90,15 +92,6 @@ pub const DEFAULT_ATTACH_CONCURRENCY: usize = 2;
 
 /// Default idle time before an on-demand session is detached (#32 §3.4).
 pub const DEFAULT_IDLE_DETACH_SECS: u64 = 900;
-
-/// Credential names a configuration may not use: `default` is what the legacy
-/// `--auth-token` / `LAMBO_AUTH_TOKEN` becomes, and `local` is the implicit
-/// loopback credential (#32 §6.1). A configured credential with either name
-/// would make a log line ambiguous about which one authorized a request.
-pub const RESERVED_CREDENTIAL_NAMES: &[&str] = &[LEGACY_CREDENTIAL_NAME, LOCAL_CREDENTIAL_NAME];
-
-/// The scope entry meaning "every session this serve may host" (#32 §6.1).
-pub const EVERY_HOSTED_SESSION: &str = "*";
 
 /// `[serve]`. Every key is optional; an absent table is [`ServeConfig::default`]
 /// and changes nothing.
@@ -219,14 +212,7 @@ fn serve_err(msg: impl std::fmt::Display) -> LamboError {
 /// The strict addressed-id rule, as a config error naming `field` and `value`.
 /// Session names are not secrets, so quoting them is fine and useful.
 fn addressed(field: &str, value: &str) -> Result<AddressedSessionId, LamboError> {
-    parse_addressed(value).map_err(|_| {
-        serve_err(format!(
-            "{field} {value:?} cannot be addressed by URL: a session named in [serve] must be \
-             1 to {MAX_ADDRESSED_LEN} bytes of [A-Za-z0-9._:-] and must not start with '.'. \
-             A session outside that rule can still be served on its own with \
-             `lambo serve --session <name>`"
-        ))
-    })
+    SERVE_TABLE.addressed(field, value)
 }
 
 /// What `lambo serve` logs once at startup when the file sets a `[serve]`
@@ -350,27 +336,10 @@ impl ServeConfig {
             }
         }
 
-        let mut names = BTreeSet::new();
-        let mut envs = BTreeSet::new();
-        for cred in &self.credentials {
-            cred.validate()?;
-            if !names.insert(cred.name.as_str()) {
-                return Err(serve_err(format!(
-                    "two [[serve.credential]] entries are named {:?}",
-                    cred.name
-                )));
-            }
-            if let Some(env) = &cred.token_env
-                && !envs.insert(env.as_str())
-            {
-                return Err(serve_err(format!(
-                    "two [[serve.credential]] entries read token_env {}; each credential \
-                     needs its own token, or a request could not be attributed to one",
-                    secret_env::shown(env)
-                )));
-            }
-        }
-        Ok(())
+        credential::validate_set(
+            self.credentials.iter().map(CredentialConfig::entry),
+            &SERVE_TABLE,
+        )
     }
 
     /// What a `"*"` scope expands to: the pinned sessions plus every
@@ -403,135 +372,46 @@ impl ServeConfig {
         lookup: impl Fn(&str) -> Option<OsString>,
     ) -> Result<Vec<ServeCredential>, LamboError> {
         self.validate()?;
-        let mut out: Vec<ServeCredential> = Vec::with_capacity(self.credentials.len());
-        for cred in &self.credentials {
-            // `validate` guarantees `token_env` is present.
-            let env = cred.token_env.as_deref().unwrap_or_default();
-            let shown = secret_env::shown(env);
-            let raw = lookup(env).ok_or_else(|| {
-                serve_err(format!(
-                    "credential {:?}: environment variable {shown} is not set",
-                    cred.name
-                ))
-            })?;
-            let raw = raw.into_string().map_err(|_| {
-                serve_err(format!(
-                    "credential {:?}: environment variable {shown} is not valid UTF-8",
-                    cred.name
-                ))
-            })?;
+        let resolved = credential::resolve(
+            self.credentials.iter().map(CredentialConfig::entry),
+            &SERVE_TABLE,
+            lookup,
             // `SecretToken::new`'s reason never quotes the value (#32 PR 5
             // review L3: surrounding whitespace, a byte outside printable
             // ASCII, or over the length cap, besides empty).
-            let token = SecretToken::new(raw).map_err(|why| {
-                serve_err(format!(
-                    "credential {:?}: environment variable {shown}: {why}",
-                    cred.name
-                ))
-            })?;
-            if let Some(twin) = out.iter().find(|c| c.token == token) {
-                return Err(serve_err(format!(
-                    "credentials {:?} and {:?} resolve to the same token; give each its own",
-                    twin.grant.name(),
-                    cred.name
-                )));
-            }
-            out.push(ServeCredential {
-                grant: cred.grant()?,
+            SecretToken::new,
+        )?;
+        Ok(self
+            .credentials
+            .iter()
+            .zip(resolved)
+            .map(|(cred, (name, scope, token))| ServeCredential {
+                grant: SessionGrant::new(
+                    name,
+                    scope,
+                    SessionCapabilities {
+                        create: cred.create,
+                        erase: cred.erase,
+                        admin: cred.admin,
+                    },
+                ),
                 token,
-            });
-        }
-        Ok(out)
+            })
+            .collect())
     }
 }
 
 impl CredentialConfig {
-    /// The checks for one entry; the cross-entry ones are in
-    /// [`ServeConfig::validate`].
-    fn validate(&self) -> Result<(), LamboError> {
-        if self.name.is_empty() {
-            return Err(serve_err("a [[serve.credential]] entry has no name"));
+    /// The fields the shared grammar checks ([`credential`]); the
+    /// capabilities are this table's own.
+    pub(crate) fn entry(&self) -> CredentialEntry<'_> {
+        CredentialEntry {
+            name: &self.name,
+            token_env: self.token_env.as_deref(),
+            inline_token: self.token.is_some(),
+            sessions: &self.sessions,
+            session_prefix: self.session_prefix.as_deref(),
         }
-        let name = &self.name;
-        if parse_addressed(name).is_err() {
-            return Err(serve_err(format!(
-                "credential name {name:?} must be 1 to {MAX_ADDRESSED_LEN} bytes of \
-                 [A-Za-z0-9._:-] and must not start with '.'"
-            )));
-        }
-        if RESERVED_CREDENTIAL_NAMES.contains(&name.as_str()) {
-            return Err(serve_err(format!(
-                "credential name {name:?} is reserved (\"default\" is the legacy \
-                 --auth-token / LAMBO_AUTH_TOKEN credential, \"local\" the implicit loopback \
-                 one); choose another name"
-            )));
-        }
-        if self.token.is_some() {
-            return Err(serve_err(format!(
-                "credential {name:?} has an inline token, which is refused: a secret in \
-                 lambo.toml ends up in backups, diffs and support bundles. Put the token in an \
-                 environment variable and name it with token_env (the value is not shown here)"
-            )));
-        }
-        let Some(env) = &self.token_env else {
-            return Err(serve_err(format!(
-                "credential {name:?} has no token_env (the environment variable holding its \
-                 token)"
-            )));
-        };
-        secret_env::check(env).map_err(|why| {
-            serve_err(why.message(&format!("credential {name:?}: token_env"), "token_env"))
-        })?;
-        let mut seen = BTreeSet::new();
-        for entry in &self.sessions {
-            if entry != EVERY_HOSTED_SESSION {
-                addressed(&format!("credential {name:?} sessions entry"), entry)?;
-            }
-            if !seen.insert(entry.as_str()) {
-                return Err(serve_err(format!(
-                    "credential {name:?} lists session {entry:?} twice"
-                )));
-            }
-        }
-        if let Some(prefix) = &self.session_prefix {
-            SessionPrefix::new(prefix)
-                .map_err(|e| serve_err(format!("credential {name:?}: {e}")))?;
-        }
-        if self.sessions.is_empty() && self.session_prefix.is_none() {
-            return Err(serve_err(format!(
-                "credential {name:?} covers no session: give it sessions = [...] and/or \
-                 session_prefix"
-            )));
-        }
-        Ok(())
-    }
-
-    /// This entry's grant. Call after validation.
-    fn grant(&self) -> Result<SessionGrant, LamboError> {
-        let mut names = Vec::new();
-        let mut every_hosted = false;
-        for entry in &self.sessions {
-            if entry == EVERY_HOSTED_SESSION {
-                every_hosted = true;
-            } else {
-                names.push(addressed("sessions entry", entry)?);
-            }
-        }
-        let prefix = self
-            .session_prefix
-            .as_deref()
-            .map(SessionPrefix::new)
-            .transpose()
-            .map_err(serve_err)?;
-        Ok(SessionGrant::new(
-            self.name.clone(),
-            SessionScope::new(names, every_hosted, prefix),
-            SessionCapabilities {
-                create: self.create,
-                erase: self.erase,
-                admin: self.admin,
-            },
-        ))
     }
 }
 
