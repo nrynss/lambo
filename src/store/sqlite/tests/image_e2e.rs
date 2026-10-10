@@ -345,15 +345,19 @@ async fn graded_similarity_ranks_by_cosine_not_recency_on_sqlite() {
     reopened.close().await.unwrap();
 }
 
-/// The #79 flake, pinned, on top of the #95 floor. A 40ms stall used to
-/// give the look derived after it recency near 1 and every earlier look
-/// near 0, which is 0.125 of final score under the default blend — enough
-/// to flip a 0.1 query gap. The floor keeps that stall's recency gap near
-/// zero. Derived worst first, the stalled look is still the 0.8 one, so
-/// even a span-relative recency could only widen the cosine order. Every
-/// look is daemon-scored here, so #79's cold-start rule is not in play.
+/// The daemon scores, not the order. Formerly
+/// `graded_similarity_survives_a_stall_between_derives_on_sqlite` (#79).
+/// The three graded looks are derived worst first with a 40ms stall before
+/// the 0.8 look, so recency could only widen the cosine order and the order
+/// is not what this test can catch: `a_stall_cannot_flip_a_half_cosine_ahead_of_point_three`
+/// is the flip. What this pins is that, on real derives through the store,
+/// the stall leaves the three daemon scores within 0.05 of each other (on
+/// the historical formula they spread by about 0.24), and that the full
+/// Dresscode result — vector-leg cosines, no recent leg, graded looks best
+/// first ahead of the unrelated looks — survives it. Every look is
+/// daemon-scored here, so #79's cold-start rule is not in play.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn graded_similarity_survives_a_stall_between_derives_on_sqlite() {
+async fn a_stall_keeps_the_graded_daemon_scores_together_on_sqlite() {
     use crate::recall::query_vector::QueryBy;
     use crate::test_util::dresscode::{
         assert_graded_order, derive_graded_looks_stalled, imageless_text,
