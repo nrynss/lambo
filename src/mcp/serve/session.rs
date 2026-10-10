@@ -170,7 +170,7 @@ impl HostCheck {
 /// The streamable-HTTP configuration every session's service uses: the SDK
 /// default with Lambo's body cap, a 15 s SSE keep-alive, and the `Host`
 /// allow-list `host` says.
-fn http_config(host: HostCheck) -> StreamableHttpServerConfig {
+pub(super) fn http_config(host: HostCheck) -> StreamableHttpServerConfig {
     // `#[non_exhaustive]` — mutate the SDK default rather than
     // constructing, so a new field cannot silently break the build.
     let mut cfg = StreamableHttpServerConfig::default()
