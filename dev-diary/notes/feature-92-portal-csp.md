@@ -28,9 +28,12 @@ are allowed by `style-src 'self'` and `script-src 'self'` without
 `'unsafe-inline'`. The policy has no `'unsafe-inline'` and no
 `'unsafe-eval'`.
 
-`X-Content-Type-Options: nosniff` is on every serve-web response: pages,
-`/app.js`, `/app.css`, `/healthz`, `/api/*`, `308`, `404`, `401`, `403`,
-`405`, and the `400` / `502` / `503` answers the handlers already build.
+`X-Content-Type-Options: nosniff` is on every response the router
+answers: pages, `/app.js`, `/app.css`, `/healthz`, `/api/*`, `308`, `404`,
+`401`, `403`, `405`, and the `400` / `502` / `503` answers the handlers
+already build. Hyper's own replies to a request it cannot parse (a
+malformed request line, a `431` for oversized headers) never enter the
+axum router and carry neither header; they are not intercepted.
 The policy is not set on JSON, assets, healthz, redirects, or errors. It
 is keyed off the response `Content-Type` being `text/html` (the index
 handler sets `text/html; charset=utf-8`). `HEAD` of `/` and of

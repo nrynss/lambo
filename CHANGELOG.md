@@ -219,10 +219,12 @@
 
 ### Changed
 
-- `lambo serve-web` sends two security headers (#92). Every response,
-  including a Host `403`, a bearer `401`, the uniform `404`, a `405`, a
-  `308`, `/healthz`, JSON and the assets, carries `X-Content-Type-Options:
-  nosniff`. The HTML page (`GET` and `HEAD` of `/` and `/s/<session>/`)
+- `lambo serve-web` sends two security headers (#92). Every response the
+  router answers, including a Host `403`, a bearer `401`, the uniform
+  `404`, a `405`, a `308`, `/healthz`, JSON and the assets, carries
+  `X-Content-Type-Options: nosniff`. Hyper's own replies to a request it
+  cannot parse (a malformed request line, a `431` for oversized headers)
+  never reach the router and carry neither header. The HTML page (`GET` and `HEAD` of `/` and `/s/<session>/`)
   also carries `Content-Security-Policy: default-src 'none'; script-src
   'self'; style-src 'self'; connect-src 'self'; img-src 'self'; font-src
   'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none';

@@ -5,7 +5,9 @@
 //! so it stamps responses those layers return without calling onward: the
 //! Host `403`, the bearer `401`, the uniform `404`, and the scoped `308`.
 //!
-//! `X-Content-Type-Options: nosniff` goes on every response.
+//! `X-Content-Type-Options: nosniff` goes on every response the router
+//! answers. Hyper's own replies to a request it cannot parse (a malformed
+//! request line, a `431` for oversized headers) never reach the router.
 //! `Content-Security-Policy` goes only on `text/html` (the page handler's
 //! `text/html; charset=utf-8`, which `HEAD` keeps because axum runs the
 //! `GET` handler and drops the body). A `<meta http-equiv>` policy cannot
@@ -26,7 +28,7 @@ use axum::response::Response;
 /// script are allowed by `style-src 'self'` and `script-src 'self'`.
 pub(super) const PAGE_CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; font-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'";
 
-/// Stamp `nosniff` on every serve-web response, and [`PAGE_CSP`] only when
+/// Stamp `nosniff` on every response the router answers, and [`PAGE_CSP`] only when
 /// the response media type is `text/html`.
 pub(super) async fn security_headers(req: Request, next: Next) -> Response {
     let mut response = next.run(req).await;
