@@ -79,6 +79,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::task::{ready, Context, Poll};
 
@@ -404,21 +405,42 @@ impl<R: AsyncRead + Unpin> AsyncRead for CappedFrames<R> {
 /// the transport, and this writer with it, when the service ends. Until
 /// then a reply waits, and end of input waits for it at most
 /// [`REPLY_DRAIN_LIMIT`].
+///
+/// A writer dropped mid-frame leaves that frame's bytes unterminated on the
+/// output. It marks the output torn (a flag shared with the reply task)
+/// before it lets the lock go, and the reply task then writes a newline
+/// ahead of its next reply, so the cut frame ends as one bad line of its
+/// own and the reply arrives as a whole, parseable line (#101 review 3
+/// L-A), rather than glued onto the cut bytes.
 pub(crate) struct FrameWriter<W> {
     shared: Arc<Mutex<W>>,
     guard: Option<OwnedMutexGuard<W>>,
     locking: Option<Pin<Box<dyn Future<Output = OwnedMutexGuard<W>> + Send>>>,
     /// Bytes of a frame have been written and its newline has not.
     mid_frame: bool,
+    /// Set when this writer is dropped mid-frame: the next reply starts
+    /// with a newline to end the cut frame.
+    torn: Arc<AtomicBool>,
+}
+
+impl<W> Drop for FrameWriter<W> {
+    fn drop(&mut self) {
+        // Runs before `guard` is dropped, so the reply task, which can only
+        // write once it has the lock, sees the flag.
+        if self.mid_frame {
+            self.torn.store(true, Ordering::Release);
+        }
+    }
 }
 
 impl<W: AsyncWrite + Unpin + Send + 'static> FrameWriter<W> {
-    fn new(shared: Arc<Mutex<W>>) -> Self {
+    fn new(shared: Arc<Mutex<W>>, torn: Arc<AtomicBool>) -> Self {
         Self {
             shared,
             guard: None,
             locking: None,
             mid_frame: false,
+            torn,
         }
     }
 
@@ -521,10 +543,17 @@ where
     let shared = Arc::new(Mutex::new(write));
     let (tx, mut rx) = mpsc::channel::<String>(REPLY_QUEUE);
     let out = Arc::clone(&shared);
+    let torn = Arc::new(AtomicBool::new(false));
+    let torn_out = Arc::clone(&torn);
     let reply_task = tokio::spawn(async move {
         while let Some(reply) = rx.recv().await {
             let mut w = out.lock().await;
             let written = async {
+                // rmcp's writer was dropped mid-frame: end the cut frame
+                // so the reply is a line of its own.
+                if torn_out.swap(false, Ordering::Acquire) {
+                    w.write_all(b"\n").await?;
+                }
                 w.write_all(reply.as_bytes()).await?;
                 w.write_all(b"\n").await?;
                 w.flush().await
@@ -543,5 +572,5 @@ where
     let mut reader = CappedFrames::with_cap(read, transport, cap);
     reader.replies = Some(tx);
     reader.reply_task = Some(reply_task);
-    (reader, FrameWriter::new(shared))
+    (reader, FrameWriter::new(shared, torn))
 }
