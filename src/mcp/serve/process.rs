@@ -181,6 +181,73 @@ async fn registry_heartbeat(registry: Arc<SessionRegistry>, every: Duration) {
     .await;
 }
 
+/// The refusal poller's cursors, one per session (#32 PR 6 review L2).
+///
+/// A cursor is kept while its session is pinned or attached, and for
+/// [`LEASE_TTL`](crate::store::lease::LEASE_TTL) after an on-demand session
+/// is detached: a fresh cursor reaches back one `LEASE_TTL`, and the holder
+/// token it filters by is this process's, unchanged across a reattach, so a
+/// session reattached inside that window with a fresh cursor would book
+/// every refusal already booked in it again. Past the window a fresh cursor
+/// sees only refusals made while the session was detached, never booked.
+/// At most [`DETACHED_CURSORS_MAX`] detached cursors are kept (the oldest
+/// detach goes first), so sessions coming and going cannot grow the map.
+#[derive(Default)]
+pub(super) struct RefusalCursors {
+    cursors: std::collections::HashMap<String, RefusalCursor>,
+    /// When each kept cursor's session was first seen detached.
+    detached: std::collections::HashMap<String, std::time::Instant>,
+}
+
+/// The most cursors [`RefusalCursors`] keeps for detached sessions.
+pub(super) const DETACHED_CURSORS_MAX: usize = 1024;
+
+impl RefusalCursors {
+    /// Keep the cursors of sessions `live` says are pinned or attached;
+    /// keep a detached one's for `LEASE_TTL` from `now`, its first round
+    /// detached.
+    pub(super) fn prune(&mut self, live: impl Fn(&str) -> bool, now: std::time::Instant) {
+        let ttl = crate::store::lease::LEASE_TTL;
+        for id in self.cursors.keys() {
+            if live(id) {
+                self.detached.remove(id);
+            } else {
+                self.detached.entry(id.clone()).or_insert(now);
+            }
+        }
+        let expired: Vec<String> = self
+            .detached
+            .iter()
+            .filter(|(_, at)| now.saturating_duration_since(**at) >= ttl)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in expired {
+            self.detached.remove(&id);
+            self.cursors.remove(&id);
+        }
+        while self.detached.len() > DETACHED_CURSORS_MAX {
+            let Some(oldest) = self
+                .detached
+                .iter()
+                .min_by_key(|(_, at)| **at)
+                .map(|(id, _)| id.clone())
+            else {
+                break;
+            };
+            self.detached.remove(&oldest);
+            self.cursors.remove(&oldest);
+        }
+    }
+
+    /// Session `id`'s cursor, kept or new.
+    pub(super) fn cursor(&mut self, id: &str) -> &mut RefusalCursor {
+        self.detached.remove(id);
+        self.cursors
+            .entry(id.to_string())
+            .or_insert_with(RefusalCursor::starting_now)
+    }
+}
+
 /// How long the refusal poller sleeps between rounds over `attached`
 /// sessions (design §3.6): `max(REFUSAL_POLL_INTERVAL, 100 ms × attached)`,
 /// so the store load stays flat as the set grows. One session polls every
@@ -193,33 +260,23 @@ pub(super) fn refusal_poll_interval(attached: usize) -> Duration {
 /// The J4 holder-side refusal poller over every attached session: one task,
 /// one cursor per session, each round polling each attached session once.
 ///
-/// A pinned session's cursor outlives a detach (#32 review L2): it is
-/// dropped only when its session is no longer pinned, so a session that is
-/// detached and attached again resumes where it stopped. An on-demand
-/// session's cursor is dropped with its detach (#32 PR 6), or the map would
-/// grow with every session ever attached. A fresh cursor reaches back one
-/// `LEASE_TTL`, and the holder token it filters by is this process's,
-/// unchanged across the re-attach, so it would book again every refusal
-/// already booked in that window.
+/// Every session's cursor outlives a detach, so a session that is detached
+/// and attached again resumes where it stopped (see [`RefusalCursors`]).
 async fn registry_refusal_poller(registry: Arc<SessionRegistry>, agent: AgentId, my_token: String) {
     registry.started().await;
-    let mut cursors: std::collections::HashMap<String, RefusalCursor> = Default::default();
+    let mut cursors = RefusalCursors::default();
     loop {
         tokio::time::sleep(refusal_poll_interval(registry.attached().len())).await;
         let attached = registry.attached();
-        // A pinned session's cursor is kept across its detaches; an
-        // on-demand session's goes with it (#32 PR 6), so the map stays
-        // bounded by `max_attached` however many sessions come and go.
-        cursors.retain(|id, _| {
-            registry.is_pinned(id) || attached.iter().any(|s| s.id().as_str() == id)
-        });
+        cursors.prune(
+            |id| registry.is_pinned(id) || attached.iter().any(|s| s.id().as_str() == id),
+            std::time::Instant::now(),
+        );
         for session in attached {
             let Some(ledger) = session.server.ledger() else {
                 continue;
             };
-            let cursor = cursors
-                .entry(session.id().to_string())
-                .or_insert_with(RefusalCursor::starting_now);
+            let cursor = cursors.cursor(session.id().as_str());
             poll_refused_takeovers(
                 session.mem.store(),
                 session.id(),
@@ -230,5 +287,49 @@ async fn registry_refusal_poller(registry: Arc<SessionRegistry>, agent: AgentId,
             )
             .await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #32 PR 6 review L2: a detached session's cursor survives a reattach
+    /// inside `LEASE_TTL`, and is dropped after it.
+    #[test]
+    fn a_detached_sessions_cursor_survives_a_reattach_within_the_lease_ttl() {
+        let mut cursors = RefusalCursors::default();
+        let t0 = std::time::Instant::now();
+        let marker = chrono::DateTime::<chrono::Utc>::from_timestamp(1_000, 0).expect("a time");
+        cursors.cursor("od").cursor = marker;
+        // Detached for a while, then attached again: the same cursor.
+        cursors.prune(|_| false, t0);
+        cursors.prune(|_| false, t0 + crate::store::lease::LEASE_TTL / 2);
+        assert_eq!(
+            cursors.cursor("od").cursor,
+            marker,
+            "kept across the reattach"
+        );
+        // Detached again, past the TTL: dropped, and a new one starts now.
+        let t1 = t0 + crate::store::lease::LEASE_TTL;
+        cursors.prune(|_| false, t1);
+        cursors.prune(|_| false, t1 + crate::store::lease::LEASE_TTL);
+        assert_ne!(cursors.cursor("od").cursor, marker, "dropped after the TTL");
+        // A pinned or attached session's is never dropped.
+        cursors.cursor("pin").cursor = marker;
+        cursors.prune(|id| id == "pin", t1 + crate::store::lease::LEASE_TTL * 10);
+        assert_eq!(cursors.cursor("pin").cursor, marker);
+    }
+
+    #[test]
+    fn detached_cursors_are_bounded() {
+        let mut cursors = RefusalCursors::default();
+        let t0 = std::time::Instant::now();
+        for i in 0..DETACHED_CURSORS_MAX + 5 {
+            cursors.cursor(&format!("s{i}"));
+            cursors.prune(|_| false, t0 + Duration::from_millis(i as u64));
+        }
+        assert_eq!(cursors.cursors.len(), DETACHED_CURSORS_MAX);
+        assert!(!cursors.cursors.contains_key("s0"), "the oldest went first");
     }
 }
