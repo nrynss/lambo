@@ -33,9 +33,12 @@
 //! the graph's vectors (`rank_by_cosine`), so a pair whose similarity sits on
 //! the threshold can merge on one path and not the other. The durable leg's
 //! pool is still the database's own top-k, so a target the ANN beam misses
-//! is missed as it was before #60. No bit parity with the database is
-//! claimed for the merge leg; [`a_merge_at_the_threshold_edge_follows_exact_cosine`]
-//! pins what the union does decide.
+//! is missed as it was before #60. Live, [`run_merge_freshness`] measures
+//! the database's score against the exact cosine for one pair and asserts a
+//! tolerance; the double scores exact cosine itself, so offline the gap must
+//! be zero and only the comparison's wiring is tested.
+//! [`the_merge_threshold_is_inclusive_on_exact_cosine`] pins the comparison
+//! the merge makes.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -187,8 +190,16 @@ fn has_merge_edge(edges: &[Edge], a: NodeId, b: NodeId) -> bool {
 ///    load carrying the concepts' vectors: the union re-scores the
 ///    database's candidates on the graph's vectors and drops one without.
 ///
+/// Between 2 and 3, the database's own score for (ORIGINAL, PARAPHRASE) is
+/// compared with the exact cosine the merge used, within `parity_tolerance`
+/// (#60 review L1).
+///
 /// Returns the session, for the caller to erase.
-pub(crate) async fn run_merge_freshness(store: Arc<dyn GraphStore>, session: &str) -> SessionId {
+pub(crate) async fn run_merge_freshness(
+    store: Arc<dyn GraphStore>,
+    session: &str,
+    parity_tolerance: f64,
+) -> SessionId {
     let dim = store.vector_dimensions().expect("pg stores carry vectors");
     let embedder = Arc::new(LabelVectors::new(dim));
     let contract = embedder.contract();
@@ -240,13 +251,29 @@ pub(crate) async fn run_merge_freshness(store: Arc<dyn GraphStore>, session: &st
     );
 
     // Recall's source, unchanged: the database's own search, after the flush.
+    let probe = embedder.vector(PARAPHRASE);
     let hits = store
-        .vector_candidates_checked(&sid, &embedder.vector(PARAPHRASE), &contract, 5)
+        .vector_candidates_checked(&sid, &probe, &contract, 5)
         .await
         .expect("the database answers once the session is flushed");
     assert!(
         hits.iter().any(|s| s.item == first),
         "the database finds the original for its paraphrase: {hits:?}"
+    );
+    // #60 review L1: the merge scored exact f32 cosine; the database scores
+    // by its own distance. Measure the gap on one real pair.
+    let database = hits
+        .iter()
+        .find(|s| s.item == first)
+        .map(|s| s.score)
+        .expect("found above");
+    let exact = f64::from(crate::embed::cosine(&embedder.vector(ORIGINAL), &probe));
+    let gap = (database - exact).abs();
+    println!("merge_freshness parity: database {database} exact {exact} gap {gap:e}");
+    assert!(
+        gap <= parity_tolerance,
+        "the database's score {database} and the exact cosine {exact} differ by {gap:e}, \
+         above {parity_tolerance:e}"
     );
 
     // 3. A paraphrase of a concept that reached this holder only by load.
@@ -273,7 +300,8 @@ pub(crate) async fn run_merge_freshness(store: Arc<dyn GraphStore>, session: &st
 }
 
 /// The live check both dialects run: [`run_merge_freshness`] over a real
-/// pg-family store, then the session is erased.
+/// pg-family store, with the score-parity tolerance, then the session is
+/// erased.
 ///
 /// Compiled where a caller is: the Postgres live test, or the Cockroach
 /// conformance suite (which needs `fixtures`).
@@ -285,7 +313,7 @@ pub(crate) async fn check_holder_merges_an_unflushed_paraphrase<D: Dialect>(
     store: Arc<PgStore<D>>,
     session: &str,
 ) {
-    let sid = run_merge_freshness(store.clone(), session).await;
+    let sid = run_merge_freshness(store.clone(), session, LIVE_PARITY_TOLERANCE).await;
     store
         .erase_session(
             &sid,
@@ -299,6 +327,18 @@ pub(crate) async fn check_holder_merges_an_unflushed_paraphrase<D: Dialect>(
         .await
         .expect("erase the test session");
 }
+
+/// How far the database's score may sit from the exact `f32` cosine for one
+/// unit-norm pair at the default width. Both are cosine for unit vectors
+/// (pgvector computes `<=>` in `f64` over `f32` inputs; Cockroach's
+/// `1 - d²/2` is cosine for unit vectors), so the gap is rounding. Not
+/// measured locally (no database here): the live log prints the measured gap,
+/// and the bound can be tightened from it.
+#[cfg(any(
+    feature = "store-postgres",
+    all(feature = "store-cockroach", feature = "fixtures")
+))]
+const LIVE_PARITY_TOLERANCE: f64 = 1e-5;
 
 // ---------------------------------------------------------------------------
 // Offline: the family's declarations over a database that lags the holder
@@ -576,7 +616,8 @@ async fn the_family_splits_merge_from_recall() {
 async fn a_holder_merges_into_unflushed_and_reloaded_concepts() {
     async fn check<D: Dialect>(kind: StoreKind, name: &str) {
         let store = Arc::new(LaggingDatabase::<D>::new(kind));
-        run_merge_freshness(store.clone(), &format!("pg-merge-{name}")).await;
+        // The double scores exact cosine, so its parity gap is zero.
+        run_merge_freshness(store.clone(), &format!("pg-merge-{name}"), 0.0).await;
         assert!(
             store.vector_calls() > 0,
             "{name}: the durable leg must ask the database"
@@ -844,14 +885,14 @@ async fn the_graph_overrides_the_database_for_unflushed_rewrites() {
     for_each_dialect!(check);
 }
 
-/// **#60 parity.** The merge decision is exact `f32` cosine against the
-/// threshold, inclusive: the pair merges at a threshold equal to its cosine
-/// and not one ulp above. The database's score for the same pair comes from
-/// its own distance arithmetic (or an ANN index) and is not used for the
-/// final ranking, so a pair this close to the edge may decide differently
-/// than it did before #60 (see the module docs).
+/// **#60, the threshold comparison.** The merge decision is exact `f32`
+/// cosine against the threshold, inclusive: the pair merges at a threshold
+/// equal to its cosine and not one ulp above. This pins only the comparison;
+/// the gap between the database's score and the exact cosine is measured
+/// live by [`run_merge_freshness`], because the double scores exact cosine
+/// itself and cannot show one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_merge_at_the_threshold_edge_follows_exact_cosine() {
+async fn the_merge_threshold_is_inclusive_on_exact_cosine() {
     async fn check<D: Dialect>(kind: StoreKind, name: &str) {
         let embedder = Arc::new(LabelVectors::new(DIM));
         let cosine = f64::from(crate::embed::cosine(
