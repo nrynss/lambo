@@ -210,22 +210,23 @@ impl HostCheck {
 
     /// Does `req` name an accepted host? The `Host` header, else the
     /// request target's authority (HTTP/2's `:authority`); a request with
-    /// neither, or with one that does not parse, is refused.
+    /// neither is refused.
+    ///
+    /// The presented value is parsed by the rule a configured entry is
+    /// ([`AllowedHost::parse`]), so a malformed one is refused even when its
+    /// host part is loopback: user info (`evil@localhost`), an empty or
+    /// non-numeric port (`localhost:`, `localhost:abc`) (#4 PR 2 review L1).
     fn allows(&self, req: &axum::extract::Request) -> bool {
         let Self::Only(allowed) = self else {
             return true;
         };
         let presented = match req.headers().get(header::HOST) {
-            Some(value) => value
-                .to_str()
-                .ok()
-                .and_then(|h| h.parse::<axum::http::uri::Authority>().ok()),
-            None => req.uri().authority().cloned(),
+            Some(value) => value.to_str().ok().map(str::to_string),
+            None => req.uri().authority().map(|a| a.as_str().to_string()),
         };
-        let Some(presented) = presented else {
+        let Some(presented) = presented.and_then(|h| AllowedHost::parse(&h).ok()) else {
             return false;
         };
-        let presented = AllowedHost::from_parts(presented.host(), presented.port_u16());
         allowed.iter().any(|a| a.matches(&presented))
     }
 }

@@ -13,12 +13,18 @@ async fn request_with(
     host: Option<&str>,
     authorization: Option<&str>,
 ) -> HttpResponse {
-    let mut sock = tokio::net::TcpStream::connect(addr).await.expect("connect");
     let host = host.map(|h| format!("Host: {h}\r\n")).unwrap_or_default();
     let auth = authorization
         .map(|a| format!("Authorization: {a}\r\n"))
         .unwrap_or_default();
     let req = format!("{method} {path} HTTP/1.1\r\n{host}{auth}Connection: close\r\n\r\n");
+    send_raw(addr, &req).await
+}
+
+/// Send `req` verbatim (a whole request head, ending in a blank line) and
+/// read the response to EOF.
+async fn send_raw(addr: SocketAddr, req: &str) -> HttpResponse {
+    let mut sock = tokio::net::TcpStream::connect(addr).await.expect("connect");
     sock.write_all(req.as_bytes()).await.expect("write");
     sock.flush().await.expect("flush");
     let mut raw = Vec::new();
@@ -229,6 +235,15 @@ async fn the_implicit_grant_answers_only_loopback_hosts() {
         Some(format!("localhost.:{port}")),
         Some("a b".to_string()),
         Some(String::new()),
+        // Review L1: malformed, though the host part is loopback.
+        Some("localhost:abc".to_string()),
+        Some("localhost:".to_string()),
+        Some("127.0.0.1:".to_string()),
+        Some(format!("[::1]:x{port}")),
+        Some("evil@localhost".to_string()),
+        Some(format!("evil@localhost:{port}")),
+        Some(format!("u:p@127.0.0.1:{port}")),
+        Some(format!("localhost:{port}/x")),
         None,
     ] {
         // Review L5: every shape reaches the portal and gets its 403; none
@@ -253,6 +268,30 @@ async fn the_implicit_grant_answers_only_loopback_hosts() {
         before,
         "a refused Host makes no store read"
     );
+    handle.abort();
+}
+
+/// Review L1 for the absolute-form fallback: a request with no `Host` whose
+/// target authority carries user info is refused, while a plain loopback
+/// one is answered.
+#[tokio::test]
+async fn a_malformed_target_authority_is_refused() {
+    let (addr, handle, loads) = portal_with(None, &[]).await;
+    let port = addr.port();
+    let before = loads.load(Ordering::SeqCst);
+    let user_info = send_raw(
+        addr,
+        &format!("GET http://evil@localhost:{port}/api/stats HTTP/1.0\r\n\r\n"),
+    )
+    .await;
+    assert_eq!(user_info.status, 403, "{}", user_info.body);
+    assert_eq!(loads.load(Ordering::SeqCst), before, "no store read");
+    let plain = send_raw(
+        addr,
+        &format!("GET http://localhost:{port}/api/stats HTTP/1.0\r\n\r\n"),
+    )
+    .await;
+    assert_eq!(plain.status, 200, "{}", plain.body);
     handle.abort();
 }
 
