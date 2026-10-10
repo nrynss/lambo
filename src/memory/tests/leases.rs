@@ -706,3 +706,34 @@ async fn fence_for_erase_closes_without_flushing_or_releasing_and_the_holder_era
         "the unflushed tail never reached the store"
     );
 }
+
+/// #32 PR 7 review L1: `fence_for_erase` fences at once (writes are refused
+/// as erased) but does not wake a waiter on the fence (a one-session
+/// serve's wind-down) until `announce_fence`, so the erase can answer its
+/// request before the transport starts to drain.
+#[tokio::test]
+async fn the_erase_fence_wakes_its_waiters_only_when_announced() {
+    let store = Arc::new(MemoryStore::new());
+    let mem = Arc::new(memory_on(store, "quiet-erase-fence").await);
+    let waiter = {
+        let mem = Arc::clone(&mem);
+        tokio::spawn(async move { mem.lease_lost_latched().await })
+    };
+    tokio::task::yield_now().await;
+    mem.fence_for_erase();
+    assert!(mem.erased(), "fenced at once");
+    let err = mem
+        .derive(&[("too late", ConceptType::Entity)], &ParentOf::none())
+        .await
+        .expect_err("writes are refused");
+    assert!(err.to_string().contains("was erased"), "{err}");
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(!waiter.is_finished(), "not woken before the announce");
+    mem.announce_fence();
+    let winner = tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
+        .await
+        .expect("woken by the announce")
+        .unwrap();
+    assert!(crate::store::erase::is_erased_holder(&winner), "{winner}");
+    let _ = mem.close().await;
+}

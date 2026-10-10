@@ -1039,6 +1039,25 @@ impl SessionRegistry {
         tasks.push(task);
     }
 
+    /// Spawn a task with `spawn` and keep it for the shutdown to join,
+    /// unless the shutdown has begun: then nothing is spawned and `false`
+    /// is returned (#32 PR 7 review L1).
+    ///
+    /// The check, the spawn and the record are under the task list's lock.
+    /// The shutdown marks itself closing before it takes that list
+    /// (`close_set`, then `join_detaches`), so a task is either recorded
+    /// before the list is taken, and joined, or never spawned: none can
+    /// slip in between a spawn and its record.
+    fn track_unless_closing(&self, spawn: impl FnOnce() -> tokio::task::JoinHandle<()>) -> bool {
+        let mut tasks = self.detaches.lock();
+        if self.is_closing() {
+            return false;
+        }
+        tasks.retain(|task| !task.is_finished());
+        tasks.push(spawn());
+        true
+    }
+
     /// Put hosted session `id` in a state that is not serving, without the
     /// detach, lease or retry that would normally lead there, so the
     /// router's answers for each state can be compared (#32 PR 5). Gated

@@ -569,9 +569,10 @@ async fn an_erase_or_admin_request_without_the_capability_or_scope_is_the_unifor
     }
     let window = w.calls.since(before);
     assert!(
-        window
-            .iter()
-            .all(|(m, _)| matches!(*m, "refresh_lease" | "flush" | "write_flush_stats")),
+        window.iter().all(|(m, _)| matches!(
+            *m,
+            "refresh_lease" | "flush" | "flushed" | "write_flush_stats"
+        )),
         "a refused admin request makes no store call: {window:?}"
     );
     assert_eq!(state_of(&w.registry, A), "live");
@@ -794,6 +795,70 @@ async fn an_erase_whose_outcome_cannot_be_read_back_says_it_is_unknown() {
         reply.body
     );
     assert_eq!(state_of(&w.registry, B), "erased");
+}
+
+/// #32 PR 7 review L1: an erase asked for once the shutdown has taken the
+/// attached set is 503 and starts nothing (it is checked and recorded under
+/// the task list's lock, so none is spawned that the shutdown would not
+/// join).
+#[tokio::test]
+async fn an_erase_after_the_shutdown_began_is_503_and_touches_nothing() {
+    let w = wire().await;
+    let closed = w.registry.close_set().await;
+    let before = w.calls.len();
+    let reply = erase_as(w.addr, "ops", B, &confirm(B)).await;
+    assert_eq!(reply.status, 503, "{}", reply.body);
+    assert!(
+        !w.calls
+            .since(before)
+            .iter()
+            .any(|(m, _)| *m == "erase_session"),
+        "nothing was erased"
+    );
+    for session in closed {
+        let _ = session.mem.close().await;
+    }
+}
+
+/// #32 PR 7 review L1: an erase whose store call hangs when the shutdown
+/// takes the attached set is cut short `ERASE_SHUTDOWN_GRACE` later with an
+/// unknown outcome, so the shutdown's `CLOSE_GRACE` wait for it ends with
+/// it rather than giving up on it. Paused clock.
+///
+/// Mutation: drop the cut-off and the wait times out (the erase is still
+/// hanging at `CLOSE_GRACE`).
+#[tokio::test]
+async fn an_erase_hanging_at_the_shutdown_is_cut_short_inside_the_close_grace() {
+    use super::pinned_serve::EraseFault;
+    use crate::mcp::serve::registry::EraseAnswer;
+    use crate::mcp::serve::shutdown::CLOSE_GRACE;
+    let w = wire().await;
+    w.calls.fail_erase(EraseFault::Hang);
+    let registry = Arc::clone(&w.registry);
+    let erase = tokio::spawn(async move { registry.erase(HELD).await });
+    eventually("the erase reached the store", || {
+        w.calls
+            .since(0)
+            .iter()
+            .any(|(m, s)| *m == "erase_session" && s == HELD)
+    })
+    .await;
+
+    tokio::time::pause();
+    let closed = w.registry.close_set().await;
+    tokio::time::timeout(CLOSE_GRACE, w.registry.join_detaches())
+        .await
+        .expect("the erase ends inside the shutdown's wait");
+    match erase.await.unwrap() {
+        EraseAnswer::Failed { erased, .. } => {
+            assert_eq!(erased, crate::store::erase::Tombstone::Unknown);
+        }
+        other => panic!("the erase answered {other:?}"),
+    }
+    tokio::time::resume();
+    for session in closed {
+        let _ = session.mem.close().await;
+    }
 }
 
 /// #32 PR 7 review H1: an erase that arrives while the pinned retry of the

@@ -116,6 +116,23 @@ pub(crate) struct LeaseLostSignal {
 }
 
 impl LeaseLostSignal {
+    /// Record the winner **without** waking anyone (#32 PR 7 review L1):
+    /// what [`Memory::fence_for_erase`] latches, so the serve's wind-down
+    /// does not start before the erase has its answer. [`Self::wake`] wakes
+    /// the waiters later. The first winner recorded is kept, as in
+    /// [`Self::latch`].
+    pub(super) fn record(&self, winner: &str) {
+        let mut slot = self.winner.lock();
+        if slot.is_none() {
+            *slot = Some(winner.to_string());
+        }
+    }
+
+    /// Wake every waiter (a latch [`Self::record`] made quietly).
+    pub(super) fn wake(&self) {
+        self.woken.notify_waiters();
+    }
+
     /// Record the winner and wake every waiter. Idempotent, like the fence
     /// beside it — the heartbeat keeps beating after a loss and may call this
     /// again; the first winner recorded is kept, because it is the one that was
@@ -411,10 +428,25 @@ impl Memory {
     /// handle's until the erase replaces it with the tombstone, so no other
     /// writer can acquire in between. Idempotent, like every latch of the
     /// fence.
+    ///
+    /// The fence latches **quietly** (#32 PR 7 review L1): a serve waiting on
+    /// [`Memory::lease_lost_latched`] is not woken until
+    /// [`Memory::announce_fence`]. A one-session serve winds down on that
+    /// wake-up, and its transport drain must not start before the erase has
+    /// answered the request that asked for it. The flag is set before the
+    /// winner, and both before anything returns, so every read and write is
+    /// refused from here all the same.
     pub(crate) fn fence_for_erase(&self) {
         self.lease_lost.store(true, Ordering::Release);
         self.lease_lost_signal
-            .latch(crate::store::erase::ERASED_HOLDER);
+            .record(crate::store::erase::ERASED_HOLDER);
+    }
+
+    /// Wake whatever waits on this handle's fence
+    /// ([`Memory::lease_lost_latched`]) after a quiet
+    /// [`Memory::fence_for_erase`]. Idempotent.
+    pub(crate) fn announce_fence(&self) {
+        self.lease_lost_signal.wake();
     }
 
     /// The honest refusal a fenced handle returns (T86-2): another writer owns

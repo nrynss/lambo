@@ -65,8 +65,12 @@
 //!
 //! Its fence ends the process (`LeaseLossPolicy::ExitProcess`, JE2E-4), so
 //! erasing its only session answers the request and then winds the process
-//! down: there is nothing left for it to serve. The erase runs on a task the
-//! shutdown waits for (beside the detaches), so the exit cannot cut it short.
+//! down: there is nothing left for it to serve. The fence latches quietly
+//! and wakes the wind-down only once the erase has its answer (#32 PR 7
+//! review L1), so the transport drain does not race the response. The
+//! shutdown waits up to `CLOSE_GRACE` for an erase in flight, and an erase
+//! still running [`ERASE_SHUTDOWN_GRACE`] after the shutdown took the
+//! attached set is cut short with an unknown outcome.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -76,13 +80,26 @@ use std::time::Instant;
 
 use super::{Negative, PreviousHandle, SessionRegistry, Slot, PINNED_RETRY};
 use crate::mcp::serve::session::AttachedSession;
-use crate::mcp::serve::shutdown::{close_bounded, LEASE_RELEASE_GRACE, SHUTDOWN_GRACE};
+use crate::mcp::serve::shutdown::{
+    close_bounded, CLOSE_FLUSH_GRACE, CLOSE_GRACE, LEASE_RELEASE_GRACE, SHUTDOWN_GRACE,
+};
 use crate::mcp::serve::stages::{ShutdownProgress, Stage};
 use crate::memory::Memory;
 use crate::store::erase::{read_tombstone, Tombstone};
 use crate::store::lease::LeaseHolder;
 use crate::store::{EraseOutcome, EraseReport, GraphStore};
 use crate::types::{AgentId, LamboError, SessionId, StoreError};
+
+/// How long an erase in flight may go on once the process shutdown has
+/// taken the attached set (#32 PR 7 review L1): what one session's close
+/// gets, so it ends inside the shutdown's `CLOSE_GRACE` wait for the
+/// detaches, which starts after that.
+pub(in crate::mcp::serve) const ERASE_SHUTDOWN_GRACE: Duration = CLOSE_FLUSH_GRACE;
+
+const _: () = assert!(
+    ERASE_SHUTDOWN_GRACE.as_secs() < CLOSE_GRACE.as_secs(),
+    "an erase cut short by the shutdown must end inside the shutdown's CLOSE_GRACE wait"
+);
 
 /// What [`SessionRegistry::erase`] answers. The admin route maps each to its
 /// HTTP status.
@@ -112,26 +129,58 @@ impl SessionRegistry {
     /// docs for the order and why. The caller has authorized the request
     /// (`erase` capability, `id` in scope) and checked the confirm.
     ///
-    /// Runs on a task of its own that the process shutdown waits for (like
-    /// a detach), so neither a client that hangs up nor a shutdown that
-    /// starts meanwhile can stop it between its fence and its commit.
+    /// Runs on a task of its own, so a client that hangs up does not stop
+    /// it between its fence and its commit. The process shutdown waits for
+    /// it beside the detaches, up to `CLOSE_GRACE` (#32 PR 7 review L1):
+    /// once the shutdown has taken the attached set, the erase gets
+    /// [`ERASE_SHUTDOWN_GRACE`] more, which ends inside that wait, and is
+    /// then cut short with an unknown outcome (the store's transaction is
+    /// atomic, and a repeat finishes it). An erase asked for once the
+    /// shutdown has begun is 503.
     pub(in crate::mcp::serve) async fn erase(self: &Arc<Self>, id: &str) -> EraseAnswer {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let registry = Arc::clone(self);
         let owned = id.to_string();
-        let task = tokio::spawn(async move {
-            let answer = registry.erase_now(&owned).await;
-            let _ = tx.send(answer);
+        let started = self.track_unless_closing(|| {
+            tokio::spawn(async move {
+                let answer = tokio::select! {
+                    biased;
+                    answer = registry.erase_now(&owned) => answer,
+                    () = registry.erase_cut_off() => {
+                        tracing::warn!(
+                            session = %owned,
+                            grace_secs = ERASE_SHUTDOWN_GRACE.as_secs(),
+                            "lambo serve: the shutdown cut an erase short; its outcome is unknown \
+                             (the store's erase is one transaction: repeat it with lambo \
+                             erase-session, which is idempotent)"
+                        );
+                        EraseAnswer::Failed {
+                            error: StoreError::Other(anyhow::anyhow!(
+                                "the server shut down before the erase finished"
+                            )),
+                            erased: Tombstone::Unknown,
+                        }
+                    }
+                };
+                let _ = tx.send(answer);
+            })
         });
-        {
-            let mut detaches = self.detaches.lock();
-            detaches.retain(|task| !task.is_finished());
-            detaches.push(task);
+        if !started {
+            return EraseAnswer::Busy {
+                retry_after: Duration::from_secs(1),
+            };
         }
         rx.await.unwrap_or_else(|_| EraseAnswer::Failed {
             error: StoreError::Invariant("the erase task ended without an answer".into()),
             erased: Tombstone::Unknown,
         })
+    }
+
+    /// Resolve [`ERASE_SHUTDOWN_GRACE`] after the process shutdown takes
+    /// the attached set; never before it.
+    async fn erase_cut_off(&self) {
+        self.closed().await;
+        tokio::time::sleep(ERASE_SHUTDOWN_GRACE).await;
     }
 
     /// [`SessionRegistry::erase`]'s body, on its task.
@@ -192,6 +241,11 @@ impl SessionRegistry {
         // Step 2, then 3: no watcher left to read the fence as a lost lease.
         session.tasks.stop();
         session.mem.fence_for_erase();
+        // The fence's wake-up waits for the erase's answer (#32 PR 7 review
+        // L1): a one-session serve winds down on it, and its transport
+        // drain would otherwise race the response. Sent on every way out,
+        // a cut-off or a panic included.
+        let _announce = AnnounceOnDrop(Arc::clone(&session.mem));
         // Step 4: the detach's per-session stages, under its own record.
         let progress = ShutdownProgress::for_session(id);
         progress.begin(Stage::TransportDrain);
@@ -481,5 +535,15 @@ impl SessionRegistry {
             .as_ref()
             .and_then(|attacher| attacher.template.shared_store())
             .or_else(|| self.store.get().cloned())
+    }
+}
+
+/// Wakes whatever waits on a handle's fence when dropped
+/// ([`Memory::announce_fence`]), after a quiet [`Memory::fence_for_erase`].
+struct AnnounceOnDrop(Arc<Memory>);
+
+impl Drop for AnnounceOnDrop {
+    fn drop(&mut self) {
+        self.0.announce_fence();
     }
 }

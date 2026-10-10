@@ -70,6 +70,8 @@ pub(super) enum EraseFault {
     BeforeCommit = 1,
     /// It erases, then fails (an index sweep, a lost commit reply).
     AfterCommit = 2,
+    /// It never answers (a store that hangs).
+    Hang = 3,
 }
 
 /// Parks every `flush` while closed ([`StoreCalls::park_flushes`]).
@@ -329,6 +331,9 @@ impl GraphStore for Shared {
         let parked = self.2.parked_flushes();
         self.2 .2.parked_at_erase.lock().push(parked);
         let fault = self.2 .2.erase.load(std::sync::atomic::Ordering::SeqCst);
+        if fault == EraseFault::Hang as u8 {
+            std::future::pending::<()>().await;
+        }
         if fault == EraseFault::BeforeCommit as u8 {
             return Err(StoreError::Backend("test: the erase was refused".into()));
         }
