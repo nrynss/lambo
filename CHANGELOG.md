@@ -381,12 +381,20 @@
   prompt profile, by default
   `ggml-org/embeddinggemma-2-GGUF@bfcd2987/Q8_0;prompts=lambo-eg2-v2`, since
   `llama-server` ignores the request's model name. The profile sends every
-  image in a canonical form, so its vector does not depend on the size it was
-  submitted at: a PNG or JPEG of at most 768 px a side goes unchanged, a
-  larger one is scaled to 768 px on its longer side (lossless PNG), and a WebP
-  is always converted to PNG (`llama-server` decodes WebP only through an
-  external `ffmpeg`). The `embed-eg2` feature now pulls in the `image` crate
-  (PNG, JPEG and WebP only) for this. The profile was `lambo-eg2-v1` during
+  image in a canonical form: Lambo decodes each PNG, JPEG or WebP and sends
+  a lossless PNG whose longer side is exactly 768 px (Lanczos3 down,
+  Catmull-Rom up, aspect ratio kept; the exact rule is in the
+  configuration reference). A flat image then embeds bit-identically at
+  any submitted size from 128 to 3000 px; a patterned one stays close but
+  not identical (measured on b11517: at least 0.9991 cosine between renders
+  at 768 px and above, 0.982 for a checkerboard submitted at 128 px), since
+  resampling changes its pixels. A WebP is never sent as WebP
+  (`llama-server` decodes it only through an external `ffmpeg`). Decoding is
+  bounded (4096 px a side, two at a time), and an image Lambo cannot decode
+  is refused as unreadable before the server sees it. The canonical pixels
+  are pinned by golden tests: if a dependency update moves them, that ships
+  as a new profile name. The `embed-eg2` feature now pulls in the `image`
+  crate (PNG, JPEG and WebP only) for this. The profile was `lambo-eg2-v1` during
   development, without the canonical form; nothing was released with it, so
   there is no migration. The profile fixes the
   image budget at 280 tokens: start the server with `--image-min-tokens 280

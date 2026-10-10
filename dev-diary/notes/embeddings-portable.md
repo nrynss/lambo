@@ -229,8 +229,8 @@ evidence: `evidence/issue-22-eg2/`.
   `--mmproj` for a text-only server and set `[embedder] images = false`.
 - **What Lambo does, not the server:** the task prefixes (`title: none | text: ` for
   stored text, `task: search result | query: ` for recall queries, none for images),
-  the canonical image form (a PNG or JPEG over 768 px a side scaled down to 768 px, any
-  WebP converted; sent as lossless PNG), MRL truncation to `dim` (768, 512, 256 or 128)
+  the canonical image form (every image decoded and resized to a 768 px longer side,
+  sent as lossless PNG), MRL truncation to `dim` (768, 512, 256 or 128)
   with re-normalization, and the contract string `<artifact>;prompts=lambo-eg2-v2`.
 - **Startup check:** before its first embed Lambo reads `/props` (`model_path`,
   `model_ftype`, `modalities.vision`) and refuses a file that is not EmbeddingGemma 2,

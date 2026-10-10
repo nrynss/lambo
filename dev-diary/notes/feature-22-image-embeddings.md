@@ -173,12 +173,21 @@ min = max = 280 tokens (645,120 px), an image whose 48-aligned area is under the
 rounds up and its grid depends only on its aspect ratio (a square becomes 816x816, 289
 tokens); a larger one rounds down (a square of 792 px or more becomes 768x768, 256
 tokens). No flag or request field picks the branch, so the fix is client-side
-(`src/embed/eg2/canonical.rs`): a PNG or JPEG whose longer side is at most 768 px (always
-the round-up branch) is sent byte-identical; a larger one is decoded, scaled to a longer
-side of 768 px with Lanczos3 (measured better than Catmull-Rom, llama.cpp's own cubic, on
-hard edges; `evidence/issue-22-eg2/size-invariance.txt`) and sent as a lossless
-PNG; a WebP is always decoded and sent as PNG, because llama-server decodes WebP only by
-running an `ffmpeg`/`ffprobe` from its `PATH` (measured: without one it answers 500). The
-`image` crate (0.25, png/jpeg/webp only) is pulled in by `embed-eg2`. Decoding is bounded
-by the header's dimensions (4096 px a side) and an allocation limit before any pixel is
-read. Stored image metadata (id, SHA-256, MIME) still describes the submitted bytes.
+(`src/embed/eg2/canonical.rs`). The first cut passed images of at most 768 px through
+unchanged; the Opus review (M1) showed the server's own resampling still left a 512 px
+and a 1024 px render about 0.01 apart, so the remediation resizes **every** image: decode
+(no EXIF orientation, no colour management), resize in one step to a longer side of
+exactly 768 px (shorter side rounded half up, at least 1; Lanczos3 down, Catmull-Rom up,
+because Lanczos3 rang on enlarged hard edges: checkerboard at 256 px 0.9796 against
+0.9848), encode as a PNG with no ancillary chunks. With the longer side at 768 the
+aligned area is at most 589,824 px, so the server always takes the round-up branch. WebP
+is therefore never sent as WebP (llama-server decodes it only by running an
+`ffmpeg`/`ffprobe` from its `PATH`; without one it answers 500). Measured
+(`evidence/issue-22-eg2/size-invariance.txt`): flat images bit-identical at 128 to 3000
+px; patterned images not (worst 0.9818, a checkerboard at 128 px against 768 px), since a
+resampled picture is not the picture drawn at 768 px. The `image` crate (0.25,
+png/jpeg/webp only) is pulled in by `embed-eg2`; golden tests pin the canonical PNG and
+pixels for fixed inputs, and moved pixels mean a new profile name. Decoding is bounded
+by the header's dimensions (4096 px a side), an allocation limit with 64 MiB headroom,
+and a process-wide limit of two concurrent decodes whose permit outlives a timed-out
+request. Stored image metadata (id, SHA-256, MIME) still describes the submitted bytes.
