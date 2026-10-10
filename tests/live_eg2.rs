@@ -10,8 +10,15 @@
 //!   --image-min-tokens 280 --image-max-tokens 280 \
 //!   --ctx-size 8192 --batch-size 8192 --ubatch-size 8192
 //! LAMBO_EG2_URL=http://127.0.0.1:8191 \
-//!   cargo test --features embed-eg2 --test live_eg2 -- --ignored --nocapture
+//!   cargo test --features embed-eg2,store-sqlite --lib --test live_eg2 \
+//!   -- --ignored --nocapture live_eg2
 //! ```
+//!
+//! `--lib` and `store-sqlite` add the #79 cold-path test, which lives in the
+//! crate (`src/memory/tests/live_eg2_cold.rs`); the `live_eg2` filter keeps
+//! the library's other ignored tests out. Without `store-sqlite`,
+//! `live_eg2_cold_start_needs_store_sqlite` fails loudly when a server is
+//! configured rather than letting the cold-path test compile out unnoticed.
 //!
 //! For the no-projector case, also start a second server without `--mmproj`
 //! and set `LAMBO_EG2_TEXT_ONLY_URL` to it.
@@ -117,6 +124,17 @@ fn checkerboard(side: u32) -> Vec<u8> {
 
 // ------------------------------------------------------------ helpers
 
+/// One live test at a time against the shared llama-server. With several
+/// requests in flight the server batches them across its slots, and a
+/// batched embedding is not bit-identical to a lone one, which
+/// `live_eg2_size_invariance` asserts. Running a fourth live test beside it
+/// made that test fail 3/3; serialized, they pass. The lock serializes only
+/// within this test binary: the crate's #79 cold-path test runs in the lib
+/// binary, which cargo runs before or after this one, never beside it, but
+/// a concurrent `cargo test` or another client of the same server still
+/// batches.
+static SERVER: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn env_url(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.trim().is_empty())
 }
@@ -200,6 +218,7 @@ const FAR: [(&str, &str); 4] = [
 #[tokio::test]
 #[ignore = "needs a live llama-server with EmbeddingGemma 2 (LAMBO_EG2_URL)"]
 async fn live_eg2_text_and_image() {
+    let _server = SERVER.lock().await;
     let Some(url) = env_url("LAMBO_EG2_URL") else {
         eprintln!("live_eg2: LAMBO_EG2_URL not set; skipping");
         return;
@@ -378,23 +397,24 @@ async fn live_eg2_text_and_image() {
         w.w_daemon, w.w_query
     );
     let mean = |xs: &[f32]| f64::from(xs.iter().sum::<f32>() / xs.len() as f32);
-    for (label, xs) in [("text->image", &t2i_rel), ("text->text ", &t2t_rel)] {
-        let m = mean(xs);
+    for (label, relevant, irrelevant) in [
+        ("text->image", &t2i_rel, &t2i_irr),
+        ("text->text ", &t2t_rel, &t2t_irr),
+    ] {
+        let relevant_min = f64::from(relevant.iter().copied().fold(f32::INFINITY, f32::min));
+        let irrelevant_max =
+            f64::from(irrelevant.iter().copied().fold(f32::NEG_INFINITY, f32::max));
+        let old_fresh = w.w_query * mean(relevant);
+        let cold_relevant = w.w_query * relevant_min;
+        let cold_noise = w.w_query * irrelevant_max;
         println!(
-            "{label} relevant mean {m:.4}: phase-1 leg {} RECENT_SCORE {RECENT_SCORE}; fresh \
-             (no daemon score yet) final {:.4} vs a daemon-scored older concept at 0.533 \
-             (PR 3's run): {}",
-            if m > RECENT_SCORE {
-                "beats"
-            } else {
-                "loses to"
-            },
-            w.w_query * m,
-            if w.w_query * m > 0.533 {
-                "wins"
-            } else {
-                "loses"
-            }
+            "{label}: old fresh mean {old_fresh:.4} vs older noise 0.533; \
+             cold query-only relevant min {cold_relevant:.4} vs irrelevant max {cold_noise:.4}"
+        );
+        assert!(
+            cold_relevant > cold_noise,
+            "{label}: the measured reference set must separate relevant from noise \
+             before query-only cold-start ranking can use it"
         );
     }
 
@@ -423,6 +443,7 @@ async fn live_eg2_text_and_image() {
 #[tokio::test]
 #[ignore = "needs a live llama-server without --mmproj (LAMBO_EG2_TEXT_ONLY_URL)"]
 async fn live_eg2_text_only_server_refuses_images_permanently() {
+    let _server = SERVER.lock().await;
     let Some(url) = env_url("LAMBO_EG2_TEXT_ONLY_URL") else {
         eprintln!("live_eg2: LAMBO_EG2_TEXT_ONLY_URL not set; skipping");
         return;
@@ -560,6 +581,7 @@ async fn raw_image(url: &str, png: &[u8]) -> Vec<f32> {
 #[tokio::test]
 #[ignore = "needs a live llama-server with EmbeddingGemma 2 (LAMBO_EG2_URL)"]
 async fn live_eg2_size_invariance() {
+    let _server = SERVER.lock().await;
     let Some(url) = env_url("LAMBO_EG2_URL") else {
         eprintln!("live_eg2: LAMBO_EG2_URL not set; skipping");
         return;
@@ -643,4 +665,25 @@ async fn live_eg2_size_invariance() {
     );
     // Same pixels, same canonical PNG: the same vector, bit for bit.
     assert_eq!(wv, pv);
+}
+
+/// #79's live cold-path test runs in the crate (it must hold the daemon
+/// back, which needs a crate-private hook): `live_eg2_cold_start_ranks_the_fresh_matching_image_first`
+/// in `src/memory/tests/live_eg2_cold.rs`. It needs `store-sqlite`, so a
+/// live run without that feature would compile it out silently. This stand-in
+/// makes that loud instead: with a server configured, it fails and names the
+/// command that runs every live EG2 test.
+#[cfg(not(feature = "store-sqlite"))]
+#[tokio::test]
+#[ignore = "needs a live llama-server with EmbeddingGemma 2 (LAMBO_EG2_URL)"]
+async fn live_eg2_cold_start_needs_store_sqlite() {
+    if env_url("LAMBO_EG2_URL").is_none() {
+        eprintln!("live_eg2: LAMBO_EG2_URL not set; skipping");
+        return;
+    }
+    panic!(
+        "live_eg2: the #79 cold-path test needs store-sqlite and was compiled out; run \
+         cargo test --features embed-eg2,store-sqlite --lib --test live_eg2 -- --ignored \
+         --nocapture live_eg2"
+    );
 }

@@ -155,6 +155,18 @@ pub(crate) struct DetailedRecall {
     /// the blend entirely.
     #[serde(skip)]
     pub(crate) legs: crate::recall::candidates::LegProvenance,
+    /// Whether phase-3 assembly ranked this recall in cold mode (#79): a
+    /// fresh query-backed concept the daemon had not yet scored would be
+    /// shown, so every member scored `w_query × q` and the daemon share was
+    /// withheld. `false` for the ordinary blend, a dispatched structural
+    /// query and the warning-only refusals.
+    ///
+    /// **Internal only, like [`Self::legs`]:** the H3 wire shape is pinned,
+    /// so the serve call ledger reads this in Rust and writes it as the
+    /// recall line's `cold_start` key (an additive ledger field, `v` stays
+    /// 1). It is what makes the cold window observable in production.
+    #[serde(skip)]
+    pub(crate) cold_start: bool,
     /// The presentation hits, serialized on the wire as `hits`.
     #[serde(rename = "hits")]
     pub(crate) detailed: Vec<DetailedHit>,
@@ -172,6 +184,7 @@ impl DetailedRecall {
             context: String::new(),
             warnings: vec![warning],
             legs: Default::default(),
+            cold_start: false,
             detailed: Vec::new(),
             response_annotations: Vec::new(),
         }

@@ -34,6 +34,8 @@ mod calibration;
 mod context_limit;
 mod image;
 mod leases;
+#[cfg(all(feature = "embed-eg2", feature = "store-sqlite"))]
+mod live_eg2_cold;
 mod query_cache;
 mod reads;
 mod recall_by;
@@ -479,4 +481,15 @@ fn query(text: &str) -> RecallQuery {
         max_tokens: 500,
         traversal_depth: 0,
     }
+}
+
+/// Freeze the last daemon score table for a cold-start read-path test.
+/// Joining the owned task before another derive avoids scheduler assumptions
+/// and avoids holding any lock across public Memory reads. `close()` accepts
+/// the empty handle slot and still drains the writer and flush tasks.
+async fn stop_daemon_for_cold_start(mem: &Memory) {
+    let task = mem.daemon_handle.lock().take().expect("daemon task");
+    task.abort();
+    let result = task.await;
+    assert!(matches!(result, Err(err) if err.is_cancelled()));
 }

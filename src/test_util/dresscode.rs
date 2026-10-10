@@ -217,13 +217,34 @@ async fn derive_look_vector(mem: &Memory, caption: &str, id: &str, values: Vec<f
 /// has cosine exactly `c` with the query. The graded looks come first, then
 /// one text concept, then the two unrelated looks (stored as `n_4`, `n_5`:
 /// cosine 0), so the three most recent interactions hold no graded look.
+///
+/// The graded looks are derived **worst first** (0.3, 0.5, 0.8). The
+/// daemon's recency dimension is the concept's position in the session's
+/// wall-clock span, truncated to whole milliseconds, and this session lasts
+/// about 2 ms. Derived best first, a scheduler stall before the 0.3 look
+/// gave it recency near 1 while the 0.5 look kept 0: under the default
+/// 0.5/0.5 blend that is +0.104 of final score against the 0.1 query gap, so
+/// the 0.3 look intermittently outranked the 0.5 look (the #79 flake).
+/// Worst first, a later look is never less recent than an earlier one, and
+/// the looks differ in no other daemon dimension, so the daemon score can
+/// only widen the cosine order, however the scheduler spaces the derives.
 pub async fn derive_graded_looks(mem: &Memory) -> GradedLooks {
+    derive_graded_looks_stalled(mem, std::time::Duration::ZERO).await
+}
+
+/// [`derive_graded_looks`], sleeping `stall` before the last graded derive:
+/// the scheduler stall that made the best-first order flaky, made
+/// deterministic for the regression test.
+pub async fn derive_graded_looks_stalled(mem: &Memory, stall: std::time::Duration) -> GradedLooks {
     let mut basis = Vec::new();
     let d = orthonormal(&mut basis, "graded query", 1).remove(0);
     let noise = orthonormal(&mut basis, "graded noise", 5);
     let to_f32 = |v: Vec<f64>| v.into_iter().map(|x| x as f32).collect::<Vec<f32>>();
-    let mut graded = Vec::new();
-    for (i, c) in GRADED_COSINES.into_iter().enumerate() {
+    let mut graded = [NodeId(uuid::Uuid::nil()); 3];
+    for (i, c) in GRADED_COSINES.into_iter().enumerate().rev() {
+        if i == 0 && !stall.is_zero() {
+            tokio::time::sleep(stall).await;
+        }
         let s = (1.0 - c * c).sqrt();
         let v: Vec<f64> = d
             .iter()
@@ -231,7 +252,7 @@ pub async fn derive_graded_looks(mem: &Memory) -> GradedLooks {
             .map(|(x, n)| c * x + s * n)
             .collect();
         let id = format!("graded{i}");
-        graded.push(derive_look_vector(mem, &format!("graded look {c}"), &id, to_f32(v)).await);
+        graded[i] = derive_look_vector(mem, &format!("graded look {c}"), &id, to_f32(v)).await;
     }
     mem.derive(
         &[("billing retries change", ConceptType::Entity)],
@@ -255,7 +276,7 @@ pub async fn derive_graded_looks(mem: &Memory) -> GradedLooks {
     .await;
     GradedLooks {
         query: to_f32(d.iter().map(|x| x * 2.5).collect()),
-        graded: [graded[0], graded[1], graded[2]],
+        graded,
         unrelated: [a, b],
     }
 }

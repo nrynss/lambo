@@ -388,3 +388,362 @@ async fn a_contract_race_fails_a_recall_by_image_and_annotates_only_text() {
     );
     mem.close().await.unwrap();
 }
+
+// #79: these tests freeze the daemon's score table with
+// `stop_daemon_for_cold_start`, which aborts the daemon task and joins it
+// before the fresh derives. Nothing can publish a newer table, so the cold
+// read goes through the actual Memory route without a scheduler race.
+#[cfg(feature = "store-sqlite")]
+fn cold_vector(probe: &[f32], seed: &[f32], cosine: f32) -> Vec<f32> {
+    let dot: f32 = probe.iter().zip(seed).map(|(a, b)| a * b).sum();
+    let mut orth: Vec<f32> = seed.iter().zip(probe).map(|(n, q)| n - dot * q).collect();
+    let norm = orth.iter().map(|x| x * x).sum::<f32>().sqrt();
+    for x in &mut orth {
+        *x /= norm;
+    }
+    let sine = (1.0 - cosine * cosine).sqrt();
+    probe
+        .iter()
+        .zip(orth)
+        .map(|(q, n)| cosine * q + sine * n)
+        .collect()
+}
+
+#[cfg(feature = "store-sqlite")]
+async fn cold_sqlite_memory(session: &str) -> (crate::test_util::ScratchDir, Memory) {
+    use crate::store::SqliteStore;
+    let dir = crate::test_util::ScratchDir::new("lambo-79-cold");
+    let path = dir.join("cold.db");
+    let store = Arc::new(SqliteStore::connect(path.to_str().unwrap()).unwrap());
+    store.init_schema().await.unwrap();
+    let mem = Memory::builder()
+        .session(session)
+        .agent("agent-a")
+        .flush_interval(Duration::from_millis(10))
+        .match_strategy(MatchStrategy::Hybrid)
+        .store(store as Arc<dyn GraphStore>)
+        .embedder(Arc::new(ContextTolerantEmbedder(FixtureEmbedder::new())) as Arc<dyn Embedder>)
+        .embedding_contract(contract("fixture", 1024))
+        .build()
+        .await
+        .unwrap();
+    (dir, mem)
+}
+
+#[cfg(feature = "store-sqlite")]
+async fn cold_image(mem: &Memory, caption: &str, image_id: &str, values: Vec<f32>) -> NodeId {
+    use crate::graph::image::{ImageDerive, ImagePayload};
+    let out = mem
+        .derive_image_as(
+            &AgentId::from("agent-a"),
+            ImageDerive {
+                caption,
+                concept_type: ConceptType::Resource,
+                image_id: Some(image_id),
+                payload: ImagePayload::Vector {
+                    values,
+                    declared: contract("fixture", 1024),
+                },
+                parent_of: &[],
+                event_time: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(out.created.len(), 1);
+    out.created[0]
+}
+
+#[cfg(feature = "store-sqlite")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sqlite_public_recall_by_ranks_fresh_supplied_image_and_guards_noise() {
+    let _quiet = crate::test_util::quiet_logs();
+    let (_dir, mem) = cold_sqlite_memory("issue-79-public-image").await;
+    let probe = FixtureEmbedder::new().embed_sync("cold image probe");
+    let seed = FixtureEmbedder::new().embed_sync("cold image orthogonal");
+    let old_relevant = cold_image(
+        &mem,
+        "old relevant",
+        "oldrelevant",
+        cold_vector(&probe, &seed, 0.75),
+    )
+    .await;
+    let old_noise = cold_image(
+        &mem,
+        "old noise",
+        "oldnoise",
+        cold_vector(&probe, &seed, 0.61),
+    )
+    .await;
+    // A recent, daemon-scored text concept: with text it would join the
+    // recent leg at RECENT_SCORE; with no text that leg is skipped (#22 PR 6),
+    // so cold mode must not let it in on the floor.
+    let recent_text = mem
+        .derive(
+            &[("orbital neutrino mechanics", ConceptType::Entity)],
+            &ParentOf::none(),
+        )
+        .await
+        .unwrap()
+        .created[0];
+    flushed(&mem).await;
+    mem.settle_daemon().await;
+    stop_daemon_for_cold_start(&mem).await;
+    let scores = mem.daemon.scores();
+    assert!(scores.ranked.iter().any(|hit| hit.item == old_relevant));
+    assert!(scores.ranked.iter().any(|hit| hit.item == old_noise));
+    assert!(scores.ranked.iter().any(|hit| hit.item == recent_text));
+    let fresh_relevant = cold_image(
+        &mem,
+        "fresh relevant",
+        "freshrelevant",
+        cold_vector(&probe, &seed, 0.85),
+    )
+    .await;
+    let fresh_noise = cold_image(
+        &mem,
+        "fresh noise",
+        "freshnoise",
+        cold_vector(&probe, &seed, 0.68),
+    )
+    .await;
+    flushed(&mem).await;
+    assert!(scores
+        .ranked
+        .iter()
+        .all(|hit| hit.item != fresh_relevant && hit.item != fresh_noise));
+    let query = RecallQuery {
+        query: String::new(),
+        top_k: 4,
+        max_tokens: 10_000,
+        traversal_depth: 0,
+    };
+    let result = mem
+        .recall_by(query.clone(), vector_query(probe.clone()))
+        .await
+        .unwrap();
+    assert_eq!(
+        result
+            .hits
+            .iter()
+            .map(|hit| hit.node_id)
+            .collect::<Vec<_>>(),
+        vec![fresh_relevant, old_relevant, fresh_noise, old_noise]
+    );
+    let detailed = mem
+        .recall_by_detailed(query, vector_query(probe))
+        .await
+        .unwrap();
+    assert!(detailed.legs.values().all(|leg| leg.recent.is_none()));
+    // Cold mode on the vector leg alone: every hit is 0.5 × its cosine, and
+    // the recent text concept gains nothing from recency or its daemon score.
+    for hit in &detailed.hits {
+        let v = detailed.legs.get(&hit.node_id).and_then(|l| l.vector);
+        let expected = 0.5 * v.unwrap_or(0.0).max(0.0);
+        assert!((hit.score - expected).abs() < 1e-6, "{hit:?} vs {v:?}");
+    }
+    assert!(
+        detailed.hits.iter().all(|hit| hit.node_id != recent_text),
+        "top_k 4 is the four images: {:?}",
+        detailed.hits
+    );
+    mem.close().await.unwrap();
+}
+
+/// #79 public text recall (review L2): the recent-only noise is derived
+/// BEFORE the freeze, so the daemon has scored it and its recency is high.
+/// Under the old blend a missing daemon entry scored 0, so the fresh strong
+/// vector hit sat at `0.5 × cosine` below the noise's `0.5 × d + 0.5 ×
+/// RECENT_SCORE`; the test asserts that hazard holds before asserting cold
+/// mode reverses it.
+#[cfg(feature = "store-sqlite")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sqlite_public_text_recall_keeps_strong_fresh_vector_above_recent_noise() {
+    use crate::recall::candidates::RECENT_SCORE;
+    let _quiet = crate::test_util::quiet_logs();
+    let (_dir, mem) = cold_sqlite_memory("issue-79-public-text").await;
+    mem.derive(
+        &[("create account guidance", ConceptType::Entity)],
+        &ParentOf::none(),
+    )
+    .await
+    .unwrap();
+    let recent = mem
+        .derive(
+            &[("orbital neutrino mechanics", ConceptType::Entity)],
+            &ParentOf::none(),
+        )
+        .await
+        .unwrap()
+        .created[0];
+    flushed(&mem).await;
+    mem.settle_daemon().await;
+    stop_daemon_for_cold_start(&mem).await;
+    let scores = mem.daemon.scores();
+    let recent_d = scores
+        .ranked
+        .iter()
+        .find(|hit| hit.item == recent)
+        .map(|hit| hit.score)
+        .expect("the recent noise is scored before the freeze");
+    let fresh = mem
+        .derive(&[("register user", ConceptType::Entity)], &ParentOf::none())
+        .await
+        .unwrap()
+        .created[0];
+    flushed(&mem).await;
+    assert!(scores.ranked.iter().all(|hit| hit.item != fresh));
+    let query = RecallQuery {
+        query: "create account".into(),
+        top_k: 5,
+        max_tokens: 10_000,
+        traversal_depth: 0,
+    };
+    let detailed = mem.recall_detailed(query).await.unwrap();
+    let fresh_leg = detailed.legs.get(&fresh).unwrap();
+    let recent_leg = detailed.legs.get(&recent).unwrap();
+    let fresh_cosine = fresh_leg.vector.unwrap();
+    assert!(fresh_cosine > 0.90);
+    assert_eq!(recent_leg.keyword, None);
+    // On the recency floor: its own cosine to the query is noise.
+    assert!(recent_leg.vector.is_none_or(|v| v < RECENT_SCORE));
+    assert_eq!(recent_leg.recent, Some(RECENT_SCORE));
+    // The hazard is real: the old blend put the recent noise first.
+    assert!(
+        0.5 * recent_d + 0.5 * RECENT_SCORE > 0.5 * fresh_cosine,
+        "recent noise d {recent_d} too low to test the hazard (fresh cosine {fresh_cosine})"
+    );
+    assert!(detailed.cold_start);
+    let ids: Vec<NodeId> = detailed.hits.iter().map(|hit| hit.node_id).collect();
+    let pos = |id: NodeId| ids.iter().position(|x| *x == id).expect("returned");
+    assert!(pos(fresh) < pos(recent), "{:?}", detailed.hits);
+    mem.close().await.unwrap();
+}
+
+/// #79 leg scale, text recall: in cold mode every member scores
+/// `w_query × q`, where `q` is the max-merged phase-1 score. The recent
+/// leg's flat `RECENT_SCORE` floor is on the same `q` scale as the vector
+/// cosine and the keyword BM25, so cold mode orders the three legs exactly
+/// as phase 1 does. The planted hazard is a recent-only concept: being
+/// recent, it has a high daemon recency (d = 0.7 here), so under the
+/// ordinary blend it would sit at `0.5 × d + 0.175 = 0.525`, above a fresh
+/// unscored strong vector hit at `0.5 × 0.80 = 0.40`.
+/// Cold mode must keep the fresh vector hit above it, and keyword hits in
+/// BM25 order above the recency floor.
+#[cfg(feature = "store-sqlite")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sqlite_cold_text_recall_orders_vector_keyword_and_recent_legs_on_one_scale() {
+    use crate::recall::candidates::RECENT_SCORE;
+    let _quiet = crate::test_util::quiet_logs();
+    let (_dir, mem) = cold_sqlite_memory("issue-79-leg-scale").await;
+    let text = "create account";
+    let probe = ContextTolerantEmbedder(FixtureEmbedder::new())
+        .embed_query(text)
+        .await
+        .unwrap();
+    let seed = FixtureEmbedder::new().embed_sync("leg scale orthogonal");
+    let derive_one = |content: &'static str| {
+        let mem = &mem;
+        async move {
+            mem.derive(&[(content, ConceptType::Entity)], &ParentOf::none())
+                .await
+                .unwrap()
+                .created[0]
+        }
+    };
+    // Older, daemon-scored concepts: two keyword hits of different BM25,
+    // a filler, then the planted recent-only concept.
+    let strong_keyword = derive_one("create account guidance").await;
+    let weak_keyword = derive_one("account settings page").await;
+    derive_one("lunar tide tables").await;
+    let planted = derive_one("orbital neutrino mechanics").await;
+    flushed(&mem).await;
+    mem.settle_daemon().await;
+    stop_daemon_for_cold_start(&mem).await;
+    let scores = mem.daemon.scores();
+    let daemon = |id: NodeId| scores.ranked.iter().find(|s| s.item == id).map(|s| s.score);
+    let planted_d = daemon(planted).expect("the planted concept is scored");
+
+    // The fresh strong vector hit, after the table froze.
+    let fresh = cold_image(
+        &mem,
+        "fresh vector match",
+        "freshvector",
+        cold_vector(&probe, &seed, 0.80),
+    )
+    .await;
+    flushed(&mem).await;
+    assert_eq!(daemon(fresh), None, "the fresh hit is not yet scored");
+    // The hazard is real: under the ordinary blend the planted recent-only
+    // hit would outrank the fresh strong vector hit.
+    assert!(
+        0.5 * planted_d + 0.5 * RECENT_SCORE > 0.5 * 0.80,
+        "planted daemon score {planted_d} too low to test the hazard"
+    );
+
+    let query = RecallQuery {
+        query: text.into(),
+        top_k: 8,
+        max_tokens: 10_000,
+        traversal_depth: 0,
+    };
+    let detailed = mem.recall_detailed(query).await.unwrap();
+    let leg = |id: NodeId| {
+        *detailed
+            .legs
+            .get(&id)
+            .unwrap_or_else(|| panic!("{id:?} in phase 1"))
+    };
+    let q = |l: crate::recall::candidates::LegScores| {
+        [l.keyword, l.recent, l.vector]
+            .into_iter()
+            .flatten()
+            .fold(f64::NEG_INFINITY, f64::max)
+    };
+    let pos = |id: NodeId| {
+        detailed
+            .hits
+            .iter()
+            .position(|h| h.node_id == id)
+            .unwrap_or_else(|| panic!("{id:?} returned: {:?}", detailed.hits))
+    };
+
+    // Provenance: each leg is what the case says it is.
+    assert!((leg(fresh).vector.unwrap() - 0.80).abs() < 1e-3);
+    assert_eq!(leg(fresh).recent, Some(RECENT_SCORE), "fresh is recent too");
+    assert!(leg(strong_keyword).keyword.unwrap() > leg(weak_keyword).keyword.unwrap());
+    assert_eq!(leg(strong_keyword).recent, None);
+    assert_eq!(leg(planted).keyword, None);
+    assert_eq!(leg(planted).recent, Some(RECENT_SCORE));
+    assert_eq!(
+        q(leg(planted)),
+        RECENT_SCORE,
+        "planted is on the recency floor"
+    );
+
+    // Cold mode: every hit is w_query × q, the daemon share withheld even
+    // for the high-daemon recent concept. The result says so (M2).
+    assert!(detailed.cold_start, "the recall reports cold mode");
+    for hit in &detailed.hits {
+        let expected = detailed.legs.get(&hit.node_id).map_or(0.0, |l| 0.5 * q(*l));
+        assert!(
+            (hit.score - expected).abs() < 1e-9,
+            "{}: {} != 0.5 × q {expected}",
+            hit.content,
+            hit.score
+        );
+    }
+    // One scale: the fresh strong vector hit and both keyword hits outrank
+    // the planted recent-only hit; keyword hits keep BM25 order.
+    assert!(pos(fresh) < pos(planted));
+    assert!(pos(strong_keyword) < pos(weak_keyword));
+    assert!(pos(weak_keyword) < pos(planted));
+    // And the whole list is in non-increasing q order.
+    let qs: Vec<f64> = detailed
+        .hits
+        .iter()
+        .map(|h| detailed.legs.get(&h.node_id).map_or(0.0, |l| q(*l)))
+        .collect();
+    assert!(qs.windows(2).all(|w| w[0] >= w[1]), "q order: {qs:?}");
+    mem.close().await.unwrap();
+}

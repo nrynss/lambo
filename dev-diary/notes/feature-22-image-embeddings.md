@@ -116,7 +116,7 @@ constant changed here (design 7.3: measured, not adjusted); it is evidence for Q
 |---|---|
 | `embed::eg2::tests::*` (25 after the review remediation; 18 before): byte-exact text bodies with the role prefixes, the image body, empty text, MRL at every width, width / non-finite / zero-norm refusals, status classes with the image 500 refined, the token budget, `images = false`, the `/props` check (verified once, mismatch until fixed, no vision, not exposed, 5xx retried, bearer on `/props`), the judge, the kind and contract string, build refusals, resolve stamping the contract | rows with `embed-eg2` (`resolve_stamps_the_eg2_contract` also needs `store-memory`) |
 | `embed::tests::{toml_kind_aliases_match_from_str, kind_feature_names}` gain the EG2 kind | every row |
-| `tests/live_eg2.rs` (2, ignored): AC2 and the no-projector case | live only, `LAMBO_EG2_URL` / `LAMBO_EG2_TEXT_ONLY_URL` |
+| `tests/live_eg2.rs` (ignored): AC2, the no-projector case and size invariance; without `store-sqlite`, a stand-in that fails when a server is set because the #79 cold-path test (`memory::tests::live_eg2_cold`, in the crate) is compiled out | live only, `LAMBO_EG2_URL` / `LAMBO_EG2_TEXT_ONLY_URL`; run `cargo test --features embed-eg2,store-sqlite --lib --test live_eg2 -- --ignored --nocapture live_eg2` |
 
 Mutation-checked: routing image calls through the default rule, swapping the two
 prefixes, and normalizing before truncating each turn the named tests red.

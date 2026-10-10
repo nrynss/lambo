@@ -71,15 +71,10 @@ fn image<'a>(png: &'a [u8]) -> ImageDerive<'a> {
 /// step 3), found by the vector leg (at the label's own vector) and not by
 /// the keyword leg, and no other candidate's query evidence comes near it.
 ///
-/// The final score mixes the query legs with the daemon's structural score
-/// table (`RecallWeights`, 0.5 each), and a concept derived moments ago is
-/// not in that table until the daemon's next cycle, so the rank of any fresh
-/// concept, text or image, races the daemon. The check therefore waits for
-/// the daemon to score the current epoch first (`Memory::settle_daemon`),
-/// which makes "the top hit" deterministic. Before that cycle the image
-/// scores 0.5 (a perfect vector match, no daemon score) against older noise
-/// at about 0.533: a cold-start ranking question recorded for PR 5's parity
-/// measurement (design 7.3), not a defect of this PR.
+/// This older #22 acceptance test waits for the daemon to settle because
+/// it also checks the scored steady state. The cold-start path, including a
+/// lower-scored established relevant concept and supplied image vectors, is
+/// checked separately below against a frozen pre-derive score table.
 async fn assert_recalled_by_the_vector_leg(mem: &Memory, image: NodeId) {
     mem.settle_daemon().await;
     let detailed = mem
@@ -348,4 +343,311 @@ async fn graded_similarity_ranks_by_cosine_not_recency_on_sqlite() {
         .unwrap();
     assert_graded_order(&detailed, &looks);
     reopened.close().await.unwrap();
+}
+
+/// The #79 flake, pinned: a scheduler stall before the last graded derive,
+/// under the default 0.5/0.5 blend. The daemon's recency is a concept's
+/// millisecond position in the session's wall-clock span; a stall there
+/// gives the look derived after it recency near 1 and every earlier look
+/// near 0. Derived best first, the stalled look was the 0.3 one and it
+/// outranked the 0.5 look (+0.104 of daemon share against a 0.1 query gap).
+/// Derived worst first, the stalled look is the 0.8 one, so recency can
+/// only widen the cosine order. Every look is daemon-scored here, so #79's
+/// cold-start rule is not in play.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn graded_similarity_survives_a_stall_between_derives_on_sqlite() {
+    use crate::recall::query_vector::QueryBy;
+    use crate::test_util::dresscode::{
+        assert_graded_order, derive_graded_looks_stalled, imageless_text,
+    };
+
+    let _quiet = crate::test_util::quiet_logs();
+    let (_dir, path) = scratch_db();
+    let store = Arc::new(SqliteStore::connect(&path).unwrap());
+    store.init_schema().await.unwrap();
+    let mem = open(store, "sqlite-recall-by-graded-stall").await;
+    let looks = derive_graded_looks_stalled(&mem, Duration::from_millis(40)).await;
+    mem.settle_daemon().await;
+    let scores = mem.daemon_scores_for_test();
+    let daemon = |id: NodeId| {
+        scores
+            .ranked
+            .iter()
+            .find(|s| s.item == id)
+            .map(|s| s.score)
+            .expect("every graded look is daemon-scored")
+    };
+    // The stall is real: it split the graded looks' daemon scores by more
+    // than the 0.1 query gap could absorb if it favoured the wrong look.
+    let d: Vec<f64> = looks.graded.iter().map(|id| daemon(*id)).collect();
+    let spread =
+        d.iter().copied().fold(f64::MIN, f64::max) - d.iter().copied().fold(f64::MAX, f64::min);
+    assert!(
+        spread > 0.2,
+        "the stall must separate the daemon scores: {d:?}"
+    );
+    let detailed = mem
+        .recall_by_detailed(
+            imageless_text(5),
+            QueryBy::Vector {
+                values: looks.query.clone(),
+                declared: contract(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_graded_order(&detailed, &looks);
+    mem.close().await.unwrap();
+}
+
+// -- #79: assembly against a frozen pre-derive table ------------------------
+
+/// Build a unit vector at a chosen cosine to the fixture query direction.
+fn cold_vector(probe: &[f32], orth_seed: &[f32], cosine: f32) -> Vec<f32> {
+    let dot: f32 = probe.iter().zip(orth_seed).map(|(a, b)| a * b).sum();
+    let mut orth: Vec<f32> = orth_seed
+        .iter()
+        .zip(probe)
+        .map(|(n, q)| n - dot * q)
+        .collect();
+    let norm = orth.iter().map(|x| x * x).sum::<f32>().sqrt();
+    for x in &mut orth {
+        *x /= norm;
+    }
+    let sine = (1.0 - cosine * cosine).sqrt();
+    probe
+        .iter()
+        .zip(orth)
+        .map(|(q, n)| cosine * q + sine * n)
+        .collect()
+}
+
+async fn cold_image(mem: &Memory, caption: &str, image_id: &str, values: Vec<f32>) -> NodeId {
+    let agent = crate::types::AgentId::from("agent-a");
+    let out = mem
+        .derive_image_as(
+            &agent,
+            ImageDerive {
+                caption,
+                concept_type: ConceptType::Resource,
+                image_id: Some(image_id),
+                payload: ImagePayload::Vector {
+                    values,
+                    declared: contract(),
+                },
+                parent_of: &[],
+                event_time: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(out.created.len(), 1);
+    out.created[0]
+}
+
+/// SQLite's checked vector leg and the fixture embedder feed graded image
+/// similarities to assembly. The score table is frozen before the two fresh
+/// derives; no daemon cycle is part of this read, even if the background
+/// worker subsequently wakes. Old daemon scores are planted at opposite
+/// ends to enforce the low-daemon noise guard.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fresh_supplied_image_ranks_by_query_until_daemon_scores_it() {
+    use crate::config::{RecallWeights, ScoringWeights};
+    use crate::daemon::score::rescore;
+    use crate::graph::Graph;
+    use crate::recall::assemble::{assemble, default_token_count};
+    use crate::recall::expand::expand;
+    use crate::types::{ScoreTable, Scored};
+    use std::collections::HashMap;
+
+    let _quiet = crate::test_util::quiet_logs();
+    let (_dir, path) = scratch_db();
+    let store = Arc::new(SqliteStore::connect(&path).unwrap());
+    store.init_schema().await.unwrap();
+    let session = "sqlite-cold-image";
+    let probe = FixtureEmbedder::new().embed_sync("cold image probe");
+    let orth = FixtureEmbedder::new().embed_sync("cold image orthogonal");
+    let mem = open(store.clone(), session).await;
+    let old_relevant = cold_image(
+        &mem,
+        "established relevant",
+        "oldrelevant",
+        cold_vector(&probe, &orth, 0.75),
+    )
+    .await;
+    let old_noise = cold_image(
+        &mem,
+        "old irrelevant",
+        "oldnoise",
+        cold_vector(&probe, &orth, 0.61),
+    )
+    .await;
+    let cold_scores = ScoreTable {
+        epoch: mem.graph().read().epoch(),
+        ranked: vec![
+            Scored::new(old_relevant, 0.20),
+            Scored::new(old_noise, 0.90),
+        ],
+    };
+    let fresh_relevant = cold_image(
+        &mem,
+        "fresh relevant",
+        "freshrelevant",
+        cold_vector(&probe, &orth, 0.85),
+    )
+    .await;
+    let fresh_noise = cold_image(
+        &mem,
+        "fresh irrelevant",
+        "freshnoise",
+        cold_vector(&probe, &orth, 0.68),
+    )
+    .await;
+    mem.close().await.unwrap();
+
+    let snapshot = store.load_session(&SessionId::from(session)).await.unwrap();
+    let graph = Graph::from_snapshot(snapshot).unwrap();
+    let phase1 = store
+        .vector_candidates_checked(&SessionId::from(session), &probe, &contract(), 4)
+        .await
+        .unwrap();
+    assert_eq!(phase1.len(), 4);
+    let by_id: HashMap<_, _> = phase1.iter().map(|hit| (hit.item, hit.score)).collect();
+    for (id, expected) in [
+        (fresh_relevant, 0.85),
+        (old_relevant, 0.75),
+        (fresh_noise, 0.68),
+        (old_noise, 0.61),
+    ] {
+        assert!(
+            (by_id[&id] - expected).abs() < 1e-5,
+            "{id}: graded SQLite cosine"
+        );
+    }
+    let expanded = expand(&graph, phase1.clone(), 0);
+    let query = RecallQuery {
+        query: String::new(), // by-vector reads skip the recent leg
+        top_k: 4,
+        max_tokens: 10_000,
+        traversal_depth: 0,
+    };
+    let run = |scores: &ScoreTable| {
+        assemble(
+            &graph,
+            &expanded,
+            &phase1,
+            scores,
+            &HashMap::new(),
+            &query,
+            RecallWeights::default(),
+            Utc::now(),
+            default_token_count,
+        )
+    };
+    let cold = run(&cold_scores);
+    assert_eq!(
+        cold.hits.iter().map(|hit| hit.node_id).collect::<Vec<_>>(),
+        vec![fresh_relevant, old_relevant, fresh_noise, old_noise]
+    );
+    // The old blend ranks old noise first and fresh relevant below it.
+    assert!(0.5 * (0.90 + by_id[&old_noise]) > 0.5 * by_id[&fresh_relevant]);
+
+    let settled_scores = ScoreTable {
+        epoch: graph.epoch(),
+        ranked: rescore(&graph, &ScoringWeights::default()),
+    };
+    let settled = run(&settled_scores);
+    let daemon: HashMap<_, _> = settled_scores
+        .ranked
+        .iter()
+        .map(|hit| (hit.item, hit.score))
+        .collect();
+    for hit in &settled.hits {
+        let expected = 0.5 * (daemon[&hit.node_id] + by_id[&hit.node_id]);
+        assert!((hit.score - expected).abs() < 1e-9);
+    }
+}
+
+/// The text path uses SQLite-backed derives and the real keyword leg. A high
+/// old daemon score would bury the just-derived exact query under the old
+/// blend; in cold mode both candidates use the query share of the custom
+/// weights. This catches a fix restricted to the image/vector path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fresh_text_uses_query_order_on_sqlite() {
+    use crate::config::RecallWeights;
+    use crate::graph::index::InvertedIndex;
+    use crate::graph::Graph;
+    use crate::recall::assemble::{assemble, default_token_count};
+    use crate::recall::candidates::{candidates, Phase1Input};
+    use crate::recall::expand::expand;
+    use crate::types::{ScoreTable, Scored};
+    use std::collections::HashMap;
+
+    let _quiet = crate::test_util::quiet_logs();
+    let (_dir, path) = scratch_db();
+    let store = Arc::new(SqliteStore::connect(&path).unwrap());
+    store.init_schema().await.unwrap();
+    let session = "sqlite-cold-text";
+    let mem = open(store.clone(), session).await;
+    let old = mem
+        .derive(
+            &[("cold start", ConceptType::Entity)],
+            &crate::graph::derive::ParentOf::none(),
+        )
+        .await
+        .unwrap()
+        .created[0];
+    let scores = ScoreTable {
+        epoch: mem.graph().read().epoch(),
+        ranked: vec![Scored::new(old, 1.40)],
+    };
+    let fresh = mem
+        .derive(
+            &[("cold start result", ConceptType::Entity)],
+            &crate::graph::derive::ParentOf::none(),
+        )
+        .await
+        .unwrap()
+        .created[0];
+    mem.close().await.unwrap();
+
+    let snapshot = store.load_session(&SessionId::from(session)).await.unwrap();
+    let index = InvertedIndex::from_snapshot(&snapshot);
+    let graph = Graph::from_snapshot(snapshot).unwrap();
+    let query = RecallQuery {
+        query: "cold start result".into(),
+        top_k: 2,
+        max_tokens: 10_000,
+        traversal_depth: 0,
+    };
+    let phase1 = candidates(
+        &graph,
+        &index,
+        Phase1Input::default(),
+        &query.query,
+        query.top_k,
+    );
+    let relevance: HashMap<_, _> = phase1.iter().map(|hit| (hit.item, hit.score)).collect();
+    assert!(relevance[&fresh] > relevance[&old]);
+    assert!(
+        0.9 * 1.40 + 0.1 * relevance[&old] > 0.1 * relevance[&fresh],
+        "the old blend must lose the cold-start test"
+    );
+    let expanded = expand(&graph, phase1.clone(), 0);
+    let result = assemble(
+        &graph,
+        &expanded,
+        &phase1,
+        &scores,
+        &HashMap::new(),
+        &query,
+        RecallWeights {
+            w_daemon: 0.9,
+            w_query: 0.1,
+        },
+        Utc::now(),
+        default_token_count,
+    );
+    assert_eq!(result.hits.first().map(|hit| hit.node_id), Some(fresh));
+    assert!((result.hits[0].score - 0.1 * relevance[&fresh]).abs() < 1e-9);
 }

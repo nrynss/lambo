@@ -1029,6 +1029,57 @@
 
 ### Fixed
 
+- A freshly derived text or image concept ranks by query relevance before
+  the daemon scores it (#79). Previously its missing daemon score counted as
+  0 inside the 0.5/0.5 blend, so a fresh relevant EG2 image (0.3616) ranked
+  below older, daemon-scored noise (about 0.655). Now, while a keyword- or
+  vector-backed phase-1 concept that query relevance alone would show
+  (within `top_k`, or force-included as hot) has no score-table entry, that
+  recall scores every hit `w_query × query relevance`, old hits included. A
+  fresh concept that could not make the result leaves the blend alone.
+  Applying the query score only to the new concept would instead lift fresh
+  noise over an established relevant hit with a low daemon score. A
+  recent-only hit, a traversal or sibling member, a stale vector id and an
+  explicit daemon 0 do not start this mode; `w_query = 0` keeps daemon-only
+  ranking. While cold, traversal and sibling members score 0 and rank last,
+  and a reservation holder the blend would have shown is kept with its
+  warning. The recall's `serve --ledger` line carries a new `cold_start`
+  boolean (additive; `v` stays 1).
+  The window lasts until the daemon's next completed cycle, not just the
+  rescore. On a dogfood-scale fixture graph (6,466 nodes, 11,600 edges,
+  release) a cycle takes about 9 ms (rescore about 5 ms, detectors about
+  6 ms), a GC sweep about 11 ms more, and an isolated derive is scored in
+  6 ms median, 23 ms worst of 60. It persists through sustained write
+  bursts: with a derive every 2 ms some concept stayed unscored for the
+  whole 3 s burst. Replaying the dogfood ledger, whose write rate is low
+  (about 20 derives a day), 1.18% (window up to 50 ms) to 1.55% (1 s) of
+  recalls could overlap a window; a write-heavy multi-agent session will
+  see more, which `cold_start` now makes measurable. Once the daemon scores
+  the concept, the normal blend returns and ranks can change.
+  Expected-output change: the assembly test fixture with a deliberately
+  unscored phase-1 member (c2) now orders `c1,c2,c5,c3,c4,c6`
+  (`.75,.375,.15,0,0,0`) instead of `c1,c2,c5,c6,c4,c3`
+  (`.95,.375,.30,.15,.10,.05`): its structural-only members lose their
+  daemon share and tie at zero. The blended-formula golden is kept byte for
+  byte with an explicit daemon 0 for c2. No fixture file changed, and every
+  golden test passes with the cold mode made to panic, so fully scored
+  goldens (recall, context and H3 payload goldens) are unchanged.
+  `RECENT_SCORE`, merge thresholds and cosine scales are untouched (#87).
+- A daemon rescore that panicked no longer leaves the score table stale
+  until the next write: the cycle marks its epoch done only after
+  publishing, so the next cycle retries. The rescore is contained on its
+  own, so one that panics every cycle no longer stops detection, the hot
+  list and GC; it logs one warning per epoch (#79 review).
+- `graded_similarity_ranks_by_cosine_not_recency_on_sqlite` no longer fails
+  intermittently. The daemon's recency is a concept's millisecond position
+  in the session's wall-clock span, and the fixture's session lasts about
+  2 ms. A scheduler stall before the 0.3 look's derive gave it recency near
+  1 against 0 for the 0.5 look, enough under the 0.5/0.5 blend to flip
+  them. The graded looks are now derived worst first, so recency can only
+  widen the cosine order; a stalled variant pins it. The holder and tier
+  tests that share the fixture had the same latent flake. #79's rule is not
+  the fix: every look is daemon-scored when the test reads.
+
 - A `bge_m3` or `embeddinggemma2` input longer than the llama-server's
   physical batch is now a content refusal, settled as failed with a hint
   naming `--ubatch-size`. llama-server answers it with HTTP 500 ("increase

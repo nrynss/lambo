@@ -260,6 +260,10 @@ async fn i1_recall_lines_carry_per_leg_scores_and_the_warning_flags() {
         );
     }
     assert!(recall["warning_count"].is_u64(), "{recall}");
+    assert!(
+        recall["cold_start"].is_boolean(),
+        "#79: cold_start is always present as a boolean: {recall}"
+    );
     // `canonical_marker` above is only claimable because the block that
     // carries `[canonical]` actually rendered. Pinned so the two halves of
     // the flag's definition are asserted together, not separately.
@@ -903,6 +907,17 @@ fn i1_the_recall_query_is_truncated_at_its_own_wider_cap() {
     let query = facts["query"].as_str().expect("query is a string");
     assert!(query.ends_with("…[truncated]"), "{}", &query[..40]);
     assert_eq!(query.chars().count(), cut.chars().count());
+}
+
+/// #79 review M2: the recall line says whether assembly ran in cold mode,
+/// so the cold window can be measured from a production ledger. The flag is
+/// read from the typed result, never inferred from the scores.
+#[test]
+fn i1_the_recall_line_reports_cold_start() {
+    let mut detailed = crate::recall::detail::DetailedRecall::warn_only(String::new());
+    assert_eq!(recall_facts("q", 8, &detailed)["cold_start"], json!(false));
+    detailed.cold_start = true;
+    assert_eq!(recall_facts("q", 8, &detailed)["cold_start"], json!(true));
 }
 
 /// **I2 acceptance.** A heartbeat line carries the stats payload, uptime,

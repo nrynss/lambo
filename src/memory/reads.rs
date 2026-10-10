@@ -387,4 +387,12 @@ impl Memory {
         .await
         .expect("the daemon settles within 10 s");
     }
+
+    /// Test hook: the daemon's current score table, for a test that must
+    /// show which concepts are scored (and how) before asserting a rank.
+    /// Its one caller is the SQLite graded-stall test.
+    #[cfg(all(test, feature = "embed-fixture", feature = "store-sqlite"))]
+    pub(crate) fn daemon_scores_for_test(&self) -> crate::types::ScoreTable {
+        self.daemon.scores()
+    }
 }
