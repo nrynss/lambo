@@ -355,6 +355,8 @@
 
   function renderSession(info) {
     $("session-name").textContent = info.session;
+    // Cut with an ellipsis on a narrow screen: the full name, as text.
+    $("session-name").title = info.session;
     state.pollMs = info.poll_interval_ms || 1500;
 
     var facts = [

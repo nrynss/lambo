@@ -523,3 +523,42 @@ async fn listing_mode_still_offers_a_typed_name() {
     assert!(INDEX_HTML.contains(r#"for="session-choice">Switch to session</label>"#));
     assert!(INDEX_HTML.contains(r#"for="session-entry">Session name to open</label>"#));
 }
+
+/// Review L3: a session name is up to 128 characters with no break
+/// opportunity, and the picker's message quotes a typed one. At 375 px
+/// neither may widen the page: the name is cut with an ellipsis (its full
+/// text in `title`, set as a property, never markup) inside a bar it cannot
+/// outgrow, and the message wraps anywhere. Checked in a browser at 375 px
+/// with a served 128-character session and a typed 128-character name
+/// (document scroll width 375 in both).
+#[test]
+fn a_long_name_never_widens_a_narrow_page() {
+    let rule = |selector: &str| -> &str {
+        APP_CSS
+            .split(&format!("\n{selector} {{"))
+            .nth(1)
+            .and_then(|rest| rest.split('}').next())
+            .unwrap_or_else(|| panic!("no rule {selector}"))
+    };
+    let name = rule(".session-name");
+    for decl in [
+        "min-width: 0;",
+        "max-width: 100%;",
+        "overflow: hidden;",
+        "text-overflow: ellipsis;",
+        "white-space: nowrap;",
+    ] {
+        assert!(name.contains(decl), ".session-name lacks {decl}");
+    }
+    let msg = rule(".picker-msg");
+    for decl in [
+        "min-width: 0;",
+        "max-width: 100%;",
+        "overflow-wrap: anywhere;",
+    ] {
+        assert!(msg.contains(decl), ".picker-msg lacks {decl}");
+    }
+    assert!(rule(".topbar-left").contains("max-width: 100%;"));
+    assert!(rule(".session-picker").contains("max-width: 100%;"));
+    assert!(APP_JS.contains(r#"$("session-name").title = info.session;"#));
+}
