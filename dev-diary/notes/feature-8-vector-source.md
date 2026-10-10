@@ -46,7 +46,7 @@ merge ranks in the holder's graph. The index lacks unflushed concepts, the
 last refresh interval and, while stale, everything, so the commonest dedupe
 case (the same fact derived twice, seconds apart) would mint paraphrased
 near-duplicates, and derive would wait on index latency. A store declares this
-with `GraphStore::holder_derives_from_graph` (default `false`), and the holder
+with `GraphStore::holder_derive_source` (default `Store`; `Graph` here), and the holder
 builds derive's source with `VectorCandidates::for_holder_derive`, which picks
 the graph wherever `for_holder` does plus over such a store. `Memory` and
 `WriteCtx` both call it (`derive_vector_candidates`), so the two write paths
@@ -56,22 +56,72 @@ already puts both callers on the graph). Cost: derive on a holder over the
 tier is an O(n) scan of the graph, about 3 ms at 3,600 concepts, acceptable
 for a write.
 
-**Extended to the Postgres family by #60 (2026-10-10).** `PgStore<D>` (Postgres
-and Cockroach, one adapter) now declares `holder_derives_from_graph` too, with
-no new mechanism: the same `for_holder_derive` picks the holder's graph for
-derive, and `exact_vector_scan` stays `false`, so recall keeps the database
-search below. Why: the database sees only flushed rows and the write-behind
-flush lags by seconds to minutes (`flush_lag_ms` read 50 to 130 s on the
-dogfood rig), so paraphrases derived seconds apart both missed each other and
-became permanent duplicates. Accepted divergence: the merge leg now scores
-exact `f32` cosine where it scored the database's distance, so a pair on the
-threshold edge can decide differently, and a target the Cockroach ANN beam
-would have missed is now found. Tests: `store::pg::merge_freshness` (offline
-over a double that lags like the database, plus the Postgres live test and the
-Cockroach conformance leg).
+**Extended to the Postgres family by #60 (2026-10-10), as a union.** Why: the
+database sees only flushed rows and the write-behind flush lags by seconds to
+minutes (`flush_lag_ms` read 50 to 130 s on the dogfood rig), so paraphrases
+derived seconds apart both missed each other and became permanent duplicates.
+The first fix declared the graph for derive, as the tier does; its review (M3)
+measured what that costs at the scale Postgres is recommended for, and the
+holder now unions two exact halves instead
+(`HolderDeriveSource::StoreAndUnflushed`, `graph::vector_source::StoreAndUnflushedSource`):
+
+- the database's checked read, for what the flush has made durable;
+- an exact scan of only the concepts the graph records as unflushed
+  (`Graph::unflushed_ids`), every candidate of both halves re-scored by exact
+  `f32` cosine on the graph's vector (a pending delete is dropped, a rewritten
+  vector is scored as written).
+
+Exactness: the graph records the epoch of every concept upsert, node delete and
+`SetEmbedding` in `append_mutation`; the flush task clears entries at or below
+a batch's stamp only after `store.flush` returned `Ok`, and a batch it drops
+(dead letter, degrade, lost lease) pins its ids. So every concept is in the
+database, in the set, or both. The set is read before the database is asked;
+reading it after could miss a concept committed and cleared in between (tested
+by a double that commits during the query). The database is over-fetched by
+the set's size. While a contract change is unflushed (a fresh session before
+its first flush, a re-embed) or more writes are unflushed than the read can
+over-fetch for (2,048), the source ranks every graph vector instead.
+
+Cost (release, d = 1024, limit 8, Apple M3 Pro, a scratch bench over a
+synthetic graph, 20 probes each; the database half is the pre-#60 indexed
+query and could not be measured here, no local Postgres):
+
+| concepts | whole-graph scan per probe | union, in process, per probe (unflushed 0 / 64 / 1,000) |
+|---|---|---|
+| 10,000 | 8.5 ms | 0.012 / 0.063 / 0.78 ms |
+| 50,000 | 45.9 ms | 0.009 / 0.067 / 0.83 ms |
+| 100,000 | 98.1 ms | 0.054 / 0.109 / 0.87 ms |
+
+A 64-concept derive at 100k concepts was about 6.3 s of synchronous scan on a
+tokio worker, outside `HYBRID_IO_TIMEOUT`; the union is flat in session size.
+Rejected: a size cutoff (graph below N, database above) loses freshness on
+exactly the large sessions; keeping the whole-graph scan off the async worker
+bounds the cost without removing it. Not adopted by the tier: its index lags
+past the flush commit (refresh interval, stale windows), so the flush cannot
+say what it has seen and the union would not be exact for it.
+
+Accepted divergence: merge scores are exact cosine where the database scored
+its distance, so a pair on the threshold edge can decide differently; the
+durable half's pool is the database's own top-k, so a flushed target the
+Cockroach ANN beam misses is missed, as before #60. The live check measures
+the database's score against the exact cosine for one pair (tolerance 1e-5,
+to tighten from the first live log). Tests: `store::pg::merge_freshness`
+(offline over a double that lags like the database and loads what it flushed,
+plus the Postgres live test and the Cockroach conformance leg running the same
+scenario) and `graph::graph::tests::unflushed`, `store::flush` for the set.
+
+Found while measuring, not changed here: hybrid derive's commit stages its
+writes on a full clone of the graph under the write lock, 10.7 ms at 10k
+concepts, 60 ms at 50k and 168 ms at 100k per derive (same bench). That cost
+is independent of the vector source and needs its own issue.
+
+`graph::hybrid::derive` (the public library function) keeps asking the store
+only: it cannot know its graph is the session's complete copy or that its
+caller's flush keeps the unflushed set exact.
 
 **Postgres and Cockroach keep database-side search for recall** (the scope
-decision #8 asked for; derive's merge moved to the graph in #60, above). Their scores come from database distance arithmetic
+decision #8 asked for; derive's merge became a database plus unflushed-set
+union in #60, above). Their scores come from database distance arithmetic
 (`distance_to_score`: Postgres `1 - d`, Cockroach `1 - d²/2`) and Cockroach can
 serve from a partial ANN index, so graph-side cosine would change scores and,
 under the index, candidate sets. #8's acceptance is bit-identical ranking. The
@@ -291,6 +341,6 @@ Caveats on these numbers:
 - #18: an Elastic tier is a store (`TieredStore`) whose checked read is its own
   `VectorCandidateSource`; it leaves `exact_vector_scan` false, so a holder's
   recall over it keeps calling the store and `for_holder` needs no change. Its
-  review (M6) added `holder_derives_from_graph` so a holder's derive ranks in
-  its graph instead (see the amendment above). #60 set the same declaration
-  on the Postgres family.
+  review (M6) added the declaration, now `holder_derive_source() == Graph`,
+  so a holder's derive ranks in its graph instead (see the amendment above).
+  #60 gave the Postgres family the cheaper `StoreAndUnflushed` union.
