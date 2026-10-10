@@ -229,9 +229,10 @@ async fn a_failed_rescore_is_retried_on_the_next_cycle() {
     );
     daemon.fail_next_rescores(1);
     let handle = daemon.spawn();
-    // The first cycle's rescore panics: nothing is published.
-    wait_until(|| daemon.rescore_faults.load(Ordering::Acquire) == 0).await;
-    assert_eq!(daemon.cycles(), 0, "the panicking cycle did not complete");
+    // The first cycle's rescore panics: nothing is published, but the rest
+    // of the cycle still runs (#79 review F1).
+    wait_until(|| daemon.cycles() == 1).await;
+    assert_eq!(daemon.rescore_faults.load(Ordering::Acquire), 0);
     assert!(daemon.scores().ranked.is_empty());
 
     // A wake with NO mutation must still retry the failed rescore.
@@ -239,6 +240,108 @@ async fn a_failed_rescore_is_retried_on_the_next_cycle() {
     let table = daemon.scores();
     assert_eq!(table.epoch, epoch, "the retried rescore published");
     assert!(table.ranked.iter().any(|s| s.item == cid));
+    handle.abort();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_rescore_that_always_panics_does_not_starve_detection_or_gc() {
+    // #79 review F1: the rescore ran inside the cycle-wide catch_unwind, so
+    // a rescore that panicked on every attempt unwound past detection, the
+    // hot list and GC on every cycle, for as long as the epoch stood still.
+    use std::sync::atomic::{AtomicI64, Ordering as AtomicOrdering};
+
+    let _quiet = crate::test_util::quiet_logs();
+    let t0 = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+    let mut g = Graph::new(sid());
+    let i1 = interaction_at(1, None, "agent-a", t0);
+    let iid = i1.id;
+    g.insert_interaction(i1).unwrap();
+    // `kept` ages into Stale (detection, hot list, event); `orphan` loses
+    // its only Derives edge, so GC collects it.
+    let kept = concept_at(1, iid, "agent-a", "idle concept", t0);
+    let kept_id = kept.id;
+    g.insert_concept(kept, iid).unwrap();
+    let orphan = concept_at(2, iid, "agent-a", "orphaned concept", t0);
+    let orphan_id = orphan.id;
+    g.insert_concept(orphan, iid).unwrap();
+    let derives = g
+        .edge_between(iid, orphan_id, EdgeType::Derives)
+        .unwrap()
+        .id;
+    g.remove_edge(derives).unwrap();
+    let graph = Arc::new(RwLock::new(g));
+
+    // The clock is already past the stale window on the first cycle.
+    let now_secs = Arc::new(AtomicI64::new(1_700_000_061));
+    let clock: Clock = {
+        let now_secs = now_secs.clone();
+        Arc::new(move || {
+            Utc.timestamp_opt(now_secs.load(AtomicOrdering::SeqCst), 0)
+                .unwrap()
+        })
+    };
+    let params = CycleParams {
+        stale_window: Duration::from_secs(60),
+        gc_interval: 3,
+        ..Default::default()
+    };
+    let daemon = Daemon::with_params(
+        graph.clone(),
+        ScoringWeights::default(),
+        Duration::from_secs(3600),
+        params,
+    )
+    .with_clock(clock);
+    daemon.fail_next_rescores(usize::MAX);
+    let mut rx = daemon.events();
+    let handle = daemon.spawn();
+
+    // Every rescore panics, yet the cycle completes: detection published
+    // Stale and the hot list holds it, and GC swept the orphan.
+    wait_until(|| daemon.cycles() >= 1).await;
+    let mut stale = false;
+    while let Ok(evt) = rx.try_recv() {
+        if let DaemonEvent::Stale { node_id, .. } = evt
+            && node_id == kept_id
+        {
+            stale = true;
+        }
+    }
+    assert!(stale, "detection published Stale despite the rescore panic");
+    assert!(daemon.hot_list().read().contains(kept_id));
+    assert!(
+        daemon.last_gc().is_some(),
+        "GC ran despite the rescore panic"
+    );
+    assert!(graph.read().node(orphan_id).is_none());
+    assert!(daemon.scores().ranked.is_empty(), "no table was published");
+
+    // Let GC's own writes settle so the epoch stands still while the
+    // rescore keeps failing.
+    let mut epoch = graph.read().epoch();
+    for _ in 0..20 {
+        wake_and_settle(&daemon).await;
+        let now = graph.read().epoch();
+        if now == epoch {
+            break;
+        }
+        epoch = now;
+    }
+    wake_and_settle(&daemon).await;
+    assert_eq!(graph.read().epoch(), epoch, "the epoch settled");
+    assert!(daemon.scores().ranked.is_empty());
+    assert!(
+        daemon.rescore_faults.load(Ordering::Acquire) > 0,
+        "the rescore was still failing"
+    );
+
+    // The failed epoch was never marked: a healthy rescore on a wake with
+    // no mutation publishes it.
+    daemon.fail_next_rescores(0);
+    wake_and_settle(&daemon).await;
+    let table = daemon.scores();
+    assert_eq!(table.epoch, epoch, "the healthy rescore published");
+    assert!(table.ranked.iter().any(|s| s.item == kept_id));
     handle.abort();
 }
 

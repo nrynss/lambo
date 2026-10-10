@@ -1081,6 +1081,9 @@ struct CycleState {
     /// Set only after the cycle's table is published, so a rescore that
     /// panicked is retried on the next cycle (#79 review L1).
     last_epoch: Option<u64>,
+    /// The epoch whose rescore last panicked and was logged at WARN, so a
+    /// failure that repeats every cycle warns once per epoch (#79 review F1).
+    rescore_failed_epoch: Option<u64>,
     /// Emit-on-transition (finding 3) + re-arm (CONC-2): every currently-held
     /// `(condition, node)` maps to the channel's publication index at its last
     /// emission ([`events::EventSender::send`]'s return). A pair absent from the
@@ -1100,6 +1103,8 @@ struct CycleState {
 /// One cycle: rescore, detect, publish, GC. Fully synchronous — no `.await`, so
 /// the graph lock is structurally incapable of spanning a suspension point
 /// (spec §6.4) and the whole body fits inside one `catch_unwind` (CONC-4).
+/// The rescore also has its own, so a rescore that keeps panicking does not
+/// starve detection, the hot list and GC (#79 review F1).
 fn run_cycle(
     state: &LoopState,
     weights: &ScoringWeights,
@@ -1135,7 +1140,12 @@ fn run_cycle(
     // 1. Rescore — only when the epoch changed (finding 1: detection is
     //    NOT epoch-gated; an idle session must age into staleness).
     if cs.last_epoch != Some(epoch) {
-        let ranked = {
+        // #79 review F1: the rescore has its own `catch_unwind`. Under the
+        // cycle-wide one (CONC-4) a rescore that panics on every attempt (a
+        // pathological node in `score_concept`) unwound past detection, the
+        // hot list and GC on every cycle, because `last_epoch` stays unset
+        // and each cycle retries. Contained here, the cycle carries on.
+        let rescored = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let g = graph.read();
             #[cfg(test)]
             if state
@@ -1146,14 +1156,43 @@ fn run_cycle(
                 panic!("injected rescore failure");
             }
             score::rescore(&g, weights)
-        };
-        *scores.write() = ScoreTable { epoch, ranked };
-        // Only once the table is published (#79 review L1). A rescore that
-        // panics (CONC-4 contains it) leaves `last_epoch` behind, so the next
-        // cycle retries. Marking the epoch done first left the table stale
-        // until the next write, and with #79 a fresh concept missing from it
-        // keeps every recall that would show it cold for that long.
-        cs.last_epoch = Some(epoch);
+        }));
+        match rescored {
+            Ok(ranked) => {
+                *scores.write() = ScoreTable { epoch, ranked };
+                // Only once the table is published (#79 review L1). A failed
+                // rescore leaves `last_epoch` behind, so the next cycle
+                // retries. Marking the epoch done first left the table stale
+                // until the next write, and with #79 a fresh concept missing
+                // from it keeps every recall that would show it cold for that
+                // long.
+                cs.last_epoch = Some(epoch);
+                cs.rescore_failed_epoch = None;
+            }
+            Err(payload) => {
+                // One WARN per epoch: a deterministic failure retries every
+                // tick, and the rest of an epoch's failures go to DEBUG.
+                let panic = crate::store::flush::panic_message(&payload);
+                if cs.rescore_failed_epoch == Some(epoch) {
+                    tracing::debug!(
+                        target: "lambo::daemon",
+                        epoch,
+                        panic = %panic,
+                        "DaemonRescorePanic: rescore panicked again; retrying next cycle"
+                    );
+                } else {
+                    cs.rescore_failed_epoch = Some(epoch);
+                    tracing::warn!(
+                        target: "lambo::daemon",
+                        epoch,
+                        panic = %panic,
+                        "DaemonRescorePanic: rescore panicked; the score table is not \
+                         published and is retried next cycle; detection, the hot list \
+                         and GC still run"
+                    );
+                }
+            }
+        }
     }
 
     // 2. Detect + hot-list sync + publish. Lock order: graph read → hot
