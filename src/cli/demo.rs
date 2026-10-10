@@ -39,8 +39,8 @@
 //!    order about one run in ten. The demo therefore stamps its interactions
 //!    from a monotone script clock ([`script_clock`]): interaction *k* lands
 //!    exactly `k ×` [`SCRIPT_STEP`] into the session. The twelve interactions
-//!    are calls 0–8, 10, 11 and 13 (see [`SCRIPT_LAST_EDIT_INDEX`]), so they
-//!    span 13 minutes, above the recency floor in `score`. The extent is the
+//!    are [`INTERACTION_CALLS`] (see [`SCRIPT_LAST_EDIT_INDEX`]), a 13-minute
+//!    span, above the recency floor in `score`. The extent is the
 //!    script's and the score table is a pure function of the graph. The wall
 //!    pause between writes stays [`STEP_PACING`] (10ms): the script step is
 //!    not a sleep. This changes which clock the *process* reads, not who may
@@ -116,11 +116,12 @@
 //! Stage 3 applies to the blast-radius query — the guard that stops a burst of
 //! same-tick edges from inflating either measure. Compressing it from 60s to
 //! 10ms keeps the guard **live**: every cycle still applies it, and an edge
-//! younger than 10ms would not count. In this script it filters nothing.
-//! Cycles are frozen until the build is complete, and by the first cycle
-//! every edge is already older than 10ms (the newest is agent A's last edit,
-//! and the wall pauses alone put a tenth of a second behind it). The fixed
-//! point does not depend on waiting for an edge to age.
+//! younger than 10ms would not count. Cycles are frozen during the build, so
+//! the floor is not applied then. Script-clock edges from the build are
+//! minutes old by the first canonization cycle, so the 10ms floor does not
+//! filter those. Edges created while settling (the synonym declarations) are
+//! wall-stamped and can be younger than 10ms; this does not claim the floor
+//! ignores them.
 //!
 //! `conflict_recency_window` is widened to [`DEMO_CONFLICT_RECENCY_WINDOW`]
 //! because the script clock is not the wall clock. The daemon measures a
@@ -245,31 +246,36 @@ pub const STEP_PACING: Duration = Duration::from_millis(10);
 
 /// Step of [`script_clock`]: call *k* is stamped `k ×` this into the session.
 ///
-/// The interactions are calls 0–8, 10, 11 and [`SCRIPT_LAST_EDIT_INDEX`], so
-/// the session spans 13 steps, 13 minutes, above
+/// Which calls are interactions is [`INTERACTION_CALLS`]. The session spans
+/// [`SCRIPT_LAST_EDIT_INDEX`] steps (13 minutes), above
 /// [`crate::daemon::score::MIN_RECENCY_SPAN`]. Recency is a position inside
-/// the span, and the call pattern is the one the old 10ms step had, so every
-/// demo recency value — and the P90 set and GC headroom that are functions
-/// of it — is on the bits the old step produced. A span shorter than the
+/// that span, so the values match the old 10ms step. A span shorter than the
 /// floor would collapse those positions toward 1.
 pub const SCRIPT_STEP: Duration = Duration::from_secs(60);
 
-/// Call index of agent A's last edit on [`script_clock`], and the one place
-/// the index is explained.
+/// Call index of agent A's last edit on [`script_clock`].
 ///
-/// The counter is read by each `begin_interaction` (twelve, one per scripted
-/// write) and by the write pipeline once at every `Memory::close`, where it
-/// stamps any receipt still pending (`writeq` drain). Two closes come before
-/// act III: after act I (call 9) and after act II (call 12). Act III's edit
-/// is therefore call 13. Those close reads stay on the script clock because
-/// they are part of the spacing the old 10ms step produced: drop them and
-/// the printed GC headroom moves.
+/// This is the one place the script clock's call indices are explained.
 ///
-/// [`script_clock`] backdates by this many steps, so the edit lands on the
-/// wall clock's present. `assert_shape` checks that, so a change to the
-/// number of reads before act III fails with a diagnosis instead of quietly
-/// moving the edit off the present.
+/// The counter advances on each `begin_interaction` (twelve, one per scripted
+/// write) and once at every `Memory::close`, where the write pipeline stamps
+/// any receipt still pending. Traced order: the interactions are
+/// [`INTERACTION_CALLS`], the closes before act III are calls 9 and 12, and
+/// [`POST_EDIT_CLOCK_READS`] closes after this index are calls 14–16. Those
+/// later closes land one [`SCRIPT_STEP`] further ahead of the wall clock
+/// each, so the lead is `POST_EDIT_CLOCK_READS × SCRIPT_STEP`. They stamp
+/// nothing in this script, and that lead is inside
+/// [`crate::writeq::RECEIPT_RETENTION`]. The closes before act III stay on
+/// this clock: dropping them moves the printed GC headroom.
+///
+/// [`script_clock`] backdates by this many steps, so the last edit lands on
+/// the wall clock's present. `assert_shape` checks that every interaction's
+/// stamp is one of [`INTERACTION_CALLS`], so a change to the number of reads
+/// before act III fails with the landed indices.
 pub const SCRIPT_LAST_EDIT_INDEX: i64 = 13;
+
+/// Script-clock reads after [`SCRIPT_LAST_EDIT_INDEX`]. See that constant.
+pub const POST_EDIT_CLOCK_READS: i64 = 3;
 
 /// The demo's `conflict_recency_window`: the spec's 30s plus the script
 /// clock's span ([`SCRIPT_LAST_EDIT_INDEX`] × [`SCRIPT_STEP`]).
@@ -316,6 +322,11 @@ pub const EXPECT_CONFLICT_LINE: &str = "Agent A wrote to it <n> seconds ago";
 pub const EXPECT_BLAST_RADIUS: u64 = 9;
 /// Interactions the script opens (one per write call, server-stamped).
 pub const EXPECT_INTERACTIONS: usize = 12;
+
+/// Script-clock call indices of the twelve interactions.
+///
+/// The gaps are `Memory::close` reads. See [`SCRIPT_LAST_EDIT_INDEX`].
+pub const INTERACTION_CALLS: [i64; EXPECT_INTERACTIONS] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 13];
 /// Concepts the script creates. Asserted so a GC eviction or a canonicalizer
 /// collision is a loud failure rather than a quietly different demo.
 pub const EXPECT_CONCEPTS: usize = 27;
@@ -1006,18 +1017,11 @@ pub fn fresh_session_id() -> String {
 ///   write is 13 minutes earlier. Only the *interior spacing* is synthetic.
 ///   Pinning `base` to a constant epoch would have made the whole graph
 ///   decades old and turned the Stage 2 / Stage 3 age floors into no-ops.
-/// * **Monotone, and ahead of the wall clock after the last edit.** Every
-///   interaction is at or before the wall clock: the last edit is the
-///   construction instant, and the wall sleep ([`STEP_PACING`]) is far
-///   shorter than [`SCRIPT_STEP`]. The three reads after it — the closes
-///   after act III, after the canonization phase and after agent B's recall
-///   (calls 14–16) — land one to three minutes ahead of the wall clock.
-///   They are the drain's stamp for receipts still pending at close, and
-///   there are none in this script, so nothing is written with them. No
-///   receipt is minted or expired on this clock either: its seventeen reads
-///   are the twelve interactions and the five closes. The lead is also under
-///   `RECEIPT_RETENTION` (300s). The daemon, canonization and recall read the
-///   wall clock, not this one.
+/// * **Monotone through the last edit, and ahead of the wall clock after it.**
+///   Every interaction is at or before the construction instant. Reads after
+///   [`SCRIPT_LAST_EDIT_INDEX`] land ahead of the wall clock; what those
+///   reads are, and why they write nothing, is on that constant. The daemon,
+///   canonization and recall read the wall clock, not this one.
 /// * **Shared across the acts, and with the write pipeline.** Agent A, agent
 ///   B and agent A again each open their own [`Memory`] on this one counter,
 ///   and each close reads it once. `declare_synonym` and `recall` open no
@@ -1056,9 +1060,8 @@ pub struct ScriptClock {
 // ---------------------------------------------------------------------------
 
 /// Attach one act's handle. Every handle of a run shares the same
-/// [`script_clock`], so the session's twelve interactions land on the same
-/// call indices (0–8, 10, 11, 13; the gaps are the closes) however the acts
-/// split them.
+/// [`script_clock`], so the session's twelve interactions land on
+/// [`INTERACTION_CALLS`] however the acts split them.
 async fn open(
     store: &Arc<dyn GraphStore>,
     embedder: &Arc<dyn Embedder>,
@@ -1143,9 +1146,9 @@ async fn play(
 
 /// The two structural facts the demo claims, checked the moment the graph is
 /// complete: exactly [`EXPECT_CONCEPTS`] concepts, and exactly
-/// [`EXPECT_BLAST_RADIUS`] dependents under `user schema`. Also that agent A's
-/// last edit is call [`SCRIPT_LAST_EDIT_INDEX`] on the script clock, the
-/// instant `last_edit_at` the clock was backdated to.
+/// [`EXPECT_BLAST_RADIUS`] dependents under `user schema`. Also that every
+/// interaction's script-clock call is in [`INTERACTION_CALLS`], so agent A's
+/// last edit is call [`SCRIPT_LAST_EDIT_INDEX`].
 fn assert_shape(
     graph: &Arc<RwLock<Graph>>,
     last_edit_at: chrono::DateTime<chrono::Utc>,
@@ -1155,6 +1158,18 @@ fn assert_shape(
     let concepts = g.concepts().count();
     let interactions = g.interactions().count();
     let newest = g.interactions().map(|i| i.created_at).max();
+    let step = SCRIPT_STEP.as_millis() as i64;
+    let base = last_edit_at - chrono::Duration::milliseconds(SCRIPT_LAST_EDIT_INDEX * step);
+    let mut landed = Vec::with_capacity(interactions);
+    let mut off_step = false;
+    for created_at in g.interactions().map(|i| i.created_at) {
+        let delta = (created_at - base).num_milliseconds();
+        if delta.rem_euclid(step) != 0 {
+            off_step = true;
+        }
+        landed.push(delta.div_euclid(step));
+    }
+    landed.sort_unstable();
     let node = concept_id(&g, USER_SCHEMA).ok_or_else(|| {
         CliError::Runtime(format!("demo: '{USER_SCHEMA}' is missing from the graph"))
     })?;
@@ -1183,19 +1198,13 @@ fn assert_shape(
             "demo: expected {EXPECT_INTERACTIONS} interactions, found {interactions}"
         )));
     }
-    let now = chrono::Utc::now();
-    if newest != Some(last_edit_at) || last_edit_at > now {
-        let step = SCRIPT_STEP.as_millis() as i64;
-        let calls = newest.map(|t| {
-            SCRIPT_LAST_EDIT_INDEX + (t - last_edit_at).num_milliseconds().div_euclid(step)
-        });
+    if off_step || landed.as_slice() != INTERACTION_CALLS {
         return Err(CliError::Runtime(format!(
-            "demo: agent A's last edit is stamped {newest:?}, expected {last_edit_at} (call \
-             {SCRIPT_LAST_EDIT_INDEX} on the script clock, not after the wall clock {now}). \
-             It landed on call {calls:?}: the number of script-clock reads before act III \
-             changed (each `Memory::close` reads it once). Update SCRIPT_LAST_EDIT_INDEX, \
-             or the edit is off the present and the conflict window no longer spans the \
-             script."
+            "demo: script-clock calls of the interactions are {landed:?}, expected \
+             {INTERACTION_CALLS:?} (newest stamp {newest:?}, last edit {last_edit_at}). \
+             Each `Memory::close` reads the script clock once. An interaction on a close \
+             index, or a close on an interaction index, means the number of reads before \
+             act III changed. Update SCRIPT_LAST_EDIT_INDEX and INTERACTION_CALLS."
         )));
     }
     if radius != EXPECT_BLAST_RADIUS {
@@ -1784,16 +1793,13 @@ fn header(n: &mut Narrator, scenario: &str, session: &str, store: &dyn GraphStor
 mod tests {
     use super::*;
 
-    /// Script-clock call indices of the twelve interactions: calls 9 and 12
-    /// are the closes after acts I and II (see [`SCRIPT_LAST_EDIT_INDEX`]).
-    const INTERACTION_CALLS: [i64; EXPECT_INTERACTIONS] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 13];
-
     /// The interactions span 13 steps, which clears the 10-minute recency
     /// floor, and each one's position in that span is the `f64` the old 10ms
-    /// step gave it, which is why widening the script does not move a demo
-    /// recency value.
+    /// step gave it. This loop is the scaling identity. Which calls the demo
+    /// actually stamps is `assert_shape`, on a real run.
     #[test]
     fn script_step_clears_the_recency_floor_without_moving_relative_recency() {
+        assert_eq!(INTERACTION_CALLS.len(), EXPECT_INTERACTIONS);
         assert_eq!(*INTERACTION_CALLS.last().unwrap(), SCRIPT_LAST_EDIT_INDEX);
         let step = SCRIPT_STEP.as_millis() as i64;
         let span = SCRIPT_LAST_EDIT_INDEX * step;
@@ -1813,17 +1819,18 @@ mod tests {
             clock,
             last_edit_at,
         } = script_clock();
+        // Consecutive counter reads, not the interaction subset. Call
+        // `SCRIPT_LAST_EDIT_INDEX` is the backdate anchor.
         let stamps: Vec<_> = (0..=SCRIPT_LAST_EDIT_INDEX).map(|_| clock()).collect();
-        let wall = chrono::Utc::now();
         assert_eq!(stamps[SCRIPT_LAST_EDIT_INDEX as usize], last_edit_at);
-        assert!(
-            stamps.iter().all(|t| *t <= wall),
-            "no interaction stamp may be after the wall clock"
-        );
         assert_eq!(
             (last_edit_at - stamps[0]).num_milliseconds(),
             span,
             "act I's first write is the whole span before the last edit"
+        );
+        assert!(
+            SCRIPT_STEP * (POST_EDIT_CLOCK_READS as u32) < crate::writeq::RECEIPT_RETENTION,
+            "closes after the last edit must stay inside receipt retention"
         );
     }
 
@@ -1846,6 +1853,11 @@ mod tests {
         assert_eq!(
             canonization_config().conflict_recency_window,
             DEMO_CONFLICT_RECENCY_WINDOW
+        );
+        assert!(
+            STEP_PACING * (EXPECT_INTERACTIONS as u32)
+                <= crate::daemon::conflict::CONFLICT_RECENCY_WINDOW,
+            "wall-clock pacing must fit in the 30s of slack past the script span"
         );
     }
 

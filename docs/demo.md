@@ -66,10 +66,11 @@ has its own fixed 30-second window and is unaffected.
 applies to inbound structural edges and Stage 3 applies to the blast-radius
 query — the guard that stops a burst of same-tick edges from inflating either
 measure. Compressing it from 60s to 10ms keeps the guard **live**: every cycle
-still applies it, and an edge younger than 10ms would not count. In this script
-it filters nothing. Cycles are frozen until the build is complete, and by the
-first cycle every edge is already older than 10ms, so the fixed point does not
-depend on waiting for an edge to age.
+still applies it, and an edge younger than 10ms would not count. Cycles are
+frozen during the build, so the floor is not applied then. Script-clock edges
+from the build are minutes old by the first canonization cycle, so the 10ms
+floor does not filter those. Edges created while settling are wall-stamped
+and can be younger than 10ms; this does not claim the floor ignores them.
 
 Freezing `canonization_eval_interval` during the build is not cosmetic: it
 guarantees no cycle ever evaluates a half-built graph, so the state machine
@@ -85,9 +86,10 @@ configured. Recall still runs its vector leg when the store claims
 
 **Left at spec defaults, deliberately**, because they are the thresholds the
 demo is claiming to satisfy: `canonization_min_peer_count` (20),
-`canonization_eval_batch_size` (50), `canonization_repromotion_cooldown` (300s),
-`max_canonical_nodes` (1000), the scoring and recall weights, and every stage constant in `src/canon` (`gc_survived >= 3`,
-strictly above P90, `distinct >= 3`, `coverage >= 0.3`, `blast_radius > 5`).
+`canonization_eval_batch_size` (50), `canonization_repromotion_cooldown`
+(300s), `max_canonical_nodes` (1000), the scoring and recall weights, and
+every stage constant in `src/canon` (`gc_survived >= 3`, strictly above P90,
+`distinct >= 3`, `coverage >= 0.3`, `blast_radius > 5`).
 
 ### Why GC cannot simply be turned off
 
@@ -130,15 +132,13 @@ a **fixed point**, not a snapshot taken at a lucky instant:
    broken by `NodeId`, and node ids are random UUIDs.
 5. **The script is paced on two clocks.** The wall pause (`STEP_PACING`, 10ms
    between interactions) keeps the narration readable. The script clock steps
-   60 seconds (`SCRIPT_STEP`). Each `Memory::close` reads that clock once, and
-   two closes come before act III, so the twelve interactions are calls 0–8,
-   10, 11 and 13. The session spans 13 minutes, above the 10-minute recency
-   floor. Recency is a position inside the span, and the call pattern is the
-   one the old 10ms step had, so every demo recency value is unchanged. The
-   last edit is stamped at the wall clock's present (the demo checks this),
-   and the conflict window spans the rest (see the knobs). Twelve writes
-   issued back to back would land microseconds apart, and that jitter would
-   be the span.
+   60 seconds (`SCRIPT_STEP`). The twelve interactions are `INTERACTION_CALLS`
+   (see `SCRIPT_LAST_EDIT_INDEX` in `src/cli/demo.rs`). The session spans 13
+   minutes, above the 10-minute recency floor, and recency positions match
+   the old 10ms step. The last edit is stamped at the wall clock's present
+   (the demo checks this), and the conflict window spans the rest (see the
+   knobs). Twelve writes issued back to back would land microseconds apart,
+   and that jitter would be the span.
 
 ### What is normalized, and why
 

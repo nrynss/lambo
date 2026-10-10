@@ -108,9 +108,8 @@ time and spaces nothing on the script clock.
 
 The clock is backdated by 13 steps so that edit falls on `Utc::now`
 (truncated to whole milliseconds, which SQLite keeps) at construction.
-`assert_shape` checks that the newest interaction is exactly that instant
-and not after the wall clock, and names the call it landed on if a change
-to the close reads moves it. Positions are the old 10 ms positions at the
+`assert_shape` checks that every interaction lands on `INTERACTION_CALLS`,
+and names the landed indices if a change to the close reads moves them. Positions are the old 10 ms positions at the
 same call indices. Dropping the close reads off this clock moved the
 printed headroom from 2.06× to 2.10×; they stay.
 
@@ -130,11 +129,10 @@ so every write the 30 s window covered when the whole run took a second of
 wall time is inside it. It is set in `build_config`, so both phases carry
 it, and it is in the knob table and the printed header. The high-risk
 modification line reads `HIGH_RISK_WRITE_WINDOW` (a fixed 30 s) and is
-unaffected. `agent_b_keeps_both_conflict_lines_on_the_memory_store` and the
-two ×2 scenario tests assert 8 warnings and both agent B lines. They failed
-on the first version.
+unaffected. The two ×2 scenario tests assert 8 warnings and both agent B
+lines. They failed on the first version.
 
-Compared `lambo demo --scenario rest-api` on the review base `212d3c4a` (a
+Compared `lambo demo --scenario rest-api` on main at `212d3c4a` (a
 throwaway worktree) and on this branch after the window fix, fixture
 embedder, fresh sqlite each, outcome block normalized the way the binary
 test normalizes it (`<s>`, `<n>`, `<node>`):

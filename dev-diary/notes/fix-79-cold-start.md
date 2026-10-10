@@ -218,9 +218,11 @@ dimension, so recency can only widen the cosine order. This also covers the
 holder and two tier tests that share the fixture. The test keeps the
 default blend, so the wip's query-only weights are dropped.
 `graded_similarity_survives_a_stall_between_derives_on_sqlite` pins the fix
-with a 40 ms stall before the last graded derive. With the old best-first
-order it fails 3/3 with the CI symptom (0.3 look 0.4667 over 0.5 look
-0.4417). On HEAD the five graded tests passed 20/20.
+with a 40 ms stall before the last graded derive. (#95 kept the name and
+changed what it pins: daemon-score spread under the recency floor. Order is
+pinned by `a_stall_cannot_flip_a_half_cosine_ahead_of_point_three`.) With
+the old best-first order it fails 3/3 with the CI symptom (0.3 look 0.4667
+over 0.5 look 0.4417). On HEAD the five graded tests passed 20/20.
 
 The millisecond truncation itself is not a production defect: real
 sessions span minutes, so the quantum is negligible. Switching to

@@ -236,21 +236,6 @@ fn scenario_is_identical_twice_on_the_memory_store() {
     runtime.shutdown_background();
 }
 
-/// Issue #95 parity: the recency floor must not change what agent B is told.
-#[test]
-fn agent_b_keeps_both_conflict_lines_on_the_memory_store() {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("runtime");
-    let store: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
-    let embedder: Arc<dyn Embedder> = Arc::new(FixtureEmbedder::new());
-    let run = runtime.block_on(run_once(&store, &embedder));
-    assert_spec_13(&run.outcome);
-    assert_conflict_lines(&run.outcome);
-    runtime.shutdown_background();
-}
-
 #[cfg(feature = "store-sqlite")]
 mod sqlite {
     use super::*;
