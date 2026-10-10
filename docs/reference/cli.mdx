@@ -386,7 +386,7 @@ Nothing crosses between sessions. Recall, inspect, saints, stats and GC each see
 
 The embedder, the store connection and the HTTP listener are shared. With more than one session, every name must be addressable by URL: 1 to 128 bytes of `A-Z`, `a-z`, `0-9`, `.`, `_`, `:` and `-`, not starting with `.`. A single session keeps `--session`'s looser rule and is served at `/mcp`.
 
-If another writer already holds one of the sessions at startup, the server does not wait for it. It serves the others, answers requests for that session with `503` and a `Retry-After` header, and tries to take it every 5 seconds.
+If another writer already holds one of the sessions at startup, the server does not wait for it. It serves the others, answers requests for that session with `503` and a `Retry-After` header, and tries to take it again 5 to 6 seconds after each failed attempt.
 
 If a running session loses its lease to another writer, only that session is detached. Its unflushed tail is discarded, as a crash would discard it, and a `lease` `lost` line goes to the ledger. The other sessions keep serving, and the lost session is retried the same way.
 

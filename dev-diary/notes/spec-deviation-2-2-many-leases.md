@@ -71,7 +71,7 @@ recommended (Q18), and the repo owner accepted it on 2026-10-09.
   single `--session lambo-dev` with or without `LAMBO_AUTH_TOKEN`.
 - **Startup.** A pinned session held by another process at startup no
   longer blocks the start. The process serves its other sessions, answers
-  503 for that one, and tries again every 5 s.
+  503 for that one, and tries again 5 to 6 s after each failed attempt.
 - **SQLite.** On SQLite, every session's flushes, heartbeats and attach
   loads share one pooled connection (design R1). `attach_concurrency` is
   forced to 1 there. For user scope at scale, use Postgres.

@@ -128,9 +128,15 @@ deviation in one place.
   only for one pinned session with nothing on demand, and `DetachSession`
   otherwise (design R4).
 - A pinned session that another process holds becomes `HeldElsewhere`. It
-  answers 503 with `Retry-After`, and a background retry runs every
-  `PINNED_RETRY`. That is `ELECTION_RETRY` × 5, so 5 s, and never less than
-  1 s. The `lease:refused` ledger line is written once, at the transition.
+  answers 503 with `Retry-After`, and a background retry is due
+  `PINNED_RETRY` after each failed attempt. That is `ELECTION_RETRY` × 5,
+  so 5 s, and never less than 1 s. The retry loop wakes every
+  `ELECTION_RETRY` (1 s) to run due retries, so an attempt starts 5 to 6 s
+  after the last one ended. After a detach the first retry is due
+  `PINNED_RETRY` later; while the detached handle is still alive, it is
+  pushed back by `ELECTION_RETRY` at a time, for at most
+  `PREVIOUS_HANDLE_WAIT` (30 s). The `lease:refused` ledger line is
+  written once, at the transition.
 - **Addition: `Slot::Failed`.** An attach error that will not clear on its
   own gets this slot: an unprovisioned store, or a mismatched embedding
   contract. It answers 503 without `Retry-After` until an operator restarts
@@ -380,9 +386,9 @@ deviation in one place.
   close, not only an erase: a close after a lost lease had the same mirror
   window.
 - **Deviation: `POST /admin/s/{s}/detach` is not served (§6.3).** A pinned
-  session's detach would be undone by the background retry within 5 s. An
-  operator detach needs its own semantics first. It is left to #33 or a
-  follow-up.
+  session's detach would be undone by the background retry a few seconds
+  later. An operator detach needs its own semantics first. It is left to #33
+  or a follow-up.
 - **Deviation: `GET /admin/sessions` has no `last_used` field (§6.3).** The
   fields are `session`, `state`, `pinned` and `default`. For a live session
   there is also `attached`: `nodes`, `edges`, `concepts`,

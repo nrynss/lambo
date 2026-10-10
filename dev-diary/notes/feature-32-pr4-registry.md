@@ -62,13 +62,15 @@ lost" in a multi-session process does not say whose.
 
 **Held elsewhere is not an error and not a wait.** A pinned session another
 writer holds at startup is `HeldElsewhere`: the others are served, its
-requests get 503 with `Retry-After`, and the retry loop tries it every
-`PINNED_RETRY` (5 s, `ELECTION_RETRY × 5`). The loser's `lease:refused`
-line is booked once, at the transition, not on every retry. Any **other**
-attach error (an unprovisioned store, a contract mismatch, an erased
-session) refuses the start, after closing the sessions already acquired so
-no lease is left to lapse. An erased pinned session is therefore a startup
-error in PR 4 (as it is for a one-session serve); the `Erased` slot is PR 7's.
+requests get 503 with `Retry-After`, and the retry loop tries it again
+`PINNED_RETRY` (5 s, `ELECTION_RETRY × 5`) after each failed attempt,
+checking for due retries every `ELECTION_RETRY` (1 s). The loser's
+`lease:refused` line is booked once, at the transition, not on every retry.
+Any **other** attach error (an unprovisioned store, a contract mismatch, an
+erased session) refuses the start, after closing the sessions already
+acquired so no lease is left to lapse. An erased pinned session is therefore
+a startup error in PR 4 (as it is for a one-session serve); the `Erased`
+slot is PR 7's.
 
 **Pinned only, so the default must be pinned.** PR 1's review asked PR 4/8
 to decide what `/mcp` does when `default_session` is not hosted. With no

@@ -138,9 +138,9 @@ authorization.
 
 **`POST /admin/s/{s}/detach` is not served.** Design §6.3 lists it for
 #33's cut-over. A pinned session's detach ends in `HeldElsewhere` and the
-retry loop takes it back within 5 s, which makes an operator detach
-pointless until PR 6 changes detach semantics (an on-demand detach removes
-the slot). Left to PR 6 or 9.
+retry loop takes it back a few seconds later, which makes an operator
+detach pointless until PR 6 changes detach semantics (an on-demand detach
+removes the slot). Left to PR 6 or 9.
 
 **`/admin/sessions` fields.** `session`, `state` (`live`, `detaching`,
 `held_elsewhere`, `failed`, `erasing`, `erased`, `unattached`), `pinned`,

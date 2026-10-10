@@ -709,8 +709,12 @@ Before you restart, know these:
   sessions is #33's split tool, which does not exist yet. Pinning
   `lambo-dev` beside the new sessions for a transition is also valid.
 - **Lease loss changes.** With two or more pinned sessions, a lost lease
-  detaches only that session (`DetachSession`), and the session is retried
-  every 5 s. The process does not exit, so `KeepAlive` no longer restarts
+  detaches only that session (`DetachSession`). The registry tries to
+  attach it again 5 s after the detach and 5 s after each failed attempt,
+  and its retry loop looks for due retries once a second, so an attempt
+  starts 5 to 6 s after the last. While the detached session's old handle
+  is still in use, the retry waits for it, checking once a second, for up
+  to 30 s. The process does not exit, so `KeepAlive` no longer restarts
   it. A session that keeps losing its lease shows up in the log, not as a
   restart.
 - **SQLite carries every session.** Every session's flushes, heartbeats and

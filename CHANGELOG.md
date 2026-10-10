@@ -769,12 +769,12 @@
   shared, and `--max-sessions` counts MCP sessions across the process. An
   unhosted or malformed id gets the same empty 404 as an unrouted path. A
   session held by another writer at startup is answered with 503 and
-  `Retry-After` and retried every 5 s; a session that loses its lease is
-  detached and retried while the others keep serving. A one-session serve
-  is unchanged, including exiting when it loses its lease. Shutdown closes
-  every session concurrently inside the existing budget and releases every
-  lease. Credentials and the operator surface are the fifth and seventh parts
-  below; on-demand sessions are the sixth, above.
+  `Retry-After` and retried 5 to 6 s after each failed attempt; a session
+  that loses its lease is detached and retried while the others keep serving.
+  A one-session serve is unchanged, including exiting when it loses its
+  lease. Shutdown closes every session concurrently inside the existing
+  budget and releases every lease. Credentials and the operator surface are
+  the fifth and seventh parts below; on-demand sessions are the sixth, above.
 - Credentials for `lambo serve --transport http` (#32, fifth part).
   `[[serve.credential]]` entries are enforced: each names the variable
   holding its token (read at startup; an unset, empty or non-UTF-8 one
