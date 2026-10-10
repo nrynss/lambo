@@ -112,15 +112,28 @@
 
   function plural(n, one, many) { return n === 1 ? one : many; }
 
+  // The page's only network call. Every URL handed to it is relative.
+  function send(url, init) {
+    return fetch(url, init);
+  }
+
   // `path` is relative ("api/..."), resolved against the page's own URL:
   // the page at `/` reads `/api/...` (the default session) and the page at
   // `/s/<session>/` reads `/s/<session>/api/...` (#4 PR 2 review M1). The
   // server redirects `/s/<session>` to `/s/<session>/` so the base is right.
   function get(path) {
-    return fetch(path, { headers: { accept: "application/json" } }).then(function (r) {
+    return send(path, { headers: { accept: "application/json" } }).then(function (r) {
       if (!r.ok) { var e = new Error("HTTP " + r.status); e.status = r.status; throw e; }
       return r.json();
     });
+  }
+
+  // The site root relative to this page: "" on the page at `/`, "../../" on
+  // the page at `/s/<session>/`. URLs that are not the session's own (the
+  // listing, another session's page) are built on it, so they stay relative
+  // too and nothing in this file names an absolute API path.
+  function rootPath() {
+    return /^\/s\/[^\/]+\//.test(window.location.pathname) ? "../../" : "";
   }
 
   // ---- state -----------------------------------------------------------
@@ -168,6 +181,142 @@
       var next = THEMES[(THEMES.indexOf(t) + 1) % THEMES.length];
       t = next;
       applyTheme(next);
+    });
+  }
+
+  // ---- session picker (#4 PR 4) -----------------------------------------
+  // One session per page. Switching is a navigation to that session's own
+  // page, never an in-page swap, so the poll cursor, the graph, the focus and
+  // the freshness all start over and nothing crosses sessions (design 6.1).
+  // The picker appears only when /api/session says this caller reads more
+  // than one served session (`switchable`): a single-session portal, or a
+  // credential that reads one session, gets the page exactly as before.
+  //
+  // Names come from the operator's opt-in listing (/api/sessions) when it
+  // answers. Otherwise the picker is a text field plus the names this browser
+  // has opened, most recent first, under one localStorage key. Names only:
+  // no counts, no times. Every name is rendered as text, never as markup.
+
+  var SESSION_HISTORY_KEY = "lambo-sessions";
+  var SESSION_HISTORY_MAX = 20;
+
+  // The server's addressed-id rule (surface::session::parse_addressed): 1 to
+  // 128 bytes of [A-Za-z0-9._:-], not starting with ".". A name outside it
+  // could never be opened, so it is refused here rather than sent.
+  var SESSION_NAME_RE = /^[A-Za-z0-9_:-][A-Za-z0-9._:-]{0,127}$/;
+
+  var picker = { mode: null, current: null };
+
+  function readSessionHistory() {
+    try {
+      var raw = JSON.parse(localStorage.getItem(SESSION_HISTORY_KEY) || "[]");
+      if (!Array.isArray(raw)) return [];
+      return raw.filter(function (n) {
+        return typeof n === "string" && SESSION_NAME_RE.test(n);
+      }).slice(0, SESSION_HISTORY_MAX);
+    } catch (e) { return []; /* private mode, or a value this page did not write */ }
+  }
+
+  function writeSessionHistory(names) {
+    try {
+      localStorage.setItem(SESSION_HISTORY_KEY, JSON.stringify(names.slice(0, SESSION_HISTORY_MAX)));
+    } catch (e) { /* private mode */ }
+  }
+
+  function rememberSession(name) {
+    var names = readSessionHistory().filter(function (n) { return n !== name; });
+    names.unshift(name);
+    writeSessionHistory(names);
+  }
+
+  function forgetSession(name) {
+    writeSessionHistory(readSessionHistory().filter(function (n) { return n !== name; }));
+  }
+
+  function sessionPage(name) {
+    return rootPath() + "s/" + name + "/";
+  }
+
+  function pickerMessage(text) {
+    $("session-picker-msg").textContent = text || "";
+  }
+
+  function fillKnownSessions() {
+    var list = $("session-known");
+    clear(list);
+    readSessionHistory().forEach(function (name) {
+      if (name === picker.current) return;
+      var o = document.createElement("option");
+      o.value = name;
+      list.appendChild(o);
+    });
+  }
+
+  // The listing answered with names: a plain choice among them.
+  function showSessionChoice(names) {
+    picker.mode = "choice";
+    var select = $("session-choice");
+    clear(select);
+    names.forEach(function (name) {
+      var o = el("option", null, name);
+      o.value = name;
+      if (name === picker.current) o.selected = true;
+      select.appendChild(o);
+    });
+    $("session-picker-label").htmlFor = "session-choice";
+    show(select, true);
+    show($("session-entry"), false);
+    show($("session-picker"), true);
+  }
+
+  // No listing: type a name; this browser's own history is offered.
+  function showSessionEntry() {
+    picker.mode = "entry";
+    rememberSession(picker.current);
+    fillKnownSessions();
+    $("session-picker-label").htmlFor = "session-entry";
+    show($("session-entry"), true);
+    show($("session-choice"), false);
+    show($("session-picker"), true);
+  }
+
+  function openPickedSession(ev) {
+    ev.preventDefault();
+    var name = (picker.mode === "choice" ? $("session-choice").value : $("session-entry").value).trim();
+    if (!name || name === picker.current) { pickerMessage(""); return; }
+    if (!SESSION_NAME_RE.test(name)) {
+      pickerMessage("Not a session name: use letters, digits, '.', '_', ':' or '-'.");
+      return;
+    }
+    var target = sessionPage(name);
+    pickerMessage("Opening " + name + "…");
+    // Ask first, so a name this caller cannot read is said here rather than
+    // by landing on an empty 404. The page itself never touches the store.
+    send(target, { method: "HEAD", cache: "no-store" }).then(function (r) {
+      if (r.ok) { window.location.assign(target); return; }
+      if (picker.mode === "entry") { forgetSession(name); fillKnownSessions(); }
+      pickerMessage("No session called " + name + " can be read here.");
+    }).catch(function () {
+      pickerMessage("Could not reach the server. Try again.");
+    });
+  }
+
+  function initPicker(info) {
+    if (!info.switchable || picker.mode) return;
+    picker.current = info.session;
+    document.title = info.session + " · " + document.title;
+    $("session-picker").addEventListener("submit", openPickedSession);
+    picker.mode = "pending";
+    get(rootPath() + "api/sessions").then(function (list) {
+      // With a listing, the browser keeps no history of its own (one source
+      // of truth). The current session is always offered: the caller is on it.
+      var names = list && Array.isArray(list.sessions) ? list.sessions.slice() : [];
+      if (names.length && names.indexOf(picker.current) < 0) names.unshift(picker.current);
+      if (names.length > 1) showSessionChoice(names);
+      else showSessionEntry();
+    }).catch(function () {
+      // Listing off (the uniform 404) or unreachable: type a name instead.
+      showSessionEntry();
     });
   }
 
@@ -1138,7 +1287,10 @@
     initLookup();
     $("details-clear").addEventListener("click", clearFocus);
 
-    get("api/session").then(renderSession).catch(function () {
+    get("api/session").then(function (info) {
+      renderSession(info);
+      initPicker(info);
+    }).catch(function () {
       $("session-name").textContent = "unavailable";
     });
 

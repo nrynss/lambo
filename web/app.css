@@ -105,9 +105,32 @@ body {
 .brand { font-weight: 700; letter-spacing: -0.01em; }
 .brand-divider { color: var(--text-muted); }
 
-/* One session per process, so this names the session rather than offering to
-   switch it. See H7 in dev-diary/notes/hardening-tasks.md. */
+/* Names the page's session. When the caller reads more than one, the picker
+   beside it switches by navigating (#4 PR 4); otherwise it stays hidden. */
 .session-name { font-family: var(--mono); font-size: 13px; }
+
+.session-picker { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.picker-control {
+  font: inherit; font-family: var(--mono); font-size: 12px;
+  padding: 3px 8px; border-radius: 5px; max-width: 14rem;
+  background: var(--card); color: var(--text); border: 1px solid var(--border);
+}
+.picker-control:focus-visible, .picker-btn:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 1px;
+}
+.picker-btn {
+  font: inherit; font-size: 12px;
+  padding: 4px 10px; border-radius: 5px; cursor: pointer;
+  background: var(--card); color: var(--text); border: 1px solid var(--border);
+}
+.picker-btn:hover { border-color: var(--accent); }
+.picker-msg { font-size: 12px; color: var(--text-muted); }
+
+/* Read by assistive technology, not drawn. */
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
 
 .readonly-tag {
   font-family: var(--mono); font-size: 10px; letter-spacing: 0.06em;
