@@ -10,6 +10,14 @@ use crate::resolve::{
 };
 use crate::types::{ConceptType, EmbeddingContract};
 
+/// `GET /api/sessions` (#4 PR 3, design 6.2, opt-in): the served sessions
+/// the presenting credential may list, in allowlist order. Names only: no
+/// counts, no times, nothing per session that would need a store read.
+#[derive(Clone, Debug, Serialize)]
+pub(super) struct SessionList {
+    pub(super) sessions: Vec<String>,
+}
+
 /// Session identity, backend kinds, and embedding-space compatibility.
 ///
 /// Backend connectivity remains deliberately hidden: `StoreConfig::dsn`,

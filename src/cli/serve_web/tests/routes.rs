@@ -62,7 +62,20 @@ fn embedded_assets_reference_no_external_origin() {
 #[tokio::test]
 async fn read_only_router_has_no_mutating_route() {
     let store = seed("t85-readonly").await;
-    let (addr, handle) = spawn(state_on(store, "t85-readonly")).await;
+    // `[web] list_sessions` on, so every route in `ROUTES` is registered
+    // (#4 PR 3: `/api/sessions` exists only then; off, it is unrouted,
+    // which `listing::the_listing_is_absent_by_default` pins).
+    let web = crate::config::WebConfig {
+        list_sessions: true,
+        ..Default::default()
+    };
+    let (addr, handle) = spawn(state_with_web(
+        backends_on(store),
+        "t85-readonly",
+        None,
+        &web,
+    ))
+    .await;
 
     for path in ROUTES {
         for method in ["POST", "PUT", "PATCH", "DELETE"] {

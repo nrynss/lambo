@@ -5,19 +5,32 @@
 //! The credential set is `crate::surface::session`'s [`SessionAuthority`],
 //! the type `lambo serve` authenticates with (#4 PR 2, design 4.1): the
 //! bearer scan, the grants and the order are shared, only the secret type
-//! ([`AuthToken`]) and the 401 wording are the portal's own. With no token
-//! configured the set is the implicit loopback grant `local`; with one, the
-//! legacy grant `default`. Both reach every served session.
+//! ([`AuthToken`]) and the 401 wording are the portal's own.
+//!
+//! | configured | grants, in scan order | scope |
+//! |---|---|---|
+//! | nothing (loopback only) | the implicit `local`, no header read | every served session |
+//! | `LAMBO_AUTH_TOKEN` / `--auth-token` | `default` | every served session |
+//! | `[[web.credential]]` (#4 PR 3) | each its own, after `default` if a legacy token is set too | its `sessions` (`"*"` = the allowlist) and/or `session_prefix`, intersected with the allowlist |
+//! | `[web] inherit_serve_credentials` | each `[[serve.credential]]`, after the web ones, capabilities dropped | as configured for serve, intersected with the allowlist |
+//!
+//! `local` exists only while no credential of any kind is configured; one
+//! configured credential (legacy, web or inherited) and every request needs
+//! a bearer. The scan over the set is `surface::bearer::match_any`,
+//! constant-time over every credential.
 //!
 //! **DNS rebinding (#4 design 4.5).** Under the implicit grant nothing
 //! about the caller is checked, so a web page the local user visits could
 //! re-resolve its own name to 127.0.0.1 and read the portal same-origin.
-//! [`HostCheck`] closes that: while no token is configured, a request whose
-//! `Host` is not `localhost`, `127.0.0.1` or `[::1]` (any port) or an
+//! [`HostCheck`] closes that: while no credential is configured, a request
+//! whose `Host` is not `localhost`, `127.0.0.1` or `[::1]` (any port) or an
 //! `--allowed-host` / `[web] allowed_hosts` entry gets one fixed 403, before
-//! anything else is evaluated. With a token configured any `Host` is
+//! anything else is evaluated. With any credential configured (legacy,
+//! `[[web.credential]]` or inherited, one or several) any `Host` is
 //! accepted: a rebound page cannot present a token it does not know (the
-//! rule `lambo serve` applies, #32 PR 5 review M1).
+//! rule `lambo serve` applies, #32 PR 5 review M1). "Only when no token" is
+//! therefore "only under the implicit grant", whatever the number of
+//! credentials.
 
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -28,11 +41,12 @@ use axum::response::{IntoResponse, Response};
 
 use super::state::AppState;
 use crate::cli::caps::CliError;
-use crate::config::AllowedHost;
+use crate::config::credential::{self, SERVE_TABLE, WEB_TABLE};
+use crate::config::{AllowedHost, ServeConfig, WebConfig};
 use crate::mcp::AUTH_TOKEN_ENV;
 use crate::surface::session::{
-    parse_addressed, BearerSecret, HostedSessions, SessionAuthority, SessionGrant,
-    LOCAL_CREDENTIAL_NAME,
+    parse_addressed, BearerSecret, HostedSessions, SessionAuthority, SessionCapabilities,
+    SessionGrant,
 };
 use crate::types::SessionId;
 
@@ -43,6 +57,22 @@ pub(super) type PortalAuthority = SessionAuthority<AuthToken>;
 /// scoped path), so the [`gate`] over the routes does not check it twice.
 #[derive(Clone, Copy)]
 pub(super) struct Authenticated;
+
+/// The grant the request authenticated as, attached by [`gate`] for an
+/// unscoped request (the listing reads it, #4 PR 3). Never a secret.
+#[derive(Clone)]
+pub(super) struct Caller(pub(super) Arc<SessionGrant>);
+
+/// One configured read credential (#4 PR 3): a `[[web.credential]]`, or a
+/// `[[serve.credential]]` imported by `[web] inherit_serve_credentials`
+/// with its capabilities dropped. `Debug` is safe: [`AuthToken`] redacts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WebCredential {
+    /// The name and scope; never a capability (the portal is read-only).
+    pub grant: SessionGrant,
+    /// The token, from the credential's `token_env`.
+    pub token: AuthToken,
+}
 
 /// A bearer token that cannot be printed.
 ///
@@ -97,27 +127,117 @@ impl BearerSecret for AuthToken {
     }
 }
 
-/// The portal's credential set over the served `sessions`.
+/// The portal's credential set over the served `sessions`: the legacy
+/// token's `default` grant first (when set), then `configured` in order;
+/// the implicit `local` grant only when there is neither (module table).
 ///
 /// The hosted set is the allowlist's addressable names and no prefix, so a
-/// grant reaches nothing outside the allowlist (design 4.2). A loose single
-/// session (one name outside the strict charset) is in no hosted set; the
-/// unscoped aliases reach it through
+/// grant reaches nothing outside the allowlist (design 4.2): `"*"` is the
+/// allowlist, and a prefix covers only allowlisted ids under it, because
+/// the scoped path is also checked against [`SessionAuthority::is_pinned`].
+/// A loose single session (one name outside the strict charset) is in no
+/// hosted set; the unscoped aliases reach it through
 /// [`SessionAuthority::authorize_default`], under a scope over every
-/// pinned session, which both of this PR's grants have.
-pub(super) fn portal_authority(auth: Option<AuthToken>, sessions: &[SessionId]) -> PortalAuthority {
+/// pinned session (`local`, `default`, `"*"`).
+pub(super) fn portal_authority(
+    auth: Option<AuthToken>,
+    configured: Vec<WebCredential>,
+    sessions: &[SessionId],
+) -> PortalAuthority {
     let hosted = HostedSessions::new(
         sessions
             .iter()
             .filter_map(|s| parse_addressed(s.as_str()).ok()),
         std::iter::empty(),
     );
-    match auth {
-        Some(token) => {
-            SessionAuthority::with_credentials([(token, SessionGrant::legacy_default())], hosted)
-        }
-        None => SessionAuthority::implicit(SessionGrant::implicit_local(), hosted),
+    if auth.is_none() && configured.is_empty() {
+        return SessionAuthority::implicit(SessionGrant::implicit_local(), hosted);
     }
+    let legacy = auth.map(|token| (token, SessionGrant::legacy_default()));
+    SessionAuthority::with_credentials(
+        legacy
+            .into_iter()
+            .chain(configured.into_iter().map(|c| (c.token, c.grant))),
+        hosted,
+    )
+}
+
+/// Resolve the portal's configured read credentials from the process
+/// environment: every `[[web.credential]]`, then, with `[web]
+/// inherit_serve_credentials`, every `[[serve.credential]]` as a read grant
+/// with the same scope and no capability (design 4.1, Q5).
+///
+/// Fails closed, naming the credential and its variable but never a value:
+/// an unset, non-UTF-8 or unpresentable token, and one token shared by two
+/// credentials (across both tables too). A configured credential equal to
+/// the legacy token is [`check_web_credentials`]' refusal. The CLI runs
+/// this before any backend is built.
+pub fn resolve_web_credentials(
+    web: &WebConfig,
+    serve: &ServeConfig,
+) -> Result<Vec<WebCredential>, CliError> {
+    resolve_web_credentials_with(web, serve, |name| std::env::var_os(name))
+}
+
+/// [`resolve_web_credentials`] with the environment injected.
+pub(super) fn resolve_web_credentials_with(
+    web: &WebConfig,
+    serve: &ServeConfig,
+    lookup: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> Result<Vec<WebCredential>, CliError> {
+    let usage = |e: crate::types::LamboError| CliError::Usage(e.to_string());
+    web.validate().map_err(usage)?;
+    let mut out: Vec<WebCredential> = credential::resolve(
+        web.credentials.iter().map(|c| c.entry()),
+        &WEB_TABLE,
+        &lookup,
+        AuthToken::new,
+    )
+    .map_err(usage)?
+    .into_iter()
+    .map(read_grant)
+    .collect();
+    if web.inherit_serve_credentials {
+        serve.validate().map_err(usage)?;
+        web.validate_with_serve(serve).map_err(usage)?;
+        let imported = credential::resolve(
+            serve.credentials.iter().map(|c| c.entry()),
+            &SERVE_TABLE,
+            &lookup,
+            AuthToken::new,
+        )
+        .map_err(usage)?;
+        out.extend(imported.into_iter().map(read_grant));
+    }
+    Ok(out)
+}
+
+/// A resolved entry as a read grant: its scope, never a capability.
+fn read_grant(
+    (name, scope, token): (String, crate::surface::session::SessionScope, AuthToken),
+) -> WebCredential {
+    WebCredential {
+        grant: SessionGrant::new(name, scope, SessionCapabilities::default()),
+        token,
+    }
+}
+
+/// The checks the whole credential set must pass before the portal starts
+/// (the rule `lambo serve` applies, `config::check_credential_set`):
+/// reserved names, a name or a token used twice, and a configured token
+/// equal to the legacy one. Names credentials, never a token. The CLI runs
+/// it before any backend is built; [`super::run`] again, for library
+/// callers.
+pub fn check_web_credentials(
+    legacy: Option<&AuthToken>,
+    credentials: &[WebCredential],
+) -> Result<(), CliError> {
+    let set: Vec<(&str, &AuthToken)> = credentials
+        .iter()
+        .map(|c| (c.grant.name(), &c.token))
+        .collect();
+    crate::config::check_credential_set(legacy, &set)
+        .map_err(|e| CliError::Usage(format!("credentials: {e}")))
 }
 
 /// Resolve the effective token from the flag and the environment (env wins).
@@ -168,15 +288,42 @@ pub(super) fn authorize_bind_web(bind: IpAddr, token: Option<&AuthToken>) -> Res
     )))
 }
 
-/// The name of the portal's one credential, for the startup log: the
-/// configured token's (`default`) or the implicit loopback one (`local`).
-/// Never a secret.
-pub(super) fn credential_label(authority: &PortalAuthority) -> &str {
+/// Each grant's name and how many served sessions it reads, in scan order,
+/// for the startup count lines (design 4.1). A session counts when the
+/// grant may read it at its own path, or, for a loose single default, at
+/// the aliases ([`SessionAuthority::authorize_default`]). Names a
+/// credential, never a token.
+pub(super) fn credential_reach<'a>(
+    authority: &'a PortalAuthority,
+    sessions: &[SessionId],
+) -> Vec<(&'a str, usize)> {
     authority
-        .credential_names()
-        .first()
-        .copied()
-        .unwrap_or(LOCAL_CREDENTIAL_NAME)
+        .grants()
+        .into_iter()
+        .map(|grant| {
+            let reach = sessions
+                .iter()
+                .filter(|s| authority.authorize_default(grant, s.as_str()).is_ok())
+                .count();
+            (grant.name(), reach)
+        })
+        .collect()
+}
+
+/// The served sessions `grant` may list (design 6.2), in allowlist order:
+/// its exact names, or every one when its scope covers every served
+/// session (`local`, `default`, `"*"`). Never a prefix expansion: a prefix
+/// grant reads the allowlisted ids under it but lists none of them.
+pub(super) fn listable<'a>(grant: &SessionGrant, sessions: &'a [SessionId]) -> Vec<&'a str> {
+    let scope = grant.scope();
+    sessions
+        .iter()
+        .map(SessionId::as_str)
+        .filter(|s| {
+            scope.covers_every_pinned()
+                || parse_addressed(s).is_ok_and(|id| scope.names().any(|n| *n == id))
+        })
+        .collect()
 }
 
 /// Which `Host` values the portal answers (#4 design 4.5).
@@ -330,6 +477,7 @@ pub(super) async fn gate(
                 session: state.default_session.clone(),
             });
         }
+        req.extensions_mut().insert(Caller(grant));
         req.extensions_mut().insert(Authenticated);
     }
     next.run(req).await

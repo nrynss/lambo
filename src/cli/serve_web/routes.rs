@@ -12,10 +12,10 @@ use axum::routing::get;
 use axum::{Json, Router};
 use serde::Serialize;
 
-use super::auth::{gate, host_guard};
+use super::auth::{gate, host_guard, listable, Caller};
 use super::dto::{
     GraphEdge, GraphNode, GraphResponse, InspectParams, InspectResponse, Pulse, RecallParams,
-    RecallResponse, SessionInfo, SinceParams,
+    RecallResponse, SessionInfo, SessionList, SinceParams,
 };
 use super::projections::{
     is_structural, read_feed_and_stats, status_str, structural_dependents, structural_rank,
@@ -98,6 +98,33 @@ pub(super) async fn script() -> Response {
 /// and take the task out of rotation.
 pub(super) async fn healthz() -> Response {
     ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], "ok").into_response()
+}
+
+/// `GET /api/sessions` (#4 PR 3, design 6.2): the served sessions the
+/// presenting credential may list ([`listable`]: its exact names, or every
+/// one for a scope over every served session; never a prefix expansion, never
+/// another credential's names), in allowlist order, `no-store`.
+///
+/// Registered only with `[web] list_sessions = true`; otherwise the path is
+/// unrouted, so it is the uniform 404 on every method. In memory only: no
+/// store call. Reached only through the gate, which attaches the caller's
+/// grant; a request without one (never, behind the gate) is the uniform 404.
+pub(super) async fn api_sessions(
+    State(state): State<Arc<AppState>>,
+    caller: Option<axum::Extension<Caller>>,
+) -> Response {
+    let Some(axum::Extension(Caller(grant))) = caller else {
+        return crate::surface::session::not_found_response();
+    };
+    json(
+        StatusCode::OK,
+        SessionList {
+            sessions: listable(&grant, &state.sessions)
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        },
+    )
 }
 
 pub(super) async fn api_session(State(state): State<Arc<AppState>>, ctx: SessionCtx) -> Response {
@@ -454,8 +481,16 @@ pub(super) async fn api_graph(State(state): State<Arc<AppState>>, ctx: SessionCt
 /// the bearer check for every unscoped path, where it has always been (so
 /// its 401 is unchanged byte for byte), and gives the aliases the default
 /// session.
+///
+/// `/api/sessions` is registered only with `[web] list_sessions` (#4 PR 3):
+/// off, the path is unrouted, so every method gets the uniform 404 rather
+/// than a 405 that would say the route exists.
 pub(super) fn router(state: Arc<AppState>) -> Router {
-    let routes = Router::new()
+    let mut routes = Router::new();
+    if state.list_sessions {
+        routes = routes.route("/api/sessions", get(api_sessions));
+    }
+    let routes = routes
         .route("/", get(index))
         .route("/app.css", get(stylesheet))
         .route("/app.js", get(script))

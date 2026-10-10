@@ -560,6 +560,16 @@ impl<T: BearerSecret> SessionAuthority<T> {
         self.credentials.iter().map(|(_, g)| g.name()).collect()
     }
 
+    /// Every grant a request can arrive as, in order: the configured
+    /// credentials', or the implicit one (for a surface's startup lines and
+    /// per-credential bounds; never a secret).
+    pub(crate) fn grants(&self) -> Vec<&SessionGrant> {
+        match &self.implicit {
+            Some(grant) => vec![grant.as_ref()],
+            None => self.credentials.iter().map(|(_, g)| g.as_ref()).collect(),
+        }
+    }
+
     /// The grant for an `Authorization` header value, or `None` (the
     /// surface's 401).
     ///

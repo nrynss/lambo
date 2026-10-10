@@ -233,6 +233,7 @@ fn portal(
         backends,
         auth.is_some(),
         auth,
+        Vec::new(),
         &[],
         web,
     ))
@@ -354,6 +355,7 @@ async fn run_refuses_a_bad_served_set_before_the_store() {
                 bind: Ipv4Addr::LOCALHOST.into(),
                 auth_token: None,
                 allowed_hosts: Vec::new(),
+                credentials: Vec::new(),
                 web: WebConfig::default(),
             },
         )
@@ -501,7 +503,8 @@ async fn in_scope_mutating_methods_are_405_and_non_routes_are_the_uniform_404() 
     let scoped_routes: Vec<&str> = ROUTES
         .iter()
         .copied()
-        .filter(|r| *r == "/" || r.starts_with("/api/"))
+        // The listing is unscoped (#4 PR 3): never under a session.
+        .filter(|r| *r == "/" || (r.starts_with("/api/") && *r != "/api/sessions"))
         .collect();
     assert_eq!(scoped_routes.len(), 8, "the page and seven data routes");
     for id in ["t4-a", "t4-b"] {
@@ -523,6 +526,7 @@ async fn in_scope_mutating_methods_are_405_and_non_routes_are_the_uniform_404() 
             "/api",
             "/api/nope",
             "//api/pulse",
+            "/api/sessions",
         ] {
             let path = format!("/s/{id}{rest}");
             let r = request(addr, "GET", &path).await;

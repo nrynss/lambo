@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::auth::{portal_authority, AuthToken, HostCheck, PortalAuthority};
+use super::auth::{portal_authority, AuthToken, HostCheck, PortalAuthority, WebCredential};
 use super::views::{SessionView, ViewBounds, ViewCache};
 use crate::cli::caps::CliError;
 use crate::config::{AllowedHost, WebConfig};
@@ -18,12 +18,16 @@ pub(super) struct AppState {
     /// The default session: what the unscoped routes serve, and the first
     /// served session.
     pub(super) default_session: SessionId,
+    /// Every served session, in order, the default first: the allowlist.
+    pub(super) sessions: Vec<SessionId>,
+    /// `[web] list_sessions`: is `GET /api/sessions` registered (#4 PR 3)?
+    pub(super) list_sessions: bool,
     pub(super) backends: ResolvedBackends,
     /// True when `--bind` reaches beyond loopback. A non-loopback bind always
     /// carries a token (see [`authorize_bind_web`](super::auth::authorize_bind_web)).
     pub(super) exposed: bool,
     /// Who may read which served session: the implicit loopback grant, or
-    /// the configured bearer token's (`surface::session`, #4 PR 2).
+    /// the configured credentials' (`surface::session`, #4 PR 2 and 3).
     pub(super) authority: PortalAuthority,
     /// Which `Host` values are answered: the loopback names and the allowed
     /// hosts under the implicit grant, any once a token is required (#4
@@ -37,13 +41,17 @@ pub(super) struct AppState {
 impl AppState {
     /// The state for a portal serving `default_session` and `more` (in
     /// order, each once, the default first), its view bounds from `web`.
-    /// `allowed_hosts` join the loopback names while no token is configured.
+    /// `allowed_hosts` join the loopback names while no credential is
+    /// configured. `credentials` are the resolved `[[web.credential]]` (and
+    /// inherited) grants, beside the legacy `auth` token.
+    #[allow(clippy::too_many_arguments)] // the composition root's inputs, each used once
     pub(super) fn new(
         default_session: SessionId,
         more: impl IntoIterator<Item = SessionId>,
         backends: ResolvedBackends,
         exposed: bool,
         auth: Option<AuthToken>,
+        credentials: Vec<WebCredential>,
         allowed_hosts: &[AllowedHost],
         web: &WebConfig,
     ) -> Self {
@@ -54,11 +62,13 @@ impl AppState {
             }
         }
         let bounds = ViewBounds::resolve(web, backends.store_cfg.kind);
-        let authority = portal_authority(auth, &sessions);
+        let authority = portal_authority(auth, credentials, &sessions);
         Self {
             views: ViewCache::new(sessions.iter().cloned(), bounds),
             host_check: HostCheck::for_authority(&authority, allowed_hosts),
             authority,
+            sessions,
+            list_sessions: web.list_sessions,
             default_session,
             backends,
             exposed,
