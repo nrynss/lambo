@@ -39,10 +39,15 @@ session, counted exactly as the startup count lines count it
 - *A prefix grant counts what it reads.* A `session_prefix` credential
   over two allowlisted ids gets `true` (it learns one bit: "you can read
   another session", never a name). The listing still never expands a
-  prefix, so such a caller gets the text field, not a list.
+  prefix, so such a caller gets the text field, not a list. (Review L2:
+  that held only when the listing named fewer than two sessions; a grant
+  with exact names plus a prefix got a select of the exact names alone.
+  The select now ends with "Other session…", which reveals the field.)
 - *Absent when false* (`skip_serializing_if`). The single-session payload
   is byte for byte what it was, which is what the earlier PRs' parity
-  checks held to; the page treats an absent field as `false`.
+  checks held to; the page treats an absent field as `false`. (Review I4:
+  the JSON and the headers are unchanged; the page's HTML is not, it
+  carries the picker's hidden markup, so the docs say "looks the same".)
 
 No new route.
 
