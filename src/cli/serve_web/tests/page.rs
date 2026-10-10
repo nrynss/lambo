@@ -381,6 +381,13 @@ fn the_picker_markup_is_hidden_labelled_and_keyboard_operable() {
     assert!(INDEX_HTML.contains(r#"for="session-choice">Switch to session</label>"#));
     assert!(INDEX_HTML.contains(r#"<button class="picker-btn" id="session-open" type="submit">"#));
     assert!(INDEX_HTML.contains(r#"id="session-picker-msg" role="status" aria-live="polite""#));
+    // Both controls point at the message (review I6).
+    assert!(INDEX_HTML.contains(
+        r#"<select class="picker-control hidden" id="session-choice" aria-describedby="session-picker-msg">"#
+    ));
+    assert!(INDEX_HTML.contains(
+        r#"maxlength="128" placeholder="session name" aria-describedby="session-picker-msg">"#
+    ));
     assert!(
         APP_JS.contains("$(\"session-picker\").addEventListener(\"submit\", openPickedSession)")
     );

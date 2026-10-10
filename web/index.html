@@ -24,7 +24,7 @@
     <span class="readonly-tag">READ-ONLY</span>
     <form class="session-picker hidden" id="session-picker" aria-label="Switch session" novalidate>
       <label class="sr-only" id="session-picker-label" for="session-choice">Switch to session</label>
-      <select class="picker-control hidden" id="session-choice"></select>
+      <select class="picker-control hidden" id="session-choice" aria-describedby="session-picker-msg"></select>
       <label class="sr-only" id="session-entry-label" for="session-entry">Session name to open</label>
       <input class="picker-control hidden" id="session-entry" type="text"
              list="session-known" autocomplete="off" autocapitalize="off" spellcheck="false"
