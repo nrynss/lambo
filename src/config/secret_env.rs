@@ -1,6 +1,7 @@
 //! The one rule for a `lambo.toml` key that names the environment variable
-//! holding a secret: `[[serve.credential]] token_env` (#32) and
-//! `[embedder] api_key_env` (#21). Neither may name a variable lambo reads its
+//! holding a secret: `[[serve.credential]] token_env` (#32),
+//! `[[web.credential]] token_env` (#4 PR 3) and `[embedder] api_key_env`
+//! (#21). Neither may name a variable lambo reads its
 //! own credentials from ([`SERVE_AUTH_TOKEN_ENV`], [`LAMBO_CREDENTIAL_ENVS`]).
 //!
 //! Such a key is where a token is most likely to be pasted by mistake, so its

@@ -763,6 +763,11 @@ mod tests {
         assert_eq!(web.max_loaded_sessions, Some(DEFAULT_MAX_LOADED_SESSIONS));
         assert_eq!(web.load_concurrency, Some(DEFAULT_LOAD_CONCURRENCY));
         assert_eq!(web.recall_concurrency, Some(DEFAULT_RECALL_CONCURRENCY));
+        assert!(!web.list_sessions && !web.inherit_serve_credentials);
+        assert_eq!(web.credentials.len(), 1);
+        assert_eq!(web.credentials[0].name, "lambo-viewers");
+        assert_eq!(web.credentials[0].sessions, ["lambo"]);
+        assert_eq!(web.credentials[0].session_prefix, None);
         assert!(LamboFile::from_toml_str(raw)
             .expect("example")
             .web

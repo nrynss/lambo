@@ -178,6 +178,17 @@
   `lambo serve-web --session` is now repeatable and no longer required when
   `[web] sessions` names one; with neither it still exits `2`, after reading
   `lambo.toml`.
+- `lambo::cli::serve_web::Args` gains `credentials: Vec<WebCredential>`, and
+  `lambo::config::WebConfig` gains `list_sessions`,
+  `inherit_serve_credentials` and `credentials` (#4 PR 3). Code that builds
+  either with a struct literal must add them (`Vec::new()` and `false` keep
+  today's behaviour; `WebConfig` also takes `..Default::default()`). Code
+  that parses `lambo.toml` is unaffected.
+- A `lambo.toml` with `[[web.credential]]`, or with `[web]
+  inherit_serve_credentials = true` beside `[[serve.credential]]`, makes
+  `lambo serve-web` require a bearer token on every request, loopback
+  included, and turns its `Host` check off (#4 PR 3), as one token does
+  today. Without either key nothing changes.
 - A `LAMBO_AUTH_TOKEN` or `--auth-token` longer than 4 KiB refuses the start
   of `lambo serve-web` (exit 2, naming the bound, never the value) (#4 PR 2).
   The window now authenticates through the shared credential set, which
@@ -494,6 +505,34 @@
   caps. Works over every vector source (#8's holder graph, the store's
   checked read on SQLite, Postgres and Cockroach, and #18's tier); no store
   contract changed.
+- Per-credential read scope for `lambo serve-web` (#4 PR 3):
+  `[[web.credential]]` entries (`name`, `token_env`, `sessions` with `"*"`
+  for every served session, `session_prefix`), each a bearer token that
+  reads only the served sessions in its scope, beside the `default`
+  credential from `LAMBO_AUTH_TOKEN` / `--auth-token`, which reads them all.
+  The grammar is `[[serve.credential]]`'s, shared in one module, minus the
+  write capabilities: `create`, `erase` and `admin` are refused by name,
+  whatever their value. `[web] inherit_serve_credentials = true` also
+  accepts every `[[serve.credential]]` token as a read credential with its
+  scope, its capabilities dropped. A session outside the caller's scope is
+  the same empty `404` as an unserved one, before any store read; the
+  unscoped `/` and `/api/...` serve the default session only to a credential
+  that may read it. Tokens are read at startup, before any backend, and a
+  missing variable, an unpresentable token, or a token shared by two
+  credentials or with `LAMBO_AUTH_TOKEN` exits `2` naming the credential,
+  never a value. Startup prints one count line per credential and warns
+  about a legacy token left beside configured credentials and a credential
+  that reads no served session. `[embedder] api_key_env` may not name a
+  `[[web.credential]]` variable. The page still sends no `Authorization`
+  header, so per-credential scope serves a proxy that adds it, and scripts.
+- `[web] list_sessions = true` (#4 PR 3): `GET /api/sessions` answers
+  `{"sessions": [...]}` (`no-store`, no store read) with the served sessions
+  the presenting credential names exactly, in served order, or every served
+  session for `default`, `"*"` and the unauthenticated window (startup
+  warns about the last). It never expands a prefix or shows another
+  credential's names. Off (the default), the route does not exist and is
+  the same empty `404` as any unknown path; under `/s/<session>/` it is
+  always that `404`.
 - `[web] sessions` and `[web] allowed_hosts`, and the repeatable
   `lambo serve-web --allowed-host` flag (#4 PR 2). A refused session name or
   host is quoted (neither is a secret); an empty, repeated or
