@@ -695,7 +695,12 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
         endpoint,
         opts.max_sessions,
         HostCheck::for_authority(authority.as_deref()),
-        opts.bounds.session_rps(opts.rate_limit_rps),
+        // A serve of one session that attaches nothing on demand draws a
+        // session bucket only when `per_session_rps` is set (#32 PR 6
+        // review L3): by default its one session's rate is the credentials'
+        // own, as before PR 6, so a serve with several credentials keeps
+        // each one's full `--rate-limit-rps`.
+        opts.bounds.per_session_rps.unwrap_or(0),
     );
     registry.insert_live(Arc::new(session));
     registry.mark_started();
