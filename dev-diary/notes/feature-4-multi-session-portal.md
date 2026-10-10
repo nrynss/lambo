@@ -81,8 +81,10 @@ in each PR note's remediation section.
 
 - **One load per session per TTL.** `ViewCache` in
   `src/cli/serve_web/views.rs`. Every request and tab shares one
-  `SessionView` until it is older than `view_ttl_ms` (default 1500, the
-  page's poll interval). Measured with a counting store: `/api/pulse` went
+  `SessionView` until it is older than `view_ttl_ms` (default 1500). That
+  is a separate setting from the page's `/api/pulse` poll interval
+  (`POLL_INTERVAL`, reported as `poll_interval_ms`, also 1500 ms); the
+  page reloads `/api/graph` every 20 s on its own timer. Measured with a counting store: `/api/pulse` went
   from 2 loads to 1, 8 concurrent cold pulses from 16 to 1, a page open from
   11 to 1.
 - **The feed comes from the loaded graph.** The design asked for a

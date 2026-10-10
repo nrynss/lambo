@@ -249,8 +249,8 @@
   malformed, percent-encoded or oversized id and an unrouted path answer the
   same empty `404` on every method, before any store read; with any
   credential configured the `401` comes first and is the same for every
-  id. A non-`GET` on a served
-  session's route is `405`. A served session never written, or erased, is an
+  id. A request other than `GET` or `HEAD` on a served
+  session's route is `405` (`HEAD` is answered like `GET`). A served session never written, or erased, is an
   empty page (`200`). The scoped page carries `no-store` and
   `Referrer-Policy: same-origin`. Startup prints one more line, naming the
   credential and how many sessions it reads. The page's script fetches
