@@ -94,7 +94,8 @@ async fn with_bearer(
 
 /// `GET` and `HEAD` of both pages carry the exact policy and `nosniff`.
 /// Everything else carries `nosniff` and no policy, including a Host
-/// refusal that never reaches the router.
+/// refusal, which `host_guard` returns before routing and the outermost
+/// layer still stamps.
 #[tokio::test]
 async fn pages_carry_the_exact_csp_and_every_response_is_nosniff() {
     let store = seed("csp92").await;
@@ -102,7 +103,7 @@ async fn pages_carry_the_exact_csp_and_every_response_is_nosniff() {
     let (addr, handle) = spawn(state).await;
 
     // First, so a nosniff regression on the pre-routing Host refusal fails
-    // here rather than on a later page that did reach the router.
+    // here rather than on a later page a handler answered.
     let refused = send_raw(
         addr,
         "GET / HTTP/1.1\r\nHost: rebind.example\r\nConnection: close\r\n\r\n",

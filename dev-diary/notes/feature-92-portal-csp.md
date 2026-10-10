@@ -30,10 +30,15 @@ are allowed by `style-src 'self'` and `script-src 'self'` without
 
 `X-Content-Type-Options: nosniff` is on every response the router
 answers: pages, `/app.js`, `/app.css`, `/healthz`, `/api/*`, `308`, `404`,
-`401`, `403`, `405`, and the `400` / `502` / `503` answers the handlers
-already build. Hyper's own replies to a request it cannot parse (a
-malformed request line, a `431` for oversized headers) never enter the
-axum router and carry neither header; they are not intercepted.
+`401`, `403`, `405`, and the error answers the handlers already build.
+Of those, the handler `400` and the recall `503` are pinned by tests. A
+`502` is the same `fail(CliError::Runtime)` path as the pinned `400` and
+is not sent as a separate request. Hyper's own replies to a request it
+cannot parse never enter the axum router and carry neither header; they
+are not intercepted. The malformed-request case is pinned
+(`a_malformed_request_gets_no_security_headers`: a control byte in the
+method, hyper's `400`, no `nosniff`, no policy). A `431` for oversized
+headers is the same hyper path and is not sent separately.
 The policy is not set on JSON, assets, healthz, redirects, or errors. It
 is keyed off the response `Content-Type` being `text/html` (the index
 handler sets `text/html; charset=utf-8`). `HEAD` of `/` and of
@@ -61,6 +66,14 @@ with `HeaderValue::from_static` sets each header once. Nobody was moved
 to `route_layer`.
 
 ## Byte identity
+
+The measured server is `84641ef3`: the byte-identity runs below and the
+console capture used binaries built at that commit. `84641ef3..HEAD`
+does not change the function body of `security_headers` or of
+`content_type_is_html`; the later commits change doc comments and tests
+only, and `content_type_is_html` became `pub(super)` so the test under
+`tests/` can call it. Any later commit must keep that true, or the runs
+must be repeated.
 
 One SQLite session (`byteid`, fixture embedder), same store, `lambo-main`
 on `127.0.0.1:18792` and this branch on `127.0.0.1:18793`. Compared with
@@ -152,8 +165,9 @@ Pages: `/`, `/s/shown/`, `/s/empty/` on 18796; the same three on 18797;
 `/` and `/s/solo/` on 18798. From the dumps: listing on shows the
 `select`, listing off shows the text field, `solo` keeps the picker
 `hidden`, `empty` says "No memory in this session yet", and the concept
-`<img src=x onerror=alert(1)>` is escaped text on the three `shown` pages
-with no `<img` element. Typing in the lookup was not exercised (no
+`<img src=x onerror=alert(1)>` is escaped text, with no `<img` element,
+on the four pages that show `shown`: `/` and `/s/shown/` on 18796, and
+`/` and `/s/shown/` on 18797. Typing in the lookup was not exercised (no
 interactive driver; `--dump-dom` only loads).
 
 `grep -c "Content Security Policy"` over the eight page logs: 0 on each

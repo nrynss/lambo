@@ -231,9 +231,10 @@
   object-src 'none'`. `img-src` is `'self'` only: the page has no image,
   no CSS `url(` and no `data:` URL, so the draft's `data:` is not in the
   policy. There is no `'unsafe-inline'` and no `'unsafe-eval'`. JSON, the
-  assets, `/healthz`, redirects and errors do not carry the policy. A
-  one-session window's other headers, and every body, stay byte-identical
-  to the previous release; that rule is relaxed for these two headers only.
+  assets, `/healthz`, redirects and errors do not carry the policy.
+  Relative to the commit this change is based on, the responses compared
+  in `dev-diary/notes/feature-92-portal-csp.md` match apart from these two
+  headers, and the layer does not rewrite bodies.
 
 - A tool call that fails because a vector read refused its probe (the
   session's embedding contract changed mid-query, or the vector width
