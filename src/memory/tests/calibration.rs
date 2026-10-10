@@ -509,7 +509,11 @@ async fn a_shut_down_calibration_starts_no_probe() {
 /// before failing is not re-run the moment it ends.
 #[tokio::test]
 async fn the_reprobe_backoff_counts_from_the_probes_end() {
-    let backoff = Duration::from_millis(300);
+    // Wide enough that opening `b` and settling fit inside it on a loaded
+    // runner: at 300 ms the full parallel suite overran it and the backoff
+    // legitimately expired before the assertion (seen on the
+    // recall-elastic row, 2026-10-10).
+    let backoff = Duration::from_secs(1);
     let counting = CountingEmbedder::gated();
     let embedder: Arc<dyn Embedder> = counting.clone();
     let calibration = EmbedderCalibration::with_retry_backoff(backoff);
