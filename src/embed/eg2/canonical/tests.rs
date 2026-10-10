@@ -683,23 +683,210 @@ fn sha_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
+/// The SHA-256 of a decoded image: width, height, colour type and raw
+/// samples (native-endian for 16 bits).
+fn pixels_sha(img: &DynamicImage) -> String {
+    let mut px = Vec::new();
+    px.extend_from_slice(&img.width().to_be_bytes());
+    px.extend_from_slice(&img.height().to_be_bytes());
+    px.extend_from_slice(format!("{:?}", img.color()).as_bytes());
+    px.extend_from_slice(img.as_bytes());
+    sha_hex(&px)
+}
+
+/// Every sample of an image as an integer, in its own units (0..=255 for 8
+/// bits, 0..=65535 for 16).
+fn samples(img: &DynamicImage) -> Vec<i32> {
+    let color = img.color();
+    if color.bytes_per_pixel() == 2 * color.channel_count() {
+        img.as_bytes()
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&c| i32::from(u16::from_ne_bytes(c)))
+            .collect()
+    } else {
+        img.as_bytes().iter().map(|&s| i32::from(s)).collect()
+    }
+}
+
+/// A `Near` reference keeps every `GRID`-th pixel of every `GRID`-th row,
+/// starting at (0, 0): exact samples, not an average, so the one-step
+/// tolerance still applies sample by sample, at a sixteenth of the size.
+const GRID: u32 = 4;
+
+fn grid_of<P: image::Pixel>(
+    b: &image::ImageBuffer<P, Vec<P::Subpixel>>,
+) -> image::ImageBuffer<P, Vec<P::Subpixel>> {
+    image::ImageBuffer::from_fn(
+        b.width().div_ceil(GRID),
+        b.height().div_ceil(GRID),
+        |x, y| *b.get_pixel(x * GRID, y * GRID),
+    )
+}
+
+/// The [`GRID`] subsample of a canonical image.
+fn grid(img: &DynamicImage) -> DynamicImage {
+    match img {
+        DynamicImage::ImageLuma8(b) => DynamicImage::ImageLuma8(grid_of(b)),
+        DynamicImage::ImageLumaA8(b) => DynamicImage::ImageLumaA8(grid_of(b)),
+        DynamicImage::ImageRgb8(b) => DynamicImage::ImageRgb8(grid_of(b)),
+        DynamicImage::ImageRgba8(b) => DynamicImage::ImageRgba8(grid_of(b)),
+        DynamicImage::ImageLuma16(b) => DynamicImage::ImageLuma16(grid_of(b)),
+        DynamicImage::ImageLumaA16(b) => DynamicImage::ImageLumaA16(grid_of(b)),
+        DynamicImage::ImageRgb16(b) => DynamicImage::ImageRgb16(grid_of(b)),
+        DynamicImage::ImageRgba16(b) => DynamicImage::ImageRgba16(grid_of(b)),
+        other => panic!("no canonical PNG is {:?}", other.color()),
+    }
+}
+
+/// How a golden case is pinned.
+enum Pin {
+    /// Bit-exact on every platform: the canonical PNG bytes and pixels.
+    /// For cases whose arithmetic uses no platform `libm` and no run-time
+    /// SIMD choice: a PNG or lossless WebP decode (integer) and a
+    /// Catmull-Rom upscale (a polynomial kernel; IEEE `f32` add and
+    /// multiply give the same bits everywhere).
+    Exact {
+        png: &'static str,
+        pixels: &'static str,
+    },
+    /// Within one step per sample of a committed reference. For cases that
+    /// are not bit-exact across platforms: a Lanczos3 downscale (its
+    /// weights call `f32::sin`, which is the platform `libm`, so one weight
+    /// may differ by an ulp and flip the rounding of a sample) and any JPEG
+    /// (`zune-jpeg` picks an AVX2, NEON or scalar IDCT and colour conversion
+    /// at run time).
+    ///
+    /// The canonical image must have exactly `size` and the reference's
+    /// colour type, and its [`GRID`] subsample must be within one step per
+    /// sample of `reference` (a lossless PNG under `fixtures/images/`),
+    /// with at most [`NEAR_MAX_DIFFERING`] of the samples differing at all.
+    /// `reference_pixels` pins the reference file (as [`pixels_sha`]), so
+    /// it cannot be swapped silently. `full_pixels` is the full image's
+    /// pixel hash on the platform that made the reference (aarch64 macOS):
+    /// a match is reported, a mismatch alone is not a failure.
+    Near {
+        size: (u32, u32),
+        reference: &'static str,
+        reference_pixels: &'static str,
+        full_pixels: &'static str,
+    },
+}
+
+/// Most samples of a `Near` case that may differ from the reference, as a
+/// fraction. A libm or SIMD wobble flips a rounding here and there (an ulp
+/// in one weight moves a sample by about 1.5e-5, so roughly one sample in
+/// 70,000); a decoder or resampler change that moves the picture by one
+/// step nearly everywhere is a real change and fails here.
+const NEAR_MAX_DIFFERING: f64 = 0.01;
+
+/// Where the `Near` references live.
+fn reference_path(file: &str) -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures/images")
+        .join(file)
+}
+
+/// Compare a `Near` case against its reference. `Err` names what moved.
+fn check_near(name: &str, got: &DynamicImage, got_full: &str, pin: &Pin) -> Result<(), String> {
+    let Pin::Near {
+        size,
+        reference,
+        reference_pixels,
+        full_pixels,
+    } = pin
+    else {
+        unreachable!("{name} is pinned exactly")
+    };
+    let path = reference_path(reference);
+    let got_grid = grid(got);
+    if std::env::var_os("LAMBO_EG2_WRITE_GOLDEN_REFS").is_some() {
+        // Re-pin helper: write this platform's output as the reference.
+        // Only after a profile bump (see the test's doc comment).
+        let mut out = Vec::new();
+        got_grid
+            .write_with_encoder(PngEncoder::new_with_quality(
+                &mut out,
+                CompressionType::Best,
+                PngFilter::Adaptive,
+            ))
+            .unwrap();
+        std::fs::write(&path, out).unwrap();
+    }
+    let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let want = decode_png(&bytes);
+    let want_sha = pixels_sha(&want);
+    if want_sha != *reference_pixels {
+        return Err(format!(
+            "{name}: reference {reference} is not the pinned one: {want_sha} \
+             (pinned {reference_pixels})"
+        ));
+    }
+    if ((got.width(), got.height()), got.color()) != (*size, want.color()) {
+        return Err(format!(
+            "{name}: {}x{} {:?}, pinned {}x{} {:?}",
+            got.width(),
+            got.height(),
+            got.color(),
+            size.0,
+            size.1,
+            want.color()
+        ));
+    }
+    let (g, w) = (samples(&got_grid), samples(&want));
+    assert_eq!(g.len(), w.len(), "{name}: the grid follows the size");
+    let max = g
+        .iter()
+        .zip(&w)
+        .map(|(a, b)| (a - b).abs())
+        .max()
+        .unwrap_or(0);
+    let differing = g.iter().zip(&w).filter(|(a, b)| a != b).count();
+    let limit = (w.len() as f64 * NEAR_MAX_DIFFERING) as usize;
+    eprintln!(
+        "{name}: {differing} of {} grid samples differ from the reference, max by {max}; \
+         full image bit-exact with the reference platform: {}",
+        w.len(),
+        got_full == *full_pixels
+    );
+    if max > 1 || differing > limit {
+        return Err(format!(
+            "{name}: {differing} of {} grid samples differ from {reference} (limit {limit}), \
+             max by {max} (limit 1)",
+            w.len()
+        ));
+    }
+    Ok(())
+}
+
 /// **The canonical form is pinned.** For fixed inputs: the SHA-256 of the
-/// input, of the canonical PNG bytes, and of the canonical pixels (width,
-/// height, colour type and raw samples).
+/// input, and either ([`Pin::Exact`]) the SHA-256 of the canonical PNG bytes
+/// and pixels, or ([`Pin::Near`]) the canonical pixels to within one step
+/// per sample of a committed reference.
+///
+/// **A wobble of at most one step per sample is not a change.** The
+/// downscale and JPEG cases are not bit-exact across platforms (macOS
+/// against Linux CI, NEON against AVX2), and a one-step difference moves
+/// the vector by about 1e-7. It needs no profile bump and no re-pin.
 ///
 /// If this test fails after a dependency update (`image`, `png`,
 /// `zune-jpeg`, `image-webp`, `fdeflate`, ...):
 ///
-/// - **pixels changed**: the canonical image is different, so vectors are
-///   different. That is a new prompt profile: bump `EG2_PROMPT_PROFILE`
-///   (`lambo-eg2-v3`), note it in the CHANGELOG, then re-pin. Never re-pin
-///   the pixel golden under the same profile name.
+/// - **pixels changed** (an exact pixel hash moved, or a `Near` case is
+///   more than one step from its reference anywhere, or in more than
+///   [`NEAR_MAX_DIFFERING`] of its samples): the canonical image is
+///   different, so vectors are different. That is a new prompt profile:
+///   bump `EG2_PROMPT_PROFILE` (`lambo-eg2-v3`), note it in the CHANGELOG,
+///   then re-pin (`LAMBO_EG2_WRITE_GOLDEN_REFS=1` rewrites the `Near`
+///   references; copy the hashes the failure prints). Never re-pin under
+///   the same profile name.
 /// - **only the PNG bytes changed** (pixels equal): the encoder compresses
 ///   differently. The server decodes the same pixels, so vectors are
 ///   unchanged; re-pin the PNG golden without a profile bump.
 /// - **an input changed**: the in-test generator (an encoder) moved; this
 ///   says nothing about the canonical form. Re-pin the input and check the
-///   other two against a run on the previous version.
+///   rest against a run on the previous version.
 #[test]
 fn the_canonical_form_matches_its_golden() {
     let mut rgba16 = Vec::new();
@@ -717,61 +904,46 @@ fn the_canonical_form_matches_its_golden() {
         PngFilter::Adaptive,
     ))
     .unwrap();
-    let cases: [(&str, Vec<u8>, &str, [&str; 3]); 8] = [
-        (
-            "png rgb 1536x1024",
-            png_rgb(1536, 1024),
-            "image/png",
-            GOLDEN[0],
-        ),
-        ("jpeg 1000x3000", jpeg(1000, 3000), "image/jpeg", GOLDEN[1]),
-        ("webp rgba 64x48", webp(64, 48).0, "image/webp", GOLDEN[2]),
-        (
-            "webp rgba 2000x1000",
-            webp(2000, 1000).0,
-            "image/webp",
-            GOLDEN[3],
-        ),
-        ("png rgba16 900x700", rgba16, "image/png", GOLDEN[4]),
-        ("png grey 100x60", grey_png(100, 60), "image/png", GOLDEN[5]),
-        (
-            "png palette+tRNS 48x24",
-            palette_png(48, 24),
-            "image/png",
-            GOLDEN[6],
-        ),
-        (
-            "jpeg cmyk 24x16",
-            CMYK_JPEG.to_vec(),
-            "image/jpeg",
-            GOLDEN[7],
-        ),
+    let inputs: [(&str, Vec<u8>, &str); 8] = [
+        ("png rgb 1536x1024", png_rgb(1536, 1024), "image/png"),
+        ("jpeg 1000x3000", jpeg(1000, 3000), "image/jpeg"),
+        ("webp rgba 64x48", webp(64, 48).0, "image/webp"),
+        ("webp rgba 2000x1000", webp(2000, 1000).0, "image/webp"),
+        ("png rgba16 900x700", rgba16, "image/png"),
+        ("png grey 100x60", grey_png(100, 60), "image/png"),
+        ("png palette+tRNS 48x24", palette_png(48, 24), "image/png"),
+        ("jpeg cmyk 24x16", CMYK_JPEG.to_vec(), "image/jpeg"),
     ];
     let mut report = String::new();
     let mut ok = true;
-    for (name, input, mime, [want_in, want_png, want_px]) in &cases {
+    for ((name, input, mime), (want_in, pin)) in inputs.iter().zip(&GOLDEN) {
         let out = canonical_of(input, mime).unwrap();
         // Same input, same output, run to run.
         assert_eq!(out, canonical_of(input, mime).unwrap(), "{name}");
         let img = decode_png(&out);
-        let mut px = Vec::new();
-        px.extend_from_slice(&img.width().to_be_bytes());
-        px.extend_from_slice(&img.height().to_be_bytes());
-        px.extend_from_slice(format!("{:?}", img.color()).as_bytes());
-        px.extend_from_slice(img.as_bytes());
-        let got = [sha_hex(input), sha_hex(&out), sha_hex(&px)];
+        let got_in = sha_hex(input);
+        let (got_png, got_px) = (sha_hex(&out), pixels_sha(&img));
         report.push_str(&format!(
-            "    [\"{}\", \"{}\", \"{}\"], // {name}\n",
-            got[0], got[1], got[2]
+            "    {name}: input {got_in}, png {got_png}, pixels {got_px}\n"
         ));
-        for (what, g, w) in [
-            ("input", &got[0], want_in),
-            ("png", &got[1], want_png),
-            ("pixels", &got[2], want_px),
-        ] {
-            if g != w {
-                ok = false;
-                eprintln!("{name}: {what} golden moved: {g} (pinned {w})");
+        if got_in != *want_in {
+            ok = false;
+            eprintln!("{name}: input golden moved: {got_in} (pinned {want_in})");
+        }
+        match pin {
+            Pin::Exact { png, pixels } => {
+                for (what, g, w) in [("png", &got_png, png), ("pixels", &got_px, pixels)] {
+                    if g != w {
+                        ok = false;
+                        eprintln!("{name}: {what} golden moved: {g} (pinned {w})");
+                    }
+                }
+            }
+            Pin::Near { .. } => {
+                if let Err(e) = check_near(name, &img, &got_px, pin) {
+                    ok = false;
+                    eprintln!("{e}");
+                }
             }
         }
     }
@@ -782,46 +954,73 @@ fn the_canonical_form_matches_its_golden() {
 }
 
 /// Pinned on image 0.25.10 (png 0.18.1, zune-jpeg 0.5.15, image-webp
-/// 0.2.4). Per case: input, canonical PNG bytes, canonical pixels.
-const GOLDEN: [[&str; 3]; 8] = [
-    [
+/// 0.2.4). Per case, in the order of the test's inputs: the input's
+/// SHA-256 and how the output is pinned.
+const GOLDEN: [(&str, Pin); 8] = [
+    (
         "6765154854a0b748f4426fc72d0027d2652634318ce3098c629f568a0993e9ef",
-        "da844357676726c98cd4254095d188b592e3fdbb181b7686389dd9589c5a9663",
-        "37f6088099e09dd6c5c412db56d38e95502da9b82a395eede0852f73b6700bd7",
-    ], // png rgb 1536x1024
-    [
+        Pin::Near {
+            size: (768, 512),
+            reference: "eg2-canonical-png-rgb-1536x1024.png",
+            reference_pixels: "8f1b4ec7743ffaa128ec9184d016c12586ac4242df0eadbf6ae775be851931e6",
+            full_pixels: "37f6088099e09dd6c5c412db56d38e95502da9b82a395eede0852f73b6700bd7",
+        },
+    ), // png rgb 1536x1024
+    (
         "e9e36f9a9c840207405b307d94c75e922e952eb36c94c43426d47c6d02fb74b6",
-        "3fb45f2f3a32495781ca8f40a4194daf417ba9f2e13ac134ef742a774812fa68",
-        "13dc7ae0acb1726d1431b9d8be0c814dd547cb8fb2b374d216b2be624f1f81b4",
-    ], // jpeg 1000x3000
-    [
+        Pin::Near {
+            size: (256, 768),
+            reference: "eg2-canonical-jpeg-1000x3000.png",
+            reference_pixels: "fb8a907ba357779a5746fa7edb4b6d1cf91c021591d5baf44912c8b854adbc2d",
+            full_pixels: "13dc7ae0acb1726d1431b9d8be0c814dd547cb8fb2b374d216b2be624f1f81b4",
+        },
+    ), // jpeg 1000x3000
+    (
         "729b4edd4c13dd43d239c8acf690f02bd47e4e1af9d34212c7a92b44f578d780",
-        "0dee3ba2dc6ab91c0fbe72993b112384328d5d4c6508292a3175f7c0ada0721a",
-        "6b7a33094e24651d4f79b54e7a3b93bbf0553d5b2dff5b94f3ca94e92bead091",
-    ], // webp rgba 64x48
-    [
+        Pin::Exact {
+            png: "0dee3ba2dc6ab91c0fbe72993b112384328d5d4c6508292a3175f7c0ada0721a",
+            pixels: "6b7a33094e24651d4f79b54e7a3b93bbf0553d5b2dff5b94f3ca94e92bead091",
+        },
+    ), // webp rgba 64x48
+    (
         "0c48aeecb64afcb64568b100fc8a864283f75f54027bda5c99184b78d4b288de",
-        "e7dc16a22b0b1c7f95d453c8e059503e7ff926deca5376e77f7f849d5f67f923",
-        "1151f666955fac9bfda45b306ceaa104fd3b807c99ea643b8ee5adbd06bbd5a5",
-    ], // webp rgba 2000x1000
-    [
+        Pin::Near {
+            size: (768, 384),
+            reference: "eg2-canonical-webp-rgba-2000x1000.png",
+            reference_pixels: "cda1f09c4065ab55a7fdc4c9a4af2744a51dbd148d497cfb1b9c9e13b4a71131",
+            full_pixels: "1151f666955fac9bfda45b306ceaa104fd3b807c99ea643b8ee5adbd06bbd5a5",
+        },
+    ), // webp rgba 2000x1000
+    (
         "f43e8c80fbad6357f0f777f8d7be32d4f237e03adaed060633446456c5bf4072",
-        "f641cfd2d760834efbfc98e464ed7e724be7b45107203b1d311756efafd088db",
-        "45cc66f30bc51f149ed060e86b23f3251b76d0e9e6f9caac82c7824cb2acac4c",
-    ], // png rgba16 900x700
-    [
+        Pin::Near {
+            size: (768, 597),
+            reference: "eg2-canonical-png-rgba16-900x700.png",
+            reference_pixels: "52b4c372a1259288e22a11d803ab7975c936d3c034d01f09e4503aba4ad60fb4",
+            full_pixels: "45cc66f30bc51f149ed060e86b23f3251b76d0e9e6f9caac82c7824cb2acac4c",
+        },
+    ), // png rgba16 900x700
+    (
         "75093ae433cc0b6fcbe7bb7bff61523e6601da17278981238a2149c8ef03cba2",
-        "6e7b7e6536bec0884bc68f860c6d3410671da492167356483b0a0ea2b671917d",
-        "f63d8f9b7b90553a1e7b15ef2a92173c3721eb30d8b105d92a74a04a0e14c374",
-    ], // png grey 100x60
-    [
+        Pin::Exact {
+            png: "6e7b7e6536bec0884bc68f860c6d3410671da492167356483b0a0ea2b671917d",
+            pixels: "f63d8f9b7b90553a1e7b15ef2a92173c3721eb30d8b105d92a74a04a0e14c374",
+        },
+    ), // png grey 100x60
+    (
         "cd6f60839fde313dad5ab388e11d2fea7c878d9aa154ce6a1f09ebecefdfeba2",
-        "f355a86bb49bf95a5b9321e45f93a330f98af846102ffe90ae24e36fbcc05c87",
-        "85730fb58151cc1671bc118a9a408af384f574fc449195561362d78259c36bd2",
-    ], // png palette+tRNS 48x24
-    [
+        Pin::Exact {
+            png: "f355a86bb49bf95a5b9321e45f93a330f98af846102ffe90ae24e36fbcc05c87",
+            pixels: "85730fb58151cc1671bc118a9a408af384f574fc449195561362d78259c36bd2",
+        },
+    ), // png palette+tRNS 48x24
+    (
         "6af90f38046d7b0e06a558b043575a1158637c5f69d47b24298623dc33718b01",
-        "ac91c5ca02a8d0ada537e00a93337e8daa48c5949299b536c9f848ea2cf8a27d",
-        "e260aaa9d556f9ab225bdde53fb52db3fd1e5a354c686651f3789c6a3e59d4b3",
-    ], // jpeg cmyk 24x16
+        Pin::Near {
+            size: (768, 512),
+            reference: "eg2-canonical-jpeg-cmyk-24x16.png",
+            reference_pixels: "683cbe192e8afc2f4ff2336c1134181708725376a93de1ee76bc56461f5ddcce",
+            full_pixels: "e260aaa9d556f9ab225bdde53fb52db3fd1e5a354c686651f3789c6a3e59d4b3",
+        },
+    ), // jpeg cmyk 24x16
 ];

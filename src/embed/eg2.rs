@@ -85,7 +85,9 @@ mod tests;
 /// `lambo-eg2-v1` was never released. The canonical pixels come from the
 /// `image` crate's decoders and resampler, which `Cargo.toml` does not pin
 /// exactly: the golden tests in `canonical/tests.rs` fail if an update moves
-/// them, and a moved pixel golden is a new profile name.
+/// them, and a moved pixel golden is a new profile name. A cross-platform
+/// wobble of at most one step per sample (downscales and JPEGs, see the
+/// golden test) is not a change and not a new profile name.
 pub const EG2_PROMPT_PROFILE: &str = "lambo-eg2-v2";
 
 /// The weights artifact the contract names when `[embedder] model` is unset:

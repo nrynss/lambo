@@ -393,7 +393,9 @@
   bounded (4096 px a side, two at a time), and an image Lambo cannot decode
   is refused as unreadable before the server sees it. The canonical pixels
   are pinned by golden tests: if a dependency update moves them, that ships
-  as a new profile name. The `embed-eg2` feature now pulls in the `image`
+  as a new profile name. Downscaled and JPEG cases are pinned to within one
+  step per sample, since they are not bit-exact across platforms; that
+  wobble is not a new profile. The `embed-eg2` feature now pulls in the `image`
   crate (PNG, JPEG and WebP only) for this. The profile was `lambo-eg2-v1` during
   development, without the canonical form; nothing was released with it, so
   there is no migration. The profile fixes the

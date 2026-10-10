@@ -53,7 +53,11 @@
 //! The server then drops alpha and reduces 16 bits to 8 itself. The golden
 //! tests in `canonical/tests.rs` pin the output for fixed inputs: a change
 //! in the decoded pixels (for example after an `image`, `zune-jpeg` or
-//! `image-webp` update) is a new profile name.
+//! `image-webp` update) is a new profile name. A downscale or a JPEG is not
+//! bit-exact across platforms (Lanczos3 weights use the platform `libm`;
+//! `zune-jpeg` picks a SIMD IDCT at run time), so those cases are pinned to
+//! within one step per sample: a wobble of one step is not a profile bump,
+//! a larger change is.
 //!
 //! **What this gives**, measured live on b11517
 //! (`evidence/issue-22-eg2/size-invariance.txt`): a flat image embeds
