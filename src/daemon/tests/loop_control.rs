@@ -213,6 +213,35 @@ async fn a_panicking_cycle_does_not_kill_the_loop() {
     handle.abort();
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_failed_rescore_is_retried_on_the_next_cycle() {
+    // #79 review L1: the epoch was marked done BEFORE the rescore, so a
+    // rescore that panicked (contained by CONC-4) never ran again until the
+    // next write. In an idle session the table stayed stale, and every recall
+    // that would show a fresh concept missing from it stayed cold.
+    let _quiet = crate::test_util::quiet_logs();
+    let (graph, cid) = locked_graph_with_one_concept();
+    let epoch = graph.read().epoch();
+    let daemon = Daemon::new(
+        graph.clone(),
+        ScoringWeights::default(),
+        Duration::from_secs(3600),
+    );
+    daemon.fail_next_rescores(1);
+    let handle = daemon.spawn();
+    // The first cycle's rescore panics: nothing is published.
+    wait_until(|| daemon.rescore_faults.load(Ordering::Acquire) == 0).await;
+    assert_eq!(daemon.cycles(), 0, "the panicking cycle did not complete");
+    assert!(daemon.scores().ranked.is_empty());
+
+    // A wake with NO mutation must still retry the failed rescore.
+    wake_and_settle(&daemon).await;
+    let table = daemon.scores();
+    assert_eq!(table.epoch, epoch, "the retried rescore published");
+    assert!(table.ranked.iter().any(|s| s.item == cid));
+    handle.abort();
+}
+
 #[test]
 fn cycle_params_come_from_config_with_no_duplicated_defaults() {
     // XP-7: `CycleParams::default()` duplicated Config's spec constants as
