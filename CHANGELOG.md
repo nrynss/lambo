@@ -219,6 +219,24 @@
 
 ### Changed
 
+- `lambo serve-web` sends two security headers (#92). Every response the
+  router answers, including a Host `403`, a bearer `401`, the uniform
+  `404`, a `405`, a `308`, `/healthz`, JSON and the assets, carries
+  `X-Content-Type-Options: nosniff`. Hyper's own replies to a request it
+  cannot parse (a malformed request line, a `431` for oversized headers)
+  never reach the router and carry neither header. The HTML page (`GET`
+  and `HEAD` of `/` and `/s/<session>/`) also carries
+  `Content-Security-Policy: default-src 'none'; script-src
+  'self'; style-src 'self'; connect-src 'self'; img-src 'self'; font-src
+  'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none';
+  object-src 'none'`. `img-src` is `'self'` only: the page has no image,
+  no CSS `url(` and no `data:` URL, so the draft's `data:` is not in the
+  policy. There is no `'unsafe-inline'` and no `'unsafe-eval'`. JSON, the
+  assets, `/healthz`, redirects and errors do not carry the policy.
+  Relative to the commit this change is based on, the responses compared
+  in `dev-diary/notes/feature-92-portal-csp.md` match apart from these two
+  headers, and the layer does not rewrite bodies.
+
 - A tool call that fails because a vector read refused its probe (the
   session's embedding contract changed mid-query, or the vector width
   differs) now tells the caller to re-check the session's embedding
