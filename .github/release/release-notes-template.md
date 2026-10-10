@@ -20,7 +20,12 @@ store and embedder at runtime in `lambo.toml`; switching among the adapters
 below never needs a different download.
 
 - Stores: `memory`, `sqlite`, `cockroach`, `postgres` (PostgreSQL + pgvector)
-- Embedders: `fixture`, `bge_m3`, `gemini` (Vertex `gemini-embedding-001`)
+- Embedders: `fixture`, `bge_m3` (also reached as `openai`), `gemini` (Vertex
+  `gemini-embedding-001`), `embeddinggemma2` (EmbeddingGemma 2, text and
+  images, feature `embed-eg2`)
+- Recall tier: `elastic` (feature `recall-elastic`), an optional Elasticsearch
+  index selected by a top-level `[recall]` section that serves recall's vector
+  leg beside the store
 - Not included: `bedrock` (Amazon Bedrock is gated on account authorization and
   lands in a later release)
 
@@ -33,9 +38,15 @@ installed beyond macOS itself. Set `LAMBO_FLAVOR=metal` for the install script
 to pick it; the script refuses that flavor on any other platform.
 
 The one caveat: the adapter code is compiled in, but its backing service must be
-reachable at runtime. BGE embeddings need a local `llama-server`. CockroachDB
+reachable at runtime. BGE embeddings need a local `llama-server` or a hosted
+OpenAI-compatible endpoint (`api_key_env`). CockroachDB
 needs a reachable cluster. Postgres needs a reachable server with pgvector.
-Gemini needs Vertex AI credentials.
+Gemini needs Vertex AI credentials. EmbeddingGemma 2 needs `llama-server`
+b11452 or later; images need it started with `--mmproj` and the image-budget
+flags in `lambo.example.toml` (without `--mmproj`, set `[embedder] images =
+false`). The Elasticsearch tier needs a reachable cluster; the store stays the
+source of truth, and recall's vector leg falls back to the store while the
+index is stale or failing.
 
 `cargo install lambo` is a leaner channel: it builds the crate's default
 features (the `memory` store, `fixture` + `bge_m3` embedders) rather than the
