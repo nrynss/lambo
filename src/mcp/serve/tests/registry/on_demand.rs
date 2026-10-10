@@ -1276,3 +1276,175 @@ async fn a_flood_of_absent_ids_stays_bounded() {
     od.registry.join_detaches().await;
     od.close().await;
 }
+
+/// #32 PR 7 review, PR 6 reconciliation 6 and 7: erasing an attached
+/// on-demand session through the registry removes its slot and its owner
+/// (no map grows with erased ids) and leaves the outcome in PR 6's negative
+/// cache, so the next request is answered 410 without a store call; once
+/// the entry expires, the probe finds the tombstone and answers 410 again.
+/// Nothing re-attaches it.
+#[tokio::test]
+async fn an_erased_on_demand_session_is_answered_from_the_negative_cache() {
+    let od = OnDemand::start(16, Duration::from_secs(900), 0).await;
+    let id = "od-u-erase";
+    initialize_as(od.addr, &format!("/mcp/s/{id}"), Some(&bearer("maker"))).await;
+    assert!(od.attached(id).is_some());
+
+    match od.registry.erase(id).await {
+        crate::mcp::serve::registry::EraseAnswer::Erased(report) => {
+            assert!(!report.already_absent, "{report:?}");
+        }
+        other => panic!("the erase answered {other:?}"),
+    }
+    assert!(od.attached(id).is_none());
+    assert!(
+        !od.registry.slot_views().iter().any(|v| v.session == id),
+        "no slot is kept for an erased on-demand id"
+    );
+    let probes = od.count("read_lease", id);
+    for who in ["maker", "reader"] {
+        let reply = http_as(
+            od.addr,
+            "POST",
+            &format!("/mcp/s/{id}"),
+            Some(&bearer(who)),
+            None,
+            "{}",
+        )
+        .await;
+        assert_eq!(reply.status, 410, "{who}: {}", reply.body);
+    }
+    assert_eq!(
+        od.count("read_lease", id),
+        probes,
+        "answered from the negative cache"
+    );
+
+    // Past the cache's TTL the probe answers, from the tombstone.
+    tokio::time::pause();
+    tokio::time::advance(crate::mcp::serve::registry::NEGATIVE_TTL + Duration::from_secs(1)).await;
+    tokio::time::resume();
+    let acquires = od.count("acquire_lease", id);
+    let reply = http_as(
+        od.addr,
+        "POST",
+        &format!("/mcp/s/{id}"),
+        Some(&bearer("maker")),
+        None,
+        "{}",
+    )
+    .await;
+    assert_eq!(reply.status, 410, "{}", reply.body);
+    assert_eq!(od.count("read_lease", id), probes + 1, "probed again");
+    assert_eq!(od.count("acquire_lease", id), acquires, "never recreated");
+    od.close().await;
+}
+
+/// #32 PR 7 review, PR 6 reconciliation 4 and 5: an on-demand session
+/// being erased still holds its `Memory` until the erase's close ends, so
+/// it takes one of the `max_attached` places; it is never evicted to make
+/// room, and never idle-detached.
+///
+/// Mutations: leave `Erasing` out of `takes_a_place` and the next attach
+/// takes the place (two `Memory`s past the cap); let `choose_victim` or
+/// the idle sweep take `Erasing` and its slot is detached under the erase.
+#[tokio::test]
+async fn an_erasing_session_takes_a_place_and_is_never_evicted_or_idle_detached() {
+    let idle = Duration::from_secs(60);
+    // The pinned session plus one on-demand place.
+    let od = OnDemand::start(2, idle, 0).await;
+    let erasing = "od-u-erasing";
+    initialize_as(
+        od.addr,
+        &format!("/mcp/s/{erasing}"),
+        Some(&bearer("maker")),
+    )
+    .await;
+    // Held as the erase holds it between its claim and its close.
+    let held = od.attached(erasing).expect("attached");
+    od.registry
+        .force_state(erasing, crate::mcp::serve::registry::ForcedState::Erasing);
+
+    let full = http_as(
+        od.addr,
+        "POST",
+        "/mcp/s/od-u-next",
+        Some(&bearer("maker")),
+        None,
+        "{}",
+    )
+    .await;
+    assert_eq!(full.status, 503, "{}", full.body);
+    assert!(full.header("retry-after").is_some(), "{}", full.head);
+    assert_eq!(od.count("acquire_lease", "od-u-next"), 0, "no place taken");
+    let state = |od: &OnDemand| {
+        od.registry
+            .slot_views()
+            .into_iter()
+            .find(|v| v.session == erasing)
+            .map(|v| v.state)
+    };
+    assert_eq!(state(&od), Some("erasing"), "not evicted");
+
+    // Idle well past `idle_detach`: the sweeper leaves it alone.
+    tokio::time::pause();
+    tokio::time::advance(idle * 3).await;
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::resume();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(state(&od), Some("erasing"), "not idle-detached");
+    drop(held);
+    od.close().await;
+}
+
+/// #32 PR 7 review, PR 6 reconciliation 7: an on-demand session whose
+/// erase fails before the store commits loses its slot and its owner, as a
+/// detach leaves it, and its old handle goes to PR 6's `previous` map: a
+/// request while something still holds that handle is answered 503 rather
+/// than attaching a second `Memory` beside it, and once it is gone the
+/// session attaches again from what is durable.
+///
+/// Mutation: drop the handle instead of keeping it in `previous` and the
+/// request attaches at once, beside the old handle.
+#[tokio::test]
+async fn an_on_demand_erase_that_fails_waits_for_the_old_handle_before_reattaching() {
+    use super::pinned_serve::EraseFault;
+    let od = OnDemand::start(16, Duration::from_secs(900), 0).await;
+    let id = "od-u-unerased";
+    initialize_as(od.addr, &format!("/mcp/s/{id}"), Some(&bearer("maker"))).await;
+    // A request still finishing with the old handle.
+    let lingering = od.attached(id).expect("attached");
+    od.calls.fail_erase(EraseFault::BeforeCommit);
+    match od.registry.erase(id).await {
+        crate::mcp::serve::registry::EraseAnswer::Failed { erased, .. } => {
+            assert!(!erased, "nothing was erased");
+        }
+        other => panic!("the erase answered {other:?}"),
+    }
+    assert!(
+        !od.registry.slot_views().iter().any(|v| v.session == id),
+        "the slot is gone, as after a detach"
+    );
+    let acquires = od.count("acquire_lease", id);
+    let waiting = http_as(
+        od.addr,
+        "POST",
+        &format!("/mcp/s/{id}"),
+        Some(&bearer("maker")),
+        None,
+        "{}",
+    )
+    .await;
+    assert_eq!(waiting.status, 503, "{}", waiting.body);
+    assert_eq!(od.count("acquire_lease", id), acquires, "no second Memory");
+
+    drop(lingering);
+    od.calls.fail_erase(EraseFault::None);
+    let (_, info) = initialize_as(od.addr, &format!("/mcp/s/{id}"), Some(&bearer("maker"))).await;
+    assert!(info["instructions"]
+        .as_str()
+        .is_some_and(|i| i.contains(id)));
+    od.close().await;
+}

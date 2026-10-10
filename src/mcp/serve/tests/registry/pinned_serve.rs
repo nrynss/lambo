@@ -38,8 +38,39 @@ pub(super) struct Shared(
 ///
 /// It also carries a gate for `flush` (#32 PR 7): while it is closed, every
 /// flush parks inside the store, so a test can hold one in flight.
+///
+/// And (#32 PR 7 review) the faults an erase test injects, and the parked
+/// flushes `erase_session` found in flight when it was entered.
 #[derive(Default)]
-pub(super) struct StoreCalls(parking_lot::Mutex<Vec<(&'static str, String)>>, FlushGate);
+pub(super) struct StoreCalls(
+    parking_lot::Mutex<Vec<(&'static str, String)>>,
+    FlushGate,
+    Faults,
+);
+
+/// What a [`Shared`] store does wrong on purpose (#32 PR 7 review).
+#[derive(Default)]
+pub(super) struct Faults {
+    /// [`EraseFault`] as a number, read at each `erase_session`.
+    erase: std::sync::atomic::AtomicU8,
+    /// While set, every `read_lease` fails.
+    read_lease: std::sync::atomic::AtomicBool,
+    /// [`StoreCalls::parked_flushes`] as each `erase_session` found it on
+    /// entry.
+    parked_at_erase: parking_lot::Mutex<Vec<usize>>,
+}
+
+/// How `erase_session` fails, when it does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub(super) enum EraseFault {
+    /// It does not.
+    None = 0,
+    /// It fails before anything is erased (the store refused).
+    BeforeCommit = 1,
+    /// It erases, then fails (an index sweep, a lost commit reply).
+    AfterCommit = 2,
+}
 
 /// Parks every `flush` while closed ([`StoreCalls::park_flushes`]).
 #[derive(Default)]
@@ -95,6 +126,26 @@ impl StoreCalls {
             }
             opened.await;
         }
+    }
+
+    /// Make every later `erase_session` fail as `fault` says.
+    pub(super) fn fail_erase(&self, fault: EraseFault) {
+        self.2
+            .erase
+            .store(fault as u8, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Make every later `read_lease` fail (`fail`) or not.
+    pub(super) fn fail_read_lease(&self, fail: bool) {
+        self.2
+            .read_lease
+            .store(fail, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// How many flushes were parked in flight at each `erase_session`'s
+    /// entry, in order.
+    pub(super) fn parked_at_erase(&self) -> Vec<usize> {
+        self.2.parked_at_erase.lock().clone()
     }
 
     fn note(&self, method: &'static str, session: &str) {
@@ -160,7 +211,11 @@ impl GraphStore for Shared {
     async fn flush(&self, batch: &MutationBatch, token: Option<u64>) -> Result<(), StoreError> {
         self.2.note("flush", "");
         self.2.pass_flush_gate().await;
-        self.0.flush(batch, token).await
+        let flushed = self.0.flush(batch, token).await;
+        // Past the store: where a recall-tier mirror would run (#18), so a
+        // test can tell one that lands after an erase.
+        self.2.note("flushed", "");
+        flushed
     }
     async fn load_session(&self, session: &SessionId) -> Result<GraphSnapshot, StoreError> {
         self.2.note("load_session", session.as_str());
@@ -242,7 +297,19 @@ impl GraphStore for Shared {
         eraser: &LeaseHolder,
     ) -> Result<EraseOutcome, StoreError> {
         self.2.note("erase_session", session.as_str());
-        self.0.erase_session(session, eraser).await
+        let parked = self.2.parked_flushes();
+        self.2 .2.parked_at_erase.lock().push(parked);
+        let fault = self.2 .2.erase.load(std::sync::atomic::Ordering::SeqCst);
+        if fault == EraseFault::BeforeCommit as u8 {
+            return Err(StoreError::Backend("test: the erase was refused".into()));
+        }
+        let erased = self.0.erase_session(session, eraser).await;
+        if fault == EraseFault::AfterCommit as u8 && erased.is_ok() {
+            return Err(StoreError::Backend(
+                "test: the erase committed, then failed".into(),
+            ));
+        }
+        erased
     }
     async fn backfill_recall_index(
         &self,
@@ -263,6 +330,14 @@ impl GraphStore for Shared {
     }
     async fn read_lease(&self, session: &SessionId) -> Result<Option<LeaseInfo>, StoreError> {
         self.2.note("read_lease", session.as_str());
+        if self
+            .2
+             .2
+            .read_lease
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(StoreError::Backend("test: read_lease failed".into()));
+        }
         self.0.read_lease(session).await
     }
     async fn refresh_lease(

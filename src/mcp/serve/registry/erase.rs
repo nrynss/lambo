@@ -67,10 +67,14 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::{SessionRegistry, Slot, PINNED_RETRY};
+use std::sync::Weak;
+use std::time::Instant;
+
+use super::{Negative, PreviousHandle, SessionRegistry, Slot, PINNED_RETRY};
 use crate::mcp::serve::session::AttachedSession;
 use crate::mcp::serve::shutdown::{close_bounded, LEASE_RELEASE_GRACE, SHUTDOWN_GRACE};
 use crate::mcp::serve::stages::{ShutdownProgress, Stage};
+use crate::memory::Memory;
 use crate::store::lease::LeaseHolder;
 use crate::store::{EraseOutcome, EraseReport, GraphStore};
 use crate::types::{AgentId, SessionId, StoreError};
@@ -236,7 +240,7 @@ impl SessionRegistry {
             }
             Err(error) => {
                 if is_tombstoned(store.as_ref(), &sid).await {
-                    self.slots.lock().insert(id.to_string(), Slot::Erased);
+                    self.mark_erased(id);
                     tracing::error!(
                         session = %id,
                         error = %error,
@@ -321,8 +325,8 @@ impl SessionRegistry {
         }
     }
 
-    /// The store committed: the slot becomes `Erased` (hosted sessions) or
-    /// goes (any other id, so the map stays bounded by the hosted set).
+    /// The store committed: `id` is recorded erased (see
+    /// [`SessionRegistry::mark_erased`]).
     fn finish_erased(&self, id: &str, report: &EraseReport) {
         self.mark_erased(id);
         tracing::info!(
@@ -334,43 +338,72 @@ impl SessionRegistry {
         );
     }
 
-    /// Record that `id` is erased: [`Slot::Erased`] for a hosted session,
-    /// no slot for any other id. The store's tombstone is what refuses a
-    /// later attach either way.
+    /// Record that `id` is erased. A pinned session's slot becomes
+    /// [`Slot::Erased`], so its map stays bounded by the pinned set. Any
+    /// other id loses its slot and its owner (#32 PR 6's `owners`), and the
+    /// negative cache answers it `Erased` (bounded and expiring, PR 6's
+    /// `NegativeCache`); after that the on-demand probe finds the tombstone
+    /// again. Either way the store's tombstone is what refuses a later
+    /// attach.
+    ///
+    /// The slot is changed only while it is still this erase's `Erasing`
+    /// (the conditional final write PR 6's detach uses).
     fn mark_erased(&self, id: &str) {
         let mut slots = self.slots.lock();
-        if self.order.iter().any(|hosted| hosted == id) {
-            slots.insert(id.to_string(), Slot::Erased);
-        } else {
-            slots.remove(id);
+        let ours = matches!(slots.get(id), Some(Slot::Erasing));
+        if self.is_pinned(id) {
+            if ours {
+                slots.insert(id.to_string(), Slot::Erased);
+            }
+            return;
         }
+        if ours {
+            slots.remove(id);
+            self.owners.lock().remove(id);
+        }
+        self.negative.lock().put(id, Negative::Erased);
     }
 
-    /// An attached session whose erase did not commit: a hosted session is
-    /// retried in the background like any detached one (it waits for the
-    /// old handle to go first); any other id loses its slot.
-    fn after_failed_attached(&self, id: &str, previous: std::sync::Weak<crate::memory::Memory>) {
+    /// An attached session whose erase did not commit, while its slot is
+    /// still this erase's `Erasing`: a pinned session is retried in the
+    /// background like any detached one, and an on-demand one loses its slot
+    /// and its owner, so its next request attaches it again. Either waits
+    /// for the old handle to go first (`previous`, as after a detach).
+    fn after_failed_attached(&self, id: &str, previous: Weak<Memory>) {
         let mut slots = self.slots.lock();
-        if self.order.iter().any(|hosted| hosted == id) {
+        if !matches!(slots.get(id), Some(Slot::Erasing)) {
+            return;
+        }
+        let previous = PreviousHandle {
+            mem: previous,
+            detached_at: Instant::now(),
+        };
+        if self.is_pinned(id) {
             slots.insert(
                 id.to_string(),
                 Slot::HeldElsewhere {
-                    retry_at: std::time::Instant::now() + PINNED_RETRY,
-                    previous: Some(super::PreviousHandle {
-                        mem: previous,
-                        detached_at: std::time::Instant::now(),
-                    }),
+                    retry_at: Instant::now() + PINNED_RETRY,
+                    previous: Some(previous),
                     warned: false,
                 },
             );
-        } else {
-            slots.remove(id);
+            return;
+        }
+        slots.remove(id);
+        self.owners.lock().remove(id);
+        drop(slots);
+        if previous.mem.strong_count() > 0 {
+            self.previous.lock().insert(id.to_string(), previous);
         }
     }
 
-    /// Put back the slot an erase that changed nothing replaced.
+    /// Put back the slot an erase that changed nothing replaced, while it
+    /// is still this erase's `Erasing`.
     fn restore(&self, id: &str, prior: Option<Slot>) {
         let mut slots = self.slots.lock();
+        if !matches!(slots.get(id), Some(Slot::Erasing)) {
+            return;
+        }
         match prior {
             Some(slot) => {
                 slots.insert(id.to_string(), slot);
