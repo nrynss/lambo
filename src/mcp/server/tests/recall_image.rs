@@ -175,7 +175,8 @@ async fn a_mismatched_query_vector_is_refused_with_no_data_echo() {
     s.mem.close().await.expect("close");
 }
 
-/// The image caps hold before any decoding (stdio has no transport cap),
+/// The image caps hold before any decoding (a frame under the transports'
+/// 4 MiB frame cap can still carry base64 over it),
 /// and no refusal quotes the payload.
 #[tokio::test]
 async fn image_caps_hold_before_decoding_and_never_echo_the_payload() {
