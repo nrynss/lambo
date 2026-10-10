@@ -378,59 +378,149 @@ fn the_script_renders_names_as_text_and_builds_relative_urls() {
     assert!(APP_JS.contains("$(\"session-picker-msg\").textContent = text"));
     // The page's own markup stays free of inline script, style, and HTML
     // event-handler attributes, so `script-src 'self'` / `style-src 'self'`
-    // need no `'unsafe-inline'`. `element.onclick =` in app.js is a property
-    // assignment from the external script, not an HTML handler.
+    // need no `'unsafe-inline'`. `element.onclick =` and `element.style.x =`
+    // in app.js are property writes from the external script, not markup;
+    // `setAttribute` with a `style` or `on…` name would be markup.
     assert_eq!(INDEX_HTML.matches("<script").count(), 1, "{INDEX_HTML}");
     assert!(INDEX_HTML.contains(r#"<script src="/app.js"></script>"#));
+    let inline = inline_markup(INDEX_HTML);
     assert!(
-        !INDEX_HTML.to_ascii_lowercase().contains("<style"),
-        "index.html must not carry an inline style"
+        inline.is_empty(),
+        "index.html has inline style or event-handler markup: {inline:?}"
     );
-    let handlers = inline_event_handler_attributes(INDEX_HTML);
-    assert!(
-        handlers.is_empty(),
-        "index.html has inline event-handler attributes: {handlers:?}"
-    );
+    let js: String = APP_JS
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    for banned in [
+        r#"setattribute("style""#,
+        "setattribute('style'",
+        r#"setattribute("on"#,
+        "setattribute('on",
+    ] {
+        assert!(!js.contains(banned), "app.js must not call {banned}");
+    }
 }
 
-/// Attribute names inside tags that are HTML event handlers (`onclick`, …).
-fn inline_event_handler_attributes(html: &str) -> Vec<String> {
+/// Inline markup `style-src 'self'` / `script-src 'self'` refuse: each
+/// `style` element (reported as `<style>`) and each `style` or `on…`
+/// attribute (reported by name). Tags are tokenized as HTML does it: an
+/// attribute name ends at whitespace, `/`, `=`, or `>`; whitespace may
+/// surround `=`; a quoted value may hold `>`; comments end at `-->`.
+fn inline_markup(html: &str) -> Vec<String> {
+    let bytes = html.as_bytes();
     let mut found = Vec::new();
-    let mut rest = html;
-    while let Some(start) = rest.find('<') {
-        rest = &rest[start + 1..];
-        if rest.starts_with('!') || rest.starts_with('/') || rest.starts_with('?') {
-            let Some(end) = rest.find('>') else { break };
-            rest = &rest[end + 1..];
+    let mut i = 0;
+    let find = |from: usize, needle: &str| html[from..].find(needle).map(|at| from + at);
+    while let Some(lt) = find(i, "<") {
+        i = lt + 1;
+        if html[i..].starts_with("!--") {
+            let Some(end) = find(i + 3, "-->") else { break };
+            i = end + 3;
             continue;
         }
-        let Some(end) = rest.find('>') else { break };
-        let tag = &rest[..end];
-        rest = &rest[end + 1..];
-        let bytes = tag.as_bytes();
-        let mut i = 0;
-        while i < bytes.len() {
-            if bytes[i].is_ascii_whitespace() {
-                let name_at = i + 1;
-                let mut j = name_at;
-                while j < bytes.len() && bytes[j].is_ascii_alphanumeric() {
-                    j += 1;
-                }
-                if j < bytes.len()
-                    && bytes[j] == b'='
-                    && j > name_at + 2
-                    && tag[name_at..name_at + 2].eq_ignore_ascii_case("on")
-                    && tag.as_bytes()[name_at + 2].is_ascii_alphabetic()
-                {
-                    found.push(tag[name_at..j].to_string());
-                }
-                i = j;
-            } else {
+        if !bytes.get(i).is_some_and(u8::is_ascii_alphabetic) {
+            // `</…>`, `<!doctype …>`, `<?…>`, or a `<` that is text.
+            continue;
+        }
+        let name_at = i;
+        while i < bytes.len() && !matches!(bytes[i], b'/' | b'>') && !bytes[i].is_ascii_whitespace()
+        {
+            i += 1;
+        }
+        if html[name_at..i].eq_ignore_ascii_case("style") {
+            found.push("<style>".to_string());
+        }
+        loop {
+            while i < bytes.len() && (bytes[i] == b'/' || bytes[i].is_ascii_whitespace()) {
                 i += 1;
+            }
+            if i >= bytes.len() || bytes[i] == b'>' {
+                i = (i + 1).min(bytes.len());
+                break;
+            }
+            let attr_at = i;
+            i += 1;
+            while i < bytes.len()
+                && !matches!(bytes[i], b'/' | b'>' | b'=')
+                && !bytes[i].is_ascii_whitespace()
+            {
+                i += 1;
+            }
+            let attr = &html[attr_at..i];
+            let handler = attr.len() > 2
+                && attr[..2].eq_ignore_ascii_case("on")
+                && attr.as_bytes()[2].is_ascii_alphabetic();
+            if handler || attr.eq_ignore_ascii_case("style") {
+                found.push(attr.to_string());
+            }
+            let mut j = i;
+            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            if bytes.get(j) != Some(&b'=') {
+                continue;
+            }
+            i = j + 1;
+            while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            match bytes.get(i) {
+                Some(&quote @ (b'"' | b'\'')) => {
+                    i = html[i + 1..]
+                        .find(quote as char)
+                        .map_or(bytes.len(), |at| i + 1 + at + 1);
+                }
+                _ => {
+                    while i < bytes.len() && bytes[i] != b'>' && !bytes[i].is_ascii_whitespace() {
+                        i += 1;
+                    }
+                }
             }
         }
     }
     found
+}
+
+/// The scanner itself: what it must report, and what it must not.
+#[test]
+fn the_inline_markup_scanner_reports_style_and_handlers_only() {
+    let report: &[(&str, &[&str])] = &[
+        (r#"<div style="color: red">x</div>"#, &["style"]),
+        (r#"<div STYLE='x'>"#, &["STYLE"]),
+        (r#"<a href="/" onclick="go()">"#, &["onclick"]),
+        (r#"<a onclick = "go()">"#, &["onclick"]),
+        ("<a onclick\n=\n'go()'>", &["onclick"]),
+        ("<a/onclick=go()>", &["onclick"]),
+        (r#"<a title="a > b" onclick="go()">"#, &["onclick"]),
+        (r#"<a title='x>y' onmouseover=go>"#, &["onmouseover"]),
+        ("<img src=x onerror=alert(1)>", &["onerror"]),
+        ("<body onload>", &["onload"]),
+        ("<style>p{}</style>", &["<style>"]),
+        (r#"<p><b style="x" onfocus="y">"#, &["style", "onfocus"]),
+    ];
+    for (html, expect) in report {
+        assert_eq!(inline_markup(html), *expect, "{html}");
+    }
+    for html in [
+        r#"<button class="b" type="button">Open</button>"#,
+        r#"<span aria-label="Close">x</span>"#,
+        r#"<meta name="viewport" content="width=device-width">"#,
+        r#"<input type="button" value="on">"#,
+        r#"<a title="x onclick=go()">"#,
+        r#"<a title="a > onclick=go()" href="/">"#,
+        "<!-- <a onclick=go()> -->",
+        "<!doctype html><p>a < b onclick=c</p>",
+        r#"<div data-onclick="x" on="2">"#,
+        r#"<link rel="stylesheet" href="/app.css">"#,
+    ] {
+        assert!(
+            inline_markup(html).is_empty(),
+            "{html}: {:?}",
+            inline_markup(html)
+        );
+    }
 }
 
 /// Acceptance: `localStorage` failures are tolerated. Every access sits in
