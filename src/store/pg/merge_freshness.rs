@@ -18,7 +18,7 @@
 //! database's vector search sees only flushed rows. It takes its source
 //! declarations from a real, never-connected `PgStore<D>`, so these tests
 //! exercise the family's own answer, not the double's, and it loads what it
-//! flushed, so a holder can reopen a durable session. The scenario
+//! flushed, vectors included, so a reopened holder is tested too. The scenario
 //! [`run_merge_freshness`] runs offline against it and live against a real
 //! database: the Postgres leg is the `#[ignore]`d test at the bottom, run by
 //! name by the `postgres-live` CI step once that step is added (see the #60
@@ -173,7 +173,7 @@ fn has_merge_edge(edges: &[Edge], a: NodeId, b: NodeId) -> bool {
 }
 
 /// The scenario both the offline double and the live databases run, over
-/// one session of `store`, in two holder lifetimes:
+/// one session of `store`, in three holder lifetimes:
 ///
 /// 1. **Seed.** A holder derives an unrelated fact and closes, so the session
 ///    and its embedding contract are durable.
@@ -181,6 +181,11 @@ fn has_merge_edge(edges: &[Edge], a: NodeId, b: NodeId) -> bool {
 ///    any flush, [`PARAPHRASE`]: the paraphrase merges into the unflushed
 ///    original, which the database cannot see yet (asserted). Closing makes
 ///    the merge durable.
+/// 3. **Reload (#60 review M2).** A third holder loads the session, so
+///    [`ORIGINAL`] reaches it only through the session load, and derives
+///    [`REPHRASE`], which must merge into [`ORIGINAL`]. This depends on the
+///    load carrying the concepts' vectors: the union re-scores the
+///    database's candidates on the graph's vectors and drops one without.
 ///
 /// Returns the session, for the caller to erase.
 pub(crate) async fn run_merge_freshness(store: Arc<dyn GraphStore>, session: &str) -> SessionId {
@@ -243,6 +248,27 @@ pub(crate) async fn run_merge_freshness(store: Arc<dyn GraphStore>, session: &st
         hits.iter().any(|s| s.item == first),
         "the database finds the original for its paraphrase: {hits:?}"
     );
+
+    // 3. A paraphrase of a concept that reached this holder only by load.
+    let reloaded = open_holder(store.clone(), session, embedder.clone(), None).await;
+    assert!(
+        reloaded
+            .graph()
+            .read()
+            .concepts()
+            .any(|c| c.id == first && c.embedding.is_some()),
+        "the session load must carry the original's vector"
+    );
+    let third = reloaded
+        .derive(&[(REPHRASE, ConceptType::Entity)], &ParentOf::none())
+        .await
+        .expect("derive the rephrase");
+    assert_eq!(
+        third.semantic_merged,
+        vec![first],
+        "a paraphrase of a reloaded concept became a near-duplicate: {third:?}"
+    );
+    reloaded.close().await.expect("close flushes");
     sid
 }
 
@@ -543,11 +569,11 @@ async fn the_family_splits_merge_from_recall() {
     for_each_dialect!(check);
 }
 
-/// **#60 acceptance 1.** The shared scenario over the double: a paraphrase
-/// merges into an unflushed original over a durable session, through the
-/// union of the database and the holder's unflushed concepts.
+/// **#60 acceptance 1, review M2.** The shared scenario over the double: a
+/// paraphrase merges into an unflushed original over a durable session, and
+/// a reopened holder merges a paraphrase into a concept it only loaded.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_holder_merges_an_unflushed_paraphrase_over_a_durable_session() {
+async fn a_holder_merges_into_unflushed_and_reloaded_concepts() {
     async fn check<D: Dialect>(kind: StoreKind, name: &str) {
         let store = Arc::new(LaggingDatabase::<D>::new(kind));
         run_merge_freshness(store.clone(), &format!("pg-merge-{name}")).await;
