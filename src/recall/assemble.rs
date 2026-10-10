@@ -2294,4 +2294,72 @@ mod tests {
         assert!(!blend.cold_start);
         assert_eq!(ids_of(&blend), vec![uid(1)]);
     }
+
+    /// F3 (#79 review): kept reservation holders take no `top_k` slot in cold
+    /// mode, so a cold result holds `top_k` query-ranked hits plus the holders
+    /// it keeps, and never more: a holder the blend would not show is not
+    /// added.
+    #[test]
+    fn a_cold_result_exceeds_top_k_by_exactly_the_kept_reservation_holders() {
+        let mut g = graph_with(5);
+        let now = ts(60);
+        // uid 5 also holds a reservation, but the blend does not show it.
+        let holders = [uid(1), uid(3)];
+        for id in [uid(1), uid(3), uid(5)] {
+            g.set_reservation(Reservation {
+                session_id: sid(),
+                node_id: id,
+                agent_id: AgentId::from("agent-c"),
+                expires_at: now + chrono::Duration::seconds(60),
+            });
+        }
+        // The blend shows both holders (0.50 and 0.525 against 0.45).
+        let scores = ScoreTable {
+            epoch: 1,
+            ranked: vec![
+                Scored::new(uid(1), 0.90),
+                Scored::new(uid(3), 0.95),
+                Scored::new(uid(4), 0.10),
+                Scored::new(uid(5), 0.05),
+            ],
+        };
+        let phase1 = vec![
+            Scored::new(uid(1), 0.10),
+            Scored::new(uid(2), 0.95), // fresh, no daemon entry
+            Scored::new(uid(3), 0.10),
+            Scored::new(uid(4), 0.80),
+            Scored::new(uid(5), 0.70),
+        ];
+        let expanded = ExpandedSet {
+            required: phase1.clone(),
+            siblings: Vec::new(),
+        };
+        let top_k = 2;
+        let result = assemble(
+            &g,
+            &expanded,
+            &phase1,
+            &scores,
+            &HashMap::new(),
+            &query(top_k, 10_000),
+            RecallWeights::default(),
+            now,
+            default_token_count,
+        );
+        assert!(result.cold_start);
+        let ids: HashSet<NodeId> = ids_of(&result).into_iter().collect();
+        assert_eq!(ids, HashSet::from([uid(1), uid(2), uid(3), uid(4)]));
+        let kept = result
+            .hits
+            .iter()
+            .filter(|h| holders.contains(&h.node_id))
+            .count();
+        assert_eq!(kept, holders.len());
+        assert_eq!(
+            result.hits.len(),
+            top_k + kept,
+            "top_k plus the kept holders"
+        );
+        assert_eq!(result.warnings.len(), holders.len());
+    }
 }
