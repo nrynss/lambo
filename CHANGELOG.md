@@ -264,10 +264,12 @@
   `per_session_rps` is set, so it answers as before, each credential at its
   full `--rate-limit-rps`.
 - A multi-session `lambo serve` whose pinned session was erased now starts
-  and serves the other sessions, answering the erased one with `410`; it
-  used to refuse to start. A pinned session found erased on a background
-  retry answers `410` too, instead of the `503` for a session that needs an
-  operator (#32, seventh part).
+  and serves the other sessions, answering the erased one with the erased
+  error (MCP error `-32003` to a call, `410` to any other request); it used
+  to refuse to start. A pinned session found erased on a background retry
+  answers the same, instead of the `503` for a session that needs an
+  operator (#32, seventh part). An on-demand session found erased (#32,
+  sixth part) gets the same answer, where it got `410` alone.
 - `lambo serve-web` reads its session through a shared per-session view
   (#4 PR 1). Every request and every open tab reads one load of the session
   until it is older than `[web] view_ttl_ms` (1.5 s by default, the page's
@@ -733,19 +735,27 @@
   credential with `erase` that reaches the session. The answer is the same
   JSON report `lambo erase-session` prints (`200`; a repeat reports
   `already_absent`), `400` for a bad body or a confirm that does not repeat
-  the id, `409` when another process holds the session, `503` while it is
-  being erased or detached, `500` when the store fails (saying whether the
-  session is durably erased). A credential without `erase`, or one that
-  does not reach the session, gets the empty `404` of an unrouted path, and
-  no store is consulted. A session the serve holds is fenced in the process,
-  its MCP sessions ended and its handle closed without flushing or releasing
-  the lease, then erased as the lease's holder, so no other writer can take
-  it in between; its requests answer `410` from then on and nothing
-  recreates it. A one-session serve answers the erase and then exits. Not an
-  MCP tool: the tool list is unchanged. `GET /admin/sessions`, for a
-  credential with `admin`, lists the sessions in its reach with their state
-  and, for live ones, their size. Neither route counts against the
-  MCP-session cap.
+  the id, `408` for a body that does not arrive in time, `409` when another
+  process holds the session, `503` while it is being erased, attached or
+  detached, or the serve is shutting down, and `500` when the store fails,
+  saying whether the session is durably erased, untouched, or in an unknown
+  state (a repeat is always safe). A credential without `erase`, or one
+  that does not reach the session, gets the empty `404` of an unrouted path,
+  and no store is consulted. A session the serve holds is fenced in the
+  process, its MCP sessions ended and its handle closed (its tasks stopped
+  and joined) without flushing or releasing the lease, then erased as the
+  lease's holder, so no other writer can take it in between. While the
+  erase runs its requests get `503` with `Retry-After: 1`; once erased, a
+  call gets the erased error (MCP error `-32003`, as a proxy to an erased
+  session answers) and any other request `410`, and nothing recreates it.
+  An erased on-demand session is remembered like PR 6's other negative
+  outcomes. A one-session serve answers the erase and then exits. The
+  shutdown waits for an erase in flight within its close budget, and cuts
+  one still running 8 seconds after it began closing the sessions short
+  with an unknown outcome. Not an MCP tool: the tool list is unchanged. `GET
+  /admin/sessions`, for a credential with `admin`, lists the sessions in
+  its reach with their state and, for live ones, their size. Neither route
+  counts against the MCP-session cap.
 - `lambo::writeq::EmbedderCalibration` and `MemoryBuilder::calibration`
   (#32, third part): the write queue's startup calibration probe once per
   embedder for the whole process. Builders over one shared embedder that are

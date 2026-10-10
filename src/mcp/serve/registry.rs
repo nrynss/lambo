@@ -36,8 +36,8 @@
 //! | [`Slot::Detaching`] | 503, `Retry-After: 1` | the detach ends: `HeldElsewhere` (pinned) or removed (on-demand) |
 //! | [`Slot::HeldElsewhere`] (pinned) | 503, `Retry-After` until the next retry | the background retry wins the lease |
 //! | [`Slot::Failed`] (pinned) | 503, no `Retry-After` | never: an operator restarts the serve |
-//! | [`Slot::Erasing`] | 503, `Retry-After: 1`; never attached | the erase ends: `Erased` (pinned) or removed (on-demand, the negative cache answers 410), or back to the state it had |
-//! | [`Slot::Erased`] (pinned) | 410 (in scope) | never: the store's tombstone refuses every attach |
+//! | [`Slot::Erasing`] | 503, `Retry-After: 1`; never attached | the erase ends: `Erased` (pinned) or removed (on-demand, the negative cache answers erased), or back to the state it had |
+//! | [`Slot::Erased`] (pinned) | the erased error: MCP error -32003 to a call, else 410 (`transport::erased_answer`) | never: the store's tombstone refuses every attach |
 //! | absent, pinned | 503, `Retry-After: 1` (between states) | |
 //! | absent, not pinned | a cached negative outcome; else an on-demand attach, when the serve attaches on demand (503 `Retry-After` while `2 × max_attached` attaches wait for their probe); else the uniform 404 (`surface::session`) | |
 //!
@@ -279,8 +279,9 @@ enum Slot {
     Erasing,
     /// Erased: the store holds the #23 tombstone, which refuses every
     /// acquire, so nothing in this process attaches it again. Requests get
-    /// the erased refusal without a store call (a negative cache, kept for
-    /// hosted sessions only, so its size is bounded by the hosted set).
+    /// the erased answer without a store call. Kept for pinned sessions
+    /// only, so its size is bounded by the pinned set; an erased on-demand
+    /// id goes to the negative cache instead (`Negative::Erased`).
     Erased,
 }
 

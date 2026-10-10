@@ -172,35 +172,112 @@ no graph lock is taken inside it.
   hub answers, exits, and a restart refuses.
 - Mutations: an unfenced close before the erase fails the attached test
   (the lease is released first, `leases: 0`); authorizing with
-  `SessionNeed::Use` fails the 404 test. Not caught by a test: skipping the
-  fence and close entirely is not caught by the census (the store fence
-  alone keeps it at zero on the memory store, refusing the parked flush
-  once it is let go); the difference is the recall-index mirror window,
-  which needs the Elastic tier to observe.
+  `SessionNeed::Use` fails the 404 test. Skipping the fence and close
+  entirely is now caught too (Opus review M2, below): the recording store
+  snapshots its parked-flush gauge when `erase_session` is entered, and the
+  test asserts it is zero.
 
-## For the merge with PR 6
+## Merged with PR 6 (main 8e47697d)
 
-PR 6 (on-demand attach) changes the registry's attach, detach and
-eviction in parallel. PR 7 touched, in `registry.rs`:
+PR 6 landed first. How each conflict was resolved:
 
-- `Slot`: two new variants, `Erasing` and `Erased`; `ForcedState::Erased`.
-- `Lookup`: one new variant, `Erased`; one new `lookup` arm.
-- `SessionRegistry`: one new field, `store` (`OnceLock`), set in
-  `insert_live`.
-- `retry`: a guard that returns unless the slot is still `HeldElsewhere`,
-  and an error arm that classifies a tombstone as `Erased` before the
-  `Failed` arm.
-- `mod erase; mod views;` and the `EraseAnswer` re-export.
+- `registry.rs`: PR 6's attach permits, `Slot::Attaching { placed, .. }`,
+  `answer_for`, `owners`, `negative`, `track` and `on_demand.rs` taken as
+  they are; PR 7's `Erasing`/`Erased`, store field and retry guard kept on
+  top (the guard runs after the permit). `answer_for` gained the arms.
+- `transport.rs`: one `Lookup::Erased` arm (PR 6's 410 body), now
+  `erased_answer` (below).
+- `views.rs`: an `Attaching` slot lists as `attaching`.
+- `tests/serve_admin_erase.rs`: the one-session test scopes both
+  credentials to its session. With PR 6, a credential reaching past the
+  pinned set makes the serve attach on demand (`DetachSession`), and the
+  erase then no longer ends the process.
+- CHANGELOG, `cli.mdx` (and the site mirror), `serve.rs`, the registry
+  test modules: both sides, main's first.
 
-Everything else is in `registry/erase.rs` and `registry/views.rs`. For PR 6:
-the on-demand attach in `lookup`'s "hosted but in no slot" arm must treat
-`Erasing` as not attachable (it is a slot, so it is not that arm), and an
-attach that meets the tombstone should land in `Erased` only within a
-bounded cache, or answer from the tombstone each time, since `mark_erased`
-keeps `Erased` for hosted ids only. Eviction and idle detach must skip
-`Erasing`. `erase_attached`'s failure path calls `after_failed_attached`,
-which puts a hosted session in `HeldElsewhere` and removes any other id's
-slot; PR 6's on-demand detach rule (remove the slot) agrees with it.
+## Opus review remediation (2026-10-10)
+
+PR 6 reconciliation, as the review listed it:
+
+1. The erase uses PR 6's permits: it takes **every** attach permit
+   (`acquire_many(permit_count)`, raced against the shutdown) before it
+   claims the slot, and drops them right after the claim. Holding them
+   through the store erase was not kept: once claimed, `Erasing` keeps
+   every attach of the id away (the retry's guard, `answer_for`, the
+   conditional admissions), and holding them would stall every other
+   attach and the shutdown's `close_set` behind the store call.
+2. `Attaching` (and `Detaching`, `Erasing`) answer the erase 503.
+3. `answer_for`: `Erasing` is `Unavailable { 1 s }` (L3), `Erased` is
+   `Lookup::Erased`.
+4. `takes_a_place` counts `Erasing`: the handle is closed only after the
+   claim, so it holds memory. An `Erasing` slot of an unattached id is
+   over-counted for a few store round trips; that only refuses an attach.
+5. Eviction (`choose_victim`) and the idle sweep take `Live` only; a test
+   pins that `Erasing` is neither.
+6. One erased answer (below) for the probe's `AttachOutcome::Erased`, the
+   negative cache and `Slot::Erased`. An erased id that is not pinned keeps
+   no slot and no owner: `mark_erased` puts `Negative::Erased` in PR 6's
+   cache (no separate erased cache), and the probe answers from the
+   tombstone once it expires. Pinned is `is_pinned`.
+7. The erase keeps its own `erase_attached` (it fences before the drain
+   and erases as the session's holder, which `run_detach` does not), with
+   PR 6's conditional style: every final slot write happens only while the
+   slot is still `Erasing`. A failed on-demand erase leaves the slot and
+   owner removed and the old handle in `previous`, as a detach does.
+8. The erase task is recorded with `track_unless_closing`.
+9. The retry guard survived the merge, and the retry's post-acquire writes
+   are conditional (H1).
+
+Findings:
+
+- **H1.** Permits before the claim (above). Every background admission is
+  conditional: `admit_if`/`insert_live_if` check the slot under the lock
+  (the pinned retry: still `HeldElsewhere`; the on-demand attach: its own
+  `Attaching`), and a refused admission closes what it built, releasing
+  the lease. The retry's `Erased`/`Failed`/`HeldElsewhere` writes go
+  through `replace_held`. Tests: the erase racing a retry parked in its
+  load waits for it and erases what it attached; a retry whose slot was
+  changed releases its lease.
+- **M1.** `close_bounded`'s `Config` error is the abandon (the fenced
+  branch returns the erased `Store` error); on it the erase calls
+  `Memory::stop_tasks_for_erase` (heartbeat, replay, canon, daemon, flush:
+  aborted and joined, no writers gate, no close lock). The fenced branch
+  shares the abort-and-join helper. Test: the writers gate held and two
+  signals recorded, then no flush parked at the erase and none completing
+  after it.
+- **M2.** The recording store's flush gauge, filtered to one session's
+  batches (`park_flushes_of`), snapshotted at `erase_session` entry, and a
+  `flushed` note after each flush that passed the store. Mutation-checked.
+- **L1.** `track_unless_closing` (check, spawn, record under the list's
+  lock). Once the shutdown has taken the set, the erase gets
+  `ERASE_SHUTDOWN_GRACE` (= `CLOSE_FLUSH_GRACE`, asserted under
+  `CLOSE_GRACE`) and is then cut short with an unknown outcome. The erase's
+  fence latches quietly (`LeaseLostSignal::record`) and is announced on
+  every way out of `erase_attached` (`AnnounceOnDrop`), so a one-session
+  serve's wind-down, and its transport drain, start only after the erase
+  has its answer.
+- **L2.** `store::erase::{read_tombstone, Tombstone}`; `refused_as_erased`
+  and the registry use it (the duplicate check is gone). `Unknown` answers
+  500 "the outcome is unknown; repeat the request".
+- **L3.** `Erasing` answers 503 `Retry-After: 1`; 410 is for `Erased`.
+- **L4.** `SessionRegistry::new` takes the store (the template's, or the
+  one-session serve's session's); the `OnceLock` is gone. Not reachable
+  before either: a no-attacher registry admits its session before routes.
+- **L5.** The listing runs on the blocking pool. No test pins it: holding
+  a graph lock to show the runtime stays free also blocks the session's
+  own flush and daemon tasks on the runtime's threads.
+- **Nits.** 408 in the route table and the docs; "refused after 1 KiB";
+  the duplicated tombstone check removed; the supervised one-session crash
+  loop and the prefix credential's tombstones documented. The one-session
+  serve's ledger still books `lease` `lost` with the tombstone holder as
+  winner, the line #23's heartbeat-detected erase books: a distinct
+  `lease:erased` event would be a new ledger vocabulary entry, and the
+  winner already says it was an erase.
+- **MCP error -32003** (design §6.2). It fits: the erased answer never
+  reaches rmcp, so `transport::erased_answer` reads the body (the guard's
+  ceiling and timeout) and answers a POST carrying one JSON-RPC request
+  with the proxy's own erased frame (`proxy::erased_reply`, 200, JSON);
+  everything else with no id to answer keeps 410.
 
 ## Not run here
 

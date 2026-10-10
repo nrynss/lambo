@@ -32,9 +32,10 @@
 //! | 200 | erased; the body is the `EraseReport` JSON, the same bytes `lambo erase-session` prints. A repeat reports `already_absent: true` |
 //! | 400 | the body is not `{"confirm": ...}`, or the confirm does not repeat the session id; nothing was erased |
 //! | 405 | not a `POST` (inside scope only) |
+//! | 408 | the body did not arrive within `REQUEST_BODY_TIMEOUT`; nothing was erased |
 //! | 409 | a live writer in another process holds the session; nothing was erased (the CLI's exit 1) |
 //! | 500 | the store failed; the body says whether the session is durably erased (repeat the request), untouched (an attached session's unflushed writes are discarded all the same), or unknown (repeat the request) |
-//! | 503 | the session is being erased or detached, or the serve is shutting down; `Retry-After` |
+//! | 503 | the session is being erased, attached or detached, or the serve is shutting down; `Retry-After` |
 //!
 //! # `GET /admin/sessions`
 //!
@@ -69,7 +70,8 @@ const ADMIN_SESSION_PREFIX: &str = "/admin/s/";
 const ERASE_SUFFIX: &str = "/erase";
 
 /// The largest erase body read: `{"confirm": "<128-byte id>"}` with room
-/// for whitespace. A larger body is refused unread (400).
+/// for whitespace. A larger body is refused (400) once this much of it has
+/// been read; the rest is not.
 const MAX_ADMIN_BODY_BYTES: usize = 1024;
 
 /// What the admin routes need.
@@ -294,8 +296,8 @@ async fn erase_session(
                 header::RETRY_AFTER,
                 retry_after.as_secs().max(1).to_string(),
             )],
-            "this session is being erased or detached, or the server is shutting down: retry \
-             later\n",
+            "this session is being erased, attached or detached, or the server is shutting \
+             down: retry later\n",
         )
             .into_response(),
         EraseAnswer::Failed {

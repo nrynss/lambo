@@ -9,9 +9,9 @@
 //!
 //! 1. The slot becomes [`Slot::Erasing`], claimed while every attach
 //!    permit is held (#32 PR 7 review H1), so no attach is between its
-//!    acquire and its admission: new requests get the erased refusal and no
-//!    attach or background retry starts for the id. An on-demand attach in
-//!    flight (`Slot::Attaching`) is answered 503, like a detach.
+//!    acquire and its admission: new requests get 503 (#32 PR 7 review L3)
+//!    and no attach or background retry starts for the id. An on-demand
+//!    attach in flight (`Slot::Attaching`) is answered 503, like a detach.
 //! 2. The session's lease watcher is stopped, so the fence below is not
 //!    booked as a lost lease and does not spawn a detach.
 //! 3. The handle is fenced **in this process only**
