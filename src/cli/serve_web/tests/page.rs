@@ -279,12 +279,39 @@ async fn the_pickers_urls_resolve_from_every_page() {
 #[test]
 fn the_pickers_name_rule_is_the_servers() {
     assert_eq!(MAX_ADDRESSED_LEN, 128, "the script's {{0,127}} assumes 128");
-    assert!(APP_JS.contains(r"var SESSION_NAME_RE = /^[A-Za-z0-9_:-][A-Za-z0-9._:-]{0,127}$/;"));
-    // The script's regex, written out.
+    // The shipped regex, read out of the script rather than transcribed
+    // (review L5): `^[FIRST][REST]{0,MAX}$`, its two classes parsed into
+    // byte sets and its bound into a number, then run as that pattern runs.
+    let literal = APP_JS
+        .split("var SESSION_NAME_RE = /^[")
+        .nth(1)
+        .and_then(|rest| rest.split("$/;").next())
+        .expect("the regex literal");
+    let (first, rest) = literal.split_once("][").expect("two classes");
+    let (rest, bound) = rest.split_once("]{0,").expect("a bounded repeat");
+    let max_rest: usize = bound.trim_end_matches('}').parse().expect("bound");
+    let class = |src: &str| -> Vec<u8> {
+        let b = src.as_bytes();
+        let mut set = Vec::new();
+        let mut i = 0;
+        while i < b.len() {
+            if i + 2 < b.len() && b[i + 1] == b'-' {
+                set.extend(b[i]..=b[i + 2]);
+                i += 3;
+            } else {
+                set.push(b[i]);
+                i += 1;
+            }
+        }
+        set
+    };
+    let (first, rest) = (class(first), class(rest));
     let js_rule = |n: &str| {
         let b = n.as_bytes();
-        let ok = |c: u8| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b':' | b'-');
-        !b.is_empty() && b.len() <= 128 && b[0] != b'.' && b.iter().all(|c| ok(*c))
+        !b.is_empty()
+            && b.len() <= 1 + max_rest
+            && first.contains(&b[0])
+            && b[1..].iter().all(|c| rest.contains(c))
     };
     let long_ok = "a".repeat(128);
     let long_bad = "a".repeat(129);
@@ -293,6 +320,8 @@ fn the_pickers_name_rule_is_the_servers() {
         "t4-a",
         "dc-u-1",
         "a:b.c_d-e",
+        "x.",
+        "Z9",
         "_x",
         ":x",
         "-x",
@@ -561,4 +590,42 @@ fn a_long_name_never_widens_a_narrow_page() {
     assert!(rule(".topbar-left").contains("max-width: 100%;"));
     assert!(rule(".session-picker").contains("max-width: 100%;"));
     assert!(APP_JS.contains(r#"$("session-name").title = info.session;"#));
+}
+
+/// Review L5: `switchable` for a prefix grant is the count of served
+/// sessions it reads, not a property of having a prefix. `pre-two`'s prefix
+/// reads two served sessions, so every page it may read is switchable;
+/// `pre-one`'s reads one, so no page carries the key (and the alias, the
+/// default it cannot read, is the uniform 404); `mixed` reads one by name
+/// and one by prefix, two in all.
+#[tokio::test]
+async fn a_prefix_grant_is_switchable_only_over_two_served_sessions() {
+    let (addr, handle) = credentialed(false).await;
+    for (cred, reads, switchable) in [
+        ("pre-two", &["t4-a", "t4-b"][..], true),
+        ("pre-one", &["t4q-1"][..], false),
+        ("mixed", &["t4-a", "t4q-1"][..], true),
+    ] {
+        let token = cred_token(cred);
+        let mut paths: Vec<String> = reads
+            .iter()
+            .map(|s| format!("/s/{s}/api/session"))
+            .collect();
+        if reads.contains(&SERVED[0]) {
+            paths.push("/api/session".to_string());
+        } else {
+            let r = as_caller(addr, "GET", "/api/session", Some(&token)).await;
+            assert_eq!(r.status, 404, "{cred}: the default is out of reach");
+        }
+        for path in paths {
+            let r = as_caller(addr, "GET", &path, Some(&token)).await;
+            assert_eq!(r.status, 200, "{cred} {path}");
+            let v: serde_json::Value = serde_json::from_str(&r.body).expect("json");
+            match switchable {
+                true => assert_eq!(v["switchable"], true, "{cred} {path}"),
+                false => assert!(v.get("switchable").is_none(), "{cred} {path}: {v}"),
+            }
+        }
+    }
+    handle.abort();
 }
