@@ -36,8 +36,13 @@
 //! | [`Slot::Detaching`] | 503, `Retry-After: 1` | the detach ends: `HeldElsewhere` (pinned) or removed (on-demand) |
 //! | [`Slot::HeldElsewhere`] (pinned) | 503, `Retry-After` until the next retry | the background retry wins the lease |
 //! | [`Slot::Failed`] (pinned) | 503, no `Retry-After` | never: an operator restarts the serve |
+//! | [`Slot::Erasing`] | 503, `Retry-After: 1`; never attached | the erase ends: `Erased` (pinned) or removed (on-demand, the negative cache answers erased), or back to the state it had |
+//! | [`Slot::Erased`] (pinned) | the erased error: MCP error -32003 to a call, else 410 (`transport::erased_answer`) | never: the store's tombstone refuses every attach |
 //! | absent, pinned | 503, `Retry-After: 1` (between states) | |
 //! | absent, not pinned | a cached negative outcome; else an on-demand attach, when the serve attaches on demand (503 `Retry-After` while `2 × max_attached` attaches wait for their probe); else the uniform 404 (`surface::session`) | |
+//!
+//! The erase itself (#32 PR 7, design §6.3) is [`SessionRegistry::erase`],
+//! in the `erase` child module.
 //!
 //! # What runs where
 //!
@@ -55,6 +60,12 @@ use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
+mod erase;
+mod views;
+
+pub(super) use erase::EraseAnswer;
+#[cfg(all(test, unix, feature = "store-memory", feature = "embed-fixture"))]
+pub(super) use erase::ERASE_PERMIT_WAIT;
 #[cfg(all(test, unix, feature = "store-memory", feature = "embed-fixture"))]
 pub(super) use on_demand::NEGATIVE_TTL;
 use on_demand::{
@@ -69,7 +80,9 @@ use super::builder::explain_startup_failure;
 use super::hub::{derive_endpoint, SessionEndpoint};
 use super::roles::{record_refused_loser, ELECTION_RETRY};
 use super::session::{session_server, AttachedSession, HostCheck};
-use super::shutdown::{book_lease_loss, close_sessions, LEASE_RELEASE_GRACE, SHUTDOWN_GRACE};
+use super::shutdown::{
+    book_lease_loss, close_bounded, close_sessions, LEASE_RELEASE_GRACE, SHUTDOWN_GRACE,
+};
 use super::signals::EarlyShutdown;
 use super::stages::{ShutdownProgress, Stage};
 use crate::ledger::Ledger;
@@ -257,8 +270,21 @@ enum Slot {
     /// A background attach failed with an error that will not clear on its
     /// own (an erased session, an embedding-contract mismatch, an
     /// unprovisioned store): logged once at ERROR and no longer retried
-    /// (#32 review L1). PR 7's `Erased` slot takes over the erased case.
+    /// (#32 review L1). An erased session gets [`Slot::Erased`] instead
+    /// (#32 PR 7).
     Failed,
+    /// Being erased by this process (#32 PR 7, design §6.3): requests get
+    /// 503 with `Retry-After: 1` until the erase ends (#32 PR 7 review L3:
+    /// an erase that does not commit serves the session again, so the
+    /// permanent 410 waits for `Erased`), and no attach or retry starts for
+    /// it.
+    Erasing,
+    /// Erased: the store holds the #23 tombstone, which refuses every
+    /// acquire, so nothing in this process attaches it again. Requests get
+    /// the erased answer without a store call. Kept for pinned sessions
+    /// only, so its size is bounded by the pinned set; an erased on-demand
+    /// id goes to the negative cache instead (`Negative::Erased`).
+    Erased,
 }
 
 /// A detached session's old `Memory`, held weakly.
@@ -278,9 +304,14 @@ const PREVIOUS_HANDLE_WAIT: Duration = Duration::from_secs(30);
 #[cfg(all(test, unix, feature = "store-memory", feature = "embed-fixture"))]
 #[derive(Clone, Copy, Debug)]
 pub(super) enum ForcedState {
+    /// An on-demand attach in flight whose outcome never comes (its sender
+    /// is dropped).
+    Attaching,
     Detaching,
     HeldElsewhere,
     Failed,
+    Erasing,
+    Erased,
 }
 
 /// What the router gets for a session id.
@@ -295,8 +326,11 @@ pub(super) enum Lookup {
     /// answered from the negative cache for `NEGATIVE_TTL`, then tried
     /// again.
     Failed,
-    /// An on-demand session that was erased (#23): it is never attached or
-    /// recreated again. Reached only inside the caller's scope.
+    /// Erased: an on-demand session found tombstoned (#23), or a session
+    /// erased by this process (#32 PR 7). It is never attached or recreated
+    /// again. Reached only inside the caller's scope. A session still being
+    /// erased is [`Lookup::Unavailable`] until the erase commits (#32 PR 7
+    /// review L3).
     Erased,
     /// Not a session this serve hosts, or an on-demand session that does
     /// not exist and that the caller may not create: the uniform 404.
@@ -387,8 +421,14 @@ pub(super) struct SessionRegistry {
     /// The idle sweeper (on demand only).
     sweeper: parking_lot::Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Detaches and on-demand attaches in flight, joined by the process
-    /// shutdown.
+    /// shutdown. An in-serve erase (#32 PR 7) runs here too, so the
+    /// shutdown waits for it.
     detaches: parking_lot::Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    /// The store every session shares (one `GraphStore`, Level B), from
+    /// construction (#32 PR 7 review L4): the template builder's, else the
+    /// one the caller hands a one-session registry. What an erase of a
+    /// session that is not attached runs against.
+    store: Option<Arc<dyn crate::store::GraphStore>>,
     /// Set by a test to make the next on-demand attach panic right after
     /// it is admitted (#32 PR 6 Sonnet review L-a).
     #[cfg(test)]
@@ -402,6 +442,10 @@ impl SessionRegistry {
     /// `bounds` sets how many attaches run at once and whether, and within
     /// which bounds, sessions attach on demand. On-demand attach needs an
     /// attacher; without one it is off.
+    ///
+    /// `store` is the store every session shares, for a registry with no
+    /// attacher (whose sessions come from the election); one with an
+    /// attacher uses its template's, and may pass `None`.
     pub(super) fn new(
         order: Vec<String>,
         default: Option<String>,
@@ -409,7 +453,12 @@ impl SessionRegistry {
         attacher: Option<SessionAttacher>,
         early: EarlyShutdown,
         bounds: RegistryBounds,
+        store: Option<Arc<dyn crate::store::GraphStore>>,
     ) -> Arc<Self> {
+        let store = attacher
+            .as_ref()
+            .and_then(|attacher| attacher.template.shared_store())
+            .or(store);
         let permit_count = u32::try_from(bounds.attach_permits.max(1)).unwrap_or(u32::MAX);
         let on_demand = bounds
             .on_demand
@@ -437,6 +486,7 @@ impl SessionRegistry {
             retry: parking_lot::Mutex::new(None),
             sweeper: parking_lot::Mutex::new(None),
             detaches: parking_lot::Mutex::new(Vec::new()),
+            store,
             #[cfg(test)]
             panic_after_admit: std::sync::atomic::AtomicBool::new(false),
         })
@@ -841,7 +891,14 @@ impl SessionRegistry {
         };
         match attempt {
             Ok(Acquired::Attached(mem, endpoint)) => {
-                let session = self.admit(mem, endpoint);
+                // Only over this flight's own `Attaching` slot (#32 PR 7
+                // review H1): nothing else may have replaced it, but the
+                // check costs nothing and keeps every background admission
+                // conditional.
+                let Some(session) = self.admit_if(mem, endpoint, |slot| flight.owns(slot)).await
+                else {
+                    return busy;
+                };
                 #[cfg(test)]
                 if self
                     .panic_after_admit
@@ -994,6 +1051,25 @@ impl SessionRegistry {
         tasks.push(task);
     }
 
+    /// Spawn a task with `spawn` and keep it for the shutdown to join,
+    /// unless the shutdown has begun: then nothing is spawned and `false`
+    /// is returned (#32 PR 7 review L1).
+    ///
+    /// The check, the spawn and the record are under the task list's lock.
+    /// The shutdown marks itself closing before it takes that list
+    /// (`close_set`, then `join_detaches`), so a task is either recorded
+    /// before the list is taken, and joined, or never spawned: none can
+    /// slip in between a spawn and its record.
+    fn track_unless_closing(&self, spawn: impl FnOnce() -> tokio::task::JoinHandle<()>) -> bool {
+        let mut tasks = self.detaches.lock();
+        if self.is_closing() {
+            return false;
+        }
+        tasks.retain(|task| !task.is_finished());
+        tasks.push(spawn());
+        true
+    }
+
     /// Put hosted session `id` in a state that is not serving, without the
     /// detach, lease or retry that would normally lead there, so the
     /// router's answers for each state can be compared (#32 PR 5). Gated
@@ -1001,6 +1077,11 @@ impl SessionRegistry {
     #[cfg(all(test, unix, feature = "store-memory", feature = "embed-fixture"))]
     pub(super) fn force_state(&self, id: &str, state: ForcedState) {
         let slot = match state {
+            ForcedState::Attaching => Slot::Attaching {
+                done: tokio::sync::watch::channel(None).1,
+                create: false,
+                placed: true,
+            },
             ForcedState::Detaching => Slot::Detaching,
             ForcedState::HeldElsewhere => Slot::HeldElsewhere {
                 retry_at: Instant::now() + PINNED_RETRY,
@@ -1008,8 +1089,18 @@ impl SessionRegistry {
                 warned: false,
             },
             ForcedState::Failed => Slot::Failed,
+            ForcedState::Erasing => Slot::Erasing,
+            ForcedState::Erased => Slot::Erased,
         };
         self.slots.lock().insert(id.to_string(), slot);
+    }
+
+    /// The process's J6 pre-arm, so a test can record shutdown signals on
+    /// it (`EarlyShutdown::simulate_signal`). Gated like its reader, the
+    /// registry tests.
+    #[cfg(all(test, unix, feature = "store-memory", feature = "embed-fixture"))]
+    pub(super) fn early(&self) -> &EarlyShutdown {
+        &self.early
     }
 
     /// Abort every on-demand attach and detach task in flight, which ends
@@ -1049,10 +1140,27 @@ impl SessionRegistry {
     /// The slot is filled first, so a fence that latches the moment the
     /// watcher starts finds the session live and detaches it.
     pub(super) fn insert_live(self: &Arc<Self>, session: Arc<AttachedSession>) {
+        self.insert_live_if(session, |_| true);
+    }
+
+    /// [`SessionRegistry::insert_live`] only while `expected` holds for the
+    /// session's slot, checked and filled under one lock (#32 PR 7 review
+    /// H1): a background attach must not overwrite a slot that changed
+    /// while it acquired (an erase that claimed it, say). `false`, with
+    /// nothing changed, when it does not hold.
+    fn insert_live_if(
+        self: &Arc<Self>,
+        session: Arc<AttachedSession>,
+        expected: impl FnOnce(Option<&Slot>) -> bool,
+    ) -> bool {
         let id = session.id().to_string();
-        self.slots
-            .lock()
-            .insert(id, Slot::Live(Arc::clone(&session)));
+        {
+            let mut slots = self.slots.lock();
+            if !expected(slots.get(&id)) {
+                return false;
+            }
+            slots.insert(id, Slot::Live(Arc::clone(&session)));
+        }
         if self.policy == LeaseLossPolicy::DetachSession {
             let watcher = tokio::spawn(watch_lease(
                 Arc::downgrade(self),
@@ -1061,6 +1169,7 @@ impl SessionRegistry {
             ));
             *session.tasks.lease_watcher.lock() = Some(watcher);
         }
+        true
     }
 
     /// Take the lease for pinned session `id` through the template builder:
@@ -1100,6 +1209,56 @@ impl SessionRegistry {
         mem: Arc<Memory>,
         endpoint: Option<SessionEndpoint>,
     ) -> Arc<AttachedSession> {
+        let session = self.build_session(mem, endpoint);
+        self.insert_live(Arc::clone(&session));
+        session
+    }
+
+    /// [`SessionRegistry::admit`] for a background attach (the pinned retry,
+    /// the on-demand attach): the session is held only while `expected`
+    /// still holds for its slot (#32 PR 7 review H1, as the detach's final
+    /// write is conditional). Otherwise the session is taken down again,
+    /// its lease released, and `None` is returned: whatever changed the
+    /// slot (an erase claimed it) owns it now.
+    async fn admit_if(
+        self: &Arc<Self>,
+        mem: Arc<Memory>,
+        endpoint: Option<SessionEndpoint>,
+        expected: impl FnOnce(Option<&Slot>) -> bool,
+    ) -> Option<Arc<AttachedSession>> {
+        let session = self.build_session(mem, endpoint);
+        if self.insert_live_if(Arc::clone(&session), expected) {
+            return Some(session);
+        }
+        tracing::warn!(
+            session = %session.id(),
+            "lambo serve: a background attach finished after the session's slot changed (an \
+             erase or a shutdown took it); releasing the lease it took instead of serving it"
+        );
+        // Never served: nothing to drain, and its close flushes nothing
+        // and releases the lease.
+        let closed = close_bounded(&session.mem, &self.early).await;
+        session.tasks.event_pump.abort();
+        session.tasks.stop();
+        session.release_endpoint().await;
+        if let Err(e) = closed {
+            tracing::warn!(
+                session = %session.id(),
+                error = %e,
+                "lambo serve: closing an attach that was not admitted failed; its lease lapses \
+                 at TTL"
+            );
+        }
+        None
+    }
+
+    /// The serving parts of a session whose lease `mem` holds (its server,
+    /// endpoint and event pump), not yet held by the registry.
+    fn build_session(
+        &self,
+        mem: Arc<Memory>,
+        endpoint: Option<SessionEndpoint>,
+    ) -> Arc<AttachedSession> {
         let (ledger, max_sessions, host_check, session_rps) = match &self.attacher {
             Some(attacher) => (
                 attacher.ledger.clone(),
@@ -1115,16 +1274,14 @@ impl SessionRegistry {
             ),
         };
         let server = session_server(&mem, &ledger);
-        let session = Arc::new(AttachedSession::attach(
+        Arc::new(AttachedSession::attach(
             mem,
             server,
             endpoint,
             max_sessions,
             host_check,
             session_rps,
-        ));
-        self.insert_live(Arc::clone(&session));
-        session
+        ))
     }
 
     /// A pinned session whose lease another writer holds: serve the others
@@ -1239,6 +1396,11 @@ impl SessionRegistry {
         let Ok(_attaching) = permit else {
             return;
         };
+        // Only a session still held elsewhere is retried: an erase (#32 PR
+        // 7) may have taken the slot while this waited for its permit.
+        if !matches!(self.slots.lock().get(id), Some(Slot::HeldElsewhere { .. })) {
+            return;
+        }
         if self.is_closing() || self.awaiting_previous(id) {
             return;
         }
@@ -1278,12 +1440,17 @@ impl SessionRegistry {
         };
         let (next, warned) = match attempt {
             Ok(Acquired::Attached(mem, endpoint)) => {
-                let session = self.admit(mem, endpoint);
-                tracing::info!(
-                    session = %session.id(),
-                    agent = %session.mem.agent(),
-                    "lambo serve: session attached (re-elected in the background)"
-                );
+                // Only over the slot this retry started from (#32 PR 7
+                // review H1): an erase, or anything else that took the slot
+                // meanwhile, is not overwritten.
+                let held = |slot: Option<&Slot>| matches!(slot, Some(Slot::HeldElsewhere { .. }));
+                if let Some(session) = self.admit_if(mem, endpoint, held).await {
+                    tracing::info!(
+                        session = %session.id(),
+                        agent = %session.mem.agent(),
+                        "lambo serve: session attached (re-elected in the background)"
+                    );
+                }
                 return;
             }
             Ok(Acquired::Held(held)) => {
@@ -1325,6 +1492,19 @@ impl SessionRegistry {
                 );
                 return;
             }
+            // Erased (decided on the lease row, never the message): the
+            // tombstone refuses every acquire, so the slot is `Erased`, not
+            // `Failed` (#32 PR 4 note for PR 7).
+            Err(e) if self.is_tombstoned(id).await => {
+                tracing::warn!(
+                    session = %id,
+                    error = %e,
+                    "lambo serve: a pinned session was erased; it is not retried and requests \
+                     for it get the erased refusal"
+                );
+                self.replace_held(id, Slot::Erased);
+                return;
+            }
             Err(e) => {
                 tracing::error!(
                     session = %id,
@@ -1333,18 +1513,28 @@ impl SessionRegistry {
                      retried: requests for it get 503 until the serve is restarted. The other \
                      sessions keep serving"
                 );
-                self.slots.lock().insert(id.to_string(), Slot::Failed);
+                self.replace_held(id, Slot::Failed);
                 return;
             }
         };
-        self.slots.lock().insert(
-            id.to_string(),
+        self.replace_held(
+            id,
             Slot::HeldElsewhere {
                 retry_at: next,
                 previous: None,
                 warned,
             },
         );
+    }
+
+    /// The pinned retry's last write: `slot` replaces `id`'s only while it
+    /// is still the `HeldElsewhere` the retry started from (#32 PR 7 review
+    /// H1). An erase that claimed it meanwhile owns it.
+    fn replace_held(&self, id: &str, slot: Slot) {
+        let mut slots = self.slots.lock();
+        if matches!(slots.get(id), Some(Slot::HeldElsewhere { .. })) {
+            slots.insert(id.to_string(), slot);
+        }
     }
 
     /// Whether a shutdown signal has already been recorded. Never waits:
@@ -1698,6 +1888,13 @@ fn answer_for(slot: &Slot) -> Lookup {
                 .max(Duration::from_secs(1)),
         },
         Slot::Failed => Lookup::Failed,
+        // Not yet erased: an erase that ends in 409 or fails before its
+        // commit serves the session again, so the permanent 410 waits for
+        // the commit (#32 PR 7 review L3). Not attachable meanwhile.
+        Slot::Erasing => Lookup::Unavailable {
+            retry_after: Duration::from_secs(1),
+        },
+        Slot::Erased => Lookup::Erased,
     }
 }
 

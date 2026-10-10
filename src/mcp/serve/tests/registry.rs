@@ -138,6 +138,7 @@ fn new_registry_ledgered(
         }),
         early,
         RegistryBounds::pinned_only(),
+        None,
     )
 }
 
@@ -1057,11 +1058,35 @@ async fn a_pinned_session_held_elsewhere_is_re_elected_in_the_background() {
     }
 }
 
+/// Write session `id`'s embedding contract as one this serve's fixture
+/// embedder does not match, presenting `token`: an attach of it then fails
+/// with an error that will not clear on its own (a contract mismatch).
+async fn plant_foreign_contract(store: &dyn GraphStore, id: &str, token: Option<u64>) {
+    let batch = crate::types::MutationBatch {
+        mutation_epoch: 1,
+        gc_mark: Default::default(),
+        mutations: vec![crate::types::Mutation::SetEmbedding {
+            session_id: crate::types::SessionId::new(id),
+            embedding: Some(EmbeddingContract {
+                kind: "another-model".into(),
+                model: None,
+                dim: 1024,
+            }),
+        }],
+    };
+    store
+        .flush(&batch, token)
+        .await
+        .expect("plant a foreign contract");
+}
+
 /// #32 review L1: a background attach that fails with an error that will
-/// not clear on its own (here the session was erased by the writer that
-/// held it) is logged once at ERROR and not retried; requests get 503 with
-/// no `Retry-After`. Before, it was retried, and logged at WARN, every
-/// `PINNED_RETRY` for the life of the process.
+/// not clear on its own (here the writer that held the session left it
+/// under another embedding contract) is logged once at ERROR and not
+/// retried; requests get 503 with no `Retry-After`. Before, it was retried,
+/// and logged at WARN, every `PINNED_RETRY` for the life of the process.
+/// (An erased session, PR 4's example, is `Erased` since #32 PR 7: see
+/// `erase::a_held_session_erased_meanwhile_becomes_erased_not_failed`.)
 #[tokio::test]
 async fn a_pinned_session_that_can_no_longer_attach_is_not_retried() {
     let (logs, _guard) = crate::test_util::capture_logs(tracing::Level::INFO);
@@ -1076,13 +1101,17 @@ async fn a_pinned_session_that_can_no_longer_attach_is_not_retried() {
     let other = crate::store::lease::LeaseHolder::for_this_process(&crate::types::AgentId::new(
         "another-writer",
     ));
-    store
+    let crate::store::LeaseOutcome::Acquired(lease) = store
         .acquire_lease(&b, &other, crate::store::lease::LEASE_TTL)
         .await
-        .expect("the other writer takes b");
+        .expect("the other writer takes b")
+    else {
+        panic!("the other writer takes b");
+    };
     attach_or_hold(&registry, "reg-gone-b").await;
-    // The holder erases b: a tombstone no acquire can take.
-    store.erase_session(&b, &other).await.expect("erase b");
+    // The holder writes b under another contract and leaves.
+    plant_foreign_contract(store.as_ref(), "reg-gone-b", Some(lease.token)).await;
+    store.release_lease(&b, &other).await.expect("release b");
     registry.mark_started();
     registry.spawn_retry_loop();
     let addr = serve_router(&registry, 32).await;
@@ -1126,6 +1155,7 @@ async fn a_pinned_session_that_can_no_longer_attach_is_not_retried() {
 
 /// The real multi-session serve, in-process (#32 review M1/M2).
 mod authority;
+mod erase;
 /// #32 PR 6: sessions attached on demand.
 mod on_demand;
 mod pinned_serve;

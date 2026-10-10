@@ -35,10 +35,149 @@ pub(super) struct Shared(
 
 /// The calls a [`Shared`] store has seen, in order: the method and the
 /// session it named (empty when it named none).
+///
+/// It also carries a gate for `flush` (#32 PR 7): while it is closed, every
+/// flush parks inside the store, so a test can hold one in flight.
+///
+/// And (#32 PR 7 review) the faults an erase test injects, and the parked
+/// flushes `erase_session` found in flight when it was entered.
 #[derive(Default)]
-pub(super) struct StoreCalls(parking_lot::Mutex<Vec<(&'static str, String)>>);
+pub(super) struct StoreCalls(
+    parking_lot::Mutex<Vec<(&'static str, String)>>,
+    FlushGate,
+    Faults,
+);
+
+/// What a [`Shared`] store does wrong on purpose (#32 PR 7 review).
+#[derive(Default)]
+pub(super) struct Faults {
+    /// [`EraseFault`] as a number, read at each `erase_session`.
+    erase: std::sync::atomic::AtomicU8,
+    /// While set, every `read_lease` fails.
+    read_lease: std::sync::atomic::AtomicBool,
+    /// [`StoreCalls::parked_flushes`] as each `erase_session` found it on
+    /// entry.
+    parked_at_erase: parking_lot::Mutex<Vec<usize>>,
+}
+
+/// How `erase_session` fails, when it does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub(super) enum EraseFault {
+    /// It does not.
+    None = 0,
+    /// It fails before anything is erased (the store refused).
+    BeforeCommit = 1,
+    /// It erases, then fails (an index sweep, a lost commit reply).
+    AfterCommit = 2,
+    /// It never answers (a store that hangs).
+    Hang = 3,
+}
+
+/// Parks every `flush` while closed ([`StoreCalls::park_flushes`]).
+#[derive(Default)]
+pub(super) struct FlushGate {
+    closed: std::sync::atomic::AtomicBool,
+    /// When set, only a flush whose batch names this string parks (its
+    /// session's id: another session's flushes pass).
+    only: parking_lot::Mutex<Option<String>>,
+    parked: std::sync::atomic::AtomicUsize,
+    opened: tokio::sync::Notify,
+}
 
 impl StoreCalls {
+    /// From now on every `flush` parks inside the store until
+    /// [`StoreCalls::release_flushes`].
+    pub(super) fn park_flushes(&self) {
+        self.1
+            .closed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// [`StoreCalls::park_flushes`] for the flushes of one session only:
+    /// those whose batch names `session`.
+    pub(super) fn park_flushes_of(&self, session: &str) {
+        *self.1.only.lock() = Some(session.to_string());
+        self.park_flushes();
+    }
+
+    /// Let every parked `flush` (and every later one) through.
+    pub(super) fn release_flushes(&self) {
+        self.1
+            .closed
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        self.1.opened.notify_waiters();
+    }
+
+    /// How many flushes are parked right now.
+    pub(super) fn parked_flushes(&self) -> usize {
+        self.1.parked.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Park while the gate is closed. The count goes down however the wait
+    /// ends, a drop of the flush included.
+    async fn pass_flush_gate(&self, batch: &MutationBatch) {
+        use std::sync::atomic::Ordering;
+        struct Parked<'a>(&'a std::sync::atomic::AtomicUsize);
+        impl Drop for Parked<'_> {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        if !self.1.closed.load(Ordering::SeqCst) {
+            return;
+        }
+        if self.1.only.lock().is_some() && self.watched(batch).is_empty() {
+            return;
+        }
+        self.1.parked.fetch_add(1, Ordering::SeqCst);
+        let _parked = Parked(&self.1.parked);
+        loop {
+            let opened = self.1.opened.notified();
+            tokio::pin!(opened);
+            opened.as_mut().enable();
+            if !self.1.closed.load(Ordering::SeqCst) {
+                return;
+            }
+            opened.await;
+        }
+    }
+
+    /// Make every later `erase_session` fail as `fault` says.
+    pub(super) fn fail_erase(&self, fault: EraseFault) {
+        self.2
+            .erase
+            .store(fault as u8, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Make every later `read_lease` fail (`fail`) or not.
+    pub(super) fn fail_read_lease(&self, fail: bool) {
+        self.2
+            .read_lease
+            .store(fail, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// How many flushes were parked in flight at each `erase_session`'s
+    /// entry, in order.
+    pub(super) fn parked_at_erase(&self) -> Vec<usize> {
+        self.2.parked_at_erase.lock().clone()
+    }
+
+    /// The session [`StoreCalls::park_flushes_of`] watches, when `batch`
+    /// names it; else empty.
+    fn watched(&self, batch: &MutationBatch) -> String {
+        let only = self.1.only.lock().clone();
+        match only {
+            Some(session)
+                if serde_json::to_string(batch)
+                    .is_ok_and(|json| json.contains(&format!("\"{session}\""))) =>
+            {
+                session
+            }
+            _ => String::new(),
+        }
+    }
+
     fn note(&self, method: &'static str, session: &str) {
         self.0.lock().push((method, session.to_string()));
     }
@@ -101,7 +240,13 @@ impl GraphStore for Shared {
     }
     async fn flush(&self, batch: &MutationBatch, token: Option<u64>) -> Result<(), StoreError> {
         self.2.note("flush", "");
-        self.0.flush(batch, token).await
+        self.2.pass_flush_gate(batch).await;
+        let flushed = self.0.flush(batch, token).await;
+        // Past the store: where a recall-tier mirror would run (#18), so a
+        // test can tell one that lands after an erase. Named by the session
+        // `park_flushes_of` watches, when the batch is that session's.
+        self.2.note("flushed", &self.2.watched(batch));
+        flushed
     }
     async fn load_session(&self, session: &SessionId) -> Result<GraphSnapshot, StoreError> {
         self.2.note("load_session", session.as_str());
@@ -183,7 +328,22 @@ impl GraphStore for Shared {
         eraser: &LeaseHolder,
     ) -> Result<EraseOutcome, StoreError> {
         self.2.note("erase_session", session.as_str());
-        self.0.erase_session(session, eraser).await
+        let parked = self.2.parked_flushes();
+        self.2 .2.parked_at_erase.lock().push(parked);
+        let fault = self.2 .2.erase.load(std::sync::atomic::Ordering::SeqCst);
+        if fault == EraseFault::Hang as u8 {
+            std::future::pending::<()>().await;
+        }
+        if fault == EraseFault::BeforeCommit as u8 {
+            return Err(StoreError::Backend("test: the erase was refused".into()));
+        }
+        let erased = self.0.erase_session(session, eraser).await;
+        if fault == EraseFault::AfterCommit as u8 && erased.is_ok() {
+            return Err(StoreError::Backend(
+                "test: the erase committed, then failed".into(),
+            ));
+        }
+        erased
     }
     async fn backfill_recall_index(
         &self,
@@ -204,6 +364,14 @@ impl GraphStore for Shared {
     }
     async fn read_lease(&self, session: &SessionId) -> Result<Option<LeaseInfo>, StoreError> {
         self.2.note("read_lease", session.as_str());
+        if self
+            .2
+             .2
+            .read_lease
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(StoreError::Backend("test: read_lease failed".into()));
+        }
         self.0.read_lease(session).await
     }
     async fn refresh_lease(
@@ -541,17 +709,15 @@ async fn a_lost_lease_is_detached_re_elected_and_served_again_end_to_end() {
 }
 
 /// M2: `serve_pinned`'s startup failure branch. A pinned session that
-/// cannot be attached (here: erased, a tombstone no acquire takes) refuses
-/// the start, after closing the sessions already acquired, so their leases
-/// are released rather than left to lapse.
+/// cannot be attached (here: stored under another embedding contract, an
+/// error no retry clears) refuses the start, after closing the sessions
+/// already acquired, so their leases are released rather than left to
+/// lapse. (An erased session, PR 4's example, no longer refuses the start
+/// since #32 PR 7: see the next test.)
 #[tokio::test]
 async fn a_pinned_session_that_cannot_attach_refuses_the_start_and_releases_the_rest() {
     let store = Arc::new(MemoryStore::new());
-    let operator = LeaseHolder::for_this_process(&AgentId::new("operator"));
-    store
-        .erase_session(&SessionId::new("fail-b"), &operator)
-        .await
-        .expect("erase b");
+    super::plant_foreign_contract(store.as_ref(), "fail-b", None).await;
 
     let opts = pinned_opts(&["fail-a", "fail-b", "fail-c"], |_| {});
     let backends = backends_over(Shared::over(&store), fast_config(1_000));
@@ -566,9 +732,11 @@ async fn a_pinned_session_that_cannot_attach_refuses_the_start_and_releases_the_
     )
     .await
     .expect("the refusal is prompt")
-    .expect_err("an erased pinned session refuses the start")
-    .to_string();
-    assert!(err.contains("erased"), "{err}");
+    .expect_err("a pinned session under another contract refuses the start");
+    assert!(
+        !matches!(err, LamboError::Store(StoreError::StaleWrite(_))),
+        "the refusal is the contract mismatch, not an erased session: {err}"
+    );
 
     let a = lease(&store, "fail-a").await;
     assert_eq!(
@@ -584,6 +752,33 @@ async fn a_pinned_session_that_cannot_attach_refuses_the_start_and_releases_the_
             .is_none(),
         "nothing after the failure is attempted"
     );
+}
+
+/// #32 PR 7 (PR 4's note): an erased pinned session does not refuse the
+/// start. It is served as erased (410, decided on the tombstone, not the
+/// error text), the other sessions attach and serve, and nothing attaches
+/// or recreates the erased one.
+#[tokio::test]
+async fn an_erased_pinned_session_is_served_as_erased_and_the_rest_start() {
+    let store = Arc::new(MemoryStore::new());
+    let operator = LeaseHolder::for_this_process(&AgentId::new("operator"));
+    store
+        .erase_session(&SessionId::new("gone-b"), &operator)
+        .await
+        .expect("erase b");
+
+    let serve = PinnedServe::start(&store, &["gone-a", "gone-b", "gone-c"], |_| {}).await;
+    assert!(serve.attached("gone-a").is_some());
+    assert!(serve.attached("gone-c").is_some());
+    assert!(serve.attached("gone-b").is_none());
+    assert!(matches!(
+        serve.registry.lookup("gone-b"),
+        crate::mcp::serve::registry::Lookup::Erased
+    ));
+    serve.stop().await.expect("a clean shutdown");
+    let b = lease(&store, "gone-b").await;
+    assert!(crate::store::erase::is_tombstone(&b), "{b:?}");
+    assert!(store.load_session(&SessionId::new("gone-b")).await.is_err());
 }
 
 /// #32 review L2: the refusal poller keeps a session's cursor across a

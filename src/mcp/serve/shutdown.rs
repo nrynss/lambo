@@ -377,6 +377,18 @@ pub(super) async fn wind_down(
         () = early.fired() => {}
         winner = mem.lease_lost_latched() => {
             book_lease_loss(&mem, ledger.as_ref(), &winner);
+            if crate::store::erase::is_erased_holder(&winner) {
+                // #32 PR 7: the session was erased (in this process through
+                // the admin route, or by an erase that met a lapsed lease).
+                // There is nothing left to serve or to proxy to.
+                tracing::warn!(
+                    session = %mem.session(),
+                    "lambo serve: this session was erased; exiting, since it was the only \
+                     session this process serves. Its in-memory tail is discarded and nothing \
+                     recreates the session"
+                );
+                return;
+            }
             tracing::warn!(
                 session = %mem.session(),
                 holder = %winner,
