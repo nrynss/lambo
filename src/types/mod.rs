@@ -407,8 +407,8 @@ pub struct EmbeddingSource {
     pub origin: VectorOrigin,
     /// Lowercase hex sha256 of the image bytes the client submitted to the
     /// server. An embedder may send its backend a canonical form of them
-    /// instead (EmbeddingGemma 2 downscales an image over 768 px a side and
-    /// converts a WebP to PNG); this still names the submitted bytes. `None`
+    /// instead (EmbeddingGemma 2 sends every image as a lossless PNG with a
+    /// 768 px longer side); this still names the submitted bytes. `None`
     /// for a client-submitted vector, where the server never saw the bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
