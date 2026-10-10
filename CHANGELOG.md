@@ -1029,6 +1029,22 @@
 
 ### Fixed
 
+- `lambo serve` over stdio, and the session endpoint a proxying serve
+  forwards to, now cap one request at 4 MiB before parsing it, the same
+  ceiling as the HTTP body limit (#101). rmcp reads those transports a line
+  at a time with no limit and parses every argument into memory before any
+  Lambo check runs, so an oversized `image.data` on `lambo_derive_image` or
+  `lambo_recall`, or an oversized `vector.values` or `query_vector.values`,
+  was allocated in full, and then again as a JSON value tree, before the
+  tool refused it. A longer request line is now discarded unread up to its
+  newline and logged at WARN with its size, never its content; it gets no
+  reply, because no request id was read from it, and the session goes on
+  serving. Requests under 4 MiB reach rmcp byte for byte, so a field over
+  its own cap inside one is refused by the tool exactly as before (same
+  message, still a tool error), and the tool schemas are unchanged. The
+  HTTP service now sets rmcp's body ceiling from Lambo's constant instead
+  of inheriting rmcp's default; it was already 4 MiB and answers `413`
+  before parsing.
 - A freshly derived text or image concept ranks by query relevance before
   the daemon scores it (#79). Previously its missing daemon score counted as
   0 inside the 0.5/0.5 blend, so a fresh relevant EG2 image (0.3616) ranked
