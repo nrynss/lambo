@@ -700,15 +700,41 @@ fn each_credential_is_counted_at_startup() {
 /// none for a single-token portal.
 #[test]
 fn startup_warnings_name_credentials_never_tokens() {
-    assert!(super::super::startup_warnings(false, &[("default", 1)], false).is_empty());
-    assert!(super::super::startup_warnings(false, &[("local", 2)], false).is_empty());
-    let w = super::super::startup_warnings(true, &[("default", 2), ("ghost", 0)], false);
-    assert_eq!(w.len(), 2, "{w:?}");
+    use super::super::startup_warnings;
+    assert!(startup_warnings(false, &[("default", 1)], &[], false).is_empty());
+    assert!(startup_warnings(false, &[("local", 2)], &[], false).is_empty());
+    let w = startup_warnings(
+        true,
+        &[("default", 2), ("ghost", 0)],
+        &[("ghost", vec!["t4-z", "t4-y"])],
+        false,
+    );
+    assert_eq!(w.len(), 3, "{w:?}");
     assert!(w[0].contains("LAMBO_AUTH_TOKEN") && w[0].contains("\"default\""));
-    assert!(w[1].contains("'ghost'") && w[1].contains("no served session"));
-    let w = super::super::startup_warnings(false, &[("local", 2)], true);
+    assert!(w[1].contains("'ghost'") && w[1].contains("(t4-z, t4-y)"));
+    assert!(w[2].contains("'ghost'") && w[2].contains("no served session"));
+    let w = startup_warnings(false, &[("local", 2)], &[], true);
     assert_eq!(w.len(), 1);
     assert!(w[0].contains("list_sessions") && w[0].contains("anyone"));
+
+    // What `run` passes: only the grants naming an unserved session.
+    let ids: Vec<SessionId> = SERVED.iter().map(|s| SessionId::new(*s)).collect();
+    let id = |s: &str| crate::surface::session::parse_addressed(s).expect("id");
+    let ghost = WebCredential {
+        grant: SessionGrant::new(
+            "ghost",
+            SessionScope::new([id("t4-a"), id("t4-z")], false, None),
+            SessionCapabilities::default(),
+        ),
+        token: AuthToken::new(tok("ghost")).expect("token"),
+    };
+    let (_, mut creds) = resolve(&config(false, false), &env()).expect("resolve");
+    creds.push(ghost);
+    let authority = portal_authority(None, creds, &ids);
+    assert_eq!(
+        super::super::auth::unserved_names(&authority, &ids),
+        [("ghost", vec!["t4-z"])]
+    );
 }
 
 /// Acceptance: the constant-time scan is reused, not re-implemented. Every

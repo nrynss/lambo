@@ -310,6 +310,30 @@ pub(super) fn credential_reach<'a>(
         .collect()
 }
 
+/// Each grant's exact session names that are not served, in scan order,
+/// for a startup warning (the one `lambo serve` gives for unpinned names,
+/// #32 PR 5 review I5): the portal never reads a session outside its
+/// allowlist, so those names are unreachable. Grants with none are left
+/// out. Names a credential and sessions, never a token.
+pub(super) fn unserved_names<'a>(
+    authority: &'a PortalAuthority,
+    sessions: &[SessionId],
+) -> Vec<(&'a str, Vec<&'a str>)> {
+    authority
+        .grants()
+        .into_iter()
+        .filter_map(|grant| {
+            let missing: Vec<&str> = grant
+                .scope()
+                .names()
+                .map(|n| n.as_str())
+                .filter(|n| !sessions.iter().any(|s| s.as_str() == *n))
+                .collect();
+            (!missing.is_empty()).then_some((grant.name(), missing))
+        })
+        .collect()
+}
+
 /// The served sessions `grant` may list (design 6.2), in allowlist order:
 /// its exact names, or every one when its scope covers every served
 /// session (`local`, `default`, `"*"`). Never a prefix expansion: a prefix

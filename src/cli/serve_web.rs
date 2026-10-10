@@ -515,9 +515,11 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
         );
     }
     let implicit = !state.authority.requires_bearer();
+    let unserved = auth::unserved_names(&state.authority, &state.sessions);
     for warning in startup_warnings(
         legacy_beside_configured,
         &reach,
+        &unserved,
         implicit && state.list_sessions,
     ) {
         eprintln!("⚑ lambo serve-web: {warning}");
@@ -540,6 +542,8 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
 ///   left exported after `[[web.credential]]` was added keeps `default`, and
 ///   with it every served session, readable by whoever holds it (as
 ///   `lambo serve` warns, #32 PR 5 review I3);
+/// * a credential that names sessions not on the allowlist (`unserved`):
+///   they are never read, whatever the credential says;
 /// * a credential that reads no served session (its names are not on the
 ///   allowlist, or its prefix covers none): it authenticates and then sees
 ///   only the uniform 404;
@@ -548,6 +552,7 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
 fn startup_warnings(
     legacy_beside_configured: bool,
     reach: &[(&str, usize)],
+    unserved: &[(&str, Vec<&str>)],
     listing_unauthenticated: bool,
 ) -> Vec<String> {
     let mut out = Vec::new();
@@ -556,6 +561,13 @@ fn startup_warnings(
             "{AUTH_TOKEN_ENV} / --auth-token is set beside [[web.credential]]: it is the \
              \"default\" credential and reads every served session. Unset it if the configured \
              credentials replace it."
+        ));
+    }
+    for (name, missing) in unserved {
+        out.push(format!(
+            "credential '{name}' names sessions this window does not serve ({}): they are never \
+             read; serve them with --session or [web] sessions",
+            missing.join(", ")
         ));
     }
     for (name, count) in reach {
