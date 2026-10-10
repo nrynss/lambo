@@ -20,12 +20,17 @@ images. Local paths read `<HOME>`, scratch paths `<SCRATCH>` (this run) and `<EV
 ## How the servers ran
 
 ```bash
-# 8191: the lambo-eg2-v1 server (text and images)
+# 8191: the lambo-eg2-v1 server (text and images), in the background
 llama-server --host 127.0.0.1 --port 8191 \
   -m embeddinggemma-2-Q8_0.gguf --mmproj mmproj-embeddinggemma-2-Q8_0.gguf \
   --embeddings --pooling mean --image-min-tokens 280 --image-max-tokens 280 \
-  --ctx-size 8192 --batch-size 8192 --ubatch-size 8192
-# 8192: the same without --mmproj (text only)
+  --ctx-size 8192 --batch-size 8192 --ubatch-size 8192 > server-8191.log 2>&1 &
+# 8192: the same without --mmproj (text only), in the background
+llama-server --host 127.0.0.1 --port 8192 \
+  -m embeddinggemma-2-Q8_0.gguf \
+  --embeddings --pooling mean \
+  --ctx-size 8192 --batch-size 8192 --ubatch-size 8192 > server-8192.log 2>&1 &
+# wait until both answer GET /health with 200, then run the live tests
 LAMBO_EG2_URL=http://127.0.0.1:8191 LAMBO_EG2_TEXT_ONLY_URL=http://127.0.0.1:8192 \
   cargo test --features embed-eg2 --test live_eg2 -- --ignored --nocapture --test-threads=1
 ```
