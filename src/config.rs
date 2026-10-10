@@ -13,6 +13,7 @@ use crate::embed::{EmbedError, EmbedderConfig};
 use crate::store::StoreConfig;
 use crate::types::{LamboError, MatchStrategy};
 
+mod credential;
 pub(crate) mod secret_env;
 mod serve;
 mod web;

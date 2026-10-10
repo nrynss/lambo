@@ -1,5 +1,5 @@
 use super::*;
-use crate::surface::session::{RefusalReason, SessionNeed};
+use crate::surface::session::{RefusalReason, SessionNeed, MAX_ADDRESSED_LEN};
 use crate::LamboFile;
 
 /// Obviously fake token values. Never real secrets; set only through
