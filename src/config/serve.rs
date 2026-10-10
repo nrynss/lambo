@@ -412,7 +412,7 @@ impl ServeConfig {
 impl CredentialConfig {
     /// The fields the shared grammar checks ([`credential`]); the
     /// capabilities are this table's own.
-    fn entry(&self) -> CredentialEntry<'_> {
+    pub(crate) fn entry(&self) -> CredentialEntry<'_> {
         CredentialEntry {
             name: &self.name,
             token_env: self.token_env.as_deref(),

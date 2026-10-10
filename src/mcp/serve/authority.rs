@@ -30,7 +30,7 @@ use super::{ServeOptions, Transport};
 use crate::config::ServeCredential;
 use crate::surface::session::{
     parse_addressed, BearerSecret, HostedSessions, SessionAuthority, SessionGrant, SessionRefusal,
-    LEGACY_CREDENTIAL_NAME, LOCAL_CREDENTIAL_NAME,
+    LEGACY_CREDENTIAL_NAME,
 };
 use crate::types::LamboError;
 
@@ -67,37 +67,11 @@ pub fn check_serve_credentials(
     legacy: Option<&SecretToken>,
     credentials: &[ServeCredential],
 ) -> Result<(), LamboError> {
-    for (i, cred) in credentials.iter().enumerate() {
-        let name = cred.grant.name();
-        if name == LEGACY_CREDENTIAL_NAME || name == LOCAL_CREDENTIAL_NAME {
-            return Err(credential_err(format!(
-                "credential name {name:?} is reserved (\"{LEGACY_CREDENTIAL_NAME}\" is the \
-                 legacy --auth-token / LAMBO_AUTH_TOKEN credential, \"{LOCAL_CREDENTIAL_NAME}\" \
-                 the implicit loopback one)"
-            )));
-        }
-        for earlier in &credentials[..i] {
-            if earlier.grant.name() == name {
-                return Err(credential_err(format!(
-                    "two credentials are named {name:?}"
-                )));
-            }
-            if earlier.token == cred.token {
-                return Err(credential_err(format!(
-                    "credentials {:?} and {name:?} resolve to the same token; give each its own",
-                    earlier.grant.name()
-                )));
-            }
-        }
-        if legacy.is_some_and(|legacy| *legacy == cred.token) {
-            return Err(credential_err(format!(
-                "credential {name:?} resolves to the same token as --auth-token / \
-                 LAMBO_AUTH_TOKEN (the legacy \"{LEGACY_CREDENTIAL_NAME}\" credential); give \
-                 each its own, or drop the legacy token (the value is not shown here)"
-            )));
-        }
-    }
-    Ok(())
+    let set: Vec<(&str, &SecretToken)> = credentials
+        .iter()
+        .map(|c| (c.grant.name(), &c.token))
+        .collect();
+    crate::config::check_credential_set(legacy, &set).map_err(credential_err)
 }
 
 /// Some credential `authorize_bind` can count: the legacy token, else the

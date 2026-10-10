@@ -255,3 +255,50 @@ pub(crate) fn resolve<'a, T: PartialEq>(
     }
     Ok(out)
 }
+
+/// The checks a resolved credential set must pass before a surface starts,
+/// shared by `lambo serve` (`crate::mcp::check_serve_credentials`) and
+/// `lambo serve-web`: given as `(name, secret)` pairs, beside the legacy
+/// `--auth-token` / `LAMBO_AUTH_TOKEN` secret if one is set. The reason
+/// names credentials, never a token; the caller prefixes it.
+///
+/// Refuses: a configured credential named `default` or `local` (the
+/// parsers refuse those, a library caller might not), two credentials with
+/// one name, two with one token, and a configured token equal to the legacy
+/// one (#32 PR 1 review): a request presenting it could not be attributed
+/// to one credential, and the two may carry different scopes. The
+/// comparison is `==` on the surface's secret type: this runs once at
+/// startup on configured values, never on a presented one.
+pub fn check_credential_set<T: PartialEq>(
+    legacy: Option<&T>,
+    credentials: &[(&str, &T)],
+) -> Result<(), String> {
+    for (i, (name, token)) in credentials.iter().enumerate() {
+        if *name == LEGACY_CREDENTIAL_NAME || *name == LOCAL_CREDENTIAL_NAME {
+            return Err(format!(
+                "credential name {name:?} is reserved (\"{LEGACY_CREDENTIAL_NAME}\" is the \
+                 legacy --auth-token / LAMBO_AUTH_TOKEN credential, \"{LOCAL_CREDENTIAL_NAME}\" \
+                 the implicit loopback one)"
+            ));
+        }
+        for (earlier, earlier_token) in &credentials[..i] {
+            if earlier == name {
+                return Err(format!("two credentials are named {name:?}"));
+            }
+            if earlier_token == token {
+                return Err(format!(
+                    "credentials {earlier:?} and {name:?} resolve to the same token; give each \
+                     its own"
+                ));
+            }
+        }
+        if legacy.is_some_and(|legacy| legacy == *token) {
+            return Err(format!(
+                "credential {name:?} resolves to the same token as --auth-token / \
+                 LAMBO_AUTH_TOKEN (the legacy \"{LEGACY_CREDENTIAL_NAME}\" credential); give \
+                 each its own, or drop the legacy token (the value is not shown here)"
+            ));
+        }
+    }
+    Ok(())
+}

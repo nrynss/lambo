@@ -13,10 +13,11 @@ use crate::embed::{EmbedError, EmbedderConfig};
 use crate::store::StoreConfig;
 use crate::types::{LamboError, MatchStrategy};
 
-mod credential;
+pub(crate) mod credential;
 pub(crate) mod secret_env;
 mod serve;
 mod web;
+pub use credential::check_credential_set;
 /// An environment variable name for an error message, or `(value not shown)`
 /// when it may be a pasted secret (shared by `[serve]` and `[recall]`).
 pub use serve::{
