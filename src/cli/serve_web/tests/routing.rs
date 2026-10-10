@@ -7,13 +7,13 @@ use crate::config::WebConfig;
 
 /// Every store call, by method name, so a test can say "none at all".
 #[derive(Clone)]
-struct Recording {
+pub(super) struct Recording {
     inner: Shared,
     calls: Arc<parking_lot::Mutex<Vec<&'static str>>>,
 }
 
 impl Recording {
-    fn new(store: Arc<MemoryStore>) -> Self {
+    pub(super) fn new(store: Arc<MemoryStore>) -> Self {
         Self {
             inner: Shared(store),
             calls: Arc::default(),
@@ -24,11 +24,11 @@ impl Recording {
         self.calls.lock().push(method);
     }
 
-    fn calls(&self) -> Vec<&'static str> {
+    pub(super) fn calls(&self) -> Vec<&'static str> {
         self.calls.lock().clone()
     }
 
-    fn loads(&self) -> usize {
+    pub(super) fn loads(&self) -> usize {
         self.calls()
             .iter()
             .filter(|m| **m == "load_session")
@@ -242,7 +242,7 @@ fn portal(
 /// Two sessions in one store: `t4-a` from [`seed`] ("user schema", a
 /// hierarchy, an action, a promotion to Canonical) and `t4-b` (one concept,
 /// "billing ledger").
-async fn two_sessions() -> Arc<MemoryStore> {
+pub(super) async fn two_sessions() -> Arc<MemoryStore> {
     let store = seed("t4-a").await;
     crate::cli::derive::run(
         backends_on(store.clone()),
@@ -270,16 +270,16 @@ fn head_without_date(r: &HttpResponse) -> String {
 }
 
 /// Status line, headers (no date) and body: what "byte-identical" compares.
-fn wire(r: &HttpResponse) -> (String, String) {
+pub(super) fn wire(r: &HttpResponse) -> (String, String) {
     (head_without_date(r), r.body.clone())
 }
 
-const METHODS: &[&str] = &["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"];
+pub(super) const METHODS: &[&str] = &["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"];
 
 /// Every id kind the portal must refuse, as raw path segments: served
 /// nowhere, malformed, percent-encoded (one of them a served name with an
 /// encoded `-`), dot-led, oversized, and empty.
-fn refused_ids() -> Vec<String> {
+pub(super) fn refused_ids() -> Vec<String> {
     vec![
         "t4-c".into(),
         "a%2Fb".into(),

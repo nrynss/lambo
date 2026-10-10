@@ -119,6 +119,7 @@ fn router_source() -> &'static str {
 }
 
 mod auth;
+mod credentials;
 mod feeds;
 mod graph;
 mod host;
