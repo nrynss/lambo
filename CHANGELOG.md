@@ -346,7 +346,7 @@
   key no longer reaches a startup log.
 - `lambo.toml` `[serve]` `sessions`, `default_session` and `max_attached`
   are enforced by an HTTP `lambo serve` (#32, fourth part). The startup
-  notice reads `[serve] is parsed but not yet enforced for some keys` and
+  notice reads `[serve] sets keys this serve ignores` and
   names only keys the serve does not act on; after the sixth part that is
   `[[serve.projects]]` on an HTTP serve (only a stdio serve reads it, #32
   eighth part), and it is not logged for a table that does not set it.
@@ -727,8 +727,7 @@
   `[[serve.projects]]` cwd map and `[[serve.credential]]` entries that name
   the environment variable holding their token. The first part parsed and
   validated it only; the later parts enforce every key, and the one
-  startup warning left (`[serve] is parsed but not yet enforced for some
-  keys`) names `[[serve.projects]]` when an HTTP serve's table sets it,
+  startup warning left (`[serve] sets keys this serve ignores`) names `[[serve.projects]]` when an HTTP serve's table sets it,
   since only a stdio serve reads the map. `token_env` must be an upper-case
   variable name and must not look like a token; a value that fails is
   refused without being quoted. A

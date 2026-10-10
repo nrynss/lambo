@@ -11,11 +11,12 @@
 //! Since PR 8 a stdio serve without `--session` takes its session from the
 //! `[[serve.projects]]` cwd map, then `default_session`
 //! ([`ServeConfig::select_stdio_session`]); an HTTP serve never reads the
-//! map, so its notice still names it. The rest is parsed and validated but
-//! **not enforced yet**, and a serve says so once
-//! ([`ServeConfig::warn_if_unenforced`]): PR 6 the on-demand bounds
-//! (`attach_concurrency`, `idle_detach_secs`, `per_session_rps`). See the
-//! approved design, issue #32, sections 2.3, 6.1 and 7.1.
+//! map. Since PR 6 an HTTP serve enforces the on-demand bounds
+//! (`attach_concurrency`, `idle_detach_secs`, `per_session_rps`), so every
+//! key is acted on by the transport it applies to. The one startup notice
+//! left ([`ServeConfig::warn_if_unenforced`]) says an HTTP serve ignores
+//! `[[serve.projects]]`, the stdio project map. See the approved design,
+//! issue #32, sections 2.3, 6.1 and 7.1.
 //!
 //! ```toml
 //! [serve]
@@ -216,11 +217,12 @@ fn addressed(field: &str, value: &str) -> Result<AddressedSessionId, LamboError>
 }
 
 /// What `lambo serve` logs once at startup when the file sets a `[serve]`
-/// key this serve does not enforce (over HTTP, the stdio-only cwd map): an
-/// operator who configured one must not think it is active. Followed by the key names that are set
-/// ([`ServeConfig::unenforced_keys`]); it quotes no value from the table.
-pub const SERVE_UNENFORCED_NOTICE: &str = "lambo.toml [serve] is parsed but not yet enforced \
-     for some keys in this release; they have no effect yet (#32)";
+/// key this serve ignores by design: over HTTP, the stdio-only cwd map. An
+/// operator who configured it must not think it steers HTTP clients.
+/// Followed by the key names that are set ([`ServeConfig::unenforced_keys`]);
+/// it quotes no value from the table.
+pub const SERVE_UNENFORCED_NOTICE: &str = "lambo.toml [serve] sets keys this serve ignores: \
+     an HTTP serve never reads [[serve.projects]], the stdio serve's project map (#32)";
 
 impl ServeConfig {
     /// Log [`SERVE_UNENFORCED_NOTICE`] once, naming the keys, if this table
@@ -234,7 +236,7 @@ impl ServeConfig {
     }
 
     /// The keys this table sets that a `lambo serve` over this transport
-    /// does not enforce yet, by name, each its own entry.
+    /// ignores, by name, each its own entry.
     ///
     /// An HTTP serve enforces `sessions`, `default_session` and
     /// `max_attached` (#32 PR 4), `[[serve.credential]]` (PR 5), and
@@ -244,7 +246,7 @@ impl ServeConfig {
     /// there). A stdio serve enforces `default_session` and
     /// `[[serve.projects]]`, which choose its session when `--session` is
     /// absent (#32 PR 8). The cwd map is stdio's only, so an HTTP serve
-    /// still lists `[[serve.projects]]`: nothing over HTTP reads it (design
+    /// lists `[[serve.projects]]`: nothing over HTTP reads it (design
     /// §2.3), and an operator must not think it steers HTTP clients.
     pub fn unenforced_keys(&self, stdio: bool) -> Vec<&'static str> {
         let mut keys = Vec::new();

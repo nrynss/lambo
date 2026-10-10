@@ -503,12 +503,13 @@ changes what a portal token can read:
 
 ## The startup notice
 
-`SERVE_UNENFORCED_NOTICE` still reads "parsed but not yet enforced for some
-keys in this release". Since PR 6, the only key it can name is
-`[[serve.projects]]` on an HTTP serve. That key is never read over HTTP by
-design, not "not yet enforced". The wording is a log string that a test
-checks, so PR 9 (docs only) left it unchanged. Rewording it ("ignored by an
-HTTP serve") is a small follow-up.
+Since PR 6, the only key `SERVE_UNENFORCED_NOTICE` can name is
+`[[serve.projects]]` on an HTTP serve, which is never read over HTTP by
+design. PR 9 reworded the notice to say so: `lambo.toml [serve] sets keys
+this serve ignores: an HTTP serve never reads [[serve.projects]], the stdio
+serve's project map (#32)`, followed by the key names. The "not yet
+enforced" framing is gone. `tests/serve_table_unenforced.rs` pins the text;
+its file name predates the rewording.
 
 ## Deviations from the design, in one table
 
@@ -548,4 +549,3 @@ HTTP serve") is a small follow-up.
 - An exact `=3.1.2` rmcp pin (PR 5 note N2). The code rests on rmcp facts
   that a source test pins. The pin is a dependency change, so it needs the
   owner.
-- The startup notice's wording (above).

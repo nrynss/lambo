@@ -118,8 +118,8 @@ fn a_stdio_serve_in_a_mapped_directory_takes_the_longest_entry() {
         "selection logged: {err}"
     );
     assert!(
-        !err.contains("not yet enforced"),
-        "a selection-only [serve] table is enforced, so no notice: {err}"
+        !err.contains("[serve] sets keys this serve ignores"),
+        "a stdio serve reads its selection keys, so no notice: {err}"
     );
 }
 
