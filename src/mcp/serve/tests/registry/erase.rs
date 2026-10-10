@@ -757,6 +757,45 @@ async fn an_abandoned_close_still_stops_the_flush_before_the_erase() {
     drop(mem);
 }
 
+/// #32 PR 7 review L2: an erase whose store call fails after it committed,
+/// while the lease row cannot be read back either, says its outcome is
+/// unknown (never "nothing was erased"), and is safe to repeat: the repeat
+/// finds the session erased. The same store failure with the row readable
+/// says it is durably erased.
+///
+/// Mutation: classify a failed read-back as "not erased" and the body says
+/// nothing was erased.
+#[tokio::test]
+async fn an_erase_whose_outcome_cannot_be_read_back_says_it_is_unknown() {
+    use super::pinned_serve::EraseFault;
+    let w = wire().await;
+    w.calls.fail_erase(EraseFault::AfterCommit);
+    w.calls.fail_read_lease(true);
+    let reply = erase_as(w.addr, "ops", A, &confirm(A)).await;
+    w.calls.fail_read_lease(false);
+    assert_eq!(reply.status, 500, "{}", reply.body);
+    assert!(reply.body.contains("outcome is unknown"), "{}", reply.body);
+    assert!(!reply.body.contains("nothing was erased"), "{}", reply.body);
+    // It did commit; a repeat says so, and finishes.
+    w.calls.fail_erase(EraseFault::None);
+    let again = erase_as(w.addr, "ops", A, &confirm(A)).await;
+    assert_eq!(again.status, 200, "{}", again.body);
+    let again: serde_json::Value = serde_json::from_str(again.body.trim_end()).unwrap();
+    assert_eq!(again["already_absent"], true, "{again}");
+    assert_only_the_tombstone(&w.store, A).await;
+
+    // Readable: the same failure is reported as durably erased.
+    w.calls.fail_erase(EraseFault::AfterCommit);
+    let reply = erase_as(w.addr, "ops", B, &confirm(B)).await;
+    assert_eq!(reply.status, 500, "{}", reply.body);
+    assert!(
+        reply.body.contains("erased from the durable store"),
+        "{}",
+        reply.body
+    );
+    assert_eq!(state_of(&w.registry, B), "erased");
+}
+
 /// #32 PR 7 review H1: an erase that arrives while the pinned retry of the
 /// same session is between its acquire and its admission (parked in its
 /// load, the lease already taken). The erase waits for the retry's attach

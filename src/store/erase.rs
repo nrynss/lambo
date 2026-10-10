@@ -175,7 +175,32 @@ pub async fn refused_as_erased(
     session: &SessionId,
     _err: &StoreError,
 ) -> bool {
-    matches!(store.read_lease(session).await, Ok(Some(row)) if is_tombstone(&row))
+    read_tombstone(store, session).await == Tombstone::Yes
+}
+
+/// What `session`'s lease row, read back, says about whether it is erased
+/// (#32 PR 7 review L2): the one typed check, shared by every caller that
+/// must tell an erased session from a failed store call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tombstone {
+    /// The row is the erasure tombstone: the session is durably erased.
+    Yes,
+    /// The row was read, and it is not the tombstone (or there is none).
+    No,
+    /// The read itself failed: nothing is known either way.
+    Unknown,
+}
+
+/// Read `session`'s lease row back and classify it ([`Tombstone`]).
+pub async fn read_tombstone(
+    store: &dyn crate::store::GraphStore,
+    session: &SessionId,
+) -> Tombstone {
+    match store.read_lease(session).await {
+        Ok(Some(row)) if is_tombstone(&row) => Tombstone::Yes,
+        Ok(_) => Tombstone::No,
+        Err(_) => Tombstone::Unknown,
+    }
 }
 
 /// Rows removed per kind by one [`crate::store::GraphStore::erase_session`].

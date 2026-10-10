@@ -79,6 +79,7 @@ use crate::mcp::serve::session::AttachedSession;
 use crate::mcp::serve::shutdown::{close_bounded, LEASE_RELEASE_GRACE, SHUTDOWN_GRACE};
 use crate::mcp::serve::stages::{ShutdownProgress, Stage};
 use crate::memory::Memory;
+use crate::store::erase::{read_tombstone, Tombstone};
 use crate::store::lease::LeaseHolder;
 use crate::store::{EraseOutcome, EraseReport, GraphStore};
 use crate::types::{AgentId, LamboError, SessionId, StoreError};
@@ -95,10 +96,15 @@ pub(in crate::mcp::serve) enum EraseAnswer {
     /// The session is being erased or detached right now, or the serve is
     /// shutting down (503 with `Retry-After`).
     Busy { retry_after: Duration },
-    /// The store refused or failed (500). `erased` is `true` when the lease
-    /// row reads back as the tombstone, so the session is durably erased and
-    /// only a later step (the recall index sweep) failed: a repeat retries it.
-    Failed { error: StoreError, erased: bool },
+    /// The store refused or failed (500). `erased` is what the lease row
+    /// read back says: [`Tombstone::Yes`] when the session is durably erased
+    /// and only a later step (the recall index sweep) failed, `No` when
+    /// nothing was erased, and `Unknown` when the read-back failed too
+    /// (#32 PR 7 review L2). A repeat is safe in every case.
+    Failed {
+        error: StoreError,
+        erased: Tombstone,
+    },
 }
 
 impl SessionRegistry {
@@ -124,7 +130,7 @@ impl SessionRegistry {
         }
         rx.await.unwrap_or_else(|_| EraseAnswer::Failed {
             error: StoreError::Invariant("the erase task ended without an answer".into()),
-            erased: false,
+            erased: Tombstone::Unknown,
         })
     }
 
@@ -258,7 +264,8 @@ impl SessionRegistry {
                 }
             }
             Err(error) => {
-                if is_tombstoned(store.as_ref(), &sid).await {
+                let erased = read_tombstone(store.as_ref(), &sid).await;
+                if erased == Tombstone::Yes {
                     self.mark_erased(id);
                     tracing::error!(
                         session = %id,
@@ -266,19 +273,30 @@ impl SessionRegistry {
                         "lambo serve: the session was erased from the durable store, but a later \
                          step failed; repeat the erase to finish it"
                     );
-                    return EraseAnswer::Failed {
-                        error,
-                        erased: true,
-                    };
+                    return EraseAnswer::Failed { error, erased };
                 }
-                tracing::error!(
-                    session = %id,
-                    error = %error,
-                    "lambo serve: erasing an attached session failed before the store committed; \
-                     nothing was erased, and its in-memory tail was discarded by the fence"
-                );
+                if erased == Tombstone::No {
+                    tracing::error!(
+                        session = %id,
+                        error = %error,
+                        "lambo serve: erasing an attached session failed before the store \
+                         committed; nothing was erased, and its in-memory tail was discarded by \
+                         the fence"
+                    );
+                } else {
+                    // #32 PR 7 review L2: the read-back failed too, so the
+                    // store may have committed. Never "nothing was erased".
+                    tracing::error!(
+                        session = %id,
+                        error = %error,
+                        "lambo serve: erasing an attached session failed and its outcome is \
+                         unknown (the lease row could not be read back); its in-memory tail was \
+                         discarded by the fence. Repeat the erase: it is idempotent"
+                    );
+                }
                 // Hand the lease back so the session can be served again
-                // from what is durable (holder-scoped: a no-op if it lapsed).
+                // from what is durable (holder-scoped: a no-op if it lapsed,
+                // or if the erase did commit and the row is the tombstone).
                 let released =
                     tokio::time::timeout(LEASE_RELEASE_GRACE, store.release_lease(&sid, &holder))
                         .await;
@@ -289,11 +307,9 @@ impl SessionRegistry {
                          lapse at TTL"
                     );
                 }
+                // A retry, or the next request, reads the row and finds out.
                 self.after_failed_attached(id, previous);
-                EraseAnswer::Failed {
-                    error,
-                    erased: false,
-                }
+                EraseAnswer::Failed { error, erased }
             }
         }
     }
@@ -305,7 +321,7 @@ impl SessionRegistry {
             self.restore(id, prior);
             return EraseAnswer::Failed {
                 error: StoreError::Capability("this serve has no store to erase from".into()),
-                erased: false,
+                erased: Tombstone::No,
             };
         };
         let sid = SessionId::new(id);
@@ -327,16 +343,18 @@ impl SessionRegistry {
                 }
             }
             Err(error) => {
-                let erased = is_tombstoned(store.as_ref(), &sid).await;
-                if erased {
+                let erased = read_tombstone(store.as_ref(), &sid).await;
+                if erased == Tombstone::Yes {
                     self.mark_erased(id);
                 } else {
+                    // Not erased, or not known (#32 PR 7 review L2): the
+                    // slot it had, whose next attach reads the row again.
                     self.restore(id, prior);
                 }
                 tracing::error!(
                     session = %id,
                     error = %error,
-                    erased,
+                    erased = ?erased,
                     "lambo serve: erasing a session failed"
                 );
                 EraseAnswer::Failed { error, erased }
@@ -449,7 +467,9 @@ impl SessionRegistry {
     /// there is no store to ask or the read fails.
     pub(in crate::mcp::serve) async fn is_tombstoned(&self, id: &str) -> bool {
         match self.shared_store() {
-            Some(store) => is_tombstoned(store.as_ref(), &SessionId::new(id)).await,
+            Some(store) => {
+                read_tombstone(store.as_ref(), &SessionId::new(id)).await == Tombstone::Yes
+            }
             None => false,
         }
     }
@@ -462,12 +482,4 @@ impl SessionRegistry {
             .and_then(|attacher| attacher.template.shared_store())
             .or_else(|| self.store.get().cloned())
     }
-}
-
-/// Whether `session`'s lease row reads back as the #23 tombstone.
-async fn is_tombstoned(store: &dyn GraphStore, session: &SessionId) -> bool {
-    matches!(
-        store.read_lease(session).await,
-        Ok(Some(row)) if crate::store::erase::is_tombstone(&row)
-    )
 }

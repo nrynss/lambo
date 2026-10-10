@@ -33,7 +33,7 @@
 //! | 400 | the body is not `{"confirm": ...}`, or the confirm does not repeat the session id; nothing was erased |
 //! | 405 | not a `POST` (inside scope only) |
 //! | 409 | a live writer in another process holds the session; nothing was erased (the CLI's exit 1) |
-//! | 500 | the store failed; the body says whether the session is durably erased (repeat the request) or untouched |
+//! | 500 | the store failed; the body says whether the session is durably erased (repeat the request), untouched (an attached session's unflushed writes are discarded all the same), or unknown (repeat the request) |
 //! | 503 | the session is being erased or detached, or the serve is shutting down; `Retry-After` |
 //!
 //! # `GET /admin/sessions`
@@ -54,6 +54,7 @@ use axum::response::{IntoResponse, Response};
 use super::authority::{Authenticated, ServeAuthority};
 use super::http_guards::REQUEST_BODY_TIMEOUT;
 use super::registry::{EraseAnswer, SessionRegistry};
+use crate::store::erase::Tombstone;
 use crate::surface::session::{
     parse_addressed, RefusalReason, SessionGrant, SessionNeed, SessionRefusal,
 };
@@ -287,7 +288,7 @@ async fn erase_session(
             .into_response(),
         EraseAnswer::Failed {
             error,
-            erased: true,
+            erased: Tombstone::Yes,
         } => text(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!(
@@ -297,10 +298,25 @@ async fn erase_session(
         ),
         EraseAnswer::Failed {
             error,
-            erased: false,
+            erased: Tombstone::No,
         } => text(
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("the erase failed and nothing was erased: {error}"),
+            format!(
+                "the erase failed and nothing was erased: {error}. If this server held the \
+                 session, writes it had acknowledged but not yet flushed were discarded"
+            ),
+        ),
+        // #32 PR 7 review L2: the store failed and the lease row could not
+        // be read back, so whether it committed is not known.
+        EraseAnswer::Failed {
+            error,
+            erased: Tombstone::Unknown,
+        } => text(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!(
+                "the erase failed and its outcome is unknown: {error}. Repeat the request (it is \
+                 idempotent)"
+            ),
         ),
     }
 }

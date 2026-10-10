@@ -1419,7 +1419,11 @@ async fn an_on_demand_erase_that_fails_waits_for_the_old_handle_before_reattachi
     od.calls.fail_erase(EraseFault::BeforeCommit);
     match od.registry.erase(id).await {
         crate::mcp::serve::registry::EraseAnswer::Failed { erased, .. } => {
-            assert!(!erased, "nothing was erased");
+            assert_eq!(
+                erased,
+                crate::store::erase::Tombstone::No,
+                "nothing was erased"
+            );
         }
         other => panic!("the erase answered {other:?}"),
     }
