@@ -98,9 +98,9 @@ impl GraphStore for Recording {
         self.note("exact_vector_scan");
         self.inner.exact_vector_scan()
     }
-    fn holder_derives_from_graph(&self) -> bool {
-        self.note("holder_derives_from_graph");
-        self.inner.holder_derives_from_graph()
+    fn holder_derive_source(&self) -> crate::store::HolderDeriveSource {
+        self.note("holder_derive_source");
+        self.inner.holder_derive_source()
     }
     async fn blast_radius(
         &self,

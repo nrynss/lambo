@@ -286,6 +286,30 @@ bitflags! {
     }
 }
 
+/// How a session holder's hybrid derive finds semantic-merge candidates over
+/// a store whose own vector read is not an exact scan
+/// ([`GraphStore::holder_derive_source`]).
+///
+/// The score is exact cosine on the holder's graph vectors in both non-default
+/// cases; they differ in which concepts are considered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum HolderDeriveSource {
+    /// The store's own checked vector read, as recall uses it. The default.
+    Store,
+    /// Every vector in the holder's in-memory graph, by an exact scan: for a
+    /// store whose search lags the holder by more than the write-behind flush,
+    /// so the flush cannot say what it has seen (the Elasticsearch recall
+    /// tier, #18: refresh intervals and stale-tier windows). Costs O(n * dim)
+    /// per probe.
+    Graph,
+    /// The store's checked read for what the flush has made durable, plus an
+    /// exact scan of only the concepts the holder has not flushed yet: for a
+    /// store whose search sees a row as soon as the flush commits it (the
+    /// Postgres family, #60). Costs the store's query plus O(unflushed).
+    StoreAndUnflushed,
+}
+
 /// Durable / query surface — Lambo vocabulary only (spec §3.2).
 #[async_trait]
 pub trait GraphStore: Send + Sync {
@@ -463,29 +487,25 @@ pub trait GraphStore: Send + Sync {
         false
     }
 
-    /// Whether a session **holder**'s hybrid derive should take its semantic
-    /// merge candidates from its in-memory graph even though
-    /// [`Self::exact_vector_scan`] is false (#18, amending #8).
+    /// Where a session **holder**'s hybrid derive takes its semantic-merge
+    /// candidates when [`Self::exact_vector_scan`] is false (#18 amending #8;
+    /// #60). Recall is not affected: it keeps asking the store
+    /// ([`Self::exact_vector_scan`] governs that).
     ///
     /// Derive's dedupe decision has to see what was written seconds ago: two
     /// agents (or one, twice) deriving the same fact in quick succession must
-    /// merge, not produce paraphrased near-duplicates. A store whose checked
-    /// read is a **lagging tier** (the Elasticsearch recall index: unflushed
-    /// concepts, the last refresh interval, everything while the tier is
-    /// stale) cannot promise that, and neither can the Postgres family
-    /// (#60: its search sees only flushed rows, and the write-behind flush
-    /// lags by seconds to minutes). Both return `true`, and the holder's
-    /// derive ranks in its graph: exact cosine, and fresh up to the write
-    /// being made. Recall keeps asking the store ([`Self::exact_vector_scan`]
-    /// governs that). The cost is parity at the threshold edge: the graph
-    /// scores exact cosine where the store scored by its own distance (or an
-    /// approximate index), so a pair on the threshold may decide differently.
-    /// Default `false`: a store that does not opt in keeps derive and recall
-    /// on one source. SQLite needs no opt-in, its exact scan already puts
-    /// both on the graph. Ignored unless the store also advertises
-    /// [`Capabilities::VECTOR_SEARCH`].
-    fn holder_derives_from_graph(&self) -> bool {
-        false
+    /// merge, not produce paraphrased near-duplicates. A store whose vector
+    /// search lags the holder cannot promise that on its own, so it declares
+    /// how the holder should make up the difference (see
+    /// [`HolderDeriveSource`]). Default [`HolderDeriveSource::Store`]: a store
+    /// that does not opt in keeps derive and recall on one source. SQLite
+    /// needs no opt-in, its exact scan already puts both on the graph.
+    /// Ignored unless the store also advertises [`Capabilities::VECTOR_SEARCH`].
+    ///
+    /// A wrapper should forward it only when its vector read is unmodified
+    /// delegation, as for [`Self::exact_vector_scan`].
+    fn holder_derive_source(&self) -> HolderDeriveSource {
+        HolderDeriveSource::Store
     }
 
     /// Count of concepts that would be orphaned by removing `node` (spec §4.1).

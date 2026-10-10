@@ -22,6 +22,10 @@
 //!   scored by [`rank_by_cosine`]. It implements this trait without
 //!   implementing `GraphStore`, and its ranking is bit-identical to the SQLite
 //!   scan's (the CON-8 text codec round-trips `f32` exactly).
+//! * `StoreAndUnflushedSource` (#60, `graph::vector_source`) — a Postgres
+//!   family holder's derive: the store's checked read for what the flush has
+//!   made durable, plus an exact scan of only the holder's unflushed
+//!   concepts, every candidate re-scored on the graph's vector.
 //!
 //! **The caller side** (#27) is [`VectorCandidates`]: recall's vector leg
 //! (`recall::candidates::gather_from`) and hybrid derive's semantic match
@@ -41,9 +45,9 @@
 use async_trait::async_trait;
 use parking_lot::RwLock;
 
-use crate::graph::vector_source::GraphVectorSource;
+use crate::graph::vector_source::{GraphVectorSource, StoreAndUnflushedSource};
 use crate::graph::Graph;
-use crate::store::{Capabilities, GraphStore};
+use crate::store::{Capabilities, GraphStore, HolderDeriveSource};
 use crate::types::{tie_break_by_key, EmbeddingContract, NodeId, Scored, SessionId, StoreError};
 
 /// Where a caller's vector candidates come from (#27, caller side).
@@ -52,7 +56,7 @@ use crate::types::{tie_break_by_key, EmbeddingContract, NodeId, Scored, SessionI
 /// it two things: whether a vector leg exists at all ([`Self::available`], no
 /// I/O), and the checked candidates for a probe ([`Self::checked`]).
 ///
-/// Two sources:
+/// Three sources:
 ///
 /// * [`Self::Store`] — the durable store's checked read, with exactly the
 ///   behaviour callers had when they called it directly: the capability bit is
@@ -64,6 +68,10 @@ use crate::types::{tie_break_by_key, EmbeddingContract, NodeId, Scored, SessionI
 ///   [`Self::for_holder`] only when the store's own checked read is the same
 ///   exact scan (`GraphStore::exact_vector_scan`), so the answer is the same
 ///   and the store is not touched.
+/// * [`Self::StoreAndUnflushed`] — the store for what the flush made durable
+///   plus the holder's unflushed concepts (#60), chosen only by
+///   [`Self::for_holder_derive`] over a store that declares it
+///   (`GraphStore::holder_derive_source`).
 ///
 /// An enum rather than a trait object so both paths stay statically
 /// dispatched. Another candidate source (#18's Elastic tier) arrives as a
@@ -75,6 +83,10 @@ pub(crate) enum VectorCandidates<'a> {
     Store(&'a dyn GraphStore),
     /// The session holder's graph, ranked in place (#8).
     Graph(GraphVectorSource<'a>),
+    /// The store for what the flush made durable, plus the holder's
+    /// unflushed concepts ranked in place (#60). Only hybrid derive on a
+    /// holder over the Postgres family is handed this.
+    StoreAndUnflushed(StoreAndUnflushedSource<'a>),
 }
 
 impl<'a> VectorCandidates<'a> {
@@ -108,22 +120,30 @@ impl<'a> VectorCandidates<'a> {
     }
 
     /// The source a **session holder**'s hybrid derive is handed (#18,
-    /// amending #8's "one constructor, two callers").
+    /// amending #8's "one constructor, two callers"; #60).
     ///
-    /// The holder's graph whenever [`Self::for_holder`] would choose it, and
-    /// also over a store that declares `holder_derives_from_graph` (one that
-    /// lags the holder: the Elastic tier, #18; the Postgres family, #60):
-    /// derive's dedupe needs a fresh, exact view of what was just written,
-    /// which the graph has and the lagging store does not. Recall still
-    /// takes [`Self::for_holder`]'s choice. Same availability as
-    /// [`Self::for_holder`]: never switches a vector leg on.
+    /// The holder's graph whenever [`Self::for_holder`] would choose it.
+    /// Otherwise the store's declaration decides
+    /// ([`GraphStore::holder_derive_source`]): a store that lags the holder
+    /// beyond its flush (the Elastic tier, #18) gets the whole graph; one
+    /// whose search sees each flush commit (the Postgres family, #60) gets
+    /// the store plus the holder's unflushed concepts. Derive's dedupe needs
+    /// a fresh view of what was just written, which a lagging store alone
+    /// does not have. Recall still takes [`Self::for_holder`]'s choice. Same
+    /// availability as [`Self::for_holder`]: never switches a vector leg on.
     pub(crate) fn for_holder_derive(store: &'a dyn GraphStore, graph: &'a RwLock<Graph>) -> Self {
-        if store.capabilities().contains(Capabilities::VECTOR_SEARCH)
-            && (store.exact_vector_scan() || store.holder_derives_from_graph())
-        {
-            Self::Graph(GraphVectorSource::new(graph))
-        } else {
-            Self::Store(store)
+        if !store.capabilities().contains(Capabilities::VECTOR_SEARCH) {
+            return Self::Store(store);
+        }
+        if store.exact_vector_scan() {
+            return Self::Graph(GraphVectorSource::new(graph));
+        }
+        match store.holder_derive_source() {
+            HolderDeriveSource::Graph => Self::Graph(GraphVectorSource::new(graph)),
+            HolderDeriveSource::StoreAndUnflushed => {
+                Self::StoreAndUnflushed(StoreAndUnflushedSource::new(store, graph))
+            }
+            _ => Self::Store(store),
         }
     }
 
@@ -134,6 +154,10 @@ impl<'a> VectorCandidates<'a> {
             Self::Store(store) => store.capabilities().contains(Capabilities::VECTOR_SEARCH),
             // Chosen only over a store that advertises VECTOR_SEARCH.
             Self::Graph(_) => true,
+            Self::StoreAndUnflushed(union) => union
+                .store()
+                .capabilities()
+                .contains(Capabilities::VECTOR_SEARCH),
         }
     }
 
@@ -154,6 +178,11 @@ impl<'a> VectorCandidates<'a> {
             }
             Self::Graph(graph) => {
                 graph
+                    .checked_vector_candidates(session, probe, expected_contract, limit)
+                    .await
+            }
+            Self::StoreAndUnflushed(union) => {
+                union
                     .checked_vector_candidates(session, probe, expected_contract, limit)
                     .await
             }
@@ -285,7 +314,7 @@ mod tests {
     struct Declares {
         caps: Capabilities,
         exact: bool,
-        derive_graph: bool,
+        derive: HolderDeriveSource,
     }
 
     #[async_trait]
@@ -299,8 +328,8 @@ mod tests {
         fn exact_vector_scan(&self) -> bool {
             self.exact
         }
-        fn holder_derives_from_graph(&self) -> bool {
-            self.derive_graph
+        fn holder_derive_source(&self) -> HolderDeriveSource {
+            self.derive
         }
         async fn flush(&self, _: &MutationBatch, _: Option<u64>) -> Result<(), StoreError> {
             unreachable!("selection is I/O-free")
@@ -367,7 +396,7 @@ mod tests {
             let store = Declares {
                 caps,
                 exact,
-                derive_graph: false,
+                derive: HolderDeriveSource::Store,
             };
             let source = VectorCandidates::for_holder(&store, &graph);
             assert_eq!(
@@ -446,11 +475,12 @@ mod tests {
         let plain = Plain(Declares {
             caps: Capabilities::VECTOR_SEARCH,
             exact: true,
-            derive_graph: true,
+            derive: HolderDeriveSource::Graph,
         });
         assert!(!plain.exact_vector_scan(), "a wrapper must opt in itself");
-        assert!(
-            !plain.holder_derives_from_graph(),
+        assert_eq!(
+            plain.holder_derive_source(),
+            HolderDeriveSource::Store,
             "a wrapper must opt in itself"
         );
         let graph = RwLock::new(Graph::new(SessionId::from("s")));
@@ -464,40 +494,61 @@ mod tests {
         ));
     }
 
-    /// #18 amending #8: derive takes the graph wherever recall does, and
-    /// also over a lagging tier that declares `holder_derives_from_graph`;
-    /// recall's choice is unchanged by that declaration, and neither ever
-    /// switches a vector leg on.
+    /// #18 amending #8, and #60: derive takes the graph wherever recall
+    /// does; otherwise the store's `holder_derive_source` picks the whole
+    /// graph (a lagging tier) or the store plus the unflushed concepts (the
+    /// Postgres family). Recall's choice is unchanged by that declaration,
+    /// and neither ever switches a vector leg on.
     #[test]
-    fn for_holder_derive_adds_the_lagging_tier_case_only() {
+    fn for_holder_derive_follows_the_store_declaration() {
+        use HolderDeriveSource as D;
         let graph = RwLock::new(Graph::new(SessionId::from("s")));
         let vs = Capabilities::VECTOR_SEARCH;
-        for (caps, exact, derive_graph, recall_graph, derive_graph_want, available) in [
-            (vs, true, false, true, true, true),
-            (vs, false, false, false, false, true),
-            (vs, false, true, false, true, true),
-            (vs, true, true, true, true, true),
-            (Capabilities::HISTORY, false, true, false, false, false),
-            (Capabilities::empty(), true, true, false, false, false),
+        // (caps, exact, declared, recall on graph, derive source, available)
+        for (caps, exact, declared, recall_graph, want, available) in [
+            (vs, true, D::Store, true, "graph", true),
+            (vs, false, D::Store, false, "store", true),
+            (vs, false, D::Graph, false, "graph", true),
+            (vs, false, D::StoreAndUnflushed, false, "union", true),
+            (vs, true, D::Graph, true, "graph", true),
+            (vs, true, D::StoreAndUnflushed, true, "graph", true),
+            (
+                Capabilities::HISTORY,
+                false,
+                D::Graph,
+                false,
+                "store",
+                false,
+            ),
+            (
+                Capabilities::HISTORY,
+                false,
+                D::StoreAndUnflushed,
+                false,
+                "store",
+                false,
+            ),
+            (Capabilities::empty(), true, D::Graph, false, "store", false),
         ] {
             let store = Declares {
                 caps,
                 exact,
-                derive_graph,
+                derive: declared,
             };
             let recall = VectorCandidates::for_holder(&store, &graph);
             let derive = VectorCandidates::for_holder_derive(&store, &graph);
-            let case = format!("caps {caps:?} exact {exact} derive_graph {derive_graph}");
+            let case = format!("caps {caps:?} exact {exact} declared {declared:?}");
             assert_eq!(
                 matches!(recall, VectorCandidates::Graph(_)),
                 recall_graph,
                 "{case}"
             );
-            assert_eq!(
-                matches!(derive, VectorCandidates::Graph(_)),
-                derive_graph_want,
-                "{case}"
-            );
+            let got = match derive {
+                VectorCandidates::Store(_) => "store",
+                VectorCandidates::Graph(_) => "graph",
+                VectorCandidates::StoreAndUnflushed(_) => "union",
+            };
+            assert_eq!(got, want, "{case}");
             assert_eq!(derive.available(), available, "{case}");
             assert_eq!(recall.available(), available, "{case}");
         }

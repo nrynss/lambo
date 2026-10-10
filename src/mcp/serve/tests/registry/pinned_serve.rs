@@ -289,9 +289,9 @@ impl GraphStore for Shared {
         self.2.note("exact_vector_scan", "");
         self.0.exact_vector_scan()
     }
-    fn holder_derives_from_graph(&self) -> bool {
-        self.2.note("holder_derives_from_graph", "");
-        self.0.holder_derives_from_graph()
+    fn holder_derive_source(&self) -> crate::store::HolderDeriveSource {
+        self.2.note("holder_derive_source", "");
+        self.0.holder_derive_source()
     }
     async fn blast_radius(
         &self,

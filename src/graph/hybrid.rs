@@ -63,10 +63,12 @@
 //!    context, `embedder.embed`, then the checked candidate read of the source
 //!    this call was handed (`VectorCandidates`): the holder's graph, ranked in
 //!    RAM under a brief read lock with no await, when the store ranks by an
-//!    exact scan (#8) or lags the holder and declares
-//!    `holder_derives_from_graph` (the Elastic tier, #18; the Postgres
-//!    family, #60), else `store.vector_candidates_checked` through the
-//!    [`GraphStore`] trait only. A capability-miss marks the concept
+//!    exact scan (#8) or lags the holder past its flush (the Elastic tier,
+//!    #18); the store for flushed concepts plus the holder's unflushed ones
+//!    ranked in RAM, when the store's search sees each flush commit (the
+//!    Postgres family, #60); both per `GraphStore::holder_derive_source`.
+//!    Otherwise `store.vector_candidates_checked` through the [`GraphStore`]
+//!    trait only. A capability-miss marks the concept
 //!    for the canonical fallback (logged once per session); an embed failure or
 //!    timeout fails the whole call before anything is written (J3-R3-1); a
 //!    genuine backend `StoreError` (not a `Capability` miss) propagates. The
