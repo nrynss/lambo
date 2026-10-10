@@ -885,6 +885,144 @@ async fn the_graph_overrides_the_database_for_unflushed_rewrites() {
     for_each_dialect!(check);
 }
 
+/// The whole-graph ranking the union falls back to: exact cosine over every
+/// concept vector the holder's graph has.
+fn whole_graph_rank(
+    graph: &parking_lot::RwLock<crate::graph::Graph>,
+    probe: &[f32],
+    limit: usize,
+) -> Vec<(NodeId, f64)> {
+    let graph = graph.read();
+    crate::store::vector_source::rank_by_cosine(
+        probe,
+        graph.concepts().filter_map(|c| {
+            c.embedding
+                .as_deref()
+                .map(|v| (c.id, v, c.canonical_key.as_str()))
+        }),
+        limit,
+    )
+    .into_iter()
+    .map(|s| (s.item, s.score))
+    .collect()
+}
+
+/// **#60 review T-1, overflow.** The store's read is over-fetched by the
+/// unflushed set's size, so once `limit + unflushed` passes
+/// [`crate::store::MAX_VECTOR_CANDIDATE_LIMIT`] (2,048) the store would
+/// refuse the read. The source ranks the whole graph instead, with no
+/// database call, and returns to the union as soon as a commit clears the
+/// set. At exactly the bound it still asks the database.
+#[tokio::test]
+async fn an_overflowing_unflushed_set_ranks_the_whole_graph() {
+    async fn check<D: Dialect>(kind: StoreKind, name: &str) {
+        use crate::store::vector_source::VectorCandidates;
+        const LIMIT: usize = 8;
+        let session = SessionId::from(format!("pg-overflow-{name}").as_str());
+        let embedder = LabelVectors::new(DIM);
+        let store = LaggingDatabase::<D>::new(kind);
+        let (graph, ids) = graph_with(&session, &embedder, &[ORIGINAL]);
+        commit(&graph, &store);
+        let at_bound = crate::store::MAX_VECTOR_CANDIDATE_LIMIT - LIMIT;
+        for i in 0..at_bound {
+            add_concept(&graph, &embedder, &format!("unflushed fact {i}"));
+        }
+        assert_eq!(graph.read().unflushed_len(), at_bound);
+        let probe = embedder.vector(PARAPHRASE);
+        let ask = || async {
+            VectorCandidates::for_holder_derive(&store, &graph)
+                .checked(&session, &probe, &embedder.contract(), LIMIT)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|s| (s.item, s.score))
+                .collect::<Vec<_>>()
+        };
+
+        // At the bound: limit + unflushed == 2,048, the store can answer.
+        let hits = ask().await;
+        assert_eq!(store.vector_calls(), 1, "{name}: at the bound, the union");
+        assert_eq!(hits.first().map(|h| h.0), Some(ids[0]), "{name}");
+
+        // One more: 2,049 > 2,048, the whole graph, no database call.
+        add_concept(&graph, &embedder, "one unflushed fact too many");
+        let hits = ask().await;
+        assert_eq!(
+            store.vector_calls(),
+            1,
+            "{name}: an overflowing set asked the database"
+        );
+        assert_eq!(hits, whole_graph_rank(&graph, &probe, LIMIT), "{name}");
+        assert_eq!(hits.first().map(|h| h.0), Some(ids[0]), "{name}");
+
+        // A commit clears the set: back to the union, one database call.
+        commit(&graph, &store);
+        assert_eq!(graph.read().unflushed_len(), 0);
+        let hits = ask().await;
+        assert_eq!(store.vector_calls(), 2, "{name}: back to the union");
+        assert_eq!(hits.first().map(|h| h.0), Some(ids[0]), "{name}");
+    }
+    for_each_dialect!(check);
+}
+
+/// **#60 review T-1, re-embed.** After a re-embed the store still holds the
+/// old contract until the batch carrying the new one commits, so it cannot
+/// answer under the new one: the source ranks the whole graph with no
+/// database call, then returns to the union once that batch is flushed.
+#[tokio::test]
+async fn an_unflushed_reembed_ranks_the_whole_graph() {
+    async fn check<D: Dialect>(kind: StoreKind, name: &str) {
+        use crate::store::vector_source::VectorCandidates;
+        let session = SessionId::from(format!("pg-reembed-{name}").as_str());
+        let embedder = LabelVectors::new(DIM);
+        let store = LaggingDatabase::<D>::new(kind);
+        let (graph, ids) = graph_with(&session, &embedder, &[ORIGINAL, "an unrelated fact"]);
+        commit(&graph, &store);
+        assert!(!graph.read().contract_unflushed());
+
+        let reembedded = EmbeddingContract {
+            model: Some("re-embedded".into()),
+            ..embedder.contract()
+        };
+        let updates = graph
+            .read()
+            .concepts()
+            .map(|c| (c.id, embedder.vector(&c.content)))
+            .collect();
+        graph
+            .write()
+            .reembed_all(updates, reembedded.clone())
+            .unwrap();
+        assert!(graph.read().contract_unflushed());
+
+        let probe = embedder.vector(PARAPHRASE);
+        let ask = || async {
+            VectorCandidates::for_holder_derive(&store, &graph)
+                .checked(&session, &probe, &reembedded, 8)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|s| (s.item, s.score))
+                .collect::<Vec<_>>()
+        };
+        let hits = ask().await;
+        assert_eq!(
+            store.vector_calls(),
+            0,
+            "{name}: the store was asked under a contract it has not seen"
+        );
+        assert_eq!(hits, whole_graph_rank(&graph, &probe, 8), "{name}");
+        assert_eq!(hits.first().map(|h| h.0), Some(ids[0]), "{name}");
+
+        commit(&graph, &store);
+        assert!(!graph.read().contract_unflushed());
+        let hits = ask().await;
+        assert_eq!(store.vector_calls(), 1, "{name}: back to the union");
+        assert_eq!(hits.first().map(|h| h.0), Some(ids[0]), "{name}");
+    }
+    for_each_dialect!(check);
+}
+
 /// **#60 review L2.** Image derive takes derive's source, not recall's: on a
 /// fresh session its `parent_of` probe asks nothing of the database (the
 /// union has no durable contract to ask under), where recall's source would.
