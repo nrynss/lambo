@@ -131,6 +131,150 @@ async fn an_oversized_frame_is_discarded_without_being_buffered() {
     assert!(!logged.contains("zq"), "the log never quotes the frame");
 }
 
+/// #101 review L3: a frame exactly at the cap is handed on without the
+/// buffer growing past the cap (pushing its newline used to double a full
+/// 4 MiB allocation to 8 MiB), and a large frame's buffer is given back
+/// once it has been handed on, so the connection does not keep it.
+///
+/// Mutations: push the newline onto the frame again, or extend without
+/// `grow`, and the peak allocation is twice the cap; drop the `shrink_to`
+/// and the retained capacity is the cap.
+#[tokio::test]
+async fn a_frame_at_the_cap_never_grows_the_buffer_past_it() {
+    for cap in [16, MAX_MCP_FRAME_BYTES] {
+        let at_cap = "x".repeat(cap);
+        let input = format!("{at_cap}\n{{\"after\":1}}\n");
+        let mut capped = CappedFrames::with_cap(input.as_bytes(), "stdio", cap);
+        let peak = capped.peak_capacity();
+        let mut out = Vec::new();
+        let mut lines = BufReader::new(&mut capped);
+        lines.read_until(b'\n', &mut out).await.expect("read");
+        assert!(out.len() == cap + 1, "the frame at the cap arrives whole");
+        out.clear();
+        lines.read_until(b'\n', &mut out).await.expect("read");
+        assert_eq!(out, b"{\"after\":1}\n");
+        drop(lines);
+        let peak = peak.load(Ordering::Relaxed);
+        assert!(
+            peak <= cap + 1,
+            "cap {cap}: the frame buffer grew to {peak} bytes"
+        );
+        if cap > 64 * 1024 {
+            assert!(
+                capped.frame_capacity() <= 64 * 1024,
+                "cap {cap}: {} bytes kept after the frame was handed on",
+                capped.frame_capacity()
+            );
+        }
+    }
+}
+
+/// #101 review M2: the reply to a discarded frame is written between the
+/// server's own frames, never inside one, however the two writers' bytes
+/// arrive. The server side writes its frames 7 bytes at a time and yields
+/// between writes, through a pipe small enough that writes are partial,
+/// while the reader discards a run of oversized requests; every line that
+/// comes out must be one whole JSON message.
+///
+/// Mutation: release the frame lock after every write in
+/// `FrameWriter::poll_write` (not only at a newline) and a reply lands
+/// inside a server frame.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reply_never_lands_inside_a_frame_the_server_is_writing() {
+    const FRAMES: usize = 20;
+    let (mut client_in, server_in) = tokio::io::duplex(64 * 1024);
+    let (server_out, client_out) = tokio::io::duplex(512);
+    let (mut reader, mut writer) =
+        crate::mcp::serve::frames::capped_transport_with_cap(server_in, server_out, "stdio", 64);
+    let server_writes = tokio::spawn(async move {
+        for i in 0..FRAMES {
+            let frame = format!(
+                "{{\"jsonrpc\":\"2.0\",\"id\":{i},\"result\":\"{}\"}}\n",
+                "r".repeat(2000)
+            );
+            for chunk in frame.as_bytes().chunks(7) {
+                writer.write_all(chunk).await.expect("write");
+                tokio::task::yield_now().await;
+            }
+            writer.flush().await.expect("flush");
+        }
+        writer
+    });
+    let client_writes = tokio::spawn(async move {
+        for i in 0..FRAMES {
+            let frame = format!(
+                "{{\"jsonrpc\":\"2.0\",\"id\":\"o{i}\",\"method\":\"x\",\"params\":\"{}\"}}\n",
+                "p".repeat(300)
+            );
+            client_in.write_all(frame.as_bytes()).await.expect("send");
+        }
+    });
+    let reads = tokio::spawn(async move {
+        let mut sink = Vec::new();
+        reader.read_to_end(&mut sink).await.expect("read");
+        assert!(sink.is_empty(), "every request was over the cap");
+        reader
+    });
+    let mut lines = BufReader::new(client_out).lines();
+    let (mut results, mut replies) = (0, 0);
+    while results + replies < 2 * FRAMES {
+        let line = tokio::time::timeout(std::time::Duration::from_secs(20), lines.next_line())
+            .await
+            .expect("output within 20 s")
+            .expect("read")
+            .expect("not closed");
+        let v: serde_json::Value = serde_json::from_str(&line)
+            .unwrap_or_else(|e| panic!("a frame was torn ({e}): {line:.120}"));
+        if v.get("result").is_some() {
+            results += 1;
+        } else {
+            assert_eq!(v["error"]["code"], -32600, "{line:.120}");
+            assert!(
+                v["id"].as_str().is_some_and(|id| id.starts_with('o')),
+                "{v}"
+            );
+            replies += 1;
+        }
+    }
+    client_writes.await.expect("client");
+    drop(server_writes.await.expect("server"));
+    drop(reads.await.expect("reader"));
+}
+
+/// An over-cap frame cut off by end of input gets no reply: the client has
+/// stopped sending, and its transport is shutting down.
+///
+/// Mutation: reply in `discarded` whatever `terminated` is, queued at once
+/// (`try_send`) rather than on the next read, and a reply comes out.
+#[tokio::test]
+async fn an_oversized_frame_cut_off_by_end_of_input_gets_no_reply() {
+    let input = format!(
+        "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"x\",\"params\":\"{}",
+        "p".repeat(300)
+    );
+    let (server_out, mut client_out) = tokio::io::duplex(4096);
+    let (mut reader, writer) = crate::mcp::serve::frames::capped_transport_with_cap(
+        input.as_bytes(),
+        server_out,
+        "stdio",
+        64,
+    );
+    let mut sink = Vec::new();
+    reader.read_to_end(&mut sink).await.expect("read");
+    assert!(sink.is_empty());
+    drop(reader);
+    drop(writer);
+    let mut out = Vec::new();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        client_out.read_to_end(&mut out),
+    )
+    .await
+    .expect("the reply task ends with its reader")
+    .expect("read");
+    assert!(out.is_empty(), "{}", String::from_utf8_lossy(&out));
+}
+
 /// The real tool path: rmcp's stdio transport over [`CappedFrames`] (what
 /// `capped_stdio` builds, with in-memory pipes in place of stdin and stdout)
 /// in front of a `LamboServer` that serves all three fields.
@@ -138,6 +282,8 @@ async fn an_oversized_frame_is_discarded_without_being_buffered() {
 mod tool_path {
     use super::*;
     use crate::embed::{Embedder, FixtureEmbedder};
+    use crate::mcp::serve::frame_id::{TOO_LARGE_CODE, TOO_LARGE_MESSAGE};
+    use crate::mcp::serve::frames::capped_transport;
     use crate::mcp::server::LamboServer;
     use crate::memory::Memory;
     use crate::store::{GraphStore, MemoryStore};
@@ -145,6 +291,7 @@ mod tool_path {
     use crate::types::EmbeddingContract;
     use crate::Config;
     use rmcp::ServiceExt;
+    use serde_json::json;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -234,11 +381,11 @@ mod tool_path {
         async fn connect() -> Self {
             let (to_server, server_in) = tokio::io::duplex(64 * 1024);
             let (server_out, from_server) = tokio::io::duplex(64 * 1024);
-            let capped = CappedFrames::new(server_in, "stdio");
+            let (capped, out) = capped_transport(server_in, server_out, "stdio");
             let peak = capped.peak();
             let server = server().await;
             tokio::spawn(async move {
-                if let Ok(running) = server.serve((capped, server_out)).await {
+                if let Ok(running) = server.serve((capped, out)).await {
                     let _ = running.waiting().await;
                 }
             });
@@ -311,22 +458,45 @@ mod tool_path {
                 .load(Ordering::Relaxed)
         }
 
-        /// Stream `field` at 8x the frame cap as request 10, then make two
-        /// small calls, and assert the session answered both and never
-        /// answered request 10: the frame was not parsed, so no tool saw it.
-        async fn oversized_frame_goes_unanswered(&mut self, field: &str) {
+        /// Stream `field` at 8x the frame cap as request 10 and assert it is
+        /// refused with a request-too-large error keyed to 10.
+        async fn oversized_field_is_refused(&mut self, field: &str) {
             let (prefix, filler, suffix) = field_frame(field, 10);
-            stream_frame(&mut self.to_server, &prefix, filler, OVER, &suffix).await;
-            self.send(r#"{"jsonrpc":"2.0","id":11,"method":"tools/list"}"#)
+            self.oversized_frame_is_refused(field, &prefix, filler, &suffix, &json!(10), 11)
                 .await;
-            let listed = self.response(11).await;
-            assert!(listed.contains("lambo_derive_image"), "{field}: {listed}");
-            self.send(r#"{"jsonrpc":"2.0","id":12,"method":"ping"}"#)
-                .await;
-            self.response(12).await;
+        }
+
+        /// Stream a frame of `prefix`, `filler` to 8x the frame cap, and
+        /// `suffix`, then make two small calls (`next` and `next + 1`), and
+        /// assert: exactly one request-too-large error came back, keyed to
+        /// `id` (or `null`); nothing else answered the frame (it was not
+        /// parsed, so no tool saw it); the session answered both calls; and
+        /// the reader never held more than the cap of it.
+        async fn oversized_frame_is_refused(
+            &mut self,
+            case: &str,
+            prefix: &str,
+            filler: &str,
+            suffix: &str,
+            id: &serde_json::Value,
+            next: u64,
+        ) {
+            self.seen.clear();
+            stream_frame(&mut self.to_server, prefix, filler, OVER, suffix).await;
+            self.send(&format!(
+                r#"{{"jsonrpc":"2.0","id":{next},"method":"tools/list"}}"#
+            ))
+            .await;
+            let listed = self.response(next).await;
+            assert!(listed.contains("lambo_derive_image"), "{case}: {listed}");
+            self.send(&format!(
+                r#"{{"jsonrpc":"2.0","id":{},"method":"ping"}}"#,
+                next + 1
+            ))
+            .await;
+            self.response(next + 1).await;
             // The ping can overtake a tool call rmcp has spawned, so give a
-            // parsed request 10 time to be answered before concluding it
-            // was not.
+            // parsed frame time to be answered before concluding it was not.
             while let Ok(Ok(Some(line))) =
                 tokio::time::timeout(Duration::from_secs(1), self.from_server.next_line()).await
             {
@@ -336,34 +506,123 @@ mod tool_path {
                 let peak = self.peak();
                 assert!(
                     peak <= MAX_MCP_FRAME_BYTES,
-                    "{field}: {peak} bytes of a {OVER}-byte frame were buffered"
+                    "{case}: {peak} bytes of a {OVER}-byte frame were buffered"
                 );
             }
-            assert!(
-                !self.seen.iter().any(|l| l.contains("\"id\":10")),
-                "{field}: the oversized frame was answered, so it was parsed: {:?}",
+            let frames: Vec<serde_json::Value> = self
+                .seen
+                .iter()
+                .map(|l| serde_json::from_str(l).expect("every frame out is JSON"))
+                .collect();
+            let refusals: Vec<&serde_json::Value> = frames
+                .iter()
+                .filter(|f| f["error"]["code"] == json!(TOO_LARGE_CODE))
+                .collect();
+            let short = || {
                 self.seen
                     .iter()
                     .map(|l| l.chars().take(200).collect::<String>())
                     .collect::<Vec<_>>()
+            };
+            assert!(
+                refusals.len() == 1,
+                "{case}: expected one request-too-large reply: {:?}",
+                short()
             );
+            let refusal = refusals[0];
+            assert!(
+                refusal.get("id") == Some(id)
+                    && refusal["error"]["message"] == json!(TOO_LARGE_MESSAGE),
+                "{case}: the reply must be keyed to {id}: {refusal}"
+            );
+            if !id.is_null() {
+                assert!(
+                    frames.iter().filter(|f| f.get("id") == Some(id)).count() == 1,
+                    "{case}: the oversized frame was answered, so it was parsed: {:?}",
+                    short()
+                );
+            }
         }
+    }
+
+    /// The shapes of id an oversized request can carry, with the id the
+    /// reply must be keyed to: before `params` (serde clients), after it
+    /// (the TypeScript SDK), none, a string, and one only inside nested
+    /// objects, which must not be taken for the request's.
+    pub(super) fn id_shapes() -> Vec<(&'static str, String, String, serde_json::Value)> {
+        const ARGS: &str = r#""name":"lambo_derive_image","arguments":{"agent_id":"agent-a","caption":"c","concept_type":"resource","image":{"mime":"image/png","data":""#;
+        vec![
+            (
+                "id before params",
+                format!(r#"{{"jsonrpc":"2.0","id":40,"method":"tools/call","params":{{{ARGS}"#),
+                "\"}}}}\n".to_owned(),
+                json!(40),
+            ),
+            (
+                "id after params",
+                format!(r#"{{"method":"tools/call","params":{{{ARGS}"#),
+                "\"}}},\"jsonrpc\":\"2.0\",\"id\":41}\n".to_owned(),
+                json!(41),
+            ),
+            (
+                "no id",
+                format!(r#"{{"jsonrpc":"2.0","method":"tools/call","params":{{{ARGS}"#),
+                "\"}}}}\n".to_owned(),
+                serde_json::Value::Null,
+            ),
+            (
+                "string id",
+                format!(
+                    r#"{{"jsonrpc":"2.0","id":"big-42","method":"tools/call","params":{{{ARGS}"#
+                ),
+                "\"}}}}\n".to_owned(),
+                json!("big-42"),
+            ),
+            (
+                "id only nested",
+                format!(r#"{{"jsonrpc":"2.0","method":"tools/call","params":{{"id":43,{ARGS}"#),
+                "\"},\"id\":44},\"id\":45}}\n".to_owned(),
+                serde_json::Value::Null,
+            ),
+        ]
     }
 
     /// Each capped field, streamed at 8x the frame cap through the real
     /// tool path: the frame is never buffered past the cap (so neither
     /// rmcp's line nor its `Value` tree nor the tool's `String`/`Vec<f32>`
-    /// is ever built from it), it is never answered, and the session goes
-    /// on to answer the next call.
+    /// is ever built from it), it is refused with a request-too-large error
+    /// keyed to its id rather than answered by the tool, and the session
+    /// goes on to answer the next call.
     ///
     /// Mutations: drop the cap comparison in `CappedFrames::poll_read` and
     /// the high-water mark is the whole frame, which rmcp then parses and
-    /// the tool answers by name.
+    /// the tool answers by name; drop the reply in `discarded` and no
+    /// request-too-large error arrives.
     #[tokio::test]
     async fn an_oversized_field_is_refused_before_it_is_allocated() {
         for field in ["query_vector.values", "vector.values", "image.data"] {
             let mut client = Client::connect().await;
-            client.oversized_frame_goes_unanswered(field).await;
+            client.oversized_field_is_refused(field).await;
+        }
+    }
+
+    /// #101 review M2 over stdio: an oversized request is answered with
+    /// `-32600` keyed to the id recovered from its head or tail, or to
+    /// `null`, never to an id nested inside it; every case on one
+    /// connection, which keeps serving after each.
+    ///
+    /// Mutations: scan only the head (drop the tail ring) and "id after
+    /// params" is answered with `null`; let the head scan descend into
+    /// `params` and "id only nested" is answered with 43. (The frame lock
+    /// that keeps the reply out of rmcp's frames is proved by
+    /// `a_reply_never_lands_inside_a_frame_the_server_is_writing`.)
+    #[tokio::test]
+    async fn an_oversized_request_is_answered_with_its_id_over_stdio() {
+        let mut client = Client::connect().await;
+        for (n, (case, prefix, suffix, id)) in (50u64..).step_by(2).zip(id_shapes()) {
+            client
+                .oversized_frame_is_refused(case, &prefix, "QUJD", &suffix, &id, n)
+                .await;
         }
     }
 
@@ -425,12 +684,14 @@ mod tool_path {
     }
 
     /// The session endpoint (the J2 hub socket) is the same rmcp line
-    /// transport and gets the same cap: each oversized field goes unanswered
-    /// there too, and the connection goes on serving.
+    /// transport and gets the same cap: each oversized field is refused
+    /// there too with a request-too-large error keyed to its id, as is every
+    /// id shape, and the connection goes on serving.
     ///
-    /// Mutation: serve the endpoint connection without `capped_endpoint`
+    /// Mutations: serve the endpoint connection without `capped_endpoint`
     /// (`server.serve(stream)`, as before #101) and rmcp parses the frame
-    /// and the tool answers request 10.
+    /// and the tool answers request 10; give `capped_endpoint` a reader with
+    /// no reply channel and no request-too-large error arrives.
     #[cfg(unix)]
     #[tokio::test]
     async fn the_endpoint_discards_an_oversized_frame_too() {
@@ -448,8 +709,16 @@ mod tool_path {
         let hub = crate::mcp::serve::hub::bind_hub(Some(&endpoint), &server, 4);
         for field in ["query_vector.values", "vector.values", "image.data"] {
             let mut client = Client::dial(&endpoint).await;
-            client.oversized_frame_goes_unanswered(field).await;
+            client.oversized_field_is_refused(field).await;
         }
+        // #101 review M2: every id shape, on one endpoint connection.
+        let mut client = Client::dial(&endpoint).await;
+        for (n, (case, prefix, suffix, id)) in (50u64..).step_by(2).zip(id_shapes()) {
+            client
+                .oversized_frame_is_refused(case, &prefix, "QUJD", &suffix, &id, n)
+                .await;
+        }
+        drop(client);
         hub.release(Some(&endpoint)).await;
         mem.close().await.expect("close");
     }

@@ -310,14 +310,21 @@ pub(super) async fn serve_endpoint(
 /// front of its read half (#101): the socket is fed by a proxy (which caps
 /// its own reads, `MAX_FRAME_BYTES` in `crate::mcp::proxy`) but anything that
 /// can connect to it can write to it, and rmcp's line reader has no limit.
+/// The write half carries the request-too-large reply to a discarded frame
+/// between rmcp's own frames (see `super::frames`).
+///
+/// `into_split` rather than rmcp's `tokio::io::split`: the halves are owned,
+/// and dropping the write half (once rmcp and the reply task have both let
+/// go of it) half-closes the socket, so the peer sees EOF as soon as the
+/// session is done writing rather than when the read half goes too.
 fn capped_endpoint(
     stream: tokio::net::UnixStream,
 ) -> (
     super::frames::CappedFrames<tokio::net::unix::OwnedReadHalf>,
-    tokio::net::unix::OwnedWriteHalf,
+    super::frames::FrameWriter<tokio::net::unix::OwnedWriteHalf>,
 ) {
     let (read, write) = stream.into_split();
-    (super::frames::CappedFrames::new(read, "endpoint"), write)
+    super::frames::capped_transport(read, write, "endpoint")
 }
 
 /// One endpoint session: the MCP handshake, then the session until the client

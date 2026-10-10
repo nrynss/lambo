@@ -13,7 +13,7 @@ use rmcp::service::ServerInitializeError;
 use rmcp::ServiceExt;
 
 use super::authority::{authorize_default, Authenticated, ServeAuthority};
-use super::frames::CappedFrames;
+use super::frames::{capped_transport, CappedFrames, FrameWriter};
 use super::http_guards::{
     guard_request, usable_session_id, HttpGuard, OpeningReservation, MCP_SESSION_ID,
 };
@@ -123,12 +123,16 @@ pub(super) async fn run_until_shutdown<T>(
 }
 
 /// rmcp's stdio transport with Lambo's frame cap in front of stdin (#101):
-/// stdout as rmcp's `stdio()` gives it, stdin through [`CappedFrames`], so a
-/// frame over [`MAX_MCP_FRAME_BYTES`](super::frames::MAX_MCP_FRAME_BYTES) is
-/// discarded before rmcp buffers or parses it.
-pub(super) fn capped_stdio() -> (CappedFrames<tokio::io::Stdin>, tokio::io::Stdout) {
+/// stdin through [`CappedFrames`], so a frame over
+/// [`MAX_MCP_FRAME_BYTES`](super::frames::MAX_MCP_FRAME_BYTES) is discarded
+/// before rmcp buffers or parses it, and stdout through a [`FrameWriter`], so
+/// the request-too-large reply to it goes out between rmcp's own frames.
+pub(super) fn capped_stdio() -> (
+    CappedFrames<tokio::io::Stdin>,
+    FrameWriter<tokio::io::Stdout>,
+) {
     let (stdin, stdout) = rmcp::transport::io::stdio();
-    (CappedFrames::new(stdin, "stdio"), stdout)
+    capped_transport(stdin, stdout, "stdio")
 }
 
 /// stdio transport — the shape an MCP client launches as a subprocess.

@@ -95,6 +95,7 @@ pub(crate) mod activity;
 mod admin;
 mod authority;
 mod builder;
+mod frame_id;
 mod frames;
 pub(crate) use frames::MAX_MCP_FRAME_BYTES;
 mod heartbeat;

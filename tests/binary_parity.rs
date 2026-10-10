@@ -768,9 +768,10 @@ fn mcp_stdio_publishes_the_spec_tools_and_the_image_tool_and_refuses_a_client_ti
     assert!(capped.len() < 4096, "the refusal does not echo the payload");
 
     // #101: a frame over the 4 MiB frame cap is discarded before it is
-    // parsed: request 8 is never answered, and the session answers the
-    // next call. Without the cap rmcp parses it and the tool refuses it by
-    // name.
+    // parsed, and request 8 is answered with a request-too-large error
+    // keyed to its id instead (review M2), not by the tool; the session
+    // answers the next call. Without the cap rmcp parses it and the tool
+    // refuses it by name; without the reply request 8 goes unanswered.
     let huge = "A".repeat(2 * 4 * 1024 * 1024);
     mcp.send(&format!(
         r#"{{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{{"name":"lambo_derive_image","arguments":{{"agent_id":"agent-a","caption":"far too big","concept_type":"resource","image":{{"mime":"image/png","data":"{huge}"}}}}}}}}"#
@@ -780,11 +781,15 @@ fn mcp_stdio_publishes_the_spec_tools_and_the_image_tool_and_refuses_a_client_ti
     // The ping can overtake a tool call rmcp has spawned, so give a
     // parsed request 8 time to be answered before concluding it was not.
     seen.extend(mcp.frames_within(Duration::from_secs(2)));
+    let answers: Vec<&String> = seen
+        .iter()
+        .filter(|l| l.contains("\"id\":8") || l.contains("\"id\": 8"))
+        .collect();
     assert!(
-        !seen
-            .iter()
-            .any(|l| l.contains("\"id\":8") || l.contains("\"id\": 8")),
-        "the frame over the cap was answered, so it was parsed: {:?}",
+        answers.len() == 1
+            && answers[0].contains("-32600")
+            && answers[0].contains("request too large (over 4 MiB)"),
+        "request 8 must be answered once, with the request-too-large error: {:?}",
         seen.iter()
             .map(|l| l.chars().take(200).collect::<String>())
             .collect::<Vec<_>>()
