@@ -253,8 +253,8 @@
   relative `api/...` URLs, so the page at `/s/<session>/` reads that
   session and the page at `/` the default; `GET` or `HEAD` of
   `/s/<session>` without the slash is a `308` to `/s/<session>/` (the query
-  kept), so the relative URLs resolve under it. The page has no session
-  picker yet (#4 PR 4). With a token configured a browser still cannot
+  kept), so the relative URLs resolve under it. (#4 PR 4 added the page's
+  session picker.) With a token configured a browser still cannot
   present it without a proxy that adds the header.
 - `lambo.toml` `[serve]` `attach_concurrency`, `idle_detach_secs` and
   `per_session_rps` are enforced by an HTTP `lambo serve` (#32, sixth
@@ -569,6 +569,16 @@
   credential's names. Off (the default), the route does not exist and is
   the same empty `404` as any unknown path; under `/s/<session>/` it is
   always that `404`.
+- A session picker on the `lambo serve-web` page (#4 PR 4). It appears only
+  when the caller reads more than one served session: `/api/session` then
+  carries `"switchable": true` (the field is absent otherwise, so a
+  single-session window's page and payload are unchanged). With
+  `list_sessions` on it offers the listed names; otherwise it is a text
+  field plus the names this browser has opened (`localStorage`
+  `lambo-sessions`, names only). Switching navigates to `/s/<session>/`;
+  a name the caller cannot read is reported in place and dropped from the
+  history. A session with nothing in it says "No memory in this session
+  yet" instead of implying concepts are being recorded.
 - `[web] sessions` and `[web] allowed_hosts`, and the repeatable
   `lambo serve-web --allowed-host` flag (#4 PR 2). A refused session name or
   host is quoted (neither is a secret); an empty, repeated or
