@@ -163,8 +163,11 @@ branch, one commit per finding.
   per-credential numbers, so these were chosen: one rate bucket per
   credential at `--rate-limit-rps` (`CredentialRates`), and a per-credential
   share of the cap, `max(1, floor(max_sessions / credentials))`, checked
-  after the process cap. Rounding down keeps the shares inside the cap, so
-  every credential, the operator's included, can always open its share.
+  after the process cap. While the cap is at least the number of
+  credentials, rounding down keeps the shares inside the cap, so every
+  credential, the operator's included, can always open its share. With more
+  credentials than the cap, each share is 1 and the process cap can still
+  refuse a credential that holds nothing.
   Idle shares are not lent: an operator who needs more raises
   `--max-sessions`. One credential means the whole cap and one bucket at the
   old rate, so the rig and every single-token serve are unchanged.

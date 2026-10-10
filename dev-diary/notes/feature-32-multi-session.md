@@ -178,8 +178,13 @@ deviation in one place.
   - each credential may hold `credential_share = max(1, floor(max_sessions
     / credentials))` MCP sessions, checked after the process cap.
 
-  Why the floor: the shares never add up to more than the cap, so every
-  credential, the operator's included, can always open its share. Unused
+  Why the floor: while the cap is at least the number of credentials, the
+  shares never add up to more than the cap, so every credential, the
+  operator's included, can always open its share. Below that, every share
+  is the minimum of 1, the shares add up to more than the cap, and the
+  process cap, checked first, can refuse a credential that holds no MCP
+  session (`--max-sessions 1` with two credentials: the first one's session
+  leaves the second nothing). The start is not refused for it. Unused
   shares are not lent to other credentials. With one credential the share is
   the whole cap and there is one bucket at the old rate, so the rig is
   unchanged.
@@ -260,7 +265,8 @@ deviation in one place.
 - **Fair place shares.** The on-demand places are `max_attached - pinned`.
   Each credential that reaches on-demand sessions has the share
   `place_share(places, credentials)`, the same floor rule as above, at least
-  1. The share limits eviction only: a free place goes to whoever asks. At
+  1, with the same limit: with fewer places than such credentials, the
+  shares add up to more than the places. The share limits eviction only: a free place goes to whoever asks. At
   the cap, a credential at or over its share may evict only its own
   least-recently-used idle session. One under its share may also evict from
   a credential over its share. A session counts against the credential
@@ -527,7 +533,7 @@ its file name predates the rewording.
 | §2.5 | every legacy serve is a one-session registry | the one-session path keeps the J2 election and proxy, then wraps the holder in a registry | J2 behavior byte-identical | 4 |
 | §3.1 | slots `Attaching`, `Live`, `Detaching`, `Erasing`, `HeldElsewhere`, `Erased` | plus `Failed` (503, no `Retry-After`) | a non-transient attach error must not retry forever | 4 |
 | Q2 / §2.1 | `/mcp` is the default: first `--session`, else `default_session`, else the first pinned | the same, and the default must be pinned | `/mcp` must never attach on demand | 4, 6 |
-| §3.6 | global rate bucket; process-wide `max_sessions` | a bucket per credential; a per-credential share `max(1, floor(cap / n))` of `max_sessions` | fairness between credentials; the floor keeps every share inside the cap | 5 |
+| §3.6 | global rate bucket; process-wide `max_sessions` | a bucket per credential; a per-credential share `max(1, floor(cap / n))` of `max_sessions` | fairness between credentials; rounding down keeps the shares inside the cap while the cap is at least the number of credentials | 5 |
 | §3.2 | capacity and eviction before the attach | probe first, then reserve a place and evict | no eviction for a request that will not attach (review H1) | 6 |
 | §3.1 | `Erased` slot as an LRU negative cache | `NegativeCache` for `Absent`, `Erased` and `Failed`, 30 s, 1024 entries; `Slot::Erased` for pinned ids only | repeats must not queue on the SQLite permit; the map must stay bounded under a Keel fan-out | 6, 7 |
 | §3.2, §3.6 | no timeouts, no eviction floor, no shares of places | `ATTACH_TIMEOUT`, `PROBE_TIMEOUT`, `ATTACH_WAIT`, `EVICT_MIN_IDLE`, the unplaced cap, `place_share` | the Opus review of PR 6 (M1, M2, M4, L-b) | 6 |
