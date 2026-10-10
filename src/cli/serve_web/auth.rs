@@ -54,30 +54,21 @@ pub(super) struct Authenticated;
 pub struct AuthToken(String);
 
 impl AuthToken {
-    /// Reject empty and whitespace-only tokens (fail closed, not silently),
-    /// and one longer than any request may present.
+    /// Refuse a token no request could present, by the rule `lambo serve`
+    /// applies to its own ([`check_configured_token`], shared so the two
+    /// cannot drift; #4 PR 2 review M2): empty or whitespace-only (fail
+    /// closed, not silently), leading or trailing whitespace, a byte outside
+    /// printable ASCII, or longer than
+    /// [`MAX_BEARER_CREDENTIAL_BYTES`](crate::surface::bearer::MAX_BEARER_CREDENTIAL_BYTES).
+    /// The portal authenticates through `SessionAuthority`, which trims the
+    /// presented credential and refuses one over the cap before the scan,
+    /// so each of those would answer every request 401. The message names
+    /// the rule, never the value.
     ///
-    /// The portal authenticates through `SessionAuthority`, which refuses a
-    /// presented credential over
-    /// [`MAX_BEARER_CREDENTIAL_BYTES`](crate::surface::bearer::MAX_BEARER_CREDENTIAL_BYTES)
-    /// before the scan (#32 PR 5 review L2), so a longer configured token
-    /// could never be matched: every request would be 401. Refused here, as
-    /// `lambo serve` refuses one, naming the bound and never the value.
+    /// [`check_configured_token`]: crate::surface::bearer::check_configured_token
     pub(super) fn new(raw: impl Into<String>) -> Result<Self, String> {
         let raw = raw.into();
-        if raw.trim().is_empty() {
-            return Err(
-                "auth token is empty — pass a non-empty secret, or omit it entirely to \
-                 run unauthenticated on loopback"
-                    .into(),
-            );
-        }
-        let max = crate::surface::bearer::MAX_BEARER_CREDENTIAL_BYTES;
-        if raw.len() > max {
-            return Err(format!(
-                "auth token is longer than {max} bytes, which no request may present"
-            ));
-        }
+        crate::surface::bearer::check_configured_token(&raw)?;
         Ok(Self(raw))
     }
 

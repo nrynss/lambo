@@ -94,6 +94,40 @@ fn an_auth_token_over_the_presented_cap_is_refused() {
     assert!(!err.contains(&over), "the value is never quoted");
 }
 
+/// #4 PR 2 review M2: a token no request could present is refused at
+/// construction by the rule `lambo serve` applies (one shared validator),
+/// with the same message, never quoting the token: surrounding whitespace
+/// (the presented credential is trimmed) and a byte outside printable
+/// ASCII (a header value holding one is unreadable). 4096 bytes is
+/// accepted, 4097 refused. A space inside the token is presentable.
+#[test]
+fn an_auth_token_no_request_could_present_is_refused_as_serve_refuses_it() {
+    let core = ["t4", "m2", "core"].concat();
+    let max = crate::surface::bearer::MAX_BEARER_CREDENTIAL_BYTES;
+    let refused = [
+        (format!(" {core}"), "leading or trailing whitespace"),
+        (format!("{core} "), "leading or trailing whitespace"),
+        (format!("\t{core}"), "leading or trailing whitespace"),
+        (format!("{core}\r"), "leading or trailing whitespace"),
+        (format!("{core}\n"), "leading or trailing whitespace"),
+        (format!("{core}\tx"), "printable ASCII"),
+        (format!("{core}\u{e9}"), "printable ASCII"),
+        (format!("{core}\u{7f}x"), "printable ASCII"),
+        ("k".repeat(max + 1), "longer than 4096 bytes"),
+    ];
+    for (raw, rule) in &refused {
+        let err = AuthToken::new(raw.as_str()).expect_err("refused");
+        assert!(err.contains(rule), "{rule}: {err}");
+        assert!(!err.contains(&core), "the value is never quoted: {err}");
+        let serve = crate::mcp::SecretToken::new(raw.as_str()).expect_err("serve refuses");
+        assert_eq!(err, serve, "one rule, one message");
+    }
+    for raw in [format!("{core} inner"), "k".repeat(max)] {
+        assert!(AuthToken::new(raw.as_str()).is_ok());
+        assert!(crate::mcp::SecretToken::new(raw.as_str()).is_ok());
+    }
+}
+
 /// A set `LAMBO_AUTH_TOKEN` that is not valid UTF-8 is a usage error
 /// naming the variable, never the value, and never read as unset (which
 /// fell back to the flag or to an unauthenticated loopback window). The

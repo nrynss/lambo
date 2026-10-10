@@ -182,7 +182,11 @@
   of `lambo serve-web` (exit 2, naming the bound, never the value) (#4 PR 2).
   The window now authenticates through the shared credential set, which
   refuses a longer presented token before comparing, so such a token could
-  never have been accepted.
+  never have been accepted. So does one with leading or trailing whitespace
+  or a byte outside printable ASCII, which no request can present (the
+  presented credential is trimmed, and such a header value is unreadable),
+  so the window used to answer every request `401` with no hint why. The
+  rule and its messages are now one validator shared with `lambo serve`.
 
 ### Changed
 

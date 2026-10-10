@@ -72,39 +72,9 @@ impl SecretToken {
     /// refused unread, so such a token could never authenticate anything.
     pub fn new(raw: impl Into<String>) -> Result<Self, String> {
         let raw = raw.into();
-        if raw.trim().is_empty() {
-            return Err(
-                "auth token is empty — pass a non-empty secret, or omit it entirely to \
-                        run unauthenticated on loopback"
-                    .into(),
-            );
-        }
-        // #32 PR 5 review L3: a token no request can carry. The guard trims
-        // the presented credential, so surrounding whitespace never
-        // matches, and an HTTP header value that is not printable ASCII is
-        // unreadable to it, so such a byte never matches either. Either
-        // used to start a serve that answered every request 401 with no
-        // hint why (a trailing newline or space from an env file, say).
-        if raw.trim() != raw {
-            return Err(
-                "auth token has leading or trailing whitespace, which a request cannot \
-                        carry (the presented credential is trimmed); remove it"
-                    .into(),
-            );
-        }
-        if raw.bytes().any(|b| !(0x20..=0x7e).contains(&b)) {
-            return Err(
-                "auth token contains a character outside printable ASCII, which an HTTP \
-                 Authorization header cannot carry"
-                    .into(),
-            );
-        }
-        if raw.len() > crate::surface::bearer::MAX_BEARER_CREDENTIAL_BYTES {
-            return Err(format!(
-                "auth token is longer than {} bytes, so no request could present it",
-                crate::surface::bearer::MAX_BEARER_CREDENTIAL_BYTES
-            ));
-        }
+        // The rule is shared with serve-web's `AuthToken` (#4 PR 2 review
+        // M2), so the two cannot drift.
+        crate::surface::bearer::check_configured_token(&raw)?;
         Ok(Self(raw))
     }
 
