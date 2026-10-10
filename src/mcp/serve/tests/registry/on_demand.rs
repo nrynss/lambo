@@ -1116,3 +1116,55 @@ async fn the_idle_sweep_skips_a_session_in_use() {
     .await;
     od.close().await;
 }
+
+/// Sonnet review L-a: an attach that panics after it admitted its session
+/// leaves the session live, tells its waiters so, and caches no `Failed`
+/// outcome. Once the session detaches, the next request attaches it again
+/// at once rather than getting 503 for `NEGATIVE_TTL` (30 s).
+#[tokio::test]
+async fn a_panic_after_admission_does_not_block_the_session() {
+    let od = OnDemand::start(16, Duration::from_secs(900), 0).await;
+    let id = "od-u-panics-late";
+    od.registry.panic_after_next_admit();
+    let routed = od.registry.get_or_attach(id, asking("maker", true)).await;
+    assert!(
+        matches!(routed.lookup, Lookup::Live(_)),
+        "the waiter is served by the session the attach admitted"
+    );
+    drop(routed);
+    od.registry.join_detaches().await;
+    assert!(od.attached(id).is_some(), "still live after the panic");
+    assert_ne!(
+        od.lease(id).await.holder,
+        RELEASED_HOLDER,
+        "the live session keeps its lease"
+    );
+
+    od.registry
+        .detach(id, crate::mcp::serve::registry::DetachReason::Idle)
+        .await;
+    assert!(matches!(od.registry.lookup(id), Lookup::NotHosted));
+    until(Duration::from_secs(10), "the detached handle to go", || {
+        od.attached(id).is_none()
+    })
+    .await;
+    // No clock advance: a cached `Failed` would answer this for 30 s.
+    let mut lookup = od.registry.get_or_attach(id, asking("maker", true)).await;
+    for _ in 0..50 {
+        match lookup.lookup {
+            // The detached handle may still be going (`PreviousHandle`).
+            Lookup::Unavailable { .. } => {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                lookup = od.registry.get_or_attach(id, asking("maker", true)).await;
+            }
+            _ => break,
+        }
+    }
+    assert!(
+        matches!(lookup.lookup, Lookup::Live(_)),
+        "attached again, not refused from the negative cache"
+    );
+    drop(lookup);
+    assert_eq!(od.count("acquire_lease", id), 2);
+    od.close().await;
+}

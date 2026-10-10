@@ -387,6 +387,10 @@ pub(super) struct SessionRegistry {
     /// Detaches and on-demand attaches in flight, joined by the process
     /// shutdown.
     detaches: parking_lot::Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    /// Set by a test to make the next on-demand attach panic right after
+    /// it is admitted (#32 PR 6 Sonnet review L-a).
+    #[cfg(test)]
+    panic_after_admit: std::sync::atomic::AtomicBool,
 }
 
 impl SessionRegistry {
@@ -431,6 +435,8 @@ impl SessionRegistry {
             retry: parking_lot::Mutex::new(None),
             sweeper: parking_lot::Mutex::new(None),
             detaches: parking_lot::Mutex::new(Vec::new()),
+            #[cfg(test)]
+            panic_after_admit: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -813,6 +819,13 @@ impl SessionRegistry {
         match attempt {
             Ok(Acquired::Attached(mem, endpoint)) => {
                 let session = self.admit(mem, endpoint);
+                #[cfg(test)]
+                if self
+                    .panic_after_admit
+                    .swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
+                    panic!("test: an on-demand attach panics after its admission");
+                }
                 tracing::info!(
                     session = %session.id(),
                     agent = %session.mem.agent(),
@@ -984,6 +997,15 @@ impl SessionRegistry {
         for task in self.detaches.lock().iter() {
             task.abort();
         }
+    }
+
+    /// Make the next on-demand attach panic right after its admission, as a
+    /// bug between `admit` and the flight's end would (#32 PR 6 Sonnet
+    /// review L-a). Gated like its reader, the registry tests.
+    #[cfg(all(test, unix, feature = "store-memory", feature = "embed-fixture"))]
+    pub(super) fn panic_after_next_admit(&self) {
+        self.panic_after_admit
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Mark the startup set complete: the process tasks waiting on it start.

@@ -317,16 +317,31 @@ impl Flight {
 
     /// End the flight with `outcome`; `true` when its slot was still its
     /// own `Attaching` one (and, unless it attached, is now removed).
+    ///
+    /// A `Failed` outcome is remembered (the negative cache) only while the
+    /// flight still owns its `Attaching` slot (#32 PR 6 Sonnet review L-a).
+    /// The drop guard synthesises `Failed` for any flight that ends without
+    /// an outcome, including one that panicked after `admit` had already
+    /// made the session live: caching it then would refuse a healthy
+    /// session for `NEGATIVE_TTL` once it detaches. When the drop guard
+    /// finds the slot live, the attach did succeed, and its waiters are
+    /// told so.
     fn end(&mut self, outcome: AttachOutcome) -> bool {
         let Some(tx) = self.tx.take() else {
             return false;
         };
-        let mine = {
+        let (mine, outcome) = {
             let mut slots = self.registry.slots.lock();
             let mine = matches!(
                 slots.get(&self.id),
                 Some(Slot::Attaching { done, .. }) if done.same_channel(&tx.subscribe())
             );
+            let outcome = match outcome {
+                AttachOutcome::Failed if matches!(slots.get(&self.id), Some(Slot::Live(_))) => {
+                    AttachOutcome::Attached
+                }
+                other => other,
+            };
             if outcome != AttachOutcome::Attached && mine {
                 slots.remove(&self.id);
                 self.registry.owners.lock().remove(&self.id);
@@ -336,10 +351,10 @@ impl Flight {
                 AttachOutcome::Attached => negative.forget(&self.id),
                 AttachOutcome::Absent if !self.create => negative.put(&self.id, Negative::Absent),
                 AttachOutcome::Erased => negative.put(&self.id, Negative::Erased),
-                AttachOutcome::Failed => negative.put(&self.id, Negative::Failed),
-                AttachOutcome::Absent | AttachOutcome::Busy { .. } => {}
+                AttachOutcome::Failed if mine => negative.put(&self.id, Negative::Failed),
+                AttachOutcome::Absent | AttachOutcome::Busy { .. } | AttachOutcome::Failed => {}
             }
-            mine
+            (mine, outcome)
         };
         // Nobody waiting is fine: the outcome is in the slot already.
         let _ = tx.send(Some(outcome));
@@ -353,7 +368,7 @@ impl Drop for Flight {
             tracing::error!(
                 session = %self.id,
                 "lambo serve: an on-demand attach ended without an outcome (a panic or an \
-                 abort); answering 503 and clearing its slot"
+                 abort); answering 503 and clearing its slot, unless it is already live"
             );
             // An attach that died while its slot was still `Attaching` may
             // have taken the lease; release it by holder, in the background
