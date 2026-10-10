@@ -150,6 +150,13 @@ pub(crate) async fn open_holder(
 /// the original is still unflushed; the flush makes that merge durable; and
 /// the database's own vector search (recall's source) then finds the
 /// original. Erases the session at the end.
+///
+/// Compiled where a caller is: the Postgres live test, or the Cockroach
+/// conformance suite (which needs `fixtures`).
+#[cfg(any(
+    feature = "store-postgres",
+    all(feature = "store-cockroach", feature = "fixtures")
+))]
 pub(crate) async fn check_holder_merges_an_unflushed_paraphrase<D: Dialect>(
     store: Arc<PgStore<D>>,
     session: &str,
