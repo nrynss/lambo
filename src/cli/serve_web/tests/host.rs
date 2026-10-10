@@ -271,6 +271,39 @@ async fn the_implicit_grant_answers_only_loopback_hosts() {
     handle.abort();
 }
 
+/// Review L2: a request with two `Host` headers gets the fixed 403, in
+/// either order and even when both are loopback, so a proxy in front that
+/// reads the other one cannot disagree with the portal about the target.
+#[tokio::test]
+async fn two_host_headers_are_refused() {
+    let (addr, handle, loads) = portal_with(None, &[]).await;
+    let port = addr.port();
+    let expected =
+        without_date(&request_with(addr, "GET", "/api/stats", Some("rebind.example"), None).await);
+    assert!(expected.0.starts_with("HTTP/1.1 403"), "{}", expected.0);
+    let before = loads.load(Ordering::SeqCst);
+    let loopback = format!("localhost:{port}");
+    for (first, second) in [
+        ("rebind.example", loopback.as_str()),
+        (loopback.as_str(), "rebind.example"),
+        (loopback.as_str(), loopback.as_str()),
+    ] {
+        for path in PATHS {
+            let req = format!(
+                "GET {path} HTTP/1.1\r\nHost: {first}\r\nHost: {second}\r\nConnection: close\r\n\r\n"
+            );
+            let r = send_raw(addr, &req).await;
+            assert_eq!(
+                without_date(&r),
+                expected,
+                "{path}: Host {first} then {second}"
+            );
+        }
+    }
+    assert_eq!(loads.load(Ordering::SeqCst), before, "no store read");
+    handle.abort();
+}
+
 /// Review L1 for the absolute-form fallback: a request with no `Host` whose
 /// target authority carries user info is refused, while a plain loopback
 /// one is answered.

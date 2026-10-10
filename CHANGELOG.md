@@ -830,8 +830,9 @@
   configured any web page the local user visited could rebind its own name
   to `127.0.0.1` and read every served session same-origin. Without a token
   it now answers only `localhost`, `127.0.0.1`, `[::1]` (any port) and the
-  allowed hosts, and anything else, including a missing or malformed `Host`,
-  gets one fixed `403` before any other check. With a token configured any
+  allowed hosts, and anything else, including a missing or malformed `Host`
+  (user info, an empty or non-numeric port) and a request with two `Host`
+  headers, gets one fixed `403` before any other check. With a token configured any
   `Host` is accepted, as `lambo serve` does (a rebound page cannot present
   the token).
 - `lambo serve-web`'s `/api/pulse`, polled every 1.5 s by every open tab,

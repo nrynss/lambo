@@ -216,13 +216,18 @@ impl HostCheck {
     /// ([`AllowedHost::parse`]), so a malformed one is refused even when its
     /// host part is loopback: user info (`evil@localhost`), an empty or
     /// non-numeric port (`localhost:`, `localhost:abc`) (#4 PR 2 review L1).
+    /// More than one `Host` header is refused too (review L2; RFC 9112
+    /// section 3.2): a proxy in front that read the other one would
+    /// disagree with the portal about which host the request is for.
     fn allows(&self, req: &axum::extract::Request) -> bool {
         let Self::Only(allowed) = self else {
             return true;
         };
-        let presented = match req.headers().get(header::HOST) {
-            Some(value) => value.to_str().ok().map(str::to_string),
-            None => req.uri().authority().map(|a| a.as_str().to_string()),
+        let mut hosts = req.headers().get_all(header::HOST).iter();
+        let presented = match (hosts.next(), hosts.next()) {
+            (Some(value), None) => value.to_str().ok().map(str::to_string),
+            (None, _) => req.uri().authority().map(|a| a.as_str().to_string()),
+            (Some(_), Some(_)) => return false,
         };
         let Some(presented) = presented.and_then(|h| AllowedHost::parse(&h).ok()) else {
             return false;
