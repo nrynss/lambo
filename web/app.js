@@ -496,14 +496,16 @@
   // ---- empty session ---------------------------------------------------
   // An allowlisted session nothing was ever written to, or one that was
   // erased, is served as an empty page (#4 design Q9). Known from the counts
-  // (the poll) or the structure, whichever answered.
+  // when the poll has answered: they are refreshed every poll interval, the
+  // structure only every 20 s, so a first write or an erase shows within one
+  // poll (review L4). The structure decides only before the first poll.
 
   var EMPTY_SESSION = "No memory in this session yet";
   var AUDIT_EMPTY = "No status changes yet in this session. Concepts are being recorded; none has reached Canonical.";
 
   function isEmptySession() {
-    if (state.graph) return state.graph.nodes.length === 0;
-    return state.concepts === 0;
+    if (state.concepts !== null) return state.concepts === 0;
+    return !!state.graph && state.graph.nodes.length === 0;
   }
 
   // ---- history ---------------------------------------------------------
@@ -567,7 +569,9 @@
   }
 
   function renderHero() {
-    var pillar = pickPillar();
+    // An emptied session shows no pillar from a structure loaded before it
+    // was erased.
+    var pillar = isEmptySession() ? null : pickPillar();
     show($("hero-filled"), !!pillar);
     show($("hero-empty"), !pillar);
 
@@ -1292,6 +1296,10 @@
           renderHistory();
           renderLadder();
         }
+        // The hero says whether the session is empty too: repaint it on the
+        // transition (a first write, an erase), not at the next structure
+        // refresh.
+        if (wasEmpty !== isEmptySession()) renderHero();
       })
       .catch(function (e) {
         state.failures++;

@@ -400,8 +400,30 @@ fn the_picker_markup_is_hidden_labelled_and_keyboard_operable() {
 #[test]
 fn an_empty_session_says_so() {
     assert!(APP_JS.contains(r#"var EMPTY_SESSION = "No memory in this session yet";"#));
-    assert!(APP_JS.contains("return state.graph.nodes.length === 0;"));
-    assert!(APP_JS.contains("return state.concepts === 0;"));
+    // Review L4: the poll's count (every poll interval) decides once it has
+    // answered; the structure (every 20 s) only before that.
+    let rule = APP_JS
+        .split("function isEmptySession() {")
+        .nth(1)
+        .and_then(|rest| rest.split('}').next())
+        .expect("isEmptySession");
+    let count = rule
+        .find("if (state.concepts !== null) return state.concepts === 0;")
+        .expect("the count decides");
+    let structure = rule
+        .find("return !!state.graph && state.graph.nodes.length === 0;")
+        .expect("the structure falls back");
+    assert!(count < structure, "{rule}");
+    // A transition repaints the hero from the poll, and an emptied session
+    // shows no pillar from a structure loaded before the erase.
+    let poll = APP_JS
+        .split("function poll() {")
+        .nth(1)
+        .and_then(|rest| rest.split("function schedule()").next())
+        .expect("poll");
+    assert!(poll.contains("var wasEmpty = isEmptySession();"));
+    assert!(poll.contains("if (wasEmpty !== isEmptySession()) renderHero();"));
+    assert!(APP_JS.contains("var pillar = isEmptySession() ? null : pickPillar();"));
     assert!(INDEX_HTML.contains(r#"<h1 id="hero-empty-heading">Nothing relied on yet</h1>"#));
 }
 
