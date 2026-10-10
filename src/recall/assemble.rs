@@ -563,12 +563,15 @@ mod tests {
             Scored::new(uid(2), 0.5),
             Scored::new(uid(5), 0.2),
         ];
-        // c2 is deliberately MISSING from the daemon table (-> 0.0); c6 has a
-        // daemon score but no phase-1 evidence (-> relevance 0.0).
+        // c2 has an EXPLICIT daemon score of 0.0 (scored, so the blend
+        // applies; #79's cold mode is for a phase-1 concept with no entry, see
+        // the next test); c6 has a daemon score but no phase-1 evidence
+        // (-> relevance 0.0).
         let scores = ScoreTable {
             epoch: 7,
             ranked: vec![
                 Scored::new(uid(1), 0.8),
+                Scored::new(uid(2), 0.0),
                 Scored::new(uid(3), 0.2),
                 Scored::new(uid(4), 0.4),
                 Scored::new(uid(5), 0.6),
@@ -594,15 +597,94 @@ mod tests {
         );
 
         // c1: 0.8×0.25 + 1.0×0.75 = 0.95
-        // c2 lacks a daemon entry, so all members use query-only scores.
+        // c2: 0.0×0.25 + 0.5×0.75 = 0.375 (explicit daemon zero)
         // c3: 0.2×0.25 + 0.0×0.75 = 0.05  (BFS member, no relevance)
         // c4: 0.4×0.25 + 0.0×0.75 = 0.10  (sibling, no relevance)
         // c5: 0.6×0.25 + 0.2×0.75 = 0.30
         // c6: 0.6×0.25 + 0.0×0.75 = 0.15
-        let want_order = vec![uid(1), uid(2), uid(5), uid(3), uid(4), uid(6)];
-        // In cold mode the three structural-only members tie at zero; their
-        // canonical keys make that tail deterministic.
+        let want_order = vec![uid(1), uid(2), uid(5), uid(6), uid(4), uid(3)];
+        // Score desc; the six planted finals are all distinct, so the tie
+        // arms below the score (canonical-first, then canonical key, then id)
+        // do not fire in this test — the chain itself is pinned by
+        // `final_score_ties_break_by_canonical_key_ahead_of_node_id`.
         assert_eq!(ids_of(&result), want_order);
+        let score = |id: NodeId| {
+            result
+                .hits
+                .iter()
+                .find(|h| h.node_id == id)
+                .expect("hit present")
+                .score
+        };
+        assert!(approx(score(uid(1)), 0.95));
+        assert!(approx(score(uid(2)), 0.375));
+        assert!(approx(score(uid(5)), 0.30));
+        assert!(approx(score(uid(6)), 0.15));
+        assert!(approx(score(uid(4)), 0.10));
+        assert!(approx(score(uid(3)), 0.05));
+        // The id-asc tie-break is exercised in the dedicated test below.
+        assert!(result.warnings.is_empty());
+    }
+
+    /// #79: the same planted fixture with c2 MISSING from the daemon table
+    /// (it was derived after the table was computed). Before #79 a missing
+    /// entry scored 0.0 inside the blend and this produced the previous
+    /// test's order. Now one unscored query-backed phase-1 concept puts the
+    /// whole recall in cold mode: every member scores `r × w_query`, so the
+    /// structural-only members (c3 BFS, c4/c6 siblings) tie at zero and fall
+    /// back to canonical key order. This is the legacy golden that #79
+    /// changes, documented in the CHANGELOG and the fix-79 note.
+    #[test]
+    fn a_missing_phase1_daemon_score_puts_the_planted_fixture_in_cold_mode() {
+        let g = graph_with(6);
+        let expanded = ExpandedSet {
+            required: vec![
+                Scored::new(uid(1), 0.0),
+                Scored::new(uid(2), 0.0),
+                Scored::new(uid(3), 0.0),
+            ],
+            siblings: vec![
+                Scored::new(uid(4), 0.0),
+                Scored::new(uid(5), 0.0),
+                Scored::new(uid(6), 0.0),
+            ],
+        };
+        let phase1 = vec![
+            Scored::new(uid(1), 1.0),
+            Scored::new(uid(2), 0.5),
+            Scored::new(uid(5), 0.2),
+        ];
+        let scores = ScoreTable {
+            epoch: 7,
+            ranked: vec![
+                Scored::new(uid(1), 0.8),
+                Scored::new(uid(3), 0.2),
+                Scored::new(uid(4), 0.4),
+                Scored::new(uid(5), 0.6),
+                Scored::new(uid(6), 0.6),
+            ],
+        };
+        let result = assemble(
+            &g,
+            &expanded,
+            &phase1,
+            &scores,
+            &HashMap::new(),
+            &query(10, 10_000),
+            RecallWeights {
+                w_daemon: 0.25,
+                w_query: 0.75,
+            },
+            ts(0),
+            default_token_count,
+        );
+        // Before #79: c1,c2,c5,c6,c4,c3 at 0.95/0.375/0.30/0.15/0.10/0.05.
+        // c1: 1.0×0.75 = 0.75; c2: 0.5×0.75 = 0.375; c5: 0.2×0.75 = 0.15;
+        // c3, c4, c6: 0.0, tied, canonical key order.
+        assert_eq!(
+            ids_of(&result),
+            vec![uid(1), uid(2), uid(5), uid(3), uid(4), uid(6)]
+        );
         let score = |id: NodeId| {
             result
                 .hits
@@ -614,10 +696,9 @@ mod tests {
         assert!(approx(score(uid(1)), 0.75));
         assert!(approx(score(uid(2)), 0.375));
         assert!(approx(score(uid(5)), 0.15));
-        assert!(approx(score(uid(6)), 0.0));
-        assert!(approx(score(uid(4)), 0.0));
         assert!(approx(score(uid(3)), 0.0));
-        // The id-asc tie-break is exercised in the dedicated test below.
+        assert!(approx(score(uid(4)), 0.0));
+        assert!(approx(score(uid(6)), 0.0));
         assert!(result.warnings.is_empty());
     }
 
