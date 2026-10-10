@@ -538,8 +538,10 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
 /// What an operator should hear about the credentials at startup (#4 PR 3),
 /// one line each, never a token:
 ///
-/// * the legacy token beside configured credentials: a `LAMBO_AUTH_TOKEN`
-///   left exported after `[[web.credential]]` was added keeps `default`, and
+/// * the legacy token beside configured credentials (`[[web.credential]]`
+///   or inherited ones; review L1: the line names both, since either may be
+///   the only kind): a `LAMBO_AUTH_TOKEN`
+///   left exported after credentials were configured keeps `default`, and
 ///   with it every served session, readable by whoever holds it (as
 ///   `lambo serve` warns, #32 PR 5 review I3);
 /// * a credential that names sessions not on the allowlist (`unserved`):
@@ -558,9 +560,10 @@ fn startup_warnings(
     let mut out = Vec::new();
     if legacy_beside_configured {
         out.push(format!(
-            "{AUTH_TOKEN_ENV} / --auth-token is set beside [[web.credential]]: it is the \
-             \"default\" credential and reads every served session. Unset it if the configured \
-             credentials replace it."
+            "{AUTH_TOKEN_ENV} / --auth-token is set beside configured credentials \
+             ([[web.credential]], or [[serve.credential]] imported by [web] \
+             inherit_serve_credentials): it is the \"default\" credential and reads every \
+             served session. Unset it if the configured credentials replace it."
         ));
     }
     for (name, missing) in unserved {

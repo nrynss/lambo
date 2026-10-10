@@ -792,6 +792,16 @@ fn startup_warnings_name_credentials_never_tokens() {
     );
     assert_eq!(w.len(), 3, "{w:?}");
     assert!(w[0].contains("LAMBO_AUTH_TOKEN") && w[0].contains("\"default\""));
+    // Review L1: the credentials beside it may all be inherited, so the
+    // line names both sources, not only [[web.credential]].
+    assert!(
+        w[0].contains("configured credentials")
+            && w[0].contains("[[web.credential]]")
+            && w[0].contains("[[serve.credential]]")
+            && w[0].contains("inherit_serve_credentials"),
+        "{}",
+        w[0]
+    );
     assert!(w[1].contains("'ghost'") && w[1].contains("(t4-z, t4-y)"));
     assert!(w[2].contains("'ghost'") && w[2].contains("no served session"));
     let w = startup_warnings(false, &[("local", 2)], &[], true);
