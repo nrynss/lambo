@@ -1037,15 +1037,28 @@
   `lambo_recall`, or an oversized `vector.values` or `query_vector.values`,
   was allocated in full, and then again as a JSON value tree, before the
   tool refused it. A longer request line is now discarded unread up to its
-  newline and logged at WARN with its size, never its content; it gets no
-  reply, because no request id was read from it, and the session goes on
-  serving. A proxying serve drops such a request from its client itself
-  instead of forwarding it to the holder. Requests under 4 MiB reach rmcp byte for byte, so a field over
-  its own cap inside one is refused by the tool exactly as before (same
+  newline and logged at WARN with its size, never its content, and answered
+  with a JSON-RPC error, code `-32600`, "request too large (over 4 MiB)",
+  keyed to the request's `id` when it can be read from the line's start or
+  end (before or after `params`), else to `null`. The connection stays open
+  and the session goes on serving. A proxying serve drops such a request
+  from its client itself, unforwarded, and answers it the same way.
+  Requests of at most 4 MiB reach rmcp byte for byte, so a field over its
+  own cap inside one is refused by the tool exactly as before (same
   message, still a tool error), and the tool schemas are unchanged. The
   HTTP service now sets rmcp's body ceiling from Lambo's constant instead
   of inheriting rmcp's default; it was already 4 MiB and answers `413`
   before parsing.
+
+  **Behaviour change for stdio clients that sent requests over 4 MiB.** The
+  cap is not above every request the tools' own limits allow: a
+  `lambo_derive` with 64 concepts and 256 `parent_of` pairs at 16 KB a
+  string is about 9.5 MB, a `lambo_derive_image` with a full image and 256
+  pairs about 11.2 MB, and `\uXXXX` escaping makes either up to three times
+  larger. Stdio used to accept those; they are now refused with the error
+  above, as HTTP already refused them with `413`. Split such a batch into
+  calls under 4 MiB. The `parent_of` limit (256 pairs, 512 concepts and
+  pairs combined) is now in the MCP reference's limits table.
 - A freshly derived text or image concept ranks by query relevance before
   the daemon scores it (#79). Previously its missing daemon score counted as
   0 inside the 0.5/0.5 blend, so a fresh relevant EG2 image (0.3616) ranked

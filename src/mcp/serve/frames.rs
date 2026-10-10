@@ -54,8 +54,9 @@
 //! * rmcp is given a [`FrameWriter`], which takes the lock on the first byte
 //!   of a frame and holds it until a write ends on the frame's newline (rmcp
 //!   writes compact JSON, so a newline only ever ends a frame);
-//! * the reader queues each reply line on a small channel, and one task per
-//!   transport takes the lock, writes the whole line and flushes.
+//! * the reader queues each reply line on a small channel (waiting for room,
+//!   never dropping one), and one task per transport takes the lock, writes
+//!   the whole line and flushes.
 //!
 //! So the two writers alternate by whole frames, and rmcp's backpressure is
 //! unchanged (a reply waits for the lock like any frame). This was chosen
