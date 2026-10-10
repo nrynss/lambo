@@ -231,14 +231,11 @@ async fn the_implicit_grant_answers_only_loopback_hosts() {
         Some(String::new()),
         None,
     ] {
+        // Review L5: every shape reaches the portal and gets its 403; none
+        // is skipped (hyper refuses none of them itself).
         for path in PATHS {
             for method in ["GET", "POST"] {
                 let r = request_with(addr, method, path, host.as_deref(), None).await;
-                if r.status == 400 {
-                    // hyper refuses some malformed requests itself, before the
-                    // portal sees them; that is no less of a refusal.
-                    continue;
-                }
                 assert_eq!(
                     without_date(&r),
                     expected,
