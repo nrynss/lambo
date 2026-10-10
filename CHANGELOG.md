@@ -1,6 +1,165 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 (2026-10-11)
+
+### Highlights
+
+- **Images in memory (#22).** A new `embeddinggemma2` embedder (feature
+  `embed-eg2`, carried by the released binaries) runs EmbeddingGemma 2 on
+  llama.cpp's `llama-server`. It embeds text, and images too when the server
+  is started with `--mmproj`, into one space. `lambo_derive_image` and
+  `lambo derive-image` store an image concept, and `lambo_recall` and
+  `lambo recall` search by an image or a client query vector. Every image is
+  sent in one canonical form, a lossless PNG whose longer side is 768 px, so
+  an image embeds nearly the same at any submitted size (the limits are
+  under Added).
+- **Multi-session `lambo serve` (#32).** One HTTP serve holds several
+  sessions at `/mcp/s/{session}`. Each `[[serve.credential]]` token reaches
+  only its own sessions. Sessions in a credential's reach attach on demand
+  within the `[serve]` bounds. An operator can erase a session or list
+  sessions over HTTP. A stdio serve takes its session from
+  `[[serve.projects]]`.
+- **Session erasure (#23).** `lambo erase-session` erases a whole session in
+  one transaction on every store and leaves a tombstone that no writer can
+  take over.
+- **A multi-session read-only portal (#4, #92).** `lambo serve-web` serves an
+  allowlist of sessions. `[[web.credential]]` gives each token its own read
+  scope, and the page offers a session picker. Without a credential it checks
+  `Host` against DNS rebinding. It also sends `nosniff`, and its page carries
+  a strict Content-Security-Policy.
+- **Fresh and young memory ranks fairly (#79, #95).** A concept the daemon
+  has not scored yet now ranks by query relevance instead of below older
+  noise. In a session younger than 10 minutes, recency uses a 10-minute
+  floor, so a scheduler stall can no longer flip two scores.
+- **A 4 MiB request cap on every transport (#101).** Stdio and the session
+  endpoint now refuse a request over 4 MiB before parsing it, as HTTP
+  already did.
+- **Merges stay fresh on PostgreSQL and CockroachDB (#60).** A paraphrase
+  derived seconds after the original now merges into it while the flush
+  lags, instead of becoming a permanent near-duplicate.
+- **An optional Elasticsearch recall tier (#18).** `[recall] kind =
+  "elastic"` (feature `recall-elastic`, carried by the released binaries)
+  mirrors each flush to an index that serves recall's vector leg. The store
+  stays the source of truth.
+- **Faster recall on SQLite (#8, #14).** The session holder ranks vectors
+  from memory: warm recall p50 went from 219 ms to 4.3 ms on a
+  3,600-concept session. A repeated query reuses its cached vector.
+
+### Upgrading from 0.3.0
+
+1. **Re-provision every store.** Run `lambo provision` before this build
+   attaches. Stores gain a `concepts.embedding_source` column (#22), and the
+   preflight refuses an unprovisioned store by name. Provisioning only adds
+   the column (see Breaking).
+2. **Building from source needs Rust 1.99 or newer.** The crate also moves to
+   edition 2024 (#42).
+3. **Update library code.** Struct literals and exhaustive matches break;
+   `..Default::default()` or a wildcard arm fixes most of them. The details
+   are under Breaking.
+   - `RecallParams`: `image`, `query_vector`; it now derives `Default`.
+   - `Concept`: `embedding_source`.
+   - `Config` and `EmbedderConfig`: `accept_client_vectors`.
+     `EmbedderConfig`: `images`.
+   - New enum variants: `EmbedderKind::EmbeddingGemma2`,
+     `WriteKind::DeriveImage`, `WriteIntentPayload::DeriveImage`,
+     `ReplayBlockReason::ImageConfig`, `LamboError::ImageIdTaken` and
+     `EmbedError::Unsupported`. `EmbedError` is now `#[non_exhaustive]`.
+   - `LamboFile`: `serve`. `ServeOptions`: `sessions`, `bounds` and
+     `credentials` (`ServeOptions::new` fills all three).
+   - `lambo::cli::serve_web::Args`: `sessions`, `allowed_hosts` and
+     `credentials`. `lambo::config::WebConfig`: `list_sessions`,
+     `inherit_serve_credentials` and `credentials`.
+   - `Embedder` and `GraphStore` gain methods with defaults, so existing
+     adapters compile unchanged (see Added). Two caveats:
+     - A wrapping embedder should forward `embed_query`, `modalities` and
+       `embed_image`.
+     - `GraphStore::erase_session` refuses by default.
+4. **New `lambo.toml` keys.** All of them are optional, and 0.3.0 refuses a
+   file that has `[serve]` or `[web]`. See Added and the configuration
+   reference.
+   - `[serve]`: `sessions`, `default_session`, `max_attached`,
+     `attach_concurrency`, `idle_detach_secs` and `per_session_rps`.
+   - `[[serve.projects]]`.
+   - `[[serve.credential]]`: `name`, `token_env`, `sessions`,
+     `session_prefix`, `create`, `erase` and `admin`.
+   - `[web]`: `sessions`, `allowed_hosts`, `view_ttl_ms`,
+     `max_loaded_sessions`, `load_concurrency`, `recall_concurrency`,
+     `list_sessions` and `inherit_serve_credentials`.
+   - `[[web.credential]]`: `name`, `token_env`, `sessions` and
+     `session_prefix`.
+   - `[embedder]`: `kind = "embeddinggemma2"` with `url`, `dim`, `model` and
+     `images`.
+   - `[embedder] accept_client_vectors`, also set by
+     `LAMBO_ACCEPT_CLIENT_VECTORS`.
+   - `[embedder] api_key_env` for `bge_m3` and its `openai` alias (#21).
+   - `[recall]`: `kind = "elastic"`, `url`, `api_key = { env = ... }`,
+     `index_prefix`, `refresh` and `timeout_ms`.
+5. **Check these behaviour changes.**
+   - **Portal `Host` check.** `lambo serve-web` with no credential now
+     answers `403` to any `Host` other than `localhost`, `127.0.0.1` or
+     `[::1]`. A reverse proxy that forwards its public name as `Host`
+     (Caddy's default) must pass that name with `--allowed-host` or
+     `[web] allowed_hosts`. An exhibit launched by
+     `scripts/aws-infra/launch_exhibit_ec2.py` before this release needs the
+     user-data edit given under Breaking, or a relaunch.
+   - **Portal security headers.** Every routed response carries
+     `X-Content-Type-Options: nosniff`. The HTML page also carries a
+     Content-Security-Policy that allows no inline script or style, so a
+     proxy that injects either into the page is blocked.
+   - **4 MiB cap on stdio.** A stdio request over 4 MiB gets JSON-RPC error
+     `-32600` instead of reaching the tool. Split a large `lambo_derive`
+     batch into smaller calls.
+   - **HTTP `lambo serve` routes and auth.**
+     - It serves exactly `/mcp` and `/mcp/s/{session}`, so drop a trailing
+       slash from `/mcp/`.
+     - Once any `[[serve.credential]]` is configured, loopback requests need
+       a token too.
+     - `--rate-limit-rps` applies per credential.
+   - **Recency in young sessions (#95).** Recency scores change in sessions
+     younger than 10 minutes. Sessions of 10 minutes or more score bit for
+     bit as before.
+   - **Cold mode (#79).** While a relevant concept is still unscored, that
+     recall ranks every hit by `w_query` × query relevance. Recall lines in
+     `serve --ledger` carry `cold_start`.
+   - **Receipts and error text.** A hybrid `record_action` receipt reads
+     `(M embedded)`. `lambo.toml` errors no longer quote values, and a parse
+     error reads `(line N, column M)`.
+   - **Shutdown watchdog (#40).** Set a supervisor kill timeout above 20 s;
+     30 s is recommended.
+6. **EmbeddingGemma 2 uses the `lambo-eg2-v2` profile.** Its contract model
+   defaults to
+   `ggml-org/embeddinggemma-2-GGUF@bfcd2987/Q8_0;prompts=lambo-eg2-v2`. Use
+   `llama-server` b11452 or later, with `--mmproj` for images, and these
+   flags: `--image-min-tokens 280 --image-max-tokens 280 --batch-size 8192
+   --ubatch-size 8192`. The full command line is in `lambo.example.toml`.
+   `lambo-eg2-v1` was never released, so there is nothing to migrate.
+7. **One-way changes.**
+   - Going back to 0.3.0 is loud by design: 0.3.0 cannot read an unapplied
+     image write intent, so it fails to load that session.
+   - `lambo re-embed` over image concepts needs `--drop-image-vectors`.
+     That nulls their vectors until each image is derived again.
+   - Erasing a session is permanent. Reusing an erased id takes a
+     deliberate operator UPDATE.
+   - Never delete a lease row. A release now keeps the row and its fencing
+     token, and the operator override is an UPDATE.
+   - Existing canonical keys are not rewritten (#25).
+
+### Known issues
+
+- Recall scores and the merge threshold are not calibrated per embedder
+  ([#87](https://github.com/nrynss/lambo/issues/87)). They were tuned on
+  BGE-M3. Under EmbeddingGemma 2, irrelevant vector hits score high and
+  outrank the recent leg, and most paraphrases stay unmerged.
+- Hybrid derive clones the whole session graph under the write lock on every
+  commit ([#102](https://github.com/nrynss/lambo/issues/102)). The clone
+  took about 10.7 ms at 10k concepts, 60 ms at 50k and 168 ms at 100k, and
+  each recall and derive on the session waits for it.
+- Some live database tests run only by hand. CI's `postgres-live` job runs a
+  fixed set, which does not yet include #60's live merge-freshness test.
+  The `cockroach-live` job is disabled.
+- There is no Windows binary
+  ([#39](https://github.com/nrynss/lambo/issues/39)). v0.2.2 is the last
+  release with one.
 
 ### Breaking
 
