@@ -206,6 +206,39 @@ impl Mcp {
         }
     }
 
+    /// Every frame read up to and including the response to `id`.
+    fn read_until_response(&self, id: u64) -> Vec<String> {
+        let needle = format!("\"id\": {id}");
+        let needle_compact = format!("\"id\":{id}");
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut seen = Vec::new();
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let line = self
+                .rx
+                .recv_timeout(remaining)
+                .unwrap_or_else(|e| panic!("no JSON-RPC frame with id {id} within 20s: {e}"));
+            let done = line.contains(&needle) || line.contains(&needle_compact);
+            seen.push(line);
+            if done {
+                return seen;
+            }
+        }
+    }
+
+    /// Every frame that arrives within `wait`.
+    fn frames_within(&self, wait: Duration) -> Vec<String> {
+        let deadline = Instant::now() + wait;
+        let mut seen = Vec::new();
+        while let Ok(line) = self
+            .rx
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        {
+            seen.push(line);
+        }
+        seen
+    }
+
     fn shutdown(mut self) {
         // Reap the serve stdio child deterministically. The owning KillOnDrop
         // guard reaps it again on drop (a no-op once reaped), so a panicking
@@ -720,8 +753,8 @@ fn mcp_stdio_publishes_the_spec_tools_and_the_image_tool_and_refuses_a_client_ti
         image.contains("\"isError\":false") && image.contains("accepted 1 image concept"),
         "an image derive over stdio is acked; resp=\n{image}"
     );
-    // ... and stdio, which has no transport cap, still refuses base64 over
-    // the cap before decoding it, without echoing it.
+    // ... and a field over its own cap in a frame under the frame cap is
+    // still refused by the tool, before decoding, without echoing it.
     let over = "A".repeat(2_796_204 + 4);
     mcp.send(&format!(
         r#"{{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{{"name":"lambo_derive_image","arguments":{{"agent_id":"agent-a","caption":"too big","concept_type":"resource","image":{{"mime":"image/png","data":"{over}"}}}}}}}}"#
@@ -733,6 +766,29 @@ fn mcp_stdio_publishes_the_spec_tools_and_the_image_tool_and_refuses_a_client_ti
         capped.len()
     );
     assert!(capped.len() < 4096, "the refusal does not echo the payload");
+
+    // #101: a frame over the 4 MiB frame cap is discarded before it is
+    // parsed: request 8 is never answered, and the session answers the
+    // next call. Without the cap rmcp parses it and the tool refuses it by
+    // name.
+    let huge = "A".repeat(2 * 4 * 1024 * 1024);
+    mcp.send(&format!(
+        r#"{{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{{"name":"lambo_derive_image","arguments":{{"agent_id":"agent-a","caption":"far too big","concept_type":"resource","image":{{"mime":"image/png","data":"{huge}"}}}}}}}}"#
+    ));
+    mcp.send(r#"{"jsonrpc":"2.0","id":9,"method":"ping"}"#);
+    let mut seen = mcp.read_until_response(9);
+    // The ping can overtake a tool call rmcp has spawned, so give a
+    // parsed request 8 time to be answered before concluding it was not.
+    seen.extend(mcp.frames_within(Duration::from_secs(2)));
+    assert!(
+        !seen
+            .iter()
+            .any(|l| l.contains("\"id\":8") || l.contains("\"id\": 8")),
+        "the frame over the cap was answered, so it was parsed: {:?}",
+        seen.iter()
+            .map(|l| l.chars().take(200).collect::<String>())
+            .collect::<Vec<_>>()
+    );
 
     mcp.shutdown();
 }

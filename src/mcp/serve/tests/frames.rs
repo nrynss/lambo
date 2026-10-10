@@ -320,6 +320,14 @@ mod tool_path {
             self.send(r#"{"jsonrpc":"2.0","id":12,"method":"ping"}"#)
                 .await;
             self.response(12).await;
+            // The ping can overtake a tool call rmcp has spawned, so give a
+            // parsed request 10 time to be answered before concluding it
+            // was not.
+            while let Ok(Ok(Some(line))) =
+                tokio::time::timeout(Duration::from_secs(1), self.from_server.next_line()).await
+            {
+                self.seen.push(line);
+            }
             if self.peak.is_some() {
                 let peak = self.peak();
                 assert!(
