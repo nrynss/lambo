@@ -79,8 +79,10 @@ database, in the set, or both. The set is read before the database is asked;
 reading it after could miss a concept committed and cleared in between (tested
 by a double that commits during the query). The database is over-fetched by
 the set's size. While a contract change is unflushed (a fresh session before
-its first flush, a re-embed) or more writes are unflushed than the read can
-over-fetch for (2,048), the source ranks every graph vector instead.
+its first flush, a re-embed) or the derive's limit plus the set's size passes
+the read's 2,048-candidate bound (about 2,000 unflushed concepts: 2,048 minus
+the derive's limit, counting distinct concepts and pending deletes, not
+writes), the source ranks every graph vector instead.
 
 Cost (release, d = 1024, limit 8, Apple M3 Pro, a scratch bench over a
 synthetic graph, 20 probes each; the database half is the pre-#60 indexed

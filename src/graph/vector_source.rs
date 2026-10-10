@@ -248,9 +248,11 @@ fn concept_of<'g>(graph: &'g Graph, id: &NodeId) -> Option<&'g Concept> {
 /// Two cases rank every graph vector instead (exact, as the graph source
 /// does): the session's embedding contract has a change the store has not
 /// seen (a fresh session before its first flush, a re-embed), so the store
-/// would compare against the old one; or more writes are unflushed than the
-/// store's read can over-fetch for ([`MAX_VECTOR_CANDIDATE_LIMIT`]), which
-/// takes a store outage or a degraded session.
+/// would compare against the old one; or `limit` plus the unflushed set's
+/// size passes the store's read bound ([`MAX_VECTOR_CANDIDATE_LIMIT`],
+/// 2,048), about 2,000 unflushed concepts (2,048 minus the derive's limit;
+/// the set counts distinct concepts and pending deletes, not writes), which
+/// takes a long store outage, a degraded session or a large dropped batch.
 ///
 /// What remains different from ranking the whole graph: the durable leg's
 /// pool is the store's own top-k, by its distance and possibly from an

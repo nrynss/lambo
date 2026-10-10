@@ -1051,7 +1051,10 @@
   10,000 concepts, 46 ms at 50,000 and 98 ms at 100,000. Until a session's
   first flush (or after a re-embed, until it is flushed), the database cannot
   answer under the session's embedding contract, so the holder compares
-  against every concept it holds. This is the per-purpose split #18 made for
+  against every concept it holds; it does the same while about 2,000
+  concepts are unflushed (2,048 minus the derive's limit, counting distinct
+  concepts and pending deletes rather than writes), the most the database's
+  read can over-fetch for. This is the per-purpose split #18 made for
   the Elasticsearch tier: `PgStore` declares
   `HolderDeriveSource::StoreAndUnflushed`. Recall is unchanged and still
   ranks vectors in the database. Merge scores are now exact cosine instead of
