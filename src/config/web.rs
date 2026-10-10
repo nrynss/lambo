@@ -19,7 +19,8 @@
 //! recall_concurrency = 4      # simultaneous recalls; a request waiting 2 s gets 503
 //! ```
 //!
-//! `allowed_hosts` matters only while no bearer token is configured: then
+//! `allowed_hosts` matters only while no credential of any kind is
+//! configured (no legacy token, no `[[web.credential]]`, none inherited): then
 //! the portal answers only requests whose `Host` is `localhost`,
 //! `127.0.0.1` or `[::1]` (any port) or one of these entries, which is its
 //! DNS-rebinding defence. An entry is a host name or address, optionally
@@ -165,7 +166,7 @@ pub struct WebConfig {
     /// ordered union is the allowlist; its first entry is the default.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sessions: Vec<String>,
-    /// Extra `Host` values accepted while no bearer token is configured,
+    /// Extra `Host` values accepted while no credential is configured,
     /// beside `--allowed-host` and the built-in loopback names (#4 PR 2).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_hosts: Vec<String>,

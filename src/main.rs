@@ -93,12 +93,15 @@ enum Commands {
         #[arg(long, value_name = "SECS")]
         ledger_heartbeat: Option<u64>,
     },
-    /// Serve the read-only demo page for a session: live recall, the canonization feed, and durable counts.
+    /// Serve the read-only page for one or more sessions: live recall, the canonization feed, and durable counts.
     ///
     /// A reader process: it never takes the writer lease and exposes no mutating
-    /// route, so it runs safely beside `lambo serve` on the same session.
+    /// route, so it runs safely beside `lambo serve` on the same sessions.
     /// Loopback is unauthenticated by default; a non-loopback bind requires a
-    /// bearer token (LAMBO_AUTH_TOKEN or --auth-token) and fails closed without one.
+    /// credential (LAMBO_AUTH_TOKEN, --auth-token, a lambo.toml
+    /// [[web.credential]] or a [[serve.credential]] inherited through [web]
+    /// inherit_serve_credentials) and fails closed without one. LAMBO_AUTH_TOKEN reads
+    /// every served session; a [[web.credential]] reads only its own scope.
     ServeWeb {
         /// Session to open a read-only window onto (reader process; does not
         /// take the writer lease). Repeatable, beside lambo.toml [web]
@@ -114,31 +117,34 @@ enum Commands {
         #[arg(long, default_value_t = 7710, help = "HTTP port to listen on.")]
         port: u16,
         /// Bind address. Loopback by default — unauthenticated. A non-loopback
-        /// bind REQUIRES a credential (--auth-token, LAMBO_AUTH_TOKEN or
-        /// lambo.toml [[web.credential]]) and refuses to start without one.
+        /// bind REQUIRES a credential (--auth-token, LAMBO_AUTH_TOKEN, a
+        /// lambo.toml [[web.credential]] or an inherited [[serve.credential]])
+        /// and refuses to start without one.
         #[arg(
             long,
             default_value = "127.0.0.1",
-            help = "Bind address. Loopback by default. A non-loopback bind requires a bearer token (--auth-token, LAMBO_AUTH_TOKEN or lambo.toml [[web.credential]])."
+            help = "Bind address. Loopback by default. A non-loopback bind requires a credential (--auth-token, LAMBO_AUTH_TOKEN, a lambo.toml [[web.credential]] or an inherited [[serve.credential]])."
         )]
         bind: std::net::IpAddr,
         /// Bearer token required on every request. Prefer the LAMBO_AUTH_TOKEN
         /// env var, which overrides this flag — a token in argv is visible in
         /// `ps` and shell history. Optional on loopback, mandatory on any other
-        /// bind unless lambo.toml [[web.credential]] configures one. It reads
+        /// bind unless lambo.toml configures a credential: a [[web.credential]],
+        /// or a [[serve.credential]] inherited through [web]
+        /// inherit_serve_credentials. It reads
         /// every served session; [[web.credential]] entries read only their
         /// own.
         #[arg(long, value_name = "TOKEN")]
         auth_token: Option<lambo::cli::serve_web::AuthToken>,
         /// A Host (name or address, optionally :port) the portal also
-        /// answers while no token is configured, beside localhost,
+        /// answers while no credential is configured, beside localhost,
         /// 127.0.0.1 and [::1] and lambo.toml [web] allowed_hosts. Needed
         /// behind a proxy that forwards its public name (DNS-rebinding
-        /// defence). Repeatable; ignored once a token is configured.
+        /// defence). Repeatable; ignored once any credential is configured.
         #[arg(
             long = "allowed-host",
             value_name = "HOST",
-            help = "A Host (name or address, optionally :port) the portal also answers while no token is configured, beside localhost, 127.0.0.1 and [::1]. Needed behind a proxy that forwards its public name. Repeatable."
+            help = "A Host (name or address, optionally :port) the portal also answers while no credential is configured, beside localhost, 127.0.0.1 and [::1]. Needed behind a proxy that forwards its public name. Repeatable."
         )]
         allowed_host: Vec<String>,
     },

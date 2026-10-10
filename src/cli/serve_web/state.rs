@@ -24,7 +24,7 @@ pub(super) struct AppState {
     pub(super) list_sessions: bool,
     pub(super) backends: ResolvedBackends,
     /// True when `--bind` reaches beyond loopback. A non-loopback bind always
-    /// carries a token (see [`authorize_bind_web`](super::auth::authorize_bind_web)).
+    /// carries a credential (see [`authorize_bind_web`](super::auth::authorize_bind_web)).
     pub(super) exposed: bool,
     /// Who may read which served session: the implicit loopback grant, or
     /// the configured credentials' (`surface::session`, #4 PR 2 and 3).

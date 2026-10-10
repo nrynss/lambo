@@ -172,11 +172,14 @@
   struct literal must add `images: None` (or use `..Default::default()`).
   `lambo.toml` files are unaffected.
 
-- `lambo serve-web` checks `Host` while no token is configured (#4 PR 2,
-  a DNS-rebinding fix, see Fixed). A loopback window reached under any name
-  other than `localhost`, `127.0.0.1` or `[::1]` now answers `403`: a reverse
-  proxy that forwards its public name as `Host` (Caddy's default) must pass
-  that name with `--allowed-host` (or `[web] allowed_hosts`).
+- `lambo serve-web` checks `Host` while no credential is configured (#4
+  PR 2, a DNS-rebinding fix, see Fixed): no `LAMBO_AUTH_TOKEN` or
+  `--auth-token`, no `[[web.credential]]`, nothing inherited (PR 3). An
+  unauthenticated window reached under any name other than `localhost`,
+  `127.0.0.1` or `[::1]` now answers `403`: a reverse proxy that forwards
+  its public name as `Host` (Caddy's default) must pass that name with
+  `--allowed-host` (or `[web] allowed_hosts`). A window with any credential
+  accepts any `Host`, as before.
   `scripts/aws-infra/launch_exhibit_ec2.py` now does: with `--hostname` the
   service passes `--allowed-host <hostname>`, and with `--self-signed` Caddy
   sends the upstream address as `Host`. An exhibit launched before this
@@ -244,9 +247,10 @@
   128 bytes of `[A-Za-z0-9._:-]` (exit 2 naming the one that is not); one
   session keeps `--session`'s looser rule. A session that is not served, a
   malformed, percent-encoded or oversized id and an unrouted path answer the
-  same empty `404` on every method, before any store read; under a token the
-  `401` comes first and is the same for every id. A non-`GET` on a served
-  session's route is `405`. A served session never written, or erased, is an
+  same empty `404` on every method, before any store read; with any
+  credential configured the `401` comes first and is the same for every
+  id. A request other than `GET` or `HEAD` on a served
+  session's route is `405` (`HEAD` is answered like `GET`). A served session never written, or erased, is an
   empty page (`200`). The scoped page carries `no-store` and
   `Referrer-Policy: same-origin`. Startup prints one more line, naming the
   credential and how many sessions it reads. The page's script fetches
@@ -254,8 +258,10 @@
   session and the page at `/` the default; `GET` or `HEAD` of
   `/s/<session>` without the slash is a `308` to `/s/<session>/` (the query
   kept), so the relative URLs resolve under it. (#4 PR 4 added the page's
-  session picker.) With a token configured a browser still cannot
-  present it without a proxy that adds the header.
+  session picker.) The page sends no `Authorization` header, so with any
+  credential configured a plain browser cannot open it at all: it needs a
+  proxy that adds the header for each user (design 4.4; a login flow is
+  out of scope).
 - `lambo.toml` `[serve]` `attach_concurrency`, `idle_detach_secs` and
   `per_session_rps` are enforced by an HTTP `lambo serve` (#32, sixth
   part), so the startup notice no longer names them; none applies to a
@@ -282,13 +288,16 @@
   answers the same, instead of the `503` for a session that needs an
   operator (#32, seventh part). An on-demand session found erased (#32,
   sixth part) gets the same answer, where it got `410` alone.
-- `lambo serve-web` reads its session through a shared per-session view
-  (#4 PR 1). Every request and every open tab reads one load of the session
-  until it is older than `[web] view_ttl_ms` (1.5 s by default, the page's
-  poll interval), so the store sees about one load per 1.5 s however many
-  tabs are open, and concurrent requests for a stale view share one load.
-  The page can show durable state up to that long before a fresh store read
-  would; the writer-published flush lag is still read on every poll.
+- `lambo serve-web` reads each session it serves through a shared
+  per-session view (#4 PR 1). Every request and every open tab reads one
+  load of the session until it is older than `[web] view_ttl_ms` (1.5 s by
+  default, the page's poll interval), so the store sees about one load per
+  session per 1.5 s however many tabs are open, and concurrent requests for
+  a stale view share one load. So the page is staler than before: it can
+  show durable state up to `view_ttl_ms` older than a fresh store read
+  would (`0` reloads on every request); the writer-published flush lag is
+  still read on every poll. An erased session's content stays at most one
+  `view_ttl_ms`.
   Startup checks the store schema and no longer loads the session: a store
   error other than an unprovisioned schema now shows on the first request
   rather than at startup, and the embedding-mismatch warning is printed at
@@ -560,6 +569,16 @@
   caps. Works over every vector source (#8's holder graph, the store's
   checked read on SQLite, Postgres and Cockroach, and #18's tier); no store
   contract changed.
+- Documentation for the multi-session read-only window (#4 PR 5). The
+  command line reference's "Watch a session in a browser" opens with an
+  overview of several sessions in one window, set against "Several sessions
+  in one serve" (#32): the window is a lease-free reader of exactly the
+  served sessions, attaches nothing on demand, and is up to `view_ttl_ms`
+  behind the store. `lambo.example.toml` explains every `[web]` key with its
+  default, and `lambo serve-web --help` says "credential" where it said
+  "token". `dev-diary/notes/feature-4-multi-session-portal.md` records the
+  design and every decision and deviation across the five PRs, and closes
+  hardening task H7.
 - Per-credential read scope for `lambo serve-web` (#4 PR 3):
   `[[web.credential]]` entries (`name`, `token_env`, `sessions` with `"*"`
   for every served session, `session_prefix`), each a bearer token that
@@ -603,7 +622,8 @@
   a `session_prefix` (the listing never expands one); otherwise it is a
   text field plus the names this browser profile has opened
   (`localStorage` `lambo-sessions`, names only, shared by whoever uses the
-  profile). Switching navigates to `/s/<session>/`; a name the caller
+  profile). Switching asks for the target page with `HEAD`, then navigates to
+  `/s/<session>/`; a name the caller
   cannot read (the portal's `404`) is reported in place and dropped from
   the history, while a `401`, a `5xx` or no answer keeps it and says to
   try again. A long name is cut with an ellipsis on a narrow screen. A
@@ -1080,15 +1100,16 @@
   was skipped. The line names no backend detail (that is logged). The
   embedding-contract race's `vector_degraded` line (E2E-6) now reaches
   `warnings` too, where before only the CLI and the portal showed it.
-- `lambo serve-web` validated no `Host` header (#4 PR 2), so with no token
-  configured any web page the local user visited could rebind its own name
-  to `127.0.0.1` and read every served session same-origin. Without a token
-  it now answers only `localhost`, `127.0.0.1`, `[::1]` (any port) and the
+- `lambo serve-web` validated no `Host` header (#4 PR 2), so with no
+  credential configured any web page the local user visited could rebind its
+  own name to `127.0.0.1` and read every served session same-origin. Without
+  a credential it now answers only `localhost`, `127.0.0.1`, `[::1]` (any port) and the
   allowed hosts, and anything else, including a missing or malformed `Host`
   (user info, an empty or non-numeric port) and a request with two `Host`
-  headers, gets one fixed `403` before any other check. With a token configured any
+  headers, gets one fixed `403` before any other check. With any credential
+  configured (a token, a `[[web.credential]]` or an inherited one) any
   `Host` is accepted, as `lambo serve` does (a rebound page cannot present
-  the token).
+  a token).
 - The multi-session refusal poller kept a ledger cursor only for pinned
   sessions, so an on-demand session's cursor would have been rebuilt every
   round and re-booked the last `LEASE_TTL` of lease refusals each time (#32,
