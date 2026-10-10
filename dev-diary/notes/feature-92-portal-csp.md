@@ -127,6 +127,40 @@ No browser MCP was attached.
 Stderr has headless display and GPU noise (`CVDisplayLink`,
 `SharedImageManager`) and no Content-Security-Policy violation.
 
+### Console capture (remediation)
+
+`--dump-dom` with stderr unread proves nothing about violations, so the
+check was repeated with console logging on and the log searched. Google
+Chrome 155.0.8059.40, against `lambo-branch` (`84641ef3`) on fresh copies
+of the same stores, ports 18796 (`shown` and `empty`, `list_sessions =
+true`), 18797 (the same two, `list_sessions = false`), and 18798
+(`solo`). Each page was one run, a fresh profile, stderr to its own file:
+
+```
+"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless=new --disable-gpu --no-first-run --no-default-browser-check --enable-logging=stderr --v=0 --virtual-time-budget=12000 --dump-dom --user-data-dir=<fresh temp dir> <url> > <page>.html 2> <page>.err
+```
+
+The flag is confirmed by a control page first (a `file://` page whose meta
+policy is `script-src 'unsafe-inline'; style-src 'none'`, with an inline
+`<style>` and an inline `console.log('lambo92-console-probe')`). Its log
+has both, as `INFO:CONSOLE:1` lines: the probe, and "Applying inline style
+violates the following Content Security Policy directive 'style-src
+'none''". This Chrome does not say "Refused to" for that violation, so
+`Content Security Policy` is the search that would catch one.
+
+Pages: `/`, `/s/shown/`, `/s/empty/` on 18796; the same three on 18797;
+`/` and `/s/solo/` on 18798. From the dumps: listing on shows the
+`select`, listing off shows the text field, `solo` keeps the picker
+`hidden`, `empty` says "No memory in this session yet", and the concept
+`<img src=x onerror=alert(1)>` is escaped text on the three `shown` pages
+with no `<img` element. Typing in the lookup was not exercised (no
+interactive driver; `--dump-dom` only loads).
+
+`grep -c "Content Security Policy"` over the eight page logs: 0 on each
+(1 on the control). `grep -c "Refused to"`: 0 on each. `grep -c
+"CONSOLE"`: 0 on each, so the pages wrote no console line of any kind
+(2 on the control). All three servers were stopped.
+
 ## Caddy
 
 `launch_exhibit_ec2.py --dry-run` (no AWS calls) with `--session byteid
