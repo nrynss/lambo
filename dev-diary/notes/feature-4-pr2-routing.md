@@ -7,8 +7,8 @@ section 10 and Q10, Q11, Q12 and Q18. Decisions and why; the commits carry
 the mechanics.
 
 PR 2 serves an allowlist through one grant. Per-credential scope
-(`[[web.credential]]`) and the opt-in listing are PR 3; the page's base path
-and picker are PR 4.
+(`[[web.credential]]`) and the opt-in listing are PR 3; the page's picker is
+PR 4 (its base path landed here, review M1).
 
 ## What changed
 
@@ -156,6 +156,6 @@ the Host check fails the two Host tests.
 ## Not done here
 
 PR 3: `[[web.credential]]`, prefix scopes, `inherit_serve_credentials`,
-`list_sessions`. PR 4: the page's base path and picker (the page at
-`/s/b/` still polls `/api/...`, which is the default session; that is PR 4's
-first acceptance item). PR 5: H7 closure and the remaining docs.
+`list_sessions`. PR 4: the page's session picker. (The page's base path
+landed here, review M1: the script fetches relative `api/...` URLs, and
+`/s/{b}` redirects to `/s/{b}/` so they resolve under `b`.) PR 5: H7 closure and the remaining docs.

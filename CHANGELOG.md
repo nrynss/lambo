@@ -219,11 +219,13 @@
   session's route is `405`. A served session never written, or erased, is an
   empty page (`200`). The scoped page carries `no-store` and
   `Referrer-Policy: same-origin`. Startup prints one more line, naming the
-  credential and how many sessions it reads. The page's script still polls
-  the unscoped `/api/...`, so a browser at `/s/<session>/` shows the default
-  session's data until #4 PR 4 gives the page its base path; the scoped data
-  routes are what to read from a script meanwhile. With a token configured a
-  browser still cannot present it without a proxy that adds the header.
+  credential and how many sessions it reads. The page's script fetches
+  relative `api/...` URLs, so the page at `/s/<session>/` reads that
+  session and the page at `/` the default; `GET` or `HEAD` of
+  `/s/<session>` without the slash is a `308` to `/s/<session>/` (the query
+  kept), so the relative URLs resolve under it. The page has no session
+  picker yet (#4 PR 4). With a token configured a browser still cannot
+  present it without a proxy that adds the header.
 - `lambo serve-web` reads its session through a shared per-session view
   (#4 PR 1). Every request and every open tab reads one load of the session
   until it is older than `[web] view_ttl_ms` (1.5 s by default, the page's

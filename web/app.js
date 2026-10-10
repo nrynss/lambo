@@ -112,6 +112,10 @@
 
   function plural(n, one, many) { return n === 1 ? one : many; }
 
+  // `path` is relative ("api/..."), resolved against the page's own URL:
+  // the page at `/` reads `/api/...` (the default session) and the page at
+  // `/s/<session>/` reads `/s/<session>/api/...` (#4 PR 2 review M1). The
+  // server redirects `/s/<session>` to `/s/<session>/` so the base is right.
   function get(path) {
     return fetch(path, { headers: { accept: "application/json" } }).then(function (r) {
       if (!r.ok) { var e = new Error("HTTP " + r.status); e.status = r.status; throw e; }
@@ -412,7 +416,7 @@
     // stale pillar's response a no-op — an overlapping render for an older
     // graph must not fill hero-deps for the newer pillar.
     var seq = ++state.heroSeq;
-    get("/api/inspect?focus=" + encodeURIComponent(pillar.content))
+    get("api/inspect?focus=" + encodeURIComponent(pillar.content))
       .then(function (d) {
         if (seq !== state.heroSeq) return;
         fillHeroDeps(pillar, d.dependents || [], d.dependents ? d.dependents.length : 0);
@@ -535,7 +539,7 @@
   }
 
   function loadFocus(name) {
-    get("/api/inspect?focus=" + encodeURIComponent(name))
+    get("api/inspect?focus=" + encodeURIComponent(name))
       .then(renderDetails)
       .catch(function () {
         show($("details-filled"), false);
@@ -880,7 +884,7 @@
       $("lookup-stage").textContent = STAGES[stage];
     }, 1300);
 
-    get("/api/recall?q=" + encodeURIComponent(q))
+    get("api/recall?q=" + encodeURIComponent(q))
       .then(function (r) {
         if (seq !== state.lookupSeq) return;
         state.lastResult = r;
@@ -1067,7 +1071,7 @@
   }
 
   function poll() {
-    return get("/api/pulse?since=" + state.seen)
+    return get("api/pulse?since=" + state.seen)
       .then(function (p) {
         state.failures = 0;
         setConn("live", "Live");
@@ -1100,7 +1104,7 @@
   // The structure is not static on a session that is still being written to,
   // so it is refreshed, just far less often than the counts (H4).
   function loadGraph() {
-    return get("/api/graph")
+    return get("api/graph")
       .then(function (g) {
         state.graph = g;
         show($("structure"), true);
@@ -1134,7 +1138,7 @@
     initLookup();
     $("details-clear").addEventListener("click", clearFocus);
 
-    get("/api/session").then(renderSession).catch(function () {
+    get("api/session").then(renderSession).catch(function () {
       $("session-name").textContent = "unavailable";
     });
 

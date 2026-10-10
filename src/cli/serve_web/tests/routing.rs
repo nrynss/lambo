@@ -557,7 +557,7 @@ async fn the_aliases_equal_the_default_sessions_scoped_routes() {
     }
 
     let alias = request(addr, "GET", "/").await;
-    for path in ["/s/t4-a", "/s/t4-a/"] {
+    for path in ["/s/t4-a/"] {
         let page = request(addr, "GET", path).await;
         assert_eq!(page.status, 200, "{path}");
         assert_eq!(page.body, alias.body, "{path}: the same page");
@@ -578,6 +578,115 @@ async fn the_aliases_equal_the_default_sessions_scoped_routes() {
             .contains("referrer-policy"),
         "the unscoped page is unchanged"
     );
+    handle.abort();
+}
+
+/// Review M1: the page's script fetches relative `api/...` URLs, so the
+/// page at `/s/{b}/` reads session `b` and the page at `/` the default. No
+/// fetch in the script names an absolute `/api` path, and every one it
+/// makes, resolved against each page's URL, answers for that page's session.
+#[tokio::test]
+async fn the_scoped_page_reads_its_own_session() {
+    assert!(
+        !APP_JS.contains("\"/api") && !APP_JS.contains("'/api"),
+        "the script must not fetch an absolute /api URL"
+    );
+    assert_eq!(
+        APP_JS.matches("fetch(").count(),
+        1,
+        "one fetch, inside get(), so every request goes through the relative paths below"
+    );
+    // The script's own `get(path)`, not a method such as
+    // `URLSearchParams.get("focus")`.
+    let fetched: Vec<&str> = APP_JS
+        .match_indices("get(\"")
+        .filter(|(i, _)| !APP_JS[..*i].ends_with('.'))
+        .filter_map(|(i, m)| APP_JS[i + m.len()..].split('"').next())
+        .collect();
+    assert!(fetched.len() >= 5, "{fetched:?}");
+    for path in &fetched {
+        assert!(path.starts_with("api/"), "relative API path: {path}");
+    }
+
+    let store = two_sessions().await;
+    let state = portal(
+        backends_on(store),
+        &["t4-a", "t4-b"],
+        None,
+        &WebConfig::default(),
+    );
+    let (addr, handle) = spawn(state).await;
+    for (page, session) in [("/", "t4-a"), ("/s/t4-a/", "t4-a"), ("/s/t4-b/", "t4-b")] {
+        assert_eq!(request(addr, "GET", page).await.status, 200, "{page}");
+        // A page URL ends in `/`, so a relative path resolves by appending.
+        for path in &fetched {
+            let url = if path.ends_with('=') {
+                format!("{page}{path}1")
+            } else {
+                format!("{page}{path}")
+            };
+            let r = request(addr, "GET", &url).await;
+            assert_eq!(r.status, 200, "{page} fetches {url}: {}", r.body);
+        }
+        let info = get_json(addr, &format!("{page}api/session")).await;
+        assert_eq!(info["session"], session, "{page}: {info}");
+        let stats = get_json(addr, &format!("{page}api/stats")).await;
+        assert_eq!(stats["session"], session, "{page}: {stats}");
+    }
+    handle.abort();
+}
+
+/// Review M1: `/s/{id}` without its slash would resolve the page's relative
+/// URLs against `/s/`, so a `GET` or `HEAD` of it is a `308` to `/s/{id}/`
+/// (query kept, with the page's `no-store` and `Referrer-Policy`); another
+/// method is the page route's 405, as for `/s/{id}/`. A refused id is still
+/// the uniform 404, never a redirect.
+#[tokio::test]
+async fn the_bare_scoped_page_redirects_to_its_slash() {
+    let store = two_sessions().await;
+    let state = portal(
+        backends_on(store),
+        &["t4-a", "t4-b"],
+        None,
+        &WebConfig::default(),
+    );
+    let (addr, handle) = spawn(state).await;
+    let location = |r: &HttpResponse| {
+        r.headers
+            .lines()
+            .find_map(|l| {
+                l.split_once(':')
+                    .filter(|(k, _)| k.eq_ignore_ascii_case("location"))
+                    .map(|(_, v)| v.trim().to_string())
+            })
+            .unwrap_or_default()
+    };
+    for method in ["GET", "HEAD"] {
+        for (path, to) in [
+            ("/s/t4-b", "/s/t4-b/"),
+            ("/s/t4-a", "/s/t4-a/"),
+            (
+                "/s/t4-b?focus=billing%20ledger",
+                "/s/t4-b/?focus=billing%20ledger",
+            ),
+        ] {
+            let r = request(addr, method, path).await;
+            assert_eq!(r.status, 308, "{method} {path}");
+            assert_eq!(location(&r), to, "{method} {path}");
+            let head = r.headers.to_ascii_lowercase();
+            assert!(head.contains("cache-control: no-store"), "{head}");
+            assert!(head.contains("referrer-policy: same-origin"), "{head}");
+        }
+    }
+    for method in ["POST", "PUT", "PATCH", "DELETE"] {
+        let r = request(addr, method, "/s/t4-b").await;
+        let slash = request(addr, method, "/s/t4-b/").await;
+        assert_eq!(r.status, 405, "{method}");
+        assert_eq!(wire(&r), wire(&slash), "{method}");
+    }
+    let refused = request(addr, "GET", "/s/t4-c").await;
+    assert_eq!(refused.status, 404);
+    assert!(location(&refused).is_empty());
     handle.abort();
 }
 

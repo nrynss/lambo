@@ -10,7 +10,8 @@
 //!
 //! | path | session |
 //! |---|---|
-//! | `/s/{session}`, `/s/{session}/` | `{session}`'s page (the same `INDEX_HTML`, plus `no-store` and `Referrer-Policy: same-origin`) |
+//! | `/s/{session}` | `GET`/`HEAD`: a `308` to `/s/{session}/` (query kept), so the page's relative `api/...` URLs resolve under the session; other methods: the page route's 405 |
+//! | `/s/{session}/` | `{session}`'s page (the same `INDEX_HTML`, plus `no-store` and `Referrer-Policy: same-origin`) |
 //! | `/s/{session}/api/{route}` | `{session}`, served by the same `GET`-only route as the alias |
 //! | `/s/{session}/{anything else}` | none: the uniform 404 |
 //! | `/`, `/api/{route}` | the default session (aliases, design Q10), authorized as `SessionAuthority::authorize_default` rules |
@@ -33,9 +34,9 @@ use std::sync::Arc;
 use axum::extract::{FromRequestParts, Request, State};
 use axum::http::request::Parts;
 use axum::http::uri::PathAndQuery;
-use axum::http::{header, HeaderValue, Uri};
+use axum::http::{header, HeaderValue, Method, StatusCode, Uri};
 use axum::middleware::Next;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 
 use super::auth::{authenticate, unauthorized, Authenticated};
 use super::state::AppState;
@@ -90,10 +91,22 @@ pub(super) async fn resolve_session(
         return unauthorized();
     };
     let after = &req.uri().path()[SCOPE_PREFIX.len()..];
-    let Some((session, target)) = scoped(&state, &grant, after) else {
+    let Some(Scoped {
+        session,
+        target,
+        slash,
+    }) = scoped(&state, &grant, after)
+    else {
         return not_found_response();
     };
     let page = target == "/";
+    if page && !slash && (req.method() == Method::GET || req.method() == Method::HEAD) {
+        // `/s/{id}` without its slash: the page's script fetches relative
+        // `api/...` URLs, which against `/s/{id}` would resolve to
+        // `/s/api/...` (review M1). Send the browser to `/s/{id}/`. The id
+        // passed the strict charset, so it is safe in a header as is.
+        return page_redirect(session.as_str(), req.uri().query());
+    }
     // The query string rides along unchanged (`?since=`, `?q=`, `?focus=`).
     let rewritten = match req.uri().query() {
         Some(query) => format!("{target}?{query}"),
@@ -112,17 +125,51 @@ pub(super) async fn resolve_session(
     req.extensions_mut().insert(Authenticated);
     let mut response = next.run(req).await;
     if page && response.status().is_success() {
-        // The page's URL names the session: never cache it, and never send
-        // the name onward in a Referer (design 6.1). Only on the page
-        // itself, so a scoped 405 is the alias's 405 byte for byte.
-        let headers = response.headers_mut();
-        headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-        headers.insert(
-            header::REFERRER_POLICY,
-            HeaderValue::from_static("same-origin"),
-        );
+        // Only on the page itself, so a scoped 405 is the alias's 405 byte
+        // for byte.
+        page_headers(&mut response);
     }
     response
+}
+
+/// The page's URL names the session: never cache it, and never send the
+/// name onward in a Referer (design 6.1).
+fn page_headers(response: &mut Response) {
+    let headers = response.headers_mut();
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("same-origin"),
+    );
+}
+
+/// `308` from `/s/{session}` to `/s/{session}/`, the query string kept,
+/// with the page's own `no-store` and `Referrer-Policy`. Only for a served
+/// session in the grant's scope, so it says no more than the page would.
+fn page_redirect(session: &str, query: Option<&str>) -> Response {
+    let location = match query {
+        Some(query) => format!("{SCOPE_PREFIX}{session}/?{query}"),
+        None => format!("{SCOPE_PREFIX}{session}/"),
+    };
+    let Ok(location) = HeaderValue::try_from(location) else {
+        return not_found_response();
+    };
+    let mut response = (
+        StatusCode::PERMANENT_REDIRECT,
+        [(header::LOCATION, location)],
+    )
+        .into_response();
+    page_headers(&mut response);
+    response
+}
+
+/// An authorized scoped path: the session, the unscoped path to route, and
+/// whether the id was followed by a `/` (`/s/{id}/...` rather than the bare
+/// `/s/{id}`).
+struct Scoped {
+    session: SessionId,
+    target: String,
+    slash: bool,
 }
 
 /// Authorize the scoped path `after` (what follows `/s/`) for `grant`: the
@@ -134,8 +181,11 @@ pub(super) async fn resolve_session(
 /// then the allowlist (design 3.3 and 4.2), all in memory. Only the page
 /// (`/s/{id}` or `/s/{id}/`) and the data routes (`/s/{id}/api/...`) exist
 /// under a session; anything else is the same 404, in scope or not.
-fn scoped(state: &AppState, grant: &SessionGrant, after: &str) -> Option<(SessionId, String)> {
-    let (raw, rest) = after.split_once('/').unwrap_or((after, ""));
+fn scoped(state: &AppState, grant: &SessionGrant, after: &str) -> Option<Scoped> {
+    let (raw, rest, slash) = match after.split_once('/') {
+        Some((raw, rest)) => (raw, rest, true),
+        None => (after, "", false),
+    };
     let id = match state.authority.authorize(grant, raw, SessionNeed::Use) {
         Ok(id) => id,
         Err(refusal) => {
@@ -155,5 +205,9 @@ fn scoped(state: &AppState, grant: &SessionGrant, after: &str) -> Option<(Sessio
     } else {
         return None;
     };
-    Some((id.to_session_id(), target))
+    Some(Scoped {
+        session: id.to_session_id(),
+        target,
+        slash,
+    })
 }
