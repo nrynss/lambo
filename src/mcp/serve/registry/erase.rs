@@ -7,8 +7,11 @@
 //!
 //! # An attached session: fence, quiesce, then erase as the holder
 //!
-//! 1. The slot becomes [`Slot::Erasing`]: new requests get the erased
-//!    refusal and no attach or background retry starts for the id.
+//! 1. The slot becomes [`Slot::Erasing`], claimed while every attach
+//!    permit is held (#32 PR 7 review H1), so no attach is between its
+//!    acquire and its admission: new requests get the erased refusal and no
+//!    attach or background retry starts for the id. An on-demand attach in
+//!    flight (`Slot::Attaching`) is answered 503, like a detach.
 //! 2. The session's lease watcher is stopped, so the fence below is not
 //!    booked as a lost lease and does not spawn a detach.
 //! 3. The handle is fenced **in this process only**
@@ -48,8 +51,9 @@
 //! # A session that is not attached
 //!
 //! Held by another process, failed, erased already, or never attached
-//! here: the store erase runs with the CLI's own eraser identity, under the
-//! attach lock so a background attach of the same id cannot interleave. A
+//! here: the store erase runs with the CLI's own eraser identity. The slot
+//! was claimed under every attach permit, so no background attach of the
+//! id was in flight then, and none starts over the `Erasing` slot after. A
 //! live lease held elsewhere is [`EraseAnswer::HeldElsewhere`] (409), as the
 //! CLI's exit 1. A repeat finds the tombstone and reports `already_absent`.
 //!
@@ -118,20 +122,33 @@ impl SessionRegistry {
 
     /// [`SessionRegistry::erase`]'s body, on its task.
     async fn erase_now(self: &Arc<Self>, id: &str) -> EraseAnswer {
+        let busy = EraseAnswer::Busy {
+            retry_after: Duration::from_secs(1),
+        };
+        // Every attach permit before the claim (#32 PR 7 review H1), as the
+        // shutdown takes them before its close set: no attach of any id is
+        // then between its acquire and its admission, so none can admit
+        // over the claim below, or leave a lease this erase would meet as
+        // another holder's. Raced against the shutdown, which wants them too.
+        let permits = tokio::select! {
+            biased;
+            () = self.closed() => return busy,
+            permits = self.attach_permits.acquire_many(self.permit_count) => permits,
+        };
+        let Ok(permits) = permits else {
+            return busy;
+        };
         if self.is_closing() {
-            return EraseAnswer::Busy {
-                retry_after: Duration::from_secs(1),
-            };
+            return busy;
         }
         // Claim the slot. Everything after this sees `Erasing`.
         let (attached, prior) = {
             let mut slots = self.slots.lock();
             match slots.get(id) {
-                Some(Slot::Erasing | Slot::Detaching) => {
-                    return EraseAnswer::Busy {
-                        retry_after: Duration::from_secs(1),
-                    };
-                }
+                // An on-demand attach in flight (#32 PR 6) is answered like
+                // a detach: its own outcome decides the slot, and a retry
+                // after it finds the session live or absent.
+                Some(Slot::Erasing | Slot::Detaching | Slot::Attaching { .. }) => return busy,
                 Some(Slot::Live(session)) => {
                     let session = Arc::clone(session);
                     slots.insert(id.to_string(), Slot::Erasing);
@@ -140,6 +157,11 @@ impl SessionRegistry {
                 _ => (None, slots.insert(id.to_string(), Slot::Erasing)),
             }
         };
+        // Claimed, `Erasing` keeps every later attach of this id away: the
+        // pinned retry's guard skips it, and a request finds it not
+        // attachable (`answer_for`). The permits are not needed past here,
+        // so no other session's attach waits on this erase.
+        drop(permits);
         match attached {
             Some(session) => self.erase_attached(id, session).await,
             None => self.erase_unattached(id, prior).await,
@@ -266,12 +288,9 @@ impl SessionRegistry {
         let sid = SessionId::new(id);
         let eraser =
             LeaseHolder::for_this_process(&AgentId::new(crate::cli::erase_session::ERASER_AGENT));
-        // A background attach of this id (the pinned retry) cannot run in
-        // between: it takes the same lock, and finds the slot `Erasing`.
-        let outcome = {
-            let _no_attach = self.attach_permits.acquire_many(self.permit_count).await;
-            store.erase_session(&sid, &eraser).await
-        };
+        // No attach of this id runs meanwhile: none was in flight at the
+        // claim, and none starts over an `Erasing` slot.
+        let outcome = store.erase_session(&sid, &eraser).await;
         match outcome {
             Ok(EraseOutcome::Erased(report)) => {
                 self.finish_erased(id, &report);

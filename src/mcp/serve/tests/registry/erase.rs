@@ -115,6 +115,12 @@ struct Wire {
 }
 
 async fn wire() -> Wire {
+    wire_stalling(Default::default()).await
+}
+
+/// [`wire`], whose store parks every `load_session` while `stall` is set
+/// (an attach that has taken its lease and is loading).
+async fn wire_stalling(stall: Arc<std::sync::atomic::AtomicBool>) -> Wire {
     let mut opts = ServeOptions::new(A, "agent-a");
     opts.sessions = HOSTED.iter().map(|s| s.to_string()).collect();
     opts.transport = Transport::Http;
@@ -141,7 +147,7 @@ async fn wire() -> Wire {
     else {
         panic!("the other writer takes er-held");
     };
-    let (recorded, calls) = Shared::recording(&store);
+    let (recorded, calls) = Shared::recording_with_stall(&store, stall);
     let registry = new_registry_with(
         &HOSTED,
         backends_over(recorded, flushing_config()),
@@ -667,6 +673,139 @@ async fn an_erase_of_a_detaching_session_is_503() {
         .await
         .unwrap()
         .is_some_and(|l| !crate::store::erase::is_tombstone(&l)));
+}
+
+/// #32 PR 7 review H1: an erase that arrives while the pinned retry of the
+/// same session is between its acquire and its admission (parked in its
+/// load, the lease already taken). The erase waits for the retry's attach
+/// permit before it claims the slot, so the retry admits the session over
+/// the `HeldElsewhere` it started from, and the erase then finds it live
+/// and erases it as its holder: 200, only the tombstone, the slot
+/// `Erased`, and nothing attached.
+///
+/// Mutation: claim the slot before taking the permits and the retry
+/// overwrites `Erasing` with `Live` (or, admitting conditionally, gives
+/// its lease back late), while the erase meets the retry's lease as
+/// another holder's: 409, the session served on.
+#[tokio::test]
+async fn an_erase_racing_the_pinned_retry_waits_for_it_then_erases_what_it_attached() {
+    let stall = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let w = wire_stalling(Arc::clone(&stall)).await;
+    // The other writer goes away; the retry will take the session.
+    w.store
+        .release_lease(&SessionId::new(HELD), &elsewhere())
+        .await
+        .unwrap();
+    stall.store(true, std::sync::atomic::Ordering::SeqCst);
+    let before = w.calls.len();
+    w.registry.spawn_retry_loop();
+    eventually("the retry took the lease and parked in its load", || {
+        w.calls
+            .since(before)
+            .iter()
+            .any(|(m, s)| *m == "load_session" && s == HELD)
+    })
+    .await;
+
+    let addr = w.addr;
+    let erase = tokio::spawn(async move { erase_as(addr, "ops", HELD, &confirm(HELD)).await });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!erase.is_finished(), "the erase waits for the attach");
+    assert_eq!(
+        state_of(&w.registry, HELD),
+        "held_elsewhere",
+        "the slot is not claimed while an attach is in flight"
+    );
+
+    stall.store(false, std::sync::atomic::Ordering::SeqCst);
+    let reply = erase.await.unwrap();
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    let report: serde_json::Value = serde_json::from_str(reply.body.trim_end()).unwrap();
+    assert_eq!(report["already_absent"], false, "{report}");
+    assert_eq!(report["removed"]["leases"], 1, "{report}");
+    assert_only_the_tombstone(&w.store, HELD).await;
+    assert_eq!(state_of(&w.registry, HELD), "erased");
+    assert!(
+        !w.registry
+            .attached()
+            .iter()
+            .any(|s| s.id().as_str() == HELD),
+        "nothing of the erased session is attached"
+    );
+}
+
+/// #32 PR 7 review H1, belt and braces: a pinned retry whose slot changed
+/// while it acquired (forced here, as nothing in the serve now changes it
+/// then) does not overwrite it. The session it attached is taken down and
+/// its lease released, so nothing of it is served and no lease is left
+/// behind.
+///
+/// Mutation: admit unconditionally and the slot becomes `Live` again.
+#[tokio::test]
+async fn a_retry_that_finds_its_slot_changed_releases_what_it_took() {
+    let stall = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let w = wire_stalling(Arc::clone(&stall)).await;
+    w.store
+        .release_lease(&SessionId::new(HELD), &elsewhere())
+        .await
+        .unwrap();
+    stall.store(true, std::sync::atomic::Ordering::SeqCst);
+    let before = w.calls.len();
+    w.registry.spawn_retry_loop();
+    eventually("the retry took the lease and parked in its load", || {
+        w.calls
+            .since(before)
+            .iter()
+            .any(|(m, s)| *m == "load_session" && s == HELD)
+    })
+    .await;
+    w.registry.force_state(HELD, ForcedState::Failed);
+    stall.store(false, std::sync::atomic::Ordering::SeqCst);
+    eventually("the retry gave its lease back", || {
+        w.calls
+            .since(before)
+            .iter()
+            .any(|(m, s)| *m == "release_lease" && s == HELD)
+    })
+    .await;
+    assert_eq!(state_of(&w.registry, HELD), "failed");
+    assert!(!w
+        .registry
+        .attached()
+        .iter()
+        .any(|s| s.id().as_str() == HELD));
+    let lease = w
+        .store
+        .read_lease(&SessionId::new(HELD))
+        .await
+        .unwrap()
+        .expect("a lease row");
+    assert_eq!(
+        lease.holder,
+        crate::store::lease::RELEASED_HOLDER,
+        "{lease:?}"
+    );
+}
+
+/// #32 PR 7 review, PR 6 reconciliation 2: an erase of a session whose
+/// on-demand attach is in flight is 503 with `Retry-After`; the slot is
+/// left to the attach, and nothing is touched.
+#[tokio::test]
+async fn an_erase_of_an_attaching_session_is_503() {
+    let w = wire().await;
+    w.registry.force_state(B, ForcedState::Attaching);
+    let before = w.calls.len();
+    let reply = erase_as(w.addr, "ops", B, &confirm(B)).await;
+    assert_eq!(reply.status, 503, "{}", reply.body);
+    assert!(reply.header("retry-after").is_some());
+    assert_eq!(state_of(&w.registry, B), "attaching");
+    assert!(
+        !w.calls
+            .since(before)
+            .iter()
+            .any(|(m, _)| *m == "erase_session"),
+        "nothing was erased"
+    );
 }
 
 /// A pinned session that meets the tombstone when its background retry
