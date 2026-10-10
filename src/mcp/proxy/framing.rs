@@ -49,6 +49,11 @@ pub(super) enum Framed {
     /// The peer stopped mid-frame: this many bytes arrived with no newline
     /// after them. Never forwarded — a torn JSON line is never valid to
     /// deliver — and always followed by end-of-stream.
+    ///
+    /// A direct stdio serve differs here on purpose: its reader
+    /// (`crate::mcp::serve`'s `frames`) hands an unterminated last line
+    /// within the cap on to rmcp, which parses one. Do not align either
+    /// with the other (#101 review I5).
     Torn(usize),
     /// A frame past the cap ([`MAX_FRAME_BYTES`] unless the reader was given
     /// another), `bytes` long, discarded through its newline. The stream is
