@@ -341,8 +341,10 @@ url = "http://127.0.0.1:8080"
 # view_ttl_ms however many tabs poll it, so the page can be up to that much
 # older than the store; 0 reloads on every request. SQLite always loads one
 # session at a time. A recall that waits 2 s for one of the
-# recall_concurrency slots gets 503 with Retry-After: 1. Every value below
-# is the default; omit the table for all of them.
+# recall_concurrency slots gets 503 with Retry-After: 1. Every number and
+# true/false below is the default; omit the table for all of them. sessions,
+# allowed_hosts and the [[web.credential]] block are examples (none by
+# default).
 #
 # --- [web] example begins ---
 # [web]
