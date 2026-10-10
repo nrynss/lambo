@@ -138,6 +138,11 @@ mod lease_race;
     )
 ))]
 pub(crate) mod embedding_source_live;
+// #60: a holder's hybrid derive merges into concepts the database has not
+// seen yet (offline tests over a lagging double, the Postgres live test here,
+// the Cockroach leg in its conformance suite).
+#[cfg(test)]
+pub(crate) mod merge_freshness;
 
 // T3.2 — CockroachDB durable adapter (spec §3.2/§3.3, §4), the family's first
 // dialect. Feature: store-cockroach.

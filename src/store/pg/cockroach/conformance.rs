@@ -1798,6 +1798,14 @@ async fn conformance_suite() {
     crate::store::pg::release_fencing::check_release_keeps_the_token(&store).await;
     crate::store::pg::erase::check_erase_session(&store).await;
     crate::store::pg::erase::check_erase_after_release(&store).await;
+    // #60: a holder's derive merges into a concept Cockroach has not seen
+    // yet. Its own store (the check needs an `Arc` for the holder); the
+    // schema is already initialised above.
+    crate::store::pg::merge_freshness::check_holder_merges_an_unflushed_paraphrase(
+        std::sync::Arc::new(new_store(&dsn)),
+        &format!("conformance-merge-fresh-{}", Uuid::new_v4()),
+    )
+    .await;
 }
 
 /// DECISION D1 item 3 camera-proof: the global vector query must execute as
