@@ -330,6 +330,15 @@ impl Rig {
         ctx.store = Arc::new(VectorCapable(MemoryStore::new(), true));
         rig
     }
+
+    /// What a close whose final flush completes does to the queue: quiesce,
+    /// then settle the set-aside receipts as durable (#117 review M1).
+    /// Returns the quiesce's count of set-aside receipts.
+    async fn close_queue(&self) -> usize {
+        let deferred = self.pipeline.quiesce().await;
+        self.pipeline.settle_deferred(CloseFlush::Durable);
+        deferred
+    }
 }
 
 /// Spin until `cond` holds, with a deadline, so a broken invariant fails

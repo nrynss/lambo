@@ -288,5 +288,27 @@ class CheckDurability(unittest.TestCase):
         self.assertEqual(rc, USAGE, out)
 
 
+class ClassifyTest(unittest.TestCase):
+    """ReceiptAnswer::describe prefixes the checker must tell apart."""
+
+    def setUp(self):
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("check_durability", CHECK)
+        self.mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.mod)
+
+    def test_close_unflushed_is_not_read_as_intent_durable(self):
+        # #117 review M1: a close whose final flush did not complete has its
+        # own answer, distinct from intent_durable.
+        tag, _ = self.mod.classify(
+            "close did not finish its final flush — this write was not applied before the "
+            "session closed, and it may or may not have been saved"
+        )
+        self.assertEqual(tag, "close_unflushed")
+        tag, _ = self.mod.classify("not applied before this session closed — the validated")
+        self.assertEqual(tag, "intent_durable")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

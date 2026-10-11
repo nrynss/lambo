@@ -52,7 +52,7 @@
 //! | `counters` | `WriteQueueCounters`, `ReplayBlockReason` |
 //! | `admission` | the bounds, `DropReason`, `Job`, the per-agent `Lanes`, `admit` |
 //! | `execution` | `WriteCtx::run`, index mirroring, the lane worker and its settle |
-//! | `drain` | `quiesce` / `abort_workers` for `close()`, `abort_all_sync` for `Drop` |
+//! | `drain` | `quiesce` / `abort_workers` / `settle_deferred` for `close()`, `abort_all_sync` for `Drop` |
 //! | `replay` | the durable-intent replay spawned at attach |
 //!
 //! The review chronology behind these rules (J3 rounds 1-3, the estimator
@@ -96,6 +96,7 @@ pub use calibration::{
 pub use counters::{
     ApplyLatencySummary, ReplayBlockReason, WriteQueueCounters, APPLY_LATENCY_WINDOW,
 };
+pub(crate) use drain::CloseFlush;
 pub use drain::WRITE_QUEUE_DRAIN_BUDGET;
 pub(crate) use execution::{mirror_concepts, ConsumeStamp, WriteCtx};
 pub use receipts::{

@@ -9,7 +9,7 @@ async fn quiesce_settles_everything_it_could_not_apply() {
     let rig = Rig::fixture("wq-quiesce");
     let agent = AgentId::new("agent-a");
     let submitted = rig.derive(&agent, "tail concept").await;
-    let deferred = rig.pipeline.quiesce().await;
+    let deferred = rig.close_queue().await;
     let answer = rig.pipeline.lookup(&agent, submitted.receipt);
     assert!(
         answer.is_settled(),
@@ -68,7 +68,7 @@ async fn one_agents_burst_never_loses_an_acked_write_at_a_clean_close() {
         "every submission is either accepted or refused"
     );
 
-    let deferred = rig.pipeline.quiesce().await;
+    let deferred = rig.close_queue().await;
 
     // 64 accepted × 100 ms against a 2 s budget: some MUST defer — this
     // burst is deliberately larger than the budget can drain, because that
@@ -173,7 +173,7 @@ async fn a_burst_of_concepts_larger_than_the_probes_text_loses_nothing_at_a_clea
             "every submission is either accepted or refused"
         );
 
-        let deferred = rig.pipeline.quiesce().await;
+        let deferred = rig.close_queue().await;
 
         assert_eq!(
             counters.abandoned(),
@@ -286,7 +286,7 @@ async fn a_close_that_cannot_drain_defers_acked_writes_as_durable_intents() {
 
     // Every embed needs 3 s of a 2 s budget: nothing can drain, everything
     // MUST defer.
-    let deferred = rig.pipeline.quiesce().await;
+    let deferred = rig.close_queue().await;
     let counters = rig.pipeline.counters();
     assert!(deferred > 0, "a 2 s budget cannot cover a 3 s embed");
     assert_eq!(counters.deferred(), deferred as u64);
@@ -593,7 +593,7 @@ async fn a_quiesce_after_a_cancelled_abort_does_not_wait_out_the_budget() {
     // The retried close's quiesce: the stretches end within 400 ms, so a
     // quiesce that goes straight to the joins returns well inside the budget.
     let started = std::time::Instant::now();
-    let deferred = rig.pipeline.quiesce().await;
+    let deferred = rig.close_queue().await;
     let took = started.elapsed();
     assert!(
         took < WRITE_QUEUE_DRAIN_BUDGET / 2,
@@ -658,8 +658,15 @@ async fn a_wait_inside_the_close_join_sees_the_intent_durable_settle() {
 
     // A wait that starts inside the join window, raced against the rest of
     // the close.
+    // #117 review M1: the close answers the set-aside receipts only once its
+    // final flush has reported, so the race is against the abort AND that
+    // settle, as `Memory::close` runs them.
     let (deferred, answer) = tokio::join!(
-        abort,
+        async {
+            let deferred = abort.await;
+            rig.pipeline.settle_deferred(CloseFlush::Durable);
+            deferred
+        },
         rig.pipeline.wait(&agent, queued.receipt, RECEIPT_WAIT_MAX)
     );
     assert!(deferred >= 1, "the queued job was deferred by the close");
@@ -667,4 +674,67 @@ async fn a_wait_inside_the_close_join_sees_the_intent_durable_settle() {
         matches!(answer, ReceiptAnswer::IntentRecorded),
         "a wait inside the close's join answered before its settle: {answer:?}"
     );
+}
+
+/// #117 review M1: a close whose final flush does not complete must not tell
+/// a caller its write is a durable intent. The set-aside receipt answers
+/// `close_unflushed`, a wait parked on it is released with that answer, and
+/// a retried close whose flush completes upgrades it to `intent_durable`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unflushed_close_answers_close_unflushed_and_a_retry_upgrades_it() {
+    let gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let rig = Rig::hybrid(
+        "wq-close-unflushed",
+        Arc::new(HeldEmbedder {
+            gate: gate.clone(),
+            inner: FixtureEmbedder::new(),
+            calls: Arc::new(AtomicUsize::new(0)),
+        }),
+    );
+    let agent = AgentId::new("agent-a");
+    let held = rig.derive(&agent, "held concept").await;
+    assert_eq!(held.answer.tag(), "pending", "{:?}", held.answer);
+
+    // A wait that starts before the close and outlives its quiesce.
+    let waiting = rig.pipeline.wait(&agent, held.receipt, RECEIPT_WAIT_MAX);
+    let closing = async {
+        let deferred = rig.pipeline.quiesce().await;
+        // Set aside, not yet answered: the flush has not reported.
+        assert_eq!(
+            rig.pipeline.lookup(&agent, held.receipt).tag(),
+            "pending",
+            "the quiesce must not answer before the final flush reports"
+        );
+        rig.pipeline.settle_deferred(CloseFlush::Incomplete);
+        deferred
+    };
+    let (deferred, answer) = tokio::join!(closing, waiting);
+    assert_eq!(deferred, 1);
+    assert!(
+        matches!(answer, ReceiptAnswer::CloseUnflushed),
+        "an unflushed close answered {answer:?}"
+    );
+    assert!(answer.describe().contains("may or may not have been saved"));
+    assert_eq!(
+        rig.pipeline.counters().deferred(),
+        0,
+        "write_queue_deferred counts only writes the close made durable"
+    );
+
+    // A retried close: nothing new to quiesce, and its flush completes.
+    assert_eq!(
+        rig.pipeline.quiesce().await,
+        1,
+        "still set aside for the retry"
+    );
+    assert_eq!(rig.pipeline.settle_deferred(CloseFlush::Durable), 1);
+    assert!(
+        matches!(
+            rig.pipeline.lookup(&agent, held.receipt),
+            ReceiptAnswer::IntentRecorded
+        ),
+        "a retry whose flush completed must upgrade the answer"
+    );
+    assert_eq!(rig.pipeline.counters().deferred(), 1);
+    gate.add_permits(16);
 }

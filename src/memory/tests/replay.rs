@@ -692,3 +692,121 @@ async fn a_wait_on_a_replay_owed_receipt_ends_when_the_session_closes() {
         started.elapsed()
     );
 }
+
+/// A session whose acked write cannot drain (the embedder hangs on real
+/// content), over `store`, with that write admitted. For the #117 review M1
+/// tests: the write's receipt is what the close has to answer.
+async fn undrainable_write(
+    session: &str,
+    store: Arc<dyn GraphStore>,
+) -> (Memory, AgentId, crate::writeq::ReceiptId) {
+    let agent = AgentId::new("agent-a");
+    let mem = Memory::builder()
+        .session(session)
+        .agent("agent-a")
+        .flush_interval(Duration::from_secs(3_600))
+        .store(store)
+        .embedder(Arc::new(HangingEmbedder {
+            inner: FixtureEmbedder::new(),
+        }) as Arc<dyn Embedder>)
+        .embedding_contract(contract("fixture", 1024))
+        .match_strategy(MatchStrategy::Hybrid)
+        .build()
+        .await
+        .expect("build");
+    let submitted = mem
+        .derive_async_as(
+            &agent,
+            &[("user schema", ConceptType::Entity)],
+            &ParentOf::none(),
+            None,
+        )
+        .await
+        .expect("ack");
+    assert!(!submitted.dropped(), "the write must be ADMITTED");
+    (mem, agent, submitted.receipt)
+}
+
+/// #117 review M1: a close whose final flush FAILS must not answer
+/// `intent_durable` — the intent never reached the store. It answers
+/// `close_unflushed`; the retried close that does flush upgrades it, and the
+/// intent is then really in the store.
+#[tokio::test]
+async fn a_failed_final_flush_answers_close_unflushed_until_a_retry_lands_it() {
+    let inner = Arc::new(MemoryStore::new());
+    let store: Arc<dyn GraphStore> = Arc::new(FlakyStore::new(
+        Arc::new(VectorSearchable(inner.clone())) as Arc<dyn GraphStore>,
+        1,
+    ));
+    let (mem, agent, receipt) = undrainable_write("close-unflushed", store).await;
+
+    mem.close()
+        .await
+        .expect_err("the one failing flush is close's");
+    assert_eq!(
+        mem.pipeline().lookup(&agent, receipt).tag(),
+        "close_unflushed",
+        "a close whose flush failed cannot vouch for the intent"
+    );
+    assert_eq!(mem.pipeline().counters().deferred(), 0);
+    assert!(
+        inner
+            .load_session(&SessionId::new("close-unflushed"))
+            .await
+            .is_err(),
+        "and indeed nothing reached the store"
+    );
+
+    mem.close().await.expect("the store recovered");
+    assert_eq!(
+        mem.pipeline().lookup(&agent, receipt).tag(),
+        "intent_durable",
+        "the retry made the intent durable, so the answer is upgraded"
+    );
+    assert_eq!(mem.pipeline().counters().deferred(), 1);
+    let snap = inner
+        .load_session(&SessionId::new("close-unflushed"))
+        .await
+        .expect("durable now");
+    assert_eq!(snap.write_intents.len(), 1);
+}
+
+/// #117 review M1: a close on a handle that LOST its lease drops the tail,
+/// so the set-aside receipt answers `close_unflushed`, never
+/// `intent_durable`.
+#[tokio::test]
+async fn a_lease_lost_close_answers_close_unflushed() {
+    let inner = Arc::new(MemoryStore::new());
+    let session = SessionId::new("close-fenced");
+    let (mem, agent, receipt) = undrainable_write(
+        "close-fenced",
+        Arc::new(VectorSearchable(inner.clone())) as Arc<dyn GraphStore>,
+    )
+    .await;
+
+    // Let the lane worker take the job into the (hanging) embedder before the
+    // fence: a job still queued at the fence is refused by the worker's own
+    // per-job check (`failed`, its own honest message) and never reaches the
+    // close's set-aside.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    inner.force_expire_lease(&session);
+    let taker = LeaseHolder::for_this_process(&AgentId::new("agent-b"));
+    assert!(inner
+        .acquire_lease(&session, &taker, LEASE_TTL)
+        .await
+        .unwrap()
+        .is_acquired());
+    mem.simulate_lease_loss();
+
+    let err = mem.close().await.expect_err("a fenced close refuses");
+    assert!(
+        err.to_string().contains("lost its single-writer lease"),
+        "{err}"
+    );
+    assert_eq!(
+        mem.pipeline().lookup(&agent, receipt).tag(),
+        "close_unflushed",
+        "a fenced close dropped the tail and cannot vouch for the intent"
+    );
+    assert_eq!(mem.pipeline().counters().deferred(), 0);
+}

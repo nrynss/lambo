@@ -190,7 +190,7 @@ async fn a_burst_past_the_lane_bound_drops_and_counts_it() {
     }
     // A clean close accounts for every admitted job: what fits the budget
     // applies, the rest defers to durable intents — nothing abandons.
-    let deferred = rig.pipeline.quiesce().await;
+    let deferred = rig.close_queue().await;
     assert_eq!(counters.abandoned(), 0);
     assert_eq!(counters.failed(), 0);
     assert_eq!(

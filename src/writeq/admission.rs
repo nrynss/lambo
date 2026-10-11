@@ -339,14 +339,20 @@ pub(super) struct Lanes {
     /// instead of waiting out [`super::WRITE_QUEUE_DRAIN_BUDGET`]. Never
     /// cleared: lanes stay sealed, so no new worker can make it stale.
     pub(super) workers_aborted: bool,
-    /// `true` once [`WritePipeline::abort_workers`] has **settled** every
-    /// receipt it held, set under this lock just before its final
+    /// `true` once [`WritePipeline::settle_deferred`] has **settled** every
+    /// receipt the close set aside, set under this lock just before its final
     /// `notify_waiters`. Distinct from [`Lanes::workers_aborted`], which is
     /// set a whole join earlier: a receipt wait that ends at close keys on
     /// this one, or it answers `pending` for a queued job the same close is
     /// about to settle `intent_durable` (#11 review round 2, F1). Never
     /// cleared.
     pub(super) settled_at_close: bool,
+    /// Receipts [`WritePipeline::abort_workers`] set aside for
+    /// [`WritePipeline::settle_deferred`]: unsettled when the close aborted
+    /// the workers, answered once its final flush reports (#117 review M1).
+    /// Kept after an incomplete flush so a retried close that completes can
+    /// upgrade them; cleared once they are settled `intent_durable`.
+    pub(super) close_deferred: Vec<ReceiptId>,
 }
 
 impl Lanes {
