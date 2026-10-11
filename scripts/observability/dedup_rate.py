@@ -50,7 +50,8 @@ under one rule, per bucket, per agent and in TOTAL:
     figure and a partial one are three distinguishable states.
 
 With `--store <path>` the ledger's own arithmetic is checked against the SQLite
-store: created-minus-matched should land near the store's concept count. A large
+store: every concept the ledger saw created (derive's `created` plus
+`record_action`'s) should land near the store's concept count. A large
 shortfall is normally the daemon's GC having swept unreferenced concepts (the
 C1–C3 capture saw exactly this), not a broken ledger — but it should be *seen*
 rather than assumed either way. The same flag counts the store's `Semantic`
