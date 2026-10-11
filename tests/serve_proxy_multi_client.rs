@@ -1263,7 +1263,8 @@ fn a_holder_whose_lease_outlasts_the_client_budget_is_refused_at_once() {
 }
 
 /// #118, at the binary: a holder on this host whose process is gone is named as
-/// gone, with the lease's expiry and the takeover note, and is still refused.
+/// looking gone, with the lease's expiry and the takeover note, and is still
+/// refused.
 #[cfg(unix)]
 #[test]
 fn a_local_holder_whose_process_is_gone_is_named_as_gone() {
@@ -1317,9 +1318,7 @@ fn a_local_holder_whose_process_is_gone_is_named_as_gone() {
     );
     let err = String::from_utf8_lossy(&out.stderr).to_string();
     assert!(
-        err.contains(&format!(
-            "the holder process is gone: no process {dead_pid} exists"
-        )),
+        err.contains(&format!("no process {dead_pid} is visible from here")),
         "{err}"
     );
     assert!(err.contains("expires in"), "{err}");

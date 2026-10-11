@@ -7,18 +7,20 @@
 //! row's facts (when it was last refreshed, when it expires) and claims a holder
 //! is gone only on better evidence than the row:
 //!
-//! * the holder is on this host and its pid no longer exists (`kill(pid, 0)`
-//!   answers `ESRCH`), checked here; or
+//! * the holder names this host and its pid is not visible from here
+//!   (`kill(pid, 0)` answers `ESRCH`), checked here; or
 //! * `serve`'s election probed the holder's endpoint and the connect was
 //!   refused, which the caller passes in.
 //!
-//! Both are advisory. A pid can be reused and an endpoint can be slow, so
-//! neither changes what the lease does: the refusal stands until the lease
+//! Both are advisory. A pid can be reused, a host name is not a PID namespace
+//! (two containers on `--network host`, or a Kubernetes `hostNetwork` pod,
+//! share the name and not the pids), and an endpoint can be slow, so the
+//! message hedges what it infers and neither changes what the lease does: the refusal stands until the lease
 //! expires or an operator expires it by hand. Nothing here takes over.
 
 use std::time::Duration;
 
-use crate::store::lease::{detect_host, holder_host_and_pid, LeaseInfo, LEASE_TTL};
+use crate::store::lease::{detect_host, holder_host_and_pid, LeaseInfo, LEASE_TTL, UNKNOWN_HOST};
 use crate::types::SessionId;
 
 /// Where the operator override is documented, quoted in every variant.
@@ -30,7 +32,8 @@ pub(crate) enum HolderEvidence {
     /// Only the row. The holder may be alive, or dead with its lease not yet
     /// expired; the message says neither.
     RowOnly,
-    /// The holder is on this host and `pid` is not a running process.
+    /// The holder names this host and `pid` is not visible from this
+    /// process's PID namespace.
     ProcessGone { pid: u32 },
     /// `serve`'s election found the holder's endpoint refusing connections.
     EndpointRefused,
@@ -124,9 +127,10 @@ pub(crate) fn format_lease_held(
              operator can force a takeover ({TAKEOVER_NOTE})"
         ),
         HolderEvidence::ProcessGone { pid } => format!(
-            "{opening}, but the holder process is gone: no process {pid} exists on this host. \
-             Its lease ({refreshed}) expires in {expires_in}s. Refusing to open a second writer \
-             until it does; an operator can force a takeover now instead ({TAKEOVER_NOTE})"
+            "{opening}, and its process looks gone: no process {pid} is visible from here, so \
+             if the holder ran in this PID namespace it has exited. Its lease ({refreshed}) \
+             expires in {expires_in}s. Refusing to open a second writer until it does; if the \
+             holder has exited, an operator can force a takeover now instead ({TAKEOVER_NOTE})"
         ),
         HolderEvidence::EndpointRefused => format!(
             "{opening}; the lease was {refreshed} and expires in {expires_in}s, but the holder's \
@@ -138,12 +142,13 @@ pub(crate) fn format_lease_held(
 }
 
 /// The holder's pid, when the holder token names this host and no process
-/// with that pid exists. `None` whenever that cannot be established: another
-/// host, a token in another shape, this very process, or a pid that exists
-/// (including one this process may not signal).
+/// with that pid is visible. `None` whenever that cannot be established:
+/// another host, a host name that is only the fallback (so it proves nothing
+/// about sharing a host), a token in another shape, this very process, or a
+/// pid that exists (including one this process may not signal).
 fn local_holder_gone(token: &str) -> Option<u32> {
     let (host, pid) = holder_host_and_pid(token)?;
-    if pid == std::process::id() || host != detect_host() {
+    if pid == std::process::id() || host == UNKNOWN_HOST || host != detect_host() {
         return None;
     }
     process_is_gone(pid).then_some(pid)
@@ -213,9 +218,10 @@ mod tests {
         assert_eq!(
             msg,
             "session s is already held by another writer (a@h#37916) — it acquired the \
-             single-writer lease 77s ago, but the holder process is gone: no process 37916 \
-             exists on this host. Its lease (last refreshed 12s ago) expires in 33s. Refusing \
-             to open a second writer until it does; an operator can force a takeover now \
+             single-writer lease 77s ago, and its process looks gone: no process 37916 is \
+             visible from here, so if the holder ran in this PID namespace it has exited. Its \
+             lease (last refreshed 12s ago) expires in 33s. Refusing to open a second writer \
+             until it does; if the holder has exited, an operator can force a takeover now \
              instead (see the single-writer lease note in docs/reference/cli.mdx)"
         );
     }
@@ -322,5 +328,16 @@ mod tests {
         }
         // pid 1 exists on every unix (and is not ours to signal): alive.
         assert!(!process_is_gone(1));
+    }
+
+    /// #117 review M2: two processes that both fell back to the placeholder
+    /// host name share the string, not a host, so the check never fires for
+    /// it — whatever the pid.
+    #[test]
+    fn the_fallback_host_name_never_counts_as_this_host() {
+        assert_eq!(
+            local_holder_gone(&format!("a@{UNKNOWN_HOST}#{}", u32::MAX - 1)),
+            None
+        );
     }
 }

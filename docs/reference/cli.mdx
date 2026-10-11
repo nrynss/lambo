@@ -186,7 +186,7 @@ $ echo $?
 
 The same refusal covers `derive`, `derive-image`, `record-action`, `reserve`, `release`, and a second `serve`.
 
-The refusal reports what the lease row says: when the lease was last refreshed and when it expires. A row cannot tell a live holder from one that crashed before its lease expired (a lease lasts 45 seconds from its last refresh). When the holder is on the same host and its process no longer exists, the refusal says the holder process is gone and how long until the lease expires. Either way the lease is honoured until it expires or an operator takes it over as below; Lambo never takes over on its own.
+The refusal reports what the lease row says: when the lease was last refreshed and when it expires. A row cannot tell a live holder from one that crashed before its lease expired (a lease lasts 45 seconds from its last refresh). When the holder names the same host and no process with its pid is visible from here, the refusal says its process looks gone and how long until the lease expires. That check runs on Unix only, and it is a hint, not proof: a host name is not a PID namespace, so two containers sharing the host network (Docker `--network host`, a Kubernetes `hostNetwork` pod) share the name but not the pids, and a pid can be reused. Before you take over, confirm the holder has really exited. Either way the lease is honoured until it expires or an operator takes it over as below; Lambo never takes over on its own.
 
 If the holder is wedged (alive and refreshing its lease, but no longer making progress), an operator can force a takeover by expiring its lease row in the store:
 

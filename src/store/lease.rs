@@ -385,6 +385,11 @@ pub(crate) fn holder_host_and_pid(token: &str) -> Option<(&str, u32)> {
     Some((host, pid.parse().ok()?))
 }
 
+/// What [`detect_host`] answers when it cannot find a name. Two processes that
+/// both fell back to it share the string without sharing a host, so a check
+/// that compares hosts must treat it as "unknown", never as a match.
+pub(crate) const UNKNOWN_HOST: &str = "unknown-host";
+
 /// Best-effort host name, dependency-free. Only needs to distinguish hosts (see
 /// [`LeaseHolder::for_this_process`]).
 pub(crate) fn detect_host() -> String {
@@ -404,7 +409,7 @@ pub(crate) fn detect_host() -> String {
             return h;
         }
     }
-    "unknown-host".to_string()
+    UNKNOWN_HOST.to_string()
 }
 
 /// Store-agnostic lease checks every adapter runs against itself: the SQLite
