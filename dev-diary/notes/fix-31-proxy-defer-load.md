@@ -113,13 +113,73 @@ holding the key and the digest; written by temp file and rename.
 * An unreadable, corrupt or foreign entry is a miss; a failed write is logged
   at debug and only costs the next start a hash. No cache directory: hash
   every time (the old behaviour).
-* Trust: the entry is in the operator's own cache directory. Whoever can
-  rewrite it can already rewrite the weights, so it does not widen who can
-  change what the contract stamps. It trades "hash the bytes on every start"
-  (K2-R1-8) for "hash the bytes whenever their metadata changes", which is
-  what the issue asked for.
-* `CandleOpts::identity_cache_dir` overrides the directory (tests); it is not
-  a config key.
+* Trust (review L4): the directory is created 0700 and entries are written
+  0600. An entry is trusted only if both the directory and the entry are
+  owned by the effective uid and are not group- or world-writable (checked
+  with `symlink_metadata`, so a symlinked entry is a miss too); anything else
+  is a miss and the bytes are hashed. So only a process that could already
+  rewrite the weights can plant a digest.
+* **Trade-off, accepted:** it replaces "hash the bytes on every start"
+  (K2-R1-8) with "hash the bytes whenever their metadata changes", which is
+  what the issue asked for. A cache hit does not read the bytes, so silent
+  on-disk corruption that leaves the metadata unchanged (bit rot) is no
+  longer caught at start. A badly rotted safetensors file still fails to
+  load; a quietly rotted one embeds under the old identity, as it would have
+  between two starts before #31.
+* The directory is not a config key and `CandleOpts` is unchanged from 0.4.0
+  (review L5): tests reach a scratch directory through the crate-internal
+  `CandleEmbedder::deferred_in`.
+
+## The load checks the artifact again (review M2)
+
+The identity is stamped at resolve, but the load can run much later (a
+pinned session's background retry, an on-demand attach, hours or days
+after the start). `deferred` records the fingerprint of the weights (taken
+before they are hashed), `config.json` and `tokenizer.json` in the
+`LoadPlan`; `load` re-takes each and refuses on any difference with
+`EmbedError::Backend` ("changed after this process resolved its identity";
+restart to re-resolve). So the bytes on the device are always the bytes the
+stamped contract describes; a file that changed while it was being hashed
+also fails this check.
+
+## Load order and error classes (review L2, L3)
+
+`load_core` parses and configures the tokenizer first, then maps the
+weights and builds the model, so a corrupt `tokenizer.json` is refused before
+~1.1 GB is read. Classes:
+
+* `EmbedError::Backend` (permanent): a changed artifact, a tokenizer that does
+  not parse, an unsupported weight-file extension, a panicked load task.
+  `build_attach` maps it to `LamboError::Config`, so a pinned session goes to
+  `Slot::Failed` until the serve is restarted.
+* `EmbedError::Unavailable` (transient): mapping the weights or building the
+  model on the device (memory pressure, a busy or failing device).
+  `build_attach` maps it to `LamboError::EmbedUnavailable`, which the pinned
+  retry treats like an unreachable embedder: the slot stays held-elsewhere and
+  is retried every `PINNED_RETRY`.
+
+Either way the failed attach releases its lease. A one-session serve exits on
+either, as it did when the resolve failed.
+
+## The lease heartbeat starts at the acquire (review L1)
+
+Before #31 the heartbeat was spawned after the startup load. With the model
+load in the startup, acquire-to-first-refresh would have included it. The
+heartbeat now starts immediately after the acquire, under a guard that aborts
+it if the attach does not complete (an error, a shutdown abandon, the caller
+dropping the future); the `Memory` takes it over on success. A lease lost
+during the startup latches the fence, which the flush task and the write gate
+then inherit.
+
+## Keep-warm never loads (review M1)
+
+A multi-session serve arms keep-warm whether or not it holds a session, and
+the candle `embed` loads an unloaded model as a fallback. So a pinned serve
+whose sessions were all held elsewhere, or an on-demand serve with nothing
+attached, would have loaded ~1.4 GB at its first touch. `Embedder::is_prepared`
+(new, default `true`; candle returns `is_loaded`) lets `keep_warm_loop` skip
+a touch while nothing is loaded. Once a session attaches, its attach loads the
+model and the touches begin.
 
 ## Other embedder kinds
 
@@ -136,8 +196,12 @@ cheap identity in its registry arm, the heavy part in `prepare`.
 
 ## Invariants
 
-1. A serve that does not hold the lease never calls `prepare`, so never loads
-   candle weights.
+1. A serve that holds no lease never loads candle weights: it never reaches
+   `prepare` in an attach, and keep-warm skips its touches while the
+   embedder is not prepared (the only other embed a serve makes on its own).
+   Tested for the proxy (`a_proxy_never_loads_and_the_holder_loads_before_it_serves`)
+   and for a multi-session serve whose sessions are all held elsewhere, with
+   keep-warm on (`a_serve_holding_no_session_never_loads_its_model_for_keep_warm`).
 2. A holder's `prepare` completes before `build_attach` returns, before the
    write pipeline starts, and so before any handshake, recall, probe or
    replay.
@@ -165,8 +229,21 @@ cheap identity in its registry arm, the heavy part in `prepare`.
 * `mcp::serve::tests::proxy_releases_the_model::a_proxy_never_loads_and_the_holder_loads_before_it_serves`:
   through the real `serve_builder` + `resolve_role` election with a
   load-counting embedder: the proxy loads 0 times, the holder exactly once
-  and before the session is handed to the transport, and nothing embeds
-  before the load.
+  and before the session is handed to the transport, and none of the
+  holder's embeds (a real derive and recall, review L6) came before the load.
+* `mcp::serve::tests::registry::pinned_serve::a_serve_holding_no_session_never_loads_its_model_for_keep_warm`
+  (review M1): the real `serve_pinned`, every session held elsewhere,
+  keep-warm every second: 0 loads over 3.5 s; once a session is released and
+  re-attached in the background, exactly one load, by the attach.
+* `embed::keep_warm::tests::an_unprepared_embedder_is_not_touched_until_it_is_prepared`.
+* `embed::candle::tests::a_weight_file_changed_after_resolve_is_refused_at_load`
+  (review M2; also `config.json` and `tokenizer.json`).
+* `embed::candle::tests::a_corrupt_tokenizer_fails_the_load_before_the_weights`
+  (review L3).
+* `embed::candle::tests::the_identity_cache_trusts_only_private_entries`
+  (review L4).
+* `mcp::serve::tests::registry::a_transient_model_load_failure_is_retried_and_a_permanent_one_is_not`
+  (review L2).
 
 The candle tests run in CI's `embed-candle` row with no network and no cached
 weights: `embed::candle::test_artifact` writes a tiny real artifact (1024
@@ -199,5 +276,7 @@ uncached hash.
 * A proxy still creates a Metal device (to keep the K "no accelerator is a
   hard error at resolve" rule and to know `on_metal`). ~4 MB; not worth
   deferring.
-* The tokenizer is parsed at load, so a corrupt `tokenizer.json` now fails
-  the holder's attach (lease released, serve exits) rather than the resolve.
+* The tokenizer is parsed at load (first, before the weights), so a corrupt
+  `tokenizer.json` fails the holder's attach (lease released, serve exits, or
+  a pinned slot is marked failed) rather than the resolve. Parsing it at
+  resolve would put its vocabulary in every proxy's memory.

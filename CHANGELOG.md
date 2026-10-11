@@ -56,14 +56,20 @@
   inside the attach and before it serves. Measured on an M3 Pro: a proxying
   serve's embedder adds about 4 MB instead of about 1.4 GB. A session
   refused for a mismatched embedding contract no longer loads the weights
-  either. Holder startup and the first recall are unchanged, since the load
-  still finishes before the serve answers its client.
+  either, and neither does an HTTP serve that holds no session yet:
+  keep-warm skips its touch until a session has loaded the model. Holder
+  startup and the first recall are unchanged, since the load still finishes
+  before the serve answers its client. The load checks that the weight file,
+  `config.json` and `tokenizer.json` are the ones the resolve identified and
+  refuses to load changed files. A load that fails for lack of memory or a
+  busy device leaves a pinned session retrying rather than failed.
 - **The candle weight digest is cached (#31).** The contract identity hashed
   the 1.1 GB weight file on every start. The digest is now cached under
   `$XDG_CACHE_HOME/lambo/candle-identity` (else
   `~/.cache/lambo/candle-identity`), keyed by the file's path, size,
   modification and status-change times, device and inode, so a changed file
-  is hashed again. An unusable cache only costs a hash.
+  is hashed again. The directory is created private (0700), and an entry
+  another user could write is ignored. An unusable cache only costs a hash.
 
 ### Changed
 
@@ -73,11 +79,12 @@
   refuses an artifact whose `hidden_size` differs from `embedder.dim` at
   resolve instead of at its first embed. The store-authoritative checks
   (`store.vector_dim`, the store's vector width) are unchanged.
-- **`Embedder::prepare` (#31).** The `Embedder` trait has a new defaulted
-  method, `prepare`, which loads what an adapter deferred at construction.
-  `Memory` attaches await it once the lease is won; an adapter that
-  overrides nothing is unaffected. A wrapper embedder should forward it with
-  the other methods. `CandleEmbedder::deferred`, `load`, `is_loaded` and
+- **`Embedder::prepare` and `Embedder::is_prepared` (#31).** The `Embedder`
+  trait has two new defaulted methods: `prepare` loads what an adapter
+  deferred at construction, and `is_prepared` says whether that is done.
+  `Memory` attaches await `prepare` once the lease is won; an adapter that
+  overrides neither is unaffected. A wrapper embedder should forward both
+  with the other methods. `CandleEmbedder::deferred`, `load`, `is_loaded` and
   `load_count` are new; `CandleEmbedder::new` still loads eagerly.
   `lambo serve-web` loads the embedder at startup, before it listens.
 
