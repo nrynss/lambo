@@ -88,6 +88,40 @@
   `load_count` are new; `CandleEmbedder::new` still loads eagerly.
   `lambo serve-web` loads the embedder at startup, before it listens.
 
+- Concurrent hybrid derives no longer starve each other (#116). A derive
+  plans, embeds with no lock held, then commits. Its commit went ahead only
+  if nothing at all had changed in the graph since it planned. Any other
+  write in that window forced a replan, and each replan re-embedded every
+  item. After 8 replans the write failed with "hybrid derive could not
+  commit after 8 concurrent graph changes". With 8 concurrent agents, about
+  a third of writes failed this way.
+  - The commit now rechecks only what its plan read: the session's
+    embedding contract, each item's canonical key and canonical match, and
+    the concepts written since the plan that could change a semantic-merge
+    choice.
+  - A write on unrelated keys commits alongside.
+  - A write that claims the same canonical key sends the derive round
+    again, and the replan matches that concept instead of creating a
+    duplicate.
+  - A concept written since the plan that would win, tie or change the
+    merge target also sends it round again. So does a change to the target.
+  - A replan reuses every vector the derive has already embedded, so it
+    makes no embedder call for them.
+  - For a single writer, derive outcomes are unchanged.
+- A hybrid derive's commit no longer copies the whole session graph under
+  the write lock (#102). The copy cost grew with the session (10.7 ms at
+  10,000 concepts, 168 ms at 100,000) and every recall and write waited
+  behind it.
+  - The commit now writes in place and undoes every write if any step
+    fails, so a failed derive still leaves the graph, its write-behind log
+    and its epoch untouched.
+  - Matching a canonical key, and the uniqueness check on a new concept,
+    now use an index instead of scanning every concept.
+  - The commit's write-lock hold is now about 20 µs at 10,000, 50,000 and
+    100,000 concepts (release build, M3 Pro), down from 6.8 ms at 10,000
+    and 36 ms at 50,000 measured the same way.
+
+
 ## 0.4.0 (2026-10-11)
 
 ### Highlights
