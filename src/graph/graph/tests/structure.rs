@@ -128,6 +128,42 @@ fn insert_concept_enforces_partial_canonical_key_uniqueness() {
     g.assert_invariants().unwrap();
 }
 
+/// #102: the canonical-key index follows every way a concept enters, changes
+/// type, or leaves, and answers what the old whole-graph scan answered.
+#[test]
+fn the_canonical_key_index_follows_inserts_retypes_and_removals() {
+    let mut g = Graph::new(sid());
+    let i1 = interaction(1, None, 0);
+    let iid = i1.id;
+    g.insert_interaction(i1).unwrap();
+
+    let mut c = concept(1, iid, "user schema");
+    c.canonical_key = "schema user".into();
+    let cid = c.id;
+    g.insert_concept(c.clone(), iid).unwrap();
+    assert_eq!(g.concept_by_key("schema user"), Some(cid));
+    assert_eq!(g.concept_by_key("absent"), None);
+
+    // Re-upserted as an Observation (a demotion): no longer matchable.
+    let mut demoted = c.clone();
+    demoted.concept_type = ConceptType::Observation;
+    g.insert_concept(demoted, iid).unwrap();
+    assert_eq!(g.concept_by_key("schema user"), None);
+    g.assert_invariants().unwrap();
+
+    // Back to an Entity under a new key: the old key is gone.
+    let mut rekeyed = c.clone();
+    rekeyed.canonical_key = "schema account".into();
+    g.insert_concept(rekeyed, iid).unwrap();
+    assert_eq!(g.concept_by_key("schema user"), None);
+    assert_eq!(g.concept_by_key("schema account"), Some(cid));
+    g.assert_invariants().unwrap();
+
+    g.remove_node(cid).unwrap();
+    assert_eq!(g.concept_by_key("schema account"), None);
+    g.assert_invariants().unwrap();
+}
+
 #[cfg(feature = "fixtures")]
 #[test]
 fn assert_invariants_rejects_duplicate_canonical_keys_on_load() {

@@ -67,7 +67,7 @@ impl Graph {
                 )));
             }
             match g.nodes.insert(c.id, Node::Concept(c.clone())) {
-                None => {}
+                None => g.index_key(c),
                 Some(Node::Interaction(_)) => {
                     return Err(invariant(format!(
                         "concept {} id already names an interaction in snapshot",

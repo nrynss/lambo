@@ -55,6 +55,7 @@ use crate::types::{
 mod accesses;
 mod embeddings;
 mod invariants;
+mod keys;
 mod mutation_log;
 mod root_goal;
 mod snapshot;
@@ -80,6 +81,9 @@ type EdgeKey = (NodeId, NodeId, EdgeType);
 pub struct Graph {
     session_id: SessionId,
     nodes: HashMap<NodeId, Node>,
+    /// Non-`Observation` concepts by canonical key, lowest id first (#102;
+    /// see `keys.rs`). Derived from `nodes`, RAM-only.
+    concept_keys: HashMap<String, Vec<NodeId>>,
     edges: HashMap<NodeId, Edge>,
     edge_keys: HashMap<EdgeKey, NodeId>,
     out: HashMap<NodeId, HashMap<EdgeType, HashSet<NodeId>>>,
@@ -143,6 +147,7 @@ impl Graph {
         Self {
             session_id,
             nodes: HashMap::new(),
+            concept_keys: HashMap::new(),
             edges: HashMap::new(),
             edge_keys: HashMap::new(),
             out: HashMap::new(),
@@ -339,30 +344,23 @@ impl Graph {
         // (spec §7) and may legitimately share keys, so they are exempt;
         // Observation keys may shadow entity keys (grok G7 — P5 recall must
         // disambiguate by concept_type, not key uniqueness).
-        // Scaling note (grok G4): this is an O(N) scan per insert — no
-        // canonical_key index in v0.1 (deliberate cut); P4 GC should not
-        // benchmark a long-session derive against this without an index.
-        if c.concept_type != ConceptType::Observation {
-            let collision = self.nodes.iter().find_map(|(id, n)| match n {
-                Node::Concept(x)
-                    if *id != c.id
-                        && x.canonical_key == c.canonical_key
-                        && x.concept_type != ConceptType::Observation =>
-                {
-                    Some(*id)
-                }
-                _ => None,
-            });
-            if let Some(other) = collision {
-                return Err(invariant(format!(
-                    "concept {} canonical_key {:?} collides with concept {other} \
-                     (UNIQUE (session_id, canonical_key), spec §4; Observations exempt)",
-                    c.id, c.canonical_key
-                )));
-            }
+        // Answered by the canonical-key index (#102; grok G4's O(N) scan
+        // per insert is gone), which holds exactly the non-Observation
+        // concepts this gate compares against.
+        if c.concept_type != ConceptType::Observation
+            && let Some(other) = self.key_holder_other_than(&c.canonical_key, c.id)
+        {
+            return Err(invariant(format!(
+                "concept {} canonical_key {:?} collides with concept {other} \
+                 (UNIQUE (session_id, canonical_key), spec §4; Observations exempt)",
+                c.id, c.canonical_key
+            )));
         }
         let node = Node::Concept(c.clone());
-        self.nodes.insert(c.id, node.clone());
+        if let Some(Node::Concept(previous)) = self.nodes.insert(c.id, node.clone()) {
+            self.unindex_key(&previous);
+        }
+        self.index_key(&c);
         self.append_mutation(Mutation::UpsertNode { node });
 
         let edge = Edge {
@@ -455,7 +453,9 @@ impl Graph {
         for eid in incident {
             self.remove_edge(eid)?;
         }
-        self.nodes.remove(&id);
+        if let Some(Node::Concept(removed)) = self.nodes.remove(&id) {
+            self.unindex_key(&removed);
+        }
         // Issue #30: nothing left to count against; keep the dirty set bounded
         // by the live concepts even while the flush is not draining it.
         self.access_dirty.remove(&id);
