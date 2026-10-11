@@ -107,11 +107,22 @@
   pair naming the same concept twice was refused. So `parent_of: [(a, b)]`
   followed by `[(b, a)]`, a chain `a -> b -> c` followed by `(c, a)`, or
   both directions in one call, wrote a cycle into a relationship the spec
-  defines as acyclic (§5.7). The refusal is a store invariant error naming
-  the pair, the same kind `record_action` returns for a Causal or Dependency
-  cycle. It is raised when the call is accepted where the graph already
-  shows the cycle, and otherwise when the write is applied (a concurrent
-  write closed it in between).
+  defines as acyclic (§5.7). The caller is told "store error: parent_of
+  would close a Hierarchical cycle (the hierarchy must stay acyclic);
+  nothing was written"; the pair is named only in the server log. It is
+  refused when the call is accepted if the graph already shows the cycle,
+  and otherwise when the write is applied (a write applied in between
+  closed it).
+- `lambo_record_action`'s refusal of an edge that would close a Causal or
+  Dependency cycle now tells the caller so ("store error: record_action
+  would close a Causal or Dependency cycle ...; nothing was written")
+  instead of the generic "store error (the detail was logged
+  server-side)".
+- A durable write refused at replay because it would close a cycle
+  (either kind) now settles `failed` on its own, and the replay goes on.
+  Before, it stopped the replay as a session-wide fault, so every later
+  durable write of the session stayed `pending_replay` until an operator
+  intervened.
 
 ### Changed
 

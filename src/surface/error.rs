@@ -5,7 +5,19 @@
 //! message; a caller (often a model) gets only the class, and the detail goes
 //! to the operator's log at the call site.
 
-use crate::types::LamboError;
+use crate::types::{CycleKind, LamboError};
+
+/// What a caller is told when a `parent_of` pair would close a
+/// `Hierarchical` cycle. Fixed: nothing the caller sent is echoed.
+pub(crate) const HIERARCHICAL_CYCLE_REFUSAL: &str =
+    "store error: parent_of would close a Hierarchical cycle (the hierarchy must stay \
+     acyclic); nothing was written";
+
+/// What a caller is told when a `record_action` edge would close a `Causal`
+/// or `Dependency` cycle. Fixed, like the `parent_of` one.
+pub(crate) const CAUSAL_CYCLE_REFUSAL: &str =
+    "store error: record_action would close a Causal or Dependency cycle (produces, modifies \
+     and depends_on must stay acyclic); nothing was written";
 
 /// A short, detail-free class for a `Memory` failure (N4).
 ///
@@ -81,6 +93,13 @@ pub(crate) fn model_safe_message(err: &LamboError) -> String {
              embedding contract (lambo_stats) and retry"
                 .into()
         }
+        // #116 review: a cycle refusal says what was refused and that nothing
+        // was written, in fixed words; the pair it names stays in the log.
+        LamboError::Store(e) => match e.cycle_refusal_kind() {
+            Some(CycleKind::Hierarchical) => HIERARCHICAL_CYCLE_REFUSAL.into(),
+            Some(CycleKind::CausalOrDependency) => CAUSAL_CYCLE_REFUSAL.into(),
+            None => format!("{} (the detail was logged server-side)", err_class(err)),
+        },
         other => format!("{} (the detail was logged server-side)", err_class(other)),
     }
 }
@@ -88,6 +107,34 @@ pub(crate) fn model_safe_message(err: &LamboError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #116 review: a cycle refusal tells the caller what was refused in
+    /// fixed words, echoing nothing it sent; the class stays `store error`.
+    #[test]
+    fn a_cycle_refusal_says_what_was_refused_and_echoes_nothing() {
+        use crate::types::StoreError;
+        let pair = LamboError::Store(StoreError::cycle_refusal(
+            CycleKind::Hierarchical,
+            "parent_of pair (/srv/secret, b) would close a Hierarchical cycle",
+        ));
+        assert_eq!(model_safe_message(&pair), HIERARCHICAL_CYCLE_REFUSAL);
+        assert_eq!(err_class(&pair), "store error");
+        let action = LamboError::Store(StoreError::cycle_refusal(
+            CycleKind::CausalOrDependency,
+            "Causal edge x -> /srv/secret would create a cycle",
+        ));
+        assert_eq!(model_safe_message(&action), CAUSAL_CYCLE_REFUSAL);
+        for msg in [model_safe_message(&pair), model_safe_message(&action)] {
+            assert!(!msg.contains("/srv"), "{msg}");
+            assert!(msg.ends_with("nothing was written"), "{msg}");
+        }
+        // Any other invariant is still the bare class.
+        let other = LamboError::Store(StoreError::Invariant("temporal chain broken".into()));
+        assert_eq!(
+            model_safe_message(&other),
+            "store error (the detail was logged server-side)"
+        );
+    }
 
     /// #22 PR 4: the image-id collision names the fix and the caller's own
     /// id, and nothing else; every other error is still a bare class.

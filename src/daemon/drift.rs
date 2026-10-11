@@ -684,9 +684,10 @@ mod tests {
 
     #[test]
     fn detection_is_cycle_safe_on_writable_hierarchical_cycle() {
-        // G6: multi-hop Hierarchical cycles are writable across calls
-        // (only self-loops are rejected at write). The BFS must terminate and
-        // still report the planted drift beyond a cycle.
+        // G6: multi-hop Hierarchical cycles were writable across calls until
+        // derive refused them (#116 review), and a store written before that
+        // can still hold one. The BFS must terminate and still report the
+        // planted drift beyond a cycle.
         let (mut g, _, chain) = chain_graph(2);
         // A->B->C->A Hierarchical cycle attached to the terminal node.
         let iid = g.interactions().next().unwrap().id;

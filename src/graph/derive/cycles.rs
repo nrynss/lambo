@@ -40,11 +40,14 @@ enum End {
 }
 
 fn cycle_error(parent: &str, child: &str) -> LamboError {
-    LamboError::Store(StoreError::cycle_refusal(format!(
-        "parent_of pair ({parent}, {child}) would close a Hierarchical cycle: {child:?} is \
+    LamboError::Store(StoreError::cycle_refusal(
+        crate::types::CycleKind::Hierarchical,
+        format!(
+            "parent_of pair ({parent}, {child}) would close a Hierarchical cycle: {child:?} is \
          already an ancestor of {parent:?}. Hierarchical edges form a DAG (spec §5.7); \
          nothing was written"
-    )))
+        ),
+    ))
 }
 
 /// Refuse a call whose `parent_of` pairs, together with the graph's

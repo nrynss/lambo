@@ -1624,16 +1624,27 @@ impl StoreError {
     /// detail N4 hides, and both are fixed by re-reading the contract and
     /// retrying, which a bare "store error" does not say (#22 PR 6 review
     /// Low 1). The class stays `store error`.
-    /// The prefix every write-time cycle refusal's message starts with: a
-    /// `parent_of` pair that would close a `Hierarchical` cycle, or a
-    /// `record_action` edge that would close a `Causal`/`Dependency` one.
+    /// The prefix every write-time cycle refusal's message starts with,
+    /// followed by its [`CycleKind`]'s tag.
     const CYCLE_REFUSAL: &'static str = "refused: the write would close a cycle: ";
 
     /// A cycle refusal (see [`StoreError::is_cycle_refusal`]): an
-    /// [`StoreError::Invariant`] whose message is [`Self::CYCLE_REFUSAL`]
-    /// followed by `detail`, which names the pair for the operator's log.
-    pub(crate) fn cycle_refusal(detail: impl std::fmt::Display) -> StoreError {
-        StoreError::Invariant(format!("{}{detail}", Self::CYCLE_REFUSAL))
+    /// [`StoreError::Invariant`] whose message is [`Self::CYCLE_REFUSAL`],
+    /// the kind's tag, then `detail`, which names the pair for the
+    /// operator's log and never reaches a model.
+    pub(crate) fn cycle_refusal(kind: CycleKind, detail: impl std::fmt::Display) -> StoreError {
+        StoreError::Invariant(format!("{}{}{detail}", Self::CYCLE_REFUSAL, kind.tag()))
+    }
+
+    /// Which cycle a [cycle refusal](Self::is_cycle_refusal) is about.
+    pub(crate) fn cycle_refusal_kind(&self) -> Option<CycleKind> {
+        let StoreError::Invariant(m) = self else {
+            return None;
+        };
+        let rest = m.strip_prefix(Self::CYCLE_REFUSAL)?;
+        [CycleKind::Hierarchical, CycleKind::CausalOrDependency]
+            .into_iter()
+            .find(|k| rest.starts_with(k.tag()))
     }
 
     /// Whether this is a write refused because it would close a cycle in an
@@ -1648,13 +1659,32 @@ impl StoreError {
     /// both producers build it through [`Self::cycle_refusal`], so the
     /// variant stays `Invariant` and no public enum gains a member.
     pub fn is_cycle_refusal(&self) -> bool {
-        matches!(self, StoreError::Invariant(m) if m.starts_with(Self::CYCLE_REFUSAL))
+        self.cycle_refusal_kind().is_some()
     }
 
     pub fn is_embedding_contract_refusal(&self) -> bool {
         matches!(self, StoreError::Invariant(m)
             if m.starts_with("vector candidate lookup refused after embedding contract changed")
                 || m.starts_with("query embedding has "))
+    }
+}
+
+/// The acyclic edge family a [cycle refusal](StoreError::is_cycle_refusal)
+/// protects.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CycleKind {
+    /// `parent_of` (`Hierarchical`), from derive.
+    Hierarchical,
+    /// `record_action`'s `Causal` and `Dependency` edges.
+    CausalOrDependency,
+}
+
+impl CycleKind {
+    fn tag(self) -> &'static str {
+        match self {
+            CycleKind::Hierarchical => "[hierarchical] ",
+            CycleKind::CausalOrDependency => "[causal/dependency] ",
+        }
     }
 }
 
@@ -1753,7 +1783,14 @@ mod tests {
     /// any other `Invariant` (which can mean an inconsistent graph) is not.
     #[test]
     fn only_cycle_refusals_are_marked_as_cycle_refusals() {
-        assert!(StoreError::cycle_refusal("Causal edge a -> b").is_cycle_refusal());
+        assert!(
+            StoreError::cycle_refusal(CycleKind::CausalOrDependency, "Causal edge a -> b")
+                .is_cycle_refusal()
+        );
+        assert_eq!(
+            StoreError::cycle_refusal(CycleKind::Hierarchical, "pair").cycle_refusal_kind(),
+            Some(CycleKind::Hierarchical)
+        );
         assert!(!StoreError::Invariant("temporal chain covers 1 of 2".into()).is_cycle_refusal());
         assert!(!StoreError::Invariant("would close a cycle".into()).is_cycle_refusal());
         assert!(

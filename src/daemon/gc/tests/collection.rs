@@ -425,8 +425,9 @@ fn protected_classes_survive_disconnected_component() {
 #[test]
 fn disconnected_bfs_is_cycle_safe() {
     // A Hierarchical cycle in a component with no path to the temporal
-    // chain (G6: multi-hop Hierarchical cycles are writable; the BFS must
-    // terminate and collect the whole component).
+    // chain (G6: multi-hop Hierarchical cycles were writable before derive
+    // refused them, so a loaded store can hold one; the BFS must terminate
+    // and collect the whole component).
     let mut g = Graph::new(sid());
     let i1 = interaction(1, None);
     let iid = i1.id;

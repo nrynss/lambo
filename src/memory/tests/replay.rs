@@ -704,6 +704,19 @@ async fn a_cycle_refused_at_replay_settles_failed_and_the_replay_goes_on() {
             "applied_after_restart"
         ]
     );
+    for (receipt, said) in [
+        (
+            closing_pair,
+            crate::surface::error::HIERARCHICAL_CYCLE_REFUSAL,
+        ),
+        (closing_action, crate::surface::error::CAUSAL_CYCLE_REFUSAL),
+    ] {
+        let answer = format!("{:?}", mem2.pipeline().lookup(&agent, receipt));
+        assert!(
+            answer.contains(said),
+            "the receipt says why, model-safe: {answer}"
+        );
+    }
     assert_eq!(mem2.pipeline().counters().replay_owed(), 0);
     assert!(matches!(
         mem2.pipeline().counters().replay_blocked(),
