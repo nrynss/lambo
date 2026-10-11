@@ -13,7 +13,8 @@ paths, session and protected directories are arguments, and the reasons a
 difference is expected are data (see "Classification" below).
 
 Approach (truncate-and-replay):
-  1. Copy the snapshot read-only (`sqlite3 "file:SRC?mode=ro" ".backup DST"`).
+  1. Copy the snapshot read-only (the sqlite3 module's backup API on a
+     `file:...?mode=ro` URI).
   2. Pick the last N write calls ("groups") in the snapshot. One interaction row
      is one lambo_derive or lambo_record_action call. T = created_at of the
      first of them.
@@ -48,33 +49,44 @@ Approach (truncate-and-replay):
      the daemon timer; there is no CLI trigger), take one lambo_stats, close
      stdin, and read final counts from each copy with sqlite3.
 
-Classification: every differing call gets one or more reason ids from fixed
-detectors in classify() (receipt fields, merge targets, refusal text). Whether
-a reason id is EXPECTED, and what CHANGELOG entry explains it, is data: a
-catalogue mapping id -> {label, expected, ref}. The built-in catalogue,
-REASONS_0_4_0, is the 0.4.0 CHANGELOG mapping used for the 0.4.0 vs 0.3.0
-run. A later release passes --reasons FILE (JSON, same shape) whose entries
-override or extend it; an entry may set "expected": false to retire a reason.
-`state_differs` entries may carry a "detail_pattern" regex matched against the
-refusal text, so a release can name why a call is now refused. A reason id
-not in the catalogue, marked unexpected, or produced by no detector at all is
-reported as UNEXPECTED, and the script exits 1 when any call is UNEXPECTED.
+Classification: every differing call gets reason ids from detectors in
+classify() that run independently; each id accounts for a set of compared
+fields (EXPLAINS), and any differing field no fired id accounts for becomes
+its own UNEXPECTED id, "unexplained:<field>". Whether a reason id is
+EXPECTED, and what CHANGELOG entry explains it, is data: a catalogue mapping
+id -> {label, expected, ref}. The built-in catalogue, REASONS_0_4_0, is the
+0.4.0 CHANGELOG mapping used for the 0.4.0 vs 0.3.0 run. A later release
+passes --reasons FILE (see load_catalogue for the format and validation).
+`state_differs` entries match the exact server refusal text in a given
+direction (default: A applied, B refused). A reason id not in the catalogue,
+marked unexpected, or produced by no detector is UNEXPECTED.
+
+Verdict and exit status: 0 pass; 1 fail, when any differing call is
+UNEXPECTED, more than --max-not-applied of the calls applied on neither side,
+any result never settled (pending, transport error, not run), or a serve
+exited non-zero. Canonization, unembedded and content-diff differences are
+listed as notes in the verdict. parity.txt opens with the verdict.
 
 Output: <out>/parity.json and <out>/parity.txt hold aggregates: totals, store
 counts, canonization counts, and differing calls grouped by reason. Concept
-text is omitted unless --include-content is passed, so <out> can be committed
-as evidence. Everything that holds store content (snapshot and replay copies,
-reconstructed calls, per-side results, stderr logs, JSON-RPC transcripts) goes
-to --work (default: a fresh temp directory, outside any checkout); never
-commit that directory.
+text and raw refusal text are omitted (refusals are reduced to known-message
+ids or error classes, in the log too) unless --include-content is passed, so
+<out> can be committed as evidence. Everything that holds store content
+(snapshot and replay copies, reconstructed calls, per-side results, stderr
+logs, JSON-RPC transcripts) goes to --work: by default a fresh 0700 temp
+directory removed at exit (--keep-work keeps it); a given --work is created
+0700 when missing. Never commit it.
 
 Tool-call budget: 2 per replayed call (write + receipt wait, more only while a
 receipt stays pending) plus 1 final lambo_stats, per side.
 
-Stdlib only. Opens the snapshot read-only, never writes under a --protect
-directory (default ~/lambo-dogfood, the live dogfood rig), refuses a snapshot
-named like a live store unless --allow-live-name, and never uses the HTTP
-transport.
+Stdlib only. Opens the snapshot read-only; never writes under ~/lambo-dogfood
+(the live dogfood rig) or any extra --protect directory; refuses a snapshot
+named like a live store unless --allow-live-name; requires a sqlite [store]
+in the config template, drops any dsn, and strips store-redirecting LAMBO_*
+variables (LAMBO_CONFIG, LAMBO_STORE*, LAMBO_SQLITE_*, LAMBO_POSTGRES_*,
+LAMBO_COCKROACH_*, LAMBO_*_DSN) from the children's environment; never uses
+the HTTP transport.
 """
 
 import argparse
@@ -90,7 +102,12 @@ import sys
 import tempfile
 import threading
 import time
+import tomllib
+import urllib.parse
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from mcp_concurrent import KNOWN_MESSAGES, reason_key  # noqa: E402  (sibling module)
 
 DEFAULT_PROTECT = Path.home() / "lambo-dogfood"
 # A snapshot whose file name starts with one of these is taken to be a live
@@ -118,8 +135,14 @@ def under(path, root):
         return False
 
 
+def ro_uri(path):
+    """A read-only SQLite URI for path, percent-escaped so '?', '#' or '%' in
+    a file name cannot change the URI's meaning."""
+    return f"file:{urllib.parse.quote(str(Path(path).resolve()))}?mode=ro"
+
+
 def ro_connect(path):
-    return sqlite3.connect(f"file:{Path(path).resolve()}?mode=ro", uri=True)
+    return sqlite3.connect(ro_uri(path), uri=True)
 
 
 def loose(text):
@@ -350,8 +373,17 @@ def make_variants(calls, k):
 # ---------------------------------------------------------------------------
 
 def sqlite_backup(src, dst, src_readonly=True):
-    src_arg = f"file:{Path(src).resolve()}?mode=ro" if src_readonly else str(src)
-    subprocess.run(["sqlite3", src_arg, f".backup '{dst}'"], check=True)
+    """Online backup of src into dst with the sqlite3 module's backup API (no
+    shell, so no quoting of paths). src is opened read-only by default."""
+    s = ro_connect(src) if src_readonly else sqlite3.connect(str(src))
+    try:
+        d = sqlite3.connect(str(dst))
+        try:
+            s.backup(d)
+        finally:
+            d.close()
+    finally:
+        s.close()
 
 
 def truncate(db_path, T):
@@ -394,30 +426,65 @@ def truncate(db_path, T):
 
 
 def write_config(template, db_path, cfg_out, canon_secs, gc_secs, protect=()):
+    """Copy the template with [store] repointed at db_path.
+
+    The template must be valid TOML with store.kind == "sqlite" (a replay
+    never runs against a server store); any dsn key in [store] is dropped.
+    The result is re-parsed and checked: kind sqlite, path == db_path, no dsn,
+    and the path not under a protected directory.
+    """
     text = Path(template).read_text()
+    try:
+        parsed = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as e:
+        raise SystemExit(f"config template is not valid TOML: {e}")
+    store = parsed.get("store")
+    if not isinstance(store, dict) or store.get("kind") != "sqlite":
+        raise SystemExit("refusing: config template [store] kind must be \"sqlite\" "
+                         f"(got {(store or {}).get('kind')!r})")
     lines, section, done = [], None, False
     for ln in text.splitlines():
         m = re.match(r"\s*\[\[?([A-Za-z0-9_.]+)\]?\]\s*$", ln)
         if m:
             section = m.group(1)
         if section == "store" and re.match(r"\s*path\s*=", ln):
-            ln = f'path = "{db_path}"'
+            ln = f"path = {json.dumps(str(db_path))}"
             done = True
+        elif section == "store" and re.match(r"\s*\"?dsn\"?\s*=", ln):
+            continue
         lines.append(ln)
     if not done:
         raise SystemExit("config template has no [store] path")
-    if re.search(r"^\s*\[daemon\]", text, re.M):
+    if isinstance(parsed.get("daemon"), dict):
         log("config template already has [daemon]; leaving it as is")
     else:
         lines += ["", "# replay_parity: deterministic daemon cadence for the replay copy",
                   "[daemon]", f"canonization_eval_interval_secs = {canon_secs}",
                   f"gc_max_interval_secs = {gc_secs}"]
     out = "\n".join(lines) + "\n"
-    store_sec = out.split("[store]", 1)[1].split("\n[", 1)[0]
+    try:
+        st = tomllib.loads(out)["store"]
+    except (tomllib.TOMLDecodeError, KeyError) as e:
+        raise SystemExit(f"rewritten config does not parse: {e}")
+    if st.get("kind") != "sqlite" or st.get("path") != str(db_path) or "dsn" in st:
+        raise SystemExit("refusing: rewritten [store] is not exactly the replay copy")
     for root in protect:
-        if str(Path(root).expanduser().resolve()) in store_sec or under(db_path, root):
+        if under(st["path"], root):
             raise SystemExit(f"refusing: rewritten [store] points under protected {root}")
     Path(cfg_out).write_text(out)
+
+
+# Environment that could point a child lambo at another store or config.
+_STORE_ENV = re.compile(r"^LAMBO_(CONFIG|STORE.*|SQLITE_.*|POSTGRES_.*|COCKROACH_.*|.*_DSN)$")
+
+
+def child_env(environ, **extra):
+    """environ minus every variable that could redirect the store or config
+    (LAMBO_CONFIG, LAMBO_STORE*, LAMBO_SQLITE_*, LAMBO_POSTGRES_*,
+    LAMBO_COCKROACH_*, LAMBO_*_DSN), plus extra."""
+    env = {k: v for k, v in environ.items() if not _STORE_ENV.match(k)}
+    env.update(extra)
+    return env
 
 
 def store_counts(db_path):
@@ -497,26 +564,41 @@ class Serve:
         # A fresh, short XDG_RUNTIME_DIR per serve (a unix socket path must
         # stay short, hence a short parent), removed on close.
         self.rt = tempfile.mkdtemp(prefix="lbrp.", dir=runtime_parent)
-        env = dict(os.environ, XDG_RUNTIME_DIR=self.rt)
-        env.pop("LAMBO_CONFIG", None)
-        self.errf = open(Path(workdir) / "serve.stderr.log", "w")
-        self.transcript = open(Path(workdir) / "rpc.jsonl", "w")
-        self.p = subprocess.Popen(
-            [binary, "serve", "--transport", "stdio", "--config", str(cfg),
-             "--session", session, "--agent", "replay"],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.errf,
-            env=env, cwd=workdir, text=True, bufsize=1)
+        self.errf = self.transcript = None
+        self.tlock = threading.Lock()
+        try:
+            env = child_env(os.environ, XDG_RUNTIME_DIR=self.rt)
+            self.errf = open(Path(workdir) / "serve.stderr.log", "w")
+            self.transcript = open(Path(workdir) / "rpc.jsonl", "w")
+            self.p = subprocess.Popen(
+                [binary, "serve", "--transport", "stdio", "--config", str(cfg),
+                 "--session", session, "--agent", "replay"],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.errf,
+                env=env, cwd=workdir, text=True, bufsize=1)
+        except BaseException:
+            for f in (self.errf, self.transcript):
+                if f:
+                    f.close()
+            shutil.rmtree(self.rt, ignore_errors=True)
+            raise
         self.q = queue.Queue()
         self.next_id = 1
         self.tool_calls = 0
-        threading.Thread(target=self._reader, daemon=True).start()
+        self.reader = threading.Thread(target=self._reader, daemon=True)
+        self.reader.start()
+
+    def _log_line(self, direction, line):
+        with self.tlock:
+            if self.transcript and not self.transcript.closed:
+                self.transcript.write(json.dumps({"dir": direction, "t": time.time(),
+                                                  "line": line}) + "\n")
 
     def _reader(self):
         for line in self.p.stdout:
             line = line.strip()
             if not line:
                 continue
-            self.transcript.write(json.dumps({"dir": "in", "t": time.time(), "line": line}) + "\n")
+            self._log_line("in", line)
             try:
                 self.q.put(json.loads(line))
             except ValueError:
@@ -525,7 +607,7 @@ class Serve:
 
     def send(self, obj):
         s = json.dumps(obj)
-        self.transcript.write(json.dumps({"dir": "out", "t": time.time(), "line": s}) + "\n")
+        self._log_line("out", s)
         self.p.stdin.write(s + "\n")
         self.p.stdin.flush()
 
@@ -578,8 +660,12 @@ class Serve:
             except subprocess.TimeoutExpired:
                 self.p.kill()
                 rc = self.p.wait()
+        # stdout hits EOF once the process is gone; let the reader finish
+        # before its transcript is closed.
+        self.reader.join(timeout=10)
+        with self.tlock:
+            self.transcript.close()
         self.errf.close()
-        self.transcript.close()
         shutil.rmtree(self.rt, ignore_errors=True)
         return rc
 
@@ -627,7 +713,7 @@ def run_side(label, binary, base_db, template, workdir, calls, T, a):
     # refuses to serve an unmigrated store). provision builds no embedder.
     pv = subprocess.run([str(binary), "provision", "--config", str(cfg)],
                         capture_output=True, text=True, cwd=workdir,
-                        env={k: v for k, v in os.environ.items() if k != "LAMBO_CONFIG"})
+                        env=child_env(os.environ))
     (workdir / "provision.log").write_text(pv.stdout + pv.stderr)
     if pv.returncode != 0:
         raise SystemExit(f"[{label}] provision failed: {(pv.stdout + pv.stderr)[-500:]}")
@@ -652,7 +738,8 @@ def run_side(label, binary, base_db, template, workdir, calls, T, a):
             if ack["is_error"]:
                 rec.update(state="refused", detail=ack["text"][:2000])
                 results.append(rec)
-                log(f"[{label}] {i + 1}/{len(calls)} {c['tool']} refused: {ack['text'][:160]}")
+                why = reason_key(ack["text"], raw=a.include_content)
+                log(f"[{label}] {i + 1}/{len(calls)} {c['tool']} refused: {why}")
                 continue
             receipt = receipt_of(ack)
             if not receipt:
@@ -695,12 +782,20 @@ def run_side(label, binary, base_db, template, workdir, calls, T, a):
             "store": store_counts(db), "facts": replay_facts(db, T)}
 
 
+
+
 # ---------------------------------------------------------------------------
 # Comparison
 # ---------------------------------------------------------------------------
 
 FIELDS = ("state", "created_count", "matched_count", "semantic_merged", "reinforced",
           "edges", "embedded")
+# Content-level fields compared besides FIELDS (lists of concept text).
+CONTENT_FIELDS = ("created", "matched", "merges")
+APPLIED_STATES = {"applied", "applied_after_restart"}
+# Results that are an answer (the replay of that call finished).
+SETTLED_RESULT_STATES = TERMINAL_STATES | {"refused"}
+DIRECTIONS = ("b_refuses", "a_refuses", "any")
 
 
 def summary_of(r):
@@ -711,23 +806,34 @@ def summary_of(r):
     return out
 
 
-# Reason catalogue: reason id -> {label, expected, ref[, kind, detail_pattern]}.
+_KNOWN = dict(KNOWN_MESSAGES)
+
+# Reason catalogue: reason id -> {label, expected, ref[, kind, detail_pattern,
+# direction]}.
 #
 # THIS BUILT-IN CATALOGUE IS 0.4.0-SPECIFIC: it is the 0.4.0 CHANGELOG mapping
 # used for the 0.4.0 vs 0.3.0 run (evidence/0.4.0-vs-0.3.0-load/). A later
 # release passes --reasons FILE with its own entries (see load_catalogue). A
 # reason id that is absent here, or present with "expected": false, is
-# reported as UNEXPECTED.
+# reported as UNEXPECTED. state_differs patterns are the exact server texts
+# (shared with mcp_concurrent.KNOWN_MESSAGES), never loose keywords: refusal
+# text can echo caller content.
 REASONS_0_4_0 = {
     "state_differs:image_suffix": {
-        "kind": "state_differs", "detail_pattern": r"(?i)image",
+        "kind": "state_differs", "direction": "b_refuses",
+        "detail_pattern": _KNOWN["image_suffix_refused"],
         "label": "derived text carries an [image:<id>]-shaped token, refused by design",
         "expected": True, "ref": "0.4.0 CHANGELOG, #22 PR 4"},
-    "state_differs:refusal_limits": {
-        "kind": "state_differs",
-        "detail_pattern": r"(?i)(context|MAX_HYBRID_EMBEDS|too many|too large|exceeds|MiB)",
-        "label": "refusal rules changed (#74 context cap / MAX_HYBRID_EMBEDS=256 / 4 MiB cap)",
+    "state_differs:embed_context_cap": {
+        "kind": "state_differs", "direction": "b_refuses",
+        "detail_pattern": _KNOWN["hybrid_embed_context_cap"],
+        "label": "hybrid derive context cap (refused before the write)",
         "expected": True, "ref": "0.4.0 CHANGELOG, #74"},
+    "state_differs:embed_budget": {
+        "kind": "state_differs", "direction": "b_refuses",
+        "detail_pattern": _KNOWN["hybrid_embed_budget"],
+        "label": "hybrid derive embed budget (MAX_HYBRID_EMBEDS = 256)",
+        "expected": True, "ref": "0.4.0 CHANGELOG"},
     "receipt_gains_embedded": {
         "label": "record_action receipt gains `embedded` (receipt only, not the store)",
         "expected": True, "ref": "0.4.0 CHANGELOG"},
@@ -748,30 +854,84 @@ REASONS_0_4_0 = {
         "label": "canonical-key change for invisible codepoints",
         "expected": True, "ref": "0.4.0 CHANGELOG, #25"},
     "reinforced_cascade": {
-        "label": "reinforced differs: edge state diverged after an earlier differing call",
+        "label": "reinforced differs after an earlier differing call (edge state diverged)",
         "expected": True, "ref": "consequence of an earlier difference"},
 }
 BUILTIN_CATALOGUES = {"0.4.0": REASONS_0_4_0}
 
 # Detector ids that are never in a catalogue: always UNEXPECTED.
 UNEXPECTED_IDS = {
-    "state_differs": "write outcome differs, refusal text matches no catalogued reason",
-    "canonical_match_differs": "canonical match differs without a merge change",
+    "state_differs": "write outcome differs; no catalogued reason matches the refusal "
+                     "text in this direction",
+    "canonical_match_differs": "canonical match differs (not an invisible-codepoint key change)",
     "action_edges_differ": "record_action edge count differs",
+    "created_differs": "created concepts differ with no merge or canonical change to explain it",
+    "reinforced_differs": "reinforced differs with no earlier differing call",
     "unclassified": "differs, no detector fired",
 }
+# Which compared fields each detector id accounts for. A field that differs
+# and no fired id accounts for becomes its own UNEXPECTED id,
+# "unexplained:<field>". A state_differs* id accounts for every field.
+EXPLAINS = {
+    "receipt_gains_embedded": {"embedded"},
+    "parent_of_ends_embedded": {"embedded"},
+    "parent_of_embedded_differs": {"embedded"},
+    "merge_into_replayed_concept": {"semantic_merged", "merges", "created_count", "created",
+                                    "embedded"},
+    "merge_differs_pre_t": {"semantic_merged", "merges", "created_count", "created",
+                            "embedded"},
+    "canonical_key_invisible": {"matched_count", "matched", "created_count", "created",
+                                "embedded"},
+    "canonical_match_differs": {"matched_count", "matched"},
+    "reinforced_cascade": {"reinforced"},
+    "reinforced_differs": {"reinforced"},
+    "action_edges_differ": {"edges"},
+    "created_differs": {"created_count", "created"},
+}
+
+
+def _validate_entry(path, rid, e):
+    if not isinstance(e, dict):
+        raise SystemExit(f"{path}: reason {rid!r} must be an object")
+    if not isinstance(e.get("label"), str):
+        raise SystemExit(f"{path}: reason {rid!r} needs a string 'label'")
+    if not isinstance(e.get("expected"), bool):
+        raise SystemExit(f"{path}: reason {rid!r} needs 'expected' as true or false")
+    if "ref" in e and e["ref"] is not None and not isinstance(e["ref"], str):
+        raise SystemExit(f"{path}: reason {rid!r}: 'ref' must be a string")
+    if rid.startswith("state_differs") and e.get("kind") != "state_differs":
+        raise SystemExit(f"{path}: reason {rid!r} needs \"kind\": \"state_differs\"")
+    if e.get("kind") not in (None, "state_differs"):
+        raise SystemExit(f"{path}: reason {rid!r}: unknown kind {e['kind']!r}")
+    if e.get("kind") == "state_differs":
+        if not isinstance(e.get("detail_pattern"), str) or not e["detail_pattern"]:
+            raise SystemExit(f"{path}: reason {rid!r} needs a 'detail_pattern'")
+        try:
+            re.compile(e["detail_pattern"])
+        except re.error as err:
+            raise SystemExit(f"{path}: reason {rid!r}: bad detail_pattern: {err}")
+        if e.get("direction", "b_refuses") not in DIRECTIONS:
+            raise SystemExit(f"{path}: reason {rid!r}: direction must be one of {DIRECTIONS}")
 
 
 def load_catalogue(path=None):
     """(catalogue dict, description). No path: the built-in 0.4.0 catalogue.
 
-    A file is JSON: {"base": "0.4.0" | null, "reasons": {id: {...}}}. With a
-    base, its entries are laid over that built-in catalogue (override or
-    extend; set "expected": false to retire one); without, they replace it.
+    A file is JSON: {"base": "0.4.0", "reasons": {id: {...}}}. With "base",
+    its entries are laid over that built-in catalogue (an entry replaces the
+    built-in one of the same id; set "expected": false to retire one). With
+    no "base" key (or null), the file's entries replace the built-in
+    catalogue entirely. Every entry needs a string "label" and a boolean
+    "expected"; a state_differs entry also needs "kind": "state_differs" and
+    a "detail_pattern" regex, and may set "direction" (b_refuses, the
+    default: A applied and B did not; a_refuses; any).
     """
     if not path:
         return dict(REASONS_0_4_0), "builtin 0.4.0"
-    d = json.loads(Path(path).read_text())
+    try:
+        d = json.loads(Path(path).read_text())
+    except ValueError as e:
+        raise SystemExit(f"{path}: not JSON: {e}")
     if not isinstance(d, dict) or not isinstance(d.get("reasons"), dict):
         raise SystemExit(f"{path}: expected an object with a 'reasons' object")
     base = d.get("base")
@@ -779,19 +939,27 @@ def load_catalogue(path=None):
         raise SystemExit(f"{path}: unknown base {base!r} (have {sorted(BUILTIN_CATALOGUES)})")
     cat = dict(BUILTIN_CATALOGUES[base]) if base else {}
     for rid, entry in d["reasons"].items():
-        if not isinstance(entry, dict) or "label" not in entry:
-            raise SystemExit(f"{path}: reason {rid!r} needs an object with a 'label'")
-        if entry.get("detail_pattern"):
-            re.compile(entry["detail_pattern"])
-        cat[rid] = {**cat.get(rid, {}), **entry}
+        _validate_entry(path, rid, entry)
+        cat[rid] = dict(entry)
     return cat, f"{path} (base {base})" if base else str(path)
 
 
-def state_reason(catalogue, detail):
-    """The catalogue id of a state difference whose refusal text is `detail`."""
+def _direction_ok(direction, sa_state, sb_state):
+    a_ok, b_ok = sa_state in APPLIED_STATES, sb_state in APPLIED_STATES
+    if direction == "b_refuses":
+        return a_ok and not b_ok
+    if direction == "a_refuses":
+        return b_ok and not a_ok
+    return True
+
+
+def state_reason(catalogue, detail, sa_state, sb_state):
+    """The catalogue id of a state difference: the first state_differs entry
+    (by id) whose direction holds and whose pattern matches the refusal text."""
     for rid in sorted(catalogue):
         e = catalogue[rid]
         if (e.get("kind") == "state_differs" and e.get("detail_pattern")
+                and _direction_ok(e.get("direction", "b_refuses"), sa_state, sb_state)
                 and re.search(e["detail_pattern"], detail or "")):
             return rid
     return "state_differs"
@@ -800,17 +968,37 @@ def state_reason(catalogue, detail):
 INVISIBLE_RE = re.compile("[​-‏⁠-⁤﻿­͏]")
 
 
-def classify(call, sa, sb, ra, rb, T, catalogue):
-    """Reason ids for one differing call (detectors only; no expectations)."""
-    if sa["state"] != sb["state"]:
-        if sb["state"] != "applied":
+def differing_fields(sa, sb, ra, rb):
+    """Every compared field whose value differs between the sides."""
+    out = {f for f in FIELDS if sa.get(f) != sb.get(f)}
+    if sorted(ra.get("created") or []) != sorted(rb.get("created") or []):
+        out.add("created")
+    if sorted(ra.get("matched") or []) != sorted(rb.get("matched") or []):
+        out.add("matched")
+    if (sorted(map(json.dumps, ra.get("semantic_merges") or []))
+            != sorted(map(json.dumps, rb.get("semantic_merges") or []))):
+        out.add("merges")
+    return out
+
+
+def classify(call, sa, sb, ra, rb, T, catalogue, prior_diff=False):
+    """Reason ids for one differing call.
+
+    Every detector runs independently. Afterwards each differing field that
+    no fired id accounts for (EXPLAINS) adds "unexplained:<field>", so an
+    expected reason can never mask an unexpected difference. prior_diff says
+    whether an earlier call already differed (reinforced cascade).
+    """
+    diff = differing_fields(sa, sb, ra, rb)
+    if "state" in diff:
+        if sb["state"] not in APPLIED_STATES:
             detail = rb.get("detail") or (rb.get("receipt") or {}).get("detail") or ""
         else:
             detail = ra.get("detail") or (ra.get("receipt") or {}).get("detail") or ""
-        return [state_reason(catalogue, detail)]
+        return [state_reason(catalogue, detail, sa["state"], sb["state"])]
     ids = []
     ends = call.get("parent_of_only_ends_created") or 0
-    if sa["embedded"] != sb["embedded"]:
+    if "embedded" in diff:
         if sa["embedded"] is None and call["kind"] == "record_action":
             ids.append("receipt_gains_embedded")
         elif (sa["embedded"] is not None and sb["embedded"] is not None and ends
@@ -819,22 +1007,24 @@ def classify(call, sa, sb, ra, rb, T, catalogue):
             ids.append("parent_of_ends_embedded")
         elif call.get("arguments", {}).get("parent_of"):
             ids.append("parent_of_embedded_differs")
-    merge_diff = (sa["semantic_merged"] != sb["semantic_merged"]
-                  or sorted(map(json.dumps, ra.get("semantic_merges", []))) !=
-                  sorted(map(json.dumps, rb.get("semantic_merges", []))))
-    if merge_diff:
-        fresh = [m for m in ra.get("semantic_merges", []) + rb.get("semantic_merges", [])
+    if diff & {"semantic_merged", "merges"}:
+        fresh = [m for m in (ra.get("semantic_merges") or []) + (rb.get("semantic_merges") or [])
                  if (m.get("to_created_at") or "") >= T]
         ids.append("merge_into_replayed_concept" if fresh else "merge_differs_pre_t")
-    if sa["matched_count"] != sb["matched_count"] or ra.get("matched") != rb.get("matched"):
+    if diff & {"matched_count", "matched"}:
         if INVISIBLE_RE.search(json.dumps(call.get("arguments", {}), ensure_ascii=False)):
             ids.append("canonical_key_invisible")
-        elif not merge_diff:
+        else:
             ids.append("canonical_match_differs")
-    if sa["reinforced"] != sb["reinforced"] and not ids:
-        ids.append("reinforced_cascade")
-    if sa["edges"] != sb["edges"] and call["kind"] == "record_action" and not ids:
+    if "reinforced" in diff:
+        ids.append("reinforced_cascade" if prior_diff else "reinforced_differs")
+    if "edges" in diff and call["kind"] == "record_action":
         ids.append("action_edges_differ")
+    if diff & {"created_count", "created"} and not any(
+            "created_count" in EXPLAINS.get(i, ()) for i in ids):
+        ids.append("created_differs")
+    covered = set().union(*(EXPLAINS.get(i, set()) for i in ids)) if ids else set()
+    ids += [f"unexplained:{f}" for f in sorted(diff - covered)]
     if not ids:
         ids.append("unclassified")
     return ids
@@ -842,11 +1032,14 @@ def classify(call, sa, sb, ra, rb, T, catalogue):
 
 def resolve_reason(rid, catalogue):
     """{id, label, expected, ref} for a detector id under a catalogue."""
+    if rid.startswith("unexplained:"):
+        return {"id": rid, "label": f"{rid.split(':', 1)[1]} differs and no detector "
+                                    "accounts for it", "expected": False, "ref": None}
     e = catalogue.get(rid)
     if e is None or rid in UNEXPECTED_IDS:
         return {"id": rid, "label": UNEXPECTED_IDS.get(rid, "not in the reason catalogue"),
                 "expected": False, "ref": None}
-    return {"id": rid, "label": e["label"], "expected": bool(e.get("expected", True)),
+    return {"id": rid, "label": e["label"], "expected": e.get("expected") is True,
             "ref": e.get("ref")}
 
 
@@ -871,6 +1064,8 @@ def counter_diff(ca, cb, keyfmt):
 def compare(calls, A, B, T, base_counts, catalogue):
     per_call, differing = [], []
     totals = {s: collections.Counter() for s in ("a", "b")}
+    not_applied_both = 0
+    nonterminal = collections.Counter()
     for i, c in enumerate(calls):
         ra = A["results"][i] if i < len(A["results"]) else {"state": "not_run"}
         rb = B["results"][i] if i < len(B["results"]) else {"state": "not_run"}
@@ -878,13 +1073,14 @@ def compare(calls, A, B, T, base_counts, catalogue):
         for side, s in (("a", sa), ("b", sb)):
             totals[side]["calls"] += 1
             totals[side][f"state:{s['state']}"] += 1
+            if s["state"] not in SETTLED_RESULT_STATES:
+                nonterminal[f"{side}:{s['state']}"] += 1
             for k in FIELDS[1:]:
                 if isinstance(s.get(k), int):
                     totals[side][k] += s[k]
-        same = (sa == sb and ra.get("created") == rb.get("created")
-                and ra.get("matched") == rb.get("matched")
-                and sorted(map(json.dumps, ra.get("semantic_merges", []))) ==
-                sorted(map(json.dumps, rb.get("semantic_merges", []))))
+        if sa["state"] not in APPLIED_STATES and sb["state"] not in APPLIED_STATES:
+            not_applied_both += 1
+        same = not differing_fields(sa, sb, ra, rb)
         row = {"idx": i, "kind": c["kind"], "agent_id": c["agent_id"],
                "interaction_id": c.get("interaction_id"), "variant": bool(c.get("variant")),
                "orig_created": c.get("orig_created"), "orig_matched": c.get("orig_matched"),
@@ -892,16 +1088,16 @@ def compare(calls, A, B, T, base_counts, catalogue):
                "ack_ms": [ra.get("ack_ms"), rb.get("ack_ms")],
                "applied_ms": [ra.get("applied_ms"), rb.get("applied_ms")]}
         if not same:
-            row["reasons"] = [resolve_reason(r, catalogue)
-                              for r in classify(c, sa, sb, ra, rb, T, catalogue)]
+            row["reasons"] = [resolve_reason(r, catalogue) for r in
+                              classify(c, sa, sb, ra, rb, T, catalogue, bool(differing))]
             row["unexpected"] = any(not r["expected"] for r in row["reasons"])
             row["detail"] = {  # store content: stripped unless --include-content
                 "created_only_a": sorted(set(ra.get("created", [])) - set(rb.get("created", []))),
                 "created_only_b": sorted(set(rb.get("created", [])) - set(ra.get("created", []))),
                 "matched_a": ra.get("matched"), "matched_b": rb.get("matched"),
                 "merges_a": ra.get("semantic_merges"), "merges_b": rb.get("semantic_merges"),
-                "refusal_a": ra.get("detail") if sa["state"] != "applied" else None,
-                "refusal_b": rb.get("detail") if sb["state"] != "applied" else None,
+                "refusal_a": ra.get("detail") if sa["state"] not in APPLIED_STATES else None,
+                "refusal_b": rb.get("detail") if sb["state"] not in APPLIED_STATES else None,
             }
             differing.append(row)
         per_call.append(row)
@@ -911,6 +1107,8 @@ def compare(calls, A, B, T, base_counts, catalogue):
         "differing": differing,
         "reasons": group_reasons(differing),
         "unexpected_calls": sum(1 for d in differing if d["unexpected"]),
+        "not_applied_both": not_applied_both,
+        "nonterminal_results": dict(nonterminal),
         "totals": {"a": dict(totals["a"]), "b": dict(totals["b"])},
         "store": {"base": base_counts, "a": A["store"], "b": B["store"]},
         "final_stats_tool": {"a": A["final_stats_tool"], "b": B["final_stats_tool"]},
@@ -932,6 +1130,53 @@ def compare(calls, A, B, T, base_counts, catalogue):
     }
 
 
+def _n(x):
+    return x if isinstance(x, int) else len(x)
+
+
+def verdict(cmp_, exit_codes, max_not_applied):
+    """{"pass", "failures", "notes"} for a comparison.
+
+    Fails on: any UNEXPECTED differing call; a share of calls not applied on
+    either side above max_not_applied (a run where both builds refuse or fail
+    everything is not parity); any result that never settled (pending,
+    transport error, not run, no receipt); a serve exiting non-zero. Notes
+    (reported, not failing): canonization, unembedded and content-diff
+    counts that differ between the sides.
+    """
+    failures, notes = [], []
+    n = len(cmp_["per_call"])
+    if cmp_["unexpected_calls"]:
+        failures.append(f"{cmp_['unexpected_calls']} differing call(s) are UNEXPECTED")
+    share = cmp_["not_applied_both"] / n if n else 1.0
+    if n == 0:
+        failures.append("no calls were compared")
+    elif share > max_not_applied:
+        failures.append(f"{cmp_['not_applied_both']} of {n} calls ({share:.1%}) applied on "
+                        f"neither side (limit {max_not_applied:.1%})")
+    if cmp_["nonterminal_results"]:
+        failures.append(f"results that never settled: {cmp_['nonterminal_results']}")
+    for side, rc in sorted((exit_codes or {}).items()):
+        if rc != 0:
+            failures.append(f"serve {side.upper()} exited with rc={rc}")
+    can = cmp_["canonization"]
+    if can["status_counts"]["a"] != can["status_counts"]["b"]:
+        notes.append(f"canonization status counts differ: A={can['status_counts']['a']} "
+                     f"B={can['status_counts']['b']}")
+    if can["events_since_T"]["a"] != can["events_since_T"]["b"]:
+        notes.append(f"canonization events differ: A={can['events_since_T']['a']} "
+                     f"B={can['events_since_T']['b']}")
+    cd = cmp_["content_diff"]
+    for k in ("unembedded_new", "hierarchical_ends_unembedded"):
+        if cd[k]["a"] != cd[k]["b"]:
+            notes.append(f"{k} differs: A={cd[k]['a']} B={cd[k]['b']}")
+    for k in ("concepts_created", "semantic_edges"):
+        oa, ob = _n(cd[k]["only_a"]), _n(cd[k]["only_b"])
+        if oa or ob:
+            notes.append(f"{k}: only A={oa} only B={ob}")
+    return {"pass": not failures, "failures": failures, "notes": notes}
+
+
 def strip_content(cmp_):
     """A copy of compare()'s result with every piece of store text removed:
     per-call detail dropped, content-diff lists reduced to counts."""
@@ -944,17 +1189,23 @@ def strip_content(cmp_):
     out["differing"] = [r for r in rows if not r["same"]]
     cd = dict(cmp_["content_diff"])
     for k in ("concepts_created", "semantic_edges"):
-        cd[k] = {side: len(v) for side, v in cmp_["content_diff"][k].items()}
+        cd[k] = {side: _n(v) for side, v in cmp_["content_diff"][k].items()}
     out["content_diff"] = cd
     return out
 
 
-def _n(x):
-    return x if isinstance(x, int) else len(x)
-
-
 def render_text(meta, cmp_):
     L = []
+    v = cmp_.get("verdict")
+    if v is not None:
+        L.append("=" * 72)
+        L.append(f"VERDICT: {'PASS' if v['pass'] else 'FAIL'}")
+        for f in v["failures"]:
+            L.append(f"  FAIL  {f}")
+        for nte in v["notes"]:
+            L.append(f"  note  {nte}")
+        L.append("=" * 72)
+        L.append("")
     L.append(f"replay parity  A={meta['bin_a']}  B={meta['bin_b']}")
     L.append(f"snapshot {meta['snapshot']}  session={meta['session']}  T={meta['T']}  "
              f"calls={meta['n_calls']} (derive={meta['n_derive']}, "
@@ -966,6 +1217,7 @@ def render_text(meta, cmp_):
     keys = sorted(set(cmp_["totals"]["a"]) | set(cmp_["totals"]["b"]))
     for k in keys:
         L.append(f"  {k:<24}{cmp_['totals']['a'].get(k, 0):>6}     {cmp_['totals']['b'].get(k, 0):>6}")
+    L.append(f"  applied on neither side: {cmp_['not_applied_both']}")
     L.append("")
     sa, sb, s0 = cmp_["store"]["a"], cmp_["store"]["b"], cmp_["store"]["base"]
     L.append("final store                base       A          B")
@@ -1002,6 +1254,16 @@ def render_text(meta, cmp_):
     return "\n".join(L) + "\n"
 
 
+def protect_dirs(extra):
+    """The protected directories: DEFAULT_PROTECT always, plus any --protect."""
+    out = [DEFAULT_PROTECT.expanduser().resolve()]
+    for p in extra or []:
+        rp_ = Path(p).expanduser().resolve()
+        if rp_ not in out:
+            out.append(rp_)
+    return out
+
+
 def check_paths(out, work, snapshot, protect, allow_live_name):
     """Refuse unsafe paths (SystemExit). The snapshot is only ever opened
     read-only, so it may live under a protected directory; outputs may not."""
@@ -1014,6 +1276,19 @@ def check_paths(out, work, snapshot, protect, allow_live_name):
                          "pass a backup, or --allow-live-name if it is one")
 
 
+def make_work_dir(path):
+    """(work dir, created_by_us). A given path is created 0700 when missing;
+    no path means a fresh 0700 temp directory."""
+    if path is None:
+        return Path(tempfile.mkdtemp(prefix="replay-parity-work.")).resolve(), True
+    p = Path(path).expanduser().resolve()
+    if p.exists():
+        return p, False
+    p.mkdir(parents=True, mode=0o700)
+    p.chmod(0o700)
+    return p, False
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0],
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1022,25 +1297,32 @@ def main(argv=None):
     ap.add_argument("--snapshot", required=True,
                     help="a backup of the store (SQLite); opened read-only")
     ap.add_argument("--config-template", required=True,
-                    help="a lambo.toml whose [store] path is rewritten per side")
+                    help="a lambo.toml with [store] kind = \"sqlite\"; its path is rewritten "
+                         "per side and any dsn dropped")
     ap.add_argument("--session", required=True, help="session id whose writes are replayed")
     ap.add_argument("--groups", type=int, required=True,
-                    help="replay the last N write calls (interactions) of the snapshot")
+                    help="replay the last N (>= 1) write calls (interactions) of the snapshot")
     ap.add_argument("--out", required=True,
                     help="directory for parity.json / parity.txt (aggregates)")
     ap.add_argument("--work", help="directory for store copies, reconstructed calls, "
                     "per-side results and transcripts, all holding store content "
-                    "(default: a fresh temp directory; never commit it)")
+                    "(default: a fresh 0700 temp directory, removed at exit unless "
+                    "--keep-work; never commit it)")
+    ap.add_argument("--keep-work", action="store_true",
+                    help="keep the default temp --work directory at exit")
     ap.add_argument("--protect", action="append", metavar="PATH",
-                    help=f"directory nothing may be written under; repeatable "
-                         f"(default {DEFAULT_PROTECT}; passing any replaces the default)")
+                    help=f"extra directory nothing may be written under; repeatable "
+                         f"({DEFAULT_PROTECT} is always protected)")
     ap.add_argument("--allow-live-name", action="store_true",
                     help=f"accept a snapshot named like a live store ({', '.join(LIVE_DB_PREFIXES)}*)")
     ap.add_argument("--reasons", help="JSON reason catalogue (see the header); "
                     "default: the built-in 0.4.0 CHANGELOG mapping")
+    ap.add_argument("--max-not-applied", type=float, default=0.02,
+                    help="fail when more than this share of calls applied on neither side "
+                         "(default 0.02)")
     ap.add_argument("--include-content", action="store_true",
-                    help="keep concept text and refusal text in parity.json/parity.txt "
-                         "(default: omitted, so --out can be committed)")
+                    help="keep concept text and raw refusal text in parity.json/parity.txt "
+                         "and the log (default: omitted, so --out can be committed)")
     ap.add_argument("--offset", type=int, default=0,
                     help="skip the newest K write calls (they are truncated away, not replayed)")
     ap.add_argument("--variants", type=int, default=0,
@@ -1065,14 +1347,20 @@ def main(argv=None):
                     help="reconstruct and truncate only; do not start any binary")
     a = ap.parse_args(argv)
 
-    a.protect = [Path(p).expanduser().resolve() for p in (a.protect or [DEFAULT_PROTECT])]
+    if a.groups < 1:
+        ap.error("--groups must be >= 1")
+    if a.offset < 0 or a.variants < 0:
+        ap.error("--offset and --variants must be >= 0")
+    if not 0 <= a.max_not_applied <= 1:
+        ap.error("--max-not-applied must be between 0 and 1")
+    a.protect = protect_dirs(a.protect)
     out = Path(a.out).expanduser().resolve()
-    work = (Path(a.work).expanduser().resolve() if a.work
-            else Path(tempfile.mkdtemp(prefix="replay-parity-work.")).resolve())
     snapshot = Path(a.snapshot).expanduser().resolve()
     template = Path(a.config_template).expanduser().resolve()
     bins = {"a": Path(a.bin_a).expanduser().resolve(), "b": Path(a.bin_b).expanduser().resolve()}
-    check_paths(out, work, snapshot, a.protect, a.allow_live_name)
+    work_arg = Path(a.work).expanduser().resolve() if a.work else None
+    check_paths(out, work_arg or Path(tempfile.gettempdir()), snapshot, a.protect,
+                a.allow_live_name)
     if not snapshot.is_file():
         raise SystemExit(f"no such snapshot: {snapshot}")
     if not a.dry_run:
@@ -1081,9 +1369,17 @@ def main(argv=None):
                 raise SystemExit(f"not executable: {b}")
     catalogue, cat_desc = load_catalogue(a.reasons)
     out.mkdir(parents=True, exist_ok=True)
-    work.mkdir(parents=True, exist_ok=True)
+    work, temp_work = make_work_dir(a.work)
     log(f"work directory (holds store content, never commit it): {work}")
+    try:
+        return _run(a, out, work, snapshot, template, bins, catalogue, cat_desc)
+    finally:
+        if temp_work and not a.keep_work:
+            shutil.rmtree(work, ignore_errors=True)
+            log(f"removed work directory {work} (pass --keep-work to keep it)")
 
+
+def _run(a, out, work, snapshot, template, bins, catalogue, cat_desc):
     src_copy = work / "snapshot-copy.db"
     for suffix in ("", "-wal", "-shm"):
         p = Path(str(src_copy) + suffix)
@@ -1114,6 +1410,7 @@ def main(argv=None):
             "n_action": sum(c["kind"] == "record_action" for c in calls),
             "n_variants": len(variants), "n_warn": n_warn, "truncation": tstats,
             "catalogue": cat_desc, "content_included": a.include_content,
+            "max_not_applied": a.max_not_applied,
             "reconstruction_warnings": [
                 {"idx": i, "interaction_id": c["interaction_id"], "warnings": c["warnings"]}
                 for i, c in enumerate(calls) if c["warnings"]]}
@@ -1138,17 +1435,19 @@ def main(argv=None):
         log("one side only; no comparison")
         return 0
     cmp_ = compare(all_calls, sides["a"], sides["b"], T, base_counts, catalogue)
-    if not a.include_content:
-        cmp_ = strip_content(cmp_)
     meta["tool_calls"] = {k: v["tool_calls"] for k, v in sides.items()}
     meta["exit_codes"] = {k: v["exit_code"] for k, v in sides.items()}
+    cmp_["verdict"] = verdict(cmp_, meta["exit_codes"], a.max_not_applied)
+    if not a.include_content:
+        cmp_ = strip_content(cmp_)
     (out / "parity.json").write_text(json.dumps({"meta": meta, **cmp_}, indent=1, default=list))
     text = render_text(meta, cmp_)
     (out / "parity.txt").write_text(text)
     print(text)
-    log(f"wrote {out / 'parity.json'} and {out / 'parity.txt'} (work files in {work})")
-    if cmp_["unexpected_calls"]:
-        log(f"{cmp_['unexpected_calls']} differing call(s) are UNEXPECTED")
+    log(f"wrote {out / 'parity.json'} and {out / 'parity.txt'}")
+    if not cmp_["verdict"]["pass"]:
+        for f in cmp_["verdict"]["failures"]:
+            log(f"FAIL: {f}")
         return 1
     return 0
 

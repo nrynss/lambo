@@ -19,17 +19,32 @@ receipt: receipts are scoped to the agent that created them.
 What it reports (JSON of aggregates only, no memory content, safe to paste
 into an issue):
 
-* per-tool latency (p50/p90/p99/mean/max, via mcp_ab.summ) and call errors;
-* `writes`: acked, refused at ack, receipts queried, receipt states, the
-  failure rate among settled receipts, and failed writes grouped by reason.
-  A receipt's reason is the model-safe class the server puts on it (N4, for
-  example "conflict" or "internal error"); with --server-ledger the raw
-  operator-facing `error` of each failed `completion` line for one of our
-  receipts is grouped too (numbers and URLs normalized away). This is the
-  nrynss/lambo#116 acceptance metric: failure rate and reason under N workers;
+* `latency_ms`: per-tool latency of successful calls (p50/p90/p99/mean/max,
+  via mcp_ab.summ); `errors`: per tool, the count and latency of calls that
+  came back as a tool error or a transport failure;
+* `writes`: acked, refused at ack, transport-failed, receipts queried, receipt
+  states, and failed writes grouped by reason. Two rates:
+  - `failure_rate`: failed + dropped over settled queried receipts;
+  - `write_failure_rate_all`: (failed + dropped + refused_at_ack +
+    transport_failed) over (settled + refused_at_ack + transport_failed).
+    This is the #116 acceptance rate. A transport-failed write may still have
+    been admitted by the server (the reply was lost, not necessarily the
+    write), so this rate is an upper bound on what the server failed;
+* reasons are reduced to known-message ids (`hybrid_replan_exhausted`, ...)
+  or the server's model-safe error class (`conflict`, `internal error`, ...);
+  `--include-raw-reasons` keeps the normalized text instead. With
+  --server-ledger, the raw operator-facing `error` of each failed
+  `completion` line for one of our receipts is grouped the same way;
 * `drain`: `drained` true only when the queue emptied before --drain-timeout.
   With `drained: false` the counters are a snapshot, not totals;
+* `flags`: `expired_receipts` (receipts are kept RECEIPT_RETENTION_S = 300 s
+  after they settle, so a long run + drain loses early outcomes) and
+  `retention_risk` (run + drain reached RETENTION_WARN_FRACTION of that);
+* `worker_errors`: workers that died on an unexpected exception;
 * `final_stats`: the server's write-queue counters after the drain.
+
+Exit status: 0 ok; 2 when the drain did not complete, no call succeeded, or a
+worker died (the JSON is still written); other non-zero for usage errors.
 
 Determinism: --seed drives every worker's RNG (`random.Random(seed * 1000 +
 worker)`), so the call mix and every derive / record_action text are a pure
@@ -64,8 +79,48 @@ TOOLS = {"recall": "lambo_recall", "derive": "lambo_derive",
          "record_action": "lambo_record_action", "stats": "lambo_stats"}
 WRITE_TOOLS = ("lambo_derive", "lambo_record_action")
 SETTLED_FAILURE_STATES = ("failed", "dropped")
+UNSETTLED_STATES = {"pending", "pending_replay", "expired", "query_error", "unknown",
+                    "restart_lost", "never_issued", "forbidden", "intent_durable"}
 FAILED_PREFIXES = ("FAILED, nothing was written — ", "DROPPED before it was attempted, "
                    "nothing was written — ")
+# src/writeq/receipts.rs RECEIPT_RETENTION: a settled receipt is kept this long.
+RECEIPT_RETENTION_S = 300.0
+RETENTION_WARN_FRACTION = 0.8
+EXIT_INCOMPLETE = 2
+
+# Known server messages -> stable ids. Each pattern is anchored on the exact
+# server text (cited), never a loose keyword, because a reason string can
+# echo caller content.
+KNOWN_MESSAGES = (
+    # src/graph/hybrid.rs MAX_HYBRID_REPLANS failure
+    ("hybrid_replan_exhausted",
+     r"hybrid derive could not commit after \d+ concurrent graph changes"),
+    # src/graph/hybrid.rs HYBRID_IO_TIMEOUT on the candidate lookup
+    ("hybrid_candidate_timeout", r"hybrid vector candidate lookup timed out after "),
+    # src/graph/hybrid.rs check_embed_budget
+    ("hybrid_embed_budget",
+     r"hybrid derive would embed \d+ new concepts and parent_of ends in one call"),
+    # src/graph/hybrid.rs check_embed_context (#74), both messages
+    ("hybrid_embed_context_cap",
+     r"a hybrid derive embeds every new concept with it, so it may be at most \d+ bytes"
+     r"|framed with the call's text for embedding \(the text, \" — \", then the call's "
+     r"concepts joined by \"; \"\) is \d+ bytes; at most \d+ bytes fit"),
+    # src/surface/validate.rs check_no_image_suffix (#22 PR 4)
+    ("image_suffix_refused",
+     r"may not contain an image suffix \(\[image:<id>\], in any case or spelling\)"),
+    # src/surface/error.rs model_safe_message, embedding-contract refusal
+    ("embedding_contract_mismatch",
+     r"the session's embedding contract no longer matches this query"),
+    # src/writeq/admission.rs DropReason::describe
+    ("drop_lane_full", r"this agent's background write lane is full \(\d+ outstanding"),
+    ("drop_queue_full", r"the background write queue is full \(\d+ outstanding"),
+    ("drop_queue_bytes", r"the background write queue is at its \d+ MiB payload cap"),
+    ("drop_session_closing", r"^the session is closing$"),
+)
+_KNOWN = tuple((rid, re.compile(p)) for rid, p in KNOWN_MESSAGES)
+# src/surface/error.rs err_class: every model-safe failure starts with one.
+ERROR_CLASSES = ("store error", "embedding error", "configuration error", "conflict",
+                 "image id taken", "internal error")
 
 
 # ---------------------------------------------------------------------------
@@ -126,19 +181,19 @@ _NUM = re.compile(r"\d+(?:\.\d+)?")
 _RECEIPT = re.compile(r"\blwr\S+")
 
 
-def normalize_reason(text: str | None, limit: int = 160) -> str:
-    """A grouping key for a failure reason: first line, known prefix dropped,
-    URLs, absolute paths, receipt ids and numbers replaced, length bounded.
-
-    Numbers are folded so "after 8 concurrent graph changes" and a timeout
-    duration group together across runs; the point is the class of failure.
-    """
-    if not text:
-        return "(no reason given)"
-    line = text.strip().splitlines()[0] if text.strip() else ""
+def _strip_prefix(text: str) -> str:
+    line = text.strip().splitlines()[0] if text and text.strip() else ""
     for p in FAILED_PREFIXES:
         if line.startswith(p):
             line = line[len(p):]
+    return line
+
+
+def normalize_reason(text: str | None, limit: int = 160) -> str:
+    """Raw-mode grouping key: first line, known prefix dropped, URLs, absolute
+    paths, receipt ids and numbers replaced, length bounded. Can still hold
+    server or caller text; used only behind --include-raw-reasons."""
+    line = _strip_prefix(text or "")
     line = _URL.sub("<url>", line)
     line = _PATH.sub("<path>", line)
     line = _RECEIPT.sub("<receipt>", line)
@@ -147,6 +202,28 @@ def normalize_reason(text: str | None, limit: int = 160) -> str:
     if len(line) > limit:
         line = line[:limit - 1] + "…"
     return line or "(no reason given)"
+
+
+def reason_key(text: str | None, raw: bool = False) -> str:
+    """Grouping key for a failure reason.
+
+    Default (redacted): a KNOWN_MESSAGES id if one matches anywhere in the
+    text, else the err_class token the text starts with, else
+    "unrecognised". Nothing from the text itself is returned. raw=True
+    returns normalize_reason(text) instead.
+    """
+    if raw:
+        return normalize_reason(text)
+    if not text or not text.strip():
+        return "(no reason given)"
+    for rid, pat in _KNOWN:
+        if pat.search(text):
+            return rid
+    line = _strip_prefix(text)
+    for cls in ERROR_CLASSES:
+        if line.startswith(cls):
+            return cls
+    return "unrecognised"
 
 
 def pick_sample(items: list, k: int, seed: int) -> list:
@@ -158,44 +235,51 @@ def pick_sample(items: list, k: int, seed: int) -> list:
     return [items[i] for i in idx]
 
 
-def receipt_outcome(stats_body: dict | None, is_error: bool, text: str = "") -> dict:
+def receipt_outcome(stats_body, is_error: bool, text: str = "", raw: bool = False) -> dict:
     """Reduce one lambo_stats(receipt) reply to {"state", "reason"}."""
     if is_error or not isinstance(stats_body, dict):
-        return {"state": "query_error", "reason": normalize_reason(text)}
+        return {"state": "query_error", "reason": reason_key(text, raw)}
     r = stats_body.get("receipt")
     if not isinstance(r, dict):
         return {"state": "unknown", "reason": None}
-    state = r.get("state") or "unknown"
-    reason = normalize_reason(r.get("detail")) if state in SETTLED_FAILURE_STATES else None
+    state = r.get("state") if isinstance(r.get("state"), str) else "unknown"
+    reason = reason_key(r.get("detail"), raw) if state in SETTLED_FAILURE_STATES else None
     return {"state": state, "reason": reason}
 
 
 def summarize_writes(acked: int, refused: list[str], outcomes: list[dict],
-                     ledger_errors: list[str] | None = None) -> dict:
+                     ledger_errors: list[str] | None = None,
+                     transport_failed: int = 0) -> dict:
     """Aggregate write outcomes.
 
     acked: writes the server acknowledged with a receipt.
-    refused: normalized reasons of writes refused at ack (isError).
+    refused: reason keys of writes refused at ack (tool error, no receipt).
     outcomes: receipt_outcome() dicts for the queried receipts.
-    failure_rate is failed+dropped over settled queried receipts (pending,
-    expired and query errors are not settled outcomes and are excluded); None
-    when nothing settled.
+    transport_failed: write calls whose reply never arrived (may or may not
+    have been admitted).
+
+    failure_rate: failed + dropped over settled queried receipts.
+    write_failure_rate_all: (failed + dropped + refused + transport_failed)
+    over (settled + refused + transport_failed). Both None when undefined.
     """
     states = collections.Counter(o["state"] for o in outcomes)
     failed = [o for o in outcomes if o["state"] in SETTLED_FAILURE_STATES]
-    unsettled = {"pending", "pending_replay", "expired", "query_error", "unknown",
-                 "restart_lost", "never_issued", "forbidden", "intent_durable"}
-    settled = sum(n for s, n in states.items() if s not in unsettled)
+    settled = sum(n for s, n in states.items() if s not in UNSETTLED_STATES)
     by_reason = collections.Counter(f"{o['state']}: {o['reason']}" for o in failed)
+    denom_all = settled + len(refused) + transport_failed
     out = {
         "acked": acked,
         "refused_at_ack": len(refused),
         "refused_at_ack_reasons": dict(collections.Counter(refused).most_common()),
+        "transport_failed": transport_failed,
         "receipts_queried": len(outcomes),
         "receipt_states": dict(states.most_common()),
         "settled": settled,
         "failed": len(failed),
         "failure_rate": round(len(failed) / settled, 4) if settled else None,
+        "write_failure_rate_all": (
+            round((len(failed) + len(refused) + transport_failed) / denom_all, 4)
+            if denom_all else None),
         "failed_reasons": dict(by_reason.most_common()),
     }
     if ledger_errors is not None:
@@ -204,9 +288,9 @@ def summarize_writes(acked: int, refused: list[str], outcomes: list[dict],
     return out
 
 
-def ledger_failure_reasons(lines, receipts: set[str]) -> list[str]:
-    """Normalized raw `error` of each failed `completion` line whose receipt is
-    one of ours. `lines` is an iterable of JSONL strings; bad lines are skipped."""
+def ledger_failure_reasons(lines, receipts: set[str], raw: bool = False) -> list[str]:
+    """Reason keys of each failed `completion` line whose receipt is one of
+    ours. `lines` is an iterable of JSONL strings; bad lines are skipped."""
     out = []
     for line in lines:
         if '"completion"' not in line:
@@ -217,18 +301,49 @@ def ledger_failure_reasons(lines, receipts: set[str]) -> list[str]:
             continue
         if (isinstance(d, dict) and d.get("kind") == "completion"
                 and d.get("state") == "failed" and d.get("receipt") in receipts):
-            out.append(normalize_reason(str(d.get("error") or "")))
+            out.append(reason_key(str(d.get("error") or ""), raw))
     return out
 
 
-def drain_done(stats: dict) -> bool:
-    return (stats.get("write_queue_outstanding", 0) == 0 and stats.get("log_depth", 0) == 0
-            and stats.get("flush_depth", 0) == 0)
+DRAIN_KEYS = ("write_queue_outstanding", "log_depth", "flush_depth")
+
+
+def drain_done(stats) -> bool:
+    """True only when every DRAIN_KEYS value is present, an int, and zero."""
+    if not isinstance(stats, dict):
+        return False
+    for k in DRAIN_KEYS:
+        v = stats.get(k)
+        if not isinstance(v, int) or isinstance(v, bool) or v != 0:
+            return False
+    return True
+
+
+def retention_flags(outcomes: list[dict], run_s: float, drain_s: float) -> dict:
+    expired = sum(1 for o in outcomes if o["state"] == "expired")
+    return {"expired_receipts": expired,
+            "retention_risk": run_s + drain_s >= RETENTION_WARN_FRACTION * RECEIPT_RETENTION_S,
+            "receipt_retention_s": RECEIPT_RETENTION_S}
+
+
+def exit_problems(drained: bool, ok_calls: int, worker_errors: int) -> list[str]:
+    """Reasons the run is not a result; empty means exit 0."""
+    out = []
+    if not drained:
+        out.append("the write queue did not drain; counts are a snapshot, not totals")
+    if ok_calls == 0:
+        out.append("no call succeeded")
+    if worker_errors:
+        out.append(f"{worker_errors} worker(s) died on an unexpected exception")
+    return out
 
 
 # ---------------------------------------------------------------------------
 # Driver
 # ---------------------------------------------------------------------------
+
+OK, TOOL_ERROR, TRANSPORT = "ok", "tool_error", "transport"
+
 
 class Client(mcp_ab.Mcp):
     """mcp_ab.Mcp with a per-worker agent id and a non-raising call."""
@@ -238,58 +353,75 @@ class Client(mcp_ab.Mcp):
         super().__init__(url, token)
 
     def call(self, name, **args):
-        """(ms, is_error, structured body or None, text)."""
+        """(ms, outcome in OK/TOOL_ERROR/TRANSPORT, structured dict or None, text)."""
         args["agent_id"] = self.agent_id
         t = time.perf_counter()
         try:
             res = self._rpc("tools/call", {"name": name, "arguments": args})
         except Exception as e:  # transport or JSON-RPC error
-            return (time.perf_counter() - t) * 1000, True, None, f"transport: {type(e).__name__}"
+            return (time.perf_counter() - t) * 1000, TRANSPORT, None, f"transport: {type(e).__name__}"
         ms = (time.perf_counter() - t) * 1000
-        text = "\n".join(c.get("text", "") for c in res.get("content", []) or []
-                         if isinstance(c, dict))
-        return ms, bool(res.get("isError")), res.get("structuredContent"), text
+        if not isinstance(res, dict):
+            return ms, TRANSPORT, None, "transport: non-object result"
+        content = res.get("content") if isinstance(res.get("content"), list) else []
+        text = "\n".join(str(c.get("text", "")) for c in content if isinstance(c, dict))
+        body = res.get("structuredContent")
+        body = body if isinstance(body, dict) else None
+        return ms, TOOL_ERROR if res.get("isError") else OK, body, text
 
 
 def run(o, queries, mix, token):
     lat = collections.defaultdict(list)
+    err_lat = collections.defaultdict(list)
     errs = collections.Counter()
     refused: list[str] = []
+    transport_failed = [0]
     receipts: list[tuple[int, str]] = []  # (worker, receipt id)
+    worker_errors: list[str] = []
     lock = threading.Lock()
     stop = time.time() + o.secs
     clients = [Client(o.endpoint, f"conc-{i}", token) for i in range(o.workers)]
     tools, weights = [m[0] for m in mix], [m[1] for m in mix]
+    raw = o.include_raw_reasons
 
     def worker(i):
-        rng = random.Random(o.seed * 1000 + i)
-        c = clients[i]
-        n = 0
-        while time.time() < stop:
-            time.sleep(rng.expovariate(1 / o.think) if o.think > 0 else 0)
-            if time.time() >= stop:
-                break
-            tool = rng.choices(tools, weights)[0]
-            n += 1
-            q = rng.choice(queries)
-            if tool == "lambo_recall":
-                r = c.call(tool, query=q)
-            elif tool == "lambo_derive":
-                r = c.call(tool, concepts=derive_concepts(o.seed, i, n, q))
-            elif tool == "lambo_record_action":
-                r = c.call(tool, **action_args(o.seed, i, n, q, rng.randrange(40)))
-            else:
-                r = c.call(tool)
-            ms, is_err, body, text = r
-            with lock:
-                lat[tool].append(ms)
-                errs[tool] += is_err
-                if tool in WRITE_TOOLS:
-                    rid = (body or {}).get("receipt") if not is_err else None
-                    if isinstance(rid, str):
-                        receipts.append((i, rid))
+        try:
+            rng = random.Random(o.seed * 1000 + i)
+            c = clients[i]
+            n = 0
+            while time.time() < stop:
+                time.sleep(rng.expovariate(1 / o.think) if o.think > 0 else 0)
+                if time.time() >= stop:
+                    break
+                tool = rng.choices(tools, weights)[0]
+                n += 1
+                q = rng.choice(queries)
+                if tool == "lambo_recall":
+                    r = c.call(tool, query=q)
+                elif tool == "lambo_derive":
+                    r = c.call(tool, concepts=derive_concepts(o.seed, i, n, q))
+                elif tool == "lambo_record_action":
+                    r = c.call(tool, **action_args(o.seed, i, n, q, rng.randrange(40)))
+                else:
+                    r = c.call(tool)
+                ms, outcome, body, text = r
+                with lock:
+                    if outcome == OK:
+                        lat[tool].append(ms)
                     else:
-                        refused.append(normalize_reason(text))
+                        errs[tool] += 1
+                        err_lat[tool].append(ms)
+                    if tool in WRITE_TOOLS:
+                        rid = (body or {}).get("receipt") if outcome == OK else None
+                        if isinstance(rid, str):
+                            receipts.append((i, rid))
+                        elif outcome == TRANSPORT:
+                            transport_failed[0] += 1
+                        else:
+                            refused.append(reason_key(text, raw))
+        except Exception as e:  # a bug or an unexpected reply shape: count it, fail the run
+            with lock:
+                worker_errors.append(f"worker {i}: {type(e).__name__}")
 
     warm = Client(o.endpoint, "conc-warm", token)
     for q in queries[:3]:
@@ -305,9 +437,10 @@ def run(o, queries, mix, token):
     drain_t = time.time()
     st, drained = {}, False
     while True:
-        _, is_err, body, _ = warm.call("lambo_stats")
-        st = body if isinstance(body, dict) and not is_err else st
-        if st and drain_done(st):
+        _, outcome, body, _ = warm.call("lambo_stats")
+        if outcome == OK and body is not None:
+            st = body
+        if drain_done(st):
             drained = True
             break
         if time.time() - drain_t > o.drain_timeout:
@@ -318,30 +451,39 @@ def run(o, queries, mix, token):
     sample = pick_sample(receipts, o.receipt_max, o.seed)
     outcomes = []
     for wi, rid in sample:
-        _, is_err, body, text = clients[wi].call("lambo_stats", receipt=rid, wait_ms=0)
-        outcomes.append(receipt_outcome(body, is_err, text))
+        _, outcome, body, text = clients[wi].call("lambo_stats", receipt=rid, wait_ms=0)
+        outcomes.append(receipt_outcome(body, outcome != OK, text, raw))
 
     ledger_errors = None
     if o.server_ledger:
         mine = {rid for _, rid in receipts}
         with open(o.server_ledger, errors="replace") as f:
-            ledger_errors = ledger_failure_reasons(f, mine)
+            ledger_errors = ledger_failure_reasons(f, mine, raw)
 
     keep = {k: st.get(k) for k in st
             if k.startswith("write_queue_") or k in (
                 "dead_lettered", "degraded", "concept_count", "embedded_concepts")}
-    writes = summarize_writes(len(receipts), refused, outcomes, ledger_errors)
+    writes = summarize_writes(len(receipts), refused, outcomes, ledger_errors,
+                              transport_failed[0])
     writes["sampled"] = len(sample) < len(receipts)
+    ok_calls = sum(len(v) for v in lat.values())
     return {
         "workers": o.workers, "secs": o.secs, "think": o.think, "seed": o.seed,
         "mix": {t: w for t, w in mix},
         "wall_s": round(wall, 1),
         "drain": {"drained": drained, "drain_s": round(drain_s, 1),
                   "drain_timeout_s": o.drain_timeout},
-        "calls": sum(len(v) for v in lat.values()),
+        "calls": ok_calls + sum(errs.values()),
+        "ok_calls": ok_calls,
         "latency_ms": {k: mcp_ab.summ(v) for k, v in sorted(lat.items())},
-        "errors": dict(errs),
+        "errors": {k: {"count": errs[k], "latency_ms": mcp_ab.summ(err_lat[k])}
+                   for k in sorted(errs)},
+        "worker_errors": len(worker_errors),
+        "worker_error_kinds": dict(collections.Counter(
+            e.split(": ", 1)[1] for e in worker_errors)),
         "writes": writes,
+        "flags": retention_flags(outcomes, wall, drain_s),
+        "reasons_redacted": not raw,
         "final_stats": keep,
     }
 
@@ -370,6 +512,10 @@ def main(argv=None):
     ap.add_argument("--server-ledger",
                     help="the serve's --ledger file, read only, to group the raw "
                          "operator-facing error of each failed write of this run")
+    ap.add_argument("--include-raw-reasons", action="store_true",
+                    help="group reasons by normalized server text instead of known-message "
+                         "ids and error classes (the text can echo server detail; do not "
+                         "paste into a public issue unread)")
     ap.add_argument("--token", help="bearer token; defaults to $LAMBO_AUTH_TOKEN")
     ap.add_argument("--allow-production-port", action="store_true",
                     help=f"permit an endpoint on port {PRODUCTION_PORT}, where a live writer listens")
@@ -397,13 +543,20 @@ def main(argv=None):
         queries = list(mcp_ab.QUERIES)
 
     res = run(o, queries, mix, o.token or os.environ.get("LAMBO_AUTH_TOKEN"))
+    problems = exit_problems(res["drain"]["drained"], res["ok_calls"], res["worker_errors"])
+    res["problems"] = problems
     with open(o.out, "w") as f:
         json.dump(res, f, indent=2)
     print(json.dumps(res, indent=2))
-    if not res["drain"]["drained"]:
-        print(f"warning: the write queue did not drain within {o.drain_timeout:g}s; "
-              "counts are a snapshot, not totals", file=sys.stderr)
+    fl = res["flags"]
+    if fl["expired_receipts"] or fl["retention_risk"]:
+        print(f"warning: {fl['expired_receipts']} receipt(s) expired; run + drain was "
+              f"{res['wall_s'] + res['drain']['drain_s']:.0f}s against a "
+              f"{RECEIPT_RETENTION_S:.0f}s receipt retention", file=sys.stderr)
+    for p in problems:
+        print(f"error: {p}", file=sys.stderr)
+    return EXIT_INCOMPLETE if problems else 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -51,8 +51,8 @@ prompt, so any commentary in it (even an HTML comment) reaches the model.
 | Script | Role |
 |---|---|
 | `mcp_ab.py` | Latency A/B between two `lambo serve` builds. `ab` drives two HTTP serves, each on its own copy of the same store, with recalls interleaved per query, a `lambo_stats` per round, and synthetic `lambo_derive` writes timed to ack and to applied (via the receipt). It reports p50/p90/p99 per path and the top-k node-id overlap between the two sides as a recall-quality check. `ledger` splits a `serve --ledger` file at a re-pin time and summarizes server-side latency per tool on each side. Output is aggregates only, safe to paste into an issue. Refuses port 7700 unless `--allow-production-port`, since `ab` writes. First run: [#108](https://github.com/nrynss/lambo/issues/108). |
-| `mcp_concurrent.py` | Many agents at once against one HTTP serve: N workers, each its own MCP session and agent id, exponential think time, weighted tool mix (`--mix`). After the run it waits for the write queue to drain, then asks `lambo_stats(receipt)` for every acked write and reports the failure rate and failed-write reasons, plus `drained: true/false`. Aggregates only. Promoted from `evidence/0.4.0-vs-0.3.0-load/harness/concurrent_mix.py`. See [Concurrent agents](#concurrent-agents-mcp_concurrentpy). |
-| `replay_parity.py` | Replays the last N real write calls of a store backup into two builds over stdio and compares every receipt and the final stores. Each difference is classified by reason; reasons a release expects come from a data catalogue, anything else is UNEXPECTED. Promoted from `evidence/0.4.0-vs-0.3.0-load/harness/replay_parity.py`. See [Replay parity](#replay-parity-replay_paritypy). |
+| `mcp_concurrent.py` | Many agents at once against one HTTP serve: N workers, each its own MCP session and agent id, exponential think time, weighted tool mix (`--mix`). After the run it waits for the write queue to drain, then asks `lambo_stats(receipt)` for every acked write and reports the all-inclusive write failure rate and failed-write reasons, plus `drained: true/false`; exits 2 when the run is not a result. Aggregates only. Promoted from `evidence/0.4.0-vs-0.3.0-load/harness/concurrent_mix.py`. See [Concurrent agents](#concurrent-agents-mcp_concurrentpy). |
+| `replay_parity.py` | Replays the last N real write calls of a store backup into two builds over stdio and compares every receipt and the final stores. Each difference is classified by reason; reasons a release expects come from a data catalogue, anything else is UNEXPECTED, and the verdict also fails runs where both builds refuse most calls, results never settle, or a serve exits non-zero. Promoted from `evidence/0.4.0-vs-0.3.0-load/harness/replay_parity.py`. See [Replay parity](#replay-parity-replay_paritypy). |
 | `test_loadtest_harnesses.py` | Stdlib `unittest` for the pure parts of the two above (mix parsing, seeded payloads, reason normalization and grouping, failure rate, prompt splitting, classification, the catalogue, content stripping, path refusals). No server, GPU or network. Run `python3 -m unittest scripts/loadtest/test_loadtest_harnesses.py`. |
 
 ## Concurrent agents (`mcp_concurrent.py`)
@@ -74,22 +74,42 @@ a seeded sample of `--receipt-max` (default 2000) when there were more.
 
 The JSON (`--out`) holds aggregates only, safe to paste into an issue:
 
-- `latency_ms` per tool and `errors` per tool;
-- `writes.failure_rate`: failed + dropped over settled receipts (pending,
+- `latency_ms`: per-tool latency of successful calls only; `errors`: per tool,
+  the count and latency of calls that came back as a tool error or a
+  transport failure;
+- `writes.write_failure_rate_all`: the #116 acceptance rate, (failed + dropped
+  + refused at ack + transport-failed writes) over (settled receipts + refused
+  at ack + transport-failed writes). A transport-failed write may still have
+  been admitted (only the reply is known lost), so this is an upper bound;
+- `writes.failure_rate`: failed + dropped over settled receipts only (pending,
   expired and query errors are counted in `receipt_states` but excluded);
-- `writes.failed_reasons`: the receipt's reason, grouped. A receipt carries
-  only the model-safe class (`conflict`, `internal error`, ...). Pass
-  `--server-ledger` (the serve's `--ledger` file) to also group the raw
-  operator-facing `error` of each failed `completion` line of this run, as
-  `writes.failed_reasons_server_ledger` (numbers, paths and URLs folded);
-- `writes.refused_at_ack`: writes refused before a receipt was issued;
+- `writes.failed_reasons`: receipt reasons, grouped. By default every reason
+  is reduced to a known-message id (`hybrid_replan_exhausted`,
+  `hybrid_candidate_timeout`, `image_suffix_refused`, `drop_queue_full`, ...,
+  each anchored on the exact server text) or the model-safe error class the
+  text starts with (`conflict`, `internal error`, ...), else `unrecognised`;
+  no server text is copied. `--include-raw-reasons` groups by normalized text
+  instead (numbers, paths and URLs folded; read it before pasting). A failed
+  receipt carries only the error class, so pass `--server-ledger` (the serve's
+  `--ledger` file) to also group the operator-facing `error` of each failed
+  `completion` line of this run, as `writes.failed_reasons_server_ledger`.
+  A dropped write never reaches the apply path, so it has no `completion`
+  line: its reason is only on the receipt (`drop_*`);
+- `writes.refused_at_ack` / `writes.transport_failed`: writes that got no
+  receipt;
 - `drain.drained`: false means the drain timed out and every counter is a
-  snapshot with writes still outstanding, never final totals. The script
-  warns on stderr too;
+  snapshot with writes still outstanding, never final totals. Drained means
+  `write_queue_outstanding`, `log_depth` and `flush_depth` were all present
+  and zero;
+- `flags.expired_receipts` / `flags.retention_risk`: receipts are kept 300 s
+  after they settle (`RECEIPT_RETENTION`), so a long run plus drain loses the
+  outcomes of early writes. `retention_risk` is set when run + drain reaches
+  240 s, and the script warns on stderr;
+- `worker_errors`: workers that died on an unexpected exception;
 - `final_stats`: the server's `write_queue_*` counters after the drain.
 
-Receipts are kept 300 s after they settle (`RECEIPT_RETENTION`), so a run whose
-drain is long can see early receipts as `expired`; they are reported as such.
+Exit status: 0 ok; 2 when the drain did not complete, no call succeeded, or a
+worker died (the JSON is still written, with `problems` listing why).
 
 It writes synthetic derives: run it against a scratch serve on a store copy.
 Port 7700 is refused unless `--allow-production-port`. The token comes from
@@ -113,14 +133,18 @@ python3 scripts/loadtest/mcp_concurrent.py \
     --workers 8 --think 1.0 --secs 120 --seed 1 \
     --server-ledger scratch/serve-ledger.jsonl
 
-jq '{drained: .drain.drained, rate: .writes.failure_rate, acked: .writes.acked,
-     failed: .writes.failed, reasons: .writes.failed_reasons,
-     raw: .writes.failed_reasons_server_ledger}' conc-116-w8.json
+echo "exit $?"   # 2: not drained, nothing succeeded, or a worker died
+
+jq '{drained: .drain.drained, rate: .writes.write_failure_rate_all,
+     settled_rate: .writes.failure_rate, acked: .writes.acked,
+     refused: .writes.refused_at_ack, transport: .writes.transport_failed,
+     reasons: .writes.failed_reasons, ledger: .writes.failed_reasons_server_ledger,
+     expired: .flags.expired_receipts, problems: .problems}' conc-116-w8.json
 ```
 
-Pass means `drained` is true (otherwise rerun with a longer `--drain-timeout`;
-a snapshot is not a result) and the failure rate and reasons meet the bar set in
-#116. Run the baseline build the same way on a fresh copy of the same store
+Pass means exit 0, `drained` true (otherwise rerun with a longer
+`--drain-timeout`; a snapshot is not a result), `expired` 0, and
+`write_failure_rate_all` and the reasons meet the bar set in #116. Run the baseline build the same way on a fresh copy of the same store
 for the comparison.
 
 ## Replay parity (`replay_parity.py`)
@@ -133,39 +157,63 @@ two builds over stdio, waiting on every receipt, and compares receipts, final
 store counts and canonization. `--variants K` adds K reworded `Recap: ...`
 derives to exercise semantic merge. The script header has the full method.
 
-Every differing call gets reason ids from fixed detectors. Which reasons are
-expected is data: the built-in catalogue, `REASONS_0_4_0`, is the 0.4.0
-CHANGELOG mapping from the 0.4.0 vs 0.3.0 run and applies to that pair only.
-For another pair, write a catalogue and pass `--reasons FILE`:
+Every differing call gets reason ids from detectors that run independently.
+Each id accounts for some compared fields (state, created/matched/merged
+counts, reinforced, edges, embedded, and the created/matched/merge content);
+a differing field that no fired id accounts for becomes its own UNEXPECTED id,
+`unexplained:<field>`, so an expected reason cannot hide another difference.
+
+Which reasons are expected is data: the built-in catalogue, `REASONS_0_4_0`,
+is the 0.4.0 CHANGELOG mapping from the 0.4.0 vs 0.3.0 run and applies to
+that pair only. For another pair, write a catalogue and pass `--reasons FILE`:
 
 ```json
 {
-  "base": null,
+  "base": "0.4.0",
   "reasons": {
-    "merge_differs_pre_t": {"label": "...", "expected": true, "ref": "0.4.1 CHANGELOG, #116"},
-    "state_differs:some_rule": {"kind": "state_differs", "detail_pattern": "(?i)regex on the refusal text",
+    "receipt_gains_embedded": {"label": "0.4.0 only", "expected": false},
+    "state_differs:some_rule": {"kind": "state_differs", "direction": "b_refuses",
+                                "detail_pattern": "exact server refusal text",
                                 "label": "...", "expected": true, "ref": "0.4.1 CHANGELOG, #N"}
   }
 }
 ```
 
-`"base": "0.4.0"` lays the file over the built-in catalogue instead of replacing
-it, and `"expected": false` retires an entry. A reason that is not in the
-catalogue, is marked unexpected, or comes from no detector at all is reported
-as UNEXPECTED, and the script then exits 1.
+With `"base": "0.4.0"` the file's entries are laid over the built-in
+catalogue; without a `base` key they replace it. Every entry needs a string
+`label` and a boolean `expected` (no defaults). A `state_differs:*` entry needs
+`"kind": "state_differs"` and a `detail_pattern`, which should be the exact
+server message (refusal text can echo caller content, so a loose keyword
+would explain the wrong refusals); `direction` is `b_refuses` (A applied, B
+did not; the default), `a_refuses` or `any`. A reason that is not in the
+catalogue, is marked unexpected, or comes from no detector is UNEXPECTED.
+
+Verdict: `parity.txt` opens with PASS or FAIL. The run fails (exit 1) when any
+differing call is UNEXPECTED, more than `--max-not-applied` (default 0.02) of
+the calls applied on neither side (both builds refusing everything is not
+parity), any result never settled (pending, transport error, not run), or a
+serve exited non-zero. Canonization, unembedded and content-diff differences
+are listed as notes.
 
 Safety: the snapshot is opened read-only and may be a backup anywhere. Nothing
-is written under a `--protect` directory (repeatable; default `~/lambo-dogfood`,
-and passing any replaces the default), and a snapshot named like a live store
-(`lambo-dev.db*`) is refused unless `--allow-live-name`. Each serve gets a fresh
-`XDG_RUNTIME_DIR` under `--runtime-parent` (default `/tmp`).
+is written under `~/lambo-dogfood` or any extra `--protect` directory
+(repeatable; added to the default, never replacing it), and a snapshot named
+like a live store (`lambo-dev.db*`) is refused unless `--allow-live-name`. The
+config template must have a `[store]` with `kind = "sqlite"`; its path is
+rewritten to the copy, any `dsn` is dropped, and `LAMBO_CONFIG`,
+`LAMBO_STORE*`, `LAMBO_SQLITE_*`, `LAMBO_POSTGRES_*`, `LAMBO_COCKROACH_*` and
+`LAMBO_*_DSN` are removed from the environment of `provision` and `serve`.
+Each serve gets a fresh `XDG_RUNTIME_DIR` under `--runtime-parent` (default
+`/tmp`).
 
 Outputs: `--out` gets `parity.json` and `parity.txt`, aggregates only. Concept
-and refusal text is left out unless `--include-content`, so `--out` can be
+text and raw refusal text are left out (refusals become known-message ids or
+error classes, in the log too) unless `--include-content`, so `--out` can be
 committed as evidence. Everything that holds store content (store copies,
 `calls.json`, `side-*.json`, serve stderr, JSON-RPC transcripts) goes to
-`--work` (default: a fresh temp directory, logged at start). Never commit
-`--work`, and keep it out of the checkout.
+`--work`: by default a fresh 0700 temp directory, removed at exit unless
+`--keep-work`; a given `--work` is created 0700 if missing and kept. Never
+commit `--work`, and keep it out of the checkout.
 
 ### Acceptance check: replay parity between two builds
 
@@ -176,11 +224,11 @@ python3 scripts/loadtest/replay_parity.py \
     --session lambo-dev --groups 300 --variants 30 \
     --reasons path/to/reasons-0.4.1.json \
     --out evidence/<run>/parity --work ~/scratch/parity-work
-echo "exit $?"   # 0: every difference is catalogued; 1: some are UNEXPECTED
+echo "exit $?"   # 0: PASS; 1: FAIL (see the VERDICT block at the top of parity.txt)
 ```
 
-Run `--dry-run` first: it reconstructs and truncates without starting a binary,
-and reports the reconstruction warnings in `parity.json`.
+Run `--dry-run --keep-work` first: it reconstructs and truncates without
+starting a binary, and reports the reconstruction warnings in `parity.json`.
 
 ## How the driver is shaped (so refusals don't crowd out the measurement)
 
