@@ -284,9 +284,9 @@ async fn erase_session(
         EraseAnswer::HeldElsewhere { holder, age } => text(
             StatusCode::CONFLICT,
             format!(
-                "a live writer holds this session ({holder}, holding the single-writer lease for \
-                 {}s); nothing was erased. Stop that writer (a clean stop flushes and releases \
-                 the lease), then retry",
+                "another writer holds this session ({holder}, holding the single-writer lease \
+                 for {}s); nothing was erased. Stop that writer (a clean stop flushes and \
+                 releases the lease), or if it has died let its lease expire, then retry",
                 age.as_secs()
             ),
         ),

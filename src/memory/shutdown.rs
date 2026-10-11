@@ -574,9 +574,11 @@ impl Memory {
     ///    "nothing new lands after the drain" true of the workers. Bounded by
     ///    [`crate::writeq::WRITE_QUEUE_DRAIN_BUDGET`]; anything still
     ///    outstanding is **deferred, not lost**: workers are aborted **and
-    ///    joined**, each pending receipt is settled `intent_durable`, the count
-    ///    lands in `lambo_stats`' `write_queue_deferred`, and the next serve
-    ///    replays the durable intents. (This said "abandoned ... settled
+    ///    joined**, and each pending receipt is set aside until the final
+    ///    flush reports — then settled `intent_durable` (counted in
+    ///    `lambo_stats`' `write_queue_deferred`, replayed by the next serve) if
+    ///    the flush completed, `close_unflushed` if it failed, the session was
+    ///    degraded or the lease was lost (#117 review M1). (This said "abandoned ... settled
     ///    `failed` ... `write_queue_abandoned`", the pre-durable-intent
     ///    behaviour; `abandoned` now counts only jobs refused after a lost
     ///    lease.) The intent replay is stopped, aborted and joined, before the
@@ -667,8 +669,8 @@ impl Memory {
         // what stops new jobs (the enqueue path is a gated write), and this
         // quiesce is what makes "nothing new lands after the drain" true of the
         // workers. Bounded by `WRITE_QUEUE_DRAIN_BUDGET`; anything left over is
-        // deferred (receipt `intent_durable`, durable intent replayed by the
-        // next serve) rather than waited for.
+        // deferred (its receipt answered once the final flush reports, below)
+        // rather than waited for.
         let step = CloseStep::start(&self.session, 2, "replay_stop");
         self.pipeline.abort_probe();
         // The intent replay is stopped — aborted AND joined — before the
@@ -729,6 +731,10 @@ impl Memory {
                      writer owns the session"
                 );
             }
+            // The tail is dropped, so no set-aside write can be vouched
+            // for (#117 review M1).
+            self.pipeline
+                .settle_deferred(crate::writeq::CloseFlush::Incomplete);
             step.done();
             return Err(self.lease_lost_error());
         }
@@ -830,6 +836,8 @@ impl Memory {
             } else {
                 format!("{count} tail mutations were not flushed")
             };
+            self.pipeline
+                .settle_deferred(crate::writeq::CloseFlush::Incomplete);
             step.done();
             return Err(LamboError::Store(StoreError::Backend(format!(
                 "close: session {} degraded to durability=\"none\"; {detail}",
@@ -846,6 +854,10 @@ impl Memory {
                 step_name = "final_flush",
                 "close: step 9/{CLOSE_STEPS} final_flush skipped (empty tail)"
             );
+            // Nothing left to write: every set-aside intent was taken by an
+            // earlier flush, so it is durable (#117 review M1).
+            self.pipeline
+                .settle_deferred(crate::writeq::CloseFlush::Durable);
             // Graceful close: hand off the lease now rather than waiting out the
             // TTL, so the next writer takes the session immediately (T8.6).
             let step = CloseStep::start(&self.session, 10, "lease_release");
@@ -868,6 +880,10 @@ impl Memory {
                 // on the log. Nothing awaits between here and the return, so
                 // no cancellation can land in this window.
                 tail.durable();
+                // Only now are the set-aside receipts true to call
+                // `intent_durable` (#117 review M1).
+                self.pipeline
+                    .settle_deferred(crate::writeq::CloseFlush::Durable);
                 tracing::info!(
                     mutations = count,
                     session = %self.session,
@@ -890,6 +906,9 @@ impl Memory {
                 // that fixes the store first) drains and flushes exactly this
                 // tail, in order.
                 drop(tail);
+                // A retried close that flushes upgrades these (#117 M1).
+                self.pipeline
+                    .settle_deferred(crate::writeq::CloseFlush::Incomplete);
                 tracing::error!(
                     error = %err,
                     mutations = count,

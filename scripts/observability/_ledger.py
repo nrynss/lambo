@@ -51,7 +51,9 @@ because metric 2 and metric 3 **join** to it, and leaves `startup`/`lease` in
                 including ledger_written_lines / ledger_dropped_lines /
                 ledger_queued_lines}
     completion  agent_id, receipt, state ("applied" | "applied_after_restart" |
-                "failed" | "deferred"); the two applied states also carry
+                "failed" | "deferred" | "close_unflushed", the last since #117:
+                the close's final flush did not complete, so the write may not
+                have been saved); the two applied states also carry
                 created_count and matched_count, and since #12 (0.4.0)
                 semantic_merged / reinforced (derive), edges (record_action)
                 and embedded (hybrid), each ABSENT rather than zero when the

@@ -140,6 +140,7 @@ ANSWER_PREFIXES = (
     ("pending", "pending"),
     ("FAILED, nothing was written", "failed"),
     ("not applied before this session closed", "intent_durable"),
+    ("close did not finish its final flush", "close_unflushed"),
     ("DROPPED before it was attempted", "dropped"),
     ("expired", "expired"),
     ("restart-lost", "restart_lost"),
@@ -339,8 +340,10 @@ def main() -> int:
     acked_writes = acked_derive + acked_record
     expected_interactions = acked_writes + refused_at_ack
     settled_applied = outcome_counts.get("applied", 0) + outcome_counts.get("applied_after_restart", 0)
-    unsettled = sum(outcome_counts.get(t, 0) for t in UNSETTLED) + outcome_counts.get(
-        "intent_durable", 0
+    unsettled = (
+        sum(outcome_counts.get(t, 0) for t in UNSETTLED)
+        + outcome_counts.get("intent_durable", 0)
+        + outcome_counts.get("close_unflushed", 0)
     )
     expected_concepts = derive_created + record_created
     expected_record_edges = record_edges
@@ -405,7 +408,7 @@ def main() -> int:
     out.write("receipt outcomes (admitted writes, as last seen in the ledger)\n")
     out.write("-" * 78 + "\n")
     for tag in ("applied", "applied_after_restart", "failed", "dropped", "intent_durable",
-                "expired", "restart_lost", "never_issued", "forbidden", "pending", "unknown"):
+                "close_unflushed", "expired", "restart_lost", "never_issued", "forbidden", "pending", "unknown"):
         n = outcome_counts.get(tag, 0)
         if n or tag in ("applied", "failed", "pending"):
             label = "pending (never seen settled)" if tag == "pending" else tag

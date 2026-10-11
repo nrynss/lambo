@@ -337,8 +337,10 @@ pub enum LeaseOutcome {
     Held {
         /// The current holder's row.
         current: LeaseInfo,
-        /// How long the current holder has held it (store clock − `acquired_at`),
-        /// clamped to zero if the clocks disagree slightly.
+        /// How long the current holder has held it: the refusing process's
+        /// `Utc::now()` at the read minus the row's `acquired_at`, clamped to
+        /// zero if the clocks disagree slightly. Not the store's clock: the
+        /// adapters read the row and subtract locally.
         age: Duration,
     },
 }
@@ -372,9 +374,37 @@ pub struct LeaseRefusal {
     pub current_holder: String,
 }
 
+/// The `host` and `pid` inside a [`LeaseHolder::token`] (`agent@host#pid`),
+/// or `None` for a token not in that shape (the reserved markers, a row
+/// written by something other than a [`LeaseHolder`]).
+///
+/// Split from the right: an agent id is caller-chosen and may itself contain
+/// `@` or `#`, while the host and the pid never contain the separator that
+/// follows them.
+pub(crate) fn holder_host_and_pid(token: &str) -> Option<(&str, u32)> {
+    let (rest, pid) = token.rsplit_once('#')?;
+    let (_agent, host) = rest.rsplit_once('@')?;
+    Some((host, pid.parse().ok()?))
+}
+
+/// What [`detect_host`] answers when it cannot find a name. Two processes that
+/// both fell back to it share the string without sharing a host, so a check
+/// that compares hosts must treat it as "unknown", never as a match.
+pub(crate) const UNKNOWN_HOST: &str = "unknown-host";
+
 /// Best-effort host name, dependency-free. Only needs to distinguish hosts (see
 /// [`LeaseHolder::for_this_process`]).
-fn detect_host() -> String {
+///
+/// Computed once per process and cached (#117 review L2): the fallback runs
+/// the `hostname` command, a blocking spawn that the lease refusal would
+/// otherwise repeat on an async path at every refused acquire. A process's
+/// host name does not change under it in any way this needs to follow.
+pub(crate) fn detect_host() -> String {
+    static HOST: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    HOST.get_or_init(detect_host_uncached).clone()
+}
+
+fn detect_host_uncached() -> String {
     for var in ["HOSTNAME", "HOST"] {
         if let Ok(h) = std::env::var(var) {
             let h = h.trim();
@@ -391,7 +421,7 @@ fn detect_host() -> String {
             return h;
         }
     }
-    "unknown-host".to_string()
+    UNKNOWN_HOST.to_string()
 }
 
 /// Store-agnostic lease checks every adapter runs against itself: the SQLite
@@ -630,5 +660,17 @@ mod tests {
         let h = LeaseHolder::for_this_process(&AgentId::new("a"));
         assert_eq!(h.pid, std::process::id());
         assert!(!h.host.is_empty());
+    }
+
+    /// #117 review L2: the host name is computed once and reused.
+    #[test]
+    fn the_host_name_is_cached() {
+        let first = detect_host();
+        assert!(!first.is_empty());
+        assert_eq!(detect_host(), first);
+        assert_eq!(
+            LeaseHolder::for_this_process(&AgentId::new("a")).host,
+            first
+        );
     }
 }

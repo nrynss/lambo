@@ -50,18 +50,6 @@ use crate::store::GraphStore;
 use crate::types::{AgentId, EmbeddingContract, LamboError, MatchStrategy, SessionId, StoreError};
 use crate::writeq::{EmbedderCalibration, WriteCtx, WritePipeline};
 
-/// The clause [`Attach::Held`]'s message uses for a holder that still looks
-/// live — named, not inlined, because `mcp::serve` has to be able to *correct*
-/// it (J2-R2-3).
-///
-/// The refusal is composed here from the lease row alone, which is evidence up to
-/// one `LEASE_HEARTBEAT_INTERVAL` old. `serve`'s election then probes the
-/// holder's endpoint, and a refused connect is better evidence: it replaces this
-/// clause rather than contradicting it a sentence later. Sharing the literal is
-/// what keeps the two ends from drifting — a reword here that left `serve`
-/// looking for the old text would silently turn the correction into a no-op.
-pub(crate) const STILL_REFRESHING_CLAUSE: &str = "is still refreshing it";
-
 /// The shutdown pre-arm a serving process hands [`MemoryBuilder::build_attach`]
 /// (J6), as the builder needs it: armed at lease acquisition, and raced
 /// against the startup load.
@@ -559,18 +547,13 @@ impl MemoryBuilder {
                 ));
             }
             LeaseOutcome::Held { current, age } => {
-                // Fail closed, naming the current holder and its age. Reported
-                // as data (J2) so `mcp::serve` can proxy to the holder; the
-                // message is byte-identical to what `build` has always returned,
-                // and `build` still returns it as `LamboError::Conflict`.
-                let message = format!(
-                    "session {session} is already held by another writer ({}) — it acquired the \
-                     single-writer lease {}s ago and {STILL_REFRESHING_CLAUSE}. Refusing to open \
-                     a second writer. If that holder is wedged, an operator can force a takeover \
-                     (see the single-writer lease note in docs/reference/cli.mdx)",
-                    current.holder,
-                    age.as_secs(),
-                );
+                // Fail closed, naming the current holder and the lease row's
+                // facts. Reported as data (J2) so `mcp::serve` can proxy to
+                // the holder; `build` returns the same message as
+                // `LamboError::Conflict`. The row cannot say whether the
+                // holder is alive, so the message does not claim it is (#118).
+                let message =
+                    super::lease_refusal::lease_held_message(&session, &current, age, false);
                 return Ok(Attach::Held(Box::new(LeaseHeldElsewhere {
                     message,
                     current,

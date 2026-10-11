@@ -12,8 +12,10 @@
 //!
 //! * the quiesce is bounded by [`WRITE_QUEUE_DRAIN_BUDGET`]; what does not
 //!   drain is **deferred, not lost** — workers are aborted **and joined**, and
-//!   every unsettled receipt is settled `intent_durable` (its durable intent
-//!   was recorded at admission and the final flush persists it);
+//!   every unsettled receipt is set aside until `close()`'s final flush
+//!   reports, then settled by [`WritePipeline::settle_deferred`]:
+//!   `intent_durable` if the flush made its intent durable, `close_unflushed`
+//!   if it did not (#117 review M1);
 //! * `Drop` cannot await, so [`WritePipeline::abort_all_sync`] aborts without
 //!   joining and settles nothing.
 //!
@@ -33,6 +35,15 @@ use tokio::task::JoinHandle;
 use parking_lot::Mutex as PlMutex;
 
 use super::{Job, Lanes, ReceiptAnswer, ReceiptId, WritePipeline};
+
+/// How `close()`'s final flush ended, for [`WritePipeline::settle_deferred`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CloseFlush {
+    /// The tail is in the store (or there was none left to write).
+    Durable,
+    /// The flush failed, the session is degraded, or the lease was lost.
+    Incomplete,
+}
 use crate::types::AgentId;
 
 /// How long a clean `close()` drains the queue before **deferring** the
@@ -81,13 +92,15 @@ impl WritePipeline {
     /// number admission promised"; admission stopped promising a drain time at
     /// the J3 redesign.) Anything still outstanding when it runs out is
     /// **deferred, not lost** (J3 durable intents): workers are aborted and
-    /// joined (aborting alone proves nothing — the R3-1 lesson), every
-    /// still-pending receipt is settled `intent_durable`, and the count lands
-    /// in `lambo_stats` as `write_queue_deferred`. The jobs themselves were
-    /// recorded as durable intents at admission and the close's final flush —
-    /// which runs AFTER this quiesce — persists them; the next serve of the
-    /// session applies them in order. Acked ⇒ (applied ∨ durable intent) at a
-    /// clean close, **by construction**, whatever any drain estimate said.
+    /// joined (aborting alone proves nothing — the R3-1 lesson), and every
+    /// still-pending receipt is set aside for
+    /// [`WritePipeline::settle_deferred`]. The jobs themselves were recorded
+    /// as intents at admission, and the close's final flush — which runs AFTER
+    /// this quiesce — persists them; only then are their receipts answered
+    /// `intent_durable` (and counted in `write_queue_deferred`), and the next
+    /// serve of the session applies them in order. Acked ⇒ (applied ∨ durable
+    /// intent) at a clean close, **by construction**, whatever any drain
+    /// estimate said. Returns how many receipts it set aside.
     pub(crate) async fn quiesce(&self) -> usize {
         self.seal();
         let started = std::time::Instant::now();
@@ -124,16 +137,18 @@ impl WritePipeline {
                 session = %self.ctx.session,
                 deferred,
                 "write queue: {deferred} acked write(s) did not drain within {:?} of close(); \
-                 their durable intents survive the close and the next serve of this session \
-                 applies them — receipts say intent_durable",
+                 their receipts are answered once the final flush reports — intent_durable if \
+                 it lands their intents, close_unflushed if it does not",
                 WRITE_QUEUE_DRAIN_BUDGET
             );
         }
         deferred
     }
 
-    /// Stop every worker and settle whatever is left as `intent_durable`.
-    /// Returns how many receipts this deferred to the next serve.
+    /// Stop every worker and set aside every receipt still unsettled, to be
+    /// settled by [`WritePipeline::settle_deferred`] once `close()` knows
+    /// whether its final flush made the intents durable (#117 review M1).
+    /// Returns how many receipts this set aside.
     pub(crate) async fn abort_workers(&self) -> usize {
         self.seal();
         let (handles, orphans) = {
@@ -185,58 +200,123 @@ impl WritePipeline {
         );
         // Whatever the aborted workers had in flight is now provably not
         // running, so any receipt still `Pending` names a write this process
-        // will not apply — including the ones that were still queued. Every
-        // such job has a durable intent (recorded at admission, in the log the
-        // close's final flush persists), so the honest settle is
-        // `intent_durable`, not `failed`: the write is deferred to the next
-        // serve of this session, not lost.
-        let mut deferred = 0usize;
-        let now = (self.clock)();
-        {
-            let mut r = self.receipts.lock();
-            let pending: Vec<ReceiptId> = r
+        // will not apply — including the ones that were still queued. Each has
+        // an intent in the write-behind log (recorded at admission), but that
+        // intent is durable only once a flush has taken it, and the close's
+        // final flush runs AFTER this. So the receipts are set aside here, not
+        // settled: `settle_deferred` answers them once the flush has reported.
+        let pending: Vec<ReceiptId> = {
+            let r = self.receipts.lock();
+            let mut ids: Vec<ReceiptId> = r
                 .entries
                 .iter()
                 .filter(|(_, e)| !e.answer.is_settled())
                 .map(|(id, _)| *id)
                 .collect();
-            for id in pending.iter().chain(orphans.iter()) {
-                if let Some(entry) = r.entries.get_mut(id)
-                    && entry.settle(ReceiptAnswer::IntentRecorded, now)
+            for id in orphans {
+                if !ids.contains(&id) && r.entries.get(&id).is_some_and(|e| !e.answer.is_settled())
                 {
-                    let agent = entry.agent.clone();
-                    // J4 proof obligation 5: a close-deferred intent is a
-                    // lifecycle fact (admitted → deferred), measurable.
-                    if let Some(ledger) = &self.ctx.ledger {
-                        ledger.append(&crate::ledger::completion_line(
-                            &agent.to_string(),
-                            &id.to_string(),
-                            "deferred",
-                            Some(json!({ "reason": "close_drain_exceeded" })),
-                        ));
-                    }
-                    r.undelivered.entry(agent).or_default().push_back(*id);
-                    deferred += 1;
+                    ids.push(id);
                 }
             }
+            ids
+        };
+        let mut lanes = self.lanes.lock();
+        lanes.running = 0;
+        lanes.running_per_lane.clear();
+        lanes.queued = 0;
+        lanes.bytes = 0;
+        for id in pending {
+            if !lanes.close_deferred.contains(&id) {
+                lanes.close_deferred.push(id);
+            }
         }
-        if deferred > 0 {
-            self.counters
-                .deferred
-                .fetch_add(deferred as u64, Ordering::Relaxed);
+        lanes.close_deferred.len()
+    }
+
+    /// Settle the receipts [`WritePipeline::abort_workers`] set aside, now that
+    /// `close()` knows how its final flush ended (#117 review M1).
+    ///
+    /// * [`CloseFlush::Durable`] — the flush completed (or there was nothing
+    ///   left to flush), so every set-aside write is a durable intent the next
+    ///   serve replays: `intent_durable`, a ledger `deferred` line, and
+    ///   `write_queue_deferred`. A receipt an earlier, failed attempt of this
+    ///   close answered `close_unflushed` is upgraded: the retry made it true.
+    /// * [`CloseFlush::Incomplete`] — the flush failed, the session is
+    ///   degraded, or the lease was lost and the tail dropped. The write may or
+    ///   may not have been saved (its intent is durable only if an earlier
+    ///   background flush took it), so the answer is `close_unflushed`, never
+    ///   `intent_durable`.
+    ///
+    /// Either way the close has now settled everything it will settle, so the
+    /// waits it holds are released. Returns how many receipts it settled.
+    pub(crate) fn settle_deferred(&self, flush: CloseFlush) -> usize {
+        let ids: Vec<ReceiptId> = self.lanes.lock().close_deferred.clone();
+        let now = (self.clock)();
+        let mut settled = 0usize;
+        {
+            let mut r = self.receipts.lock();
+            for id in &ids {
+                let Some(entry) = r.entries.get_mut(id) else {
+                    continue;
+                };
+                let upgrade = matches!(entry.answer, ReceiptAnswer::CloseUnflushed);
+                let (answer, line, reason) = match flush {
+                    CloseFlush::Durable => (
+                        ReceiptAnswer::IntentRecorded,
+                        "deferred",
+                        "close_drain_exceeded",
+                    ),
+                    CloseFlush::Incomplete => (
+                        ReceiptAnswer::CloseUnflushed,
+                        "close_unflushed",
+                        "final_flush_incomplete",
+                    ),
+                };
+                let changed = if upgrade && flush == CloseFlush::Durable {
+                    entry.answer = answer;
+                    entry.settled_at = Some(now);
+                    true
+                } else {
+                    entry.settle(answer, now)
+                };
+                if !changed {
+                    continue;
+                }
+                let agent = entry.agent.clone();
+                // J4 proof obligation 5: a close-deferred intent is a
+                // lifecycle fact (admitted → deferred), measurable; so is
+                // a close that could not vouch for it.
+                if let Some(ledger) = &self.ctx.ledger {
+                    ledger.append(&crate::ledger::completion_line(
+                        &agent.to_string(),
+                        &id.to_string(),
+                        line,
+                        Some(json!({ "reason": reason })),
+                    ));
+                }
+                let queue = r.undelivered.entry(agent).or_default();
+                if !queue.contains(id) {
+                    queue.push_back(*id);
+                }
+                settled += 1;
+            }
+        }
+        if flush == CloseFlush::Durable {
+            if settled > 0 {
+                self.counters
+                    .deferred
+                    .fetch_add(settled as u64, Ordering::Relaxed);
+            }
+            self.lanes.lock().close_deferred.clear();
         }
         {
-            let mut lanes = self.lanes.lock();
-            lanes.running = 0;
-            lanes.running_per_lane.clear();
-            lanes.queued = 0;
-            lanes.bytes = 0;
             // After the settle block above, never before it: a wait that sees
             // this has nothing left to wait for from this close.
-            lanes.settled_at_close = true;
+            self.lanes.lock().settled_at_close = true;
         }
         self.settled.notify_waiters();
-        deferred
+        settled
     }
 
     /// Abort the workers without awaiting them — the `Drop` path, which cannot

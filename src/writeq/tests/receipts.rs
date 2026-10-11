@@ -118,6 +118,7 @@ fn every_answer_has_a_distinct_tag_and_none_of_them_is_unknown() {
         ReceiptAnswer::Failed("x".into()),
         ReceiptAnswer::AppliedAfterRestart("x".into()),
         ReceiptAnswer::IntentRecorded,
+        ReceiptAnswer::CloseUnflushed,
         ReceiptAnswer::Dropped("x".into()),
         ReceiptAnswer::Expired,
         ReceiptAnswer::RestartLost,
@@ -125,9 +126,9 @@ fn every_answer_has_a_distinct_tag_and_none_of_them_is_unknown() {
         ReceiptAnswer::Forbidden,
     ];
     // J3-R2R-4: `ordinal` has no `_` arm, so it is exhaustive by
-    // construction — if a twelfth variant is ever added, this compiles
-    // only when it is named. Asserting eleven distinct ordinals (and
-    // eleven distinct tags) turns that mechanical exhaustiveness into the
+    // construction — if a thirteenth variant is ever added, this compiles
+    // only when it is named. Asserting twelve distinct ordinals (and
+    // twelve distinct tags) turns that mechanical exhaustiveness into the
     // proof that `ReceiptAnswer`'s count stays real.
     let ords: Vec<usize> = answers.iter().map(ReceiptAnswer::ordinal).collect();
     let mut ords_sorted = ords.clone();
@@ -135,10 +136,10 @@ fn every_answer_has_a_distinct_tag_and_none_of_them_is_unknown() {
     ords_sorted.dedup();
     assert_eq!(
         ords_sorted.len(),
-        11,
-        "ordinals must be eleven and distinct: {ords:?}"
+        12,
+        "ordinals must be twelve and distinct: {ords:?}"
     );
-    assert_eq!(answers.len(), 11, "the taxonomy holds eleven answers");
+    assert_eq!(answers.len(), 12, "the taxonomy holds twelve answers");
     let mut tags: Vec<&str> = answers.iter().map(ReceiptAnswer::tag).collect();
     tags.sort_unstable();
     let mut deduped = tags.clone();
@@ -176,6 +177,7 @@ fn only_the_two_pendings_are_unsettled() {
         // same id is applied_after_restart or failed, but nothing in this
         // one can change it again.
         ReceiptAnswer::IntentRecorded,
+        ReceiptAnswer::CloseUnflushed,
         ReceiptAnswer::Dropped("x".into()),
         ReceiptAnswer::Expired,
         ReceiptAnswer::RestartLost,

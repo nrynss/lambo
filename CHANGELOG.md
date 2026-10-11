@@ -1,5 +1,52 @@
 # Changelog
 
+## Unreleased
+
+### Breaking (library API)
+
+- `lambo::writeq::ReceiptAnswer` gained the variant `CloseUnflushed` (#117)
+  and is now `#[non_exhaustive]`, so a later answer is not another breaking
+  change. A `match` on it outside this crate needs a wildcard arm.
+
+### Fixed
+
+- `embed-candle-cuda` builds against CUDA 13.4 (#111). `cudarc` is now
+  0.19.10, which knows 13.4; 0.4.0's knew versions only up to 13.3 and
+  needed `CUDARC_CUDA_VERSION=13030` set for the build.
+- The docs no longer say an acked write is durable at admission (#117). The
+  write intent recorded at admission rides the write-behind log and reaches
+  the store with the next flush (`backend_flush_interval`, 1 s by default). A
+  clean shutdown loses no acked write; a crash (SIGKILL, an OOM kill, power
+  loss) can lose writes acked since the last flush, which are not replayed
+  and answer `restart_lost` on the next server. What was flushed replays.
+  `mcp.mdx` now says so under `lambo_derive` and `lambo_stats`.
+- A write the close deferred is answered `intent_durable` only after the
+  close's final flush has completed (#117). It used to be answered during
+  the queue quiesce, before that flush ran, so a close whose flush then
+  failed, or a degraded or fenced session, had told a still-connected caller
+  "durable intent" about an intent that never reached the store. Such a
+  receipt now answers the new state `close_unflushed`: the write may or may
+  not have been saved, so recall before re-deriving. A retried close whose
+  flush completes upgrades it to `intent_durable`. The ledger writes a
+  `close_unflushed` completion line for it, and `write_queue_deferred`
+  counts only writes the close made durable. `scripts/loadtest/
+  check_durability.py`, `mcp_concurrent.py` and `replay_parity.py`
+  recognise the new answer. A `wait_ms` waiter on a write still pending at
+  close is now released when the final flush reports (so up to the close's
+  flush bound), not at the queue quiesce.
+- A refused lease no longer claims the holder "is still refreshing it"
+  (#118). A lease row cannot tell a live holder from one that crashed before
+  its lease expired, so the refusal now reports the row's facts: when the
+  lease was last refreshed and when it expires. When the holder names this
+  host and its pid is not visible from here (Unix only, and never for the
+  `unknown-host` fallback name), the refusal says its process looks gone,
+  hedged because a host name is not a PID namespace, gives the time until
+  the lease expires and points to the takeover note; `serve`'s budget
+  refusal then ends "or have an operator take over" rather than "or stop
+  the other holder". `lambo erase-session`, the HTTP erase and `recall-index backfill`
+  refusals no longer call the holder "a live writer". Lease acquisition and
+  fencing are unchanged, and nothing takes over automatically.
+
 ## 0.4.0 (2026-10-11)
 
 ### Highlights

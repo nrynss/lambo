@@ -155,7 +155,7 @@ A second `serve` is different, and is not refused: over stdio it connects to the
 
 ```bash
 $ lambo --config lambo.toml derive --session demo --agent agent-b --content "x" --kind entity
-lambo derive: conflict: session demo is already held by another writer (agent-a@host#10492) — it acquired the single-writer lease 66s ago and is still refreshing it. ...
+lambo derive: conflict: session demo is already held by another writer (agent-a@host#10492) — it acquired the single-writer lease 66s ago; the lease was last refreshed 6s ago and expires in 39s unless the holder refreshes it again. ...
 $ echo $?
 1
 ```

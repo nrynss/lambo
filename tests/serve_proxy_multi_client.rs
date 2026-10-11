@@ -1249,15 +1249,107 @@ fn a_holder_whose_lease_outlasts_the_client_budget_is_refused_at_once() {
         err.contains("NO TOOLS"),
         "and why waiting would be worse — a client that gives up reports no tools: {err}"
     );
-    // J2-R2-3, the narrow half. This holder published no endpoint, so it is a
-    // CLI verb that really is alive and really is refreshing its lease — the
-    // clause is TRUE here and must survive. The correction applies only where the
-    // probe found the endpoint refusing connections; see the test below.
+    // J2-R2-3 / #118, the narrow half. This holder published no endpoint, so
+    // there is no probe evidence: the refusal reports the lease row's facts and
+    // claims nothing about liveness.
     assert!(
-        err.contains("is still refreshing it"),
-        "a live-but-unforwardable holder is still refreshing its lease, and the refusal must \
-         keep saying so: {err}"
+        err.contains("last refreshed") && err.contains("expires in"),
+        "a holder this process cannot forward to is described by its lease timing: {err}"
     );
+    assert!(
+        !err.contains("still refreshing"),
+        "a lease row cannot show its holder is refreshing it: {err}"
+    );
+}
+
+/// #118, at the binary: a holder on this host whose process is gone is named as
+/// looking gone, with the lease's expiry and the takeover note, and is still
+/// refused.
+#[cfg(unix)]
+#[test]
+fn a_local_holder_whose_process_is_gone_is_named_as_gone() {
+    let (_dir, cfg, db) = scratch("goneholder");
+    let runtime = RuntimeDir::new();
+    provision(&db);
+
+    // A pid that existed and has been reaped: free unless the OS reuses it in
+    // the next few milliseconds.
+    let mut child = std::process::Command::new("true")
+        .spawn()
+        .expect("spawn true");
+    let dead_pid = child.id();
+    child.wait().expect("reap");
+    // #117 review L5: the same guard as the unit test. If the OS has already
+    // handed the pid to another process, there is no gone holder to name, and
+    // the test skips rather than fail on an unlucky reuse.
+    if pid_visible(dead_pid) {
+        eprintln!("skipping: pid {dead_pid} was reused before the test could use it");
+        return;
+    }
+    let mut holder =
+        lambo::store::LeaseHolder::for_this_process(&lambo::types::AgentId::new("c-load"));
+    holder.pid = dead_pid;
+    {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let store = SqliteStore::connect(&db).unwrap();
+            store
+                .acquire_lease(&SessionId::from(SESSION), &holder, Duration::from_secs(45))
+                .await
+                .unwrap();
+        });
+    }
+
+    let out = common::lambo_command()
+        .env(RUNTIME_DIR_VAR, runtime.path())
+        .args([
+            "--config",
+            cfg.to_str().unwrap(),
+            "serve",
+            "--session",
+            SESSION,
+            "--agent",
+            "late-arrival",
+            "--transport",
+            "stdio",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("spawn");
+
+    assert!(
+        !out.status.success(),
+        "a gone holder's lease is still honoured"
+    );
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    if pid_visible(dead_pid) {
+        eprintln!("skipping: pid {dead_pid} was reused while serve ran: {err}");
+        return;
+    }
+    assert!(
+        err.contains(&format!("no process {dead_pid} is visible from here")),
+        "{err}"
+    );
+    assert!(err.contains("expires in"), "{err}");
+    assert!(err.contains("force a takeover"), "{err}");
+    assert!(!err.contains("still refreshing"), "{err}");
+    // #117 review L3: a holder described as gone is not one to stop.
+    assert!(err.contains("or have an operator take over"), "{err}");
+    assert!(!err.contains("or stop the other holder"), "{err}");
+}
+
+/// `true` when a process with this pid exists (or exists and may not be
+/// signalled), per `kill(pid, 0)`.
+#[cfg(unix)]
+fn pid_visible(pid: u32) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    // SAFETY: signal 0 delivers nothing; it only checks the pid.
+    let rc = unsafe { libc::kill(pid, 0) };
+    rc == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
 }
 
 /// J2-R2-3, at the binary: a holder whose endpoint refuses connections must not
@@ -1332,7 +1424,7 @@ fn a_holder_whose_endpoint_refuses_is_not_described_as_still_refreshing() {
         "this test is only meaningful if the probe reached the connect: {err}"
     );
     assert!(
-        !err.contains("is still refreshing it"),
+        !err.contains("still refreshing"),
         "the refusal contradicted itself: the holder is not refreshing anything, and the \
          message's own next clause says so: {err}"
     );

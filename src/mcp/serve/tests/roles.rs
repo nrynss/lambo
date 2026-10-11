@@ -49,51 +49,96 @@ fn an_abrupt_holder_death_outlasts_the_election_budget() {
     );
 }
 
-/// J2-R2-3: the refusal must not tell an operator that a dead holder "is
-/// still refreshing" its lease.
-///
-/// The false clause came *first* in the composed paragraph and the probe's
-/// contradiction second, so the opening sentence sent an operator looking for
-/// a process that no longer exists.
+/// J2-R2-3 / #118: the refusal must not tell an operator that a dead holder
+/// "is still refreshing" its lease, and a refused endpoint must be named as
+/// the likely death it is.
+// Builds a `LeaseHeldElsewhere`, whose store is a `MemoryStore`.
+#[cfg(feature = "store-memory")]
 #[test]
 fn a_dead_holders_refusal_does_not_claim_it_is_still_refreshing() {
-    let held = format!(
-        "session s is already held by another writer (a@h#1) — it acquired the \
-             single-writer lease 4s ago and {}. Refusing to open a second writer.",
-        crate::memory::STILL_REFRESHING_CLAUSE
+    let session = crate::types::SessionId::new("s");
+    let now = chrono::Utc::now();
+    let current = lease::LeaseInfo {
+        // Another host, so the local pid check cannot fire and this pins the
+        // probe's branch alone.
+        holder: "a@not-this-host.invalid#1".into(),
+        token: 1,
+        acquired_at: now - chrono::Duration::seconds(4),
+        expires_at: now + chrono::Duration::seconds(41),
+        endpoint: None,
+    };
+    let age = Duration::from_secs(4);
+    let held = crate::memory::LeaseHeldElsewhere {
+        message: crate::memory::lease_held_message(&session, &current, age, false),
+        current,
+        age,
+        store: Arc::new(crate::store::MemoryStore::new()),
+    };
+    assert!(
+        !held.message.contains("still refreshing"),
+        "the row alone must not claim liveness: {}",
+        held.message
     );
     let refused = format!("{ENDPOINT_NOT_ACCEPTING} (Connection refused (os error 61))");
-    let corrected = correct_the_refresh_claim(&held, &refused);
-    assert!(
-        !corrected.contains(crate::memory::STILL_REFRESHING_CLAUSE),
-        "the probe is the better evidence and the claim must go: {corrected}"
-    );
+    let corrected = refusal_with_probe(&held, &session, &refused);
     assert!(
         corrected.contains("most likely died"),
-        "and it must be replaced by what the probe actually found: {corrected}"
+        "the probe's conclusion must be in the refusal: {corrected}"
     );
-    // J2-R1-9's rule, applied to the new literal: a continuation that lost
-    // its `\\` shows up as a double space, and a phrase that spans one shows
-    // up nowhere. Assert both.
+    assert!(
+        corrected.contains("endpoint is not answering") && corrected.contains("expires in 41s"),
+        "with the row's facts beside it: {corrected}"
+    );
     assert!(
         !corrected.contains("  "),
         "a broken string continuation leaves a double space: {corrected}"
     );
-    assert!(
-        corrected.contains("endpoint is not answering"),
-        "the phrase spanning the continuation must survive it: {corrected}"
-    );
-    // Narrow on purpose: every other refusal is a LIVE holder this process
-    // merely cannot forward to, and the clause is true for it.
+    // Narrow on purpose: every other outcome is a holder this process merely
+    // cannot forward to, and the row's facts stand unchanged.
     for other in [
         "That holder published no endpoint, so there is nothing to forward tool calls to",
         "That holder is on another host (a@elsewhere#2)",
         "the holder's endpoint is not safe to dial (a directory check failed)",
     ] {
-        assert!(
-            correct_the_refresh_claim(&held, other)
-                .contains(crate::memory::STILL_REFRESHING_CLAUSE),
-            "a live-but-unforwardable holder IS still refreshing its lease: {other}"
+        assert_eq!(
+            refusal_with_probe(&held, &session, other),
+            held.message,
+            "an unforwardable holder keeps the row-only refusal: {other}"
         );
     }
+}
+
+/// #117 review L3: the budget refusal does not ask the operator to stop a
+/// holder it has just described as gone, and its expiry comes from the same
+/// instant as the refusal's own figures.
+#[test]
+fn the_budget_refusal_advice_follows_the_holder_evidence() {
+    assert_eq!(
+        retry_advice(34, false),
+        "Retry in 34s, or stop the other holder."
+    );
+    assert_eq!(
+        retry_advice(34, true),
+        "Retry in 34s, or have an operator take over."
+    );
+
+    let now = chrono::Utc::now();
+    let current = lease::LeaseInfo {
+        holder: "a@not-this-host.invalid#1".into(),
+        token: 1,
+        acquired_at: now - chrono::Duration::seconds(20),
+        expires_at: now + chrono::Duration::seconds(25),
+        endpoint: None,
+    };
+    // The age was taken at `now`, so the remaining time is exactly 25 s,
+    // whatever the wall clock says by the time this runs.
+    let remaining = crate::memory::lease_remaining(&current, Duration::from_secs(20));
+    assert_eq!(remaining, Duration::from_secs(25));
+    let message = crate::memory::lease_held_message(
+        &crate::types::SessionId::new("s"),
+        &current,
+        Duration::from_secs(20),
+        false,
+    );
+    assert!(message.contains("expires in 25s"), "{message}");
 }

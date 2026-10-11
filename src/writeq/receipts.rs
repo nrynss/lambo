@@ -167,9 +167,11 @@ pub const MAX_RETAINED_RECEIPTS: usize = 4096;
 /// A waiting call does not extend a shutdown, though not because the
 /// transport drops it: hub and proxy endpoint sessions stay connected until
 /// `serve`'s last stage. It is because the close settles every receipt this
-/// process holds: `quiesce` drains, then `abort_workers` settles what is
-/// left `intent_durable` and wakes every waiter, so those waits return with
-/// it. A `pending_replay` id, owed to a replay the close stops, is not
+/// process holds: `quiesce` drains, `abort_workers` sets aside what is left,
+/// and once the final flush reports, `settle_deferred` settles those
+/// `intent_durable` (or `close_unflushed`) and wakes every waiter, so those
+/// waits return with it. A close cancelled before that point leaves them to
+/// their own deadline. A `pending_replay` id, owed to a replay the close stops, is not
 /// settled; its wait returns once the pipeline is sealed and the close has
 /// settled what its aborted workers left (#11 review P3-2, round 2 F1). Nothing in shutdown joins a waiting call either:
 /// `serve`'s final stage cancels the MCP services without awaiting their
@@ -469,18 +471,25 @@ impl AppliedSummary {
 
 /// The answer to "what happened to this receipt?".
 ///
-/// **Eleven** variants, and **none of them is "unknown"** (J3 round-1 F1: this
+/// **Twelve** variants, and **none of them is "unknown"** (J3 round-1 F1: this
 /// count said "seven" at eight, then at ten; it is checked by a test now rather
-/// than restated by hand). Two of the eleven are unsettled —
+/// than restated by hand). Two of the twelve are unsettled —
 /// [`ReceiptAnswer::Pending`] and [`ReceiptAnswer::PendingReplay`] — and the
-/// other nine are terminal for the process answering. The three the spec calls
+/// other ten are terminal for the process answering. The three the spec calls
 /// out by name are [`ReceiptAnswer::Expired`], [`ReceiptAnswer::RestartLost`]
 /// and [`ReceiptAnswer::NeverIssued`] — a receipt this process discarded, one
-/// another process issued, and one nobody issued; the remaining six are
+/// another process issued, and one nobody issued; the remaining seven are
 /// [`ReceiptAnswer::Applied`], [`ReceiptAnswer::AppliedAfterRestart`],
 /// [`ReceiptAnswer::Failed`], [`ReceiptAnswer::IntentRecorded`],
-/// [`ReceiptAnswer::Dropped`] and [`ReceiptAnswer::Forbidden`].
+/// [`ReceiptAnswer::CloseUnflushed`], [`ReceiptAnswer::Dropped`] and
+/// [`ReceiptAnswer::Forbidden`].
+///
+/// `#[non_exhaustive]` (#117 review): `CloseUnflushed` was added after 0.4.0,
+/// and a later answer must not be another breaking change for downstream
+/// matchers. Match with a wildcard arm. Inside this crate the attribute has no
+/// effect, so [`ReceiptAnswer::ordinal`] stays exhaustive by construction.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ReceiptAnswer {
     /// Admitted, not yet decided. Also what a timed-out wait answers *for a
     /// receipt this process holds* — a replay-owed id answers
@@ -527,34 +536,27 @@ pub enum ReceiptAnswer {
     /// (recall finds the concepts).
     AppliedAfterRestart(String),
     /// Not applied before this session closed, and **not lost**: the validated
-    /// job is recorded as a durable intent that the close's final flush
-    /// persists, and the next serve of this session re-attempts it —
-    /// idempotently, in submission order (J3 durable intents). Terminal *for
-    /// this process*; the next process's answer for this id is
-    /// `applied_after_restart` (or `failed`, if the replay is refused for the
-    /// content, or `pending_replay` while it is still owed).
+    /// job is recorded as a durable intent, and the next serve of this session
+    /// re-attempts it — idempotently, in submission order (J3 durable
+    /// intents). Terminal *for this process*; the next process's answer for
+    /// this id is `applied_after_restart` (or `failed`, if the replay is
+    /// refused for the content, or `pending_replay` while it is still owed).
     ///
-    /// **Read the tense: this is durable as of the mutation log, pending the
-    /// close's final flush** (J3 round-1 N7). It is the one answer in the
-    /// taxonomy that asserts a future rather than records a past, and it is
-    /// forced: `abort_workers` settles every unsettled receipt during the
-    /// quiesce, and `close()`'s final flush necessarily runs **after** that
-    /// quiesce (`crate::Memory::close`), so the assertion is made before the
-    /// write it describes reaches the store. If that flush fails, the process
-    /// has told a caller "recorded as a durable intent" about a record that
-    /// never landed.
-    ///
-    /// Why it is left as a prediction rather than deferred until the flush
-    /// reports success: the alternative settles receipts *after* the store I/O
-    /// that may hang or fail, which means a close that cannot reach its store
-    /// leaves callers holding `pending` — an answer that is unsettled, so
-    /// waiters keep waiting — where they currently get a specific one. And the
-    /// contradiction is transient and **self-correcting in both directions**:
-    /// after a restart an id with no durable record answers `restart_lost`
-    /// (honest), and an id whose apply *did* land answers
-    /// `applied_after_restart` from the consumed row. The only observation
-    /// window is a `lambo_stats(receipt=…)` racing the close.
+    /// **Settled only after the close's final flush has completed** (#117
+    /// review M1). It used to be settled during the quiesce, before that
+    /// flush ran, so a close whose flush then failed (or a degraded or fenced
+    /// session) had already told a caller "durable intent" about a record that
+    /// never landed. `abort_workers` now sets the receipts aside and
+    /// `WritePipeline::settle_deferred` answers them once the flush reports:
+    /// this answer on success, [`ReceiptAnswer::CloseUnflushed`] otherwise.
     IntentRecorded,
+    /// Not applied before this session closed, and the close could **not**
+    /// complete its final flush: it failed, the session was degraded, or the
+    /// lease was lost and the tail dropped (#117 review M1). The write's intent
+    /// is durable only if an earlier background flush took it, so whether the
+    /// next serve replays it is unknown from here. A retried `close()` whose
+    /// flush completes upgrades this to [`ReceiptAnswer::IntentRecorded`].
+    CloseUnflushed,
     /// Never attempted: the queue was full when the ack was issued.
     Dropped(String),
     /// This process issued it and has since discarded its outcome — either the
@@ -598,6 +600,7 @@ impl ReceiptAnswer {
             ReceiptAnswer::Failed(_) => "failed",
             ReceiptAnswer::AppliedAfterRestart(_) => "applied_after_restart",
             ReceiptAnswer::IntentRecorded => "intent_durable",
+            ReceiptAnswer::CloseUnflushed => "close_unflushed",
             ReceiptAnswer::Dropped(_) => "dropped",
             ReceiptAnswer::Expired => "expired",
             ReceiptAnswer::RestartLost => "restart_lost",
@@ -612,8 +615,8 @@ impl ReceiptAnswer {
     }
 
     /// A unique index per variant, with **no `_` arm** — the mechanical
-    /// exhaustiveness that makes the "Eleven variants" docstring true by
-    /// construction (J3-R2R-4): a twelfth variant is a compile error here
+    /// exhaustiveness that makes the "Twelve variants" docstring true by
+    /// construction (J3-R2R-4): a thirteenth variant is a compile error here
     /// before it can drift out of the taxonomy tests.
     pub fn ordinal(&self) -> usize {
         match self {
@@ -628,6 +631,7 @@ impl ReceiptAnswer {
             ReceiptAnswer::RestartLost => 8,
             ReceiptAnswer::NeverIssued => 9,
             ReceiptAnswer::Forbidden => 10,
+            ReceiptAnswer::CloseUnflushed => 11,
         }
     }
 
@@ -654,6 +658,12 @@ impl ReceiptAnswer {
                                               RE-ATTEMPT it, idempotently and in submission \
                                               order. Fetch this receipt id there to learn the \
                                               outcome, or recall."
+                .into(),
+            ReceiptAnswer::CloseUnflushed => "close did not finish its final flush — this write \
+                                              was not applied before the session closed, and it \
+                                              may or may not have been saved as an intent for \
+                                              the next serve to re-attempt. Recall before \
+                                              re-deriving."
                 .into(),
             ReceiptAnswer::Dropped(why) => {
                 format!("DROPPED before it was attempted, nothing was written — {why}")
@@ -943,9 +953,9 @@ impl WritePipeline {
     }
 
     /// `true` once nothing in this process can settle another receipt: the
-    /// lanes are sealed and [`WritePipeline::abort_workers`] has joined the
-    /// workers **and settled** what they left. The replay loop stops at the
-    /// seal as well.
+    /// lanes are sealed, [`WritePipeline::abort_workers`] has joined the
+    /// workers, and [`WritePipeline::settle_deferred`] has **settled** what
+    /// they left. The replay loop stops at the seal as well.
     fn closed_to_settles(&self) -> bool {
         let lanes = self.lanes.lock();
         lanes.sealed && lanes.settled_at_close
