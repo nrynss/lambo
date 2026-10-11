@@ -394,7 +394,17 @@ pub(crate) const UNKNOWN_HOST: &str = "unknown-host";
 
 /// Best-effort host name, dependency-free. Only needs to distinguish hosts (see
 /// [`LeaseHolder::for_this_process`]).
+///
+/// Computed once per process and cached (#117 review L2): the fallback runs
+/// the `hostname` command, a blocking spawn that the lease refusal would
+/// otherwise repeat on an async path at every refused acquire. A process's
+/// host name does not change under it in any way this needs to follow.
 pub(crate) fn detect_host() -> String {
+    static HOST: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    HOST.get_or_init(detect_host_uncached).clone()
+}
+
+fn detect_host_uncached() -> String {
     for var in ["HOSTNAME", "HOST"] {
         if let Ok(h) = std::env::var(var) {
             let h = h.trim();
@@ -650,5 +660,17 @@ mod tests {
         let h = LeaseHolder::for_this_process(&AgentId::new("a"));
         assert_eq!(h.pid, std::process::id());
         assert!(!h.host.is_empty());
+    }
+
+    /// #117 review L2: the host name is computed once and reused.
+    #[test]
+    fn the_host_name_is_cached() {
+        let first = detect_host();
+        assert!(!first.is_empty());
+        assert_eq!(detect_host(), first);
+        assert_eq!(
+            LeaseHolder::for_this_process(&AgentId::new("a")).host,
+            first
+        );
     }
 }
