@@ -165,11 +165,13 @@ async fn a_proxy_does_not_retain_the_embedder() {
 struct LoadCounting {
     inner: FixtureEmbedder,
     loads: AtomicUsize,
+    embeds: AtomicUsize,
     embedded_unloaded: AtomicBool,
 }
 
 impl LoadCounting {
     fn note_embed(&self) {
+        self.embeds.fetch_add(1, Ordering::SeqCst);
         if self.loads.load(Ordering::SeqCst) == 0 {
             self.embedded_unloaded.store(true, Ordering::SeqCst);
         }
@@ -318,8 +320,29 @@ async fn a_proxy_never_loads_and_the_holder_loads_before_it_serves() {
         "a proxying serve must never load its model (#31)"
     );
 
-    // Let the holder's pipeline run (calibration probe) and close: nothing
-    // embedded before the load.
+    // #31 review L6: make the holder embed for real (a derive embeds the
+    // concept, a recall embeds the query), so "nothing embedded before the
+    // load" is checked against embeds that happened, not vacuously.
+    holder
+        .derive(
+            &[("user schema", crate::types::ConceptType::Entity)],
+            &crate::graph::derive::ParentOf::none(),
+        )
+        .await
+        .expect("the holder derives");
+    holder
+        .recall(crate::types::RecallQuery {
+            query: "user schema".into(),
+            top_k: 5,
+            max_tokens: 500,
+            traversal_depth: 0,
+        })
+        .await
+        .expect("the holder recalls");
+    assert!(
+        holder_model.embeds.load(Ordering::SeqCst) >= 2,
+        "the holder embedded (derive + recall)"
+    );
     holder.close().await.expect("holder close");
     assert!(
         !holder_model.embedded_unloaded.load(Ordering::SeqCst),
