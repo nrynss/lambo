@@ -339,9 +339,21 @@ async fn a_proxy_never_loads_and_the_holder_loads_before_it_serves() {
         })
         .await
         .expect("the holder recalls");
-    assert!(
-        holder_model.embeds.load(Ordering::SeqCst) >= 2,
-        "the holder embedded (derive + recall)"
+    // Review L-D: whether the derive and recall above embed depends on the
+    // match strategy and the store's vector leg, so pin the counter with an
+    // explicit embed through the holder's own embedder: it must count
+    // exactly one more, so the flag below is checked against embeds the
+    // counter demonstrably sees.
+    let before = holder_model.embeds.load(Ordering::SeqCst);
+    holder
+        .embedder()
+        .embed("issue 31 explicit embed")
+        .await
+        .expect("the holder's embedder embeds");
+    assert_eq!(
+        holder_model.embeds.load(Ordering::SeqCst),
+        before + 1,
+        "the counter sees the holder's embeds"
     );
     holder.close().await.expect("holder close");
     assert!(
