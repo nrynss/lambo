@@ -29,6 +29,15 @@
 //! rather than the raw `llama_model` string, so a kind/dim match can no longer
 //! hide a swap between two quantizations of the same model.
 //!
+//! **Identity before load (issue #31).** Construction is two steps.
+//! [`CandleEmbedder::deferred`], which `build_embedder` (so every resolve)
+//! uses, resolves the device, the artifact, its sha256 (cached on disk by file
+//! metadata so an unchanged 1.1 GB file is not re-hashed every start) and the
+//! width from `config.json`, which is all the resolve-time checks and the
+//! contract need. [`CandleEmbedder::load`] puts the weights on the device; a
+//! `lambo serve` runs it through [`Embedder::prepare`] only once it has won
+//! the session's lease, so a serve that proxies never holds the model.
+//!
 //! **Batching (K1's central finding).** [`Embedder::embed`] is single-text and
 //! async, but the K1 throughput legs showed the Metal/CUDA advantage comes from
 //! *one forward per batch*, not from thread concurrency (the command queue
@@ -41,7 +50,8 @@
 //! fills), while a burst of concurrent calls shares one forward.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -102,6 +112,11 @@ pub struct CandleOpts {
     pub offline: bool,
     /// Explicit local weights directory; bypasses hf-hub entirely (offline).
     pub weights_dir: Option<PathBuf>,
+    /// Where the weight-digest cache lives (issue #31). `None` = the default,
+    /// `$XDG_CACHE_HOME/lambo/candle-identity` or
+    /// `~/.cache/lambo/candle-identity`. Not a config key: tests point it at
+    /// a scratch directory.
+    pub identity_cache_dir: Option<PathBuf>,
 }
 
 /// The resolved computational device plus the dtype to run (f16 on GPU, f32 on
@@ -414,24 +429,19 @@ pub fn reject_empty(text: &str) -> Result<(), EmbedError> {
     Ok(())
 }
 
-/// Load the tokenizer + model from on-disk artifact paths (a `config.json`, a
-/// `tokenizer.json`, and a weight file). Shared by the hf-hub and explicit-dir
-/// fetch paths.
+/// Load the tokenizer + model from the parsed `config.json` and the on-disk
+/// `tokenizer.json` and weight file. Shared by the hf-hub and explicit-dir
+/// fetch paths; run by [`CandleEmbedder::load`] only (issue #31).
 fn load_core(
-    config_path: &Path,
+    cfg: &Config,
     tokenizer_path: &Path,
     weights_path: &Path,
     device: &Device,
     dtype: DType,
 ) -> Result<BgeM3Core, EmbedError> {
-    let cfg: Config = serde_json::from_slice(
-        &std::fs::read(config_path).map_err(|e| EmbedError::Backend(format!("config: {e}")))?,
-    )
-    .map_err(|e| EmbedError::Backend(format!("parse config.json: {e}")))?;
-
     let vb = load_varbuilder(weights_path, dtype, device)?;
     let model =
-        XLMRobertaModel::new(&cfg, vb).map_err(|e| EmbedError::Backend(format!("model: {e}")))?;
+        XLMRobertaModel::new(cfg, vb).map_err(|e| EmbedError::Backend(format!("model: {e}")))?;
 
     let mut tokenizer = Tokenizer::from_file(tokenizer_path)
         .map_err(|e| EmbedError::Backend(format!("tokenizer: {e}")))?;
@@ -495,20 +505,68 @@ fn is_macos() -> bool {
     cfg!(target_os = "macos")
 }
 
+/// Everything the device load needs, resolved and verified at construction
+/// (issue #31): the parsed `config.json`, the artifact paths, and the device.
+///
+/// Built by [`CandleEmbedder::deferred`] without touching the weights beyond
+/// hashing them (or reading the cached digest), so a serve that loses the
+/// election never pays the ~1.1 GB device load.
+struct LoadPlan {
+    config: Config,
+    tokenizer_path: PathBuf,
+    weights_path: PathBuf,
+    device: Device,
+    dtype: DType,
+}
+
+/// The device-loaded half of a [`CandleEmbedder`], shared by every clone.
+///
+/// `handle` is set at most once, by [`CandleEmbedder::load`], under `init`;
+/// reads after that are lock-free. The model and the coalescer go with the
+/// last clone's drop of this slot (`Handle::drop`, K2-R1-7), loaded or not.
+struct LoadSlot {
+    handle: OnceLock<Handle>,
+    init: Mutex<()>,
+    /// Device loads this slot has run: 0 until the holder path loads, then 1
+    /// for the life of the slot. Read by tests and the #31 measurement.
+    loads: AtomicUsize,
+}
+
+impl LoadSlot {
+    fn empty() -> Self {
+        Self {
+            handle: OnceLock::new(),
+            init: Mutex::new(()),
+            loads: AtomicUsize::new(0),
+        }
+    }
+}
+
 /// The in-process BGE-M3 embedder. Cheap to clone; the model + coalescer are
 /// shared behind an `Arc`.
+///
+/// **Identity and load are two steps (issue #31).** [`Self::deferred`] (what
+/// `build_embedder` uses, so what every resolve builds) computes everything
+/// the resolve-time checks and the [`crate::types::EmbeddingContract`] need:
+/// the device, the artifact identity (source + weight sha256) and the width
+/// (`config.json`'s `hidden_size`). The weights reach the device only in
+/// [`Self::load`], which the holder path runs through
+/// [`Embedder::prepare`] once its lease is won. [`Self::new`] is both steps.
 #[derive(Clone)]
 pub struct CandleEmbedder {
     dim: usize,
     identity: String,
-    /// The weights live in Metal buffers: unified memory the macOS pager can
-    /// compress while the process idles (issue #13). Drives the keep-warm
-    /// auto default through [`crate::embed::weights_in_unified_memory`].
+    /// The weights live (or, deferred, will live) in Metal buffers: unified
+    /// memory the macOS pager can compress while the process idles (issue
+    /// #13). Known before the load because the device is resolved first.
+    /// Drives the keep-warm auto default through
+    /// [`crate::embed::weights_in_unified_memory`].
     on_metal: bool,
+    plan: Arc<LoadPlan>,
     /// Shutdown ownership: `Handle::drop` fires only when the LAST adapter
     /// handle is gone (K2-R1-7), so dropping one clone never kills the
     /// coalescer the other clones still serve.
-    handle: Arc<Handle>,
+    slot: Arc<LoadSlot>,
 }
 
 struct Handle {
@@ -523,13 +581,30 @@ impl Drop for Handle {
 
 impl CandleEmbedder {
     /// Load weights (fetching/caching via hf-hub on first use), resolve the
-    /// device, and spawn the batch-coalescing thread.
+    /// device, and spawn the batch-coalescing thread: [`Self::deferred`]
+    /// followed by [`Self::load`].
     ///
     /// Fails with [`EmbedError::Unavailable`] when weights are absent/offline
     /// or the configured `dim` disagrees with BGE-M3's architectural width, and
     /// (per the K device rule) when no accelerator is available and the
     /// operator did not pin `device = "cpu"`.
     pub fn new(dim: usize, opts: CandleOpts) -> Result<Self, EmbedError> {
+        let embedder = Self::deferred(dim, opts)?;
+        embedder.load()?;
+        Ok(embedder)
+    }
+
+    /// Everything [`Self::new`] does except put the weights on the device
+    /// (issue #31).
+    ///
+    /// Resolves the device (the K hard-error rule still fires here), the
+    /// artifact paths, the weight sha256 (served from a metadata-keyed cache
+    /// when the file is unchanged, see [`weight_sha256`]) and the width from
+    /// `config.json`. Every refusal [`Self::new`] makes before its load is
+    /// made here: zero or non-1024 `dim`, a missing artifact, an unverified
+    /// default artifact, and (new) a `config.json` whose `hidden_size` is not
+    /// the configured width. The tokenizer is parsed by [`Self::load`].
+    pub fn deferred(dim: usize, opts: CandleOpts) -> Result<Self, EmbedError> {
         if dim == 0 {
             return Err(EmbedError::Unavailable("embedder dim must be > 0".into()));
         }
@@ -554,7 +629,7 @@ impl CandleEmbedder {
             .clone()
             .unwrap_or_else(|| DEFAULT_WEIGHT_FILE.to_string());
 
-        // Resolve device + dtype BEFORE loading (f16 on GPU, f32 on CPU).
+        // Resolve device + dtype BEFORE anything else (f16 on GPU, f32 on CPU).
         let DeviceChoice { device, dtype } = resolve_device(
             opts.device.as_deref(),
             has_metal_backend(),
@@ -586,8 +661,13 @@ impl CandleEmbedder {
 
         // K2-R1-8: hash BEFORE any model work — refuse tampered/corrupt bytes
         // before they influence anything. K2-R1-1: this digest is also what the
-        // contract stamps, on EVERY path including explicit overrides.
-        let weight_sha256 = sha256_file(&weights_path)?;
+        // contract stamps, on EVERY path including explicit overrides. #31: an
+        // unchanged file's digest comes from the identity cache.
+        let cache_dir = opts
+            .identity_cache_dir
+            .clone()
+            .or_else(default_identity_cache_dir);
+        let weight_sha256 = weight_sha256(&weights_path, cache_dir.as_deref())?;
         // The shipped artifact is machine-checked against the pinned digest;
         // any override (repo/revision/file/dir) is stamped from its own bytes.
         let is_default_artifact = opts.weights_dir.is_none()
@@ -602,17 +682,13 @@ impl CandleEmbedder {
             )));
         }
 
-        let on_metal = device.is_metal();
-        let core = load_core(&config_path, &tokenizer_path, &weights_path, &device, dtype)?;
+        // #31: the width the resolve checks against the store comes from the
+        // artifact's own config, not from a loaded model. `hidden_size` is the
+        // CLS vector's width, so it is exactly what the forward will emit.
+        let config = read_config(&config_path)?;
+        check_hidden_size(&config, dim, &config_path)?;
 
-        let shared = Arc::new(Shared {
-            queue: BatchQueue::new(),
-            core,
-            dim,
-        });
-        spawn_coalescer(Arc::clone(&shared));
-
-        // K2-R1-1: the stamp ALWAYS describes the artifact actually loaded —
+        // K2-R1-1: the stamp ALWAYS describes the artifact that will be loaded —
         // canonical source for the verified default, effective source plus the
         // computed digest for every override.
         let identity = if is_default_artifact {
@@ -636,23 +712,220 @@ impl CandleEmbedder {
         Ok(Self {
             dim,
             identity,
-            on_metal,
-            handle: Arc::new(Handle { shared }),
+            on_metal: device.is_metal(),
+            plan: Arc::new(LoadPlan {
+                config,
+                tokenizer_path,
+                weights_path,
+                device,
+                dtype,
+            }),
+            slot: Arc::new(LoadSlot::empty()),
         })
     }
 
-    /// Whether the loaded weights sit on a Metal device (issue #13).
+    /// Put the weights on the device and start the coalescer (issue #31).
+    ///
+    /// Blocking (it reads ~1.1 GB on the shipped artifact) and idempotent:
+    /// the first call loads, concurrent callers wait for it, later calls
+    /// return at once. Every clone shares the load. A failed load leaves the
+    /// embedder unloaded, so a later call retries it.
+    ///
+    /// The serve holder path does not call this directly: it awaits
+    /// [`Embedder::prepare`], which runs this on a blocking thread.
+    pub fn load(&self) -> Result<(), EmbedError> {
+        if self.is_loaded() {
+            return Ok(());
+        }
+        let _init = self.slot.init.lock().unwrap_or_else(unpoison);
+        if self.is_loaded() {
+            return Ok(());
+        }
+        let plan = &self.plan;
+        let core = load_core(
+            &plan.config,
+            &plan.tokenizer_path,
+            &plan.weights_path,
+            &plan.device,
+            plan.dtype,
+        )?;
+        let shared = Arc::new(Shared {
+            queue: BatchQueue::new(),
+            core,
+            dim: self.dim,
+        });
+        spawn_coalescer(Arc::clone(&shared));
+        self.slot.loads.fetch_add(1, Ordering::SeqCst);
+        // Under `init` and after the check above, so the slot is empty.
+        let _ = self.slot.handle.set(Handle { shared });
+        Ok(())
+    }
+
+    /// Whether the weights are on the device (issue #31). `false` from
+    /// [`Self::deferred`] until [`Self::load`] (or [`Embedder::prepare`])
+    /// has run.
+    pub fn is_loaded(&self) -> bool {
+        self.slot.handle.get().is_some()
+    }
+
+    /// How many device loads this embedder (and its clones) has run: 0 or 1.
+    /// A proxying serve stays at 0 (issue #31).
+    pub fn load_count(&self) -> usize {
+        self.slot.loads.load(Ordering::SeqCst)
+    }
+
+    /// Whether the weights sit (or, deferred, will sit) on a Metal device
+    /// (issue #13).
     pub fn on_metal(&self) -> bool {
         self.on_metal
     }
 
     /// The served-artifact identity string to stamp into the session's
-    /// `EmbeddingContract.model` (K2 task 3): the loaded artifact's source and
+    /// `EmbeddingContract.model` (K2 task 3): the artifact's source and
     /// sha256 prefix, so a kind/dim match cannot hide a swap between two
-    /// quantizations of the same model.
+    /// quantizations of the same model. Available before the load (#31).
     pub fn model_identity(&self) -> &str {
         &self.identity
     }
+}
+
+/// Parse `config.json` (#31: at construction, so the width is known before the
+/// load and the load does not read the file a second time).
+fn read_config(config_path: &Path) -> Result<Config, EmbedError> {
+    serde_json::from_slice(
+        &std::fs::read(config_path).map_err(|e| EmbedError::Backend(format!("config: {e}")))?,
+    )
+    .map_err(|e| EmbedError::Backend(format!("parse config.json: {e}")))
+}
+
+/// #31: the resolve-time width check that used to need the loaded model. The
+/// CLS vector is `hidden_size` wide, so an artifact whose config disagrees
+/// with the configured (and contract-stamped) width is refused here, before
+/// any store check could accept it and before any forward runs.
+fn check_hidden_size(config: &Config, dim: usize, config_path: &Path) -> Result<(), EmbedError> {
+    if config.hidden_size != dim {
+        return Err(EmbedError::Unavailable(format!(
+            "candle artifact {} declares hidden_size = {} but dim = {dim} is configured — \
+             refusing to resolve: the model would emit {}-dim vectors under a {dim}-dim \
+             contract",
+            config_path.display(),
+            config.hidden_size,
+            config.hidden_size
+        )));
+    }
+    Ok(())
+}
+
+/// Where the weight-digest cache lives when [`CandleOpts::identity_cache_dir`]
+/// is not set: `$XDG_CACHE_HOME/lambo/candle-identity`, else
+/// `$HOME/.cache/lambo/candle-identity` (the same `~/.cache` root hf-hub uses
+/// for the weights). `None` (no usable directory) disables the cache: every
+/// construction hashes, as before #31.
+fn default_identity_cache_dir() -> Option<PathBuf> {
+    let non_empty = |key: &str| std::env::var_os(key).filter(|v| !v.is_empty());
+    let root = non_empty("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| non_empty("HOME").map(|home| PathBuf::from(home).join(".cache")))?;
+    Some(root.join("lambo").join("candle-identity"))
+}
+
+/// The weight file's sha256 (K2-R1-1/R1-8), served from `cache_dir` when the
+/// file is unchanged since it was last hashed (issue #31).
+///
+/// Hashing the shipped artifact reads ~1.1 GB, which every `lambo serve`
+/// would otherwise pay at resolve, the election losers included. The cache
+/// entry is keyed by [`file_fingerprint`]: the canonical path (an hf-hub
+/// snapshot entry resolves to its blob), the size, the modification and
+/// status-change times in nanoseconds, and the device and inode. Rewriting,
+/// replacing, truncating or `touch`-restoring the file changes at least one
+/// of them, so the entry misses and the bytes are hashed again. The cache is
+/// best effort: an unreadable, corrupt or foreign entry is a miss, a failed
+/// write only costs the next start a hash, and a file that changed while it
+/// was being hashed is not cached at all.
+///
+/// Trust: the entry lives under the operator's own cache directory, writable
+/// only by the same user who can already rewrite the weights; it does not
+/// widen who can change what the contract stamps.
+fn weight_sha256(path: &Path, cache_dir: Option<&Path>) -> Result<String, EmbedError> {
+    let Some(cache_dir) = cache_dir else {
+        return sha256_file(path);
+    };
+    let before = match file_fingerprint(path) {
+        Ok(fingerprint) => fingerprint,
+        // Let the hash produce the canonical "open weights" error.
+        Err(_) => return sha256_file(path),
+    };
+    let entry = cache_dir.join(format!("{}.json", &sha256_hex(before.as_bytes())[..32]));
+    if let Some(digest) = read_identity_entry(&entry, &before) {
+        return Ok(digest);
+    }
+    let digest = sha256_file(path)?;
+    if file_fingerprint(path).ok().as_deref() == Some(before.as_str()) {
+        write_identity_entry(cache_dir, &entry, &before, &digest);
+    }
+    Ok(digest)
+}
+
+/// The metadata key of [`weight_sha256`]'s cache (see there).
+fn file_fingerprint(path: &Path) -> std::io::Result<String> {
+    use std::os::unix::fs::MetadataExt;
+    let canonical = std::fs::canonicalize(path)?;
+    let meta = std::fs::metadata(&canonical)?;
+    Ok(format!(
+        "v1|{}|len={}|mtime={}.{}|ctime={}.{}|dev={}|ino={}",
+        canonical.display(),
+        meta.len(),
+        meta.mtime(),
+        meta.mtime_nsec(),
+        meta.ctime(),
+        meta.ctime_nsec(),
+        meta.dev(),
+        meta.ino()
+    ))
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct IdentityEntry {
+    fingerprint: String,
+    sha256: String,
+}
+
+fn read_identity_entry(entry: &Path, fingerprint: &str) -> Option<String> {
+    let bytes = std::fs::read(entry).ok()?;
+    let parsed: IdentityEntry = serde_json::from_slice(&bytes).ok()?;
+    let well_formed = parsed.sha256.len() == 64
+        && parsed
+            .sha256
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    (parsed.fingerprint == fingerprint && well_formed).then_some(parsed.sha256)
+}
+
+fn write_identity_entry(cache_dir: &Path, entry: &Path, fingerprint: &str, digest: &str) {
+    let write = || -> std::io::Result<()> {
+        std::fs::create_dir_all(cache_dir)?;
+        let body = serde_json::to_vec(&IdentityEntry {
+            fingerprint: fingerprint.to_string(),
+            sha256: digest.to_string(),
+        })
+        .map_err(std::io::Error::other)?;
+        // Write-then-rename, so a reader never sees a torn entry.
+        let tmp = entry.with_extension(format!("tmp.{}", std::process::id()));
+        std::fs::write(&tmp, body)?;
+        std::fs::rename(&tmp, entry)
+    };
+    if let Err(e) = write() {
+        tracing::debug!(
+            target: "lambo::embed",
+            error = %e,
+            dir = %cache_dir.display(),
+            "candle: could not cache the weight digest; the next start hashes again"
+        );
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 /// Fetch `filename` via hf-hub (cache hit, or network download on first use).
@@ -878,14 +1151,123 @@ impl Embedder for CandleEmbedder {
         Some(self)
     }
 
+    /// Issue #31: load the weights deferred at resolve, on a blocking thread
+    /// so the runtime keeps polling (a holder's startup races this against
+    /// its shutdown signal). Idempotent; every clone shares the one load.
+    async fn prepare(&self) -> Result<(), EmbedError> {
+        if self.is_loaded() {
+            return Ok(());
+        }
+        let this = self.clone();
+        tokio::task::spawn_blocking(move || this.load())
+            .await
+            .map_err(|e| EmbedError::Backend(format!("candle load task failed: {e}")))?
+    }
+
     async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbedError> {
         reject_empty(text)?;
+        // #31: the holder path has loaded by now (`prepare` in the attach).
+        // A caller that embeds straight from `ResolvedBackends.embedder`
+        // without a `Memory` (the one-shot CLI recall, a library user) loads
+        // here, on its first call, which is when it would have needed the
+        // weights anyway.
+        if !self.is_loaded() {
+            self.prepare().await?;
+        }
+        let handle = self.slot.handle.get().ok_or_else(|| {
+            EmbedError::Unavailable("candle embedder weights are not loaded".into())
+        })?;
         let (tx, rx) = tokio::sync::oneshot::channel();
-        self.handle.shared.queue.push(Pending {
+        handle.shared.queue.push(Pending {
             text: text.to_string(),
             tx,
         });
         recv_bounded(rx, EMBED_WAIT).await
+    }
+}
+
+/// A tiny, real BGE-M3-shaped artifact on disk for tests (issue #31): a
+/// `config.json` with BGE-M3's 1024 hidden size but one layer, one head and a
+/// four-word vocabulary, a matching `tokenizer.json`, and randomly initialised
+/// f32 `model.safetensors` (~17 MB). It loads and embeds on CPU like the real
+/// artifact, with no network and no cached weights, so the deferred-load path
+/// runs in CI's candle row. Every call draws new weights, so two calls produce
+/// two artifacts with different digests.
+#[cfg(test)]
+pub(crate) mod test_artifact {
+    use super::*;
+
+    /// The tiny config, as `config.json` would carry it.
+    pub(crate) fn config_json(hidden_size: usize) -> String {
+        serde_json::json!({
+            "hidden_size": hidden_size,
+            "layer_norm_eps": 1e-5,
+            "attention_probs_dropout_prob": 0.0,
+            "hidden_dropout_prob": 0.0,
+            "num_attention_heads": 1,
+            "position_embedding_type": "absolute",
+            "intermediate_size": 8,
+            "hidden_act": "gelu",
+            "num_hidden_layers": 1,
+            "vocab_size": 8,
+            "max_position_embeddings": 16,
+            "type_vocab_size": 1,
+            "pad_token_id": 1
+        })
+        .to_string()
+    }
+
+    /// Write the three files into `dir` (created if missing).
+    pub(crate) fn write(dir: &Path) {
+        std::fs::create_dir_all(dir).expect("artifact dir");
+        let config = config_json(BGE_M3_DIM);
+        std::fs::write(dir.join("config.json"), &config).expect("config.json");
+        std::fs::write(
+            dir.join("tokenizer.json"),
+            serde_json::json!({
+                "version": "1.0",
+                "truncation": null,
+                "padding": null,
+                "added_tokens": [],
+                "normalizer": null,
+                "pre_tokenizer": null,
+                "post_processor": null,
+                "decoder": null,
+                "model": {
+                    "type": "WordPiece",
+                    "unk_token": "[UNK]",
+                    "continuing_subword_prefix": "##",
+                    "max_input_chars_per_word": 100,
+                    "vocab": {"[UNK]": 0, "<pad>": 1, "x": 2, "lambo": 3}
+                }
+            })
+            .to_string(),
+        )
+        .expect("tokenizer.json");
+        write_weights(dir);
+    }
+
+    /// (Re)write only `model.safetensors`, with fresh random weights.
+    pub(crate) fn write_weights(dir: &Path) {
+        let cfg: Config = serde_json::from_str(&config_json(BGE_M3_DIM)).expect("tiny config");
+        let varmap = candle_nn::VarMap::new();
+        let vb = VarBuilder::from_varmap(&varmap, DType::F32, &Device::Cpu);
+        XLMRobertaModel::new(&cfg, vb).expect("tiny model initialises");
+        varmap
+            .save(dir.join(DEFAULT_WEIGHT_FILE))
+            .expect("model.safetensors");
+    }
+
+    /// Options that load this artifact on CPU, offline, with the digest cache
+    /// in `cache_dir` (never the operator's).
+    pub(crate) fn opts(dir: &Path, cache_dir: &Path) -> CandleOpts {
+        CandleOpts {
+            device: Some("cpu".into()),
+            offline: true,
+            weights_dir: Some(dir.to_path_buf()),
+            identity_cache_dir: Some(cache_dir.to_path_buf()),
+            ..Default::default()
+        }
     }
 }
 
@@ -1058,13 +1440,15 @@ mod tests {
         let core = BgeM3Core {
             model,
             tokenizer,
-            device,
+            device: device.clone(),
         };
         let shared = Arc::new(Shared {
             queue: BatchQueue::new(),
             core,
             dim: BGE_M3_DIM,
         });
+        let slot = LoadSlot::empty();
+        let _ = slot.handle.set(Handle { shared });
         CandleEmbedder {
             dim: BGE_M3_DIM,
             identity: stamp_identity(
@@ -1075,7 +1459,14 @@ mod tests {
                 WEIGHT_SHA256,
             ),
             on_metal: false,
-            handle: Arc::new(Handle { shared }),
+            plan: Arc::new(LoadPlan {
+                config: cfg,
+                tokenizer_path: PathBuf::new(),
+                weights_path: PathBuf::new(),
+                device,
+                dtype: DType::F32,
+            }),
+            slot: Arc::new(slot),
         }
     }
 
@@ -1388,6 +1779,229 @@ mod tests {
             "K1 gate: median {median} < 0.99 — pooling wrong on Metal"
         );
         assert!(min >= 0.99, "worst item {min} < 0.99 on Metal");
+    }
+
+    // ---- Issue #31: identity before load ----
+
+    #[tokio::test]
+    async fn deferred_stamps_identity_and_width_without_loading_the_model() {
+        let dir = crate::test_util::ScratchDir::new("lambo-31-deferred");
+        let artifact = dir.join("artifact");
+        test_artifact::write(&artifact);
+        let e = CandleEmbedder::deferred(
+            BGE_M3_DIM,
+            test_artifact::opts(&artifact, &dir.join("cache")),
+        )
+        .expect("the tiny artifact resolves");
+
+        // Everything the resolve needs, and no weights on the device.
+        assert!(!e.is_loaded(), "deferred must not load the model");
+        assert_eq!(e.load_count(), 0);
+        assert_eq!(e.dimensions(), BGE_M3_DIM);
+        let digest = sha256_file(&artifact.join(DEFAULT_WEIGHT_FILE)).unwrap();
+        let expected = stamp_identity(
+            WEIGHT_REPO,
+            WEIGHT_REVISION,
+            DEFAULT_WEIGHT_FILE,
+            Some(&artifact),
+            &digest,
+        );
+        assert_eq!(e.model_identity(), expected);
+        let dyn_ref: &dyn Embedder = &e;
+        assert_eq!(crate::embed::candle_identity(dyn_ref), Some(expected));
+
+        // The holder's explicit load: once, shared by every clone.
+        let clone = e.clone();
+        dyn_ref.prepare().await.expect("prepare loads");
+        assert!(e.is_loaded() && clone.is_loaded());
+        clone.prepare().await.expect("prepare is idempotent");
+        e.load().expect("load is idempotent");
+        assert_eq!(
+            e.load_count(),
+            1,
+            "one device load per embedder, not per call"
+        );
+
+        let v = clone
+            .embed("lambo")
+            .await
+            .expect("a loaded embedder embeds");
+        assert_eq!(v.len(), BGE_M3_DIM);
+        assert_eq!(e.load_count(), 1);
+    }
+
+    /// A direct user of `ResolvedBackends.embedder` (the one-shot CLI recall)
+    /// never calls `prepare`; its first embed loads.
+    #[tokio::test]
+    async fn embed_without_prepare_loads_once_then_embeds() {
+        let dir = crate::test_util::ScratchDir::new("lambo-31-fallback");
+        let artifact = dir.join("artifact");
+        test_artifact::write(&artifact);
+        let e = CandleEmbedder::deferred(
+            BGE_M3_DIM,
+            test_artifact::opts(&artifact, &dir.join("cache")),
+        )
+        .unwrap();
+        let (a, b) = tokio::join!(e.embed("x"), e.embed("lambo"));
+        assert_eq!(a.unwrap().len(), BGE_M3_DIM);
+        assert_eq!(b.unwrap().len(), BGE_M3_DIM);
+        assert_eq!(e.load_count(), 1, "concurrent first calls share one load");
+    }
+
+    /// The width check that used to need the loaded model now reads
+    /// `config.json` at construction (#31), so an artifact that would emit
+    /// another width is refused before any load.
+    #[test]
+    fn a_config_hidden_size_other_than_dim_is_refused_at_construction() {
+        let dir = crate::test_util::ScratchDir::new("lambo-31-hidden");
+        let artifact = dir.join("artifact");
+        test_artifact::write(&artifact);
+        std::fs::write(
+            artifact.join("config.json"),
+            test_artifact::config_json(768),
+        )
+        .unwrap();
+        let err = match CandleEmbedder::deferred(
+            BGE_M3_DIM,
+            test_artifact::opts(&artifact, &dir.join("cache")),
+        ) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("a 768-wide artifact must not resolve under dim = 1024"),
+        };
+        assert!(err.contains("hidden_size = 768"), "{err}");
+        assert!(err.contains("dim = 1024"), "{err}");
+    }
+
+    #[test]
+    fn the_identity_cache_serves_an_unchanged_file_and_misses_a_changed_one() {
+        let dir = crate::test_util::ScratchDir::new("lambo-31-idcache");
+        let cache = dir.join("cache");
+        let weights = dir.join("weights.bin");
+        std::fs::write(&weights, b"first artifact bytes").unwrap();
+        let first = sha256_file(&weights).unwrap();
+
+        // A miss hashes the bytes and records them.
+        assert_eq!(weight_sha256(&weights, Some(&cache)).unwrap(), first);
+        let entries: Vec<_> = std::fs::read_dir(&cache).unwrap().collect();
+        assert_eq!(entries.len(), 1, "one entry per fingerprint");
+        let entry = entries[0].as_ref().unwrap().path();
+
+        // A hit is served from the entry, not the bytes: plant a different
+        // (well-formed) digest under the same fingerprint and it comes back.
+        let fingerprint = file_fingerprint(&weights).unwrap();
+        let planted = "0".repeat(64);
+        std::fs::write(
+            &entry,
+            serde_json::to_vec(&IdentityEntry {
+                fingerprint: fingerprint.clone(),
+                sha256: planted.clone(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(weight_sha256(&weights, Some(&cache)).unwrap(), planted);
+
+        // Rewriting the file (same length, new bytes) changes the
+        // fingerprint, so the entry misses and the new bytes are hashed.
+        std::thread::sleep(Duration::from_millis(5));
+        std::fs::write(&weights, b"other artifact bytes").unwrap();
+        assert_ne!(file_fingerprint(&weights).unwrap(), fingerprint);
+        let second = sha256_file(&weights).unwrap();
+        assert_ne!(second, first);
+        assert_eq!(weight_sha256(&weights, Some(&cache)).unwrap(), second);
+
+        // A corrupt entry is a miss, never an error.
+        for entry in std::fs::read_dir(&cache).unwrap() {
+            std::fs::write(entry.unwrap().path(), b"{not json").unwrap();
+        }
+        assert_eq!(weight_sha256(&weights, Some(&cache)).unwrap(), second);
+        // No cache directory: hash every time, as before #31.
+        assert_eq!(weight_sha256(&weights, None).unwrap(), second);
+    }
+
+    /// The contract identity follows the bytes through the cache: a changed
+    /// weight file stamps a new identity on the next construction.
+    #[test]
+    fn a_changed_weight_file_changes_the_stamped_identity() {
+        let dir = crate::test_util::ScratchDir::new("lambo-31-reweigh");
+        let artifact = dir.join("artifact");
+        let cache = dir.join("cache");
+        test_artifact::write(&artifact);
+        let before = CandleEmbedder::deferred(BGE_M3_DIM, test_artifact::opts(&artifact, &cache))
+            .unwrap()
+            .model_identity()
+            .to_string();
+        let again = CandleEmbedder::deferred(BGE_M3_DIM, test_artifact::opts(&artifact, &cache))
+            .unwrap()
+            .model_identity()
+            .to_string();
+        assert_eq!(before, again, "an unchanged file keeps its identity");
+        std::thread::sleep(Duration::from_millis(5));
+        test_artifact::write_weights(&artifact);
+        let after = CandleEmbedder::deferred(BGE_M3_DIM, test_artifact::opts(&artifact, &cache))
+            .unwrap()
+            .model_identity()
+            .to_string();
+        assert_ne!(before, after, "new weights must stamp a new identity");
+        let digest = sha256_file(&artifact.join(DEFAULT_WEIGHT_FILE)).unwrap();
+        assert!(after.contains(&digest[..12]), "{after}");
+    }
+
+    /// Issue #31 measurement, recorded as a test: the process footprint of a
+    /// deferred candle embedder on Metal (what a proxying serve now holds)
+    /// against the same embedder once loaded (what a holder holds). Needs the
+    /// cached published f16 weights (offline, never downloads) and a Metal
+    /// build. Run with:
+    /// `cargo test --features embed-candle-metal --lib -- --ignored --nocapture metal_proxy_footprint`
+    #[cfg(target_os = "macos")]
+    #[ignore]
+    #[test]
+    fn metal_proxy_footprint() {
+        fn footprint_mb() -> f64 {
+            let mut info = std::mem::MaybeUninit::<libc::rusage_info_v2>::zeroed();
+            // SAFETY: proc_pid_rusage writes a rusage_info_v2 into `info`.
+            let rc = unsafe {
+                libc::proc_pid_rusage(
+                    std::process::id() as libc::c_int,
+                    libc::RUSAGE_INFO_V2,
+                    info.as_mut_ptr().cast(),
+                )
+            };
+            assert_eq!(rc, 0, "proc_pid_rusage");
+            // SAFETY: initialised by the successful call above.
+            unsafe { info.assume_init() }.ri_phys_footprint as f64 / 1_048_576.0
+        }
+        let opts = || CandleOpts {
+            device: Some("metal".into()),
+            offline: true,
+            ..Default::default()
+        };
+        let base = footprint_mb();
+        let t = std::time::Instant::now();
+        let e = CandleEmbedder::deferred(BGE_M3_DIM, opts()).expect("cached weights, Metal");
+        let first = t.elapsed();
+        let deferred = footprint_mb();
+        let t = std::time::Instant::now();
+        drop(CandleEmbedder::deferred(BGE_M3_DIM, opts()).unwrap());
+        let cached = t.elapsed();
+        let t = std::time::Instant::now();
+        e.load().expect("load on Metal");
+        let load = t.elapsed();
+        let loaded = footprint_mb();
+        eprintln!(
+            "#31 METAL FOOTPRINT: baseline {base:.1} MB, deferred (proxy) {deferred:.1} MB, \
+             loaded (holder) {loaded:.1} MB; deferred construct {first:?} (first), \
+             {cached:?} (identity cached); load {load:?}"
+        );
+        assert!(e.on_metal() && e.is_loaded());
+        assert!(
+            loaded - deferred > 500.0,
+            "the load is where the weights arrive"
+        );
+        assert!(
+            deferred - base < 100.0,
+            "a deferred embedder must not hold the weights"
+        );
     }
 
     // Compile-time sanity (clippy wants const assertions, not runtime tests).
