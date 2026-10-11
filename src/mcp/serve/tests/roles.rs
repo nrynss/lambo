@@ -105,3 +105,38 @@ fn a_dead_holders_refusal_does_not_claim_it_is_still_refreshing() {
         );
     }
 }
+
+/// #117 review L3: the budget refusal does not ask the operator to stop a
+/// holder it has just described as gone, and its expiry comes from the same
+/// instant as the refusal's own figures.
+#[test]
+fn the_budget_refusal_advice_follows_the_holder_evidence() {
+    assert_eq!(
+        retry_advice(34, false),
+        "Retry in 34s, or stop the other holder."
+    );
+    assert_eq!(
+        retry_advice(34, true),
+        "Retry in 34s, or have an operator take over."
+    );
+
+    let now = chrono::Utc::now();
+    let current = lease::LeaseInfo {
+        holder: "a@not-this-host.invalid#1".into(),
+        token: 1,
+        acquired_at: now - chrono::Duration::seconds(20),
+        expires_at: now + chrono::Duration::seconds(25),
+        endpoint: None,
+    };
+    // The age was taken at `now`, so the remaining time is exactly 25 s,
+    // whatever the wall clock says by the time this runs.
+    let remaining = crate::memory::lease_remaining(&current, Duration::from_secs(20));
+    assert_eq!(remaining, Duration::from_secs(25));
+    let message = crate::memory::lease_held_message(
+        &crate::types::SessionId::new("s"),
+        &current,
+        Duration::from_secs(20),
+        false,
+    );
+    assert!(message.contains("expires in 25s"), "{message}");
+}

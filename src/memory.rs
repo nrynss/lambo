@@ -87,7 +87,7 @@ mod writes;
 
 pub(crate) use builder::AttachShutdown;
 pub use builder::{Attach, LeaseHeldElsewhere, MemoryBuilder};
-pub(crate) use lease_refusal::lease_held_message;
+pub(crate) use lease_refusal::{holder_looks_gone, lease_held_message, lease_remaining};
 pub(crate) use leases::LeaseLostSignal;
 pub use types::{CanonicalMemory, DryRun, GcStats, GcSweepSummary, ImpactReport, MemoryStats};
 

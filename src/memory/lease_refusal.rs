@@ -114,6 +114,13 @@ pub(crate) fn lease_held_message(
     )
 }
 
+/// `true` when the holder names this host and its pid is not visible from
+/// here: the same advisory check [`lease_held_message`] reports, for a
+/// caller that words its own advice around the refusal.
+pub(crate) fn holder_looks_gone(current: &LeaseInfo) -> bool {
+    local_holder_gone(&current.holder).is_some()
+}
+
 /// Compose the refusal from facts already gathered. Pure, so every branch is
 /// testable without a store or a dead process.
 pub(crate) fn format_lease_held(

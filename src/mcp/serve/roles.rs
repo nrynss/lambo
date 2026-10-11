@@ -165,6 +165,17 @@ pub(super) fn refusal_with_probe(
     }
 }
 
+/// How the budget refusal ends (#117 review L3). A holder the refusal has
+/// just described as gone cannot be stopped, so it is not asked for: the
+/// operator's move is the takeover the refusal already points to.
+pub(super) fn retry_advice(retry_in_secs: u64, holder_looks_gone: bool) -> String {
+    if holder_looks_gone {
+        format!("Retry in {retry_in_secs}s, or have an operator take over.")
+    } else {
+        format!("Retry in {retry_in_secs}s, or stop the other holder.")
+    }
+}
+
 /// Decide whether this process holds the session or proxies to whoever does.
 ///
 /// # The election, and why it lives HERE and not in the proxy
@@ -313,9 +324,11 @@ pub(super) async fn resolve_role(
         // arithmetic rather than hope — and refusing in milliseconds with the
         // number in the message beats burning the client's whole startup gate to
         // arrive at the same refusal.
-        let lapses_in = (held.current.expires_at - chrono::Utc::now())
-            .to_std()
-            .unwrap_or(Duration::ZERO);
+        //
+        // Measured from the same instant as the refusal's own figures (#117
+        // review L3): two `now()` reads used to put two different expiries
+        // in one message.
+        let lapses_in = crate::memory::lease_remaining(&held.current, held.age);
         let left = deadline.saturating_duration_since(Instant::now());
         if !waiting_fits(lapses_in, left) {
             record_refused_loser(
@@ -331,12 +344,15 @@ pub(super) async fn resolve_role(
                 "{} {outcome} That holder's lease does not lapse for {}s, and this process will \
                  not block the client that spawned it for longer than {}s waiting — an MCP \
                  client that gives up on a slow server reports NO TOOLS rather than 'starting', \
-                 which would be a worse outcome than this message. Retry in {}s, or stop the \
-                 other holder.",
+                 which would be a worse outcome than this message. {}",
                 refusal_with_probe(&held, &session, &outcome),
                 lapses_in.as_secs(),
                 ELECTION_BUDGET.as_secs(),
-                lapses_in.as_secs() + 1
+                retry_advice(
+                    lapses_in.as_secs() + 1,
+                    crate::memory::holder_looks_gone(&held.current)
+                        || outcome.contains(ENDPOINT_NOT_ACCEPTING)
+                )
             )));
         }
 
