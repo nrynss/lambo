@@ -374,6 +374,66 @@ async fn a_merge_target_vector_change_forces_a_replan() {
     assert_eq!(embeds, 3);
 }
 
+/// Five ranked items race a rival that writes `n` vector-carrying concepts,
+/// orthogonal to every item, during the gather. Returns the plan attempts.
+async fn bulk_rival_race(sess: &str, n: usize) -> usize {
+    let (graph, interaction) = stamped_session(sess);
+    let embedder = Arc::new(
+        TableEmbedder::new(vec![
+            ("item a", vec![1.0, 0.0, 0.0, 0.0]),
+            ("item b", vec![0.0, 1.0, 0.0, 0.0]),
+            ("item c", vec![0.0, 0.0, 1.0, 0.0]),
+            ("item d", vec![0.6, 0.8, 0.0, 0.0]),
+            ("item e", vec![0.0, 0.6, 0.8, 0.0]),
+            ("bulk parent", vec![0.0, 0.0, 0.0, 1.0]),
+            ("bulk child", vec![0.0, 0.0, 0.6, 0.8]),
+        ])
+        .pausing_on("bulk parent"),
+    );
+    let attempts = plan_attempts();
+    let task = tokio::spawn(derive_over_graph(
+        graph.clone(),
+        embedder.clone(),
+        interaction,
+        ["item a", "item b", "item c", "item d", "item e"]
+            .into_iter()
+            .map(|c| (c, ConceptType::Entity))
+            .collect(),
+        vec![("bulk parent", "bulk child")],
+    ));
+    embedder.started.notified().await;
+    for k in 0..n {
+        seed(
+            &graph,
+            interaction,
+            &format!("bulk rival {k}"),
+            vec![0.0, 0.0, 0.0, 1.0],
+        );
+    }
+    embedder.release.notify_one();
+    let out = task.await.unwrap().unwrap();
+    assert_eq!(out.created.len(), 7, "{out:?}");
+    assert!(out.semantic_merged.is_empty(), "{out:?}");
+    graph.read().assert_invariants().unwrap();
+    plan_attempts() - attempts
+}
+
+/// Review L1: the rescoring under the write lock is bounded. Up to
+/// `MAX_PLAN_RESCORES` cosines the plan is checked and holds (nothing the
+/// rival wrote is near an item); one past it, the plan is replanned instead
+/// of scanned. Both sides stay inside the node-write window.
+#[tokio::test]
+async fn plan_rescoring_is_capped_and_replans_past_the_cap() {
+    let at_cap = MAX_PLAN_RESCORES / 5;
+    const { assert!(MAX_PLAN_RESCORES / 5 < crate::graph::graph::NODE_WRITE_WINDOW) };
+    assert_eq!(bulk_rival_race("hybrid-rescore-under-cap", at_cap).await, 1);
+    assert_eq!(
+        bulk_rival_race("hybrid-rescore-over-cap", at_cap + 1).await,
+        2,
+        "past the cap the plan is stale"
+    );
+}
+
 /// #102: a commit that fails after it has already written (here the second
 /// item's vector has the wrong width, which only `insert_concept` checks)
 /// leaves the graph exactly as it was: no first concept, no contract stamp,

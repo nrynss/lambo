@@ -1653,6 +1653,13 @@ async fn derive_planned(
 /// costs a replan, never a wrong merge.
 const MERGE_RESCORE_MARGIN: f64 = 1e-4;
 
+/// The most cosines [`plan_still_holds`] computes under the commit's write
+/// lock: concepts written since the plan that carry a text vector, times the
+/// plan's ranked items. Beyond it the plan is treated as stale and replanned
+/// (cheap, the embeds are cached) rather than holding every reader and writer
+/// for the scan. At 1,024 dimensions it is a few milliseconds.
+const MAX_PLAN_RESCORES: usize = 32_768;
+
 /// What a plan read from the graph, for [`plan_still_holds`].
 struct PlanRead<'p, 'a> {
     planned_epoch: u64,
@@ -1703,7 +1710,9 @@ struct PlanRead<'p, 'a> {
 ///    the planned best, an image concept, which a text item never merges
 ///    into, an edge, a deleted non-target) cannot change a choice, and
 ///    commits alongside. When the window no longer reaches back to the plan
-///    (thousands of node writes in one embed window) the plan is stale.
+///    (thousands of node writes in one embed window) the plan is stale, and
+///    so it is when the rescoring would exceed [`MAX_PLAN_RESCORES`] cosines,
+///    which bounds this check's hold on the write lock.
 ///
 /// Items with no vector (a canonical match, the store's capability refusal,
 /// a store without vector search) and the supplied image item never rank,
@@ -1751,7 +1760,12 @@ fn plan_still_holds(g: &Graph, plan: &PlanRead<'_, '_>) -> Result<bool, LamboErr
             _ => {}
         }
     }
+    // The concepts written since the plan that a ranked item could merge
+    // into: live, text-sourced (#22: a text item never merges into an image
+    // concept), carrying a vector. Collected first so the rescoring below is
+    // bounded before any of it runs.
     let mut seen: HashSet<NodeId> = HashSet::with_capacity(written.len());
+    let mut rivals: Vec<&[f32]> = Vec::new();
     for id in written {
         if !seen.insert(id) {
             continue;
@@ -1759,16 +1773,22 @@ fn plan_still_holds(g: &Graph, plan: &PlanRead<'_, '_>) -> Result<bool, LamboErr
         if targets.contains(&id) {
             return Ok(false);
         }
-        let Some(Node::Concept(c)) = g.node(id) else {
-            continue;
-        };
-        // #22: a text item never merges into an image concept.
-        if c.embedding_source.is_some() {
+        if ranked.is_empty() {
             continue;
         }
-        let Some(vector) = c.embedding.as_deref() else {
-            continue;
-        };
+        if let Some(Node::Concept(c)) = g.node(id)
+            && c.embedding_source.is_none()
+            && let Some(vector) = c.embedding.as_deref()
+        {
+            rivals.push(vector);
+        }
+    }
+    // Review L1: the rescoring runs under the write lock, so it is capped.
+    // Past the cap the plan is treated as stale; the replan costs no embeds.
+    if rivals.len().saturating_mul(ranked.len()) > MAX_PLAN_RESCORES {
+        return Ok(false);
+    }
+    for vector in rivals {
         for (probe, planned) in &ranked {
             if vector.len() != probe.len() {
                 continue;
