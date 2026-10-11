@@ -483,7 +483,13 @@ impl AppliedSummary {
 /// [`ReceiptAnswer::Failed`], [`ReceiptAnswer::IntentRecorded`],
 /// [`ReceiptAnswer::CloseUnflushed`], [`ReceiptAnswer::Dropped`] and
 /// [`ReceiptAnswer::Forbidden`].
+///
+/// `#[non_exhaustive]` (#117 review): `CloseUnflushed` was added after 0.4.0,
+/// and a later answer must not be another breaking change for downstream
+/// matchers. Match with a wildcard arm. Inside this crate the attribute has no
+/// effect, so [`ReceiptAnswer::ordinal`] stays exhaustive by construction.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ReceiptAnswer {
     /// Admitted, not yet decided. Also what a timed-out wait answers *for a
     /// receipt this process holds* — a replay-owed id answers

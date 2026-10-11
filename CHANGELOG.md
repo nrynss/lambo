@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Breaking (library API)
+
+- `lambo::writeq::ReceiptAnswer` gained the variant `CloseUnflushed` (#117)
+  and is now `#[non_exhaustive]`, so a later answer is not another breaking
+  change. A `match` on it outside this crate needs a wildcard arm.
+
 ### Fixed
 
 - `embed-candle-cuda` builds against CUDA 13.4 (#111). `cudarc` is now
