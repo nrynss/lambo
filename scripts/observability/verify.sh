@@ -283,7 +283,7 @@ out="$("$py" "$here/duplicates.py" --store "$work/sample.db" \
       --ledger "$work/j4-completion.jsonl")"
 check "duplicates.py joins the same counts" "$out" "derives created 9, matched 3"
 check "duplicates.py joins semantic_merged when present (#112)" "$out" \
-  "semantically merged 2 (INCOMPLETE"
+  "semantically merged 2+ (INCOMPLETE"
 check "duplicates.py suppresses the zero-means-never-fired reading" "$out" \
   "does NOT apply to this run"
 
@@ -400,13 +400,65 @@ echo "$out"
 # One Semantic edge inside the window; a Semantic edge before it and a Derives
 # edge inside it are planted to oppose a count that ignores either filter.
 check "counts only in-window Semantic edges" "$out" \
-  "store Semantic edges created 2026-08-18T09:03:00+00:00 .. 2026-08-19T09:41:00+00:00: 1 (of 2 in the store), ledger sem.merged=1"
+  "store Semantic edges created 2026-08-18T09:02:59.998+00:00 .. 2026-08-19T09:41:00.000+00:00: 1 (of 2 in the store), ledger sem.merged=1"
 "$py" "$here/make_sample.py" --store "$work/no-edges.db"
 "$py" -c 'import sqlite3,sys; c = sqlite3.connect(sys.argv[1]); c.execute("DROP TABLE edges"); c.commit()' \
   "$work/no-edges.db"
 out="$("$py" "$here/dedup_rate.py" --store "$work/no-edges.db" "$ledger")"
 check "a store without an edges table says so rather than reporting 0" "$out" \
   "could not read Semantic edges"
+if "$py" "$here/duplicates.py" --json --store "$work/sample.db" \
+     --ledger "$work/j4-completion.jsonl" \
+   | "$py" -c 'import json,sys
+d = json.load(sys.stdin)
+assert d["ledger_semantic_merged"] == 2, d["ledger_semantic_merged"]
+assert d["ledger_semantic_merged_missing"] == 2, d["ledger_semantic_merged_missing"]'; then
+  printf '    ok   duplicates.py --json marks the partial semantic_merged\n'
+else
+  printf '    FAIL duplicates.py --json did not mark the partial semantic_merged\n'
+  fail=1
+fi
+
+# An async-acked derive's Semantic edge is stamped at APPLY time, after the
+# call line and before its completion line. A window that ended at the last
+# call's `ts` would miss it (review M1): the edge at .350 sits between the call
+# at .000 and the applied completion at .400.
+cat >"$work/late-edge.jsonl" <<'LATE'
+{"v":1,"ts":"2026-08-25T10:00:00.000+00:00","kind":"call","tool":"lambo_derive","agent_id":"a","outcome":"ok","duration_us":40,"concepts_requested":1,"admitted":true,"receipt":"w-1"}
+{"v":1,"ts":"2026-08-25T10:00:00.400+00:00","kind":"completion","agent_id":"a","receipt":"w-1","state":"applied","created_count":0,"matched_count":0,"semantic_merged":1,"reinforced":0}
+LATE
+"$py" "$here/make_sample.py" --store "$work/late-edge.db"
+"$py" -c 'import sqlite3,sys
+c = sqlite3.connect(sys.argv[1])
+c.execute("DELETE FROM edges")
+c.execute("INSERT INTO edges VALUES (?, ?, ?)", ("late", "Semantic", "2026-08-25T10:00:00.350Z"))
+c.commit()' "$work/late-edge.db"
+out="$("$py" "$here/dedup_rate.py" --store "$work/late-edge.db" "$work/late-edge.jsonl")"
+echo "$out" | tail -3
+check "the window reaches the applied completion, not just the last call" "$out" \
+  ": 1 (of 1 in the store), ledger sem.merged=1"
+
+step "an empty ledger is a clean error, not a traceback"
+: >"$work/empty.jsonl"
+if "$py" "$here/dedup_rate.py" "$work/empty.jsonl" >"$work/empty.out" 2>&1; then
+  printf '    FAIL dedup_rate.py accepted an empty ledger\n'
+  fail=1
+elif grep -q Traceback "$work/empty.out"; then
+  printf '    FAIL dedup_rate.py crashed on an empty ledger\n'
+  fail=1
+else
+  printf '    ok   %s\n' "$(head -1 "$work/empty.out")"
+fi
+if "$py" "$here/duplicates.py" --store "$work/sample.db" --ledger "$work/empty.jsonl" \
+     >"$work/empty.out" 2>&1; then
+  printf '    FAIL duplicates.py accepted an empty ledger\n'
+  fail=1
+elif grep -q Traceback "$work/empty.out"; then
+  printf '    FAIL duplicates.py crashed on an empty ledger\n'
+  fail=1
+else
+  printf '    ok   %s\n' "$(head -1 "$work/empty.out")"
+fi
 
 step "chrono's nine-digit fractional seconds parse (no Python floor)"
 cat >"$work/nanos.jsonl" <<'NANOS'

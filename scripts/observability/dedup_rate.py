@@ -57,7 +57,10 @@ C1–C3 capture saw exactly this), not a broken ledger — but it should be *see
 rather than assumed either way. The same flag counts the store's `Semantic`
 edges whose `created_at` falls inside the ledger's derive window, the store-side
 figure `sem.merged` should land near (approximate: an edge upserted again keeps
-only its latest `created_at`, and GC may have swept some).
+only its latest `created_at`, and GC may have swept some). The window runs from
+the first successful derive's start (`ts` minus `duration_us`) to the later of
+the last derive's `ts` and its applied `completion` line's `ts`, because an
+async-acked derive's edges are stamped at apply time, after the ack.
 
 Usage:
     python3 scripts/observability/dedup_rate.py ~/lambo-dogfood/calls.jsonl
@@ -66,6 +69,7 @@ Usage:
 
 from __future__ import annotations
 
+import datetime as dt
 import sqlite3
 import sys
 from collections import defaultdict
@@ -152,9 +156,9 @@ def analyse(ledger: _ledger.Ledger, bucket: str, store: str | None) -> dict[str,
     # file" and "these writes were synchronous" used to look identical (J4).
     from_line = 0
     from_completion = 0
-    # The ledger window the store's `Semantic` edges are counted over: first to
-    # last successful derive, whatever its facts.
-    window: list[str] = []
+    # The window the store's `Semantic` edges are counted over, as parsed
+    # datetimes [lo, hi]. See `_widen` for why each end is where it is.
+    window: list[Any] = []
     completions = ledger.completions_by_receipt()
     # `record_action` fans its produces/modifies/depends_on out into concepts too,
     # so the store cross-check below must count them or it will always report a
@@ -174,7 +178,7 @@ def analyse(ledger: _ledger.Ledger, bucket: str, store: str | None) -> dict[str,
         if not _ledger.succeeded(call):
             failed += 1
             continue
-        window = [window[0] if window else call["ts"], call["ts"]]
+        _widen(window, call, completions)
         key = call["ts"][:width] if width else "all"
         row = per_bucket[key]
         row["calls"] += 1
@@ -225,6 +229,40 @@ def analyse(ledger: _ledger.Ledger, bucket: str, store: str | None) -> dict[str,
     return data
 
 
+def _widen(window: list[Any], call: dict[str, Any], completions: dict[str, Any]) -> None:
+    """Grow the `Semantic`-edge window [lo, hi] to cover one successful derive.
+
+    A `Semantic` edge is stamped when the write is APPLIED, which is not when
+    the call line is stamped, in either direction:
+
+    * **lo** — a call line is stamped when the call RETURNS. A synchronous
+      (CLI) derive applies its write before that, so the bound is the call's
+      `ts` minus its `duration_us`, not the `ts` itself.
+    * **hi** — an async-acked (MCP) derive is acked before it is applied, so
+      its edges land after the call line, up to its applied `completion`
+      line. The bound is the later of the call's `ts` and the `ts` of the
+      applied completion joined on its receipt. A derive whose completion is
+      missing from this file can still land edges after the window; that
+      undercount is the same gap the fact-less line already reports.
+    """
+    stamp = _ledger.parse_ts(call["ts"])
+    duration = call.get("duration_us")
+    start = stamp - dt.timedelta(microseconds=duration) if isinstance(duration, int) else stamp
+    end = stamp
+    receipt = call.get("receipt")
+    completion = completions.get(receipt) if isinstance(receipt, str) else None
+    if completion and completion.get("state") in _ledger.APPLIED_STATES:
+        try:
+            end = max(end, _ledger.parse_ts(completion["ts"]))
+        except (KeyError, TypeError, ValueError):
+            pass
+    if window:
+        window[0] = min(window[0], start)
+        window[1] = max(window[1], end)
+    else:
+        window.extend([start, end])
+
+
 def _store_ts(raw: str) -> Any:
     """The store writes `...Z` (chrono `SecondsFormat::Millis`); `parse_ts`
     needs an explicit offset on Pythons before 3.11."""
@@ -234,7 +272,7 @@ def _store_ts(raw: str) -> Any:
 
 
 def store_check(
-    path: str, created: int, window: tuple[str, ...] | None
+    path: str, created: int, window: tuple[Any, ...] | None
 ) -> dict[str, Any]:
     """Compare every concept the ledger saw created against the store's count,
     and count the `Semantic` edges created inside the ledger's derive window."""
@@ -266,7 +304,7 @@ def store_check(
     else:
         semantic["semantic_edges"] = len(stamps)
         if window:
-            lo, hi = _ledger.parse_ts(window[0]), _ledger.parse_ts(window[-1])
+            lo, hi = window[0], window[-1]
             inside = 0
             for raw in stamps:
                 try:
@@ -276,7 +314,10 @@ def store_check(
                 if lo <= when <= hi:
                     inside += 1
             semantic["semantic_edges_in_window"] = inside
-            semantic["window"] = [window[0], window[-1]]
+            semantic["window"] = [
+                lo.isoformat(timespec="milliseconds"),
+                hi.isoformat(timespec="milliseconds"),
+            ]
     finally:
         con.close()
     return {
@@ -449,7 +490,11 @@ def main(argv: list[str]) -> int:
         help="SQLite store path to cross-check the created total against",
     )
     args = parser.parse_args(argv)
-    ledger = _ledger.load(args.ledger)
+    try:
+        ledger = _ledger.load(args.ledger)
+    except _ledger.LedgerError as exc:
+        print(f"dedup_rate.py: {exc}", file=sys.stderr)
+        return 1
     data = analyse(ledger, args.bucket, args.store)
     _ledger.emit(
         "metric 2 — re-derivation savings", ledger, render(data), data, args.json

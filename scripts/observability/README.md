@@ -457,7 +457,9 @@ Three things are worth knowing about what the join does and does not restore:
   otherwise be a conclusion about the write path drawn from a gap in the
   reader. `dedup_rate.py --store` also counts the store's `Semantic` edges
   created inside the ledger's derive window, the store-side figure
-  `sem.merged` should land near.
+  `sem.merged` should land near. The window runs from the first derive's start
+  (`ts` minus `duration_us`) to the later of the last derive's `ts` and its
+  applied completion's `ts`, because async edges are stamped at apply time.
 * **Only *applied* completions contribute.** A `failed` write created nothing
   and a `deferred` one has not created it yet (it is owed to the next serve of
   that session), so neither adds facts. A derive whose completion is `deferred`

@@ -204,6 +204,10 @@ def ledger_cross_check(ledger: _ledger.Ledger) -> dict[str, Any]:
         "ledger_semantic_merged": merged if merged_seen else None,
         "ledger_calls_joined_from_completion": joined,
         "ledger_calls_without_semantic_merged": merged_unavailable,
+        # Same shape as dedup_rate.py's `semantic_merged_missing`: non-zero
+        # with a non-null `ledger_semantic_merged` means a partial (lower-bound)
+        # sum; with a null one, nothing carried the key.
+        "ledger_semantic_merged_missing": merged_unavailable,
     }
 
 
@@ -274,6 +278,7 @@ def render(meta: dict[str, Any], data: dict[str, Any], cross: dict[str, Any] | N
             f"   derives created {cross['ledger_created']}, matched "
             f"{cross['ledger_matched']}, semantically merged "
             + ("n/a" if cross["ledger_semantic_merged"] is None
+               else f"{cross['ledger_semantic_merged']}+" if unavailable
                else str(cross["ledger_semantic_merged"]))
             + (" (INCOMPLETE — see below)" if unavailable else ""),
             "   `matched` is exact-key convergence and `semantic_merged` is the",
@@ -352,7 +357,11 @@ def main(argv: list[str]) -> int:
 
     cross = None
     if args.ledger:
-        cross = ledger_cross_check(_ledger.load(args.ledger))
+        try:
+            cross = ledger_cross_check(_ledger.load(args.ledger))
+        except _ledger.LedgerError as exc:
+            print(f"duplicates.py: {exc}", file=sys.stderr)
+            return 1
         data.update(cross)
 
     if args.json:
