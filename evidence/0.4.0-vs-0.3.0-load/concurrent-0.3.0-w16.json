@@ -1,0 +1,57 @@
+{
+  "workers": 16,
+  "secs": 120.0,
+  "think": 0.5,
+  "wall_s": 149.3,
+  "drain_s": 5.1,
+  "calls": 151,
+  "latency_ms": {
+    "lambo_derive": {
+      "n": 62,
+      "p50": 0.62,
+      "p90": 0.73,
+      "p99": 5.79,
+      "mean": 0.84,
+      "max": 8.9
+    },
+    "lambo_stats": {
+      "n": 8,
+      "p50": 0.78,
+      "p90": 3.07,
+      "p99": 4.97,
+      "mean": 1.56,
+      "max": 4.97
+    },
+    "lambo_record_action": {
+      "n": 32,
+      "p50": 0.74,
+      "p90": 0.85,
+      "p99": 8.57,
+      "mean": 1.03,
+      "max": 8.57
+    },
+    "lambo_recall": {
+      "n": 49,
+      "p50": 47041.46,
+      "p90": 63184.01,
+      "p99": 64889.87,
+      "mean": 43381.73,
+      "max": 64889.87
+    }
+  },
+  "errors": {
+    "lambo_derive": 0,
+    "lambo_stats": 0,
+    "lambo_record_action": 0,
+    "lambo_recall": 0
+  },
+  "final_stats": {
+    "concept_count": 5022,
+    "dead_lettered": 0,
+    "degraded": false,
+    "embedded_concepts": 5018,
+    "write_queue_applied": 41,
+    "write_queue_dropped": 0,
+    "write_queue_failed": 53
+  }
+}

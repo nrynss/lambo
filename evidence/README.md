@@ -31,6 +31,7 @@ have contained one, it is replaced by a named placeholder such as `<CLUSTER_ID>`
 | Path | What it shows |
 |---|---|
 | [`issue-108-perf/`](issue-108-perf/) | 0.4.0 against the build it replaced on two rigs, CUDA (vs `bef53e6`) and Metal (vs 0.3.0), via `scripts/loadtest/mcp_ab.py`. Recall is about 50x faster at p50 on repeated queries and about 12x on unseen ones, with identical top-8 results; a derive reaches the store about 9x sooner. Includes the live-ledger cross-check. |
+| [`0.4.0-vs-0.3.0-load/`](0.4.0-vs-0.3.0-load/) | Beyond sequential latency: 8 and 16 concurrent agents (0.4.0 recall stays in milliseconds where 0.3.0 waits 16 to 47 s; about a third of writes fail under concurrent writers on both builds, #116), a replay of 330 real writes (every difference traces to the CHANGELOG), and SIGTERM/SIGKILL crash recovery (clean shutdown durable; SIGKILL loses the last fraction of a second of acked writes, #117). |
 
 ## CockroachDB
 
