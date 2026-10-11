@@ -966,7 +966,9 @@ async fn derive_planned(
     // Survives replans too (#116): a replan embeds only text it has not
     // embedded yet in this call.
     let mut embeds = EmbedCache::default();
-    for _attempt in 0..MAX_HYBRID_REPLANS {
+    // Why the last attempt did not commit, for the error if none does.
+    let mut last_stale = Verdict::Stale;
+    for attempt in 0..MAX_HYBRID_REPLANS {
         #[cfg(test)]
         ATTEMPTS.with(|n| n.set(n.get() + 1));
         // The vector leg can run only when the store advertises it. Probed once,
@@ -1274,7 +1276,11 @@ async fn derive_planned(
         // against "anything changed". A rival write that touches nothing
         // this plan read commits alongside it; one that does sends this
         // call round again, which now costs no embeds.
-        if !plan_still_holds(
+        // Review L1: the final attempt validates with a far higher rescoring
+        // ceiling, so a large call under sustained unrelated writes ends in
+        // one serialized check-and-commit instead of exhausting its replans.
+        let last_attempt = attempt + 1 == MAX_HYBRID_REPLANS;
+        let verdict = plan_still_holds(
             &guard,
             &PlanRead {
                 planned_epoch,
@@ -1291,9 +1297,32 @@ async fn derive_planned(
                 parent_ends: &parent_ends,
                 resolutions: &resolutions,
                 semantic_match_threshold,
+                rescore_cap: if last_attempt {
+                    MAX_PLAN_RESCORES_FINAL
+                } else {
+                    MAX_PLAN_RESCORES
+                },
             },
-        )? {
-            continue;
+        )?;
+        match verdict {
+            Verdict::Holds => {}
+            Verdict::Stale => {
+                last_stale = Verdict::Stale;
+                continue;
+            }
+            Verdict::OverBudget => {
+                last_stale = Verdict::OverBudget;
+                let n = PLAN_BUDGET_REPLANS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                tracing::info!(
+                    target: "lambo::hybrid",
+                    session = %session_id,
+                    attempt = attempt + 1,
+                    budget_replans_total = n,
+                    "hybrid derive: too much was written since the plan to recheck it under the \
+                     write lock; planning again (no embeds are repeated)"
+                );
+                continue;
+            }
         }
         // #22: a canonically matched image item repairs an image concept whose
         // vector is missing (see `derive_with`); that writes a vector too.
@@ -1669,9 +1698,40 @@ async fn derive_planned(
         return Ok(outcome);
     }
 
-    Err(LamboError::Store(StoreError::Backend(format!(
-        "hybrid derive could not commit after {MAX_HYBRID_REPLANS} concurrent graph changes"
-    ))))
+    Err(LamboError::Store(StoreError::Backend(match last_stale {
+        Verdict::OverBudget => format!(
+            "hybrid derive could not commit after {MAX_HYBRID_REPLANS} attempts: more was \
+             written to the graph during each one than its plan can be rechecked against \
+             (over {MAX_PLAN_RESCORES_FINAL} comparisons, or {} concept writes); split the call",
+            crate::graph::graph::NODE_WRITE_WINDOW
+        ),
+        _ => format!(
+            "hybrid derive could not commit after {MAX_HYBRID_REPLANS} concurrent graph changes"
+        ),
+    })))
+}
+
+/// How a plan compared with the graph at commit ([`plan_still_holds`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Verdict {
+    /// Nothing it read changed: commit.
+    Holds,
+    /// Something it read changed: plan again.
+    Stale,
+    /// Too much was written since the plan to check it within the attempt's
+    /// rescoring budget (or the node-write window no longer reaches back):
+    /// plan again, and say so if no attempt commits.
+    OverBudget,
+}
+
+/// Replans [`Verdict::OverBudget`] caused, process-wide (review L1). Logged
+/// with each such replan; read by tests.
+static PLAN_BUDGET_REPLANS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many budget-driven replans this process has made.
+#[cfg(all(test, feature = "embed-fixture"))]
+pub(crate) fn plan_budget_replans() -> u64 {
+    PLAN_BUDGET_REPLANS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// How far below a planned merge's score a concept written since the plan
@@ -1691,6 +1751,15 @@ const MERGE_RESCORE_MARGIN: f64 = 1e-4;
 /// vector-carrying concepts written inside one embed window.
 const MAX_PLAN_RESCORES: usize = 8_192;
 
+/// [`MAX_PLAN_RESCORES`] for a call's final attempt (review L1): 32 times
+/// higher, about 180 ms at 1,024 dimensions. Without it a large call (100 to
+/// 256 unmatched items) under a steady stream of unrelated writes could be
+/// over the normal cap on every attempt and fail although nothing conflicts.
+/// The final attempt's check and commit are already one write-lock hold, so
+/// this is the serialized path; it fails only on a genuine conflict or past
+/// this ceiling.
+const MAX_PLAN_RESCORES_FINAL: usize = 32 * MAX_PLAN_RESCORES;
+
 /// What a plan read from the graph, for [`plan_still_holds`].
 struct PlanRead<'p, 'a> {
     planned_epoch: u64,
@@ -1706,6 +1775,9 @@ struct PlanRead<'p, 'a> {
     parent_ends: &'p PlannedEnds<'a>,
     resolutions: &'p [Resolution],
     semantic_match_threshold: f64,
+    /// [`MAX_PLAN_RESCORES`], or [`MAX_PLAN_RESCORES_FINAL`] on the final
+    /// attempt.
+    rescore_cap: usize,
 }
 
 /// Whether a plan made at `plan.planned_epoch` still describes `g`, the
@@ -1758,9 +1830,9 @@ struct PlanRead<'p, 'a> {
 /// ends, which are embedded but never merged. The interaction must still
 /// carry the prompt text, creation time and event time the plan read (an
 /// interaction cannot be removed, but a re-upsert can rewrite them).
-fn plan_still_holds(g: &Graph, plan: &PlanRead<'_, '_>) -> Result<bool, LamboError> {
+fn plan_still_holds(g: &Graph, plan: &PlanRead<'_, '_>) -> Result<Verdict, LamboError> {
     if g.epoch() == plan.planned_epoch {
-        return Ok(true);
+        return Ok(Verdict::Holds);
     }
     // Review L3: the interaction the plan framed its embeds with and stamps
     // its rows from. Append-only in the chain, but a re-upsert can rewrite
@@ -1768,21 +1840,21 @@ fn plan_still_holds(g: &Graph, plan: &PlanRead<'_, '_>) -> Result<bool, LamboErr
     match g.node(plan.interaction) {
         Some(Node::Interaction(i))
             if (i.prompt_text.as_deref(), i.created_at, i.event_time) == plan.interaction_read => {}
-        _ => return Ok(false),
+        _ => return Ok(Verdict::Stale),
     }
     if g.embedding() != plan.stamped {
-        return Ok(false);
+        return Ok(Verdict::Stale);
     }
     let Some(written) = g.nodes_written_since(plan.planned_epoch) else {
-        return Ok(false);
+        return Ok(Verdict::OverBudget);
     };
     validate_pairs(g, plan.parent_of)?;
     let (items, parent_ends) = plan_inputs(g, plan.concepts, plan.parent_of)?;
     if &items != plan.items || &parent_ends != plan.parent_ends {
-        return Ok(false);
+        return Ok(Verdict::Stale);
     }
     if written.is_empty() {
-        return Ok(true);
+        return Ok(Verdict::Holds);
     }
     let mut targets: HashSet<NodeId> = HashSet::new();
     // Each ranked item's vector, with its planned merge score (`None`: it
@@ -1818,7 +1890,7 @@ fn plan_still_holds(g: &Graph, plan: &PlanRead<'_, '_>) -> Result<bool, LamboErr
             continue;
         }
         if targets.contains(&id) {
-            return Ok(false);
+            return Ok(Verdict::Stale);
         }
         if ranked.is_empty() {
             continue;
@@ -1832,8 +1904,8 @@ fn plan_still_holds(g: &Graph, plan: &PlanRead<'_, '_>) -> Result<bool, LamboErr
     }
     // Review L1: the rescoring runs under the write lock, so it is capped.
     // Past the cap the plan is treated as stale; the replan costs no embeds.
-    if rivals.len().saturating_mul(ranked.len()) > MAX_PLAN_RESCORES {
-        return Ok(false);
+    if rivals.len().saturating_mul(ranked.len()) > plan.rescore_cap {
+        return Ok(Verdict::OverBudget);
     }
     for vector in rivals {
         for (probe, planned) in &ranked {
@@ -1848,13 +1920,13 @@ fn plan_still_holds(g: &Graph, plan: &PlanRead<'_, '_>) -> Result<bool, LamboErr
                 continue;
             }
             match planned {
-                None => return Ok(false),
-                Some(best) if score >= best - MERGE_RESCORE_MARGIN => return Ok(false),
+                None => return Ok(Verdict::Stale),
+                Some(best) if score >= best - MERGE_RESCORE_MARGIN => return Ok(Verdict::Stale),
                 Some(_) => {}
             }
         }
     }
-    Ok(true)
+    Ok(Verdict::Holds)
 }
 
 /// The vectors one hybrid derive has embedded, kept across its replans

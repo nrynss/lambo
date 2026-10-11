@@ -679,3 +679,159 @@ async fn a_rival_closing_the_cycle_during_the_gather_is_refused_at_commit() {
     assert_eq!((g.epoch(), g.node_count(), g.edge_count()), before);
     g.assert_invariants().unwrap();
 }
+
+/// A store whose every checked vector read first writes `per_read` new
+/// concepts into the graph (vectors orthogonal to every item), as a steady
+/// stream of unrelated writers would between a plan and its commit, then
+/// answers with no candidates.
+struct StreamingRivalStore {
+    inner: SpyStore,
+    graph: Arc<RwLock<Graph>>,
+    interaction: NodeId,
+    per_read: usize,
+    written: AtomicUsize,
+}
+
+#[async_trait]
+impl GraphStore for StreamingRivalStore {
+    async fn init_schema(&self) -> Result<(), StoreError> {
+        self.inner.init_schema().await
+    }
+    fn capabilities(&self) -> Capabilities {
+        self.inner.capabilities()
+    }
+    async fn flush(&self, batch: &MutationBatch, token: Option<u64>) -> Result<(), StoreError> {
+        self.inner.flush(batch, token).await
+    }
+    async fn load_session(
+        &self,
+        session: &SessionId,
+    ) -> Result<crate::types::GraphSnapshot, StoreError> {
+        self.inner.load_session(session).await
+    }
+    async fn keyword_candidates(
+        &self,
+        session: &SessionId,
+        tokens: &[String],
+        limit: usize,
+    ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+        self.inner.keyword_candidates(session, tokens, limit).await
+    }
+    async fn vector_candidates(
+        &self,
+        session: &SessionId,
+        embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+        self.inner
+            .vector_candidates(session, embedding, limit)
+            .await
+    }
+    async fn vector_candidates_checked(
+        &self,
+        _session: &SessionId,
+        _embedding: &[f32],
+        _expected_contract: &EmbeddingContract,
+        _limit: usize,
+    ) -> Result<Vec<Scored<NodeId>>, StoreError> {
+        for _ in 0..self.per_read {
+            let k = self.written.fetch_add(1, Ordering::SeqCst);
+            seed(
+                &self.graph,
+                self.interaction,
+                &format!("streamed rival {k}"),
+                vec![0.0, 0.0, 0.0, 1.0],
+            );
+        }
+        Ok(Vec::new())
+    }
+    async fn blast_radius(
+        &self,
+        session: &SessionId,
+        node: NodeId,
+        min_edge_age: std::time::Duration,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64, StoreError> {
+        self.inner
+            .blast_radius(session, node, min_edge_age, now)
+            .await
+    }
+    async fn interaction_span(
+        &self,
+        session: &SessionId,
+        node: NodeId,
+        min_age: std::time::Duration,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<crate::types::InteractionSpan, StoreError> {
+        self.inner
+            .interaction_span(session, node, min_age, now)
+            .await
+    }
+    async fn record_canonization(
+        &self,
+        event: &crate::types::CanonizationEvent,
+        token: Option<u64>,
+    ) -> Result<(), StoreError> {
+        self.inner.record_canonization(event, token).await
+    }
+}
+
+/// Review L1: a large call (40 unmatched items) under a steady stream of
+/// unrelated writes (six concepts per candidate read, 240 per attempt) is
+/// over the normal rescoring cap on every attempt: 40 x 240 = 9,600 >
+/// 8,192. It used to fail with "could not commit after 8 concurrent graph
+/// changes" although nothing conflicted; the final attempt now checks with
+/// the higher ceiling, finds no conflict and commits. The seven cap-driven
+/// replans are counted.
+#[tokio::test]
+async fn a_large_call_under_streaming_writes_commits_on_the_final_attempt() {
+    const ITEMS: usize = 40;
+    const PER_READ: usize = 6;
+    const {
+        assert!(ITEMS * ITEMS * PER_READ > MAX_PLAN_RESCORES);
+        assert!(ITEMS * ITEMS * PER_READ <= MAX_PLAN_RESCORES_FINAL);
+    };
+    let (graph, interaction) = stamped_session("hybrid-final-attempt");
+    let contents: Vec<String> = (0..ITEMS).map(|k| format!("batch item {k}")).collect();
+    let table: Vec<(&'static str, Vec<f32>)> = contents
+        .iter()
+        .map(|c| (&*Box::leak(c.clone().into_boxed_str()), probe()))
+        .collect();
+    let embedder = TableEmbedder::new(table);
+    let store = StreamingRivalStore {
+        inner: SpyStore::with_vector(Vec::new()),
+        graph: graph.clone(),
+        interaction,
+        per_read: PER_READ,
+        written: AtomicUsize::new(0),
+    };
+    let concepts: Vec<(&str, ConceptType)> = contents
+        .iter()
+        .map(|c| (c.as_str(), ConceptType::Entity))
+        .collect();
+    let attempts = plan_attempts();
+    let budget_replans = plan_budget_replans();
+    let out = derive(
+        graph.clone(),
+        &store,
+        &embedder,
+        &table_contract(),
+        interaction,
+        &agent(),
+        &concepts,
+        &ParentOf::none(),
+        10,
+        SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+        None,
+    )
+    .await
+    .expect("the final attempt commits");
+    assert_eq!(out.created.len(), ITEMS);
+    assert_eq!(plan_attempts() - attempts, MAX_HYBRID_REPLANS);
+    assert!(
+        plan_budget_replans() - budget_replans >= (MAX_HYBRID_REPLANS - 1) as u64,
+        "every earlier attempt was a budget replan"
+    );
+    assert_eq!(embedder.calls(), ITEMS, "no item embedded twice");
+    graph.read().assert_invariants().unwrap();
+}

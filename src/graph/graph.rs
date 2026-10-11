@@ -64,7 +64,6 @@ mod txn;
 mod unflushed;
 
 pub use root_goal::root_goal_texts;
-#[cfg(all(test, feature = "embed-fixture"))]
 pub(crate) use txn::NODE_WRITE_WINDOW;
 
 /// Edge-weight bump per reinforcement (v0.6.0 §5.4 semantics; see module docs).

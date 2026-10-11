@@ -210,11 +210,12 @@ fn plan_validation_worst_case_is_bounded() {
         parent_ends: &parent_ends,
         resolutions: &resolutions,
         semantic_match_threshold: SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+        rescore_cap: MAX_PLAN_RESCORES,
     };
     let mut samples = Vec::new();
     for _ in 0..21 {
         let started = std::time::Instant::now();
-        assert!(plan_still_holds(&g, &plan).unwrap(), "the plan holds");
+        assert_eq!(plan_still_holds(&g, &plan).unwrap(), Verdict::Holds);
         samples.push(started.elapsed());
     }
     samples.sort();
