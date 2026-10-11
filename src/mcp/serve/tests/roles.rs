@@ -52,6 +52,8 @@ fn an_abrupt_holder_death_outlasts_the_election_budget() {
 /// J2-R2-3 / #118: the refusal must not tell an operator that a dead holder
 /// "is still refreshing" its lease, and a refused endpoint must be named as
 /// the likely death it is.
+// Builds a `LeaseHeldElsewhere`, whose store is a `MemoryStore`.
+#[cfg(feature = "store-memory")]
 #[test]
 fn a_dead_holders_refusal_does_not_claim_it_is_still_refreshing() {
     let session = crate::types::SessionId::new("s");
