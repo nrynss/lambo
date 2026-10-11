@@ -26,6 +26,12 @@ have contained one, it is replaced by a named placeholder such as `<CLUSTER_ID>`
 |---|---|
 | [`issue-22-eg2/`](issue-22-eg2/) | EmbeddingGemma 2 on llama.cpp b11517 (#22 PR 5): the live test passing for text and images, the no-projector refusal, what `/props` reports, the default-ubatch cap on the image budget that the adapter refuses, and the design 7.3 ranking-parity table. |
 
+## Performance
+
+| Path | What it shows |
+|---|---|
+| [`issue-108-perf/`](issue-108-perf/) | 0.4.0 against the build it replaced on two rigs, CUDA (vs `bef53e6`) and Metal (vs 0.3.0), via `scripts/loadtest/mcp_ab.py`. Recall is about 50x faster at p50 on repeated queries and about 12x on unseen ones, with identical top-8 results; a derive reaches the store about 9x sooner. Includes the live-ledger cross-check. |
+
 ## CockroachDB
 
 | Path | What it shows |
