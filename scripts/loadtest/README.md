@@ -46,6 +46,12 @@ guards it, and what changed when the instruction was removed.
 The same rule applies to `--skill`: the file is read verbatim as the system
 prompt, so any commentary in it (even an HTML comment) reaches the model.
 
+### Version A/B
+
+| Script | Role |
+|---|---|
+| `mcp_ab.py` | Latency A/B between two `lambo serve` builds. `ab` drives two HTTP serves, each on its own copy of the same store, with recalls interleaved per query, a `lambo_stats` per round, and synthetic `lambo_derive` writes timed to ack and to applied (via the receipt). It reports p50/p90/p99 per path and the top-k node-id overlap between the two sides as a recall-quality check. `ledger` splits a `serve --ledger` file at a re-pin time and summarizes server-side latency per tool on each side. Output is aggregates only, safe to paste into an issue. Refuses port 7700 unless `--allow-production-port`, since `ab` writes. First run: [#108](https://github.com/nrynss/lambo/issues/108). |
+
 ## How the driver is shaped (so refusals don't crowd out the measurement)
 
 The HTTP surface enforces documented limits (T8.7): a sustained rate limit
