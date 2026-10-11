@@ -40,6 +40,7 @@
 //! |---|---|
 //! | `types` | `DryRun`, `ImpactReport`, `CanonicalMemory`, `MemoryStats`, `GcStats` |
 //! | `builder` | `MemoryBuilder`, `Attach`, `LeaseHeldElsewhere`, the attach order |
+//! | `lease_refusal` | the refusal message for a lease another writer holds (#118) |
 //! | `leases` | lease heartbeat, `LeaseLostSignal`, the `ACTIVE_SESSIONS` registry |
 //! | `gate` | `begin_write`, `begin_write_sync`, `ensure_open` |
 //! | `writes` | metadata writes, `derive*`, `record_action*`, `demote`, `retract`, soft locks |
@@ -77,14 +78,16 @@ use crate::writeq::WritePipeline;
 mod builder;
 mod gate;
 mod image;
+mod lease_refusal;
 mod leases;
 mod reads;
 mod shutdown;
 mod types;
 mod writes;
 
+pub(crate) use builder::AttachShutdown;
 pub use builder::{Attach, LeaseHeldElsewhere, MemoryBuilder};
-pub(crate) use builder::{AttachShutdown, STILL_REFRESHING_CLAUSE};
+pub(crate) use lease_refusal::lease_held_message;
 pub(crate) use leases::LeaseLostSignal;
 pub use types::{CanonicalMemory, DryRun, GcStats, GcSweepSummary, ImpactReport, MemoryStats};
 

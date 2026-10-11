@@ -138,35 +138,30 @@ pub(super) enum Role {
 /// than merely unreachable (J2-R2-3).
 ///
 /// A named constant, not a literal at each site, so
-/// [`correct_the_refresh_claim`] cannot drift out of step with the message it
+/// [`refusal_with_probe`] cannot drift out of step with the outcome it
 /// looks for — the class of bug this whole round is about.
 pub(super) const ENDPOINT_NOT_ACCEPTING: &str =
     "the holder's endpoint is not accepting connections";
 
-/// What replaces `crate::memory::STILL_REFRESHING_CLAUSE` when the probe says the endpoint is not answering.
-pub(super) const PROBABLY_DEAD: &str = "has not yet let its lease lapse — but its endpoint is not \
-     answering, so it has most likely died";
-
-/// Repair the lease refusal before folding a probe outcome into it (J2-R2-3).
+/// The lease refusal with the election's endpoint probe folded in (J2-R2-3,
+/// #118).
 ///
-/// `build_attach`'s message says the holder "is still refreshing" its lease,
-/// which is the right thing to say to a serve that simply lost a race. J2-L2
-/// newly composes that message with [`probe_holder`]'s outcome, and when the
-/// outcome is [`ENDPOINT_NOT_ACCEPTING`] the composition contradicts itself
-/// inside one paragraph — with the **false half first**, so an operator reading
-/// the opening sentence goes looking for a live process that no longer exists.
-/// The probe is the better evidence of the two: a lease row is a claim made up to
-/// [`lease::LEASE_HEARTBEAT_INTERVAL`] ago, a refused connect is now.
-///
-/// Only that one clause changes, and only on that one outcome. Every other
-/// refusal — another host, no endpoint published, a foreign address name — is a
-/// live holder this process merely cannot forward to, and "is still refreshing
-/// it" is exactly true for it.
-pub(super) fn correct_the_refresh_claim(message: &str, outcome: &str) -> String {
+/// `build_attach` composes its refusal from the lease row alone, which cannot
+/// tell a live holder from a dead one whose lease has not expired yet. The probe
+/// is newer evidence: when it found [`ENDPOINT_NOT_ACCEPTING`], the refusal is
+/// recomposed from the same row to say the holder has most likely died, rather
+/// than appending the probe's finding after a sentence that does not mention it.
+/// Every other outcome (another host, no endpoint, an unsafe directory) is a
+/// holder this process merely cannot forward to, and the row's facts stand.
+pub(super) fn refusal_with_probe(
+    held: &crate::memory::LeaseHeldElsewhere,
+    session: &crate::types::SessionId,
+    outcome: &str,
+) -> String {
     if outcome.contains(ENDPOINT_NOT_ACCEPTING) {
-        message.replacen(crate::memory::STILL_REFRESHING_CLAUSE, PROBABLY_DEAD, 1)
+        crate::memory::lease_held_message(session, &held.current, held.age, true)
     } else {
-        message.to_string()
+        held.message.clone()
     }
 }
 
@@ -338,7 +333,7 @@ pub(super) async fn resolve_role(
                  client that gives up on a slow server reports NO TOOLS rather than 'starting', \
                  which would be a worse outcome than this message. Retry in {}s, or stop the \
                  other holder.",
-                correct_the_refresh_claim(&held.message, &outcome),
+                refusal_with_probe(&held, &session, &outcome),
                 lapses_in.as_secs(),
                 ELECTION_BUDGET.as_secs(),
                 lapses_in.as_secs() + 1
@@ -366,7 +361,7 @@ pub(super) async fn resolve_role(
             return Err(LamboError::Conflict(format!(
                 "{} {outcome} Waited {}s for that holder's lease to lapse or its endpoint to \
                  answer, and neither happened.",
-                correct_the_refresh_claim(&held.message, &outcome),
+                refusal_with_probe(&held, &session, &outcome),
                 ELECTION_BUDGET.as_secs()
             )));
         }

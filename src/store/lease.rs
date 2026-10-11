@@ -372,9 +372,22 @@ pub struct LeaseRefusal {
     pub current_holder: String,
 }
 
+/// The `host` and `pid` inside a [`LeaseHolder::token`] (`agent@host#pid`),
+/// or `None` for a token not in that shape (the reserved markers, a row
+/// written by something other than a [`LeaseHolder`]).
+///
+/// Split from the right: an agent id is caller-chosen and may itself contain
+/// `@` or `#`, while the host and the pid never contain the separator that
+/// follows them.
+pub(crate) fn holder_host_and_pid(token: &str) -> Option<(&str, u32)> {
+    let (rest, pid) = token.rsplit_once('#')?;
+    let (_agent, host) = rest.rsplit_once('@')?;
+    Some((host, pid.parse().ok()?))
+}
+
 /// Best-effort host name, dependency-free. Only needs to distinguish hosts (see
 /// [`LeaseHolder::for_this_process`]).
-fn detect_host() -> String {
+pub(crate) fn detect_host() -> String {
     for var in ["HOSTNAME", "HOST"] {
         if let Ok(h) = std::env::var(var) {
             let h = h.trim();
