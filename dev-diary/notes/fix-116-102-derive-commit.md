@@ -1,4 +1,4 @@
-# #116 and #102: hybrid derive's commit (0.4.1 lane A)
+# #116 and #102: hybrid derive's commit (0.5.0 lane A)
 
 Base: main `a2d4f64`. Both issues live in one function,
 `derive_planned` in `src/graph/hybrid.rs`, so they were fixed together.
@@ -45,12 +45,15 @@ At commit, under the write lock, the plan is checked against what changed
 since it was made:
 
 1. **Same epoch:** it holds (the fast path; no other writer committed).
-2. **Contract:** the session's stamp must equal the one the plan saw.
-3. **Canonical resolution:** `validate_graph_inputs` and `plan_inputs` are
+2. **Interaction** (review L3): it must still carry the prompt text,
+   creation time and event time the plan read. The text frames every
+   embed and the times stamp every row; a re-upsert can rewrite them.
+3. **Contract:** the session's stamp must equal the one the plan saw.
+4. **Canonical resolution:** `validate_graph_inputs` and `plan_inputs` are
    rerun against the live graph. The items (content, type, canonical key,
    canonical match) and the `parent_of` ends to create must be identical.
    An error here is the error a replan would return.
-4. **Semantic-merge choices:** every concept upserted or deleted since the
+5. **Semantic-merge choices:** every plan-relevant concept write since the
    plan is read from the graph's node-write window and checked against each
    item that ranked candidates:
    - any change to a merge target (any member of the tied top tier) makes
@@ -65,6 +68,14 @@ since it was made:
    item never merges into one, #22), an edge, a deleted non-target. If the
    window no longer reaches back to the plan, the plan is stale.
 
+   **The rescoring is capped** (review L1). It runs under the write lock,
+   so the check first collects the written concepts an item could merge
+   into (live, text-sourced, with a vector). If their count times the
+   ranked items exceeds `MAX_PLAN_RESCORES` (8,192), the plan is treated
+   as stale instead of scanned; the replan costs no embeds. A first cap of
+   32,768 measured 22.5 ms, more than the clone #102 removed, so it was
+   lowered (see Measurements).
+
 A stale plan goes round again. That is cheap now, because of (1).
 
 **The semantic-merge rule, decided: correctness over throughput.** A rival
@@ -73,7 +84,7 @@ always forces a replan, so the result is what a call starting after the
 rival would produce:
 
 - a rival with the same canonical key is matched, never duplicated, by
-  check 3;
+  check 4;
 - a rival that scores above the planned target, or ties it within the
   margin (a tie is decided by canonical key, so a tying rival can win),
   becomes the merge target after the replan;
@@ -93,15 +104,23 @@ to rivals on its own keys or merge candidates.
 
 ### The node-write window
 
-`append_mutation` records `(epoch, id)` for every `UpsertNode` and
-`DeleteNode` in a RAM-only ring of the last 8,192 node writes
-(`Graph::nodes_written_since`). The ring answers `None` for an epoch older
-than anything it has evicted. A loaded graph answers from its load epoch.
+A RAM-only ring of the last 8,192 *plan-relevant* concept writes, each
+`(epoch, id)` (`Graph::nodes_written_since`). The ring answers `None` for
+an epoch older than anything it has evicted. A loaded graph answers from
+its load epoch.
+
+Plan-relevant (review L2) means what a plan can read: a concept created or
+deleted, or a change to its vector, vector source, canonical key or type.
+`insert_concept` compares against the value it replaces; `remove_node` and
+the vector rewrites (re-embed, image vector drop, backfill) always record.
+Counter and status writers (GC survivor bumps, human confirmation,
+canonization transitions, access bookkeeping) and an unchanged re-upsert
+(a canonical re-derive) do not. Without this, any write to a hot merge
+target made every in-flight plan that ranked it stale, and enough of them
+could still exhaust `MAX_HYBRID_REPLANS`. A future writer that changes one
+of those fields must call `note_plan_relevant_write`.
 
 The mutation log was not usable for this, because the flush drains it.
-The ring sees every concept write: derive, record_action, demote, retract,
-GC, canonization, vector rewrites. It does not see access bookkeeping,
-which goes around the log and changes nothing a plan reads.
 
 ### 3. Commit in place (`Graph::transaction`)
 
@@ -179,9 +198,45 @@ and rollback. `assert_invariants` checks it.
 - **Image derive** goes through `hybrid::derive_with`, so it is covered by
   this change.
 - **Canonical `derive`** (`derive.rs`) is synchronous: it validates, then
-  mutates, under one write hold. No clone, no epoch.
+  mutates, under one write hold. No clone, no epoch. Its write loop now runs
+  inside `Graph::transaction` as well, for the cycle refusal below.
 - No other path in `src/` clones the whole `Graph` or gates a commit on the
   epoch.
+
+## Hierarchical cycles (pre-existing, found in review)
+
+Neither strategy refused a `Hierarchical` cycle longer than one node:
+`parent_of [(a, b)]` then `[(b, a)]`, a chain `a -> b -> c` then `(c, a)`,
+both directions in one call, or (hybrid) a rival writing `child -> parent`
+between plan and commit. Spec §5.7 makes `Hierarchical` a DAG.
+
+**Decision: refuse, with nothing written,** as `StoreError::Invariant`
+naming the pair. The review suggested a `Config` error; `Invariant` was
+kept because it is what the reflexive-pair refusals beside it and
+`record_action`'s Causal/Dependency cycle refusal already return, and the
+write queue's replay treats `Config` and `Invariant` identically (both stop
+the replay as session-wide), so the kind changes nothing there.
+
+- `derive::cycles::reject_parent_of_cycles` runs in both pre-passes (sync
+  `validate`, hybrid `validate_graph_inputs`), so the J3 ack refuses what
+  the graph already shows. It walks the existing `Hierarchical` edges plus
+  every pair of the call, with an end the call will create named by its
+  canonical key. Hybrid's commit recheck (`plan_still_holds`) reruns it,
+  which is what refuses the rival case.
+- `reject_closing_edge` runs at every `Hierarchical` edge write, against
+  the live graph (`Graph::hierarchical_path`), and is the authority. Both
+  strategies' write loops run inside a transaction, so a refusal there
+  undoes the call.
+- An edge that already exists is a reinforcement and never counts as
+  closing a cycle.
+
+Known consequence, shared with `record_action`'s cycle refusal: an
+apply-time refusal of a *durable intent during replay* (a cycle the ack
+could not see, closed by an earlier queued write) stops the replay, which
+treats any non-embedder error as session-wide. The ack-time check makes
+that a narrow race. Classifying input-dependent apply-time refusals so
+replay settles them `failed` would be a separate change to the J3 replay
+rule.
 
 ## Tests
 
@@ -195,6 +250,19 @@ and rollback. `assert_invariants` checks it.
   - `a_removed_merge_target_forces_a_replan`
   - `a_commit_that_fails_midway_leaves_the_graph_untouched`
   - `the_commit_hook_runs_once_after_a_replan`
+  - review L2: `counter_writes_to_the_merge_target_do_not_force_a_replan`
+    (GC survivor bump, human confirmation, unchanged re-upsert) and
+    `a_merge_target_vector_change_forces_a_replan`
+  - review L1: `plan_rescoring_is_capped_and_replans_past_the_cap` (five
+    ranked items against `MAX_PLAN_RESCORES / 5` written concepts commit
+    first time; one more replans)
+  - review L3: `a_rewritten_interaction_forces_a_replan`
+  - cycles: `hybrid_refuses_a_two_cycle_across_calls_and_in_one_call`,
+    `hybrid_refuses_a_two_step_cycle`,
+    `a_rival_closing_the_cycle_during_the_gather_is_refused_at_commit`
+- New in `src/graph/derive/cycles.rs` (sync derive): direct, in-call and
+  two-step cycles refused with the graph untouched, and the write-time
+  check undoing a partially written call.
 - New in `src/graph/graph/tests/txn.rs`: transaction rollback (failure,
   panic, an edge recreated under a new id), commit, and the node-write
   window, including its reach.
@@ -212,7 +280,12 @@ and rollback. `assert_invariants` checks it.
   - restoring the epoch rule fails the race test, the weaker-rival test
     and the unrelated-mutation test;
   - disabling the cache fails the synonym and two merge tests;
-  - skipping the rollback fails the midway test.
+  - skipping the rollback fails the midway test;
+  - recording every upsert in the window fails the counter-write test;
+  - removing the cap fails the cap test;
+  - skipping the interaction check fails the interaction test;
+  - removing the write-time cycle check fails the write-time test, and
+    removing both cycle checks fails all seven cycle tests.
 
 ## Measurements
 
@@ -232,18 +305,31 @@ cargo test --release --lib graph::hybrid::tests::commit_cost -- --ignored --noca
 
 | concepts | before (clone) | after |
 |---:|---:|---:|
-| 10,000 | 6.8 ms | 18 µs |
-| 50,000 | 36.2 ms | 20 µs |
-| 100,000 | 168 ms (from #102) | 27 µs |
+| 10,000 | 6.8 ms | 16.5 µs |
+| 50,000 | 36.2 ms | 17 µs |
+| 100,000 | 168 ms (from #102) | 21 µs |
 
-The probe measures the uncontended path. A contended commit adds
-`plan_still_holds`, which costs the same order as one plan: a few index
-lookups per item, plus one cosine per item for each concept written since
-the plan.
+(After the review fixes; the first round measured 18, 20 and 27 µs.)
+
+That probe measures the uncontended path. A contended commit adds
+`plan_still_holds`: a few index lookups per item, the cycle walk over the
+hierarchy below the call's children, and at most `MAX_PLAN_RESCORES`
+cosines. Its bounded worst case is measured by the second ignored probe,
+`plan_validation_worst_case_is_bounded`, at exactly the cap with every
+cosine computed: 32 fresh items against 256 written concepts on a
+10,000-concept session.
+
+| cap (cosines) | median hold |
+|---:|---:|
+| 32,768 (first choice) | 22.5 ms |
+| 8,192 (kept) | 5.6 ms |
+
+Past the cap the plan is replanned rather than scanned, so 5.6 ms is the
+most validation adds to a commit's write-lock hold at 1,024 dimensions.
 
 Not measured here: the #116 acceptance run (`mcp_concurrent.py` at 8
 workers, under 1% failed writes) needs a release binary on a store copy.
-That run belongs to the 0.4.1 milestone check, not this lane.
+That run belongs to the release milestone check, not this lane.
 
 The plan phase still scans every concept once, under the read lock, to
 collect image-sourced concepts (#22), so a writer can wait behind one pass
