@@ -579,12 +579,14 @@ struct PinnedFile {
 }
 
 impl PinnedFile {
-    /// Read `path`'s fingerprint and hash its bytes (a small file).
-    fn identify(path: &Path) -> Result<Self, EmbedError> {
-        let fingerprint = fingerprint_or_backend(path)?;
+    /// Read `path`'s fingerprint and digest, through the same digest cache
+    /// as the weights (BGE-M3's `tokenizer.json` is ~17 MB, which a proxy
+    /// would otherwise hash on every start).
+    fn identify(path: &Path, cache_dir: Option<&Path>) -> Result<Self, EmbedError> {
+        let (sha256, fingerprint) = weight_sha256(path, cache_dir)?;
         Ok(Self {
             path: path.to_path_buf(),
-            sha256: sha256_file(path)?,
+            sha256,
             fingerprint,
         })
     }
@@ -809,10 +811,10 @@ impl CandleEmbedder {
         // #31: the width the resolve checks against the store comes from the
         // artifact's own config, not from a loaded model. `hidden_size` is the
         // CLS vector's width, so it is exactly what the forward will emit.
-        let config_file = PinnedFile::identify(&config_path)?;
+        let config_file = PinnedFile::identify(&config_path, cache_dir.as_deref())?;
         let config = read_config(&config_path)?;
         check_hidden_size(&config, dim, &config_path)?;
-        let tokenizer_file = PinnedFile::identify(&tokenizer_path)?;
+        let tokenizer_file = PinnedFile::identify(&tokenizer_path, cache_dir.as_deref())?;
 
         // K2-R1-1: the stamp ALWAYS describes the artifact that will be loaded —
         // canonical source for the verified default, effective source plus the
