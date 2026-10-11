@@ -362,7 +362,7 @@ Unlike `lambo stats` on the command line, this reaches the writer, so the flush 
 
 **Asking about one write.** Pass `receipt` and the payload gains a `receipt` object: an `id`, a `state`, and a `detail` sentence written for a model to read. On `applied` it also carries `created`, `matched`, `created_count`, `matched_count`, and the `semantic_merged` / `reinforced` / `edges` / `embedded` counts — everything the ack could not know. The same counts are written to the `completion` line of the `--ledger` file, so they outlive the receipt. Add `wait_ms` and the call blocks until the write lands, which is how you get read-your-writes when you need it; the session figures in the same payload are read after that wait, so they never disagree with the receipt beside them.
 
-The `state` is one of eleven, and none of them is "unknown":
+The `state` is one of twelve (the eleven below, and `forbidden`), and none of them is "unknown":
 
 | State | What it means |
 |---|---|
