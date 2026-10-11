@@ -38,7 +38,8 @@ because metric 2 and metric 3 **join** to it, and leaves `startup`/`lease` in
                 line — the ack precedes the write and cannot know them. J4 put
                 created_count / matched_count back on a `completion` line
                 carrying the same `receipt`, which is the join `completions()`
-                below performs and `dedup_rate.py` / `duplicates.py` use.)
+                below performs and `dedup_rate.py` / `duplicates.py` use. #12
+                added semantic_merged / reinforced to that completion too.)
     + record_action  admitted, receipt
                 (J3/J4: created is on the completion, same reason, same join.)
     + reserve   op ("reserve"|"release"), granted, ttl_seconds (grants only)
@@ -51,7 +52,10 @@ because metric 2 and metric 3 **join** to it, and leaves `startup`/`lease` in
                 ledger_queued_lines}
     completion  agent_id, receipt, state ("applied" | "applied_after_restart" |
                 "failed" | "deferred"); the two applied states also carry
-                created_count and matched_count
+                created_count and matched_count, and since #12 (0.4.0)
+                semantic_merged / reinforced (derive), edges (record_action)
+                and embedded (hybrid), each ABSENT rather than zero when the
+                write kind has none or the serve predates #12
     startup     session, agent_id, transport, state ("acquiring") — written
                 BEFORE the lease acquire, so a serve that loses still leaves one
     lease       event ("refused" | "refused_takeover" | "proxying" |
@@ -369,14 +373,21 @@ def succeeded(call: dict[str, Any]) -> bool:
 APPLIED_STATES = ("applied", "applied_after_restart")
 
 #: The name each metric-2 fact carries on a `completion` line. The completion
-#: reports true post-write counts, so `created` is `created_count` there.
+#: reports true post-write counts, so `created` is `created_count` there; the
+#: other two keep their names (`AppliedSummary::ledger_facts`, #12).
 #:
-#: **`semantic_merged` and `reinforced` are deliberately absent.** Completion
-#: lines written before #12 carry the created/matched pair and no more, so for
-#: an async-acked write those two may be genuinely unavailable rather than zero —
-#: which is why `dedup_rate.py` reports them as a separate, honestly-labelled
-#: figure instead of folding a join-recovered zero into them.
-COMPLETION_FACTS = {"created": "created_count", "matched": "matched_count"}
+#: **`semantic_merged` and `reinforced` are optional on the completion.** Lines
+#: written before #12 (every pre-0.4.0 serve) carry the created/matched pair and
+#: no more, and since #12 a `record_action` completion carries neither (they are
+#: derive facts). A key that is absent is therefore "not available for this
+#: write", never zero: `joined_facts` only copies a key that is present, and the
+#: reports count the calls that lacked it instead of folding a zero in.
+COMPLETION_FACTS = {
+    "created": "created_count",
+    "matched": "matched_count",
+    "semantic_merged": "semantic_merged",
+    "reinforced": "reinforced",
+}
 
 
 def joined_facts(

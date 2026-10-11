@@ -175,13 +175,15 @@ def ledger_cross_check(ledger: _ledger.Ledger) -> dict[str, Any]:
 
     `_ledger.joined_facts` is the shared implementation (also used by
     `dedup_rate.py`), so the two reports cannot disagree about what a derive
-    created. `semantic_merged` is reported with its own availability, because
-    the completion line carries the created/matched pair and no more: for a
-    joined call it is genuinely unknown, and the render must not let that read
-    as "the merge never fired".
+    created. `semantic_merged` is reported with its own availability: a
+    completion line from a 0.4.0+ serve carries it (#12), but one from an older
+    serve carries the created/matched pair and no more, so for those calls it
+    is genuinely unknown, and the render must not let that read as "the merge
+    never fired". When NO derive with facts carried it, the figure is `None`
+    (JSON `null`), not `0`.
     """
     created = matched = merged = 0
-    joined = merged_unavailable = 0
+    joined = merged_unavailable = merged_seen = 0
     completions = ledger.completions_by_receipt()
     for call in ledger.sorted_calls():
         if call.get("tool") != "lambo_derive" or not _ledger.succeeded(call):
@@ -191,6 +193,7 @@ def ledger_cross_check(ledger: _ledger.Ledger) -> dict[str, Any]:
         matched += facts.get("matched", 0)
         if "semantic_merged" in facts:
             merged += facts["semantic_merged"]
+            merged_seen += 1
         elif source != "none":
             merged_unavailable += 1
         if source == "completion":
@@ -198,9 +201,13 @@ def ledger_cross_check(ledger: _ledger.Ledger) -> dict[str, Any]:
     return {
         "ledger_created": created,
         "ledger_matched": matched,
-        "ledger_semantic_merged": merged,
+        "ledger_semantic_merged": merged if merged_seen else None,
         "ledger_calls_joined_from_completion": joined,
         "ledger_calls_without_semantic_merged": merged_unavailable,
+        # Same shape as dedup_rate.py's `semantic_merged_missing`: non-zero
+        # with a non-null `ledger_semantic_merged` means a partial (lower-bound)
+        # sum; with a null one, nothing carried the key.
+        "ledger_semantic_merged_missing": merged_unavailable,
     }
 
 
@@ -270,7 +277,9 @@ def render(meta: dict[str, Any], data: dict[str, Any], cross: dict[str, Any] | N
             "Ledger cross-check:",
             f"   derives created {cross['ledger_created']}, matched "
             f"{cross['ledger_matched']}, semantically merged "
-            f"{cross['ledger_semantic_merged']}"
+            + ("n/a" if cross["ledger_semantic_merged"] is None
+               else f"{cross['ledger_semantic_merged']}+" if unavailable
+               else str(cross["ledger_semantic_merged"]))
             + (" (INCOMPLETE — see below)" if unavailable else ""),
             "   `matched` is exact-key convergence and `semantic_merged` is the",
             "   similarity path.",
@@ -286,10 +295,16 @@ def render(meta: dict[str, Any], data: dict[str, Any], cross: dict[str, Any] | N
         if unavailable:
             out += [
                 f"   {unavailable} derive(s) report NO semantic_merged count: a completion",
-                "   line carries created/matched and no more. So the figure above is a",
-                "   LOWER BOUND, and the zero-means-the-merge-never-fired reading below",
+                "   line from a serve before #12 (0.4.0) carries created/matched and no",
+                "   more. So the figure above is a LOWER BOUND (or n/a), and the",
+                "   zero-means-the-merge-never-fired reading below",
                 "   does NOT apply to this run — read the store-side pair counts instead.",
             ]
+        elif cross["ledger_semantic_merged"] is None:
+            out.append(
+                "   No derive in this ledger carried facts, so there is no "
+                "semantic_merged figure to read."
+            )
         else:
             out.append(
                 "   A high pair count above with a zero `semantic_merged` means the "
@@ -342,7 +357,11 @@ def main(argv: list[str]) -> int:
 
     cross = None
     if args.ledger:
-        cross = ledger_cross_check(_ledger.load(args.ledger))
+        try:
+            cross = ledger_cross_check(_ledger.load(args.ledger))
+        except _ledger.LedgerError as exc:
+            print(f"duplicates.py: {exc}", file=sys.stderr)
+            return 1
         data.update(cross)
 
     if args.json:

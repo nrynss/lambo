@@ -30,16 +30,37 @@ synchronous" are different states that used to look identical.
 similarity merge adds a decaying `Semantic` edge and does **not** re-upsert the
 target or add a `Derives` edge, so folding it into `matched` would overstate
 re-derivation savings with a weaker relationship. See `DeriveOutcome` in
-`src/graph/derive.rs`. **It is unavailable for joined calls**, and reported as
-unavailable rather than as zero: the completion line carries the created/matched
-pair and no more, so a joined session's `sem.merged` column is a genuine
-absence.
+`src/graph/derive.rs`. `reinforced` sits beside it for the same reason.
+
+**Both come through the join since #12 (0.4.0), and only when present.** An
+applied completion line from a 0.4.0+ serve carries `semantic_merged` and
+`reinforced` for a derive; one from an older serve carries the created/matched
+pair and no more. An absent key is "not available", never zero, so each of the
+two columns is computed over the derive calls that HAVE facts (line-carried or
+joined; fact-less calls are excluded here exactly as they are from the rate)
+under one rule, per bucket, per agent and in TOTAL:
+
+  * no contributing call carried the key -> `n/a` (JSON `null`), never `0`;
+  * every contributing call carried it   -> the exact sum;
+  * some did and some did not (a ledger spanning the 0.4.0 upgrade, or a
+    bucket mixing old and new serves) -> the sum of what is present, rendered
+    with a trailing `+` because it is a LOWER BOUND. The JSON keeps the sum in
+    `semantic_merged` / `reinforced` and counts the calls that lacked the key
+    in `semantic_merged_missing` / `reinforced_missing`, so `null`, an exact
+    figure and a partial one are three distinguishable states.
 
 With `--store <path>` the ledger's own arithmetic is checked against the SQLite
-store: created-minus-matched should land near the store's concept count. A large
+store: every concept the ledger saw created (derive's `created` plus
+`record_action`'s) should land near the store's concept count. A large
 shortfall is normally the daemon's GC having swept unreferenced concepts (the
 C1–C3 capture saw exactly this), not a broken ledger — but it should be *seen*
-rather than assumed either way.
+rather than assumed either way. The same flag counts the store's `Semantic`
+edges whose `created_at` falls inside the ledger's derive window, the store-side
+figure `sem.merged` should land near (approximate: an edge upserted again keeps
+only its latest `created_at`, and GC may have swept some). The window runs from
+the first successful derive's start (`ts` minus `duration_us`) to the later of
+the last derive's `ts` and its applied `completion` line's `ts`, because an
+async-acked derive's edges are stamped at apply time, after the ack.
 
 Usage:
     python3 scripts/observability/dedup_rate.py ~/lambo-dogfood/calls.jsonl
@@ -48,6 +69,7 @@ Usage:
 
 from __future__ import annotations
 
+import datetime as dt
 import sqlite3
 import sys
 from collections import defaultdict
@@ -66,19 +88,62 @@ import _ledger
 #: recorded together.
 BUCKETS = {"hour": 13, "day": 10, "all": 0}
 
-#: The derive facts this report reads. `matched` and `created` are the dedup rate;
-#: the other two are reported beside it and deliberately not folded in.
-DERIVE_FACTS = ("created", "matched", "semantic_merged", "reinforced")
+#: The derive facts that make the dedup rate. Every producer writes them as a
+#: pair; a call carrying neither is fact-less and reported on its own line.
+RATE_FACTS = ("created", "matched")
+
+#: The derive facts reported beside the rate and deliberately not folded in.
+#: Each may be absent on a call that has the rate facts (a completion line from
+#: a pre-#12 serve), so each is summed under the present / partial / n/a rule in
+#: the module docstring rather than defaulted to zero.
+OPTIONAL_FACTS = ("semantic_merged", "reinforced")
+
+
+def _new_row() -> dict[str, int]:
+    row = {"calls": 0, "created": 0, "matched": 0}
+    for name in OPTIONAL_FACTS:
+        # `name` is the running sum; `_seen` / `_missing` count the fact-bearing
+        # calls that did / did not carry the key. Finalised by `_finish`.
+        row[name] = 0
+        row[f"{name}_seen"] = 0
+        row[f"{name}_missing"] = 0
+    return row
+
+
+def _add(row: dict[str, int], facts: dict[str, int]) -> None:
+    for name in RATE_FACTS:
+        row[name] += facts.get(name, 0)
+    for name in OPTIONAL_FACTS:
+        value = facts.get(name)
+        if isinstance(value, int):
+            row[name] += value
+            row[f"{name}_seen"] += 1
+        else:
+            row[f"{name}_missing"] += 1
+
+
+def _finish(row: dict[str, int]) -> dict[str, Any]:
+    """Apply the availability rule: `null` when no contributing call carried
+    the key, otherwise the sum (partial when `<name>_missing` is non-zero)."""
+    out: dict[str, Any] = {k: v for k, v in row.items() if not k.endswith("_seen")}
+    for name in OPTIONAL_FACTS:
+        if not row[f"{name}_seen"]:
+            out[name] = None
+    return out
+
+
+def _merge(rows: list[dict[str, int]]) -> dict[str, int]:
+    total = _new_row()
+    for row in rows:
+        for k in total:
+            total[k] += row[k]
+    return total
 
 
 def analyse(ledger: _ledger.Ledger, bucket: str, store: str | None) -> dict[str, Any]:
     width = BUCKETS[bucket]
-    per_bucket: dict[str, dict[str, int]] = defaultdict(
-        lambda: {"calls": 0, "created": 0, "matched": 0, "semantic_merged": 0, "reinforced": 0}
-    )
-    per_agent: dict[str, dict[str, int]] = defaultdict(
-        lambda: {"calls": 0, "created": 0, "matched": 0, "semantic_merged": 0}
-    )
+    per_bucket: dict[str, dict[str, int]] = defaultdict(_new_row)
+    per_agent: dict[str, dict[str, int]] = defaultdict(_new_row)
     failed = 0
     # A successful derive line that carries NO created/matched facts at all — on
     # the line OR on a joined completion — is not the same thing as one that
@@ -91,6 +156,9 @@ def analyse(ledger: _ledger.Ledger, bucket: str, store: str | None) -> dict[str,
     # file" and "these writes were synchronous" used to look identical (J4).
     from_line = 0
     from_completion = 0
+    # The window the store's `Semantic` edges are counted over, as parsed
+    # datetimes [lo, hi]. See `_widen` for why each end is where it is.
+    window: list[Any] = []
     completions = ledger.completions_by_receipt()
     # `record_action` fans its produces/modifies/depends_on out into concepts too,
     # so the store cross-check below must count them or it will always report a
@@ -110,45 +178,43 @@ def analyse(ledger: _ledger.Ledger, bucket: str, store: str | None) -> dict[str,
         if not _ledger.succeeded(call):
             failed += 1
             continue
+        _widen(window, call, completions)
         key = call["ts"][:width] if width else "all"
         row = per_bucket[key]
         row["calls"] += 1
         agent_row = per_agent[call.get("agent_id", "?")]
         agent_row["calls"] += 1
         facts, source = _ledger.joined_facts(call, completions)
-        for name in DERIVE_FACTS:
-            value = facts.get(name)
-            if isinstance(value, int):
-                row[name] += value
-                if name in agent_row:
-                    agent_row[name] += value
         if source == "none":
+            # Excluded from every fact column, the optional two included: a
+            # call this file has no outcome for is not "missing semantic_merged",
+            # it is missing everything, and is reported once, below.
             factless += 1
-        elif source == "completion":
+            continue
+        _add(row, facts)
+        _add(agent_row, facts)
+        if source == "completion":
             from_completion += 1
         else:
             from_line += 1
 
-    def rate(row: dict[str, int]) -> float | None:
+    def rate(row: dict[str, Any]) -> float | None:
         total = row["created"] + row["matched"]
         return (row["matched"] / total) if total else None
 
     buckets = [
-        {"bucket": k, **v, "dedup_rate": rate(v)} for k, v in sorted(per_bucket.items())
+        {"bucket": k, **_finish(v), "dedup_rate": rate(v)}
+        for k, v in sorted(per_bucket.items())
     ]
-    totals = {"calls": 0, "created": 0, "matched": 0, "semantic_merged": 0, "reinforced": 0}
-    for row in per_bucket.values():
-        for k in totals:
-            totals[k] += row[k]
+    totals = _merge(list(per_bucket.values()))
 
     data: dict[str, Any] = {
         "bucket": bucket,
         "buckets": buckets,
         "agents": {
-            a: {**v, "dedup_rate": rate({**v, "matched": v["matched"]})}
-            for a, v in sorted(per_agent.items())
+            a: {**_finish(v), "dedup_rate": rate(v)} for a, v in sorted(per_agent.items())
         },
-        "totals": {**totals, "dedup_rate": rate(totals)},
+        "totals": {**_finish(totals), "dedup_rate": rate(totals)},
         "failed_derive_calls": failed,
         "derive_calls_without_facts": factless,
         "derive_facts_from_line": from_line,
@@ -157,12 +223,59 @@ def analyse(ledger: _ledger.Ledger, bucket: str, store: str | None) -> dict[str,
     }
 
     if store:
-        data["store"] = store_check(store, totals["created"] + action_created)
+        data["store"] = store_check(
+            store, totals["created"] + action_created, tuple(window) or None
+        )
     return data
 
 
-def store_check(path: str, created: int) -> dict[str, Any]:
-    """Compare every concept the ledger saw created against the store's count."""
+def _widen(window: list[Any], call: dict[str, Any], completions: dict[str, Any]) -> None:
+    """Grow the `Semantic`-edge window [lo, hi] to cover one successful derive.
+
+    A `Semantic` edge is stamped when the write is APPLIED, which is not when
+    the call line is stamped, in either direction:
+
+    * **lo** — a call line is stamped when the call RETURNS. A synchronous
+      (CLI) derive applies its write before that, so the bound is the call's
+      `ts` minus its `duration_us`, not the `ts` itself.
+    * **hi** — an async-acked (MCP) derive is acked before it is applied, so
+      its edges land after the call line, up to its applied `completion`
+      line. The bound is the later of the call's `ts` and the `ts` of the
+      applied completion joined on its receipt. A derive whose completion is
+      missing from this file can still land edges after the window; that
+      undercount is the same gap the fact-less line already reports.
+    """
+    stamp = _ledger.parse_ts(call["ts"])
+    duration = call.get("duration_us")
+    start = stamp - dt.timedelta(microseconds=duration) if isinstance(duration, int) else stamp
+    end = stamp
+    receipt = call.get("receipt")
+    completion = completions.get(receipt) if isinstance(receipt, str) else None
+    if completion and completion.get("state") in _ledger.APPLIED_STATES:
+        try:
+            end = max(end, _ledger.parse_ts(completion["ts"]))
+        except (KeyError, TypeError, ValueError):
+            pass
+    if window:
+        window[0] = min(window[0], start)
+        window[1] = max(window[1], end)
+    else:
+        window.extend([start, end])
+
+
+def _store_ts(raw: str) -> Any:
+    """The store writes `...Z` (chrono `SecondsFormat::Millis`); `parse_ts`
+    needs an explicit offset on Pythons before 3.11."""
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    return _ledger.parse_ts(raw)
+
+
+def store_check(
+    path: str, created: int, window: tuple[Any, ...] | None
+) -> dict[str, Any]:
+    """Compare every concept the ledger saw created against the store's count,
+    and count the `Semantic` edges created inside the ledger's derive window."""
     try:
         con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     except sqlite3.Error as exc:
@@ -173,7 +286,38 @@ def store_check(path: str, created: int) -> dict[str, Any]:
             "SELECT count(*) FROM concepts WHERE embedding IS NOT NULL"
         ).fetchone()[0]
     except sqlite3.Error as exc:
+        con.close()
         return {"error": f"{path} does not look like a provisioned lambo store: {exc}"}
+    # `Semantic` edges: optional, so a store without an `edges` table (or a
+    # ledger with no successful derive to bound a window) reports `null` rather
+    # than zero. `edge_type` is the serde PascalCase name `enum_to_text` writes.
+    semantic: dict[str, Any] = {"semantic_edges": None, "semantic_edges_in_window": None}
+    try:
+        stamps = [
+            r[0]
+            for r in con.execute(
+                "SELECT created_at FROM edges WHERE edge_type = 'Semantic'"
+            ).fetchall()
+        ]
+    except sqlite3.Error as exc:
+        semantic["semantic_edges_error"] = f"could not read Semantic edges: {exc}"
+    else:
+        semantic["semantic_edges"] = len(stamps)
+        if window:
+            lo, hi = window[0], window[-1]
+            inside = 0
+            for raw in stamps:
+                try:
+                    when = _store_ts(raw)
+                except (TypeError, ValueError):
+                    continue
+                if lo <= when <= hi:
+                    inside += 1
+            semantic["semantic_edges_in_window"] = inside
+            semantic["window"] = [
+                lo.isoformat(timespec="milliseconds"),
+                hi.isoformat(timespec="milliseconds"),
+            ]
     finally:
         con.close()
     return {
@@ -185,28 +329,40 @@ def store_check(path: str, created: int) -> dict[str, Any]:
         # ledger was written beside.
         "ledger_created": created,
         "shortfall": created - concepts,
+        **semantic,
     }
+
+
+def _optional(row: dict[str, Any], name: str) -> str:
+    """Render one optional fact under the module docstring's rule."""
+    value = row[name]
+    if value is None:
+        return "n/a"
+    return f"{value}+" if row[f"{name}_missing"] else str(value)
 
 
 def render(data: dict[str, Any]) -> list[str]:
     t = data["totals"]
+    rule = "-" * 70
     out = [
         f"{'bucket':<15} {'calls':>6} {'created':>8} {'matched':>8} "
-        f"{'sem.merged':>11} {'dedup':>7}",
-        "-" * 60,
+        f"{'sem.merged':>11} {'reinf.':>7} {'dedup':>7}",
+        rule,
     ]
     for row in data["buckets"]:
         r = row["dedup_rate"]
         out.append(
             f"{row['bucket']:<15} {row['calls']:>6} {row['created']:>8} "
-            f"{row['matched']:>8} {row['semantic_merged']:>11} "
+            f"{row['matched']:>8} {_optional(row, 'semantic_merged'):>11} "
+            f"{_optional(row, 'reinforced'):>7} "
             f"{('n/a' if r is None else f'{r:.3f}'):>7}"
         )
-    out.append("-" * 60)
+    out.append(rule)
     total_rate = "n/a" if t["dedup_rate"] is None else f"{t['dedup_rate']:.3f}"
     out.append(
         f"{'TOTAL':<15} {t['calls']:>6} {t['created']:>8} {t['matched']:>8} "
-        f"{t['semantic_merged']:>11} {total_rate:>7}"
+        f"{_optional(t, 'semantic_merged'):>11} {_optional(t, 'reinforced'):>7} "
+        f"{total_rate:>7}"
     )
     if data["failed_derive_calls"]:
         out.append(
@@ -217,10 +373,26 @@ def render(data: dict[str, Any]) -> list[str]:
         out.append(
             f"   {joined} derive call(s) were acknowledged asynchronously (J3) and their "
             "facts were JOINED from `completion` lines on the receipt (J4). The rates "
-            "above include them. `sem.merged` is unavailable for those calls — the "
-            "completion carries the created/matched pair and no more — so that column "
-            "is an undercount, not a zero, whenever this number is non-zero."
+            "above include them."
         )
+    with_facts = data["derive_facts_from_line"] + joined
+    for name, label in (("semantic_merged", "sem.merged"), ("reinforced", "reinf.")):
+        missing = t[f"{name}_missing"]
+        if not with_facts or not missing:
+            continue
+        if t[name] is None:
+            out.append(
+                f"   `{label}` is n/a: none of the {missing} derive call(s) with facts "
+                f"carried `{name}` (completion lines from a serve before #12 / 0.4.0 "
+                "carry created/matched and no more). Unavailable, not zero."
+            )
+        else:
+            out.append(
+                f"   `{label}` with a trailing + is a LOWER BOUND, an undercount, not a "
+                f"zero: {missing} derive call(s) with facts carried no `{name}` "
+                "(completion lines from a serve before #12 / 0.4.0), and only the "
+                "calls that did are summed."
+            )
     if data["derive_calls_without_facts"]:
         out.append(
             f"   {data['derive_calls_without_facts']} SUCCESSFUL derive call(s) carried NO "
@@ -240,7 +412,9 @@ def render(data: dict[str, Any]) -> list[str]:
         r = a["dedup_rate"]
         out.append(
             f"   {agent[:24]:<24} {a['calls']:>5} calls  created={a['created']:<6} "
-            f"matched={a['matched']:<6} dedup={'n/a' if r is None else f'{r:.3f}'}"
+            f"matched={a['matched']:<6} sem.merged={_optional(a, 'semantic_merged'):<5} "
+            f"reinf.={_optional(a, 'reinforced'):<5} "
+            f"dedup={'n/a' if r is None else f'{r:.3f}'}"
         )
 
     trend = [b["dedup_rate"] for b in data["buckets"] if b["dedup_rate"] is not None]
@@ -279,6 +453,27 @@ def render(data: dict[str, Any]) -> list[str]:
                     "   ^ the store holds MORE than this ledger created: the "
                     "session predates the ledger, or another writer contributed."
                 )
+            if store.get("semantic_edges_error"):
+                out.append(f"   {store['semantic_edges_error']}")
+            elif store.get("semantic_edges_in_window") is None:
+                out.append(
+                    f"   store Semantic edges={store['semantic_edges']} "
+                    "(no successful derive in the ledger to bound a window)"
+                )
+            else:
+                lo, hi = store["window"]
+                out.append(
+                    f"   store Semantic edges created {lo} .. {hi}: "
+                    f"{store['semantic_edges_in_window']} "
+                    f"(of {store['semantic_edges']} in the store), ledger sem.merged="
+                    f"{_optional(t, 'semantic_merged')}"
+                )
+                out.append(
+                    "   ^ should be in the same ballpark. Approximate both ways: a "
+                    "re-upserted edge keeps only its latest created_at, GC sweeps "
+                    "edges, and `n/a` / `+` above mean the ledger side is unknown "
+                    "or a lower bound."
+                )
     return out
 
 
@@ -295,7 +490,11 @@ def main(argv: list[str]) -> int:
         help="SQLite store path to cross-check the created total against",
     )
     args = parser.parse_args(argv)
-    ledger = _ledger.load(args.ledger)
+    try:
+        ledger = _ledger.load(args.ledger)
+    except _ledger.LedgerError as exc:
+        print(f"dedup_rate.py: {exc}", file=sys.stderr)
+        return 1
     data = analyse(ledger, args.bucket, args.store)
     _ledger.emit(
         "metric 2 — re-derivation savings", ledger, render(data), data, args.json

@@ -215,14 +215,21 @@ step "the J4 completion join restores metric 2 for an async-acked session"
 # Planted arithmetic: created 3+1+5 = 9, matched 1+2+0 = 3 across the three
 # joinable calls, so the rate is 3/12 = 0.250 — a number no zero-fold and no
 # mispairing produces.
+#
+# **#112: `r-1` is a 0.4.0+ completion** carrying `semantic_merged` 2 and
+# `reinforced` 1; `r-2` and `r-4` are pre-#12 shapes carrying neither. So the
+# joined `sem.merged` is 2 from one call with 2 calls missing — a lower bound,
+# rendered `2+`, never a bare 2 and never 0. The failed `r-5` and the shadowed
+# deferred `r-7` carry absurd values (40, 90) for the same reason as their
+# counts: a join that read them would move these totals too.
 cat >"$work/j4-completion.jsonl" <<'J4DONE'
 {"v":1,"ts":"2026-08-21T10:00:10+00:00","kind":"completion","agent_id":"agent-alpha","receipt":"r-2","state":"applied","created_count":1,"matched_count":2}
-{"v":1,"ts":"2026-08-21T10:00:09+00:00","kind":"completion","agent_id":"agent-alpha","receipt":"r-1","state":"applied","created_count":3,"matched_count":1}
+{"v":1,"ts":"2026-08-21T10:00:09+00:00","kind":"completion","agent_id":"agent-alpha","receipt":"r-1","state":"applied","created_count":3,"matched_count":1,"semantic_merged":2,"reinforced":1}
 {"v":1,"ts":"2026-08-21T10:00:11+00:00","kind":"completion","agent_id":"agent-alpha","receipt":"r-4","state":"deferred","reason":"close_drain_exceeded"}
 {"v":1,"ts":"2026-08-21T10:00:12+00:00","kind":"completion","agent_id":"agent-alpha","receipt":"r-4","state":"applied_after_restart","created_count":5,"matched_count":0}
-{"v":1,"ts":"2026-08-21T10:00:13+00:00","kind":"completion","agent_id":"agent-alpha","receipt":"r-5","state":"failed","error":"embedding error (the detail was logged server-side)","created_count":40,"matched_count":40}
+{"v":1,"ts":"2026-08-21T10:00:13+00:00","kind":"completion","agent_id":"agent-alpha","receipt":"r-5","state":"failed","error":"embedding error (the detail was logged server-side)","created_count":40,"matched_count":40,"semantic_merged":40,"reinforced":40}
 {"v":1,"ts":"2026-08-21T10:00:14+00:00","kind":"completion","agent_id":"agent-alpha","receipt":"r-7","state":"applied","created_count":7,"matched_count":7}
-{"v":1,"ts":"2026-08-21T10:00:15+00:00","kind":"completion","agent_id":"agent-alpha","receipt":"r-7","state":"deferred","reason":"close_drain_exceeded","created_count":90,"matched_count":90}
+{"v":1,"ts":"2026-08-21T10:00:15+00:00","kind":"completion","agent_id":"agent-alpha","receipt":"r-7","state":"deferred","reason":"close_drain_exceeded","created_count":90,"matched_count":90,"semantic_merged":90,"reinforced":90}
 {"v":1,"ts":"2026-08-21T10:00:00+00:00","kind":"call","tool":"lambo_recall","agent_id":"agent-alpha","outcome":"ok","duration_us":900,"query":"what did we decide","top_k":8,"hit_count":0,"hits":[]}
 {"v":1,"ts":"2026-08-21T10:00:01+00:00","kind":"call","tool":"lambo_derive","agent_id":"agent-alpha","outcome":"ok","duration_us":48,"concepts_requested":4,"admitted":true,"receipt":"r-1"}
 {"v":1,"ts":"2026-08-21T10:00:02+00:00","kind":"call","tool":"lambo_derive","agent_id":"agent-alpha","outcome":"ok","duration_us":51,"concepts_requested":3,"admitted":true,"receipt":"r-2"}
@@ -241,6 +248,7 @@ check "says the facts were joined from completion lines" "$out" \
   "3 derive call(s) were acknowledged asynchronously"
 check "warns that sem.merged is an undercount, not a zero" "$out" \
   "undercount, not a zero"
+check "marks the partial sem.merged as a lower bound" "$out" "2+"
 check "the failed, deferred and record-less derives stay fact-less" "$out" \
   "3 SUCCESSFUL derive call(s) carried NO created/matched facts"
 check "and the message names the replay as a cause" "$out" "still owed a replay"
@@ -260,7 +268,10 @@ assert d["derive_calls_without_facts"] == 3, d["derive_calls_without_facts"]
 # record_action rides the same join, or the store cross-check reports a phantom
 # surplus for every async session.
 assert d["record_action_created"] == 2, d["record_action_created"]
-assert d["ledger_schema"]["completion_lines"] == 8, d["ledger_schema"]'; then
+assert d["ledger_schema"]["completion_lines"] == 8, d["ledger_schema"]
+# #112: r-1 carried the post-#12 keys, r-2 and r-4 did not -> partial sums.
+assert t["semantic_merged"] == 2 and t["semantic_merged_missing"] == 2, t
+assert t["reinforced"] == 1 and t["reinforced_missing"] == 2, t'; then
   printf '    ok   --json carries the joined totals, the terminal state, and the split\n'
 else
   printf '    FAIL --json did not carry the completion join correctly\n'
@@ -271,9 +282,183 @@ fi
 out="$("$py" "$here/duplicates.py" --store "$work/sample.db" \
       --ledger "$work/j4-completion.jsonl")"
 check "duplicates.py joins the same counts" "$out" "derives created 9, matched 3"
-check "duplicates.py marks semantic_merged incomplete" "$out" "INCOMPLETE"
+check "duplicates.py joins semantic_merged when present (#112)" "$out" \
+  "semantically merged 2+ (INCOMPLETE"
 check "duplicates.py suppresses the zero-means-never-fired reading" "$out" \
   "does NOT apply to this run"
+
+step "#112: sem.merged / reinf. are n/a before 0.4.0, a lower bound across the upgrade"
+# The completion join reads `semantic_merged` / `reinforced` only when the line
+# carries them (#12, 0.4.0). Two fixtures, because the three states — n/a, a
+# lower bound, an exact figure — have to be told apart both per bucket and in
+# TOTAL, and a TOTAL can only be n/a if no bucket contributed.
+#
+# `pre12`: every completion is the pre-#12 shape. Before #112 this rendered a
+# confident `0` per bucket and in TOTAL.
+cat >"$work/pre12.jsonl" <<'PRE12'
+{"v":1,"ts":"2026-08-22T09:00:00+00:00","kind":"completion","agent_id":"a","receipt":"p-1","state":"applied","created_count":2,"matched_count":1}
+{"v":1,"ts":"2026-08-23T09:00:00+00:00","kind":"completion","agent_id":"a","receipt":"p-2","state":"applied","created_count":0,"matched_count":3}
+{"v":1,"ts":"2026-08-22T08:59:59+00:00","kind":"call","tool":"lambo_derive","agent_id":"a","outcome":"ok","duration_us":40,"concepts_requested":3,"admitted":true,"receipt":"p-1"}
+{"v":1,"ts":"2026-08-23T08:59:59+00:00","kind":"call","tool":"lambo_derive","agent_id":"a","outcome":"ok","duration_us":40,"concepts_requested":3,"admitted":true,"receipt":"p-2"}
+PRE12
+out="$("$py" "$here/dedup_rate.py" "$work/pre12.jsonl")"
+echo "$out"
+check "says sem.merged is unavailable, not zero" "$out" \
+  '`sem.merged` is n/a: none of the 2 derive call(s) with facts carried `semantic_merged`'
+check "and the same for reinforced" "$out" \
+  '`reinf.` is n/a: none of the 2 derive call(s) with facts carried `reinforced`'
+if "$py" -c 'import sys
+rows = [l.split() for l in sys.stdin.read().splitlines()
+        if l.startswith(("2026-08-22", "2026-08-23", "TOTAL"))]
+assert len(rows) == 3, rows
+for r in rows:
+    # bucket calls created matched sem.merged reinf. dedup
+    assert r[4:6] == ["n/a", "n/a"], r' <<<"$out"; then
+  printf '    ok   every bucket and the TOTAL render n/a, never 0\n'
+else
+  printf '    FAIL a pre-#12 bucket or TOTAL rendered sem.merged / reinf. as a number\n'
+  fail=1
+fi
+if "$py" "$here/dedup_rate.py" --json "$work/pre12.jsonl" \
+   | "$py" -c 'import json,sys
+d = json.load(sys.stdin)
+for row in d["buckets"] + [d["totals"]] + list(d["agents"].values()):
+    assert row["semantic_merged"] is None, row
+    assert row["reinforced"] is None, row
+t = d["totals"]
+assert t["created"] == 2 and t["matched"] == 4, t
+assert t["semantic_merged_missing"] == 2, t'; then
+  printf '    ok   --json says null (absent), not 0, per bucket, per agent and in totals\n'
+else
+  printf '    FAIL --json folded an absent semantic_merged into a number\n'
+  fail=1
+fi
+
+# `upgrade`: a ledger spanning the 0.4.0 upgrade. Day 1 is pre-#12 only (n/a)
+# and also holds a fact-less derive with no completion, which must NOT count as
+# "missing semantic_merged" (it is missing everything, and is reported once on
+# its own line). Day 2 mixes one 0.4.0 completion with one pre-#12 completion
+# (a lower bound). Day 3 is 0.4.0 only plus a CLI line-carried derive, and its
+# `semantic_merged` really is 0 — the one bucket where `0` is the right answer.
+cat >"$work/upgrade.jsonl" <<'UPGRADE'
+{"v":1,"ts":"2026-08-22T09:00:00+00:00","kind":"completion","agent_id":"a","receipt":"u-1","state":"applied","created_count":2,"matched_count":1}
+{"v":1,"ts":"2026-08-23T09:00:00+00:00","kind":"completion","agent_id":"a","receipt":"u-2","state":"applied","created_count":1,"matched_count":1,"semantic_merged":3,"reinforced":0}
+{"v":1,"ts":"2026-08-23T09:01:00+00:00","kind":"completion","agent_id":"a","receipt":"u-3","state":"applied","created_count":0,"matched_count":2}
+{"v":1,"ts":"2026-08-24T09:00:00+00:00","kind":"completion","agent_id":"a","receipt":"u-4","state":"applied","created_count":1,"matched_count":0,"semantic_merged":0,"reinforced":2}
+{"v":1,"ts":"2026-08-22T08:59:59+00:00","kind":"call","tool":"lambo_derive","agent_id":"a","outcome":"ok","duration_us":40,"concepts_requested":3,"admitted":true,"receipt":"u-1"}
+{"v":1,"ts":"2026-08-22T09:30:00+00:00","kind":"call","tool":"lambo_derive","agent_id":"a","outcome":"ok","duration_us":40,"concepts_requested":3,"admitted":true,"receipt":"u-6"}
+{"v":1,"ts":"2026-08-23T08:59:59+00:00","kind":"call","tool":"lambo_derive","agent_id":"a","outcome":"ok","duration_us":40,"concepts_requested":2,"admitted":true,"receipt":"u-2"}
+{"v":1,"ts":"2026-08-23T09:00:59+00:00","kind":"call","tool":"lambo_derive","agent_id":"a","outcome":"ok","duration_us":40,"concepts_requested":2,"admitted":true,"receipt":"u-3"}
+{"v":1,"ts":"2026-08-24T08:59:59+00:00","kind":"call","tool":"lambo_derive","agent_id":"a","outcome":"ok","duration_us":40,"concepts_requested":1,"admitted":true,"receipt":"u-4"}
+{"v":1,"ts":"2026-08-24T09:30:00+00:00","kind":"call","tool":"lambo_derive","agent_id":"a","outcome":"ok","duration_us":900,"created":0,"matched":1,"semantic_merged":0,"reinforced":0}
+UPGRADE
+out="$("$py" "$here/dedup_rate.py" "$work/upgrade.jsonl")"
+echo "$out"
+check "labels the partial figure a lower bound" "$out" "LOWER BOUND, an undercount, not a zero"
+check "still reports the fact-less derive on its own line" "$out" \
+  "1 SUCCESSFUL derive call(s) carried NO created/matched facts"
+if "$py" -c 'import sys
+rows = {l.split()[0]: l.split() for l in sys.stdin.read().splitlines()
+        if l.startswith(("2026-08-2", "TOTAL"))}
+assert rows["2026-08-22"][4:6] == ["n/a", "n/a"], rows
+assert rows["2026-08-23"][4:6] == ["3+", "0+"], rows
+assert rows["2026-08-24"][4:6] == ["0", "2"], rows
+assert rows["TOTAL"][4:6] == ["3+", "2+"], rows' <<<"$out"; then
+  printf '    ok   n/a, lower bound and exact are three different renderings\n'
+else
+  printf '    FAIL the upgrade-spanning buckets did not render n/a / N+ / N as planted\n'
+  fail=1
+fi
+if "$py" "$here/dedup_rate.py" --json "$work/upgrade.jsonl" \
+   | "$py" -c 'import json,sys
+d = json.load(sys.stdin)
+b = {r["bucket"]: r for r in d["buckets"]}
+# Day 1: the fact-less u-6 is NOT a missing semantic_merged; only u-1 is.
+assert b["2026-08-22"]["semantic_merged"] is None, b["2026-08-22"]
+assert b["2026-08-22"]["semantic_merged_missing"] == 1, b["2026-08-22"]
+assert b["2026-08-23"]["semantic_merged"] == 3, b["2026-08-23"]
+assert b["2026-08-23"]["semantic_merged_missing"] == 1, b["2026-08-23"]
+# A real zero stays a zero (not null) when every contributing call carried it.
+assert b["2026-08-24"]["semantic_merged"] == 0, b["2026-08-24"]
+assert b["2026-08-24"]["semantic_merged_missing"] == 0, b["2026-08-24"]
+assert b["2026-08-24"]["reinforced"] == 2, b["2026-08-24"]
+t = d["totals"]
+assert t["semantic_merged"] == 3 and t["semantic_merged_missing"] == 2, t
+assert t["reinforced"] == 2 and t["reinforced_missing"] == 2, t
+assert d["derive_calls_without_facts"] == 1, d
+assert d["derive_facts_from_completion"] == 4, d
+assert d["derive_facts_from_line"] == 1, d'; then
+  printf '    ok   --json separates null, a partial sum and an exact zero\n'
+else
+  printf '    FAIL --json did not separate null, partial and exact\n'
+  fail=1
+fi
+
+step "#112: dedup_rate.py --store counts Semantic edges in the ledger window"
+out="$("$py" "$here/dedup_rate.py" --store "$work/sample.db" "$ledger")"
+echo "$out"
+# One Semantic edge inside the window; a Semantic edge before it and a Derives
+# edge inside it are planted to oppose a count that ignores either filter.
+check "counts only in-window Semantic edges" "$out" \
+  "store Semantic edges created 2026-08-18T09:02:59.998+00:00 .. 2026-08-19T09:41:00.000+00:00: 1 (of 2 in the store), ledger sem.merged=1"
+"$py" "$here/make_sample.py" --store "$work/no-edges.db"
+"$py" -c 'import sqlite3,sys; c = sqlite3.connect(sys.argv[1]); c.execute("DROP TABLE edges"); c.commit()' \
+  "$work/no-edges.db"
+out="$("$py" "$here/dedup_rate.py" --store "$work/no-edges.db" "$ledger")"
+check "a store without an edges table says so rather than reporting 0" "$out" \
+  "could not read Semantic edges"
+if "$py" "$here/duplicates.py" --json --store "$work/sample.db" \
+     --ledger "$work/j4-completion.jsonl" \
+   | "$py" -c 'import json,sys
+d = json.load(sys.stdin)
+assert d["ledger_semantic_merged"] == 2, d["ledger_semantic_merged"]
+assert d["ledger_semantic_merged_missing"] == 2, d["ledger_semantic_merged_missing"]'; then
+  printf '    ok   duplicates.py --json marks the partial semantic_merged\n'
+else
+  printf '    FAIL duplicates.py --json did not mark the partial semantic_merged\n'
+  fail=1
+fi
+
+# An async-acked derive's Semantic edge is stamped at APPLY time, after the
+# call line and before its completion line. A window that ended at the last
+# call's `ts` would miss it (review M1): the edge at .350 sits between the call
+# at .000 and the applied completion at .400.
+cat >"$work/late-edge.jsonl" <<'LATE'
+{"v":1,"ts":"2026-08-25T10:00:00.000+00:00","kind":"call","tool":"lambo_derive","agent_id":"a","outcome":"ok","duration_us":40,"concepts_requested":1,"admitted":true,"receipt":"w-1"}
+{"v":1,"ts":"2026-08-25T10:00:00.400+00:00","kind":"completion","agent_id":"a","receipt":"w-1","state":"applied","created_count":0,"matched_count":0,"semantic_merged":1,"reinforced":0}
+LATE
+"$py" "$here/make_sample.py" --store "$work/late-edge.db"
+"$py" -c 'import sqlite3,sys
+c = sqlite3.connect(sys.argv[1])
+c.execute("DELETE FROM edges")
+c.execute("INSERT INTO edges VALUES (?, ?, ?)", ("late", "Semantic", "2026-08-25T10:00:00.350Z"))
+c.commit()' "$work/late-edge.db"
+out="$("$py" "$here/dedup_rate.py" --store "$work/late-edge.db" "$work/late-edge.jsonl")"
+echo "$out" | tail -3
+check "the window reaches the applied completion, not just the last call" "$out" \
+  ": 1 (of 1 in the store), ledger sem.merged=1"
+
+step "an empty ledger is a clean error, not a traceback"
+: >"$work/empty.jsonl"
+if "$py" "$here/dedup_rate.py" "$work/empty.jsonl" >"$work/empty.out" 2>&1; then
+  printf '    FAIL dedup_rate.py accepted an empty ledger\n'
+  fail=1
+elif grep -q Traceback "$work/empty.out"; then
+  printf '    FAIL dedup_rate.py crashed on an empty ledger\n'
+  fail=1
+else
+  printf '    ok   %s\n' "$(head -1 "$work/empty.out")"
+fi
+if "$py" "$here/duplicates.py" --store "$work/sample.db" --ledger "$work/empty.jsonl" \
+     >"$work/empty.out" 2>&1; then
+  printf '    FAIL duplicates.py accepted an empty ledger\n'
+  fail=1
+elif grep -q Traceback "$work/empty.out"; then
+  printf '    FAIL duplicates.py crashed on an empty ledger\n'
+  fail=1
+else
+  printf '    ok   %s\n' "$(head -1 "$work/empty.out")"
+fi
 
 step "chrono's nine-digit fractional seconds parse (no Python floor)"
 cat >"$work/nanos.jsonl" <<'NANOS'
