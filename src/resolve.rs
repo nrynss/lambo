@@ -252,7 +252,8 @@ pub fn resolve_backends(file: LamboFile) -> Result<ResolvedBackends, LamboError>
     let recall_cfg = file.recall;
     // Fail closed at the file boundary: every file-driven command rejects a
     // degenerate cadence here, uniformly and BEFORE any store/embedder build
-    // (an embedder build may load a model, so we reject the file first).
+    // (an embedder build may hash a weight file or dial a credential source,
+    // so we reject the file first; since #31 none loads a model, see below).
     let mut config = crate::Config::default();
     daemon_cfg.apply_to(&mut config);
     if let Some(policy) = promotion_policy {
@@ -286,6 +287,14 @@ pub fn resolve_backends(file: LamboFile) -> Result<ResolvedBackends, LamboError>
         Some(embedder_cfg.dim).filter(|d| *d > 0),
     )
     .map_err(|e| LamboError::Config(e.to_string()))?;
+    // Issue #31: every adapter's construction here is light. The candle
+    // adapter is built deferred: its device, artifact identity (weight
+    // sha256) and width (`config.json`'s `hidden_size`, refused here if it
+    // disagrees with `embedder.dim`) are resolved now, and its weights reach
+    // the device only on the holder path (`Embedder::prepare`, awaited by
+    // `MemoryBuilder::build_attach` once the lease is won). Every check below
+    // reads `dimensions()` and the identity, neither of which needs the
+    // loaded model, so compatibility is still decided here, at resolve.
     let embedder =
         build_embedder(embedder_cfg.clone()).map_err(|e| LamboError::Config(e.to_string()))?;
     check_vector_search_contract(store.as_ref(), store_cfg.kind)?;
@@ -1360,5 +1369,182 @@ mod tests {
             err.to_string().contains("atomic embedding-contract"),
             "{err}"
         );
+    }
+
+    /// Issue #31: the candle embedder resolves its contract identity and its
+    /// width without loading the model, and every resolve-time and
+    /// attach-time refusal still fires, before any load.
+    #[cfg(all(feature = "embed-candle", feature = "store-memory"))]
+    mod candle_deferred {
+        use super::*;
+        use crate::embed::{candle_test_artifact as artifact, CandleEmbedder, EmbedderKind};
+        use crate::memory::{Attach, Memory};
+        use crate::store::{MemoryStore, StoreKind};
+        use std::path::Path;
+        use std::sync::Arc;
+
+        fn file(artifact: &Path, vector_dim: Option<usize>) -> LamboFile {
+            LamboFile {
+                store: StoreConfig {
+                    kind: StoreKind::Memory,
+                    dsn: None,
+                    path: None,
+                    vector_dim,
+                },
+                embedder: EmbedderConfig {
+                    kind: EmbedderKind::Candle,
+                    dim: 1024,
+                    device: Some("cpu".into()),
+                    offline: Some(true),
+                    weights_dir: Some(artifact.to_path_buf()),
+                    ..Default::default()
+                },
+                daemon: Default::default(),
+                promotion_policy: None,
+                recall: None,
+                serve: Default::default(),
+                web: Default::default(),
+            }
+        }
+
+        fn candle(embedder: &dyn Embedder) -> &CandleEmbedder {
+            embedder
+                .as_any()
+                .and_then(|a| a.downcast_ref::<CandleEmbedder>())
+                .expect("the resolved embedder is the candle adapter")
+        }
+
+        /// The env lock plus a scratch cache root, so the resolve's identity
+        /// cache never touches the operator's `~/.cache`.
+        fn scratch(tag: &str) -> (crate::test_util::EnvGuard, crate::test_util::ScratchDir) {
+            let env = crate::test_util::env_lock();
+            let dir = crate::test_util::ScratchDir::new(tag);
+            env.set("XDG_CACHE_HOME", dir.join("xdg-cache"));
+            artifact::write(&dir.join("artifact"));
+            (env, dir)
+        }
+
+        #[test]
+        fn the_contract_is_stamped_at_resolve_without_loading_the_model() {
+            let (_env, dir) = scratch("lambo-31-resolve");
+            let r = resolve_backends(file(&dir.join("artifact"), None)).expect("resolves");
+            let c = candle(r.embedder.as_ref());
+            assert!(
+                !c.is_loaded(),
+                "resolve must not put the weights on the device"
+            );
+            assert_eq!(c.load_count(), 0);
+            assert_eq!(r.embedding.kind, "candle");
+            assert_eq!(r.embedding.dim, 1024);
+            assert_eq!(r.embedding.model.as_deref(), Some(c.model_identity()));
+            assert!(
+                c.model_identity().contains("sha256:"),
+                "{}",
+                c.model_identity()
+            );
+            // The identity cache landed under the scratch root, not $HOME.
+            assert!(dir.join("xdg-cache/lambo/candle-identity").is_dir());
+        }
+
+        /// Dimension refusal at resolve: the width (from `config.json` now,
+        /// not from a loaded model) still meets the store-authoritative pin.
+        #[test]
+        fn a_store_pinned_to_another_width_is_refused_at_resolve() {
+            let (_env, dir) = scratch("lambo-31-pin");
+            let msg = match resolve_backends(file(&dir.join("artifact"), Some(768))) {
+                Err(e) => e.to_string(),
+                Ok(_) => panic!("a 768 pin must not resolve against a 1024-wide candle model"),
+            };
+            for needle in ["768", "1024", "store.vector_dim"] {
+                assert!(msg.contains(needle), "{msg}");
+            }
+            // And an artifact whose own config declares another width.
+            std::fs::write(dir.join("artifact/config.json"), artifact::config_json(768)).unwrap();
+            let msg = match resolve_backends(file(&dir.join("artifact"), None)) {
+                Err(e) => e.to_string(),
+                Ok(_) => panic!("a 768-wide artifact must not resolve under dim = 1024"),
+            };
+            assert!(msg.contains("hidden_size = 768"), "{msg}");
+        }
+
+        /// Contract-identity refusal: a store whose session was written by
+        /// other weights refuses the new identity, which is known at resolve,
+        /// and refuses it before the model loads. A holder that attaches
+        /// loads before the attach returns; a lease loser never loads.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn a_mismatched_store_is_refused_before_the_model_loads() {
+            let (_env, dir) = scratch("lambo-31-contract");
+            let store: Arc<dyn crate::store::GraphStore> = Arc::new(MemoryStore::new());
+            // Artifact A attaches, stamps the session and loads on the way in.
+            let a = resolve_backends(file(&dir.join("artifact"), None)).unwrap();
+            let a_embedder: Arc<dyn Embedder> = Arc::from(a.embedder);
+            let a_identity = a.embedding.model.clone().unwrap();
+            let holder = Memory::builder()
+                .session("issue-31")
+                .agent("holder")
+                .store(store.clone())
+                .embedder(a_embedder.clone())
+                .embedding_contract(a.embedding)
+                .build()
+                .await
+                .expect("A attaches");
+            assert!(
+                candle(a_embedder.as_ref()).is_loaded(),
+                "the holder loads before its attach returns"
+            );
+
+            // A second writer with the same artifact loses the lease and
+            // never loads.
+            let loser = resolve_backends(file(&dir.join("artifact"), None)).unwrap();
+            let loser_embedder: Arc<dyn Embedder> = Arc::from(loser.embedder);
+            let attach = Memory::builder()
+                .session("issue-31")
+                .agent("loser")
+                .store(store.clone())
+                .embedder(loser_embedder.clone())
+                .embedding_contract(loser.embedding)
+                .build_attach()
+                .await
+                .expect("the attach answers");
+            assert!(
+                matches!(attach, Attach::Held(_)),
+                "the second writer must lose"
+            );
+            drop(attach);
+            assert_eq!(
+                candle(loser_embedder.as_ref()).load_count(),
+                0,
+                "a lease loser must never load the weights"
+            );
+            holder.close().await.expect("A closes");
+            drop(holder);
+
+            // New weights: a new identity, computed at resolve (the cache
+            // entry for the old file misses).
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            artifact::write_weights(&dir.join("artifact"));
+            let b = resolve_backends(file(&dir.join("artifact"), None)).unwrap();
+            let b_identity = b.embedding.model.clone().unwrap();
+            assert_ne!(a_identity, b_identity);
+            let b_embedder: Arc<dyn Embedder> = Arc::from(b.embedder);
+            let refused = Memory::builder()
+                .session("issue-31")
+                .agent("b")
+                .store(store.clone())
+                .embedder(b_embedder.clone())
+                .embedding_contract(b.embedding)
+                .build()
+                .await;
+            let msg = match refused {
+                Err(e) => e.to_string(),
+                Ok(_) => panic!("a session written by A must refuse B's weights"),
+            };
+            assert!(msg.contains("incompatible"), "{msg}");
+            assert_eq!(
+                candle(b_embedder.as_ref()).load_count(),
+                0,
+                "a refused attach must not load the weights"
+            );
+        }
     }
 }

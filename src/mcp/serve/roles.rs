@@ -224,6 +224,14 @@ pub(super) fn retry_advice(retry_in_secs: u64, holder_looks_gone: bool) -> Strin
 /// its `Memory`, a proxy's is released before `HubProxy::run` starts, and
 /// `serve` cannot reintroduce the retention because it no longer owns the
 /// value. `a_proxy_does_not_retain_the_embedder` pins the proxy half.
+///
+/// Since issue #31 a proxy never *loads* the candle weights either: the
+/// resolve builds the embedder with its identity and width only, and
+/// `MemoryBuilder::build_attach` loads it (`Embedder::prepare`) only after
+/// the lease is won, so the `Attach::Held` arm below has nothing on the
+/// device to release. Dropping the builder still frees the rest (the device
+/// handle, the store). `a_proxy_never_loads_and_the_holder_loads_before_it_serves`
+/// pins both halves.
 pub(super) async fn resolve_role(
     opts: &ServeOptions,
     builder: crate::memory::MemoryBuilder,

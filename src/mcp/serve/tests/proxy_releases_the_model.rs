@@ -4,7 +4,7 @@ use crate::mcp::SessionEndpoint;
 use crate::store::{GraphStore, SqliteStore, StoreConfig, StoreKind};
 use crate::types::EmbeddingContract;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// The fixture embedder, plus a flag set when the last owner drops it.
 struct DropFlagged {
@@ -38,6 +38,9 @@ impl Embedder for DropFlagged {
         image: crate::embed::ImageInput<'_>,
     ) -> Result<Vec<f32>, EmbedError> {
         self.inner.embed_image(image).await
+    }
+    async fn prepare(&self) -> Result<(), EmbedError> {
+        self.inner.prepare().await
     }
     fn as_any(&self) -> Option<&dyn std::any::Any> {
         self.inner.as_any()
@@ -153,4 +156,169 @@ async fn a_proxy_does_not_retain_the_embedder() {
 
     drop(proxy);
     holder.close().await.expect("holder close");
+}
+
+/// Issue #31: the fixture embedder, standing in for an adapter whose weights
+/// load in `prepare` (the candle adapter). Counts the loads and notes any
+/// embed that arrived before one.
+#[derive(Default)]
+struct LoadCounting {
+    inner: FixtureEmbedder,
+    loads: AtomicUsize,
+    embedded_unloaded: AtomicBool,
+}
+
+impl LoadCounting {
+    fn note_embed(&self) {
+        if self.loads.load(Ordering::SeqCst) == 0 {
+            self.embedded_unloaded.store(true, Ordering::SeqCst);
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Embedder for LoadCounting {
+    fn dimensions(&self) -> usize {
+        self.inner.dimensions()
+    }
+    async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbedError> {
+        self.note_embed();
+        self.inner.embed(text).await
+    }
+    async fn embed_query(&self, text: &str) -> Result<Vec<f32>, EmbedError> {
+        self.note_embed();
+        self.inner.embed_query(text).await
+    }
+    fn modalities(&self) -> crate::embed::Modalities {
+        self.inner.modalities()
+    }
+    async fn embed_image(
+        &self,
+        image: crate::embed::ImageInput<'_>,
+    ) -> Result<Vec<f32>, EmbedError> {
+        self.note_embed();
+        self.inner.embed_image(image).await
+    }
+    async fn prepare(&self) -> Result<(), EmbedError> {
+        self.loads.fetch_add(1, Ordering::SeqCst);
+        self.inner.prepare().await
+    }
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        self.inner.as_any()
+    }
+}
+
+/// Issue #31: a serve that loses the election never loads its model, and the
+/// one that wins has loaded it by the time `resolve_role` hands it the
+/// session: before the handshake, before the first recall, and before the
+/// write pipeline's calibration probe or intent replay could embed.
+#[tokio::test]
+async fn a_proxy_never_loads_and_the_holder_loads_before_it_serves() {
+    /// An `Embedder` box that lends the test a counter it can still read.
+    struct Shared(Arc<LoadCounting>);
+    #[async_trait::async_trait]
+    impl Embedder for Shared {
+        fn dimensions(&self) -> usize {
+            self.0.dimensions()
+        }
+        async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbedError> {
+            self.0.embed(text).await
+        }
+        async fn embed_query(&self, text: &str) -> Result<Vec<f32>, EmbedError> {
+            self.0.embed_query(text).await
+        }
+        fn modalities(&self) -> crate::embed::Modalities {
+            self.0.modalities()
+        }
+        async fn embed_image(
+            &self,
+            image: crate::embed::ImageInput<'_>,
+        ) -> Result<Vec<f32>, EmbedError> {
+            self.0.embed_image(image).await
+        }
+        async fn prepare(&self) -> Result<(), EmbedError> {
+            self.0.prepare().await
+        }
+        fn as_any(&self) -> Option<&dyn std::any::Any> {
+            self.0.as_any()
+        }
+    }
+
+    let dir = crate::test_util::ScratchDir::short("31p");
+    let db = dir.join("store.db");
+    SqliteStore::connect(db.to_str().unwrap())
+        .unwrap()
+        .init_schema()
+        .await
+        .expect("provision the scratch store");
+    let ep_dir = dir.join("run");
+    let session = "issue31-proxy-load";
+    let probe_backends = backends(&db, Box::new(FixtureEmbedder::new()));
+    let endpoint = SessionEndpoint::resolve_in(&ep_dir, session, &probe_backends.store_cfg)
+        .expect("endpoint fits");
+    drop(probe_backends);
+
+    // The holder, through the real election.
+    let holder_model = Arc::new(LoadCounting::default());
+    let holder_opts = ServeOptions::new(session, "agent-holder");
+    let builder = serve_builder(
+        &holder_opts,
+        backends(&db, Box::new(Shared(Arc::clone(&holder_model)))),
+        Some(&endpoint),
+        None,
+        EarlyShutdown::unarmed(),
+        Some(crate::writeq::EmbedderCalibration::new()),
+    );
+    assert_eq!(
+        holder_model.loads.load(Ordering::SeqCst),
+        0,
+        "control: building the serve's builder loads nothing"
+    );
+    let holder = match resolve_role(&holder_opts, builder, Some(&endpoint), &None)
+        .await
+        .expect("the election resolves")
+    {
+        Role::Holder(mem) => mem,
+        Role::Proxy(_) => panic!("the first agent must take the lease"),
+    };
+    assert_eq!(
+        holder_model.loads.load(Ordering::SeqCst),
+        1,
+        "the holder loads exactly once, before the session is handed to the transport"
+    );
+    let _listener = endpoint.bind().expect("bind the holder endpoint");
+
+    // The would-be second writer.
+    let proxy_model = Arc::new(LoadCounting::default());
+    let proxy_opts = ServeOptions::new(session, "agent-proxy");
+    let builder = serve_builder(
+        &proxy_opts,
+        backends(&db, Box::new(Shared(Arc::clone(&proxy_model)))),
+        Some(&endpoint),
+        None,
+        EarlyShutdown::unarmed(),
+        Some(crate::writeq::EmbedderCalibration::new()),
+    );
+    match resolve_role(&proxy_opts, builder, Some(&endpoint), &None)
+        .await
+        .expect("the election resolves")
+    {
+        Role::Proxy(proxy) => drop(proxy),
+        Role::Holder(_) => panic!("the second agent must lose the lease and proxy"),
+    }
+    assert_eq!(
+        proxy_model.loads.load(Ordering::SeqCst),
+        0,
+        "a proxying serve must never load its model (#31)"
+    );
+
+    // Let the holder's pipeline run (calibration probe) and close: nothing
+    // embedded before the load.
+    holder.close().await.expect("holder close");
+    assert!(
+        !holder_model.embedded_unloaded.load(Ordering::SeqCst),
+        "nothing on the holder may embed before its load"
+    );
+    assert!(!proxy_model.embedded_unloaded.load(Ordering::SeqCst));
+    assert_eq!(holder_model.loads.load(Ordering::SeqCst), 1);
 }

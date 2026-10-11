@@ -434,6 +434,14 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
         .preflight_schema()
         .await
         .map_err(|e| CliError::Runtime(e.to_string()))?;
+    // Issue #31: the resolve no longer puts a candle model on the device;
+    // load it now, before the listener binds, so the first recall costs what
+    // it did when the resolve loaded it. A no-op for every other kind.
+    backends
+        .embedder
+        .prepare()
+        .await
+        .map_err(|e| CliError::Runtime(format!("the embedder could not be loaded: {e}")))?;
 
     let exposed = !args.bind.is_loopback();
     let state = Arc::new(AppState::new(

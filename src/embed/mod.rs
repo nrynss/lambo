@@ -26,6 +26,8 @@ pub use math::cosine;
 
 #[cfg(feature = "embed-bge")]
 pub use bge_m3::BgeM3LlamaCppEmbedder;
+#[cfg(all(test, feature = "embed-candle"))]
+pub(crate) use candle::test_artifact as candle_test_artifact;
 #[cfg(feature = "embed-candle")]
 pub use candle::CandleEmbedder;
 #[cfg(feature = "embed-eg2")]
@@ -985,7 +987,10 @@ pub fn build_embedder(cfg: EmbedderConfig) -> Result<Box<dyn Embedder>, EmbedErr
         EmbedderKind::Candle => {
             #[cfg(feature = "embed-candle")]
             {
-                Ok(Box::new(candle::CandleEmbedder::new(
+                // #31: identity, device and width now; the weights reach the
+                // device on the holder path (`Embedder::prepare`), so a serve
+                // that proxies never loads them.
+                Ok(Box::new(candle::CandleEmbedder::deferred(
                     cfg.dim,
                     crate::embed::candle::CandleOpts {
                         device: cfg.device,

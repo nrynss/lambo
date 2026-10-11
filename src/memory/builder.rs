@@ -639,6 +639,23 @@ impl MemoryBuilder {
                     }
                 }
             }
+            // (2b) Issue #31 — the holder's model load. The role is decided
+            // (the lease is ours, step 0) and the session's contract has been
+            // checked (step 2), so this is the first point at which the
+            // weights are both needed and allowed: a lease loser returned
+            // `Attach::Held` above, and a contract refusal returned before
+            // loading anything. Inside this future, so the J6 race below
+            // covers it and a signal mid-load releases the lease; ahead of
+            // the write pipeline, so the calibration probe and the intent
+            // replay never wait on it, and ahead of the return, so no serve
+            // handshake or first recall does either. A no-op for adapters
+            // with nothing deferred, and for an embedder an earlier session
+            // in this process already prepared (#32: one shared embedder).
+            embedder.prepare().await.map_err(|e| {
+                LamboError::Config(format!(
+                    "session {session}: the embedder could not be loaded: {e}"
+                ))
+            })?;
             Ok::<_, LamboError>((existing, graph, loaded.index, write_intents))
         };
         // J6 — the one unbounded `await` under the pre-arm, and therefore the
