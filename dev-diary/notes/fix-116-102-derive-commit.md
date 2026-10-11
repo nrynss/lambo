@@ -76,6 +76,19 @@ since it was made:
    32,768 measured 22.5 ms, more than the clone #102 removed, so it was
    lowered (see Measurements).
 
+   **The final attempt checks past it** (second review, L1). A large call
+   (100 to 256 unmatched items) under a steady stream of unrelated writes
+   could be over the cap on every attempt and fail although nothing
+   conflicted. The eighth attempt therefore uses `MAX_PLAN_RESCORES_FINAL`
+   (32 times the cap, about 180 ms extrapolated from the measurement);
+   its check and commit are one write-lock hold, so it is the serialized
+   path and fails only on a real conflict or past that ceiling.
+   `plan_still_holds` answers `Holds`, `Stale` or `OverBudget`; a
+   budget-driven replan is logged (target `lambo::hybrid`) with a
+   process-wide count, and a call that ends over budget fails with its own
+   message ("more was written ... than its plan can be rechecked against
+   ...; split the call") instead of "8 concurrent graph changes".
+
 A stale plan goes round again. That is cheap now, because of (1).
 
 **The semantic-merge rule, decided: correctness over throughput.** A rival
@@ -210,33 +223,51 @@ Neither strategy refused a `Hierarchical` cycle longer than one node:
 both directions in one call, or (hybrid) a rival writing `child -> parent`
 between plan and commit. Spec §5.7 makes `Hierarchical` a DAG.
 
-**Decision: refuse, with nothing written,** as `StoreError::Invariant`
-naming the pair. The review suggested a `Config` error; `Invariant` was
-kept because it is what the reflexive-pair refusals beside it and
-`record_action`'s Causal/Dependency cycle refusal already return, and the
-write queue's replay treats `Config` and `Invariant` identically (both stop
-the replay as session-wide), so the kind changes nothing there.
+**Decision: refuse, with nothing written,** as a `StoreError::Invariant`
+built by `StoreError::cycle_refusal`. The review suggested a `Config`
+error; `Invariant` was kept because it is what the reflexive-pair refusals
+beside it and `record_action`'s Causal/Dependency cycle refusal already
+return. Both cycle producers now share the constructor: a fixed prefix plus
+a kind tag (`CycleKind::Hierarchical` or `CausalOrDependency`), then the
+pair for the operator's log. `StoreError::is_cycle_refusal` recognises it,
+following `is_embedding_contract_refusal`, so no public enum gains a
+variant.
+
+- **What the caller is told** (second review, L-msg): a fixed sentence per
+  kind, "store error: parent_of would close a Hierarchical cycle (the
+  hierarchy must stay acyclic); nothing was written", or the record_action
+  equivalent. Nothing the caller sent is echoed; the class stays `store
+  error`. Documented on `parent_of` and on `produces`, `modifies`,
+  `depends_on` in `docs/reference/mcp.mdx` and its site mirror.
+- **At replay** (second review, M1): a durable intent that meets a cycle
+  refusal settles `failed` on its own and the replay goes on, as for an
+  `Embed` refusal (without counting it as embedder evidence). Before, it
+  fell to the session-wide arm, stopped the replay and left every later
+  intent `pending_replay` for good; `record_action`'s cycle refusal had the
+  same hazard. Every other `Invariant` still stops the replay: it can mean
+  an inconsistent graph or store.
 
 - `derive::cycles::reject_parent_of_cycles` runs in both pre-passes (sync
   `validate`, hybrid `validate_graph_inputs`), so the J3 ack refuses what
   the graph already shows. It walks the existing `Hierarchical` edges plus
   every pair of the call, with an end the call will create named by its
-  canonical key. Hybrid's commit recheck (`plan_still_holds`) reruns it,
-  which is what refuses the rival case.
+  canonical key. It runs under the read lock only: hybrid's commit recheck
+  (`plan_still_holds`) skips it (second review, L-cost), and the rival case
+  is refused by the write-time check below.
 - `reject_closing_edge` runs at every `Hierarchical` edge write, against
   the live graph (`Graph::hierarchical_path`), and is the authority. Both
   strategies' write loops run inside a transaction, so a refusal there
   undoes the call.
 - An edge that already exists is a reinforcement and never counts as
   closing a cycle.
-
-Known consequence, shared with `record_action`'s cycle refusal: an
-apply-time refusal of a *durable intent during replay* (a cycle the ack
-could not see, closed by an earlier queued write) stops the replay, which
-treats any non-embedder error as session-wide. The ack-time check makes
-that a narrow race. Classifying input-dependent apply-time refusals so
-replay settles them `failed` would be a separate change to the J3 replay
-rule.
+- Both walks go *up*, from the pair's parent through its ancestors looking
+  for the child (`Graph::hierarchical_parents`, straight off the adjacency
+  index, no allocation or sort). A hierarchy is far shallower than it is
+  wide, and sync derive's one-parent rule makes ancestors a chain. Worst
+  case, measured by the ignored probe
+  `derive::cycles::tests::a_cycle_walk_over_a_large_hierarchy_is_timed`
+  (release, M3 Pro): a pair under the leaf of a 100,000-node chain, 20 to
+  30 ms per walk; a pair over its root, about 8 µs.
 
 ## Tests
 
@@ -257,12 +288,18 @@ rule.
     ranked items against `MAX_PLAN_RESCORES / 5` written concepts commit
     first time; one more replans)
   - review L3: `a_rewritten_interaction_forces_a_replan`
+  - second review L1:
+    `a_large_call_under_streaming_writes_commits_on_the_final_attempt`
   - cycles: `hybrid_refuses_a_two_cycle_across_calls_and_in_one_call`,
     `hybrid_refuses_a_two_step_cycle`,
     `a_rival_closing_the_cycle_during_the_gather_is_refused_at_commit`
 - New in `src/graph/derive/cycles.rs` (sync derive): direct, in-call and
   two-step cycles refused with the graph untouched, and the write-time
   check undoing a partially written call.
+- Second review: `memory::tests::replay::a_cycle_refused_at_replay_settles_failed_and_the_replay_goes_on`
+  (M1; red before: the replay stopped at the first refusal),
+  `surface::error` and `types` unit tests for the fixed sentences and the
+  narrow marker.
 - New in `src/graph/graph/tests/txn.rs`: transaction rollback (failure,
   panic, an edge recreated under a new id), commit, and the node-write
   window, including its reach.
@@ -325,7 +362,10 @@ cosine computed: 32 fresh items against 256 written concepts on a
 | 8,192 (kept) | 5.6 ms |
 
 Past the cap the plan is replanned rather than scanned, so 5.6 ms is the
-most validation adds to a commit's write-lock hold at 1,024 dimensions.
+most validation adds to a commit's write-lock hold at 1,024 dimensions on
+attempts one to seven. The eighth (final) attempt allows 32 times that,
+about 180 ms extrapolated, so that a large call under steady unrelated
+writes can still commit; past it the call fails as over budget.
 
 Not measured here: the #116 acceptance run (`mcp_concurrent.py` at 8
 workers, under 1% failed writes) needs a release binary on a store copy.
