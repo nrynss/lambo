@@ -42,7 +42,12 @@ drains. The two builds ran one after the other, each on a fresh store copy.
 | 0.3.0, 8, 1.0 s | 139 | 16,431 ms | 18,339 ms | 21,135 ms | 27 of 74 | 0 |
 | 0.4.0, 8, 1.0 s | 894 | **7 ms** | 100 ms | 285 ms | 165 of 497 | 0 |
 | 0.3.0, 16, 0.5 s | 151 | 47,041 ms | 63,184 ms | 64,890 ms | 53 of 94 | 0 |
-| 0.4.0, 16, 0.5 s | 3,484 | **6 ms** | 16 ms | 587 ms | 670 of 1,993 | 682 |
+| 0.4.0, 16, 0.5 s | 3,484 | **6 ms** | 16 ms | 587 ms | 670 of 1,993\* | 682\* |
+
+\* A snapshot, not final totals. The driver's 300 s drain wait ran out (`drain_s`
+  300.3 in the JSON) before this run's queue emptied, so the failed and dropped
+  counts were read with writes still outstanding. Every other row drained
+  fully (5 to 23 s).
 
 - **Recall.** 0.3.0 serializes recall behind the graph scan. With 8 agents a recall
   waits 16 s, and with 16 agents 47 s, so agents spend almost the whole run

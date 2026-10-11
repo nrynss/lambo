@@ -2,8 +2,9 @@
 # Copy of scripts/loadtest/capture_sigterm.sh used for the 0.4.0 vs 0.3.0 crash
 # test. Differences: the embedder is candle on Metal (release binaries carry no
 # fixture embedder), SIGNAL=KILL sends SIGKILL instead of SIGTERM, and a KILL run
-# restarts serve to replay durable intents. That restart must wait out LEASE_TTL
-# (45 s) after the kill; the recorded runs restarted by hand once it had (#118).
+# restarts serve to replay durable intents after waiting out LEASE_TTL (45 s).
+# The recorded runs predate that wait and were restarted by hand (#118).
+# REPLAY_SECS (default 20) sets how long the restarted serve replays.
 #
 # C2 — run `lambo serve` under concurrent load and pull the SIGTERM.
 #
@@ -254,14 +255,30 @@ wait "$DRIVER_PID" || { echo "driver failed" >&2; DRIVER_PID=; exit 1; }
 DRIVER_PID=
 
 if [[ "${SIGNAL:-TERM}" == KILL ]]; then
+  # The dead holder's lease stays valid until LEASE_TTL (45 s) passes; a
+  # restart before then is refused (#118). Check the store as the crash left
+  # it first, then wait out the lease and restart to replay durable intents.
+  python3 "$HERE/check_durability.py" --ledger "$LEDGER" --db "$DB" --session "$SESSION" \
+      --stderr "$STDERR" > "$OUT/durability-$RUN-before-restart.txt" || true
+  echo "waiting 50 s for the killed holder's lease to expire"
+  sleep 50
   echo "restarting serve to replay durable intents"
   XDG_RUNTIME_DIR="$RUNTIME_DIR" "$BIN" serve --config "$CFG" --session "$SESSION" --agent c-load \
       --transport http --port "$PORT" --bind 127.0.0.1 >> "$OUT/restart-$RUN.log" 2>&1 &
   RPID=$!
-  for _ in $(seq 1 120); do grep -q "listening on /mcp" "$OUT/restart-$RUN.log" 2>/dev/null && break; sleep 0.5; done
-  sleep 20
-  kill -TERM $RPID; wait $RPID 2>/dev/null || true
-  grep -i -E "replay|intent|restart" "$OUT/restart-$RUN.log" | tail -5
+  for _ in $(seq 1 120); do
+    grep -q "listening on /mcp" "$OUT/restart-$RUN.log" 2>/dev/null && break
+    kill -0 "$RPID" 2>/dev/null || break
+    sleep 0.5
+  done
+  if kill -0 "$RPID" 2>/dev/null; then
+    sleep "${REPLAY_SECS:-20}"
+    kill -TERM "$RPID" 2>/dev/null || true
+    wait "$RPID" 2>/dev/null || true
+  else
+    echo "restart exited early; see $OUT/restart-$RUN.log" >&2
+  fi
+  grep -i -E "replay|intent|restart" "$OUT/restart-$RUN.log" | tail -5 || true
 fi
 # C3 — prove the tail is durable. Its exit status is the harness's: 0 only when
 # the check ran and passed. Artifacts are written first, then the status is
