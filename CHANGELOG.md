@@ -13,15 +13,28 @@
   clean shutdown loses no acked write; a crash (SIGKILL, an OOM kill, power
   loss) can lose writes acked since the last flush, which are not replayed
   and answer `restart_lost` on the next server. What was flushed replays.
-  `mcp.mdx` now says so under `lambo_derive` and `lambo_stats`. No behaviour
-  change.
+  `mcp.mdx` now says so under `lambo_derive` and `lambo_stats`.
+- A write the close deferred is answered `intent_durable` only after the
+  close's final flush has completed (#117). It used to be answered during
+  the queue quiesce, before that flush ran, so a close whose flush then
+  failed, or a degraded or fenced session, had told a still-connected caller
+  "durable intent" about an intent that never reached the store. Such a
+  receipt now answers the new state `close_unflushed`: the write may or may
+  not have been saved, so recall before re-deriving. A retried close whose
+  flush completes upgrades it to `intent_durable`. The ledger writes a
+  `close_unflushed` completion line for it, and `write_queue_deferred`
+  counts only writes the close made durable. `scripts/loadtest/
+  check_durability.py` recognises the new answer.
 - A refused lease no longer claims the holder "is still refreshing it"
   (#118). A lease row cannot tell a live holder from one that crashed before
   its lease expired, so the refusal now reports the row's facts: when the
-  lease was last refreshed and when it expires. When the holder is on this
-  host and its pid no longer exists, the refusal says the holder process is
-  gone, gives the time until the lease expires and points to the takeover
-  note. `lambo erase-session`, the HTTP erase and `recall-index backfill`
+  lease was last refreshed and when it expires. When the holder names this
+  host and its pid is not visible from here (Unix only, and never for the
+  `unknown-host` fallback name), the refusal says its process looks gone,
+  hedged because a host name is not a PID namespace, gives the time until
+  the lease expires and points to the takeover note; `serve`'s budget
+  refusal then ends "or have an operator take over" rather than "or stop
+  the other holder". `lambo erase-session`, the HTTP erase and `recall-index backfill`
   refusals no longer call the holder "a live writer". Lease acquisition and
   fencing are unchanged, and nothing takes over automatically.
 
