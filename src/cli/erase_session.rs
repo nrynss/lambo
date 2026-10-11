@@ -50,9 +50,9 @@ pub async fn run(store: &dyn GraphStore, args: Args) -> Result<String, CliError>
         Ok(EraseOutcome::Erased(report)) => serde_json::to_string(&report)
             .map_err(|e| CliError::Runtime(format!("render the erase report: {e}"))),
         Ok(EraseOutcome::Held { current, age }) => Err(CliError::Runtime(format!(
-            "session {session} is held by a live writer ({}, holding the single-writer lease \
+            "session {session} is held by another writer ({}, holding the single-writer lease \
              for {}s); nothing was erased. Stop that writer (a clean stop flushes and releases \
-             the lease), then run erase-session again",
+             the lease), or if it has died let its lease expire, then run erase-session again",
             current.holder,
             age.as_secs(),
         ))),

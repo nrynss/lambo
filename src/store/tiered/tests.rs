@@ -2027,7 +2027,7 @@ async fn backfill_converges_and_refuses_a_live_writer() {
         .backfill_recall_index(&sid, &holder("operator"))
         .await
         .unwrap_err();
-    assert!(err.to_string().contains("live writer"), "{err}");
+    assert!(err.to_string().contains("held by another writer"), "{err}");
     seeder.release_lease(&sid, &w).await.unwrap();
 
     // Junk the index: a ghost the durable store never had, and a lost doc.

@@ -1658,9 +1658,10 @@ impl GraphStore for TieredStore {
             LeaseOutcome::Acquired(info) => info.token,
             LeaseOutcome::Held { current, age } => {
                 return Err(StoreError::Backend(format!(
-                    "session {session} is held by a live writer ({}, holding the lease for \
+                    "session {session} is held by another writer ({}, holding the lease for \
                      {}s); nothing was rebuilt. A holder repairs its own recall index when it \
-                     loads the session and after a failed mirror; stop it to rebuild from here",
+                     loads the session and after a failed mirror; stop it, or if it has died \
+                     let its lease expire, to rebuild from here",
                     current.holder,
                     age.as_secs()
                 )));
