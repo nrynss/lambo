@@ -470,9 +470,10 @@ def run(o, queries, mix, token):
     # the limit and retry a rate-limited query with backoff.
     interval = 1.0 / o.receipt_rps if o.receipt_rps > 0 else 0.0
     for wi, rid in sample:
-        for attempt in range(6):
+        attempts = 6
+        for attempt in range(attempts):
             _, outcome, body, text = clients[wi].call("lambo_stats", receipt=rid, wait_ms=0)
-            if outcome == OK or not is_rate_limited(text):
+            if outcome == OK or not is_rate_limited(text) or attempt == attempts - 1:
                 break
             time.sleep(min(0.25 * 2 ** attempt, 4.0))
         outcomes.append(receipt_outcome(body, outcome != OK, text, raw))
