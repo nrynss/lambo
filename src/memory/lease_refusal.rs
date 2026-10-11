@@ -39,38 +39,53 @@ pub(crate) enum HolderEvidence {
     EndpointRefused,
 }
 
-/// The lease row's timing, in whole seconds of the store's clock.
+/// The lease row's timing, in whole seconds, all measured from one instant:
+/// the moment the refused acquire read the row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct LeaseTiming {
     /// Since the holder first took the lease.
     pub(crate) held_for: u64,
     /// Since the holder last refreshed it, when that can be told from the row.
+    /// Never more than `held_for`.
     pub(crate) refreshed_ago: Option<u64>,
     /// Until the lease lapses if it is not refreshed again.
     pub(crate) expires_in: u64,
 }
 
+/// How long the lease in `current` has left, measured from the instant `age`
+/// was taken.
+///
+/// `age` is what [`crate::store::lease::LeaseOutcome::Held`] carries: the
+/// refusing process's `Utc::now()` at the read minus the row's `acquired_at`
+/// (clamped at zero). So `acquired_at + age` is that same instant, and the
+/// remaining time, the age and the refresh time all come from one clock
+/// reading rather than from separate `now()` calls. The row's timestamps
+/// were stamped by the holder's or the store's clock, so skew between the
+/// two hosts shifts these figures; nothing here can correct for that.
+pub(crate) fn lease_remaining(current: &LeaseInfo, age: Duration) -> Duration {
+    let read_at = current.acquired_at
+        + chrono::Duration::from_std(age).unwrap_or_else(|_| chrono::Duration::zero());
+    (current.expires_at - read_at)
+        .to_std()
+        .unwrap_or(Duration::ZERO)
+}
+
 impl LeaseTiming {
-    /// Read the timing off a refused acquire's row.
-    ///
-    /// `age` is the store's clock minus `acquired_at` (what
-    /// [`crate::store::lease::LeaseOutcome::Held`] carries), so the store's
-    /// "now" is `acquired_at + age`, and every figure here is on the store's
-    /// clock rather than this host's. `refreshed_ago` assumes the holder
-    /// refreshes with [`LEASE_TTL`], which every writer does; a row whose
-    /// remaining time exceeds it was written with some other TTL, and then the
-    /// figure is left out rather than guessed.
+    /// Read the timing off a refused acquire's row (see [`lease_remaining`]
+    /// for the clock). `refreshed_ago` assumes the holder refreshes with
+    /// [`LEASE_TTL`], which every writer does; a row whose remaining time
+    /// exceeds it was written with some other TTL, and then the figure is
+    /// left out rather than guessed. It is clamped to `held_for`: a lease
+    /// cannot have been refreshed before it was taken, and skew can make the
+    /// arithmetic say so.
     pub(crate) fn from_row(current: &LeaseInfo, age: Duration) -> Self {
-        let store_now = current.acquired_at
-            + chrono::Duration::from_std(age).unwrap_or_else(|_| chrono::Duration::zero());
-        let expires_in = (current.expires_at - store_now)
-            .to_std()
-            .unwrap_or(Duration::ZERO);
+        let expires_in = lease_remaining(current, age);
+        let held_for = age.as_secs();
         let refreshed_ago = LEASE_TTL
             .checked_sub(expires_in)
-            .map(|since| since.as_secs());
+            .map(|since| since.as_secs().min(held_for));
         Self {
-            held_for: age.as_secs(),
+            held_for,
             refreshed_ago,
             expires_in: expires_in.as_secs(),
         }
@@ -261,7 +276,7 @@ mod tests {
     }
 
     #[test]
-    fn timing_is_read_on_the_store_clock() {
+    fn timing_is_read_from_one_instant() {
         let acquired_at = chrono::Utc::now() - chrono::Duration::seconds(100);
         let row = LeaseInfo {
             holder: "a@h#1".into(),
@@ -291,6 +306,22 @@ mod tests {
         let t = LeaseTiming::from_row(&long, Duration::from_secs(100));
         assert_eq!(t.refreshed_ago, None);
         assert_eq!(t.expires_in, 3_600);
+
+        // #117 review L1: skew can put the row's expiry further out than a
+        // fresh lease allows only by under a TTL, and then the arithmetic
+        // "refreshed before it was taken" is clamped to the lease's age.
+        let young = LeaseInfo {
+            expires_at: acquired_at + chrono::Duration::seconds(5) + chrono::Duration::seconds(30),
+            ..long
+        };
+        let t = LeaseTiming::from_row(&young, Duration::from_secs(5));
+        assert_eq!(t.held_for, 5);
+        assert_eq!(t.expires_in, 30);
+        assert_eq!(
+            t.refreshed_ago,
+            Some(5),
+            "clamped to the lease's age, not 15"
+        );
     }
 
     #[test]

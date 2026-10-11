@@ -337,8 +337,10 @@ pub enum LeaseOutcome {
     Held {
         /// The current holder's row.
         current: LeaseInfo,
-        /// How long the current holder has held it (store clock − `acquired_at`),
-        /// clamped to zero if the clocks disagree slightly.
+        /// How long the current holder has held it: the refusing process's
+        /// `Utc::now()` at the read minus the row's `acquired_at`, clamped to
+        /// zero if the clocks disagree slightly. Not the store's clock: the
+        /// adapters read the row and subtract locally.
         age: Duration,
     },
 }
