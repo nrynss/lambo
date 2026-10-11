@@ -39,8 +39,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use super::Graph;
 use crate::types::{Mutation, Node, NodeId};
 
-/// A flag a reader under the read lock can set once. A clone carries its
-/// value, so a hybrid commit's staged clone keeps it.
+/// A flag a reader under the read lock can set once. A clone of the graph
+/// carries its value.
 #[derive(Debug, Default)]
 pub(super) struct LoggedOnce(AtomicBool);
 
@@ -62,9 +62,11 @@ impl Graph {
             Mutation::UpsertNode {
                 node: Node::Concept(c),
             } => {
+                self.undo_unflushed(c.id);
                 self.unflushed.insert(c.id, epoch);
             }
             Mutation::DeleteNode { id } => {
+                self.undo_unflushed(*id);
                 self.unflushed.insert(*id, epoch);
             }
             Mutation::SetEmbedding { .. } => self.unflushed_contract = Some(epoch),

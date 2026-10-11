@@ -55,13 +55,16 @@ use crate::types::{
 mod accesses;
 mod embeddings;
 mod invariants;
+mod keys;
 mod mutation_log;
 mod root_goal;
 mod snapshot;
 mod transitions;
+mod txn;
 mod unflushed;
 
 pub use root_goal::root_goal_texts;
+pub(crate) use txn::NODE_WRITE_WINDOW;
 
 /// Edge-weight bump per reinforcement (v0.6.0 §5.4 semantics; see module docs).
 pub const REINFORCE_BUMP: f64 = 1.0;
@@ -80,6 +83,9 @@ type EdgeKey = (NodeId, NodeId, EdgeType);
 pub struct Graph {
     session_id: SessionId,
     nodes: HashMap<NodeId, Node>,
+    /// Non-`Observation` concepts by canonical key, lowest id first (#102;
+    /// see `keys.rs`). Derived from `nodes`, RAM-only.
+    concept_keys: HashMap<String, Vec<NodeId>>,
     edges: HashMap<NodeId, Edge>,
     edge_keys: HashMap<EdgeKey, NodeId>,
     out: HashMap<NodeId, HashMap<EdgeType, HashSet<NodeId>>>,
@@ -136,6 +142,12 @@ pub struct Graph {
     /// Whether the holder has logged its first whole-graph fallback for an
     /// overflowing unflushed set (#60 review L-2). RAM-only.
     unflushed_overflow_logged: unflushed::LoggedOnce,
+    /// The most recent plan-relevant concept writes with their epochs (#116; see
+    /// `txn.rs`). RAM-only.
+    node_writes: txn::NodeWrites,
+    /// The open [`Graph::transaction`]'s undo record (#102). `None` outside
+    /// one.
+    undo: Option<Box<txn::UndoLog>>,
 }
 
 impl Graph {
@@ -143,6 +155,7 @@ impl Graph {
         Self {
             session_id,
             nodes: HashMap::new(),
+            concept_keys: HashMap::new(),
             edges: HashMap::new(),
             edge_keys: HashMap::new(),
             out: HashMap::new(),
@@ -162,6 +175,8 @@ impl Graph {
             unflushed: HashMap::new(),
             unflushed_contract: None,
             unflushed_overflow_logged: unflushed::LoggedOnce::default(),
+            node_writes: txn::NodeWrites::default(),
+            undo: None,
         }
     }
 
@@ -254,6 +269,7 @@ impl Graph {
         }
 
         let node = Node::Interaction(i.clone());
+        self.undo_node(i.id);
         self.nodes.insert(i.id, node.clone());
         if !known {
             self.temporal_chain.push(i.id);
@@ -339,31 +355,35 @@ impl Graph {
         // (spec §7) and may legitimately share keys, so they are exempt;
         // Observation keys may shadow entity keys (grok G7 — P5 recall must
         // disambiguate by concept_type, not key uniqueness).
-        // Scaling note (grok G4): this is an O(N) scan per insert — no
-        // canonical_key index in v0.1 (deliberate cut); P4 GC should not
-        // benchmark a long-session derive against this without an index.
-        if c.concept_type != ConceptType::Observation {
-            let collision = self.nodes.iter().find_map(|(id, n)| match n {
-                Node::Concept(x)
-                    if *id != c.id
-                        && x.canonical_key == c.canonical_key
-                        && x.concept_type != ConceptType::Observation =>
-                {
-                    Some(*id)
-                }
-                _ => None,
-            });
-            if let Some(other) = collision {
-                return Err(invariant(format!(
-                    "concept {} canonical_key {:?} collides with concept {other} \
-                     (UNIQUE (session_id, canonical_key), spec §4; Observations exempt)",
-                    c.id, c.canonical_key
-                )));
-            }
+        // Answered by the canonical-key index (#102; grok G4's O(N) scan
+        // per insert is gone), which holds exactly the non-Observation
+        // concepts this gate compares against.
+        if c.concept_type != ConceptType::Observation
+            && let Some(other) = self.key_holder_other_than(&c.canonical_key, c.id)
+        {
+            return Err(invariant(format!(
+                "concept {} canonical_key {:?} collides with concept {other} \
+                 (UNIQUE (session_id, canonical_key), spec §4; Observations exempt)",
+                c.id, c.canonical_key
+            )));
         }
         let node = Node::Concept(c.clone());
-        self.nodes.insert(c.id, node.clone());
+        self.undo_node(c.id);
+        // #116: only a change a hybrid plan could have read enters the
+        // node-write window; a re-upsert that rewrites counters, status or
+        // content (a canonical re-derive of an existing concept) does not.
+        let plan_relevant = match self.nodes.insert(c.id, node.clone()) {
+            Some(Node::Concept(previous)) => {
+                self.unindex_key(&previous);
+                txn::plan_relevant_change(&previous, &c)
+            }
+            _ => true,
+        };
+        self.index_key(&c);
         self.append_mutation(Mutation::UpsertNode { node });
+        if plan_relevant {
+            self.note_plan_relevant_write(c.id);
+        }
 
         let edge = Edge {
             id: NodeId::new(),
@@ -452,16 +472,21 @@ impl Graph {
                 }
             }
         }
+        self.undo_node(id);
+        self.undo_removal_bookkeeping(id);
         for eid in incident {
             self.remove_edge(eid)?;
         }
-        self.nodes.remove(&id);
+        if let Some(Node::Concept(removed)) = self.nodes.remove(&id) {
+            self.unindex_key(&removed);
+        }
         // Issue #30: nothing left to count against; keep the dirty set bounded
         // by the live concepts even while the flush is not draining it.
         self.access_dirty.remove(&id);
         self.temporal_chain.retain(|&x| x != id);
         self.reservations.retain(|r| r.node_id != id);
         self.append_mutation(Mutation::DeleteNode { id });
+        self.note_plan_relevant_write(id);
         Ok(())
     }
 
@@ -473,6 +498,7 @@ impl Graph {
             .cloned()
             .ok_or_else(|| not_found(format!("edge {id}")))?;
         let key = (edge.source, edge.target, edge.edge_type);
+        self.undo_edge(id);
         self.edges.remove(&id);
         self.edge_keys.remove(&key);
         self.remove_adjacency(edge.source, edge.target, edge.edge_type);
@@ -600,6 +626,39 @@ impl Graph {
         v
     }
 
+    /// Whether `to` is reachable from `from` over `Hierarchical` edges
+    /// (`from == to` counts), i.e. whether `from` is `to` or one of its
+    /// ancestors. Walks *up* from `to`, so it costs `to`'s ancestors, not
+    /// `from`'s descendants: a hierarchy is usually far shallower than it is
+    /// wide. Iterative, so a deep one cannot overflow the stack; visits each
+    /// node once.
+    pub fn hierarchical_path(&self, from: NodeId, to: NodeId) -> bool {
+        let mut seen: HashSet<NodeId> = HashSet::new();
+        let mut stack = vec![to];
+        while let Some(at) = stack.pop() {
+            if at == from {
+                return true;
+            }
+            if !seen.insert(at) {
+                continue;
+            }
+            stack.extend(self.hierarchical_parents(at));
+        }
+        false
+    }
+
+    /// `node`'s `Hierarchical` parents, straight off the adjacency index: no
+    /// allocation and no sort, in unspecified order (for walks that only ask
+    /// whether something is reachable).
+    pub(crate) fn hierarchical_parents(&self, node: NodeId) -> impl Iterator<Item = NodeId> + '_ {
+        self.incoming
+            .get(&node)
+            .and_then(|by_type| by_type.get(&EdgeType::Hierarchical))
+            .into_iter()
+            .flatten()
+            .copied()
+    }
+
     /// All edges incident to `node` (out or in), in id-ascending order.
     ///
     /// Routed through the out/in adjacency index — `O(degree log degree)` for
@@ -640,6 +699,7 @@ impl Graph {
 
     fn append_mutation(&mut self, m: Mutation) {
         self.epoch += 1;
+        self.debug_check_undoable(&m);
         // #60: at the epoch the drained batch will be stamped with, so the
         // flush can clear exactly what it committed.
         self.note_unflushed(&m);
@@ -692,6 +752,7 @@ impl Graph {
         let key = (edge.source, edge.target, edge.edge_type);
         if let Some(existing_id) = self.edge_keys.get(&key).copied() {
             // Reinforcement on duplicate natural key (v0.6.0 §5.4 semantics).
+            self.undo_edge(existing_id);
             let existing = self
                 .edges
                 .get_mut(&existing_id)
@@ -704,6 +765,7 @@ impl Graph {
         }
         let mut edge = edge;
         edge.weight = weight;
+        self.undo_edge(edge.id);
         self.edge_keys.insert(key, edge.id);
         self.edges.insert(edge.id, edge.clone());
         self.add_adjacency(edge.source, edge.target, edge.edge_type);

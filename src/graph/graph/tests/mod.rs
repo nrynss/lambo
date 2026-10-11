@@ -11,6 +11,7 @@ mod root_goal;
 mod snapshot;
 mod structure;
 mod transitions;
+mod txn;
 mod unflushed;
 
 fn ts(minutes: i64) -> DateTime<Utc> {

@@ -35,7 +35,7 @@ use rust_stemmers::{Algorithm, Stemmer};
 use unicode_normalization::UnicodeNormalization;
 
 use crate::graph::Graph;
-use crate::types::{ConceptType, LamboError, NodeId};
+use crate::types::{LamboError, NodeId};
 
 /// Stopwords stripped during normalization — pinned to the fixture convention
 /// (`scripts/gen-fixtures.py` `STOPWORDS`).
@@ -312,13 +312,9 @@ pub fn canonicalize(content: &str, graph: &Graph) -> Result<CanonicalizeResult, 
         Some(mapped) => tokens_to_key(&mut normalize_tokens(mapped)),
         None => tokens_to_key(&mut normalize_tokens(raw)),
     };
-    match graph
-        .concepts()
-        .filter(|c| c.concept_type != ConceptType::Observation)
-        .filter(|c| c.canonical_key == key)
-        .min_by_key(|c| c.id.0)
-        .map(|c| c.id)
-    {
+    // The canonical-key index (#102) holds exactly the non-Observation
+    // concepts, lowest id first: the scan this replaced, in O(1).
+    match graph.concept_by_key(&key) {
         Some(node) => Ok(CanonicalizeResult::Matched { key, node }),
         None => Ok(CanonicalizeResult::Unmatched { key }),
     }

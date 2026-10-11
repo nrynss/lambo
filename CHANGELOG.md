@@ -70,6 +70,67 @@
   modification and status-change times, device and inode, so a changed file
   is hashed again. The directory is created private (0700), and an entry
   another user could write is ignored. An unusable cache only costs a hash.
+- Concurrent hybrid derives no longer starve each other (#116). A derive
+  plans, embeds with no lock held, then commits. Its commit went ahead only
+  if nothing at all had changed in the graph since it planned. Any other
+  write in that window forced a replan, and each replan re-embedded every
+  item. After 8 replans the write failed with "hybrid derive could not
+  commit after 8 concurrent graph changes". With 8 concurrent agents, about
+  a third of writes failed this way.
+  - The commit now rechecks only what its plan read: the session's
+    embedding contract, each item's canonical key and canonical match, and
+    the concepts written since the plan that could change a semantic-merge
+    choice.
+  - A write on unrelated keys commits alongside.
+  - A write that claims the same canonical key sends the derive round
+    again, and the replan matches that concept instead of creating a
+    duplicate.
+  - A concept written since the plan that would win, tie or change the
+    merge target also sends it round again. So does a change to the target.
+  - A replan reuses every vector the derive has already embedded, so it
+    makes no embedder call for them.
+  - The recheck is bounded so it cannot hold the write lock for long; a
+    derive over the bound plans again. Its last attempt checks with a much
+    higher bound, so a large derive under a steady stream of unrelated
+    writes still commits. One that cannot fails with "... more was written
+    to the graph during each one than its plan can be rechecked against
+    ...; split the call" rather than the old message.
+  - For a single writer, derive outcomes are unchanged.
+- A hybrid derive's commit no longer copies the whole session graph under
+  the write lock (#102). The copy cost grew with the session (10.7 ms at
+  10,000 concepts, 168 ms at 100,000) and every recall and write waited
+  behind it.
+  - The commit now writes in place and undoes every write if any step
+    fails, so a failed derive still leaves the graph, its write-behind log
+    and its epoch untouched.
+  - Matching a canonical key, and the uniqueness check on a new concept,
+    now use an index instead of scanning every concept.
+  - The commit's write-lock hold is now about 20 µs at 10,000, 50,000 and
+    100,000 concepts (release build, M3 Pro), down from 6.8 ms at 10,000
+    and 36 ms at 50,000 measured the same way. Rechecking a plan under
+    concurrent writes adds at most about 6 ms (about 180 ms on a derive's
+    final attempt).
+- A `parent_of` pair that would close a `Hierarchical` cycle is now
+  refused, with nothing written, in both match strategies. Before, only a
+  pair naming the same concept twice was refused. So `parent_of: [(a, b)]`
+  followed by `[(b, a)]`, a chain `a -> b -> c` followed by `(c, a)`, or
+  both directions in one call, wrote a cycle into a relationship the spec
+  defines as acyclic (§5.7). The caller is told "store error: parent_of
+  would close a Hierarchical cycle (the hierarchy must stay acyclic);
+  nothing was written"; the pair is named only in the server log. It is
+  refused when the call is accepted if the graph already shows the cycle,
+  and otherwise when the write is applied (a write applied in between
+  closed it).
+- `lambo_record_action`'s refusal of an edge that would close a Causal or
+  Dependency cycle now tells the caller so ("store error: record_action
+  would close a Causal or Dependency cycle ...; nothing was written")
+  instead of the generic "store error (the detail was logged
+  server-side)".
+- A durable write refused at replay because it would close a cycle
+  (either kind) now settles `failed` on its own, and the replay goes on.
+  Before, it stopped the replay as a session-wide fault, so every later
+  durable write of the session stayed `pending_replay` until an operator
+  intervened.
 
 ### Changed
 
@@ -87,6 +148,7 @@
   with the other methods. `CandleEmbedder::deferred`, `load`, `is_loaded` and
   `load_count` are new; `CandleEmbedder::new` still loads eagerly.
   `lambo serve-web` loads the embedder at startup, before it listens.
+
 
 ## 0.4.0 (2026-10-11)
 

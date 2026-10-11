@@ -216,7 +216,7 @@ Writes you send one after another are applied in that order, whatever other agen
 | `concepts[].content` | string | Yes | Up to 16 KB, and on a store with vector search at most 8,189 bytes for a concept sent alone (see [the embedding-text limit](#limits)). May not contain an image suffix, `[image:<id>]` in any case or spelling, which only `lambo_derive_image` builds; text that only mentions it, such as `see [image: diagram]`, is fine. |
 | `concepts[].concept_type` | enum | Yes | One of `entity`, `logic`, `constraint`, `resource`, `observation`. |
 | `event_time` | RFC3339 timestamp | No | Historical about-time, such as a commit or document date. Omit for a live fact, which is about now. |
-| `parent_of` | array of `{parent, child}` | No | Hierarchy links. Both ends resolve as concepts, and either may be created. |
+| `parent_of` | array of `{parent, child}` | No | Hierarchy links. Both ends resolve as concepts, and either may be created. The hierarchy must stay acyclic: a pair that would close a cycle (its child is already an ancestor of its parent, or the call's own pairs loop) refuses the whole call with "store error: parent_of would close a Hierarchical cycle (the hierarchy must stay acyclic); nothing was written". A cycle the graph already shows is refused before the ack; one closed by a write applied in between is refused on the receipt. |
 
 <Warning>
 `concept_type` is lower case on the wire. Sending `Entity` is refused with "unknown variant `Entity`, expected one of `entity`, `logic`, `constraint`, `resource`, `observation`".
@@ -286,7 +286,7 @@ Record something the agent did, along with what it produces, modifies, and depen
 | `agent_id` | string | Yes | |
 | `action` | string | Yes | Up to 16 KB. May not contain an image suffix (`[image:<id>]`). |
 | `event_time` | RFC3339 timestamp | No | Historical about-time, such as a commit or document date. Omit for a live fact, which is about now. |
-| `produces`, `modifies`, `depends_on` | array of string | No | Up to 64 entries combined across the three. An entry may name an image concept by its content, `caption [image:<image_id>]`. |
+| `produces`, `modifies`, `depends_on` | array of string | No | Up to 64 entries combined across the three. An entry may name an image concept by its content, `caption [image:<image_id>]`. The `Causal` and `Dependency` edges they create must stay acyclic: one that would close a cycle refuses the whole call with "store error: record_action would close a Causal or Dependency cycle (produces, modifies and depends_on must stay acyclic); nothing was written", before the ack or, if a write applied in between closed it, on the receipt. |
 
 ```json
 {"name": "lambo_record_action", "arguments": {"agent_id": "agent-a",

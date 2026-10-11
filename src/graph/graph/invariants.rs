@@ -74,6 +74,10 @@ impl Graph {
             }
         }
 
+        if let Some(drift) = self.key_index_drift() {
+            v.push(drift);
+        }
+
         if self.edge_keys.len() != self.edges.len() {
             v.push(format!(
                 "natural-key index has {} entries for {} edges",
