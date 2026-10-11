@@ -116,6 +116,8 @@ LIVE_DB_PREFIXES = ("lambo-dev.db",)
 TERMINAL_STATES = {
     "applied", "failed", "applied_after_restart", "dropped", "expired",
     "restart_lost", "never_issued", "forbidden", "intent_durable",
+    # #117: the close's final flush did not complete; settled, not applied.
+    "close_unflushed",
 }
 WIRE_TYPE = {
     "Entity": "entity", "Logic": "logic", "Constraint": "constraint",

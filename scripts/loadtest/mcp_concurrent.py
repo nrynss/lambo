@@ -24,8 +24,10 @@ into an issue):
   came back as a tool error or a transport failure;
 * `writes`: acked, refused at ack, transport-failed, receipts queried, receipt
   states, and failed writes grouped by reason. Two rates:
-  - `failure_rate`: failed + dropped over settled queried receipts;
-  - `write_failure_rate_all`: (failed + dropped + refused_at_ack +
+  - `failure_rate`: failed + dropped + close_unflushed over settled queried
+    receipts (close_unflushed: the close's final flush did not complete, so
+    the write may not have been saved; it counts as not applied);
+  - `write_failure_rate_all`: (failed + dropped + close_unflushed + refused_at_ack +
     transport_failed) over (settled + refused_at_ack + transport_failed).
     This is the #116 acceptance rate. A transport-failed write may still have
     been admitted by the server (the reply was lost, not necessarily the
@@ -78,7 +80,7 @@ DEFAULT_MIX = "recall=40,derive=38,record_action=18,stats=4"
 TOOLS = {"recall": "lambo_recall", "derive": "lambo_derive",
          "record_action": "lambo_record_action", "stats": "lambo_stats"}
 WRITE_TOOLS = ("lambo_derive", "lambo_record_action")
-SETTLED_FAILURE_STATES = ("failed", "dropped")
+SETTLED_FAILURE_STATES = ("failed", "dropped", "close_unflushed")
 UNSETTLED_STATES = {"pending", "pending_replay", "expired", "query_error", "unknown",
                     "restart_lost", "never_issued", "forbidden", "intent_durable"}
 FAILED_PREFIXES = ("FAILED, nothing was written — ", "DROPPED before it was attempted, "
@@ -116,6 +118,8 @@ KNOWN_MESSAGES = (
     ("drop_queue_full", r"the background write queue is full \(\d+ outstanding"),
     ("drop_queue_bytes", r"the background write queue is at its \d+ MiB payload cap"),
     ("drop_session_closing", r"^the session is closing$"),
+    # src/writeq/receipts.rs ReceiptAnswer::CloseUnflushed describe (#117)
+    ("close_unflushed", r"^close did not finish its final flush"),
 )
 _KNOWN = tuple((rid, re.compile(p)) for rid, p in KNOWN_MESSAGES)
 # src/surface/error.rs err_class: every model-safe failure starts with one.
@@ -258,8 +262,10 @@ def summarize_writes(acked: int, refused: list[str], outcomes: list[dict],
     transport_failed: write calls whose reply never arrived (may or may not
     have been admitted).
 
-    failure_rate: failed + dropped over settled queried receipts.
-    write_failure_rate_all: (failed + dropped + refused + transport_failed)
+    failure_rate: failed + dropped + close_unflushed over settled queried
+    receipts.
+    write_failure_rate_all: (failed + dropped + close_unflushed + refused +
+    transport_failed)
     over (settled + refused + transport_failed). Both None when undefined.
     """
     states = collections.Counter(o["state"] for o in outcomes)

@@ -147,6 +147,24 @@ class Reasons(unittest.TestCase):
         self.assertIsNone(only_refused["failure_rate"])
         self.assertEqual(only_refused["write_failure_rate_all"], 1.0)
 
+    def test_close_unflushed_is_a_settled_failure_with_its_own_reason(self):
+        # #117: the close's final flush did not complete, so the write may not
+        # have been saved. Settled (no polling to the budget), not applied.
+        body = {"receipt": {"state": "close_unflushed",
+                            "detail": "close did not finish its final flush — this write "
+                                      "was not applied before the session closed"}}
+        self.assertEqual(mc.receipt_outcome(body, False),
+                         {"state": "close_unflushed", "reason": "close_unflushed"})
+        out = [{"state": "applied", "reason": None}] * 3 + \
+              [{"state": "close_unflushed", "reason": "close_unflushed"}]
+        s = mc.summarize_writes(4, [], out)
+        self.assertEqual(s["settled"], 4)
+        self.assertEqual(s["failed"], 1)
+        self.assertEqual(s["write_failure_rate_all"], 0.25)
+        self.assertEqual(s["failed_reasons"], {"close_unflushed: close_unflushed": 1})
+        self.assertIn("close_unflushed", rp.TERMINAL_STATES)
+        self.assertNotIn("close_unflushed", rp.APPLIED_STATES)
+
     def test_ledger_reasons_keep_only_our_failed_completions(self):
         lines = [
             json.dumps({"kind": "completion", "receipt": "r1", "state": "failed",

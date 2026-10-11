@@ -339,11 +339,12 @@ lambo_stats         (no extra facts — the numbers are in the heartbeat)
 
 // kind: "completion" (J4) — one background write's durable lifecycle.
 // `receipt` joins it back to the derive/record_action `call` line that acked
-// it. The two applied states carry the metric-2 fact set; the other two carry
-// no counts, because a failed write created nothing and a deferred one has not
-// created it yet.
+// it. The two applied states carry the metric-2 fact set; the other three
+// carry no counts, because a failed write created nothing, a deferred one has
+// not created it yet, and a close_unflushed one (#117: the close's final flush
+// did not complete) may not have been saved at all.
 {"v":1,"ts":"…","kind":"completion","agent_id":"…","receipt":"lwr1.…",
- "state":"applied|applied_after_restart|failed|deferred",
+ "state":"applied|applied_after_restart|failed|deferred|close_unflushed",
  "created_count":3,"matched_count":1,           // applied states only
  "semantic_merged":0,"reinforced":0,            // derive only (#12)
  "edges":2,                                     // record_action only (#12)
