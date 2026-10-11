@@ -70,24 +70,6 @@
   modification and status-change times, device and inode, so a changed file
   is hashed again. The directory is created private (0700), and an entry
   another user could write is ignored. An unusable cache only costs a hash.
-
-### Changed
-
-- **The candle width check reads `config.json` (#31).** The resolve-time
-  dimension check for `kind = "candle"` takes the width from the artifact's
-  `config.json` (`hidden_size`) rather than from a loaded model, and now
-  refuses an artifact whose `hidden_size` differs from `embedder.dim` at
-  resolve instead of at its first embed. The store-authoritative checks
-  (`store.vector_dim`, the store's vector width) are unchanged.
-- **`Embedder::prepare` and `Embedder::is_prepared` (#31).** The `Embedder`
-  trait has two new defaulted methods: `prepare` loads what an adapter
-  deferred at construction, and `is_prepared` says whether that is done.
-  `Memory` attaches await `prepare` once the lease is won; an adapter that
-  overrides neither is unaffected. A wrapper embedder should forward both
-  with the other methods. `CandleEmbedder::deferred`, `load`, `is_loaded` and
-  `load_count` are new; `CandleEmbedder::new` still loads eagerly.
-  `lambo serve-web` loads the embedder at startup, before it listens.
-
 - Concurrent hybrid derives no longer starve each other (#116). A derive
   plans, embeds with no lock held, then commits. Its commit went ahead only
   if nothing at all had changed in the graph since it planned. Any other
@@ -130,6 +112,23 @@
   cycle. It is raised when the call is accepted where the graph already
   shows the cycle, and otherwise when the write is applied (a concurrent
   write closed it in between).
+
+### Changed
+
+- **The candle width check reads `config.json` (#31).** The resolve-time
+  dimension check for `kind = "candle"` takes the width from the artifact's
+  `config.json` (`hidden_size`) rather than from a loaded model, and now
+  refuses an artifact whose `hidden_size` differs from `embedder.dim` at
+  resolve instead of at its first embed. The store-authoritative checks
+  (`store.vector_dim`, the store's vector width) are unchanged.
+- **`Embedder::prepare` and `Embedder::is_prepared` (#31).** The `Embedder`
+  trait has two new defaulted methods: `prepare` loads what an adapter
+  deferred at construction, and `is_prepared` says whether that is done.
+  `Memory` attaches await `prepare` once the lease is won; an adapter that
+  overrides neither is unaffected. A wrapper embedder should forward both
+  with the other methods. `CandleEmbedder::deferred`, `load`, `is_loaded` and
+  `load_count` are new; `CandleEmbedder::new` still loads eagerly.
+  `lambo serve-web` loads the embedder at startup, before it listens.
 
 
 ## 0.4.0 (2026-10-11)
