@@ -174,7 +174,7 @@ that pair only. For another pair, write a catalogue and pass `--reasons FILE`:
     "receipt_gains_embedded": {"label": "0.4.0 only", "expected": false},
     "state_differs:some_rule": {"kind": "state_differs", "direction": "b_refuses",
                                 "detail_pattern": "exact server refusal text",
-                                "label": "...", "expected": true, "ref": "0.4.1 CHANGELOG, #N"}
+                                "label": "...", "expected": true, "ref": "0.5.0 CHANGELOG, #N"}
   }
 }
 ```
@@ -222,13 +222,25 @@ python3 scripts/loadtest/replay_parity.py \
     --bin-a path/to/lambo-0.4.0 --bin-b target/release/lambo \
     --snapshot path/to/store-backup.db --config-template path/to/lambo.toml \
     --session lambo-dev --groups 300 --variants 30 \
-    --reasons path/to/reasons-0.4.1.json \
+    --reasons path/to/reasons-0.5.0.json \
     --out evidence/<run>/parity --work ~/scratch/parity-work
 echo "exit $?"   # 0: PASS; 1: FAIL (see the VERDICT block at the top of parity.txt)
 ```
 
 Run `--dry-run --keep-work` first: it reconstructs and truncates without
 starting a binary, and reports the reconstruction warnings in `parity.json`.
+
+**Compare with canonization off.** Canonization passes run on the daemon's
+timer, so which concepts they promote depends on where the passes fall
+relative to the replayed writes, not only on the build. The canonization
+counts vary between two runs of the same build (0.4.0 alone gave 401 to 433
+across timer settings), and a run of one build against itself also flags
+calls whose semantic merge picked a different target. For a
+timing-independent comparison, replay with canonization off, for example
+`--canon-eval-secs 100000000 --canon-wait 0`, keep the work directory
+(`--keep-work`), then compare the two final stores directly and run
+canonization offline over each at a fixed clock. See
+[`evidence/0.5.0-acceptance/`](../../evidence/0.5.0-acceptance/README.md).
 
 ## How the driver is shaped (so refusals don't crowd out the measurement)
 
