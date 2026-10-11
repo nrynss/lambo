@@ -1676,8 +1676,11 @@ const MERGE_RESCORE_MARGIN: f64 = 1e-4;
 /// lock: concepts written since the plan that carry a text vector, times the
 /// plan's ranked items. Beyond it the plan is treated as stale and replanned
 /// (cheap, the embeds are cached) rather than holding every reader and writer
-/// for the scan. At 1,024 dimensions it is a few milliseconds.
-const MAX_PLAN_RESCORES: usize = 32_768;
+/// for the scan. Measured at 1,024 dimensions (release, M3 Pro): 32,768
+/// cosines took 22.5 ms, longer than the 10k-concept clone #102 removed, so
+/// the cap is 8,192, about 6 ms. That is still 32 ranked items against 256
+/// vector-carrying concepts written inside one embed window.
+const MAX_PLAN_RESCORES: usize = 8_192;
 
 /// What a plan read from the graph, for [`plan_still_holds`].
 struct PlanRead<'p, 'a> {

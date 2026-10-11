@@ -148,3 +148,79 @@ async fn commit_cost_does_not_scale_with_session_size() {
         "commit cost grew with the session: {small:?} at 10k, {large:?} at 100k"
     );
 }
+
+/// Review L1: the worst plan validation the cap admits, timed. A plan with
+/// 32 ranked items (fresh concepts) checked against `MAX_PLAN_RESCORES / 32`
+/// concepts written since it was made, each with a 1,024-wide vector: exactly
+/// `MAX_PLAN_RESCORES` cosines, none near an item, so the plan holds and
+/// every cosine is computed.
+#[test]
+#[ignore = "benchmark: run by hand in release (#116 review L1)"]
+fn plan_validation_worst_case_is_bounded() {
+    const ITEMS: usize = 32;
+    const WRITTEN: usize = MAX_PLAN_RESCORES / ITEMS;
+    let (graph, interaction) = session(10_000);
+    let contents: Vec<String> = (0..ITEMS).map(|k| format!("validation item {k}")).collect();
+    let concepts: Vec<(&str, ConceptType)> = contents
+        .iter()
+        .map(|c| (c.as_str(), ConceptType::Entity))
+        .collect();
+    let mut g = graph.write();
+    let planned_epoch = g.epoch();
+    let (items, parent_ends) = plan_inputs(&g, &concepts, &ParentOf::none()).unwrap();
+    let mut probe = vec![0.0f32; DIM];
+    probe[3] = 1.0;
+    probe[11] = 1.0;
+    let resolutions: Vec<Resolution> = items
+        .iter()
+        .map(|(_, _, key, _)| Resolution::Fresh {
+            key: key.clone(),
+            embedding: Some(probe.clone()),
+            source: None,
+        })
+        .collect();
+    let session_id = g.session_id().clone();
+    for k in 0..WRITTEN as u64 {
+        let c = new_concept(
+            &session_id,
+            &format!("written since the plan {k}"),
+            ConceptType::Entity,
+            format!("written since the plan {k}"),
+            interaction,
+            &agent(),
+            ts(0),
+            Some(vector(100_000 + k)),
+            None,
+        );
+        g.insert_concept(c, interaction).unwrap();
+    }
+    let stamped = g.embedding().cloned();
+    let (created_at, event_time, prompt) = match g.node(interaction) {
+        Some(Node::Interaction(i)) => (i.created_at, i.event_time, i.prompt_text.clone()),
+        _ => unreachable!(),
+    };
+    let plan = PlanRead {
+        planned_epoch,
+        interaction,
+        interaction_read: (prompt.as_deref(), created_at, event_time),
+        stamped: stamped.as_ref(),
+        concepts: &concepts,
+        parent_of: &ParentOf::none(),
+        items: &items,
+        parent_ends: &parent_ends,
+        resolutions: &resolutions,
+        semantic_match_threshold: SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+    };
+    let mut samples = Vec::new();
+    for _ in 0..21 {
+        let started = std::time::Instant::now();
+        assert!(plan_still_holds(&g, &plan).unwrap(), "the plan holds");
+        samples.push(started.elapsed());
+    }
+    samples.sort();
+    println!(
+        "plan validation, {ITEMS} items x {WRITTEN} written concepts x {DIM} dims \
+         ({MAX_PLAN_RESCORES} cosines): median {:?}",
+        samples[samples.len() / 2]
+    );
+}
