@@ -226,6 +226,9 @@ Readings:
   `footprint --swapped` `IOAccelerator (graphics)` row.
 * Re-check the 10 s auto interval on the re-pinned writer with
   `footprint --swapped` (`IOAccelerator (graphics)` row) and latency by gap.
+* **Fixed by #31 (2026-10-11): a proxy no longer loads the model at all.**
+  See `fix-31-proxy-defer-load.md`. The original follow-up, kept for the
+  record:
 * **A proxy still loads the model transiently.** `resolve_backends` builds the
   embedder eagerly (`build_embedder` -> `CandleEmbedder::new` hashes the weight
   file for the contract identity and loads the model onto the device in one

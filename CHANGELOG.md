@@ -46,6 +46,40 @@
   the other holder". `lambo erase-session`, the HTTP erase and `recall-index backfill`
   refusals no longer call the holder "a live writer". Lease acquisition and
   fencing are unchanged, and nothing takes over automatically.
+- **A `lambo serve` that becomes a proxy no longer loads the candle model
+  (#31).** The resolve used to load the whole embedder (about 1.1 GB of
+  Metal weights for BGE-M3) before the startup election, so every serve
+  that lost it held a model it never embeds with until it learned its role.
+  The candle embedder is now built in two steps: the resolve computes its
+  contract identity (source and weight sha256), device and width, and the
+  weights reach the device only once a serve has won the session's lease,
+  inside the attach and before it serves. Measured on an M3 Pro: a proxying
+  serve's embedder adds about 4 MB instead of about 1.4 GB. A session
+  refused for a mismatched embedding contract no longer loads the weights
+  either. Holder startup and the first recall are unchanged, since the load
+  still finishes before the serve answers its client.
+- **The candle weight digest is cached (#31).** The contract identity hashed
+  the 1.1 GB weight file on every start. The digest is now cached under
+  `$XDG_CACHE_HOME/lambo/candle-identity` (else
+  `~/.cache/lambo/candle-identity`), keyed by the file's path, size,
+  modification and status-change times, device and inode, so a changed file
+  is hashed again. An unusable cache only costs a hash.
+
+### Changed
+
+- **The candle width check reads `config.json` (#31).** The resolve-time
+  dimension check for `kind = "candle"` takes the width from the artifact's
+  `config.json` (`hidden_size`) rather than from a loaded model, and now
+  refuses an artifact whose `hidden_size` differs from `embedder.dim` at
+  resolve instead of at its first embed. The store-authoritative checks
+  (`store.vector_dim`, the store's vector width) are unchanged.
+- **`Embedder::prepare` (#31).** The `Embedder` trait has a new defaulted
+  method, `prepare`, which loads what an adapter deferred at construction.
+  `Memory` attaches await it once the lease is won; an adapter that
+  overrides nothing is unaffected. A wrapper embedder should forward it with
+  the other methods. `CandleEmbedder::deferred`, `load`, `is_loaded` and
+  `load_count` are new; `CandleEmbedder::new` still loads eagerly.
+  `lambo serve-web` loads the embedder at startup, before it listens.
 
 ## 0.4.0 (2026-10-11)
 
