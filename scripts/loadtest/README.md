@@ -51,6 +51,136 @@ prompt, so any commentary in it (even an HTML comment) reaches the model.
 | Script | Role |
 |---|---|
 | `mcp_ab.py` | Latency A/B between two `lambo serve` builds. `ab` drives two HTTP serves, each on its own copy of the same store, with recalls interleaved per query, a `lambo_stats` per round, and synthetic `lambo_derive` writes timed to ack and to applied (via the receipt). It reports p50/p90/p99 per path and the top-k node-id overlap between the two sides as a recall-quality check. `ledger` splits a `serve --ledger` file at a re-pin time and summarizes server-side latency per tool on each side. Output is aggregates only, safe to paste into an issue. Refuses port 7700 unless `--allow-production-port`, since `ab` writes. First run: [#108](https://github.com/nrynss/lambo/issues/108). |
+| `mcp_concurrent.py` | Many agents at once against one HTTP serve: N workers, each its own MCP session and agent id, exponential think time, weighted tool mix (`--mix`). After the run it waits for the write queue to drain, then asks `lambo_stats(receipt)` for every acked write and reports the failure rate and failed-write reasons, plus `drained: true/false`. Aggregates only. Promoted from `evidence/0.4.0-vs-0.3.0-load/harness/concurrent_mix.py`. See [Concurrent agents](#concurrent-agents-mcp_concurrentpy). |
+| `replay_parity.py` | Replays the last N real write calls of a store backup into two builds over stdio and compares every receipt and the final stores. Each difference is classified by reason; reasons a release expects come from a data catalogue, anything else is UNEXPECTED. Promoted from `evidence/0.4.0-vs-0.3.0-load/harness/replay_parity.py`. See [Replay parity](#replay-parity-replay_paritypy). |
+| `test_loadtest_harnesses.py` | Stdlib `unittest` for the pure parts of the two above (mix parsing, seeded payloads, reason normalization and grouping, failure rate, prompt splitting, classification, the catalogue, content stripping, path refusals). No server, GPU or network. Run `python3 -m unittest scripts/loadtest/test_loadtest_harnesses.py`. |
+
+## Concurrent agents (`mcp_concurrent.py`)
+
+N workers, each with its own MCP session and agent id (`conc-<i>`), call one
+`lambo serve --transport http`. Between calls a worker waits an exponentially
+distributed think time with mean `--think` seconds. The default mix is the live
+dogfood ledger's: `recall=40,derive=38,record_action=18,stats=4`; `--mix`
+overrides it. Derives write two concepts and record_actions one modifies
+target; their text is a pure function of `(--seed, worker, call number)`, so
+two runs with the same seed send the same writes in the same per-worker order.
+Recall queries come from `--queries FILE` (one per line) or mcp_ab.py's list.
+
+After `--secs` the workers stop and the driver polls `lambo_stats` until the
+write queue, log and flush depths are all zero, for at most `--drain-timeout`
+seconds. Then, using each worker's own session (receipts are scoped to the
+agent that made them), it asks `lambo_stats(receipt)` for every acked write, or
+a seeded sample of `--receipt-max` (default 2000) when there were more.
+
+The JSON (`--out`) holds aggregates only, safe to paste into an issue:
+
+- `latency_ms` per tool and `errors` per tool;
+- `writes.failure_rate`: failed + dropped over settled receipts (pending,
+  expired and query errors are counted in `receipt_states` but excluded);
+- `writes.failed_reasons`: the receipt's reason, grouped. A receipt carries
+  only the model-safe class (`conflict`, `internal error`, ...). Pass
+  `--server-ledger` (the serve's `--ledger` file) to also group the raw
+  operator-facing `error` of each failed `completion` line of this run, as
+  `writes.failed_reasons_server_ledger` (numbers, paths and URLs folded);
+- `writes.refused_at_ack`: writes refused before a receipt was issued;
+- `drain.drained`: false means the drain timed out and every counter is a
+  snapshot with writes still outstanding, never final totals. The script
+  warns on stderr too;
+- `final_stats`: the server's `write_queue_*` counters after the drain.
+
+Receipts are kept 300 s after they settle (`RECEIPT_RETENTION`), so a run whose
+drain is long can see early receipts as `expired`; they are reported as such.
+
+It writes synthetic derives: run it against a scratch serve on a store copy.
+Port 7700 is refused unless `--allow-production-port`. The token comes from
+`--token` or `$LAMBO_AUTH_TOKEN`.
+
+### Acceptance check for #116 (concurrent write failures)
+
+8 workers, think 1.0 s, 120 s, on a scratch copy of a realistic store (the
+0.4.0 baseline was 165 failed of 497 writes, all `could not commit after 8
+concurrent graph changes`):
+
+```bash
+# scratch serve on a store copy, with a ledger for the raw failure reasons
+lambo provision --config scratch/lambo.toml
+XDG_RUNTIME_DIR=$(mktemp -d /tmp/lbc.XXXX) lambo serve --config scratch/lambo.toml \
+    --session conc-116 --agent conc --transport http --port 17701 --bind 127.0.0.1 \
+    --ledger scratch/serve-ledger.jsonl 2> scratch/serve.stderr.log &
+
+python3 scripts/loadtest/mcp_concurrent.py \
+    --endpoint http://127.0.0.1:17701/mcp --out conc-116-w8.json \
+    --workers 8 --think 1.0 --secs 120 --seed 1 \
+    --server-ledger scratch/serve-ledger.jsonl
+
+jq '{drained: .drain.drained, rate: .writes.failure_rate, acked: .writes.acked,
+     failed: .writes.failed, reasons: .writes.failed_reasons,
+     raw: .writes.failed_reasons_server_ledger}' conc-116-w8.json
+```
+
+Pass means `drained` is true (otherwise rerun with a longer `--drain-timeout`;
+a snapshot is not a result) and the failure rate and reasons meet the bar set in
+#116. Run the baseline build the same way on a fresh copy of the same store
+for the comparison.
+
+## Replay parity (`replay_parity.py`)
+
+Rewinds a copy of a store backup to just before its last `--groups` write calls,
+rebuilds those calls from the store (concept text from each interaction's
+prompt, types from the concepts it created, `parent_of` and action edges from
+the edges stamped with the call's time), replays them in order into each of
+two builds over stdio, waiting on every receipt, and compares receipts, final
+store counts and canonization. `--variants K` adds K reworded `Recap: ...`
+derives to exercise semantic merge. The script header has the full method.
+
+Every differing call gets reason ids from fixed detectors. Which reasons are
+expected is data: the built-in catalogue, `REASONS_0_4_0`, is the 0.4.0
+CHANGELOG mapping from the 0.4.0 vs 0.3.0 run and applies to that pair only.
+For another pair, write a catalogue and pass `--reasons FILE`:
+
+```json
+{
+  "base": null,
+  "reasons": {
+    "merge_differs_pre_t": {"label": "...", "expected": true, "ref": "0.4.1 CHANGELOG, #116"},
+    "state_differs:some_rule": {"kind": "state_differs", "detail_pattern": "(?i)regex on the refusal text",
+                                "label": "...", "expected": true, "ref": "0.4.1 CHANGELOG, #N"}
+  }
+}
+```
+
+`"base": "0.4.0"` lays the file over the built-in catalogue instead of replacing
+it, and `"expected": false` retires an entry. A reason that is not in the
+catalogue, is marked unexpected, or comes from no detector at all is reported
+as UNEXPECTED, and the script then exits 1.
+
+Safety: the snapshot is opened read-only and may be a backup anywhere. Nothing
+is written under a `--protect` directory (repeatable; default `~/lambo-dogfood`,
+and passing any replaces the default), and a snapshot named like a live store
+(`lambo-dev.db*`) is refused unless `--allow-live-name`. Each serve gets a fresh
+`XDG_RUNTIME_DIR` under `--runtime-parent` (default `/tmp`).
+
+Outputs: `--out` gets `parity.json` and `parity.txt`, aggregates only. Concept
+and refusal text is left out unless `--include-content`, so `--out` can be
+committed as evidence. Everything that holds store content (store copies,
+`calls.json`, `side-*.json`, serve stderr, JSON-RPC transcripts) goes to
+`--work` (default: a fresh temp directory, logged at start). Never commit
+`--work`, and keep it out of the checkout.
+
+### Acceptance check: replay parity between two builds
+
+```bash
+python3 scripts/loadtest/replay_parity.py \
+    --bin-a path/to/lambo-0.4.0 --bin-b target/release/lambo \
+    --snapshot path/to/store-backup.db --config-template path/to/lambo.toml \
+    --session lambo-dev --groups 300 --variants 30 \
+    --reasons path/to/reasons-0.4.1.json \
+    --out evidence/<run>/parity --work ~/scratch/parity-work
+echo "exit $?"   # 0: every difference is catalogued; 1: some are UNEXPECTED
+```
+
+Run `--dry-run` first: it reconstructs and truncates without starting a binary,
+and reports the reconstruction warnings in `parity.json`.
 
 ## How the driver is shaped (so refusals don't crowd out the measurement)
 
