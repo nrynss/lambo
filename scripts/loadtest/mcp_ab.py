@@ -19,7 +19,7 @@ per-tool server-side latency on each side. It only reads the file.
 Stdlib only. Output is JSON of aggregates, no memory content, so it is safe to
 paste into a public issue. First used for nrynss/lambo#108 (0.4.0 vs bef53e6).
 """
-import argparse, json, os, statistics, sys, time, urllib.parse, urllib.request
+import argparse, json, os, re, statistics, sys, time, urllib.error, urllib.parse, urllib.request
 from collections import defaultdict
 from datetime import datetime, timedelta
 
@@ -39,8 +39,22 @@ QUERIES = [
 ]
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    # urllib would follow a 3xx and carry Authorization to the new host.
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(req.full_url, code, f"refusing redirect to {newurl}", headers, fp)
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
 class Mcp:
     def __init__(self, url, token=None):
+        u = urllib.parse.urlsplit(url)
+        if u.scheme not in ("http", "https"):
+            raise ValueError(f"{url!r}: only http and https endpoints are supported")
+        if token and u.scheme == "http" and u.hostname not in ("127.0.0.1", "localhost", "::1"):
+            print(f"warning: sending a bearer token over plaintext HTTP to {u.hostname}", file=sys.stderr)
         self.url, self.token, self.sid, self.n = url, token, None, 0
         self._rpc("initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
                                  "clientInfo": {"name": AGENT, "version": "1"}})
@@ -53,7 +67,7 @@ class Mcp:
         if self.token:
             h["authorization"] = f"Bearer {self.token}"
         req = urllib.request.Request(self.url, json.dumps(body).encode(), h)
-        with urllib.request.urlopen(req, timeout=120) as r:
+        with _OPENER.open(req, timeout=120) as r:
             self.sid = r.headers.get("mcp-session-id") or self.sid
             return r.read().decode()
 
@@ -74,10 +88,12 @@ class Mcp:
         t = time.perf_counter()
         res = self._rpc("tools/call", {"name": name, "arguments": args})
         ms = (time.perf_counter() - t) * 1000
+        if res.get("isError"):
+            return ms, {}, True
         body = res.get("structuredContent")
         if body is None:
             body = json.loads(res["content"][0]["text"])
-        return ms, body, bool(res.get("isError"))
+        return ms, body, False
 
 
 def summ(xs):
@@ -115,11 +131,15 @@ def run_ab(a, b, rounds, derives, token):
             ms, body, err = c.tool("lambo_derive",
                                    concepts=[{"content": content, "concept_type": "observation"}])
             lat[name]["derive_ack"].append(ms)
-            errors[name] += err
+            if err or not body.get("receipt"):
+                errors[name] += 1
+                continue
             t = time.perf_counter()
-            _, st, _ = c.tool("lambo_stats", receipt=body["receipt"], wait_ms=4000)
+            _, st, st_err = c.tool("lambo_stats", receipt=body["receipt"], wait_ms=4000)
             lat[name]["derive_applied"].append(ms + (time.perf_counter() - t) * 1000)
-            if st.get("receipt_state", st.get("receipt", {}).get("state")) not in (None, "applied"):
+            receipt = st.get("receipt")
+            state = receipt.get("state") if isinstance(receipt, dict) else None
+            if st_err or state != "applied":
                 errors[name] += 1
     names = list(sides)
     overlap = []
@@ -133,8 +153,14 @@ def run_ab(a, b, rounds, derives, token):
             "recall_topk_jaccard": summ(overlap)}
 
 
+def parse_ts(ts):
+    # Ledger stamps carry nanoseconds; datetime takes at most microseconds.
+    ts = re.sub(r"Z$", "+00:00", ts)
+    return datetime.fromisoformat(re.sub(r"(\.\d{6})\d+", r"\1", ts))
+
+
 def run_ledger(path, switch, days):
-    sw = datetime.fromisoformat(switch.replace("Z", "+00:00"))
+    sw = parse_ts(switch)
     lo = sw - timedelta(days=days)
     lat = {"old": defaultdict(list), "new": defaultdict(list)}
     err = {"old": defaultdict(int), "new": defaultdict(int)}
@@ -143,13 +169,13 @@ def run_ledger(path, switch, days):
         for line in f:
             try:
                 d = json.loads(line)
-                ts = datetime.fromisoformat(d["ts"][:26] + "+00:00")
+                ts = parse_ts(d["ts"])
             except Exception:
                 continue
             if ts < lo:
                 continue
             side = "new" if ts >= sw else "old"
-            if d.get("kind") == "call" or "duration_us" in d:
+            if d.get("kind") == "call" and {"tool", "duration_us", "outcome"} <= d.keys():
                 if d.get("agent_id") == AGENT:
                     continue
                 lat[side][d["tool"]].append(d["duration_us"] / 1000)
