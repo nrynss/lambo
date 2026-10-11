@@ -173,21 +173,36 @@ fn the_node_write_window_reports_recent_writes_and_refuses_past_its_reach() {
     g.remove_node(bid).unwrap();
     assert_eq!(g.nodes_written_since(start), Some(vec![bid, bid]));
 
+    // A re-upsert that changes only counters or content is not a write a
+    // plan reads, so the window does not record it.
+    let before_counters = g.epoch();
+    let mut touched = match g.node(a) {
+        Some(Node::Concept(c)) => c.clone(),
+        _ => unreachable!(),
+    };
+    touched.access_count += 3;
+    touched.content = "user schema, reworded".into();
+    g.insert_concept(touched.clone(), iid).unwrap();
+    g.bump_gc_survived(&[a]);
+    assert!(g.epoch() > before_counters);
+    assert_eq!(g.nodes_written_since(before_counters), Some(Vec::new()));
+    // A retype is.
+    touched.concept_type = ConceptType::Logic;
+    g.insert_concept(touched, iid).unwrap();
+    assert_eq!(g.nodes_written_since(before_counters), Some(vec![a]));
+
     // Past the window, an old epoch cannot be answered.
     for k in 0..(super::super::txn::NODE_WRITE_WINDOW as u64 + 1) {
-        let c = match g.node(a) {
-            Some(Node::Concept(c)) => {
-                let mut c = c.clone();
-                c.access_count = i32::try_from(k).unwrap();
-                c
-            }
-            _ => unreachable!(),
-        };
-        g.insert_concept(c, iid).unwrap();
+        g.insert_concept(concept(100 + k, iid, &format!("bulk {k}")), iid)
+            .unwrap();
     }
     assert_eq!(g.nodes_written_since(start), None);
     let recent = g.epoch() - 2;
-    assert_eq!(g.nodes_written_since(recent), Some(vec![a]));
+    let last = NodeId(Uuid::from_u64_pair(
+        2,
+        100 + super::super::txn::NODE_WRITE_WINDOW as u64,
+    ));
+    assert_eq!(g.nodes_written_since(recent), Some(vec![last]));
 }
 
 #[cfg(feature = "fixtures")]

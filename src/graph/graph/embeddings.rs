@@ -254,6 +254,8 @@ impl Graph {
                 }
             };
             self.append_mutation(Mutation::UpsertNode { node });
+            // #116: a vector change is one a hybrid plan reads.
+            self.note_plan_relevant_write(id);
         }
         // #22: null the image vectors (source kept), before the contract
         // swap like every other vector change of the batch.
@@ -267,6 +269,8 @@ impl Graph {
                 _ => unreachable!("collected from this graph's concepts above"),
             };
             self.append_mutation(Mutation::UpsertNode { node });
+            // #116: a vector change is one a hybrid plan reads.
+            self.note_plan_relevant_write(id);
         }
         self.embedding = Some(contract.clone());
         self.append_mutation(Mutation::SetEmbedding {
@@ -385,6 +389,8 @@ impl Graph {
                 _ => unreachable!("backfill target validated as a concept above"),
             };
             self.append_mutation(Mutation::UpsertNode { node });
+            // #116: a vector change is one a hybrid plan reads.
+            self.note_plan_relevant_write(id);
         }
         Ok(filled)
     }

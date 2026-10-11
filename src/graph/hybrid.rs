@@ -1686,6 +1686,10 @@ struct PlanRead<'p, 'a> {
 /// 4. **Semantic-merge choices** (correctness over throughput): every
 ///    concept upserted or deleted since the plan, from the graph's
 ///    node-write window, is checked against the plan's ranked text items.
+///    The window holds only changes a plan reads (a concept created or
+///    deleted, or its vector, vector source, canonical key or type changed),
+///    so a counter or status write to a target (a GC survivor bump, a human
+///    confirmation, a canonical re-derive) does not make the plan stale.
 ///    * A change to any merge target (a member of a merge's tied top tier)
 ///      is stale: the target may be gone, re-embedded, or retyped.
 ///    * A live, text-sourced concept with a vector that scores at or above

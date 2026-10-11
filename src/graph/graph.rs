@@ -141,7 +141,7 @@ pub struct Graph {
     /// Whether the holder has logged its first whole-graph fallback for an
     /// overflowing unflushed set (#60 review L-2). RAM-only.
     unflushed_overflow_logged: unflushed::LoggedOnce,
-    /// The most recent node upserts and deletes with their epochs (#116; see
+    /// The most recent plan-relevant concept writes with their epochs (#116; see
     /// `txn.rs`). RAM-only.
     node_writes: txn::NodeWrites,
     /// The open [`Graph::transaction`]'s undo record (#102). `None` outside
@@ -368,11 +368,21 @@ impl Graph {
         }
         let node = Node::Concept(c.clone());
         self.undo_node(c.id);
-        if let Some(Node::Concept(previous)) = self.nodes.insert(c.id, node.clone()) {
-            self.unindex_key(&previous);
-        }
+        // #116: only a change a hybrid plan could have read enters the
+        // node-write window; a re-upsert that rewrites counters, status or
+        // content (a canonical re-derive of an existing concept) does not.
+        let plan_relevant = match self.nodes.insert(c.id, node.clone()) {
+            Some(Node::Concept(previous)) => {
+                self.unindex_key(&previous);
+                txn::plan_relevant_change(&previous, &c)
+            }
+            _ => true,
+        };
         self.index_key(&c);
         self.append_mutation(Mutation::UpsertNode { node });
+        if plan_relevant {
+            self.note_plan_relevant_write(c.id);
+        }
 
         let edge = Edge {
             id: NodeId::new(),
@@ -475,6 +485,7 @@ impl Graph {
         self.temporal_chain.retain(|&x| x != id);
         self.reservations.retain(|r| r.node_id != id);
         self.append_mutation(Mutation::DeleteNode { id });
+        self.note_plan_relevant_write(id);
         Ok(())
     }
 
@@ -658,8 +669,6 @@ impl Graph {
         // #60: at the epoch the drained batch will be stamped with, so the
         // flush can clear exactly what it committed.
         self.note_unflushed(&m);
-        // #116: what a hybrid commit checks its plan against.
-        self.note_node_write(&m);
         self.mutation_log.push(m);
     }
 

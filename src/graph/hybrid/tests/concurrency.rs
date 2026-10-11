@@ -327,6 +327,53 @@ async fn a_removed_merge_target_forces_a_replan() {
     assert_eq!(embeds, 3);
 }
 
+/// #116 review L2: writes that touch a merge target without changing
+/// anything a plan reads (a GC survivor bump, a human confirmation, a
+/// canonical re-derive that re-upserts it unchanged) leave the plan valid.
+/// Before the window was narrowed, each one replanned, so a hot target
+/// could exhaust `MAX_HYBRID_REPLANS`.
+#[tokio::test]
+async fn counter_writes_to_the_merge_target_do_not_force_a_replan() {
+    let (out, target, _rival, attempts, embeds) =
+        merge_race("hybrid-race-target-counters", |g, i, target| {
+            let mut g = g.write();
+            assert_eq!(g.bump_gc_survived(&[target]), 1);
+            g.confirm_human(target).unwrap();
+            let same = match g.node(target) {
+                Some(Node::Concept(c)) => c.clone(),
+                _ => unreachable!(),
+            };
+            g.insert_concept(same, i).unwrap();
+            None
+        })
+        .await;
+    assert_eq!(out.semantic_merged, vec![target], "{out:?}");
+    assert_eq!(attempts, 1, "no replan");
+    assert_eq!(embeds, 3);
+}
+
+/// The other half of L2: a change to the target's vector is something the
+/// plan read, so it replans. Here the target moves below the threshold, and
+/// the replan writes a fresh concept instead of merging.
+#[tokio::test]
+async fn a_merge_target_vector_change_forces_a_replan() {
+    let (out, _target, _rival, attempts, embeds) =
+        merge_race("hybrid-race-target-vector", |g, i, target| {
+            let mut g = g.write();
+            let mut moved = match g.node(target) {
+                Some(Node::Concept(c)) => c.clone(),
+                _ => unreachable!(),
+            };
+            moved.embedding = Some(at_cosine(0.5, 1));
+            g.insert_concept(moved, i).unwrap();
+            None
+        })
+        .await;
+    assert!(out.semantic_merged.is_empty(), "{out:?}");
+    assert_eq!(attempts, 2);
+    assert_eq!(embeds, 3);
+}
+
 /// #102: a commit that fails after it has already written (here the second
 /// item's vector has the wrong width, which only `insert_concept` checks)
 /// leaves the graph exactly as it was: no first concept, no contract stamp,

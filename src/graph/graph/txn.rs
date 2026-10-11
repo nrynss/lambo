@@ -28,21 +28,44 @@
 //!
 //! # The node-write window
 //!
-//! Every node upsert or delete that reaches the log through
-//! `append_mutation` is also recorded here with its epoch, in a bounded ring
-//! of the most recent [`NODE_WRITE_WINDOW`] writes. A hybrid derive asks it
-//! at commit which concepts changed since it planned, so it can check its
-//! plan against just those instead of giving up on any change anywhere
-//! (#116). The ring cannot answer for an epoch older than what it has
-//! evicted; the caller then treats the plan as stale and plans again.
-//! RAM-only; a loaded graph starts with an empty ring that answers from its
-//! load epoch on.
+//! Every concept write a hybrid plan could have read is recorded here with
+//! its epoch, in a bounded ring of the most recent [`NODE_WRITE_WINDOW`]
+//! such writes: a concept created or deleted, or one whose vector, vector
+//! source, canonical key or type changed ([`plan_relevant_change`]).
+//! `insert_concept` compares against the value it replaces, `remove_node`
+//! and the vector rewrites in `embeddings.rs` always record. Counter-only
+//! and status-only writers (GC survivor bumps, human confirmation,
+//! canonization transitions, access bookkeeping) and a re-upsert that
+//! changes none of those fields (a canonical re-derive) do not, so a hot
+//! concept being touched cannot make a plan that ranked it stale.
+//!
+//! A hybrid derive asks the ring at commit which concepts changed since it
+//! planned, so it can check its plan against just those instead of giving
+//! up on any change anywhere (#116). A new writer that changes one of those
+//! fields must call `note_plan_relevant_write`. The ring cannot answer for
+//! an epoch older than what it has evicted; the caller then treats the plan
+//! as stale and plans again. RAM-only; a loaded graph starts with an empty
+//! ring that answers from its load epoch on.
 
 use std::collections::{HashMap, VecDeque};
 use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 
 use super::Graph;
-use crate::types::{Edge, EmbeddingContract, LamboError, Mutation, Node, NodeId, Reservation};
+use crate::types::{
+    Concept, Edge, EmbeddingContract, LamboError, Mutation, Node, NodeId, Reservation,
+};
+
+/// Whether replacing `previous` with `next` changes anything a hybrid plan
+/// reads about a concept that already exists: its vector or the vector's
+/// source (merge ranking, the image exclusion), its canonical key (matching,
+/// the tie-break) or its type (Observations are never matched). Counters,
+/// status, content and timestamps are not read by a plan.
+pub(super) fn plan_relevant_change(previous: &Concept, next: &Concept) -> bool {
+    previous.embedding != next.embedding
+        || previous.embedding_source != next.embedding_source
+        || previous.canonical_key != next.canonical_key
+        || previous.concept_type != next.concept_type
+}
 
 /// How many recent node writes [`Graph::nodes_written_since`] can answer
 /// for. A derive's plan-to-commit window spans its embeds; 8,192 node writes
@@ -163,13 +186,11 @@ impl Graph {
         self.node_writes.since(epoch)
     }
 
-    /// Feed the node-write ring; called by `append_mutation` only.
-    pub(super) fn note_node_write(&mut self, m: &Mutation) {
-        let id = match m {
-            Mutation::UpsertNode { node } => node.id(),
-            Mutation::DeleteNode { id } => *id,
-            _ => return,
-        };
+    /// Record, at the current epoch, that concept `id` changed in a way a
+    /// hybrid plan reads (see the module docs). Called right after the
+    /// mutation is appended, by every writer that creates or deletes a
+    /// concept or changes one of [`plan_relevant_change`]'s fields.
+    pub(super) fn note_plan_relevant_write(&mut self, id: NodeId) {
         self.node_writes.record(self.epoch, id);
     }
 
