@@ -1839,7 +1839,7 @@ thread_local! {
 }
 
 /// How many plan attempts this thread's hybrid derives have started.
-#[cfg(test)]
+#[cfg(all(test, feature = "embed-fixture"))]
 pub(crate) fn plan_attempts() -> usize {
     ATTEMPTS.with(std::cell::Cell::get)
 }
@@ -1852,7 +1852,7 @@ thread_local! {
 }
 
 /// The write-lock hold of this thread's last successful hybrid commit.
-#[cfg(test)]
+#[cfg(all(test, feature = "embed-fixture"))]
 pub(crate) fn last_commit_duration() -> Option<Duration> {
     LAST_COMMIT.with(std::cell::Cell::get)
 }
