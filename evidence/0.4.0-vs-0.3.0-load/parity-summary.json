@@ -1,0 +1,175 @@
+{
+  "meta": {
+    "bin_a": "~/lambo-dogfood/bin/lambo-0.3.0",
+    "bin_b": "~/lambo-dogfood/bin/lambo-0.4.0",
+    "snapshot": "~/lambo-dogfood/backup-pre-0.4.0-20261011-084541.db",
+    "T": "2026-10-08T15:04:38.933Z",
+    "n_calls": 330,
+    "n_derive": 206,
+    "n_action": 94,
+    "n_variants": 30,
+    "n_warn": 0,
+    "truncation": {
+      "edges": 2137,
+      "concepts": 797,
+      "interactions": 300,
+      "canon_status_rolled_back": 279,
+      "canonization_events": 293,
+      "write_intents": 1,
+      "reservations": 0,
+      "session_leases": 0,
+      "lease_refusals": 1,
+      "session_stats": 1
+    },
+    "reconstruction_warnings": [],
+    "tool_calls": {
+      "a": 671,
+      "b": 665
+    },
+    "exit_codes": {
+      "a": 0,
+      "b": 0
+    }
+  },
+  "totals": {
+    "a": {
+      "calls": 330,
+      "state:applied": 329,
+      "created_count": 817,
+      "matched_count": 4,
+      "edges": 765,
+      "semantic_merged": 40,
+      "reinforced": 0,
+      "embedded": 401,
+      "state:failed": 1
+    },
+    "b": {
+      "calls": 330,
+      "state:applied": 326,
+      "created_count": 812,
+      "matched_count": 4,
+      "edges": 765,
+      "embedded": 812,
+      "semantic_merged": 41,
+      "reinforced": 0,
+      "state:failed": 1,
+      "state:refused": 3
+    }
+  },
+  "store": {
+    "base": {
+      "concepts": 4152,
+      "embedded": 4152,
+      "unembedded": 0,
+      "interactions": 1457,
+      "concepts_by_type": {
+        "Constraint": 373,
+        "Entity": 663,
+        "Logic": 731,
+        "Observation": 560,
+        "Resource": 1825
+      },
+      "edges_by_type": {
+        "Causal": 1851,
+        "CoOccurrence": 1418,
+        "Dependency": 954,
+        "Derives": 4175,
+        "Hierarchical": 44,
+        "Semantic": 36,
+        "Temporal": 1456
+      },
+      "canonization_status": {
+        "None": 4152
+      },
+      "edges": 9934
+    },
+    "a": {
+      "concepts": 4969,
+      "embedded": 4969,
+      "unembedded": 0,
+      "interactions": 1787,
+      "concepts_by_type": {
+        "Constraint": 471,
+        "Entity": 769,
+        "Logic": 990,
+        "Observation": 595,
+        "Resource": 2144
+      },
+      "edges_by_type": {
+        "Causal": 2496,
+        "CoOccurrence": 1662,
+        "Dependency": 1074,
+        "Derives": 4992,
+        "Hierarchical": 46,
+        "Semantic": 76,
+        "Temporal": 1786
+      },
+      "canonization_status": {
+        "Candidate": 428,
+        "None": 4527,
+        "Venerable": 14
+      },
+      "edges": 12132
+    },
+    "b": {
+      "concepts": 4964,
+      "embedded": 4964,
+      "unembedded": 0,
+      "interactions": 1784,
+      "concepts_by_type": {
+        "Constraint": 471,
+        "Entity": 769,
+        "Logic": 985,
+        "Observation": 595,
+        "Resource": 2144
+      },
+      "edges_by_type": {
+        "Causal": 2496,
+        "CoOccurrence": 1659,
+        "Dependency": 1074,
+        "Derives": 4987,
+        "Hierarchical": 46,
+        "Semantic": 77,
+        "Temporal": 1783
+      },
+      "canonization_status": {
+        "Candidate": 427,
+        "None": 4523,
+        "Venerable": 14
+      },
+      "edges": 12122
+    }
+  },
+  "canonization": {
+    "status_counts": {
+      "base": {
+        "None": 4152
+      },
+      "a": {
+        "Candidate": 428,
+        "None": 4527,
+        "Venerable": 14
+      },
+      "b": {
+        "Candidate": 427,
+        "None": 4523,
+        "Venerable": 14
+      }
+    },
+    "events_since_T": {
+      "a": {
+        "Candidate->Venerable": 14,
+        "None->Candidate": 442
+      },
+      "b": {
+        "Candidate->Venerable": 14,
+        "None->Candidate": 441
+      }
+    }
+  },
+  "differing_by_reason": {
+    "record_action receipt gains `embedded` (0.4.0, intended)": 94,
+    "semantic merge into a concept written during the replay: SQLite holder ranks unflushed concepts in RAM (#8, intended)": 43,
+    "refused by 0.4.0: concept text contains a token that is a valid image suffix after normalization ([image:<id>], #22 PR 4, intended)": 3
+  }
+}
