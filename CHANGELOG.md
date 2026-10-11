@@ -89,6 +89,12 @@
     merge target also sends it round again. So does a change to the target.
   - A replan reuses every vector the derive has already embedded, so it
     makes no embedder call for them.
+  - The recheck is bounded so it cannot hold the write lock for long; a
+    derive over the bound plans again. Its last attempt checks with a much
+    higher bound, so a large derive under a steady stream of unrelated
+    writes still commits. One that cannot fails with "... more was written
+    to the graph during each one than its plan can be rechecked against
+    ...; split the call" rather than the old message.
   - For a single writer, derive outcomes are unchanged.
 - A hybrid derive's commit no longer copies the whole session graph under
   the write lock (#102). The copy cost grew with the session (10.7 ms at
@@ -101,7 +107,9 @@
     now use an index instead of scanning every concept.
   - The commit's write-lock hold is now about 20 µs at 10,000, 50,000 and
     100,000 concepts (release build, M3 Pro), down from 6.8 ms at 10,000
-    and 36 ms at 50,000 measured the same way.
+    and 36 ms at 50,000 measured the same way. Rechecking a plan under
+    concurrent writes adds at most about 6 ms (about 180 ms on a derive's
+    final attempt).
 - A `parent_of` pair that would close a `Hierarchical` cycle is now
   refused, with nothing written, in both match strategies. Before, only a
   pair naming the same concept twice was refused. So `parent_of: [(a, b)]`
