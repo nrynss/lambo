@@ -1,0 +1,115 @@
+{
+  "window_days_before_switch": 3,
+  "switch": "2026-10-11T03:15:44Z",
+  "latency_ms": {
+    "old": {
+      "lambo_recall": {
+        "n": 303,
+        "p50": 778.21,
+        "p90": 1320.42,
+        "p99": 5714.16,
+        "mean": 1007.81,
+        "max": 13434.8
+      },
+      "lambo_derive": {
+        "n": 290,
+        "p50": 2.08,
+        "p90": 3.7,
+        "p99": 21.91,
+        "mean": 2.59,
+        "max": 56.11
+      },
+      "lambo_record_action": {
+        "n": 140,
+        "p50": 3.37,
+        "p90": 7.59,
+        "p99": 75.58,
+        "mean": 5.32,
+        "max": 78.86
+      },
+      "lambo_stats": {
+        "n": 11,
+        "p50": 1.68,
+        "p90": 2.56,
+        "p99": 2.77,
+        "mean": 1.48,
+        "max": 2.77
+      },
+      "lambo_inspect": {
+        "n": 1,
+        "p50": 31.24,
+        "p90": 31.24,
+        "p99": 31.24,
+        "mean": 31.24,
+        "max": 31.24
+      }
+    },
+    "new": {
+      "lambo_stats": {
+        "n": 2,
+        "p50": 0.71,
+        "p90": 1.48,
+        "p99": 1.48,
+        "mean": 1.1,
+        "max": 1.48
+      },
+      "lambo_derive": {
+        "n": 2,
+        "p50": 1.43,
+        "p90": 2.74,
+        "p99": 2.74,
+        "mean": 2.09,
+        "max": 2.74
+      },
+      "lambo_recall": {
+        "n": 1,
+        "p50": 111.0,
+        "p90": 111.0,
+        "p99": 111.0,
+        "mean": 111.0,
+        "max": 111.0
+      },
+      "lambo_record_action": {
+        "n": 1,
+        "p50": 1.31,
+        "p90": 1.31,
+        "p99": 1.31,
+        "mean": 1.31,
+        "max": 1.31
+      }
+    }
+  },
+  "error_count": {
+    "old": {
+      "lambo_recall": 0,
+      "lambo_derive": 0,
+      "lambo_record_action": 0,
+      "lambo_stats": 0,
+      "lambo_inspect": 1
+    },
+    "new": {
+      "lambo_stats": 0,
+      "lambo_derive": 0,
+      "lambo_recall": 0,
+      "lambo_record_action": 0
+    }
+  },
+  "flush_lag_ms": {
+    "old": {
+      "n": 729,
+      "p50": 339215,
+      "p90": 10142542,
+      "p99": 25217510,
+      "mean": 2651407.98,
+      "max": 27317512
+    },
+    "new": {
+      "n": 26,
+      "p50": 34,
+      "p90": 39,
+      "p99": 66,
+      "mean": 31.31,
+      "max": 66
+    }
+  }
+}
