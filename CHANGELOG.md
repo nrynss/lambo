@@ -1,6 +1,149 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 (2026-10-12)
+
+### Highlights
+
+Measured on an Apple M3 Pro with the candle BGE-M3 embedder on Metal, against
+copies of a real store (4,949 concepts for the concurrent runs). The
+concurrent runs use `scripts/loadtest/mcp_concurrent.py` for 120 s with a
+40/38/18/4 mix of recall, derive, record_action and stats. The method and the
+aggregate files are in `evidence/0.5.0-acceptance/`.
+
+- **Concurrent writers no longer fail (#116).** With 8 agents, 0.4.0 failed
+  249 of 519 writes ("hybrid derive could not commit after 8 concurrent graph
+  changes"). 0.5.0 applied 522 of 522 with none failed, and a write reached
+  the graph 93 ms after its ack at p50 (146 ms at p90). With 16 agents, 0.5.0
+  applied 1,999 of 1,999, with none failed or dropped. Apply latency at 16
+  agents is still high (see Known issues, #125).
+- **A derive's commit no longer stalls the session (#102).** The commit's
+  write-lock hold (release build) fell from 6.8 ms to 16.5 µs at 10,000
+  concepts, from 36.2 ms to 17 µs at 50,000, and from 168 ms to 21 µs at
+  100,000. Every recall and write on the session used to wait behind it.
+- **A proxying serve no longer loads the model (#31).** On Metal, the
+  embedder of a `lambo serve` that becomes a proxy now takes about 4 MB
+  instead of about 1.4 GB. The candle weight digest is cached, so a start
+  with an unchanged model reads its identity in under 1 ms instead of
+  hashing 1.1 GB.
+- **Same write outcomes as 0.4.0.** A replay of 293 real write calls through
+  0.4.0 and 0.5.0 gave identical write outcomes. One call that 0.4.0 failed
+  on its 30 s I/O deadline, because it re-embedded on every replan, applies
+  in 5 s on 0.5.0. With canonization switched off during the replay, the two
+  final stores are field-identical, and a fixed-clock evaluation of them is
+  byte-identical.
+- **Cycles are refused (#116 review).** A `parent_of` pair or a
+  `record_action` edge that would close a cycle in an acyclic relationship is
+  refused with nothing written, and the caller is told why.
+- **Honest durability and lease answers (#117, #118).** A write the close
+  could not flush answers the new receipt state `close_unflushed` instead of
+  "durable intent". The docs now say what a crash can lose. A lease refusal
+  reports the lease row's facts instead of claiming the holder is alive.
+- **CUDA 13.4 builds directly (#111).** `embed-candle-cuda` no longer needs
+  `CUDARC_CUDA_VERSION=13030` to build against CUDA 13.4.
+
+### Upgrading from 0.4.0
+
+1. **No re-provision is needed.** No schema or migration changed since
+   0.4.0, and no `lambo.toml` key was added. A 0.4.0 store attaches as it is.
+   The toolchain is unchanged (Rust 1.99, edition 2024). A CUDA build
+   against 13.4 can drop `CUDARC_CUDA_VERSION=13030`.
+2. **Update library code.** The details are under Breaking (library API) and
+   Changed.
+   - `lambo::writeq::ReceiptAnswer` has a new variant, `CloseUnflushed`, and
+     is now `#[non_exhaustive]`. A `match` on it outside this crate needs a
+     wildcard arm.
+   - `Embedder` gains `prepare` and `is_prepared`, both with defaults, so
+     existing adapters compile unchanged. A wrapping embedder should forward
+     both.
+   - `CandleEmbedder::new` still loads eagerly. `CandleEmbedder::deferred`
+     builds one that loads on `prepare`.
+3. **Check these behaviour changes.**
+   - **Cycle refusals.** A `lambo_derive` whose `parent_of` pairs would close
+     a `Hierarchical` cycle is refused with "store error: parent_of would
+     close a Hierarchical cycle (the hierarchy must stay acyclic); nothing
+     was written". A `lambo_record_action` whose edges would close a Causal
+     or Dependency cycle now says so ("store error: record_action would close
+     a Causal or Dependency cycle ...; nothing was written") instead of the
+     generic store error. Nothing from the call is written. A `parent_of`
+     cycle the graph already shows is refused when the call is accepted;
+     otherwise the refusal comes when the write is applied, so check the
+     receipt. A durable write refused this way at replay settles `failed`,
+     and the replay goes on.
+   - **New receipt state `close_unflushed`.** A write still pending when the
+     session closed answers `intent_durable` only once the close's final
+     flush has completed. If that flush did not complete, it answers
+     `close_unflushed`: the write may or may not have been saved, so recall
+     before re-deriving. A client that switches on receipt states must
+     handle it. There are now twelve states.
+   - **`wait_ms` at close.** A `lambo_stats` `wait_ms` waiter on a write
+     still pending at close is released when the close's final flush
+     reports, so it can wait up to the close's flush bound. It used to be
+     released at the queue quiesce.
+   - **Crash durability.** The docs no longer say an acked write is durable
+     at admission. A clean shutdown loses no acked write. A crash (SIGKILL,
+     an OOM kill, power loss) can lose the writes acked since the last flush
+     (`backend_flush_interval`, 1 s by default). Those writes are not
+     replayed, and their receipts answer `restart_lost` on the next server.
+   - **The candle model loads at attach.** With `[embedder] kind = "candle"`,
+     the resolve now only identifies the artifact and reads its width from
+     `config.json`. The weights reach the device once a serve has won the
+     session's lease, inside the attach and before it serves. So an error
+     loading the tokenizer or the weights now surfaces at attach rather than
+     at startup. A corrupt or changed artifact (a truncated weight file,
+     a missing tensor, a file that differs from the one the resolve
+     identified) fails the attach permanently. A load that fails for lack of
+     memory or a busy device is retried. A `hidden_size` that differs from
+     `embedder.dim` is refused at resolve. `lambo serve-web` still loads the
+     model at startup.
+   - **Proxies and keep-warm.** A `lambo serve` that becomes a proxy, or is
+     refused for a mismatched embedding contract, never loads the model.
+     Keep-warm skips its touch until a session has loaded the model, so an
+     HTTP serve that holds no session yet stays light.
+   - **Candle identity cache.** The weight, `config.json` and
+     `tokenizer.json` digests are cached under
+     `$XDG_CACHE_HOME/lambo/candle-identity` (else
+     `~/.cache/lambo/candle-identity`), created 0700. The first start of
+     0.5.0 still hashes the 1.1 GB weight file once to fill the cache; later
+     starts with unchanged files skip it. A changed file is hashed again. An
+     unusable cache only costs the hash. There is no cache outside Unix.
+   - **Lease refusal wording.** A refused lease no longer says the holder
+     "is still refreshing it". It reports when the lease was last refreshed
+     and when it expires. When the holder names this host and its pid is not
+     visible here, it says the holder's process looks gone, hedged, and
+     points to the takeover note. `lambo erase-session`, the HTTP erase and
+     `recall-index backfill` no longer call the holder "a live writer". A
+     script that matches the old text needs updating. Lease acquisition,
+     fencing and takeover are unchanged.
+
+### Known issues
+
+- Write apply latency grows with concurrent agents
+  ([#125](https://github.com/nrynss/lambo/issues/125)). Each hybrid derive
+  embeds its own items one write at a time, so the embedder is the
+  bottleneck. At 16 agents a write reaches the graph 7.1 s after its ack at
+  p50 (12.3 s at p90), against 93 ms at 8 agents. Nothing fails or is
+  dropped, and the queue drains about 5 s after load stops, but an agent
+  that derives and then recalls will usually not see its own write unless it
+  waits on the receipt.
+- The lease holder string `agent@host#pid` does not identify a process
+  across PID namespaces ([#126](https://github.com/nrynss/lambo/issues/126)).
+  Containers on the host network share the host name, two hosts that both
+  fall back to `unknown-host` match, and a pid can be reused after a reboot.
+  So the "looks gone" hint in a lease refusal stays a hedge: a live holder
+  can look gone. Nothing takes over automatically.
+- A crash can lose the writes acked in the last flush interval (#117), by
+  design. The write intent rides the write-behind log and reaches the store
+  with the next flush (1 s by default). A clean shutdown loses none.
+- Recall scores and the merge threshold are not calibrated per embedder
+  ([#87](https://github.com/nrynss/lambo/issues/87)). They were tuned on
+  BGE-M3. Under EmbeddingGemma 2, irrelevant vector hits score high and
+  outrank the recent leg, and most paraphrases stay unmerged.
+- Some live database tests run only by hand. CI's `postgres-live` job runs a
+  fixed set, which does not yet include #60's live merge-freshness test.
+  The `cockroach-live` job is disabled.
+- There is no Windows binary
+  ([#39](https://github.com/nrynss/lambo/issues/39)). v0.2.2 is the last
+  release with one.
 
 ### Breaking (library API)
 
@@ -43,8 +186,9 @@
   hedged because a host name is not a PID namespace, gives the time until
   the lease expires and points to the takeover note; `serve`'s budget
   refusal then ends "or have an operator take over" rather than "or stop
-  the other holder". `lambo erase-session`, the HTTP erase and `recall-index backfill`
-  refusals no longer call the holder "a live writer". Lease acquisition and
+  the other holder". `lambo erase-session`, the HTTP erase and
+  `recall-index backfill` refusals no longer call the holder "a live
+  writer". Lease acquisition and
   fencing are unchanged, and nothing takes over automatically.
 - **A `lambo serve` that becomes a proxy no longer loads the candle model
   (#31).** The resolve used to load the whole embedder (about 1.1 GB of
@@ -131,6 +275,12 @@
   Before, it stopped the replay as a session-wide fault, so every later
   durable write of the session stayed `pending_replay` until an operator
   intervened.
+- `scripts/observability/dedup_rate.py` reported `sem.merged = 0` for every
+  bucket (#112). It now reads `semantic_merged` and `reinforced` off the
+  applied completion lines, shows `n/a` for a ledger from before 0.4.0 and a
+  lower bound (`N+`) for one that spans the upgrade, and `--store` counts the
+  Semantic edges created inside the ledger's derive window.
+  `duplicates.py` marks partial figures the same way.
 
 ### Changed
 
@@ -148,6 +298,25 @@
   with the other methods. `CandleEmbedder::deferred`, `load`, `is_loaded` and
   `load_count` are new; `CandleEmbedder::new` still loads eagerly.
   `lambo serve-web` loads the embedder at startup, before it listens.
+
+### Added
+
+- `Graph::transaction`, `Graph::hierarchical_path` and
+  `Graph::concept_by_key` (#102, #116), and `StoreError::is_cycle_refusal`.
+  All are additive.
+- Load-test harnesses in `scripts/loadtest/` (see its README):
+  - `mcp_ab.py` (#109): a latency A/B between two serve builds on copies of
+    one store, with per-path percentiles and a top-k overlap check.
+  - `mcp_concurrent.py` (#120): N concurrent agents on a weighted
+    recall/derive/record_action/stats mix, reporting aggregates, the
+    server's `write_queue_*` counters after a drain, and each acked write's
+    receipt outcome. Since #124 it paces its receipt queries
+    (`--receipt-rps`, 40/s by default) and retries a rate-limited one, so a
+    long run no longer counts most receipts as `query_error`.
+  - `replay_parity.py` (#120): replays a store's recent real write calls
+    through two builds and classifies every difference against a reason
+    catalogue (`--reasons`).
+- Evidence for this release in `evidence/0.5.0-acceptance/`.
 
 
 ## 0.4.0 (2026-10-11)
