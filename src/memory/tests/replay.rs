@@ -13,6 +13,18 @@ pub(super) use crate::test_util::VectorSearchable;
 /// at close, which is the case J3's durable intents exist for.
 struct HangingEmbedder {
     inner: FixtureEmbedder,
+    /// Real-content calls that have entered the hang, so a test can wait for
+    /// a job to be inside the embedder rather than sleep for it.
+    entered: Arc<AtomicUsize>,
+}
+
+impl HangingEmbedder {
+    fn new() -> Self {
+        Self {
+            inner: FixtureEmbedder::new(),
+            entered: Arc::new(AtomicUsize::new(0)),
+        }
+    }
 }
 
 #[async_trait]
@@ -52,6 +64,7 @@ impl HangingEmbedder {
         if text.contains(crate::writeq::PROBE_TEXT) {
             return role.embed(&self.inner, text).await;
         }
+        self.entered.fetch_add(1, Ordering::SeqCst);
         std::future::pending().await
     }
 }
@@ -75,9 +88,7 @@ async fn an_acked_write_survives_a_clean_close_as_a_durable_intent_and_replays()
         .agent("agent-a")
         .flush_interval(Duration::from_secs(3_600))
         .store(Arc::new(VectorSearchable(inner.clone())) as Arc<dyn GraphStore>)
-        .embedder(Arc::new(HangingEmbedder {
-            inner: FixtureEmbedder::new(),
-        }) as Arc<dyn Embedder>)
+        .embedder(Arc::new(HangingEmbedder::new()) as Arc<dyn Embedder>)
         .embedding_contract(contract("fixture", 1024))
         .match_strategy(MatchStrategy::Hybrid)
         .build()
@@ -245,9 +256,7 @@ async fn defer_one_intent(
         .agent(agent.as_str())
         .flush_interval(Duration::from_secs(3_600))
         .store(Arc::new(VectorSearchable(inner.clone())) as Arc<dyn GraphStore>)
-        .embedder(Arc::new(HangingEmbedder {
-            inner: FixtureEmbedder::new(),
-        }) as Arc<dyn Embedder>)
+        .embedder(Arc::new(HangingEmbedder::new()) as Arc<dyn Embedder>)
         .embedding_contract(contract("fixture", 1024))
         .match_strategy(MatchStrategy::Hybrid)
         .build()
@@ -699,16 +708,16 @@ async fn a_wait_on_a_replay_owed_receipt_ends_when_the_session_closes() {
 async fn undrainable_write(
     session: &str,
     store: Arc<dyn GraphStore>,
-) -> (Memory, AgentId, crate::writeq::ReceiptId) {
+) -> (Memory, AgentId, crate::writeq::ReceiptId, Arc<AtomicUsize>) {
     let agent = AgentId::new("agent-a");
+    let embedder = HangingEmbedder::new();
+    let entered = embedder.entered.clone();
     let mem = Memory::builder()
         .session(session)
         .agent("agent-a")
         .flush_interval(Duration::from_secs(3_600))
         .store(store)
-        .embedder(Arc::new(HangingEmbedder {
-            inner: FixtureEmbedder::new(),
-        }) as Arc<dyn Embedder>)
+        .embedder(Arc::new(embedder) as Arc<dyn Embedder>)
         .embedding_contract(contract("fixture", 1024))
         .match_strategy(MatchStrategy::Hybrid)
         .build()
@@ -724,7 +733,7 @@ async fn undrainable_write(
         .await
         .expect("ack");
     assert!(!submitted.dropped(), "the write must be ADMITTED");
-    (mem, agent, submitted.receipt)
+    (mem, agent, submitted.receipt, entered)
 }
 
 /// #117 review M1: a close whose final flush FAILS must not answer
@@ -738,7 +747,7 @@ async fn a_failed_final_flush_answers_close_unflushed_until_a_retry_lands_it() {
         Arc::new(VectorSearchable(inner.clone())) as Arc<dyn GraphStore>,
         1,
     ));
-    let (mem, agent, receipt) = undrainable_write("close-unflushed", store).await;
+    let (mem, agent, receipt, _) = undrainable_write("close-unflushed", store).await;
 
     mem.close()
         .await
@@ -778,17 +787,24 @@ async fn a_failed_final_flush_answers_close_unflushed_until_a_retry_lands_it() {
 async fn a_lease_lost_close_answers_close_unflushed() {
     let inner = Arc::new(MemoryStore::new());
     let session = SessionId::new("close-fenced");
-    let (mem, agent, receipt) = undrainable_write(
+    let (mem, agent, receipt, entered) = undrainable_write(
         "close-fenced",
         Arc::new(VectorSearchable(inner.clone())) as Arc<dyn GraphStore>,
     )
     .await;
 
-    // Let the lane worker take the job into the (hanging) embedder before the
-    // fence: a job still queued at the fence is refused by the worker's own
-    // per-job check (`failed`, its own honest message) and never reaches the
-    // close's set-aside.
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Wait until the lane worker has taken the job into the (hanging)
+    // embedder before the fence: a job still queued at the fence is refused
+    // by the worker's own per-job check (`failed`, its own honest message)
+    // and never reaches the close's set-aside.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while entered.load(Ordering::SeqCst) == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the job never reached the embedder"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
     inner.force_expire_lease(&session);
     let taker = LeaseHolder::for_this_process(&AgentId::new("agent-b"));
     assert!(inner
