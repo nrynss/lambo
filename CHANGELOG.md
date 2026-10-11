@@ -30,7 +30,10 @@
   flush completes upgrades it to `intent_durable`. The ledger writes a
   `close_unflushed` completion line for it, and `write_queue_deferred`
   counts only writes the close made durable. `scripts/loadtest/
-  check_durability.py` recognises the new answer.
+  check_durability.py`, `mcp_concurrent.py` and `replay_parity.py`
+  recognise the new answer. A `wait_ms` waiter on a write still pending at
+  close is now released when the final flush reports (so up to the close's
+  flush bound), not at the queue quiesce.
 - A refused lease no longer claims the holder "is still refreshing it"
   (#118). A lease row cannot tell a live holder from one that crashed before
   its lease expired, so the refusal now reports the row's facts: when the
