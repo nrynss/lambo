@@ -114,11 +114,18 @@ holding the key and the digest; written by temp file and rename.
   at debug and only costs the next start a hash. No cache directory: hash
   every time (the old behaviour).
 * Trust (review L4): the directory is created 0700 and entries are written
-  0600. An entry is trusted only if both the directory and the entry are
-  owned by the effective uid and are not group- or world-writable (checked
-  with `symlink_metadata`, so a symlinked entry is a miss too); anything else
-  is a miss and the bytes are hashed. So only a process that could already
-  rewrite the weights can plant a digest.
+  0600. The directory is trusted only if it is a real directory owned by the
+  effective uid; one of ours that is group- or world-writable (a umask of
+  002) is tightened to 0700 first (second review L-A). An entry is opened
+  with `O_NOFOLLOW` and trusted only if the open descriptor is a regular
+  file owned by the effective uid and not group- or world-writable (second
+  review L-B). Anything else is a miss and the bytes are hashed, with one
+  warning per process naming the path, so a cache that never hits is
+  visible. Only a process that could already rewrite the weights can plant a
+  digest.
+* Non-unix (second review L-C, #39): the fingerprint and ownership code is
+  `cfg(unix)`; elsewhere the fingerprint is path, size and mtime, and there
+  is no cache (every construction hashes).
 * **Trade-off, accepted:** it replaces "hash the bytes on every start"
   (K2-R1-8) with "hash the bytes whenever their metadata changes", which is
   what the issue asked for. A cache hit does not read the bytes, so silent
@@ -134,13 +141,21 @@ holding the key and the digest; written by temp file and rename.
 
 The identity is stamped at resolve, but the load can run much later (a
 pinned session's background retry, an on-demand attach, hours or days
-after the start). `deferred` records the fingerprint of the weights (taken
-before they are hashed), `config.json` and `tokenizer.json` in the
-`LoadPlan`; `load` re-takes each and refuses on any difference with
-`EmbedError::Backend` ("changed after this process resolved its identity";
-restart to re-resolve). So the bytes on the device are always the bytes the
-stamped contract describes; a file that changed while it was being hashed
-also fails this check.
+after the start). `deferred` records each artifact file (the weights, with
+the fingerprint taken before they were hashed, `config.json` and
+`tokenizer.json`) with its fingerprint and sha256 in the `LoadPlan`. `load`
+checks each one **before** the device load and **again after it** (second
+review M-C: mapping the weights takes seconds, and a file swapped while it
+ran would otherwise put unverified bytes on the device; on a mismatch the
+loaded model is dropped before anything can embed with it).
+
+The check (second review M-B): an unchanged fingerprint passes at once. A
+changed one is not by itself a refusal, because a chmod, an xattr, an extra
+hard link or a backup tool moves ctime with identical bytes; the file is
+re-hashed, and only a different digest refuses, with `EmbedError::Backend`
+naming the fields that changed and both digest prefixes ("restart the
+process to resolve the new artifact"). The cache key keeps ctime: a
+metadata-only change just costs the next start a hash.
 
 ## Load order and error classes (review L2, L3)
 
@@ -149,11 +164,18 @@ weights and builds the model, so a corrupt `tokenizer.json` is refused before
 ~1.1 GB is read. Classes:
 
 * `EmbedError::Backend` (permanent): a changed artifact, a tokenizer that does
-  not parse, an unsupported weight-file extension, a panicked load task.
+  not parse, an unsupported weight-file extension, a panicked load task, and
+  (second review M-A) any candle error that is the artifact's fault: a
+  safetensors header or offsets that do not parse (a truncated or corrupt
+  file), a missing tensor, a shape or dtype that does not match the config.
   `build_attach` maps it to `LamboError::Config`, so a pinned session goes to
   `Slot::Failed` until the serve is restarted.
-* `EmbedError::Unavailable` (transient): mapping the weights or building the
-  model on the device (memory pressure, a busy or failing device).
+* `EmbedError::Unavailable` (transient): a candle I/O, CUDA or Metal error
+  while mapping the weights or building the model (memory pressure, a busy or
+  failing device). `candle_load_error` classes by the candle error variant,
+  looking through its path, context and backtrace wrappers. No escalation
+  after N identical transient failures: the pinned retry's 5 s cadence and
+  its log-once rule bound the cost.
   `build_attach` maps it to `LamboError::EmbedUnavailable`, which the pinned
   retry treats like an unreachable embedder: the slot stays held-elsewhere and
   is retried every `PINNED_RETRY`.
@@ -244,6 +266,15 @@ cheap identity in its registry arm, the heavy part in `prepare`.
   (review L4).
 * `mcp::serve::tests::registry::a_transient_model_load_failure_is_retried_and_a_permanent_one_is_not`
   (review L2).
+* Second review: `a_truncated_weight_file_is_a_permanent_load_failure` (M-A,
+  plus the classifier on wrapped errors),
+  `a_metadata_only_change_after_resolve_still_loads` (M-B, a chmod),
+  `a_swap_during_the_load_is_refused_after_it` (M-C, through a test hook
+  between the pre-load check and the load),
+  `a_loose_cache_directory_of_ours_is_tightened_and_used` (L-A), and the
+  symlinked-entry case in `the_identity_cache_trusts_only_private_entries`
+  (L-B). The holder test now pins its embed counter with an explicit embed
+  through the holder's embedder (L-D).
 
 The candle tests run in CI's `embed-candle` row with no network and no cached
 weights: `embed::candle::test_artifact` writes a tiny real artifact (1024
