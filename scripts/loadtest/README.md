@@ -236,10 +236,15 @@ relative to the replayed writes, not only on the build. The canonization
 counts vary between two runs of the same build (0.4.0 alone gave 401 to 433
 across timer settings), and a run of one build against itself also flags
 calls whose semantic merge picked a different target. For a
-timing-independent comparison, replay with canonization off, for example
-`--canon-eval-secs 100000000 --canon-wait 0`, keep the work directory
-(`--keep-work`), then compare the two final stores directly and run
-canonization offline over each at a fixed clock. See
+timing-independent comparison, keep canonization from running during the
+replay: pass a very large `--canon-eval-secs` (for example `100000000`) so
+the timer never fires, and `--canon-wait 0` to skip the final idle wait. This
+works only when the config template has no `[daemon]` section, because
+`write_config` leaves an existing one as it is (the run logs a line when it
+does). Keep both final stores with `--keep-work` and compare them directly.
+This harness has no offline canonization command. The 0.5.0 check ran a
+scratch program that drives the real `Evaluator::eval_cycle` with an injected
+clock over each final store. See
 [`evidence/0.5.0-acceptance/`](../../evidence/0.5.0-acceptance/README.md).
 
 ## How the driver is shaped (so refusals don't crowd out the measurement)
