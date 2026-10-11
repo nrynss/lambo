@@ -202,7 +202,7 @@ Cargo features select which adapters are compiled in. List fewer to get a smalle
 | `embed-candle` | In-process BGE-M3 through candle (`kind = "candle"`), CPU backend only. Builds anywhere. |
 | `embed-candle-metal` | `embed-candle` plus the Metal GPU backend. Apple silicon only. This is what the Metal release asset adds to `ship`. |
 | `embed-candle-accelerate` | `embed-candle` plus Apple's Accelerate framework for the CPU backend. macOS only. |
-| `embed-candle-cuda` | `embed-candle` plus the CUDA GPU backend. Needs a CUDA toolkit at build time and an NVIDIA GPU at runtime. With CUDA 13.4, 0.4.0 fails to build because its `cudarc` knows versions only up to 13.3 (#111); set `CUDARC_CUDA_VERSION=13030` for the build. A 13.3 build runs on a 13.4 driver. |
+| `embed-candle-cuda` | `embed-candle` plus the CUDA GPU backend. Needs a CUDA toolkit at build time and an NVIDIA GPU at runtime. Building 0.4.0 against CUDA 13.4 fails because its `cudarc` knows versions only up to 13.3 (#111); for 0.4.0, set `CUDARC_CUDA_VERSION=13030` for the build (a 13.3 build runs on a 13.4 driver). The next release ships `cudarc` 0.19.10, which builds against 13.4 directly. |
 | `embed-bedrock` | Reserved for Amazon Titan embeddings through Bedrock. Not implemented, so it fails at startup if selected. |
 | `recall-elastic` | Optional Elasticsearch recall tier, selected by a top-level `[recall]` section (`kind = "elastic"`). The index serves recall's vector leg; the store stays the source of truth. Needs a reachable Elasticsearch cluster at runtime. |
 

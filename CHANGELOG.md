@@ -4,6 +4,9 @@
 
 ### Fixed
 
+- `embed-candle-cuda` builds against CUDA 13.4 (#111). `cudarc` is now
+  0.19.10, which knows 13.4; 0.4.0's knew versions only up to 13.3 and
+  needed `CUDARC_CUDA_VERSION=13030` set for the build.
 - The docs no longer say an acked write is durable at admission (#117). The
   write intent recorded at admission rides the write-behind log and reaches
   the store with the next flush (`backend_flush_interval`, 1 s by default). A
