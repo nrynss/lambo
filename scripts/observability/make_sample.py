@@ -30,7 +30,9 @@ Deliberately planted, one per script, so no report is exercised on an empty set:
 `duplicates.py` reads the store, not the ledger, so `--store <path>` synthesizes
 a matching SQLite fixture instead: four fabricated concepts with hand-built unit
 vectors placed at known cosines, one pair above the 0.85 merge threshold (a
-should-have-merged defect) and one inside G1's paraphrase band below it. Written
+should-have-merged defect) and one inside G1's paraphrase band below it. The
+same store carries three edges for `dedup_rate.py --store`'s `Semantic`-edge
+count (see `STORE_EDGES`). Written
 on demand rather than committed — a generated binary in the tree is a thing
 nobody can review.
 
@@ -379,7 +381,8 @@ def lines() -> list[dict]:
 # The store fixture for duplicates.py
 # ---------------------------------------------------------------------------
 
-#: Only the columns `duplicates.py` reads. A real store's schema is
+#: Only the columns `duplicates.py` and `dedup_rate.py --store` read. A real
+#: store's schema is
 #: `migrations/sqlite/001_init.sql`; reproducing all of it here would couple this
 #: fixture to migrations it does not exercise, and the script's own SQL is the
 #: contract being tested.
@@ -391,7 +394,25 @@ CREATE TABLE concepts (
     embedding           TEXT,
     canonization_status TEXT NOT NULL
 );
+CREATE TABLE edges (
+    id          TEXT PRIMARY KEY,
+    edge_type   TEXT NOT NULL,
+    created_at  TEXT NOT NULL
+);
 """
+
+#: (edge_type, created_at) for `dedup_rate.py --store`'s Semantic-edge count.
+#: The committed ledger's successful derives span 2026-08-18T09:03 ..
+#: 2026-08-19T09:41 and report `semantic_merged` = 1 in total, so exactly one
+#: `Semantic` edge is planted inside that window. The other two oppose the
+#: count: a `Semantic` edge from the day BEFORE the window (a count that ignored
+#: the window reads 2) and a `Derives` edge inside it (a count that ignored the
+#: type reads 2). Stamps use the store's own `...Z` millisecond form.
+STORE_EDGES = [
+    ("Semantic", "2026-08-19T09:34:00.000Z"),
+    ("Semantic", "2026-08-17T12:00:00.000Z"),
+    ("Derives", "2026-08-18T09:04:00.000Z"),
+]
 
 
 def unit_at_angle(degrees: float, dim: int = 16) -> list[float]:
@@ -448,6 +469,11 @@ def write_store(path: str) -> None:
                 "None",
             ),
         )
+        for i, (edge_type, created_at) in enumerate(STORE_EDGES):
+            con.execute(
+                "INSERT INTO edges (id, edge_type, created_at) VALUES (?, ?, ?)",
+                (f"e{i:07d}-0000-4000-8000-000000000000", edge_type, created_at),
+            )
         con.commit()
     finally:
         con.close()

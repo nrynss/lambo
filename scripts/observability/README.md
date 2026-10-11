@@ -112,7 +112,11 @@ overrule:
 * **`semantic_merged` is not a match** (`dedup_rate.py`). A hybrid similarity
   merge adds a decaying `Semantic` edge and does not re-upsert the target or add
   a `Derives` edge, so counting it as re-derivation savings would overstate them
-  with a weaker relationship. Reported in its own column.
+  with a weaker relationship. Reported in its own column, beside `reinf.`
+  (`reinforced`). Both read `n/a` when no contributing derive carried the key
+  (a pre-0.4.0 ledger), and `N+` — a lower bound — when only some did; JSON
+  says `null` for the first and carries `<fact>_missing` for the second, so
+  absent and zero are never the same value.
 * **The git join proves nothing** (`blast_radius.py --repo`). A commit in the window
   after a warning is not evidence the agent ignored it, and its absence is not
   evidence the agent heeded it. `overlap[...]` is an explicitly-labelled token
@@ -313,9 +317,9 @@ lambo_derive        concepts_requested, admitted, receipt
                     NOT here — the ack is issued before the write, so it does
                     not know them. J4 put created/matched back on a `completion`
                     line carrying the same `receipt`, which is the join
-                    dedup_rate.py and duplicates.py perform; semantic_merged and
-                    reinforced remain receipt-only, reachable with
-                    lambo_stats(receipt=...).)
+                    dedup_rate.py and duplicates.py perform; since #12 (0.4.0)
+                    that completion also carries semantic_merged and
+                    reinforced, which the join reads when present.)
 lambo_record_action admitted, receipt
                     (J3/J4: created is on the completion, same reason, same
                     join; edges remain receipt-only.)
@@ -435,17 +439,25 @@ what a derive created.
 
 Three things are worth knowing about what the join does and does not restore:
 
-* **`semantic_merged` and `reinforced` do not come back through the join.**
-  Since #12 an applied completion line also carries `semantic_merged`,
-  `reinforced` (derive), `edges` (record_action) and `embedded` (hybrid), each
-  absent rather than zero when the write kind has none, so a raw query over
-  the ledger can answer them (embedding coverage is `embedded` against
-  `created_count`). The reports here still join only the created/matched pair,
-  because lines written before #12 lack the rest. Both reports say so where
-  the number would otherwise read as a zero — `dedup_rate.py` labels the
-  `sem.merged` column an undercount, and `duplicates.py` suppresses its
-  "a zero here means the vector merge never fired" reading, which would
-  otherwise be a conclusion about the write path drawn from a gap in the reader.
+* **`semantic_merged` and `reinforced` come back through the join only on a
+  0.4.0+ ledger.** Since #12 an applied completion line also carries
+  `semantic_merged`, `reinforced` (derive), `edges` (record_action) and
+  `embedded` (hybrid), each absent rather than zero when the write kind has
+  none, so a raw query over the ledger can answer them (embedding coverage is
+  `embedded` against `created_count`). The join (`_ledger.COMPLETION_FACTS`)
+  reads `semantic_merged` and `reinforced` when present (#112); lines written
+  before #12 lack them, and an absent key stays absent. `dedup_rate.py` sums
+  each over the derive calls that have facts, per bucket, per agent and in
+  TOTAL: `n/a` (JSON `null`) when none carried the key, the exact sum when all
+  did, and the sum with a trailing `+` (JSON: the sum plus a non-zero
+  `<fact>_missing`) when only some did — a lower bound, as on a ledger that
+  spans the 0.4.0 upgrade. `duplicates.py` likewise marks its figure
+  INCOMPLETE and suppresses its "a zero here means the vector merge never
+  fired" reading whenever any derive lacked the key, because that would
+  otherwise be a conclusion about the write path drawn from a gap in the
+  reader. `dedup_rate.py --store` also counts the store's `Semantic` edges
+  created inside the ledger's derive window, the store-side figure
+  `sem.merged` should land near.
 * **Only *applied* completions contribute.** A `failed` write created nothing
   and a `deferred` one has not created it yet (it is owed to the next serve of
   that session), so neither adds facts. A derive whose completion is `deferred`
