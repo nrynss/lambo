@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- The docs no longer say an acked write is durable at admission (#117). The
+  write intent recorded at admission rides the write-behind log and reaches
+  the store with the next flush (`backend_flush_interval`, 1 s by default). A
+  clean shutdown loses no acked write; a crash (SIGKILL, an OOM kill, power
+  loss) can lose writes acked since the last flush, which are not replayed
+  and answer `restart_lost` on the next server. What was flushed replays.
+  `mcp.mdx` now says so under `lambo_derive` and `lambo_stats`. No behaviour
+  change.
+- A refused lease no longer claims the holder "is still refreshing it"
+  (#118). A lease row cannot tell a live holder from one that crashed before
+  its lease expired, so the refusal now reports the row's facts: when the
+  lease was last refreshed and when it expires. When the holder is on this
+  host and its pid no longer exists, the refusal says the holder process is
+  gone, gives the time until the lease expires and points to the takeover
+  note. `lambo erase-session`, the HTTP erase and `recall-index backfill`
+  refusals no longer call the holder "a live writer". Lease acquisition and
+  fencing are unchanged, and nothing takes over automatically.
+
 ## 0.4.0 (2026-10-11)
 
 ### Highlights
