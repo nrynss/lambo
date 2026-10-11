@@ -1279,6 +1279,13 @@ fn a_local_holder_whose_process_is_gone_is_named_as_gone() {
         .expect("spawn true");
     let dead_pid = child.id();
     child.wait().expect("reap");
+    // #117 review L5: the same guard as the unit test. If the OS has already
+    // handed the pid to another process, there is no gone holder to name, and
+    // the test skips rather than fail on an unlucky reuse.
+    if pid_visible(dead_pid) {
+        eprintln!("skipping: pid {dead_pid} was reused before the test could use it");
+        return;
+    }
     let mut holder =
         lambo::store::LeaseHolder::for_this_process(&lambo::types::AgentId::new("c-load"));
     holder.pid = dead_pid;
@@ -1317,6 +1324,10 @@ fn a_local_holder_whose_process_is_gone_is_named_as_gone() {
         "a gone holder's lease is still honoured"
     );
     let err = String::from_utf8_lossy(&out.stderr).to_string();
+    if pid_visible(dead_pid) {
+        eprintln!("skipping: pid {dead_pid} was reused while serve ran: {err}");
+        return;
+    }
     assert!(
         err.contains(&format!("no process {dead_pid} is visible from here")),
         "{err}"
@@ -1324,6 +1335,21 @@ fn a_local_holder_whose_process_is_gone_is_named_as_gone() {
     assert!(err.contains("expires in"), "{err}");
     assert!(err.contains("force a takeover"), "{err}");
     assert!(!err.contains("still refreshing"), "{err}");
+    // #117 review L3: a holder described as gone is not one to stop.
+    assert!(err.contains("or have an operator take over"), "{err}");
+    assert!(!err.contains("or stop the other holder"), "{err}");
+}
+
+/// `true` when a process with this pid exists (or exists and may not be
+/// signalled), per `kill(pid, 0)`.
+#[cfg(unix)]
+fn pid_visible(pid: u32) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    // SAFETY: signal 0 delivers nothing; it only checks the pid.
+    let rc = unsafe { libc::kill(pid, 0) };
+    rc == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
 }
 
 /// J2-R2-3, at the binary: a holder whose endpoint refuses connections must not
