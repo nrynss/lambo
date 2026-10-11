@@ -1162,6 +1162,91 @@ mod on_demand;
 mod oversized_body;
 mod pinned_serve;
 
+/// #31 review L2: a holder whose model load fails transiently (the device or
+/// memory momentarily unavailable) fails its attach with an error the pinned
+/// retry keeps retrying, not one that marks the session `Failed` for the life
+/// of the serve; a permanent load failure (a changed or corrupt artifact)
+/// still does. Either way the lease the attach took is released, and a later
+/// attach whose load succeeds takes the session.
+#[tokio::test]
+async fn a_transient_model_load_failure_is_retried_and_a_permanent_one_is_not() {
+    use crate::embed::{EmbedError, Embedder};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Fails `prepare` with the error `make` builds while `failures` > 0.
+    struct FailingLoad {
+        failures: AtomicUsize,
+        make: fn() -> EmbedError,
+        inner: FixtureEmbedder,
+    }
+    #[async_trait::async_trait]
+    impl Embedder for FailingLoad {
+        fn dimensions(&self) -> usize {
+            self.inner.dimensions()
+        }
+        async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbedError> {
+            self.inner.embed(text).await
+        }
+        async fn prepare(&self) -> Result<(), EmbedError> {
+            if self.failures.load(Ordering::SeqCst) > 0 {
+                self.failures.fetch_sub(1, Ordering::SeqCst);
+                return Err((self.make)());
+            }
+            Ok(())
+        }
+    }
+
+    let store: Arc<dyn GraphStore> = Arc::new(MemoryStore::new());
+    let attach = |embedder: Arc<dyn Embedder>| {
+        crate::Memory::builder()
+            .session("issue-31-l2")
+            .agent("agent-l2")
+            .store(store.clone())
+            .embedder(embedder)
+            .embedding_contract(EmbeddingContract {
+                kind: "fixture".into(),
+                model: None,
+                dim: 1024,
+            })
+            .build_attach()
+    };
+
+    let transient: Arc<dyn Embedder> = Arc::new(FailingLoad {
+        failures: AtomicUsize::new(1),
+        make: || EmbedError::Unavailable("candle model load: out of memory".into()),
+        inner: FixtureEmbedder::new(),
+    });
+    let err = match attach(transient.clone()).await {
+        Err(e) => e,
+        Ok(_) => panic!("the load fails this time"),
+    };
+    assert!(matches!(err, LamboError::EmbedUnavailable(_)), "{err:?}");
+    assert!(
+        is_transient(&err),
+        "a transient load failure is retried: {err:?}"
+    );
+    // The lease was released, and the retry (the load now succeeds) attaches.
+    match attach(transient).await.expect("the retry attaches") {
+        crate::memory::Attach::Attached(mem) => mem.close().await.expect("close"),
+        crate::memory::Attach::Held(_) => panic!("the failed attach must release its lease"),
+    }
+
+    let permanent: Arc<dyn Embedder> = Arc::new(FailingLoad {
+        failures: AtomicUsize::new(1),
+        make: || EmbedError::Backend("candle artifact changed after resolve".into()),
+        inner: FixtureEmbedder::new(),
+    });
+    let err = match attach(permanent).await {
+        Err(e) => e,
+        Ok(_) => panic!("the load fails"),
+    };
+    assert!(matches!(err, LamboError::Config(_)), "{err:?}");
+    assert!(
+        !is_transient(&err),
+        "a permanent load failure is not retried: {err:?}"
+    );
+}
+
 /// Sonnet review L-C: which background-attach errors keep a pinned session
 /// retrying (the store or the embedder could not be reached) and which mark
 /// it `Failed` (the same answer on every retry).
