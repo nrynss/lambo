@@ -432,12 +432,15 @@ pub fn reject_empty(text: &str) -> Result<(), EmbedError> {
 /// MB of JSON against ~1.1 GB of weights, so a corrupt `tokenizer.json` is
 /// refused before anything reaches the device.
 ///
-/// Error classes (#31 review L2): a tokenizer that does not parse, or a weight
-/// file of an unsupported kind, is [`EmbedError::Backend`] (permanent: the
-/// same artifact fails the same way). The device load itself (mapping the
-/// weights, allocating the model's buffers) is [`EmbedError::Unavailable`]:
-/// it fails under memory pressure or a busy device and can succeed later, so
-/// a pinned session's background retry keeps trying it.
+/// Error classes (#31 review L2, M-A): a tokenizer that does not parse, or a
+/// weight file of an unsupported kind, is [`EmbedError::Backend`] (permanent:
+/// the same artifact fails the same way). A candle error from mapping the
+/// weights or building the model is classed by [`candle_load_error`]: I/O and
+/// device (CUDA, Metal) failures are [`EmbedError::Unavailable`], since they
+/// come from memory pressure or a busy device and can succeed later, so a
+/// pinned session's background retry keeps trying; a malformed safetensors
+/// file, a missing tensor or a shape or dtype mismatch is the artifact's
+/// fault and is [`EmbedError::Backend`], never retried.
 fn load_core(
     cfg: &Config,
     tokenizer_path: &Path,
@@ -447,8 +450,8 @@ fn load_core(
 ) -> Result<BgeM3Core, EmbedError> {
     let tokenizer = load_tokenizer(cfg, tokenizer_path)?;
     let vb = load_varbuilder(weights_path, dtype, device)?;
-    let model = XLMRobertaModel::new(cfg, vb)
-        .map_err(|e| EmbedError::Unavailable(format!("candle model load: {e}")))?;
+    let model =
+        XLMRobertaModel::new(cfg, vb).map_err(|e| candle_load_error("candle model load", &e))?;
     Ok(BgeM3Core {
         model,
         tokenizer,
@@ -489,10 +492,10 @@ fn load_varbuilder(
     let vb = match ext {
         "safetensors" => unsafe {
             VarBuilder::from_mmaped_safetensors(&[weights.to_path_buf()], dtype, device)
-                .map_err(|e| EmbedError::Unavailable(format!("safetensors: {e}")))?
+                .map_err(|e| candle_load_error("safetensors", &e))?
         },
         "bin" | "pth" | "pt" => VarBuilder::from_pth(weights, dtype, device)
-            .map_err(|e| EmbedError::Unavailable(format!("pytorch_model.bin: {e}")))?,
+            .map_err(|e| candle_load_error("pytorch_model.bin", &e))?,
         other => {
             return Err(EmbedError::Backend(format!(
                 "unsupported weight extension: {other:?}"
@@ -500,6 +503,33 @@ fn load_varbuilder(
         }
     };
     Ok(vb)
+}
+
+/// #31 review M-A: class a candle error from the device load. Transient
+/// ([`EmbedError::Unavailable`], retried): I/O (an mmap or read that failed
+/// for lack of memory or a busy disk) and the device backends (CUDA, Metal:
+/// allocation, a busy or lost device). Everything else is the artifact's
+/// fault and permanent ([`EmbedError::Backend`]): a safetensors file whose
+/// header or offsets do not parse (truncated, corrupt), a tensor the model
+/// needs that is missing, a shape or dtype that does not match the config.
+/// Context wrappers are looked through to the cause.
+fn candle_load_error(what: &str, err: &candle_core::Error) -> EmbedError {
+    if candle_error_is_transient(err) {
+        EmbedError::Unavailable(format!("{what}: {err}"))
+    } else {
+        EmbedError::Backend(format!("{what}: {err}"))
+    }
+}
+
+fn candle_error_is_transient(err: &candle_core::Error) -> bool {
+    use candle_core::Error as E;
+    match err {
+        E::Io(_) | E::Cuda(_) | E::Metal(_) => true,
+        E::WithPath { inner, .. } | E::WithBacktrace { inner, .. } | E::Context { inner, .. } => {
+            candle_error_is_transient(inner)
+        }
+        _ => false,
+    }
 }
 
 /// Compile-time accelerator facts (cfg-gated so the plain build stays clean).
@@ -527,38 +557,78 @@ struct LoadPlan {
     weights_path: PathBuf,
     device: Device,
     dtype: DType,
-    /// [`file_fingerprint`] of each artifact file as construction read it
-    /// (#31 review M2): `(path, fingerprint)` for the weights (taken before
-    /// they were hashed for the identity), `config.json` and
-    /// `tokenizer.json`. [`CandleEmbedder::load`] refuses if any differs, so
-    /// the bytes it loads are the bytes the stamped identity describes, even
-    /// when the load runs hours after the resolve (a pinned retry, an
+    /// Each artifact file as construction read it (#31 review M2): the
+    /// weights (fingerprint taken before they were hashed for the identity),
+    /// `config.json` and `tokenizer.json`, each with its sha256.
+    /// [`CandleEmbedder::load`] checks them before and after the device load,
+    /// so the bytes it loads are the bytes the stamped identity describes,
+    /// even when the load runs hours after the resolve (a pinned retry, an
     /// on-demand attach). Empty for a test embedder built already loaded.
-    fingerprints: Vec<(PathBuf, String)>,
+    artifacts: Vec<PinnedFile>,
+    /// Test hook run between the pre-load check and the device load, to
+    /// change the artifact in exactly that window (#31 review M-C).
+    #[cfg(test)]
+    before_map: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
+
+/// One artifact file as [`CandleEmbedder::deferred`] identified it.
+struct PinnedFile {
+    path: PathBuf,
+    fingerprint: Fingerprint,
+    sha256: String,
+}
+
+impl PinnedFile {
+    /// Read `path`'s fingerprint and hash its bytes (a small file).
+    fn identify(path: &Path) -> Result<Self, EmbedError> {
+        let fingerprint = fingerprint_or_backend(path)?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            sha256: sha256_file(path)?,
+            fingerprint,
+        })
+    }
+
+    /// #31 review M2, M-B: the file still holds the bytes construction
+    /// identified. The fingerprint is the fast path; when it differs (a new
+    /// mtime, but also a chmod, an xattr, an extra hard link or a backup tool
+    /// that only moves ctime) the bytes are hashed again and only a different
+    /// digest refuses. A changed artifact is permanent for this process (its
+    /// identity was stamped at resolve), so that error is
+    /// [`EmbedError::Backend`], naming what changed.
+    fn check_unchanged(&self) -> Result<(), EmbedError> {
+        let now = fingerprint_or_backend(&self.path)?;
+        if now == self.fingerprint {
+            return Ok(());
+        }
+        let changed = self.fingerprint.changed_fields(&now).join(", ");
+        let digest = sha256_file(&self.path)?;
+        if digest == self.sha256 {
+            tracing::debug!(
+                target: "lambo::embed",
+                file = %self.path.display(),
+                changed = %changed,
+                "candle: artifact metadata changed since resolve but its bytes did not"
+            );
+            return Ok(());
+        }
+        Err(EmbedError::Backend(format!(
+            "candle artifact {} changed after this process resolved its identity ({changed} \
+             changed, and its sha256 is now {} where the resolve read {}); refusing to load \
+             bytes the stamped embedding contract does not describe. Restart the process to \
+             resolve the new artifact",
+            self.path.display(),
+            &digest[..12],
+            &self.sha256[..12]
+        )))
+    }
 }
 
 impl LoadPlan {
-    /// #31 review M2: the artifact on disk is still the one construction
-    /// identified. A changed file is permanent for this process (its identity
-    /// was stamped at resolve), so the error is [`EmbedError::Backend`].
     fn check_unchanged(&self) -> Result<(), EmbedError> {
-        for (path, at_resolve) in &self.fingerprints {
-            let now = file_fingerprint(path).map_err(|e| {
-                EmbedError::Backend(format!(
-                    "candle artifact {} cannot be read back for the load: {e}",
-                    path.display()
-                ))
-            })?;
-            if &now != at_resolve {
-                return Err(EmbedError::Backend(format!(
-                    "candle artifact {} changed after this process resolved its identity; \
-                     refusing to load bytes the stamped embedding contract does not describe. \
-                     Restart the process to resolve the new artifact",
-                    path.display()
-                )));
-            }
-        }
-        Ok(())
+        self.artifacts
+            .iter()
+            .try_for_each(PinnedFile::check_unchanged)
     }
 }
 
@@ -739,10 +809,10 @@ impl CandleEmbedder {
         // #31: the width the resolve checks against the store comes from the
         // artifact's own config, not from a loaded model. `hidden_size` is the
         // CLS vector's width, so it is exactly what the forward will emit.
-        let config_fingerprint = fingerprint_or_backend(&config_path)?;
+        let config_file = PinnedFile::identify(&config_path)?;
         let config = read_config(&config_path)?;
         check_hidden_size(&config, dim, &config_path)?;
-        let tokenizer_fingerprint = fingerprint_or_backend(&tokenizer_path)?;
+        let tokenizer_file = PinnedFile::identify(&tokenizer_path)?;
 
         // K2-R1-1: the stamp ALWAYS describes the artifact that will be loaded —
         // canonical source for the verified default, effective source plus the
@@ -770,11 +840,17 @@ impl CandleEmbedder {
             identity,
             on_metal: device.is_metal(),
             plan: Arc::new(LoadPlan {
-                fingerprints: vec![
-                    (weights_path.clone(), weights_fingerprint),
-                    (config_path, config_fingerprint),
-                    (tokenizer_path.clone(), tokenizer_fingerprint),
+                artifacts: vec![
+                    PinnedFile {
+                        path: weights_path.clone(),
+                        fingerprint: weights_fingerprint,
+                        sha256: weight_sha256.clone(),
+                    },
+                    config_file,
+                    tokenizer_file,
                 ],
+                #[cfg(test)]
+                before_map: Mutex::new(None),
                 config,
                 tokenizer_path,
                 weights_path,
@@ -804,6 +880,10 @@ impl CandleEmbedder {
         }
         let plan = &self.plan;
         plan.check_unchanged()?;
+        #[cfg(test)]
+        if let Some(hook) = plan.before_map.lock().unwrap_or_else(unpoison).take() {
+            hook();
+        }
         let core = load_core(
             &plan.config,
             &plan.tokenizer_path,
@@ -811,6 +891,11 @@ impl CandleEmbedder {
             &plan.device,
             plan.dtype,
         )?;
+        // #31 review M-C: mapping the weights takes seconds, and a file
+        // swapped while it ran would put unverified bytes on the device.
+        // Check again now that the load has read them; on a mismatch the
+        // model is dropped here, before anything can embed with it.
+        plan.check_unchanged()?;
         let shared = Arc::new(Shared {
             queue: BatchQueue::new(),
             core,
@@ -917,45 +1002,123 @@ fn default_identity_cache_dir() -> Option<PathBuf> {
 /// caught at start the way a full re-hash would catch it. A safetensors file
 /// that rots badly enough still fails to load; one that rots quietly embeds
 /// under the old identity, as it would have between two starts before #31.
-fn weight_sha256(path: &Path, cache_dir: Option<&Path>) -> Result<(String, String), EmbedError> {
+fn weight_sha256(
+    path: &Path,
+    cache_dir: Option<&Path>,
+) -> Result<(String, Fingerprint), EmbedError> {
     let before = fingerprint_or_backend(path)?;
+    // #31 review L-C: the cache is unix-only (it needs ownership and
+    // permission bits to be trusted); elsewhere every construction hashes.
+    let cache_dir = cache_dir.filter(|_| cfg!(unix));
     let Some(cache_dir) = cache_dir else {
         return Ok((sha256_file(path)?, before));
     };
-    let entry = cache_dir.join(format!("{}.json", &sha256_hex(before.as_bytes())[..32]));
-    if let Some(digest) = read_identity_entry(cache_dir, &entry, &before) {
+    let key = before.key();
+    let entry = cache_dir.join(format!("{}.json", &sha256_hex(key.as_bytes())[..32]));
+    if let Some(digest) = read_identity_entry(cache_dir, &entry, &key) {
         return Ok((digest, before));
     }
     let digest = sha256_file(path)?;
-    if file_fingerprint(path).ok().as_deref() == Some(before.as_str()) {
-        write_identity_entry(cache_dir, &entry, &before, &digest);
+    if file_fingerprint(path).ok().as_ref() == Some(&before) {
+        write_identity_entry(cache_dir, &entry, &key, &digest);
     }
     Ok((digest, before))
 }
 
 /// [`file_fingerprint`], with a missing or unreadable file as the adapter's
 /// usual artifact error.
-fn fingerprint_or_backend(path: &Path) -> Result<String, EmbedError> {
+fn fingerprint_or_backend(path: &Path) -> Result<Fingerprint, EmbedError> {
     file_fingerprint(path)
         .map_err(|e| EmbedError::Backend(format!("candle artifact {}: {e}", path.display())))
 }
 
-/// The metadata key of [`weight_sha256`]'s cache (see there).
-fn file_fingerprint(path: &Path) -> std::io::Result<String> {
+/// A file's identifying metadata: the key of [`weight_sha256`]'s cache and
+/// the fast path of [`PinnedFile::check_unchanged`].
+///
+/// On unix: canonical path, size, mtime and ctime in nanoseconds, device and
+/// inode. Elsewhere (#31 review L-C, not built today) only the canonical
+/// path, size and mtime, with the rest zero.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Fingerprint {
+    canonical: PathBuf,
+    len: u64,
+    mtime: (i64, i64),
+    ctime: (i64, i64),
+    dev: u64,
+    ino: u64,
+}
+
+impl Fingerprint {
+    /// The cache key (unchanged from the first #31 cut, so existing entries
+    /// stay valid).
+    fn key(&self) -> String {
+        format!(
+            "v1|{}|len={}|mtime={}.{}|ctime={}.{}|dev={}|ino={}",
+            self.canonical.display(),
+            self.len,
+            self.mtime.0,
+            self.mtime.1,
+            self.ctime.0,
+            self.ctime.1,
+            self.dev,
+            self.ino
+        )
+    }
+
+    /// The fields that differ from `other`, for an error message.
+    fn changed_fields(&self, other: &Self) -> Vec<&'static str> {
+        let mut changed = Vec::new();
+        if self.canonical != other.canonical {
+            changed.push("resolved path");
+        }
+        if self.len != other.len {
+            changed.push("size");
+        }
+        if self.mtime != other.mtime {
+            changed.push("mtime");
+        }
+        if self.ctime != other.ctime {
+            changed.push("ctime");
+        }
+        if (self.dev, self.ino) != (other.dev, other.ino) {
+            changed.push("inode");
+        }
+        changed
+    }
+}
+
+#[cfg(unix)]
+fn file_fingerprint(path: &Path) -> std::io::Result<Fingerprint> {
     use std::os::unix::fs::MetadataExt;
     let canonical = std::fs::canonicalize(path)?;
     let meta = std::fs::metadata(&canonical)?;
-    Ok(format!(
-        "v1|{}|len={}|mtime={}.{}|ctime={}.{}|dev={}|ino={}",
-        canonical.display(),
-        meta.len(),
-        meta.mtime(),
-        meta.mtime_nsec(),
-        meta.ctime(),
-        meta.ctime_nsec(),
-        meta.dev(),
-        meta.ino()
-    ))
+    Ok(Fingerprint {
+        canonical,
+        len: meta.len(),
+        mtime: (meta.mtime(), meta.mtime_nsec()),
+        ctime: (meta.ctime(), meta.ctime_nsec()),
+        dev: meta.dev(),
+        ino: meta.ino(),
+    })
+}
+
+#[cfg(not(unix))]
+fn file_fingerprint(path: &Path) -> std::io::Result<Fingerprint> {
+    let canonical = std::fs::canonicalize(path)?;
+    let meta = std::fs::metadata(&canonical)?;
+    let mtime = meta
+        .modified()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| (d.as_secs() as i64, i64::from(d.subsec_nanos())))
+        .unwrap_or((0, 0));
+    Ok(Fingerprint {
+        canonical,
+        len: meta.len(),
+        mtime,
+        ctime: (0, 0),
+        dev: 0,
+        ino: 0,
+    })
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -964,22 +1127,71 @@ struct IdentityEntry {
     sha256: String,
 }
 
-/// #31 review L4: a cache path is trusted only when this user owns it and
-/// nobody else can write it. Anything else is a miss (the bytes are hashed).
-fn private_to_us(path: &Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    // `symlink_metadata`: an entry or directory that is a link is a miss too.
-    std::fs::symlink_metadata(path).is_ok_and(|meta| {
-        // SAFETY: geteuid has no preconditions and cannot fail.
-        meta.uid() == unsafe { libc::geteuid() } && meta.mode() & 0o022 == 0
-    })
+/// #31 review L-A: say once per process that the cache was refused, so an
+/// operator whose cache never hits (a shared or group-writable directory)
+/// learns why instead of paying a silent hash on every start.
+#[cfg(unix)]
+fn warn_cache_refused(path: &Path, why: &str) {
+    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !WARNED.swap(true, Ordering::Relaxed) {
+        tracing::warn!(
+            target: "lambo::embed",
+            path = %path.display(),
+            "candle: not using the weight-digest cache ({why}); every start hashes the \
+             weights until it is owned by this user and not group- or world-writable"
+        );
+    }
 }
 
+/// #31 review L4, L-A: the cache directory is trusted only when this user
+/// owns it and nobody else can write it. One this user owns but left group-
+/// or world-writable (a umask of 002) is tightened to 0700 first; anything
+/// else is refused, with a warning once per process.
+#[cfg(unix)]
+fn cache_dir_is_private(dir: &Path) -> bool {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let Ok(meta) = std::fs::symlink_metadata(dir) else {
+        return false;
+    };
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    let ours = meta.uid() == unsafe { libc::geteuid() } && meta.file_type().is_dir();
+    if !ours {
+        warn_cache_refused(dir, "the directory is not this user's, or is a link");
+        return false;
+    }
+    if meta.mode() & 0o022 == 0 {
+        return true;
+    }
+    if std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).is_ok() {
+        return true;
+    }
+    warn_cache_refused(dir, "the directory is group- or world-writable");
+    false
+}
+
+/// Read an entry, trusting it only if it is a regular file (not a link:
+/// opened `O_NOFOLLOW`, #31 review L-B) owned by this user and not group- or
+/// world-writable, checked on the open descriptor.
+#[cfg(unix)]
 fn read_identity_entry(cache_dir: &Path, entry: &Path, fingerprint: &str) -> Option<String> {
-    if !private_to_us(cache_dir) || !private_to_us(entry) {
+    use std::io::Read as _;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    if !cache_dir_is_private(cache_dir) {
         return None;
     }
-    let bytes = std::fs::read(entry).ok()?;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(entry)
+        .ok()?;
+    let meta = file.metadata().ok()?;
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    if !meta.is_file() || meta.uid() != unsafe { libc::geteuid() } || meta.mode() & 0o022 != 0 {
+        warn_cache_refused(entry, "an entry is not this user's private file");
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(64 * 1024).read_to_end(&mut bytes).ok()?;
     let parsed: IdentityEntry = serde_json::from_slice(&bytes).ok()?;
     let well_formed = parsed.sha256.len() == 64
         && parsed
@@ -989,12 +1201,18 @@ fn read_identity_entry(cache_dir: &Path, entry: &Path, fingerprint: &str) -> Opt
     (parsed.fingerprint == fingerprint && well_formed).then_some(parsed.sha256)
 }
 
+#[cfg(not(unix))]
+fn read_identity_entry(_cache_dir: &Path, _entry: &Path, _fingerprint: &str) -> Option<String> {
+    None
+}
+
+#[cfg(unix)]
 fn write_identity_entry(cache_dir: &Path, entry: &Path, fingerprint: &str, digest: &str) {
     let write = || -> std::io::Result<()> {
         use std::io::Write as _;
         use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
         // 0700 (#31 review L4): created private, and an existing directory
-        // that is not is refused by `read_identity_entry` anyway.
+        // that is not is tightened or refused by `cache_dir_is_private`.
         std::fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
@@ -1024,6 +1242,9 @@ fn write_identity_entry(cache_dir: &Path, entry: &Path, fingerprint: &str, diges
         );
     }
 }
+
+#[cfg(not(unix))]
+fn write_identity_entry(_cache_dir: &Path, _entry: &Path, _fingerprint: &str, _digest: &str) {}
 
 fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
@@ -1574,7 +1795,8 @@ mod tests {
                 weights_path: PathBuf::new(),
                 device,
                 dtype: DType::F32,
-                fingerprints: Vec::new(),
+                artifacts: Vec::new(),
+                before_map: Mutex::new(None),
             }),
             slot: Arc::new(slot),
         }
@@ -1993,7 +2215,7 @@ mod tests {
         std::fs::write(
             &entry,
             serde_json::to_vec(&IdentityEntry {
-                fingerprint: fingerprint.clone(),
+                fingerprint: fingerprint.key(),
                 sha256: planted.clone(),
             })
             .unwrap(),
@@ -2072,12 +2294,14 @@ mod tests {
         assert!(!e.is_loaded());
         assert_eq!(e.load_count(), 0);
 
-        // The same for config.json and tokenizer.json.
+        // The same for config.json and tokenizer.json (new bytes: a change
+        // of metadata alone is re-hashed and accepted, review M-B).
         for file in ["config.json", "tokenizer.json"] {
             let e = test_artifact::deferred(&artifact, &dir.join("cache")).unwrap();
             std::thread::sleep(Duration::from_millis(5));
             let path = artifact.join(file);
-            let body = std::fs::read(&path).unwrap();
+            let mut body = std::fs::read(&path).unwrap();
+            body.extend_from_slice(b"\n");
             std::fs::write(&path, body).unwrap();
             let msg = e.prepare().await.expect_err(file).to_string();
             assert!(msg.contains(file), "{msg}");
@@ -2137,7 +2361,7 @@ mod tests {
         std::fs::write(
             &entry,
             serde_json::to_vec(&IdentityEntry {
-                fingerprint: file_fingerprint(&weights).unwrap(),
+                fingerprint: file_fingerprint(&weights).unwrap().key(),
                 sha256: planted.clone(),
             })
             .unwrap(),
@@ -2152,15 +2376,132 @@ mod tests {
         std::fs::write(
             &entry,
             serde_json::to_vec(&IdentityEntry {
-                fingerprint: file_fingerprint(&weights).unwrap(),
+                fingerprint: file_fingerprint(&weights).unwrap().key(),
                 sha256: planted.clone(),
             })
             .unwrap(),
         )
         .unwrap();
         assert_eq!(weight_sha256(&weights, Some(&cache)).unwrap().0, planted);
-        std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o777)).unwrap();
+        // A symlinked entry is never followed (review L-B).
+        let target = dir.join("elsewhere.json");
+        std::fs::rename(&entry, &target).unwrap();
+        std::os::unix::fs::symlink(&target, &entry).unwrap();
         assert_eq!(weight_sha256(&weights, Some(&cache)).unwrap().0, real);
+    }
+
+    /// #31 review L-A: a cache directory this user owns but left group- or
+    /// world-writable (a umask of 002) is tightened to 0700 and used, not
+    /// silently missed on every start.
+    #[test]
+    fn a_loose_cache_directory_of_ours_is_tightened_and_used() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = crate::test_util::ScratchDir::new("lambo-31-la");
+        let cache = dir.join("cache");
+        let weights = dir.join("weights.bin");
+        std::fs::write(&weights, b"artifact bytes").unwrap();
+        weight_sha256(&weights, Some(&cache)).unwrap();
+        let entry = std::fs::read_dir(&cache)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let planted = "0".repeat(64);
+        std::fs::write(
+            &entry,
+            serde_json::to_vec(&IdentityEntry {
+                fingerprint: file_fingerprint(&weights).unwrap().key(),
+                sha256: planted.clone(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o775)).unwrap();
+        assert_eq!(
+            weight_sha256(&weights, Some(&cache)).unwrap().0,
+            planted,
+            "our own loose directory is tightened, then trusted"
+        );
+        let mode = std::fs::metadata(&cache).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+    }
+
+    /// #31 review M-A: a weight file whose safetensors header does not parse
+    /// (truncated) is the artifact's fault: permanent, never retried. The
+    /// classifier looks through context wrappers to the cause.
+    #[tokio::test]
+    async fn a_truncated_weight_file_is_a_permanent_load_failure() {
+        let dir = crate::test_util::ScratchDir::new("lambo-31-ma");
+        let artifact = dir.join("artifact");
+        test_artifact::write(&artifact);
+        let weights = artifact.join(DEFAULT_WEIGHT_FILE);
+        let bytes = std::fs::read(&weights).unwrap();
+        std::fs::write(&weights, &bytes[..bytes.len() / 2]).unwrap();
+        let e = test_artifact::deferred(&artifact, &dir.join("cache")).unwrap();
+        let err = e
+            .prepare()
+            .await
+            .expect_err("a truncated file must not load");
+        assert!(!err.is_transient(), "never retried: {err:?}");
+        assert!(err.to_string().contains("safetensors"), "{err}");
+        assert_eq!(e.load_count(), 0);
+
+        use candle_core::Error as E;
+        let io = || E::Io(std::io::Error::other("cannot allocate memory"));
+        assert!(candle_error_is_transient(&io()));
+        assert!(candle_error_is_transient(&io().with_path("/w")));
+        assert!(!candle_error_is_transient(&E::CannotFindTensor {
+            path: "embeddings.word_embeddings.weight".into()
+        }));
+        assert!(!candle_error_is_transient(&E::Msg("shape mismatch".into())));
+    }
+
+    /// #31 review M-B: a chmod (which moves ctime only) after the resolve is
+    /// not a changed artifact: the bytes are re-hashed and the load proceeds.
+    #[tokio::test]
+    async fn a_metadata_only_change_after_resolve_still_loads() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = crate::test_util::ScratchDir::new("lambo-31-mb");
+        let artifact = dir.join("artifact");
+        test_artifact::write(&artifact);
+        let e = test_artifact::deferred(&artifact, &dir.join("cache")).unwrap();
+        let weights = artifact.join(DEFAULT_WEIGHT_FILE);
+        let before = file_fingerprint(&weights).unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+        std::fs::set_permissions(&weights, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_ne!(
+            file_fingerprint(&weights).unwrap(),
+            before,
+            "the chmod moved ctime"
+        );
+        e.prepare().await.expect("identical bytes load");
+        assert!(e.is_loaded());
+    }
+
+    /// #31 review M-C: a file swapped while the weights were being mapped is
+    /// caught by the check after the load, and the model is dropped.
+    #[tokio::test]
+    async fn a_swap_during_the_load_is_refused_after_it() {
+        let dir = crate::test_util::ScratchDir::new("lambo-31-mc");
+        let artifact = dir.join("artifact");
+        test_artifact::write(&artifact);
+        let e = test_artifact::deferred(&artifact, &dir.join("cache")).unwrap();
+        let swap = artifact.clone();
+        *e.plan.before_map.lock().unwrap() = Some(Box::new(move || {
+            std::thread::sleep(Duration::from_millis(5));
+            test_artifact::write_weights(&swap);
+        }));
+        let err = e
+            .prepare()
+            .await
+            .expect_err("a swapped file must not be served");
+        assert!(err.to_string().contains("changed after"), "{err}");
+        assert!(
+            !e.is_loaded(),
+            "the model loaded from the swapped file is dropped"
+        );
+        assert_eq!(e.load_count(), 0);
     }
 
     /// Issue #31 measurement, recorded as a test: the process footprint of a
