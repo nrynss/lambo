@@ -445,6 +445,17 @@ impl PinnedServe {
         sessions: &[&str],
         tweak: impl FnOnce(&mut ServeOptions),
     ) -> Self {
+        Self::start_with(store, sessions, tweak, |_| {}).await
+    }
+
+    /// [`PinnedServe::start`], with the resolved backends adjusted by
+    /// `backends_tweak` before the serve takes them.
+    async fn start_with(
+        store: &Arc<MemoryStore>,
+        sessions: &[&str],
+        tweak: impl FnOnce(&mut ServeOptions),
+        backends_tweak: impl FnOnce(&mut ResolvedBackends),
+    ) -> Self {
         let early = EarlyShutdown::unarmed();
         let (tx, rx) = tokio::sync::oneshot::channel();
         let opts = pinned_opts(sessions, tweak);
@@ -453,7 +464,8 @@ impl PinnedServe {
             registry: Some(tx),
             on_demand: crate::mcp::serve::authority::reaches_past_pinned(&opts),
         };
-        let backends = backends_over(Shared::over(store), fast_config(1_000));
+        let mut backends = backends_over(Shared::over(store), fast_config(1_000));
+        backends_tweak(&mut backends);
         let authority = authority_for(&opts);
         let task = tokio::spawn(serve_pinned_with(opts, backends, authority, seams));
         let registry = tokio::time::timeout(Duration::from_secs(20), rx)
@@ -1068,4 +1080,119 @@ async fn one_pinned_session_with_a_prefix_credential_attaches_on_demand() {
             "{id}"
         );
     }
+}
+
+/// #31 review M1: an embedder whose model loads in `prepare`, as the candle
+/// adapter's does, and loads itself on an embed that comes first (the
+/// candle fallback), counting both.
+#[derive(Default)]
+struct DeferredModel {
+    loads: std::sync::atomic::AtomicUsize,
+    embeds: std::sync::atomic::AtomicUsize,
+    inner: FixtureEmbedder,
+}
+
+#[async_trait::async_trait]
+impl crate::embed::Embedder for DeferredModel {
+    fn dimensions(&self) -> usize {
+        self.inner.dimensions()
+    }
+    async fn embed(&self, text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
+        self.prepare().await?;
+        self.embeds
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.embed(text).await
+    }
+    async fn prepare(&self) -> Result<(), crate::embed::EmbedError> {
+        use std::sync::atomic::Ordering;
+        let _ = self
+            .loads
+            .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst);
+        Ok(())
+    }
+    fn is_prepared(&self) -> bool {
+        self.loads.load(std::sync::atomic::Ordering::SeqCst) > 0
+    }
+}
+
+/// `Arc<DeferredModel>` as the serve's `Box<dyn Embedder>`, so the test can
+/// still read the counters.
+struct Lent(Arc<DeferredModel>);
+
+#[async_trait::async_trait]
+impl crate::embed::Embedder for Lent {
+    fn dimensions(&self) -> usize {
+        self.0.dimensions()
+    }
+    async fn embed(&self, text: &str) -> Result<Vec<f32>, crate::embed::EmbedError> {
+        self.0.embed(text).await
+    }
+    async fn prepare(&self) -> Result<(), crate::embed::EmbedError> {
+        self.0.prepare().await
+    }
+    fn is_prepared(&self) -> bool {
+        self.0.is_prepared()
+    }
+}
+
+/// #31 review M1: a multi-session serve that holds no session (every pinned
+/// session held elsewhere) never loads its model, even with keep-warm on:
+/// a touch keeps a loaded model warm and never loads one. Once a session
+/// attaches, the model is loaded by the attach and the touches begin.
+#[tokio::test]
+async fn a_serve_holding_no_session_never_loads_its_model_for_keep_warm() {
+    use std::sync::atomic::Ordering;
+    let store = Arc::new(MemoryStore::new());
+    for id in ["kw-a", "kw-b"] {
+        store
+            .acquire_lease(&SessionId::new(id), &other_writer(), LEASE_TTL)
+            .await
+            .expect("the other writer holds every pinned session");
+    }
+    let model = Arc::new(DeferredModel::default());
+    let lent = Arc::clone(&model);
+    let serve = PinnedServe::start_with(
+        &store,
+        &["kw-a", "kw-b"],
+        |_| {},
+        |backends| {
+            backends.embedder = Box::new(Lent(lent));
+            // Keep-warm every second (the auto rule would leave it off for a
+            // fixture-backed embedder).
+            backends.embedder_cfg.keep_warm_secs = Some(1);
+        },
+    )
+    .await;
+    assert_eq!(serve.registry.attached().len(), 0, "every session is held");
+
+    // Several keep-warm periods with nothing attached.
+    tokio::time::sleep(Duration::from_millis(3_500)).await;
+    assert_eq!(
+        model.loads.load(Ordering::SeqCst),
+        0,
+        "a serve holding no session must not load its model (keep-warm included)"
+    );
+    assert_eq!(model.embeds.load(Ordering::SeqCst), 0);
+
+    // Control: the other writer lets go, the background retry attaches,
+    // the attach loads, and keep-warm starts touching.
+    store
+        .release_lease(&SessionId::new("kw-a"), &other_writer())
+        .await
+        .expect("release");
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while model.embeds.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("once a session attaches, keep-warm touches the loaded model");
+    assert!(serve.attached("kw-a").is_some());
+    assert_eq!(
+        model.loads.load(Ordering::SeqCst),
+        1,
+        "loaded once, by the attach"
+    );
+
+    serve.stop().await.expect("a clean shutdown");
 }

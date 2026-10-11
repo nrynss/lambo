@@ -563,6 +563,35 @@ impl MemoryBuilder {
             }
         };
 
+        // Single-writer-lease fence (T86-2): shared by the flush loop and the
+        // lease heartbeat. Latched `true` the instant the heartbeat detects the
+        // lease was lost; from then the flush loop stops (and drops its tail)
+        // and the write gate refuses. Created before both consumers.
+        let lease_lost = Arc::new(AtomicBool::new(false));
+        // JE2E-4: the wake-up and the winner's id, latched beside the fence.
+        let lease_lost_signal = Arc::new(LeaseLostSignal::default());
+        // Heartbeat: refresh the lease at a fraction of its TTL so a live holder
+        // keeps the session and a crashed one's lease lapses (T8.6).
+        //
+        // Started HERE, the moment the lease is ours and before the startup
+        // load (#31 review L1): since the holder's model load moved into the
+        // startup (step 2b), the stretch from the acquire to the first refresh
+        // includes reading ~1.1 GB of weights onto a device, on top of the
+        // session load. Beating from the acquire means a slow load can no
+        // longer run the lease out (LEASE_TTL 45 s) before the first refresh.
+        // A lease lost meanwhile latches the fence, which the flush task and
+        // the write gate built below inherit. The guard aborts the beat if
+        // this attach does not complete (an error, a shutdown abandon, or the
+        // caller dropping this future), so an abandoned attach cannot keep a
+        // lease alive it is about to release or leave to lapse.
+        let mut heartbeat_guard = AbortOnDrop(Some(spawn_lease_heartbeat(
+            store.clone(),
+            session.clone(),
+            lease_holder.clone(),
+            lease_lost.clone(),
+            lease_lost_signal.clone(),
+        )));
+
         // (1) Startup load (spec §2.5). The async core, not the sync wrapper:
         // `store::load::load_session` parks a worker thread and joins it, which
         // would block a runtime worker from inside this async fn. The lease is
@@ -639,6 +668,32 @@ impl MemoryBuilder {
                     }
                 }
             }
+            // (2b) Issue #31 — the holder's model load. The role is decided
+            // (the lease is ours, step 0) and the session's contract has been
+            // checked (step 2), so this is the first point at which the
+            // weights are both needed and allowed: a lease loser returned
+            // `Attach::Held` above, and a contract refusal returned before
+            // loading anything. Inside this future, so the J6 race below
+            // covers it and a signal mid-load releases the lease; ahead of
+            // the write pipeline, so the calibration probe and the intent
+            // replay never wait on it, and ahead of the return, so no serve
+            // handshake or first recall does either. A no-op for adapters
+            // with nothing deferred, and for an embedder an earlier session
+            // in this process already prepared (#32: one shared embedder).
+            //
+            // Error class (#31 review L2): a load that may succeed later (the
+            // device or memory was momentarily unavailable) is
+            // `EmbedUnavailable`, which a pinned session's background retry
+            // keeps retrying; anything else (a changed or corrupt artifact)
+            // is `Config`, permanent until an operator restarts the serve.
+            embedder.prepare().await.map_err(|e| {
+                let message = format!("session {session}: the embedder could not be loaded: {e}");
+                if e.is_transient() {
+                    LamboError::EmbedUnavailable(message)
+                } else {
+                    LamboError::Config(message)
+                }
+            })?;
             Ok::<_, LamboError>((existing, graph, loaded.index, write_intents))
         };
         // J6 — the one unbounded `await` under the pre-arm, and therefore the
@@ -680,6 +735,8 @@ impl MemoryBuilder {
         let (existing, graph, index, write_intents) = match startup {
             Ok(startup) => startup,
             Err(startup_error) => {
+                // Stop beating before releasing, so no refresh races the release.
+                drop(heartbeat_guard);
                 if let Err(release_error) = store.release_lease(&session, &lease_holder).await {
                     tracing::warn!(
                         session = %session,
@@ -706,14 +763,6 @@ impl MemoryBuilder {
             .with_access_ledger(accesses.clone());
         // CONC-3: subscribe BEFORE spawn or the warm-up condition set is lost.
         let startup_events = daemon.events();
-
-        // Single-writer-lease fence (T86-2): shared by the flush loop and the
-        // lease heartbeat. Latched `true` the instant the heartbeat detects the
-        // lease was lost; from then the flush loop stops (and drops its tail)
-        // and the write gate refuses. Created before both consumers.
-        let lease_lost = Arc::new(AtomicBool::new(false));
-        // JE2E-4: the wake-up and the winner's id, latched beside the fence.
-        let lease_lost_signal = Arc::new(LeaseLostSignal::default());
 
         let flush = FlushTask::new(
             graph.clone(),
@@ -748,15 +797,12 @@ impl MemoryBuilder {
         let daemon_handle = daemon.spawn();
         let flush_handle = flush.spawn();
         let canon_handle = canon.spawn();
-        // Heartbeat: refresh the lease at a fraction of its TTL so a live holder
-        // keeps the session and a crashed one's lease lapses (T8.6).
-        let heartbeat_handle = spawn_lease_heartbeat(
-            store.clone(),
-            session.clone(),
-            lease_holder.clone(),
-            lease_lost.clone(),
-            lease_lost_signal.clone(),
-        );
+        // The heartbeat started at the acquire (above); the `Memory` owns it
+        // from here.
+        let heartbeat_handle = heartbeat_guard
+            .0
+            .take()
+            .expect("the heartbeat is taken exactly once, here");
 
         tracing::info!(
             session = %session,
@@ -845,5 +891,18 @@ impl MemoryBuilder {
             lease_lost_signal,
             clock,
         })))
+    }
+}
+
+/// Aborts the task it holds when dropped, unless the task was taken out
+/// first. `build_attach` holds the lease heartbeat in one from the acquire
+/// until the `Memory` takes it (#31 review L1).
+struct AbortOnDrop(Option<tokio::task::JoinHandle<()>>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        if let Some(task) = self.0.take() {
+            task.abort();
+        }
     }
 }

@@ -180,7 +180,11 @@ Adding a backend:
 3. One registry arm (+ `is_ready` when the impl is complete)  
    *(K2 note: the candle adapter additionally overrides the embedder's
    artifact-identity hook so its contract stamps repo@revision + weight sha256
-   rather than a config string — see `dev-diary/lambo-for-mooshik/K-candle-embedder.md`.)*  
+   rather than a config string — see `dev-diary/lambo-for-mooshik/K-candle-embedder.md`.
+   #31 note: an adapter whose construction is heavy builds *deferred* in its
+   registry arm (identity and width only) and does the heavy part in
+   `Embedder::prepare`, which the holder's attach awaits once the lease is
+   won — see `fix-31-proxy-defer-load.md`.)*  
 4. Document `kind` in this note + `lambo.example.toml`  
 5. For stores with vectors: implement `vector_dimensions() -> Some(n)`
 

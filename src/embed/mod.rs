@@ -26,6 +26,8 @@ pub use math::cosine;
 
 #[cfg(feature = "embed-bge")]
 pub use bge_m3::BgeM3LlamaCppEmbedder;
+#[cfg(all(test, feature = "embed-candle"))]
+pub(crate) use candle::test_artifact as candle_test_artifact;
 #[cfg(feature = "embed-candle")]
 pub use candle::CandleEmbedder;
 #[cfg(feature = "embed-eg2")]
@@ -310,7 +312,8 @@ impl std::fmt::Debug for ImageInput<'_> {
 /// document role, an image refused, and the inner adapter's identity hidden
 /// from the registry, whatever the inner adapter does. So a delegating
 /// embedder forwards [`Self::embed_query`], [`Self::embed_image`],
-/// [`Self::modalities`] and [`Self::as_any`] to its inner embedder as well.
+/// [`Self::modalities`], [`Self::prepare`], [`Self::is_prepared`] and
+/// [`Self::as_any`] to its inner embedder as well.
 #[async_trait]
 pub trait Embedder: Send + Sync {
     /// Embedding dimensionality this backend emits.
@@ -373,6 +376,35 @@ pub trait Embedder: Send + Sync {
         Err(EmbedError::Unsupported(
             "this embedder does not embed images".into(),
         ))
+    }
+
+    /// Make the adapter ready to embed: do whatever heavy work construction
+    /// deferred (issue #31). Idempotent, and shared by every clone of a
+    /// shared adapter; the default does nothing.
+    ///
+    /// The candle adapter is built at resolve with its identity and width but
+    /// without its weights on the device, so a `lambo serve` that loses the
+    /// startup election never loads ~1.1 GB it would not embed with. The
+    /// holder loads them here: `MemoryBuilder::build_attach` awaits this once
+    /// the lease is won and the session's contract has been checked, before
+    /// the write pipeline starts and before the attach returns, so no serve
+    /// handshake or first recall waits on it. An adapter whose `embed` is
+    /// called without `prepare` must still work (it may prepare itself
+    /// first): direct users of `ResolvedBackends::embedder` need not call it.
+    async fn prepare(&self) -> Result<(), EmbedError> {
+        Ok(())
+    }
+
+    /// Whether [`Self::prepare`] has nothing left to do: an embed now costs
+    /// one embed, not a model load first. Default `true` (nothing deferred).
+    ///
+    /// Read by work that must not be the thing that loads a model (#31 review
+    /// M1): the keep-warm loop skips its touch while this is `false`, so a
+    /// serve holding no session (a pinned serve whose sessions are all held
+    /// elsewhere, an on-demand serve with nothing attached) never loads the
+    /// weights to keep them warm.
+    fn is_prepared(&self) -> bool {
+        true
     }
 
     /// Optional downcast hook so the registry can ask a concrete adapter for
@@ -967,7 +999,10 @@ pub fn build_embedder(cfg: EmbedderConfig) -> Result<Box<dyn Embedder>, EmbedErr
         EmbedderKind::Candle => {
             #[cfg(feature = "embed-candle")]
             {
-                Ok(Box::new(candle::CandleEmbedder::new(
+                // #31: identity, device and width now; the weights reach the
+                // device on the holder path (`Embedder::prepare`), so a serve
+                // that proxies never loads them.
+                Ok(Box::new(candle::CandleEmbedder::deferred(
                     cfg.dim,
                     crate::embed::candle::CandleOpts {
                         device: cfg.device,

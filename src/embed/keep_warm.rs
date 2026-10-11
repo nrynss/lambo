@@ -133,6 +133,14 @@ pub async fn keep_warm_loop(embedder: Arc<dyn Embedder>, every: Duration) {
     let mut state = TouchState::default();
     loop {
         tokio::time::sleep(every).await;
+        // #31 review M1: a touch keeps a loaded model warm; it never loads
+        // one. Until a session attaches and prepares the embedder (a pinned
+        // serve whose sessions are all held elsewhere, an on-demand serve
+        // with nothing attached yet) there is nothing to keep warm.
+        if !embedder.is_prepared() {
+            tracing::debug!("embedder keep-warm: model not loaded yet; skipping the touch");
+            continue;
+        }
         let started = tokio::time::Instant::now();
         let outcome = embedder.embed(KEEP_WARM_PROBE).await;
         let elapsed_ms = started.elapsed().as_secs_f64() * 1e3;
@@ -291,6 +299,51 @@ mod tests {
         let after_abort = rec.calls();
         advance(every * 3).await;
         assert_eq!(rec.calls(), after_abort, "abort stops the loop");
+    }
+
+    /// #31 review M1: an embedder whose model is not loaded is never
+    /// touched (a touch would load it), and is touched once it is.
+    #[tokio::test(start_paused = true)]
+    async fn an_unprepared_embedder_is_not_touched_until_it_is_prepared() {
+        struct Deferred {
+            prepared: AtomicBool,
+            calls: AtomicUsize,
+        }
+        #[async_trait]
+        impl Embedder for Deferred {
+            fn dimensions(&self) -> usize {
+                4
+            }
+            async fn embed(&self, _text: &str) -> Result<Vec<f32>, EmbedError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(vec![1.0, 0.0, 0.0, 0.0])
+            }
+            fn is_prepared(&self) -> bool {
+                self.prepared.load(Ordering::SeqCst)
+            }
+        }
+        let e = Arc::new(Deferred {
+            prepared: AtomicBool::new(false),
+            calls: AtomicUsize::new(0),
+        });
+        let every = Duration::from_secs(10);
+        let task = tokio::spawn(keep_warm_loop(e.clone() as Arc<dyn Embedder>, every));
+        for _ in 0..3 {
+            advance(every).await;
+        }
+        assert_eq!(
+            e.calls.load(Ordering::SeqCst),
+            0,
+            "no touch may load a model"
+        );
+        e.prepared.store(true, Ordering::SeqCst);
+        advance(every).await;
+        assert_eq!(
+            e.calls.load(Ordering::SeqCst),
+            1,
+            "touches resume once loaded"
+        );
+        task.abort();
     }
 
     #[tokio::test(start_paused = true)]
