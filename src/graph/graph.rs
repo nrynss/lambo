@@ -627,6 +627,30 @@ impl Graph {
         v
     }
 
+    /// Whether `to` is reachable from `from` over `Hierarchical` edges
+    /// (`from == to` counts). Iterative, so a deep hierarchy cannot overflow
+    /// the stack; visits each node once.
+    pub fn hierarchical_path(&self, from: NodeId, to: NodeId) -> bool {
+        let mut seen: HashSet<NodeId> = HashSet::new();
+        let mut stack = vec![from];
+        while let Some(at) = stack.pop() {
+            if at == to {
+                return true;
+            }
+            if !seen.insert(at) {
+                continue;
+            }
+            if let Some(next) = self
+                .out
+                .get(&at)
+                .and_then(|by_type| by_type.get(&EdgeType::Hierarchical))
+            {
+                stack.extend(next.iter().copied());
+            }
+        }
+        false
+    }
+
     /// All edges incident to `node` (out or in), in id-ascending order.
     ///
     /// Routed through the out/in adjacency index — `O(degree log degree)` for

@@ -572,3 +572,110 @@ async fn the_commit_hook_runs_once_after_a_replan() {
     assert_eq!(out.matched.len(), 1, "{out:?}");
     assert_eq!(runs.load(Ordering::SeqCst), 1);
 }
+
+/// Pre-existing defect fixed alongside #116: `parent_of` closing a
+/// Hierarchical cycle longer than one node is refused in the hybrid strategy
+/// too, with nothing written.
+async fn hybrid_pairs(
+    graph: &Arc<RwLock<Graph>>,
+    interaction: NodeId,
+    pairs: Vec<(&'static str, &'static str)>,
+) -> Result<DeriveOutcome, LamboError> {
+    let embedder = Arc::new(TableEmbedder::new(vec![
+        ("cyc alpha", vec![1.0, 0.0, 0.0, 0.0]),
+        ("cyc beta", vec![0.0, 1.0, 0.0, 0.0]),
+        ("cyc gamma", vec![0.0, 0.0, 1.0, 0.0]),
+    ]));
+    derive_over_graph(graph.clone(), embedder, interaction, Vec::new(), pairs).await
+}
+
+async fn assert_cycle_refused(
+    graph: &Arc<RwLock<Graph>>,
+    interaction: NodeId,
+    pairs: Vec<(&'static str, &'static str)>,
+) {
+    let before = {
+        let g = graph.read();
+        (g.epoch(), g.node_count(), g.edge_count())
+    };
+    let err = hybrid_pairs(graph, interaction, pairs)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("Hierarchical cycle"), "{err}");
+    let g = graph.read();
+    assert_eq!((g.epoch(), g.node_count(), g.edge_count()), before);
+    g.assert_invariants().unwrap();
+}
+
+#[tokio::test]
+async fn hybrid_refuses_a_two_cycle_across_calls_and_in_one_call() {
+    let (graph, interaction) = stamped_session("hybrid-cycle-two");
+    assert_cycle_refused(
+        &graph,
+        interaction,
+        vec![("cyc alpha", "cyc beta"), ("cyc beta", "cyc alpha")],
+    )
+    .await;
+    hybrid_pairs(&graph, interaction, vec![("cyc alpha", "cyc beta")])
+        .await
+        .unwrap();
+    assert_cycle_refused(&graph, interaction, vec![("cyc beta", "cyc alpha")]).await;
+}
+
+#[tokio::test]
+async fn hybrid_refuses_a_two_step_cycle() {
+    let (graph, interaction) = stamped_session("hybrid-cycle-chain");
+    hybrid_pairs(
+        &graph,
+        interaction,
+        vec![("cyc alpha", "cyc beta"), ("cyc beta", "cyc gamma")],
+    )
+    .await
+    .unwrap();
+    assert_cycle_refused(&graph, interaction, vec![("cyc gamma", "cyc alpha")]).await;
+}
+
+/// A rival closes the cycle between plan and commit (it writes
+/// `child -> parent` while the call embeds): the commit's recheck refuses
+/// it and nothing is written.
+#[tokio::test]
+async fn a_rival_closing_the_cycle_during_the_gather_is_refused_at_commit() {
+    let (graph, interaction) = stamped_session("hybrid-cycle-race");
+    let parent = seed(&graph, interaction, "cyc parent", vec![0.0, 1.0, 0.0, 0.0]);
+    let child = seed(&graph, interaction, "cyc child", vec![0.0, 0.0, 1.0, 0.0]);
+    let embedder =
+        Arc::new(TableEmbedder::new(vec![("cyc racer", probe())]).pausing_on("cyc racer"));
+    let task = tokio::spawn(derive_over_graph(
+        graph.clone(),
+        embedder.clone(),
+        interaction,
+        vec![("cyc racer", ConceptType::Entity)],
+        vec![("cyc parent", "cyc child")],
+    ));
+    embedder.started.notified().await;
+    let before = {
+        let mut g = graph.write();
+        let session = g.session_id().clone();
+        g.upsert_edge(Edge {
+            event_time: None,
+            id: NodeId::new(),
+            session_id: session,
+            source: child,
+            target: parent,
+            edge_type: EdgeType::Hierarchical,
+            weight: 0.5,
+            reinforcements: 1,
+            created_at: ts(0),
+            last_reinforced: ts(0),
+        })
+        .unwrap();
+        (g.epoch(), g.node_count(), g.edge_count())
+    };
+    embedder.release.notify_one();
+    let err = task.await.unwrap().unwrap_err().to_string();
+    assert!(err.contains("Hierarchical cycle"), "{err}");
+    let g = graph.read();
+    assert_eq!((g.epoch(), g.node_count(), g.edge_count()), before);
+    g.assert_invariants().unwrap();
+}

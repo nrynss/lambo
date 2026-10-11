@@ -94,10 +94,13 @@ use chrono::{DateTime, Utc};
 
 use crate::graph::canonical::{canonicalize, CanonicalizeResult};
 use crate::graph::Graph;
+
+mod cycles;
 use crate::types::{
     AgentId, CanonizationStatus, Concept, ConceptType, Edge, EdgeType, LamboError, Node, NodeId,
     SessionId, StoreError,
 };
+pub(crate) use cycles::{reject_closing_edge, reject_parent_of_cycles};
 
 /// Initial weight of `CoOccurrence` edges written by [`derive`](fn@derive) (module
 /// constant per task contract; `Derives`/`Temporal` are Graph-owned at 0.9/1.0).
@@ -222,17 +225,23 @@ pub fn derive(
 
     validate(graph, concepts, parent_of)?;
 
-    derive_after_validation(
-        graph,
-        interaction,
-        agent,
-        concepts,
-        parent_of,
-        max_cooccurrence_per_derive,
-        interaction_created_at,
-        interaction_event_time,
-        session_id,
-    )
+    // One transaction: the pre-pass above refuses everything it can see,
+    // and the write loop's own refusal (a Hierarchical cycle a concurrent
+    // writer closed after the pre-pass could have seen it) undoes whatever
+    // the loop wrote before it.
+    graph.transaction(|graph| {
+        derive_after_validation(
+            graph,
+            interaction,
+            agent,
+            concepts,
+            parent_of,
+            max_cooccurrence_per_derive,
+            interaction_created_at,
+            interaction_event_time,
+            session_id,
+        )
+    })
 }
 
 /// [`derive`](fn@derive)'s read-only pre-pass, on its own so a caller can run
@@ -311,6 +320,9 @@ pub fn validate(
             &mut pending_hier_parents,
         )?;
     }
+    // A pair that would close a Hierarchical cycle with the graph's existing
+    // edges or the call's other pairs (spec §5.7); see `cycles`.
+    reject_parent_of_cycles(graph, parent_of.pairs)?;
     Ok(())
 }
 
@@ -460,6 +472,10 @@ fn derive_after_validation(
             // Hierarchical edge was already written; skip the duplicate.
             continue;
         }
+        // The authoritative cycle check, against the graph as written so far
+        // (the pre-pass already refused what it could see). `derive` runs
+        // this inside one transaction, so a refusal here writes nothing.
+        reject_closing_edge(graph, parent, child, parent_node, child_node)?;
         if graph
             .edge_between(parent_node, child_node, EdgeType::Hierarchical)
             .is_some()

@@ -826,6 +826,9 @@ pub fn validate_graph_inputs(graph: &Graph, parent_of: &ParentOf<'_>) -> Result<
             ))));
         }
     }
+    // A pair that would close a longer Hierarchical cycle (spec §5.7), with
+    // the graph's edges or the call's other pairs; see `derive::cycles`.
+    crate::graph::derive::reject_parent_of_cycles(graph, parent_of.pairs())?;
     Ok(())
 }
 
@@ -1613,6 +1616,16 @@ async fn derive_planned(
                 if !seen_pairs.insert((parent_node, child_node)) {
                     continue;
                 }
+                // The authoritative cycle check, against the live graph with
+                // this call's earlier edges in it; inside the transaction, so
+                // a refusal writes nothing.
+                crate::graph::derive::reject_closing_edge(
+                    g,
+                    parent,
+                    child,
+                    parent_node,
+                    child_node,
+                )?;
                 if g.edge_between(parent_node, child_node, EdgeType::Hierarchical)
                     .is_some()
                 {

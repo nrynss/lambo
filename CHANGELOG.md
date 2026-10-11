@@ -120,6 +120,16 @@
   - The commit's write-lock hold is now about 20 µs at 10,000, 50,000 and
     100,000 concepts (release build, M3 Pro), down from 6.8 ms at 10,000
     and 36 ms at 50,000 measured the same way.
+- A `parent_of` pair that would close a `Hierarchical` cycle is now
+  refused, with nothing written, in both match strategies. Before, only a
+  pair naming the same concept twice was refused. So `parent_of: [(a, b)]`
+  followed by `[(b, a)]`, a chain `a -> b -> c` followed by `(c, a)`, or
+  both directions in one call, wrote a cycle into a relationship the spec
+  defines as acyclic (§5.7). The refusal is a store invariant error naming
+  the pair, the same kind `record_action` returns for a Causal or Dependency
+  cycle. It is raised when the call is accepted where the graph already
+  shows the cycle, and otherwise when the write is applied (a concurrent
+  write closed it in between).
 
 
 ## 0.4.0 (2026-10-11)
