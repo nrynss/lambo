@@ -397,7 +397,7 @@ fn plan(graph: &Graph, action: &Action) -> Result<Plan, LamboError> {
 
     // Step 4 — cycle check (read-only). Rejection leaves the graph byte-identical.
     if let Some((src, tgt, ty)) = closing_edge(graph, &planned_edges) {
-        return Err(LamboError::Store(StoreError::Invariant(format!(
+        return Err(LamboError::Store(StoreError::cycle_refusal(format!(
             "{ty:?} edge {src} -> {tgt} would create a cycle"
         ))));
     }

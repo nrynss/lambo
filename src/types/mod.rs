@@ -1624,6 +1624,33 @@ impl StoreError {
     /// detail N4 hides, and both are fixed by re-reading the contract and
     /// retrying, which a bare "store error" does not say (#22 PR 6 review
     /// Low 1). The class stays `store error`.
+    /// The prefix every write-time cycle refusal's message starts with: a
+    /// `parent_of` pair that would close a `Hierarchical` cycle, or a
+    /// `record_action` edge that would close a `Causal`/`Dependency` one.
+    const CYCLE_REFUSAL: &'static str = "refused: the write would close a cycle: ";
+
+    /// A cycle refusal (see [`StoreError::is_cycle_refusal`]): an
+    /// [`StoreError::Invariant`] whose message is [`Self::CYCLE_REFUSAL`]
+    /// followed by `detail`, which names the pair for the operator's log.
+    pub(crate) fn cycle_refusal(detail: impl std::fmt::Display) -> StoreError {
+        StoreError::Invariant(format!("{}{detail}", Self::CYCLE_REFUSAL))
+    }
+
+    /// Whether this is a write refused because it would close a cycle in an
+    /// acyclic edge type. That is a fact about the write's input against the
+    /// graph it met, not about the session: the same write against the same
+    /// graph is refused again, and nothing else is wrong. So a replayed
+    /// durable intent that meets it settles `failed` and the replay goes on
+    /// (as for [`LamboError::Embed`]), where any other `Invariant`, which can
+    /// mean the graph or the store is inconsistent, still stops the replay.
+    ///
+    /// Identified by prefix, like [`Self::is_embedding_contract_refusal`]:
+    /// both producers build it through [`Self::cycle_refusal`], so the
+    /// variant stays `Invariant` and no public enum gains a member.
+    pub fn is_cycle_refusal(&self) -> bool {
+        matches!(self, StoreError::Invariant(m) if m.starts_with(Self::CYCLE_REFUSAL))
+    }
+
     pub fn is_embedding_contract_refusal(&self) -> bool {
         matches!(self, StoreError::Invariant(m)
             if m.starts_with("vector candidate lookup refused after embedding contract changed")
@@ -1721,6 +1748,19 @@ pub enum LamboError {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    /// #116 review M1: only the two cycle producers' refusals are marked;
+    /// any other `Invariant` (which can mean an inconsistent graph) is not.
+    #[test]
+    fn only_cycle_refusals_are_marked_as_cycle_refusals() {
+        assert!(StoreError::cycle_refusal("Causal edge a -> b").is_cycle_refusal());
+        assert!(!StoreError::Invariant("temporal chain covers 1 of 2".into()).is_cycle_refusal());
+        assert!(!StoreError::Invariant("would close a cycle".into()).is_cycle_refusal());
+        assert!(
+            !StoreError::Backend("refused: the write would close a cycle: x".into())
+                .is_cycle_refusal()
+        );
+    }
 
     /// #22 review L5: `{:?}` of a supplied vector, or of an intent carrying
     /// one, shows its length and never a component.

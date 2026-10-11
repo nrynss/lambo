@@ -587,6 +587,132 @@ async fn a_content_refusal_at_replay_still_settles_the_intent_failed() {
     );
 }
 
+/// **#116 review M1**: a replayed intent refused because it would close a
+/// cycle settles `failed` on its own and the replay goes on.
+///
+/// Two derives whose `parent_of` pairs close a Hierarchical 2-cycle, and two
+/// actions whose `produces` close a Causal one, are all acked while nothing
+/// has applied (each ack sees no edge yet), then deferred by a clean close.
+/// At the next attach the first of each pair applies, the second is refused,
+/// and the plain derive queued behind them still applies. Before the fix the
+/// first refusal stopped the replay as session-wide, leaving it and every
+/// later intent `pending_replay` for good.
+#[tokio::test]
+async fn a_cycle_refused_at_replay_settles_failed_and_the_replay_goes_on() {
+    let inner = Arc::new(MemoryStore::new());
+    let agent = AgentId::new("agent-a");
+    let mem = Memory::builder()
+        .session("intent-cycle")
+        .agent("agent-a")
+        .flush_interval(Duration::from_secs(3_600))
+        .store(Arc::new(VectorSearchable(inner.clone())) as Arc<dyn GraphStore>)
+        .embedder(Arc::new(HangingEmbedder::new()) as Arc<dyn Embedder>)
+        .embedding_contract(contract("fixture", 1024))
+        .match_strategy(MatchStrategy::Hybrid)
+        .build()
+        .await
+        .expect("build the deferring session");
+    let derive_pairs = |pairs: &'static [(&'static str, &'static str)]| {
+        let mem = &mem;
+        let agent = &agent;
+        async move {
+            mem.derive_async_as(agent, &[], &ParentOf::from_pairs(pairs), None)
+                .await
+                .expect("ack")
+                .receipt
+        }
+    };
+    let act = |action: &'static str, produces: &'static [&'static str]| {
+        let mem = &mem;
+        let agent = &agent;
+        async move {
+            mem.record_action_async_as(
+                agent,
+                &Action {
+                    event_time: None,
+                    action,
+                    produces,
+                    modifies: &[],
+                    depends_on: &[],
+                },
+            )
+            .await
+            .expect("ack")
+            .receipt
+        }
+    };
+    let first_pair = derive_pairs(&[("cyc alpha", "cyc beta")]).await;
+    let closing_pair = derive_pairs(&[("cyc beta", "cyc alpha")]).await;
+    let first_action = act("ran step one", &["step two output"]).await;
+    let closing_action = act("step two output", &["ran step one"]).await;
+    let later = mem
+        .derive_async_as(
+            &agent,
+            &[("a later fact", ConceptType::Entity)],
+            &ParentOf::none(),
+            None,
+        )
+        .await
+        .expect("ack")
+        .receipt;
+    mem.close().await.expect("clean close");
+    assert_eq!(mem.pipeline().counters().deferred(), 5);
+
+    let mem2 = Memory::builder()
+        .session("intent-cycle")
+        .agent("agent-a")
+        .flush_interval(Duration::from_secs(3_600))
+        .store(Arc::new(VectorSearchable(inner.clone())) as Arc<dyn GraphStore>)
+        .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
+        .embedding_contract(contract("fixture", 1024))
+        .match_strategy(MatchStrategy::Hybrid)
+        .build()
+        .await
+        .expect("build session 2");
+    let receipts = [
+        first_pair,
+        closing_pair,
+        first_action,
+        closing_action,
+        later,
+    ];
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let tags = loop {
+        let tags: Vec<&str> = receipts
+            .iter()
+            .map(|r| mem2.pipeline().lookup(&agent, *r).tag())
+            .collect();
+        if tags
+            .iter()
+            .all(|t| *t != "pending_replay" && *t != "pending")
+        {
+            break tags;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the replay must settle every intent, not stop: {tags:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    };
+    assert_eq!(
+        tags,
+        [
+            "applied_after_restart",
+            "failed",
+            "applied_after_restart",
+            "failed",
+            "applied_after_restart"
+        ]
+    );
+    assert_eq!(mem2.pipeline().counters().replay_owed(), 0);
+    assert!(matches!(
+        mem2.pipeline().counters().replay_blocked(),
+        crate::writeq::ReplayBlockReason::None
+    ));
+    mem2.graph.read().assert_invariants().unwrap();
+    mem2.close().await.expect("clean close 2");
+}
+
 /// Issue #16 §2 made `parent_of` ends embed, so a call can now ask for more
 /// embeds than fit one `HYBRID_IO_TIMEOUT`. Under hybrid the J3 ack refuses
 /// a call over `MAX_HYBRID_EMBEDS` at call time with a `Config` error, rather

@@ -307,8 +307,23 @@ impl WritePipeline {
                     // would. It never counts toward embedder-sickness evidence,
                     // and the refusal proves the embedder just answered (resets
                     // the streak — observed aliveness).
-                    Err(err @ (LamboError::Embed(_) | LamboError::ImageIdTaken(_))) => {
-                        transient_streak = 0;
+                    //
+                    // A cycle refusal (#116 review M1) is the same kind of fact:
+                    // this write against this graph closes a cycle, every time.
+                    // Before, it fell to the session-wide arm below, which left
+                    // the intent durable and stopped the replay, so every later
+                    // intent stayed `pending_replay` for good. Narrow on purpose:
+                    // any other `Invariant` can mean an inconsistent graph or
+                    // store, and still stops the replay.
+                    Err(err)
+                        if matches!(&err, LamboError::Embed(_) | LamboError::ImageIdTaken(_))
+                            || matches!(&err, LamboError::Store(e) if e.is_cycle_refusal()) =>
+                    {
+                        // A cycle refusal is decided before any embed, so it
+                        // proves nothing about the embedder's health.
+                        if !matches!(&err, LamboError::Store(_)) {
+                            transient_streak = 0;
+                        }
                         failed += 1;
                         this.counters.replay_owed.fetch_sub(1, Ordering::Relaxed);
                         // JE2E-12, same split as the in-session worker's failure
@@ -321,7 +336,7 @@ impl WritePipeline {
                         // model-safe sentence (it names the fix); every other
                         // refusal is its class, as before.
                         let reason = match &err {
-                            LamboError::ImageIdTaken(_) => {
+                            LamboError::ImageIdTaken(_) | LamboError::Store(_) => {
                                 crate::surface::error::model_safe_message(&err)
                             }
                             _ => crate::surface::error::err_class(&err).to_owned(),

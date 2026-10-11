@@ -40,7 +40,7 @@ enum End {
 }
 
 fn cycle_error(parent: &str, child: &str) -> LamboError {
-    LamboError::Store(StoreError::Invariant(format!(
+    LamboError::Store(StoreError::cycle_refusal(format!(
         "parent_of pair ({parent}, {child}) would close a Hierarchical cycle: {child:?} is \
          already an ancestor of {parent:?}. Hierarchical edges form a DAG (spec §5.7); \
          nothing was written"
