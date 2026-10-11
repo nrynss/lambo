@@ -312,8 +312,8 @@ impl std::fmt::Debug for ImageInput<'_> {
 /// document role, an image refused, and the inner adapter's identity hidden
 /// from the registry, whatever the inner adapter does. So a delegating
 /// embedder forwards [`Self::embed_query`], [`Self::embed_image`],
-/// [`Self::modalities`], [`Self::prepare`] and [`Self::as_any`] to its inner
-/// embedder as well.
+/// [`Self::modalities`], [`Self::prepare`], [`Self::is_prepared`] and
+/// [`Self::as_any`] to its inner embedder as well.
 #[async_trait]
 pub trait Embedder: Send + Sync {
     /// Embedding dimensionality this backend emits.
@@ -393,6 +393,18 @@ pub trait Embedder: Send + Sync {
     /// first): direct users of `ResolvedBackends::embedder` need not call it.
     async fn prepare(&self) -> Result<(), EmbedError> {
         Ok(())
+    }
+
+    /// Whether [`Self::prepare`] has nothing left to do: an embed now costs
+    /// one embed, not a model load first. Default `true` (nothing deferred).
+    ///
+    /// Read by work that must not be the thing that loads a model (#31 review
+    /// M1): the keep-warm loop skips its touch while this is `false`, so a
+    /// serve holding no session (a pinned serve whose sessions are all held
+    /// elsewhere, an on-demand serve with nothing attached) never loads the
+    /// weights to keep them warm.
+    fn is_prepared(&self) -> bool {
+        true
     }
 
     /// Optional downcast hook so the registry can ask a concrete adapter for

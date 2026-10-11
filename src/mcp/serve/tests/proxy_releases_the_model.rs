@@ -203,6 +203,9 @@ impl Embedder for LoadCounting {
         self.loads.fetch_add(1, Ordering::SeqCst);
         self.inner.prepare().await
     }
+    fn is_prepared(&self) -> bool {
+        self.loads.load(Ordering::SeqCst) > 0
+    }
     fn as_any(&self) -> Option<&dyn std::any::Any> {
         self.inner.as_any()
     }
@@ -238,6 +241,9 @@ async fn a_proxy_never_loads_and_the_holder_loads_before_it_serves() {
         }
         async fn prepare(&self) -> Result<(), EmbedError> {
             self.0.prepare().await
+        }
+        fn is_prepared(&self) -> bool {
+            self.0.is_prepared()
         }
         fn as_any(&self) -> Option<&dyn std::any::Any> {
             self.0.as_any()

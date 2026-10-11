@@ -1164,6 +1164,10 @@ impl Embedder for CandleEmbedder {
             .map_err(|e| EmbedError::Backend(format!("candle load task failed: {e}")))?
     }
 
+    fn is_prepared(&self) -> bool {
+        self.is_loaded()
+    }
+
     async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbedError> {
         reject_empty(text)?;
         // #31: the holder path has loaded by now (`prepare` in the attach).
