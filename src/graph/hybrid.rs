@@ -82,9 +82,11 @@
 //!    concurrent mutation the plan depended on discards the stale gather and
 //!    plans again, reusing every vector already embedded (`EmbedCache`); one
 //!    it did not depend on commits alongside. Revalidate the embedding
-//!    contract under this lock, apply the logical derive to a cloned graph,
-//!    and swap only after every write succeeds. The stamp and all node/edge
-//!    mutations are thus atomic in RAM; no `.await` is held here.
+//!    contract under this lock and apply the logical derive in place inside
+//!    one [`Graph::transaction`] (#102), which undoes every write if any fails.
+//!    The stamp and all node/edge mutations are thus atomic in RAM, at a cost
+//!    proportional to what the call writes, not to the session; no `.await`
+//!    is held here.
 //!
 //! This remains sound even when future callers introduce concurrent writers;
 //! correctness does not depend on every writer participating in a private mutex.
@@ -158,8 +160,8 @@
 //! 3. **A vector minted in this call can never drive a merge in this call.**
 //!    Candidates come from the live graph (on a holder whose store ranks
 //!    exactly, #8, or lags it, #18 and #60) or from the store, and neither can see this call's staged
-//!    writes: they live on a private clone until the commit swaps it in;
-//!    `*target != id` is the defence in depth.
+//!    writes: they are applied only inside the commit, after every candidate
+//!    was ranked; `*target != id` is the defence in depth.
 //!
 //! ## What is deliberately *not* claimed
 //!
@@ -1254,6 +1256,8 @@ async fn derive_planned(
         // Phase 3 — commit under a write lock (sync, no await).
         // -----------------------------------------------------------------------
         let mut guard = graph.write();
+        #[cfg(test)]
+        let commit_started = std::time::Instant::now();
         // #116: check the plan against what changed since it was made, not
         // against "anything changed". A rival write that touches nothing
         // this plan read commits alongside it; one that does sends this
@@ -1300,11 +1304,12 @@ async fn derive_planned(
             }
         }
 
-        // Stage every graph mutation on a private clone. Any invariant failure in
-        // concept, co-occurrence, or hierarchy construction drops the clone and
-        // leaves both live state and its ordered mutation log untouched.
-        let mut staged = guard.clone();
-        let committed = (|g: &mut Graph| -> Result<DeriveOutcome, LamboError> {
+        // Apply every graph mutation in place, inside one transaction (#102):
+        // any invariant failure in concept, co-occurrence, or hierarchy
+        // construction rolls it back and leaves both live state and its
+        // ordered mutation log untouched, as the whole-graph clone this
+        // replaced did, at a cost proportional to what the call writes.
+        let committed = guard.transaction(|g| {
             if attempted_embed && g.embedding().is_none() {
                 g.stamp_embedding(embedding.clone())?;
             }
@@ -1622,9 +1627,8 @@ async fn derive_planned(
             }
 
             Ok(outcome)
-        })(&mut staged);
+        });
         let outcome = committed?;
-        *guard = staged;
         // J3: run the commit hook (intent consumption) under THIS write-lock
         // hold, after the mutations — the flush drain takes the same lock, so the
         // committed mutations and whatever the hook appends travel in one
@@ -1632,6 +1636,8 @@ async fn derive_planned(
         if let Some(hook) = on_commit.take() {
             hook(&mut guard, &outcome);
         }
+        #[cfg(test)]
+        LAST_COMMIT.with(|d| d.set(Some(commit_started.elapsed())));
         return Ok(outcome);
     }
 
@@ -1836,6 +1842,19 @@ thread_local! {
 #[cfg(test)]
 pub(crate) fn plan_attempts() -> usize {
     ATTEMPTS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How long this thread's last successful hybrid commit held the write
+    /// lock (tests only: the #102 commit-cost probe).
+    static LAST_COMMIT: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
+}
+
+/// The write-lock hold of this thread's last successful hybrid commit.
+#[cfg(test)]
+pub(crate) fn last_commit_duration() -> Option<Duration> {
+    LAST_COMMIT.with(std::cell::Cell::get)
 }
 
 /// CoOccurrence is symmetric; adopt the existing direction so a swapped re-derive
