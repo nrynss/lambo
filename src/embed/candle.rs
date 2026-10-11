@@ -112,11 +112,6 @@ pub struct CandleOpts {
     pub offline: bool,
     /// Explicit local weights directory; bypasses hf-hub entirely (offline).
     pub weights_dir: Option<PathBuf>,
-    /// Where the weight-digest cache lives (issue #31). `None` = the default,
-    /// `$XDG_CACHE_HOME/lambo/candle-identity` or
-    /// `~/.cache/lambo/candle-identity`. Not a config key: tests point it at
-    /// a scratch directory.
-    pub identity_cache_dir: Option<PathBuf>,
 }
 
 /// The resolved computational device plus the dtype to run (f16 on GPU, f32 on
@@ -432,6 +427,17 @@ pub fn reject_empty(text: &str) -> Result<(), EmbedError> {
 /// Load the tokenizer + model from the parsed `config.json` and the on-disk
 /// `tokenizer.json` and weight file. Shared by the hf-hub and explicit-dir
 /// fetch paths; run by [`CandleEmbedder::load`] only (issue #31).
+///
+/// The tokenizer is parsed and configured FIRST (#31 review L3): it is a few
+/// MB of JSON against ~1.1 GB of weights, so a corrupt `tokenizer.json` is
+/// refused before anything reaches the device.
+///
+/// Error classes (#31 review L2): a tokenizer that does not parse, or a weight
+/// file of an unsupported kind, is [`EmbedError::Backend`] (permanent: the
+/// same artifact fails the same way). The device load itself (mapping the
+/// weights, allocating the model's buffers) is [`EmbedError::Unavailable`]:
+/// it fails under memory pressure or a busy device and can succeed later, so
+/// a pinned session's background retry keeps trying it.
 fn load_core(
     cfg: &Config,
     tokenizer_path: &Path,
@@ -439,10 +445,19 @@ fn load_core(
     device: &Device,
     dtype: DType,
 ) -> Result<BgeM3Core, EmbedError> {
+    let tokenizer = load_tokenizer(cfg, tokenizer_path)?;
     let vb = load_varbuilder(weights_path, dtype, device)?;
-    let model =
-        XLMRobertaModel::new(cfg, vb).map_err(|e| EmbedError::Backend(format!("model: {e}")))?;
+    let model = XLMRobertaModel::new(cfg, vb)
+        .map_err(|e| EmbedError::Unavailable(format!("candle model load: {e}")))?;
+    Ok(BgeM3Core {
+        model,
+        tokenizer,
+        device: device.clone(),
+    })
+}
 
+/// Parse `tokenizer.json` and set BGE-M3's truncation and padding.
+fn load_tokenizer(cfg: &Config, tokenizer_path: &Path) -> Result<Tokenizer, EmbedError> {
     let mut tokenizer = Tokenizer::from_file(tokenizer_path)
         .map_err(|e| EmbedError::Backend(format!("tokenizer: {e}")))?;
     tokenizer
@@ -462,12 +477,7 @@ fn load_core(
         pad_token: "<pad>".to_string(),
         ..Default::default()
     }));
-
-    Ok(BgeM3Core {
-        model,
-        tokenizer,
-        device: device.clone(),
-    })
+    Ok(tokenizer)
 }
 
 fn load_varbuilder(
@@ -479,10 +489,10 @@ fn load_varbuilder(
     let vb = match ext {
         "safetensors" => unsafe {
             VarBuilder::from_mmaped_safetensors(&[weights.to_path_buf()], dtype, device)
-                .map_err(|e| EmbedError::Backend(format!("safetensors: {e}")))?
+                .map_err(|e| EmbedError::Unavailable(format!("safetensors: {e}")))?
         },
         "bin" | "pth" | "pt" => VarBuilder::from_pth(weights, dtype, device)
-            .map_err(|e| EmbedError::Backend(format!("pytorch_model.bin: {e}")))?,
+            .map_err(|e| EmbedError::Unavailable(format!("pytorch_model.bin: {e}")))?,
         other => {
             return Err(EmbedError::Backend(format!(
                 "unsupported weight extension: {other:?}"
@@ -517,6 +527,39 @@ struct LoadPlan {
     weights_path: PathBuf,
     device: Device,
     dtype: DType,
+    /// [`file_fingerprint`] of each artifact file as construction read it
+    /// (#31 review M2): `(path, fingerprint)` for the weights (taken before
+    /// they were hashed for the identity), `config.json` and
+    /// `tokenizer.json`. [`CandleEmbedder::load`] refuses if any differs, so
+    /// the bytes it loads are the bytes the stamped identity describes, even
+    /// when the load runs hours after the resolve (a pinned retry, an
+    /// on-demand attach). Empty for a test embedder built already loaded.
+    fingerprints: Vec<(PathBuf, String)>,
+}
+
+impl LoadPlan {
+    /// #31 review M2: the artifact on disk is still the one construction
+    /// identified. A changed file is permanent for this process (its identity
+    /// was stamped at resolve), so the error is [`EmbedError::Backend`].
+    fn check_unchanged(&self) -> Result<(), EmbedError> {
+        for (path, at_resolve) in &self.fingerprints {
+            let now = file_fingerprint(path).map_err(|e| {
+                EmbedError::Backend(format!(
+                    "candle artifact {} cannot be read back for the load: {e}",
+                    path.display()
+                ))
+            })?;
+            if &now != at_resolve {
+                return Err(EmbedError::Backend(format!(
+                    "candle artifact {} changed after this process resolved its identity; \
+                     refusing to load bytes the stamped embedding contract does not describe. \
+                     Restart the process to resolve the new artifact",
+                    path.display()
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// The device-loaded half of a [`CandleEmbedder`], shared by every clone.
@@ -603,8 +646,22 @@ impl CandleEmbedder {
     /// `config.json`. Every refusal [`Self::new`] makes before its load is
     /// made here: zero or non-1024 `dim`, a missing artifact, an unverified
     /// default artifact, and (new) a `config.json` whose `hidden_size` is not
-    /// the configured width. The tokenizer is parsed by [`Self::load`].
+    /// the configured width. The tokenizer is parsed by [`Self::load`], before
+    /// the weights; every artifact file's fingerprint is recorded here and
+    /// checked again by the load.
     pub fn deferred(dim: usize, opts: CandleOpts) -> Result<Self, EmbedError> {
+        Self::deferred_in(dim, opts, default_identity_cache_dir())
+    }
+
+    /// [`Self::deferred`] with the weight-digest cache in `cache_dir` (`None`:
+    /// no cache, hash every time). Crate-internal so [`CandleOpts`] keeps the
+    /// public shape it had in 0.4.0 (#31 review L5); tests point it at a
+    /// scratch directory.
+    pub(crate) fn deferred_in(
+        dim: usize,
+        opts: CandleOpts,
+        cache_dir: Option<PathBuf>,
+    ) -> Result<Self, EmbedError> {
         if dim == 0 {
             return Err(EmbedError::Unavailable("embedder dim must be > 0".into()));
         }
@@ -663,11 +720,8 @@ impl CandleEmbedder {
         // before they influence anything. K2-R1-1: this digest is also what the
         // contract stamps, on EVERY path including explicit overrides. #31: an
         // unchanged file's digest comes from the identity cache.
-        let cache_dir = opts
-            .identity_cache_dir
-            .clone()
-            .or_else(default_identity_cache_dir);
-        let weight_sha256 = weight_sha256(&weights_path, cache_dir.as_deref())?;
+        let (weight_sha256, weights_fingerprint) =
+            weight_sha256(&weights_path, cache_dir.as_deref())?;
         // The shipped artifact is machine-checked against the pinned digest;
         // any override (repo/revision/file/dir) is stamped from its own bytes.
         let is_default_artifact = opts.weights_dir.is_none()
@@ -685,8 +739,10 @@ impl CandleEmbedder {
         // #31: the width the resolve checks against the store comes from the
         // artifact's own config, not from a loaded model. `hidden_size` is the
         // CLS vector's width, so it is exactly what the forward will emit.
+        let config_fingerprint = fingerprint_or_backend(&config_path)?;
         let config = read_config(&config_path)?;
         check_hidden_size(&config, dim, &config_path)?;
+        let tokenizer_fingerprint = fingerprint_or_backend(&tokenizer_path)?;
 
         // K2-R1-1: the stamp ALWAYS describes the artifact that will be loaded —
         // canonical source for the verified default, effective source plus the
@@ -714,6 +770,11 @@ impl CandleEmbedder {
             identity,
             on_metal: device.is_metal(),
             plan: Arc::new(LoadPlan {
+                fingerprints: vec![
+                    (weights_path.clone(), weights_fingerprint),
+                    (config_path, config_fingerprint),
+                    (tokenizer_path.clone(), tokenizer_fingerprint),
+                ],
                 config,
                 tokenizer_path,
                 weights_path,
@@ -742,6 +803,7 @@ impl CandleEmbedder {
             return Ok(());
         }
         let plan = &self.plan;
+        plan.check_unchanged()?;
         let core = load_core(
             &plan.config,
             &plan.tokenizer_path,
@@ -816,8 +878,7 @@ fn check_hidden_size(config: &Config, dim: usize, config_path: &Path) -> Result<
     Ok(())
 }
 
-/// Where the weight-digest cache lives when [`CandleOpts::identity_cache_dir`]
-/// is not set: `$XDG_CACHE_HOME/lambo/candle-identity`, else
+/// Where [`CandleEmbedder::deferred`] keeps the weight-digest cache: `$XDG_CACHE_HOME/lambo/candle-identity`, else
 /// `$HOME/.cache/lambo/candle-identity` (the same `~/.cache` root hf-hub uses
 /// for the weights). `None` (no usable directory) disables the cache: every
 /// construction hashes, as before #31.
@@ -846,24 +907,37 @@ fn default_identity_cache_dir() -> Option<PathBuf> {
 /// Trust: the entry lives under the operator's own cache directory, writable
 /// only by the same user who can already rewrite the weights; it does not
 /// widen who can change what the contract stamps.
-fn weight_sha256(path: &Path, cache_dir: Option<&Path>) -> Result<String, EmbedError> {
+///
+/// Returns the digest and the fingerprint taken BEFORE hashing, which the
+/// load checks again (#31 review M2): a file that changes during or after
+/// the hash fails that check.
+///
+/// Trade-off (#31 review L4): a cache hit does not read the bytes, so silent
+/// on-disk corruption that leaves the metadata alone (bit rot) is no longer
+/// caught at start the way a full re-hash would catch it. A safetensors file
+/// that rots badly enough still fails to load; one that rots quietly embeds
+/// under the old identity, as it would have between two starts before #31.
+fn weight_sha256(path: &Path, cache_dir: Option<&Path>) -> Result<(String, String), EmbedError> {
+    let before = fingerprint_or_backend(path)?;
     let Some(cache_dir) = cache_dir else {
-        return sha256_file(path);
-    };
-    let before = match file_fingerprint(path) {
-        Ok(fingerprint) => fingerprint,
-        // Let the hash produce the canonical "open weights" error.
-        Err(_) => return sha256_file(path),
+        return Ok((sha256_file(path)?, before));
     };
     let entry = cache_dir.join(format!("{}.json", &sha256_hex(before.as_bytes())[..32]));
-    if let Some(digest) = read_identity_entry(&entry, &before) {
-        return Ok(digest);
+    if let Some(digest) = read_identity_entry(cache_dir, &entry, &before) {
+        return Ok((digest, before));
     }
     let digest = sha256_file(path)?;
     if file_fingerprint(path).ok().as_deref() == Some(before.as_str()) {
         write_identity_entry(cache_dir, &entry, &before, &digest);
     }
-    Ok(digest)
+    Ok((digest, before))
+}
+
+/// [`file_fingerprint`], with a missing or unreadable file as the adapter's
+/// usual artifact error.
+fn fingerprint_or_backend(path: &Path) -> Result<String, EmbedError> {
+    file_fingerprint(path)
+        .map_err(|e| EmbedError::Backend(format!("candle artifact {}: {e}", path.display())))
 }
 
 /// The metadata key of [`weight_sha256`]'s cache (see there).
@@ -890,7 +964,21 @@ struct IdentityEntry {
     sha256: String,
 }
 
-fn read_identity_entry(entry: &Path, fingerprint: &str) -> Option<String> {
+/// #31 review L4: a cache path is trusted only when this user owns it and
+/// nobody else can write it. Anything else is a miss (the bytes are hashed).
+fn private_to_us(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    // `symlink_metadata`: an entry or directory that is a link is a miss too.
+    std::fs::symlink_metadata(path).is_ok_and(|meta| {
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        meta.uid() == unsafe { libc::geteuid() } && meta.mode() & 0o022 == 0
+    })
+}
+
+fn read_identity_entry(cache_dir: &Path, entry: &Path, fingerprint: &str) -> Option<String> {
+    if !private_to_us(cache_dir) || !private_to_us(entry) {
+        return None;
+    }
     let bytes = std::fs::read(entry).ok()?;
     let parsed: IdentityEntry = serde_json::from_slice(&bytes).ok()?;
     let well_formed = parsed.sha256.len() == 64
@@ -903,15 +991,28 @@ fn read_identity_entry(entry: &Path, fingerprint: &str) -> Option<String> {
 
 fn write_identity_entry(cache_dir: &Path, entry: &Path, fingerprint: &str, digest: &str) {
     let write = || -> std::io::Result<()> {
-        std::fs::create_dir_all(cache_dir)?;
+        use std::io::Write as _;
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+        // 0700 (#31 review L4): created private, and an existing directory
+        // that is not is refused by `read_identity_entry` anyway.
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(cache_dir)?;
         let body = serde_json::to_vec(&IdentityEntry {
             fingerprint: fingerprint.to_string(),
             sha256: digest.to_string(),
         })
         .map_err(std::io::Error::other)?;
-        // Write-then-rename, so a reader never sees a torn entry.
+        // Write-then-rename, so a reader never sees a torn entry; 0600.
         let tmp = entry.with_extension(format!("tmp.{}", std::process::id()));
-        std::fs::write(&tmp, body)?;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)?
+            .write_all(&body)?;
         std::fs::rename(&tmp, entry)
     };
     if let Err(e) = write() {
@@ -1262,16 +1363,20 @@ pub(crate) mod test_artifact {
             .expect("model.safetensors");
     }
 
-    /// Options that load this artifact on CPU, offline, with the digest cache
-    /// in `cache_dir` (never the operator's).
-    pub(crate) fn opts(dir: &Path, cache_dir: &Path) -> CandleOpts {
+    /// Options that load this artifact on CPU, offline.
+    pub(crate) fn opts(dir: &Path) -> CandleOpts {
         CandleOpts {
             device: Some("cpu".into()),
             offline: true,
             weights_dir: Some(dir.to_path_buf()),
-            identity_cache_dir: Some(cache_dir.to_path_buf()),
             ..Default::default()
         }
+    }
+
+    /// A deferred embedder over this artifact, with the digest cache in
+    /// `cache_dir` (never the operator's).
+    pub(crate) fn deferred(dir: &Path, cache_dir: &Path) -> Result<CandleEmbedder, EmbedError> {
+        CandleEmbedder::deferred_in(BGE_M3_DIM, opts(dir), Some(cache_dir.to_path_buf()))
     }
 }
 
@@ -1469,6 +1574,7 @@ mod tests {
                 weights_path: PathBuf::new(),
                 device,
                 dtype: DType::F32,
+                fingerprints: Vec::new(),
             }),
             slot: Arc::new(slot),
         }
@@ -1792,11 +1898,8 @@ mod tests {
         let dir = crate::test_util::ScratchDir::new("lambo-31-deferred");
         let artifact = dir.join("artifact");
         test_artifact::write(&artifact);
-        let e = CandleEmbedder::deferred(
-            BGE_M3_DIM,
-            test_artifact::opts(&artifact, &dir.join("cache")),
-        )
-        .expect("the tiny artifact resolves");
+        let e = test_artifact::deferred(&artifact, &dir.join("cache"))
+            .expect("the tiny artifact resolves");
 
         // Everything the resolve needs, and no weights on the device.
         assert!(!e.is_loaded(), "deferred must not load the model");
@@ -1841,11 +1944,7 @@ mod tests {
         let dir = crate::test_util::ScratchDir::new("lambo-31-fallback");
         let artifact = dir.join("artifact");
         test_artifact::write(&artifact);
-        let e = CandleEmbedder::deferred(
-            BGE_M3_DIM,
-            test_artifact::opts(&artifact, &dir.join("cache")),
-        )
-        .unwrap();
+        let e = test_artifact::deferred(&artifact, &dir.join("cache")).unwrap();
         let (a, b) = tokio::join!(e.embed("x"), e.embed("lambo"));
         assert_eq!(a.unwrap().len(), BGE_M3_DIM);
         assert_eq!(b.unwrap().len(), BGE_M3_DIM);
@@ -1865,10 +1964,7 @@ mod tests {
             test_artifact::config_json(768),
         )
         .unwrap();
-        let err = match CandleEmbedder::deferred(
-            BGE_M3_DIM,
-            test_artifact::opts(&artifact, &dir.join("cache")),
-        ) {
+        let err = match test_artifact::deferred(&artifact, &dir.join("cache")) {
             Err(e) => e.to_string(),
             Ok(_) => panic!("a 768-wide artifact must not resolve under dim = 1024"),
         };
@@ -1885,7 +1981,7 @@ mod tests {
         let first = sha256_file(&weights).unwrap();
 
         // A miss hashes the bytes and records them.
-        assert_eq!(weight_sha256(&weights, Some(&cache)).unwrap(), first);
+        assert_eq!(weight_sha256(&weights, Some(&cache)).unwrap().0, first);
         let entries: Vec<_> = std::fs::read_dir(&cache).unwrap().collect();
         assert_eq!(entries.len(), 1, "one entry per fingerprint");
         let entry = entries[0].as_ref().unwrap().path();
@@ -1903,7 +1999,7 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        assert_eq!(weight_sha256(&weights, Some(&cache)).unwrap(), planted);
+        assert_eq!(weight_sha256(&weights, Some(&cache)).unwrap().0, planted);
 
         // Rewriting the file (same length, new bytes) changes the
         // fingerprint, so the entry misses and the new bytes are hashed.
@@ -1912,15 +2008,15 @@ mod tests {
         assert_ne!(file_fingerprint(&weights).unwrap(), fingerprint);
         let second = sha256_file(&weights).unwrap();
         assert_ne!(second, first);
-        assert_eq!(weight_sha256(&weights, Some(&cache)).unwrap(), second);
+        assert_eq!(weight_sha256(&weights, Some(&cache)).unwrap().0, second);
 
         // A corrupt entry is a miss, never an error.
         for entry in std::fs::read_dir(&cache).unwrap() {
             std::fs::write(entry.unwrap().path(), b"{not json").unwrap();
         }
-        assert_eq!(weight_sha256(&weights, Some(&cache)).unwrap(), second);
+        assert_eq!(weight_sha256(&weights, Some(&cache)).unwrap().0, second);
         // No cache directory: hash every time, as before #31.
-        assert_eq!(weight_sha256(&weights, None).unwrap(), second);
+        assert_eq!(weight_sha256(&weights, None).unwrap().0, second);
     }
 
     /// The contract identity follows the bytes through the cache: a changed
@@ -1931,24 +2027,140 @@ mod tests {
         let artifact = dir.join("artifact");
         let cache = dir.join("cache");
         test_artifact::write(&artifact);
-        let before = CandleEmbedder::deferred(BGE_M3_DIM, test_artifact::opts(&artifact, &cache))
+        let before = test_artifact::deferred(&artifact, &cache)
             .unwrap()
             .model_identity()
             .to_string();
-        let again = CandleEmbedder::deferred(BGE_M3_DIM, test_artifact::opts(&artifact, &cache))
+        let again = test_artifact::deferred(&artifact, &cache)
             .unwrap()
             .model_identity()
             .to_string();
         assert_eq!(before, again, "an unchanged file keeps its identity");
         std::thread::sleep(Duration::from_millis(5));
         test_artifact::write_weights(&artifact);
-        let after = CandleEmbedder::deferred(BGE_M3_DIM, test_artifact::opts(&artifact, &cache))
+        let after = test_artifact::deferred(&artifact, &cache)
             .unwrap()
             .model_identity()
             .to_string();
         assert_ne!(before, after, "new weights must stamp a new identity");
         let digest = sha256_file(&artifact.join(DEFAULT_WEIGHT_FILE)).unwrap();
         assert!(after.contains(&digest[..12]), "{after}");
+    }
+
+    /// #31 review M2: the load re-checks the artifact against what the
+    /// resolve identified. New weights written between the two are refused,
+    /// permanently, and nothing reaches the device.
+    #[tokio::test]
+    async fn a_weight_file_changed_after_resolve_is_refused_at_load() {
+        let dir = crate::test_util::ScratchDir::new("lambo-31-m2");
+        let artifact = dir.join("artifact");
+        test_artifact::write(&artifact);
+        let e = test_artifact::deferred(&artifact, &dir.join("cache")).unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+        test_artifact::write_weights(&artifact);
+        let err = e
+            .prepare()
+            .await
+            .expect_err("changed weights must not load");
+        let msg = err.to_string();
+        assert!(msg.contains("changed after this process resolved"), "{msg}");
+        assert!(msg.contains(DEFAULT_WEIGHT_FILE), "{msg}");
+        assert!(
+            !err.is_transient(),
+            "a changed artifact needs a restart: {err:?}"
+        );
+        assert!(!e.is_loaded());
+        assert_eq!(e.load_count(), 0);
+
+        // The same for config.json and tokenizer.json.
+        for file in ["config.json", "tokenizer.json"] {
+            let e = test_artifact::deferred(&artifact, &dir.join("cache")).unwrap();
+            std::thread::sleep(Duration::from_millis(5));
+            let path = artifact.join(file);
+            let body = std::fs::read(&path).unwrap();
+            std::fs::write(&path, body).unwrap();
+            let msg = e.prepare().await.expect_err(file).to_string();
+            assert!(msg.contains(file), "{msg}");
+            assert_eq!(e.load_count(), 0);
+        }
+    }
+
+    /// #31 review L3: the tokenizer is validated before the weights are
+    /// touched. With a corrupt tokenizer AND weights that would fail to map,
+    /// the load fails on the tokenizer: the weights were never read.
+    #[tokio::test]
+    async fn a_corrupt_tokenizer_fails_the_load_before_the_weights() {
+        let dir = crate::test_util::ScratchDir::new("lambo-31-l3");
+        let artifact = dir.join("artifact");
+        test_artifact::write(&artifact);
+        std::fs::write(artifact.join("tokenizer.json"), b"{ not a tokenizer").unwrap();
+        std::fs::write(artifact.join(DEFAULT_WEIGHT_FILE), b"not safetensors").unwrap();
+        let e = test_artifact::deferred(&artifact, &dir.join("cache"))
+            .expect("neither file is parsed at resolve");
+        let err = e
+            .prepare()
+            .await
+            .expect_err("a corrupt tokenizer must not load");
+        let msg = err.to_string();
+        assert!(msg.contains("tokenizer"), "{msg}");
+        assert!(
+            !msg.contains("safetensors"),
+            "the weights were read first: {msg}"
+        );
+        assert!(!err.is_transient(), "{err:?}");
+        assert_eq!(e.load_count(), 0);
+    }
+
+    /// #31 review L4: the cache is created private, and an entry or a
+    /// directory that another user could write is never trusted.
+    #[test]
+    fn the_identity_cache_trusts_only_private_entries() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = crate::test_util::ScratchDir::new("lambo-31-l4");
+        let cache = dir.join("cache");
+        let weights = dir.join("weights.bin");
+        std::fs::write(&weights, b"artifact bytes").unwrap();
+        let real = sha256_file(&weights).unwrap();
+        assert_eq!(weight_sha256(&weights, Some(&cache)).unwrap().0, real);
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&cache), 0o700, "the cache directory is created 0700");
+        let entry = std::fs::read_dir(&cache)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        assert_eq!(mode(&entry), 0o600, "entries are written 0600");
+
+        // Plant a digest under the right fingerprint: served while private...
+        let planted = "0".repeat(64);
+        std::fs::write(
+            &entry,
+            serde_json::to_vec(&IdentityEntry {
+                fingerprint: file_fingerprint(&weights).unwrap(),
+                sha256: planted.clone(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(weight_sha256(&weights, Some(&cache)).unwrap().0, planted);
+        // ...a miss once the entry is group/world-writable...
+        std::fs::set_permissions(&entry, std::fs::Permissions::from_mode(0o666)).unwrap();
+        assert_eq!(weight_sha256(&weights, Some(&cache)).unwrap().0, real);
+        // ...and once the directory is.
+        std::fs::set_permissions(&entry, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::write(
+            &entry,
+            serde_json::to_vec(&IdentityEntry {
+                fingerprint: file_fingerprint(&weights).unwrap(),
+                sha256: planted.clone(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(weight_sha256(&weights, Some(&cache)).unwrap().0, planted);
+        std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert_eq!(weight_sha256(&weights, Some(&cache)).unwrap().0, real);
     }
 
     /// Issue #31 measurement, recorded as a test: the process footprint of a

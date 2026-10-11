@@ -1011,7 +1011,6 @@ pub fn build_embedder(cfg: EmbedderConfig) -> Result<Box<dyn Embedder>, EmbedErr
                         weights_file: cfg.weights_file,
                         offline: cfg.offline.unwrap_or(false),
                         weights_dir: cfg.weights_dir.clone(),
-                        identity_cache_dir: None,
                     },
                 )?))
             }
