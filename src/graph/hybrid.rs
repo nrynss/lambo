@@ -1266,6 +1266,12 @@ async fn derive_planned(
             &guard,
             &PlanRead {
                 planned_epoch,
+                interaction,
+                interaction_read: (
+                    origin_text.as_deref(),
+                    interaction_created_at,
+                    interaction_event_time,
+                ),
                 stamped: stamped.as_ref(),
                 concepts,
                 parent_of,
@@ -1663,6 +1669,11 @@ const MAX_PLAN_RESCORES: usize = 32_768;
 /// What a plan read from the graph, for [`plan_still_holds`].
 struct PlanRead<'p, 'a> {
     planned_epoch: u64,
+    interaction: NodeId,
+    /// The interaction's prompt text (every embed's framing), creation time
+    /// and event time (every written row's timestamps), as the plan read
+    /// them.
+    interaction_read: (Option<&'p str>, DateTime<Utc>, Option<DateTime<Utc>>),
     stamped: Option<&'p EmbeddingContract>,
     concepts: &'p [(&'a str, ConceptType)],
     parent_of: &'p ParentOf<'a>,
@@ -1717,11 +1728,20 @@ struct PlanRead<'p, 'a> {
 /// Items with no vector (a canonical match, the store's capability refusal,
 /// a store without vector search) and the supplied image item never rank,
 /// so only the canonical check applies to them, as it does to `parent_of`
-/// ends, which are embedded but never merged. The interaction is not
-/// checked: interactions are append-only.
+/// ends, which are embedded but never merged. The interaction must still
+/// carry the prompt text, creation time and event time the plan read (an
+/// interaction cannot be removed, but a re-upsert can rewrite them).
 fn plan_still_holds(g: &Graph, plan: &PlanRead<'_, '_>) -> Result<bool, LamboError> {
     if g.epoch() == plan.planned_epoch {
         return Ok(true);
+    }
+    // Review L3: the interaction the plan framed its embeds with and stamps
+    // its rows from. Append-only in the chain, but a re-upsert can rewrite
+    // its fields.
+    match g.node(plan.interaction) {
+        Some(Node::Interaction(i))
+            if (i.prompt_text.as_deref(), i.created_at, i.event_time) == plan.interaction_read => {}
+        _ => return Ok(false),
     }
     if g.embedding() != plan.stamped {
         return Ok(false);

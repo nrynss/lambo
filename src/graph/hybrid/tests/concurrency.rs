@@ -32,11 +32,12 @@ fn probe() -> Vec<f32> {
     vec![1.0, 0.0, 0.0, 0.0]
 }
 
-/// Maps contents to vectors; may pause on one content until released, or
+/// Maps contents to vectors; may pause on one content (the first time) until released, or
 /// hold its first `barrier` calls at a barrier. Counts every embed.
 struct TableEmbedder {
     table: Vec<(&'static str, Vec<f32>)>,
     pause_on: Option<&'static str>,
+    paused: std::sync::atomic::AtomicBool,
     started: Notify,
     release: Notify,
     barrier: Option<Barrier>,
@@ -48,6 +49,7 @@ impl TableEmbedder {
         Self {
             table,
             pause_on: None,
+            paused: std::sync::atomic::AtomicBool::new(false),
             started: Notify::new(),
             release: Notify::new(),
             barrier: None,
@@ -80,7 +82,7 @@ impl Embedder for TableEmbedder {
         {
             barrier.wait().await;
         }
-        if self.pause_on == Some(content) {
+        if self.pause_on == Some(content) && !self.paused.swap(true, Ordering::SeqCst) {
             self.started.notify_one();
             self.release.notified().await;
         }
@@ -432,6 +434,45 @@ async fn plan_rescoring_is_capped_and_replans_past_the_cap() {
         2,
         "past the cap the plan is stale"
     );
+}
+
+/// Review L3: the interaction is part of what the plan read (its text
+/// frames every embed). A re-upsert that rewrites its prompt text between
+/// plan and commit makes the plan stale; the replan embeds the new framing,
+/// which the cache has not seen.
+#[tokio::test]
+async fn a_rewritten_interaction_forces_a_replan() {
+    let (graph, interaction) = stamped_session("hybrid-race-interaction");
+    let embedder =
+        Arc::new(TableEmbedder::new(vec![("framed topic", probe())]).pausing_on("framed topic"));
+    let attempts = plan_attempts();
+    let task = tokio::spawn(derive_over_graph(
+        graph.clone(),
+        embedder.clone(),
+        interaction,
+        vec![("framed topic", ConceptType::Entity)],
+        Vec::new(),
+    ));
+    embedder.started.notified().await;
+    {
+        let mut g = graph.write();
+        let mut i = match g.node(interaction) {
+            Some(Node::Interaction(i)) => i.clone(),
+            _ => unreachable!(),
+        };
+        i.prompt_text = Some("rewritten prompt".into());
+        g.insert_interaction(i).unwrap();
+    }
+    embedder.release.notify_one();
+    let out = task.await.unwrap().unwrap();
+    assert_eq!(out.created.len(), 1, "{out:?}");
+    assert_eq!(
+        plan_attempts() - attempts,
+        2,
+        "the stale plan was replanned"
+    );
+    assert_eq!(embedder.calls(), 2, "the new framing is a new embed");
+    graph.read().assert_invariants().unwrap();
 }
 
 /// #102: a commit that fails after it has already written (here the second
