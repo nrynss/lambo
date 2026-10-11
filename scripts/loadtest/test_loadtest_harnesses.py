@@ -669,5 +669,158 @@ class Storage(unittest.TestCase):
         self.assertEqual(list(parent.iterdir()), [])
 
 
+class FakeServe:
+    """In-process stand-in for replay_parity.Serve. tool() raises `exc` on
+    the call numbered `die_on` (1-based, counting every tool call)."""
+
+    def __init__(self, die_on=None, exc=BrokenPipeError("[Errno 32] Broken pipe"),
+                 die_in_init=False):
+        self.die_on, self.exc, self.die_in_init, self.n = die_on, exc, die_in_init, 0
+
+    def initialize(self, timeout):
+        if self.die_in_init:
+            raise RuntimeError("serve exited during initialize (rc=101)")
+        return {"serverInfo": {"version": "fake"}}
+
+    def tool(self, name, args, timeout=180):
+        self.n += 1
+        if self.n == self.die_on:
+            raise self.exc
+        if name == "lambo_stats" and "receipt" in args:
+            return {"is_error": False, "text": "",
+                    "structured": {"receipt": {"state": "applied", "created_count": 1,
+                                               "matched_count": 0}}}
+        if name == "lambo_stats":
+            return {"is_error": False, "text": "", "structured": {}}
+        return {"is_error": False, "text": "", "structured": {"receipt": f"lwr1.{self.n}"}}
+
+
+def replay_opts(**kw):
+    base = dict(startup_timeout=1, wait_ms=0, receipt_budget=1, canon_wait=0,
+                no_final_stats=False, include_content=False)
+    base.update(kw)
+    return argparse.Namespace(**base)
+
+
+CALLS = [{"kind": "derive", "agent_id": "ag", "tool": "lambo_derive",
+          "arguments": {"agent_id": "ag", "concepts": []}}] * 3
+
+
+class ReplayTransportFailure(unittest.TestCase):
+    def test_a_broken_pipe_mid_run_stops_the_side_without_raising(self):
+        with redirect_stdout(io.StringIO()):
+            # call 1: derive, 2: its receipt wait, 3: derive #2 -> broken pipe
+            results, final, err = rp.replay_calls(FakeServe(die_on=3), "A", CALLS,
+                                                  replay_opts())
+        self.assertEqual([r["state"] for r in results], ["applied", "transport_error"])
+        self.assertEqual(results[1]["detail"], "BrokenPipeError")  # no raw text by default
+        self.assertIsNone(final)
+        self.assertIn("call 2 of 3", err)
+        self.assertIn("BrokenPipeError", err)
+
+    def test_failures_in_initialize_receipt_wait_and_final_stats_are_caught(self):
+        cases = ((FakeServe(die_in_init=True), "initialize", 0),
+                 (FakeServe(die_on=2, exc=ValueError("bad json")), "call 1 of 3", 1),
+                 (FakeServe(die_on=7, exc=TimeoutError("t")), "final lambo_stats", 3))
+        for serve, stage, n in cases:
+            with self.subTest(stage=stage), redirect_stdout(io.StringIO()):
+                results, _, err = rp.replay_calls(serve, "A", CALLS, replay_opts())
+                self.assertIn(stage, err)
+                self.assertEqual(len(results), n)
+
+    def test_a_stopped_side_fails_the_verdict_and_the_report_is_written(self):
+        d = tmpdir(self)
+        snap = d / "backup.db"
+        db = sqlite3.connect(snap)
+        db.executescript("""
+            CREATE TABLE interactions(id TEXT PRIMARY KEY, session_id TEXT, agent_id TEXT,
+                prompt_text TEXT, created_at TEXT, event_time TEXT);
+            CREATE TABLE concepts(id TEXT PRIMARY KEY, content TEXT, concept_type TEXT,
+                origin_interaction TEXT, created_at TEXT, embedding BLOB,
+                canonization_status TEXT);
+            CREATE TABLE edges(source TEXT, target TEXT, edge_type TEXT, created_at TEXT);
+            CREATE TABLE canonization_events(node_id TEXT, from_status TEXT,
+                to_status TEXT, occurred_at TEXT);
+            INSERT INTO interactions VALUES('i1','s','ag','alpha','2026-01-02T00:00:00Z',NULL);
+            INSERT INTO concepts VALUES('c1','alpha','Logic','i1','2026-01-02T00:00:00Z',
+                x'00','Candidate');
+            INSERT INTO edges VALUES('i1','c1','Derives','2026-01-02T00:00:00Z');
+        """)
+        db.commit()
+        db.close()
+        tpl = d / "t.toml"
+        tpl.write_text('[store]\nkind = "sqlite"\npath = "x.db"\n')
+        store = {"concepts": 0, "embedded": 0, "unembedded": 0, "interactions": 0,
+                 "edges": 0, "edges_by_type": {}, "concepts_by_type": {},
+                 "canonization_status": {}}
+        facts = {"created": rp.collections.Counter(), "semantic": rp.collections.Counter(),
+                 "unembedded_new": [], "hierarchical_ends_unembedded": 0,
+                 "canonization_events": {}}
+
+        def fake_side(label, binary, base_db, template, workdir, calls, T, a):
+            ok = {"state": "applied", "receipt": {"created_count": 1}, "created": [],
+                  "matched": [], "semantic_merges": []}
+            dead = label == "A"
+            return {"binary": str(binary), "db": "x", "exit_code": 0, "tool_calls": 1,
+                    "side_error": "transport failure during call 1 of 1: BrokenPipeError"
+                    if dead else None,
+                    "results": [{"idx": 0, "state": "transport_error",
+                                 "detail": "BrokenPipeError"}] if dead else [ok],
+                    "final_stats_tool": {}, "store": store, "facts": facts}
+
+        out = d / "out"
+        with mock.patch.object(rp, "run_side", fake_side), \
+                redirect_stdout(io.StringIO()):
+            rc = rp.main(["--bin-a", sys.executable, "--bin-b", sys.executable,
+                          "--snapshot", str(snap), "--config-template", str(tpl),
+                          "--session", "s", "--groups", "1", "--out", str(out),
+                          "--canon-wait", "0", "--runtime-parent", str(d / "rt")])
+        self.assertEqual(rc, 1)
+        text = (out / "parity.txt").read_text()
+        self.assertIn("VERDICT: FAIL", text)
+        self.assertIn("side A stopped early: transport failure during call 1 of 1", text)
+        parity = json.loads((out / "parity.json").read_text())
+        self.assertFalse(parity["verdict"]["pass"])
+        self.assertEqual(parity["nonterminal_results"], {"a:transport_error": 1})
+
+
+class RuntimeParent(unittest.TestCase):
+    def test_runtime_parent_under_a_protected_dir_is_refused(self):
+        d = tmpdir(self)
+        live = d / "live"
+        live.mkdir()
+        with self.assertRaises(SystemExit) as cm:
+            rp.check_paths(d / "o", d / "w", d / "b.db", [live], False, live / "rt")
+        self.assertIn("--runtime-parent", str(cm.exception.code))
+        rp.check_paths(d / "o", d / "w", d / "b.db", [live], False, d / "rt")
+
+    def test_main_refuses_it_before_creating_anything(self):
+        d = tmpdir(self)
+        live = d / "live"
+        live.mkdir()
+        with self.assertRaises(SystemExit) as cm:
+            rp.main(["--bin-a", "x", "--bin-b", "y", "--snapshot", str(d / "b.db"),
+                     "--config-template", "t", "--session", "s", "--groups", "1",
+                     "--out", str(d / "o"), "--protect", str(live),
+                     "--runtime-parent", str(live / "rt")])
+        self.assertIn("--runtime-parent", str(cm.exception.code))
+        self.assertFalse((live / "rt").exists())
+        self.assertFalse((d / "o").exists())
+
+    def test_runtime_parent_is_created_private_and_existing_ones_untouched(self):
+        d = tmpdir(self)
+        p = rp.make_runtime_parent(d / "a" / "rt")
+        self.assertEqual(stat.S_IMODE(os.stat(p).st_mode), 0o700)
+        existing = d / "shared"
+        existing.mkdir(mode=0o755)
+        existing.chmod(0o755)
+        rp.make_runtime_parent(existing)
+        self.assertEqual(stat.S_IMODE(os.stat(existing).st_mode), 0o755)
+        f = d / "file"
+        f.write_text("x")
+        with self.assertRaises(SystemExit):
+            rp.make_runtime_parent(f)
+
+
 if __name__ == "__main__":
     unittest.main()

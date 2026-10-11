@@ -698,6 +698,76 @@ def wait_receipt(serve, agent, receipt, wait_ms, budget_s):
             return st
 
 
+def transport_detail(e, include_content):
+    """What is kept of a transport failure: the exception class, plus its
+    message only with --include-content (it can quote server output)."""
+    return f"{type(e).__name__}: {e}" if include_content else type(e).__name__
+
+
+def replay_calls(s, label, calls, a):
+    """Replay calls through serve s. Returns (results, final_stats_ack,
+    side_error).
+
+    A transport failure (serve died, broken pipe, undecodable or timed-out
+    reply) during initialize, a call, its receipt wait or the final stats
+    stops this side cleanly: the call in flight is recorded with state
+    "transport_error", calls after it are left out (compare() sees them as
+    "not_run"; both are non-terminal, so the verdict fails), and side_error
+    says what happened. It never propagates, so the report is still written.
+    """
+    results, final, side_error = [], None, None
+    stage = "initialize"
+    try:
+        t_init = time.time()
+        init = s.initialize(a.startup_timeout)
+        log(f"[{label}] initialized in {time.time() - t_init:.1f}s "
+            f"({(init.get('serverInfo') or {}).get('version')})")
+        for i, c in enumerate(calls):
+            stage = f"call {i + 1} of {len(calls)}"
+            rec = {"idx": i}
+            t0 = time.time()
+            try:
+                ack = s.tool(c["tool"], c["arguments"])
+                rec["ack_ms"] = round((time.time() - t0) * 1000, 1)
+                if ack["is_error"]:
+                    rec.update(state="refused", detail=ack["text"][:2000])
+                    results.append(rec)
+                    why = reason_key(ack["text"], raw=a.include_content)
+                    log(f"[{label}] {i + 1}/{len(calls)} {c['tool']} refused: {why}")
+                    continue
+                receipt = receipt_of(ack)
+                if not receipt:
+                    rec.update(state="no_receipt", detail=ack["text"][:2000])
+                    results.append(rec)
+                    continue
+                r = wait_receipt(s, c["arguments"]["agent_id"], receipt, a.wait_ms,
+                                 a.receipt_budget)
+            except Exception as e:  # transport failure: record it, stop this side
+                rec.update(state="transport_error",
+                           detail=transport_detail(e, a.include_content))
+                results.append(rec)
+                raise
+            rec["receipt"] = r
+            rec["state"] = r.get("state")
+            rec["applied_ms"] = round((time.time() - t0) * 1000, 1)
+            created = list(r.get("created") or [])
+            matched = list(r.get("matched") or [])
+            rec["created_ids"], rec["matched_ids"] = created, matched
+            results.append(rec)
+            if (i + 1) % 10 == 0 or i + 1 == len(calls):
+                log(f"[{label}] {i + 1}/{len(calls)} replayed (last: {rec['state']}, "
+                    f"{rec['applied_ms']:.0f} ms)")
+        stage = "final lambo_stats"
+        if a.canon_wait > 0:
+            log(f"[{label}] waiting {a.canon_wait}s for canonization passes")
+            time.sleep(a.canon_wait)
+        final = s.tool("lambo_stats", {"agent_id": "replay"}) if not a.no_final_stats else None
+    except Exception as e:
+        side_error = f"transport failure during {stage}: {transport_detail(e, a.include_content)}"
+        log(f"[{label}] {side_error}; stopping this side")
+    return results, final, side_error
+
+
 def run_side(label, binary, base_db, template, workdir, calls, T, a):
     workdir.mkdir(parents=True, exist_ok=True)
     db = workdir / "replay.db"
@@ -719,48 +789,8 @@ def run_side(label, binary, base_db, template, workdir, calls, T, a):
         raise SystemExit(f"[{label}] provision failed: {(pv.stdout + pv.stderr)[-500:]}")
     log(f"[{label}] starting {binary} on {db}")
     s = Serve(binary, cfg, workdir, a.session, a.runtime_parent)
-    results = []
     try:
-        t_init = time.time()
-        init = s.initialize(a.startup_timeout)
-        log(f"[{label}] initialized in {time.time() - t_init:.1f}s "
-            f"({(init.get('serverInfo') or {}).get('version')})")
-        for i, c in enumerate(calls):
-            rec = {"idx": i}
-            t0 = time.time()
-            try:
-                ack = s.tool(c["tool"], c["arguments"])
-            except Exception as e:  # transport failure: stop this side
-                rec.update(state="transport_error", detail=str(e))
-                results.append(rec)
-                raise
-            rec["ack_ms"] = round((time.time() - t0) * 1000, 1)
-            if ack["is_error"]:
-                rec.update(state="refused", detail=ack["text"][:2000])
-                results.append(rec)
-                why = reason_key(ack["text"], raw=a.include_content)
-                log(f"[{label}] {i + 1}/{len(calls)} {c['tool']} refused: {why}")
-                continue
-            receipt = receipt_of(ack)
-            if not receipt:
-                rec.update(state="no_receipt", detail=ack["text"][:2000])
-                results.append(rec)
-                continue
-            r = wait_receipt(s, c["arguments"]["agent_id"], receipt, a.wait_ms, a.receipt_budget)
-            rec["receipt"] = r
-            rec["state"] = r.get("state")
-            rec["applied_ms"] = round((time.time() - t0) * 1000, 1)
-            created = list(r.get("created") or [])
-            matched = list(r.get("matched") or [])
-            rec["created_ids"], rec["matched_ids"] = created, matched
-            results.append(rec)
-            if (i + 1) % 10 == 0 or i + 1 == len(calls):
-                log(f"[{label}] {i + 1}/{len(calls)} replayed (last: {rec['state']}, "
-                    f"{rec['applied_ms']:.0f} ms)")
-        if a.canon_wait > 0:
-            log(f"[{label}] waiting {a.canon_wait}s for canonization passes")
-            time.sleep(a.canon_wait)
-        final = s.tool("lambo_stats", {"agent_id": "replay"}) if not a.no_final_stats else None
+        results, final, side_error = replay_calls(s, label, calls, a)
     finally:
         rc = s.close(a.shutdown_timeout)
         log(f"[{label}] serve exited rc={rc}; {s.tool_calls} tool calls")
@@ -778,6 +808,7 @@ def run_side(label, binary, base_db, template, workdir, calls, T, a):
         "write_queue_failed", "write_queue_apply_ms_p50", "write_queue_apply_ms_p90",
         "write_queue_apply_ms_max", "embedding_contract") if k in st}
     return {"binary": str(binary), "db": str(db), "exit_code": rc, "tool_calls": s.tool_calls,
+            "side_error": side_error,
             "results": results, "final_stats_tool": final_stats,
             "store": store_counts(db), "facts": replay_facts(db, T)}
 
@@ -1134,13 +1165,14 @@ def _n(x):
     return x if isinstance(x, int) else len(x)
 
 
-def verdict(cmp_, exit_codes, max_not_applied):
+def verdict(cmp_, exit_codes, max_not_applied, side_errors=None):
     """{"pass", "failures", "notes"} for a comparison.
 
     Fails on: any UNEXPECTED differing call; a share of calls not applied on
     either side above max_not_applied (a run where both builds refuse or fail
     everything is not parity); any result that never settled (pending,
-    transport error, not run, no receipt); a serve exiting non-zero. Notes
+    transport error, not run, no receipt); a serve exiting non-zero; a side
+    stopped by a transport failure (side_errors: label -> reason). Notes
     (reported, not failing): canonization, unembedded and content-diff
     counts that differ between the sides.
     """
@@ -1156,6 +1188,9 @@ def verdict(cmp_, exit_codes, max_not_applied):
                         f"neither side (limit {max_not_applied:.1%})")
     if cmp_["nonterminal_results"]:
         failures.append(f"results that never settled: {cmp_['nonterminal_results']}")
+    for side, why in sorted((side_errors or {}).items()):
+        if why:
+            failures.append(f"side {side.upper()} stopped early: {why}")
     for side, rc in sorted((exit_codes or {}).items()):
         if rc != 0:
             failures.append(f"serve {side.upper()} exited with rc={rc}")
@@ -1264,16 +1299,32 @@ def protect_dirs(extra):
     return out
 
 
-def check_paths(out, work, snapshot, protect, allow_live_name):
+def check_paths(out, work, snapshot, protect, allow_live_name, runtime_parent=None):
     """Refuse unsafe paths (SystemExit). The snapshot is only ever opened
-    read-only, so it may live under a protected directory; outputs may not."""
-    for label, p in (("--out", out), ("--work", work)):
+    read-only, so it may live under a protected directory; --out, --work and
+    --runtime-parent (each serve's XDG_RUNTIME_DIR lands there) may not."""
+    targets = [("--out", out), ("--work", work)]
+    if runtime_parent is not None:
+        targets.append(("--runtime-parent", runtime_parent))
+    for label, p in targets:
         for root in protect:
             if under(p, root):
                 raise SystemExit(f"refusing: {label} {p} is under protected {root}")
     if not allow_live_name and any(snapshot.name.startswith(x) for x in LIVE_DB_PREFIXES):
         raise SystemExit(f"refusing: --snapshot {snapshot.name} is named like a live store; "
                          "pass a backup, or --allow-live-name if it is one")
+
+
+def make_runtime_parent(path):
+    """The --runtime-parent directory: created 0700 when missing; an existing
+    one (such as /tmp) is used as is, never chmod-ed."""
+    p = Path(path)
+    if not p.exists():
+        p.mkdir(parents=True, mode=0o700)
+        p.chmod(0o700)
+    elif not p.is_dir():
+        raise SystemExit(f"--runtime-parent {p} is not a directory")
+    return p
 
 
 def make_work_dir(path):
@@ -1332,7 +1383,8 @@ def main(argv=None):
                          "ambiguous calls")
     ap.add_argument("--runtime-parent", default="/tmp",
                     help="parent of each serve's fresh XDG_RUNTIME_DIR (keep it short: "
-                         "unix socket paths are length-limited)")
+                         "unix socket paths are length-limited); refused under a protected "
+                         "directory, created 0700 when missing")
     ap.add_argument("--wait-ms", type=int, default=4000)
     ap.add_argument("--receipt-budget", type=float, default=120.0)
     ap.add_argument("--startup-timeout", type=float, default=600.0)
@@ -1359,8 +1411,9 @@ def main(argv=None):
     template = Path(a.config_template).expanduser().resolve()
     bins = {"a": Path(a.bin_a).expanduser().resolve(), "b": Path(a.bin_b).expanduser().resolve()}
     work_arg = Path(a.work).expanduser().resolve() if a.work else None
+    runtime_parent = Path(a.runtime_parent).expanduser().resolve()
     check_paths(out, work_arg or Path(tempfile.gettempdir()), snapshot, a.protect,
-                a.allow_live_name)
+                a.allow_live_name, runtime_parent)
     if not snapshot.is_file():
         raise SystemExit(f"no such snapshot: {snapshot}")
     if not a.dry_run:
@@ -1369,6 +1422,7 @@ def main(argv=None):
                 raise SystemExit(f"not executable: {b}")
     catalogue, cat_desc = load_catalogue(a.reasons)
     out.mkdir(parents=True, exist_ok=True)
+    a.runtime_parent = str(make_runtime_parent(runtime_parent))
     work, temp_work = make_work_dir(a.work)
     log(f"work directory (holds store content, never commit it): {work}")
     try:
@@ -1437,7 +1491,8 @@ def _run(a, out, work, snapshot, template, bins, catalogue, cat_desc):
     cmp_ = compare(all_calls, sides["a"], sides["b"], T, base_counts, catalogue)
     meta["tool_calls"] = {k: v["tool_calls"] for k, v in sides.items()}
     meta["exit_codes"] = {k: v["exit_code"] for k, v in sides.items()}
-    cmp_["verdict"] = verdict(cmp_, meta["exit_codes"], a.max_not_applied)
+    meta["side_errors"] = {k: v.get("side_error") for k, v in sides.items()}
+    cmp_["verdict"] = verdict(cmp_, meta["exit_codes"], a.max_not_applied, meta["side_errors"])
     if not a.include_content:
         cmp_ = strip_content(cmp_)
     (out / "parity.json").write_text(json.dumps({"meta": meta, **cmp_}, indent=1, default=list))
