@@ -148,10 +148,12 @@
    vector, so recall can reach it by keyword but not by meaning. 0.4.0 embeds
    these ends on write but does not go back for old ones. With the writer
    stopped, run `lambo re-embed --missing-only --session <id> --agent <id>`.
-   It embeds only the concepts that have no vector and leaves every other
-   vector and the session contract alone. To check first, count the
-   concepts whose `embedding` is NULL; `lambo_stats` reports the gap as
-   `concept_count` minus `embedded_concepts`.
+   It embeds only the text concepts that have no vector and leaves every
+   other vector and the session contract alone. It skips image concepts
+   without a vector and reports how many; deriving each image again
+   restores its vector. To check first, `lambo_stats` reports the gap as
+   `concept_count` minus `embedded_concepts`, which counts image concepts
+   too.
 
 ### Known issues
 
