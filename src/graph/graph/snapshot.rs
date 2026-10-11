@@ -193,6 +193,8 @@ impl Graph {
         // mid-construction. `Graph::new` started it at 0; the snapshot's value
         // is the deployment's count through its last durable mutation.
         g.epoch = snap.mutation_epoch;
+        // #116: nothing before the load is a write this process can report.
+        g.node_writes.reset(g.epoch);
         // Issue #29: GC's sweep accounting resumes with it, so a restart does
         // not measure the next sweep from 0 (which swept once per restart and
         // bumped every `gc_survived` once the lifetime count passed the

@@ -60,6 +60,7 @@ mod mutation_log;
 mod root_goal;
 mod snapshot;
 mod transitions;
+mod txn;
 mod unflushed;
 
 pub use root_goal::root_goal_texts;
@@ -140,6 +141,12 @@ pub struct Graph {
     /// Whether the holder has logged its first whole-graph fallback for an
     /// overflowing unflushed set (#60 review L-2). RAM-only.
     unflushed_overflow_logged: unflushed::LoggedOnce,
+    /// The most recent node upserts and deletes with their epochs (#116; see
+    /// `txn.rs`). RAM-only.
+    node_writes: txn::NodeWrites,
+    /// The open [`Graph::transaction`]'s undo record (#102). `None` outside
+    /// one.
+    undo: Option<Box<txn::UndoLog>>,
 }
 
 impl Graph {
@@ -167,6 +174,8 @@ impl Graph {
             unflushed: HashMap::new(),
             unflushed_contract: None,
             unflushed_overflow_logged: unflushed::LoggedOnce::default(),
+            node_writes: txn::NodeWrites::default(),
+            undo: None,
         }
     }
 
@@ -259,6 +268,7 @@ impl Graph {
         }
 
         let node = Node::Interaction(i.clone());
+        self.undo_node(i.id);
         self.nodes.insert(i.id, node.clone());
         if !known {
             self.temporal_chain.push(i.id);
@@ -357,6 +367,7 @@ impl Graph {
             )));
         }
         let node = Node::Concept(c.clone());
+        self.undo_node(c.id);
         if let Some(Node::Concept(previous)) = self.nodes.insert(c.id, node.clone()) {
             self.unindex_key(&previous);
         }
@@ -450,6 +461,8 @@ impl Graph {
                 }
             }
         }
+        self.undo_node(id);
+        self.undo_removal_bookkeeping(id);
         for eid in incident {
             self.remove_edge(eid)?;
         }
@@ -473,6 +486,7 @@ impl Graph {
             .cloned()
             .ok_or_else(|| not_found(format!("edge {id}")))?;
         let key = (edge.source, edge.target, edge.edge_type);
+        self.undo_edge(id);
         self.edges.remove(&id);
         self.edge_keys.remove(&key);
         self.remove_adjacency(edge.source, edge.target, edge.edge_type);
@@ -640,9 +654,12 @@ impl Graph {
 
     fn append_mutation(&mut self, m: Mutation) {
         self.epoch += 1;
+        self.debug_check_undoable(&m);
         // #60: at the epoch the drained batch will be stamped with, so the
         // flush can clear exactly what it committed.
         self.note_unflushed(&m);
+        // #116: what a hybrid commit checks its plan against.
+        self.note_node_write(&m);
         self.mutation_log.push(m);
     }
 
@@ -692,6 +709,7 @@ impl Graph {
         let key = (edge.source, edge.target, edge.edge_type);
         if let Some(existing_id) = self.edge_keys.get(&key).copied() {
             // Reinforcement on duplicate natural key (v0.6.0 §5.4 semantics).
+            self.undo_edge(existing_id);
             let existing = self
                 .edges
                 .get_mut(&existing_id)
@@ -704,6 +722,7 @@ impl Graph {
         }
         let mut edge = edge;
         edge.weight = weight;
+        self.undo_edge(edge.id);
         self.edge_keys.insert(key, edge.id);
         self.edges.insert(edge.id, edge.clone());
         self.add_adjacency(edge.source, edge.target, edge.edge_type);
