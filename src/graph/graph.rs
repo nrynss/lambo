@@ -628,27 +628,36 @@ impl Graph {
     }
 
     /// Whether `to` is reachable from `from` over `Hierarchical` edges
-    /// (`from == to` counts). Iterative, so a deep hierarchy cannot overflow
-    /// the stack; visits each node once.
+    /// (`from == to` counts), i.e. whether `from` is `to` or one of its
+    /// ancestors. Walks *up* from `to`, so it costs `to`'s ancestors, not
+    /// `from`'s descendants: a hierarchy is usually far shallower than it is
+    /// wide. Iterative, so a deep one cannot overflow the stack; visits each
+    /// node once.
     pub fn hierarchical_path(&self, from: NodeId, to: NodeId) -> bool {
         let mut seen: HashSet<NodeId> = HashSet::new();
-        let mut stack = vec![from];
+        let mut stack = vec![to];
         while let Some(at) = stack.pop() {
-            if at == to {
+            if at == from {
                 return true;
             }
             if !seen.insert(at) {
                 continue;
             }
-            if let Some(next) = self
-                .out
-                .get(&at)
-                .and_then(|by_type| by_type.get(&EdgeType::Hierarchical))
-            {
-                stack.extend(next.iter().copied());
-            }
+            stack.extend(self.hierarchical_parents(at));
         }
         false
+    }
+
+    /// `node`'s `Hierarchical` parents, straight off the adjacency index: no
+    /// allocation and no sort, in unspecified order (for walks that only ask
+    /// whether something is reachable).
+    pub(crate) fn hierarchical_parents(&self, node: NodeId) -> impl Iterator<Item = NodeId> + '_ {
+        self.incoming
+            .get(&node)
+            .and_then(|by_type| by_type.get(&EdgeType::Hierarchical))
+            .into_iter()
+            .flatten()
+            .copied()
     }
 
     /// All edges incident to `node` (out or in), in id-ascending order.

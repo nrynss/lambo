@@ -32,11 +32,11 @@ use crate::graph::Graph;
 use crate::types::{EdgeType, LamboError, NodeId, StoreError};
 
 /// One end of a planned edge: an existing concept, or one the call creates,
-/// named by its canonical key.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-enum End {
+/// named by its canonical key (borrowed: the walk allocates no end).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum End<'k> {
     Node(NodeId),
-    New(String),
+    New(&'k str),
 }
 
 fn cycle_error(parent: &str, child: &str) -> LamboError {
@@ -44,14 +44,30 @@ fn cycle_error(parent: &str, child: &str) -> LamboError {
         crate::types::CycleKind::Hierarchical,
         format!(
             "parent_of pair ({parent}, {child}) would close a Hierarchical cycle: {child:?} is \
-         already an ancestor of {parent:?}. Hierarchical edges form a DAG (spec §5.7); \
-         nothing was written"
+             already an ancestor of {parent:?}. Hierarchical edges form a DAG (spec §5.7); \
+             nothing was written"
         ),
     ))
 }
 
+/// The planned end for a resolved `(match, key)`.
+fn end((node, key): &(Option<NodeId>, String)) -> End<'_> {
+    match node {
+        Some(id) => End::Node(*id),
+        None => End::New(key.as_str()),
+    }
+}
+
 /// Refuse a call whose `parent_of` pairs, together with the graph's
 /// existing `Hierarchical` edges, would contain a cycle. Read-only.
+///
+/// Cost: one walk per pair, up from its parent through the parent's
+/// ancestors (existing edges and the call's pairs), each node visited once
+/// per walk, reading the adjacency index directly. A pair whose parent sits
+/// under a long chain is the worst case: on a 100,000-node chain one walk
+/// took 20 to 30 ms (release, M3 Pro), while a pair under the chain's root
+/// took about 8 µs; a typical hierarchy is far shallower than it is wide. It runs where the call is accepted and in the
+/// plan phase, under the read lock; a hybrid commit does not rerun it.
 pub(crate) fn reject_parent_of_cycles(
     graph: &Graph,
     pairs: &[(&str, &str)],
@@ -59,62 +75,70 @@ pub(crate) fn reject_parent_of_cycles(
     if pairs.is_empty() {
         return Ok(());
     }
-    let end = |content: &str| -> Result<End, LamboError> {
+    let resolve = |content: &str| -> Result<(Option<NodeId>, String), LamboError> {
         Ok(match canonicalize(content, graph)? {
-            CanonicalizeResult::Matched { node, .. } => End::Node(node),
-            CanonicalizeResult::Unmatched { key } => End::New(key),
+            CanonicalizeResult::Matched { node, key } => (Some(node), key),
+            CanonicalizeResult::Unmatched { key } => (None, key),
         })
     };
-    let mut planned: Vec<(End, End, usize)> = Vec::with_capacity(pairs.len());
-    for (i, &(parent, child)) in pairs.iter().enumerate() {
-        planned.push((end(parent)?, end(child)?, i));
+    let mut resolved: Vec<[(Option<NodeId>, String); 2]> = Vec::with_capacity(pairs.len());
+    for &(parent, child) in pairs {
+        resolved.push([resolve(parent)?, resolve(child)?]);
     }
-    let mut out: HashMap<&End, Vec<&End>> = HashMap::new();
-    for (p, c, _) in &planned {
-        out.entry(p).or_default().push(c);
+
+    // Child -> its planned parents: the walk goes up, from a pair's parent
+    // through its ancestors, looking for the pair's child.
+    let mut planned_parents: HashMap<End<'_>, Vec<End<'_>>> = HashMap::new();
+    for [p, c] in &resolved {
+        planned_parents.entry(end(c)).or_default().push(end(p));
     }
-    for (p, c, i) in &planned {
-        if let (End::Node(pn), End::Node(cn)) = (p, c)
-            && graph
-                .edge_between(*pn, *cn, EdgeType::Hierarchical)
-                .is_some()
-        {
-            continue;
-        }
+    let mut seen: HashSet<End<'_>> = HashSet::new();
+    let mut stack: Vec<End<'_>> = Vec::new();
+    for (i, [p, c]) in resolved.iter().enumerate() {
+        let (p, c) = (end(p), end(c));
         if p == c {
             // A reflexive pair; the pre-pass refuses it with its own message.
             continue;
         }
-        if reaches(graph, &out, c, p) {
-            let (parent, child) = pairs[*i];
+        if let (End::Node(pn), End::Node(cn)) = (p, c)
+            && graph.edge_between(pn, cn, EdgeType::Hierarchical).is_some()
+        {
+            continue;
+        }
+        if is_ancestor(graph, &planned_parents, c, p, &mut seen, &mut stack) {
+            let (parent, child) = pairs[i];
             return Err(cycle_error(parent, child));
         }
     }
     Ok(())
 }
 
-/// Whether `to` is reachable from `from` over existing `Hierarchical` edges
-/// and the planned ones.
-fn reaches(graph: &Graph, planned: &HashMap<&End, Vec<&End>>, from: &End, to: &End) -> bool {
-    let mut seen: HashSet<End> = HashSet::new();
-    let mut stack: Vec<End> = vec![from.clone()];
+/// Whether `ancestor` is `node` or one of its ancestors over existing
+/// `Hierarchical` edges and the planned ones, walking up from `node`.
+/// `seen` and `stack` are scratch space reused across a call's pairs.
+fn is_ancestor<'k>(
+    graph: &Graph,
+    planned_parents: &HashMap<End<'k>, Vec<End<'k>>>,
+    ancestor: End<'k>,
+    node: End<'k>,
+    seen: &mut HashSet<End<'k>>,
+    stack: &mut Vec<End<'k>>,
+) -> bool {
+    seen.clear();
+    stack.clear();
+    stack.push(node);
     while let Some(at) = stack.pop() {
-        if &at == to {
+        if at == ancestor {
             return true;
         }
-        if !seen.insert(at.clone()) {
+        if !seen.insert(at) {
             continue;
         }
-        if let End::Node(id) = &at {
-            stack.extend(
-                graph
-                    .out_neighbors_typed(*id, EdgeType::Hierarchical)
-                    .into_iter()
-                    .map(End::Node),
-            );
+        if let End::Node(id) = at {
+            stack.extend(graph.hierarchical_parents(id).map(End::Node));
         }
-        if let Some(next) = planned.get(&at) {
-            stack.extend(next.iter().map(|e| (*e).clone()));
+        if let Some(next) = planned_parents.get(&at) {
+            stack.extend(next.iter().copied());
         }
     }
     false
@@ -220,6 +244,94 @@ mod tests {
         // A new branch off the chain is not a cycle.
         pairs(&mut g, i, &[("cyc gamma", "cyc delta")]).unwrap();
         g.assert_invariants().unwrap();
+    }
+
+    /// #116 review L-cost: what one cycle walk costs on a large hierarchy.
+    /// A 100,000-node chain, and a pair whose parent is its leaf, so each walk
+    /// climbs the whole chain: the worst case for one pair. Then a pair over
+    /// the root, which has no ancestors: the common, shallow case. Ignored; run by
+    /// hand in release:
+    /// `cargo test --release --lib derive::cycles -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "benchmark: run by hand in release (#116 review L-cost)"]
+    fn a_cycle_walk_over_a_large_hierarchy_is_timed() {
+        use crate::types::{CanonizationStatus, Concept, ConceptType, Edge, GraphSnapshot};
+        const N: u64 = 100_000;
+        let (seed, i) = graph();
+        let interaction = match seed.node(i) {
+            Some(crate::types::Node::Interaction(x)) => x.clone(),
+            _ => unreachable!(),
+        };
+        let sid = seed.session_id().clone();
+        let at = interaction.created_at;
+        fn no_synonym(_: &str) -> Option<&str> {
+            None
+        }
+        let mut concepts = Vec::new();
+        let mut edges = Vec::new();
+        let ids: Vec<NodeId> = (0..N).map(|_| NodeId::new()).collect();
+        for (k, id) in ids.iter().enumerate() {
+            let content = format!("chain node {k}");
+            concepts.push(Concept {
+                id: *id,
+                session_id: sid.clone(),
+                canonical_key: crate::graph::canonical::canonical_key(&content, no_synonym),
+                content,
+                concept_type: ConceptType::Entity,
+                origin_interaction: i,
+                origin_agent: AgentId::from("agent-a"),
+                created_at: at,
+                access_count: 0,
+                last_accessed: None,
+                gc_survived: 0,
+                canonization_status: CanonizationStatus::None,
+                blast_radius: None,
+                last_demotion_time: None,
+                embedding: None,
+                human_confirmed: 0,
+                embedding_source: None,
+                chunk_group_id: None,
+            });
+            let edge = |source, target, edge_type| Edge {
+                event_time: None,
+                id: NodeId::new(),
+                session_id: sid.clone(),
+                source,
+                target,
+                edge_type,
+                weight: 0.5,
+                reinforcements: 1,
+                created_at: at,
+                last_reinforced: at,
+            };
+            edges.push(edge(i, *id, EdgeType::Derives));
+            if k > 0 {
+                edges.push(edge(ids[k - 1], *id, EdgeType::Hierarchical));
+            }
+        }
+        let g = Graph::from_snapshot(GraphSnapshot {
+            session_id: sid,
+            interactions: vec![interaction],
+            concepts,
+            edges,
+            ..Default::default()
+        })
+        .unwrap();
+        let leaf = format!("chain node {}", N - 1);
+        let started = std::time::Instant::now();
+        let err = reject_parent_of_cycles(&g, &[(leaf.as_str(), "chain node 0")]).unwrap_err();
+        let prepass = started.elapsed();
+        assert!(err.to_string().contains("Hierarchical cycle"));
+        let started = std::time::Instant::now();
+        assert!(reject_closing_edge(&g, "leaf", "root", ids[N as usize - 1], ids[0]).is_err());
+        let write_time = started.elapsed();
+        let started = std::time::Instant::now();
+        reject_parent_of_cycles(&g, &[("a new parent", "chain node 0")]).unwrap();
+        let no_cycle = started.elapsed();
+        println!(
+            "cycle walk over a {N}-node chain: pre-pass {prepass:?}, write-time {write_time:?}, \
+             a new parent over the root (no cycle) {no_cycle:?}"
+        );
     }
 
     /// The write-time check is the authority: a cycle the pre-pass did not

@@ -804,6 +804,18 @@ pub fn validate_limits(
 ///
 /// Read-only: [`canonicalize`] writes nothing.
 pub fn validate_graph_inputs(graph: &Graph, parent_of: &ParentOf<'_>) -> Result<(), LamboError> {
+    validate_pairs(graph, parent_of)?;
+    // A pair that would close a longer Hierarchical cycle (spec §5.7), with
+    // the graph's edges or the call's other pairs; see `derive::cycles`.
+    crate::graph::derive::reject_parent_of_cycles(graph, parent_of.pairs())
+}
+
+/// [`validate_graph_inputs`] without the cycle walk: reflexive pairs and
+/// empty keys only. The commit's revalidation (`plan_still_holds`) uses this
+/// one, under the write lock: the cycle check that counts there is
+/// `reject_closing_edge` at each edge write, inside the transaction, so
+/// walking the hierarchy a second time under the lock buys nothing.
+fn validate_pairs(graph: &Graph, parent_of: &ParentOf<'_>) -> Result<(), LamboError> {
     for &(parent, child) in parent_of.pairs() {
         if parent == child {
             return Err(LamboError::Store(StoreError::Invariant(format!(
@@ -826,9 +838,6 @@ pub fn validate_graph_inputs(graph: &Graph, parent_of: &ParentOf<'_>) -> Result<
             ))));
         }
     }
-    // A pair that would close a longer Hierarchical cycle (spec §5.7), with
-    // the graph's edges or the call's other pairs; see `derive::cycles`.
-    crate::graph::derive::reject_parent_of_cycles(graph, parent_of.pairs())?;
     Ok(())
 }
 
@@ -1716,7 +1725,9 @@ struct PlanRead<'p, 'a> {
 ///    concept with one of this call's keys (or declared a synonym onto one)
 ///    makes them differ, so the replan matches that concept instead of
 ///    writing a duplicate key. An error here is the error a replan would
-///    return.
+///    return. The pre-pass here skips the `parent_of` cycle walk: the
+///    commit's own `reject_closing_edge`, at each edge write inside the
+///    transaction, is the authoritative cycle check under this lock.
 /// 4. **Semantic-merge choices** (correctness over throughput): every
 ///    concept upserted or deleted since the plan, from the graph's
 ///    node-write window, is checked against the plan's ranked text items.
@@ -1765,7 +1776,7 @@ fn plan_still_holds(g: &Graph, plan: &PlanRead<'_, '_>) -> Result<bool, LamboErr
     let Some(written) = g.nodes_written_since(plan.planned_epoch) else {
         return Ok(false);
     };
-    validate_graph_inputs(g, plan.parent_of)?;
+    validate_pairs(g, plan.parent_of)?;
     let (items, parent_ends) = plan_inputs(g, plan.concepts, plan.parent_of)?;
     if &items != plan.items || &parent_ends != plan.parent_ends {
         return Ok(false);
