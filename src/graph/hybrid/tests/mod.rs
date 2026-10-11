@@ -16,6 +16,7 @@ use crate::store::Capabilities;
 
 use crate::types::{Interaction, MutationBatch, Scored};
 
+mod concurrency;
 mod embedding;
 mod merging;
 mod planning;

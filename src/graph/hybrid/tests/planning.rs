@@ -942,8 +942,11 @@ async fn first_use_empty_candidates_still_commits_contract() {
     )));
 }
 
+/// #116: a mutation the plan never read (here the root goal) moves the epoch
+/// but does not invalidate the plan. Before #116 this replanned and
+/// re-embedded; now it commits on the first attempt.
 #[tokio::test]
-async fn intervening_graph_mutation_discards_stale_gather_and_replans() {
+async fn an_intervening_unrelated_mutation_commits_without_a_replan() {
     let (graph, interaction) = graph_with_interaction("hybrid-epoch-race", 1, 0, "epoch race");
     let embedder = Arc::new(PausingEmbedder {
         started: Notify::new(),
@@ -973,19 +976,24 @@ async fn intervening_graph_mutation_discards_stale_gather_and_replans() {
         })
     };
     embedder.started.notified().await;
+    let epoch = graph.read().epoch();
     graph
         .write()
         .set_root_goal(Some(serde_json::json!("concurrent daemon mutation")));
+    assert!(graph.read().epoch() > epoch, "the mutation moved the epoch");
     embedder.release.notify_one();
     task.await.unwrap().unwrap();
 
-    assert_eq!(embedder.calls.load(Ordering::SeqCst), 2);
-    assert_eq!(store.vector_calls(), 2);
+    assert_eq!(embedder.calls.load(Ordering::SeqCst), 1, "no re-embed");
+    assert_eq!(store.vector_calls(), 1, "no replan");
     let g = graph.read();
-    assert_eq!(g.concepts().count(), 1, "stale attempt wrote nothing");
+    assert_eq!(g.concepts().count(), 1);
     g.assert_invariants().unwrap();
 }
 
+/// A synonym declared onto the call's content changes its canonical key, so
+/// the plan is stale and the call replans, reusing the vector it already
+/// has (#116: before, the replan embedded again).
 #[tokio::test]
 async fn intervening_synonym_change_discards_stale_gather_and_replans() {
     let (graph, interaction) = graph_with_interaction("hybrid-synonym-race", 1, 0, "synonym race");
@@ -1021,8 +1029,12 @@ async fn intervening_synonym_change_discards_stale_gather_and_replans() {
     embedder.release.notify_one();
     task.await.unwrap().unwrap();
 
-    assert_eq!(embedder.calls.load(Ordering::SeqCst), 2);
-    assert_eq!(store.vector_calls(), 2);
+    assert_eq!(
+        embedder.calls.load(Ordering::SeqCst),
+        1,
+        "the replan reuses the vector"
+    );
+    assert_eq!(store.vector_calls(), 2, "the stale plan was replanned");
     let concept = graph.read().concepts().next().unwrap().clone();
     assert_eq!(concept.canonical_key, "canon target");
 }
