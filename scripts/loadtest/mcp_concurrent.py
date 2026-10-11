@@ -239,6 +239,12 @@ def pick_sample(items: list, k: int, seed: int) -> list:
     return [items[i] for i in idx]
 
 
+def is_rate_limited(text) -> bool:
+    """True when a failed call's text says the serve's rate limit refused it."""
+    t = (text or "").lower()
+    return "429" in t or "too many requests" in t or "rate limit" in t
+
+
 def receipt_outcome(stats_body, is_error: bool, text: str = "", raw: bool = False) -> dict:
     """Reduce one lambo_stats(receipt) reply to {"state", "reason"}."""
     if is_error or not isinstance(stats_body, dict):
@@ -365,7 +371,9 @@ class Client(mcp_ab.Mcp):
         try:
             res = self._rpc("tools/call", {"name": name, "arguments": args})
         except Exception as e:  # transport or JSON-RPC error
-            return (time.perf_counter() - t) * 1000, TRANSPORT, None, f"transport: {type(e).__name__}"
+            code = getattr(e, "code", None)  # urllib HTTPError carries the status
+            detail = f" {code}" if isinstance(code, int) else ""
+            return (time.perf_counter() - t) * 1000, TRANSPORT, None, f"transport: {type(e).__name__}{detail}"
         ms = (time.perf_counter() - t) * 1000
         if not isinstance(res, dict):
             return ms, TRANSPORT, None, "transport: non-object result"
@@ -456,9 +464,21 @@ def run(o, queries, mix, token):
 
     sample = pick_sample(receipts, o.receipt_max, o.seed)
     outcomes = []
+    # The serve rate-limits each credential (DEFAULT_RATE_LIMIT_RPS, 50/s with a
+    # 2x burst), and every client here shares one. Unpaced, the queries after
+    # the burst come back 429 and would be counted as query_error. Pace under
+    # the limit and retry a rate-limited query with backoff.
+    interval = 1.0 / o.receipt_rps if o.receipt_rps > 0 else 0.0
     for wi, rid in sample:
-        _, outcome, body, text = clients[wi].call("lambo_stats", receipt=rid, wait_ms=0)
+        attempts = 6
+        for attempt in range(attempts):
+            _, outcome, body, text = clients[wi].call("lambo_stats", receipt=rid, wait_ms=0)
+            if outcome == OK or not is_rate_limited(text) or attempt == attempts - 1:
+                break
+            time.sleep(min(0.25 * 2 ** attempt, 4.0))
         outcomes.append(receipt_outcome(body, outcome != OK, text, raw))
+        if interval:
+            time.sleep(interval)
 
     ledger_errors = None
     if o.server_ledger:
@@ -515,6 +535,10 @@ def main(argv=None):
     ap.add_argument("--receipt-max", type=int, default=2000,
                     help="query at most this many receipts after the drain (seeded "
                          "sample when more were acked; 0 = all)")
+    ap.add_argument("--receipt-rps", type=float, default=40.0,
+                    help="pace receipt queries under the serve's per-credential rate "
+                         "limit (default 40/s; 0 = unpaced). Rate-limited queries are "
+                         "retried with backoff either way")
     ap.add_argument("--server-ledger",
                     help="the serve's --ledger file, read only, to group the raw "
                          "operator-facing error of each failed write of this run")

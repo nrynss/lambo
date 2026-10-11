@@ -231,7 +231,7 @@ class FakeClient:
 class ConcurrentRun(unittest.TestCase):
     def opts(self, **kw):
         base = dict(endpoint="http://fake", workers=3, secs=0.3, think=0.0, seed=1,
-                    drain_timeout=1.0, receipt_max=0, server_ledger=None,
+                    drain_timeout=1.0, receipt_max=0, receipt_rps=0, server_ledger=None,
                     include_raw_reasons=False)
         base.update(kw)
         return argparse.Namespace(**base)
@@ -842,3 +842,12 @@ class RuntimeParent(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RateLimitDetectionTest(unittest.TestCase):
+    def test_http_429_and_rate_limit_texts_are_rate_limited(self):
+        self.assertTrue(mc.is_rate_limited("transport: HTTPError 429"))
+        self.assertTrue(mc.is_rate_limited("Too Many Requests"))
+        self.assertFalse(mc.is_rate_limited("transport: HTTPError 500"))
+        self.assertFalse(mc.is_rate_limited(None))
+
