@@ -143,6 +143,17 @@
    - Never delete a lease row. A release now keeps the row and its fencing
      token, and the operator override is an UPDATE.
    - Existing canonical keys are not rewritten (#25).
+8. **Backfill vectors that 0.3.0 skipped.** Under the hybrid strategy (the
+   default), 0.3.0 stored a concept created only as a `parent_of` end with no
+   vector, so recall can reach it by keyword but not by meaning. 0.4.0 embeds
+   these ends on write but does not go back for old ones. With the writer
+   stopped, run `lambo re-embed --missing-only --session <id> --agent <id>`.
+   It embeds only the text concepts that have no vector and leaves every
+   other vector and the session contract alone. It skips image concepts
+   without a vector and reports how many; deriving each image again
+   restores its vector. To check first, `lambo_stats` reports the gap as
+   `concept_count` minus `embedded_concepts`, which counts image concepts
+   too.
 
 ### Known issues
 
