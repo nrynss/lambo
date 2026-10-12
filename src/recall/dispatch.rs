@@ -31,10 +31,12 @@
 //! collected. This is default-invisible (no subscriber enables trace on the
 //! CLI/daemon path) and is the T9 instrumentation for the structural arm.
 
+use unicode_normalization::{UnicodeNormalization, char::is_combining_mark};
+
 use crate::graph::Graph;
 use crate::recall::detail::{Annotation, AnnotationKind, DetailedHit, DetailedRecall};
 use crate::recall::format;
-use crate::types::{tie_break_by_key, CanonizationStatus, Node, NodeId, RecallHit, Scored};
+use crate::types::{CanonizationStatus, Node, NodeId, RecallHit, Scored, tie_break_by_key};
 
 /// What kind of question a recall query is, for routing (T9).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,7 +74,7 @@ const STRUCTURAL_MARKERS: [&str; 7] = [
 ///
 /// Classify a query into a recall arm (lexical/vector vs structural).
 pub fn classify(query: &str) -> RecallKind {
-    let lower = query.to_lowercase();
+    let lower = anchor_text(query);
     let structural = STRUCTURAL_MARKERS.iter().any(|m| lower.contains(m));
     tracing::trace!(
         target: "lambo::recall",
@@ -106,8 +108,12 @@ const ANCHOR_STOP_WORDS: [&str; 26] = [
 /// Whether `c` counts as a word character for anchor boundaries. Unicode-aware
 /// (`char::is_alphanumeric`), so a multibyte word is one word, and `-`, `_`,
 /// `/`, `.` and spaces all separate words.
+pub(crate) fn anchor_text(text: &str) -> String {
+    text.nfc().flat_map(char::to_lowercase).nfc().collect()
+}
+
 fn is_word_char(c: char) -> bool {
-    c.is_alphanumeric()
+    c.is_alphanumeric() || is_combining_mark(c)
 }
 
 /// Byte spans of every occurrence of `needle` in `hay` that sits on word
@@ -192,14 +198,14 @@ fn is_stop_content(lower_content: &str) -> bool {
 ///    that names nothing real ("what depends on nothing-imaginary") still
 ///    refuses.
 fn resolve_anchor(graph: &Graph, query: &str) -> Option<NodeId> {
-    let lower_q = query.to_lowercase();
+    let lower_q = anchor_text(query);
     let markers = marker_spans(&lower_q);
     let inside_marker = |(s, e): (usize, usize)| markers.iter().any(|&(ms, me)| ms <= s && e <= me);
     // Each candidate keeps the spans it matched at, for the containment rule.
     let candidates: Vec<(&crate::types::Concept, Vec<(usize, usize)>)> = graph
         .concepts()
         .filter_map(|c| {
-            let lower_c = c.content.to_lowercase();
+            let lower_c = anchor_text(&c.content);
             if lower_c.trim().is_empty() || is_stop_content(&lower_c) {
                 return None;
             }
@@ -840,6 +846,33 @@ mod tests {
     }
 
     #[test]
+    fn normalized_accents_combining_marks_and_sigma_preserve_word_boundaries() {
+        let g = anchors(&[
+            (10, "café", ConceptType::Entity),
+            (11, "ΟΣ", ConceptType::Entity),
+            (12, "x", ConceptType::Entity),
+        ]);
+        assert_eq!(
+            anchor_content(&g, "what depends on cafe\u{301}").as_deref(),
+            Some("café")
+        );
+        assert_eq!(
+            anchor_content(&g, "what depends on ΟΣ").as_deref(),
+            Some("ΟΣ")
+        );
+        assert_eq!(
+            anchor_content(&g, "what depends on οσ").as_deref(),
+            Some("ΟΣ")
+        );
+        assert_eq!(anchor_content(&g, "what depends on x\u{307}y"), None);
+        let decomposed = anchors(&[(10, "cafe\u{301}", ConceptType::Entity)]);
+        assert_eq!(
+            anchor_content(&decomposed, "what depends on CAFÉ").as_deref(),
+            Some("cafe\u{301}")
+        );
+    }
+
+    #[test]
     fn word_bounded_spans_need_word_edges_and_see_overlaps() {
         assert_eq!(word_bounded_spans("dbadmin db", "db"), vec![(8, 10)]);
         assert_eq!(word_bounded_spans("dbadmin", "db"), vec![]);
@@ -1216,10 +1249,11 @@ mod tests {
         assert!(payments.annotations.is_empty());
         assert!(result.detailed.iter().all(|h| h.included_in_context));
         // Response-global explanations never appear as hit annotations.
-        assert!(result.detailed.iter().all(|h| !h
-            .annotations
-            .iter()
-            .any(|a| a.kind == AnnotationKind::Traversal)));
+        assert!(result.detailed.iter().all(|h| {
+            !h.annotations
+                .iter()
+                .any(|a| a.kind == AnnotationKind::Traversal)
+        }));
 
         let actual = serde_json::to_value(&result).expect("payload serializes");
         let golden_path = concat!(
@@ -1324,9 +1358,11 @@ mod tests {
         );
         assert!(result.detailed[0].truncated_in_context);
         assert!(!result.detailed[0].included_in_context);
-        assert!(result.detailed[1..]
-            .iter()
-            .all(|h| !h.included_in_context && !h.truncated_in_context));
+        assert!(
+            result.detailed[1..]
+                .iter()
+                .all(|h| !h.included_in_context && !h.truncated_in_context)
+        );
         // The headline counts the truncated dependent the context shows.
         assert_eq!(
             result.response_annotations[0].text,
