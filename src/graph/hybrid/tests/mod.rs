@@ -90,6 +90,8 @@ struct SpyStore {
     hits: Vec<Scored<NodeId>>,
     backend_err: bool,
     refuses: bool,
+    /// The checked lookup never answers (#125 review H1).
+    hangs: bool,
     vector_calls: Arc<AtomicUsize>,
 }
 
@@ -100,6 +102,7 @@ impl SpyStore {
             hits,
             backend_err: false,
             refuses: false,
+            hangs: false,
             vector_calls: Arc::new(AtomicUsize::new(0)),
         }
     }
@@ -109,6 +112,7 @@ impl SpyStore {
             hits: Vec::new(),
             backend_err: false,
             refuses: false,
+            hangs: false,
             vector_calls: Arc::new(AtomicUsize::new(0)),
         }
     }
@@ -118,7 +122,14 @@ impl SpyStore {
             hits: Vec::new(),
             backend_err: true,
             refuses: false,
+            hangs: false,
             vector_calls: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+    fn hanging() -> Self {
+        Self {
+            hangs: true,
+            ..Self::with_vector(Vec::new())
         }
     }
     fn refusing() -> Self {
@@ -175,6 +186,9 @@ impl GraphStore for SpyStore {
         _limit: usize,
     ) -> Result<Vec<Scored<NodeId>>, StoreError> {
         self.vector_calls.fetch_add(1, Ordering::SeqCst);
+        if self.hangs {
+            std::future::pending::<()>().await;
+        }
         if self.backend_err {
             return Err(StoreError::Backend("boom".into()));
         }

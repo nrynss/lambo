@@ -2098,19 +2098,32 @@ async fn checked_candidates(
     limit: usize,
     io_deadline: tokio::time::Instant,
 ) -> Result<Option<Vec<crate::types::Scored<NodeId>>>, LamboError> {
-    match tokio::time::timeout_at(
-        io_deadline,
-        vectors.checked(session_id, emb, embedding, limit),
-    )
-    .await
-    {
-        Err(_) => Err(StoreError::Backend(format!(
-            "hybrid vector candidate lookup timed out after {HYBRID_IO_TIMEOUT:?}"
-        ))
-        .into()),
-        Ok(Ok(hits)) => Ok(Some(hits)),
-        Ok(Err(StoreError::Capability(_))) => Ok(None),
-        Ok(Err(e)) => Err(e.into()),
+    // Review H2: a lookup is not started once the budget is spent (a
+    // `timeout_at` past its deadline still polls the future once).
+    let lookup = async {
+        if tokio::time::Instant::now() >= io_deadline {
+            return None;
+        }
+        tokio::time::timeout_at(
+            io_deadline,
+            vectors.checked(session_id, emb, embedding, limit),
+        )
+        .await
+        .ok()
+    };
+    match lookup.await {
+        // Review H1: transient, like an embed timeout. The budget ran out
+        // (often in the embeds before this lookup), so nothing was learned
+        // about this write's input, and its durable intent must stay
+        // unconsumed for a later attempt rather than settle `failed`.
+        None => Err(LamboError::EmbedUnavailable(format!(
+            "hybrid vector candidate lookup timed out after {HYBRID_IO_TIMEOUT:?}; nothing was \
+             written — the write's embed and lookup budget ran out, which says nothing about \
+             its input"
+        ))),
+        Some(Ok(hits)) => Ok(Some(hits)),
+        Some(Err(StoreError::Capability(_))) => Ok(None),
+        Some(Err(e)) => Err(e.into()),
     }
 }
 

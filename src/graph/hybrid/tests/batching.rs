@@ -165,3 +165,35 @@ async fn record_action_contents_embed_in_one_round() {
         .unwrap_err();
     assert!(matches!(err, LamboError::Embed(_)), "{err:?}");
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_candidate_lookup_timeout_is_transient_and_writes_nothing() {
+    // #125 review H1: the lookup shares the embeds' deadline. Its timeout
+    // used to be a `Store(Backend)` error, which the write queue settles
+    // `failed`, consuming an acked write's durable intent over a timeout.
+    let (graph, iid) = graph_with_interaction("b125-lookup", 1, 0, PROMPT);
+    let store = SpyStore::hanging();
+    let err = derive_with(
+        graph.clone(),
+        VectorCandidates::from_store(&store),
+        &FixtureEmbedder::new(),
+        &contract("fixture", 1024),
+        iid,
+        &agent(),
+        &items(),
+        &ParentOf::none(),
+        10,
+        SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+        None,
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, LamboError::EmbedUnavailable(_)), "{err:?}");
+    assert_eq!(
+        store.vector_calls(),
+        1,
+        "no lookup is started past the deadline"
+    );
+    assert_eq!(graph.read().concepts().count(), 0);
+}

@@ -1712,8 +1712,12 @@ pub enum LamboError {
     /// one transient outage.
     ///
     /// Produced only where the cause is known: `graph::hybrid::derive`'s embed
-    /// timeout arm, and its embed-error arm when
-    /// [`crate::embed::EmbedError::is_transient`] says so.
+    /// timeout arm, its embed-error arm when
+    /// [`crate::embed::EmbedError::is_transient`] says so, and (#125 review
+    /// H1) its vector-candidate lookup when the call's embed-and-lookup
+    /// budget ran out before the lookup answered: that lookup runs under the
+    /// same deadline as the embeds, and its timeout likewise says nothing
+    /// about the input, so the write's durable intent must stay unconsumed.
     ///
     /// `Display` is deliberately identical to [`LamboError::Embed`]'s: to an
     /// operator and to the ledger this is the same *class* of failure
