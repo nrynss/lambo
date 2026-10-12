@@ -104,7 +104,7 @@ pub use receipts::{
     MAX_PIGGYBACK_RECEIPTS, MAX_RECEIPT_IDS, MAX_RECEIPT_WAITS_PER_AGENT, MAX_RETAINED_RECEIPTS,
     MEASURED_WORST_FLUSH_LAG_SECS, RECEIPT_RETENTION, RECEIPT_WAIT_MAX,
 };
-pub use replay::EMBEDDER_SICK_THRESHOLD;
+pub use replay::{EMBEDDER_SICK_THRESHOLD, REPLAY_LOOKUP_TIMEOUT_LIMIT};
 
 // Crate-internal names the sibling modules reach through `super::`.
 use admission::{Job, JobPayload, Lanes};

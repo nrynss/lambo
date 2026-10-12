@@ -965,3 +965,222 @@ async fn a_lease_lost_close_answers_close_unflushed() {
     );
     assert_eq!(mem.pipeline().counters().deferred(), 0);
 }
+
+/// [`VectorSearchable`] whose checked vector lookup is slower than a write's
+/// whole I/O budget, every time (#125 Sonnet review).
+struct SlowLookup(VectorSearchable);
+
+#[async_trait::async_trait]
+impl GraphStore for SlowLookup {
+    fn capabilities(&self) -> crate::store::Capabilities {
+        self.0.capabilities() | crate::store::Capabilities::VECTOR_SEARCH
+    }
+    async fn init_schema(&self) -> Result<(), crate::types::StoreError> {
+        self.0.init_schema().await
+    }
+    async fn flush(
+        &self,
+        batch: &crate::types::MutationBatch,
+        token: Option<u64>,
+    ) -> Result<(), crate::types::StoreError> {
+        self.0.flush(batch, token).await
+    }
+    async fn load_session(
+        &self,
+        session: &crate::types::SessionId,
+    ) -> Result<crate::types::GraphSnapshot, crate::types::StoreError> {
+        self.0.load_session(session).await
+    }
+    async fn keyword_candidates(
+        &self,
+        session: &crate::types::SessionId,
+        tokens: &[String],
+        limit: usize,
+    ) -> Result<Vec<crate::types::Scored<NodeId>>, crate::types::StoreError> {
+        self.0.keyword_candidates(session, tokens, limit).await
+    }
+    async fn vector_candidates(
+        &self,
+        _session: &crate::types::SessionId,
+        _embedding: &[f32],
+        _limit: usize,
+    ) -> Result<Vec<crate::types::Scored<NodeId>>, crate::types::StoreError> {
+        Ok(Vec::new())
+    }
+    async fn vector_candidates_checked(
+        &self,
+        _session: &crate::types::SessionId,
+        _embedding: &[f32],
+        _expected_contract: &crate::types::EmbeddingContract,
+        _limit: usize,
+    ) -> Result<Vec<crate::types::Scored<NodeId>>, crate::types::StoreError> {
+        // Slower than any write's whole budget, every time.
+        tokio::time::sleep(crate::graph::hybrid::HYBRID_IO_TIMEOUT * 2).await;
+        Ok(Vec::new())
+    }
+    async fn blast_radius(
+        &self,
+        session: &crate::types::SessionId,
+        node: crate::types::NodeId,
+        min_edge_age: Duration,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64, crate::types::StoreError> {
+        self.0.blast_radius(session, node, min_edge_age, now).await
+    }
+    async fn interaction_span(
+        &self,
+        session: &crate::types::SessionId,
+        node: crate::types::NodeId,
+        min_age: Duration,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<crate::types::InteractionSpan, crate::types::StoreError> {
+        self.0.interaction_span(session, node, min_age, now).await
+    }
+    async fn record_canonization(
+        &self,
+        event: &crate::types::CanonizationEvent,
+        token: Option<u64>,
+    ) -> Result<(), crate::types::StoreError> {
+        self.0.record_canonization(event, token).await
+    }
+    async fn acquire_lease(
+        &self,
+        session: &crate::types::SessionId,
+        holder: &crate::store::LeaseHolder,
+        ttl: Duration,
+    ) -> Result<crate::store::LeaseOutcome, crate::types::StoreError> {
+        self.0.acquire_lease(session, holder, ttl).await
+    }
+    async fn read_lease(
+        &self,
+        session: &crate::types::SessionId,
+    ) -> Result<Option<crate::store::LeaseInfo>, crate::types::StoreError> {
+        self.0.read_lease(session).await
+    }
+    async fn refresh_lease(
+        &self,
+        session: &crate::types::SessionId,
+        holder: &crate::store::LeaseHolder,
+        ttl: Duration,
+    ) -> Result<crate::store::LeaseOutcome, crate::types::StoreError> {
+        self.0.refresh_lease(session, holder, ttl).await
+    }
+    async fn release_lease(
+        &self,
+        session: &crate::types::SessionId,
+        holder: &crate::store::LeaseHolder,
+    ) -> Result<(), crate::types::StoreError> {
+        self.0.release_lease(session, holder).await
+    }
+}
+
+/// **#125 (Sonnet review)**: a lookup timeout at replay is settled `failed`
+/// instead of being left durable as an embedder outage, so a write whose
+/// lookup is slow every time cannot hold the backlog on every restart; and a
+/// run of [`REPLAY_LOOKUP_TIMEOUT_LIMIT`] of them stops the replay with the
+/// rest durable, because then the store, not one write, is slow.
+///
+/// Red before: each timeout was `EmbedUnavailable`, left durable, and counted
+/// toward embedder sickness, so three stopped the replay with none settled,
+/// on every restart.
+#[tokio::test(start_paused = true)]
+async fn a_lookup_timeout_at_replay_settles_failed_and_a_run_of_them_stops_it() {
+    use crate::writeq::{ReceiptAnswer, ReplayBlockReason, REPLAY_LOOKUP_TIMEOUT_LIMIT};
+    let inner = Arc::new(MemoryStore::new());
+    let agent = AgentId::new("agent-a");
+    let mem = Memory::builder()
+        .session("intent-slow-lookup")
+        .agent("agent-a")
+        .flush_interval(Duration::from_secs(3_600))
+        .store(Arc::new(VectorSearchable(inner.clone())) as Arc<dyn GraphStore>)
+        .embedder(Arc::new(HangingEmbedder::new()) as Arc<dyn Embedder>)
+        .embedding_contract(contract("fixture", 1024))
+        .match_strategy(MatchStrategy::Hybrid)
+        .build()
+        .await
+        .expect("build the deferring session");
+    let mut receipts = Vec::new();
+    for i in 0..REPLAY_LOOKUP_TIMEOUT_LIMIT + 1 {
+        let content = format!("slow lookup concept {i}");
+        let submitted = mem
+            .derive_async_as(
+                &agent,
+                &[(content.as_str(), ConceptType::Entity)],
+                &ParentOf::none(),
+                None,
+            )
+            .await
+            .expect("ack");
+        assert!(!submitted.dropped());
+        receipts.push(submitted.receipt);
+    }
+    mem.close().await.expect("clean close");
+
+    let mem2 = Memory::builder()
+        .session("intent-slow-lookup")
+        .agent("agent-a")
+        .flush_interval(Duration::from_secs(3_600))
+        .store(Arc::new(SlowLookup(VectorSearchable(inner.clone()))) as Arc<dyn GraphStore>)
+        .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
+        .embedding_contract(contract("fixture", 1024))
+        .match_strategy(MatchStrategy::Hybrid)
+        .build()
+        .await
+        .expect("build session 2");
+    let settled = REPLAY_LOOKUP_TIMEOUT_LIMIT - 1;
+    for _ in 0..10_000 {
+        if mem2.pipeline().counters().replay_blocked() != ReplayBlockReason::None {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    assert_eq!(
+        mem2.pipeline().counters().replay_blocked(),
+        ReplayBlockReason::Other,
+        "a run of lookup timeouts stops the replay as a store fault, not an embedder one"
+    );
+    for (i, receipt) in receipts.iter().enumerate() {
+        let answer = mem2.pipeline().lookup(&agent, *receipt);
+        if i < settled {
+            match answer {
+                ReceiptAnswer::Failed(why) => {
+                    assert!(why.contains("candidate lookup"), "{why}")
+                }
+                other => panic!("intent {i} must settle failed: {other:?}"),
+            }
+        } else {
+            assert_eq!(answer.tag(), "pending_replay", "intent {i} stays durable");
+        }
+    }
+    assert_eq!(
+        mem2.pipeline().counters().replay_owed(),
+        (receipts.len() - settled) as u64
+    );
+    mem2.close().await.expect("clean close 2");
+
+    // The next serve, with a healthy store, applies what was left durable.
+    let mem3 = Memory::builder()
+        .session("intent-slow-lookup")
+        .agent("agent-a")
+        .flush_interval(Duration::from_secs(3_600))
+        .store(Arc::new(VectorSearchable(inner.clone())) as Arc<dyn GraphStore>)
+        .embedder(Arc::new(FixtureEmbedder::new()) as Arc<dyn Embedder>)
+        .embedding_contract(contract("fixture", 1024))
+        .match_strategy(MatchStrategy::Hybrid)
+        .build()
+        .await
+        .expect("build session 3");
+    for _ in 0..10_000 {
+        if mem3.pipeline().counters().replay_owed() == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    for receipt in &receipts[settled..] {
+        assert_eq!(
+            mem3.pipeline().lookup(&agent, *receipt).tag(),
+            "applied_after_restart"
+        );
+    }
+    mem3.close().await.expect("clean close 3");
+}

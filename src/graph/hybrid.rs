@@ -539,6 +539,15 @@ fn reject_empty_key(content: &str, key: &str) -> Result<(), LamboError> {
 /// did not answer in time, [`LamboError::Embed`] when it answered and the answer
 /// was unusable for this input. The two render identically to a caller.
 ///
+/// A vector-candidate lookup that does not answer before the call's
+/// [`HYBRID_IO_TIMEOUT`] (it shares the embeds' deadline) is also
+/// [`LamboError::EmbedUnavailable`] (#125): it reads `embed: hybrid vector
+/// candidate lookup timed out ...` with the "embedding error" kind, where
+/// before 0.6.0 it was a store error. Any other store error from the lookup
+/// still propagates as [`LamboError::Store`]. Nothing here retries; a write
+/// queue intent that fails transiently is replayed by the session's next
+/// serve.
+///
 /// `embedding` is the live, resolved [`EmbeddingContract`] for the process's
 /// embedder (from `ResolvedBackends`); it is stamped on the graph at first embed
 /// and checked via [`EmbeddingContract::ensure_compatible`] on later hybrid
@@ -2135,11 +2144,7 @@ async fn checked_candidates(
         // (often in the embeds before this lookup), so nothing was learned
         // about this write's input, and its durable intent must stay
         // unconsumed for a later attempt rather than settle `failed`.
-        None => Err(LamboError::EmbedUnavailable(format!(
-            "hybrid vector candidate lookup timed out after {HYBRID_IO_TIMEOUT:?}; nothing was \
-             written — the write's embed and lookup budget ran out, which says nothing about \
-             its input"
-        ))),
+        None => Err(LamboError::lookup_timeout(HYBRID_IO_TIMEOUT)),
         Some(Ok(hits)) => Ok(Some(hits)),
         Some(Err(StoreError::Capability(_))) => Ok(None),
         Some(Err(e)) => Err(e.into()),
