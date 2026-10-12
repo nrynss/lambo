@@ -406,17 +406,23 @@ pub fn high_risk_at(
         Some(crate::types::Node::Concept(c)) => c,
         _ => return None,
     };
-    // O(degree) through the adjacency index, like the write check below.
-    let live_radius = crate::recall::format::blast_radius(graph, node);
-    if !is_high_value(c, live_radius) {
+    // The fresh-write check first: most concepts on most cycles have none,
+    // and then the dependent count is never computed (this runs for every
+    // concept on every daemon cycle, under the graph read lock).
+    let own_write = c.created_at >= window_start && c.created_at <= now;
+    let edge_write = own_write
+        || graph.incident_edges(node).iter().any(|e| {
+            let w = e.last_reinforced.max(e.created_at);
+            w >= window_start && w <= now
+        });
+    if !(own_write || edge_write) {
         return None;
     }
-    let own_write = c.created_at >= window_start && c.created_at <= now;
-    let edge_write = graph.incident_edges(node).iter().any(|e| {
-        let w = e.last_reinforced.max(e.created_at);
-        w >= window_start && w <= now
-    });
-    if !(own_write || edge_write) {
+    // O(degree) through the adjacency index. No age floor, unlike Stage 3:
+    // this asks what rests on the node right now, so the edge that makes a
+    // fifth dependent is itself the fresh write that fires the check.
+    let live_radius = crate::recall::format::blast_radius(graph, node);
+    if !is_high_value(c, live_radius) {
         return None;
     }
     let status = format!("{:?}", c.canonization_status);
@@ -940,7 +946,9 @@ mod tests {
         g.insert_concept(c1, i1_id).unwrap();
         // c2: five live dependents (the writer below plus four older
         // ones), write at 95 (5s ago) -> hit. No stored stamp: the live
-        // count decides (#36).
+        // count decides (#36). The fresh edge is also the one that makes the
+        // fifth dependent: reaching five fires immediately, because the live
+        // count has no age floor.
         let c2 = concept(
             2,
             i1_id,
