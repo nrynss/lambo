@@ -12,13 +12,50 @@ use crate::graph::Graph;
 use crate::recall::format;
 use crate::types::{CanonizationStatus, EdgeType, Node, NodeId};
 
-/// Render a BFS neighbourhood around `target`. Caller holds the graph read
-/// lock; this function never awaits (spec §6.4).
+/// Render a BFS neighbourhood around `target`, with no canonization
+/// explanation (tests; the adapters use [`render_neighbourhood_parts`]).
+/// Caller holds the graph read lock; this function never awaits (spec §6.4).
+#[cfg(test)]
 pub(crate) fn render_neighbourhood(
     g: &Graph,
     target: NodeId,
     depth: usize,
 ) -> (String, serde_json::Value) {
+    let view = render_neighbourhood_parts(g, target, depth);
+    (view.text(None), view.json)
+}
+
+/// A rendered neighbourhood, split where the canonization explanation
+/// (#36 PR 3, [`crate::canon::render_admission`]) goes: after the focus,
+/// blast radius, dependents and reservation lines, before the hop listing.
+/// The explanation needs store queries that cannot run under the read
+/// guard, so callers render first and splice it in after the await.
+pub(crate) struct NeighbourhoodView {
+    head: String,
+    hops: String,
+    /// The structured neighbourhood (`focus` in `lambo_inspect`'s result).
+    pub(crate) json: serde_json::Value,
+}
+
+impl NeighbourhoodView {
+    /// The inspect text, with `admission` (already rendered) between the
+    /// head and the hops when given.
+    pub(crate) fn text(&self, admission: Option<&str>) -> String {
+        let mut out = self.head.clone();
+        if let Some(a) = admission {
+            out.push_str(a);
+        }
+        out.push_str(&self.hops);
+        out
+    }
+}
+
+/// [`render_neighbourhood`] in parts (see [`NeighbourhoodView`]).
+pub(crate) fn render_neighbourhood_parts(
+    g: &Graph,
+    target: NodeId,
+    depth: usize,
+) -> NeighbourhoodView {
     use std::collections::{HashMap, HashSet};
 
     let radii = format::blast_radii(g);
@@ -69,6 +106,7 @@ pub(crate) fn render_neighbourhood(
     if let Some(res) = g.reservation(target) {
         text.push_str(&format!("{}\n", format::reservation_warning(res)));
     }
+    let head = std::mem::take(&mut text);
 
     let mut seen: HashSet<NodeId> = HashSet::new();
     seen.insert(target);
@@ -153,7 +191,11 @@ pub(crate) fn render_neighbourhood(
         "dependents_truncated": dependents_truncated,
         "levels": levels,
     });
-    (text, structured)
+    NeighbourhoodView {
+        head,
+        hops: text,
+        json: structured,
+    }
 }
 
 /// One dependent of the inspect focus and the edge kind that declares it.
@@ -209,10 +251,25 @@ mod tests {
     /// in `fixtures/inspect-dependents-golden.txt`. The Python self-test reads
     /// the same file, so the parser is tested against real renderer output.
     /// Regenerate with `LAMBO_UPDATE_GOLDEN=1` after a deliberate change.
-    #[test]
-    fn inspect_text_matches_the_golden_the_cloudops_guard_parses() {
-        let g = case::graph();
-        let (text, _) = render_neighbourhood(&g, case::concept_id("X"), 1);
+    ///
+    /// Since #36 PR 3 the golden carries the canonization explanation the
+    /// adapters splice in between the head and the hops, explained under the
+    /// default policy against a `MemoryStore` holding the same case.
+    #[cfg(feature = "store-memory")]
+    #[tokio::test]
+    async fn inspect_text_matches_the_golden_the_cloudops_guard_parses() {
+        use crate::store::GraphStore;
+        let store = crate::store::MemoryStore::new();
+        store.flush(&case::store_batch(), None).await.unwrap();
+        let g = parking_lot::RwLock::new(case::graph());
+        let x = case::concept_id("X");
+        let params = crate::canon::EvalParams::default();
+        let admission = crate::canon::explain_node(&g, &store, x, &params, case::now())
+            .await
+            .unwrap()
+            .expect("X is a concept");
+        let view = super::render_neighbourhood_parts(&g.read(), x, 1);
+        let text = view.text(Some(&crate::canon::render_admission(&admission)));
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/fixtures/inspect-dependents-golden.txt"

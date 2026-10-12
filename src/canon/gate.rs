@@ -24,40 +24,36 @@
 //! and thresholds*, never as a parallel metric the two could drift apart on.
 //! The bars are the stage modules' own `MIN_*` constants — a single source.
 //!
-//! ## These four gates are `Swarm`'s gates (C2)
+//! ## The four-gate block is `Swarm`'s, and it is no longer the whole story
 //!
-//! Everything above is true **only under [`PromotionPolicy::Swarm`]**. Under
-//! `Solo` the promotion decision is [`crate::canon::SoloScorer`]'s recurrence
-//! score and its bands: `gc_survived` is not read, the stage-2/stage-3 evidence
-//! verdict is not consulted (`admits_hop` ignores its `evidence` argument
-//! outright), and so none of `gc_survived`, `blast_radius`,
-//! `distinct_interactions` or `coverage` participates. Surfacing them anyway
-//! would put "0 of 4 gates met" on the page beside a concept that goes
-//! Canonical on the next cycle — the payload contradicting the engine, which is
-//! the one thing this module promises never to do.
+//! [`SwarmGates`] carries the four numbers the portal has always shown:
+//! `gc_survived`, `blast_radius`, `distinct_interactions` and `coverage`.
+//! [`gate_progress`] ships them under [`PromotionPolicy::Swarm`] and leaves
+//! them out under `Solo` (C2), which keeps the wire shape every existing
+//! client reads.
 //!
-//! So the four move into [`SwarmGates`], which [`gate_progress`] leaves absent
-//! under `Solo`. What does **not** move is the cooldown, and that split is the
-//! whole reason this is a *shaped* payload and not a suppressed one:
+//! Since #36 PR 3 that block is not the complete account under either
+//! policy:
 //!
-//! * The re-promotion cooldown is policy-independent, and on the solo path it
-//!   is the only store-side determinant left. `canon::eval` gates the
-//!   Venerable → Canonical hop on `stage3::in_repromotion_cooldown` precisely
-//!   **when the stage-3 evidence is absent** — which is exactly the
-//!   score-admitted hop `Solo` takes on every promotion.
-//! * This struct is the cooldown's only carrier. A budget-demoted concept that
-//!   climbed back to Venerable on the band alone and is now stalling out a
-//!   300 s cooldown has exactly one honest explanation available, and
-//!   suppressing the whole struct threw that away along with the four
-//!   irrelevant numbers — leaving the operator with *no* account of the stall
-//!   where the pre-C2 payload at least carried this one correct fact.
+//! * Swarm's Stage 1 also needs dependents from at least two other
+//!   interactions, which no gate here reports.
+//! * Solo's later hops now need the Stage 2 and Stage 3 verdicts too, so
+//!   `distinct_interactions`, `coverage` and `blast_radius` matter under Solo
+//!   even though this block still omits them there.
+//!
+//! The complete, per-policy explanation is [`crate::canon::Admission`]
+//! (`canon::explain`), which `/api/inspect` carries beside this block as
+//! `admission`, and `lambo_inspect` / `lambo inspect` render as text. This
+//! block is kept unchanged rather than reshaped, because its absence under
+//! `Solo` and its `met_count() == None` there are pinned contracts.
+//!
+//! What does **not** move is the cooldown: it is policy-independent, and
+//! [`GateProgress`] reports it under both policies.
 //!
 //! [`GateProgress::policy`] labels which policy the block describes, so a
 //! client never has to infer from an absent key whether the four gates were
-//! irrelevant, or merely unavailable. Absence still means one thing higher up:
-//! H2 drops the entire block for a Canonical concept, which has no promotion
-//! gates left to explain — but that is the caller's decision about a promoted
-//! fact, not this module's about a policy.
+//! irrelevant, or merely unavailable. H2 drops the entire block for a
+//! Canonical concept, which has no promotion gates left to explain.
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::Serialize;
@@ -159,7 +155,9 @@ pub struct GateProgress {
     /// way to tell a meaningful "0 of 4" from a reader/writer mismatch.
     pub policy: PromotionPolicy,
     /// Swarm's four store-evidence gates — absent under
-    /// [`PromotionPolicy::Solo`], which reads none of them.
+    /// [`PromotionPolicy::Solo`] (see the module docs: since #36 PR 3 Solo
+    /// does consume Stage 2 and 3, which [`crate::canon::Admission`]
+    /// reports).
     ///
     /// Flattened: under `Swarm` the four keys sit directly on this object.
     #[serde(flatten)]
@@ -168,10 +166,9 @@ pub struct GateProgress {
     /// demoted inside the last `cooldown` cannot be re-promoted even when
     /// every gate reads `met`).
     ///
-    /// Reported under **both** policies, because it applies under both. On the
-    /// score-admitted solo path it is the only store-side determinant this
-    /// block carries: `canon::eval` puts `in_repromotion_cooldown` on the
-    /// Venerable → Canonical hop whenever the stage-3 evidence is absent.
+    /// Reported under **both** policies, because it applies under both: it
+    /// is part of Stage 3's verdict, which every Venerable → Canonical hop
+    /// needs since #36 PR 3.
     pub in_cooldown: bool,
     /// Instant at which the cooldown lifts; present only while `in_cooldown`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -201,8 +198,8 @@ impl GateProgress {
 /// Stages 3 and 2, so the surfaced numbers are the ones the eval would reach.
 ///
 /// Under [`PromotionPolicy::Solo`] the [`SwarmGates`] block is absent and
-/// **neither store query runs** — solo promotion reads none of those four
-/// measurements, so there is no honest reading of them to ship.
+/// **neither store query runs**, the C2 wire contract this function keeps;
+/// [`crate::canon::explain_admission`] reports what Solo now reads.
 ///
 /// The cooldown is computed either way and returned either way, mirroring
 /// Stage 3's `in_repromotion_cooldown` from [`Concept::last_demotion_time`] +

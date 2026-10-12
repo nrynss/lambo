@@ -328,6 +328,18 @@ async fn solo_cannot_bypass_the_repromotion_cooldown() {
     hub.last_demotion_time = Some(ts() - chrono::Duration::seconds(60));
     g.insert_concept(hub, iid(1)).unwrap();
     let store = store_from_graph(&g).await;
+    // Inspect explains the stall by the cooldown, and nothing else.
+    let inputs = crate::canon::admission_inputs(&g, hub_id, &solo_params(), ts()).unwrap();
+    let why = crate::canon::explain_admission(&store, &sid(), &inputs, &solo_params(), ts())
+        .await
+        .unwrap();
+    assert!(!why.eligible);
+    assert_eq!(why.reasons.len(), 1, "{:?}", why.reasons);
+    assert!(
+        why.reasons[0].contains("240s of the re-promotion cooldown left"),
+        "{:?}",
+        why.reasons
+    );
     let g = RwLock::new(g);
     let (tx, _rx) = channel();
     let mut ev = Evaluator::new();
@@ -1655,4 +1667,32 @@ fn no_window_graph() -> Graph {
         attach_blast(&mut g, id, blast, first);
     }
     g
+}
+
+/// #36 PR 3: inspect's explanation treats a store without the window-aware
+/// span the way the evaluator does: no Stage 2 evidence, said in words, and
+/// not eligible. On a capable store the same two nodes are eligible, as the
+/// evaluator's verdicts are.
+#[tokio::test]
+async fn the_explanation_matches_the_evaluator_on_a_store_without_the_window_span() {
+    let g = no_window_graph();
+    let p = params();
+    let without = FaultyStore::without_window(store_from_graph(&g).await);
+    let healthy = store_from_graph(&g).await;
+    for id in [20, 21] {
+        let inputs = crate::canon::admission_inputs(&g, nid(id), &p, ts()).unwrap();
+        let a = crate::canon::explain_admission(&without, &sid(), &inputs, &p, ts())
+            .await
+            .unwrap();
+        assert!(!a.eligible, "{a:?}");
+        assert!(
+            a.reasons[0].contains("cannot measure capped interaction-span coverage"),
+            "{:?}",
+            a.reasons
+        );
+        let a = crate::canon::explain_admission(&healthy, &sid(), &inputs, &p, ts())
+            .await
+            .unwrap();
+        assert!(a.eligible, "{a:?}");
+    }
 }

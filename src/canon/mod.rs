@@ -15,6 +15,7 @@
 mod contradicts_tests;
 mod eval;
 mod event_time;
+mod explain;
 mod gate;
 mod policy;
 mod stage1;
@@ -24,6 +25,11 @@ mod task;
 
 pub use eval::{eval_cycle, EvalError, EvalOutcome, EvalParams, Evaluator};
 pub use event_time::separated_session_count;
+pub(crate) use explain::explain_node;
+pub use explain::{
+    admission_inputs, explain_admission, render_admission, Admission, AdmissionCheck,
+    AdmissionInputs, Comparison,
+};
 pub use gate::{gate_progress, gate_progress_with_config, GateMetric, GateProgress, SwarmGates};
 pub use policy::{
     solo_breakdown, PromotionPolicy, PromotionScorer, SoloBreakdown, SoloScorer, SwarmScorer,

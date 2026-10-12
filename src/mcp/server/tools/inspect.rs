@@ -3,6 +3,7 @@
 use rmcp::model::{CallToolResult, ContentBlock};
 use serde_json::json;
 
+use crate::canon::{explain_node, render_admission, EvalParams};
 use crate::mcp::server::params::{check_size, InspectParams};
 use crate::mcp::server::response::{attach_warnings, bad_param};
 use crate::mcp::server::trace::{focus_for_ledger, note_facts};
@@ -11,7 +12,7 @@ use crate::surface::focus::{
     ambiguous_refusal, fuzzy_note, missing_refusal, oversized_refusal, resolve_focus, Focus,
 };
 use crate::surface::limits::MAX_INSPECT_DEPTH;
-use crate::surface::neighbourhood::render_neighbourhood;
+use crate::surface::neighbourhood::render_neighbourhood_parts;
 use crate::surface::validate::{check_in_range, require_nonempty};
 
 impl LamboServer {
@@ -35,7 +36,7 @@ impl LamboServer {
         let resolved = {
             let g = self.mem.graph().read();
             match resolve_focus(&g, p.focus.trim()) {
-                Focus::Exact(id) => Ok((id, None, render_neighbourhood(&g, id, depth))),
+                Focus::Exact(id) => Ok((id, None, render_neighbourhood_parts(&g, id, depth))),
                 Focus::Fuzzy {
                     id,
                     content,
@@ -47,13 +48,13 @@ impl LamboServer {
                     // bounded one also names the bound (issue #9), so the
                     // caller knows what was not scanned.
                     let note = fuzzy_note(p.focus.trim(), &content, bounded.as_ref());
-                    Ok((id, Some(note), render_neighbourhood(&g, id, depth)))
+                    Ok((id, Some(note), render_neighbourhood_parts(&g, id, depth)))
                 }
                 other => Err(other),
             }
         };
 
-        let (focus_id, note, (text, structured)) = match resolved {
+        let (focus_id, note, view) = match resolved {
             Ok(v) => v,
             Err(Focus::Ambiguous {
                 candidates,
@@ -118,6 +119,29 @@ impl LamboServer {
             }
         };
 
+        // #36 PR 3: why the focus is or is not admitted to its next status,
+        // through the evaluator's own predicates and the live config. A store
+        // fault degrades this additive section to a warning; the
+        // neighbourhood still answers.
+        let params = EvalParams::from_config(self.mem.config());
+        let admission = match explain_node(
+            self.mem.graph(),
+            self.mem.store().as_ref(),
+            focus_id,
+            &params,
+            chrono::Utc::now(),
+        )
+        .await
+        {
+            Ok(a) => a,
+            Err(e) => {
+                warnings.push(format!("canonization explanation unavailable: {e}"));
+                None
+            }
+        };
+        let text = view.text(admission.as_ref().map(render_admission).as_deref());
+        let structured = view.json;
+
         // A fuzzy resolution is stated in the *text*, not only in a warning:
         // "focus: <something the caller did not ask for>" is exactly the line a
         // model reads straight past.
@@ -147,6 +171,7 @@ impl LamboServer {
         out.structured_content = Some(json!({
             "view": text,
             "focus": structured,
+            "admission": admission,
             "resolution": note,
             "warnings": warnings,
         }));

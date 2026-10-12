@@ -25,7 +25,7 @@ use super::scope::{resolve_session, ScopedRequest, SessionCtx};
 use super::state::AppState;
 use super::views::RECALL_PERMIT_WAIT;
 use super::{APP_CSS, APP_JS, INDEX_HTML, POLL_INTERVAL};
-use crate::canon::gate_progress_with_config;
+use crate::canon::{admission_inputs, explain_admission, gate_progress_with_config, EvalParams};
 use crate::cli::caps::CliError;
 use crate::cli::recall::RecallRequest;
 use crate::recall::format::blast_radii;
@@ -307,6 +307,8 @@ pub(super) async fn api_inspect(
     };
     // Scoped so the (`!Send`) read guard provably never spans the await for
     // the gate-progress query below.
+    let now = chrono::Utc::now();
+    let eval_params = EvalParams::from_config(&state.backends.config);
     let found = {
         let g = view.reader.graph.read();
         match resolve_focus(&g, params.focus.trim()) {
@@ -314,7 +316,8 @@ pub(super) async fn api_inspect(
                 Some(Node::Concept(c)) => {
                     let blast = blast_radii(&g).get(&id).copied().unwrap_or(0);
                     let (dependents, truncated) = structural_dependents(&g, id);
-                    Some((c.clone(), blast, dependents, truncated))
+                    let inputs = admission_inputs(&g, id, &eval_params, now);
+                    Some((c.clone(), blast, dependents, truncated, inputs))
                 }
                 _ => None,
             },
@@ -324,7 +327,7 @@ pub(super) async fn api_inspect(
         }
     };
     let resp = match found {
-        Some((concept, blast, dependents, truncated)) => {
+        Some((concept, blast, dependents, truncated, inputs)) => {
             // T11 surfaces the concept's gate progress by re-running the
             // evaluation's own queries (`blast_radius` + `interaction_span`,
             // both with the eval's min_edge_age, plus the re-promotion
@@ -351,11 +354,8 @@ pub(super) async fn api_inspect(
             // response itself (so a miss and an omitted block still say which
             // policy this reader resolved). Under `Solo` the block is still
             // shipped: `gate_progress` leaves swarm's four gates out and keeps
-            // the cooldown, which is policy-independent and, on the
-            // score-admitted hop, the only reason a banded-through Venerable
-            // still is not Canonical. Suppressing the whole block under `Solo`
-            // would take that one true fact with it and leave a stall with no
-            // account at all.
+            // the cooldown, which is policy-independent. Since #36 PR 3 the
+            // full per-policy account is `admission`, below.
             //
             // Every absence is labelled. `gate_progress: null` used to mean
             // three unrelated things at once; it now means two, and
@@ -369,7 +369,7 @@ pub(super) async fn api_inspect(
                         &ctx.session,
                         &concept,
                         &state.backends.config,
-                        chrono::Utc::now(),
+                        now,
                     )
                     .await
                     {
@@ -383,6 +383,26 @@ pub(super) async fn api_inspect(
                         }
                     }
                 };
+            // #36 PR 3: the per-gate admission explanation, through the
+            // evaluator's own predicates. A store fault degrades it to an
+            // absence, like `gate_progress`.
+            let admission = match &inputs {
+                Some(inputs) => {
+                    match explain_admission(state.store(), &ctx.session, inputs, &eval_params, now)
+                        .await
+                    {
+                        Ok(a) => Some(a),
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "admission explanation for /api/inspect failed; omitted"
+                            );
+                            None
+                        }
+                    }
+                }
+                None => None,
+            };
             InspectResponse {
                 focus: params.focus,
                 found: true,
@@ -393,6 +413,7 @@ pub(super) async fn api_inspect(
                 promotion_policy: state.backends.config.promotion_policy,
                 gate_progress,
                 gate_progress_omitted,
+                admission,
             }
         }
         None => InspectResponse::missing(params.focus, state.backends.config.promotion_policy),

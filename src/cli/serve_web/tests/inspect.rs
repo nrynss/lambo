@@ -197,6 +197,17 @@ async fn inspect_endpoint_reports_a_focus_and_its_structural_dependents() {
     // fact identically.
     assert_eq!(hit["gate_progress_omitted"], "already_canonical", "{hit}");
     assert_eq!(hit["promotion_policy"], "Swarm", "{hit}");
+    // #36 PR 3: the additive admission explanation is present for a
+    // Canonical hit too, with no next status and one plain reason.
+    let admission = &hit["admission"];
+    assert_eq!(admission["policy"], "Swarm", "{hit}");
+    assert_eq!(admission["status"], "Canonical", "{hit}");
+    assert!(admission.get("next").is_none(), "{hit}");
+    assert_eq!(admission["eligible"], false, "{hit}");
+    assert_eq!(
+        admission["reasons"][0], "canonical: no further promotion",
+        "{hit}"
+    );
 
     handle.abort();
 }
@@ -282,6 +293,10 @@ async fn inspect_keeps_the_gate_block_for_every_non_canonical_status() {
 /// replaced four irrelevant numbers with zero relevant ones. Pinned
 /// directly below by `inspect_reports_the_repromotion_cooldown_under_solo`.
 ///
+/// (Both lies are C2-era history. Since #36 PR 3 Solo needs the Stage 2 and
+/// Stage 3 verdicts too; this block keeps its C2 shape, and the per-policy
+/// account of every gate Solo now reads is the additive `admission` key.)
+///
 /// Both policies run, against the same concept and the same store: a
 /// `Solo`-only assertion would pass equally well if the four gates had been
 /// dropped for everyone. The query counters make the `Solo` half
@@ -324,6 +339,14 @@ async fn inspect_drops_only_the_swarm_gates_under_solo_and_keeps_them_under_swar
         // count is attributable and an absence is never a guess. Present at
         // both levels and on every policy.
         assert_eq!(hit["promotion_policy"], policy.as_str(), "{hit}");
+        // #36 PR 3: the admission explanation names the same policy, and
+        // only Solo's carries the score terms.
+        assert_eq!(hit["admission"]["policy"], policy.as_str(), "{hit}");
+        assert_eq!(
+            hit["admission"].get("solo").is_some(),
+            policy == PromotionPolicy::Solo,
+            "{hit}"
+        );
         let gp = &hit["gate_progress"];
         assert!(
             !gp.is_null(),
@@ -386,7 +409,9 @@ async fn inspect_drops_only_the_swarm_gates_under_solo_and_keeps_them_under_swar
 /// suppressed the operator got `status: "Venerable"`, no explanation
 /// whatsoever, and a page whose `renderGates` returned early — strictly
 /// worse than the pre-C2 payload, which at least carried this one true
-/// fact among the four bogus gates.
+/// fact among the four bogus gates. (Since #36 PR 3 a Solo Venerable needs
+/// the Stage 3 verdict as well, the cooldown included; the cooldown is
+/// still the determinant this fixture stalls on.)
 ///
 /// Deliberately asserted with the four swarm gates absent in the same
 /// breath: the point is not that the block exists but that it carries the
