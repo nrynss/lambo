@@ -236,7 +236,8 @@
   embedded alone, so one bad text fails only its own write. Measured with
   `mcp_concurrent.py` on an M3 Pro (candle on Metal, a store copy, 120 s),
   apply latency p50/p90: 51/71 ms against 64/94 ms on 0.5.0 at 8 agents, and
-  70/134 ms against 113/189 ms at 16 agents; recall p99 the same or better;
+  70/134 ms against 113/189 ms at 16 agents; recall p99 better on the means
+  (one 16-agent run regressed, 132.7 against 119.9 ms);
   0 failed and 0 dropped writes in every run. 0.5.0 did not show its earlier
   multi-second backlog in these runs, so this compares two unbacklogged
   queues. See `dev-diary/notes/perf-125-batched-embeds.md`.
