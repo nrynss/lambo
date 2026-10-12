@@ -89,11 +89,17 @@ configured. Recall still runs its vector leg when the store claims
 `VECTOR_SEARCH`.
 
 **Left at spec defaults, deliberately**, because they are the thresholds the
-demo is claiming to satisfy: `canonization_min_peer_count` (20),
-`canonization_eval_batch_size` (50), `canonization_repromotion_cooldown`
-(300s), `max_canonical_nodes` (1000), the scoring and recall weights, and
-every stage constant in `src/canon` (`gc_survived >= 3`, strictly above P90,
+demo is claiming to satisfy: `canonization_eval_batch_size` (50),
+`canonization_repromotion_cooldown` (300s), `max_canonical_nodes` (1000), the
+scoring and recall weights, and every stage constant in `src/canon`
+(`gc_survived >= 3`, dependents from at least 2 other interactions,
 `distinct >= 3`, `coverage >= 0.3`, `blast_radius > 5`).
+
+Since 0.6.0 (#36) Stage 1 admits on evidence rather than by a P90 quota, so
+the run's fixed point has 15 canonization events instead of 5: ten concepts
+with dependents from two other interactions become Candidates, four of them
+(`user schema` among them) reach Venerable, and `user schema`, the only
+concept with more than five dependents, alone goes Canonical.
 
 ### Why GC cannot simply be turned off
 

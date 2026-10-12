@@ -66,7 +66,7 @@ The demo has to finish in seconds rather than in an afternoon, so it compresses 
 
 The conflict window is the one knob the demo widens. The demo stamps its writes from a script clock that spans 13 minutes, so the window is the default 30 seconds plus that span. Every scripted write stays inside it, as every write did when the run was stamped from the wall clock and took about a second.
 
-Every admission threshold stays at its default. Those are minimum peer count 20, `gc_survived` at least 3, and a score strictly above P90. They also include at least 3 distinct sources, coverage at least 0.3, and blast radius above 5.
+Every admission threshold stays at its default. Those are `gc_survived` at least 3 and dependents from at least 2 other interactions for Candidate, at least 3 distinct sources and coverage at least 0.3 for Venerable, and blast radius above 5 for Canonical. Since 0.6.0 no stage selects by score, so the run ends with 15 canonization events: ten Candidates, four of them Venerable, and `user schema` alone Canonical.
 
 ## Why two runs match
 

@@ -22,8 +22,8 @@
   Nothing is demoted. This includes a session's root goal, which
   `set_root_goal` makes Venerable directly: under Swarm it now needs Stage 2
   support (three dependents' interactions spanning 30% of the capped
-  session extent) to go Canonical. Solo is unchanged: it still probes and
-  stamps blast radius and admits by its score bands. On a copy of the
+  session extent) to go Canonical. Since #36 PR 3 the same re-check runs
+  under Solo (below). On a copy of the
   dogfood store taken 2026-10-12, no Candidate or Venerable would have
   promoted on the first evaluation, with or without this check, and all 7
   Venerables lose their Stage 2 support.
@@ -45,6 +45,34 @@
   dependents, so a file or entity that many actions name in `depends_on`
   reports a larger count than before, and an action record that depended
   on many things reports a smaller one.
+- **Candidates are admitted on evidence, not by quota (#36 PR 3).** Under
+  Swarm, Stage 1 no longer needs 20 peers and a score above their 90th
+  percentile: a concept becomes a Candidate when it has survived three GC
+  sweeps and its dependents come from at least two other interactions.
+  Small and young sessions can promote; reading a concept never makes it
+  more promotable. Nothing is demoted: a 0.5.0 Candidate without that
+  evidence stays a Candidate and simply cannot climb further. On a copy of
+  the dogfood store taken 2026-10-12 07:26 (5,005 concepts), evaluated at
+  2026-10-12T12:00Z with `examples/canon36_admission.rs`, the first
+  evaluation would admit 63 new Candidates (42 Resource, 20 Entity, 1
+  Constraint), and, run to a fixed point, 2 of them (both Resources) become
+  Venerable. **No concept turns Canonical**, and none of the 404 existing
+  Candidates or 7 Venerables moves. The new Candidates are almost all
+  artifacts, because on today's history only actions declare dependence;
+  rulings need #36 PR 4's citations.
+- **Solo needs the stage evidence (#36 PR 3).** Under `Solo` a concept
+  still becomes a Candidate by its score band, but every later hop now also
+  needs the Stage 2 or Stage 3 verdict Swarm needs, cooldown included, and
+  the score's "valid actions" term is now distinct dependent interactions
+  (a file many actions modified no longer scores for it). A Solo session
+  that promoted on its bands alone stops climbing until it has declared
+  dependents. Nothing is demoted. On the same store copy, Solo's first
+  evaluation would admit 244 new Candidates (164 Resource, 70 Entity, 8
+  Constraint, 2 Logic), 2 become Venerable at the fixed point, and **no
+  concept turns Canonical**.
+- **`lambo demo` ends with 15 canonization events, not 5.** Ten concepts
+  with dependents from two other interactions become Candidates, four
+  reach Venerable, and `user schema` alone goes Canonical as before.
 - **Downgrading or mixing versions with `Contradicts` edges (#19).** No
   0.6.0 tool writes a `Contradicts` edge yet; only a library caller or a
   hand-built batch can. A 0.5.0 (or older) binary refuses to load a
@@ -58,6 +86,19 @@
 
 ### Breaking (library API)
 
+- **`canon::stage1_candidates(graph, scores, min_age, now)`**
+  ([#36](https://github.com/nrynss/lambo/issues/36) PR 3) replaces
+  `stage1_candidates(graph, scores, min_peer_count)`: Stage 1 admits on
+  evidence aged by `min_age` at `now`, and returns the admitted set ordered
+  by composite score (highest first), not by `NodeId`.
+- **`PromotionScorer::admits_hop` takes `params: &EvalParams` and `now`**
+  (#36 PR 3), so Solo's dependent-interaction term ages its evidence like
+  Stage 1. `PromotionScorer::candidates` now returns its admitted set in the
+  order a bounded cycle should take it. The evaluator no longer asks a
+  scorer about a hop whose stage verdict failed.
+- **`EvalParams::min_peer_count` and `Config::canonization_min_peer_count`
+  are inert** (#36 PR 3). They still exist and deserialize, no policy reads
+  them, and `Config::warnings` names a non-default value.
 - **`Config` gains `canonization_coverage_window` and `EvalParams` gains
   `coverage_window`** ([#36](https://github.com/nrynss/lambo/issues/36)
   PR 2). Exhaustive struct literals need the field, or
@@ -120,6 +161,25 @@
 
 ### Added
 
+- **Inspect explains each concept's next promotion (#36 PR 3).**
+  `lambo_inspect` and `lambo inspect` print a `canonization (<policy>):
+  <status> -> <next> eligible|refused` line with one reason per gate that
+  fails, and `lambo_inspect`'s structured result and `/api/inspect` carry
+  the same as `admission` (`policy`, `status`, `next`, `eligible`, `checks`,
+  `solo`, `reasons`). It runs the evaluator's own gates. `lambo inspect`
+  explains under the policy `lambo.toml` and `LAMBO_PROMOTION_POLICY`
+  select. In the library: `canon::admission_inputs`,
+  `canon::explain_admission`, `canon::render_admission`, `Admission`,
+  `AdmissionCheck`, `AdmissionInputs`, `Comparison`,
+  `canon::dependent_interaction_counts`, `canon::dependent_interactions`,
+  `canon::solo_breakdown`, `SoloBreakdown` and
+  `cli::inspect::run_with_policy`.
+- **The canonization fair-test fixture** (`fixtures/session-fair-test.json`,
+  #36 PR 3): four supported rulings, under-supported variants, chaff and one
+  contradiction. Both policies promote exactly the four rulings to
+  Canonical on Memory and SQLite, with no seeded statuses.
+- `examples/canon36_admission.rs` measures what PR 3's admission does on a
+  copy of a SQLite store (counts and ids only, no concept text).
 - `EdgeType::Contradicts` persistence and synthetic exclusion checks across
   the store adapters (#19(a)). It does not decay. Write-tool fields,
   contradiction warnings and evidence-driven supersession follow separately.
@@ -172,6 +232,10 @@
 
 ### Changed
 
+- **Swarm admits Candidates on evidence; Solo needs the stage evidence for
+  every later hop** ([#36](https://github.com/nrynss/lambo/issues/36) PR 3).
+  See Upgrading from 0.5.0. The `lambo_inspect` tool description now
+  mentions the explanation.
 - **Stage 2 coverage is measured against at most fourteen days**
   ([#36](https://github.com/nrynss/lambo/issues/36) PR 2). The bars are
   unchanged (three dependent origin interactions, coverage at least 0.3),
