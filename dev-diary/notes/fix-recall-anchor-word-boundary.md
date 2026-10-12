@@ -71,8 +71,7 @@ holds `user db schema` without dependents and the layer holds `db`.
 
 The repetitive-span regression has a one-second ceiling in a debug test and
 asserts the helper's 257-span bound. Recall tests: 173 passed/0 failed/0 ignored;
-Memory layered tests: 9 passed/0 failed/0 ignored. The prescribed lane gate passed before the final metadata refinement (the
-final rerun is in progress):
+Memory layered tests: 9 passed/0 failed/0 ignored. The final prescribed lane gate passed on reviewed source 4727d48f:
 
 - `cargo fmt --check`.
 - `cargo clippy --all-targets --features store-sqlite,fixtures -- -D warnings`.
@@ -82,10 +81,10 @@ final rerun is in progress):
 - `cargo clippy --all-targets --features embed-eg2 -- -D warnings`.
 - `cargo clippy --all-targets --features recall-elastic -- -D warnings`.
 - `cargo clippy --all-targets --features embed-candle -- -D warnings`.
-- `cargo test --features store-sqlite,fixtures`: 2,188 passed, 0 failed,
+- `cargo test --features store-sqlite,fixtures`: 2,189 passed, 0 failed,
   7 ignored across unit, integration and doc tests. The unit block has
-  2,108 passed and 5 ignored (2,113 total); the initial focused run's unit
-  inventory was 2,104 including filtered tests, so nine tests were added at that gate; the metadata regression adds one more.
+  2,109 passed and 5 ignored (2,114 total); the initial focused run's unit
+  inventory was 2,104 including filtered tests, so ten tests were added.
   No test was removed or newly ignored.
 - `cargo test --no-run --no-default-features --features store-sqlite`.
 - `cargo check --no-default-features`.
@@ -98,6 +97,10 @@ No fixture or golden was updated. No live database was used.
 
 ## Follow-ups
 
-Fresh adversarial review and Luna verification are orchestrator-owned. The
-orchestrator creates the issue/PR and handles push/merge. No release or rig
+Fresh adversarial review closed with 0 open findings on b5a74757 after
+one new Medium marker-clause position finding was fixed. Focused verification
+reported READY on 4727d48f, with 0 High/Medium/Low open findings and a passing
+no-default check. The only change after the adversarial review was restoration
+of the existing named-anchor trace event. The orchestrator opened #138 and
+handles PR creation, push and merge. No release or rig
 change belongs to this branch.
