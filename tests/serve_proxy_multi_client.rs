@@ -233,31 +233,34 @@ fn lease_row(db: &str) -> Option<lambo::store::LeaseInfo> {
     })
 }
 
-/// Release a lease row the way the documented operator override does, given the
-/// `agent@host#pid` token from the row itself.
+/// Release a lease row the way the documented operator override does
+/// (`store::lease::OPERATOR_OVERRIDE`), after checking the row still names
+/// `holder_token`.
 ///
-/// Release is holder-scoped, so the dead (or unwanted) holder's identity is
-/// reconstructed from the row rather than invented.
+/// The shipped statement runs, rather than a `release_lease` with a holder
+/// rebuilt from the token: since #126 a holder's token carries its process's
+/// boot and PID-namespace ids, which only that process can reproduce, so
+/// another process cannot release it by impersonation. The override is what
+/// an operator does, and it leaves the same row a release does: expired,
+/// `lambo:released`, no endpoint, token kept.
 fn release_row(db: &str, holder_token: &str) {
+    let current = lease_row(db).expect("a lease row to release");
+    assert_eq!(
+        current.holder, holder_token,
+        "release the row we think we hold"
+    );
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
-        let store = SqliteStore::connect(db).unwrap();
-        let mut parts = holder_token.rsplitn(2, '#');
-        let pid: u32 = parts.next().unwrap().parse().unwrap();
-        let head = parts.next().unwrap();
-        let (agent, host) = head.rsplit_once('@').unwrap();
-        store
-            .release_lease(
-                &SessionId::from(SESSION),
-                &lambo::store::LeaseHolder {
-                    agent: lambo::types::AgentId::new(agent),
-                    pid,
-                    host: host.to_string(),
-                    endpoint: None,
-                },
-            )
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&format!("sqlite://{db}"))
             .await
-            .unwrap();
+            .expect("open for lease override");
+        let sql = lambo::store::lease::OPERATOR_OVERRIDE.replace("<session>", SESSION);
+        sqlx::query(&sql)
+            .execute(&pool)
+            .await
+            .expect("operator lease override");
     });
 }
 

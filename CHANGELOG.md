@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- The lease holder string now names the holder's boot and PID namespace
+  ([#126](https://github.com/nrynss/lambo/issues/126)). A writer stores
+  `agent@host#pid;boot=<id>;pidns=<inode>` in `session_leases.holder`
+  instead of `agent@host#pid`, with each field present only when the OS
+  reports it (boot id on Linux and macOS, PID namespace on Linux). Readers
+  accept both formats; a row written by an older Lambo parses as before. A
+  lease refusal now says plainly that the holder process is gone only when
+  the holder ran in this process's boot and PID namespace and its pid is not
+  visible; otherwise it keeps the hedged "looks gone" wording. Lease,
+  fencing and takeover are unchanged, and the hint stays advisory. Anything
+  outside Lambo that parses the holder column should ignore text after the
+  pid that starts with `;`. A program that released another process's
+  lease by rebuilding a `LeaseHolder` from the row's `agent@host#pid` can
+  no longer do so, because only the holder's own process reproduces the
+  new fields; use the documented operator override
+  (`store::lease::OPERATOR_OVERRIDE`) instead.
+
 ## 0.5.0 (2026-10-12)
 
 ### Highlights

@@ -175,4 +175,13 @@ fn an_agent_id_containing_at_and_hash_does_not_confuse_the_host_check() {
     ));
     // A malformed token names no host and must not pass.
     assert!(!holder_is_on_host("no-at-sign", "this-host"));
+    // #126: the boot and namespace fields after the pid leave the host as is.
+    assert!(holder_is_on_host(
+        "a@this-host#4213;boot=b1;pidns=7",
+        "this-host"
+    ));
+    assert!(!holder_is_on_host(
+        "a@other-host#4213;boot=b1;pidns=7",
+        "this-host"
+    ));
 }

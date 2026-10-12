@@ -15,12 +15,19 @@
 //! Both are advisory. A pid can be reused, a host name is not a PID namespace
 //! (two containers on `--network host`, or a Kubernetes `hostNetwork` pod,
 //! share the name and not the pids), and an endpoint can be slow, so the
-//! message hedges what it infers and neither changes what the lease does: the refusal stands until the lease
-//! expires or an operator expires it by hand. Nothing here takes over.
+//! message hedges what it infers. The one exception (#126): when the holder's
+//! token carries a boot id and a PID-namespace id and both equal this
+//! process's, a pid that is not visible is a process that has exited, and the
+//! message says so plainly. Neither changes what the lease does: the refusal
+//! stands until the lease expires or an operator expires it by hand. Nothing
+//! here takes over.
 
 use std::time::Duration;
 
-use crate::store::lease::{detect_host, holder_host_and_pid, LeaseInfo, LEASE_TTL, UNKNOWN_HOST};
+use crate::store::lease::{
+    detect_host, parse_holder, process_instance, LeaseInfo, ProcessInstance, LEASE_TTL,
+    PLATFORM_HAS_PID_NAMESPACES, UNKNOWN_HOST,
+};
 use crate::types::SessionId;
 
 /// Where the operator override is documented, quoted in every variant.
@@ -33,8 +40,11 @@ pub(crate) enum HolderEvidence {
     /// expired; the message says neither.
     RowOnly,
     /// The holder names this host and `pid` is not visible from this
-    /// process's PID namespace.
-    ProcessGone { pid: u32 },
+    /// process's PID namespace. `certain` (#126) when the holder's token
+    /// carries the same boot id and PID namespace as this process: then the
+    /// holder ran where this process runs, and it has exited. Otherwise the
+    /// message hedges.
+    ProcessGone { pid: u32, certain: bool },
     /// `serve`'s election found the holder's endpoint refusing connections.
     EndpointRefused,
 }
@@ -102,7 +112,7 @@ pub(crate) fn lease_held_message(
     endpoint_refused: bool,
 ) -> String {
     let evidence = match local_holder_gone(&current.holder) {
-        Some(pid) => HolderEvidence::ProcessGone { pid },
+        Some(gone) => gone,
         None if endpoint_refused => HolderEvidence::EndpointRefused,
         None => HolderEvidence::RowOnly,
     };
@@ -148,7 +158,16 @@ pub(crate) fn format_lease_held(
              refreshes it again. Refusing to open a second writer. If that holder is wedged, an \
              operator can force a takeover ({TAKEOVER_NOTE})"
         ),
-        HolderEvidence::ProcessGone { pid } => format!(
+        HolderEvidence::ProcessGone { pid, certain: true } => format!(
+            "{opening}, and the holder process is gone: it ran in this boot and PID namespace, and \
+             no process {pid} exists. Its lease ({refreshed}) expires in {expires_in}s. Refusing \
+             to open a second writer until it does; an operator can force a takeover now instead \
+             ({TAKEOVER_NOTE})"
+        ),
+        HolderEvidence::ProcessGone {
+            pid,
+            certain: false,
+        } => format!(
             "{opening}, and its process looks gone: no process {pid} is visible from here, so \
              if the holder ran in this PID namespace it has exited. Its lease ({refreshed}) \
              expires in {expires_in}s. Refusing to open a second writer until it does; if the \
@@ -163,17 +182,56 @@ pub(crate) fn format_lease_held(
     }
 }
 
-/// The holder's pid, when the holder token names this host and no process
-/// with that pid is visible. `None` whenever that cannot be established:
-/// another host, a host name that is only the fallback (so it proves nothing
-/// about sharing a host), a token in another shape, this very process, or a
-/// pid that exists (including one this process may not signal).
-fn local_holder_gone(token: &str) -> Option<u32> {
-    let (host, pid) = holder_host_and_pid(token)?;
-    if pid == std::process::id() || host == UNKNOWN_HOST || host != detect_host() {
+/// [`HolderEvidence::ProcessGone`], when the holder token names this host and
+/// no process with its pid is visible. `None` whenever that cannot be
+/// established: another host, a host name that is only the fallback (so it
+/// proves nothing about sharing a host), a token in another shape, this very
+/// process, or a pid that exists (including one this process may not signal).
+fn local_holder_gone(token: &str) -> Option<HolderEvidence> {
+    assess_holder(
+        token,
+        &detect_host(),
+        std::process::id(),
+        process_instance(),
+        process_is_gone,
+    )
+}
+
+/// [`local_holder_gone`] with this process's facts passed in, so every branch
+/// is testable without a second boot or namespace.
+fn assess_holder(
+    token: &str,
+    our_host: &str,
+    our_pid: u32,
+    ours: &ProcessInstance,
+    is_gone: impl Fn(u32) -> bool,
+) -> Option<HolderEvidence> {
+    let holder = parse_holder(token)?;
+    if holder.pid == our_pid || holder.host == UNKNOWN_HOST || holder.host != our_host {
         return None;
     }
-    process_is_gone(pid).then_some(pid)
+    if !is_gone(holder.pid) {
+        return None;
+    }
+    Some(HolderEvidence::ProcessGone {
+        pid: holder.pid,
+        certain: same_instance(&holder.instance, ours),
+    })
+}
+
+/// `true` only when the holder provably ran in this boot and this PID
+/// namespace (#126). A boot id must be present on both sides and equal. The
+/// namespace ids must be present and equal, or both absent on a platform
+/// without PID namespaces. A token from before #126 carries neither, so it is
+/// never `true`.
+fn same_instance(holder: &ProcessInstance, ours: &ProcessInstance) -> bool {
+    let same_boot = matches!((&holder.boot_id, &ours.boot_id), (Some(a), Some(b)) if a == b);
+    let same_ns = match (holder.pid_ns, ours.pid_ns) {
+        (Some(a), Some(b)) => a == b,
+        (None, None) => !PLATFORM_HAS_PID_NAMESPACES,
+        _ => false,
+    };
+    same_boot && same_ns
 }
 
 /// `true` only when the OS says no process has this pid.
@@ -235,7 +293,10 @@ mod tests {
             &session(),
             "a@h#37916",
             timing(),
-            HolderEvidence::ProcessGone { pid: 37916 },
+            HolderEvidence::ProcessGone {
+                pid: 37916,
+                certain: false,
+            },
         );
         assert_eq!(
             msg,
@@ -268,7 +329,14 @@ mod tests {
     fn no_branch_has_a_broken_continuation() {
         for evidence in [
             HolderEvidence::RowOnly,
-            HolderEvidence::ProcessGone { pid: 9 },
+            HolderEvidence::ProcessGone {
+                pid: 9,
+                certain: false,
+            },
+            HolderEvidence::ProcessGone {
+                pid: 9,
+                certain: true,
+            },
             HolderEvidence::EndpointRefused,
         ] {
             for refreshed_ago in [Some(12), None] {
@@ -331,15 +399,99 @@ mod tests {
         );
     }
 
+    /// #126: only a holder in this boot and PID namespace is called gone
+    /// without a hedge.
     #[test]
-    fn holder_tokens_split_from_the_right() {
-        assert_eq!(holder_host_and_pid("a@h#1"), Some(("h", 1)));
-        assert_eq!(
-            holder_host_and_pid("we@ird#id@host-7#4213"),
-            Some(("host-7", 4213))
+    fn a_gone_holder_in_this_boot_and_namespace_is_named_plainly() {
+        let msg = format_lease_held(
+            &session(),
+            "a@h#37916;boot=b1;pidns=7",
+            timing(),
+            HolderEvidence::ProcessGone {
+                pid: 37916,
+                certain: true,
+            },
         );
-        assert_eq!(holder_host_and_pid("lambo:released"), None);
-        assert_eq!(holder_host_and_pid("a@h#notapid"), None);
+        assert_eq!(
+            msg,
+            "session s is already held by another writer (a@h#37916;boot=b1;pidns=7) — it \
+             acquired the single-writer lease 77s ago, and the holder process is gone: it ran \
+             in this boot and PID namespace, and no process 37916 exists. Its lease (last \
+             refreshed 12s ago) expires in 33s. Refusing to open a second writer until it \
+             does; an operator can force a takeover now instead (see the single-writer lease \
+             note in docs/reference/cli.mdx)"
+        );
+        assert!(!msg.contains("looks gone"), "{msg}");
+    }
+
+    fn instance(boot: Option<&str>, ns: Option<u64>) -> ProcessInstance {
+        ProcessInstance {
+            boot_id: boot.map(str::to_string),
+            pid_ns: ns,
+        }
+    }
+
+    /// Every branch of the #126 decision, with this process's facts
+    /// injected: which tokens get the plain wording, which keep the hedge,
+    /// and which get no hint at all.
+    #[test]
+    fn every_hint_branch_of_the_holder_assessment() {
+        let gone = |_: u32| true;
+        let alive = |_: u32| false;
+        let ours = instance(Some("b1"), Some(7));
+        let assess = |token: &str, ours: &ProcessInstance, is_gone: &dyn Fn(u32) -> bool| {
+            assess_holder(token, "h", 100, ours, is_gone)
+        };
+        let hedged = Some(HolderEvidence::ProcessGone {
+            pid: 5,
+            certain: false,
+        });
+        let plain = Some(HolderEvidence::ProcessGone {
+            pid: 5,
+            certain: true,
+        });
+
+        // Same boot, same namespace, pid not visible: plain.
+        assert_eq!(assess("a@h#5;boot=b1;pidns=7", &ours, &gone), plain);
+        // An older writer's token: hedged, as in 0.5.0.
+        assert_eq!(assess("a@h#5", &ours, &gone), hedged);
+        // Another boot (a reboot reused the pid), or another namespace (a
+        // container on the host network): hedged.
+        assert_eq!(assess("a@h#5;boot=b2;pidns=7", &ours, &gone), hedged);
+        assert_eq!(assess("a@h#5;boot=b1;pidns=8", &ours, &gone), hedged);
+        // Only one of the two ids: hedged.
+        assert_eq!(assess("a@h#5;boot=b1", &ours, &gone), hedged);
+        assert_eq!(assess("a@h#5;pidns=7", &ours, &gone), hedged);
+        // This process cannot read its own boot id: hedged.
+        assert_eq!(
+            assess("a@h#5;boot=b1;pidns=7", &instance(None, Some(7)), &gone),
+            hedged
+        );
+        // Both sides without a namespace id: plain only where there are no
+        // PID namespaces.
+        let no_ns = instance(Some("b1"), None);
+        let expect = if PLATFORM_HAS_PID_NAMESPACES {
+            hedged
+        } else {
+            plain
+        };
+        assert_eq!(assess("a@h#5;boot=b1", &no_ns, &gone), expect);
+        // No hint at all: the pid is visible, another host, the fallback
+        // host, this very process, a token in another shape.
+        assert_eq!(assess("a@h#5;boot=b1;pidns=7", &ours, &alive), None);
+        assert_eq!(assess("a@other#5;boot=b1;pidns=7", &ours, &gone), None);
+        assert_eq!(
+            assess_holder(
+                &format!("a@{UNKNOWN_HOST}#5;boot=b1;pidns=7"),
+                UNKNOWN_HOST,
+                100,
+                &ours,
+                gone
+            ),
+            None
+        );
+        assert_eq!(assess("a@h#100;boot=b1;pidns=7", &ours, &gone), None);
+        assert_eq!(assess("lambo:released", &ours, &gone), None);
     }
 
     /// The liveness check, both ways, against real pids.
@@ -357,7 +509,32 @@ mod tests {
         let pid = child.id();
         child.wait().expect("reap");
         if process_is_gone(pid) {
-            assert_eq!(local_holder_gone(&format!("a@{host}#{pid}")), Some(pid));
+            // A pre-#126 token: the hedge.
+            assert_eq!(
+                local_holder_gone(&format!("a@{host}#{pid}")),
+                Some(HolderEvidence::ProcessGone {
+                    pid,
+                    certain: false
+                })
+            );
+            // Our own boot and namespace: plain, where the OS reports them.
+            let ours = process_instance();
+            let token = format!(
+                "a@{host}#{pid}{}{}",
+                ours.boot_id
+                    .as_deref()
+                    .map(|b| format!(";boot={b}"))
+                    .unwrap_or_default(),
+                ours.pid_ns
+                    .map(|n| format!(";pidns={n}"))
+                    .unwrap_or_default()
+            );
+            let certain =
+                ours.boot_id.is_some() && (ours.pid_ns.is_some() || !PLATFORM_HAS_PID_NAMESPACES);
+            assert_eq!(
+                local_holder_gone(&token),
+                Some(HolderEvidence::ProcessGone { pid, certain })
+            );
             // Same pid on another host: not ours to judge.
             assert_eq!(
                 local_holder_gone(&format!("a@{host}-elsewhere#{pid}")),
