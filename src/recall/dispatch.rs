@@ -113,6 +113,9 @@ pub(crate) fn anchor_text(text: &str) -> String {
     text.nfc().flat_map(char::to_lowercase).nfc().collect()
 }
 
+const MAX_ANCHOR_QUERY_BYTES: usize = 16 * 1024;
+const MAX_ANCHOR_SPANS: usize = 256;
+
 fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_' || is_combining_mark(c)
 }
@@ -149,6 +152,9 @@ fn word_bounded_spans(hay: &str, needle: &str) -> Vec<(usize, usize)> {
             !is_word_char(last) || hay[end..].chars().next().is_none_or(|_| !word_at(hay, end));
         if left_ok && right_ok {
             spans.push((start, end));
+            if spans.len() > MAX_ANCHOR_SPANS {
+                break;
+            }
         }
         // Step one char, not one match, so overlapping occurrences are seen.
         from = start + hay[start..].chars().next().map_or(1, char::len_utf8);
@@ -206,72 +212,89 @@ fn is_stop_content(lower_content: &str) -> bool {
 ///    requires explicit `"security group"` language, so a structural phrasing
 ///    that names nothing real ("what depends on nothing-imaginary") still
 ///    refuses.
-fn resolve_anchor(graph: &Graph, query: &str) -> Option<NodeId> {
+pub(crate) fn resolve_anchor(graph: &Graph, query: &str) -> Option<NodeId> {
+    if query.len() > MAX_ANCHOR_QUERY_BYTES {
+        return None;
+    }
     let raw_q: String = query.nfc().collect();
     let lower_q = anchor_text(query);
+    if lower_q.len() > MAX_ANCHOR_QUERY_BYTES {
+        return None;
+    }
     let markers = marker_spans(&lower_q);
-    let inside_marker = |(s, e): (usize, usize)| markers.iter().any(|&(ms, me)| ms <= s && e <= me);
-    // Each candidate keeps the spans it matched at, for the containment rule.
-    let candidates: Vec<(&crate::types::Concept, Vec<(usize, usize)>)> = graph
-        .concepts()
-        .filter_map(|c| {
-            let lower_c = anchor_text(&c.content);
-            if !lower_c.chars().any(is_word_char) {
-                return None;
+    let mut candidates = Vec::new();
+    let mut spans = Vec::new();
+    for c in graph.concepts() {
+        let lower_c = anchor_text(&c.content);
+        if !lower_c.chars().any(is_word_char) {
+            continue;
+        }
+        let mut found = word_bounded_spans(&lower_q, &lower_c);
+        if found.len() > MAX_ANCHOR_SPANS {
+            return None;
+        }
+        if found.is_empty() {
+            continue;
+        }
+        if is_stop_content(&lower_c) {
+            let raw_c: String = c.content.nfc().collect();
+            let uppercase =
+                raw_c.chars().any(char::is_uppercase) && !raw_c.chars().any(char::is_lowercase);
+            if !uppercase {
+                continue;
             }
-            let mut found = word_bounded_spans(&lower_q, &lower_c);
+            found = word_bounded_spans(&raw_q, &raw_c)
+                .into_iter()
+                .map(|(s, e)| {
+                    (
+                        anchor_text(&raw_q[..s]).len(),
+                        anchor_text(&raw_q[..e]).len(),
+                    )
+                })
+                .collect();
             if found.is_empty() {
-                return None;
+                continue;
             }
-            if is_stop_content(&lower_c) {
-                let raw_c: String = c.content.nfc().collect();
-                let uppercase =
-                    raw_c.chars().any(char::is_uppercase) && !raw_c.chars().any(char::is_lowercase);
-                if !uppercase {
-                    return None;
-                }
-                found = word_bounded_spans(&raw_q, &raw_c)
-                    .into_iter()
-                    .map(|(s, e)| {
-                        (
-                            anchor_text(&raw_q[..s]).len(),
-                            anchor_text(&raw_q[..e]).len(),
-                        )
-                    })
-                    .collect();
+        }
+        let index = candidates.len();
+        candidates.push(c);
+        for (start, end) in found {
+            // Marker-overlapping clauses must not suppress the subject.
+            if markers.iter().any(|&(ms, me)| ms <= start && end <= me) {
+                continue;
             }
-            let spans: Vec<_> = found.into_iter().filter(|&sp| !inside_marker(sp)).collect();
-            (!spans.is_empty()).then_some((c, spans))
-        })
-        .collect();
-    // Drop a candidate when every one of its spans lies inside a strictly
-    // longer span of another candidate: the query spelled out the longer
-    // concept, and the short one is only a word of it.
-    let all_spans: Vec<(usize, usize)> = candidates
-        .iter()
-        .flat_map(|(_, spans)| spans.iter().copied())
-        .collect();
-    let mut matches: Vec<&crate::types::Concept> = candidates
-        .iter()
-        .filter(|(_, spans)| {
-            !spans.iter().all(|&(s, e)| {
-                all_spans
-                    .iter()
-                    .any(|&(os, oe)| os <= s && e <= oe && oe - os > e - s)
-            })
-        })
-        .map(|(c, _)| *c)
+            spans.push((start, end, index));
+        }
+    }
+    spans.sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1)));
+    let mut best = vec![None::<usize>; candidates.len()];
+    let mut furthest: Option<(usize, usize)> = None;
+    for (start, end, index) in spans {
+        let contained =
+            furthest.is_some_and(|(s, e)| s <= start && end <= e && (s < start || end < e));
+        if !contained {
+            let distance = markers
+                .iter()
+                .filter(|&&(_, e)| e <= start)
+                .map(|&(_, e)| start - e)
+                .min()
+                .unwrap_or(usize::MAX);
+            best[index] = Some(best[index].map_or(distance, |d| d.min(distance)));
+        }
+        if furthest.is_none_or(|(_, e)| end > e) {
+            furthest = Some((start, end));
+        }
+    }
+    let mut matches: Vec<_> = candidates
+        .into_iter()
+        .zip(best)
+        .filter_map(|(c, d)| d.map(|d| (c, d)))
         .collect();
     let ty_prio = |c: &crate::types::Concept| match c.concept_type {
         crate::types::ConceptType::Entity | crate::types::ConceptType::Resource => 0,
         _ => 1,
     };
-    // Entity/Resource first, then the longest content (in chars, so a
-    // multibyte name is not favoured for its encoding); equal (type, length)
-    // matches compare full content, then the stable issue-2 chain (canonical
-    // key ascending, NodeId ascending — ids are minted per run) as the final
-    // fallback (remediation round 2; the bare id used to decide).
-    matches.sort_by(|a, b| {
+    matches.sort_by(|(a, _), (b, _)| {
         ty_prio(a)
             .cmp(&ty_prio(b))
             .then_with(|| b.content.chars().count().cmp(&a.content.chars().count()))
@@ -280,13 +303,7 @@ fn resolve_anchor(graph: &Graph, query: &str) -> Option<NodeId> {
                 tie_break_by_key(Some(&a.canonical_key), &a.id, Some(&b.canonical_key), &b.id)
             })
     });
-    if let Some(c) = matches.first() {
-        tracing::trace!(
-            target: "lambo::recall",
-            anchor = %c.id,
-            content = %c.content,
-            "recall dispatch: resolved named anchor"
-        );
+    if let Some((c, _)) = matches.first() {
         return Some(c.id);
     }
 
@@ -952,6 +969,30 @@ mod tests {
             (11, "...", ConceptType::Resource),
         ]);
         assert_eq!(anchor_content(&g, "what depends on unknown...?"), None);
+    }
+
+    #[test]
+    fn repetitive_anchor_spans_and_oversized_queries_refuse_in_bounded_time() {
+        let names: Vec<_> = (1..=30).map(|n| vec!["x"; n].join(" ")).collect();
+        let concepts: Vec<_> = names
+            .iter()
+            .enumerate()
+            .map(|(n, s)| (n as u64 + 10, s.as_str(), ConceptType::Entity))
+            .collect();
+        let g = anchors(&concepts);
+        let q = format!("what depends on {}", "x ".repeat(8000));
+        let start = std::time::Instant::now();
+        assert_eq!(anchor_content(&g, &q), None);
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(1),
+            "bounded repeated spans took {:?}",
+            start.elapsed()
+        );
+        assert_eq!(
+            anchor_content(&g, &format!("what depends on {}", "x ".repeat(9000))),
+            None
+        );
+        assert!(word_bounded_spans(&q, "x").len() <= MAX_ANCHOR_SPANS + 1);
     }
 
     #[test]
