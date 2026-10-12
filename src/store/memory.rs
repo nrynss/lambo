@@ -855,6 +855,27 @@ impl GraphStore for MemoryStore {
         min_age: Duration,
         now: DateTime<Utc>,
     ) -> Result<InteractionSpan, StoreError> {
+        // Preserve the raw accessor: chrono's full timestamp domain spans
+        // less than i64::MAX milliseconds, so this cap cannot shorten it.
+        self.interaction_span_with_window(
+            session,
+            node,
+            min_age,
+            now,
+            Duration::from_millis(i64::MAX as u64),
+        )
+        .await
+    }
+
+    async fn interaction_span_with_window(
+        &self,
+        session: &SessionId,
+        node: NodeId,
+        min_age: Duration,
+        now: DateTime<Utc>,
+        window: Duration,
+    ) -> Result<InteractionSpan, StoreError> {
+        super::validate_coverage_window(window)?;
         // Spec §4.1 with the #36 errata: the distinct origin interactions of
         // `node`'s aged dependents (see `blast_radius`), other than `node`'s
         // own origin interaction, each old enough itself; plus the share of
@@ -915,18 +936,9 @@ impl GraphStore for MemoryStore {
                 .collect();
             let sess_lo = all.iter().min().copied().unwrap_or(lo);
             let sess_hi = all.iter().max().copied().unwrap_or(hi);
-            let sess_span = (sess_hi - sess_lo).num_milliseconds().max(0) as f64;
-            if sess_span <= 0.0 {
-                // Single-point session extent (one interaction, or all
-                // interactions sharing a timestamp): every supported
-                // interaction spans the whole session, so coverage is 1.0
-                // (F1 — canonization Stage 2 must not be blocked in short
-                // sessions). `times` is non-empty here, so distinct >= 1.
-                1.0
-            } else {
-                let span = (hi - lo).num_milliseconds().max(0) as f64;
-                (span / sess_span).clamp(0.0, 1.0)
-            }
+            let sess_span = (sess_hi - sess_lo).num_milliseconds().max(0);
+            let span = (hi - lo).num_milliseconds().max(0);
+            super::span::coverage(span, sess_span, window)
         };
         Ok(InteractionSpan { distinct, coverage })
     }
@@ -1925,6 +1937,20 @@ mod tests {
         expect.access_count = 5;
         expect.last_accessed = Some(t(30));
         assert_eq!(*after, expect, "no other column moves");
+    }
+
+    /// #36 PR 2: the fourteen-day cap on the shared window case (long
+    /// session, injected clock, event time, age guards).
+    #[tokio::test]
+    async fn capped_span_follows_window_case() {
+        crate::test_util::dependents::check_window_case(&MemoryStore::new()).await;
+    }
+
+    /// #36 PR 2: short, fourteen-day, single-point and empty extents answer
+    /// the same capped as raw.
+    #[tokio::test]
+    async fn capped_span_follows_extents_case() {
+        crate::test_util::dependents::check_extents_case(&MemoryStore::new()).await;
     }
 
     /// #36: the shared dependents case (`crate::test_util::dependents`):

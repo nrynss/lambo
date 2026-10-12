@@ -117,7 +117,9 @@ impl<D: Dialect> PgStore<D> {
         node: NodeId,
         min_age: Duration,
         now: DateTime<Utc>,
+        window: Duration,
     ) -> Result<InteractionSpan, StoreError> {
+        crate::store::validate_coverage_window(window)?;
         if !self.session_exists(session).await? {
             return Err(StoreError::SessionNotFound(session.0.clone()));
         }
@@ -128,6 +130,7 @@ impl<D: Dialect> PgStore<D> {
             .bind(&session.0)
             .bind(node.0)
             .bind(cutoff)
+            .bind(window.as_millis() as f64 / 1000.0)
             .fetch_one(pool)
             .await
             .map_err(backend)?;

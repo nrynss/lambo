@@ -1609,9 +1609,12 @@ pub enum HotListPayload {
 /// Stage 2 structural evidence (spec §4.1 / §10).
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct InteractionSpan {
-    /// How many distinct interactions mention the concept.
+    /// Distinct eligible dependent origin interactions, excluding own origin.
     pub distinct: u64,
-    /// What fraction of the session's interactions those are, from `0.0` to `1.0`.
+    /// Eligible evidence time spread / session extent (raw accessor) or
+    /// min(session extent, coverage window) (window-aware accessor),
+    /// clamped to `0.0..=1.0`. Nonempty evidence in a single-point session is
+    /// `1.0`; empty evidence is `0.0`. Stage 2 selects a fourteen-day cap.
     pub coverage: f64,
 }
 

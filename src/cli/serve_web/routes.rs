@@ -25,7 +25,7 @@ use super::scope::{resolve_session, ScopedRequest, SessionCtx};
 use super::state::AppState;
 use super::views::RECALL_PERMIT_WAIT;
 use super::{APP_CSS, APP_JS, INDEX_HTML, POLL_INTERVAL};
-use crate::canon::gate_progress;
+use crate::canon::gate_progress_with_config;
 use crate::cli::caps::CliError;
 use crate::cli::recall::RecallRequest;
 use crate::recall::format::blast_radii;
@@ -364,13 +364,11 @@ pub(super) async fn api_inspect(
                 if concept.canonization_status == CanonizationStatus::Canonical {
                     (None, Some("already_canonical"))
                 } else {
-                    match gate_progress(
+                    match gate_progress_with_config(
                         state.store(),
                         &ctx.session,
                         &concept,
-                        state.backends.config.promotion_policy,
-                        state.backends.config.canonization_edge_min_age,
-                        state.backends.config.canonization_repromotion_cooldown,
+                        &state.backends.config,
                         chrono::Utc::now(),
                     )
                     .await

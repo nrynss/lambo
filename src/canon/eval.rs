@@ -41,10 +41,13 @@
 //! 1. [`Evaluator::gather`] — **synchronous, read guard.** Reads the three
 //!    stage windows, the Stage-3 cooldown inputs and the budget probe out of
 //!    the graph. No I/O.
-//! 2. [`verdicts`] — **async, no lock.** One `interaction_span` per Stage-2
-//!    window member, one `blast_radius` per Stage-3 window member (under
-//!    Swarm preceded by an `interaction_span`, and skipped when that fails),
-//!    and one `blast_radius` per budget probe. Touches no graph.
+//! 2. [`verdicts`] — **async, no lock.** Under Swarm, one
+//!    `interaction_span_with_window` per Stage-2 window member (Solo asks
+//!    nothing: its hop ignores the verdict); one `blast_radius` per Stage-3
+//!    window member (under Swarm preceded by an `interaction_span_with_window`,
+//!    and skipped when that fails); and one `blast_radius` per budget probe.
+//!    A store without the window-aware span gives a node no Stage 2 evidence
+//!    and one warning per cycle, not a failed cycle. Touches no graph.
 //! 3. [`apply`] — **synchronous, write guard.** Re-checks each node's
 //!    current status, applies the transitions, emits `DaemonEvent::Canonized`.
 //! 4. [`record`] — **async, no lock.** `store.record_canonization` per hop.
@@ -103,7 +106,7 @@ use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 
 use crate::canon::stage3;
-use crate::canon::{stage2_passes, PromotionPolicy};
+use crate::canon::{stage2_passes_with_window, PromotionPolicy};
 use crate::daemon::events::{self, EventSender};
 use crate::graph::Graph;
 use crate::store::GraphStore;
@@ -125,8 +128,10 @@ pub struct Evaluator {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EvalParams {
     pub min_peer_count: usize,
-    /// Forwarded to Stage 2 (`interaction_span` age floor).
+    /// Forwarded to Stage 2 (`interaction_span_with_window` age floor).
     pub min_age: Duration,
+    /// Denominator cap forwarded to Stage 2; no evidence expiry.
+    pub coverage_window: Duration,
     /// Forwarded to Stage 3 / budget (`blast_radius` age floor).
     pub min_edge_age: Duration,
     pub cooldown: Duration,
@@ -215,6 +220,7 @@ impl EvalParams {
         Self {
             min_peer_count: config.canonization_min_peer_count,
             min_age: config.canonization_edge_min_age,
+            coverage_window: config.canonization_coverage_window,
             min_edge_age: config.canonization_edge_min_age,
             cooldown: config.canonization_repromotion_cooldown,
             batch_size: config.canonization_eval_batch_size,
@@ -435,7 +441,7 @@ impl Evaluator {
             .take(params.batch_size)
             .collect();
 
-        // Stage 2 — one `interaction_span` round-trip per member, so the
+        // Stage 2 — one `interaction_span_with_window` round-trip per member, so the
         // window is capped and walks the identity cursor (F13).
         let candidates = ids_with_status(graph, CanonizationStatus::Candidate);
         let stage2 = ring_window(&candidates, self.stage2_cursor, params.batch_size);
@@ -561,9 +567,22 @@ async fn verdicts(
     now: DateTime<Utc>,
 ) -> Result<Verdicts, StoreError> {
     let mut out = Verdicts::default();
-    for &id in &plan.stage2 {
-        if stage2_passes(store, &plan.session, id, params.min_age, now).await? {
-            out.stage2_pass.push(id);
+    // #36 PR 2 review M1: which policies consume the Stage 2 verdict. Solo
+    // admits by its score band and ignores the verdict (`admits_hop` drops
+    // its `evidence`), so it asks the store nothing for it. The match is
+    // exhaustive so a new policy has to decide.
+    let (query_stage2, recheck_stage2) = match params.promotion_policy {
+        PromotionPolicy::Swarm => (true, true),
+        PromotionPolicy::Solo => (false, false),
+    };
+    // The capability a store lacks, if its window-aware span refused this
+    // cycle. Collected so one warning names it, not one per node.
+    let mut missing: Option<String> = None;
+    if query_stage2 {
+        for &id in &plan.stage2 {
+            if swarm_stage2(store, &plan.session, id, params, now, &mut missing).await? {
+                out.stage2_pass.push(id);
+            }
         }
     }
     for probe in &plan.stage3 {
@@ -583,12 +602,8 @@ async fn verdicts(
         // Solo keeps the plain probe: skipping it would promote the same
         // node with no measured blast recorded. The match is exhaustive so a
         // new policy has to decide.
-        let recheck_stage2 = match params.promotion_policy {
-            PromotionPolicy::Swarm => true,
-            PromotionPolicy::Solo => false,
-        };
         if recheck_stage2
-            && !stage2_passes(store, &plan.session, probe.node, params.min_age, now).await?
+            && !swarm_stage2(store, &plan.session, probe.node, params, now, &mut missing).await?
         {
             continue;
         }
@@ -616,7 +631,49 @@ async fn verdicts(
         a.0.cmp(&b.0)
             .then_with(|| tie_break_by_key(Some(&a.2), &a.1, Some(&b.2), &b.1))
     });
+    if let Some(capability) = missing {
+        tracing::warn!(
+            target: "lambo::canon",
+            capability = %capability,
+            "CanonizationStage2Unsupported: the store does not implement \
+             interaction_span_with_window, so no concept passes Stage 2 this \
+             cycle; Stage 1, Stage 3 and the budget still ran"
+        );
+    }
     Ok(out)
+}
+
+/// One Swarm Stage 2 verdict. A store that lacks the window-aware span
+/// (`StoreError::Capability`, the trait default) gives this node **no
+/// evidence** rather than failing the cycle (#36 PR 2 review M1): Stage 2
+/// fails closed for the node, and Stage 1, Stage 3's other probes and the
+/// budget still run. The capability is recorded once for the cycle's
+/// warning. Any other store error still fails the cycle.
+async fn swarm_stage2(
+    store: &dyn GraphStore,
+    session: &crate::types::SessionId,
+    node: crate::types::NodeId,
+    params: &EvalParams,
+    now: DateTime<Utc>,
+    missing: &mut Option<String>,
+) -> Result<bool, StoreError> {
+    match stage2_passes_with_window(
+        store,
+        session,
+        node,
+        params.min_age,
+        now,
+        params.coverage_window,
+    )
+    .await
+    {
+        Ok(pass) => Ok(pass),
+        Err(StoreError::Capability(what)) => {
+            missing.get_or_insert(what);
+            Ok(false)
+        }
+        Err(err) => Err(err),
+    }
 }
 
 /// Phase 3 — apply the verdicts. Synchronous: the caller holds the write

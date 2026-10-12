@@ -21,12 +21,22 @@
   stays Venerable instead of jumping to Canonical on its first cycle.
   Nothing is demoted. This includes a session's root goal, which
   `set_root_goal` makes Venerable directly: under Swarm it now needs Stage 2
-  support (three dependents' interactions spanning 30% of the session) to
-  go Canonical. Solo is unchanged: it still probes and stamps blast radius
-  and admits by its score bands. On a copy of
-  the dogfood store taken 2026-10-12, no Candidate or Venerable would have
+  support (three dependents' interactions spanning 30% of the capped
+  session extent) to go Canonical. Solo is unchanged: it still probes and
+  stamps blast radius and admits by its score bands. On a copy of the
+  dogfood store taken 2026-10-12, no Candidate or Venerable would have
   promoted on the first evaluation, with or without this check, and all 7
   Venerables lose their Stage 2 support.
+- **Long sessions can pass Stage 2 with less spread (#36 PR 2).** In a
+  session whose about-time extent (first to last interaction, by event
+  time, else creation time) exceeds fourteen days, coverage now divides by
+  fourteen days,
+  so a concept that fell just short before may become Venerable, and a
+  Venerable that also has more than five dependents may go Canonical.
+  Nothing is demoted. On a copy of the dogfood store taken 2026-10-12 (one
+  53-day session), 3 concepts move from failing to passing Stage 2, all of
+  them Resources with three dependents: none is a Candidate, and the one
+  Venerable has blast radius 3, so no transition follows.
 - **Stored blast-radius stamps are history.** `Concept::blast_radius` and
   `CanonizationEvent::blast_radius` rows written by 0.5.0 hold the older
   exclusive count. Readers that show a current count (recall, inspect,
@@ -48,6 +58,28 @@
 
 ### Breaking (library API)
 
+- **`Config` gains `canonization_coverage_window` and `EvalParams` gains
+  `coverage_window`** ([#36](https://github.com/nrynss/lambo/issues/36)
+  PR 2). Exhaustive struct literals need the field, or
+  `..Default::default()`. A serialized `Config` without the field
+  deserializes to fourteen days. `Config::validate` rejects a cap below one
+  day (`MIN_COVERAGE_WINDOW`), a cap with a fraction of a millisecond, and
+  one above `i64::MAX` milliseconds.
+- **Stage 2 needs `GraphStore::interaction_span_with_window`** (#36 PR 2).
+  The new trait method has a default body, so a third-party store still
+  compiles, but the default returns `StoreError::Capability`: Stage 2 never
+  substitutes the uncapped measurement. Until the store implements it (a
+  wrapper forwards it), under Swarm no Candidate becomes Venerable and no
+  Venerable becomes Canonical: each concept checked gets no Stage 2
+  evidence. The cycle itself still succeeds, so Stage 1 admission and the
+  Canonical budget's demotions continue, and each cycle logs one
+  `CanonizationStage2Unsupported` warning naming the missing capability.
+  Solo never asks for the span and is unaffected. The portal's inspect
+  panel omits the Swarm gates for such a store. `stage2_passes` and
+  `gate_progress` keep their signatures and now measure against the
+  default cap; `stage2_passes_with_window` and `gate_progress_with_config`
+  take a chosen one. `interaction_span` itself is unchanged and still
+  divides by the whole session extent.
 - **`EdgeType` gains `Contradicts` (#19, edge groundwork).** Exhaustive
   matches must handle the new variant. It connects concepts, persists as
   `Contradicts`, and declares opposition without dependence, canonization
@@ -140,6 +172,17 @@
 
 ### Changed
 
+- **Stage 2 coverage is measured against at most fourteen days**
+  ([#36](https://github.com/nrynss/lambo/issues/36) PR 2). The bars are
+  unchanged (three dependent origin interactions, coverage at least 0.3),
+  but the denominator is min(session extent, 14 days), so a session whose
+  about-time extent exceeds fourteen days needs 4.2 days of spread instead
+  of 30% of that extent. Sessions whose extent is fourteen days or less,
+  the demo and the REST API fixture included, measure exactly as before.
+  This is a cap on the denominator, not an expiry: evidence older than
+  fourteen days still counts. Evaluation and the portal's inspect panel
+  use the same configured cap, and `stage2_evidence_passes` is the shared
+  comparison later stages reuse.
 - The MCP tool descriptions say what a concept is and how to send
   `agent_id` ([#98](https://github.com/nrynss/lambo/issues/98),
   [#99](https://github.com/nrynss/lambo/issues/99)). `lambo_derive`, its

@@ -107,6 +107,10 @@ impl Default for RecallWeights {
     }
 }
 
+fn default_coverage_window() -> Duration {
+    crate::store::DEFAULT_COVERAGE_WINDOW
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Config {
     pub backend_flush_interval: Duration,
@@ -148,6 +152,12 @@ pub struct Config {
 
     pub canonization_min_peer_count: usize,
     pub canonization_edge_min_age: Duration,
+    /// Stage 2 divides eligible evidence spread by min(session extent, this
+    /// cap). Default fourteen days; no evidence expires at the cap. Library
+    /// setting only, validated as at least one day
+    /// ([`crate::store::MIN_COVERAGE_WINDOW`]) in whole milliseconds.
+    #[serde(default = "default_coverage_window")]
+    pub canonization_coverage_window: Duration,
     pub canonization_eval_interval: Duration,
     pub canonization_eval_batch_size: usize,
     pub canonization_repromotion_cooldown: Duration,
@@ -214,6 +224,7 @@ impl Default for Config {
 
             canonization_min_peer_count: 20,
             canonization_edge_min_age: Duration::from_secs(60),
+            canonization_coverage_window: crate::store::DEFAULT_COVERAGE_WINDOW,
             canonization_eval_interval: Duration::from_secs(60),
             canonization_eval_batch_size: 50,
             canonization_repromotion_cooldown: Duration::from_secs(300),
@@ -240,6 +251,8 @@ impl Config {
     /// should invoke this before starting a session; the hybrid entry point
     /// repeats the threshold check at the trust boundary.
     pub fn validate(&self) -> Result<(), LamboError> {
+        crate::store::validate_coverage_window(self.canonization_coverage_window)
+            .map_err(|e| LamboError::Config(e.to_string()))?;
         if !self.semantic_match_threshold.is_finite()
             || !(0.0..=1.0).contains(&self.semantic_match_threshold)
         {
@@ -1071,6 +1084,27 @@ mod tests {
         }
     }
 
+    /// #36 PR 2 review L5: the Stage 2 coverage cap is a library setting.
+    /// The file reserves `[daemon]` for cadences (see `DaemonConfig`), so
+    /// the key, under any spelling a reader might try, is refused there and
+    /// at the top level rather than silently ignored.
+    #[test]
+    fn lambo_file_refuses_the_coverage_cap() {
+        for key in [
+            "canonization_coverage_window = 1209600",
+            "canonization_coverage_window_secs = 1209600",
+            "coverage_window = 1209600",
+        ] {
+            let err = LamboFile::from_toml_str(&format!("[daemon]\n{key}\n"))
+                .expect_err("a coverage cap under [daemon] must fail closed");
+            assert!(err.to_string().contains("unknown field"), "{key}: {err}");
+            assert!(
+                LamboFile::from_toml_str(&format!("{key}\n")).is_err(),
+                "a top-level {key:?} must fail closed"
+            );
+        }
+    }
+
     #[test]
     fn lambo_file_rejects_empty_kind_strings() {
         assert!(LamboFile::from_toml_str("[store]\nkind = \"\"\n").is_err());
@@ -1468,4 +1502,40 @@ kind = "fake"
         let back: LamboFile = toml::from_str(&s).unwrap();
         assert_eq!(f, back);
     }
+}
+
+#[cfg(test)]
+#[test]
+fn coverage_window_config_is_validated_and_backward_deserializable() {
+    for bad in [
+        Duration::ZERO,
+        Duration::from_nanos(1),
+        Duration::from_secs(3_600),
+        Duration::MAX,
+    ] {
+        let cfg = Config {
+            canonization_coverage_window: bad,
+            ..Config::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+    let cfg = Config {
+        canonization_coverage_window: Duration::from_secs(28 * 86_400),
+        ..Config::default()
+    };
+    cfg.validate().unwrap();
+    assert_eq!(
+        crate::canon::EvalParams::from_config(&cfg).coverage_window,
+        cfg.canonization_coverage_window
+    );
+    let mut legacy = serde_json::to_value(Config::default()).unwrap();
+    legacy
+        .as_object_mut()
+        .unwrap()
+        .remove("canonization_coverage_window");
+    let parsed: Config = serde_json::from_value(legacy).unwrap();
+    assert_eq!(
+        parsed.canonization_coverage_window,
+        crate::store::DEFAULT_COVERAGE_WINDOW
+    );
 }

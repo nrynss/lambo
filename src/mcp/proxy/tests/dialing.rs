@@ -78,6 +78,16 @@ impl crate::store::GraphStore for HungLeaseStore {
     ) -> Result<crate::types::InteractionSpan, crate::types::StoreError> {
         unreachable!("a proxy never queries")
     }
+    async fn interaction_span_with_window(
+        &self,
+        _session: &crate::types::SessionId,
+        _node: crate::types::NodeId,
+        _min_age: std::time::Duration,
+        _now: chrono::DateTime<Utc>,
+        _window: std::time::Duration,
+    ) -> Result<crate::types::InteractionSpan, crate::types::StoreError> {
+        unreachable!("a proxy never queries")
+    }
     async fn record_canonization(
         &self,
         _event: &crate::types::CanonizationEvent,

@@ -245,6 +245,334 @@ pub fn store_batch() -> MutationBatch {
     batch
 }
 
+/// A 60-day session with exactly three aged support origins spanning 4.2
+/// days, all older than fourteen days at the injected clock. Two young rows
+/// and an own-origin dependent must not contribute. IDs do not collide with
+/// the ordinary dependents case, including on persistent live adapters.
+pub fn window_batch() -> MutationBatch {
+    let start = now() - ChronoDuration::days(60);
+    let iid = |n| NodeId(Uuid::from_u64_pair(0x36_04, n));
+    let cid = |n| NodeId(Uuid::from_u64_pair(0x36_05, n));
+    let mut batch = MutationBatch::new();
+    for (n, seconds) in [
+        (0, 0),
+        (1, 86_400),
+        (2, 267_840),
+        (3, 449_280),
+        (4, 49 * 86_400),
+        (5, 60 * 86_400),
+        // c5's own origin: aged, and outside the 1..5.2-day support span,
+        // so an adapter that drops the edge-age filter counts a fourth
+        // origin and a 29-day spread.
+        (6, 30 * 86_400),
+    ] {
+        let mut i = interaction("i1", 0);
+        i.id = iid(n);
+        i.session_id = window_session();
+        i.created_at = start + ChronoDuration::seconds(seconds);
+        if (1..=3).contains(&n) {
+            i.event_time = Some(i.created_at);
+            i.created_at = now();
+        }
+        batch.push(Mutation::UpsertNode {
+            node: Node::Interaction(i),
+        });
+    }
+    for (n, origin) in [(0, 0), (1, 1), (2, 2), (3, 3), (4, 0), (5, 6), (6, 5)] {
+        let mut c = concept("X", "i1", ConceptType::Logic);
+        c.id = cid(n);
+        c.origin_interaction = iid(origin);
+        c.session_id = window_session();
+        c.content = format!("window-{n}");
+        c.canonical_key = c.content.clone();
+        c.canonization_status = if n == 0 {
+            CanonizationStatus::Candidate
+        } else {
+            CanonizationStatus::None
+        };
+        batch.push(Mutation::UpsertNode {
+            node: Node::Concept(c),
+        });
+        if n > 0 {
+            let mut e = edge(n, cid(n), cid(0), EdgeType::Dependency, 0);
+            e.id = NodeId(Uuid::from_u64_pair(0x36_06, n));
+            e.session_id = window_session();
+            // n=5 is an unaged edge; n=6 has an aged edge but a young origin.
+            e.event_time = (n != 5).then_some(start);
+            batch.push(Mutation::UpsertEdge { edge: e });
+        }
+    }
+    batch
+}
+
+pub fn window_session() -> SessionId {
+    SessionId::from("deps-window")
+}
+pub fn window_pillar() -> NodeId {
+    NodeId(Uuid::from_u64_pair(0x36_05, 0))
+}
+
+/// Independent expected arithmetic and the same injected-clock/age checks
+/// for every adapter. No rolling expiry is allowed; old evidence still wins.
+pub async fn check_window_case(store: &dyn crate::store::GraphStore) {
+    use std::time::Duration;
+    store.flush(&window_batch(), None).await.unwrap();
+    let sid = window_session();
+    let pillar = window_pillar();
+    let raw = store
+        .interaction_span(&sid, pillar, MIN_AGE, now())
+        .await
+        .unwrap();
+    assert_eq!(raw.distinct, 3);
+    // The young interaction still extends the full session to sixty days.
+    assert!((raw.coverage - 4.2 / 60.0).abs() < 1e-12);
+    let capped = store
+        .interaction_span_with_window(
+            &sid,
+            pillar,
+            MIN_AGE,
+            now(),
+            crate::store::DEFAULT_COVERAGE_WINDOW,
+        )
+        .await
+        .unwrap();
+    assert_eq!(capped.distinct, 3);
+    assert_eq!(capped.coverage, 0.3);
+    assert!(crate::canon::stage2_evidence_passes(capped));
+    assert!(
+        crate::canon::stage2_passes(store, &sid, pillar, MIN_AGE, now())
+            .await
+            .unwrap()
+    );
+    let wide = Duration::from_secs(28 * 86_400);
+    let wider = store
+        .interaction_span_with_window(&sid, pillar, MIN_AGE, now(), wide)
+        .await
+        .unwrap();
+    assert_eq!(wider.distinct, 3);
+    assert_eq!(wider.coverage, 0.15);
+    assert!(
+        !crate::canon::stage2_passes_with_window(store, &sid, pillar, MIN_AGE, now(), wide)
+            .await
+            .unwrap()
+    );
+    let later = now() + ChronoDuration::days(30);
+    // The two young rows (c5's edge, c6's origin) now qualify: five origins,
+    // coverage saturates, never exceeds one.
+    let later_span = store
+        .interaction_span_with_window(
+            &sid,
+            pillar,
+            MIN_AGE,
+            later,
+            crate::store::DEFAULT_COVERAGE_WINDOW,
+        )
+        .await
+        .unwrap();
+    assert_eq!(later_span.distinct, 5);
+    assert_eq!(later_span.coverage, 1.0);
+    let premature = store
+        .interaction_span_with_window(
+            &sid,
+            pillar,
+            MIN_AGE,
+            now() - ChronoDuration::days(70),
+            crate::store::DEFAULT_COVERAGE_WINDOW,
+        )
+        .await
+        .unwrap();
+    assert_eq!(premature.distinct, 0);
+    assert_eq!(premature.coverage, 0.0);
+    // Below the one-day floor, sub-millisecond, or past i64::MAX ms.
+    for bad in [
+        Duration::ZERO,
+        Duration::from_nanos(1),
+        Duration::from_secs(3_600),
+        Duration::MAX,
+    ] {
+        assert!(store
+            .interaction_span_with_window(&sid, pillar, MIN_AGE, now(), bad)
+            .await
+            .is_err());
+    }
+}
+
+/// One extents session: interactions at the given offsets (seconds after
+/// `start`), a pillar originating in the first, and one `Dependency`
+/// dependent per listed support interaction. Edges are aged at `start`.
+fn extents_batch(
+    session: &SessionId,
+    tag: u64,
+    start: DateTime<Utc>,
+    offsets: &[i64],
+    supports: &[usize],
+) -> MutationBatch {
+    let iid = |n: usize| NodeId(Uuid::from_u64_pair(0x36_07, (tag << 8) | n as u64));
+    let mut batch = MutationBatch::new();
+    for (n, seconds) in offsets.iter().enumerate() {
+        let mut i = interaction("i1", 0);
+        i.id = iid(n);
+        i.session_id = session.clone();
+        i.created_at = start + ChronoDuration::seconds(*seconds);
+        batch.push(Mutation::UpsertNode {
+            node: Node::Interaction(i),
+        });
+    }
+    let concept_at = |n: usize, origin: usize| {
+        let mut c = concept("X", "i1", ConceptType::Logic);
+        c.id = extents_concept(tag, n);
+        c.origin_interaction = iid(origin);
+        c.session_id = session.clone();
+        c.created_at = start;
+        c.content = format!("extents-{tag}-{n}");
+        c.canonical_key = c.content.clone();
+        c
+    };
+    batch.push(Mutation::UpsertNode {
+        node: Node::Concept(concept_at(0, 0)),
+    });
+    for (k, origin) in supports.iter().enumerate() {
+        let n = k + 1;
+        batch.push(Mutation::UpsertNode {
+            node: Node::Concept(concept_at(n, *origin)),
+        });
+        let mut e = edge(
+            n as u64,
+            extents_concept(tag, n),
+            extents_concept(tag, 0),
+            EdgeType::Dependency,
+            0,
+        );
+        e.id = NodeId(Uuid::from_u64_pair(0x36_09, (tag << 8) | n as u64));
+        e.session_id = session.clone();
+        e.created_at = start;
+        e.last_reinforced = start;
+        batch.push(Mutation::UpsertEdge { edge: e });
+    }
+    batch
+}
+
+fn extents_concept(tag: u64, n: usize) -> NodeId {
+    NodeId(Uuid::from_u64_pair(0x36_08, (tag << 8) | n as u64))
+}
+
+/// #36 PR 2 extents: the cap leaves every session no longer than fourteen
+/// days exactly as it was, keeps the F1 single-point rule and the empty and
+/// single-point evidence answers, and does not turn one supporting instant
+/// into spread. Raw and capped answers are compared on the same store, so an
+/// adapter that capped its raw accessor, or capped a short session, fails.
+pub async fn check_extents_case(store: &dyn crate::store::GraphStore) {
+    use std::time::Duration;
+    let day = 86_400;
+    let wide = Duration::from_secs(28 * 86_400);
+    let caps = [crate::store::DEFAULT_COVERAGE_WINDOW, wide];
+
+    // The ordinary `deps` session (120 minutes): every concept, both ages,
+    // under both caps, answers exactly what the raw accessor answers.
+    store.flush(&store_batch(), None).await.unwrap();
+    for (name, _, _) in CONCEPTS {
+        for age in [std::time::Duration::ZERO, MIN_AGE] {
+            let node = concept_id(name);
+            let raw = store
+                .interaction_span(&session(), node, age, now())
+                .await
+                .unwrap();
+            for cap in caps {
+                let capped = store
+                    .interaction_span_with_window(&session(), node, age, now(), cap)
+                    .await
+                    .unwrap();
+                assert_eq!(capped, raw, "short session {name} at {age:?}, cap {cap:?}");
+            }
+        }
+    }
+    // Not vacuous: X's coverage is a proper fraction (20/120 aged).
+    let x = store
+        .interaction_span_with_window(&session(), concept_id("X"), MIN_AGE, now(), caps[0])
+        .await
+        .unwrap();
+    assert!((x.coverage - 20.0 / 120.0).abs() < 1e-9, "{x:?}");
+
+    // Single-point extent: four interactions at one instant, thirty days
+    // old. Three supports cover the whole (zero-length) session: 1.0.
+    let point = SessionId::from("deps-extent-point");
+    let start = now() - ChronoDuration::days(30);
+    store
+        .flush(
+            &extents_batch(&point, 1, start, &[0, 0, 0, 0], &[1, 2, 3]),
+            None,
+        )
+        .await
+        .unwrap();
+    // Exactly fourteen days: three supports spread 4.2 days. Raw and capped
+    // denominators coincide, so both land exactly on the 0.3 bar.
+    let fortnight = SessionId::from("deps-extent-fortnight");
+    let start14 = now() - ChronoDuration::days(20);
+    store
+        .flush(
+            &extents_batch(
+                &fortnight,
+                2,
+                start14,
+                &[0, day, 2 * day, day + 362_880, 14 * day],
+                &[1, 2, 3],
+            ),
+            None,
+        )
+        .await
+        .unwrap();
+    // A sixty-day session: a pillar with no dependents (zero points), and
+    // a pillar whose only support is one interaction (one point, spread 0).
+    let long = SessionId::from("deps-extent-long");
+    let start60 = now() - ChronoDuration::days(70);
+    store
+        .flush(
+            &extents_batch(&long, 3, start60, &[0, 30 * day, 60 * day], &[]),
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .flush(
+            &extents_batch(&long, 4, start60, &[0, 30 * day, 60 * day], &[1]),
+            None,
+        )
+        .await
+        .unwrap();
+
+    for (sid, tag, distinct, coverage, passes) in [
+        (&point, 1, 3, 1.0, true),
+        (&fortnight, 2, 3, 0.3, true),
+        (&long, 3, 0, 0.0, false),
+        (&long, 4, 1, 0.0, false),
+    ] {
+        let pillar = extents_concept(tag, 0);
+        let raw = store
+            .interaction_span(sid, pillar, MIN_AGE, now())
+            .await
+            .unwrap();
+        assert_eq!(
+            (raw.distinct, raw.coverage),
+            (distinct, coverage),
+            "raw {sid:?}"
+        );
+        for cap in caps {
+            let capped = store
+                .interaction_span_with_window(sid, pillar, MIN_AGE, now(), cap)
+                .await
+                .unwrap();
+            assert_eq!(capped, raw, "{sid:?} under cap {cap:?}");
+            assert_eq!(
+                crate::canon::stage2_passes_with_window(store, sid, pillar, MIN_AGE, now(), cap)
+                    .await
+                    .unwrap(),
+                passes,
+                "{sid:?} under cap {cap:?}"
+            );
+        }
+    }
+}
+
 /// #19(a): persistence accepts opposition as an ordinary typed edge, with
 /// natural-key replay idempotency. (That it changes no verdict is
 /// `canon::contradicts_tests`.)
