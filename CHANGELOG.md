@@ -206,7 +206,6 @@
   resolves none. The security-group prose fallback is unchanged. No fixture
   or golden output changed.
 
-
 - **A recall no longer comes back empty when its top hit is long (#130).**
   `context` keeps whole hit blocks while they fit `max_tokens` and stops at
   the first that does not. When that was the first block, the context was
