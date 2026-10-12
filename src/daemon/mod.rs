@@ -101,11 +101,27 @@ enum Route {
     /// to traversal (it would skip the vector leg), and the vector leg is
     /// required, so a failed vector read fails the recall.
     ByVector,
+    /// A layer's side of a layered recall (#33 PR 2), with the query vector
+    /// the caller's session embedded. The blended pipeline always runs (a
+    /// dispatched traversal answer has no leg scores, so the merge's
+    /// per-layer floor would drop every hit of it); traversal expansion
+    /// still runs inside the layer's own graph, so edges never cross
+    /// sessions. The recent leg is off (its flat score would put the
+    /// layer's last writes into every answer), a failed vector read
+    /// degrades as on a text recall, and nothing is cached, so the public
+    /// `CacheKey` needs no route.
+    Layer,
 }
 
 impl Route {
     fn routes_structural(self) -> bool {
         self == Route::Text
+    }
+
+    /// Whether the blended pipeline may be served from or stored in the
+    /// recall cache (a vector-dependent pipeline never is, P1-2).
+    fn may_cache(self) -> bool {
+        self != Route::Layer
     }
 
     fn vector_required(self) -> bool {
@@ -116,7 +132,9 @@ impl Route {
     /// recall, and on a recall by vector only beside text (see
     /// [`candidates::RecentLeg`]).
     fn recent_leg(self, text: &str) -> candidates::RecentLeg {
-        if self == Route::ByVector && crate::surface::validate::is_blank(text) {
+        if self == Route::Layer
+            || (self == Route::ByVector && crate::surface::validate::is_blank(text))
+        {
             candidates::RecentLeg::Skip
         } else {
             candidates::RecentLeg::Run
@@ -546,8 +564,43 @@ impl Daemon {
         .await
     }
 
-    /// [`Daemon::recall_with`] or [`Daemon::recall_by_vector_with`], as
-    /// `route` says. `Err` only on [`Route::ByVector`], whose vector leg is
+    /// A layer's recall inside a layered recall (#33 PR 2): `embedding` is
+    /// the caller's session's query vector (the contracts were checked
+    /// equal), and the route is [`Route::Layer`]. Like
+    /// [`Daemon::recall_with`], a failed vector read degrades to the other
+    /// legs with a warning, so this never fails.
+    pub(crate) async fn recall_layer_with(
+        &self,
+        session: &SessionId,
+        query: RecallQuery,
+        vectors: crate::store::vector_source::VectorCandidates<'_>,
+        embedding: Option<(&[f32], &crate::types::EmbeddingContract)>,
+        weights: RecallWeights,
+    ) -> DetailedRecall {
+        let mut uncached = RecallCache::<RecallPipeline>::new();
+        match self
+            .recall_routed(
+                session,
+                query,
+                vectors,
+                embedding,
+                weights,
+                &mut uncached,
+                Route::Layer,
+            )
+            .await
+        {
+            Ok(result) => result,
+            // Unreachable, as in `recall_with`: only `ByVector` returns `Err`.
+            Err(err) => {
+                tracing::warn!(target: "lambo::recall", "recall: {err}");
+                DetailedRecall::warn_only("recall: the vector read failed".into())
+            }
+        }
+    }
+
+    /// [`Daemon::recall_with`], [`Daemon::recall_by_vector_with`] or
+    /// [`Daemon::recall_layer_with`], as `route` says. `Err` only on [`Route::ByVector`], whose vector leg is
     /// required.
     #[allow(clippy::too_many_arguments)]
     async fn recall_routed(
@@ -683,7 +736,7 @@ impl Daemon {
         // P1-2: the cache key cannot capture vector-source state (embedding
         // presence, transient store success/failure, write-behind progress), so
         // vector-dependent results are NEVER cached or served from cache.
-        let can_cache = embedding.is_none();
+        let can_cache = embedding.is_none() && route.may_cache();
         let build_pipeline = |graph: &Graph,
                               index: Option<&InvertedIndex>,
                               input: crate::recall::candidates::Phase1Input,
