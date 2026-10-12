@@ -398,7 +398,25 @@ lambo serve --config lambo.toml --transport http --session lambo --session gener
 
 Each session is a full writer of its own. It has its own lease and fencing token, graph, caches, write queue and local endpoint. So a stdio `lambo serve --session <name>` on the same machine forwards to this process for that session.
 
-Nothing crosses between sessions. Inspect, saints, stats, writes and GC each see only the session the request addressed, and so does recall, unless the operator layered the session (below). An MCP session opened on one session's URL is unknown at another's.
+Each graph's edges, writes, GC, saints and stats stay in that session. MCP
+recall can merge its configured layers, and MCP recall/inspect can read a
+configured layer with `scope` (below). An MCP session opened on one session's
+URL is unknown at another's.
+
+For a project split, set `[serve] default_session = "general-usage"`, pin that
+session, and point each project's HTTP client at `/mcp/s/<project>`. Leave
+`--session` off the start command if the file should choose `/mcp`'s default:
+a first `--session` takes precedence. `general` can be the shared recall layer
+without being the fallback write session. See the
+[configuration example](/config#project-urls-and-a-shared-layer).
+
+**MCP read scope versus CLI session selection.** The JSON field `scope` belongs
+to `lambo_recall` and `lambo_inspect`; there is no `--scope` flag on the CLI
+reader verbs. `lambo recall --session general --query "worktree policy"` and
+`lambo inspect --session general --focus <id>` read that one stored session directly,
+without merging layers. For the layered result agents see, call `lambo_recall`
+through the project's HTTP endpoint. `lambo serve-web` also reads each session
+alone rather than blending its layers.
 
 The embedder, the store connection and the HTTP listener are shared. With more than one session, every name must be addressable by URL: 1 to 128 bytes of `A-Z`, `a-z`, `0-9`, `.`, `_`, `:` and `-`, not starting with `.`. A single session keeps `--session`'s looser rule and is served at `/mcp`.
 

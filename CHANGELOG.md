@@ -219,6 +219,13 @@
 
 ### Changed
 
+- **Layered serving documentation and cut-over runbook (#33 PR 6).**
+  Project URL examples separate `general-usage` fallback writes from
+  shared `general` rulings, distinguish MCP recall/inspect read scope from
+  CLI session readers, and document verified Claude Code, Codex and Cursor
+  project overrides. The runbook includes worktree checks and rollback
+  boundaries; applying it remains the operator's action. Write scope waits
+  for #33 PR 4.
 - **Stage 2 coverage is measured against at most fourteen days**
   ([#36](https://github.com/nrynss/lambo/issues/36) PR 2). The bars are
   unchanged (three dependent origin interactions, coverage at least 0.3),
