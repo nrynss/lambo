@@ -76,7 +76,11 @@ async fn rest_api_user_schema_progresses_three_hops_with_audit() {
     assert_eq!(status_of(&graph.read(), us), CanonizationStatus::Canonical);
     match graph.read().node(us) {
         Some(Node::Concept(c)) => {
-            assert_eq!(c.blast_radius, Some(8), "Stage 3 must stamp measured blast");
+            assert_eq!(
+                c.blast_radius,
+                Some(14),
+                "Stage 3 must stamp measured blast"
+            );
             assert!(c.last_demotion_time.is_none());
         }
         other => panic!("user schema must be a concept, got {other:?}"),

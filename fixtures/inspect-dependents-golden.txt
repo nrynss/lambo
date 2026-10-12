@@ -1,0 +1,32 @@
+focus: concept X [Logic]
+blast radius: 8
+⚑ Load-bearing pillar — 8 nodes depend on this. Modify with caution.
+dependents (8):
+  concept A1 [Resource] (Dependency)
+  concept A2 [Resource] (Dependency)
+  concept C1 [Entity] (Hierarchical)
+  concept C2 [Entity] (Hierarchical)
+  concept E [Resource] (Dependency)
+  concept V [Entity] (Dependency)
+  concept W [Resource] (Dependency)
+  concept Z [Resource] (Dependency)
+
+hop 1:
+  Causal
+    <- concept K [Resource]
+  CoOccurrence
+    <- concept N [Entity]
+  Dependency
+    -> concept D [Entity]
+    <- concept A1 [Resource]
+    <- concept A2 [Resource]
+    <- concept E [Resource]
+    <- concept V [Entity]
+    <- concept W [Resource]
+    <- concept Z [Resource]
+  Derives
+    <- <interaction 00000000-0000-3601-0000-000000000000>
+  Hierarchical
+    -> concept C1 [Entity]
+    -> concept C2 [Entity]
+    <- concept P [Entity]

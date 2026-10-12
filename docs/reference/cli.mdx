@@ -126,7 +126,9 @@ $ lambo saints --session demo
 
 ### lambo inspect
 
-Shows the neighbourhood around a concept: its type, its blast radius, and the typed edges leading out from it.
+Shows the neighbourhood around a concept: its type, its blast radius, the dependents that count makes up, and its typed edges in both directions (`->` leads out of the focus, `<-` leads into it).
+
+The blast radius is the number of concepts that depend on this one: actions that named it in `depends_on`, concepts with a `Dependency` edge to it, and its `parent_of` children. An action that produced or modified it does not count, because that records where it came from, not what rests on it.
 
 | Flag | Required | Default |
 |---|---|---|
@@ -141,6 +143,8 @@ $ lambo inspect --session demo --focus "user schema" --depth 2
 focus: user schema [Entity]
 blast radius: 1
 ⚑ Load-bearing pillar — 1 nodes depend on this. Modify with caution.
+dependents (1):
+  auth middleware [Entity] (Hierarchical)
 
 hop 1:
   CoOccurrence

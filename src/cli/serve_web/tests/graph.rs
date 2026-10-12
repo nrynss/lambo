@@ -152,8 +152,9 @@ async fn graph_endpoint_returns_the_structural_skeleton() {
 /// foregrounds load-bearing Candidates/Venerables (T3-R1-2).
 #[tokio::test]
 async fn graph_and_inspect_agree_on_a_live_blast_radius_for_non_canonical() {
-    // The seed's `create user` action is never promoted (status `None`)
-    // but stands behind a dependent, so format::blast_radii counts it.
+    // The seed's `auth middleware` is never promoted (status `None`) but
+    // the `create user` action depends on it (#36), so format::blast_radii
+    // counts it.
     let store = seed("t93-graph-live").await;
     let (addr, handle) = spawn(state_on(store, "t93-graph-live")).await;
 
@@ -162,16 +163,16 @@ async fn graph_and_inspect_agree_on_a_live_blast_radius_for_non_canonical() {
         .as_array()
         .expect("nodes")
         .iter()
-        .find(|n| n["content"] == "create user")
-        .expect("create user node");
+        .find(|n| n["content"] == "auth middleware")
+        .expect("auth middleware node");
     assert_ne!(pillar["status"], "Canonical", "{g}");
     let graph_radius = pillar["blast_radius"].as_u64().expect("radius");
-    assert!(
-        graph_radius >= 1,
+    assert_eq!(
+        graph_radius, 1,
         "a non-canonical node with a dependent must report a nonzero live radius: {g}"
     );
 
-    let hit = get_json(addr, "/api/inspect?focus=create%20user").await;
+    let hit = get_json(addr, "/api/inspect?focus=auth%20middleware").await;
     assert_eq!(hit["found"], true, "{hit}");
     assert_eq!(
         hit["blast_radius"].as_u64().unwrap(),

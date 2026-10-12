@@ -57,15 +57,33 @@ fn edge(id: u64, src: u64, tgt: u64, at: DateTime<Utc>) -> Edge {
     }
 }
 
-/// `n` exclusive dependents of `hub` so `blast_radius(hub) == n`.
+/// `n` `Hierarchical` children of `hub`, its dependents (#36), so
+/// `blast_radius(hub) == n`. The children originate round-robin in
+/// interactions 2, 3 and 4 (created here when missing, at `ts()`, so the
+/// session extent stays a single point), which gives a hub with three or
+/// more children Stage 2 support from interactions other than its own: the
+/// Stage 3 verdict re-checks Stage 2 since #36.
 fn attach_blast(graph: &mut Graph, hub: u64, n: u64, first_dep: u64) {
     let at = ts();
+    for k in 2..=4u64 {
+        if graph.node(iid(k)).is_none() {
+            graph
+                .insert_interaction(interaction(k, Some(k - 1), at))
+                .unwrap();
+        }
+    }
     for i in 0..n {
         let dep = first_dep + i;
+        let origin = 2 + i % 3;
         graph
-            .insert_concept(concept(dep, 1, 0, CanonizationStatus::None), iid(1))
+            .insert_concept(
+                concept(dep, origin, 0, CanonizationStatus::None),
+                iid(origin),
+            )
             .unwrap();
-        graph.upsert_edge(edge(dep, hub, dep, at)).unwrap();
+        let mut child = edge(dep, hub, dep, at);
+        child.edge_type = EdgeType::Hierarchical;
+        graph.upsert_edge(child).unwrap();
     }
 }
 
@@ -125,7 +143,8 @@ async fn one_hop_per_cycle_none_with_stage2_evidence_becomes_candidate() {
         g.insert_concept(concept(id, 1, 5, CanonizationStatus::None), iid(1))
             .unwrap();
     }
-    g.insert_concept(concept(20, 1, 5, CanonizationStatus::None), iid(1))
+    // The hub's own origin (4) is not support for it (#36).
+    g.insert_concept(concept(20, 4, 5, CanonizationStatus::None), iid(4))
         .unwrap();
     // Distinct origins 1/2/3 covering 40/80 = 0.5 of the session.
     g.insert_concept(concept(31, 1, 0, CanonizationStatus::None), iid(1))
@@ -1266,4 +1285,161 @@ async fn flush_after_eval_does_not_duplicate_audit_rows() {
         "flush must not duplicate the audit trail"
     );
     assert_eq!(reloaded, committed, "reloaded audit matches committed hops");
+}
+
+/// #36 upgrade guard. A Venerable admitted under the pre-#36 Stage 2, where
+/// inbound `Causal` edges counted, has more than five dependents that all
+/// come from one interaction and no other support. Its blast radius clears
+/// Stage 3, but it no longer holds Stage 2, so the cycle must leave it
+/// Venerable instead of promoting it to Canonical on the first evaluation.
+#[tokio::test]
+async fn a_venerable_that_no_longer_holds_stage_2_does_not_promote() {
+    let mut g = Graph::new(sid());
+    let at = ts();
+    g.insert_interaction(interaction(1, None, at)).unwrap();
+    for k in 2..=4u64 {
+        g.insert_interaction(interaction(k, Some(k - 1), at))
+            .unwrap();
+    }
+    // The hub: a path-like Resource admitted to Venerable long ago.
+    let hub = concept(10, 1, 5, CanonizationStatus::Venerable);
+    g.insert_concept(hub, iid(1)).unwrap();
+    // Its old Stage 2 support: actions in three interactions that produced
+    // or modified it (Causal), which no longer counts.
+    for (k, origin) in [(31u64, 2u64), (32, 3), (33, 4)] {
+        g.insert_concept(concept(k, origin, 0, CanonizationStatus::None), iid(origin))
+            .unwrap();
+        let mut causal = edge(k, k, 10, at);
+        causal.edge_type = EdgeType::Causal;
+        g.upsert_edge(causal).unwrap();
+    }
+    // Six dependents, all recorded in one interaction (2): blast 6 > 5,
+    // but only one distinct supporting interaction.
+    for k in 40..46u64 {
+        g.insert_concept(concept(k, 2, 0, CanonizationStatus::None), iid(2))
+            .unwrap();
+        g.upsert_edge(edge(k, k, 10, at)).unwrap();
+    }
+
+    let store = store_from_graph(&g).await;
+    assert_eq!(
+        store
+            .blast_radius(&sid(), nid(10), Duration::ZERO, at)
+            .await
+            .unwrap(),
+        6,
+        "fixture premise: Stage 3's blast bar alone would pass"
+    );
+    assert!(
+        !stage2_passes(&store, &sid(), nid(10), Duration::ZERO, at)
+            .await
+            .unwrap(),
+        "fixture premise: Stage 2 no longer holds"
+    );
+
+    let g = RwLock::new(g);
+    let (tx, mut rx) = channel();
+    let mut ev = Evaluator::new();
+    let outcome = eval_cycle(&mut ev, &g, &store, &table(&[]), &tx, &params(), at)
+        .await
+        .unwrap();
+    assert_eq!(
+        status_of(&g.read(), nid(10)),
+        CanonizationStatus::Venerable,
+        "a Venerable without Stage 2 support must not turn Canonical"
+    );
+    assert!(outcome.promotions.is_empty(), "{:?}", outcome.promotions);
+    assert!(drain_canonized(&mut rx).is_empty());
+}
+
+/// The complement: the same shape with its six dependents recorded across
+/// three interactions holds Stage 2 and promotes, stamped with its blast.
+#[tokio::test]
+async fn a_venerable_that_holds_stage_2_and_stage_3_promotes() {
+    let mut g = Graph::new(sid());
+    g.insert_interaction(interaction(1, None, ts())).unwrap();
+    g.insert_concept(concept(10, 1, 5, CanonizationStatus::Venerable), iid(1))
+        .unwrap();
+    attach_blast(&mut g, 10, 6, 100);
+    let store = store_from_graph(&g).await;
+    let g = RwLock::new(g);
+    let (tx, _rx) = channel();
+    let mut ev = Evaluator::new();
+    let outcome = eval_cycle(&mut ev, &g, &store, &table(&[]), &tx, &params(), ts())
+        .await
+        .unwrap();
+    assert_eq!(status_of(&g.read(), nid(10)), CanonizationStatus::Canonical);
+    assert_eq!(outcome.promotions.len(), 1);
+    assert_eq!(outcome.promotions[0].blast_radius, Some(6));
+}
+
+/// #36 review M1: the Stage 2 re-check is Swarm's. A Solo Venerable whose
+/// six dependents all come from its own interaction fails Stage 2, but Solo
+/// admits by its score band, and the Stage 3 probe must still run so the
+/// audit row carries the measured blast radius, exactly as before the
+/// re-check existed.
+#[tokio::test]
+async fn solo_keeps_its_stage_3_probe_and_stamps_the_measured_blast() {
+    let mut g = Graph::new(sid());
+    let mut prev = None;
+    for n in 1..=2u64 {
+        let mut turn = interaction(n, prev, ts());
+        turn.event_time = Some(ts() - chrono::Duration::hours(n as i64));
+        g.insert_interaction(turn).unwrap();
+        prev = Some(n);
+    }
+    let mut hub = concept(10, 1, 0, CanonizationStatus::Venerable);
+    hub.concept_type = ConceptType::Entity;
+    hub.human_confirmed = 2;
+    let hub_id = hub.id;
+    g.insert_concept(hub, iid(1)).unwrap();
+    g.upsert_edge(Edge {
+        id: eid(2),
+        session_id: sid(),
+        source: iid(2),
+        target: hub_id,
+        edge_type: EdgeType::Derives,
+        weight: 0.9,
+        reinforcements: 1,
+        created_at: ts(),
+        last_reinforced: ts(),
+        event_time: Some(ts() - chrono::Duration::hours(2)),
+    })
+    .unwrap();
+    // Six children from the hub's own interaction: blast 6, no Stage 2.
+    for k in 100..106u64 {
+        g.insert_concept(concept(k, 1, 0, CanonizationStatus::None), iid(1))
+            .unwrap();
+        let mut child = edge(k, 10, k, ts());
+        child.edge_type = EdgeType::Hierarchical;
+        g.upsert_edge(child).unwrap();
+    }
+
+    let store = store_from_graph(&g).await;
+    assert!(
+        !stage2_passes(&store, &sid(), hub_id, Duration::ZERO, ts())
+            .await
+            .unwrap(),
+        "fixture premise: Stage 2 fails"
+    );
+    let g = RwLock::new(g);
+    let solo_params = EvalParams {
+        promotion_policy: PromotionPolicy::Solo,
+        ..params()
+    };
+    let (tx, _rx) = channel();
+    let mut ev = Evaluator::new();
+    let outcome = eval_cycle(&mut ev, &g, &store, &table(&[]), &tx, &solo_params, ts())
+        .await
+        .unwrap();
+    assert_eq!(status_of(&g.read(), hub_id), CanonizationStatus::Canonical);
+    let hop = outcome
+        .transitions()
+        .find(|e| e.node_id == hub_id)
+        .expect("the canonical hop must be audited");
+    assert_eq!(
+        hop.blast_radius,
+        Some(6),
+        "Solo's audit row must carry the measured blast radius"
+    );
 }

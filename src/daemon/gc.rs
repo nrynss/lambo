@@ -39,8 +39,9 @@
 //!      Resources, and a Resource with dependents is spared it too.
 //!    * **A Resource with dependents is spared the score cut**
 //!      ([`resources_with_dependents`], operator decision): another concept has
-//!      a `Dependency`/`Causal`/`Hierarchical` edge into it, or its blast radius
-//!      is non-zero. An isolated, untouched Resource still ages out. Counted in
+//!      a `Dependency`/`Causal`/`Hierarchical` edge into it, or it is the only
+//!      such source of another concept (#29's predicate, which #36's
+//!      dependents relation did not change). An isolated, untouched Resource still ages out. Counted in
 //!      [`GcOutcome::resources_spared_by_dependents`].
 //!    * **Eviction recency is time since last touch** over a fixed
 //!      [`GC_RECENCY_WINDOW`] ([`eviction_recency`]), not position in the
@@ -760,12 +761,15 @@ pub fn collection_cap(unprotected: usize, params: GcParams) -> usize {
 /// Resources the step-2 score cut must not collect because other concepts
 /// depend on them (issue #29 operator decision, 2026-10-07).
 ///
-/// "Dependents" uses the two senses the codebase already gives the word, over
-/// the structural edge kinds blast radius counts
+/// "Dependents" here is #29's own predicate, defined independently of the #36
+/// dependents relation that blast radius, Stage 2/3 and the ⚑ warning read
+/// ([`crate::recall::format::dependents_of`]); #36 deliberately left it
+/// unchanged. It uses two senses over the structural edge kinds
 /// ([`crate::recall::format::STRUCTURAL_EDGE_TYPES`]: `Dependency`, `Causal`,
 /// `Hierarchical`; never `Derives`, `Temporal`, `CoOccurrence` or `Semantic`),
-/// and only concept-to-concept edges with a source other than the Resource
-/// itself (a self-loop is not a dependent):
+/// in either direction, and only concept-to-concept edges with a source other
+/// than the Resource itself (a self-loop is not a dependent), both read from
+/// [`crate::recall::format::inbound_sources`]:
 ///
 /// * **Incoming** — another concept has a structural edge **into** the
 ///   Resource. This is `record_action`'s direction (`src/graph/action.rs`):
@@ -773,18 +777,16 @@ pub fn collection_cap(unprotected: usize, params: GcParams) -> usize {
 ///   on and of `Causal` edges to what it produces or modifies, so a Resource
 ///   that some action depends on, produced or modified has one. This is the
 ///   operator's rule as stated.
-/// * **Blast radius** — the Resource has a non-zero blast radius
-///   ([`crate::recall::format::blast_radius`]): some concept's *only*
-///   structural source is this Resource, which is exactly what the load-bearing
-///   warning reports as "N nodes depend on this". This is the outgoing side:
-///   a `record_action` node is the sole source of the Resources it alone
-///   produced or depends on.
+/// * **Sole source** — the Resource is the *only* structural source of some
+///   other concept (the pre-#36 exclusive blast-radius sense). This is the
+///   outgoing side: a `record_action` node is the sole source of the
+///   Resources it alone produced or depends on.
 ///
 /// The second sense is included because the first alone erodes from the
 /// source end: an action node usually has no incoming structural edge, so it
 /// would be collected, its targets would lose their only incoming edge with it,
-/// and the next sweep would collect them too — the dependency graph blast
-/// radius reads would disappear one layer per day.
+/// and the next sweep would collect them too — the recorded dependency graph
+/// would disappear one layer per day.
 ///
 /// Only the score cut honours this. A Resource with no structural edge at all
 /// (an isolated, untouched one) ages out under [`eviction_recency`] like any

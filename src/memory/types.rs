@@ -50,7 +50,7 @@ pub struct ImpactReport {
     pub content: String,
     /// Its canonization status — retracting a `Canonical` node is the loud case.
     pub canonization_status: CanonizationStatus,
-    /// Concepts that would be orphaned, from the in-RAM graph (headline).
+    /// The concept's dependents (#36), from the in-RAM graph (headline).
     pub blast_radius: u64,
     /// The same count from `GraphStore::blast_radius`; `None` when the store
     /// could not answer (see [`Self::warnings`]).

@@ -126,6 +126,17 @@ pub(crate) mod erase;
 ))]
 pub(crate) mod release_fencing;
 
+// #36: the shared dependents case on the live family (Postgres test here,
+// Cockroach leg in its conformance suite).
+#[cfg(all(
+    test,
+    any(
+        feature = "store-postgres",
+        all(feature = "store-cockroach", feature = "fixtures")
+    )
+))]
+pub(crate) mod dependents_live;
+
 // Postgres-only: the flush fence's lease row stays locked until commit.
 #[cfg(all(test, feature = "store-postgres"))]
 mod lease_race;

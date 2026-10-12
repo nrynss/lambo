@@ -740,12 +740,14 @@ async fn seed_chain_around(session: &str, focus: &str, dependents: usize) -> Arc
         batch.push(Mutation::UpsertEdge {
             edge: edge(NodeId::new(), sid.clone(), iid, cid, EdgeType::Derives, now),
         });
+        // Each dependent depends on the focus: a Dependency edge's source
+        // rests on its target (#36).
         batch.push(Mutation::UpsertEdge {
             edge: edge(
                 NodeId::new(),
                 sid.clone(),
-                focus_id,
                 cid,
+                focus_id,
                 EdgeType::Dependency,
                 now,
             ),

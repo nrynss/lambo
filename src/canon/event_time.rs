@@ -315,20 +315,21 @@ mod tests {
             // Supports from turns 2, 4, 6; each edge carries its writing
             // interaction's about-time in event mode (what record_action
             // would stamp), falls back to flush time otherwise.
-            let support_edge = |id, src, ty, turn: usize| {
+            let support_edge = |id, src, tgt, ty, turn: usize| {
                 edge(
                     id,
                     src,
-                    10,
+                    tgt,
                     ty,
                     ts(flushes[turn]),
                     with_event_time.then(|| event_times[turn]),
                 )
             };
             let edges = vec![
-                support_edge(1, 2, EdgeType::Dependency, 1),
-                support_edge(2, 4, EdgeType::Causal, 3),
-                support_edge(3, 6, EdgeType::Hierarchical, 5),
+                // Dependents of 10 (#36): 2 and 4 depend on it, 6 is its child.
+                support_edge(1, 2, 10, EdgeType::Dependency, 1),
+                support_edge(2, 4, 10, EdgeType::Dependency, 3),
+                support_edge(3, 10, 6, EdgeType::Hierarchical, 5),
             ];
             (interactions, concepts, edges)
         };
@@ -445,7 +446,8 @@ mod tests {
             interaction(4, FLUSH_SPREAD, None),
         ];
         let cs = vec![
-            concept(10, 1, ts(0)),
+            // The hub's own origin (4) is not support for it (#36).
+            concept(10, 4, ts(FLUSH_SPREAD)),
             concept(1, 1, ts(0)),
             concept(2, 2, ts(20)),
             concept(3, 3, ts(40)),
@@ -454,7 +456,7 @@ mod tests {
         let es = vec![
             edge(1, 1, 10, EdgeType::Dependency, ts(0), None),
             edge(2, 2, 10, EdgeType::Dependency, ts(20), None),
-            edge(3, 3, 10, EdgeType::Hierarchical, ts(40), None),
+            edge(3, 10, 3, EdgeType::Hierarchical, ts(40), None),
         ];
         let store = seed(&ix, &cs, &es).await;
         let sid = crate::types::SessionId::from("history");

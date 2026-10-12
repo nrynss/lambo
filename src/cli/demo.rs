@@ -112,7 +112,7 @@
 //! | `conflict_recency_window` | 30s | **810s** | **810s** |
 //!
 //! `canonization_edge_min_age` is the knob the T8.4 brief names. It is the age
-//! floor Stage 2 applies to inbound structural edges (`interaction_span`) and
+//! floor Stage 2 applies to the dependence edges it reads (`interaction_span`) and
 //! Stage 3 applies to the blast-radius query — the guard that stops a burst of
 //! same-tick edges from inflating either measure. Compressing it from 60s to
 //! 10ms keeps the guard **live**: every cycle still applies it, and an edge
@@ -320,14 +320,18 @@ pub const SETTLE_ALIASES: &[&str] = &[
 pub const USER_SCHEMA: &str = "user schema";
 /// The canonical marker recall must render for it (spec §13 step 3).
 pub const EXPECT_CANONICAL_LABEL: &str = "user schema [Entity, canonical]";
-/// The load-bearing-pillar warning, verbatim including the count (spec §13).
+/// The load-bearing-pillar warning: spec §13's template verbatim, with the
+/// count this script's graph produces ([`EXPECT_BLAST_RADIUS`]). Spec §13
+/// narrates 9, the pre-#36 count; see the #36 errata.
 pub const EXPECT_BLAST_WARNING: &str =
-    "⚑ Load-bearing pillar — 9 nodes depend on this. Modify with caution.";
+    "⚑ Load-bearing pillar — 15 nodes depend on this. Modify with caution.";
 /// The conflict line with its one time-derived integer normalized.
 pub const EXPECT_CONFLICT_LINE: &str = "Agent A wrote to it <n> seconds ago";
-/// Spec §13's ⚑ count, and therefore the number of dependents the script
-/// plants under `user schema`.
-pub const EXPECT_BLAST_RADIUS: u64 = 9;
+/// The ⚑ count: `user schema`'s dependents (#36), its nine children
+/// ([`USER_SCHEMA_DEPENDENTS`]) plus the six actions whose `depends_on`
+/// names it. Before #36 only the nine exclusive children counted, which is
+/// the 9 spec §13 narrates.
+pub const EXPECT_BLAST_RADIUS: u64 = 15;
 /// Interactions the script opens (one per write call, server-stamped).
 pub const EXPECT_INTERACTIONS: usize = 12;
 
@@ -339,9 +343,9 @@ pub const INTERACTION_CALLS: [i64; EXPECT_INTERACTIONS] = [0, 1, 2, 3, 4, 5, 6, 
 /// collision is a loud failure rather than a quietly different demo.
 pub const EXPECT_CONCEPTS: usize = 27;
 
-/// The nine concepts whose only structural inbound source is `user schema`,
-/// i.e. exactly the nine the ⚑ warning counts. Nothing else in the script may
-/// point at them, or they stop being dependents.
+/// The nine concepts the script plants as `user schema`'s `Hierarchical`
+/// children. With the six actions that depend on it they are the
+/// [`EXPECT_BLAST_RADIUS`] dependents the ⚑ warning counts (#36).
 pub const USER_SCHEMA_DEPENDENTS: &[&str] = &[
     "email column",
     "password hash column",
@@ -399,8 +403,8 @@ impl Step {
 }
 
 /// Act I — agent A builds the API. Nine interactions: three derives that plant
-/// the pillars and their nine dependents, six actions that make the rest of
-/// the codebase depend on them.
+/// the pillars and `user schema`'s nine children, six actions that make the
+/// rest of the codebase depend on them.
 pub const ACT_I: &[Step] = &[
     Step::Derive {
         concepts: &[
@@ -1596,7 +1600,7 @@ fn trail(graph: &Arc<RwLock<Graph>>) -> Vec<Transition> {
 /// ([`normalize_score`]).
 ///
 /// The hit *ordering*, every concept's content, the `[Entity, canonical]`
-/// marker, `blast radius 9`, the ⚑ line and the conflict sentence all survive
+/// marker, `blast radius 15`, the ⚑ line and the conflict sentence all survive
 /// this untouched and are compared byte for byte.
 pub fn normalize_volatile(text: &str) -> String {
     normalize_node_ids(&normalize_score(&normalize_conflict_age(text)))
@@ -1876,8 +1880,8 @@ mod tests {
 
     #[test]
     fn normalizes_the_conflict_age_and_nothing_else() {
-        let ctx = "user schema [Entity, canonical] (score 0.71, blast radius 9)\n\
-                   ⚑ Load-bearing pillar — 9 nodes depend on this. Modify with caution.\n\
+        let ctx = "user schema [Entity, canonical] (score 0.71, blast radius 15)\n\
+                   ⚑ Load-bearing pillar — 15 nodes depend on this. Modify with caution.\n\
                    Agent A wrote to it 11 seconds ago";
         let got = normalize_conflict_age(ctx);
         assert!(got.contains(EXPECT_CONFLICT_LINE), "{got}");
@@ -1907,10 +1911,10 @@ mod tests {
 
     #[test]
     fn normalize_score_masks_the_number_and_keeps_the_blast_radius() {
-        let line = "user schema [Entity, canonical] (score 2.27, blast radius 9)";
+        let line = "user schema [Entity, canonical] (score 2.27, blast radius 15)";
         assert_eq!(
             normalize_score(line),
-            "user schema [Entity, canonical] (score <s>, blast radius 9)"
+            "user schema [Entity, canonical] (score <s>, blast radius 15)"
         );
         assert_eq!(
             normalize_score("a [Resource] (score 0.13)\nb [Logic] (score 12.5)"),
@@ -1926,7 +1930,7 @@ mod tests {
     fn normalize_node_ids_masks_uuids_and_preserves_multibyte_text() {
         let line = format!(
             "{EXPECT_BLAST_WARNING}\nHigh-risk modification: high-value node \
-             445370df-69b2-47ac-94ab-b18b52b8b100 (Canonical, blast radius 9)"
+             445370df-69b2-47ac-94ab-b18b52b8b100 (Canonical, blast radius 15)"
         );
         let got = normalize_node_ids(&line);
         assert!(got.contains("high-value node <node> (Canonical"), "{got}");
@@ -1940,11 +1944,11 @@ mod tests {
         // Issue #9: the recall block's short-form id is minted per run like a
         // full UUID, so it is masked too, keeping the ×2 determinism bar
         // meaningful. A longer hex run is never half-masked.
-        let hit = "user schema [Entity, canonical] (score 0.72, id 445370df, blast radius 9)";
+        let hit = "user schema [Entity, canonical] (score 0.72, id 445370df, blast radius 15)";
         let got = normalize_node_ids(hit);
         assert_eq!(
             got,
-            "user schema [Entity, canonical] (score 0.72, id <node>, blast radius 9)"
+            "user schema [Entity, canonical] (score 0.72, id <node>, blast radius 15)"
         );
         assert_eq!(got, normalize_node_ids(&got));
         assert_eq!(
@@ -1974,16 +1978,16 @@ mod tests {
 
     #[test]
     fn normalize_volatile_masks_all_three_and_keeps_every_spec_string() {
-        let ctx = "user schema [Entity, canonical] (score 2.27, blast radius 9)\n\
-                   ⚑ Load-bearing pillar — 9 nodes depend on this. Modify with caution.\n\
+        let ctx = "user schema [Entity, canonical] (score 2.27, blast radius 15)\n\
+                   ⚑ Load-bearing pillar — 15 nodes depend on this. Modify with caution.\n\
                    Agent A wrote to it 11 seconds ago\n\
                    High-risk modification: high-value node \
-                   445370df-69b2-47ac-94ab-b18b52b8b100 (Canonical, blast radius 9)";
+                   445370df-69b2-47ac-94ab-b18b52b8b100 (Canonical, blast radius 15)";
         let got = normalize_volatile(ctx);
         assert!(got.contains(EXPECT_CANONICAL_LABEL), "{got}");
         assert!(got.contains(EXPECT_BLAST_WARNING), "{got}");
         assert!(got.contains(EXPECT_CONFLICT_LINE), "{got}");
-        assert!(got.contains("blast radius 9"), "{got}");
+        assert!(got.contains("blast radius 15"), "{got}");
         assert!(got.contains("(score <s>"), "{got}");
         assert!(got.contains("<node>"), "{got}");
         assert_eq!(got, normalize_volatile(&got), "must be idempotent");
@@ -2057,7 +2061,7 @@ mod tests {
         let missing = missing_strings("").expect("empty context is missing all three");
         assert_eq!(missing.len(), 3, "{missing:?}");
         let full = format!(
-            "{EXPECT_CANONICAL_LABEL} (score 0.71, blast radius 9)\n{EXPECT_BLAST_WARNING}\n\
+            "{EXPECT_CANONICAL_LABEL} (score 0.71, blast radius 15)\n{EXPECT_BLAST_WARNING}\n\
              Agent A wrote to it 3 seconds ago"
         );
         assert!(missing_strings(&full).is_none());
@@ -2071,10 +2075,28 @@ mod tests {
         );
     }
 
-    /// The nine dependents must be planted by `parent_of` and touched by
-    /// nothing else: any `produces` / `modifies` / `depends_on` naming one
-    /// gives it a second structural inbound source and silently drops the ⚑
-    /// count below nine.
+    /// The ⚑ count is the nine children plus the actions that depend on
+    /// `user schema` (#36): a `modifies`/`produces` edge to it is
+    /// provenance and does not count.
+    #[test]
+    fn the_blast_radius_is_the_children_plus_the_actions_that_depend_on_the_pillar() {
+        let depending_actions = ACT_I
+            .iter()
+            .chain(ACT_II)
+            .chain(ACT_III)
+            .filter(|step| {
+                matches!(step, Step::Action { depends_on, .. } if depends_on.contains(&USER_SCHEMA))
+            })
+            .count();
+        assert_eq!(depending_actions, 6);
+        assert_eq!(
+            (USER_SCHEMA_DEPENDENTS.len() + depending_actions) as u64,
+            EXPECT_BLAST_RADIUS
+        );
+    }
+
+    /// The nine children are planted by `parent_of` and named by no action,
+    /// so the script's graph stays the one the narration describes.
     #[test]
     fn no_action_target_collides_with_a_user_schema_dependent() {
         for step in ACT_I.iter().chain(ACT_II).chain(ACT_III) {
@@ -2096,8 +2118,7 @@ mod tests {
             {
                 assert!(
                     !USER_SCHEMA_DEPENDENTS.contains(target),
-                    "'{target}' is a user schema dependent; an action edge would cost it \
-                     its place in the ⚑ {EXPECT_BLAST_RADIUS} count"
+                    "'{target}' is one of user schema's planted children; no action names it"
                 );
             }
         }
@@ -2126,7 +2147,6 @@ mod tests {
             }
         }
         assert_eq!(seen.len(), USER_SCHEMA_DEPENDENTS.len());
-        assert_eq!(seen.len() as u64, EXPECT_BLAST_RADIUS);
     }
 
     /// Spec §13 step 2 wants inbound evidence from several distinct
@@ -2137,12 +2157,10 @@ mod tests {
             .iter()
             .chain(ACT_II)
             .chain(ACT_III)
+            // #36: only `depends_on` makes an action a dependent; `modifies`
+            // is provenance and confers no support.
             .filter(|s| match s {
-                Step::Action {
-                    modifies,
-                    depends_on,
-                    ..
-                } => modifies.contains(&USER_SCHEMA) || depends_on.contains(&USER_SCHEMA),
+                Step::Action { depends_on, .. } => depends_on.contains(&USER_SCHEMA),
                 Step::Derive { .. } => false,
             })
             .count();
@@ -2277,7 +2295,7 @@ mod tests {
                 content: USER_SCHEMA.into(),
                 from: "Venerable".into(),
                 to: "Canonical".into(),
-                blast_radius: Some(9),
+                blast_radius: Some(15),
             }],
             canonical: vec![(USER_SCHEMA.into(), EXPECT_BLAST_RADIUS)],
             recall_context: format!("{EXPECT_CANONICAL_LABEL}\n{EXPECT_CONFLICT_LINE}"),
@@ -2289,6 +2307,6 @@ mod tests {
             once.contains("user schema: Venerable -> Canonical"),
             "{once}"
         );
-        assert!(once.contains("blast_radius=9"), "{once}");
+        assert!(once.contains("blast_radius=15"), "{once}");
     }
 }

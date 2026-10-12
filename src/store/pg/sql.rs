@@ -374,65 +374,77 @@ FROM synonyms
 WHERE session_id = $1
 "#;
 
-/// Blast radius (spec §4.1 + errata, `MemoryStore`-equivalent): count concepts that have
-/// at least one **aged** inbound structural edge (`Dependency`/`Causal`/`Hierarchical`)
-/// from `node` and no aged inbound structural edge from any other concept. Provenance
-/// `Derives`/`Temporal` edges must not un-orphan (errata; T1.4). `src.session_id = $1`
-/// keeps the source-concept check session-scoped (MemoryStore's `concept_ids`), and
-/// `c.id <> $2` excludes a hypothetical self-loop, matching MemoryStore's skip.
-/// Placeholders: `$1` session, `$2` node, `$3` cutoff timestamp (Rust-computed).
+/// Blast radius (spec §4.1 with the #36 errata, `MemoryStore`-equivalent): the number of
+/// `node`'s **dependents**, all of them rather than exclusive ones. A dependent is the
+/// source of an aged `Dependency` edge into `node` (`record_action`'s `action ->
+/// depends_on` direction) or the target of an aged `Hierarchical` edge out of it (a
+/// child), per [`crate::types::EdgeType::dependent_end`]; `Causal`, provenance and
+/// association edges declare none. `UNION` deduplicates. The dependent must be a concept
+/// of the session other than `node` (a self-loop is not a dependent), matching
+/// `MemoryStore::aged_dependents`. Edges age on their about-time (D: `COALESCE(e.event_time,
+/// e.created_at)`). Placeholders: `$1` session, `$2` node, `$3` cutoff timestamp
+/// (Rust-computed).
 pub(super) const BLAST_RADIUS_SQL: &str = r#"
+WITH dependents AS (
+    SELECT e.source AS id FROM edges e
+    WHERE e.session_id = $1 AND e.target = $2 AND e.edge_type = 'Dependency'
+      AND COALESCE(e.event_time, e.created_at) <= $3
+    UNION
+    SELECT e.target AS id FROM edges e
+    WHERE e.session_id = $1 AND e.source = $2 AND e.edge_type = 'Hierarchical'
+      AND COALESCE(e.event_time, e.created_at) <= $3
+)
 SELECT count(*) AS n
-FROM concepts c
-WHERE c.session_id = $1
-  AND c.id <> $2
-  AND EXISTS (
-      SELECT 1 FROM edges e
-      JOIN concepts src ON src.id = e.source AND src.session_id = $1
-      WHERE e.target = c.id AND e.source = $2
-        AND e.edge_type IN ('Dependency', 'Causal', 'Hierarchical')
-        AND COALESCE(e.event_time, e.created_at) <= $3
-  )
-  AND NOT EXISTS (
-      SELECT 1 FROM edges e2
-      JOIN concepts src2 ON src2.id = e2.source AND src2.session_id = $1
-      WHERE e2.target = c.id AND e2.source <> $2
-        AND e2.edge_type IN ('Dependency', 'Causal', 'Hierarchical')
-        AND COALESCE(e2.event_time, e2.created_at) <= $3
-  )
+FROM dependents d
+JOIN concepts c ON c.id = d.id AND c.session_id = $1
+WHERE d.id <> $2
 "#;
 
-/// Interaction span + temporal coverage (spec §4.1, `MemoryStore`-equivalent): distinct
-/// origin interactions of concepts reachable via aged structural inbound edges, and the
-/// share of the session's temporal extent those interactions cover. Filters BOTH the
-/// edge and the interaction age (MemoryStore parity — see module doc). The `CASE` keeps
-/// the coverage `0.0` when no spans match (a `NULL` epoch-arithmetic result would
-/// otherwise surface as a decode error). The extent is never `NULL` while the span is
-/// non-empty (the span's interactions belong to the same session), so the `ELSE` arm
-/// covers exactly one case: a non-empty span over a **single-point session extent**
-/// (extent <= 0) — that interaction spans the whole session, so coverage is `1.0`
-/// (F1: canonization Stage 2 parity with MemoryStore in short sessions).
+/// Interaction span + temporal coverage (spec §4.1 with the #36 errata,
+/// `MemoryStore`-equivalent): the distinct origin interactions of `node`'s dependents
+/// (the `dependents` CTE, identical to [`BLAST_RADIUS_SQL`]'s), other than `node`'s own
+/// origin interaction, and the share of the session's temporal extent they cover. Filters
+/// BOTH the dependence edge and the interaction age (MemoryStore parity — see module
+/// doc). The `CASE` keeps the coverage `0.0` when no spans match (a `NULL`
+/// epoch-arithmetic result would otherwise surface as a decode error). The extent is
+/// never `NULL` while the span is non-empty (the span's interactions belong to the same
+/// session), so the `ELSE` arm covers exactly one case: a non-empty span over a
+/// **single-point session extent** (extent <= 0) — that interaction spans the whole
+/// session, so coverage is `1.0` (F1: canonization Stage 2 parity with MemoryStore in
+/// short sessions).
 ///
-/// **Session scope (F5).** `i.session_id = $1` is not redundant with
-/// `e.session_id = $1`: `concepts.origin_interaction` is a **global** FK, so a
-/// concept in session S may legally point at an interaction in session S′.
-/// Without the filter the span counted those foreign interactions — inflating
-/// `distinct` against a session `MemoryStore` never sees, while the extent CTE
-/// stayed session-filtered. The `least`/`greatest` clamp is the same guard
-/// `MemoryStore` and SQLite apply in Rust (`clamp(0.0, 1.0)`): a span whose
+/// **Own origin (#36).** `node`'s own origin interaction never counts as support: a
+/// parent derived together with its children is one interaction vouching for itself.
+///
+/// **Session scope (F5).** `i.session_id = $1` is not redundant: concepts'
+/// `origin_interaction` is a **global** FK, so a concept in session S may legally point
+/// at an interaction in session S′. Without the filter the span counted those foreign
+/// interactions — inflating `distinct` against a session `MemoryStore` never sees,
+/// while the extent CTE stayed session-filtered. The `least`/`greatest` clamp is the
+/// same guard `MemoryStore` and SQLite apply in Rust (`clamp(0.0, 1.0)`): a span whose
 /// endpoints fall outside the session extent must not report a ratio above 1.0.
 /// Placeholders: `$1` session, `$2` node, `$3` cutoff timestamp.
 pub(super) const INTERACTION_SPAN_SQL: &str = r#"
-WITH span AS (
-    SELECT DISTINCT i.id AS iid, COALESCE(i.event_time, i.created_at) AS ts
-    FROM edges e
-    JOIN concepts src ON src.id = e.source AND src.session_id = $1
-    JOIN interactions i ON i.id = src.origin_interaction AND i.session_id = $1
-    WHERE e.target = $2
-      AND e.session_id = $1
-      AND e.edge_type IN ('Dependency', 'Causal', 'Hierarchical')
+WITH dependents AS (
+    SELECT e.source AS id FROM edges e
+    WHERE e.session_id = $1 AND e.target = $2 AND e.edge_type = 'Dependency'
       AND COALESCE(e.event_time, e.created_at) <= $3
+    UNION
+    SELECT e.target AS id FROM edges e
+    WHERE e.session_id = $1 AND e.source = $2 AND e.edge_type = 'Hierarchical'
+      AND COALESCE(e.event_time, e.created_at) <= $3
+),
+span AS (
+    SELECT DISTINCT i.id AS iid, COALESCE(i.event_time, i.created_at) AS ts
+    FROM dependents d
+    JOIN concepts c ON c.id = d.id AND c.session_id = $1
+    JOIN interactions i ON i.id = c.origin_interaction AND i.session_id = $1
+    WHERE d.id <> $2
       AND COALESCE(i.event_time, i.created_at) <= $3
+      AND NOT EXISTS (
+          SELECT 1 FROM concepts own
+          WHERE own.id = $2 AND own.session_id = $1 AND own.origin_interaction = i.id
+      )
 ),
 extent AS (
     SELECT min(COALESCE(event_time, created_at)) AS lo,
