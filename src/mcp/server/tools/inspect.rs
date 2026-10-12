@@ -144,11 +144,12 @@ impl LamboServer {
         // #36 PR 3: why the focus is or is not admitted to its next status,
         // through the evaluator's own predicates and the live config. A store
         // fault degrades this additive section to a warning; the
-        // neighbourhood still answers.
-        let params = EvalParams::from_config(self.mem.config());
+        // neighbourhood still answers. A scoped call explains the layer's
+        // concept against the layer's own graph, store and config (#33).
+        let params = EvalParams::from_config(mem.config());
         let admission = match explain_node(
-            self.mem.graph(),
-            self.mem.store().as_ref(),
+            mem.graph(),
+            mem.store().as_ref(),
             focus_id,
             &params,
             chrono::Utc::now(),
