@@ -197,3 +197,90 @@ async fn a_candidate_lookup_timeout_is_transient_and_writes_nothing() {
     );
     assert_eq!(graph.read().concepts().count(), 0);
 }
+
+/// An embedder that batches through the trait's default `embed_batch` and
+/// never answers a text containing "stall"; optionally its `embed_batch`
+/// ignores the deadline altogether.
+struct Stalls {
+    inner: FixtureEmbedder,
+    calls: AtomicUsize,
+    overruns: bool,
+}
+
+#[async_trait]
+impl Embedder for Stalls {
+    fn dimensions(&self) -> usize {
+        self.inner.dimensions()
+    }
+    async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbedError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if text.contains("stall") {
+            std::future::pending::<()>().await;
+        }
+        self.inner.embed(text).await
+    }
+    async fn embed_batch(
+        &self,
+        texts: &[&str],
+        deadline: tokio::time::Instant,
+    ) -> Vec<Result<Vec<f32>, EmbedError>> {
+        if self.overruns {
+            std::future::pending::<()>().await;
+        }
+        let mut out = Vec::new();
+        for text in texts {
+            if tokio::time::Instant::now() >= deadline {
+                out.push(Err(crate::embed::deadline_passed()));
+                continue;
+            }
+            out.push(
+                tokio::time::timeout_at(deadline, self.embed(text))
+                    .await
+                    .unwrap_or_else(|_| Err(crate::embed::deadline_passed())),
+            );
+        }
+        out
+    }
+    fn batch_capacity(&self) -> usize {
+        8
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_gathered_round_keeps_the_slots_done_before_its_deadline() {
+    // #125 review H2: a timeout around the whole round dropped the vectors
+    // of texts it had already embedded.
+    let e = Stalls {
+        inner: FixtureEmbedder::new(),
+        calls: AtomicUsize::new(0),
+        overruns: false,
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let got = embed_gathered(&e, &["kept one", "stall here", "never started"], deadline).await;
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].0, "kept one");
+    assert_eq!(
+        e.calls.load(Ordering::SeqCst),
+        2,
+        "nothing starts after the deadline"
+    );
+
+    // Past the deadline no round starts at all.
+    let got = embed_gathered(&e, &["a late one", "another"], deadline).await;
+    assert!(got.is_empty());
+    assert_eq!(e.calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_round_that_overruns_its_deadline_is_abandoned_just_past_it() {
+    let e = Stalls {
+        inner: FixtureEmbedder::new(),
+        calls: AtomicUsize::new(0),
+        overruns: true,
+    };
+    let start = tokio::time::Instant::now();
+    let deadline = start + Duration::from_secs(5);
+    let got = embed_gathered(&e, &["one", "two"], deadline).await;
+    assert!(got.is_empty());
+    assert_eq!(tokio::time::Instant::now(), deadline + BATCH_DEADLINE_GRACE);
+}

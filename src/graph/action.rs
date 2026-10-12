@@ -205,8 +205,16 @@ pub async fn embed_action_contents(
         // and for the same downstream reason: the durable-intent replay's
         // consume-or-keep decision turns on whether anything was learned about
         // this input. A timeout learned nothing, so it is `EmbedUnavailable`.
-        match tokio::time::timeout_at(io_deadline, embedder.embed(content)).await {
-            Err(_) => {
+        // Review H2: an embed is not started once the budget is spent.
+        let embedded = if tokio::time::Instant::now() >= io_deadline {
+            Err(())
+        } else {
+            tokio::time::timeout_at(io_deadline, embedder.embed(content))
+                .await
+                .map_err(|_| ())
+        };
+        match embedded {
+            Err(()) => {
                 return Err(LamboError::EmbedUnavailable(format!(
                     "record_action embed timed out after {:?}; nothing was written — the write \
                      is refused rather than applied without its vectors (a concept stored with \

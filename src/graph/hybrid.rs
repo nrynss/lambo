@@ -2013,15 +2013,27 @@ impl EmbedCache {
     }
 }
 
+/// How long past its deadline a batched round may take to return before it
+/// is abandoned (#125 review H2). [`Embedder::embed_batch`] must return by
+/// its deadline; this only bounds an adapter that does not. It extends the
+/// worst case of one call's I/O past [`HYBRID_IO_TIMEOUT`] by this much,
+/// which `RECEIPT_WAIT_MAX`'s 4 s of headroom over that budget covers.
+pub(crate) const BATCH_DEADLINE_GRACE: Duration = Duration::from_millis(100);
+
 /// Embed `texts` in rounds of the embedder's [`Embedder::batch_capacity`]
 /// under `io_deadline`, and return the vectors that came back (#125).
 ///
-/// Best effort, by design: a text whose slot failed, or that a timed-out
-/// round never answered, is simply absent, and the caller embeds it alone
-/// through its ordinary path, which turns that text's failure into that
-/// write's refusal with the right class. Nothing is gathered when the
-/// embedder does not batch (capacity 1) or there is only one text: that
-/// path is then exactly the one-at-a-time path it always was.
+/// Best effort, by design: a text whose slot failed, or that the deadline
+/// overtook, is simply absent, and the caller embeds it alone through its
+/// ordinary path, which turns that text's failure into that write's refusal
+/// with the right class. Nothing is gathered when the embedder does not
+/// batch (capacity 1) or there is only one text: that path is then exactly
+/// the one-at-a-time path it always was.
+///
+/// Review H2: a round is handed the deadline itself, so the slots it
+/// finished before the deadline keep their vectors; no round starts after
+/// the deadline; and [`BATCH_DEADLINE_GRACE`] past it, a round that has not
+/// returned (an adapter overrunning its deadline) is abandoned.
 pub(crate) async fn embed_gathered(
     embedder: &dyn Embedder,
     texts: &[&str],
@@ -2033,7 +2045,14 @@ pub(crate) async fn embed_gathered(
         return out;
     }
     for round in texts.chunks(capacity) {
-        let Ok(results) = tokio::time::timeout_at(io_deadline, embedder.embed_batch(round)).await
+        if tokio::time::Instant::now() >= io_deadline {
+            break;
+        }
+        let Ok(results) = tokio::time::timeout_at(
+            io_deadline + BATCH_DEADLINE_GRACE,
+            embedder.embed_batch(round, io_deadline),
+        )
+        .await
         else {
             break;
         };
@@ -2160,8 +2179,16 @@ async fn embed_or_refuse(
     context: &str,
     io_deadline: tokio::time::Instant,
 ) -> Result<Vec<f32>, LamboError> {
-    match tokio::time::timeout_at(io_deadline, embedder.embed(context)).await {
-        Err(_) => Err(LamboError::EmbedUnavailable(format!(
+    // Review H2: an embed is not started once the budget is spent.
+    let embedded = if tokio::time::Instant::now() >= io_deadline {
+        Err(())
+    } else {
+        tokio::time::timeout_at(io_deadline, embedder.embed(context))
+            .await
+            .map_err(|_| ())
+    };
+    match embedded {
+        Err(()) => Err(LamboError::EmbedUnavailable(format!(
             "hybrid embed timed out after {HYBRID_IO_TIMEOUT:?}; nothing was written — the write \
              is refused rather than applied without its vector (a concept stored with no \
              embedding is unfindable by semantic recall)"

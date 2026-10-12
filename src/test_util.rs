@@ -591,7 +591,11 @@ impl Embedder for BatchingEmbedder {
     async fn embed_query(&self, text: &str) -> Result<Vec<f32>, EmbedError> {
         self.embed_as(text, TextRole::Query).await
     }
-    async fn embed_batch(&self, texts: &[&str]) -> Vec<Result<Vec<f32>, EmbedError>> {
+    async fn embed_batch(
+        &self,
+        texts: &[&str],
+        deadline: tokio::time::Instant,
+    ) -> Vec<Result<Vec<f32>, EmbedError>> {
         assert!(
             texts.len() <= self.capacity,
             "a caller sent {} texts to an embedder of capacity {}",
@@ -601,7 +605,15 @@ impl Embedder for BatchingEmbedder {
         self.rounds
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.round_sizes.lock().push(texts.len());
-        self.pass_gate().await;
+        if tokio::time::timeout_at(deadline, self.pass_gate())
+            .await
+            .is_err()
+        {
+            return texts
+                .iter()
+                .map(|_| Err(crate::embed::deadline_passed()))
+                .collect();
+        }
         if self.fail_rounds.load(std::sync::atomic::Ordering::SeqCst) {
             return texts
                 .iter()

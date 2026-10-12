@@ -219,16 +219,25 @@ impl Embedder for FixtureEmbedder {
 
     /// Native batch (#125): each text gets exactly what [`Self::embed`]
     /// gives it, empty-input refusal included, so a batched write and an
-    /// unbatched one are indistinguishable in their vectors.
-    async fn embed_batch(&self, texts: &[&str]) -> Vec<Result<Vec<f32>, EmbedError>> {
+    /// unbatched one are indistinguishable in their vectors. A text reached
+    /// after `deadline` fails its own slot, as the trait requires.
+    async fn embed_batch(
+        &self,
+        texts: &[&str],
+        deadline: tokio::time::Instant,
+    ) -> Vec<Result<Vec<f32>, EmbedError>> {
         let mut out = Vec::with_capacity(texts.len());
         for text in texts {
-            out.push(self.embed(text).await);
+            if tokio::time::Instant::now() >= deadline {
+                out.push(Err(super::deadline_passed()));
+            } else {
+                out.push(self.embed(text).await);
+            }
         }
         out
     }
 
-    /// The candle adapter's coalescer width, so tests over the fixture take
+    /// The candle adapter's per-round width, so tests over the fixture take
     /// the same gathered write path a batching deployment takes.
     fn batch_capacity(&self) -> usize {
         FIXTURE_BATCH_CAPACITY
@@ -236,7 +245,7 @@ impl Embedder for FixtureEmbedder {
 }
 
 /// What [`FixtureEmbedder`] reports from [`Embedder::batch_capacity`] (#125).
-pub(crate) const FIXTURE_BATCH_CAPACITY: usize = 32;
+pub(crate) const FIXTURE_BATCH_CAPACITY: usize = 8;
 
 #[cfg(test)]
 mod tests {

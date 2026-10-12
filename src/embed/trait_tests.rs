@@ -72,7 +72,7 @@ async fn default_embed_image_is_unsupported_and_permanent() {
 async fn default_embed_batch_is_embed_per_text_in_order() {
     // #125: the default is a loop of `embed`, each slot its own result.
     let e = TextOnly;
-    let out = e.embed_batch(&["a", "  ", "abc"]).await;
+    let out = e.embed_batch(&["a", "  ", "abc"], later()).await;
     assert_eq!(out.len(), 3);
     assert_eq!(out[0].as_ref().unwrap(), &vec![1.0, 1.0]);
     assert!(
@@ -82,7 +82,55 @@ async fn default_embed_batch_is_embed_per_text_in_order() {
     );
     assert_eq!(out[2].as_ref().unwrap(), &vec![3.0, 1.0]);
     assert_eq!(e.batch_capacity(), 1, "a loop batches nothing");
-    assert!(e.embed_batch(&[]).await.is_empty());
+    assert!(e.embed_batch(&[], later()).await.is_empty());
+}
+
+fn later() -> tokio::time::Instant {
+    tokio::time::Instant::now() + std::time::Duration::from_secs(30)
+}
+
+/// Counts its embeds, and never answers for a text containing "stall".
+struct Stalling {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl Embedder for Stalling {
+    fn dimensions(&self) -> usize {
+        2
+    }
+
+    async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbedError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if text.contains("stall") {
+            std::future::pending::<()>().await;
+        }
+        Ok(vec![text.len() as f32, 1.0])
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn default_embed_batch_keeps_what_finished_by_the_deadline_and_starts_nothing_after() {
+    // #125 review H2: a slot done before the deadline keeps its vector; the
+    // one in flight at the deadline fails transient; none is started after.
+    let e = Stalling {
+        calls: Default::default(),
+    };
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let out = e.embed_batch(&["ab", "stall", "abc"], deadline).await;
+    assert_eq!(out[0].as_ref().unwrap(), &vec![2.0, 1.0]);
+    assert!(
+        matches!(out[1], Err(EmbedError::Unavailable(_))),
+        "{:?}",
+        out[1]
+    );
+    assert!(
+        matches!(out[2], Err(EmbedError::Unavailable(_))),
+        "{:?}",
+        out[2]
+    );
+    assert_eq!(e.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert!(tokio::time::Instant::now() >= deadline);
 }
 
 #[test]
@@ -155,7 +203,7 @@ async fn the_fixture_batch_matches_its_single_embeds() {
     let f = FixtureEmbedder::new();
     assert!(f.batch_capacity() > 1);
     let texts = ["user schema", "", "red silk saree"];
-    let out = f.embed_batch(&texts).await;
+    let out = f.embed_batch(&texts, later()).await;
     for (text, got) in texts.iter().zip(&out) {
         match f.embed(text).await {
             Ok(v) => assert_eq!(got.as_ref().unwrap(), &v, "{text:?}"),
