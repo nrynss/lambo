@@ -61,7 +61,7 @@ That score is only the entry fee. Promotion runs three gates, one hop per cycle:
   distinct origin interactions other than its own, covering at least 0.3 of the session's
   temporal extent. Edges younger than 60 seconds do not count, so a burst of writes cannot
   inflate a span.
-- **Canonical.** Still meets the Venerable bar, has more than 5 dependents (its blast
+- **Canonical.** Still meets the Venerable bar (under the default Swarm policy), has more than 5 dependents (its blast
   radius), and is outside the 300 second re-promotion cooldown, so a flapping concept
   cannot oscillate into permanence.
 

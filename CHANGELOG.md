@@ -14,12 +14,17 @@
 1. **Nothing to migrate.** No schema, stored edge or `lambo.toml` key
    changed. Stored edges are read with the #36 meaning when the store
    answers.
-2. **Existing Venerables are re-checked before they can go Canonical.**
-   Venerables admitted by 0.5.0 counted inbound `Causal` edges (actions
-   that produced or modified them) as support. That no longer counts, and a
-   Venerable must now pass Stage 2 again before Stage 3 can promote it, so
-   an old Venerable with only `Causal` support stays Venerable instead of
-   jumping to Canonical on its first cycle. Nothing is demoted. On a copy of
+2. **Existing Venerables are re-checked before they can go Canonical
+   (Swarm).** Venerables admitted by 0.5.0 counted inbound `Causal` edges
+   (actions that produced or modified them) as support. That no longer
+   counts, and under Swarm a Venerable must now pass Stage 2 again before
+   Stage 3 can promote it, so an old Venerable with only `Causal` support
+   stays Venerable instead of jumping to Canonical on its first cycle.
+   Nothing is demoted. This includes a session's root goal, which
+   `set_root_goal` makes Venerable directly: under Swarm it now needs Stage 2
+   support (three dependents' interactions spanning 30% of the session) to
+   go Canonical. Solo is unchanged: it still probes and stamps blast radius
+   and admits by its score bands. On a copy of
    the dogfood store taken 2026-10-12, no Candidate or Venerable would have
    promoted on the first evaluation, with or without this check, and all 7
    Venerables lose their Stage 2 support.
@@ -69,6 +74,11 @@
 
 ### Added
 
+- A live check of the #36 dependents case on Postgres and Cockroach, with
+  MemoryStore parity. It is manual by the owner's decision and is not part
+  of CI: run `LAMBO_POSTGRES_DSN=<dsn> cargo test --no-default-features --features store-postgres --lib store::pg::dependents_live -- --ignored` or, for
+  Cockroach, `LAMBO_COCKROACH_DSN=<dsn> cargo test --features store-cockroach,fixtures --lib conformance_suite -- --ignored`.
+
 - `EdgeType::dependent_end`, `DependentEnd` (re-exported at the crate
   root), `Edge::dependence` and `recall::format::dependents_of`.
 - `lambo inspect` and `lambo_inspect` list the dependents their blast radius
@@ -116,11 +126,16 @@
   action that produced or modified a node no longer counts toward it there.
   `Causal` edges still count where they did outside that relation: Solo's
   valid-action count, the score's edge-type bonus, and #29's GC protection.
-- A Venerable must pass Stage 2 again before Stage 3 can promote it.
+- Under Swarm, a Venerable must pass Stage 2 again before Stage 3 can
+  promote it. Solo is unchanged.
 - The high-risk check reads a node's live dependent count instead of the
   stored blast-radius stamp, so a node with five or more dependents counts
-  as high-value whatever its status. The demo's agent B recall gains one
-  such line, for `auth middleware`.
+  as high-value whatever its status. The live count has no age floor,
+  unlike Stage 3, and the edge that gives a node its fifth dependent is
+  itself a fresh write, so reaching five fires a high-risk warning at once.
+  In the demo, `auth middleware` (five actions depend on it) is now
+  high-value, so agent B's recall carries a high-risk line for it: nine
+  warnings instead of eight.
 - The REST API fixture plants `user schema`'s eight fields as `parent_of`
   children, so it has 14 dependents (was 8). The demo's `user schema` reports
   15 (its nine children plus the six actions that depend on it; was 9).

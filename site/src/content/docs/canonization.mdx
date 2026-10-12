@@ -81,7 +81,7 @@ $$
 
 A dependent is a concept with a `Dependency` edge into $c$, which is what `lambo_record_action`'s `depends_on` writes, or one of $c$'s `parent_of` children. Every dependent counts, including one that also depends on something else. `Causal` edges, which `produces` and `modifies` write, record provenance and count for nothing, and neither do association edges. Lambo reads the stored edges this way when it answers; nothing is migrated.
 
-The comparison is strict. Stage 3 also asks again whether the concept still meets Stage 2: Venerable is not a permanent pass, so a concept whose support has thinned, or was admitted under an older definition of support, waits at Venerable instead of promoting on blast radius alone. A concept that was demoted also stays inside a `canonization_repromotion_cooldown` of 300 seconds before it can be promoted again, so a flapping concept cannot oscillate its way into permanence. The cooldown is checked first, because it is a field comparison while blast radius is a store round trip.
+The comparison is strict. Under the default `Swarm` policy, Stage 3 also asks again whether the concept still meets Stage 2: Venerable is not a permanent pass, so a concept whose support has thinned, or was admitted under an older definition of support, waits at Venerable instead of promoting on blast radius alone. A concept that was demoted also stays inside a `canonization_repromotion_cooldown` of 300 seconds before it can be promoted again, so a flapping concept cannot oscillate its way into permanence. The cooldown is checked first, because it is a field comparison while blast radius is a store round trip.
 
 <Note>
 The blast radius that admitted the concept is the one stamped on the audit row. It is not re-queried afterwards, which on a live store could write a row that contradicts the gate that let the concept through.
@@ -96,6 +96,8 @@ $$
 $$
 
 $Q$ is the BM25 keyword score, or the merged similarity score for a vector hit. It is $0$ for a concept that arrived through graph traversal rather than as a query hit.
+
+A recalled concept that was just written to is also flagged as a high-risk modification when it is high-value: Canonical, Venerable, or with five or more dependents counted live from the graph. That count has no age floor, unlike Stage 3, so the edge that gives a concept its fifth dependent is itself the fresh write that raises the flag.
 
 That last rule is the one that makes dependency retrieval work. A concept nobody searched for still surfaces if the graph says it is load-bearing, carried entirely by the daemon half of the mix. Canonical concepts are partitioned ahead of everything else regardless of score, and each one returns marked with its blast radius and a warning.
 

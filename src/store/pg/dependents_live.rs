@@ -3,10 +3,21 @@
 //! `interaction_span`, against the case's expected answers and, when the
 //! build carries `MemoryStore`, against MemoryStore on every concept.
 //!
-//! Live only. The Postgres leg is the `#[ignore]`d test below; the Cockroach
-//! leg runs inside `cockroach::conformance::conformance_suite`. The SQL text
-//! itself is checked offline in `cockroach::tests::sql_shapes`, and the same
-//! case runs offline on MemoryStore and SQLite.
+//! Live only, and run by hand: by the owner's decision this check is not part
+//! of CI. The Postgres leg is the `#[ignore]`d test below:
+//!
+//! ```text
+//! LAMBO_POSTGRES_DSN=<dsn> cargo test --no-default-features --features store-postgres --lib store::pg::dependents_live -- --ignored
+//! ```
+//!
+//! The Cockroach leg runs inside `cockroach::conformance::conformance_suite`:
+//!
+//! ```text
+//! LAMBO_COCKROACH_DSN=<dsn> cargo test --features store-cockroach,fixtures --lib conformance_suite -- --ignored
+//! ```
+//!
+//! The SQL text itself is checked offline in `cockroach::tests::sql_shapes`,
+//! and the same case runs offline on MemoryStore and SQLite.
 //!
 //! The case uses fixed node ids and the session ids `deps` / `deps-other`, so
 //! a re-run against a persistent database upserts the same rows and expects

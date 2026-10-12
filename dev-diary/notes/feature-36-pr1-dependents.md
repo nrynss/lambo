@@ -78,6 +78,14 @@ script is unchanged: `user schema` has nine `parent_of` children (the nine
 the spec counted) and six actions whose `depends_on` names it, and the six
 now count. The spec's 9 is the pre-#36 count.
 
+**High-risk check.** `daemon::events::high_risk_at` reads the live
+dependent count, with no age floor (unlike Stage 3), and only after the
+node has a fresh write, so a quiet cycle costs what it did in 0.5.0. The
+edge that gives a node its fifth dependent is itself a fresh write, so
+reaching five fires a high-risk warning at once. In the demo, `auth
+middleware` (five actions depend on it) now carries a high-risk line in
+agent B's recall: nine warnings instead of eight.
+
 **Stored stamps.** `Concept::blast_radius` and
 `CanonizationEvent::blast_radius` are written at Stage 3 promotion. Rows
 written by 0.5.0 hold the pre-#36 exclusive count and are not rewritten:
@@ -100,11 +108,20 @@ whose only support was `Causal` (a cross-repo path hub such as a README, see
 had more than five aged `depends_on` sources, even from one interaction, and
 carry a ⚑ warning. Budget demotion cannot catch it with 0 Canonicals.
 
-`canon::eval::verdicts` now runs `stage2_passes` for each Stage 3 window
-member before its blast probe, with the same age floor. The design does not
-exempt Venerables from Stage 2, and its acceptance wants Canonical rulings to
-be both supported and load-bearing. Solo ignores verdicts and is unchanged;
-a root-goal Venerable now also needs Stage 2 support to go Canonical.
+Under Swarm, `canon::eval::verdicts` now runs `stage2_passes` for each
+Stage 3 window member before its blast probe, with the same age floor. The
+design does not exempt Venerables from Stage 2, and its acceptance wants
+Canonical rulings to be both supported and load-bearing. A root-goal
+Venerable (made Venerable directly by `set_root_goal`) now also needs Stage 2
+support to go Canonical under Swarm.
+
+Solo keeps its plain probe. It admits by score band and does not consume
+the verdict for admission, but `apply` stamps the audit row with the blast
+measured by a passing Stage 3 verdict, so skipping the probe for Solo
+promoted the same node with no measured blast on its row (review M1; the
+first version of this guard claimed Solo was unchanged and was wrong). The
+re-check is selected by an exhaustive match on `PromotionPolicy`; test
+`solo_keeps_its_stage_3_probe_and_stamps_the_measured_blast`.
 Venerables are never demoted for losing Stage 2; they stop progressing.
 Tests: `a_venerable_that_no_longer_holds_stage_2_does_not_promote` (fails
 without the re-check) and `a_venerable_that_holds_stage_2_and_stage_3_promotes`.
@@ -195,8 +212,10 @@ quote captures with the old count and are left as captured.
   `pg/cockroach/tests/sql_shapes.rs`. `pg::dependents_live` runs the shared
   case live with MemoryStore parity: `postgres_answers_the_dependents_case`
   (`#[ignore]`d) and a leg in Cockroach's `conformance_suite`. Neither was
-  run here (no live database); the `postgres-live` CI job runs tests by name
-  and does not list the new one yet.
+  run here (no live database). By the owner's decision the Postgres check
+  stays manual and is not part of CI. Run it by hand with
+  `LAMBO_POSTGRES_DSN=<dsn> cargo test --no-default-features --features store-postgres --lib store::pg::dependents_live -- --ignored`; the Cockroach leg with
+  `LAMBO_COCKROACH_DSN=<dsn> cargo test --features store-cockroach,fixtures --lib conformance_suite -- --ignored`.
 - Inspect: `inspect_lists_the_dependents_it_counts`
   (`src/surface/neighbourhood.rs`) and the portal's
   `inspect_dependents_follow_the_dependents_case`.
