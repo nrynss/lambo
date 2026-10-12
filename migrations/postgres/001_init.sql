@@ -191,6 +191,8 @@ CREATE TABLE IF NOT EXISTS reservations (
     PRIMARY KEY (session_id, node_id)
 );
 
+-- holder = 'agent@host#pid', optionally followed by ';boot=<id>;pidns=<inode>'
+-- (#126, the holder process's boot and PID namespace; older rows lack it).
 CREATE TABLE IF NOT EXISTS session_leases (
     session_id  TEXT PRIMARY KEY,
     holder      TEXT NOT NULL,

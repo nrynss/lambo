@@ -18,7 +18,10 @@
 //! message hedges what it infers. The one exception (#126): when the holder's
 //! token carries a boot id and a PID-namespace id and both equal this
 //! process's, a pid that is not visible is a process that has exited, and the
-//! message says so plainly. Neither changes what the lease does: the refusal
+//! message says so plainly. Residual risk: a VM or microVM cloned from a
+//! snapshot, or a process restored with CRIU, keeps the boot id, and every
+//! Linux kernel's root PID namespace has the same inode, so a live holder on
+//! such a clone can be called gone. The lease itself is unaffected. Neither changes what the lease does: the refusal
 //! stands until the lease expires or an operator expires it by hand. Nothing
 //! here takes over.
 
@@ -159,8 +162,8 @@ pub(crate) fn format_lease_held(
              operator can force a takeover ({TAKEOVER_NOTE})"
         ),
         HolderEvidence::ProcessGone { pid, certain: true } => format!(
-            "{opening}, and the holder process is gone: it ran in this boot and PID namespace, and \
-             no process {pid} exists. Its lease ({refreshed}) expires in {expires_in}s. Refusing \
+            "{opening}, and the holder process is gone: it ran in this boot (and PID namespace, \
+             where the platform has them), and no process {pid} exists. Its lease ({refreshed}) expires in {expires_in}s. Refusing \
              to open a second writer until it does; an operator can force a takeover now instead \
              ({TAKEOVER_NOTE})"
         ),
@@ -184,9 +187,10 @@ pub(crate) fn format_lease_held(
 
 /// [`HolderEvidence::ProcessGone`], when the holder token names this host and
 /// no process with its pid is visible. `None` whenever that cannot be
-/// established: another host, a host name that is only the fallback (so it
-/// proves nothing about sharing a host), a token in another shape, this very
-/// process, or a pid that exists (including one this process may not signal).
+/// established: another host or a host name that is only the fallback (so it
+/// proves nothing about sharing a host), unless the token's boot and PID
+/// namespace match this process's; a token in another shape; this very
+/// process; or a pid that exists (including one this process may not signal).
 fn local_holder_gone(token: &str) -> Option<HolderEvidence> {
     assess_holder(
         token,
@@ -207,7 +211,16 @@ fn assess_holder(
     is_gone: impl Fn(u32) -> bool,
 ) -> Option<HolderEvidence> {
     let holder = parse_holder(token)?;
-    if holder.pid == our_pid || holder.host == UNKNOWN_HOST || holder.host != our_host {
+    if holder.pid == our_pid {
+        return None;
+    }
+    // Same boot and PID namespace is stronger evidence of a shared pid space
+    // than a host name, so it stands on its own (review L9): a container with
+    // its own host name on the host's PID namespace, or two processes that
+    // both fell back to the placeholder name, are judged on it. Without it,
+    // the host name has to match, and the placeholder never does.
+    let certain = same_instance(&holder.instance, ours);
+    if !certain && (holder.host == UNKNOWN_HOST || holder.host != our_host) {
         return None;
     }
     if !is_gone(holder.pid) {
@@ -215,7 +228,7 @@ fn assess_holder(
     }
     Some(HolderEvidence::ProcessGone {
         pid: holder.pid,
-        certain: same_instance(&holder.instance, ours),
+        certain,
     })
 }
 
@@ -416,7 +429,8 @@ mod tests {
             msg,
             "session s is already held by another writer (a@h#37916;boot=b1;pidns=7) — it \
              acquired the single-writer lease 77s ago, and the holder process is gone: it ran \
-             in this boot and PID namespace, and no process 37916 exists. Its lease (last \
+             in this boot (and PID namespace, where the platform has them), and no process \
+             37916 exists. Its lease (last \
              refreshed 12s ago) expires in 33s. Refusing to open a second writer until it \
              does; an operator can force a takeover now instead (see the single-writer lease \
              note in docs/reference/cli.mdx)"
@@ -479,7 +493,21 @@ mod tests {
         // No hint at all: the pid is visible, another host, the fallback
         // host, this very process, a token in another shape.
         assert_eq!(assess("a@h#5;boot=b1;pidns=7", &ours, &alive), None);
-        assert_eq!(assess("a@other#5;boot=b1;pidns=7", &ours, &gone), None);
+        assert_eq!(assess("a@other#5", &ours, &gone), None);
+        assert_eq!(assess("a@other#5;boot=b2;pidns=7", &ours, &gone), None);
+        assert_eq!(
+            assess_holder(
+                &format!("a@{UNKNOWN_HOST}#5"),
+                UNKNOWN_HOST,
+                100,
+                &ours,
+                gone
+            ),
+            None
+        );
+        // Review L9: the same boot and namespace stand without the host name,
+        // the placeholder included.
+        assert_eq!(assess("a@other#5;boot=b1;pidns=7", &ours, &gone), plain);
         assert_eq!(
             assess_holder(
                 &format!("a@{UNKNOWN_HOST}#5;boot=b1;pidns=7"),
@@ -488,7 +516,7 @@ mod tests {
                 &ours,
                 gone
             ),
-            None
+            plain
         );
         assert_eq!(assess("a@h#100;boot=b1;pidns=7", &ours, &gone), None);
         assert_eq!(assess("lambo:released", &ours, &gone), None);

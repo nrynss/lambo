@@ -239,7 +239,9 @@ CREATE TABLE IF NOT EXISTS reservations (
 );
 
 -- Single-writer lease (spec §2.2, T8.6): one row per session enforcing one
--- writer across processes and hosts. holder = 'agent@host#pid'; acquired_at /
+-- writer across processes and hosts. holder = 'agent@host#pid', optionally
+-- followed by ';boot=<id>;pidns=<inode>' (#126, the holder process's boot and
+-- PID namespace; older rows lack it); acquired_at /
 -- expires_at are stamped from the CLUSTER clock (now()) — never a client
 -- argument (F18) — which is the authority two processes actually share. The
 -- adapter's acquire is a single INSERT ... ON CONFLICT DO UPDATE guarded by an

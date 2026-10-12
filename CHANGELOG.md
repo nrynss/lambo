@@ -57,8 +57,11 @@
   Readers accept both formats; a row written by an older Lambo parses as
   before. A lease refusal now says plainly that the holder process is gone
   only when the holder ran in this process's boot and PID namespace and its
-  pid is not visible; otherwise it keeps the hedged "looks gone" wording.
-  Lease, fencing and takeover are unchanged, and the hint stays advisory.
+  pid is not visible (with that match the host name is not compared);
+  otherwise it keeps the hedged "looks gone" wording. A VM cloned from a
+  snapshot, or a CRIU restore, keeps the boot id and the root PID namespace
+  inode, so on such clones the plain wording is still only a hint. Lease,
+  fencing and takeover are unchanged, and the hint stays advisory.
   In a mixed fleet, a 0.5.0 reader shows no liveness hint for a 0.6.0
   holder (it cannot parse the pid out of the new string); proxying between
   versions is unaffected, since the host still reads the same.
