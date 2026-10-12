@@ -140,20 +140,19 @@ fn assert_spec_13(outcome: &DemoOutcome) {
     );
 }
 
-/// Agent B's recall carries ten warnings, two of them agent B's own
+/// Agent B's recall carries eight warnings, two of them agent B's own
 /// conflict lines on `redis backend` and `middleware/session.rs`. Those
 /// writes are act II's, minutes before the recall on the script clock, so
 /// they hold only while the demo's conflict window spans the script (#95).
-/// One is the high-risk line for `auth middleware`: five actions depend on
-/// it, and since #36 the high-value check reads that live count. Since #36
-/// PR 3 one more is the high-risk line for a Venerable with four
-/// dependents: evidence-led Stage 1 lets it climb to Venerable, and a
-/// Venerable is high-value.
+/// One high-risk modification line remains, on `user schema`: since #36
+/// PR 3 a node is high-value only when Canonical or with more than five
+/// live dependents (Stage 3's bar), so `auth middleware` (five dependents,
+/// Venerable) and the Venerable file with four no longer raise one.
 fn assert_conflict_lines(outcome: &DemoOutcome) {
     const AGENT_B_LINE: &str = "Agent B wrote to it <n> seconds ago";
     assert_eq!(
         outcome.recall_warnings.len(),
-        10,
+        8,
         "agent B's recall must carry every warning main's demo renders: {:?}",
         outcome.recall_warnings
     );
@@ -187,6 +186,8 @@ fn assert_conflict_lines(outcome: &DemoOutcome) {
 fn assert_transcript(run: &DemoRun) {
     let text = run.transcript.join("\n");
     for beat in [
+        "also promoted on their own evidence (9 concepts;",
+        "    auth middleware            → Venerable  (5 dependents)",
         "ACT I",
         "ACT II",
         "ACT III",

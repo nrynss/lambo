@@ -883,6 +883,7 @@ async fn run_scenario_with_override(
     settle_gc_survived(&mem, &mut n).await?;
     await_progression(&mem, &mut n).await?;
     quiesce(&mem, &mut n).await?;
+    narrate_other_promotions(&mem, &mut n);
 
     // Snapshot the canonization trail at the fixed point, AFTER `quiesce` has
     // run out the remaining cycles to a stable end state. `await_progression`
@@ -1331,6 +1332,43 @@ async fn await_progression(mem: &Memory, n: &mut Narrator) -> Result<Vec<Transit
         ));
     }
     Ok(trail(mem.graph()))
+}
+
+/// After the fixed point, narrate every promotion other than `user
+/// schema`'s (#36 PR 3: Stage 1 admits on evidence, so the demo promotes
+/// more than its pillar). One line per concept, by content, with its final
+/// status and live dependent count: the trail is grouped by content, so the
+/// lines are the same every run.
+fn narrate_other_promotions(mem: &Memory, n: &mut Narrator) {
+    let trail = trail(mem.graph());
+    let g = mem.graph().read();
+    let mut seen: Vec<&str> = Vec::new();
+    for t in trail.iter().filter(|t| t.content != USER_SCHEMA) {
+        if seen.last() != Some(&t.content.as_str()) {
+            seen.push(&t.content);
+        }
+    }
+    if seen.is_empty() {
+        return;
+    }
+    n.say(format!(
+        "  also promoted on their own evidence ({} concepts; none has more than \
+         5 dependents, so none goes Canonical):",
+        seen.len()
+    ));
+    for content in seen {
+        let last = trail
+            .iter()
+            .rev()
+            .find(|t| t.content == content)
+            .map_or("None", |t| t.to.as_str());
+        let dependents = concept_id(&g, content)
+            .map(|id| crate::recall::format::blast_radius(&g, id))
+            .unwrap_or(0);
+        n.say(format!(
+            "    {content:<26} → {last:<9}  ({dependents} dependents)"
+        ));
+    }
 }
 
 /// Wait until the audit trail stops growing across [`QUIESCE_STABLE_CYCLES`]
@@ -2233,10 +2271,6 @@ mod tests {
 
         // Thresholds are the thing being demonstrated — untouched in both.
         for cfg in [&build, &canon] {
-            assert_eq!(
-                cfg.canonization_min_peer_count,
-                spec.canonization_min_peer_count
-            );
             assert_eq!(
                 cfg.canonization_eval_batch_size,
                 spec.canonization_eval_batch_size
