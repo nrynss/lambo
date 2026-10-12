@@ -16,6 +16,8 @@ mod contradicts_tests;
 mod eval;
 mod event_time;
 mod explain;
+#[cfg(all(test, feature = "store-memory", feature = "fixtures"))]
+mod fair_test_tests;
 mod gate;
 mod policy;
 mod stage1;
