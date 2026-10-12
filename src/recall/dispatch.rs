@@ -883,8 +883,8 @@ mod tests {
     // #130: the shared budget cut (`format::fit_blocks`)
     // -----------------------------------------------------------------------
 
-    /// `app router` is the structural source of a 6 KB `big handler` (the
-    /// strongest dependent, so ranked first) and a short `payments handler`.
+    /// A 6 KB `big handler` (the strongest dependent, so ranked first) and a
+    /// short `payments handler` both depend on `app router` (#36).
     fn oversized_first_dependent() -> Graph {
         let mut g = Graph::new(sid());
         let i1 = NodeId(uuid::Uuid::from_u64_pair(1, 1));
@@ -907,9 +907,11 @@ mod tests {
             g.insert_concept(concept(id, &content, ConceptType::Entity), i1)
                 .unwrap();
         }
-        g.upsert_edge(edge(1, 1, 2, EdgeType::Dependency, 5.0))
+        // Both handlers depend on the router: a Dependency edge's source
+        // rests on its target (#36).
+        g.upsert_edge(edge(1, 2, 1, EdgeType::Dependency, 5.0))
             .unwrap();
-        g.upsert_edge(edge(2, 1, 3, EdgeType::Dependency, 3.0))
+        g.upsert_edge(edge(2, 3, 1, EdgeType::Dependency, 3.0))
             .unwrap();
         g
     }
