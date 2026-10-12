@@ -259,7 +259,8 @@ pub fn proxyable(
 ///
 /// The agent id is caller-chosen and untrimmed (J1), so it can itself contain
 /// `@` and `#`. The host is the segment between the **last** `@` and the last
-/// `#`, which is exactly how `LeaseHolder::token` composes it.
+/// `#`, which is exactly how `LeaseHolder::token` composes it. The `;boot=`
+/// and `;pidns=` fields #126 adds follow the pid and are dropped with it.
 pub(super) fn holder_is_on_host(holder: &str, our_host: &str) -> bool {
     let Some(after_at) = holder.rsplit_once('@').map(|(_, rest)| rest) else {
         return false;

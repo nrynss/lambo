@@ -1,5 +1,71 @@
 # Changelog
 
+## Unreleased
+
+### Upgrading from 0.5.0
+
+- **Code or scripts that read `session_leases.holder` or
+  `LeaseHolder::token()`.** The holder string gains an optional
+  `;boot=<id>;pidns=<inode>` suffix after the pid. Ignore anything after
+  the pid that starts with `;`. Releasing another process's lease now needs
+  the holder-scoped operator statement below, not a rebuilt `LeaseHolder`.
+  See Breaking (library API).
+
+### Breaking (library API)
+
+- **`LeaseHolder::token()` and its `Display`, and the
+  `session_leases.holder` column, have a new format** (#126). A holder for
+  the current process writes `agent@host#pid;boot=<id>;pidns=<inode>`
+  instead of `agent@host#pid`; a holder naming any other pid or host keeps
+  the old format. The struct's fields are unchanged.
+- **Releasing another process's lease by rebuilding its `LeaseHolder` no
+  longer works** (#126). Release matches the exact holder string, and only
+  the holder's own process reproduces the boot and namespace fields. To
+  expire one specific holder's row, run the operator override scoped to
+  the exact holder string read from the row:
+
+  ```sql
+  UPDATE session_leases SET holder = 'lambo:released', expires_at = acquired_at,
+    endpoint = NULL WHERE session_id = '<session>' AND holder = '<holder as read>';
+  ```
+
+  Do not use the unscoped `store::lease::OPERATOR_OVERRIDE` for this: it
+  also expires a new, healthy writer that took the lease after you read the
+  row.
+
+### Changed
+
+- The MCP tool descriptions say what a concept is and how to send
+  `agent_id` ([#98](https://github.com/nrynss/lambo/issues/98),
+  [#99](https://github.com/nrynss/lambo/issues/99)). `lambo_derive`, its
+  `concept.content` field and the server instructions say a concept is one
+  fact, stated atomically and short, such as a decision with its reason, not
+  a log line or a paragraph, with a good and a bad example;
+  `lambo_record_action` says it is where activity goes. Every tool's
+  `agent_id` description and the server instructions say to keep one stable
+  id for an agent's whole life, never one per call, task or topic, so
+  attribution stays whole; and that agents sharing an id share soft locks,
+  so concurrent agents that must keep out of each other's edits need
+  distinct stable ids (a model id plus a stable instance suffix). The
+  published tool schemas change only in these descriptions; the golden is
+  updated to match. Write acks now name the id the write is recorded under,
+  as the last line of their first text block and as
+  `structuredContent.agent_id` (both additive).
+- The lease holder string now names the holder's boot and PID namespace
+  ([#126](https://github.com/nrynss/lambo/issues/126)), each field only when
+  the OS reports it (boot id on Linux and macOS, PID namespace on Linux).
+  Readers accept both formats; a row written by an older Lambo parses as
+  before. A lease refusal now says plainly that the holder process is gone
+  only when the holder ran in this process's boot and PID namespace and its
+  pid is not visible (with that match the host name is not compared);
+  otherwise it keeps the hedged "looks gone" wording. A VM cloned from a
+  snapshot, or a CRIU restore, keeps the boot id and the root PID namespace
+  inode, so on such clones the plain wording is still only a hint. Lease,
+  fencing and takeover are unchanged, and the hint stays advisory.
+  In a mixed fleet, a 0.5.0 reader shows no liveness hint for a 0.6.0
+  holder (it cannot parse the pid out of the new string); proxying between
+  versions is unaffected, since the host still reads the same.
+
 ## 0.5.0 (2026-10-12)
 
 ### Highlights

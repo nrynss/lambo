@@ -34,6 +34,8 @@ async fn every_write_ack_carries_a_receipt_and_claims_nothing_about_the_write() 
             "{tool}'s receipt must be parseable: {id}"
         );
         assert_eq!(payload["receipt_state"], json!("pending"), "{tool}");
+        // #99: the ack reflects the id the write is recorded under.
+        assert_eq!(payload["agent_id"], json!("agent-a"), "{tool}");
         // The ack cannot know these, so it must not carry them at all.
         for absent in ["created", "matched", "action_node", "edges"] {
             assert!(
@@ -50,6 +52,12 @@ async fn every_write_ack_carries_a_receipt_and_claims_nothing_about_the_write() 
         assert!(
             text.contains(id),
             "{tool}'s text must name the receipt: {text}"
+        );
+        assert!(
+            text.ends_with(
+                "\nRecorded under agent_id \"agent-a\"; send this same id on every call."
+            ),
+            "{tool}'s text must name the agent_id: {text}"
         );
     }
     s.mem.close().await.expect("close");

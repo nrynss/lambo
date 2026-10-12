@@ -113,6 +113,36 @@ async fn every_tool_schema_is_an_object_requiring_agent_id() {
             "{} must take agent_id",
             t.name
         );
+        // #99: the stable-id rule is stated where the id is filled in.
+        let id_doc = schema["properties"]["agent_id"]["description"]
+            .as_str()
+            .unwrap_or_default();
+        // #99 review M1: sharing an id shares locks; distinct ids contend.
+        let flat = id_doc.replace('\n', " ");
+        assert!(
+            flat.contains("one stable id for the agent's whole life")
+                && flat.contains("never one per call, task or topic"),
+            "{} agent_id must say to keep one stable id: {flat}",
+            t.name
+        );
+        assert!(
+            flat.contains("b1-review")
+                && flat.contains("gpt-5.6")
+                && flat.contains("claude-opus-5-5"),
+            "{} agent_id must give good and bad examples from more than one vendor: {flat}",
+            t.name
+        );
+        assert!(
+            flat.contains("can release each other's"),
+            "{} agent_id must say a shared id shares locks: {flat}",
+            t.name
+        );
+        assert!(
+            !flat.contains("per-task ids split")
+                && !flat.contains("from seeing each other's locks"),
+            "{} agent_id must not claim distinct ids avoid contention: {flat}",
+            t.name
+        );
         let required = schema["required"].as_array().cloned().unwrap_or_default();
         assert!(
             required.iter().any(|r| r == "agent_id"),
@@ -775,6 +805,21 @@ async fn get_info_advertises_tools_and_names_the_session() {
     assert!(
         !instructions.contains("Never send a timestamp"),
         "the obsolete blanket timestamp prohibition must not suppress event_time: {instructions}"
+    );
+    // #98 / #99: what a concept is, and the stable agent_id rule with why.
+    assert!(
+        instructions.contains("A concept is one fact, stated atomically")
+            && instructions.contains("not a log line or a paragraph"),
+        "instructions must say what a concept is: {instructions}"
+    );
+    assert!(
+        instructions.contains("use one stable id for as long as you run")
+            && instructions.contains("never one per call, task or topic")
+            && instructions.contains("<your-model-id>")
+            && instructions.contains("distinct ids contend for a node")
+            && instructions.contains("callers sharing an id share its locks")
+            && instructions.contains("need distinct stable ids"),
+        "instructions must carry the agent_id rule and its reason: {instructions}"
     );
     assert!(
         instructions.contains("Ordering is yours to manage"),

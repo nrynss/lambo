@@ -143,7 +143,9 @@ CREATE TABLE IF NOT EXISTS reservations (
     PRIMARY KEY (session_id, node_id)
 );
 -- Single-writer lease (spec §2.2, T8.6): one row per session, holder =
--- 'agent@host#pid', timestamps stamped from the store clock. `current_token`
+-- 'agent@host#pid', optionally followed by ';boot=<id>;pidns=<inode>' (#126,
+-- the holder process's boot and PID namespace; older rows lack it),
+-- timestamps stamped from the store clock. `current_token`
 -- is the monotonic fencing token (issue #1): minted on takeover, PRESERVED on a
 -- same-holder refresh, 0 = never leased (seed/fixture parity bypass). The
 -- adapter's acquire is a single INSERT ... ON CONFLICT guarded by an expiry

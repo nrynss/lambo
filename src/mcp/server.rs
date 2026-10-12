@@ -241,6 +241,13 @@ impl LamboServer {
     #[tool(
         name = "lambo_derive",
         description = "Derive concepts from the current interaction into session memory. \
+                       A concept is one fact, stated atomically and short enough that a later \
+                       restatement of the same fact matches it, such as a decision with its \
+                       reason. Good: 'Lease TTL is 45s because it must exceed the 15s \
+                       shutdown budget'. Bad: a paragraph narrating what you did and found. \
+                       It is not a log: record activity with lambo_record_action. To group \
+                       facts under a decision, send each as its own concept and add parent_of \
+                       pairs with the decision as parent and each fact as child. \
                        created_at is stamped server-side. event_time is optional RFC3339 \
                        historical about-time, such as a commit or document date; omit it for \
                        a live fact, which is about now. Returns as soon \
@@ -263,7 +270,9 @@ impl LamboServer {
     #[tool(
         name = "lambo_record_action",
         description = "Record an action the agent took, with what it produces, modifies and \
-                       depends on. created_at is stamped server-side. event_time is optional \
+                       depends on. This is where activity goes: name the act in a short line \
+                       (e.g. 'merged PR #52'), not a narrative. A fact or decision that later \
+                       work should recall is a concept for lambo_derive. created_at is stamped server-side. event_time is optional \
                        RFC3339 historical about-time, such as a commit or document date; omit \
                        it for a live fact, which is about now. \
                        Returns as soon as the input is validated and ordered — the write is \
@@ -412,10 +421,17 @@ impl ServerHandler for LamboServer {
                  acting on a task to load relevant prior memory, lambo_derive and \
                  lambo_record_action to write what you learned and did, lambo_reserve \
                  before editing a shared concept, and lambo_inspect / lambo_saints / \
-                 lambo_stats to look around. Every tool takes your agent_id: it is \
-                 caller-asserted and unverified, so send one stable id of your own — \
-                 work is recorded under it, soft locks are held under it, distinct ids \
-                 get distinct locks, and callers sharing an id share locks. created_at is \
+                 lambo_stats to look around. A concept is one fact, stated atomically \
+                 and short, such as a decision with its reason; it is not a log line or a \
+                 paragraph, and activity goes to lambo_record_action. Every tool takes \
+                 your agent_id: use one stable id for as long as you run, never one per \
+                 call, task or topic: your model or client id (<your-model-id>), with a \
+                 stable instance suffix if several of you run at once. It is \
+                 caller-asserted and unverified. Work is recorded under it, so a stable \
+                 id keeps attribution whole. Soft locks are held under it: distinct ids \
+                 contend for a node, and callers sharing an id share its locks and can \
+                 release each other's, so concurrent agents that must keep out of each \
+                 other's edits need distinct stable ids. created_at is \
                  server-stamped: do not send a client flush timestamp. lambo_derive and \
                  lambo_record_action may take optional RFC3339 event_time for historical \
                  about-time, such as a commit or document date; omit it for a live fact, \

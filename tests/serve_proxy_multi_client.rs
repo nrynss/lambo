@@ -233,31 +233,38 @@ fn lease_row(db: &str) -> Option<lambo::store::LeaseInfo> {
     })
 }
 
-/// Release a lease row the way the documented operator override does, given the
-/// `agent@host#pid` token from the row itself.
+/// Release a lease row the way an operator releases one holder: the
+/// documented override (`store::lease::OPERATOR_OVERRIDE`) scoped to the
+/// exact holder string read from the row.
 ///
-/// Release is holder-scoped, so the dead (or unwanted) holder's identity is
-/// reconstructed from the row rather than invented.
+/// The holder match is in the statement itself, not a read before it, so a
+/// writer that took the lease in between is never evicted (review M2). A
+/// `release_lease` with a holder rebuilt from the token no longer works:
+/// since #126 a holder's token carries its process's boot and PID-namespace
+/// ids, which only that process reproduces. The row left behind is the one a
+/// release leaves: expired, `lambo:released`, no endpoint, token kept.
 fn release_row(db: &str, holder_token: &str) {
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
-        let store = SqliteStore::connect(db).unwrap();
-        let mut parts = holder_token.rsplitn(2, '#');
-        let pid: u32 = parts.next().unwrap().parse().unwrap();
-        let head = parts.next().unwrap();
-        let (agent, host) = head.rsplit_once('@').unwrap();
-        store
-            .release_lease(
-                &SessionId::from(SESSION),
-                &lambo::store::LeaseHolder {
-                    agent: lambo::types::AgentId::new(agent),
-                    pid,
-                    host: host.to_string(),
-                    endpoint: None,
-                },
-            )
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&format!("sqlite://{db}"))
             .await
-            .unwrap();
+            .expect("open for lease override");
+        let done = sqlx::query(
+            "UPDATE session_leases SET holder = 'lambo:released', expires_at = acquired_at, \
+             endpoint = NULL WHERE session_id = ?1 AND holder = ?2",
+        )
+        .bind(SESSION)
+        .bind(holder_token)
+        .execute(&pool)
+        .await
+        .expect("holder-scoped lease override");
+        assert_eq!(
+            done.rows_affected(),
+            1,
+            "the row must still name {holder_token} when it is released"
+        );
     });
 }
 

@@ -165,6 +165,13 @@ const _: () = assert!(
 /// Postgres family. The `holder <> 'lambo:erased'` guard keeps it from
 /// lifting an erasure tombstone (see `store::erase`).
 ///
+/// To expire one specific holder, append `AND holder = '<exact holder string
+/// read from the row>'` (#126 review M2): the match then happens in the
+/// statement itself, so a writer that took the lease after the row was read
+/// is not evicted. Rebuilding a [`LeaseHolder`] to call `release_lease` does
+/// not work for another process, whose token carries its own boot and PID
+/// namespace.
+///
 /// This is intentionally a deliberate act: it says "I have confirmed the
 /// current holder is not making progress and I am forcing a takeover." The new
 /// writer still replays from durable state, so the wedged holder's un-flushed
@@ -270,9 +277,123 @@ impl LeaseHolder {
     /// Stable for the whole life of a handle (heartbeat refreshes reuse it, and
     /// release matches on it), so a lease can only ever be refreshed or released
     /// by the exact identity that took it.
+    ///
+    /// `agent@host#pid`, followed (#126) by this process's
+    /// [`ProcessInstance`] as `;boot=<id>` and `;pidns=<inode>` when the holder
+    /// names this process (its pid and host are this process's) and the OS
+    /// reports them. A process can read only its own boot id and PID
+    /// namespace, so a holder describing any other pid carries neither. The
+    /// suffix never contains `@` or `#`, so a reader that splits the host from
+    /// the last `@` and `#` reads the same host from either format.
     pub fn token(&self) -> String {
-        format!("{}@{}#{}", self.agent, self.host, self.pid)
+        let mut token = format!("{}@{}#{}", self.agent, self.host, self.pid);
+        if self.pid == std::process::id() && self.host == detect_host() {
+            token.push_str(&process_instance().suffix());
+        }
+        token
     }
+}
+
+/// What tells this process apart from a process with the same host name and
+/// pid (#126): the boot it runs in and its PID namespace.
+///
+/// A host name is not a PID namespace (containers on the host network,
+/// Kubernetes `hostNetwork` pods), and a pid is reused after a reboot. With
+/// both of these equal, a pid that is not visible from here is a process that
+/// has exited.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProcessInstance {
+    /// The kernel's id for the current boot: Linux
+    /// `/proc/sys/kernel/random/boot_id`, macOS `kern.bootsessionuuid`.
+    /// `None` where it cannot be read.
+    pub boot_id: Option<String>,
+    /// The inode of `/proc/self/ns/pid` on Linux. `None` elsewhere, and where
+    /// `/proc` cannot be read.
+    pub pid_ns: Option<u64>,
+}
+
+impl ProcessInstance {
+    /// The `;boot=...;pidns=...` suffix [`LeaseHolder::token`] appends; empty
+    /// when neither is known.
+    fn suffix(&self) -> String {
+        let mut s = String::new();
+        if let Some(boot) = &self.boot_id {
+            s.push_str(";boot=");
+            s.push_str(boot);
+        }
+        if let Some(ns) = self.pid_ns {
+            s.push_str(&format!(";pidns={ns}"));
+        }
+        s
+    }
+}
+
+/// `true` on a platform with PID namespaces. Off Linux there are none, so two
+/// tokens that both lack a namespace id are in the one namespace there is.
+pub(crate) const PLATFORM_HAS_PID_NAMESPACES: bool = cfg!(target_os = "linux");
+
+/// This process's [`ProcessInstance`], read once and cached: neither the boot
+/// nor the PID namespace changes under a running process.
+pub(crate) fn process_instance() -> &'static ProcessInstance {
+    static INSTANCE: std::sync::OnceLock<ProcessInstance> = std::sync::OnceLock::new();
+    INSTANCE.get_or_init(|| ProcessInstance {
+        boot_id: read_boot_id().filter(|b| is_token_safe(b)),
+        pid_ns: read_pid_ns(),
+    })
+}
+
+/// A value safe to embed in a holder token: non-empty, and none of the
+/// separators a reader splits on.
+fn is_token_safe(value: &str) -> bool {
+    !value.is_empty() && value.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+#[cfg(target_os = "linux")]
+fn read_boot_id() -> Option<String> {
+    let id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
+    Some(id.trim().to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn read_boot_id() -> Option<String> {
+    let name = c"kern.bootsessionuuid";
+    let mut buf = [0u8; 64];
+    let mut len: libc::size_t = buf.len();
+    // SAFETY: `name` is NUL-terminated; `buf` is writable for `len` bytes and
+    // `len` is updated with the bytes written; no new value is set.
+    let rc = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            buf.as_mut_ptr().cast(),
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 {
+        return None;
+    }
+    let bytes = &buf[..len.min(buf.len())];
+    let bytes = bytes.split(|b| *b == 0).next().unwrap_or_default();
+    Some(String::from_utf8_lossy(bytes).trim().to_string())
+}
+
+/// No boot id elsewhere: tokens carry none, and the refusal stays hedged.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn read_boot_id() -> Option<String> {
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn read_pid_ns() -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    // `metadata` follows the `pid:[inode]` link to the namespace's inode.
+    std::fs::metadata("/proc/self/ns/pid").ok().map(|m| m.ino())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn read_pid_ns() -> Option<u64> {
+    None
 }
 
 impl std::fmt::Display for LeaseHolder {
@@ -374,17 +495,43 @@ pub struct LeaseRefusal {
     pub current_holder: String,
 }
 
-/// The `host` and `pid` inside a [`LeaseHolder::token`] (`agent@host#pid`),
-/// or `None` for a token not in that shape (the reserved markers, a row
-/// written by something other than a [`LeaseHolder`]).
+/// The parts of a [`LeaseHolder::token`] a reader needs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ParsedHolder<'a> {
+    pub(crate) host: &'a str,
+    pub(crate) pid: u32,
+    /// The holder's [`ProcessInstance`]; both `None` for a token written
+    /// before #126, or by a process that could not read them.
+    pub(crate) instance: ProcessInstance,
+}
+
+/// Parse a [`LeaseHolder::token`]: `agent@host#pid`, optionally followed by
+/// `;key=value` fields (#126: `boot`, `pidns`). `None` for a token not in that
+/// shape (the reserved markers, a row written by something other than a
+/// [`LeaseHolder`]).
 ///
 /// Split from the right: an agent id is caller-chosen and may itself contain
-/// `@` or `#`, while the host and the pid never contain the separator that
-/// follows them.
-pub(crate) fn holder_host_and_pid(token: &str) -> Option<(&str, u32)> {
-    let (rest, pid) = token.rsplit_once('#')?;
+/// `@` or `#`, while the host, the pid and the fields never contain the
+/// separator that follows them. An unknown field is ignored, so a later
+/// writer may add one; a malformed `pidns` is treated as absent.
+pub(crate) fn parse_holder(token: &str) -> Option<ParsedHolder<'_>> {
+    let (rest, tail) = token.rsplit_once('#')?;
     let (_agent, host) = rest.rsplit_once('@')?;
-    Some((host, pid.parse().ok()?))
+    let mut fields = tail.split(';');
+    let pid = fields.next()?.parse().ok()?;
+    let mut instance = ProcessInstance::default();
+    for field in fields {
+        match field.split_once('=') {
+            Some(("boot", v)) if is_token_safe(v) => instance.boot_id = Some(v.to_string()),
+            Some(("pidns", v)) => instance.pid_ns = v.parse().ok(),
+            _ => {}
+        }
+    }
+    Some(ParsedHolder {
+        host,
+        pid,
+        instance,
+    })
 }
 
 /// What [`detect_host`] answers when it cannot find a name. Two processes that
@@ -653,6 +800,79 @@ mod tests {
             };
             assert!(refuse_reserved_holder(&lookalike.token()).is_ok());
         }
+    }
+
+    /// #126: a holder naming this process carries its instance; one naming
+    /// any other pid, or another host, carries the 0.5.0 format unchanged.
+    #[test]
+    fn only_a_holder_naming_this_process_carries_its_instance() {
+        let me = LeaseHolder::for_this_process(&AgentId::new("a"));
+        let token = me.token();
+        let base = format!("a@{}#{}", me.host, me.pid);
+        assert_eq!(token, format!("{base}{}", process_instance().suffix()));
+        let parsed = parse_holder(&token).expect("own token parses");
+        assert_eq!(parsed.host, me.host);
+        assert_eq!(parsed.pid, me.pid);
+        assert_eq!(&parsed.instance, process_instance());
+        // Stable across calls: refresh and release match on it.
+        assert_eq!(me.token(), token);
+        // Another pid on this host, or this pid on another host: no suffix.
+        let other = LeaseHolder {
+            pid: me.pid.wrapping_add(1),
+            ..me.clone()
+        };
+        assert_eq!(other.token(), format!("a@{}#{}", me.host, other.pid));
+        let elsewhere = LeaseHolder {
+            host: format!("{}-elsewhere", me.host),
+            ..me.clone()
+        };
+        assert!(elsewhere.token().ends_with(&format!("#{}", me.pid)));
+    }
+
+    /// The OS answers on the platforms that have the ids, and what it
+    /// answers is safe to embed.
+    #[test]
+    fn this_process_instance_is_read_where_the_platform_has_it() {
+        let i = process_instance();
+        if cfg!(any(target_os = "linux", target_os = "macos")) {
+            assert!(i.boot_id.is_some(), "{i:?}");
+        }
+        if cfg!(target_os = "linux") {
+            assert!(i.pid_ns.is_some(), "{i:?}");
+        } else {
+            assert_eq!(i.pid_ns, None);
+        }
+        if let Some(b) = &i.boot_id {
+            assert!(is_token_safe(b), "{b:?}");
+        }
+        assert_eq!(process_instance(), i, "cached");
+    }
+
+    #[test]
+    fn both_holder_formats_parse() {
+        // 0.5.0 and earlier.
+        let old = parse_holder("a@h#42").expect("old format");
+        assert_eq!((old.host, old.pid), ("h", 42));
+        assert_eq!(old.instance, ProcessInstance::default());
+        // #126, both fields, either order, and an agent id with separators.
+        let new = parse_holder("we@ird#id;x@host-7#4213;pidns=4026531836;boot=ab-12")
+            .expect("new format");
+        assert_eq!((new.host, new.pid), ("host-7", 4213));
+        assert_eq!(
+            new.instance,
+            ProcessInstance {
+                boot_id: Some("ab-12".into()),
+                pid_ns: Some(4_026_531_836),
+            }
+        );
+        // One field only; an unknown field; a malformed pidns.
+        let boot_only = parse_holder("a@h#1;boot=b1;later=x;pidns=nope").expect("parses");
+        assert_eq!(boot_only.instance.boot_id.as_deref(), Some("b1"));
+        assert_eq!(boot_only.instance.pid_ns, None);
+        // Not a holder token at all.
+        assert_eq!(parse_holder(RELEASED_HOLDER), None);
+        assert_eq!(parse_holder("a@h#notapid"), None);
+        assert_eq!(parse_holder("a@h#;boot=b1"), None);
     }
 
     #[test]

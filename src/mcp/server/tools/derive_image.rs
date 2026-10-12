@@ -18,7 +18,9 @@ use serde_json::json;
 use crate::embed::Modalities;
 use crate::graph::image::{self, ImageDerive, ImagePayload};
 use crate::mcp::server::params::{check_size, DeriveImageParams};
-use crate::mcp::server::response::{bad_param, config_refusal, redact_urls, tool_err};
+use crate::mcp::server::response::{
+    bad_param, config_refusal, recorded_under, redact_urls, tool_err,
+};
 use crate::mcp::server::trace::note_facts;
 use crate::mcp::server::LamboServer;
 use crate::surface::image::{check_caption_fits, check_submitted_vector, decode_base64, validate};
@@ -211,15 +213,17 @@ impl LamboServer {
         };
         let mut out = CallToolResult::success(vec![ContentBlock::text(format!(
             "{summary}\nreceipt {}: {}\nThe outcome arrives on your next tool response. To wait \
-             for it, call lambo_stats with receipt={} (add wait_ms to block).",
+             for it, call lambo_stats with receipt={} (add wait_ms to block).\n{}",
             submitted.receipt,
             redact_urls(&submitted.answer.describe()),
             submitted.receipt,
+            recorded_under(&acting),
         ))]);
         out.structured_content = Some(json!({
             "summary": summary,
             "receipt": submitted.receipt.to_string(),
             "receipt_state": submitted.answer.tag(),
+            "agent_id": acting.to_string(),
             "warnings": [],
         }));
         out

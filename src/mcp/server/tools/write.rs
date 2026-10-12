@@ -8,7 +8,7 @@ use crate::graph::action::Action;
 use crate::graph::derive::ParentOf;
 use crate::graph::hybrid;
 use crate::mcp::server::params::{check_size, DeriveParams, RecordActionParams};
-use crate::mcp::server::response::{bad_param, redact_urls, tool_err};
+use crate::mcp::server::response::{bad_param, recorded_under, redact_urls, tool_err};
 use crate::mcp::server::trace::note_facts;
 use crate::mcp::server::LamboServer;
 use crate::surface::validate::{
@@ -144,10 +144,11 @@ impl LamboServer {
         };
         let mut out = CallToolResult::success(vec![ContentBlock::text(format!(
             "{summary}\nreceipt {}: {}\nThe outcome arrives on your next tool response. To wait \
-             for it, call lambo_stats with receipt={} (add wait_ms to block).",
+             for it, call lambo_stats with receipt={} (add wait_ms to block).\n{}",
             submitted.receipt,
             redact_urls(&submitted.answer.describe()),
             submitted.receipt,
+            recorded_under(&acting),
         ))]);
         // `created` / `matched` are deliberately ABSENT rather than empty: an
         // empty list here would claim nothing was created, which is not what
@@ -156,6 +157,7 @@ impl LamboServer {
             "summary": summary,
             "receipt": submitted.receipt.to_string(),
             "receipt_state": submitted.answer.tag(),
+            "agent_id": acting.to_string(),
             "warnings": [],
         }));
         out
@@ -275,10 +277,11 @@ impl LamboServer {
         };
         let mut out = CallToolResult::success(vec![ContentBlock::text(format!(
             "{summary}\nreceipt {}: {}\nThe outcome arrives on your next tool response. To wait \
-             for it, call lambo_stats with receipt={} (add wait_ms to block).",
+             for it, call lambo_stats with receipt={} (add wait_ms to block).\n{}",
             submitted.receipt,
             redact_urls(&submitted.answer.describe()),
             submitted.receipt,
+            recorded_under(&acting),
         ))]);
         // `action_node`, `created` and `edges` are ABSENT rather than zeroed:
         // this ack does not know them. They are on the receipt.
@@ -286,6 +289,7 @@ impl LamboServer {
             "summary": summary,
             "receipt": submitted.receipt.to_string(),
             "receipt_state": submitted.answer.tag(),
+            "agent_id": acting.to_string(),
             "warnings": [],
         }));
         out

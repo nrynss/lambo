@@ -117,6 +117,16 @@ pub(super) fn conflict_err(what: &str, msg: &str, nothing: &str) -> CallToolResu
     ))])
 }
 
+/// The last line of a write ack's first text block (#99): the agent_id the
+/// write is recorded under, so a caller sending a per-task id sees it at the
+/// point of use. The same id is in the ack's `structuredContent.agent_id`.
+/// Printed as sent, unescaped: it is only the caller's own id, which
+/// `caller_agent` has already checked to be one line of at most 256
+/// characters.
+pub(super) fn recorded_under(agent: &crate::types::AgentId) -> String {
+    format!("Recorded under agent_id \"{agent}\"; send this same id on every call.")
+}
+
 /// Replace any whitespace-delimited token that looks like a URL with a
 /// placeholder (N3), so a warning that surfaced a store/embedder endpoint does
 /// not carry it into a model-facing string. Idempotent — a redacted token has
@@ -272,5 +282,18 @@ pub(super) async fn contain_panic(
                  the call had no effect beyond anything already written"
             ))])
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Review L6: the id is printed as sent, not Debug-escaped.
+    #[test]
+    fn recorded_under_prints_the_id_unescaped() {
+        let line = super::recorded_under(&crate::types::AgentId::new("modèle-ü"));
+        assert_eq!(
+            line,
+            "Recorded under agent_id \"modèle-ü\"; send this same id on every call."
+        );
     }
 }
