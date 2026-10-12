@@ -590,17 +590,30 @@ fn structural_query_placeholder_order_and_counts() {
         let p3 = sql.find("$3").unwrap();
         assert!(p1 < p2 && p2 < p3, "placeholders must appear in bind order");
     }
-    // Errata: structural edge types only; provenance must not appear.
+    // #36 errata: one dependents set, Dependency sources plus Hierarchical
+    // children; Causal, provenance and association never appear.
     for sql in [BLAST_RADIUS_SQL, INTERACTION_SPAN_SQL] {
         assert!(
-            sql.contains("'Dependency', 'Causal', 'Hierarchical'"),
+            sql.contains("e.target = $2 AND e.edge_type = 'Dependency'"),
             "{sql}"
         );
-        assert!(!sql.contains("Derives"), "{sql}");
-        assert!(!sql.contains("Temporal"), "{sql}");
-        // Concept-sourced only: source JOIN pins src to a concept row.
-        assert!(sql.contains("JOIN concepts src"), "{sql}");
+        assert!(
+            sql.contains("e.source = $2 AND e.edge_type = 'Hierarchical'"),
+            "{sql}"
+        );
+        for absent in ["Causal", "Derives", "Temporal", "CoOccurrence", "Semantic"] {
+            assert!(!sql.contains(absent), "{absent} in {sql}");
+        }
+        // Dependents are concepts of the session, never the node itself.
+        assert!(
+            sql.contains("JOIN concepts c ON c.id = d.id AND c.session_id = $1"),
+            "{sql}"
+        );
+        assert!(sql.contains("d.id <> $2"), "{sql}");
     }
+    // #36: the node's own origin interaction is not support for it.
+    assert!(INTERACTION_SPAN_SQL
+        .contains("own.id = $2 AND own.session_id = $1 AND own.origin_interaction = i.id"));
     // MemoryStore parity: interaction_span filters BOTH edge and interaction
     // age — each resolved through D's fallback rule (COALESCE with event_time).
     assert!(INTERACTION_SPAN_SQL.contains("COALESCE(e.event_time, e.created_at) <= $3"));

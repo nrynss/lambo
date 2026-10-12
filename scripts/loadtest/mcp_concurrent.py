@@ -393,7 +393,10 @@ def run(o, queries, mix, token):
     receipts: list[tuple[int, str]] = []  # (worker, receipt id)
     worker_errors: list[str] = []
     lock = threading.Lock()
-    stop = time.time() + o.secs
+    # Set after the clients connect and the warm-up recalls return (below), so
+    # a slow handshake or a cold first embed does not eat into the --secs of
+    # measured load. The workers read it when they start.
+    stop = 0.0
     clients = [Client(o.endpoint, f"conc-{i}", token) for i in range(o.workers)]
     tools, weights = [m[0] for m in mix], [m[1] for m in mix]
     raw = o.include_raw_reasons
@@ -442,6 +445,7 @@ def run(o, queries, mix, token):
         warm.call("lambo_recall", query=q)
     ts = [threading.Thread(target=worker, args=(i,)) for i in range(o.workers)]
     t0 = time.time()
+    stop = t0 + o.secs
     for t in ts:
         t.start()
     for t in ts:

@@ -203,6 +203,44 @@ impl EdgeType {
     pub const fn decays(self) -> bool {
         matches!(self, Self::CoOccurrence | Self::Semantic)
     }
+
+    /// Which end of an edge of this type is the **dependent**: the concept
+    /// that rests on the other end (#36, read-time dependents semantics).
+    ///
+    /// * `Dependency` — the **source** depends on the target. This is the
+    ///   direction `record_action` writes (`action -> depends_on`), so the
+    ///   action is a dependent of what it depends on.
+    /// * `Hierarchical` — the **target** (the child) depends on the source
+    ///   (the parent), the direction `parent_of` writes.
+    /// * Every other type declares no dependence. `Causal` is provenance
+    ///   (`action -> produced/modified artifact`) and confers no load;
+    ///   `Derives`/`Temporal` are provenance and `CoOccurrence`/`Semantic`
+    ///   are association.
+    ///
+    /// This one table is the definition every implementation follows: the
+    /// stores' `blast_radius`/`interaction_span`, the graph-side
+    /// `recall::format::blast_radii`, recall warnings, inspect and the
+    /// structural dispatch. The match is exhaustive on purpose: a new edge
+    /// type (for example #19's `Contradicts`, which must never count) has to
+    /// choose an arm here before anything compiles.
+    pub const fn dependent_end(self) -> Option<DependentEnd> {
+        match self {
+            Self::Dependency => Some(DependentEnd::Source),
+            Self::Hierarchical => Some(DependentEnd::Target),
+            Self::Temporal | Self::Derives | Self::CoOccurrence | Self::Causal | Self::Semantic => {
+                None
+            }
+        }
+    }
+}
+
+/// Which end of an edge is the dependent ([`EdgeType::dependent_end`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum DependentEnd {
+    /// The edge's source rests on its target (`Dependency`).
+    Source,
+    /// The edge's target rests on its source (`Hierarchical`).
+    Target,
 }
 
 /// How far a concept has travelled toward becoming a canonical fact.
@@ -606,6 +644,23 @@ impl Edge {
     /// [`Interaction::about_time`]).
     pub fn about_time(&self) -> DateTime<Utc> {
         self.event_time.unwrap_or(self.created_at)
+    }
+
+    /// The dependence this edge declares, as `(pillar, dependent)`: the
+    /// `dependent` rests on the `pillar` (#36; see
+    /// [`EdgeType::dependent_end`]). `None` for an edge type that declares no
+    /// dependence, and for a self-loop, which is never its own dependent.
+    ///
+    /// Endpoint kinds are not checked here: callers that count dependents
+    /// keep only concept endpoints in the queried session.
+    pub fn dependence(&self) -> Option<(NodeId, NodeId)> {
+        if self.source == self.target {
+            return None;
+        }
+        match self.edge_type.dependent_end()? {
+            DependentEnd::Source => Some((self.target, self.source)),
+            DependentEnd::Target => Some((self.source, self.target)),
+        }
     }
 }
 
@@ -1669,6 +1724,40 @@ impl StoreError {
     }
 }
 
+impl LamboError {
+    /// The fixed start of a [lookup timeout](Self::is_lookup_timeout)'s
+    /// message.
+    const LOOKUP_TIMEOUT: &'static str = "hybrid vector candidate lookup timed out";
+
+    /// A hybrid derive's vector-candidate lookup that did not answer inside
+    /// its own budget, `graph::hybrid::VECTOR_LOOKUP_TIMEOUT` from when it
+    /// started (#125 review H1). A call whose overall budget ran out first
+    /// (slow embeds before the lookup) is the ordinary embed-budget
+    /// [`LamboError::EmbedUnavailable`], not this. It is
+    /// [`LamboError::EmbedUnavailable`]: transient, so the in-session write
+    /// queue leaves the write's durable intent for the next serve to replay.
+    /// Its `Display` is `embed: hybrid vector candidate lookup timed out ...`,
+    /// and its error kind is "embedding error", like an embed timeout.
+    pub(crate) fn lookup_timeout(budget: std::time::Duration) -> Self {
+        LamboError::EmbedUnavailable(format!(
+            "{} after {budget:?}; nothing was written — the store did not answer the lookup \
+             in its own budget, which says nothing about the write's input",
+            Self::LOOKUP_TIMEOUT
+        ))
+    }
+
+    /// Whether this is a [lookup timeout](Self::lookup_timeout). The replay
+    /// tells it apart from an embedder outage (#125 Sonnet review): the
+    /// embedder answered before the lookup, so it is no evidence that the
+    /// embedder is sick, and a lookup that is slow every time for one input
+    /// must not hold the backlog behind it on every restart. Identified by
+    /// prefix, like [`StoreError::is_cycle_refusal`], so no public enum gains
+    /// a variant.
+    pub(crate) fn is_lookup_timeout(&self) -> bool {
+        matches!(self, LamboError::EmbedUnavailable(m) if m.starts_with(Self::LOOKUP_TIMEOUT))
+    }
+}
+
 /// The acyclic edge family a [cycle refusal](StoreError::is_cycle_refusal)
 /// protects.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1712,8 +1801,19 @@ pub enum LamboError {
     /// one transient outage.
     ///
     /// Produced only where the cause is known: `graph::hybrid::derive`'s embed
-    /// timeout arm, and its embed-error arm when
-    /// [`crate::embed::EmbedError::is_transient`] says so.
+    /// timeout arm, its embed-error arm when
+    /// [`crate::embed::EmbedError::is_transient`] says so, and (#125 review
+    /// H1) its vector-candidate lookup when the store did not answer within
+    /// the lookup's own budget ([`Self::lookup_timeout`]), or when the call's
+    /// embed-and-lookup budget ran out before or during the lookup (the
+    /// ordinary budget message). Neither says anything about the input, so
+    /// the in-session write queue leaves the durable intent unconsumed. Before 0.6.0 a lookup
+    /// timeout was a store error (`store error`, `Backend`); it now reads
+    /// `embed: hybrid vector candidate lookup timed out ...` with the
+    /// "embedding error" kind. Nothing retries a transient write within the
+    /// session: the next serve of the session replays its durable intent,
+    /// and the replay settles a lookup timeout `failed` rather than retry it
+    /// again ([`Self::is_lookup_timeout`]).
     ///
     /// `Display` is deliberately identical to [`LamboError::Embed`]'s: to an
     /// operator and to the ledger this is the same *class* of failure
@@ -1911,6 +2011,59 @@ mod tests {
         assert!(!EdgeType::Dependency.decays());
         assert!(!EdgeType::Hierarchical.decays());
         assert!(EdgeType::Semantic.decays());
+    }
+
+    /// #36: only `Dependency` (source rests on target) and `Hierarchical`
+    /// (child rests on parent) declare dependence. Every other type,
+    /// `Causal` included, confers no load. A new edge type (#19's
+    /// `Contradicts`, which must answer `None`) has to be added both to
+    /// `dependent_end`'s exhaustive match and to this table.
+    #[test]
+    fn edge_type_dependent_end_table() {
+        assert_eq!(
+            EdgeType::Dependency.dependent_end(),
+            Some(DependentEnd::Source)
+        );
+        assert_eq!(
+            EdgeType::Hierarchical.dependent_end(),
+            Some(DependentEnd::Target)
+        );
+        for ty in [
+            EdgeType::Temporal,
+            EdgeType::Derives,
+            EdgeType::CoOccurrence,
+            EdgeType::Causal,
+            EdgeType::Semantic,
+        ] {
+            assert_eq!(ty.dependent_end(), None, "{ty:?} must confer no load");
+        }
+    }
+
+    #[test]
+    fn edge_dependence_names_pillar_and_dependent_and_skips_self_loops() {
+        let (a, b) = (NodeId::new(), NodeId::new());
+        let edge = |source, target, edge_type| Edge {
+            id: NodeId::new(),
+            session_id: SessionId::from("s"),
+            source,
+            target,
+            edge_type,
+            weight: 1.0,
+            reinforcements: 1,
+            created_at: Utc::now(),
+            last_reinforced: Utc::now(),
+            event_time: None,
+        };
+        // An action `a` that depends on `b` is `b`'s dependent.
+        assert_eq!(edge(a, b, EdgeType::Dependency).dependence(), Some((b, a)));
+        // A child `b` of parent `a` is `a`'s dependent.
+        assert_eq!(
+            edge(a, b, EdgeType::Hierarchical).dependence(),
+            Some((a, b))
+        );
+        assert_eq!(edge(a, b, EdgeType::Causal).dependence(), None);
+        assert_eq!(edge(a, a, EdgeType::Dependency).dependence(), None);
+        assert_eq!(edge(a, a, EdgeType::Hierarchical).dependence(), None);
     }
 
     #[test]

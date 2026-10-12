@@ -7,12 +7,13 @@
 //! A concept passes when `store.interaction_span(session, node, min_age, now)`
 //! reports **both**:
 //!
-//! 1. **`distinct >= 3`** inbound structural sources tracing to distinct
-//!    origin interactions.
+//! 1. **`distinct >= 3`** origin interactions behind the concept's
+//!    dependents, not counting the concept's own origin interaction.
 //! 2. **`coverage >= 0.3`** of the session's temporal extent.
 //!
-//! Structural edge types (`Dependency` / `Causal` / `Hierarchical`) and the
-//! age cutoff are already applied inside the store. `min_age` is forwarded
+//! The dependents relation (#36: `Dependency` sources into the concept plus
+//! its `Hierarchical` children; `Causal` confers no load) and the age cutoff
+//! are already applied inside the store. `min_age` is forwarded
 //! unchanged — callers pass [`crate::Config::canonization_edge_min_age`]
 //! (default 60s). Fresh edges must not inflate the span.
 //!
@@ -156,15 +157,16 @@ mod tests {
     async fn distinct_2_fails_even_when_coverage_is_one() {
         let ts = Utc::now() - ChronoDuration::hours(1);
         let store = seed(
-            &[interaction(1, ts), interaction(2, ts)],
+            &[interaction(1, ts), interaction(2, ts), interaction(3, ts)],
             &[
-                concept(10, 1, ts, CanonizationStatus::Candidate),
+                // The hub's own origin (3) is never its own support (#36).
+                concept(10, 3, ts, CanonizationStatus::Candidate),
                 concept(1, 1, ts, CanonizationStatus::None),
                 concept(2, 2, ts, CanonizationStatus::None),
             ],
             &[
                 edge(1, 1, 10, EdgeType::Dependency, ts),
-                edge(2, 2, 10, EdgeType::Causal, ts),
+                edge(2, 2, 10, EdgeType::Dependency, ts),
             ],
         )
         .await;
@@ -197,7 +199,7 @@ mod tests {
                 interaction(4, t(100)),
             ],
             &[
-                concept(10, 1, t(0), CanonizationStatus::None),
+                concept(10, 4, t(0), CanonizationStatus::None),
                 concept(1, 1, t(0), CanonizationStatus::None),
                 concept(2, 2, t(10), CanonizationStatus::None),
                 concept(3, 3, t(20), CanonizationStatus::None),
@@ -205,7 +207,7 @@ mod tests {
             &[
                 edge(1, 1, 10, EdgeType::Dependency, t(0)),
                 edge(2, 2, 10, EdgeType::Dependency, t(10)),
-                edge(3, 3, 10, EdgeType::Hierarchical, t(20)),
+                edge(3, 10, 3, EdgeType::Hierarchical, t(20)),
             ],
         )
         .await;
@@ -244,15 +246,15 @@ mod tests {
                 interaction(4, t(80)),
             ],
             &[
-                concept(10, 1, t(0), CanonizationStatus::None),
+                concept(10, 4, t(0), CanonizationStatus::None),
                 concept(1, 1, t(0), CanonizationStatus::None),
                 concept(2, 2, t(20), CanonizationStatus::None),
                 concept(3, 3, t(40), CanonizationStatus::None),
             ],
             &[
                 edge(1, 1, 10, EdgeType::Dependency, t(0)),
-                edge(2, 2, 10, EdgeType::Causal, t(20)),
-                edge(3, 3, 10, EdgeType::Hierarchical, t(40)),
+                edge(2, 2, 10, EdgeType::Dependency, t(20)),
+                edge(3, 10, 3, EdgeType::Hierarchical, t(40)),
             ],
         )
         .await;
@@ -292,15 +294,15 @@ mod tests {
                 interaction(4, t(100)),
             ],
             &[
-                concept(10, 1, t(0), CanonizationStatus::None),
+                concept(10, 4, t(0), CanonizationStatus::None),
                 concept(1, 1, t(0), CanonizationStatus::None),
                 concept(2, 2, t(15), CanonizationStatus::None),
                 concept(3, 3, t(30), CanonizationStatus::None),
             ],
             &[
                 edge(1, 1, 10, EdgeType::Dependency, t(0)),
-                edge(2, 2, 10, EdgeType::Causal, t(15)),
-                edge(3, 3, 10, EdgeType::Hierarchical, t(30)),
+                edge(2, 2, 10, EdgeType::Dependency, t(15)),
+                edge(3, 10, 3, EdgeType::Hierarchical, t(30)),
             ],
         )
         .await;
@@ -337,9 +339,10 @@ mod tests {
                 interaction(1, t(300)),
                 interaction(2, t(200)),
                 interaction(3, t(100)),
+                interaction(4, t(300)),
             ],
             &[
-                concept(10, 1, t(300), CanonizationStatus::Candidate),
+                concept(10, 4, t(300), CanonizationStatus::Candidate),
                 concept(1, 1, t(300), CanonizationStatus::None),
                 concept(2, 2, t(200), CanonizationStatus::None),
                 concept(3, 3, t(100), CanonizationStatus::None),
@@ -347,8 +350,8 @@ mod tests {
             // Every origin interaction is aged; every EDGE is brand new.
             &[
                 edge(1, 1, 10, EdgeType::Dependency, now),
-                edge(2, 2, 10, EdgeType::Causal, now),
-                edge(3, 3, 10, EdgeType::Hierarchical, now),
+                edge(2, 2, 10, EdgeType::Dependency, now),
+                edge(3, 10, 3, EdgeType::Hierarchical, now),
             ],
         )
         .await;
@@ -381,17 +384,18 @@ mod tests {
                 interaction(1, now),
                 interaction(2, now),
                 interaction(3, now),
+                interaction(4, now),
             ],
             &[
-                concept(10, 1, t(300), CanonizationStatus::Candidate),
+                concept(10, 4, t(300), CanonizationStatus::Candidate),
                 concept(1, 1, t(300), CanonizationStatus::None),
                 concept(2, 2, t(200), CanonizationStatus::None),
                 concept(3, 3, t(100), CanonizationStatus::None),
             ],
             &[
                 edge(1, 1, 10, EdgeType::Dependency, t(300)),
-                edge(2, 2, 10, EdgeType::Causal, t(200)),
-                edge(3, 3, 10, EdgeType::Hierarchical, t(100)),
+                edge(2, 2, 10, EdgeType::Dependency, t(200)),
+                edge(3, 10, 3, EdgeType::Hierarchical, t(100)),
             ],
         )
         .await;
@@ -442,8 +446,8 @@ mod tests {
                 edge(1, 2, 10, EdgeType::Dependency, aged1),
                 edge(2, 3, 10, EdgeType::Dependency, aged2),
                 edge(3, 4, 10, EdgeType::Dependency, now),
-                edge(4, 5, 10, EdgeType::Causal, now),
-                edge(5, 6, 10, EdgeType::Hierarchical, now),
+                edge(4, 5, 10, EdgeType::Dependency, now),
+                edge(5, 10, 6, EdgeType::Hierarchical, now),
             ],
         )
         .await;
@@ -542,10 +546,13 @@ mod tests {
             .interaction_span(&sid, us.id, Duration::ZERO, Utc::now())
             .await
             .unwrap();
-        assert_eq!(span.distinct, 6, "distinct={}", span.distinct);
+        // #36: six concepts depend on it (interactions 3..8) and its eight
+        // field children come from interactions 1..8; its own origin (1)
+        // does not count, leaving 2..8.
+        assert_eq!(span.distinct, 7, "distinct={}", span.distinct);
         assert!(
-            (span.coverage - 25.0 / 55.0).abs() < 1e-9,
-            "coverage={} (expected 25/55)",
+            (span.coverage - 30.0 / 55.0).abs() < 1e-9,
+            "coverage={} (expected 30/55)",
             span.coverage
         );
         assert!(

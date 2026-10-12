@@ -48,9 +48,24 @@ The accessors `session`, `agent`, `config`, `embedding_contract`, `graph`, `inde
 | Method | What it returns |
 |---|---|
 | `recall` | The context block for a query. Async. |
+| `recall_layered` | One recall over this session and its layers, merged under one budget. Async. See [Layered recall](#layered-recall). |
 | `canonical_memories` | The session's canonical memories. |
 | `stats` | Flush lag, log depth, counts, and degraded state. |
 | `events` | A live feed of background events. |
+
+### Layered recall
+
+`recall_layered(&layers, query)` reads this session and a stack of other sessions (layers, such as a shared `general` session) in one call. Pass the layers nearest tier first, each as `LayerRef::new(&memory)`, optionally with `.with_weight(w)` (greater than 0) and `.with_min_similarity(s)` (0 to 1). It returns a `LayeredRecall`: merged `hits`, each naming its `session`, one `context` and the `warnings`. With no layers it returns exactly what `recall` returns.
+
+- The query is embedded once and the vector is passed to every layer. A layer's embedding contract must equal this session's.
+- Each session ranks its own hits. The lists are merged by `weight / rank`: this session has weight 1.0, a layer 0.5 by default, and ties go to the nearer tier. `score` stays each hit's own session score, so the merged order is not sorted by `score`.
+- A layer hit is merged only if the keyword leg found it, or its vector similarity is at least the layer's `min_similarity` (0.40 by default), or it is part of the layer's answer to a dependency question (below). A warning does not get a hit past this floor. The default weight and floor are not calibrated yet.
+- `top_k` limits the merged hits, except that hits with a conflict, hot or reservation warning that passed the floor are kept beyond it.
+- A dependency question ("what depends on X") is answered by graph traversal in each session where X is found, layers included, so a ruling stored in `general` can be asked about from a project. Each session's dependents are merged like any other list. The warning `recall: dependency question answered by graph traversal (N dependents)` counts the dependents of that session shown in the merged context, with the layer's `[<name>] ` prefix for a layer.
+- When the same memory is in two tiers (same canonical key, or vectors at or above `semantic_match_threshold`), the nearer tier's copy is kept and its label names the other copy: `also 9f8e7d6c in general`.
+- One `max_tokens` budget covers the merged context. A layer hit's label ends with `from <session>`, and if its block is truncated the marker reads `lambo_inspect <id> (scope <session>)`.
+- A layer that is closed, has a different embedding contract, or whose recall panics is left out, with the warning `recall: layer <name> is unavailable; results are from <sessions>`. It never fails the call. A layer whose vector search fails is not left out: it answers from its keyword results, with a warning. Warnings from a layer start with `[<name>] `.
+- Graph edges are never followed from one session into another.
 
 ## Settings
 
@@ -120,10 +135,20 @@ A store also declares what it can do. `capabilities` reports its features, and `
 pub trait Embedder: Send + Sync {
     fn dimensions(&self) -> usize;
     async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbedError>;
+
+    // Optional, with defaults:
+    async fn embed_batch(
+        &self,
+        texts: &[&str],
+        deadline: tokio::time::Instant,
+    ) -> Vec<Result<Vec<f32>, EmbedError>>;
+    fn batch_capacity(&self) -> usize; // default 1
 }
 ```
 
-The implementations are the fixture embedder, BGE-M3 over `llama-server`, and Amazon Titan through Bedrock.
+`embed_batch` embeds several texts in one call and returns one result per text, in order. Each result belongs to its own text: an adapter that batches must not let one text's failure fail the others. The default calls `embed` once per text, and `batch_capacity` defaults to 1, which tells Lambo that gathering texts gains nothing. `embed_batch` takes a deadline: a text not embedded by then fails its own slot as unavailable, and the texts already embedded keep their vectors. `batch_capacity` is the most texts worth gathering into one call; a larger call is allowed and must still answer every slot. An adapter whose backend embeds several texts in one round overrides both, and Lambo then sends each write's texts in calls of up to that many. The candle adapter does this, with a capacity of 8.
+
+The implementations are the fixture embedder, BGE-M3 over `llama-server` (or any OpenAI-compatible embeddings endpoint), BGE-M3 in-process through candle, Gemini on Vertex, and EmbeddingGemma 2 over `llama-server`. Amazon Titan through Bedrock is planned and not yet built.
 
 ## The single-writer lease
 

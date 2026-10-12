@@ -10,6 +10,31 @@
   the pid that starts with `;`. Releasing another process's lease now needs
   the holder-scoped operator statement below, not a rebuilt `LeaseHolder`.
   See Breaking (library API).
+- **Nothing to migrate for #36.** No schema, stored edge or `lambo.toml`
+  key changed for it. Stored edges are read with the #36 meaning when the store
+  answers.
+- **Existing Venerables are re-checked before they can go Canonical
+  (Swarm).** Venerables admitted by 0.5.0 counted inbound `Causal` edges
+  (actions that produced or modified them) as support. That no longer
+  counts, and under Swarm a Venerable must now pass Stage 2 again before
+  Stage 3 can promote it, so an old Venerable with only `Causal` support
+  stays Venerable instead of jumping to Canonical on its first cycle.
+  Nothing is demoted. This includes a session's root goal, which
+  `set_root_goal` makes Venerable directly: under Swarm it now needs Stage 2
+  support (three dependents' interactions spanning 30% of the session) to
+  go Canonical. Solo is unchanged: it still probes and stamps blast radius
+  and admits by its score bands. On a copy of
+  the dogfood store taken 2026-10-12, no Candidate or Venerable would have
+  promoted on the first evaluation, with or without this check, and all 7
+  Venerables lose their Stage 2 support.
+- **Stored blast-radius stamps are history.** `Concept::blast_radius` and
+  `CanonizationEvent::blast_radius` rows written by 0.5.0 hold the older
+  exclusive count. Readers that show a current count (recall, inspect,
+  saints, the portal, the high-risk check) compute it from the graph.
+- **Expect different counts.** Blast radius is now the number of
+  dependents, so a file or entity that many actions name in `depends_on`
+  reports a larger count than before, and an action record that depended
+  on many things reports a smaller one.
 
 ### Breaking (library API)
 
@@ -32,6 +57,67 @@
   Do not use the unscoped `store::lease::OPERATOR_OVERRIDE` for this: it
   also expires a new, healthy writer that took the lease after you read the
   row.
+- **`GraphStore::blast_radius` and `GraphStore::interaction_span` have a new
+  contract (#36).** Both now read one relation, a node's *dependents*: the
+  sources of `Dependency` edges into it plus its `Hierarchical` children.
+  Blast radius counts all of them instead of the concepts the node would
+  orphan, and the span drops the node's own origin interaction. `Causal`
+  edges no longer count in either. A third-party adapter must follow
+  `MemoryStore`; the SQL is in `src/store/sqlite/structural.rs` and
+  `src/store/pg/sql.rs`.
+- `lambo::recall::format::{blast_radius, blast_radii}` and
+  `lambo::recall::dispatch::dependents` return the same relation, so their
+  values change for the same graph. `recall::format::inbound_sources` is
+  unchanged and is now documented as #29's GC input only.
+
+### Added
+
+- A live check of the #36 dependents case on Postgres and Cockroach, with
+  MemoryStore parity. It is manual by the owner's decision and is not part
+  of CI: run `LAMBO_POSTGRES_DSN=<dsn> cargo test --no-default-features --features store-postgres --lib store::pg::dependents_live -- --ignored` or, for
+  Cockroach, `LAMBO_COCKROACH_DSN=<dsn> cargo test --features store-cockroach,fixtures --lib conformance_suite -- --ignored`.
+- `EdgeType::dependent_end`, `DependentEnd` (re-exported at the crate
+  root), `Edge::dependence` and `recall::format::dependents_of`.
+- `lambo inspect` and `lambo_inspect` list the dependents their blast radius
+  counts: a `dependents (N):` section in the text, and `dependents` plus
+  `dependents_truncated` in the structured result.
+- **Layered recall in the library (#33).** `Memory::recall_layered` reads
+  a session and a stack of layers (other sessions, such as a shared
+  `general`), passed nearest tier first as `LayerRef`s, and returns a
+  `LayeredRecall` whose hits each name their session. The query is embedded
+  once. Lists are merged by `weight / rank` (a layer's weight defaults to
+  0.5 and must be greater than 0); a layer hit needs keyword evidence,
+  vector similarity of at least its `min_similarity` (default 0.40), or a
+  place in the layer's traversal answer, and no warning lifts that floor;
+  hits with a conflict, hot or reservation warning are kept beyond
+  `top_k`; the same memory in two tiers keeps the nearer copy; and one
+  `max_tokens` budget covers the merged context, where a layer hit's label
+  says `from <session>`. A dependency question ("what depends on X") is
+  answered by traversal in every session where X is found, layers included,
+  and each traversal warning counts that session's dependents shown in the
+  merged context. A layer that is closed, has another embedding contract or
+  panics is left out with a warning; a layer whose vector search fails
+  answers from its keyword results. The default weight and floor are not
+  calibrated yet (#87). With no layers the call returns exactly what
+  `recall` returns. Serve configuration and the MCP surface follow in later
+  0.6.0 changes.
+
+- **A vector-candidate lookup timeout is `LamboError::EmbedUnavailable`,
+  not `LamboError::Store`** (#125). `hybrid::derive` and `Memory::derive`
+  return it when a hybrid derive's lookup does not answer within its own
+  15 s budget (`hybrid::VECTOR_LOOKUP_TIMEOUT`, from when the lookup starts,
+  inside the call's 30 s). Its message reads `embed: hybrid vector
+  candidate lookup timed out after 15s; ...` and its error kind is
+  "embedding error" (it was `store error`), on write receipts too. Other
+  store errors from the lookup are unchanged.
+- `Embedder::embed_batch(texts, deadline)` and `Embedder::batch_capacity`,
+  default methods (non-breaking): embed several texts in one call, one result
+  per text, keeping the texts finished by the deadline. The defaults call
+  `embed` per text and report a capacity of 1.
+- `writeq::REPLAY_LOOKUP_TIMEOUT_LIMIT` (3): consecutive lookup timeouts at
+  replay that stop it (#125).
+- `graph::hybrid::VECTOR_LOOKUP_TIMEOUT` (15 s): one vector-candidate
+  lookup's own budget inside a hybrid call's 30 s (#125).
 
 ### Changed
 
@@ -65,6 +151,31 @@
   In a mixed fleet, a 0.5.0 reader shows no liveness hint for a 0.6.0
   holder (it cannot parse the pid out of the new string); proxying between
   versions is unaffected, since the host still reads the same.
+- **Load-bearing means "other work depends on this" (#36).** The ⚑ warning,
+  inspect, the portal's dependents list, `saints`, Swarm canonization
+  Stage 2 and Stage 3, budget demotion and the high-risk check now count the
+  concepts that depend on a node: actions that named it in `depends_on`,
+  concepts with a `Dependency` edge to it, and its `parent_of` children. An
+  action that produced or modified a node no longer counts toward it there.
+  `Causal` edges still count where they did outside that relation: Solo's
+  valid-action count, the score's edge-type bonus, and #29's GC protection.
+- Under Swarm, a Venerable must pass Stage 2 again before Stage 3 can
+  promote it. Solo is unchanged.
+- The high-risk check reads a node's live dependent count instead of the
+  stored blast-radius stamp, so a node with five or more dependents counts
+  as high-value whatever its status. The live count has no age floor,
+  unlike Stage 3, and the edge that gives a node its fifth dependent is
+  itself a fresh write, so reaching five fires a high-risk warning at once.
+  In the demo, `auth middleware` (five actions depend on it) is now
+  high-value, so agent B's recall carries a high-risk line for it: nine
+  warnings instead of eight.
+- The REST API fixture plants `user schema`'s eight fields as `parent_of`
+  children, so it has 14 dependents (was 8). The demo's `user schema` reports
+  15 (its nine children plus the six actions that depend on it; was 9).
+- The second-`parent_of` refusal no longer says a second parent would zero
+  the blast radius. The refusal itself is unchanged.
+- The cloudops scripts read inspect's dependents list, and the client-side
+  `check_single_source` guard is gone (Lambo refuses a second parent itself).
 
 ### Fixed
 
@@ -107,6 +218,51 @@
   - The portal shows it as "Partly in context (truncated)", expanded, and
     does not list its warnings as excluded. In `lambo recall` and the portal
     text, warning lines that did not fit print above the context.
+
+- **One bad text no longer fails other agents' writes on candle (#125).** The
+  candle coalescer failed every caller in a batch when the batch's forward
+  failed or panicked, so a write coalesced with a bad text by timing alone
+  failed as a permanent refusal. A failed forward is now followed by a
+  one-word canary forward: if the canary fails too, the device is at fault
+  and every caller gets a transient error with no per-text retries;
+  otherwise each text is rerun alone and only the bad one fails.
+- **A vector-candidate lookup timeout no longer loses an acked write
+  (#125 review).** The lookup ran under the same deadline as a derive's
+  embeds, and its timeout was a store error, which the write queue settles
+  `failed`, consuming the write's durable intent. It is now transient, like an
+  embed timeout, and it has its own 15 s budget from when it starts, so a
+  lookup timeout means the store did not answer (slow embeds that use up the
+  call's budget fail as an ordinary embed-budget error instead): the receipt
+  says `failed`, the intent stays durable, and the
+  session's next serve replays it (nothing retries it within the session). If
+  the lookup times out again at replay, the intent settles `failed` with a
+  reason that says so, rather than holding the backlog on every restart;
+  three in a row with nothing applied between stop the replay and leave the
+  rest durable, so at most two writes are settled failed per attach when the
+  store is slow. A derive also no longer starts an embed or a lookup once its
+  deadline has passed.
+
+### Performance
+
+- **One embedder call per write (#125).** A hybrid derive or record_action
+  now embeds all of its texts in one batched call instead of one call per
+  concept, when the embedder batches (the candle adapter does; the HTTP
+  adapters keep their one-at-a-time behaviour). Each write still plans,
+  validates and commits on its own; a text the call could not embed is
+  embedded alone, so one bad text fails only its own write. Measured with
+  `mcp_concurrent.py` on an M3 Pro (candle on Metal, a store copy, 120 s),
+  apply latency p50/p90: 51/71 ms against 64/94 ms on 0.5.0 at 8 agents, and
+  70/134 ms against 113/189 ms at 16 agents; recall p99 better on the means
+  (one 16-agent run regressed, 132.7 against 119.9 ms);
+  0 failed and 0 dropped writes in every run. 0.5.0 did not show its earlier
+  multi-second backlog in these runs, so this compares two unbacklogged
+  queues. See `dev-diary/notes/perf-125-batched-embeds.md`.
+- **Candle forwards in short, length-sorted chunks (#125).** A coalesced
+  take now runs as forwards of at most 8 texts of similar length, so one long
+  text no longer pads every other text in its batch. Measured on Metal: a
+  16-wide batch with one 910-byte text took 1,280 ms padded and 312 ms as
+  three chunks. Single embeds (a recall's query) are served before batched
+  ones, and a request whose caller has stopped waiting is not forwarded.
 
 ## 0.5.0 (2026-10-12)
 

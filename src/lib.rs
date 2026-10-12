@@ -119,9 +119,10 @@ pub use embed::{
 pub use embed::{near_far_contract, FixtureEmbedder, FAR, NEAR_A, NEAR_B, NEAR_PAIR};
 pub use graph::Graph;
 pub use memory::{
-    CanonicalMemory, DryRun, GcStats, GcSweepSummary, ImpactReport, Memory, MemoryBuilder,
-    MemoryStats,
+    CanonicalMemory, DryRun, GcStats, GcSweepSummary, ImpactReport, LayerCopy, LayerRef,
+    LayeredHit, LayeredRecall, Memory, MemoryBuilder, MemoryStats,
 };
+pub use recall::layered::{DEFAULT_LAYER_MIN_SIMILARITY, DEFAULT_LAYER_WEIGHT};
 
 pub use resolve::{
     assert_session_embedding_compatible, check_vector_compatibility, resolve_backends,
@@ -137,9 +138,9 @@ pub use store::{
 
 // Explicit re-exports (no `types::*` glob — keeps the public surface auditable).
 pub use types::{
-    AgentId, CanonizationEvent, CanonizationStatus, Concept, ConceptType, DaemonEvent, Edge,
-    EdgeType, EmbeddingContract, EmbeddingSource, GraphSnapshot, ImageMimeWire, Interaction,
-    InteractionSpan, LamboError, MatchStrategy, Mutation, MutationBatch, Node, NodeId, RecallHit,
-    RecallQuery, RecallResult, Reservation, ScoreTable, Scored, SessionId, SourceModality,
-    StoreError, Synonym, VectorOrigin,
+    AgentId, CanonizationEvent, CanonizationStatus, Concept, ConceptType, DaemonEvent,
+    DependentEnd, Edge, EdgeType, EmbeddingContract, EmbeddingSource, GraphSnapshot, ImageMimeWire,
+    Interaction, InteractionSpan, LamboError, MatchStrategy, Mutation, MutationBatch, Node, NodeId,
+    RecallHit, RecallQuery, RecallResult, Reservation, ScoreTable, Scored, SessionId,
+    SourceModality, StoreError, Synonym, VectorOrigin,
 };

@@ -35,29 +35,35 @@
 //! golden text (repo rule: em dashes are otherwise banned in docs; this one
 //! is the exception, exactly as spec §13 quotes it).
 //!
-//! ## Blast radius (spec §4.1 contract + errata 2026-08-11)
+//! ## Blast radius (spec §4.1 contract + errata 2026-08-11, #36)
 //!
 //! [`blast_radius`] computes the Stage-3 dependent count over the in-RAM
-//! graph, mirroring `GraphStore::blast_radius` (the three-way MemoryStore /
-//! SQLite / Cockroach agreement, T3.6): count concepts `c != node` that have
-//! at least one inbound structural edge from `node` and no inbound structural
-//! edge from any other concept. Structural means
-//! `Dependency` / `Causal` / `Hierarchical` only; the mandatory provenance
-//! `Derives` (interaction → concept) and `Temporal` edges never count as
-//! "another inbound source", or Stage-3 blast radius would be zero for every
-//! legal graph (errata). The definition is 1-hop, no recursion.
+//! graph, mirroring `GraphStore::blast_radius` (the MemoryStore / SQLite /
+//! Postgres-family agreement): the number of distinct concepts that declare a
+//! dependence on `node` ([`crate::types::Edge::dependence`]). Since #36 that
+//! is the **sources of `Dependency` edges into `node`** (`record_action`
+//! writes `action -> depends_on`, so the action is a dependent of what it
+//! depends on) plus **`node`'s `Hierarchical` children**, all of them rather
+//! than only those `node` would orphan. `Causal` (`action -> produced or
+//! modified artifact`) is provenance and confers no load, nor do `Derives`,
+//! `Temporal`, `CoOccurrence` or `Semantic`. A self-loop is not a dependent.
+//! The definition is 1-hop, no recursion, and is a read-time reinterpretation
+//! of the stored edges: nothing is migrated.
 //!
 //! No edge-age cutoff applies here: recall renders over the current graph
-//! (the store query's `min_edge_age` is a T3.x adapter concern), and the
+//! (the store query's `min_edge_age` is an adapter concern), and the
 //! committed fixtures put every edge in the past by convention.
 //!
 //! **Fixture note (shipped numbers):** on `fixtures/session-rest-api.json`
-//! the demo pillar "user schema" computes **8** dependents, pinned by
-//! `src/fixtures.rs` (`blast_radius: Some(8)`), the Cockroach anchor test,
-//! and `scripts/gen-fixtures.py` ("blast_radius = 8 > 5"). Spec §13 and
-//! `dev-diary/PHASE-8-surface.md` narrate the live demo with **9**; that
-//! number belongs to the T8.4 demo-scenario graph, which must plant a 9th
-//! dependent. The format renders whatever the graph computes.
+//! the pillar "user schema" computes **14** dependents (six concepts that
+//! depend on it plus its eight field children), pinned by `src/fixtures.rs`
+//! (`blast_radius: Some(14)`) and `scripts/gen-fixtures.py`. The live demo
+//! (`lambo demo`) builds its own graph and prints its own count.
+//!
+//! [`inbound_sources`] is a different relation, kept for #29's GC
+//! protection (`crate::daemon::gc::resources_with_dependents`): every
+//! structural (`Dependency`/`Causal`/`Hierarchical`) source of each concept,
+//! whatever the edge direction means. It is not the dependents relation.
 //!
 //! ## The conflict line
 //!
@@ -77,29 +83,32 @@ use std::collections::{HashMap, HashSet};
 
 use crate::graph::Graph;
 use crate::types::HotListPayload;
-use crate::types::{AgentId, EdgeType, NodeId, RecallHit, Reservation};
+use crate::types::{AgentId, EdgeType, Node, NodeId, RecallHit, Reservation};
 
 mod fit;
 pub(crate) use fit::{fit_blocks, ContextBlock, FittedContext, Truncation};
 
-/// The structural edge types that carry dependency for Stage-3 blast radius
-/// (spec §4.1 errata: `Derives` provenance and `Temporal` never count).
+/// The structural edge types (spec §4.1 errata: `Derives` provenance and
+/// `Temporal` never count). This is the edge set of #29's GC protection
+/// ([`inbound_sources`]), the portal's structural edge filter and the
+/// structural dispatch's anchor search. It is **not** the dependents relation:
+/// since #36 only `Dependency` and `Hierarchical` declare dependence, each in
+/// its own direction ([`crate::types::EdgeType::dependent_end`]).
 pub const STRUCTURAL_EDGE_TYPES: [EdgeType; 3] = [
     EdgeType::Dependency,
     EdgeType::Causal,
     EdgeType::Hierarchical,
 ];
 
-/// Stage-3 dependent count for `node` (spec §4.1 contract; see module docs).
+/// Every distinct concept structural source of each concept, keyed by the
+/// target: `target -> [sources]` over [`STRUCTURAL_EDGE_TYPES`],
+/// concept-to-concept edges only.
 ///
-/// A concept `c` "depends on" `node` when `node` is a structural source of `c`
-/// and `c` has no OTHER structural source. Deterministic for a given graph:
-/// the count is a pure set predicate over concepts and structural edges.
-///
-/// Both [`blast_radius`] (one node) and [`blast_radii`] (all nodes) share ONE
-/// graph pass building `inbound_sources`, so formatting many canonical hits
-/// under a lock is O(concepts + edges), not O(hits * concepts * edges)
-/// (GPT5.6sol P2-7). Pure and lock-safe.
+/// This is #29's GC-protection input (`crate::daemon::gc::resources_with_dependents`),
+/// defined independently of the #36 dependents relation on purpose: GC keeps
+/// a Resource that any structural edge reaches, or that is the sole structural
+/// source of another concept, whatever the edge direction means. Do not use it
+/// to count dependents; use [`dependents_of`] / [`blast_radii`].
 pub fn inbound_sources(graph: &Graph) -> HashMap<NodeId, Vec<NodeId>> {
     let concept_ids: HashSet<NodeId> = graph.concepts().map(|c| c.id).collect();
     let mut sources: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
@@ -118,30 +127,58 @@ pub fn inbound_sources(graph: &Graph) -> HashMap<NodeId, Vec<NodeId>> {
     sources
 }
 
-/// Dependent count for a single `node` (spec §4.1). Prefer [`blast_radii`]
-/// when several canonical hits render under one lock.
-pub fn blast_radius(graph: &Graph, node: NodeId) -> u64 {
-    let sources = inbound_sources(graph);
-    sources
-        .into_iter()
-        .filter(|(dst, srcs)| *dst != node && srcs.len() == 1 && srcs[0] == node)
-        .count() as u64
+/// The concept a dependence edge names as the dependent of `node`, when the
+/// edge declares one ([`crate::types::Edge::dependence`]) with `node` as the
+/// pillar and both ends are concepts of `graph`.
+fn dependent_via(graph: &Graph, node: NodeId, e: &crate::types::Edge) -> Option<NodeId> {
+    let (pillar, dependent) = e.dependence()?;
+    let is_concept = |id: NodeId| matches!(graph.node(id), Some(Node::Concept(_)));
+    (pillar == node && is_concept(pillar) && is_concept(dependent)).then_some(dependent)
 }
 
-/// All blast radii in ONE graph pass (GPT5.6sol P2-7): a map from each node to
-/// its dependent count. Use this when rendering multiple canonical hits.
-pub fn blast_radii(graph: &Graph) -> HashMap<NodeId, u64> {
-    let sources = inbound_sources(graph);
-    let mut out: HashMap<NodeId, u64> = HashMap::new();
-    for (dst, srcs) in sources {
-        if srcs.len() == 1 {
-            let only = srcs[0];
-            // A structural self-loop (srcs[dst] == {dst}) is not a dependent;
-            // blast_radius and all durable stores exclude it (dst != node).
-            if only != dst {
-                *out.entry(only).or_insert(0) += 1;
+/// `node`'s dependents (#36): the distinct concepts that declare a dependence
+/// on it — `Dependency` sources into it plus its `Hierarchical` children —
+/// each with the strongest weight among the edges declaring it, in
+/// node-id order. Routed through the adjacency index (`O(degree)`), so it is
+/// cheap per node.
+pub fn dependents_of(graph: &Graph, node: NodeId) -> Vec<(NodeId, f64)> {
+    let mut out: HashMap<NodeId, f64> = HashMap::new();
+    for e in graph.incident_edges(node) {
+        if let Some(dependent) = dependent_via(graph, node, e) {
+            let w = out.entry(dependent).or_insert(e.weight);
+            if e.weight > *w {
+                *w = e.weight;
             }
         }
+    }
+    let mut out: Vec<(NodeId, f64)> = out.into_iter().collect();
+    out.sort_by_key(|(id, _)| id.0);
+    out
+}
+
+/// Dependent count for a single `node` (spec §4.1 with the #36 errata; see
+/// the module docs). Prefer [`blast_radii`] when many nodes need a count.
+pub fn blast_radius(graph: &Graph, node: NodeId) -> u64 {
+    dependents_of(graph, node).len() as u64
+}
+
+/// All blast radii in ONE graph pass (GPT5.6sol P2-7): a map from each node
+/// with at least one dependent to its dependent count. Agrees with
+/// [`blast_radius`] for every node.
+pub fn blast_radii(graph: &Graph) -> HashMap<NodeId, u64> {
+    let concept_ids: HashSet<NodeId> = graph.concepts().map(|c| c.id).collect();
+    let mut pairs: HashSet<(NodeId, NodeId)> = HashSet::new();
+    for e in graph.edges() {
+        if let Some((pillar, dependent)) = e.dependence()
+            && concept_ids.contains(&pillar)
+            && concept_ids.contains(&dependent)
+        {
+            pairs.insert((pillar, dependent));
+        }
+    }
+    let mut out: HashMap<NodeId, u64> = HashMap::new();
+    for (pillar, _) in pairs {
+        *out.entry(pillar).or_insert(0) += 1;
     }
     out
 }
@@ -387,19 +424,20 @@ mod tests {
             created_at: ts(m),
             last_reinforced: ts(m),
         };
-        // a depends only on x: counted.
+        // A Dependency edge's source rests on its target (#36).
+        // x depends on a: x is a's dependent.
         g.upsert_edge(dep(x, a, 1)).unwrap();
-        // b depends on x AND y: not an orphan of x.
+        // x and y both depend on b: b has two dependents (shared ones count).
         g.upsert_edge(dep(x, b, 2)).unwrap();
         g.upsert_edge(dep(y, b, 3)).unwrap();
-        // c -> x is inbound to x: irrelevant to x's blast radius.
+        // c depends on x: x's one dependent.
         g.upsert_edge(dep(c, x, 4)).unwrap();
-        // d depends only on y: y's exclusive orphan.
+        // y depends on d.
         g.upsert_edge(dep(y, d, 8)).unwrap();
         // NOTE: an interaction-sourced structural edge cannot exist in a legal
         // graph (spec §5: Dependency/Causal/Hierarchical must connect Concept
         // to Concept; the write gate rejects it), so `blast_radius`'s
-        // concept-source filter is defensive belt-and-suspenders, not a
+        // concept-endpoint filter is defensive belt-and-suspenders, not a
         // reachable case.
         // Provenance Derives (i1 -> a) and a Temporal edge: must not count.
         g.upsert_edge(crate::types::Edge {
@@ -432,16 +470,67 @@ mod tests {
     }
 
     #[test]
-    fn blast_radius_counts_only_exclusive_concept_orphans() {
+    fn blast_radius_counts_every_dependency_source() {
         let g = blast_graph();
-        assert_eq!(blast_radius(&g, uid(10)), 1, "only `a` is exclusively x's");
+        assert_eq!(blast_radius(&g, uid(10)), 1, "c depends on x");
+        assert_eq!(blast_radius(&g, uid(13)), 0, "nothing depends on y");
         assert_eq!(
-            blast_radius(&g, uid(13)),
+            blast_radius(&g, uid(11)),
             1,
-            "`b` keeps its x-edge, so `d` is y's only exclusive orphan"
+            "x depends on a (Derives ignored)"
         );
-        assert_eq!(blast_radius(&g, uid(11)), 0, "`a` has no dependents");
-        assert_eq!(blast_radius(&g, uid(14)), 1, "`x` depends only on c");
+        assert_eq!(
+            blast_radius(&g, uid(12)),
+            2,
+            "x and y both depend on b; a shared dependent counts for each pillar"
+        );
+        assert_eq!(blast_radius(&g, uid(14)), 0, "nothing depends on c");
+        assert_eq!(blast_radius(&g, uid(15)), 1, "y depends on d");
+        let radii = blast_radii(&g);
+        for id in 10..=15u64 {
+            assert_eq!(
+                radii.get(&uid(id)).copied().unwrap_or(0),
+                blast_radius(&g, uid(id)),
+                "blast_radii agrees with blast_radius for {id}"
+            );
+        }
+    }
+
+    /// #36: the graph-side relation answers the shared dependents case
+    /// (`crate::test_util::dependents`), and every graph-side reader agrees
+    /// with it: `dependents_of`, `blast_radius`, `blast_radii` and the
+    /// structural dispatch's `dependents`.
+    #[test]
+    fn graph_side_dependents_follow_the_dependents_case() {
+        use crate::test_util::dependents as case;
+        let g = case::graph();
+        let radii = blast_radii(&g);
+        for (name, want) in case::expected_graph() {
+            let node = case::concept_id(name);
+            let mut want: Vec<NodeId> = want.iter().map(|n| case::concept_id(n)).collect();
+            want.sort_by_key(|id| id.0);
+            let got: Vec<NodeId> = dependents_of(&g, node)
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect();
+            assert_eq!(got, want, "dependents_of({name})");
+            assert_eq!(
+                blast_radius(&g, node),
+                want.len() as u64,
+                "blast_radius({name})"
+            );
+            assert_eq!(
+                radii.get(&node).copied().unwrap_or(0),
+                want.len() as u64,
+                "blast_radii({name})"
+            );
+            let mut dispatched: Vec<NodeId> = crate::recall::dispatch::dependents(&g, node)
+                .into_iter()
+                .map(|s| s.item)
+                .collect();
+            dispatched.sort_by_key(|id| id.0);
+            assert_eq!(dispatched, want, "dispatch::dependents({name})");
+        }
     }
 
     #[test]
@@ -644,12 +733,12 @@ mod tests {
         assert_eq!(default_token_count("aaaaaaaaaaaaaaaa"), 5); // ceil(16/3.5)
     }
 
-    /// The shipped demo pillar computes its dependent count from the graph
-    /// (spec §4.1 contract), not from the fixture's stored `blast_radius`
-    /// field. Both agree on the fixture: 8.
+    /// The shipped pillar computes its dependent count from the graph
+    /// (spec §4.1 contract with the #36 errata), not from the fixture's
+    /// stored `blast_radius` field. Both agree on the fixture: 14.
     #[cfg(feature = "fixtures")]
     #[test]
-    fn fixture_schema_user_blast_radius_computes_eight() {
+    fn fixture_schema_user_blast_radius_computes_fourteen() {
         use crate::fixtures;
         let snap = fixtures::load_snapshot("session-rest-api").unwrap();
         let g = Graph::from_snapshot(snap).expect("fixture loads");
@@ -667,18 +756,16 @@ mod tests {
         );
         assert_eq!(
             blast_radius(&g, us),
-            8,
-            "user schema: 8 exclusive orphans (D1..D8). Spec §13's demo narration says 9; that number belongs to the T8.4 live demo graph (see module docs)."
+            14,
+            "user schema: six concepts depend on it plus its eight field children (D1..D8)"
         );
     }
 
     #[test]
-    fn blast_radius_matches_batched_and_depends_only_on_exclusive_structural() {
-        // hub; leaf1 (hub Dependency + Semantic other => does NOT depend);
-        // leaf2 (hub Dependency only => depends); child (chain off leaf2 =>
-        // depends via leaf2 not hub? structural-only: leaf2 is a concept, so
-        // child has an exclusive structural source leaf2 -> leaf2 depends on hub,
-        // and child depends on leaf2, NOT hub).
+    fn blast_radius_matches_batched_and_counts_only_declared_dependence() {
+        // hub; leaf1..5 each depend on hub through a Dependency edge into it.
+        // `mixed` is reached from hub only by a Semantic edge (association,
+        // not dependence), and leaf1 depends on it.
         let mut g = Graph::new(sid());
         let hub = uid(100);
         let origin = interaction(99, "a");
@@ -692,12 +779,12 @@ mod tests {
             )
             .unwrap();
         }
-        // leaf1..5 each has ONLY a Dependency edge from hub => all 5 depend on hub.
+        // leaf1..5 each depend on hub (Dependency edge into hub).
         for id in [1u64, 2, 3, 4, 5] {
-            g.upsert_edge(dep_edge(id, hub, uid(id))).unwrap();
+            g.upsert_edge(dep_edge(id, uid(id), hub)).unwrap();
         }
-        // A concept with a NON-structural (Semantic) source from hub + a
-        // structural source from another concept => depends on NEITHER exclusively.
+        // A Semantic edge from hub to `mixed` declares nothing; leaf1
+        // depending on `mixed` makes leaf1 a dependent of `mixed` too.
         g.insert_concept(concept_for_blast(uid(6), origin.id, "mixed"), origin.id)
             .unwrap();
         g.upsert_edge(non_structural_edge(1, hub, uid(6))).unwrap();
@@ -706,8 +793,9 @@ mod tests {
         let single = blast_radius(&g, hub);
         assert_eq!(
             single, 5,
-            "only the 5 exclusive-structural leaves depend on hub"
+            "the 5 leaves depend on hub; Semantic does not count"
         );
+        assert_eq!(blast_radius(&g, uid(6)), 1, "leaf1 depends on mixed");
 
         // Batched must agree per-node.
         let radii = blast_radii(&g);
@@ -741,9 +829,9 @@ mod tests {
 
     #[test]
     fn blast_radii_one_pass_agrees_with_per_node_over_a_larger_graph() {
-        // A chain: 0 -> 1 -> 2 -> ... -> n. Each i>0 depends exclusively on
-        // i-1, so i (i>0) has blast radius 1 (its child). Node 0 has radius 1
-        // too (node 1). Ensure the batched map matches per-node calls.
+        // A chain of Dependency edges 0 -> 1 -> 2 -> ... -> n: each i<n
+        // depends on i+1, so every i>0 has exactly one dependent (i-1) and
+        // node 0 has none. Ensure the batched map matches per-node calls.
         let mut g = Graph::new(sid());
         let n = 40;
         let origin = interaction(98, "a");
@@ -762,7 +850,7 @@ mod tests {
         let radii = blast_radii(&g);
         for i in 0..=n {
             let node = uid(i as u64);
-            let count = if i == n { 0 } else { 1 }; // n has no children
+            let count = if i == 0 { 0 } else { 1 }; // nothing depends on 0
             assert_eq!(
                 radii.get(&node).copied().unwrap_or(0),
                 count,

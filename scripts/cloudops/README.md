@@ -144,8 +144,8 @@ Plan §3's climax. `network-infra-agent` runs a drift cleanup and decides
 2. Runs the pre-flight recall protocol (plan §4.1) with the plan's own query,
    `"tear down Subnet-Private-1a and delete SG-Base-VPC"`.
 3. Runs `lambo inspect --focus SG-Base-VPC --depth 1`.
-4. Blocks if either signal shows a dependency, and renders what would have been
-   stranded.
+4. Blocks if either signal shows a dependency, and renders what depends on the
+   group.
 
 Exit status is 0 when it blocked (the outcome the demo wants) and when the
 session is empty/unpopulated (nothing to protect — printed as a prominent
@@ -172,15 +172,12 @@ Arguments: `--action delete-security-group|revoke-ingress`, `--query`,
   Phase 3 documents, the lowercase `rds-lambo-demo-db` identifier against the
   plan's `RDS-Lambo-Demo-DB` `Name` tag.
 
-* **One structural parent per concept, enforced.** Blast radius counts, for a
-  node, the concepts whose *only* inbound structural edge comes from it. A second
-  parent does not split the credit, it removes the child from both parents'
-  counts. Do that across a tier and the pillar never clears Stage 3, never
-  becomes Canonical, and the load-bearing-pillar warning never renders, with
-  nothing anywhere reporting an error. `check_single_source` refuses the
-  hierarchy half of that mistake at build time; the other half is avoided by
-  never naming a resource in `--produces` when the derive step has already
-  placed it under a parent.
+* **What counts toward a blast radius (#36).** A node's dependents are its
+  `--parent-of` children and every action that names it in `--depends-on`.
+  `--produces` and `--modifies` record provenance and count for nothing, so the
+  scripts use them only for concepts with no hierarchy parent. Containment is
+  expressed once, with `--parent-of`; Lambo refuses a second parent for any
+  concept at derive time, because the hierarchy is a tree.
 
 * **The database hangs off the security group, not the subnet.** Both are true
   in AWS and only one can be the hierarchy edge. Membership of `SG-Base-VPC` is
@@ -218,31 +215,28 @@ lives for about a second, so on a session written only by these scripts the
 warning is usually not there yet. It arrives once `lambo serve` has held the
 session for a few minutes.
 
-`lambo inspect` has no such gate: it prints `blast radius: N` and the same `⚑`
-line for any focus, whatever its status. So `03` reads both and blocks on either.
+`lambo inspect` has no such gate: it prints `blast radius: N`, the same `⚑`
+line and a `dependents (N):` section naming them, for any focus, whatever its
+status. So `03` reads both and blocks on either.
 The recall line is the one the plan puts on screen; the inspect line is the one
 that works from the first run.
 
-On a session with the whole stack recorded, `VPC-Enterprise-Prod` measures a
-blast radius of 9, or 7 once the exhibit instance exists and takes a dependency
-on the public subnet and `SG-PublicWeb`. `SG-Base-VPC` measures 5 either way,
-with `RDS-Lambo-Demo-DB` named first among its dependents. Both are above zero,
-and the VPC is above Stage 3's floor of 5, which is what lets it eventually earn
-`Canonical` under a long-running writer.
+Since #36 the counts are the dependents: `VPC-Enterprise-Prod` counts its
+subnets, groups, facts and bindings as children plus every action that names it
+in `--depends-on`; `SG-Base-VPC` counts its rule constraints, its binding and
+`RDS-Lambo-Demo-DB` as children plus the RDS action that depends on it. The
+0.5.0 figures recorded for this stack (9 or 7 for the VPC, 5 for the group)
+used the older exclusive count and have not been re-measured.
 
 ### Reading `inspect` output back
 
-`02` and `03` parse `lambo inspect`, because neither `recall` nor `inspect` has a
-JSON mode on the CLI today. `parse_outbound_neighbours` keeps only the
-**structural** edge headings — `Dependency` / `Causal` / `Hierarchical` —
-matching the engine's structural-edge definition (the CLI's `is_structural`), so
-the banner names genuine dependents only. `CoOccurrence` (and the interaction
-provenance kinds) are deliberately excluded and never appear as a stranded
-dependent; a hierarchy child carries a `Hierarchical` edge, not a
-`CoOccurrence` one, because concepts derived in the same interaction no longer
-co-add a cross-tier `CoOccurrence` edge (each tier is derived separately). The
-authoritative blast-radius count remains the `blast radius:` line, which counts
-the same structural set.
+`03` parses `lambo inspect`, because neither `recall` nor `inspect` has a JSON
+mode on the CLI today. `parse_dependents` reads the `dependents (N):` section
+that `inspect` prints under the `blast radius:` line: exactly the concepts the
+count is made of, each tagged `Dependency` (it depends on the focus) or
+`Hierarchical` (it is the focus's child). The hop listing below it names
+neighbours in both directions, parents and producers included, and is not
+read. The MCP tool's structured result carries the same list as `dependents`.
 
 ## Files
 

@@ -31,8 +31,6 @@
 //! collected. This is default-invisible (no subscriber enables trace on the
 //! CLI/daemon path) and is the T9 instrumentation for the structural arm.
 
-use std::collections::HashMap;
-
 use crate::graph::Graph;
 use crate::recall::detail::{Annotation, AnnotationKind, DetailedHit, DetailedRecall};
 use crate::recall::format;
@@ -47,13 +45,12 @@ pub enum RecallKind {
     Structural,
 }
 
-/// The traversal answers a dependency question over the structural edge types
-/// (`Dependency` / `Causal` / `Hierarchical` — [`format::STRUCTURAL_EDGE_TYPES`],
-/// spec §4.1 errata: `Derives` provenance and `Temporal` never carry
-/// dependency). Membership follows the §4.1 blast-radius predicate directly:
-/// a node depends on the anchor when the anchor is its **sole** structural
-/// source (see [`dependents`]), so the returned set and the `blast_radius`
-/// field stamped on each hit always agree.
+/// The traversal answers a dependency question with the #36 dependents
+/// relation ([`format::dependents_of`]): the concepts that declare a
+/// dependence on the anchor (`Dependency` sources into it, its `Hierarchical`
+/// children). `Causal`, provenance and association edges never carry
+/// dependency. The returned set and the `blast_radius` field stamped on each
+/// hit are the same relation, so they always agree.
 const STRUCTURAL_MARKERS: [&str; 7] = [
     "depends on",
     "depend on",
@@ -270,9 +267,8 @@ fn resolve_anchor(graph: &Graph, query: &str) -> Option<NodeId> {
         })
         .map(|c| c.id)
         .collect();
-    // Each `dependents(graph, *id)` is a full inbound_sources pass, run twice
-    // per recall (brief read + final lock), so this branch is O(SG x E) —
-    // bounded and fine at recall-graph sizes; counts are precomputed so the
+    // Each `dependents(graph, *id)` walks the SG's incident edges, run twice
+    // per recall (brief read + final lock); counts are precomputed so the
     // sort calls it once per SG instead of once per comparison.
     // Most structural dependents wins; equal-dependent SGs fall to the stable
     // issue-2 chain (canonical key ascending, NodeId ascending) because
@@ -324,31 +320,22 @@ pub fn fits_structural(graph: &Graph, query: &str) -> bool {
 /// The structural dependents of `anchor`, ranked by how strongly the graph
 /// binds each to it.
 ///
-/// Membership matches the §4.1 blast-radius predicate exactly (T9-R1-2),
-/// reusing [`format::inbound_sources`] so the returned set and the
-/// `blast_radius` field stamped on each hit agree: a concept `dst` depends on
-/// `anchor` when `anchor` is its **sole** structural source
-/// (`srcs.len() == 1 && srcs[0] == anchor`). A multi-source dependent survives
-/// `anchor`'s deletion and is deliberately NOT a blast-radius dependent, so it
-/// is not returned here — this is what reconciles the traversal with §4.1 and
-/// keeps delete-safety answers from over-reporting risk. The anchor itself is
-/// excluded by construction (`inbound_sources` tracks concepts only).
+/// Membership is the #36 dependents relation ([`format::dependents_of`]): a
+/// concept depends on `anchor` when it is the source of a `Dependency` edge
+/// into `anchor` or `anchor`'s `Hierarchical` child. Every such concept is
+/// returned, including one that also depends on something else: the
+/// delete-safety question is "what rests on this", and a dependent with a
+/// second pillar still rests on this one. The set is exactly what
+/// `blast_radius` counts, so the two agree. The anchor itself is never its
+/// own dependent.
 ///
-/// Score is the strongest structural edge weight binding `dst` to `anchor`.
-/// Ordering applies spec §10 canonical-first promotion, then strength, then the
-/// issue-2 tie-break (canonical key ascending, node id ascending behind it):
-/// the same partition and tie order `assemble` applies, so the traversal
+/// Score is the strongest weight among the edges declaring the dependence.
+/// Ordering applies spec §10 canonical-first promotion, then strength, then
+/// the issue-2 tie-break (canonical key ascending, node id ascending behind
+/// it): the same partition and tie order `assemble` applies, so the traversal
 /// answer orders identically to the blend.
 pub fn dependents(graph: &Graph, anchor: NodeId) -> Vec<Scored<NodeId>> {
-    let sources = format::inbound_sources(graph);
-    let mut strength: HashMap<NodeId, f64> = HashMap::new();
-    for (dst, srcs) in sources {
-        if dst == anchor || srcs.len() != 1 || srcs[0] != anchor {
-            continue;
-        }
-        strength.insert(dst, max_structural_strength(graph, anchor, dst));
-    }
-    let mut out: Vec<Scored<NodeId>> = strength
+    let mut out: Vec<Scored<NodeId>> = format::dependents_of(graph, anchor)
         .into_iter()
         .map(|(id, w)| Scored::new(id, w))
         .collect();
@@ -378,21 +365,6 @@ pub fn dependents(graph: &Graph, anchor: NodeId) -> Vec<Scored<NodeId>> {
         );
     }
     out
-}
-
-/// Strongest weight of any structural edge between `a` and `b` (either
-/// direction). Scans `graph.edges()`; the recall-relevant subgraph is small.
-fn max_structural_strength(graph: &Graph, a: NodeId, b: NodeId) -> f64 {
-    let mut best: f64 = 0.0;
-    for e in graph.edges() {
-        if format::STRUCTURAL_EDGE_TYPES.contains(&e.edge_type)
-            && ((e.source == a && e.target == b) || (e.source == b && e.target == a))
-            && e.weight > best
-        {
-            best = e.weight;
-        }
-    }
-    best
 }
 
 /// Answer a structural query by traversal when possible.
@@ -478,8 +450,7 @@ pub(crate) fn try_structural(
     // context does show), not the pre-truncation hit set.
     let count = fitted.rendered();
     let mut warnings = Vec::new();
-    let traversal =
-        format!("recall: dependency question answered by graph traversal ({count} dependents)");
+    let traversal = traversal_headline(count);
     warnings.push(traversal.clone());
     // H3: included_in_context at the cut; the traversal explanation is
     // response-global — one annotation, never attached to a hit.
@@ -498,6 +469,13 @@ pub(crate) fn try_structural(
         detailed,
         response_annotations: vec![Annotation::new(AnnotationKind::Traversal, traversal)],
     })
+}
+
+/// The structural-dispatch headline (the `traversal` response annotation
+/// and its warning line) for `count` rendered dependents (T9-R1-N4). The
+/// layered merge recomputes it after its own budget cut (#33 PR 2).
+pub(crate) fn traversal_headline(count: usize) -> String {
+    format!("recall: dependency question answered by graph traversal ({count} dependents)")
 }
 
 #[cfg(test)]
@@ -1152,8 +1130,8 @@ mod tests {
         );
     }
 
-    /// A dedicated structural graph: `app router` is the sole structural
-    /// source of a canonical `users handler` and a plain `payments handler`,
+    /// A dedicated structural graph: a canonical `users handler` and a plain
+    /// `payments handler` both depend on `app router`,
     /// so the traversal answer exercises a load-bearing annotation and a
     /// full status on structural hits.
     fn structural_exhibit() -> Graph {
@@ -1195,9 +1173,11 @@ mod tests {
             })
             .unwrap();
         }
-        g.upsert_edge(edge(1, 1, 2, EdgeType::Dependency, 5.0))
+        // Both handlers depend on the router: a Dependency edge's source
+        // rests on its target (#36).
+        g.upsert_edge(edge(1, 2, 1, EdgeType::Dependency, 5.0))
             .unwrap();
-        g.upsert_edge(edge(2, 1, 3, EdgeType::Dependency, 3.0))
+        g.upsert_edge(edge(2, 3, 1, EdgeType::Dependency, 3.0))
             .unwrap();
         g
     }
@@ -1260,8 +1240,8 @@ mod tests {
     // #130: the shared budget cut (`format::fit_blocks`)
     // -----------------------------------------------------------------------
 
-    /// `app router` is the structural source of a 6 KB `big handler` (the
-    /// strongest dependent, so ranked first) and a short `payments handler`.
+    /// A 6 KB `big handler` (the strongest dependent, so ranked first) and a
+    /// short `payments handler` both depend on `app router` (#36).
     fn oversized_first_dependent() -> Graph {
         let mut g = Graph::new(sid());
         let i1 = NodeId(uuid::Uuid::from_u64_pair(1, 1));
@@ -1284,9 +1264,11 @@ mod tests {
             g.insert_concept(concept(id, &content, ConceptType::Entity), i1)
                 .unwrap();
         }
-        g.upsert_edge(edge(1, 1, 2, EdgeType::Dependency, 5.0))
+        // Both handlers depend on the router: a Dependency edge's source
+        // rests on its target (#36).
+        g.upsert_edge(edge(1, 2, 1, EdgeType::Dependency, 5.0))
             .unwrap();
-        g.upsert_edge(edge(2, 1, 3, EdgeType::Dependency, 3.0))
+        g.upsert_edge(edge(2, 3, 1, EdgeType::Dependency, 3.0))
             .unwrap();
         g
     }

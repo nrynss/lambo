@@ -66,23 +66,58 @@ impl Memory {
         // run, and served from the session's query-embedding cache on a
         // repeat (#14). After `ensure_open`, so a closed or erased session
         // never answers from the cache (#23).
-        let vectors = self.vector_candidates();
-        let mut warnings = Vec::new();
-        let embedding = match query_cache::embed_query_cached(
+        let (embedding, warning) = self
+            .embed_recall_query(&query.query, self.vector_candidates())
+            .await;
+        let result = self
+            .recall_text_with(query, embedding.as_deref(), warning)
+            .await;
+
+        // Issue #30: every hit returned to the caller is an access — cache-
+        // served or not, inside the token budget or not (the wire carries every
+        // hit's content). Noted after the pipeline released the graph lock;
+        // non-concept hits are skipped when the daemon applies the batch.
+        self.note_accesses(result.hits.iter().map(|h| h.node_id));
+        Ok(result)
+    }
+
+    /// The query embedding a text recall searches the vector leg with:
+    /// `None` when `vectors` cannot search (no embed call is made), and on
+    /// an embed failure, which is returned as the warning line instead of
+    /// failing the read. Served from, and stored in, this session's
+    /// query-embedding cache (#14). The caller has run `ensure_open`.
+    pub(crate) async fn embed_recall_query(
+        &self,
+        text: &str,
+        vectors: VectorCandidates<'_>,
+    ) -> (Option<std::sync::Arc<[f32]>>, Option<String>) {
+        match query_cache::embed_query_cached(
             &self.query_embeddings,
             vectors,
             self.embedder.as_ref(),
             &self.embedding,
-            &query.query,
+            text,
         )
         .await
         {
-            Ok(vector) => vector,
-            Err(warning) => {
-                warnings.push(warning);
-                None
-            }
-        };
+            Ok(vector) => (vector, None),
+            Err(warning) => (None, Some(warning)),
+        }
+    }
+
+    /// The text recall pipeline with the query vector already in hand (or
+    /// `None`): the body of [`Memory::recall_detailed`] after the embed,
+    /// and the caller's own session's side of a layered recall (#33 PR 2).
+    /// `warning` (the embed failure, if any) leads the result's warnings.
+    /// Notes no accesses: the caller decides which hits were returned.
+    pub(crate) async fn recall_text_with(
+        &self,
+        query: RecallQuery,
+        embedding: Option<&[f32]>,
+        warning: Option<String>,
+    ) -> crate::recall::detail::DetailedRecall {
+        let vectors = self.vector_candidates();
+        let mut warnings: Vec<String> = warning.into_iter().collect();
 
         // The recall cache is `&mut` across `Daemon::recall`'s awaits. This is
         // NOT the graph lock — `Daemon::recall` takes and releases that itself,
@@ -94,22 +129,16 @@ impl Memory {
                 &self.session,
                 query,
                 vectors,
-                embedding.as_deref().map(|vector| (vector, &self.embedding)),
+                embedding.map(|vector| (vector, &self.embedding)),
                 self.config.recall_weights,
                 &mut cache,
             )
             .await;
         drop(cache);
 
-        // Issue #30: every hit returned to the caller is an access — cache-
-        // served or not, inside the token budget or not (the wire carries every
-        // hit's content). Noted after the pipeline released the graph lock;
-        // non-concept hits are skipped when the daemon applies the batch.
-        self.note_accesses(result.hits.iter().map(|h| h.node_id));
-
         warnings.append(&mut result.warnings);
         result.warnings = warnings;
-        Ok(result)
+        result
     }
 
     /// Recall by an image or a client-computed query vector (#22 PR 6),

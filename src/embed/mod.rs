@@ -157,6 +157,26 @@ impl EmbedError {
     }
 }
 
+/// The slot error for a text an [`Embedder::embed_batch`] call did not embed
+/// by its deadline (#125). Transient: nothing was learned about the text.
+pub(crate) fn deadline_passed() -> EmbedError {
+    EmbedError::Unavailable("the batch's deadline passed before this text was embedded".into())
+}
+
+/// A copy of `e` with the same variant and message, for an error that
+/// answers several batch slots at once (#125). `EmbedError` is not `Clone`
+/// because it is public and `#[non_exhaustive]`; inside the crate every
+/// variant is known.
+#[cfg(feature = "embed-candle")]
+pub(crate) fn same_error(e: &EmbedError) -> EmbedError {
+    match e {
+        EmbedError::Unavailable(m) => EmbedError::Unavailable(m.clone()),
+        EmbedError::Backend(m) => EmbedError::Backend(m.clone()),
+        EmbedError::Unsupported(m) => EmbedError::Unsupported(m.clone()),
+        EmbedError::Unreadable(m) => EmbedError::Unreadable(m.clone()),
+    }
+}
+
 bitflags::bitflags! {
     /// The kinds of input an [`Embedder`] can embed (#22). Every adapter embeds
     /// [`Modalities::TEXT`]; an adapter that also embeds images into the same
@@ -313,7 +333,10 @@ impl std::fmt::Debug for ImageInput<'_> {
 /// from the registry, whatever the inner adapter does. So a delegating
 /// embedder forwards [`Self::embed_query`], [`Self::embed_image`],
 /// [`Self::modalities`], [`Self::prepare`], [`Self::is_prepared`] and
-/// [`Self::as_any`] to its inner embedder as well.
+/// [`Self::as_any`] to its inner embedder as well. A wrapper that does not
+/// forward [`Self::embed_batch`] and [`Self::batch_capacity`] is still
+/// correct (its texts go through its own `embed` one at a time); it only
+/// gives up the inner adapter's batching (#125).
 #[async_trait]
 pub trait Embedder: Send + Sync {
     /// Embedding dimensionality this backend emits.
@@ -358,6 +381,59 @@ pub trait Embedder: Send + Sync {
     /// [`crate::types::EmbeddingContract`]'s `model`.
     async fn embed_query(&self, text: &str) -> Result<Vec<f32>, EmbedError> {
         self.embed(text).await
+    }
+
+    /// Embed several texts in the **document** role (#125): one result per
+    /// text, in the order given, each under [`Self::embed`]'s input and
+    /// output contract.
+    ///
+    /// **Each result is that text's own.** An adapter that sends the texts
+    /// to its backend together must not let one text's failure become
+    /// another's: a refused or malformed text fails its own slot, and the
+    /// rest get their vectors. A whole-call failure (the backend is
+    /// unreachable) may fail every slot, each with that error.
+    ///
+    /// **Answer by `deadline`, and keep what is done.** The call returns by
+    /// `deadline`. A text not embedded by then fails its own slot with
+    /// [`EmbedError::Unavailable`] (nothing was learned about it), while the
+    /// texts already embedded keep their vectors. No work is started for a
+    /// text once `deadline` has passed. Callers may still guard the call
+    /// with a timeout a little past `deadline`, so an adapter that overruns
+    /// loses its whole answer.
+    ///
+    /// The default embeds the texts one after another through
+    /// [`Self::embed`], each bounded by `deadline`, so it is exactly as fast
+    /// as calling `embed` in a loop. An adapter whose backend embeds several
+    /// texts in one round overrides this and [`Self::batch_capacity`].
+    async fn embed_batch(
+        &self,
+        texts: &[&str],
+        deadline: tokio::time::Instant,
+    ) -> Vec<Result<Vec<f32>, EmbedError>> {
+        let mut out = Vec::with_capacity(texts.len());
+        for text in texts {
+            if tokio::time::Instant::now() >= deadline {
+                out.push(Err(deadline_passed()));
+                continue;
+            }
+            out.push(
+                tokio::time::timeout_at(deadline, self.embed(text))
+                    .await
+                    .unwrap_or_else(|_| Err(deadline_passed())),
+            );
+        }
+        out
+    }
+
+    /// The most texts worth gathering into one [`Self::embed_batch`] call
+    /// (#125): the size of one backend round. Callers send at most this
+    /// many per call; a larger call is still allowed, and the adapter must
+    /// answer every slot of it (it may run several rounds). The default, 1,
+    /// says `embed_batch` is a loop of [`Self::embed`]: gathering texts gains
+    /// nothing, and the write paths then embed one text at a time as they
+    /// always did.
+    fn batch_capacity(&self) -> usize {
+        1
     }
 
     /// The kinds of input this adapter embeds. Default: text only.

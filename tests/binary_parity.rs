@@ -455,10 +455,11 @@ fn demo_outcome_meets_spec_13_and_is_identical_across_two_runs() {
     assert!(o1.contains("canonical           1"), "{o1}");
 
     // Step 2 outcome: the single canonical is `user schema` with a Stage-3
-    // blast radius of 9.
+    // blast radius of 15 (#36: nine children plus six actions that depend
+    // on it).
     assert!(
-        o1.contains("  user schema  blast_radius=9"),
-        "the canonical line must name user schema with blast radius 9:\n{o1}"
+        o1.contains("  user schema  blast_radius=15"),
+        "the canonical line must name user schema with blast radius 15:\n{o1}"
     );
     // ...and it alone sits at Canonical (mirror of the `statuses` assertion).
     assert!(
@@ -473,7 +474,7 @@ fn demo_outcome_meets_spec_13_and_is_identical_across_two_runs() {
         "recall context is missing the canonical marker:\n{o1}"
     );
     assert!(
-        o1.contains("⚑ Load-bearing pillar — 9 nodes depend on this. Modify with caution."),
+        o1.contains("⚑ Load-bearing pillar — 15 nodes depend on this. Modify with caution."),
         "recall context is missing the ⚑ load-bearing pillar line verbatim:\n{o1}"
     );
 
