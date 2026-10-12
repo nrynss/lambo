@@ -92,7 +92,7 @@ impl GateMetric {
         Self {
             current,
             bar,
-            met: current >= bar,
+            met: current.is_finite() && current >= bar,
             strictly_above: false,
         }
     }
@@ -101,7 +101,7 @@ impl GateMetric {
         Self {
             current,
             bar,
-            met: current > bar,
+            met: current.is_finite() && current > bar,
             strictly_above: true,
         }
     }
@@ -429,5 +429,13 @@ mod tests {
             Some(1)
         );
         assert_eq!(progress(None, PromotionPolicy::Swarm).met_count(), None);
+    }
+    #[test]
+    fn nonfinite_gate_metrics_never_claim_evidence_passes() {
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(!GateMetric::at_least(value, MIN_COVERAGE).met);
+            assert!(!GateMetric::strictly_above(value, 5.0).met);
+        }
+        assert!(GateMetric::at_least(0.3, MIN_COVERAGE).met);
     }
 }

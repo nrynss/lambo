@@ -93,3 +93,11 @@ this lane. Manifests/lock/workflows and forbidden live/secret paths are untouche
 fixture. #20 must filter its future cutoff **before** counting/spread and
 reuse the capped full-session denominator and shared comparison. PR4 owns
 citations/shared resolver; no cutoff accessor or resolver is added here.
+
+### Adversarial Low 1: nonfinite inspector evidence
+
+The shared Stage 2 comparison refuses nonfinite coverage, but the inspector's
+`GateMetric` previously accepted positive infinity as meeting the bar. Its
+comparisons now require a finite current measurement. The regression tests
+NaN and both infinities, preserving equality at 0.3. This keeps malformed
+third-party evidence from claiming a passed inspector gate.
