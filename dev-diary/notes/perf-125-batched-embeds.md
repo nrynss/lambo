@@ -282,8 +282,11 @@ release asset:
 | 16, 0.5 s | 0.5.0 | 113 ms | 189 ms |
 | 16, 0.5 s | this branch | 70 ms | 134 ms |
 
-Recall p99 was the same or better on the branch. Every run had 0 failed
-and 0 dropped writes.
+Recall p99 improved on the means: 37 against 48 ms at 8 agents, and 128
+against 239 ms at 16 agents. It did not improve in every run: at 16 agents
+the branch's first run had 132.7 ms against 0.5.0's 119.9 ms. 0.5.0's tail
+was noisy (120 to 517 ms across its runs). Every run had 0 failed and 0
+dropped writes.
 
 **Caveat.** In these runs 0.5.0 did not reproduce the multi-second backlog
 the issue reported (apply p90 12.3 s at 16 agents), so these numbers
