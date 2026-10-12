@@ -16,6 +16,8 @@ use crate::store::Capabilities;
 
 use crate::types::{Interaction, MutationBatch, Scored};
 
+#[cfg(feature = "embed-fixture")]
+mod batching;
 mod commit_cost;
 mod concurrency;
 mod embedding;

@@ -631,6 +631,43 @@ pub(crate) async fn derive_with(
     supplied: Option<&SuppliedVector>,
     on_commit: Option<CommitHook>,
 ) -> Result<DeriveOutcome, LamboError> {
+    derive_with_gather(
+        graph,
+        vectors,
+        embedder,
+        embedding,
+        interaction,
+        agent,
+        concepts,
+        parent_of,
+        max_cooccurrence_per_derive,
+        semantic_match_threshold,
+        supplied,
+        on_commit,
+        Gather::default(),
+    )
+    .await
+}
+
+/// [`derive_with`], with vectors the caller already embedded for this call
+/// and the instant its I/O budget started (#125, the write queue's lane
+/// prefetch). See [`Gather`].
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn derive_with_gather(
+    graph: Arc<RwLock<Graph>>,
+    vectors: VectorCandidates<'_>,
+    embedder: &dyn Embedder,
+    embedding: &EmbeddingContract,
+    interaction: NodeId,
+    agent: &AgentId,
+    concepts: &[(&str, ConceptType)],
+    parent_of: &ParentOf<'_>,
+    max_cooccurrence_per_derive: usize,
+    semantic_match_threshold: f64,
+    supplied: Option<&SuppliedVector>,
+    on_commit: Option<CommitHook>,
+    gather: Gather<'_>,
+) -> Result<DeriveOutcome, LamboError> {
     validate_limits(concepts, parent_of, semantic_match_threshold)?;
     if let Some(supplied) = supplied {
         check_supplied(supplied, embedding, concepts, vectors.available())?;
@@ -640,7 +677,7 @@ pub(crate) async fn derive_with(
     // not share a mutex with this function. The commit's plan validation
     // (`plan_still_holds`) sees their mutations; a gather they made stale is
     // discarded and planned again.
-    let io_deadline = tokio::time::Instant::now() + HYBRID_IO_TIMEOUT;
+    let io_deadline = gather.io_deadline();
     derive_planned(
         graph,
         vectors,
@@ -655,6 +692,7 @@ pub(crate) async fn derive_with(
         io_deadline,
         supplied,
         on_commit,
+        gather.seed,
     )
     .await
 }
@@ -958,6 +996,7 @@ async fn derive_planned(
     io_deadline: tokio::time::Instant,
     supplied: Option<&SuppliedVector>,
     on_commit: Option<CommitHook>,
+    seed: Option<&EmbedSeed>,
 ) -> Result<DeriveOutcome, LamboError> {
     let is_supplied =
         |content: &str| supplied.is_some_and(|supplied| supplied.content.as_str() == content);
@@ -965,7 +1004,7 @@ async fn derive_planned(
     let mut on_commit = on_commit;
     // Survives replans too (#116): a replan embeds only text it has not
     // embedded yet in this call.
-    let mut embeds = EmbedCache::default();
+    let mut embeds = EmbedCache::seeded(seed);
     // Why the last attempt did not commit, for the error if none does.
     let mut last_stale = Verdict::Stale;
     for attempt in 0..MAX_HYBRID_REPLANS {
@@ -1098,6 +1137,19 @@ async fn derive_planned(
         // -----------------------------------------------------------------------
         // Phase 2 — async gather (no lock held).
         // -----------------------------------------------------------------------
+        // #125: every text this attempt will embed, in one round when the
+        // embedder batches. What the round fails to embed is embedded alone
+        // below, so each item still meets its own error and class.
+        if vector_ok {
+            let texts: Vec<String> = items
+                .iter()
+                .filter(|(content, _, _, matched)| matched.is_none() && !is_supplied(content))
+                .map(|(content, _, _, _)| *content)
+                .chain(parent_ends.iter().map(|(content, _)| *content))
+                .map(|content| context_text(content, origin_text.as_deref()))
+                .collect();
+            embeds.prefill(embedder, texts, io_deadline).await;
+        }
         // First-session fallback log for the capability-absent path (zero I/O, so
         // acceptable here); embed-failure logging happens per concept below.
         let mut attempted_embed = false;
@@ -1941,21 +1993,60 @@ fn plan_still_holds(g: &Graph, plan: &PlanRead<'_, '_>) -> Result<Verdict, Lambo
 /// or is cleared, the cache is emptied. A first stamp (none to some) is not a
 /// change of space for vectors this embedder made; a stamp incompatible with
 /// the live contract is refused by the plan before any embed.
-#[derive(Default)]
-struct EmbedCache {
+struct EmbedCache<'s> {
     by_text: HashMap<String, Vec<f32>>,
+    /// Vectors the caller embedded before this call (#125). Read on a miss,
+    /// and dropped with the cache when the stamp moves.
+    seed: Option<&'s EmbedSeed>,
     /// The stamp the last plan saw; `None` before the first plan.
     stamp: Option<Option<EmbeddingContract>>,
 }
 
-impl EmbedCache {
+impl<'s> EmbedCache<'s> {
+    fn seeded(seed: Option<&'s EmbedSeed>) -> Self {
+        Self {
+            by_text: HashMap::new(),
+            seed,
+            stamp: None,
+        }
+    }
+
     fn observe_stamp(&mut self, stamped: Option<&EmbeddingContract>) {
         if let Some(Some(previous)) = &self.stamp
             && Some(previous) != stamped
         {
             self.by_text.clear();
+            self.seed = None;
         }
         self.stamp = Some(stamped.cloned());
+    }
+
+    fn cached(&self, context: &str) -> Option<&Vec<f32>> {
+        self.by_text
+            .get(context)
+            .or_else(|| self.seed.and_then(|seed| seed.get(context)))
+    }
+
+    /// Embed every text not already here in batched rounds (#125). Best
+    /// effort: a text the round does not embed is left for [`Self::embed`],
+    /// which embeds it alone and refuses the write with that text's own
+    /// error.
+    async fn prefill(
+        &mut self,
+        embedder: &dyn Embedder,
+        texts: Vec<String>,
+        io_deadline: tokio::time::Instant,
+    ) {
+        let mut wanted: Vec<String> = Vec::with_capacity(texts.len());
+        for text in texts {
+            if self.cached(&text).is_none() && !wanted.contains(&text) {
+                wanted.push(text);
+            }
+        }
+        let refs: Vec<&str> = wanted.iter().map(String::as_str).collect();
+        for (text, vector) in embed_gathered(embedder, &refs, io_deadline).await {
+            self.by_text.insert(text, vector);
+        }
     }
 
     /// The vector for `context`, embedding it only on the first ask.
@@ -1965,12 +2056,85 @@ impl EmbedCache {
         context: String,
         io_deadline: tokio::time::Instant,
     ) -> Result<Vec<f32>, LamboError> {
-        if let Some(vector) = self.by_text.get(&context) {
+        if let Some(vector) = self.cached(&context) {
             return Ok(vector.clone());
         }
         let vector = embed_or_refuse(embedder, &context, io_deadline).await?;
         self.by_text.insert(context, vector.clone());
         Ok(vector)
+    }
+}
+
+/// Embed `texts` in rounds of the embedder's [`Embedder::batch_capacity`]
+/// under `io_deadline`, and return the vectors that came back (#125).
+///
+/// Best effort, by design: a text whose slot failed, or that a timed-out
+/// round never answered, is simply absent, and the caller embeds it alone
+/// through its ordinary path, which turns that text's failure into that
+/// write's refusal with the right class. Nothing is gathered when the
+/// embedder does not batch (capacity 1) or there is only one text: that
+/// path is then exactly the one-at-a-time path it always was.
+pub(crate) async fn embed_gathered(
+    embedder: &dyn Embedder,
+    texts: &[&str],
+    io_deadline: tokio::time::Instant,
+) -> Vec<(String, Vec<f32>)> {
+    let capacity = embedder.batch_capacity();
+    let mut out = Vec::new();
+    if capacity < 2 || texts.len() < 2 {
+        return out;
+    }
+    for round in texts.chunks(capacity) {
+        let Ok(results) = tokio::time::timeout_at(io_deadline, embedder.embed_batch(round)).await
+        else {
+            break;
+        };
+        for (text, result) in round.iter().zip(results) {
+            if let Ok(vector) = result {
+                out.push(((*text).to_string(), vector));
+            }
+        }
+    }
+    out
+}
+
+/// Vectors embedded ahead of a write, keyed by the exact text the write
+/// would send the embedder (#125). The write queue's lane worker fills one
+/// for the jobs queued behind the one it runs; each job's call reads it on
+/// a cache miss. The live embedder is the process's one, so a text's vector
+/// does not depend on when it was embedded.
+#[derive(Debug, Default)]
+pub(crate) struct EmbedSeed {
+    by_text: HashMap<String, Vec<f32>>,
+}
+
+impl EmbedSeed {
+    pub(crate) fn get(&self, text: &str) -> Option<&Vec<f32>> {
+        self.by_text.get(text)
+    }
+
+    #[allow(dead_code)] // The write queue's lane prefetch fills it (next commit).
+    pub(crate) fn extend(&mut self, vectors: impl IntoIterator<Item = (String, Vec<f32>)>) {
+        self.by_text.extend(vectors);
+    }
+}
+
+/// What a caller hands a hybrid derive beyond its inputs (#125).
+///
+/// * `seed`: vectors already embedded for this call's texts.
+/// * `io_started`: when the call's [`HYBRID_IO_TIMEOUT`] budget started.
+///   A caller that spent part of the budget embedding ahead for this call
+///   passes the instant it started, so the call's own I/O and that work
+///   together stay within one budget; `None` starts it now.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Gather<'s> {
+    pub(crate) seed: Option<&'s EmbedSeed>,
+    pub(crate) io_started: Option<tokio::time::Instant>,
+}
+
+impl Gather<'_> {
+    pub(crate) fn io_deadline(&self) -> tokio::time::Instant {
+        self.io_started.unwrap_or_else(tokio::time::Instant::now) + HYBRID_IO_TIMEOUT
     }
 }
 
