@@ -9,7 +9,6 @@ fn contradictions_are_directed_concept_edges_with_natural_key_replay() {
     let c = concept(2, iid, "contrary assertion");
     let newer = c.id;
     g.insert_concept(c, iid).unwrap();
-    let before = g.snapshot().concepts;
     g.upsert_edge(edge(1, newer, older, EdgeType::Contradicts, 0.5))
         .unwrap();
     g.upsert_edge(edge(2, newer, older, EdgeType::Contradicts, 0.5))
@@ -22,7 +21,6 @@ fn contradictions_are_directed_concept_edges_with_natural_key_replay() {
     assert!(g
         .edge_between(older, newer, EdgeType::Contradicts)
         .is_none());
-    assert_eq!(g.snapshot().concepts, before, "no canonization change");
     assert!(g.cycle_neighbors(newer).is_empty());
     assert!(g.cycle_neighbors(older).is_empty());
     for (a, b) in [(iid, older), (older, iid)] {

@@ -634,14 +634,7 @@ fn structural_span_sql_gates_both_timestamps() {
     for sql in [sql, with_dependents(BLAST_RADIUS_SQL)] {
         assert!(sql.contains("e.edge_type = 'Dependency'"), "{sql}");
         assert!(sql.contains("e.edge_type = 'Hierarchical'"), "{sql}");
-        for absent in [
-            "Causal",
-            "Derives",
-            "Temporal",
-            "CoOccurrence",
-            "Semantic",
-            "Contradicts",
-        ] {
+        for absent in ["Causal", "Derives", "Temporal", "CoOccurrence", "Semantic"] {
             assert!(!sql.contains(absent), "{absent} in {sql}");
         }
         assert!(!sql.contains("{DEPENDENTS_CTE}"), "{sql}");

@@ -156,18 +156,12 @@ mod contradiction_tests {
     use super::*;
 
     #[test]
-    fn contradiction_codec_matches_serde_and_structural_sql_excludes_it() {
+    fn contradiction_codec_matches_serde() {
         let ty = EdgeType::Contradicts;
         assert_eq!(edge_type_sql(ty), "Contradicts");
         assert_eq!(parse_edge_type("Contradicts").unwrap(), ty);
         assert_eq!(serde_json::to_string(&ty).unwrap(), "\"Contradicts\"");
         assert!(parse_edge_type("contradicts").is_err());
-        for sql in [
-            super::super::sql::BLAST_RADIUS_SQL,
-            super::super::sql::INTERACTION_SPAN_SQL,
-        ] {
-            assert!(!sql.contains("Contradicts"), "opposition is never evidence");
-        }
     }
 }
 

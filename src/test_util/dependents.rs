@@ -246,7 +246,8 @@ pub fn store_batch() -> MutationBatch {
 }
 
 /// #19(a): persistence accepts opposition as an ordinary typed edge, with
-/// natural-key replay idempotency, without changing either endpoint's status.
+/// natural-key replay idempotency. (That it changes no verdict is
+/// `canon::contradicts_tests`.)
 /// Called by each adapter's synthetic dependents harness (live SQL stays manual).
 pub async fn check_contradiction_persistence(store: &dyn crate::store::GraphStore) {
     let before = store.load_session(&session()).await.unwrap();
@@ -266,10 +267,6 @@ pub async fn check_contradiction_persistence(store: &dyn crate::store::GraphStor
     store.flush(&replay, None).await.unwrap();
     let after = store.load_session(&session()).await.unwrap();
     assert_eq!(after.edges.len(), before.edges.len());
-    assert_eq!(
-        after.concepts, before.concepts,
-        "opposition never changes status"
-    );
     for e in original {
         let rows: Vec<_> = after
             .edges
