@@ -204,6 +204,26 @@ mod tests {
     /// #36: inspect names the dependents its blast radius counts, in text
     /// and JSON, with the declaring edge kind; a parent, a Causal producer
     /// and an association neighbour are not listed.
+    /// The inspect text the cloudops guard parses
+    /// (`scripts/cloudops/_lambo.py::parse_dependents`), pinned byte for byte
+    /// in `fixtures/inspect-dependents-golden.txt`. The Python self-test reads
+    /// the same file, so the parser is tested against real renderer output.
+    /// Regenerate with `LAMBO_UPDATE_GOLDEN=1` after a deliberate change.
+    #[test]
+    fn inspect_text_matches_the_golden_the_cloudops_guard_parses() {
+        let g = case::graph();
+        let (text, _) = render_neighbourhood(&g, case::concept_id("X"), 1);
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/fixtures/inspect-dependents-golden.txt"
+        );
+        if std::env::var_os("LAMBO_UPDATE_GOLDEN").is_some() {
+            std::fs::write(path, &text).expect("write golden");
+        }
+        let golden = std::fs::read_to_string(path).expect("golden present");
+        assert_eq!(text, golden, "inspect text drifted from {path}");
+    }
+
     #[test]
     fn inspect_lists_the_dependents_it_counts() {
         let g = case::graph();

@@ -522,9 +522,13 @@ def parse_dependents(inspect_text: str) -> list[str]:
 
     Parsing text is a knowing risk: the CLI has no JSON mode for `inspect`
     (the MCP tool's structured result carries the same list as `dependents`).
-    The grammar is the section header, then two-space rows of
-    `content [Type{, status}] (EdgeKind)`, then an optional truncation row.
-    Anything else ends the section.
+    The grammar is the section header (carrying the true total), then
+    two-space rows of `content [Type{, status}] (EdgeKind)`, then an optional
+    `(truncated at N dependents)` row when the rows stop at inspect's cap.
+    Anything else ends the section. A truncated list returns the rows that
+    were printed; [`parse_dependents_total`] gives the full count.
+    `_self_test_dependents_section` runs this against the renderer's own
+    output, pinned in `fixtures/inspect-dependents-golden.txt`.
     """
     names: list[str] = []
     in_section = False
@@ -542,6 +546,22 @@ def parse_dependents(inspect_text: str) -> list[str]:
             break
         names.append(NEIGHBOUR_METADATA_RE.sub("", stripped[:kind_at]).strip())
     return names
+
+
+def parse_dependents_total(inspect_text: str) -> int:
+    """The true dependent total from the `dependents (N):` header, or 0.
+
+    Past inspect's row cap the section lists fewer rows than this; the header
+    always carries the full count, which equals the `blast radius:` line.
+    """
+    for line in inspect_text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("dependents (") and stripped.endswith("):"):
+            try:
+                return int(stripped[len("dependents (") : -2])
+            except ValueError:
+                return 0
+    return 0
 
 
 def carries_pillar_warning(text: str) -> bool:
@@ -582,40 +602,55 @@ def _self_test_ipv6_parent() -> None:
 
 
 def _self_test_dependents_section() -> None:
-    """Pin `parse_dependents` to the `dependents (N):` section's grammar (#36).
+    """Pin `parse_dependents` to real renderer output (#36).
 
-    The synthetic banner mirrors `render_neighbourhood`: the section lists both
-    dependent kinds, a content that itself contains ` [`, and a status tag; the
-    hop listing below it names a parent, a `Causal` producer and an association
-    neighbour, none of which is a dependent and none of which may be read.
+    `fixtures/inspect-dependents-golden.txt` is `render_neighbourhood`'s text
+    for the shared dependents case, pinned byte for byte by the Rust test
+    `inspect_text_matches_the_golden_the_cloudops_guard_parses`
+    (`src/surface/neighbourhood.rs`). Its hop listing names a parent, a
+    `Causal` producer, an association neighbour and a concept the focus
+    depends on, none of which may be read as a dependent.
+
+    The truncation row cannot appear in that small case, so its text is
+    pinned to the renderer's source instead, and a truncated banner is built
+    from the golden with it: the parser must return the printed rows and the
+    header's true total.
     """
-    banner = (
-        "focus: SG-Base-VPC [Resource]\n"
-        "blast radius: 3\n"
-        "dependents (3):\n"
-        "  RDS-Lambo-Demo-DB [Resource] (Hierarchical)\n"
-        "  allow [tcp] 5432 from app tier [Constraint] (Hierarchical)\n"
-        "  app-data-agent provisioned RDS [Resource, candidate] (Dependency)\n"
-        "\n"
-        "hop 1:\n"
-        "  Causal\n"
-        "    <- network-agent created SG-Base-VPC [Resource]\n"
-        "  CoOccurrence\n"
-        "    -> coincident-peer [Entity]\n"
-        "  Hierarchical\n"
-        "    <- VPC-Enterprise-Prod [Entity]\n"
-        "    -> RDS-Lambo-Demo-DB [Resource]\n"
-    )
-    names = parse_dependents(banner)
-    expected = [
-        "RDS-Lambo-Demo-DB",
-        "allow [tcp] 5432 from app tier",
-        "app-data-agent provisioned RDS",
-    ]
+    golden_path = REPO_ROOT / "fixtures" / "inspect-dependents-golden.txt"
+    try:
+        golden = golden_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise SystemExit(f"self-test FAILED: cannot read {golden_path}: {exc}") from exc
+    expected = [f"concept {n}" for n in ("A1", "A2", "C1", "C2", "E", "V", "W", "Z")]
+    names = parse_dependents(golden)
     if names != expected:
         raise SystemExit(
             f"self-test FAILED: parse_dependents returned {names!r}, expected {expected!r}"
         )
+    if parse_dependents_total(golden) != len(expected) or parse_blast_radius(golden) != len(expected):
+        raise SystemExit("self-test FAILED: the dependents header must equal the blast radius")
+
+    source_path = REPO_ROOT / "src" / "surface" / "neighbourhood.rs"
+    try:
+        source = source_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise SystemExit(f"self-test FAILED: cannot read {source_path}: {exc}") from exc
+    header_fmt = '"dependents ({dependents_total}):\\n"'
+    row_fmt = '"  {} ({:?})\\n"'
+    trunc_fmt = '"  (truncated at {MAX_INSPECT_NODES} dependents)\\n"'
+    for needle in (header_fmt, row_fmt, trunc_fmt):
+        if needle not in source:
+            raise SystemExit(
+                f"self-test FAILED: {source_path} no longer renders {needle}; "
+                "update parse_dependents and this self-test together"
+            )
+    truncated = golden.replace("dependents (8):", "dependents (250):", 1).replace(
+        "  concept Z [Resource] (Dependency)\n",
+        "  concept Z [Resource] (Dependency)\n  (truncated at 200 dependents)\n",
+        1,
+    )
+    if parse_dependents(truncated) != expected or parse_dependents_total(truncated) != 250:
+        raise SystemExit("self-test FAILED: a truncated dependents list must parse")
     if parse_dependents("focus: lonely [Entity]\nblast radius: 0\n") != []:
         raise SystemExit("self-test FAILED: no dependents section must read as no dependents")
 

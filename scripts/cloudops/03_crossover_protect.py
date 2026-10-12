@@ -83,6 +83,7 @@ from _lambo import (  # noqa: E402
     note,
     parse_blast_radius,
     parse_dependents,
+    parse_dependents_total,
     queried,
     require_boto3,
     require_sg,
@@ -208,6 +209,9 @@ class Verdict:
         self.pillar_warning: bool = False
         self.blast_radius: int = 0
         self.dependents: list[str] = []
+        # The true count from the section header; past inspect's row cap it
+        # exceeds len(self.dependents).
+        self.dependents_total: int = 0
         self.recall_text: str = ""
         self.inspect_text: str = ""
         self.concept_missing: bool = False
@@ -223,7 +227,10 @@ class Verdict:
         if self.blast_radius > 0:
             out.append(f"{SG_BASE_NAME} has a blast radius of {self.blast_radius}")
         if self.dependents:
-            out.append(f"{len(self.dependents)} concept(s) depend on it")
+            shown = len(self.dependents)
+            total = max(self.dependents_total, shown)
+            listed = "" if total == shown else f" ({shown} listed)"
+            out.append(f"{total} concept(s) depend on it{listed}")
         return out
 
 
@@ -268,6 +275,7 @@ def run_guard(lam: Lambo, query: str, top_k: int) -> Verdict:
     say()
     verdict.blast_radius = parse_blast_radius(verdict.inspect_text)
     verdict.dependents = parse_dependents(verdict.inspect_text)
+    verdict.dependents_total = parse_dependents_total(verdict.inspect_text)
     queried("inspect", SG_BASE_NAME, f"blast radius {verdict.blast_radius}")
     return verdict
 
