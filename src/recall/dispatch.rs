@@ -224,6 +224,7 @@ pub(crate) fn resolve_anchor(graph: &Graph, query: &str) -> Option<NodeId> {
     let markers = marker_spans(&lower_q);
     let mut candidates = Vec::new();
     let mut spans = Vec::new();
+    let mut marker_clauses = Vec::new();
     for c in graph.concepts() {
         let lower_c = anchor_text(&c.content);
         if !lower_c.chars().any(is_word_char) {
@@ -263,11 +264,18 @@ pub(crate) fn resolve_anchor(graph: &Graph, query: &str) -> Option<NodeId> {
             if markers.iter().any(|&(ms, me)| ms <= start && end <= me) {
                 continue;
             }
-            spans.push((start, end, index));
+            if markers.iter().any(|&(ms, me)| start < me && ms < end) {
+                marker_clauses.push(index);
+            } else {
+                spans.push((start, end, index));
+            }
         }
     }
     spans.sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1)));
     let mut best = vec![None::<usize>; candidates.len()];
+    for index in marker_clauses {
+        best[index] = Some(usize::MAX);
+    }
     let mut furthest: Option<(usize, usize)> = None;
     for (start, end, index) in spans {
         let contained =
@@ -993,6 +1001,18 @@ mod tests {
             None
         );
         assert!(word_bounded_spans(&q, "x").len() <= MAX_ANCHOR_SPANS + 1);
+    }
+
+    #[test]
+    fn marker_overlapping_clause_cannot_hide_its_named_subject() {
+        let g = anchors(&[
+            (10, "safe to delete db", ConceptType::Logic),
+            (11, "db", ConceptType::Entity),
+        ]);
+        assert_eq!(
+            anchor_content(&g, "is it safe to delete db").as_deref(),
+            Some("db")
+        );
     }
 
     #[test]
