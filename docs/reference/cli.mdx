@@ -128,6 +128,8 @@ $ lambo saints --session demo
 
 Shows the neighbourhood around a concept: its type, its blast radius, and the typed edges leading out from it.
 
+The blast radius is the number of concepts that depend on this one: actions that named it in `depends_on`, concepts with a `Dependency` edge to it, and its `parent_of` children. An action that produced or modified it does not count, because that records where it came from, not what rests on it.
+
 | Flag | Required | Default |
 |---|---|---|
 | `--session <SESSION>` | Yes | |

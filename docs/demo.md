@@ -29,7 +29,8 @@ predicates (`interaction_span`, `blast_radius`), through the same
 transitions. The context block is the T5.3 renderer's output, verbatim.
 
 The demo asserts its own claims before it waits on anything: 12 interactions,
-27 concepts, `user schema` blast radius exactly 9. A run that would have
+27 concepts, `user schema` blast radius exactly 15 (its nine `parent_of`
+children plus the six actions that depend on it). A run that would have
 produced a different graph fails with a diagnosis instead of quietly showing a
 different demo.
 
@@ -155,7 +156,7 @@ it is a genuine measurement rather than a property of the script:
 | node ids | `<node>` | `Uuid::new_v4()` |
 
 Everything else is compared byte for byte, including the hit **ordering**, every
-concept's content, the `[Entity, canonical]` marker, `blast radius 9`, the ⚑
+concept's content, the `[Entity, canonical]` marker, `blast radius 15`, the ⚑
 line and the conflict sentence. The demo prints the real values; only the
 comparison sees the placeholders.
 

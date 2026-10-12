@@ -34,7 +34,7 @@ Agent B joins on a separate feature and adds rate limiting, which quietly depend
 
 Agent A returns for one last edit and adds `oauth_id` to `user schema`.
 
-Agent B then asks `recall("update user schema")`. Memory answers that the thing it is about to change is load-bearing, carries a blast radius of 9, and was touched seconds ago by another agent. No colleague told it that.
+Agent B then asks `recall("update user schema")`. Memory answers that the thing it is about to change is load-bearing, carries a blast radius of 15, and was touched seconds ago by another agent. No colleague told it that.
 
 ## What it proves
 
@@ -42,14 +42,14 @@ Each act demonstrates one claim you can check in the output.
 
 - **Consolidation.** Twelve interactions produce 27 concepts rather than 27 unrelated notes, because repeated ideas match existing concepts instead of duplicating them.
 - **Promotion by evidence.** `user schema` walks Candidate, then Venerable, then Canonical. The canonization engine decides that from structural evidence. No line in the demo writes a status.
-- **Blast radius.** The recall block marks `user schema` as a load-bearing pillar with 9 dependents.
+- **Blast radius.** The recall block marks `user schema` as a load-bearing pillar with 15 dependents: its nine child columns and artifacts, and the six actions that depend on it.
 - **Conflict awareness.** The recall block names the other agent and how recently it wrote.
 
 ## Nothing is staged
 
 The demo drives the same public `Memory` API an MCP client drives. Every concept, edge, and canonization transition comes from the real engine running against the real store. The context block you see is the actual renderer output, not a formatted string.
 
-The run asserts its own claims before reporting success. It expects 12 interactions, 27 concepts, and `user schema` at blast radius 9. A run that produces a different graph fails with a diagnosis rather than quietly showing you something else.
+The run asserts its own claims before reporting success. It expects 12 interactions, 27 concepts, and `user schema` at blast radius 15. A run that produces a different graph fails with a diagnosis rather than quietly showing you something else.
 
 ## The knobs it compresses
 
@@ -96,10 +96,10 @@ The canonization section shows the engine promoting one concept across three cyc
 The final recall is the payoff. This is the block an agent receives, verbatim.
 
 ```
-  user schema [Entity, canonical] (score 2.27, blast radius 9)
-  ⚑ Load-bearing pillar — 9 nodes depend on this. Modify with caution.
+  user schema [Entity, canonical] (score 2.27, blast radius 15)
+  ⚑ Load-bearing pillar — 15 nodes depend on this. Modify with caution.
   Agent A wrote to it 0 seconds ago
-  High-risk modification: high-value node d034055c (Canonical, blast radius 9) modified within 30s
+  High-risk modification: high-value node d034055c (Canonical, blast radius 15) modified within 30s
 
   add oauth_id to user schema [Resource] (score 1.50)
 

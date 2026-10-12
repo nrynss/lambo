@@ -33,6 +33,21 @@
   also expires a new, healthy writer that took the lease after you read the
   row.
 
+- **`GraphStore::blast_radius` and `GraphStore::interaction_span` have a new
+  contract (#36).** Both now read one relation, a node's *dependents*: the
+  sources of `Dependency` edges into it plus its `Hierarchical` children.
+  Blast radius counts all of them instead of the concepts the node would
+  orphan, and the span drops the node's own origin interaction. `Causal`
+  edges no longer count anywhere. A third-party adapter must follow
+  `MemoryStore`; the SQL is in `src/store/sqlite/structural.rs` and
+  `src/store/pg/sql.rs`.
+- `lambo::recall::format::{blast_radius, blast_radii}` and
+  `lambo::recall::dispatch::dependents` return the same relation, so their
+  values change for the same graph. `recall::format::inbound_sources` is
+  unchanged and is now documented as #29's GC input only.
+- New: `EdgeType::dependent_end`, `DependentEnd` (re-exported at the crate
+  root), `Edge::dependence` and `recall::format::dependents_of`.
+
 ### Changed
 
 - The MCP tool descriptions say what a concept is and how to send
@@ -66,6 +81,21 @@
   holder (it cannot parse the pid out of the new string); proxying between
   versions is unaffected, since the host still reads the same.
 
+- **Load-bearing means "other work depends on this" (#36).** The ⚑ warning,
+  `lambo inspect`/`lambo_inspect`, the portal's dependents list, `saints`,
+  canonization Stage 2 and Stage 3, and budget demotion now count the
+  concepts that depend on a node: actions that named it in `depends_on`,
+  concepts with a `Dependency` edge to it, and its `parent_of` children.
+  Before, an action that depended on many things looked load-bearing and the
+  things it depended on did not. An action that produced or modified a node
+  no longer counts toward it. Nothing is migrated: stored edges are read the
+  new way.
+- The REST API fixture plants `user schema`'s eight fields as `parent_of`
+  children, so it has 14 dependents (was 8). The demo's `user schema` reports
+  15 (its nine children plus the six actions that depend on it; was 9).
+- The second-`parent_of` refusal no longer says a second parent would zero
+  the blast radius. The refusal itself is unchanged.
+
 ### Fixed
 
 - **A recall no longer comes back empty when its top hit is long (#130).**
@@ -91,6 +121,7 @@
   - The portal shows it as "Partly in context (truncated)", expanded, and
     does not list its warnings as excluded. In `lambo recall` and the portal
     text, warning lines that did not fit print above the context.
+
 
 ## 0.5.0 (2026-10-12)
 

@@ -294,7 +294,7 @@ The same caption and `image_id` derived again is the same concept, and two image
 
 ### lambo_record_action
 
-Record something the agent did, along with what it produces, modifies, and depends on. This is where activity goes: name the act in a short line, such as `merged PR #52`, rather than a narrative. A fact or decision that later work should recall is a concept for [`lambo_derive`](#lambo_derive). The action becomes a `Resource` concept, `produces` and `modifies` become causal edges, and `depends_on` becomes dependency edges.
+Record something the agent did, along with what it produces, modifies, and depends on. This is where activity goes: name the act in a short line, such as `merged PR #52`, rather than a narrative. A fact or decision that later work should recall is a concept for [`lambo_derive`](#lambo_derive). The action becomes a `Resource` concept, `produces` and `modifies` become causal edges, and `depends_on` becomes dependency edges. A `depends_on` entry makes the action a dependent of that concept, so it counts toward the concept's blast radius and its canonization evidence. `produces` and `modifies` record provenance and count toward neither.
 
 **Like `lambo_derive`, this returns before the write is applied**, and its ack carries a receipt resolved the same way. It has no embedding step of its own, so what asynchrony buys here is ordering: both write tools feed one queue per agent, so an action you record and then derive from is applied in that order.
 
@@ -344,7 +344,7 @@ Reservations are advisory and live in memory only, so they do not survive a serv
 
 ### lambo_inspect
 
-Look at the neighbourhood around a concept, including its type, whether it is canonical, its blast radius, and the edges leading out from it.
+Look at the neighbourhood around a concept, including its type, whether it is canonical, its blast radius, and the edges leading out from it. The blast radius counts the concepts that depend on this one: those with a `Dependency` edge to it (an action's `depends_on`) and its `parent_of` children.
 
 | Argument | Type | Required | Notes |
 |---|---|---|---|

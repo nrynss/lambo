@@ -67,17 +67,19 @@ $$
 \text{distinct}(c) \ge 3 \quad \wedge \quad \frac{\text{span}(c)}{\text{extent}(\text{session})} \ge 0.3
 $$
 
-`distinct` counts inbound structural edges tracing to distinct origin interactions. `span` is the temporal reach of those edges against the session's own extent. Edges younger than `canonization_edge_min_age`, 60 seconds by default, are excluded from both counts, so a burst of fresh writes cannot inflate a span.
+`distinct` counts the distinct origin interactions of the concept's dependents (defined under Stage 3), not counting the interaction the concept itself came from. `span` is the temporal reach of those interactions against the session's own extent. Edges and interactions younger than `canonization_edge_min_age`, 60 seconds by default, are excluded from both counts, so a burst of fresh writes cannot inflate a span.
 
 One agent writing the same idea five times in one minute produces one distinct source and near-zero coverage. It does not pass.
 
 ### Stage 3, Canonical
 
-[`src/canon/stage3.rs`](https://github.com/nrynss/lambo/blob/main/src/canon/stage3.rs). Consequence. Blast radius is the count of concepts that transitively depend on this one over structural edges:
+[`src/canon/stage3.rs`](https://github.com/nrynss/lambo/blob/main/src/canon/stage3.rs). Consequence. Blast radius is the number of concepts that declare a dependence on this one, one hop out:
 
 $$
-B(c) = \big|\{\, d : d \leadsto c \,\}\big|, \qquad B(c) > 5
+B(c) = \big|\{\, d \ne c : d \xrightarrow{\text{Dependency}} c \;\vee\; c \xrightarrow{\text{Hierarchical}} d \,\}\big|, \qquad B(c) > 5
 $$
+
+A dependent is a concept with a `Dependency` edge into $c$, which is what `lambo_record_action`'s `depends_on` writes, or one of $c$'s `parent_of` children. Every dependent counts, including one that also depends on something else. `Causal` edges, which `produces` and `modifies` write, record provenance and count for nothing, and neither do association edges. Lambo reads the stored edges this way when it answers; nothing is migrated.
 
 The comparison is strict. A concept that was demoted also stays inside a `canonization_repromotion_cooldown` of 300 seconds before it can be promoted again, so a flapping concept cannot oscillate its way into permanence. The cooldown is checked first, because it is a field comparison while blast radius is a store round trip.
 
@@ -125,7 +127,7 @@ The cadence keys change how often the bar is checked. None of them changes where
 
 ## Verifying it yourself
 
-Every promotion writes an audit row, which is what makes this checkable rather than assertable. In the shipped demo, `user schema` walks Candidate to Venerable to Canonical, with a blast radius of 9 recorded on the promotion and left null on the earlier hops.
+Every promotion writes an audit row, which is what makes this checkable rather than assertable. In the shipped demo, `user schema` walks Candidate to Venerable to Canonical, with a blast radius of 15 recorded on the promotion and left null on the earlier hops.
 
 You can read those rows from a client that has never heard of Lambo:
 
