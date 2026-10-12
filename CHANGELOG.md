@@ -10,32 +10,31 @@
   the pid that starts with `;`. Releasing another process's lease now needs
   the holder-scoped operator statement below, not a rebuilt `LeaseHolder`.
   See Breaking (library API).
-
-1. **Nothing to migrate.** No schema, stored edge or `lambo.toml` key
-   changed. Stored edges are read with the #36 meaning when the store
-   answers.
-2. **Existing Venerables are re-checked before they can go Canonical
-   (Swarm).** Venerables admitted by 0.5.0 counted inbound `Causal` edges
-   (actions that produced or modified them) as support. That no longer
-   counts, and under Swarm a Venerable must now pass Stage 2 again before
-   Stage 3 can promote it, so an old Venerable with only `Causal` support
-   stays Venerable instead of jumping to Canonical on its first cycle.
-   Nothing is demoted. This includes a session's root goal, which
-   `set_root_goal` makes Venerable directly: under Swarm it now needs Stage 2
-   support (three dependents' interactions spanning 30% of the session) to
-   go Canonical. Solo is unchanged: it still probes and stamps blast radius
-   and admits by its score bands. On a copy of
-   the dogfood store taken 2026-10-12, no Candidate or Venerable would have
-   promoted on the first evaluation, with or without this check, and all 7
-   Venerables lose their Stage 2 support.
-3. **Stored blast-radius stamps are history.** `Concept::blast_radius` and
-   `CanonizationEvent::blast_radius` rows written by 0.5.0 hold the older
-   exclusive count. Readers that show a current count (recall, inspect,
-   saints, the portal, the high-risk check) compute it from the graph.
-4. **Expect different counts.** Blast radius is now the number of
-   dependents, so a file or entity that many actions name in `depends_on`
-   reports a larger count than before, and an action record that depended
-   on many things reports a smaller one.
+- **Nothing to migrate for #36.** No schema, stored edge or `lambo.toml`
+  key changed for it. Stored edges are read with the #36 meaning when the store
+  answers.
+- **Existing Venerables are re-checked before they can go Canonical
+  (Swarm).** Venerables admitted by 0.5.0 counted inbound `Causal` edges
+  (actions that produced or modified them) as support. That no longer
+  counts, and under Swarm a Venerable must now pass Stage 2 again before
+  Stage 3 can promote it, so an old Venerable with only `Causal` support
+  stays Venerable instead of jumping to Canonical on its first cycle.
+  Nothing is demoted. This includes a session's root goal, which
+  `set_root_goal` makes Venerable directly: under Swarm it now needs Stage 2
+  support (three dependents' interactions spanning 30% of the session) to
+  go Canonical. Solo is unchanged: it still probes and stamps blast radius
+  and admits by its score bands. On a copy of
+  the dogfood store taken 2026-10-12, no Candidate or Venerable would have
+  promoted on the first evaluation, with or without this check, and all 7
+  Venerables lose their Stage 2 support.
+- **Stored blast-radius stamps are history.** `Concept::blast_radius` and
+  `CanonizationEvent::blast_radius` rows written by 0.5.0 hold the older
+  exclusive count. Readers that show a current count (recall, inspect,
+  saints, the portal, the high-risk check) compute it from the graph.
+- **Expect different counts.** Blast radius is now the number of
+  dependents, so a file or entity that many actions name in `depends_on`
+  reports a larger count than before, and an action record that depended
+  on many things reports a smaller one.
 
 ### Breaking (library API)
 
@@ -58,7 +57,6 @@
   Do not use the unscoped `store::lease::OPERATOR_OVERRIDE` for this: it
   also expires a new, healthy writer that took the lease after you read the
   row.
-
 - **`GraphStore::blast_radius` and `GraphStore::interaction_span` have a new
   contract (#36).** Both now read one relation, a node's *dependents*: the
   sources of `Dependency` edges into it plus its `Hierarchical` children.
@@ -78,7 +76,6 @@
   MemoryStore parity. It is manual by the owner's decision and is not part
   of CI: run `LAMBO_POSTGRES_DSN=<dsn> cargo test --no-default-features --features store-postgres --lib store::pg::dependents_live -- --ignored` or, for
   Cockroach, `LAMBO_COCKROACH_DSN=<dsn> cargo test --features store-cockroach,fixtures --lib conformance_suite -- --ignored`.
-
 - `EdgeType::dependent_end`, `DependentEnd` (re-exported at the crate
   root), `Edge::dependence` and `recall::format::dependents_of`.
 - `lambo inspect` and `lambo_inspect` list the dependents their blast radius
@@ -117,7 +114,6 @@
   In a mixed fleet, a 0.5.0 reader shows no liveness hint for a 0.6.0
   holder (it cannot parse the pid out of the new string); proxying between
   versions is unaffected, since the host still reads the same.
-
 - **Load-bearing means "other work depends on this" (#36).** The ⚑ warning,
   inspect, the portal's dependents list, `saints`, Swarm canonization
   Stage 2 and Stage 3, budget demotion and the high-risk check now count the
