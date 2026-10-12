@@ -111,8 +111,6 @@ pub(crate) struct HitIdentity {
 /// One session's recall, ready to merge.
 #[derive(Clone, Debug)]
 pub(crate) struct TierRecall {
-    /// Normalized resolved subject, even when it has no dependents.
-    pub(crate) anchor: Option<String>,
     pub(crate) recall: DetailedRecall,
     /// Parallel to `recall.hits`.
     pub(crate) identities: Vec<HitIdentity>,
@@ -328,8 +326,8 @@ where
         let anchored = is_anchored(&t.recall)
             && (tier == 0
                 || recall_of(0)
-                    .and_then(|p| p.anchor.as_ref())
-                    .is_none_or(|a| t.anchor.as_ref() == Some(a)));
+                    .and_then(|p| p.recall.anchor.as_ref())
+                    .is_none_or(|a| t.recall.anchor.as_ref() == Some(a)));
         let n = t.recall.hits.len().min(t.recall.detailed.len());
         for pos in 0..n {
             let hit = &t.recall.hits[pos];
@@ -535,8 +533,8 @@ where
         let mut annotations = t.recall.response_annotations.clone();
         if tier > 0
             && recall_of(0)
-                .and_then(|p| p.anchor.as_ref())
-                .is_some_and(|a| t.anchor.as_ref() != Some(a))
+                .and_then(|p| p.recall.anchor.as_ref())
+                .is_some_and(|a| t.recall.anchor.as_ref() != Some(a))
         {
             for a in &annotations {
                 if a.kind == AnnotationKind::Traversal {
@@ -590,6 +588,7 @@ where
     }
 
     let detail = DetailedRecall {
+        anchor: recall_of(0).and_then(|t| t.recall.anchor.clone()),
         hits,
         context: fitted.context,
         truncation,

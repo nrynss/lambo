@@ -24,11 +24,15 @@ CHANGELOG conflict. No public API, schema, dependency or manifest changed.
   occurrences, not earlier lowercase question scaffolding. Added that, with,
   from, by, at, how, who, when, will, i and we. The earlier claim that ordinary
   recall always finds IT was wrong: canonical tokenization omits it too.
-- M4: a private TierRecall anchor identity is compared at merge admission.
+- M4: private, serde-skipped DetailedRecall anchor metadata is captured under
+  the same graph guard as traversal/assembly and compared at merge admission.
   A different layer anchor cannot lift its traversal dependents past the
   floor; its rejected traversal headline is removed too. The normalized
   caller identity is resolved even when it has no dependents. When the
-  caller has no anchor, layer-only traversal remains valid under #33.
+  caller has no anchor, layer-only traversal remains valid under #33. A
+  separately reconstructed identity was rejected because concurrent derives
+  could change the winning anchor between reads; metadata follows the actual
+  traversal snapshot and removes extra graph reads.
 - L1: NFC on query/content followed by per-character lowercase and NFC;
   combining marks count as word characters. This avoids contextual sigma
   lowercasing and matches composed/decomposed accents. Existing Unicode
@@ -51,17 +55,18 @@ fixture repair, not a relaxation of the production relation.
 
 ## Regressions and validation
 
-Nine new tests cover separate SG/VPC subjects with four markers and a
+Ten new tests cover separate SG/VPC subjects with four markers and a
 pre-marker name; underscore/internal-hyphen identifiers; eight uppercase
 acronyms and eleven added scaffolding words; NFC in both directions, combining
-marks and sigma; punctuation-only names; marker-overlapping clauses; a 16 KiB
+marks and sigma; punctuation-only names; marker-overlapping clauses; immutable traversal subject metadata after a later graph mutation; a 16 KiB
 repetitive query with 30 names plus oversized refusal; merge-level wrong and
 matching layer identities; and real Memory layered recall where the caller
 holds `user db schema` without dependents and the layer holds `db`.
 
 The repetitive-span regression has a one-second ceiling in a debug test and
-asserts the helper's 257-span bound. Recall tests: 172 passed/0 failed/0 ignored;
-Memory layered tests: 9 passed/0 failed/0 ignored. Full prescribed lane gate passed on the final implementation:
+asserts the helper's 257-span bound. Recall tests: 173 passed/0 failed/0 ignored;
+Memory layered tests: 9 passed/0 failed/0 ignored. The prescribed lane gate passed before the final metadata refinement (the
+final rerun is in progress):
 
 - `cargo fmt --check`.
 - `cargo clippy --all-targets --features store-sqlite,fixtures -- -D warnings`.
@@ -74,7 +79,7 @@ Memory layered tests: 9 passed/0 failed/0 ignored. Full prescribed lane gate pas
 - `cargo test --features store-sqlite,fixtures`: 2,188 passed, 0 failed,
   7 ignored across unit, integration and doc tests. The unit block has
   2,108 passed and 5 ignored (2,113 total); the initial focused run's unit
-  inventory was 2,104 including filtered tests, so nine tests were added.
+  inventory was 2,104 including filtered tests, so nine tests were added at that gate; the metadata regression adds one more.
   No test was removed or newly ignored.
 - `cargo test --no-run --no-default-features --features store-sqlite`.
 - `cargo check --no-default-features`.

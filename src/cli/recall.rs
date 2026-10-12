@@ -631,6 +631,7 @@ mod tests {
         let truncation = DetailedRecall::mark_context(&mut detailed, &fitted);
         assert!(truncation.is_some(), "the fixture must truncate");
         DetailedRecall {
+            anchor: None,
             hits: vec![hit],
             context: fitted.context,
             truncation,

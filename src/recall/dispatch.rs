@@ -333,6 +333,15 @@ pub(crate) fn resolve_anchor(graph: &Graph, query: &str) -> Option<NodeId> {
     None
 }
 
+/// Normalized resolved subject, even when it has no dependents. The caller
+/// must use its pipeline's graph snapshot, never reconstruct it after recall.
+pub(crate) fn resolved_anchor_text(graph: &Graph, query: &str) -> Option<String> {
+    match graph.node(resolve_anchor(graph, query)?) {
+        Some(Node::Concept(c)) => Some(anchor_text(&c.content)),
+        _ => None,
+    }
+}
+
 /// Cheap in-memory predicate: would a structural dispatch fire for `query` on
 /// `graph`? True iff the query classifies `Structural` AND an anchor resolves
 /// WITH at least one structural dependent. The daemon routing (T9-R1-3) uses
@@ -491,6 +500,10 @@ pub(crate) fn try_structural(
     // response-global — one annotation, never attached to a hit.
     let truncation = DetailedRecall::mark_context(&mut detailed, &fitted);
     Some(DetailedRecall {
+        anchor: match graph.node(anchor) {
+            Some(Node::Concept(c)) => Some(anchor_text(&c.content)),
+            _ => None,
+        },
         hits,
         context: fitted.context,
         truncation,
@@ -1011,6 +1024,23 @@ mod tests {
             None
         );
         assert!(word_bounded_spans(&q, "x").len() <= MAX_ANCHOR_SPANS + 1);
+    }
+
+    #[test]
+    fn traversal_subject_metadata_survives_later_graph_mutations() {
+        let mut g = anchors(&[(10, "db", ConceptType::Entity)]);
+        let q = "what depends on db cache";
+        let answer = try_structural(&g, q, 10, 500).unwrap();
+        assert_eq!(answer.anchor.as_deref(), Some("db"));
+        let longer = concept(11, "db cache", ConceptType::Entity);
+        let origin = longer.origin_interaction;
+        g.insert_concept(longer, origin).unwrap();
+        assert_eq!(resolved_anchor_text(&g, q).as_deref(), Some("db cache"));
+        assert_eq!(answer.anchor.as_deref(), Some("db"));
+        assert!(serde_json::to_value(&answer)
+            .unwrap()
+            .get("anchor")
+            .is_none());
     }
 
     #[test]

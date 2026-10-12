@@ -130,6 +130,10 @@ impl DetailedHit {
 /// presentation model, produced by ONE execution.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct DetailedRecall {
+    /// Resolved normalized subject captured under the pipeline graph guard.
+    /// Also present for a structural blend whose anchor has no dependents.
+    #[serde(skip)]
+    pub(crate) anchor: Option<String>,
     /// The public flattened hits (node_id, is_canonical) — the existing
     /// pipeline shape, projected into [`crate::types::RecallResult`] by the
     /// daemon. Internal only; never serialized.
@@ -209,6 +213,7 @@ impl DetailedRecall {
     /// refusal paths (limit validation, session mismatch).
     pub(crate) fn warn_only(warning: String) -> Self {
         Self {
+            anchor: None,
             hits: Vec::new(),
             context: String::new(),
             truncation: None,
