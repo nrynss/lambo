@@ -64,7 +64,9 @@ threshold was enforced by the engine, not by this script:
 
 * blast radius strictly greater than 5, counted over structural edges only
 * `gc_survived >= 3`
-* a score in the top decile of at least 20 non-Canonical peers
+* a score in the top decile of at least 20 non-Canonical peers (the Stage 1 bar
+  when this ran; since 0.6.0 `Swarm` instead admits on `gc_survived >= 3` plus
+  dependents from at least 2 interactions other than the concept's own)
 * interaction coverage of at least 0.3
 
 `VPC-Enterprise-Prod` cleared all of them, at a real blast radius of 7 derived
