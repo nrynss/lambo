@@ -135,10 +135,20 @@ A store also declares what it can do. `capabilities` reports its features, and `
 pub trait Embedder: Send + Sync {
     fn dimensions(&self) -> usize;
     async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbedError>;
+
+    // Optional, with defaults:
+    async fn embed_batch(
+        &self,
+        texts: &[&str],
+        deadline: tokio::time::Instant,
+    ) -> Vec<Result<Vec<f32>, EmbedError>>;
+    fn batch_capacity(&self) -> usize; // default 1
 }
 ```
 
-The implementations are the fixture embedder, BGE-M3 over `llama-server`, and Amazon Titan through Bedrock.
+`embed_batch` embeds several texts in one call and returns one result per text, in order. Each result belongs to its own text: an adapter that batches must not let one text's failure fail the others. The default calls `embed` once per text, and `batch_capacity` defaults to 1, which tells Lambo that gathering texts gains nothing. `embed_batch` takes a deadline: a text not embedded by then fails its own slot as unavailable, and the texts already embedded keep their vectors. `batch_capacity` is the most texts worth gathering into one call; a larger call is allowed and must still answer every slot. An adapter whose backend embeds several texts in one round overrides both, and Lambo then sends each write's texts in calls of up to that many. The candle adapter does this, with a capacity of 8.
+
+The implementations are the fixture embedder, BGE-M3 over `llama-server` (or any OpenAI-compatible embeddings endpoint), BGE-M3 in-process through candle, Gemini on Vertex, and EmbeddingGemma 2 over `llama-server`. Amazon Titan through Bedrock is planned and not yet built.
 
 ## The single-writer lease
 

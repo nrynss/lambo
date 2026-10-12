@@ -67,6 +67,15 @@ use crate::types::{LamboError, WriteIntent, WriteIntentOutcome};
 /// doc's as-built disposition (J3-R2R-1).
 pub const EMBEDDER_SICK_THRESHOLD: usize = 3;
 
+/// Consecutive vector-candidate lookup timeouts at replay that stop it, the
+/// last one left durable (#125). One timeout is a fact about that write (its
+/// lookup is slow, every time) and settles it `failed`; this many in a row,
+/// with nothing applied between, is a fact about the store, and the rest of
+/// the backlog waits for the next serve. Same value and reading as
+/// [`EMBEDDER_SICK_THRESHOLD`]: two in a row do not stop a healthy replay, and
+/// a slow store costs at most two settled writes per attach.
+pub const REPLAY_LOOKUP_TIMEOUT_LIMIT: usize = EMBEDDER_SICK_THRESHOLD;
+
 impl WritePipeline {
     /// Replay durable write intents left by previous processes (J3), spawned
     /// at attach.
@@ -226,6 +235,9 @@ impl WritePipeline {
             // Consecutive-transient embedder-sickness evidence; threshold and
             // rationale at [`EMBEDDER_SICK_THRESHOLD`].
             let mut transient_streak: usize = 0;
+            // Consecutive lookup timeouts (#125); see
+            // [`REPLAY_LOOKUP_TIMEOUT_LIMIT`].
+            let mut lookup_streak: usize = 0;
             for intent in pending {
                 if this.ctx.lease_lost.load(Ordering::Acquire) || this.lanes.lock().sealed {
                     break;
@@ -250,6 +262,7 @@ impl WritePipeline {
                         // Observed health: the embedder just worked. Resets the
                         // consecutive-transient streak.
                         transient_streak = 0;
+                        lookup_streak = 0;
                         applied += 1;
                         this.counters.replay_owed.fetch_sub(1, Ordering::Relaxed);
                         this.counters.replayed.fetch_add(1, Ordering::Relaxed);
@@ -265,6 +278,70 @@ impl WritePipeline {
                             ));
                         }
                         ReceiptAnswer::AppliedAfterRestart(summary.summary)
+                    }
+                    // #125 (Sonnet review): a vector-candidate lookup that
+                    // did not answer within its own budget. The embedder answered before it, so
+                    // it is no evidence of a sick embedder and never counts
+                    // toward that streak. Left durable, a lookup that is slow
+                    // every time for this input would hold the backlog on
+                    // every restart; so the replay is its last attempt (the
+                    // first was in the session that acked it, or it was
+                    // deferred there unattempted), and it settles `failed`
+                    // with a reason that says so. A run of them with nothing
+                    // applied between means the store is slow for everyone:
+                    // stop and leave the rest durable, so when the store is
+                    // slow at most REPLAY_LOOKUP_TIMEOUT_LIMIT - 1 (two) are
+                    // settled failed per attach.
+                    Err(err) if err.is_lookup_timeout() => {
+                        lookup_streak += 1;
+                        if lookup_streak >= REPLAY_LOOKUP_TIMEOUT_LIMIT {
+                            this.counters.set_replay_blocked(ReplayBlockReason::Other);
+                            tracing::warn!(
+                                session = %this.ctx.session,
+                                receipt = %intent.receipt,
+                                applied,
+                                failed,
+                                remaining = backlog - applied - failed,
+                                "write queue: {REPLAY_LOOKUP_TIMEOUT_LIMIT} durable intents in a \
+                                 row timed out in the vector candidate lookup; the store looks \
+                                 slow for every write, so THIS intent and the rest of the backlog \
+                                 stay DURABLE and unconsumed for the next serve"
+                            );
+                            break;
+                        }
+                        failed += 1;
+                        this.counters.replay_owed.fetch_sub(1, Ordering::Relaxed);
+                        let why = format!(
+                            "replay after restart was refused (the vector candidate lookup did \
+                             not answer within {:?}, so the write is not retried again); \
+                             nothing was written",
+                            crate::graph::hybrid::VECTOR_LOOKUP_TIMEOUT
+                        );
+                        if let Some(ledger) = &this.ctx.ledger {
+                            ledger.append(&crate::ledger::completion_line(
+                                &job.agent.to_string(),
+                                &job.receipt.to_string(),
+                                "failed",
+                                Some(json!({ "error": &why, "replay": true })),
+                            ));
+                        }
+                        this.ctx.graph.write().consume_write_intent(
+                            intent.receipt.clone(),
+                            WriteIntentOutcome {
+                                tag: "failed".into(),
+                                summary: why.clone(),
+                                consumed_at: (this.clock)(),
+                            },
+                        );
+                        tracing::warn!(
+                            session = %this.ctx.session,
+                            receipt = %intent.receipt,
+                            error = %err,
+                            "write queue: a durable intent's vector candidate lookup timed out \
+                             again at replay; it is settled failed rather than retried on every \
+                             restart"
+                        );
+                        ReceiptAnswer::Failed(why)
                     }
                     // Transient — the status-classifier draw is "embedder
                     // momentarily unwilling / unreachable": evidence of sickness,

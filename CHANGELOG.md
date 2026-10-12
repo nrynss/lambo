@@ -102,6 +102,23 @@
   `recall` returns. Serve configuration and the MCP surface follow in later
   0.6.0 changes.
 
+- **A vector-candidate lookup timeout is `LamboError::EmbedUnavailable`,
+  not `LamboError::Store`** (#125). `hybrid::derive` and `Memory::derive`
+  return it when a hybrid derive's lookup does not answer within its own
+  15 s budget (`hybrid::VECTOR_LOOKUP_TIMEOUT`, from when the lookup starts,
+  inside the call's 30 s). Its message reads `embed: hybrid vector
+  candidate lookup timed out after 15s; ...` and its error kind is
+  "embedding error" (it was `store error`), on write receipts too. Other
+  store errors from the lookup are unchanged.
+- `Embedder::embed_batch(texts, deadline)` and `Embedder::batch_capacity`,
+  default methods (non-breaking): embed several texts in one call, one result
+  per text, keeping the texts finished by the deadline. The defaults call
+  `embed` per text and report a capacity of 1.
+- `writeq::REPLAY_LOOKUP_TIMEOUT_LIMIT` (3): consecutive lookup timeouts at
+  replay that stop it (#125).
+- `graph::hybrid::VECTOR_LOOKUP_TIMEOUT` (15 s): one vector-candidate
+  lookup's own budget inside a hybrid call's 30 s (#125).
+
 ### Changed
 
 - The MCP tool descriptions say what a concept is and how to send
@@ -185,6 +202,50 @@
   - The portal shows it as "Partly in context (truncated)", expanded, and
     does not list its warnings as excluded. In `lambo recall` and the portal
     text, warning lines that did not fit print above the context.
+
+- **One bad text no longer fails other agents' writes on candle (#125).** The
+  candle coalescer failed every caller in a batch when the batch's forward
+  failed or panicked, so a write coalesced with a bad text by timing alone
+  failed as a permanent refusal. A failed forward is now followed by a
+  one-word canary forward: if the canary fails too, the device is at fault
+  and every caller gets a transient error with no per-text retries;
+  otherwise each text is rerun alone and only the bad one fails.
+- **A vector-candidate lookup timeout no longer loses an acked write
+  (#125 review).** The lookup ran under the same deadline as a derive's
+  embeds, and its timeout was a store error, which the write queue settles
+  `failed`, consuming the write's durable intent. It is now transient, like an
+  embed timeout, and it has its own 15 s budget from when it starts, so a
+  lookup timeout means the store did not answer (slow embeds that use up the
+  call's budget fail as an ordinary embed-budget error instead): the receipt
+  says `failed`, the intent stays durable, and the
+  session's next serve replays it (nothing retries it within the session). If
+  the lookup times out again at replay, the intent settles `failed` with a
+  reason that says so, rather than holding the backlog on every restart;
+  three in a row with nothing applied between stop the replay and leave the
+  rest durable, so at most two writes are settled failed per attach when the
+  store is slow. A derive also no longer starts an embed or a lookup once its
+  deadline has passed.
+
+### Performance
+
+- **One embedder call per write (#125).** A hybrid derive or record_action
+  now embeds all of its texts in one batched call instead of one call per
+  concept, when the embedder batches (the candle adapter does; the HTTP
+  adapters keep their one-at-a-time behaviour). Each write still plans,
+  validates and commits on its own; a text the call could not embed is
+  embedded alone, so one bad text fails only its own write. Measured with
+  `mcp_concurrent.py` on an M3 Pro (candle on Metal, a store copy, 120 s),
+  apply latency p50/p90: 51/71 ms against 64/94 ms on 0.5.0 at 8 agents, and
+  70/134 ms against 113/189 ms at 16 agents; recall p99 the same or better;
+  0 failed and 0 dropped writes in every run. 0.5.0 did not show its earlier
+  multi-second backlog in these runs, so this compares two unbacklogged
+  queues. See `dev-diary/notes/perf-125-batched-embeds.md`.
+- **Candle forwards in short, length-sorted chunks (#125).** A coalesced
+  take now runs as forwards of at most 8 texts of similar length, so one long
+  text no longer pads every other text in its batch. Measured on Metal: a
+  16-wide batch with one 910-byte text took 1,280 ms padded and 312 ms as
+  three chunks. Single embeds (a recall's query) are served before batched
+  ones, and a request whose caller has stopped waiting is not forwarded.
 
 ## 0.5.0 (2026-10-12)
 

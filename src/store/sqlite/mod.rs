@@ -102,10 +102,12 @@
 //! iterations. All `k` of those scans share **one 30s deadline**
 //! (`HYBRID_IO_TIMEOUT`, computed once per `derive` call) and contend for the **single
 //! pooled connection** (`max_connections(1)`), which the write-behind flush also needs.
-//! Overrunning the deadline is not a degradation — it returns `Backend("hybrid vector
-//! candidate lookup timed out…")`, which propagates and fails the whole derive before
-//! its commit phase. So measure the scan on the derive path first: that is where the
-//! cliff is, and it is a path that could not run on SQLite at all before F2.
+//! Overrunning the deadline is not a degradation — it returns
+//! `EmbedUnavailable("hybrid vector candidate lookup timed out…")` (transient since
+//! #125, so the write's durable intent survives for the next serve's replay, which
+//! settles it `failed` if the lookup times out again), and fails the whole derive
+//! before its commit phase. So measure the scan on the derive path first: that is
+//! where the cliff is, and it is a path that could not run on SQLite at all before F2.
 //!
 //! The cheapest mitigation short of an index is to **hoist one scan per `derive` call**
 //! instead of one per unmatched concept (same pool, same session, same contract check).

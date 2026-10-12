@@ -122,7 +122,9 @@ pub const PROBE_WARMUP_EMBEDS: usize = 1;
 /// short embed timed alone, one representative **write** timed alone (the
 /// serial legs, the width a lane drains at — J3-R1-1, J3-R2-1), then
 /// [`PROBE_CONCURRENCY`] representative writes together. A representative
-/// write is [`PROBE_WRITE_CONCEPTS`] embeds (#11).
+/// write is [`PROBE_WRITE_CONCEPTS`] embeds (#11): one embedder call each on
+/// an embedder that does not batch, one batched call per write on one that
+/// does (#125), so this counts texts, which bounds the calls either way.
 ///
 /// The representative write is best effort: when it is refused,
 /// `probe_embedder` keeps the short figure and its concurrent leg falls back to
@@ -781,11 +783,25 @@ pub(super) async fn probe_embedder_explained(
     }
 }
 
-/// Embed one write's texts one after the other, as hybrid derive's gather
-/// phase does. The first refusal ends the write, as it ends a derive.
+/// Embed one write's texts as hybrid derive's gather phase does (#125
+/// review L3): in one batched round when the embedder batches
+/// ([`crate::embed::Embedder::batch_capacity`] above 1), then any text the
+/// round did not embed alone, one after the other. The first refusal ends
+/// the write, as it ends a derive. With an embedder that does not batch this
+/// is the old one-at-a-time write, so its figure is unchanged there.
 async fn embed_write(embedder: &dyn Embedder, texts: &[String]) -> Result<(), crate::EmbedError> {
+    let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+    let deadline = tokio::time::Instant::now() + crate::graph::hybrid::HYBRID_IO_TIMEOUT;
+    let done: std::collections::HashSet<String> =
+        crate::graph::hybrid::embed_gathered(embedder, &refs, deadline)
+            .await
+            .into_iter()
+            .map(|(text, _)| text)
+            .collect();
     for text in texts {
-        embedder.embed(text).await?;
+        if !done.contains(text) {
+            embedder.embed(text).await?;
+        }
     }
     Ok(())
 }

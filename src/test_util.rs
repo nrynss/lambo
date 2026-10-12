@@ -505,3 +505,141 @@ pub async fn on_the_wire_with(
         .collect::<Vec<_>>()
         .join("\r\n")
 }
+
+/// A batching test embedder over [`crate::embed::FixtureEmbedder`] (#125):
+/// it counts single `embed` calls and `embed_batch` rounds separately, so a
+/// test can prove that gathered writes cost fewer embedder rounds.
+///
+/// * A text containing [`BatchingEmbedder::REFUSE`] fails its own slot (and
+///   its own single embed) as a permanent `Backend` refusal.
+/// * With `fail_rounds` set, every `embed_batch` round fails every slot as
+///   `Unavailable` (a whole-batch outage), while single embeds still work.
+/// * With a `gate`, every round and every single embed first takes one
+///   permit, so a test can hold the embedder while it queues writes.
+#[cfg(feature = "embed-fixture")]
+pub struct BatchingEmbedder {
+    pub inner: crate::embed::FixtureEmbedder,
+    pub capacity: usize,
+    pub singles: Arc<std::sync::atomic::AtomicUsize>,
+    pub rounds: Arc<std::sync::atomic::AtomicUsize>,
+    pub round_sizes: Arc<PlMutex<Vec<usize>>>,
+    pub fail_rounds: Arc<std::sync::atomic::AtomicBool>,
+    pub gate: Option<Arc<tokio::sync::Semaphore>>,
+}
+
+#[cfg(feature = "embed-fixture")]
+impl BatchingEmbedder {
+    pub const REFUSE: &'static str = "REFUSE-ME";
+
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            inner: crate::embed::FixtureEmbedder::new(),
+            capacity,
+            singles: Arc::default(),
+            rounds: Arc::default(),
+            round_sizes: Arc::default(),
+            fail_rounds: Arc::default(),
+            gate: None,
+        }
+    }
+
+    pub fn singles(&self) -> usize {
+        self.singles.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn rounds(&self) -> usize {
+        self.rounds.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Every embedder call: rounds plus single embeds.
+    pub fn calls(&self) -> usize {
+        self.singles() + self.rounds()
+    }
+
+    async fn pass_gate(&self) {
+        if let Some(gate) = &self.gate {
+            gate.acquire()
+                .await
+                .expect("the gate outlives its holders")
+                .forget();
+        }
+    }
+
+    async fn one(&self, text: &str, role: TextRole) -> Result<Vec<f32>, EmbedError> {
+        if text.contains(Self::REFUSE) {
+            return Err(EmbedError::Backend("refused by the test embedder".into()));
+        }
+        role.embed(&self.inner, text).await
+    }
+
+    async fn embed_as(&self, text: &str, role: TextRole) -> Result<Vec<f32>, EmbedError> {
+        self.singles
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.pass_gate().await;
+        self.one(text, role).await
+    }
+}
+
+#[cfg(feature = "embed-fixture")]
+#[async_trait::async_trait]
+impl Embedder for BatchingEmbedder {
+    fn dimensions(&self) -> usize {
+        self.inner.dimensions()
+    }
+    async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbedError> {
+        self.embed_as(text, TextRole::Document).await
+    }
+    async fn embed_query(&self, text: &str) -> Result<Vec<f32>, EmbedError> {
+        self.embed_as(text, TextRole::Query).await
+    }
+    async fn embed_batch(
+        &self,
+        texts: &[&str],
+        deadline: tokio::time::Instant,
+    ) -> Vec<Result<Vec<f32>, EmbedError>> {
+        assert!(
+            texts.len() <= self.capacity,
+            "a caller sent {} texts to an embedder of capacity {}",
+            texts.len(),
+            self.capacity
+        );
+        self.rounds
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.round_sizes.lock().push(texts.len());
+        if tokio::time::timeout_at(deadline, self.pass_gate())
+            .await
+            .is_err()
+        {
+            return texts
+                .iter()
+                .map(|_| Err(crate::embed::deadline_passed()))
+                .collect();
+        }
+        if self.fail_rounds.load(std::sync::atomic::Ordering::SeqCst) {
+            return texts
+                .iter()
+                .map(|_| Err(EmbedError::Unavailable("batch backend down".into())))
+                .collect();
+        }
+        let mut out = Vec::with_capacity(texts.len());
+        for text in texts {
+            out.push(self.one(text, TextRole::Document).await);
+        }
+        out
+    }
+    fn batch_capacity(&self) -> usize {
+        self.capacity
+    }
+    fn modalities(&self) -> crate::embed::Modalities {
+        self.inner.modalities()
+    }
+    async fn embed_image(
+        &self,
+        image: crate::embed::ImageInput<'_>,
+    ) -> Result<Vec<f32>, EmbedError> {
+        self.inner.embed_image(image).await
+    }
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        self.inner.as_any()
+    }
+}

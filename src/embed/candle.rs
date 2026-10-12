@@ -126,6 +126,10 @@ pub struct DeviceChoice {
 struct Pending {
     text: String,
     tx: tokio::sync::oneshot::Sender<Result<Vec<f32>, EmbedError>>,
+    /// Queued by [`Embedder::embed_batch`] (#125 review M1). A take serves
+    /// single embeds (a recall's query, a lone write text) before bulk
+    /// ones, so a recall never waits behind a write's gathered texts.
+    bulk: bool,
 }
 
 /// Queue of pending requests shared between the adapter handles and the
@@ -153,6 +157,17 @@ impl BatchQueue {
         self.wake.notify_all();
     }
 
+    /// Queue several requests under one lock (#125), so one take sees all of
+    /// them.
+    fn push_many(&self, pending: Vec<Pending>) {
+        if pending.is_empty() {
+            return;
+        }
+        let mut q = self.lock_queue();
+        q.extend(pending);
+        self.wake.notify_all();
+    }
+
     #[cfg(test)]
     fn len(&self) -> usize {
         self.lock_queue().len()
@@ -177,8 +192,7 @@ impl BatchQueue {
         let mut q = self.lock_queue();
         loop {
             if !q.is_empty() {
-                let take = q.len().min(max_batch);
-                return Some(q.drain(..take).collect());
+                return Some(take_prioritized(&mut q, max_batch));
             }
             if *self.lock_shutdown() {
                 return None;
@@ -194,8 +208,28 @@ impl BatchQueue {
             return;
         }
         let mut q = self.lock_queue();
-        let additional = q.len().min(max_batch - batch.len());
-        batch.extend(q.drain(..additional));
+        batch.extend(take_prioritized(&mut q, max_batch - batch.len()));
+    }
+
+    /// Take up to `n` queued single embeds, leaving bulk ones queued in
+    /// order (#125): checked before every forward of a take, so a recall
+    /// does not wait for the rest of a write's batch.
+    fn take_singles(&self, n: usize) -> Vec<Pending> {
+        let mut q = self.lock_queue();
+        if !q.iter().any(|p| !p.bulk) {
+            return Vec::new();
+        }
+        let mut taken = Vec::new();
+        let mut kept = Vec::with_capacity(q.len());
+        for p in q.drain(..) {
+            if !p.bulk && taken.len() < n {
+                taken.push(p);
+            } else {
+                kept.push(p);
+            }
+        }
+        *q = kept;
+        taken
     }
 
     /// Fail everything still queued at shutdown (their callers are awaiting).
@@ -212,6 +246,25 @@ impl BatchQueue {
     fn lock_shutdown(&self) -> MutexGuard<'_, bool> {
         self.shutdown.lock().unwrap_or_else(unpoison)
     }
+}
+
+/// Take up to `n` requests off `q` (#125 review M1): single embeds first,
+/// then bulk ones, each in arrival order. What is not taken stays queued in
+/// its order (K2-R1-2).
+fn take_prioritized(q: &mut Vec<Pending>, n: usize) -> Vec<Pending> {
+    let mut taken = Vec::with_capacity(n.min(q.len()));
+    for bulk in [false, true] {
+        let mut kept = Vec::with_capacity(q.len());
+        for p in q.drain(..) {
+            if p.bulk == bulk && taken.len() < n {
+                taken.push(p);
+            } else {
+                kept.push(p);
+            }
+        }
+        *q = kept;
+    }
+    taken
 }
 
 fn unpoison<T>(poisoned: std::sync::PoisonError<T>) -> T {
@@ -1377,59 +1430,219 @@ fn coalesce_loop(shared: Arc<Shared>) {
             shared.queue.top_up(&mut batch, MAX_BATCH);
         }
 
-        let texts: Vec<&str> = batch.iter().map(|p| p.text.as_str()).collect();
-        let batch_len = batch.len();
-        // K2-R1-5: a candle panic fails THIS batch and the loop goes on.
-        let result =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| shared.core.forward(&texts)));
-        match result {
-            Ok(Ok(vectors)) => {
-                debug_assert_eq!(vectors.len(), batch.len());
-                // K2-R1-4 defense in depth: never hand a caller a vector whose
-                // width disagrees with the stamped contract.
-                if vectors.iter().any(|v| v.len() != shared.dim) {
-                    let got = vectors.first().map(Vec::len).unwrap_or(0);
-                    fail_batch(
-                        batch,
-                        &format!(
-                            "candle returned {got}-wide vectors but the contract pins {} — \
-                             refusing to serve width-mismatched embeddings",
-                            shared.dim
-                        ),
-                    );
-                } else {
-                    for (item, vector) in batch.into_iter().zip(vectors) {
-                        let _ = item.tx.send(Ok(vector));
-                    }
-                }
-            }
-            Ok(Err(e)) => fail_batch(
-                batch,
-                &format!("candle forward failed for a batch of {batch_len} texts: {e}"),
-            ),
-            Err(panic) => fail_batch(
-                batch,
-                &format!(
-                    "candle coalescer panicked running a batch of {} texts: {}; the worker \
-                     keeps serving",
-                    batch_len,
-                    panic_message(panic.as_ref())
-                ),
-            ),
+        serve_take(&shared.queue, batch, shared.dim, |chunk| {
+            shared.core.forward(chunk)
+        });
+    }
+}
+
+/// Run one take as forwards (#125): texts of similar length together,
+/// shortest first, and each chunk's callers answered as soon as their chunk
+/// is done.
+///
+/// Single embeds (a recall's query, a lone text) go before bulk ones, and
+/// the queue is checked for new single embeds **before every forward**
+/// (review M1, Sonnet review), not only when the take is made: a recall
+/// that arrives while a write's batch is being forwarded waits for at most
+/// the one forward in flight, never for the rest of the take.
+///
+/// Two bounds keep that preference from starving the take's bulk texts:
+/// after [`MAX_SINGLE_STREAK`] single forwards in a row, one bulk chunk runs
+/// even with singles waiting; and new singles are pulled from the queue only
+/// while the take still has bulk texts to protect, so a steady stream of
+/// recalls cannot keep the take from ending (the outer loop then takes
+/// them, singles first, alongside the queued bulk work).
+///
+/// Once shutdown is requested no new singles are pulled: the take finishes
+/// and the outer loop drains what is queued before it exits (K2-R1-7).
+///
+/// A caller that stopped waiting (its deadline passed and it dropped its
+/// receiver) is not forwarded (review H2).
+fn serve_take<F>(queue: &BatchQueue, take: Vec<Pending>, dim: usize, forward: F)
+where
+    F: Fn(&[&str]) -> Result<Vec<Vec<f32>>, EmbedError>,
+{
+    let (mut single, mut bulk): (Vec<Pending>, Vec<Pending>) =
+        take.into_iter().partition(|p| !p.bulk);
+    let mut single_streak = 0usize;
+    loop {
+        if !bulk.is_empty() && !queue.shutdown_requested() {
+            single.extend(queue.take_singles(MAX_BATCH));
+        }
+        let run_bulk =
+            !bulk.is_empty() && (single.is_empty() || single_streak >= MAX_SINGLE_STREAK);
+        let group = if run_bulk {
+            single_streak = 0;
+            &mut bulk
+        } else {
+            single_streak += 1;
+            &mut single
+        };
+        if group.is_empty() {
+            return;
+        }
+        // The first length chunk of the group, taken out of it.
+        let lens: Vec<usize> = group.iter().map(|p| p.text.len()).collect();
+        let mut chunk = length_chunks(&lens).swap_remove(0);
+        chunk.sort_unstable_by(|a, b| b.cmp(a));
+        // Highest index first, so each `remove` leaves the indices still to
+        // take where they were, and the rest of the group keeps its order.
+        let mut items: Vec<Pending> = chunk.into_iter().map(|i| group.remove(i)).collect();
+        items.reverse();
+        let items = still_awaited(items.into_iter());
+        if items.is_empty() {
+            continue;
+        }
+        let texts: Vec<&str> = items.iter().map(|p| p.text.as_str()).collect();
+        let results = forward_isolated(&texts, dim, &forward);
+        for (item, result) in items.into_iter().zip(results) {
+            let _ = item.tx.send(result);
         }
     }
 }
+
+/// Single forwards a take runs in a row before it runs one bulk chunk even
+/// with singles waiting (#125 focused check): a recall waits at most one
+/// bulk forward more, and a write's batch is never starved by a stream of
+/// recalls.
+const MAX_SINGLE_STREAK: usize = 3;
+
+/// Most texts one forward runs (#125). Measured on Metal (M3 Pro, f16,
+/// `metal_batch_throughput`): 53 texts/s alone, 80 at 4 wide, then flat
+/// (78 at 16, 76 at 32). A wider forward buys no throughput and makes every
+/// caller in it wait for the whole of it, so a take of up to [`MAX_BATCH`]
+/// runs as several forwards of at most this many.
+const FORWARD_WIDTH: usize = 8;
+
+/// How much longer than the shortest text of a forward another text may be
+/// to join it: twice its length plus this many bytes (#125). Padding makes
+/// every row of a forward cost as much as its longest; one 910-byte text in
+/// a 16-wide forward of short ones measured 798 ms against 206 ms without it.
+const CHUNK_SLACK_BYTES: usize = 64;
+
+/// Split a take into forwards (#125): indices into `lens`, shortest texts
+/// first, at most [`FORWARD_WIDTH`] per forward, and no text in a forward
+/// longer than twice the forward's shortest plus [`CHUNK_SLACK_BYTES`].
+/// Byte length stands in for token count: it orders texts the same way
+/// closely enough, and costs nothing to read.
+fn length_chunks(lens: &[usize]) -> Vec<Vec<usize>> {
+    let mut order: Vec<usize> = (0..lens.len()).collect();
+    order.sort_by_key(|&i| lens[i]);
+    let mut chunks: Vec<Vec<usize>> = Vec::new();
+    for i in order {
+        match chunks.last_mut() {
+            Some(chunk)
+                if chunk.len() < FORWARD_WIDTH
+                    && lens[i] <= 2 * lens[chunk[0]] + CHUNK_SLACK_BYTES =>
+            {
+                chunk.push(i)
+            }
+            _ => chunks.push(vec![i]),
+        }
+    }
+    chunks
+}
+
+/// One forward over `texts`, with each caller's failure kept to that
+/// caller (#125).
+///
+/// When a forward over several texts fails or panics, a one-word canary
+/// forward decides whose failure it is (review M3):
+///
+/// * **The canary fails too:** the device or model is failing, not a text.
+///   Every caller gets [`EmbedError::Unavailable`] (transient: nothing was
+///   learned about any input), and nothing is retried, so a broken device
+///   costs two forwards per chunk instead of one per text.
+/// * **The canary succeeds:** a text is at fault. Each text is run alone,
+///   and only a text that fails alone gets [`EmbedError::Backend`]. Before
+///   this, the coalescer failed every caller in the batch with the batch's
+///   error, so a write coalesced with a bad text by timing alone failed as a
+///   permanent refusal and its durable intent was settled `failed`.
+///
+/// A lone text that fails is judged the same way, by the canary.
+///
+/// A width mismatch is not retried: it is a fact about the loaded model, not
+/// about a text, so every caller gets it (K2-R1-4).
+fn forward_isolated<F>(texts: &[&str], dim: usize, forward: F) -> Vec<Result<Vec<f32>, EmbedError>>
+where
+    F: Fn(&[&str]) -> Result<Vec<Vec<f32>>, EmbedError>,
+{
+    let once = |chunk: &[&str]| -> Result<Vec<Vec<f32>>, String> {
+        // K2-R1-5: a candle panic fails THIS forward and the loop goes on.
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| forward(chunk))) {
+            Ok(Ok(vectors)) if vectors.len() == chunk.len() => Ok(vectors),
+            Ok(Ok(vectors)) => Err(format!(
+                "candle returned {} vectors for a batch of {} texts",
+                vectors.len(),
+                chunk.len()
+            )),
+            Ok(Err(e)) => Err(format!(
+                "candle forward failed for a batch of {} texts: {e}",
+                chunk.len()
+            )),
+            Err(panic) => Err(format!(
+                "candle coalescer panicked running a batch of {} texts: {}; the worker \
+                 keeps serving",
+                chunk.len(),
+                panic_message(panic.as_ref())
+            )),
+        }
+    };
+    let width_checked = |vectors: Vec<Vec<f32>>| -> Vec<Result<Vec<f32>, EmbedError>> {
+        // K2-R1-4 defense in depth: never hand a caller a vector whose
+        // width disagrees with the stamped contract.
+        if let Some(bad) = vectors.iter().find(|v| v.len() != dim) {
+            let msg = format!(
+                "candle returned {}-wide vectors but the contract pins {dim} — refusing to \
+                 serve width-mismatched embeddings",
+                bad.len()
+            );
+            return vectors
+                .iter()
+                .map(|_| Err(EmbedError::Backend(msg.clone())))
+                .collect();
+        }
+        vectors.into_iter().map(Ok).collect()
+    };
+    let msg = match once(texts) {
+        Ok(vectors) => return width_checked(vectors),
+        Err(msg) => msg,
+    };
+    if let Err(canary) = once(&[CANARY_TEXT]) {
+        let msg = format!("{msg}; a one-word canary forward failed too ({canary})");
+        return texts
+            .iter()
+            .map(|_| Err(EmbedError::Unavailable(msg.clone())))
+            .collect();
+    }
+    if texts.len() <= 1 {
+        return vec![Err(EmbedError::Backend(msg))];
+    }
+    texts
+        .iter()
+        .map(|text| match once(std::slice::from_ref(text)) {
+            Ok(vectors) => width_checked(vectors).pop().expect("one text, one vector"),
+            Err(msg) => Err(EmbedError::Backend(msg)),
+        })
+        .collect()
+}
+
+/// The requests whose caller still waits for an answer (#125 review H2): a
+/// caller whose deadline passed dropped its receiver, and forwarding its
+/// text would only spend the device on an answer nobody reads.
+fn still_awaited(items: impl Iterator<Item = Pending>) -> Vec<Pending> {
+    items.filter(|p| !p.tx.is_closed()).collect()
+}
+
+/// The text of the canary forward [`forward_isolated`] runs after a failed
+/// forward (#125 review M3): one short, ordinary word, so a failure on it is
+/// a failure of the device or model, not of any caller's text.
+const CANARY_TEXT: &str = "lambo";
 
 /// Debounce is a constant today; kept as a fn so the loop reads against the
 /// shared state it actually uses.
 fn shared_debounce() -> Duration {
     BATCH_DEBOUNCE
-}
-
-fn fail_batch(batch: Vec<Pending>, msg: &str) {
-    for item in batch {
-        let _ = item.tx.send(Err(EmbedError::Backend(msg.to_string())));
-    }
 }
 
 fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
@@ -1509,8 +1722,83 @@ impl Embedder for CandleEmbedder {
         handle.shared.queue.push(Pending {
             text: text.to_string(),
             tx,
+            bulk: false,
         });
         recv_bounded(rx, EMBED_WAIT).await
+    }
+
+    /// #125: every text is queued under one lock, as bulk work behind any
+    /// single embed (review M1), so the coalescer takes them together. An
+    /// empty text fails its own slot (CON-7) and is never queued. Every slot
+    /// shares one deadline, the caller's or [`EMBED_WAIT`] if sooner (review
+    /// L2): a slot not answered by then fails `Unavailable` while the
+    /// answered ones keep their vectors, and dropping its receiver tells
+    /// the coalescer not to forward it.
+    async fn embed_batch(
+        &self,
+        texts: &[&str],
+        deadline: tokio::time::Instant,
+    ) -> Vec<Result<Vec<f32>, EmbedError>> {
+        let deadline = deadline.min(tokio::time::Instant::now() + EMBED_WAIT);
+        if !self.is_loaded()
+            && let Err(e) = self.prepare().await
+        {
+            // Review L2: the load's own class, as `embed` would report it.
+            return texts.iter().map(|_| Err(super::same_error(&e))).collect();
+        }
+        let Some(handle) = self.slot.handle.get() else {
+            return texts
+                .iter()
+                .map(|_| {
+                    Err(EmbedError::Unavailable(
+                        "candle embedder weights are not loaded".into(),
+                    ))
+                })
+                .collect();
+        };
+        if tokio::time::Instant::now() >= deadline {
+            return texts
+                .iter()
+                .map(|_| Err(super::deadline_passed()))
+                .collect();
+        }
+        let mut waits = Vec::with_capacity(texts.len());
+        let mut queued = Vec::with_capacity(texts.len());
+        for text in texts {
+            match reject_empty(text) {
+                Err(e) => waits.push(Err(e)),
+                Ok(()) => {
+                    let (tx, rx) = tokio::sync::oneshot::channel();
+                    queued.push(Pending {
+                        text: (*text).to_string(),
+                        tx,
+                        bulk: true,
+                    });
+                    waits.push(Ok(rx));
+                }
+            }
+        }
+        handle.shared.queue.push_many(queued);
+        let mut out = Vec::with_capacity(texts.len());
+        for wait in waits {
+            out.push(match wait {
+                Err(e) => Err(e),
+                Ok(rx) => match tokio::time::timeout_at(deadline, rx).await {
+                    Ok(Ok(result)) => result,
+                    Ok(Err(_)) => Err(EmbedError::Backend(
+                        "candle coalescer dropped the request (worker exited mid-batch)".into(),
+                    )),
+                    Err(_) => Err(super::deadline_passed()),
+                },
+            });
+        }
+        out
+    }
+
+    /// One forward's width ([`FORWARD_WIDTH`], review L5): more texts per
+    /// call would only queue behind each other in the same coalescer.
+    fn batch_capacity(&self) -> usize {
+        FORWARD_WIDTH
     }
 }
 
@@ -1607,31 +1895,359 @@ pub(crate) mod test_artifact {
 mod tests {
     use super::*;
 
+    /// A stand-in forward: a unit vector per text, a panic for any batch
+    /// holding "panic", an error for any batch holding "bad", and a count of
+    /// forwards run.
+    fn fake_forward<'a>(
+        forwards: &'a AtomicUsize,
+        dim: usize,
+    ) -> impl Fn(&[&str]) -> Result<Vec<Vec<f32>>, EmbedError> + 'a {
+        move |texts: &[&str]| {
+            forwards.fetch_add(1, Ordering::SeqCst);
+            if texts.contains(&"panic") {
+                panic!("bad tensor");
+            }
+            if texts.contains(&"bad") {
+                return Err(EmbedError::Backend("degenerate input".into()));
+            }
+            Ok(texts
+                .iter()
+                .map(|t| {
+                    let mut v = vec![0.0; dim];
+                    v[t.len() % dim] = 1.0;
+                    v
+                })
+                .collect())
+        }
+    }
+
+    #[test]
+    fn length_chunks_keep_long_texts_out_of_short_forwards() {
+        // #125: one long text must not pad a forward of short ones.
+        let mut lens = vec![40; 15];
+        lens.push(910);
+        let chunks = length_chunks(&lens);
+        assert_eq!(chunks.len(), 3, "{chunks:?}");
+        assert_eq!(chunks[0].len(), FORWARD_WIDTH);
+        assert_eq!(chunks[1].len(), 7);
+        assert_eq!(chunks[2], vec![15], "the long text runs alone, last");
+        let mut all: Vec<usize> = chunks.concat();
+        all.sort_unstable();
+        assert_eq!(all, (0..16).collect::<Vec<_>>(), "every text exactly once");
+        assert!(length_chunks(&[]).is_empty());
+    }
+
+    #[test]
+    fn length_chunks_join_texts_within_the_slack() {
+        let chunks = length_chunks(&[100, 10, 84, 85]);
+        // 10 * 2 + 64 = 84: 84 joins the 10, 85 does not; 100 joins 85.
+        assert_eq!(chunks, vec![vec![1, 2], vec![3, 0]]);
+    }
+
     #[tokio::test]
-    async fn fail_batch_resolves_every_caller_even_after_a_panic() {
-        // K2-R1-5: the panic path fails each oneshot with the panic named.
-        let mut rxs = Vec::new();
-        let batch: Vec<Pending> = (0..3)
-            .map(|_| {
-                let (tx, rx) = tokio::sync::oneshot::channel();
-                rxs.push(rx);
-                Pending {
-                    text: "x".into(),
-                    tx,
-                }
-            })
-            .collect();
-        fail_batch(
-            batch,
-            "candle coalescer panicked running a batch of 3 texts: bad tensor; the worker \
-             keeps serving",
+    async fn embed_batch_matches_single_embeds_and_fails_empty_text_in_its_slot() {
+        let dir = crate::test_util::ScratchDir::new("lambo-125-batch");
+        let artifact = dir.join("artifact");
+        test_artifact::write(&artifact);
+        let e = test_artifact::deferred(&artifact, &dir.join("cache")).unwrap();
+        assert_eq!(e.batch_capacity(), FORWARD_WIDTH);
+        let texts = ["user schema", "  ", "write queue batching"];
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        let out = e.embed_batch(&texts, deadline).await;
+        assert_eq!(out.len(), 3);
+        assert!(
+            matches!(out[1], Err(EmbedError::Unavailable(_))),
+            "{:?}",
+            out[1]
         );
-        for rx in rxs {
-            let err = rx.await.unwrap().unwrap_err().to_string();
-            assert!(
-                err.contains("panicked") && err.contains("bad tensor"),
-                "{err}"
+        for i in [0, 2] {
+            let single = e.embed(texts[i]).await.unwrap();
+            let batched = out[i].as_ref().unwrap();
+            assert_eq!(batched.len(), BGE_M3_DIM);
+            let cos: f32 = single.iter().zip(batched).map(|(a, b)| a * b).sum();
+            assert!(cos > 0.999, "slot {i}: cosine {cos}");
+        }
+    }
+
+    #[test]
+    fn a_healthy_batch_is_one_forward() {
+        let forwards = AtomicUsize::new(0);
+        let out = forward_isolated(&["a", "bb", "ccc"], 4, fake_forward(&forwards, 4));
+        assert_eq!(forwards.load(Ordering::SeqCst), 1);
+        for (i, r) in out.iter().enumerate() {
+            assert_eq!(
+                r.as_ref().unwrap()[i + 1],
+                1.0,
+                "slot {i} got its own vector"
             );
+        }
+    }
+
+    #[test]
+    fn one_bad_text_fails_only_its_own_caller() {
+        // #125: before, the batch's error failed every caller in it.
+        let forwards = AtomicUsize::new(0);
+        let out = forward_isolated(&["a", "bad", "ccc"], 4, fake_forward(&forwards, 4));
+        assert_eq!(
+            forwards.load(Ordering::SeqCst),
+            5,
+            "the batch, the canary, then each text alone"
+        );
+        assert_eq!(out[0].as_ref().unwrap()[1], 1.0);
+        let err = out[1].as_ref().unwrap_err();
+        assert!(
+            matches!(err, EmbedError::Backend(_)),
+            "a bad text is permanent: {err:?}"
+        );
+        assert!(err.to_string().contains("degenerate input"), "{err}");
+        assert_eq!(out[2].as_ref().unwrap()[3], 1.0);
+    }
+
+    #[test]
+    fn a_panicking_text_fails_only_its_own_caller_and_names_the_panic() {
+        // K2-R1-5 kept: the panic is caught and named, now per text.
+        let forwards = AtomicUsize::new(0);
+        let out = forward_isolated(&["panic", "bb"], 4, fake_forward(&forwards, 4));
+        let err = out[0].as_ref().unwrap_err().to_string();
+        assert!(
+            err.contains("panicked") && err.contains("bad tensor"),
+            "{err}"
+        );
+        assert!(out[1].is_ok());
+    }
+
+    #[test]
+    fn a_failing_device_fails_every_caller_transient_without_per_text_retries() {
+        // Review M3: every forward fails, the canary included. Two forwards,
+        // not one per text, and the class is transient: no text was at fault.
+        let forwards = AtomicUsize::new(0);
+        let broken = |_: &[&str]| -> Result<Vec<Vec<f32>>, EmbedError> {
+            forwards.fetch_add(1, Ordering::SeqCst);
+            Err(EmbedError::Backend("metal command buffer error".into()))
+        };
+        let out = forward_isolated(&["a", "bb", "ccc", "dddd"], 4, broken);
+        assert_eq!(
+            forwards.load(Ordering::SeqCst),
+            2,
+            "the batch and the canary"
+        );
+        for r in out {
+            let err = r.unwrap_err();
+            assert!(matches!(err, EmbedError::Unavailable(_)), "{err:?}");
+            assert!(err.to_string().contains("canary"), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_lone_bad_text_is_permanent_when_the_canary_passes() {
+        let forwards = AtomicUsize::new(0);
+        let out = forward_isolated(&["bad"], 4, fake_forward(&forwards, 4));
+        assert_eq!(forwards.load(Ordering::SeqCst), 2);
+        assert!(
+            matches!(out[0], Err(EmbedError::Backend(_))),
+            "{:?}",
+            out[0]
+        );
+    }
+
+    #[test]
+    fn a_take_serves_single_embeds_before_bulk_ones_in_arrival_order() {
+        // Review M1: a recall's query must not wait behind a write's batch.
+        let q = BatchQueue::new();
+        let mut rxs = Vec::new();
+        for (text, bulk) in [
+            ("b1", true),
+            ("b2", true),
+            ("s1", false),
+            ("b3", true),
+            ("s2", false),
+        ] {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            rxs.push(rx);
+            q.push(Pending {
+                text: text.into(),
+                tx,
+                bulk,
+            });
+        }
+        let first = q.wait_for_batch(3).unwrap();
+        let texts: Vec<&str> = first.iter().map(|p| p.text.as_str()).collect();
+        assert_eq!(texts, ["s1", "s2", "b1"]);
+        let rest = q.wait_for_batch(3).unwrap();
+        let texts: Vec<&str> = rest.iter().map(|p| p.text.as_str()).collect();
+        assert_eq!(texts, ["b2", "b3"], "the rest stays queued in order");
+    }
+
+    #[test]
+    fn a_single_embed_queued_during_a_take_waits_for_one_forward_only() {
+        // Sonnet review of #125: priority was per take, so a recall arriving
+        // during a write's batch waited for the whole take. Now the queue is
+        // checked before every forward.
+        let q = BatchQueue::new();
+        let mut rxs = Vec::new();
+        let mut take = Vec::new();
+        for i in 0..(3 * FORWARD_WIDTH) {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            rxs.push(rx);
+            take.push(Pending {
+                text: format!("bulk text {i:02}"),
+                tx,
+                bulk: true,
+            });
+        }
+        let (tx, rx_recall) = tokio::sync::oneshot::channel();
+        let recall = std::sync::Mutex::new(Some(Pending {
+            text: "recall query".into(),
+            tx,
+            bulk: false,
+        }));
+        let order: std::sync::Mutex<Vec<Vec<String>>> = Default::default();
+        serve_take(&q, take, 4, |texts: &[&str]| {
+            order
+                .lock()
+                .unwrap()
+                .push(texts.iter().map(|t| t.to_string()).collect());
+            // The recall arrives while the first forward runs.
+            let arrived = recall.lock().unwrap().take();
+            if let Some(p) = arrived {
+                q.push(p);
+            }
+            Ok(texts.iter().map(|_| vec![1.0, 0.0, 0.0, 0.0]).collect())
+        });
+        let order = order.into_inner().unwrap();
+        assert_eq!(order.len(), 4, "three bulk forwards and the recall's");
+        assert_eq!(order[0].len(), FORWARD_WIDTH);
+        assert_eq!(
+            order[1],
+            vec!["recall query".to_string()],
+            "next forward is the recall's"
+        );
+        assert!(rx_recall.blocking_recv().unwrap().is_ok());
+        for rx in rxs {
+            assert!(
+                rx.blocking_recv().unwrap().is_ok(),
+                "every bulk text answered"
+            );
+        }
+    }
+
+    #[test]
+    fn a_stream_of_single_embeds_does_not_starve_a_takes_bulk_texts() {
+        // #125 focused check: every forward brings a new single (a recall).
+        // After MAX_SINGLE_STREAK single forwards, a bulk chunk runs anyway.
+        let q = BatchQueue::new();
+        let mut take = Vec::new();
+        let mut bulk_rxs = Vec::new();
+        for i in 0..(2 * FORWARD_WIDTH) {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            bulk_rxs.push(rx);
+            take.push(Pending {
+                text: format!("bulk text {i:02}"),
+                tx,
+                bulk: true,
+            });
+        }
+        let kept_rxs = std::sync::Mutex::new(Vec::new());
+        let order: std::sync::Mutex<Vec<bool>> = Default::default();
+        serve_take(&q, take, 4, |texts: &[&str]| {
+            let bulk = texts[0].starts_with("bulk");
+            order.lock().unwrap().push(bulk);
+            // Bounded, so a regression fails the assertions below instead
+            // of looping forever.
+            if kept_rxs.lock().unwrap().len() < 20 {
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                kept_rxs.lock().unwrap().push(rx);
+                q.push(Pending {
+                    text: "recall".into(),
+                    tx,
+                    bulk: false,
+                });
+            }
+            Ok(texts.iter().map(|_| vec![1.0, 0.0, 0.0, 0.0]).collect())
+        });
+        let order = order.into_inner().unwrap();
+        let bulk_at: Vec<usize> = (0..order.len()).filter(|&i| order[i]).collect();
+        assert_eq!(bulk_at, vec![0, 1 + MAX_SINGLE_STREAK], "{order:?}");
+        for rx in bulk_rxs {
+            assert!(
+                rx.blocking_recv().unwrap().is_ok(),
+                "every bulk text answered"
+            );
+        }
+        assert!(
+            order.len() <= 2 + 2 * MAX_SINGLE_STREAK,
+            "the take ends once its bulk is done: {order:?}"
+        );
+    }
+
+    #[test]
+    fn a_take_pulls_no_new_singles_once_shutdown_is_requested() {
+        let q = BatchQueue::new();
+        let (tx, _rx_queued) = tokio::sync::oneshot::channel();
+        q.push(Pending {
+            text: "queued recall".into(),
+            tx,
+            bulk: false,
+        });
+        q.request_shutdown();
+        let (tx, rx_bulk) = tokio::sync::oneshot::channel();
+        let take = vec![Pending {
+            text: "bulk text".into(),
+            tx,
+            bulk: true,
+        }];
+        let forwarded = std::sync::Mutex::new(Vec::new());
+        serve_take(&q, take, 4, |texts: &[&str]| {
+            forwarded
+                .lock()
+                .unwrap()
+                .extend(texts.iter().map(|t| t.to_string()));
+            Ok(texts.iter().map(|_| vec![1.0, 0.0, 0.0, 0.0]).collect())
+        });
+        assert_eq!(
+            forwarded.into_inner().unwrap(),
+            vec!["bulk text".to_string()]
+        );
+        assert!(rx_bulk.blocking_recv().unwrap().is_ok());
+        assert_eq!(
+            q.len(),
+            1,
+            "the queued recall is left for the outer loop's drain"
+        );
+    }
+
+    #[test]
+    fn a_request_whose_caller_gave_up_is_not_forwarded() {
+        // Review H2: a dropped receiver means nobody reads the answer.
+        let (tx_live, _rx_live) = tokio::sync::oneshot::channel();
+        let (tx_gone, rx_gone) = tokio::sync::oneshot::channel();
+        drop(rx_gone);
+        let items = vec![
+            Pending {
+                text: "gone".into(),
+                tx: tx_gone,
+                bulk: true,
+            },
+            Pending {
+                text: "live".into(),
+                tx: tx_live,
+                bulk: true,
+            },
+        ];
+        let live = still_awaited(items.into_iter());
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].text, "live");
+    }
+
+    #[test]
+    fn a_width_mismatch_fails_every_caller_without_a_retry() {
+        // K2-R1-4: a property of the model, not of any one text.
+        let forwards = AtomicUsize::new(0);
+        let out = forward_isolated(&["a", "bb"], 8, fake_forward(&forwards, 4));
+        assert_eq!(forwards.load(Ordering::SeqCst), 1);
+        for r in out {
+            let err = r.unwrap_err().to_string();
+            assert!(err.contains("4-wide") && err.contains("pins 8"), "{err}");
         }
     }
 
@@ -1882,6 +2498,7 @@ mod tests {
             q.push(Pending {
                 text: format!("t{i}"),
                 tx,
+                bulk: false,
             });
             rxs.push(rx);
         }
@@ -1919,6 +2536,7 @@ mod tests {
             q.push(Pending {
                 text: format!("a{i}"),
                 tx,
+                bulk: false,
             });
         }
         let mut batch = q.wait_for_batch(MAX_BATCH).unwrap();
@@ -1928,6 +2546,7 @@ mod tests {
             q.push(Pending {
                 text: format!("b{i}"),
                 tx,
+                bulk: false,
             });
             rxs.push(rx);
         }
@@ -1962,6 +2581,7 @@ mod tests {
             q.push(Pending {
                 text: format!("t{i}"),
                 tx,
+                bulk: false,
             });
         }
         q.request_shutdown();
@@ -2560,6 +3180,176 @@ mod tests {
         assert!(
             deferred - base < 100.0,
             "a deferred embedder must not hold the weights"
+        );
+    }
+
+    /// LIVE Metal probe (issue #125): forward throughput at batch sizes 1, 4,
+    /// 16, 32 and 64 on texts shaped like a write-queue derive's contexts
+    /// (a concept framed with the call's `"; "`-joined prompt), then one
+    /// 16-wide batch with a single long text in it, which `BatchLongest`
+    /// padding makes every row pay for. Needs the cached published f16
+    /// weights (offline, never downloads) and a Metal build. Run with:
+    /// `cargo test --release --features embed-candle-metal --lib -- --ignored --nocapture metal_batch_throughput`
+    #[cfg(target_os = "macos")]
+    #[ignore]
+    #[test]
+    fn metal_batch_throughput() {
+        let e = CandleEmbedder::new(
+            BGE_M3_DIM,
+            CandleOpts {
+                device: Some("metal".into()),
+                offline: true,
+                ..Default::default()
+            },
+        )
+        .expect("cached weights, Metal");
+        assert!(e.on_metal());
+        let core = &e.slot.handle.get().expect("loaded").shared.core;
+        let text = |i: usize| {
+            let a = format!("conc-s1-w{}-{i}: note about write queue batching", i % 16);
+            let b = format!("decision s1.{}.{i} on write handling", i % 16);
+            format!("{a} — {a}; {b}")
+        };
+        let texts: Vec<String> = (0..64).map(text).collect();
+        let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+        // Warm the kernels at every width first.
+        for n in [1, 4, 16, 32, 64] {
+            core.forward(&refs[..n]).expect("warm-up forward");
+        }
+        let time = |batch: &[&str], reps: usize| {
+            let mut ms: Vec<f64> = (0..reps)
+                .map(|_| {
+                    let t = std::time::Instant::now();
+                    core.forward(batch).expect("forward");
+                    t.elapsed().as_secs_f64() * 1e3
+                })
+                .collect();
+            ms.sort_by(f64::total_cmp);
+            ms[ms.len() / 2]
+        };
+        for n in [1, 4, 16, 32, 64] {
+            let median = time(&refs[..n], 15);
+            eprintln!(
+                "#125 METAL BATCH {n:>2}: median forward {median:7.2} ms, {:7.1} texts/s",
+                n as f64 * 1e3 / median
+            );
+        }
+        let long = "canonization promotes a concept once independent sessions agree. ".repeat(14);
+        let mut mixed = refs[..15].to_vec();
+        mixed.push(long.as_str());
+        let median = time(&mixed, 15);
+        eprintln!(
+            "#125 METAL BATCH 16 with one {}-byte text: median forward {median:7.2} ms, \
+             {:7.1} texts/s",
+            long.len(),
+            16.0 * 1e3 / median
+        );
+        // The same take as the coalescer now runs it: length chunks of at
+        // most FORWARD_WIDTH, shortest first.
+        let lens: Vec<usize> = mixed.iter().map(|t| t.len()).collect();
+        let chunks = length_chunks(&lens);
+        let mut ms: Vec<f64> = (0..15)
+            .map(|_| {
+                let t = std::time::Instant::now();
+                for chunk in &chunks {
+                    let texts: Vec<&str> = chunk.iter().map(|&i| mixed[i]).collect();
+                    core.forward(&texts).expect("forward");
+                }
+                t.elapsed().as_secs_f64() * 1e3
+            })
+            .collect();
+        ms.sort_by(f64::total_cmp);
+        let median = ms[ms.len() / 2];
+        eprintln!(
+            "#125 METAL BATCH 16 with one long text, as {} length chunks: median {median:7.2} \
+             ms, {:7.1} texts/s",
+            chunks.len(),
+            16.0 * 1e3 / median
+        );
+        for n in [16, 32] {
+            let mut ms: Vec<f64> = (0..15)
+                .map(|_| {
+                    let t = std::time::Instant::now();
+                    for chunk in refs[..n].chunks(FORWARD_WIDTH) {
+                        core.forward(chunk).expect("forward");
+                    }
+                    t.elapsed().as_secs_f64() * 1e3
+                })
+                .collect();
+            ms.sort_by(f64::total_cmp);
+            let median = ms[ms.len() / 2];
+            eprintln!(
+                "#125 METAL TAKE {n} as {FORWARD_WIDTH}-wide forwards: median {median:7.2} ms, \
+                 {:7.1} texts/s",
+                n as f64 * 1e3 / median
+            );
+        }
+    }
+
+    /// LIVE Metal parity (#125 review M2): a batched embed must store what an
+    /// unbatched one would, within tolerance. Compares, on the real f16
+    /// weights, each text embedded alone against (1) `embed_batch`, which
+    /// length-chunks, and (2) one forward over all the texts padded to the
+    /// longest (`BatchLongest`, the worst case). Needs the cached published
+    /// weights (offline, never downloads) and a Metal build. Run with:
+    /// `cargo test --release --features embed-candle-metal --lib -- --ignored --nocapture metal_batched_matches_single`
+    #[cfg(target_os = "macos")]
+    #[ignore]
+    #[tokio::test]
+    async fn metal_batched_matches_single_within_tolerance() {
+        let e = CandleEmbedder::new(
+            BGE_M3_DIM,
+            CandleOpts {
+                device: Some("metal".into()),
+                offline: true,
+                ..Default::default()
+            },
+        )
+        .expect("cached weights, Metal");
+        let long = "canonization promotes a concept once independent sessions agree. ".repeat(14);
+        let texts: Vec<String> = vec![
+            "user schema".into(),
+            "conc-s1-w3-17: note about write queue batching — conc-s1-w3-17: note about \
+             write queue batching; decision s1.3.17 on write handling"
+                .into(),
+            "file-3.rs".into(),
+            "decision s1.3.17 on write handling — conc-s1-w3-17: note about write queue \
+             batching; decision s1.3.17 on write handling"
+                .into(),
+            "会話の記憶をグラフとして保存する".into(),
+            "fn resolve_device(opts: &CandleOpts) -> Result<DeviceChoice, EmbedError>".into(),
+            long,
+        ];
+        let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+        let mut single = Vec::new();
+        for t in &refs {
+            single.push(e.embed(t).await.expect("single embed"));
+        }
+        let max_diff = |a: &[f32], b: &[f32]| {
+            a.iter()
+                .zip(b)
+                .map(|(x, y)| (x - y).abs())
+                .fold(0.0f32, f32::max)
+        };
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+        let batched = e.embed_batch(&refs, deadline).await;
+        let core = &e.slot.handle.get().expect("loaded").shared.core;
+        let padded = core.forward(&refs).expect("padded forward");
+        let mut worst_batched = 0.0f32;
+        let mut worst_padded = 0.0f32;
+        for i in 0..refs.len() {
+            let b = batched[i].as_ref().expect("batched slot");
+            worst_batched = worst_batched.max(max_diff(&single[i], b));
+            worst_padded = worst_padded.max(max_diff(&single[i], &padded[i]));
+        }
+        eprintln!(
+            "#125 METAL PARITY: max |single - embed_batch| = {worst_batched:e}, \
+             max |single - one padded forward| = {worst_padded:e}"
+        );
+        assert!(worst_batched < 1e-3, "embed_batch drifted: {worst_batched}");
+        assert!(
+            worst_padded < 1e-3,
+            "a padded forward drifted: {worst_padded}"
         );
     }
 

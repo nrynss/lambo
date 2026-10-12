@@ -147,6 +147,18 @@ pub fn record_action(
 /// None`, which is the pre-2026-09-01 behaviour for every action.
 pub type ActionEmbeddings = HashMap<String, Vec<f32>>;
 
+/// The distinct content strings [`embed_action_contents`] embeds, in order:
+/// the action, then `produces`, `modifies` and `depends_on`.
+fn action_embed_texts<'a>(action: &Action<'a>) -> Vec<&'a str> {
+    let mut seen: HashSet<&str> = HashSet::new();
+    std::iter::once(action.action)
+        .chain(action.produces.iter().copied())
+        .chain(action.modifies.iter().copied())
+        .chain(action.depends_on.iter().copied())
+        .filter(|content| seen.insert(content))
+        .collect()
+}
+
 /// Embed every distinct content string an [`Action`] may turn into a concept:
 /// the action itself, and each `produces` / `modifies` / `depends_on` entry.
 ///
@@ -176,22 +188,33 @@ pub async fn embed_action_contents(
     // `hybrid::derive`: an action listing twenty resources must not be able to
     // hold the write path for twenty times the budget.
     let io_deadline = tokio::time::Instant::now() + crate::graph::hybrid::HYBRID_IO_TIMEOUT;
-    let mut seen: HashSet<&str> = HashSet::new();
-    let mut out = ActionEmbeddings::new();
-    let candidates = std::iter::once(action.action)
-        .chain(action.produces.iter().copied())
-        .chain(action.modifies.iter().copied())
-        .chain(action.depends_on.iter().copied());
-    for content in candidates {
-        if !seen.insert(content) {
+    let texts = action_embed_texts(action);
+    // #125: every string in batched rounds when the embedder batches; a
+    // string the rounds did not embed is embedded alone below, so a failure
+    // is still that string's own, with its own class.
+    let mut out: ActionEmbeddings =
+        crate::graph::hybrid::embed_gathered(embedder, &texts, io_deadline)
+            .await
+            .into_iter()
+            .collect();
+    for content in texts {
+        if out.contains_key(content) {
             continue;
         }
         // The transient/permanent split is the same one `hybrid::derive` makes
         // and for the same downstream reason: the durable-intent replay's
         // consume-or-keep decision turns on whether anything was learned about
         // this input. A timeout learned nothing, so it is `EmbedUnavailable`.
-        match tokio::time::timeout_at(io_deadline, embedder.embed(content)).await {
-            Err(_) => {
+        // Review H2: an embed is not started once the budget is spent.
+        let embedded = if tokio::time::Instant::now() >= io_deadline {
+            Err(())
+        } else {
+            tokio::time::timeout_at(io_deadline, embedder.embed(content))
+                .await
+                .map_err(|_| ())
+        };
+        match embedded {
+            Err(()) => {
                 return Err(LamboError::EmbedUnavailable(format!(
                     "record_action embed timed out after {:?}; nothing was written — the write \
                      is refused rather than applied without its vectors (a concept stored with \

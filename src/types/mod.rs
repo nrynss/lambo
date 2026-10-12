@@ -1724,6 +1724,40 @@ impl StoreError {
     }
 }
 
+impl LamboError {
+    /// The fixed start of a [lookup timeout](Self::is_lookup_timeout)'s
+    /// message.
+    const LOOKUP_TIMEOUT: &'static str = "hybrid vector candidate lookup timed out";
+
+    /// A hybrid derive's vector-candidate lookup that did not answer inside
+    /// its own budget, `graph::hybrid::VECTOR_LOOKUP_TIMEOUT` from when it
+    /// started (#125 review H1). A call whose overall budget ran out first
+    /// (slow embeds before the lookup) is the ordinary embed-budget
+    /// [`LamboError::EmbedUnavailable`], not this. It is
+    /// [`LamboError::EmbedUnavailable`]: transient, so the in-session write
+    /// queue leaves the write's durable intent for the next serve to replay.
+    /// Its `Display` is `embed: hybrid vector candidate lookup timed out ...`,
+    /// and its error kind is "embedding error", like an embed timeout.
+    pub(crate) fn lookup_timeout(budget: std::time::Duration) -> Self {
+        LamboError::EmbedUnavailable(format!(
+            "{} after {budget:?}; nothing was written — the store did not answer the lookup \
+             in its own budget, which says nothing about the write's input",
+            Self::LOOKUP_TIMEOUT
+        ))
+    }
+
+    /// Whether this is a [lookup timeout](Self::lookup_timeout). The replay
+    /// tells it apart from an embedder outage (#125 Sonnet review): the
+    /// embedder answered before the lookup, so it is no evidence that the
+    /// embedder is sick, and a lookup that is slow every time for one input
+    /// must not hold the backlog behind it on every restart. Identified by
+    /// prefix, like [`StoreError::is_cycle_refusal`], so no public enum gains
+    /// a variant.
+    pub(crate) fn is_lookup_timeout(&self) -> bool {
+        matches!(self, LamboError::EmbedUnavailable(m) if m.starts_with(Self::LOOKUP_TIMEOUT))
+    }
+}
+
 /// The acyclic edge family a [cycle refusal](StoreError::is_cycle_refusal)
 /// protects.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1767,8 +1801,19 @@ pub enum LamboError {
     /// one transient outage.
     ///
     /// Produced only where the cause is known: `graph::hybrid::derive`'s embed
-    /// timeout arm, and its embed-error arm when
-    /// [`crate::embed::EmbedError::is_transient`] says so.
+    /// timeout arm, its embed-error arm when
+    /// [`crate::embed::EmbedError::is_transient`] says so, and (#125 review
+    /// H1) its vector-candidate lookup when the store did not answer within
+    /// the lookup's own budget ([`Self::lookup_timeout`]), or when the call's
+    /// embed-and-lookup budget ran out before or during the lookup (the
+    /// ordinary budget message). Neither says anything about the input, so
+    /// the in-session write queue leaves the durable intent unconsumed. Before 0.6.0 a lookup
+    /// timeout was a store error (`store error`, `Backend`); it now reads
+    /// `embed: hybrid vector candidate lookup timed out ...` with the
+    /// "embedding error" kind. Nothing retries a transient write within the
+    /// session: the next serve of the session replays its durable intent,
+    /// and the replay settles a lookup timeout `failed` rather than retry it
+    /// again ([`Self::is_lookup_timeout`]).
     ///
     /// `Display` is deliberately identical to [`LamboError::Embed`]'s: to an
     /// operator and to the ledger this is the same *class* of failure

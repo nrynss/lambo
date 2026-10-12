@@ -539,6 +539,17 @@ fn reject_empty_key(content: &str, key: &str) -> Result<(), LamboError> {
 /// did not answer in time, [`LamboError::Embed`] when it answered and the answer
 /// was unusable for this input. The two render identically to a caller.
 ///
+/// A vector-candidate lookup that does not answer within its own
+/// [`VECTOR_LOOKUP_TIMEOUT`] (from when it starts, inside the call's
+/// [`HYBRID_IO_TIMEOUT`]) is also [`LamboError::EmbedUnavailable`] (#125): it
+/// reads `embed: hybrid vector candidate lookup timed out ...` with the
+/// "embedding error" kind, where before 0.6.0 it was a store error. When the
+/// call's budget runs out first (slow embeds before the lookup), the error is
+/// the ordinary budget one, not a lookup timeout. Any other store error from the lookup
+/// still propagates as [`LamboError::Store`]. Nothing here retries; a write
+/// queue intent that fails transiently is replayed by the session's next
+/// serve.
+///
 /// `embedding` is the live, resolved [`EmbeddingContract`] for the process's
 /// embedder (from `ResolvedBackends`); it is stamped on the graph at first embed
 /// and checked via [`EmbeddingContract::ensure_compatible`] on later hybrid
@@ -1098,6 +1109,19 @@ async fn derive_planned(
         // -----------------------------------------------------------------------
         // Phase 2 — async gather (no lock held).
         // -----------------------------------------------------------------------
+        // #125: every text this attempt will embed, in one round when the
+        // embedder batches. What the round fails to embed is embedded alone
+        // below, so each item still meets its own error and class.
+        if vector_ok {
+            let texts: Vec<String> = items
+                .iter()
+                .filter(|(content, _, _, matched)| matched.is_none() && !is_supplied(content))
+                .map(|(content, _, _, _)| *content)
+                .chain(parent_ends.iter().map(|(content, _)| *content))
+                .map(|content| context_text(content, origin_text.as_deref()))
+                .collect();
+            embeds.prefill(embedder, texts, io_deadline).await;
+        }
         // First-session fallback log for the capability-absent path (zero I/O, so
         // acceptable here); embed-failure logging happens per concept below.
         let mut attempted_embed = false;
@@ -1958,6 +1982,32 @@ impl EmbedCache {
         self.stamp = Some(stamped.cloned());
     }
 
+    fn cached(&self, context: &str) -> Option<&Vec<f32>> {
+        self.by_text.get(context)
+    }
+
+    /// Embed every text not already here in batched rounds (#125). Best
+    /// effort: a text the round does not embed is left for [`Self::embed`],
+    /// which embeds it alone and refuses the write with that text's own
+    /// error.
+    async fn prefill(
+        &mut self,
+        embedder: &dyn Embedder,
+        texts: Vec<String>,
+        io_deadline: tokio::time::Instant,
+    ) {
+        let mut wanted: Vec<String> = Vec::with_capacity(texts.len());
+        for text in texts {
+            if self.cached(&text).is_none() && !wanted.contains(&text) {
+                wanted.push(text);
+            }
+        }
+        let refs: Vec<&str> = wanted.iter().map(String::as_str).collect();
+        for (text, vector) in embed_gathered(embedder, &refs, io_deadline).await {
+            self.by_text.insert(text, vector);
+        }
+    }
+
     /// The vector for `context`, embedding it only on the first ask.
     async fn embed(
         &mut self,
@@ -1965,13 +2015,65 @@ impl EmbedCache {
         context: String,
         io_deadline: tokio::time::Instant,
     ) -> Result<Vec<f32>, LamboError> {
-        if let Some(vector) = self.by_text.get(&context) {
+        if let Some(vector) = self.cached(&context) {
             return Ok(vector.clone());
         }
         let vector = embed_or_refuse(embedder, &context, io_deadline).await?;
         self.by_text.insert(context, vector.clone());
         Ok(vector)
     }
+}
+
+/// How long past its deadline a batched round may take to return before it
+/// is abandoned (#125 review H2). [`Embedder::embed_batch`] must return by
+/// its deadline; this only bounds an adapter that does not. It extends the
+/// worst case of one call's I/O past [`HYBRID_IO_TIMEOUT`] by this much,
+/// which `RECEIPT_WAIT_MAX`'s 4 s of headroom over that budget covers.
+pub(crate) const BATCH_DEADLINE_GRACE: Duration = Duration::from_millis(100);
+
+/// Embed `texts` in rounds of the embedder's [`Embedder::batch_capacity`]
+/// under `io_deadline`, and return the vectors that came back (#125).
+///
+/// Best effort, by design: a text whose slot failed, or that the deadline
+/// overtook, is simply absent, and the caller embeds it alone through its
+/// ordinary path, which turns that text's failure into that write's refusal
+/// with the right class. Nothing is gathered when the embedder does not
+/// batch (capacity 1) or there is only one text: that path is then exactly
+/// the one-at-a-time path it always was.
+///
+/// Review H2: a round is handed the deadline itself, so the slots it
+/// finished before the deadline keep their vectors; no round starts after
+/// the deadline; and [`BATCH_DEADLINE_GRACE`] past it, a round that has not
+/// returned (an adapter overrunning its deadline) is abandoned.
+pub(crate) async fn embed_gathered(
+    embedder: &dyn Embedder,
+    texts: &[&str],
+    io_deadline: tokio::time::Instant,
+) -> Vec<(String, Vec<f32>)> {
+    let capacity = embedder.batch_capacity();
+    let mut out = Vec::new();
+    if capacity < 2 || texts.len() < 2 {
+        return out;
+    }
+    for round in texts.chunks(capacity) {
+        if tokio::time::Instant::now() >= io_deadline {
+            break;
+        }
+        let Ok(results) = tokio::time::timeout_at(
+            io_deadline + BATCH_DEADLINE_GRACE,
+            embedder.embed_batch(round, io_deadline),
+        )
+        .await
+        else {
+            break;
+        };
+        for (text, result) in round.iter().zip(results) {
+            if let Ok(vector) = result {
+                out.push(((*text).to_string(), vector));
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -2026,20 +2128,57 @@ async fn checked_candidates(
     limit: usize,
     io_deadline: tokio::time::Instant,
 ) -> Result<Option<Vec<crate::types::Scored<NodeId>>>, LamboError> {
-    match tokio::time::timeout_at(
-        io_deadline,
-        vectors.checked(session_id, emb, embedding, limit),
-    )
-    .await
+    // Review H2: a lookup is not started once the budget is spent (a
+    // `timeout_at` past its deadline still polls the future once). That is
+    // the call's budget running out, not the store failing to answer.
+    let started = tokio::time::Instant::now();
+    if started >= io_deadline {
+        return Err(LamboError::EmbedUnavailable(budget_spent(
+            "before its vector candidate lookup could start",
+        )));
+    }
+    // #125: the lookup has its own sub-budget from when it starts, capped
+    // by the call's. Only the lookup's own deadline firing means the store
+    // did not answer; the call's firing first means the embeds before it
+    // used the budget up, which is the ordinary budget path.
+    let own_deadline = started + VECTOR_LOOKUP_TIMEOUT;
+    let deadline = own_deadline.min(io_deadline);
+    match tokio::time::timeout_at(deadline, vectors.checked(session_id, emb, embedding, limit))
+        .await
     {
-        Err(_) => Err(StoreError::Backend(format!(
-            "hybrid vector candidate lookup timed out after {HYBRID_IO_TIMEOUT:?}"
-        ))
-        .into()),
+        // Review H1: transient either way. Nothing was learned about this
+        // write's input, so its durable intent must stay unconsumed.
+        Err(_) if own_deadline <= io_deadline => {
+            Err(LamboError::lookup_timeout(VECTOR_LOOKUP_TIMEOUT))
+        }
+        Err(_) => Err(LamboError::EmbedUnavailable(budget_spent(
+            "while its vector candidate lookup was running",
+        ))),
         Ok(Ok(hits)) => Ok(Some(hits)),
         Ok(Err(StoreError::Capability(_))) => Ok(None),
         Ok(Err(e)) => Err(e.into()),
     }
+}
+
+/// How long one vector-candidate lookup may take, from when it starts, inside
+/// the call's [`HYBRID_IO_TIMEOUT`] (#125). Its own budget, so a lookup
+/// timeout ([`LamboError::is_lookup_timeout`]) means the store did not answer
+/// in this long, not that slow embeds before it used up the call's budget.
+/// Half the call's budget: a lookup normally takes milliseconds (the holder's
+/// graph, or one indexed query), and the SQLite exact scan the store
+/// module measures stays well inside it, while the cap keeps one call's I/O
+/// within one [`HYBRID_IO_TIMEOUT`].
+pub const VECTOR_LOOKUP_TIMEOUT: Duration = Duration::from_secs(HYBRID_IO_TIMEOUT.as_secs() / 2);
+
+/// The message for a hybrid call whose [`HYBRID_IO_TIMEOUT`] ran out (#125):
+/// the ordinary embed-budget path, not a [lookup
+/// timeout](LamboError::is_lookup_timeout).
+fn budget_spent(when: &str) -> String {
+    format!(
+        "hybrid embed and lookup budget of {HYBRID_IO_TIMEOUT:?} ran out {when}; nothing was \
+         written — the write is refused rather than applied without its vector (a concept \
+         stored with no embedding is unfindable by semantic recall)"
+    )
 }
 
 /// Log, once per session, that the store refused the checked vector lookup.
@@ -2075,8 +2214,16 @@ async fn embed_or_refuse(
     context: &str,
     io_deadline: tokio::time::Instant,
 ) -> Result<Vec<f32>, LamboError> {
-    match tokio::time::timeout_at(io_deadline, embedder.embed(context)).await {
-        Err(_) => Err(LamboError::EmbedUnavailable(format!(
+    // Review H2: an embed is not started once the budget is spent.
+    let embedded = if tokio::time::Instant::now() >= io_deadline {
+        Err(())
+    } else {
+        tokio::time::timeout_at(io_deadline, embedder.embed(context))
+            .await
+            .map_err(|_| ())
+    };
+    match embedded {
+        Err(()) => Err(LamboError::EmbedUnavailable(format!(
             "hybrid embed timed out after {HYBRID_IO_TIMEOUT:?}; nothing was written — the write \
              is refused rather than applied without its vector (a concept stored with no \
              embedding is unfindable by semantic recall)"
