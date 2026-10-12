@@ -57,7 +57,8 @@ fn edge(id: u64, src: u64, tgt: u64, at: DateTime<Utc>) -> Edge {
     }
 }
 
-/// `n` exclusive dependents of `hub` so `blast_radius(hub) == n`.
+/// `n` `Hierarchical` children of `hub`, its dependents (#36), so
+/// `blast_radius(hub) == n`.
 fn attach_blast(graph: &mut Graph, hub: u64, n: u64, first_dep: u64) {
     let at = ts();
     for i in 0..n {
@@ -65,7 +66,9 @@ fn attach_blast(graph: &mut Graph, hub: u64, n: u64, first_dep: u64) {
         graph
             .insert_concept(concept(dep, 1, 0, CanonizationStatus::None), iid(1))
             .unwrap();
-        graph.upsert_edge(edge(dep, hub, dep, at)).unwrap();
+        let mut child = edge(dep, hub, dep, at);
+        child.edge_type = EdgeType::Hierarchical;
+        graph.upsert_edge(child).unwrap();
     }
 }
 
@@ -125,7 +128,8 @@ async fn one_hop_per_cycle_none_with_stage2_evidence_becomes_candidate() {
         g.insert_concept(concept(id, 1, 5, CanonizationStatus::None), iid(1))
             .unwrap();
     }
-    g.insert_concept(concept(20, 1, 5, CanonizationStatus::None), iid(1))
+    // The hub's own origin (4) is not support for it (#36).
+    g.insert_concept(concept(20, 4, 5, CanonizationStatus::None), iid(4))
         .unwrap();
     // Distinct origins 1/2/3 covering 40/80 = 0.5 of the session.
     g.insert_concept(concept(31, 1, 0, CanonizationStatus::None), iid(1))

@@ -508,7 +508,17 @@ pub trait GraphStore: Send + Sync {
         HolderDeriveSource::Store
     }
 
-    /// Count of concepts that would be orphaned by removing `node` (spec §4.1).
+    /// Count of `node`'s dependents (spec §4.1 with the #36 errata): the
+    /// distinct concepts of the session, other than `node`, that declare an
+    /// aged dependence on it — the sources of `Dependency` edges into `node`
+    /// plus the targets of `node`'s `Hierarchical` edges
+    /// ([`crate::types::EdgeType::dependent_end`]). All of them count, not
+    /// only those `node` would orphan; `Causal`, provenance and association
+    /// edges confer no load. An edge is aged when its about-time
+    /// ([`crate::types::Edge::about_time`]) is at or before
+    /// `now - min_edge_age`. This is a read-time reinterpretation of the
+    /// stored edges (no migration); every adapter must agree with
+    /// [`MemoryStore`](crate::store::MemoryStore).
     ///
     /// **Type split (CON-6):** this surface returns `u64`, but the frozen
     /// [`crate::types::Concept::blast_radius`] /
@@ -533,9 +543,12 @@ pub trait GraphStore: Send + Sync {
         now: DateTime<Utc>,
     ) -> Result<u64, StoreError>;
 
-    /// Distinct origin interactions behind `node`'s aged structural inbound
-    /// edges, plus the share of the session's temporal extent they cover
-    /// (spec §4.1). `now` is the caller's clock — see [`Self::blast_radius`].
+    /// Distinct origin interactions behind `node`'s dependents (the set
+    /// [`Self::blast_radius`] counts, aged the same way), excluding `node`'s
+    /// own origin interaction and any interaction younger than the cutoff,
+    /// plus the share of the session's temporal extent they cover (spec §4.1
+    /// with the #36 errata). `now` is the caller's clock — see
+    /// [`Self::blast_radius`].
     async fn interaction_span(
         &self,
         session: &SessionId,

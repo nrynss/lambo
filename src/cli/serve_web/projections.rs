@@ -18,9 +18,10 @@ use crate::types::{
     SessionId,
 };
 
-/// The structural edge types the page may show. Mirrors
-/// `STRUCTURAL_EDGE_IN` in `src/store/sqlite/structural.rs`: blast radius,
-/// interaction span and this page all exclude `CoOccurrence`/`Semantic`.
+/// The structural edge types the page may show
+/// ([`crate::recall::format::STRUCTURAL_EDGE_TYPES`]): the graph view
+/// excludes `CoOccurrence`/`Semantic`. Dependents (blast radius, the inspect
+/// list) are the narrower #36 relation, see [`structural_dependents`].
 pub(super) fn is_structural(ty: EdgeType) -> bool {
     matches!(
         ty,
@@ -28,32 +29,34 @@ pub(super) fn is_structural(ty: EdgeType) -> bool {
     )
 }
 
-/// Hop-1 structural neighbours of `node`, bounded to [`MAX_INSPECT_NODES`]
-/// with the bound reported rather than cut silently.
+/// `node`'s dependents (#36, the same relation as its blast radius): the
+/// concepts that declare a dependence on it, i.e. the sources of `Dependency`
+/// edges into it and its `Hierarchical` children. Bounded to
+/// [`MAX_INSPECT_NODES`] with the bound reported rather than cut silently.
+/// `Causal` neighbours (artifacts an action produced or modified) are not
+/// dependents and are not listed.
 pub(super) fn structural_dependents(g: &Graph, node: NodeId) -> (Vec<InspectDependent>, bool) {
     let mut deps: Vec<InspectDependent> = Vec::new();
     let mut seen: HashSet<NodeId> = HashSet::new();
     let mut truncated = false;
-    // incident_edges returns id-ascending (deterministic); the first
-    // structural edge naming a neighbour decides its edge label.
+    // incident_edges returns id-ascending (deterministic); the first edge
+    // declaring a dependent decides its edge label.
     for edge in g.incident_edges(node) {
-        if !is_structural(edge.edge_type) {
+        let Some((pillar, other)) = edge.dependence() else {
+            continue;
+        };
+        if pillar != node {
             continue;
         }
-        let other = if edge.source == node {
-            edge.target
-        } else {
-            edge.source
+        // Only a unique Concept dependent counts toward the bound: a
+        // duplicate or a non-concept end must not set `truncated` when the
+        // list is actually complete.
+        let Some(Node::Concept(c)) = g.node(other) else {
+            continue;
         };
         if !seen.insert(other) {
             continue;
         }
-        // Only a structural, unique Concept neighbour counts toward the bound:
-        // a CoOccurrence/duplicate/interaction incident edge must not set
-        // `truncated` when the structural list is actually complete.
-        let Some(Node::Concept(c)) = g.node(other) else {
-            continue;
-        };
         if deps.len() >= MAX_INSPECT_NODES {
             truncated = true;
             break;

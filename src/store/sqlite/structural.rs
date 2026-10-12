@@ -1,6 +1,6 @@
 //! Read-side graph queries for the SQLite adapter that are not vector search:
 //! keyword candidates and the two §4.1 structural queries (`blast_radius`,
-//! `interaction_span`). Semantics, the errata exclusions and the
+//! `interaction_span`), both over one dependents set (#36). Semantics, the errata exclusions and the
 //! MemoryStore-exact gating are described in the adapter's module doc
 //! ("Case folding" and "Structural queries"); they are locked by the
 //! `tests::structural` agreement matrix.
@@ -13,37 +13,70 @@ use super::codec::{cutoff_text, db_err, node_id, text_to_ts};
 use super::SqliteStore;
 use crate::types::{InteractionSpan, NodeId, Scored, SessionId, StoreError};
 
-/// Structural edge types counted by both structural queries (spec §4.1 errata:
-/// concept-to-concept `Dependency`/`Causal`/`Hierarchical` only — provenance
-/// `Derives`/`Temporal` must not un-orphan concepts).
-pub(super) const STRUCTURAL_EDGE_IN: &str = "'Dependency', 'Causal', 'Hierarchical'";
-
-/// §4.1 interaction-span SQL (twin-shaped with Cockroach's
-/// `INTERACTION_SPAN_SQL`; `?` placeholders). The span gates on BOTH the edge
-/// and the origin-interaction timestamp (`e.created_at <= ? AND
-/// i.created_at <= ?` — spec §4.1 second errata, MemoryStore parity): a
-/// structural inbound edge is invisible to the span when EITHER its own
-/// timestamp or its source concept's origin interaction is younger than the
-/// cutoff. `{STRUCTURAL_EDGE_IN}` is substituted at the call site (the
-/// predicate is shared with blast_radius); the substitution keeps this const
-/// assertable verbatim in tests.
+/// The dependents of one node (#36 read-time dependents semantics, spec §4.1
+/// errata): the sources of aged `Dependency` edges into it, plus the targets
+/// of its aged `Hierarchical` edges (its children). This is
+/// [`crate::types::EdgeType::dependent_end`] as SQL: `Causal`, provenance
+/// `Derives`/`Temporal` and association `CoOccurrence`/`Semantic` edges
+/// declare no dependence. `UNION` deduplicates a dependent reached by both
+/// kinds or by several edges. Binds (`?`, in order): node, session, cutoff,
+/// node, session, cutoff. Callers join the result to `concepts` in the
+/// session and drop the node itself (self-loop).
 ///
-/// **Session scope (F5).** `i.session_id = ?` is not redundant with
-/// `e.session_id = ?`: `concepts.origin_interaction` is a **global** FK, so a
-/// concept in session S may legally point at an interaction in session S′.
-/// Without the filter the span counted those foreign interactions — inflating
-/// `distinct` and (since their timestamps sit outside S's extent) the coverage
-/// ratio, both against a session `MemoryStore` never sees. The extent CTE was
-/// already session-filtered, so the two halves of the ratio disagreed.
-pub(super) const INTERACTION_SPAN_SQL: &str = "WITH span AS ( \
-     SELECT DISTINCT i.id, COALESCE(i.event_time, i.created_at) AS about_ts \
-     FROM edges e \
-     JOIN concepts src ON src.id = e.source \
-     JOIN interactions i ON i.id = src.origin_interaction \
-     WHERE e.target = ? AND e.session_id = ? AND i.session_id = ? \
-       AND e.edge_type IN ({STRUCTURAL_EDGE_IN}) \
+/// Twin of Postgres/Cockroach's `DEPENDENTS_CTE` in `src/store/pg/sql.rs` and
+/// of `MemoryStore::aged_dependents`.
+pub(super) const DEPENDENTS_CTE: &str = "dependents AS ( \
+     SELECT e.source AS id FROM edges e \
+     WHERE e.target = ? AND e.session_id = ? AND e.edge_type = 'Dependency' \
        AND COALESCE(e.event_time, e.created_at) <= ? \
+     UNION \
+     SELECT e.target AS id FROM edges e \
+     WHERE e.source = ? AND e.session_id = ? AND e.edge_type = 'Hierarchical' \
+       AND COALESCE(e.event_time, e.created_at) <= ? \
+ )";
+
+/// §4.1 blast radius under the #36 errata: the number of `node`'s dependents
+/// ([`DEPENDENTS_CTE`]), all of them rather than exclusive ones, that are
+/// concepts of the session other than `node`. Binds: the six of
+/// `DEPENDENTS_CTE`, then session, node.
+pub(super) const BLAST_RADIUS_SQL: &str = "WITH {DEPENDENTS_CTE} \
+ SELECT count(*) FROM dependents d \
+ JOIN concepts c ON c.id = d.id AND c.session_id = ? \
+ WHERE d.id <> ?";
+
+/// §4.1 interaction-span SQL under the #36 errata (twin-shaped with
+/// Cockroach's `INTERACTION_SPAN_SQL`; `?` placeholders): the distinct origin
+/// interactions of `node`'s dependents ([`DEPENDENTS_CTE`]), other than
+/// `node`'s own origin interaction. The span gates on BOTH the dependence
+/// edge and the origin-interaction timestamp (spec §4.1 second errata,
+/// MemoryStore parity): a dependent is invisible to the span when every edge
+/// declaring it is younger than the cutoff, and its interaction is invisible
+/// when that interaction is younger than the cutoff. `{DEPENDENTS_CTE}` is
+/// substituted at the call site; the substitution keeps this const
+/// assertable verbatim in tests. Binds: the six of `DEPENDENTS_CTE`, then
+/// session, session, node, cutoff, node, session.
+///
+/// **Own origin (#36).** `node`'s own origin interaction never counts as
+/// support: a parent derived together with its children, or an action that
+/// depends on a concept minted in the same call, is one interaction vouching
+/// for itself.
+///
+/// **Session scope (F5).** `i.session_id = ?` is not redundant: concepts'
+/// `origin_interaction` is a **global** FK, so a concept in session S may
+/// legally point at an interaction in session S'. Without the filter the span
+/// counted those foreign interactions — inflating `distinct` and (since their
+/// timestamps sit outside S's extent) the coverage ratio, both against a
+/// session `MemoryStore` never sees.
+pub(super) const INTERACTION_SPAN_SQL: &str = "WITH {DEPENDENTS_CTE}, \
+ span AS ( \
+     SELECT DISTINCT i.id, COALESCE(i.event_time, i.created_at) AS about_ts \
+     FROM dependents d \
+     JOIN concepts c ON c.id = d.id AND c.session_id = ? \
+     JOIN interactions i ON i.id = c.origin_interaction AND i.session_id = ? \
+     WHERE d.id <> ? \
        AND COALESCE(i.event_time, i.created_at) <= ? \
+       AND NOT EXISTS ( \
+           SELECT 1 FROM concepts own WHERE own.id = ? AND own.origin_interaction = i.id) \
  ), \
  extent AS ( \
      SELECT min(COALESCE(event_time, created_at)) AS lo, \
@@ -56,6 +89,11 @@ pub(super) const INTERACTION_SPAN_SQL: &str = "WITH span AS ( \
      (SELECT max(about_ts) FROM span), \
      extent.lo, extent.hi \
  FROM extent";
+
+/// Expand `{DEPENDENTS_CTE}` in one of the structural queries above.
+pub(super) fn with_dependents(sql: &str) -> String {
+    sql.replace("{DEPENDENTS_CTE}", DEPENDENTS_CTE)
+}
 
 impl SqliteStore {
     /// Mirror MemoryStore: queries against a session that was never written
@@ -146,57 +184,29 @@ impl SqliteStore {
         min_edge_age: Duration,
         now: DateTime<Utc>,
     ) -> Result<u64, StoreError> {
-        // Spec §4.1 ported to `?` placeholders; the cutoff is computed in Rust
-        // (SQLite has no INTERVAL) and bound as the fixed ISO-8601 TEXT.
-        // Divergence from the spec text (for MemoryStore agreement): `c.id <> ?`
-        // excludes the node itself, and the edge about-time (D fallback rule:
-        // `COALESCE(e.event_time, e.created_at)`) gates the edge age
-        // exactly like MemoryStore (the spec's span query gates only the
-        // interaction age — see interaction_span).
-        //
-        // **Session scope (R2-3).** Both structural subqueries scope their
-        // source concept with `src.session_id = ?` / `src2.session_id = ?`,
-        // matching Cockroach's `BLAST_RADIUS_SQL` and MemoryStore's
-        // `concept_ids` (built from the session snapshot). Edges carry a
-        // `session_id` but the join to `concepts` did not, so a cross-session
-        // edge into a dependent satisfied the `NOT EXISTS` arm and
-        // **un-orphaned** it here and nowhere else — SQLite under-counted
-        // blast against both other backends, suppressing Stage-3 promotions
-        // and mis-ranking budget demotion.
+        // Spec §4.1 with the #36 errata ported to `?` placeholders; the cutoff
+        // is computed in Rust (SQLite has no INTERVAL) and bound as the fixed
+        // ISO-8601 TEXT. Edges age on their about-time (D fallback rule:
+        // `COALESCE(e.event_time, e.created_at)`), exactly like MemoryStore.
+        // Dependents are scoped to concepts of this session and the edges to
+        // the session's own rows, as MemoryStore's per-session snapshot is.
         self.require_session(session).await?;
         // F8: the cutoff anchor is the caller's `now`, never a wall clock here.
         let cutoff = cutoff_text(now, min_edge_age)?;
         let node_text = node.0.to_string();
 
-        let row = sqlx::query(&format!(
-            "SELECT count(*) \
-             FROM concepts c \
-             WHERE c.session_id = ? \
-               AND c.id <> ? \
-               AND EXISTS ( \
-                   SELECT 1 FROM edges e \
-                   JOIN concepts src ON src.id = e.source AND src.session_id = ? \
-                   WHERE e.target = c.id AND e.source = ? \
-                     AND e.edge_type IN ({STRUCTURAL_EDGE_IN}) \
-                     AND COALESCE(e.event_time, e.created_at) <= ?) \
-               AND NOT EXISTS ( \
-                   SELECT 1 FROM edges e2 \
-                   JOIN concepts src2 ON src2.id = e2.source AND src2.session_id = ? \
-                   WHERE e2.target = c.id AND e2.source <> ? \
-                     AND e2.edge_type IN ({STRUCTURAL_EDGE_IN}) \
-                     AND COALESCE(e2.event_time, e2.created_at) <= ?)"
-        ))
-        .bind(&session.0)
-        .bind(&node_text)
-        .bind(&session.0)
-        .bind(&node_text)
-        .bind(&cutoff)
-        .bind(&session.0)
-        .bind(&node_text)
-        .bind(&cutoff)
-        .fetch_one(self.pool())
-        .await
-        .map_err(|e| db_err("blast_radius", e))?;
+        let row = sqlx::query(&with_dependents(BLAST_RADIUS_SQL))
+            .bind(&node_text)
+            .bind(&session.0)
+            .bind(&cutoff)
+            .bind(&node_text)
+            .bind(&session.0)
+            .bind(&cutoff)
+            .bind(&session.0)
+            .bind(&node_text)
+            .fetch_one(self.pool())
+            .await
+            .map_err(|e| db_err("blast_radius", e))?;
         let n: i64 = row.try_get(0).map_err(|e| db_err("blast_radius", e))?;
         Ok(n as u64)
     }
@@ -208,28 +218,32 @@ impl SqliteStore {
         min_age: Duration,
         now: DateTime<Utc>,
     ) -> Result<InteractionSpan, StoreError> {
-        // Spec §4.1 span query: distinct origin interactions of concept-sourced
-        // structural edges into `node`, aged on BOTH the edge and the origin
-        // interaction (MemoryStore agreement — the spec text ages only the
-        // interaction; the fixture data satisfies both, but the three-way gate
-        // is MemoryStore's naive answer). Coverage is computed in Rust in ms,
-        // identical to MemoryStore's formula.
+        // Spec §4.1 span query with the #36 errata: distinct origin
+        // interactions of `node`'s dependents other than its own, aged on BOTH
+        // the dependence edge and the origin interaction (MemoryStore
+        // agreement). Coverage is computed in Rust in ms, identical to
+        // MemoryStore's formula.
         self.require_session(session).await?;
         // F8: the cutoff anchor is the caller's `now`, never a wall clock here.
         let cutoff = cutoff_text(now, min_age)?;
         let node_text = node.0.to_string();
 
-        let row =
-            sqlx::query(&INTERACTION_SPAN_SQL.replace("{STRUCTURAL_EDGE_IN}", STRUCTURAL_EDGE_IN))
-                .bind(&node_text)
-                .bind(&session.0)
-                .bind(&session.0)
-                .bind(&cutoff)
-                .bind(&cutoff)
-                .bind(&session.0)
-                .fetch_one(self.pool())
-                .await
-                .map_err(|e| db_err("interaction_span", e))?;
+        let row = sqlx::query(&with_dependents(INTERACTION_SPAN_SQL))
+            .bind(&node_text)
+            .bind(&session.0)
+            .bind(&cutoff)
+            .bind(&node_text)
+            .bind(&session.0)
+            .bind(&cutoff)
+            .bind(&session.0)
+            .bind(&session.0)
+            .bind(&node_text)
+            .bind(&cutoff)
+            .bind(&node_text)
+            .bind(&session.0)
+            .fetch_one(self.pool())
+            .await
+            .map_err(|e| db_err("interaction_span", e))?;
 
         let distinct: i64 = row.try_get(0).map_err(|e| db_err("interaction_span", e))?;
         let span_lo: Option<String> = row.try_get(1).map_err(|e| db_err("interaction_span", e))?;

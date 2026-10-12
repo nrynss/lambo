@@ -44,7 +44,7 @@
 //!     at scale — wrapping the same cycle's `Conflict` out of the ring.
 //!   * **HighRisk** — a fresh write to a **high-value** node: Canonical,
 //!     Venerable, or `blast_radius >= HIGH_RISK_BLAST_RADIUS` (spec §10
-//!     Stage-3 threshold: hypothetical removal would orphan > 5 nodes).
+//!     Stage-3 threshold: more than 5 dependents, #36).
 //!     Modifying such a node is the "high-risk modification" the hot list
 //!     names. A write is fresh when the node itself or any incident edge was
 //!     written inside [`HIGH_RISK_WRITE_WINDOW`] (the same 30s recency story
@@ -100,9 +100,9 @@ pub const STALE_WINDOW: Duration = Duration::from_secs(3600);
 /// Same recency story as conflict's `CONFLICT_RECENCY_WINDOW`.
 pub const HIGH_RISK_WRITE_WINDOW: Duration = Duration::from_secs(30);
 
-/// A node whose hypothetical removal would orphan at least this many nodes
-/// (spec §10 Stage-3 threshold: "orphan > 5 nodes") is high-value; modifying
-/// it is high-risk.
+/// A node with at least this many dependents (spec §10 Stage-3 threshold,
+/// counted as declared dependents since #36) is high-value; modifying it is
+/// high-risk.
 pub const HIGH_RISK_BLAST_RADIUS: u64 = 5;
 
 /// The §6.1 channel's send half: the broadcast sender plus the **publication

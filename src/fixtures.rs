@@ -166,7 +166,7 @@ mod tests {
             .find(|c| c.content == "user schema")
             .expect("user schema present");
         assert_eq!(us.canonization_status, CanonizationStatus::Canonical);
-        assert_eq!(us.blast_radius, Some(8));
+        assert_eq!(us.blast_radius, Some(14));
     }
 
     #[tokio::test]
@@ -185,7 +185,7 @@ mod tests {
             .interaction_span(&sid, us, Duration::from_secs(0), Utc::now())
             .await
             .unwrap();
-        assert!(span.distinct >= 6, "distinct={}", span.distinct);
+        assert!(span.distinct >= 7, "distinct={}", span.distinct);
         assert!(span.coverage >= 0.3, "coverage={}", span.coverage);
 
         // Stage 3: blast_radius > 5

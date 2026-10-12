@@ -19,7 +19,7 @@ use super::erase::{
 use super::lease::{LeaseHolder, LeaseInfo, LeaseOutcome};
 use super::{validate_vector_candidate_limit, Capabilities, GraphStore, SessionFlushStats};
 use crate::types::{
-    tie_break_by_key, CanonizationEvent, EdgeType, GraphSnapshot, InteractionSpan, Mutation,
+    tie_break_by_key, CanonizationEvent, Edge, GraphSnapshot, InteractionSpan, Mutation,
     MutationBatch, Node, NodeId, Scored, SessionId, StoreError,
 };
 
@@ -412,6 +412,28 @@ impl MemoryStore {
         let d = chrono::Duration::from_std(age)
             .map_err(|e| StoreError::Backend(format!("age duration out of range: {e}")))?;
         Ok(now - d)
+    }
+
+    /// `node`'s dependents in one session (#36): the distinct concepts that
+    /// declare a dependence on `node` ([`Edge::dependence`]) through at least
+    /// one edge whose about-time (D: event time, else flush time) is at or
+    /// before `min_created`. Self-loops are excluded by `Edge::dependence`;
+    /// a dependent must be a concept of this session (so neither an
+    /// interaction nor a foreign node counts).
+    fn aged_dependents(
+        data: &SessionData,
+        node: NodeId,
+        min_created: DateTime<Utc>,
+    ) -> HashSet<NodeId> {
+        let concept_ids: HashSet<NodeId> = data.snapshot.concepts.iter().map(|c| c.id).collect();
+        data.snapshot
+            .edges
+            .iter()
+            .filter(|e| e.about_time() <= min_created)
+            .filter_map(Edge::dependence)
+            .filter(|(pillar, dependent)| *pillar == node && concept_ids.contains(dependent))
+            .map(|(_, dependent)| dependent)
+            .collect()
     }
 
     /// Test hook (T86-2): force a session's lease to have already expired, so a
@@ -811,54 +833,19 @@ impl GraphStore for MemoryStore {
         min_edge_age: Duration,
         now: DateTime<Utc>,
     ) -> Result<u64, StoreError> {
-        // Spec §4.1 (1-hop): count concepts that have at least one aged inbound edge from
-        // `node` and no aged inbound edge from any other source. `now` is the caller's
-        // clock (F8) — the adapter has no wall clock of its own.
+        // #36 read-time dependents semantics (spec §4.1 errata): count the
+        // distinct concepts that declare an aged dependence on `node` — the
+        // sources of `Dependency` edges into it plus its `Hierarchical`
+        // children ([`crate::types::EdgeType::dependent_end`]). All of them,
+        // not only exclusive ones; `Causal`, provenance and association edges
+        // confer no load. `now` is the caller's clock (F8) — the adapter has no
+        // wall clock of its own.
         let min_created = Self::cutoff(now, min_edge_age)?;
         let map = self.inner.read();
         let data = map
             .get(&session.0)
             .ok_or_else(|| StoreError::SessionNotFound(session.0.clone()))?;
-
-        // Blast radius is about concept-to-concept dependency orphans. We count ONLY
-        // aged inbound {Dependency, Causal, Hierarchical} edges from a concept source.
-        // Excludes provenance Derives (interaction -> concept) and Temporal edges.
-        // Spec §4.1 errata (2026-08-11 / T1.4): mandatory §5.7 Derives must not un-orphan
-        // concepts under Stage 3 (see Handoff Log T1.4).
-        let structural = [
-            EdgeType::Dependency,
-            EdgeType::Causal,
-            EdgeType::Hierarchical,
-        ];
-        let concept_ids: HashSet<NodeId> = data.snapshot.concepts.iter().map(|c| c.id).collect();
-
-        let mut count = 0u64;
-        for c in &data.snapshot.concepts {
-            if c.id == node {
-                continue;
-            }
-            let mut from_node = false;
-            let mut from_other = false;
-            for e in &data.snapshot.edges {
-                // D: an edge ages on its resolved about-time (event time when
-                // the writing interaction carried one, else flush time).
-                if e.target != c.id || e.about_time() > min_created {
-                    continue;
-                }
-                if !structural.contains(&e.edge_type) || !concept_ids.contains(&e.source) {
-                    continue;
-                }
-                if e.source == node {
-                    from_node = true;
-                } else {
-                    from_other = true;
-                }
-            }
-            if from_node && !from_other {
-                count += 1;
-            }
-        }
-        Ok(count)
+        Ok(Self::aged_dependents(data, node, min_created).len() as u64)
     }
 
     async fn interaction_span(
@@ -868,37 +855,40 @@ impl GraphStore for MemoryStore {
         min_age: Duration,
         now: DateTime<Utc>,
     ) -> Result<InteractionSpan, StoreError> {
-        // Spec §4.1: inbound Dependency/Causal/Hierarchical from concepts whose
-        // origin_interaction is old enough; distinct interaction count + temporal
-        // coverage. `now` is the caller's clock (F8).
+        // Spec §4.1 with the #36 errata: the distinct origin interactions of
+        // `node`'s aged dependents (see `blast_radius`), other than `node`'s
+        // own origin interaction, each old enough itself; plus the share of
+        // the session's temporal extent they cover. `now` is the caller's
+        // clock (F8).
         let min_created = Self::cutoff(now, min_age)?;
         let map = self.inner.read();
         let data = map
             .get(&session.0)
             .ok_or_else(|| StoreError::SessionNotFound(session.0.clone()))?;
 
-        let structural = [
-            EdgeType::Dependency,
-            EdgeType::Causal,
-            EdgeType::Hierarchical,
-        ];
+        let own_origin = data
+            .snapshot
+            .concepts
+            .iter()
+            .find(|c| c.id == node)
+            .map(|c| c.origin_interaction);
+        let dependents = Self::aged_dependents(data, node, min_created);
         let mut interaction_ids: HashSet<NodeId> = HashSet::new();
         let mut times = Vec::new();
-        for e in &data.snapshot.edges {
-            if e.target != node || !structural.contains(&e.edge_type) {
+        for dep in data
+            .snapshot
+            .concepts
+            .iter()
+            .filter(|c| dependents.contains(&c.id))
+        {
+            if Some(dep.origin_interaction) == own_origin {
                 continue;
             }
-            if e.about_time() > min_created {
-                continue;
-            }
-            let Some(src) = data.snapshot.concepts.iter().find(|c| c.id == e.source) else {
-                continue;
-            };
             let Some(ix) = data
                 .snapshot
                 .interactions
                 .iter()
-                .find(|i| i.id == src.origin_interaction)
+                .find(|i| i.id == dep.origin_interaction)
             else {
                 continue;
             };
@@ -1103,7 +1093,8 @@ impl MemoryStore {
 mod tests {
     use super::*;
     use crate::types::{
-        AgentId, CanonizationStatus, Concept, ConceptType, Edge, EmbeddingContract, Interaction,
+        AgentId, CanonizationStatus, Concept, ConceptType, Edge, EdgeType, EmbeddingContract,
+        Interaction,
     };
     use chrono::TimeZone;
     use std::sync::Arc;
@@ -1936,86 +1927,36 @@ mod tests {
         assert_eq!(*after, expect, "no other column moves");
     }
 
+    /// #36: the shared dependents case (`crate::test_util::dependents`):
+    /// `Dependency` sources into a node and its `Hierarchical` children
+    /// count, all of them (a dependent shared with another pillar counts for
+    /// both); `Causal`, `Derives`, `Temporal`, `CoOccurrence` and `Semantic`
+    /// do not; a self-loop, a foreign concept and a young edge do not; the
+    /// span drops the node's own origin, a foreign origin and a young
+    /// interaction.
     #[tokio::test]
-    async fn blast_radius_counts_orphans() {
+    async fn blast_radius_and_span_follow_the_dependents_case() {
+        use crate::test_util::dependents as case;
         let store = MemoryStore::new();
-        let sid = SessionId::from("br");
-        let ts = Utc::now() - chrono::Duration::hours(1);
-        let i1 = NodeId::new();
-        let pillar = NodeId::new();
-        let orphan = NodeId::new();
-        let shared = NodeId::new();
-        let other = NodeId::new();
-        let mut batch = MutationBatch::new();
-        batch.push(Mutation::UpsertNode {
-            node: Node::Interaction(Interaction {
-                event_time: None,
-                id: i1,
-                session_id: sid.clone(),
-                agent_id: AgentId::from("a"),
-                prompt_text: None,
-                previous_id: None,
-                created_at: ts,
-            }),
-        });
-        for (id, name) in [
-            (pillar, "pillar"),
-            (orphan, "orphan"),
-            (shared, "shared"),
-            (other, "other"),
-        ] {
-            batch.push(plant_concept(&sid, id, i1, name, ts));
+        store.flush(&case::store_batch(), None).await.unwrap();
+        for (name, age, blast, distinct, coverage) in case::expected_store() {
+            let node = case::concept_id(name);
+            let got = store
+                .blast_radius(&case::session(), node, age, case::now())
+                .await
+                .unwrap();
+            assert_eq!(got, blast, "blast_radius({name}, {age:?})");
+            let span = store
+                .interaction_span(&case::session(), node, age, case::now())
+                .await
+                .unwrap();
+            assert_eq!(span.distinct, distinct, "span distinct({name}, {age:?})");
+            assert!(
+                (span.coverage - coverage).abs() < 1e-9,
+                "span coverage({name}, {age:?}) = {} want {coverage}",
+                span.coverage
+            );
         }
-        // orphan <- only pillar
-        batch.push(Mutation::UpsertEdge {
-            edge: Edge {
-                event_time: None,
-                id: NodeId::new(),
-                session_id: sid.clone(),
-                source: pillar,
-                target: orphan,
-                edge_type: EdgeType::Dependency,
-                weight: 1.0,
-                reinforcements: 1,
-                created_at: ts,
-                last_reinforced: ts,
-            },
-        });
-        // shared <- pillar and other
-        batch.push(Mutation::UpsertEdge {
-            edge: Edge {
-                event_time: None,
-                id: NodeId::new(),
-                session_id: sid.clone(),
-                source: pillar,
-                target: shared,
-                edge_type: EdgeType::Dependency,
-                weight: 1.0,
-                reinforcements: 1,
-                created_at: ts,
-                last_reinforced: ts,
-            },
-        });
-        batch.push(Mutation::UpsertEdge {
-            edge: Edge {
-                event_time: None,
-                id: NodeId::new(),
-                session_id: sid.clone(),
-                source: other,
-                target: shared,
-                edge_type: EdgeType::Dependency,
-                weight: 1.0,
-                reinforcements: 1,
-                created_at: ts,
-                last_reinforced: ts,
-            },
-        });
-        store.flush(&batch, None).await.unwrap();
-        let r = store
-            .blast_radius(&sid, pillar, Duration::from_secs(0), Utc::now())
-            .await
-            .unwrap();
-        assert_eq!(r, 1, "only orphan is exclusively dependent on pillar");
     }
 
     #[tokio::test]
@@ -2041,7 +1982,23 @@ mod tests {
                 created_at: ts,
             }),
         });
-        batch.push(plant_concept(&sid, pillar, i1, "pillar", ts));
+        // A second interaction at the same instant keeps the extent a
+        // single point; `pillar` (from it) depends on `orphan` (#36: the
+        // source of a Dependency edge rests on its target), and `orphan`'s
+        // own origin would not count.
+        let i2 = NodeId::new();
+        batch.push(Mutation::UpsertNode {
+            node: Node::Interaction(Interaction {
+                event_time: None,
+                id: i2,
+                session_id: sid.clone(),
+                agent_id: AgentId::from("a"),
+                prompt_text: None,
+                previous_id: None,
+                created_at: ts,
+            }),
+        });
+        batch.push(plant_concept(&sid, pillar, i2, "pillar", ts));
         batch.push(plant_concept(&sid, orphan, i1, "orphan", ts));
         batch.push(Mutation::UpsertEdge {
             edge: Edge {
@@ -2100,7 +2057,8 @@ mod tests {
         });
         batch.push(plant_concept(&sid, pillar, i1, "pillar", ts));
         batch.push(plant_concept(&sid, orphan, i1, "orphan", ts));
-        // pillar -> orphan (Dependency): the real dependency relationship.
+        // pillar -> orphan (Hierarchical): orphan is pillar's child, a
+        // dependent (#36).
         batch.push(Mutation::UpsertEdge {
             edge: Edge {
                 event_time: None,
@@ -2108,7 +2066,7 @@ mod tests {
                 session_id: sid.clone(),
                 source: pillar,
                 target: orphan,
-                edge_type: EdgeType::Dependency,
+                edge_type: EdgeType::Hierarchical,
                 weight: 1.0,
                 reinforcements: 1,
                 created_at: ts,

@@ -1474,7 +1474,7 @@ mod tests {
         assert!(
             result
                 .context
-                .contains("⚑ Load-bearing pillar — 8 nodes depend on this. Modify with caution."),
+                .contains("⚑ Load-bearing pillar — 14 nodes depend on this. Modify with caution."),
             "load-bearing warning with the graph-computed count"
         );
         assert!(
@@ -1485,13 +1485,13 @@ mod tests {
         );
         assert_eq!(result.hits[0].node_id, us, "demo pillar ranks first");
         assert!(result.hits[0].is_canonical);
-        assert_eq!(result.hits[0].blast_radius, Some(8));
+        assert_eq!(result.hits[0].blast_radius, Some(14));
         // The accumulated warnings: the ⚑ line then the conflict line, in hit
         // order (user schema is the only warned hit in this result).
         assert_eq!(
             result.warnings,
             vec![
-                "⚑ Load-bearing pillar — 8 nodes depend on this. Modify with caution.".to_string(),
+                "⚑ Load-bearing pillar — 14 nodes depend on this. Modify with caution.".to_string(),
                 "Agent A wrote to it 11 seconds ago".to_string(),
             ]
         );
@@ -1768,12 +1768,13 @@ mod tests {
         promote_to(&mut g, 1, CanonizationStatus::Canonical);
         promote_to(&mut g, 2, CanonizationStatus::Candidate);
 
-        // Two structural dependents for the canonical pillar (blast radius 2);
-        // they are never candidates, so they never become hits.
+        // Two dependents of the canonical pillar (blast radius 2): each
+        // depends on it through a Dependency edge into it (#36). They are
+        // never candidates, so they never become hits.
         for id in [7u64, 8] {
             g.insert_concept(concept(id, i1.id, &format!("dep {id}")), i1.id)
                 .unwrap();
-            g.upsert_edge(dep_edge(1, id)).unwrap();
+            g.upsert_edge(dep_edge(id, 1)).unwrap();
         }
 
         // A soft lock another agent holds on the reservation hit.

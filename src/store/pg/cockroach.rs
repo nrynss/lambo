@@ -63,13 +63,16 @@
 //!   answer — T3.6's three-way agreement test defines agreement against MemoryStore.
 //!   Full semantics (locked by the T3.6 matrix on BOTH fixtures × every node ×
 //!   min-age {0, 3600s} × MemoryStore equality, plus the errata/aged-edge probes):
-//!   (1) **errata exclusions (2026-08-11 / T1.4)** — only concept-sourced
-//!   `Dependency`/`Causal`/`Hierarchical` count; provenance `Derives`
-//!   (interaction → concept, mandatory §5.7) and `Temporal` must never un-orphan a
-//!   concept, or Stage-3 blast radius would collapse to ~0 on every legal graph;
-//!   (2) `c.id <> $node` self-exclusion, matching MemoryStore's skip;
-//!   (3) **aged edges only** — `e.created_at <= cutoff` in BOTH queries, and span
-//!   also gates `i.created_at <= cutoff` (spec §4.1 second errata); (4) **F1
+//!   (1) **dependents (#36 errata, read-time, no migration)** — both queries read
+//!   one set: the sources of `Dependency` edges into the node plus the targets of
+//!   its `Hierarchical` edges (children). Blast radius counts all of them, not
+//!   only exclusive ones; `Causal`, provenance `Derives`/`Temporal` and
+//!   association `CoOccurrence`/`Semantic` declare no dependence. The span drops
+//!   the node's own origin interaction;
+//!   (2) `d.id <> $node` self-exclusion, matching MemoryStore (a self-loop is
+//!   never a dependent);
+//!   (3) **aged edges only** — the edge's about-time `<= cutoff` in BOTH queries,
+//!   and span also gates the interaction's about-time `<= cutoff` (spec §4.1 second errata); (4) **F1
 //!   single-point rule** — `coverage` is `0.0` only when `distinct == 0`; a non-empty
 //!   span over a single-point session extent reports `1.0` (canonization Stage 2
 //!   parity in short sessions).

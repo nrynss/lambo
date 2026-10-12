@@ -98,7 +98,7 @@ fn assert_spec_13(outcome: &DemoOutcome) {
          radius above the floor"
     );
 
-    // The nine dependents are still nine, and none of them was promoted.
+    // The nine planted children are all present, and none was promoted.
     for dependent in USER_SCHEMA_DEPENDENTS {
         let status = outcome
             .statuses

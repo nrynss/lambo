@@ -14,6 +14,7 @@ use tracing_subscriber::fmt::MakeWriter;
 
 use crate::embed::{EmbedError, Embedder};
 
+pub mod dependents;
 #[cfg(feature = "embed-fixture")]
 pub mod dresscode;
 #[cfg(feature = "store-memory")]
