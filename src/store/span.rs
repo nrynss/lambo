@@ -193,8 +193,17 @@ mod tests {
     /// drives refuse Stage 2 without failing. Every in-tree `GraphStore` impl
     /// that defines `interaction_span` must therefore define
     /// `interaction_span_with_window` too. `Legacy` above is the one
-    /// deliberate exception. `src/store/pg/postgres/tests.rs` is skipped: it
-    /// holds fixture credentials this scan has no business reading.
+    /// deliberate exception.
+    ///
+    /// Only lines that start (after indentation) with `impl` and name
+    /// `GraphStore for ` are impl headers, so the literals in this test never
+    /// count toward `checked`.
+    ///
+    /// Blind spots: `src/store/pg/postgres/tests.rs` is skipped (it holds
+    /// fixture credentials this scan has no business reading), and only
+    /// `src/` is walked, so integration tests under `tests/` and programs
+    /// under `examples/` are not checked. A wrapper there that drives
+    /// canonization needs the same forward by hand.
     #[test]
     fn every_in_tree_store_forwards_the_window_aware_span() {
         fn rust_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
@@ -231,7 +240,16 @@ mod tests {
         let mut missing = Vec::new();
         for file in files.iter().filter(|f| **f != skipped) {
             let text = std::fs::read_to_string(file).unwrap();
-            for (at, _) in text.match_indices("GraphStore for ") {
+            let headers = text.split_inclusive('\n').scan(0, |offset, line| {
+                let start = *offset;
+                *offset += line.len();
+                let trimmed = line.trim_start();
+                let header = trimmed.starts_with("impl")
+                    && trimmed.contains("GraphStore for ")
+                    && !trimmed.starts_with("//");
+                Some(header.then(|| start + line.find("GraphStore for ").unwrap()))
+            });
+            for at in headers.flatten().collect::<Vec<_>>() {
                 let open = at + text[at..].find('{').unwrap();
                 let block = &text[open..block_end(&text, open)];
                 if !block.contains("fn interaction_span(") {
