@@ -1,9 +1,9 @@
 //! #33 PR 3: a layered serve's start checks (`layers`), one refusal per
 //! rule, and the stdio rule.
 
-use crate::mcp::serve::layers::{check_contracts, check_coverage, check_pinned_layers};
 use super::*;
 use crate::config::{ServeConfig, ServeCredential, ServeLayers};
+use crate::mcp::serve::layers::{check_contracts, check_coverage, check_pinned_layers};
 use crate::surface::session::{parse_addressed, SessionCapabilities, SessionGrant, SessionScope};
 use crate::types::EmbeddingContract;
 

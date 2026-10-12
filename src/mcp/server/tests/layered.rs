@@ -415,3 +415,72 @@ async fn a_recall_by_image_on_a_layered_session_says_the_layers_were_not_searche
     own.mem.close().await.expect("close");
     general.mem.close().await.expect("close");
 }
+
+/// Byte identity for an unlayered session: `lambo_recall`'s result equals,
+/// byte for byte, what the 0.5.0 body built from the same recall (that
+/// body is reproduced here as the reference). The second recall of the
+/// same query is served from the session's recall cache, so both read one
+/// answer.
+#[tokio::test]
+async fn an_unlayered_recall_is_byte_identical_to_the_0_5_0_body() {
+    let plain = server("bytes-proj").await;
+    derive(&plain, PROJECT_FACT).await;
+    derive(&plain, GENERAL_RULING).await;
+    for max_tokens in [500, 20] {
+        let query = crate::types::RecallQuery {
+            query: "worktree branches".into(),
+            top_k: 5,
+            max_tokens,
+            traversal_depth: 2,
+        };
+        let detailed = plain.memory().recall_detailed(query).await.expect("recall");
+        // The 0.5.0 body, verbatim in substance.
+        let first_truncated = detailed.truncated_hit().is_some();
+        let result: crate::types::RecallResult = detailed.into();
+        let warnings: Vec<String> = result.warnings.iter().map(|w| redact_urls(w)).collect();
+        let hits: Vec<_> = result
+            .hits
+            .iter()
+            .enumerate()
+            .map(|(i, h)| {
+                let mut hit = json!({
+                    "node_id": h.node_id.0.to_string(),
+                    "content": h.content,
+                    "concept_type": h.concept_type,
+                    "score": h.score,
+                    "is_canonical": h.is_canonical,
+                    "blast_radius": h.blast_radius,
+                });
+                if i == 0
+                    && first_truncated
+                    && let Some(map) = hit.as_object_mut()
+                {
+                    map.insert("truncated_in_context".into(), json!(true));
+                }
+                hit
+            })
+            .collect();
+        let expected = json!({"context": result.context, "hits": hits, "warnings": warnings});
+
+        let out = plain
+            .recall_impl(super::super::params::RecallParams {
+                agent_id: "agent-a".into(),
+                query: "worktree branches".into(),
+                top_k: Some(5),
+                max_tokens: Some(max_tokens),
+                traversal_depth: Some(2),
+                ..Default::default()
+            })
+            .await;
+        assert_eq!(
+            serde_json::to_string(structured(&out)).unwrap(),
+            serde_json::to_string(&expected).unwrap(),
+            "max_tokens {max_tokens}"
+        );
+        match &out.content[0] {
+            ContentBlock::Text(t) => assert_eq!(t.text, result.context),
+            other => panic!("expected text, got {other:?}"),
+        }
+    }
+    plain.mem.close().await.expect("close");
+}
