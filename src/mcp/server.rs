@@ -61,6 +61,7 @@ use crate::ledger::Ledger;
 use crate::memory::Memory;
 use crate::types::AgentId;
 
+pub(crate) mod layers;
 mod params;
 mod response;
 mod stats;
@@ -73,7 +74,7 @@ pub use params::{
     WireImage, WireImageConceptType, WireParentOf, WireQueryVector, WireResource, WireVector,
 };
 use response::attach_receipts;
-pub(crate) use trace::CallCredential;
+pub(crate) use trace::{CallCredential, CallGrant};
 
 // ---------------------------------------------------------------------------
 // Server
@@ -97,6 +98,13 @@ pub struct LamboServer {
     /// 6): every tool call holds an in-flight guard on it. `None` outside
     /// `lambo serve`.
     activity: Option<Arc<crate::mcp::serve::activity::SessionActivity>>,
+    /// The shared layers this session's `lambo_recall` also reads (#33 PR
+    /// 3), nearest tier first; empty for an unlayered session, whose tool
+    /// results and instructions are byte-identical to 0.5.0's (its
+    /// `tools/list` is not: recall and inspect list `scope`). Set by a
+    /// multi-session serve
+    /// from `[serve] layers`.
+    layers: layers::ServerLayers,
 }
 
 impl std::fmt::Debug for LamboServer {
@@ -105,6 +113,7 @@ impl std::fmt::Debug for LamboServer {
             .field("session", self.mem.session())
             .field("agent", self.mem.agent())
             .field("ledger", &self.ledger.as_ref().map(|l| l.path()))
+            .field("layers", &self.layers)
             .finish_non_exhaustive()
     }
 }
@@ -124,7 +133,19 @@ impl LamboServer {
             ledger: None,
             started_at: Instant::now(),
             activity: None,
+            layers: layers::ServerLayers::default(),
         }
+    }
+
+    /// The same handle, reading `layers` beside its own session on every
+    /// `lambo_recall` (#33 PR 3). Clones share them.
+    pub(crate) fn with_layers(self, layers: layers::ServerLayers) -> Self {
+        Self { layers, ..self }
+    }
+
+    /// The shared layers this session's recall reads, nearest tier first.
+    pub(crate) fn layers(&self) -> &layers::ServerLayers {
+        &self.layers
     }
 
     /// The same handle, recording the session's use on `activity` (#32 PR
@@ -398,16 +419,26 @@ impl ServerHandler for LamboServer {
         request: rmcp::model::CallToolRequestParams,
         context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<rmcp::model::CallToolResponse, rmcp::ErrorData> {
-        let caller = context
-            .extensions
-            .get::<axum::http::request::Parts>()
+        let parts = context.extensions.get::<axum::http::request::Parts>();
+        let caller = parts
             .and_then(|parts| parts.extensions.get::<CallCredential>())
             .map(|credential| Arc::clone(&credential.0));
+        // #33 PR 3: how the call arrived, for a layered call's per-layer
+        // check: an HTTP request with its grant (or, refused, without one),
+        // or no parts at all (stdio and the J2 endpoint).
+        let auth = parts.map(|parts| {
+            trace::CallAuth::Http(
+                parts
+                    .extensions
+                    .get::<CallGrant>()
+                    .map(|grant| Arc::clone(&grant.0)),
+            )
+        });
         // In flight to the end of the call, so neither the idle sweeper nor
         // an eviction takes the session down under it (#32 PR 6).
         let _in_flight = self.activity.as_ref().map(|activity| activity.enter());
         let call = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
-        trace::with_caller(caller, self.tool_router.call(call)).await
+        trace::with_caller(caller, auth, self.tool_router.call(call)).await
     }
 
     fn get_info(&self) -> ServerInfo {
@@ -446,6 +477,32 @@ impl ServerHandler for LamboServer {
                  fire at once have no order to keep).",
             self.mem.session().0
         ));
+        // #33 PR 3: a layered session names its layers. Appended, so an
+        // unlayered session's instructions are byte-identical to 0.5.0's
+        // (its `tools/list` is not: recall and inspect list `scope`).
+        if !self.layers.is_empty()
+            && let Some(text) = info.instructions.as_mut()
+        {
+            let names: Vec<&str> = self
+                .layers
+                .handles
+                .iter()
+                .map(|h| h.session.as_str())
+                .collect();
+            text.push_str(&format!(
+                " lambo_recall in session '{session}' also searches its shared layers: {layers}. \
+                 Every recall hit names the session it is from (structuredContent \
+                 hits[].session, and 'from <session>' in a layer hit's block), and its id \
+                 belongs to that session: pass the same scope (scope = \"{first}\") to \
+                 lambo_inspect to inspect a hit from that layer. Pass scope = \"{first}\" to \
+                 lambo_recall to read that layer alone, or scope = \"{session}\" for this \
+                 session alone. Every other tool, and every write, acts on session \
+                 '{session}' only.",
+                session = self.mem.session().0,
+                layers = names.join(", "),
+                first = names[0],
+            ));
+        }
         info
     }
 }

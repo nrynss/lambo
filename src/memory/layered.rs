@@ -19,7 +19,7 @@ use crate::recall::layered::{
     self, HitIdentity, LayeredRecall, MergeParams, TierList, TierRecall,
     DEFAULT_LAYER_MIN_SIMILARITY, DEFAULT_LAYER_WEIGHT, PRIMARY_WEIGHT,
 };
-use crate::types::{EmbeddingContract, LamboError, Node, RecallHit, RecallQuery};
+use crate::types::{EmbeddingContract, LamboError, Node, RecallHit, RecallQuery, SessionId};
 
 /// One layer of a layered recall: a session and how its hits rank against
 /// the caller's. A slice of these is the layer stack, nearest tier first;
@@ -62,6 +62,50 @@ impl<'a> LayerRef<'a> {
     pub fn with_min_similarity(mut self, min_similarity: f64) -> Self {
         self.min_similarity = min_similarity;
         self
+    }
+}
+
+/// One tier of a stack handed to `Memory::recall_layered_slots`: a layer
+/// to recall from, or one that is configured but cannot be reached now.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum LayerSlot<'a> {
+    /// Recall from this layer.
+    Live(LayerRef<'a>),
+    /// Configured, but not attached in this process right now (held by
+    /// another writer, detaching, failed): the answer says it is
+    /// unavailable.
+    Unavailable {
+        session: &'a SessionId,
+        weight: f64,
+        min_similarity: f64,
+    },
+}
+
+/// What `check_layers` reads of a slot.
+struct SlotKnobs<'a> {
+    session: &'a SessionId,
+    weight: f64,
+    min_similarity: f64,
+}
+
+impl LayerSlot<'_> {
+    fn knobs(&self) -> SlotKnobs<'_> {
+        match self {
+            LayerSlot::Live(l) => SlotKnobs {
+                session: &l.memory.session,
+                weight: l.weight,
+                min_similarity: l.min_similarity,
+            },
+            LayerSlot::Unavailable {
+                session,
+                weight,
+                min_similarity,
+            } => SlotKnobs {
+                session,
+                weight: *weight,
+                min_similarity: *min_similarity,
+            },
+        }
     }
 }
 
@@ -117,6 +161,20 @@ impl Memory {
         layers: &[LayerRef<'_>],
         query: RecallQuery,
     ) -> Result<LayeredRecall, LamboError> {
+        let slots: Vec<LayerSlot<'_>> = layers.iter().copied().map(LayerSlot::Live).collect();
+        self.recall_layered_slots(&slots, query).await
+    }
+
+    /// [`Memory::recall_layered`] over a stack in which a layer may be
+    /// known but not reachable (#33 PR 3): a serve's configured layer that
+    /// is held by another writer, detaching or failed has no `Memory` to
+    /// hand over, and is answered exactly as a closed layer is (one
+    /// `layer_unavailable` annotation and warning, its hits missing).
+    pub(crate) async fn recall_layered_slots(
+        &self,
+        layers: &[LayerSlot<'_>],
+        query: RecallQuery,
+    ) -> Result<LayeredRecall, LamboError> {
         self.check_layers(layers)?;
         // An unlayered call, or one this session's pipeline refuses before
         // running (a `top_k` out of range answers with a warning only), is
@@ -129,6 +187,13 @@ impl Memory {
                 .map(|d| LayeredRecall::single(&self.session, d));
         }
         self.ensure_open()?;
+        let live: Vec<&LayerRef<'_>> = layers
+            .iter()
+            .filter_map(|slot| match slot {
+                LayerSlot::Live(layer) => Some(layer),
+                LayerSlot::Unavailable { .. } => None,
+            })
+            .collect();
 
         // Embed once. This session's vector source decides, unless it
         // cannot search and a compatible layer's can: then the embed still
@@ -141,8 +206,7 @@ impl Memory {
         let source = if own_searches {
             own
         } else {
-            layers
-                .iter()
+            live.iter()
                 .filter(|l| l.memory.embedding == self.embedding)
                 .map(|l| l.memory.vector_candidates())
                 .find(|v| v.available())
@@ -163,7 +227,7 @@ impl Memory {
             let identities = self.hit_identities(&recall.hits);
             TierRecall { recall, identities }
         };
-        let layer_futures: Vec<LayerFuture<'_>> = layers
+        let layer_futures: Vec<LayerFuture<'_>> = live
             .iter()
             .map(|l| {
                 Box::pin(l.memory.recall_as_layer(
@@ -183,22 +247,44 @@ impl Memory {
             floor: None,
             recall: Some(primary),
         });
-        for (layer, result) in layers.iter().zip(layer_results) {
-            let recall = match result.and_then(|r| r) {
+        let mut results = layer_results.into_iter();
+        for slot in layers {
+            let (session, weight, floor, result) = match slot {
+                LayerSlot::Live(layer) => (
+                    &layer.memory.session,
+                    layer.weight,
+                    layer.min_similarity,
+                    results
+                        .next()
+                        .unwrap_or_else(|| Err("no result".to_string()))
+                        .and_then(|r| r),
+                ),
+                LayerSlot::Unavailable {
+                    session,
+                    weight,
+                    min_similarity,
+                } => (
+                    *session,
+                    *weight,
+                    *min_similarity,
+                    Err("not attached in this process".to_string()),
+                ),
+            };
+            let recall = match result {
                 Ok(t) => Some(t),
                 Err(reason) => {
                     tracing::warn!(
                         target: "lambo::recall",
-                        layer = %layer.memory.session,
+                        layer = %session,
                         "layered recall: layer unavailable: {reason}"
                     );
                     None
                 }
             };
             lists.push(TierList {
-                session: layer.memory.session.clone(),
-                weight: layer.weight,
-                floor: Some(layer.min_similarity),
+                session: session.clone(),
+                weight,
+                floor: Some(floor),
                 recall,
             });
         }
@@ -224,17 +310,18 @@ impl Memory {
                 .collect::<Vec<_>>()
         };
         self.note_accesses(own_hits(self));
-        for layer in layers {
+        for layer in &live {
             layer.memory.note_accesses(own_hits(layer.memory));
         }
         Ok(merged)
     }
 
     /// The `Config` refusals of [`Memory::recall_layered`].
-    fn check_layers(&self, layers: &[LayerRef<'_>]) -> Result<(), LamboError> {
+    fn check_layers(&self, layers: &[LayerSlot<'_>]) -> Result<(), LamboError> {
         let mut seen = vec![&self.session];
-        for layer in layers {
-            let session = &layer.memory.session;
+        for slot in layers {
+            let layer = slot.knobs();
+            let session = layer.session;
             if session == &self.session {
                 return Err(LamboError::Config(format!(
                     "layered recall: session {session} cannot be its own layer"
@@ -371,9 +458,15 @@ async fn join_all<T>(
 /// L8: `recall_layered`'s future is `Send`, so a serve handler can spawn
 /// it. Checked at compile time; never called.
 #[allow(dead_code)]
-fn recall_layered_is_send(memory: &Memory, layers: &[LayerRef<'_>], query: RecallQuery) {
+fn recall_layered_is_send(
+    memory: &Memory,
+    layers: &[LayerRef<'_>],
+    slots: &[LayerSlot<'_>],
+    query: RecallQuery,
+) {
     fn send<T: Send>(_: T) {}
-    send(memory.recall_layered(layers, query));
+    send(memory.recall_layered(layers, query.clone()));
+    send(memory.recall_layered_slots(slots, query));
 }
 
 #[cfg(test)]

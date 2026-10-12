@@ -117,6 +117,20 @@
   `lambo::recall::dispatch::dependents` return the same relation, so their
   values change for the same graph. `recall::format::inbound_sources` is
   unchanged and is now documented as #29's GC input only.
+- **`ServeConfig` and `ServeOptions` gain fields, so struct literals
+  break** (#33 PR 3). `ServeConfig` gains `layers: Vec<String>`,
+  `session_layers: BTreeMap<String, Vec<String>>` and
+  `layer: Vec<LayerConfig>`; `ServeOptions` gains
+  `layers: ServeLayers`. A literal that ends in `..Default::default()`
+  (`ServeConfig`) or `..ServeOptions::new(..)` keeps compiling.
+  The new `LayerConfig` is `#[non_exhaustive]` (team tiers may add
+  knobs): build it with `LayerConfig::default()` and set its fields.
+- **`RecallParams` and `InspectParams` gain `scope: Option<String>`** (#33
+  PR 3), breaking a struct literal that names every field; `..Default::default()` keeps
+  compiling. `DeriveParams`, `RecordActionParams`, `ReserveParams`,
+  `InspectParams`, `SaintsParams` and `DeriveImageParams` now derive
+  `Default` too, so optional fields added later (such as the write tools'
+  `scope`) do not break literals written that way.
 
 ### Added
 
@@ -169,6 +183,39 @@
   replay that stop it (#125).
 - `graph::hybrid::VECTOR_LOOKUP_TIMEOUT` (15 s): one vector-candidate
   lookup's own budget inside a hybrid call's 30 s (#125).
+
+- **Layered `lambo_recall` in `lambo serve` (#33 PR 3).** `[serve]
+  layers = ["general"]` makes every pinned session that is not itself a
+  layer read `general` too: one `lambo_recall` merges both under one
+  budget, a layer hit's block says `from general`, and every hit of a
+  layered session carries `session` in `structuredContent.hits[]`.
+  `[serve.session_layers]` overrides the stack per session (`[]` opts
+  out) and `[[serve.layer]]` sets a layer's `weight` and
+  `min_similarity`. Every shape is a list; one layer per session is
+  supported in this release. `lambo_recall` and `lambo_inspect` take
+  `scope` to read one session alone: the session itself or one of its
+  layers (a layer hit's id is inspected with its layer's `scope`; a
+  `scope = <layer>` recall says so in a warning). A direct layer read
+  draws on the layer's `per_session_rps`. A layer that is
+  not serving (its lease lost, detaching) leaves each layered recall to
+  the session's own hits with a `layer_unavailable` warning, and losing
+  its lease detaches the layer alone; a `scope` naming a layer that failed
+  for good or was erased is refused as permanent, and an erased layer is
+  warned of at start. A serve refuses to start when a
+  layer or a layered session is not pinned, when a credential reaches a
+  layered session but not its layer, or when their embedding contracts
+  differ. With `--ledger`, a layered session's recall line names each
+  hit's session and counts them in `session_hits`, and any recall line
+  carries `scope` when the call sent one. The server instructions of a
+  layered session name its layers. A stdio serve holding its session itself stays unlayered and
+  says so once; one that forwards to an HTTP holder gets the holder's
+  layering. Unlayered sessions' tool results and server instructions are
+  unchanged byte for byte (`tools/list` is not: `lambo_recall` and
+  `lambo_inspect` list the new optional `scope`);
+  `lambo recall` and `lambo serve-web` read one session, as before. New
+  library items: `config::{LayerConfig, LayerSpec, ServeLayers}`,
+  `ServeConfig::{resolve_layers, layer_stack_of, stdio_layers}`,
+  `mcp::plan_layers`.
 
 ### Changed
 

@@ -801,6 +801,9 @@ pub(super) async fn guard_request(
                 credential.name(),
             )));
     }
+    // #33 PR 3: the grant itself, for a layered recall's per-layer check.
+    req.extensions_mut()
+        .insert(crate::mcp::server::CallGrant(Arc::clone(&grant)));
     req.extensions_mut().insert(Authenticated(grant));
 
     if let Some(rate) = &guard.rate

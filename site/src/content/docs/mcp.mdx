@@ -170,6 +170,7 @@ Recall still works without a vector leg. You get matches on the words you use ra
 | `traversal_depth` | integer | No | `0` to `5`. Defaults to the configured value, which is `2`. |
 | `image` | `{mime, data}` | No; at most one of `image`, `query_vector` | Recall what is close to this image. The same shape and limits as `lambo_derive_image`'s `image`. Needs an embedder that embeds images. |
 | `query_vector` | `{values, contract}` | No; at most one of `image`, `query_vector` | Recall what is close to a vector you computed. The same shape and checks as `lambo_derive_image`'s `vector`. Accepted only when the operator enabled client vectors. |
+| `scope` | string | No | Read one session alone: this session, or one of its layers (see below). Omitted, a layered session reads itself and its layers together. Any other value is refused, listing this session's own scopes. |
 
 ```json
 {"name": "lambo_recall", "arguments": {"agent_id": "agent-a", "query": "stdio wire check"}}
@@ -196,6 +197,22 @@ user schema owns the account table, the session table and… [Entity, canonical]
 The count estimates the text of this block that was left out, and the id is the hit's short id, so `lambo_inspect` with that id as `focus` returns the whole concept. If the warning lines do not fit, they are left out of the block (they are still in `warnings`); if the label line does not fit either, only the text and the marker are shown. Nothing follows a truncated block, and `hits` still carries every hit with its full content. In `structuredContent`, that hit carries `"truncated_in_context": true`; no other hit has the key. The marker counts toward `max_tokens`, so the context stays within the budget. A budget too small for the marker itself, about 22 tokens, still gives an empty context.
 
 **Dependency questions.** A query such as "what depends on X", "dependents of X", "blast radius of X", "is it safe to delete X" or "what uses X" is answered by graph traversal when X names a concept that other concepts depend on. The hits are X's direct dependents, and the context says the answer came from graph traversal. X's whole text must appear as whole words, ignoring case after NFC normalization. Unicode letters, digits, combining marks and underscores are word characters; a hyphen between word characters joins an identifier. Thus `db` does not name `dbadmin` or `user_db`, and `SG-Base` does not name `SG-Base-VPC`. An edge that is punctuation needs no word boundary on that side (`.env` matches in `config/.env`); `src/main.rs` has word edges and needs boundaries on both sides. A name appearing only inside a longer named concept is skipped (`db` inside `user db schema`), but a clause overlapping the question marker cannot hide its subject. Among separate names, the name starting nearest after a marker wins, then Entity/Resource type and length break ties: "is it safe to delete SG-Base-VPC in VPC-Enterprise-Prod" names the security group. Marker phrases and function-word-only concepts do not anchor; an uppercase acronym such as `IT` is an exception only when written uppercase in the query. Ordinary recall may also omit function words from keyword matching. Queries over 16 KiB or a candidate with over 256 bounded occurrences fall through to ordinary recall. A layer's traversal answer passes its relevance floor only if its anchor equals the caller's resolved anchor, ignoring case and NFC; when the caller resolves none, a layer may answer its own named anchor. A question that names no concept but says "security group" picks the security group with the most dependents. Any other question is answered like an ordinary query.
+
+**Layered sessions.** When the operator layers a session with a shared one (`[serve] layers`, see [Layers](/lambo/config/#layers)), `lambo_recall` reads both in one call and merges them under one `max_tokens` budget. A layer hit's block names its session, and a memory found in both keeps the session's own copy and names the other:
+
+```text
+release notes are drafted before the tag [Logic] (score 0.71, id 57fc442c, also 9f8e7d6c in general)
+
+worktree branches are always rebased onto origin main first [Logic] (score 0.42, id b86d4709, from general)
+```
+
+* Every hit of a layered session carries `session` in `structuredContent.hits[]`, the session it is from; its `node_id` and short id belong to that session. Pass that session as `scope` to [`lambo_inspect`](#lambo_inspect) to inspect a layer hit. An unlayered session's hits never carry `session`, and its answer is unchanged by layering.
+* `score` is each hit's own session's score. Scores are not comparable across sessions, so `hits` is in merged order, which is not monotone in `score`.
+* `scope` reads one session alone, as its own plain recall: `"general"` reads the layer, the session's own name reads only the session. A recall with `scope = "general"` adds one warning, `recall: these hits are from layer general, and their ids belong to it; pass scope = "general" to lambo_inspect to inspect one`. A direct read of a layer draws on the layer's own `per_session_rps`; a merged recall draws only on the addressed session's.
+* A layer that is not serving right now leaves a merged recall to the session's own hits with one warning, `recall: layer general is unavailable; results are from lambo only`. A `scope` naming it is refused: retryably while another writer holds its lease, it is being detached or it is over its rate; as permanent, telling you to ask the operator, when its attach failed for good or it was erased.
+* A layer's warnings start with its name, such as `[general] `. A truncated layer block's marker reads `lambo_inspect <id> (scope general)`.
+* A recall by `image` or `query_vector` reads one session: on a layered session without `scope` it reads the session itself and says its layers were not searched.
+* With `--ledger`, a layered session's recall line names each hit's `session` and counts hits per session in `session_hits`; a line carries `scope` when the call sent one.
 
 **Recall by image or by vector.** With `image` or `query_vector`, the vector leg searches by that image's or vector's embedding instead of the text's, so "this outfit is close to the one you dismissed for Onam" is a recall by the photo of this outfit. The server embeds an image with no prompt, the way it embeds an image it stores, and normalizes a client vector to unit length after checking that its contract is exactly the session's `embedding_contract`, as `lambo_derive_image` does. Text sent beside it still matches words through the keyword leg. With no text the keyword leg finds nothing and recent interactions are left out: they say nothing about the image, and their fixed score would rank whatever was stored last above a real match whose similarity is lower. With text, recent interactions are included as for any recall. A structural question such as "what depends on X" is answered by the blended recall here, not by graph traversal, since traversal would ignore the image.
 
@@ -355,6 +372,7 @@ Look at the neighbourhood around a concept, including its type, whether it is ca
 | `agent_id` | string | Yes | |
 | `focus` | string | Yes | Concept text or a node UUID. Up to 16 KB. |
 | `depth` | integer | No | `0` to `5`. Defaults to `2`. |
+| `scope` | string | No | Inspect in one of this session's layers instead of the session itself, as a recall hit from that layer needs (its id belongs to the layer). Resolved and refused as `lambo_recall`'s `scope` is. |
 
 Lambo resolves `focus` exactly first, then as the short id a recall block renders, then as a single substring match, and says in the result text when it resolved a substring. Past the 2,000-concept scan cap the substring leg runs on a bounded recency-plus-blast-radius subset instead of refusing, and says it did. If the focus matches several concepts it refuses rather than guessing, and lists up to ten candidates with their node ids; a focus matching nothing gets the same treatment with the closest concepts as suggestions. The rendered neighbourhood stops after 200 neighbours and says so.
 
@@ -487,6 +505,17 @@ Three independent MCP clients have now produced this table from the managed serv
 Full transcripts for every run live in [`evidence/`](https://github.com/nrynss/lambo/tree/main/evidence) in the repository: `mcp-client-stdio/` for the Claude Code handshake and the seven-tool stdio capture, `mcp-client-interop/` for the Cursor runs and the managed-server capture above, and `managed-mcp-canonization-events.md` for the OMP capture.
 
 {/* lambo-site-only:end */}
+A layered session (see [Layers](/lambo/config/#layers)) appends one more paragraph, naming its layers and how `scope` reads them, for example for `lambo` layered with `general`:
+
+```text
+lambo_recall in session 'lambo' also searches its shared layers: general. Every recall hit
+names the session it is from (structuredContent hits[].session, and 'from <session>' in a
+layer hit's block), and its id belongs to that session: pass the same scope (scope =
+"general") to lambo_inspect to inspect a hit from that layer. Pass scope = "general" to
+lambo_recall to read that layer alone, or scope = "lambo" for this session alone. Every
+other tool, and every write, acts on session 'lambo' only.
+```
+
 ## Limits
 
 Lambo enforces these when the call runs, and the published tool schemas carry the same bounds (a `maxLength` or an `enum` on every string, `minimum` and `maximum` on every integer), so a client that validates against the schema can catch an out-of-range value before sending it.
