@@ -197,6 +197,8 @@ UPDATE session_leases SET holder = 'lambo:released', expires_at = acquired_at, e
 WHERE session_id = 'demo' AND holder <> 'lambo:erased';
 ```
 
+To expire only the holder the refusal named, so that a writer that took the lease after you read it is not evicted, add `AND holder = '<the holder string exactly as the refusal shows it>'` to the `WHERE` clause; the statement then changes no row if the holder has changed.
+
 The next writer then takes the session at once and replays it from the store, so the wedged holder's unflushed writes are lost, as on a crash. Use this UPDATE and never delete the row: the row carries the session's fencing token, which only ever goes up, and the next writer's token must be above every token issued before. Deleting the row starts the count again, so a writer that was cut off earlier could write over the new one. A clean stop releases the lease the same way.
 
 ### lambo derive

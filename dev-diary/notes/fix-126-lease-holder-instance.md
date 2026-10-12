@@ -41,6 +41,12 @@ reused after a reboot. So the #118 "looks gone" hint had to stay hedged.
 - Consequence: another process can no longer release a holder's row by
   rebuilding a `LeaseHolder` from `agent@host#pid`, since it cannot
   reproduce the holder's boot and namespace fields. Nothing in the product
-  did that; `tests/serve_proxy_multi_client.rs`'s `release_row` did, and now
-  runs the documented `OPERATOR_OVERRIDE` statement instead (same resulting
-  row). Noted in the CHANGELOG for library callers.
+  did that; `tests/serve_proxy_multi_client.rs`'s `release_row` did. It now
+  runs the override scoped with `AND holder = ?` and asserts one row
+  changed, so the holder check is inside the statement (review M2: the
+  unscoped override, or a read then an override, can evict a writer that
+  took the lease in between). The CHANGELOG lists both the format change
+  and this under Breaking (library API) and recommends the holder-scoped
+  statement. A `release_lease_matching(session, token)` store method was
+  not added: it would be a trait method in every adapter for a case the
+  product never hits, and the scoped SQL already serves operators.

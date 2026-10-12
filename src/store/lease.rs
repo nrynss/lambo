@@ -165,6 +165,13 @@ const _: () = assert!(
 /// Postgres family. The `holder <> 'lambo:erased'` guard keeps it from
 /// lifting an erasure tombstone (see `store::erase`).
 ///
+/// To expire one specific holder, append `AND holder = '<exact holder string
+/// read from the row>'` (#126 review M2): the match then happens in the
+/// statement itself, so a writer that took the lease after the row was read
+/// is not evicted. Rebuilding a [`LeaseHolder`] to call `release_lease` does
+/// not work for another process, whose token carries its own boot and PID
+/// namespace.
+///
 /// This is intentionally a deliberate act: it says "I have confirmed the
 /// current holder is not making progress and I am forcing a takeover." The new
 /// writer still replays from durable state, so the wedged holder's un-flushed
