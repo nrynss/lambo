@@ -557,6 +557,18 @@ mod tests {
                 .interaction_span(session, node, min_age, now)
                 .await
         }
+        async fn interaction_span_with_window(
+            &self,
+            session: &SessionId,
+            node: NodeId,
+            min_age: Duration,
+            now: DateTime<Utc>,
+            window: Duration,
+        ) -> Result<crate::types::InteractionSpan, crate::types::StoreError> {
+            self.inner
+                .interaction_span_with_window(session, node, min_age, now, window)
+                .await
+        }
         async fn record_canonization(
             &self,
             event: &crate::types::CanonizationEvent,
@@ -634,6 +646,30 @@ mod tests {
             out.contains("record_canonization is down"),
             "with the store error attached: {out}"
         );
+        handle.abort();
+    }
+
+    /// #36 PR 2 review L4: a store that forwards the window-aware span (this
+    /// suite's wrapper does) runs cycles that check a Candidate against
+    /// Stage 2 with no `CanonizationStage2Unsupported` warning and no failed
+    /// cycle. A wrapper that stopped forwarding would degrade quietly; this
+    /// is where the quiet degradation would be heard.
+    #[tokio::test(start_paused = true)]
+    async fn cycles_through_a_forwarding_wrapper_log_no_capability_warning() {
+        let (logs, _guard) = capture_logs(tracing::Level::WARN);
+        let (graph, store, scores) = session();
+        let store = Arc::new(FaultyStore::wrapping(store));
+        let (tx, _rx) = event_channel();
+        let task = task(graph.clone(), store, scores, tx);
+        let handle = task.spawn();
+        // Cycle 1 admits id 20 to Candidate; cycle 2 checks it at Stage 2.
+        tokio::time::sleep(Duration::from_secs(61)).await;
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        assert_eq!(task.cycles(), 2);
+        assert_eq!(task.failures(), 0);
+        let out = logs.contents();
+        assert!(!out.contains("CanonizationStage2Unsupported"), "{out}");
+        assert!(!out.contains("CanonizationCycleFailed"), "{out}");
         handle.abort();
     }
 

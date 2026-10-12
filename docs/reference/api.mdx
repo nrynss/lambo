@@ -65,6 +65,28 @@ The accessors `session`, `agent`, `config`, `embedding_contract`, `graph`, `inde
 - A layer that is closed, has a different embedding contract, or whose recall panics is left out, with the warning `recall: layer <name> is unavailable; results are from <sessions>`. It never fails the call. A layer whose vector search fails is not left out: it answers from its keyword results, with a warning. Warnings from a layer start with `[<name>] `.
 - Graph edges are never followed from one session into another.
 
+## Contradiction edges
+
+`EdgeType::Contradicts` is a directed concept-to-concept relation:
+`newer assertion -> older assertion`. Its serialized and stored name is
+`Contradicts`, following the other edge types. Graph snapshots and store
+mutation batches can carry it; existing database schemas need no migration.
+Older binaries cannot decode a store or snapshot containing the new variant.
+Library callers with exhaustive `EdgeType` matches must add an arm.
+
+A contradiction is informational: it does not change either concept's
+canonization status, count as dependence or promotion evidence, increase blast
+radius, raise either concept's score (it adds nothing to density or the edge
+bonus), or protect a Resource from the GC score cut. Its weight does not decay.
+
+GC's connectivity rules are unchanged and count it like any other edge: a
+concept with a contradiction is not an orphan, and a contradiction can keep a
+concept reachable from the interaction chain. Because the edge never decays,
+it keeps that connection until either endpoint is collected for another
+reason.
+This release groundwork adds the typed edge only; derive/action tool fields,
+recall contradiction warnings and supersession are separate follow-ups.
+
 ## Settings
 
 `Config` holds the product settings: recall defaults, flush timing, canonization thresholds, and scoring weights. Pass it to the builder with `.config(...)`.
@@ -96,6 +118,7 @@ let mem = Memory::builder()
 | `max_canonical_nodes` | `1000` | Cap on canonical concepts. |
 | `canonization_min_peer_count` | `20` | Peers a concept needs before it can be promoted. |
 | `canonization_edge_min_age` | 60 seconds | How long an edge must exist before it counts as evidence. |
+| `canonization_coverage_window` | 14 days | Stage 2 denominator cap: eligible evidence spread / min(session extent, cap). At least one day, in whole milliseconds, at most `i64::MAX` milliseconds. A library setting only; older evidence does not expire. |
 | `canonization_eval_interval` | 60 seconds | How often promotion is evaluated. Also settable from the file, as `[daemon] canonization_eval_interval_secs`. |
 | `canonization_eval_batch_size` | `50` | Concepts evaluated per pass. |
 | `canonization_repromotion_cooldown` | 300 seconds | Wait before a demoted concept can be promoted again. |
@@ -161,3 +184,54 @@ There is one known limitation. The fence trips when the holder's heartbeat notic
 </Note>
 
 See [MCP tools](/mcp) and [Configuration](/config).
+
+## Stage 2 coverage cap
+
+Stage 2 requires at least three eligible dependent origin interactions and
+coverage of at least `0.3`. It divides their time spread by **min(session
+extent, 14 days)** by default. The session extent is its about-time
+extent: from the earliest to the latest of all its interactions, each at its
+event time, else its creation time. When that extent exceeds fourteen days,
+a spread of exactly **4.2 days** passes the coverage bar. A session whose
+extent is fourteen days or less, the REST API fixture and the demo
+included, keeps its existing coverage. Empty support has coverage zero;
+nonempty support in a single-point session has coverage one. Coverage is
+clamped to one.
+
+The extent counts every interaction in the session, including ones younger
+than the age floor and ones whose about-time is after the evaluation clock
+(a backdated or future `event_time`). Only the evidence side is age-gated.
+This predates the cap; the cap bounds its effect, since a far-future
+interaction can stretch the denominator to at most fourteen days.
+
+This is a denominator cap, **not a rolling expiry window**: evidence older
+than fourteen days still counts. Age checks use the caller's injected clock
+and each edge and interaction's event time, falling back to creation time.
+The node's own origin interaction never supports itself.
+
+Library callers can set `Config::canonization_coverage_window`, for example
+`Duration::from_secs(28 * 86_400)`, then call `Config::validate`. The duration
+must be at least one day (`MIN_COVERAGE_WINDOW`), in whole milliseconds,
+and fit within `i64::MAX` milliseconds. A shorter cap would let a burst of
+citations minutes apart cover the whole denominator of any longer session,
+which is the burst Stage 2 exists to refuse. The window-aware store
+boundary validates it again.
+`EvalParams::from_config` and `gate_progress_with_config` use the same cap.
+The existing `gate_progress` wrapper selects the default fourteen days.
+
+`GraphStore::interaction_span` remains the raw, uncapped measurement.
+`interaction_span_with_window` measures the same eligible evidence against
+the selected cap. The built-in stores and `TieredStore` implement it.
+Third-party adapters still compile without an override, but Stage 2 returns
+`StoreError::Capability` until they implement the new accessor; it never
+silently substitutes raw coverage. Until then, under Swarm, every concept
+the cycle checks against Stage 2 gets no evidence: no Candidate becomes
+Venerable, and no Venerable passes the re-check that precedes its Stage 3
+probe, so none becomes Canonical. The rest of the cycle still runs
+(Stage 1 admission, the Stage 3 window and the Canonical budget's
+demotions), and each such cycle logs one `CanonizationStage2Unsupported`
+warning naming the missing capability. Solo never asks for the span, so
+it is unaffected. The portal's inspect panel omits the four Swarm gates
+for such a store. Forward the call if your adapter wraps a built-in store. `stage2_passes` selects fourteen days,
+`stage2_passes_with_window` accepts a custom cap, and
+`stage2_evidence_passes` shares the origin/coverage threshold comparison.

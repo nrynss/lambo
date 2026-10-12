@@ -177,6 +177,18 @@ impl GraphStore for Shared {
     ) -> Result<InteractionSpan, StoreError> {
         self.0.interaction_span(s, n, a, now).await
     }
+    async fn interaction_span_with_window(
+        &self,
+        s: &SessionId,
+        n: NodeId,
+        a: Duration,
+        now: chrono::DateTime<Utc>,
+        window: Duration,
+    ) -> Result<InteractionSpan, StoreError> {
+        self.0
+            .interaction_span_with_window(s, n, a, now, window)
+            .await
+    }
     async fn record_canonization(
         &self,
         e: &CanonizationEvent,
@@ -1792,6 +1804,18 @@ impl GraphStore for CountingLoads {
     ) -> Result<InteractionSpan, StoreError> {
         self.0.interaction_span(s, n, a, now).await
     }
+    async fn interaction_span_with_window(
+        &self,
+        s: &SessionId,
+        n: NodeId,
+        a: Duration,
+        now: chrono::DateTime<Utc>,
+        window: Duration,
+    ) -> Result<InteractionSpan, StoreError> {
+        self.0
+            .interaction_span_with_window(s, n, a, now, window)
+            .await
+    }
     async fn record_canonization(
         &self,
         e: &CanonizationEvent,
@@ -3062,4 +3086,24 @@ async fn a_recall_by_vector_fails_when_the_tier_and_its_fallback_both_fail() {
         assert!(!shown.contains("primary.internal"), "{shown}");
     }
     mem.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn tier_forwards_custom_coverage_window_to_primary() {
+    let store = TieredStore::new(
+        Box::new(MemoryStore::new()),
+        Box::new(Arc::new(FakeIndex::new())),
+        Some(4),
+    );
+    crate::test_util::dependents::check_window_case(&store).await;
+}
+
+#[tokio::test]
+async fn tier_forwards_capped_extents_to_primary() {
+    let store = TieredStore::new(
+        Box::new(MemoryStore::new()),
+        Box::new(Arc::new(FakeIndex::new())),
+        Some(4),
+    );
+    crate::test_util::dependents::check_extents_case(&store).await;
 }

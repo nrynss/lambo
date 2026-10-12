@@ -379,6 +379,16 @@ mod tests {
         ) -> Result<InteractionSpan, StoreError> {
             unreachable!("selection is I/O-free")
         }
+        async fn interaction_span_with_window(
+            &self,
+            _: &SessionId,
+            _: NodeId,
+            _: std::time::Duration,
+            _: chrono::DateTime<chrono::Utc>,
+            _window: std::time::Duration,
+        ) -> Result<InteractionSpan, StoreError> {
+            unreachable!("selection is I/O-free")
+        }
         async fn record_canonization(
             &self,
             _: &CanonizationEvent,
@@ -471,6 +481,18 @@ mod tests {
                 now: chrono::DateTime<chrono::Utc>,
             ) -> Result<InteractionSpan, StoreError> {
                 self.0.interaction_span(s, n, a, now).await
+            }
+            async fn interaction_span_with_window(
+                &self,
+                s: &SessionId,
+                n: NodeId,
+                a: std::time::Duration,
+                now: chrono::DateTime<chrono::Utc>,
+                window: std::time::Duration,
+            ) -> Result<InteractionSpan, StoreError> {
+                self.0
+                    .interaction_span_with_window(s, n, a, now, window)
+                    .await
             }
             async fn record_canonization(
                 &self,

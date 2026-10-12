@@ -23,7 +23,7 @@ The four weighted dimensions are session-relative, so the same graph scores iden
 | $R$ | recency | $1 - \dfrac{t_{\text{end}} - t_{\text{last}}}{\max(t_{\text{end}} - t_{\text{start}},\ 10\text{ min})}$, clamped to $[0,1]$, in integer milliseconds. A session of at least 10 minutes uses its own span, and those scores match the historical ratio. A younger session scores every concept near 1, so a few milliseconds between derives cannot sweep the dimension. |
 | $F$ | frequency | $\min\!\left(1,\ \dfrac{\text{access count}}{10}\right)$ |
 | $A$ | session activity | share of the session's interactions that derived this concept |
-| $D$ | density | incident edge count normalized by the most connected concept in the session |
+| $D$ | density | incident edge count, excluding `Contradicts`, normalized by the most connected concept in the session |
 
 The two additive terms are where the shape of the graph leaks into the number.
 
@@ -35,7 +35,7 @@ $b(\tau)$ pays per incident edge by type, and it pays structure rather than prov
 | `Hierarchical` | 0.015 |
 | `Semantic` | 0.01 |
 | `CoOccurrence` | 0.005 |
-| `Derives`, `Temporal` | 0.0 |
+| `Derives`, `Temporal`, `Contradicts` | 0.0 |
 
 An agent can write a thousand observations and move the score by zero, because the `Derives` edges those writes create are worth nothing. The sum is capped at 0.25.
 
@@ -64,10 +64,12 @@ An interpolating percentile, the kind a spreadsheet gives you, returns a value n
 [`src/canon/stage2.rs`](https://github.com/nrynss/lambo/blob/main/src/canon/stage2.rs). Time and independence, both at once:
 
 $$
-\text{distinct}(c) \ge 3 \quad \wedge \quad \frac{\text{span}(c)}{\text{extent}(\text{session})} \ge 0.3
+\text{distinct}(c) \ge 3 \quad \wedge \quad \frac{\text{span}(c)}{\min(\text{extent}(\text{session}),\ 14\text{ days})} \ge 0.3
 $$
 
-`distinct` counts the distinct origin interactions of the concept's dependents (defined under Stage 3), not counting the interaction the concept itself came from. `span` is the temporal reach of those interactions against the session's own extent. Edges and interactions younger than `canonization_edge_min_age`, 60 seconds by default, are excluded from both counts, so a burst of fresh writes cannot inflate a span.
+`distinct` counts the distinct origin interactions of the concept's dependents (defined under Stage 3), not counting the interaction the concept itself came from. `span` is the temporal reach of those interactions. Edges and interactions younger than `canonization_edge_min_age`, 60 seconds by default, are excluded from both counts, so a burst of fresh writes cannot inflate a span.
+
+The denominator is the session's about-time extent, from its earliest to its latest interaction by event time (else creation time), capped at 14 days. A session whose extent is 14 days or less, the demo and the REST API fixture included, is measured against its whole extent, exactly as before. A session with a longer extent needs 4.2 days of spread rather than 30% of everything it has ever recorded, so a ruling cited across a week still passes in a session that is two months old. The extent counts every interaction, including young ones and ones dated after the evaluation clock; the cap bounds how far those can stretch it. The cap is **not an expiry**: evidence older than 14 days still counts toward the span. A session whose interactions all share one instant counts any support as full coverage, and coverage never exceeds 1. Library callers can change the cap with `Config::canonization_coverage_window`; see [Library API](/lambo/api/#stage-2-coverage-cap).
 
 One agent writing the same idea five times in one minute produces one distinct source and near-zero coverage. It does not pass.
 

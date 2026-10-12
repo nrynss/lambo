@@ -877,8 +877,8 @@ fn normalize_weight(w: f64) -> Result<f64, LamboError> {
 
 /// Spec §5 edge-type endpoint matrix (adve-review GRAPH-2): `Temporal` connects
 /// interactions, `Derives` connects an interaction to a concept, and the
-/// remaining five types (`CoOccurrence`/`Causal`/`Dependency`/`Hierarchical`/
-/// `Semantic`) connect concepts to concepts. Returns a violation message when
+/// remaining types (`CoOccurrence`/`Causal`/`Dependency`/`Hierarchical`/
+/// `Semantic`/`Contradicts`) connect concepts to concepts. Returns a violation message when
 /// the endpoints violate the matrix, `None` when legal. The schema carries no FK
 /// on endpoints (spec §4: "the writer enforces it") — `record_edge` is that
 /// gate and `assert_invariants` the safety net.

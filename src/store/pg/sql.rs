@@ -423,7 +423,7 @@ WHERE d.id <> $2
 /// while the extent CTE stayed session-filtered. The `least`/`greatest` clamp is the
 /// same guard `MemoryStore` and SQLite apply in Rust (`clamp(0.0, 1.0)`): a span whose
 /// endpoints fall outside the session extent must not report a ratio above 1.0.
-/// Placeholders: `$1` session, `$2` node, `$3` cutoff timestamp.
+/// Placeholders: `$1` session, `$2` node, `$3` cutoff timestamp, `$4` denominator cap seconds.
 pub(super) const INTERACTION_SPAN_SQL: &str = r#"
 WITH dependents AS (
     SELECT e.source AS id FROM edges e
@@ -465,13 +465,18 @@ SELECT
     -- accepts the same value as a float, so only a Postgres-backed test sees
     -- this. `InteractionSpan::coverage` is an f64 ratio, not money: the
     -- contract belongs here at the boundary, not in a Decimal conversion.
+    -- #36 PR 2 review M2: every epoch extraction is cast to double precision
+    -- before it meets the `$4` cap, so `least()`, the comparison and the
+    -- division see one type on both dialects. The result type of `extract`
+    -- differs across dialects and versions (Postgres 14+ returns numeric),
+    -- and this must not rest on each dialect's numeric/float promotion.
     CAST(
         CASE
             WHEN (SELECT count(*) FROM span) = 0 THEN 0.0
-            WHEN extract(epoch FROM (extent.hi - extent.lo)) > 0
+            WHEN CAST(extract(epoch FROM (extent.hi - extent.lo)) AS double precision) > 0
                 THEN least(1.0, greatest(0.0,
-                     extract(epoch FROM ((SELECT max(ts) FROM span) - (SELECT min(ts) FROM span)))
-                     / extract(epoch FROM (extent.hi - extent.lo))))
+                     CAST(extract(epoch FROM ((SELECT max(ts) FROM span) - (SELECT min(ts) FROM span))) AS double precision)
+                     / least(CAST(extract(epoch FROM (extent.hi - extent.lo)) AS double precision), CAST($4 AS double precision))))
             -- F1: non-empty span over a single-point session extent covers the
             -- whole session -> 1.0 (the count = 0 arm above handles empty spans).
             ELSE 1.0

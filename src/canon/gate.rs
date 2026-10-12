@@ -3,7 +3,7 @@
 //! Why a concept is not canonical yet is fully computable, and every required
 //! number is already produced by the canonization evaluation: `gc_survived`
 //! lives on the concept row, blast radius is Stage 3's measurement, and
-//! `distinct` / `coverage` are Stage 2's `interaction_span`. This module
+//! `distinct` / `coverage` are Stage 2's capped `interaction_span_with_window`. This module
 //! **surfaces** those measurements (T11) rather than inventing a calculation:
 //!
 //! * `gc_survived` is read from the persisted [`Concept::gc_survived`] field
@@ -13,7 +13,7 @@
 //!   passes to [`GraphStore::blast_radius`] — the surfaced value *is* the
 //!   number the engine compared, not an age-unfiltered mirror.
 //! * `distinct_interactions` / `coverage` come from
-//!   [`GraphStore::interaction_span`] — the exact query Stage 2 runs.
+//!   [`GraphStore::interaction_span_with_window`] — the exact query Stage 2 runs.
 //! * `in_cooldown` / `cooldown_until` mirror Stage 3's re-promotion cooldown
 //!   ([`Concept::last_demotion_time`] + the cooldown config), so a cooling
 //!   Venerable that clears all four gates is explained instead of stalling
@@ -92,7 +92,7 @@ impl GateMetric {
         Self {
             current,
             bar,
-            met: current >= bar,
+            met: current.is_finite() && current >= bar,
             strictly_above: false,
         }
     }
@@ -101,7 +101,7 @@ impl GateMetric {
         Self {
             current,
             bar,
-            met: current > bar,
+            met: current.is_finite() && current > bar,
             strictly_above: true,
         }
     }
@@ -197,7 +197,7 @@ impl GateProgress {
 ///
 /// Under [`PromotionPolicy::Swarm`], `blast_radius` and
 /// `distinct_interactions`/`coverage` are queried from `store` with the same
-/// `min_edge_age` cutoff and `interaction_span` call the evaluation passes to
+/// `min_edge_age` cutoff and capped span call the evaluation passes to
 /// Stages 3 and 2, so the surfaced numbers are the ones the eval would reach.
 ///
 /// Under [`PromotionPolicy::Solo`] the [`SwarmGates`] block is absent and
@@ -223,6 +223,33 @@ pub async fn gate_progress(
     cooldown: Duration,
     now: DateTime<Utc>,
 ) -> Result<GateProgress, StoreError> {
+    gate_progress_with_config(
+        store,
+        session,
+        concept,
+        &crate::Config {
+            promotion_policy: policy,
+            canonization_edge_min_age: min_edge_age,
+            canonization_repromotion_cooldown: cooldown,
+            ..crate::Config::default()
+        },
+        now,
+    )
+    .await
+}
+
+/// Gate progress using the same coverage cap as the configured evaluator.
+/// The compatibility wrapper [`gate_progress`] uses the default cap.
+pub async fn gate_progress_with_config(
+    store: &dyn GraphStore,
+    session: &SessionId,
+    concept: &Concept,
+    config: &crate::Config,
+    now: DateTime<Utc>,
+) -> Result<GateProgress, StoreError> {
+    let policy = config.promotion_policy;
+    let min_edge_age = config.canonization_edge_min_age;
+    let cooldown = config.canonization_repromotion_cooldown;
     let gates = match policy {
         // Not an optimisation. Running the two gate-only queries here would put
         // four numbers on the wire that no solo promotion decision consults,
@@ -234,7 +261,13 @@ pub async fn gate_progress(
                 .blast_radius(session, concept.id, min_edge_age, now)
                 .await?;
             let span = store
-                .interaction_span(session, concept.id, min_edge_age, now)
+                .interaction_span_with_window(
+                    session,
+                    concept.id,
+                    min_edge_age,
+                    now,
+                    config.canonization_coverage_window,
+                )
                 .await?;
             Some(SwarmGates {
                 gc_survived: GateMetric::at_least(
@@ -396,5 +429,13 @@ mod tests {
             Some(1)
         );
         assert_eq!(progress(None, PromotionPolicy::Swarm).met_count(), None);
+    }
+    #[test]
+    fn nonfinite_gate_metrics_never_claim_evidence_passes() {
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(!GateMetric::at_least(value, MIN_COVERAGE).met);
+            assert!(!GateMetric::strictly_above(value, 5.0).met);
+        }
+        assert!(GateMetric::at_least(0.3, MIN_COVERAGE).met);
     }
 }

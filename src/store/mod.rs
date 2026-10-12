@@ -71,6 +71,8 @@ pub use dsn::store_dsn_identity;
 pub mod batch;
 // T3.5 — `load_session()` / startup materialization (see `load.rs`).
 pub mod load;
+pub(crate) mod span;
+pub use span::{validate_coverage_window, DEFAULT_COVERAGE_WINDOW, MIN_COVERAGE_WINDOW};
 // T3.4 — write-behind flush task (spec §2.4–§2.5); drains any GraphStore.
 pub mod flush;
 // T8.6 — single-writer lease (spec §2.2, store-enforced). Holder identity,
@@ -546,7 +548,7 @@ pub trait GraphStore: Send + Sync {
     /// Distinct origin interactions behind `node`'s dependents (the set
     /// [`Self::blast_radius`] counts, aged the same way), excluding `node`'s
     /// own origin interaction and any interaction younger than the cutoff,
-    /// plus the share of the session's temporal extent they cover (spec §4.1
+    /// plus the share of the full session temporal extent they cover (spec §4.1
     /// with the #36 errata). `now` is the caller's clock — see
     /// [`Self::blast_radius`].
     async fn interaction_span(
@@ -556,6 +558,25 @@ pub trait GraphStore: Send + Sync {
         min_age: Duration,
         now: DateTime<Utc>,
     ) -> Result<InteractionSpan, StoreError>;
+
+    /// The same eligible evidence as [`Self::interaction_span`], with a
+    /// caller-selected denominator cap. No evidence expires at this window.
+    /// Stage 2 calls this accessor with fourteen days by default. Built-in
+    /// stores implement it; third-party stores compile without an override
+    /// but fail closed at Stage 2 until they implement capped evidence.
+    async fn interaction_span_with_window(
+        &self,
+        _session: &SessionId,
+        _node: NodeId,
+        _min_age: Duration,
+        _now: DateTime<Utc>,
+        window: Duration,
+    ) -> Result<InteractionSpan, StoreError> {
+        validate_coverage_window(window)?;
+        Err(StoreError::Capability(
+            "capped interaction-span coverage".into(),
+        ))
+    }
 
     /// Durable write gate for a canonization transition (spec §10). **Fencing
     /// token (GitHub issue #1):** like [`Self::flush`], `token` must be the

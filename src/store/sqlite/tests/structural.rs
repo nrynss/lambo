@@ -806,6 +806,8 @@ async fn structural_queries_follow_the_dependents_case_like_memory() {
     let batch = case::store_batch();
     store.flush(&batch, None).await.unwrap();
     memory.flush(&batch, None).await.unwrap();
+    case::check_contradiction_persistence(&store).await;
+    case::check_contradiction_persistence(&memory).await;
     let sid = case::session();
     for (name, age, blast, distinct, coverage) in case::expected_store() {
         let node = case::concept_id(name);
@@ -854,4 +856,18 @@ async fn structural_queries_follow_the_dependents_case_like_memory() {
             );
         }
     }
+}
+
+#[tokio::test]
+async fn capped_span_follows_window_case() {
+    let store = test_store();
+    store.init_schema().await.unwrap();
+    crate::test_util::dependents::check_window_case(&store).await;
+}
+
+#[tokio::test]
+async fn capped_span_follows_extents_case() {
+    let store = test_store();
+    store.init_schema().await.unwrap();
+    crate::test_util::dependents::check_extents_case(&store).await;
 }

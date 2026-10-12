@@ -1,5 +1,7 @@
 use super::*;
 #[cfg(feature = "store-memory")]
+use crate::canon::stage2_passes;
+#[cfg(feature = "store-memory")]
 use crate::types::{
     AgentId, Concept, ConceptType, DaemonEvent, Edge, EdgeType, Interaction, Scored, SessionId,
 };

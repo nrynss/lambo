@@ -178,7 +178,7 @@ impl ConceptType {
     }
 }
 
-/// Edge types retained in v0.1 (spec §5). Seven of nine; CrossOccurrence/Fixes cut.
+/// Seven edge types retained in v0.1 (spec §5), plus explicit contradiction (#19).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub enum EdgeType {
@@ -196,12 +196,52 @@ pub enum EdgeType {
     Hierarchical,
     /// Two concepts are close in embedding space. Decays.
     Semantic,
+    /// The source asserts the opposite of the target (#19), directed
+    /// `newer assertion -> older assertion`, concept to concept.
+    /// Informational only: it declares no dependence, support or blast,
+    /// counts toward neither score density nor the edge bonus, and does not
+    /// decay. No product path writes it yet; the derive and record_action
+    /// write fields arrive with #19(b).
+    Contradicts,
 }
 
 impl EdgeType {
+    /// Every variant, in declaration order. Crate-internal: it lets a table
+    /// keyed by edge type (for example GC's decaying set) be checked in both
+    /// directions. The test `edge_type_all_is_complete` stops compiling (under
+    /// `cargo test`, not a plain build) until a new variant is added here too.
+    pub(crate) const ALL: [EdgeType; 8] = [
+        Self::Temporal,
+        Self::Derives,
+        Self::CoOccurrence,
+        Self::Causal,
+        Self::Dependency,
+        Self::Hierarchical,
+        Self::Semantic,
+        Self::Contradicts,
+    ];
+
     /// Whether this edge type participates in weight decay (spec §5 table).
     pub const fn decays(self) -> bool {
         matches!(self, Self::CoOccurrence | Self::Semantic)
+    }
+
+    /// Whether an edge of this type counts toward a concept's score
+    /// `density` (spec §9): the incident-edge numerator and the session's
+    /// `max_incident` baseline. Every type does except `Contradicts`, so
+    /// being contradicted never raises the composite that feeds Stage 1
+    /// candidate selection, recall ranking or the GC score cut (#19).
+    pub const fn counts_toward_density(self) -> bool {
+        match self {
+            Self::Temporal
+            | Self::Derives
+            | Self::CoOccurrence
+            | Self::Causal
+            | Self::Dependency
+            | Self::Hierarchical
+            | Self::Semantic => true,
+            Self::Contradicts => false,
+        }
     }
 
     /// Which end of an edge of this type is the **dependent**: the concept
@@ -215,7 +255,7 @@ impl EdgeType {
     /// * Every other type declares no dependence. `Causal` is provenance
     ///   (`action -> produced/modified artifact`) and confers no load;
     ///   `Derives`/`Temporal` are provenance and `CoOccurrence`/`Semantic`
-    ///   are association.
+    ///   are association. `Contradicts` declares opposition, never support.
     ///
     /// This one table is the definition every implementation follows: the
     /// stores' `blast_radius`/`interaction_span`, the graph-side
@@ -227,9 +267,12 @@ impl EdgeType {
         match self {
             Self::Dependency => Some(DependentEnd::Source),
             Self::Hierarchical => Some(DependentEnd::Target),
-            Self::Temporal | Self::Derives | Self::CoOccurrence | Self::Causal | Self::Semantic => {
-                None
-            }
+            Self::Temporal
+            | Self::Derives
+            | Self::CoOccurrence
+            | Self::Causal
+            | Self::Semantic
+            | Self::Contradicts => None,
         }
     }
 }
@@ -1566,9 +1609,12 @@ pub enum HotListPayload {
 /// Stage 2 structural evidence (spec §4.1 / §10).
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct InteractionSpan {
-    /// How many distinct interactions mention the concept.
+    /// Distinct eligible dependent origin interactions, excluding own origin.
     pub distinct: u64,
-    /// What fraction of the session's interactions those are, from `0.0` to `1.0`.
+    /// Eligible evidence time spread / session extent (raw accessor) or
+    /// min(session extent, coverage window) (window-aware accessor),
+    /// clamped to `0.0..=1.0`. Nonempty evidence in a single-point session is
+    /// `1.0`; empty evidence is `0.0`. Stage 2 selects a fourteen-day cap.
     pub coverage: f64,
 }
 
@@ -2011,6 +2057,46 @@ mod tests {
         assert!(!EdgeType::Dependency.decays());
         assert!(!EdgeType::Hierarchical.decays());
         assert!(EdgeType::Semantic.decays());
+        assert!(!EdgeType::Contradicts.decays());
+    }
+
+    /// `EdgeType::ALL` lists every variant once, in declaration order: the
+    /// exhaustive match stops the test build compiling when a variant is added.
+    #[test]
+    fn edge_type_all_is_complete() {
+        const fn index(ty: EdgeType) -> usize {
+            match ty {
+                EdgeType::Temporal => 0,
+                EdgeType::Derives => 1,
+                EdgeType::CoOccurrence => 2,
+                EdgeType::Causal => 3,
+                EdgeType::Dependency => 4,
+                EdgeType::Hierarchical => 5,
+                EdgeType::Semantic => 6,
+                EdgeType::Contradicts => 7,
+            }
+        }
+        for (i, ty) in EdgeType::ALL.iter().enumerate() {
+            assert_eq!(index(*ty), i, "{ty:?}");
+        }
+    }
+
+    /// #19: every edge type counts toward score density except
+    /// `Contradicts`, which must never raise a concept's composite.
+    #[test]
+    fn edge_type_density_table() {
+        for ty in [
+            EdgeType::Temporal,
+            EdgeType::Derives,
+            EdgeType::CoOccurrence,
+            EdgeType::Causal,
+            EdgeType::Dependency,
+            EdgeType::Hierarchical,
+            EdgeType::Semantic,
+        ] {
+            assert!(ty.counts_toward_density(), "{ty:?}");
+        }
+        assert!(!EdgeType::Contradicts.counts_toward_density());
     }
 
     /// #36: only `Dependency` (source rests on target) and `Hierarchical`
@@ -2034,6 +2120,7 @@ mod tests {
             EdgeType::CoOccurrence,
             EdgeType::Causal,
             EdgeType::Semantic,
+            EdgeType::Contradicts,
         ] {
             assert_eq!(ty.dependent_end(), None, "{ty:?} must confer no load");
         }
@@ -2062,6 +2149,7 @@ mod tests {
             Some((a, b))
         );
         assert_eq!(edge(a, b, EdgeType::Causal).dependence(), None);
+        assert_eq!(edge(a, b, EdgeType::Contradicts).dependence(), None);
         assert_eq!(edge(a, a, EdgeType::Dependency).dependence(), None);
         assert_eq!(edge(a, a, EdgeType::Hierarchical).dependence(), None);
     }
@@ -2294,6 +2382,7 @@ mod tests {
             EdgeType::Dependency,
             EdgeType::Hierarchical,
             EdgeType::Semantic,
+            EdgeType::Contradicts,
         ] {
             let s = serde_json::to_string(&et).unwrap();
             let back: EdgeType = serde_json::from_str(&s).unwrap();

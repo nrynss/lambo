@@ -520,23 +520,47 @@ struct FaultyStore {
     fail_record: bool,
     /// Phase 2 — Stage 2's span query (R2-4).
     fail_span: bool,
+    /// #36 PR 2 review M1: answer the window-aware span as a store that
+    /// never implemented it does (the trait default's `Capability`).
+    no_window: bool,
+    /// Window-aware span calls received.
+    window_calls: std::sync::atomic::AtomicUsize,
 }
 
 impl FaultyStore {
     fn record_fails(inner: MemoryStore) -> Self {
         Self {
-            inner,
             fail_record: true,
-            fail_span: false,
+            ..Self::healthy(inner)
         }
     }
 
     fn span_fails(inner: MemoryStore) -> Self {
         Self {
+            fail_span: true,
+            ..Self::healthy(inner)
+        }
+    }
+
+    fn without_window(inner: MemoryStore) -> Self {
+        Self {
+            no_window: true,
+            ..Self::healthy(inner)
+        }
+    }
+
+    fn healthy(inner: MemoryStore) -> Self {
+        Self {
             inner,
             fail_record: false,
-            fail_span: true,
+            fail_span: false,
+            no_window: false,
+            window_calls: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    fn window_calls(&self) -> usize {
+        self.window_calls.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -613,6 +637,28 @@ impl GraphStore for FaultyStore {
         }
         self.inner
             .interaction_span(session, node, min_age, now)
+            .await
+    }
+    async fn interaction_span_with_window(
+        &self,
+        session: &SessionId,
+        node: NodeId,
+        min_age: Duration,
+        now: DateTime<Utc>,
+        window: Duration,
+    ) -> Result<crate::types::InteractionSpan, crate::types::StoreError> {
+        self.window_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self.fail_span {
+            return Err(StoreError::Backend("interaction_span is down".into()));
+        }
+        if self.no_window {
+            return Err(StoreError::Capability(
+                "capped interaction-span coverage".into(),
+            ));
+        }
+        self.inner
+            .interaction_span_with_window(session, node, min_age, now, window)
             .await
     }
     async fn record_canonization(
@@ -1373,6 +1419,83 @@ async fn a_venerable_that_holds_stage_2_and_stage_3_promotes() {
     assert_eq!(outcome.promotions[0].blast_radius, Some(6));
 }
 
+/// The configured cap controls both Candidate admission and the Swarm
+/// upgrade re-check; inspect must explain those same numbers.
+#[tokio::test]
+async fn configured_window_controls_both_stage_2_paths_and_inspect() {
+    use crate::canon::gate_progress_with_config;
+    for initial in [CanonizationStatus::Candidate, CanonizationStatus::Venerable] {
+        for (days, expected) in [(14, true), (28, false)] {
+            let mut g = Graph::new(sid());
+            let start = ts() - chrono::Duration::days(60);
+            for (n, seconds) in [
+                (1, 0),
+                (2, 86_400),
+                (3, 267_840),
+                (4, 449_280),
+                (5, 49 * 86_400),
+            ] {
+                let mut turn = interaction(n, (n > 1).then(|| n - 1), ts());
+                turn.event_time = Some(start + chrono::Duration::seconds(seconds));
+                g.insert_interaction(turn).unwrap();
+            }
+            g.insert_concept(concept(10, 1, 5, initial), iid(1))
+                .unwrap();
+            for k in 30..36 {
+                let origin = 2 + (k - 30) % 3;
+                g.insert_concept(concept(k, origin, 0, CanonizationStatus::None), iid(origin))
+                    .unwrap();
+                let mut e = edge(k, k, 10, ts());
+                e.event_time = Some(start);
+                g.upsert_edge(e).unwrap();
+            }
+            let store = store_from_graph(&g).await;
+            let cfg = crate::Config {
+                canonization_coverage_window: Duration::from_secs(days * 86_400),
+                ..crate::Config::default()
+            };
+            let hub = concept(10, 1, 5, initial);
+            let progress = gate_progress_with_config(&store, &sid(), &hub, &cfg, ts())
+                .await
+                .unwrap();
+            let gates = progress.gates.unwrap();
+            assert_eq!(gates.coverage.met, expected);
+            assert_eq!(gates.distinct_interactions.current, 3.0);
+            assert_eq!(gates.coverage.current, if days == 14 { 0.3 } else { 0.15 });
+            let graph = RwLock::new(g);
+            let (tx, _rx) = channel();
+            let out = eval_cycle(
+                &mut Evaluator::new(),
+                &graph,
+                &store,
+                &table(&[]),
+                &tx,
+                &EvalParams::from_config(&cfg),
+                ts(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                !out.promotions.is_empty(),
+                expected,
+                "{initial:?}, {days} days"
+            );
+            assert_eq!(
+                status_of(&graph.read(), nid(10)),
+                if expected {
+                    if initial == CanonizationStatus::Candidate {
+                        CanonizationStatus::Venerable
+                    } else {
+                        CanonizationStatus::Canonical
+                    }
+                } else {
+                    initial
+                }
+            );
+        }
+    }
+}
+
 /// #36 review M1: the Stage 2 re-check is Swarm's. A Solo Venerable whose
 /// six dependents all come from its own interaction fails Stage 2, but Solo
 /// admits by its score band, and the Stage 3 probe must still run so the
@@ -1380,6 +1503,34 @@ async fn a_venerable_that_holds_stage_2_and_stage_3_promotes() {
 /// re-check existed.
 #[tokio::test]
 async fn solo_keeps_its_stage_3_probe_and_stamps_the_measured_blast() {
+    let (g, hub_id) = solo_hub_graph();
+    let store = store_from_graph(&g).await;
+    assert!(
+        !stage2_passes(&store, &sid(), hub_id, Duration::ZERO, ts())
+            .await
+            .unwrap(),
+        "fixture premise: Stage 2 fails"
+    );
+    solo_hub_promotes_with_measured_blast(g, hub_id, &store).await;
+}
+
+/// #36 PR 2 review M1 (a): Solo's hop ignores the Stage 2 verdict, so a
+/// store without the window-aware span is never asked for one, and the
+/// Solo ladder runs exactly as on a store that has it.
+#[tokio::test]
+async fn solo_never_asks_a_store_for_the_window_aware_span() {
+    let (logs, _guard) = crate::test_util::capture_logs(tracing::Level::WARN);
+    let (g, hub_id) = solo_hub_graph();
+    let store = FaultyStore::without_window(store_from_graph(&g).await);
+    solo_hub_promotes_with_measured_blast(g, hub_id, &store).await;
+    assert_eq!(store.window_calls(), 0, "Solo must not query Stage 2");
+    let out = logs.contents();
+    assert!(!out.contains("CanonizationStage2Unsupported"), "{out}");
+}
+
+/// The Solo hub: a Venerable in the Canonical band with six children from
+/// its own interaction, so blast 6 and no Stage 2 support.
+fn solo_hub_graph() -> (Graph, NodeId) {
     let mut g = Graph::new(sid());
     let mut prev = None;
     for n in 1..=2u64 {
@@ -1414,14 +1565,10 @@ async fn solo_keeps_its_stage_3_probe_and_stamps_the_measured_blast() {
         child.edge_type = EdgeType::Hierarchical;
         g.upsert_edge(child).unwrap();
     }
+    (g, hub_id)
+}
 
-    let store = store_from_graph(&g).await;
-    assert!(
-        !stage2_passes(&store, &sid(), hub_id, Duration::ZERO, ts())
-            .await
-            .unwrap(),
-        "fixture premise: Stage 2 fails"
-    );
+async fn solo_hub_promotes_with_measured_blast(g: Graph, hub_id: NodeId, store: &dyn GraphStore) {
     let g = RwLock::new(g);
     let solo_params = EvalParams {
         promotion_policy: PromotionPolicy::Solo,
@@ -1429,7 +1576,7 @@ async fn solo_keeps_its_stage_3_probe_and_stamps_the_measured_blast() {
     };
     let (tx, _rx) = channel();
     let mut ev = Evaluator::new();
-    let outcome = eval_cycle(&mut ev, &g, &store, &table(&[]), &tx, &solo_params, ts())
+    let outcome = eval_cycle(&mut ev, &g, store, &table(&[]), &tx, &solo_params, ts())
         .await
         .unwrap();
     assert_eq!(status_of(&g.read(), hub_id), CanonizationStatus::Canonical);
@@ -1442,4 +1589,86 @@ async fn solo_keeps_its_stage_3_probe_and_stamps_the_measured_blast() {
         Some(6),
         "Solo's audit row must carry the measured blast radius"
     );
+}
+
+/// #36 PR 2 review M1 (b): under Swarm, a store without the window-aware
+/// span gives each Stage 2 node no evidence instead of failing the cycle.
+/// The Candidate stays a Candidate and the Venerable fails its re-check, but
+/// the cycle still succeeds, Stage 3 still evaluates its window, the budget
+/// still demotes, and one warning names the missing capability however many
+/// nodes asked.
+#[tokio::test]
+async fn swarm_without_the_window_span_gives_no_evidence_and_keeps_the_cycle() {
+    // Budget 3 over two Canonicals leaves room, so Stage 3 runs; budget 1
+    // is over, so Stage 3 takes nothing and the budget demotes.
+    for (budget, stage3, demoted) in [(3usize, vec![nid(21)], None), (1, vec![], Some(nid(11)))] {
+        let (logs, _guard) = crate::test_util::capture_logs(tracing::Level::WARN);
+        let g = no_window_graph();
+        let healthy = store_from_graph(&g).await;
+        for id in [20, 21] {
+            assert!(
+                stage2_passes(&healthy, &sid(), nid(id), Duration::ZERO, ts())
+                    .await
+                    .unwrap(),
+                "fixture premise: {id} holds Stage 2 on a capable store"
+            );
+        }
+        let store = FaultyStore::without_window(healthy);
+        let g = RwLock::new(g);
+        let mut p = params();
+        p.max_canonical_nodes = budget;
+        let (tx, _rx) = channel();
+        let outcome = eval_cycle(
+            &mut Evaluator::new(),
+            &g,
+            &store,
+            &table(&[]),
+            &tx,
+            &p,
+            ts(),
+        )
+        .await
+        .expect("a missing capability must not fail the cycle");
+        assert_eq!(status_of(&g.read(), nid(20)), CanonizationStatus::Candidate);
+        assert_eq!(status_of(&g.read(), nid(21)), CanonizationStatus::Venerable);
+        assert!(outcome.promotions.is_empty(), "{:?}", outcome.promotions);
+        assert_eq!(outcome.stage3_batch, stage3, "budget {budget}");
+        assert_eq!(
+            outcome.demotions.first().map(|d| d.node_id),
+            demoted,
+            "budget {budget}"
+        );
+        assert_eq!(
+            store.window_calls(),
+            1 + stage3.len(),
+            "one query per Stage 2 node"
+        );
+        let out = logs.contents();
+        assert_eq!(
+            out.matches("CanonizationStage2Unsupported").count(),
+            1,
+            "one warning per cycle: {out}"
+        );
+        assert!(out.contains("capped interaction-span coverage"), "{out}");
+    }
+}
+
+/// A Candidate and a Venerable that both hold Stage 2 (and the Venerable
+/// Stage 3) on a capable store, plus two Canonicals for the budget.
+fn no_window_graph() -> Graph {
+    let mut g = Graph::new(sid());
+    g.insert_interaction(interaction(1, None, ts())).unwrap();
+    g.insert_concept(concept(20, 1, 5, CanonizationStatus::Candidate), iid(1))
+        .unwrap();
+    attach_blast(&mut g, 20, 3, 300);
+    g.insert_concept(concept(21, 1, 5, CanonizationStatus::Venerable), iid(1))
+        .unwrap();
+    attach_blast(&mut g, 21, 6, 400);
+    for (id, blast, first) in [(10u64, 8u64, 100u64), (11, 1, 200)] {
+        let mut c = concept(id, 1, 5, CanonizationStatus::Canonical);
+        c.blast_radius = Some(blast as i32);
+        g.insert_concept(c, iid(1)).unwrap();
+        attach_blast(&mut g, id, blast, first);
+    }
+    g
 }
