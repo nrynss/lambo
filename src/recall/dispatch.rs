@@ -113,7 +113,15 @@ pub(crate) fn anchor_text(text: &str) -> String {
 }
 
 fn is_word_char(c: char) -> bool {
-    c.is_alphanumeric() || is_combining_mark(c)
+    c.is_alphanumeric() || c == '_' || is_combining_mark(c)
+}
+
+fn word_at(hay: &str, at: usize) -> bool {
+    let c = hay[at..].chars().next().expect("character offset");
+    is_word_char(c)
+        || (c == '-'
+            && hay[..at].chars().next_back().is_some_and(is_word_char)
+            && hay[at + 1..].chars().next().is_some_and(is_word_char))
 }
 
 /// Byte spans of every occurrence of `needle` in `hay` that sits on word
@@ -135,9 +143,9 @@ fn word_bounded_spans(hay: &str, needle: &str) -> Vec<(usize, usize)> {
             || hay[..start]
                 .chars()
                 .next_back()
-                .is_none_or(|c| !is_word_char(c));
+                .is_none_or(|c| !word_at(hay, start - c.len_utf8()));
         let right_ok =
-            !is_word_char(last) || hay[end..].chars().next().is_none_or(|c| !is_word_char(c));
+            !is_word_char(last) || hay[end..].chars().next().is_none_or(|_| !word_at(hay, end));
         if left_ok && right_ok {
             spans.push((start, end));
         }
@@ -873,10 +881,25 @@ mod tests {
     }
 
     #[test]
+    fn identifier_components_do_not_anchor_underscore_or_hyphen_names() {
+        let g = anchors(&[
+            (10, "db", ConceptType::Entity),
+            (11, "SG-Base", ConceptType::Entity),
+        ]);
+        for q in ["what depends on user_db", "what depends on SG-Base-VPC"] {
+            assert_eq!(anchor_content(&g, q), None, "{q}");
+        }
+        assert_eq!(
+            anchor_content(&g, "what depends on (SG-Base) - db").as_deref(),
+            Some("SG-Base")
+        );
+    }
+
+    #[test]
     fn word_bounded_spans_need_word_edges_and_see_overlaps() {
         assert_eq!(word_bounded_spans("dbadmin db", "db"), vec![(8, 10)]);
         assert_eq!(word_bounded_spans("dbadmin", "db"), vec![]);
-        assert_eq!(word_bounded_spans("user_db", "db"), vec![(5, 7)]);
+        assert_eq!(word_bounded_spans("user_db", "db"), vec![]);
         // Overlapping occurrences are all tried: a non-overlapping scan
         // would stop after (0, 5) and miss (3, 8).
         assert_eq!(
