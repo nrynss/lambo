@@ -357,7 +357,9 @@ async fn i1_the_canonical_marker_flag_is_false_when_the_budget_rendered_nothing(
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        !rendered.contains("[canonical]"),
+        // The block label renders the marker as `[<Type>, canonical]`; the
+        // bare string `[canonical]` never occurs, so it proved nothing.
+        !rendered.contains(", canonical]"),
         "a 1-token budget renders no hit block, so no canonical marker: {rendered}"
     );
 
