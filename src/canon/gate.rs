@@ -3,7 +3,7 @@
 //! Why a concept is not canonical yet is fully computable, and every required
 //! number is already produced by the canonization evaluation: `gc_survived`
 //! lives on the concept row, blast radius is Stage 3's measurement, and
-//! `distinct` / `coverage` are Stage 2's `interaction_span`. This module
+//! `distinct` / `coverage` are Stage 2's capped `interaction_span_with_window`. This module
 //! **surfaces** those measurements (T11) rather than inventing a calculation:
 //!
 //! * `gc_survived` is read from the persisted [`Concept::gc_survived`] field
@@ -13,7 +13,7 @@
 //!   passes to [`GraphStore::blast_radius`] — the surfaced value *is* the
 //!   number the engine compared, not an age-unfiltered mirror.
 //! * `distinct_interactions` / `coverage` come from
-//!   [`GraphStore::interaction_span`] — the exact query Stage 2 runs.
+//!   [`GraphStore::interaction_span_with_window`] — the exact query Stage 2 runs.
 //! * `in_cooldown` / `cooldown_until` mirror Stage 3's re-promotion cooldown
 //!   ([`Concept::last_demotion_time`] + the cooldown config), so a cooling
 //!   Venerable that clears all four gates is explained instead of stalling
@@ -197,7 +197,7 @@ impl GateProgress {
 ///
 /// Under [`PromotionPolicy::Swarm`], `blast_radius` and
 /// `distinct_interactions`/`coverage` are queried from `store` with the same
-/// `min_edge_age` cutoff and `interaction_span` call the evaluation passes to
+/// `min_edge_age` cutoff and capped span call the evaluation passes to
 /// Stages 3 and 2, so the surfaced numbers are the ones the eval would reach.
 ///
 /// Under [`PromotionPolicy::Solo`] the [`SwarmGates`] block is absent and

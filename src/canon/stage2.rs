@@ -4,7 +4,7 @@
 //! interaction-span evidence. It does **not** apply a
 //! `Candidate → Venerable` transition (T6.4 owns writes).
 //!
-//! A concept passes when `store.interaction_span(session, node, min_age, now)`
+//! A concept passes when `store.interaction_span_with_window(session, node, min_age, now, window)`
 //! reports **both**:
 //!
 //! 1. **`distinct >= 3`** origin interactions behind the concept's

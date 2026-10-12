@@ -101,3 +101,10 @@ The shared Stage 2 comparison refuses nonfinite coverage, but the inspector's
 comparisons now require a finite current measurement. The regression tests
 NaN and both infinities, preserving equality at 0.3. This keeps malformed
 third-party evidence from claiming a passed inspector gate.
+
+### Adversarial Low 2: raw-accessor documentation
+
+Stage2/gate/evaluation rustdocs still named `interaction_span` as the exact
+promotion query after it was preserved as raw evidence. They now name the
+window-aware accessor explicitly, avoiding a claim that raw inspect numbers
+and capped evaluation coverage are interchangeable.

@@ -41,9 +41,9 @@
 //! 1. [`Evaluator::gather`] — **synchronous, read guard.** Reads the three
 //!    stage windows, the Stage-3 cooldown inputs and the budget probe out of
 //!    the graph. No I/O.
-//! 2. [`verdicts`] — **async, no lock.** One `interaction_span` per Stage-2
+//! 2. [`verdicts`] — **async, no lock.** One `interaction_span_with_window` per Stage-2
 //!    window member, one `blast_radius` per Stage-3 window member (under
-//!    Swarm preceded by an `interaction_span`, and skipped when that fails),
+//!    Swarm preceded by an `interaction_span_with_window`, and skipped when that fails),
 //!    and one `blast_radius` per budget probe. Touches no graph.
 //! 3. [`apply`] — **synchronous, write guard.** Re-checks each node's
 //!    current status, applies the transitions, emits `DaemonEvent::Canonized`.
@@ -125,7 +125,7 @@ pub struct Evaluator {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EvalParams {
     pub min_peer_count: usize,
-    /// Forwarded to Stage 2 (`interaction_span` age floor).
+    /// Forwarded to Stage 2 (`interaction_span_with_window` age floor).
     pub min_age: Duration,
     /// Denominator cap forwarded to Stage 2; no evidence expiry.
     pub coverage_window: Duration,
@@ -438,7 +438,7 @@ impl Evaluator {
             .take(params.batch_size)
             .collect();
 
-        // Stage 2 — one `interaction_span` round-trip per member, so the
+        // Stage 2 — one `interaction_span_with_window` round-trip per member, so the
         // window is capped and walks the identity cursor (F13).
         let candidates = ids_with_status(graph, CanonizationStatus::Candidate);
         let stage2 = ring_window(&candidates, self.stage2_cursor, params.batch_size);
