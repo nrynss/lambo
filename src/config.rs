@@ -1084,6 +1084,27 @@ mod tests {
         }
     }
 
+    /// #36 PR 2 review L5: the Stage 2 coverage cap is a library setting.
+    /// The file reserves `[daemon]` for cadences (see `DaemonConfig`), so
+    /// the key, under any spelling a reader might try, is refused there and
+    /// at the top level rather than silently ignored.
+    #[test]
+    fn lambo_file_refuses_the_coverage_cap() {
+        for key in [
+            "canonization_coverage_window = 1209600",
+            "canonization_coverage_window_secs = 1209600",
+            "coverage_window = 1209600",
+        ] {
+            let err = LamboFile::from_toml_str(&format!("[daemon]\n{key}\n"))
+                .expect_err("a coverage cap under [daemon] must fail closed");
+            assert!(err.to_string().contains("unknown field"), "{key}: {err}");
+            assert!(
+                LamboFile::from_toml_str(&format!("{key}\n")).is_err(),
+                "a top-level {key:?} must fail closed"
+            );
+        }
+    }
+
     #[test]
     fn lambo_file_rejects_empty_kind_strings() {
         assert!(LamboFile::from_toml_str("[store]\nkind = \"\"\n").is_err());
