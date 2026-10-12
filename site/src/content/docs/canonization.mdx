@@ -113,7 +113,7 @@ Without an embedder you keep the whole canonization path and lose this check, wh
 
 ## The constants, in one place
 
-Everything here is a `lambo.toml` key. See [Configuration](/lambo/config/) for the full set.
+These are library `Config` settings. Of them, only the `[daemon]` cadence keys (`gc_interval`, `gc_max_interval_secs`, `gc_idle_floor`, and `canonization_eval_interval` as `canonization_eval_interval_secs`) can also be set in `lambo.toml`; the thresholds cannot. See [Configuration](/lambo/config/) for the full set.
 
 | Key | Default | Gate it governs |
 |---|---|---|
