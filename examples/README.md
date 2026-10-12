@@ -6,6 +6,24 @@ or needed to install or operate Lambo.
 
 ---
 
+## `canon36_stage2_cap.rs` — what the Stage 2 coverage cap changes on a store
+
+Measures, through the real SQLite queries, which concepts of one session pass
+Stage 2 under the whole-extent denominator and which under the capped one
+(#36 PR 2), and lists the concepts whose verdict the cap flips by node id,
+type, status, origins, both coverages and blast radius. It prints no concept
+text and carries no data of its own. The database is opened read-only; run it
+on a copy of a store, never on a live writer's file.
+
+```text
+cargo run --features store-sqlite --example canon36_stage2_cap -- \
+    <store.db> <session-id> [--min-age-secs 60] [--window-days 14] [--at <RFC3339>]
+```
+
+Pin `--at` to make two runs over the same copy comparable.
+
+---
+
 ## `drive_mcp_soak.py` — a demo artifact, and why that label matters
 
 Connects to a running `lambo serve` over MCP and repeatedly calls `lambo_derive`
