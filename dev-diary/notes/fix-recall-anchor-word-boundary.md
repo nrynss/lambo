@@ -1,6 +1,6 @@
 # Dependency-question anchor remediation (0.6.0)
 
-Updated 2026-10-12. Existing implementation commits 9fbb0e62 and b632f661
+Updated 2026-10-12. Issue [#138](https://github.com/nrynss/lambo/issues/138). Existing implementation commits 9fbb0e62 and b632f661
 remain in history. Main 422ed101 (#137) was fetched and merged without a
 CHANGELOG conflict. No public API, schema, dependency or manifest changed.
 
@@ -44,6 +44,12 @@ CHANGELOG conflict. No public API, schema, dependency or manifest changed.
   other subjects; wholly marker-contained matches are ignored. This keeps a
   real `blast radius report` query possible while preserving `db` in a
   `safe to delete db` question with a longer matching clause.
+- Fresh adversarial review found one marker-overlap/subject-position interaction:
+  `blast radius report` was assigned artificial maximum distance, so a later
+  disjoint `db` won despite the report being the first subject after `depends
+  on`. Preserve each clause occurrence's actual position/distance; exclude
+  clauses only from containment suppression. Extended the marker-overlap
+  regression to assert the report's traversal answer, not just its identity.
 - L4: both MCP docs mirrors and CHANGELOG now explain the per-edge boundary
   rule: `.env` matches in `config/.env`; `src/main.rs` has word edges.
 - L5: CHANGELOG names the #134 floor-bypass consequence explicitly.

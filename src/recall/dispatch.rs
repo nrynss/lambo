@@ -241,7 +241,7 @@ pub(crate) fn resolve_anchor(graph: &Graph, query: &str) -> Option<NodeId> {
                 continue;
             }
             if markers.iter().any(|&(ms, me)| start < me && ms < end) {
-                marker_clauses.push(index);
+                marker_clauses.push((start, index));
             } else {
                 spans.push((start, end, index));
             }
@@ -249,20 +249,24 @@ pub(crate) fn resolve_anchor(graph: &Graph, query: &str) -> Option<NodeId> {
     }
     spans.sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1)));
     let mut best = vec![None::<usize>; candidates.len()];
-    for index in marker_clauses {
-        best[index] = Some(usize::MAX);
+    let subject_distance = |start| {
+        markers
+            .iter()
+            .filter(|&&(_, end)| end <= start)
+            .map(|&(_, end)| start - end)
+            .min()
+            .unwrap_or(usize::MAX)
+    };
+    for (start, index) in marker_clauses {
+        let distance = subject_distance(start);
+        best[index] = Some(best[index].map_or(distance, |d| d.min(distance)));
     }
     let mut furthest: Option<(usize, usize)> = None;
     for (start, end, index) in spans {
         let contained =
             furthest.is_some_and(|(s, e)| s <= start && end <= e && (s < start || end < e));
         if !contained {
-            let distance = markers
-                .iter()
-                .filter(|&&(_, e)| e <= start)
-                .map(|&(_, e)| start - e)
-                .min()
-                .unwrap_or(usize::MAX);
+            let distance = subject_distance(start);
             best[index] = Some(best[index].map_or(distance, |d| d.min(distance)));
         }
         if furthest.is_none_or(|(_, e)| end > e) {
@@ -999,6 +1003,20 @@ mod tests {
         assert_eq!(
             anchor_content(&g, "is it safe to delete db").as_deref(),
             Some("db")
+        );
+        // An internal marker must not move a real subject behind later names.
+        let g = anchors(&[
+            (10, "blast radius report", ConceptType::Resource),
+            (11, "db", ConceptType::Entity),
+        ]);
+        let q = "what depends on blast radius report and db";
+        assert_eq!(
+            anchor_content(&g, q).as_deref(),
+            Some("blast radius report")
+        );
+        assert_eq!(
+            content_of(&try_structural(&g, q, 10, 500).unwrap().hits),
+            vec!["blast radius report consumer"]
         );
     }
 
