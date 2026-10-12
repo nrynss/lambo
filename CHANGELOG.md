@@ -66,6 +66,32 @@
   holder (it cannot parse the pid out of the new string); proxying between
   versions is unaffected, since the host still reads the same.
 
+### Fixed
+
+- **A recall no longer comes back empty when its top hit is long (#130).**
+  `context` keeps whole hit blocks while they fit `max_tokens` and stops at
+  the first that does not. When that was the first block, the context was
+  empty although `hits` held the answer, so a client reading only the text
+  saw a miss. With the default budget of 500 tokens this hit any concept over
+  about 1,700 bytes. Now the concept's text is cut at a character boundary
+  and marked `…`, the block's label (type, canonical marker, score, id,
+  blast radius) and, when they fit, its warning lines are kept, and a
+  `[truncated: N tokens left out; lambo_inspect <id> for the full concept]`
+  line follows. The marker counts toward the budget, nothing follows a
+  truncated block, and a budget too small for the marker (about 22 tokens)
+  still gives an empty context. Every recall whose first block fits renders
+  byte for byte as before. The blended and the structural
+  (dependency-question) recall share one budget cut now, so they behave the
+  same.
+  - The truncated hit carries `truncated_in_context: true` (absent on every
+    other hit) in `lambo_recall`'s `structuredContent`, in the web portal's
+    recall payload and on the `--ledger` recall line, and keeps
+    `included_in_context: false`. The ledger's `canonical_marker` counts it
+    when its label was kept.
+  - The portal shows it as "Partly in context (truncated)", expanded, and
+    does not list its warnings as excluded. In `lambo recall` and the portal
+    text, warning lines that did not fit print above the context.
+
 ## 0.5.0 (2026-10-12)
 
 ### Highlights

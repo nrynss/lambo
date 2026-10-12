@@ -1618,9 +1618,10 @@ pub fn normalize_node_ids(text: &str) -> String {
         if is_uuid_at(bytes, i) {
             out.push_str("<node>");
             i += GROUPS.iter().sum::<usize>() + 4;
-        } else if is_short_id_at(bytes, i) {
-            out.push_str("id <node>");
-            i += 3 + crate::recall::format::SHORT_ID_CHARS;
+        } else if let Some(prefix) = short_id_token_at(bytes, i) {
+            out.push_str(prefix);
+            out.push_str("<node>");
+            i += prefix.len() + crate::recall::format::SHORT_ID_CHARS;
         } else {
             // Advance one char, not one byte: the context block is UTF-8 and
             // carries `⚑`.
@@ -1632,32 +1633,34 @@ pub fn normalize_node_ids(text: &str) -> String {
     out
 }
 
-/// Whether the recall block's `id <short>` short-form token starts at byte
-/// `i`. The token must open at a word boundary and the hex digits must end
-/// at a non-hex boundary, so a longer hex run (a full UUID, masked by
-/// [`is_uuid_at`]) is never half-masked and prose like "paid" never opens one.
-fn is_short_id_at(bytes: &[u8], i: usize) -> bool {
-    if bytes.get(i) != Some(&b'i')
-        || bytes.get(i + 1) != Some(&b'd')
-        || bytes.get(i + 2) != Some(&b' ')
-    {
-        return false;
-    }
+/// The prefix of a short-form id token starting at byte `i`, if one does:
+/// the recall block's `id <short>` (issue #9), or the #130 truncation
+/// marker's `lambo_inspect <short>`. The token must open at a word boundary
+/// and the hex digits must end at a non-hex boundary, so a longer hex run (a
+/// full UUID, masked by [`is_uuid_at`]) is never half-masked and prose like
+/// "paid" never opens one.
+fn short_id_token_at(bytes: &[u8], i: usize) -> Option<&'static str> {
+    const PREFIXES: [&str; 2] = ["id ", "lambo_inspect "];
+    let prefix = PREFIXES
+        .into_iter()
+        .find(|p| bytes.get(i..i + p.len()) == Some(p.as_bytes()))?;
+    // `_` is a word char for the tool name only; `id` keeps its original
+    // alphanumeric-only boundary rule, so its masking is unchanged.
     if let Some(prev) = i.checked_sub(1).and_then(|p| bytes.get(p))
-        && prev.is_ascii_alphanumeric()
+        && (prev.is_ascii_alphanumeric() || (*prev == b'_' && prefix != "id "))
     {
-        return false;
+        return None;
     }
-    let hex_at = i + 3;
+    let hex_at = i + prefix.len();
     for k in 0..crate::recall::format::SHORT_ID_CHARS {
         match bytes.get(hex_at + k) {
             Some(b) if b.is_ascii_hexdigit() => {}
-            _ => return false,
+            _ => return None,
         }
     }
     match bytes.get(hex_at + crate::recall::format::SHORT_ID_CHARS) {
-        None => true,
-        Some(b) => !b.is_ascii_hexdigit(),
+        Some(b) if b.is_ascii_hexdigit() => None,
+        _ => Some(prefix),
     }
 }
 
@@ -1953,6 +1956,19 @@ mod tests {
             normalize_node_ids("paid 445370df"),
             "paid 445370df",
             "only the literal token `id` opens a short form"
+        );
+        // #130 review L11: the truncation marker names the id too.
+        let marker = "[truncated: 12 tokens left out; lambo_inspect 445370df for the full concept]";
+        let got = normalize_node_ids(marker);
+        assert_eq!(
+            got,
+            "[truncated: 12 tokens left out; lambo_inspect <node> for the full concept]"
+        );
+        assert_eq!(got, normalize_node_ids(&got));
+        assert_eq!(
+            normalize_node_ids("my_lambo_inspect 445370df"),
+            "my_lambo_inspect 445370df",
+            "the marker token opens at a word boundary"
         );
     }
 

@@ -296,7 +296,7 @@ pub(crate) fn try_structural(
     let radii = format::blast_radii(graph);
     let mut hits: Vec<RecallHit> = Vec::new();
     let mut detailed: Vec<DetailedHit> = Vec::new();
-    let mut blocks: Vec<String> = Vec::new();
+    let mut blocks: Vec<format::ContextBlock> = Vec::new();
     for s in deps.into_iter().take(top_k) {
         let crate::types::Node::Concept(c) = graph.node(s.item)? else {
             continue;
@@ -332,8 +332,7 @@ pub(crate) fn try_structural(
                 .push(Annotation::new(AnnotationKind::LoadBearing, text.clone()));
             lines.push(text);
         }
-        let block = format::render_block(&hit, &lines);
-        blocks.push(block);
+        blocks.push(format::ContextBlock::for_hit(&hit, &lines));
         hits.push(hit);
         detailed.push(detailed_hit);
     }
@@ -341,19 +340,10 @@ pub(crate) fn try_structural(
         return None;
     }
 
-    // Truncate context to the token budget (whole blocks, longest prefix first).
-    let mut kept: Vec<String> = Vec::new();
-    for block in blocks {
-        let mut provisional = kept.join("\n\n");
-        if !provisional.is_empty() {
-            provisional.push_str("\n\n");
-        }
-        provisional.push_str(&block);
-        if format::default_token_count(&provisional) > max_tokens {
-            break;
-        }
-        kept.push(block);
-    }
+    // The shared budget cut (`format::fit_blocks`, the same one assemble
+    // runs): whole blocks, longest prefix first, or the first block's
+    // truncated head with its marker when it alone is too long (#130).
+    let fitted = format::fit_blocks(&blocks, max_tokens, format::default_token_count);
 
     tracing::debug!(
         target: "lambo::recall",
@@ -362,20 +352,20 @@ pub(crate) fn try_structural(
         "recall dispatched dependency question to structural traversal"
     );
     // T9-R1-N4: headline names only the dependents the context actually
-    // renders (kept whole blocks), not the pre-truncation hit set.
-    let count = kept.len();
+    // renders (kept whole blocks, plus a truncated first block, which the
+    // context does show), not the pre-truncation hit set.
+    let count = fitted.rendered();
     let mut warnings = Vec::new();
     let traversal =
         format!("recall: dependency question answered by graph traversal ({count} dependents)");
     warnings.push(traversal.clone());
     // H3: included_in_context at the cut; the traversal explanation is
     // response-global — one annotation, never attached to a hit.
-    for (i, d) in detailed.iter_mut().enumerate() {
-        d.included_in_context = i < count;
-    }
+    let truncation = DetailedRecall::mark_context(&mut detailed, &fitted);
     Some(DetailedRecall {
         hits,
-        context: format::render_context(&kept),
+        context: fitted.context,
+        truncation,
         warnings,
         // A dispatched structural query answers by traversal and skips the
         // phase-1 blend entirely (T9-R1-3), so there are no leg scores to
@@ -912,6 +902,204 @@ mod tests {
         assert_eq!(
             actual, golden["structural"],
             "structural structured payload must match the golden"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // #130: the shared budget cut (`format::fit_blocks`)
+    // -----------------------------------------------------------------------
+
+    /// `app router` is the structural source of a 6 KB `big handler` (the
+    /// strongest dependent, so ranked first) and a short `payments handler`.
+    fn oversized_first_dependent() -> Graph {
+        let mut g = Graph::new(sid());
+        let i1 = NodeId(uuid::Uuid::from_u64_pair(1, 1));
+        g.insert_interaction(Interaction {
+            event_time: None,
+            id: i1,
+            session_id: sid(),
+            agent_id: AgentId::from("agent-a"),
+            prompt_text: Some("route the API".into()),
+            previous_id: None,
+            created_at: ts(0),
+        })
+        .unwrap();
+        let big = format!("big handler {}", "détail 🦀 ".repeat(500));
+        for (id, content) in [
+            (1u64, "app router".to_string()),
+            (2, big),
+            (3, "payments handler".to_string()),
+        ] {
+            g.insert_concept(concept(id, &content, ConceptType::Entity), i1)
+                .unwrap();
+        }
+        g.upsert_edge(edge(1, 1, 2, EdgeType::Dependency, 5.0))
+            .unwrap();
+        g.upsert_edge(edge(2, 1, 3, EdgeType::Dependency, 3.0))
+            .unwrap();
+        g
+    }
+
+    /// The blocks a result's hits render, as `fit_blocks` takes them.
+    fn rendered_blocks(result: &DetailedRecall) -> Vec<format::ContextBlock> {
+        result
+            .detailed
+            .iter()
+            .zip(&result.hits)
+            .map(|(d, h)| {
+                let lines: Vec<String> = d.annotations.iter().map(|a| a.text.clone()).collect();
+                let block = format::ContextBlock::for_hit(h, &lines);
+                assert_eq!(block.text, format::render_detailed_block(d));
+                block
+            })
+            .collect()
+    }
+
+    #[test]
+    fn structural_oversized_first_dependent_is_truncated_not_dropped() {
+        let g = oversized_first_dependent();
+        let result = try_structural(&g, "what depends on app router", 5, 500)
+            .expect("structural question must dispatch");
+        assert_eq!(result.hits.len(), 2, "hits are never cut by the budget");
+        assert!(result.hits[0].content.starts_with("big handler"));
+
+        let big_id = format::short_id(result.hits[0].node_id);
+        assert!(
+            result.context.starts_with("big handler détail"),
+            "{}",
+            result.context
+        );
+        assert!(
+            result
+                .context
+                .ends_with(&format!("lambo_inspect {big_id} for the full concept]")),
+            "{}",
+            result.context
+        );
+        // The label survives the cut (M1): content head, `…`, then the
+        // block's own label line.
+        assert!(
+            result.context.contains("… [Entity] (score "),
+            "{}",
+            result.context
+        );
+        assert_eq!(result.truncation, Some(format::Truncation::WithWarnings));
+        assert!(format::default_token_count(&result.context) <= 500);
+        assert!(
+            !result.context.contains("payments handler"),
+            "a lower-ranked block never follows a truncated one"
+        );
+        assert!(result.detailed[0].truncated_in_context);
+        assert!(!result.detailed[0].included_in_context);
+        assert!(result.detailed[1..]
+            .iter()
+            .all(|h| !h.included_in_context && !h.truncated_in_context));
+        // The headline counts the truncated dependent the context shows.
+        assert_eq!(
+            result.response_annotations[0].text,
+            "recall: dependency question answered by graph traversal (1 dependents)"
+        );
+        // Additive wire: the flag is serialized on the truncated hit only.
+        let wire = serde_json::to_value(&result.detailed).unwrap();
+        assert_eq!(wire[0]["truncated_in_context"], serde_json::json!(true));
+        assert!(wire[1].get("truncated_in_context").is_none());
+
+        // Budget 0 and 1 still render nothing (below the marker's size).
+        for budget in [0, 1] {
+            let r = try_structural(&g, "what depends on app router", 5, budget).unwrap();
+            assert_eq!(r.context, "", "budget {budget}");
+            assert!(r.detailed.iter().all(|h| !h.truncated_in_context));
+        }
+    }
+
+    /// Both cut sites (structural dispatch and blended assembly) run the
+    /// one shared `fit_blocks`: over the same concepts and every budget in a
+    /// sweep that crosses all three regimes (empty, truncated first block,
+    /// whole blocks), each site's context and per-hit flags are exactly
+    /// `fit_blocks` over the blocks it rendered, and the two sites agree on
+    /// the regime and on the id the marker names.
+    #[test]
+    fn assemble_and_dispatch_cut_the_budget_identically() {
+        use crate::config::RecallWeights;
+        use crate::recall::expand::ExpandedSet;
+        use crate::types::{ScoreTable, Scored};
+        use std::collections::HashMap;
+
+        let g = oversized_first_dependent();
+        let big = NodeId(uuid::Uuid::from_u64_pair(2, 2));
+        let payments = NodeId(uuid::Uuid::from_u64_pair(2, 3));
+        let expanded = ExpandedSet {
+            required: vec![Scored::new(big, 0.0), Scored::new(payments, 0.0)],
+            siblings: Vec::new(),
+        };
+        let scores = ScoreTable {
+            epoch: 0,
+            ranked: vec![Scored::new(big, 1.0), Scored::new(payments, 0.6)],
+        };
+        let hot = HashMap::new();
+
+        let check = |site: &str, result: &DetailedRecall, budget: usize| {
+            let fitted = format::fit_blocks(
+                &rendered_blocks(result),
+                budget,
+                format::default_token_count,
+            );
+            assert_eq!(result.context, fitted.context, "{site} budget {budget}");
+            for (i, h) in result.detailed.iter().enumerate() {
+                assert_eq!(
+                    h.included_in_context,
+                    i < fitted.whole,
+                    "{site} budget {budget}"
+                );
+                assert_eq!(
+                    h.truncated_in_context,
+                    fitted.truncation.is_some() && i == 0,
+                    "{site} budget {budget}"
+                );
+            }
+            fitted
+        };
+
+        let mut regimes = std::collections::BTreeSet::new();
+        for budget in (0..40).chain((40..2_500).step_by(37)).chain([10_000]) {
+            let structural = try_structural(&g, "what depends on app router", 5, budget).unwrap();
+            let blended = crate::recall::assemble::assemble(
+                &g,
+                &expanded,
+                &[],
+                &scores,
+                &hot,
+                &RecallQuery {
+                    query: "irrelevant".into(),
+                    top_k: 5,
+                    max_tokens: budget,
+                    traversal_depth: 2,
+                },
+                RecallWeights::default(),
+                ts(0),
+                format::default_token_count,
+            );
+            assert_eq!(structural.hits[0].node_id, big);
+            assert_eq!(blended.hits[0].node_id, big);
+            let s = check("dispatch", &structural, budget);
+            let b = check("assemble", &blended, budget);
+            assert_eq!(s.truncation, b.truncation, "budget {budget}");
+            assert_eq!(structural.truncation, s.truncation, "budget {budget}");
+            assert_eq!(blended.truncation, b.truncation, "budget {budget}");
+            assert_eq!(s.rendered() == 0, b.rendered() == 0, "budget {budget}");
+            if s.truncation.is_some() {
+                let tail = format!(
+                    "lambo_inspect {} for the full concept]",
+                    format::short_id(big)
+                );
+                assert!(s.context.ends_with(&tail) && b.context.ends_with(&tail));
+            }
+            regimes.insert((s.whole.min(1), s.truncation.is_some()));
+        }
+        assert_eq!(
+            regimes.len(),
+            3,
+            "the sweep must cover empty, truncated and whole: {regimes:?}"
         );
     }
 }

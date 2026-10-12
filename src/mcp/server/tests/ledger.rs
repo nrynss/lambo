@@ -357,7 +357,9 @@ async fn i1_the_canonical_marker_flag_is_false_when_the_budget_rendered_nothing(
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        !rendered.contains("[canonical]"),
+        // The block label renders the marker as `[<Type>, canonical]`; the
+        // bare string `[canonical]` never occurs, so it proved nothing.
+        !rendered.contains(", canonical]"),
         "a 1-token budget renders no hit block, so no canonical marker: {rendered}"
     );
 
@@ -389,6 +391,78 @@ async fn i1_the_canonical_marker_flag_is_false_when_the_budget_rendered_nothing(
         json!(true),
         "the warning line reaches the agent through `warnings` whatever the budget \
              did to the block: {recall}"
+    );
+
+    ledger.shutdown();
+    s.mem.close().await.expect("close");
+}
+
+/// #130 review L12/M5 over the real tool: a top hit too long for the budget
+/// comes back truncated in `content[0]`, flagged on its structured hit
+/// (additive, absent elsewhere), and flagged on the ledger's hit line.
+#[tokio::test]
+async fn i1_a_truncated_top_hit_is_flagged_in_the_response_and_the_ledger() {
+    let dir = ledger_dir("truncated-top-hit");
+    let path = dir.join("calls.jsonl");
+    let s = server_with_ledger("t130-truncated", &path).await;
+    let ledger = Arc::clone(s.ledger().expect("ledger attached"));
+
+    let long = format!("pagination ledger {}", "entry detail ".repeat(250));
+    call(
+        &s,
+        "lambo_record_action",
+        json!({
+            "agent_id": "agent-a",
+            "action": "rebuild the pagination ledger",
+            "modifies": [long],
+        }),
+    )
+    .await;
+
+    let out = call(
+        &s,
+        "lambo_recall",
+        json!({
+            "agent_id": "agent-a",
+            "query": "pagination ledger entry detail",
+            "max_tokens": 200,
+        }),
+    )
+    .await;
+    let text = out.content[0].as_text().expect("context text").text.clone();
+    let structured = out.structured_content.clone().expect("structured content");
+    let hits = structured["hits"].as_array().expect("hits");
+    assert!(
+        hits[0]["content"]
+            .as_str()
+            .unwrap()
+            .starts_with("pagination ledger entry"),
+        "{structured}"
+    );
+    assert_eq!(hits[0]["truncated_in_context"], json!(true), "{structured}");
+    assert!(hits[1..]
+        .iter()
+        .all(|h| h.get("truncated_in_context").is_none()));
+    assert!(text.contains("[truncated: "), "{text}");
+    assert!(
+        crate::recall::format::default_token_count(&text) <= 200,
+        "{text}"
+    );
+
+    let lines = read_ledger(&ledger, 2);
+    let recall = lines
+        .iter()
+        .find(|l| l["tool"] == json!("lambo_recall"))
+        .expect("a recall line");
+    assert_eq!(
+        recall["hits"][0]["truncated_in_context"],
+        json!(true),
+        "{recall}"
+    );
+    assert_eq!(
+        recall["hits"][0]["included_in_context"],
+        json!(false),
+        "{recall}"
     );
 
     ledger.shutdown();
@@ -918,6 +992,69 @@ fn i1_the_recall_line_reports_cold_start() {
     assert_eq!(recall_facts("q", 8, &detailed)["cold_start"], json!(false));
     detailed.cold_start = true;
     assert_eq!(recall_facts("q", 8, &detailed)["cold_start"], json!(true));
+}
+
+/// #130 review M1/M5: a truncated Canonical top hit whose cut kept its
+/// label renders `[…, canonical]`, so `canonical_marker` is true, and the
+/// hit line says `truncated_in_context: true`. A content-only cut shows no
+/// label, so the marker is false. A hit that was not truncated has no key.
+#[test]
+fn i1_the_recall_line_reports_a_truncated_top_hit() {
+    use crate::recall::detail::{Annotation, AnnotationKind, DetailedHit, DetailedRecall};
+    use crate::recall::format::{self, Truncation};
+    use crate::types::{CanonizationStatus, ConceptType, NodeId, RecallHit};
+
+    let facts_at = |budget: usize| {
+        let hit = RecallHit {
+            node_id: NodeId(uuid::Uuid::from_u64_pair(2, 9)),
+            content: "pillar ".repeat(800),
+            concept_type: Some(ConceptType::Entity),
+            score: 0.5,
+            is_canonical: true,
+            blast_radius: Some(2),
+        };
+        let warning = format::blast_radius_warning(2);
+        let mut d = DetailedHit::new(&hit, Some(CanonizationStatus::Canonical));
+        d.annotations.push(Annotation::new(
+            AnnotationKind::LoadBearing,
+            warning.clone(),
+        ));
+        let fitted = format::fit_blocks(
+            &[format::ContextBlock::for_hit(
+                &hit,
+                std::slice::from_ref(&warning),
+            )],
+            budget,
+            format::default_token_count,
+        );
+        let mut detailed = vec![d];
+        let truncation = DetailedRecall::mark_context(&mut detailed, &fitted);
+        let mut r = DetailedRecall::warn_only(String::new());
+        r.warnings.clear();
+        r.hits = vec![hit];
+        r.context = fitted.context;
+        r.truncation = truncation;
+        r.detailed = detailed;
+        (recall_facts("q", 8, &r), truncation)
+    };
+
+    let (facts, form) = facts_at(500);
+    assert_eq!(form, Some(Truncation::WithWarnings));
+    assert_eq!(facts["canonical_marker"], json!(true), "{facts}");
+    assert_eq!(facts["hits"][0]["truncated_in_context"], json!(true));
+    assert_eq!(facts["hits"][0]["included_in_context"], json!(false));
+
+    // Just above the marker alone: the content-only form, no label.
+    let (facts, form) = facts_at(30);
+    assert_eq!(form, Some(Truncation::ContentOnly));
+    assert_eq!(facts["canonical_marker"], json!(false), "{facts}");
+    assert_eq!(facts["hits"][0]["truncated_in_context"], json!(true));
+
+    // Fits whole: no key at all.
+    let (facts, form) = facts_at(100_000);
+    assert_eq!(form, None);
+    assert_eq!(facts["canonical_marker"], json!(true));
+    assert!(facts["hits"][0].get("truncated_in_context").is_none());
 }
 
 /// **I2 acceptance.** A heartbeat line carries the stats payload, uptime,

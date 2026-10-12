@@ -18,8 +18,11 @@
 //! short-form id leg in `resolve_focus` resolves it), so a caller working only
 //! from this text can reach the durable node-id path.
 //!
-//! Blocks are joined with a blank line ([`render_context`]); a block is never
-//! split by the token budget (the truncation rule lives in `assemble`).
+//! Blocks are joined with a blank line ([`render_context`]). The token budget
+//! is applied once, by [`fit_blocks`] (submodule `fit`): the longest ranked
+//! prefix of whole blocks, except that a first block too long for the budget
+//! has its content cut at a UTF-8 boundary, keeps its label, and is followed
+//! by a marker naming its id (#130).
 //!
 //! ## The ⚑ line (spec §13, verbatim)
 //!
@@ -75,6 +78,9 @@ use std::collections::{HashMap, HashSet};
 use crate::graph::Graph;
 use crate::types::HotListPayload;
 use crate::types::{AgentId, EdgeType, NodeId, RecallHit, Reservation};
+
+mod fit;
+pub(crate) use fit::{fit_blocks, ContextBlock, FittedContext, Truncation};
 
 /// The structural edge types that carry dependency for Stage-3 blast radius
 /// (spec §4.1 errata: `Derives` provenance and `Temporal` never count).

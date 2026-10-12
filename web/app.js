@@ -1185,10 +1185,20 @@
       // H3: cards whose complete blocks are outside the context budget are
       // collapsed by default; their warnings stay visible in the persistent
       // excluded-warnings area regardless (never hidden behind the expander).
+      // #130: a top hit too long for the budget is in the context
+      // truncated. It is neither excluded nor complete: shown expanded,
+      // with its own label, and its warnings stay on the card rather than
+      // in the excluded-warnings area.
+      var truncated = h.truncated_in_context === true;
       var included = h.included_in_context !== false;
-      var card = el("div", "card" + (isPillar ? " is-pillar" : "") + (included ? "" : " is-excluded"));
+      var card = el("div", "card" + (isPillar ? " is-pillar" : "") +
+        (truncated ? " is-truncated" : (included ? "" : " is-excluded")));
 
-      if (!included) {
+      if (truncated) {
+        var tbar = el("div", "card-excluded-bar");
+        tbar.appendChild(el("span", "muted-small", "Partly in context (truncated)"));
+        card.appendChild(tbar);
+      } else if (!included) {
         var bar = el("div", "card-excluded-bar");
         bar.appendChild(el("span", "muted-small", "Outside the context budget"));
         var toggle = el("button", "card-expand", "Show content");
@@ -1243,7 +1253,8 @@
     var wrap = $("excluded-warnings");
     clear(wrap);
     var excluded = hits.filter(function (h) {
-      return h.included_in_context === false && (h.annotations || []).length;
+      return h.included_in_context === false && h.truncated_in_context !== true &&
+        (h.annotations || []).length;
     });
     if (!excluded.length) {
       show(wrap, false);

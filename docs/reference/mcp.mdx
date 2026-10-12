@@ -183,6 +183,16 @@ Recall still works without a vector leg. You get matches on the words you use ra
  "isError": false}
 ```
 
+**When the top hit is longer than `max_tokens`.** `context` holds whole hit blocks in rank order, as many as fit the budget, and stops at the first block that does not fit: a lower-ranked block never follows a skipped one, even when it would fit on its own. Tokens are estimated as `ceil(bytes / 3.5)` over the rendered text, blank-line separators included. If the first block alone is over the budget, `context` is not left empty. The concept's text is cut at a character boundary and marked with `…`, the rest of the block (type, canonical marker, score, id, blast radius and warning lines) is kept, and a marker line follows:
+
+```text
+user schema owns the account table, the session table and… [Entity, canonical] (score 1.44, id 3f9c2a10, blast radius 8)
+⚑ Load-bearing pillar — 8 nodes depend on this. Modify with caution.
+[truncated: 1342 tokens left out; lambo_inspect 3f9c2a10 for the full concept]
+```
+
+The count estimates the text of this block that was left out, and the id is the hit's short id, so `lambo_inspect` with that id as `focus` returns the whole concept. If the warning lines do not fit, they are left out of the block (they are still in `warnings`); if the label line does not fit either, only the text and the marker are shown. Nothing follows a truncated block, and `hits` still carries every hit with its full content. In `structuredContent`, that hit carries `"truncated_in_context": true`; no other hit has the key. The marker counts toward `max_tokens`, so the context stays within the budget. A budget too small for the marker itself, about 22 tokens, still gives an empty context.
+
 **Recall by image or by vector.** With `image` or `query_vector`, the vector leg searches by that image's or vector's embedding instead of the text's, so "this outfit is close to the one you dismissed for Onam" is a recall by the photo of this outfit. The server embeds an image with no prompt, the way it embeds an image it stores, and normalizes a client vector to unit length after checking that its contract is exactly the session's `embedding_contract`, as `lambo_derive_image` does. Text sent beside it still matches words through the keyword leg. With no text the keyword leg finds nothing and recent interactions are left out: they say nothing about the image, and their fixed score would rank whatever was stored last above a real match whose similarity is lower. With text, recent interactions are included as for any recall. A structural question such as "what depends on X" is answered by the blended recall here, not by graph traversal, since traversal would ignore the image.
 
 * The vector leg is the point, so a store without vector search, an embedder that cannot embed images (for `image`), or client vectors turned off (for `query_vector`) is refused with a `configuration error` naming what is missing. An image the embedder fails on, or a vector search the store fails, is an error, not an answer without the vector leg.

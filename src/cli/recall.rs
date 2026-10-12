@@ -445,10 +445,21 @@ async fn run_on(
 /// and warning text appears in the output exactly once — inside its included
 /// block, or as a header line when the block was excluded.
 pub(crate) fn render_cli_text(detail: &DetailedRecall) -> String {
+    // #130: when the first hit was truncated, the pipeline's context is
+    // exactly that one block (content head, `…`, the kept rest of the block,
+    // then the marker naming its id) and nothing follows it. It cannot be
+    // re-rendered from the hit alone, since the cut depends on the budget
+    // and the estimator. `truncated_hit` reads the single source of truth,
+    // `DetailedRecall::truncation`, never the per-hit wire flag.
+    let truncated = detail.truncated_hit();
     let mut blocks: Vec<String> = Vec::new();
-    for h in &detail.detailed {
-        if h.included_in_context {
-            blocks.push(crate::recall::format::render_detailed_block(h));
+    if truncated.is_some() {
+        blocks.push(detail.context.clone());
+    } else {
+        for h in &detail.detailed {
+            if h.included_in_context {
+                blocks.push(crate::recall::format::render_detailed_block(h));
+            }
         }
     }
     let block_context = blocks.join("\n\n");
@@ -469,8 +480,16 @@ pub(crate) fn render_cli_text(detail: &DetailedRecall) -> String {
             push_header(&a.text);
         }
     }
-    for h in &detail.detailed {
+    for (i, h) in detail.detailed.iter().enumerate() {
         if h.included_in_context {
+            continue;
+        }
+        // A truncated first block that kept its warning lines already shows
+        // every annotation once; one that dropped them (label-only or
+        // content-only) sends them all to the header. Decided by the cut's
+        // form, never by searching the text, so a warning whose words also
+        // occur in the content head is still printed.
+        if i == 0 && truncated.is_some_and(|(_, form)| form.keeps_warnings()) {
             continue;
         }
         for a in &h.annotations {
@@ -574,6 +593,108 @@ mod tests {
             "one header line per warning: {text:?}"
         );
         assert!(text.contains("recall: second note"), "{text:?}");
+    }
+
+    /// A detailed recall whose only hit is a Canonical concept with
+    /// `content` and the given annotation lines, cut to `budget` the way
+    /// the pipeline cuts it.
+    fn truncated_detail(
+        content: String,
+        lines: &[(AnnotationKind, String)],
+        budget: usize,
+    ) -> DetailedRecall {
+        use crate::recall::format;
+        use crate::types::{ConceptType, NodeId, RecallHit};
+
+        let hit = RecallHit {
+            node_id: NodeId(uuid::Uuid::from_u64_pair(2, 7)),
+            content,
+            concept_type: Some(ConceptType::Logic),
+            score: 0.5,
+            is_canonical: true,
+            blast_radius: Some(3),
+        };
+        let mut d = crate::recall::detail::DetailedHit::new(
+            &hit,
+            Some(crate::types::CanonizationStatus::Canonical),
+        );
+        let texts: Vec<String> = lines.iter().map(|(_, t)| t.clone()).collect();
+        for (kind, text) in lines {
+            d.annotations.push(Annotation::new(*kind, text.clone()));
+        }
+        let fitted = format::fit_blocks(
+            &[format::ContextBlock::for_hit(&hit, &texts)],
+            budget,
+            format::default_token_count,
+        );
+        let mut detailed = vec![d];
+        let truncation = DetailedRecall::mark_context(&mut detailed, &fitted);
+        assert!(truncation.is_some(), "the fixture must truncate");
+        DetailedRecall {
+            hits: vec![hit],
+            context: fitted.context,
+            truncation,
+            warnings: texts,
+            legs: Default::default(),
+            cold_start: false,
+            detailed,
+            response_annotations: Vec::new(),
+        }
+    }
+
+    /// #130: a truncated first block that kept its warning lines reaches the
+    /// CLI and HTTP string as the pipeline's context, unchanged, and its
+    /// warning is printed once, inside the block, not in the header.
+    #[test]
+    fn a_truncated_first_block_renders_as_the_pipeline_context() {
+        let warning = crate::recall::format::blast_radius_warning(3);
+        let detail = truncated_detail(
+            "x".repeat(4_000),
+            &[(AnnotationKind::LoadBearing, warning.clone())],
+            500,
+        );
+        assert_eq!(
+            detail.truncation,
+            Some(crate::recall::format::Truncation::WithWarnings)
+        );
+        let text = render_cli_text(&detail);
+        assert_eq!(
+            text, detail.context,
+            "no header: the warning is in the block"
+        );
+        assert_eq!(text.matches(warning.as_str()).count(), 1, "{text:?}");
+        assert!(text.contains("[Logic, canonical]"), "{text:?}");
+    }
+
+    /// #130 and review L10: when the cut dropped the warning lines, every
+    /// annotation goes to the header, even one whose text also occurs in the
+    /// content head (the skip is decided by the cut's form, not by
+    /// searching the text).
+    #[test]
+    fn a_truncated_block_without_its_warnings_prints_them_in_the_header() {
+        let warning = crate::recall::format::blast_radius_warning(3);
+        let long = format!("Reserved by {}", "agent-".repeat(400));
+        let detail = truncated_detail(
+            format!("{warning} {}", "x".repeat(4_000)),
+            &[
+                (AnnotationKind::LoadBearing, warning.clone()),
+                (AnnotationKind::Reservation, long.clone()),
+            ],
+            200,
+        );
+        assert_eq!(
+            detail.truncation,
+            Some(crate::recall::format::Truncation::LabelOnly)
+        );
+        assert!(
+            detail.context.starts_with(&warning),
+            "the warning text is inside the content head"
+        );
+        let text = render_cli_text(&detail);
+        assert!(text.starts_with(&warning), "header first: {text:?}");
+        assert!(text.contains(&long), "{text:?}");
+        assert!(text.ends_with(&detail.context), "{text:?}");
+        assert_eq!(text.matches(long.as_str()).count(), 1);
     }
 }
 

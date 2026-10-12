@@ -15,8 +15,9 @@
 //! shape: every hit carries `node_id` (added 2026-10-06, issue #9, beside the
 //! originally pinned fields), `content`, `concept_type`, `status` (absent only
 //! for `None`), `score`, `blast_radius` (when present),
-//! `included_in_context`, and `annotations` as zero or more `{kind, text}`
-//! pairs; `response_annotations` carries the response-global explanations.
+//! `included_in_context`, `truncated_in_context` (#130, only when true),
+//! and `annotations` as zero or more `{kind, text}` pairs;
+//! `response_annotations` carries the response-global explanations.
 //! Producer order is preserved within both arrays.
 //!
 //! Annotation kinds are derived from typed producers, never from text
@@ -89,6 +90,16 @@ pub(crate) struct DetailedHit {
     /// rendered blocks appear in `context`. Hits after the token-budget cut
     /// remain in `hits` with `false`.
     pub(crate) included_in_context: bool,
+    /// True for the one hit whose block was too long for the budget on its
+    /// own and appears in `context` truncated, followed by the
+    /// `[truncated: …; lambo_inspect <id> …]` marker (#130). Only ever the
+    /// first hit, and then no hit is `included_in_context`. The wire
+    /// projection of [`DetailedRecall::truncation`], written only by
+    /// [`DetailedRecall::mark_context`]. Additive on the wire: serialized
+    /// only when true, so every payload whose first block fits is
+    /// byte-identical to before.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) truncated_in_context: bool,
     /// The hit's typed warning lines, in producer order. Token exclusion
     /// discards the hit's complete block, never these annotations.
     pub(crate) annotations: Vec<Annotation>,
@@ -106,6 +117,7 @@ impl DetailedHit {
             score: hit.score,
             blast_radius: hit.blast_radius,
             included_in_context: false,
+            truncated_in_context: false,
             annotations: Vec::new(),
         }
     }
@@ -121,11 +133,25 @@ pub(crate) struct DetailedRecall {
     #[serde(skip)]
     pub(crate) hits: Vec<RecallHit>,
 
-    /// The rendered context block: whole blocks in score order, joined with
-    /// blank lines (pre-⚑-header). Internal only; the wire's `context` is the
-    /// full `lambo recall` string rendered over this presentation model.
+    /// The rendered context block, as `format::fit_blocks` cut it: the
+    /// longest ranked prefix of whole blocks joined with blank lines, or the
+    /// first block truncated with its marker (#130), or `""`
+    /// (pre-⚑-header). Internal only; the wire's `context` is the full
+    /// `lambo recall` string rendered over this presentation model.
     #[serde(skip)]
     pub(crate) context: String,
+    /// How the first hit was truncated into `context`, when it was (#130).
+    /// **The single source of truth** for truncation: it is set only by
+    /// [`DetailedRecall::mark_context`], which also sets the per-hit
+    /// `included_in_context` / `truncated_in_context` wire projections from
+    /// the same cut. When `Some`, `detailed[0]` is the truncated hit and no
+    /// hit is `included_in_context`. Internal only.
+    ///
+    /// #33 PR 2 note: a layered merge re-runs `fit_blocks` over the merged
+    /// list and must call `mark_context` on the merged hits, so the flags a
+    /// per-session recall set are reset rather than carried over.
+    #[serde(skip)]
+    pub(crate) truncation: Option<crate::recall::format::Truncation>,
     /// The flattened warning lines in producer order (the pipeline's
     /// `RecallResult.warnings`). Internal only; the wire carries the typed
     /// counterparts instead.
@@ -182,12 +208,43 @@ impl DetailedRecall {
         Self {
             hits: Vec::new(),
             context: String::new(),
+            truncation: None,
             warnings: vec![warning],
             legs: Default::default(),
             cold_start: false,
             detailed: Vec::new(),
             response_annotations: Vec::new(),
         }
+    }
+}
+
+impl DetailedRecall {
+    /// Record a budget cut on the presentation hits: hits `0..whole` are
+    /// `included_in_context`, hit 0 is `truncated_in_context` exactly when
+    /// the cut truncated it, every other flag is cleared, and
+    /// [`Self::truncation`] is set. The one place either flag is written.
+    pub(crate) fn mark_context(
+        detailed: &mut [DetailedHit],
+        fitted: &crate::recall::format::FittedContext,
+    ) -> Option<crate::recall::format::Truncation> {
+        debug_assert!(fitted.truncation.is_none() || fitted.whole == 0);
+        for (i, d) in detailed.iter_mut().enumerate() {
+            d.included_in_context = i < fitted.whole;
+            d.truncated_in_context = i == 0 && fitted.truncation.is_some();
+        }
+        fitted.truncation
+    }
+
+    /// The truncated first hit and how it was truncated, if any. Reads
+    /// [`Self::truncation`] only; the per-hit flag is its wire projection.
+    pub(crate) fn truncated_hit(
+        &self,
+    ) -> Option<(&DetailedHit, crate::recall::format::Truncation)> {
+        let form = self.truncation?;
+        let hit = self.detailed.first()?;
+        debug_assert!(hit.truncated_in_context);
+        debug_assert!(self.detailed.iter().all(|h| !h.included_in_context));
+        Some((hit, form))
     }
 }
 

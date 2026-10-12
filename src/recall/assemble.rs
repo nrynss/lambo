@@ -121,9 +121,14 @@
 //! `max_tokens` by keeping the **longest score-ordered prefix** of blocks
 //! whose cumulative `token_fn` count fits — equivalently, whole
 //! lowest-scoring blocks are dropped from the tail. A block is never split,
-//! and a dropped block still appears in `RecallResult::hits` and contributes
-//! its warnings (a warning is actionable regardless of the token budget; the
-//! caller renders `context` and `warnings` separately).
+//! with one exception (#130): when the first block alone exceeds the budget,
+//! its content is cut and marked `…`, its label is kept, and a
+//! `[truncated: …; lambo_inspect <id> …]` line follows instead of an empty
+//! context; nothing follows it. The cut is
+//! the shared [`format::fit_blocks`], which `dispatch` uses too. A dropped
+//! block still appears in `RecallResult::hits` and contributes its warnings
+//! (a warning is actionable regardless of the token budget; the caller
+//! renders `context` and `warnings` separately).
 //!
 //! The default estimator is [`default_token_count`] (`ceil(bytes / 3.5)`);
 //! callers pass their own `Fn(&str) -> usize` to override.
@@ -327,7 +332,7 @@ where
     let mut hits: Vec<RecallHit> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
     let mut detailed: Vec<DetailedHit> = Vec::new();
-    let mut hit_blocks: Vec<String> = Vec::new(); // block per emitted hit, score order
+    let mut hit_blocks: Vec<format::ContextBlock> = Vec::new(); // block per emitted hit, score order
     for s in emitted(graph, &members, forced, query.top_k) {
         let Some(Node::Concept(c)) = graph.node(s.item) else {
             continue; // `emitted` yields graph concepts only
@@ -393,46 +398,33 @@ where
         // Warning lines reflect the included hit set, independent of the token
         // budget (see module docs); a block truncated from the context still
         // reports its conditions.
-        let block = format::render_block(&hit, &lines);
+        let block = format::ContextBlock::for_hit(&hit, &lines);
         warnings.extend(lines);
         hit_blocks.push(block);
         hits.push(hit);
         detailed.push(detailed_hit);
     }
 
-    // Context: ranked-prefix over the hit blocks in score order, stopping at
-    // the first block that does not fit. The measured token count is of the
-    // ACTUAL joined context (separators `\n\n` included), so the rendered
-    // output is within budget; a lower-ranked block never follows a skipped
-    // one (GPT5.6sol P1-4). Checked arithmetic keeps overflow a no-op stop.
-    let mut blocks: Vec<String> = Vec::new();
-    for block in hit_blocks {
-        let mut provisional = blocks.join("\n\n");
-        if !provisional.is_empty() {
-            provisional.push('\n');
-            provisional.push('\n');
-        }
-        provisional.push_str(&block);
-        let tokens = token_fn(&provisional);
-        if tokens.checked_add(1).is_none() || tokens > query.max_tokens {
-            break;
-        }
-        blocks.push(block);
-    }
+    // Context: the shared budget cut (`format::fit_blocks`): the longest
+    // ranked prefix of whole blocks, measured on the ACTUAL joined text
+    // (separators included) so the rendered output is within budget; a
+    // lower-ranked block never follows a skipped one (GPT5.6sol P1-4); a
+    // first block too long on its own is truncated with a marker naming its
+    // id instead of leaving the context empty (#130).
+    let fitted = format::fit_blocks(&hit_blocks, query.max_tokens, &token_fn);
 
     // H3: `included_in_context` is recorded AT the token-budget cut — true
     // exactly for the longest ranked prefix of hits whose complete rendered
     // blocks appear in the context. Every hit stays in `hits`; later ones
     // report `false` (their annotations remain, token exclusion never
-    // discards them).
-    let kept = blocks.len();
-    for (i, d) in detailed.iter_mut().enumerate() {
-        d.included_in_context = i < kept;
-    }
+    // discards them). A truncated first block is not complete, so it reports
+    // `false` with `truncated_in_context` set.
+    let truncation = DetailedRecall::mark_context(&mut detailed, &fitted);
 
     DetailedRecall {
         hits,
-        context: format::render_context(&blocks),
+        context: fitted.context,
+        truncation,
         warnings,
         // I1: attached by the caller, which owns the phase-1 result this
         // assembly ran over. Assembly itself sees only the expanded member
@@ -1598,7 +1590,9 @@ mod tests {
         let i1 = interaction(1);
         g.insert_interaction(i1.clone()).unwrap();
         // Long, highest-scoring block (does not fit); short, lower-scoring block
-        // (fits alone). Correct code: long blocks everything -> empty context.
+        // (fits alone). Correct code: the short block never renders. Below the
+        // #130 marker's size the context is empty; above it the long block is
+        // truncated and still nothing follows it.
         g.insert_concept(concept(1, i1.id, &"A".repeat(60)), i1.id)
             .unwrap();
         g.insert_concept(concept(2, i1.id, "B"), i1.id).unwrap();
@@ -1634,8 +1628,38 @@ mod tests {
         );
         assert_eq!(
             result.context, "",
-            "a non-fitting top block yields empty context, never a lower block"
+            "below the marker's size a non-fitting top block yields empty \
+             context, never a lower block"
         );
+        assert!(!result.context.contains("B [Entity]"));
+
+        // #130: a budget above the marker's size but still below the long
+        // block truncates the long block, and the short one stays out.
+        let full_long = crate::recall::format::render_block(&result.hits[0], &[]);
+        let truncated = assemble(
+            &g,
+            &expanded,
+            &[],
+            &scores,
+            &HashMap::new(),
+            &RecallQuery {
+                query: "irrelevant".into(),
+                top_k: 2,
+                max_tokens: full_long.len() - 1,
+                traversal_depth: 2,
+            },
+            RecallWeights::default(),
+            ts(60),
+            byte_len,
+        );
+        assert!(truncated.truncation.is_some(), "{}", truncated.context);
+        assert!(truncated.context.starts_with('A'), "{}", truncated.context);
+        assert!(
+            !truncated.context.contains("B [Entity]"),
+            "a lower-ranked block never follows the truncated one: {}",
+            truncated.context
+        );
+        assert!(truncated.context.len() < full_long.len());
     }
 
     // P2-5 (GPT5.6sol): a graph-missing member within top_k (e.g. a stale durable
