@@ -57,10 +57,13 @@
   The new trait method has a default body, so a third-party store still
   compiles, but the default returns `StoreError::Capability`: Stage 2 never
   substitutes the uncapped measurement. Until the store implements it (a
-  wrapper forwards it), any canonization cycle with a Candidate to check,
-  or under Swarm a Venerable to re-check, fails as
-  `CanonizationCycleFailed`, and the portal's inspect panel omits the
-  gates. `stage2_passes` and `gate_progress` keep their signatures and now
+  wrapper forwards it), under Swarm no Candidate becomes Venerable and no
+  Venerable becomes Canonical: each concept checked gets no Stage 2
+  evidence. The cycle itself still succeeds, so Stage 1 admission and the
+  Canonical budget's demotions continue, and each cycle logs one
+  `CanonizationStage2Unsupported` warning naming the missing capability.
+  Solo never asks for the span and is unaffected. The portal's inspect
+  panel omits the Swarm gates for such a store. `stage2_passes` and `gate_progress` keep their signatures and now
   measure against the default cap; `stage2_passes_with_window` and
   `gate_progress_with_config` take a chosen one. `interaction_span` itself
   is unchanged and still divides by the whole session extent.
