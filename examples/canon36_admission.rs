@@ -29,13 +29,13 @@
 //! raises every `gc_survived` below 3 to 3 first, to show the state after
 //! three GC sweeps (Swarm's Stage 1 needs it; Solo does not read it).
 
-#[cfg(not(feature = "store-sqlite"))]
+#[cfg(not(all(feature = "store-sqlite", feature = "store-memory")))]
 fn main() {
-    eprintln!("canon36_admission needs --features store-sqlite");
+    eprintln!("canon36_admission needs --features store-sqlite and the default store-memory");
     std::process::exit(2);
 }
 
-#[cfg(feature = "store-sqlite")]
+#[cfg(all(feature = "store-sqlite", feature = "store-memory"))]
 #[tokio::main]
 async fn main() {
     if let Err(message) = run().await {
@@ -44,7 +44,7 @@ async fn main() {
     }
 }
 
-#[cfg(feature = "store-sqlite")]
+#[cfg(all(feature = "store-sqlite", feature = "store-memory"))]
 async fn run() -> Result<(), String> {
     use std::collections::BTreeMap;
     use std::str::FromStr;
