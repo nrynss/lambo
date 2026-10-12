@@ -449,6 +449,12 @@ pub(crate) fn render_cli_text(detail: &DetailedRecall) -> String {
     for h in &detail.detailed {
         if h.included_in_context {
             blocks.push(crate::recall::format::render_detailed_block(h));
+        } else if h.truncated_in_context {
+            // #130: a first block too long for the budget is the pipeline's
+            // whole context (its head plus the marker naming its id), and
+            // nothing follows it; it cannot be re-rendered from the hit
+            // alone, since the cut depends on the budget and estimator.
+            blocks.push(detail.context.clone());
         }
     }
     let block_context = blocks.join("\n\n");
@@ -474,6 +480,11 @@ pub(crate) fn render_cli_text(detail: &DetailedRecall) -> String {
             continue;
         }
         for a in &h.annotations {
+            // A truncated block's head may still carry some of its warning
+            // lines; those are in the output once already.
+            if h.truncated_in_context && block_context.contains(&a.text) {
+                continue;
+            }
             push_header(&a.text);
         }
     }
@@ -574,6 +585,60 @@ mod tests {
             "one header line per warning: {text:?}"
         );
         assert!(text.contains("recall: second note"), "{text:?}");
+    }
+
+    /// #130: a first hit whose block alone exceeds the budget reaches the CLI
+    /// and HTTP string as the pipeline's truncated head plus its marker (it
+    /// cannot be re-rendered from the hit), and its warning, cut off with
+    /// the rest of the block, goes to the header exactly once.
+    #[test]
+    fn a_truncated_first_block_renders_as_the_pipeline_context() {
+        use crate::recall::format;
+        use crate::types::{ConceptType, NodeId, RecallHit};
+
+        let hit = RecallHit {
+            node_id: NodeId(uuid::Uuid::from_u64_pair(2, 7)),
+            content: "x".repeat(4_000),
+            concept_type: Some(ConceptType::Logic),
+            score: 0.5,
+            is_canonical: true,
+            blast_radius: Some(3),
+        };
+        let warning = format::blast_radius_warning(3);
+        let mut d = crate::recall::detail::DetailedHit::new(
+            &hit,
+            Some(crate::types::CanonizationStatus::Canonical),
+        );
+        d.annotations.push(Annotation::new(
+            AnnotationKind::LoadBearing,
+            warning.clone(),
+        ));
+        let fitted = format::fit_blocks(
+            &[format::ContextBlock {
+                text: format::render_block(&hit, std::slice::from_ref(&warning)),
+                inspect_id: format::short_id(hit.node_id),
+            }],
+            500,
+            format::default_token_count,
+        );
+        assert!(fitted.first_truncated);
+        d.truncated_in_context = true;
+        let detail = DetailedRecall {
+            hits: vec![hit],
+            context: fitted.context.clone(),
+            warnings: vec![warning.clone()],
+            legs: Default::default(),
+            cold_start: false,
+            detailed: vec![d],
+            response_annotations: Vec::new(),
+        };
+        let text = render_cli_text(&detail);
+        assert!(text.ends_with(&fitted.context), "{text:?}");
+        assert_eq!(text.matches(warning.as_str()).count(), 1, "{text:?}");
+        assert!(
+            text.starts_with(&warning),
+            "warning in the header: {text:?}"
+        );
     }
 }
 

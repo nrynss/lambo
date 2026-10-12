@@ -15,8 +15,8 @@
 //! shape: every hit carries `node_id` (added 2026-10-06, issue #9, beside the
 //! originally pinned fields), `content`, `concept_type`, `status` (absent only
 //! for `None`), `score`, `blast_radius` (when present),
-//! `included_in_context`, and `annotations` as zero or more `{kind, text}`
-//! pairs; `response_annotations` carries the response-global explanations.
+//! `included_in_context`, `truncated_in_context` (#130, only when true), and
+//! `annotations` as zero or more `{kind, text}` pairs; `response_annotations` carries the response-global explanations.
 //! Producer order is preserved within both arrays.
 //!
 //! Annotation kinds are derived from typed producers, never from text
@@ -89,6 +89,14 @@ pub(crate) struct DetailedHit {
     /// rendered blocks appear in `context`. Hits after the token-budget cut
     /// remain in `hits` with `false`.
     pub(crate) included_in_context: bool,
+    /// True for the one hit whose block was too long for the budget on its
+    /// own and appears in `context` as a truncated head followed by the
+    /// `… [truncated: …; lambo_inspect <id> …]` marker (#130). Only ever the
+    /// first hit, and then no hit is `included_in_context`. Additive on the
+    /// wire: serialized only when true, so every payload whose first block
+    /// fits is byte-identical to before.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) truncated_in_context: bool,
     /// The hit's typed warning lines, in producer order. Token exclusion
     /// discards the hit's complete block, never these annotations.
     pub(crate) annotations: Vec<Annotation>,
@@ -106,6 +114,7 @@ impl DetailedHit {
             score: hit.score,
             blast_radius: hit.blast_radius,
             included_in_context: false,
+            truncated_in_context: false,
             annotations: Vec::new(),
         }
     }

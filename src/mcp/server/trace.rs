@@ -111,7 +111,8 @@ fn caller() -> Option<Arc<str>> {
 /// * **`canonical_marker` is budget-gated.** `[canonical]` exists *only* inside a
 ///   hit's context block (`format::render_block`), and the block is emitted only
 ///   while the token budget lasts. So this flag counts hits with
-///   `included_in_context == true` and nothing else. A `max_tokens: 1` recall of
+///   `included_in_context == true`, plus a truncated first block (#130) whose
+///   head reached the end of its label line, and nothing else. A `max_tokens: 1` recall of
 ///   a Canonical concept therefore reports `canonical_marker: false` — correctly:
 ///   the agent received an empty context and the string `[canonical]` appeared
 ///   nowhere in the response. (Per-hit `is_canonical` is still on every hit, so
@@ -145,7 +146,14 @@ pub(super) fn recall_facts(
         .map(|(hit, d)| {
             // Budget-gated: `[canonical]` renders inside the hit's block, so a
             // hit the budget cut rendered no marker. See this function's docs.
-            canonical_marker |= hit.is_canonical && d.included_in_context;
+            // A truncated first block (#130) rendered the marker only if its
+            // head reached the end of the label (`<content> [Type, canonical]`).
+            canonical_marker |= hit.is_canonical
+                && (d.included_in_context
+                    || (d.truncated_in_context
+                        && detailed
+                            .context
+                            .starts_with(&crate::recall::format::concept_label(hit))));
             let mut legs = serde_json::Map::new();
             if let Some(l) = detailed.legs.get(&hit.node_id) {
                 if let Some(s) = l.keyword {

@@ -20,7 +20,8 @@
 //!
 //! Blocks are joined with a blank line ([`render_context`]). The token budget
 //! is applied once, by [`fit_blocks`] (submodule `fit`): the longest ranked
-//! prefix of whole blocks; a block is never split.
+//! prefix of whole blocks, except that a first block too long for the budget
+//! is cut at a UTF-8 boundary and followed by a marker naming its id (#130).
 //!
 //! ## The ⚑ line (spec §13, verbatim)
 //!

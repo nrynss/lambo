@@ -120,9 +120,11 @@
 //! whole block ([`crate::recall::format`]); the context is truncated to
 //! `max_tokens` by keeping the **longest score-ordered prefix** of blocks
 //! whose cumulative `token_fn` count fits — equivalently, whole
-//! lowest-scoring blocks are dropped from the tail. A block is never split.
-//! The cut is the shared [`format::fit_blocks`], which `dispatch` uses too.
-//! A dropped
+//! lowest-scoring blocks are dropped from the tail. A block is never split,
+//! with one exception (#130): when the first block alone exceeds the budget,
+//! its head is rendered with a `… [truncated: …; lambo_inspect <id> …]`
+//! marker instead of an empty context, and nothing follows it. The cut is
+//! the shared [`format::fit_blocks`], which `dispatch` uses too. A dropped
 //! block still appears in `RecallResult::hits` and contributes its warnings
 //! (a warning is actionable regardless of the token budget; the caller
 //! renders `context` and `warnings` separately).
@@ -408,17 +410,20 @@ where
     // Context: the shared budget cut (`format::fit_blocks`): the longest
     // ranked prefix of whole blocks, measured on the ACTUAL joined text
     // (separators included) so the rendered output is within budget; a
-    // lower-ranked block never follows a skipped one (GPT5.6sol P1-4).
-    // Checked arithmetic keeps overflow a no-op stop.
+    // lower-ranked block never follows a skipped one (GPT5.6sol P1-4); a
+    // first block too long on its own is truncated with a marker naming its
+    // id instead of leaving the context empty (#130).
     let fitted = format::fit_blocks(&hit_blocks, query.max_tokens, &token_fn);
 
     // H3: `included_in_context` is recorded AT the token-budget cut — true
     // exactly for the longest ranked prefix of hits whose complete rendered
     // blocks appear in the context. Every hit stays in `hits`; later ones
     // report `false` (their annotations remain, token exclusion never
-    // discards them).
+    // discards them). A truncated first block is not complete, so it reports
+    // `false` with `truncated_in_context` set.
     for (i, d) in detailed.iter_mut().enumerate() {
         d.included_in_context = i < fitted.whole;
+        d.truncated_in_context = fitted.first_truncated && i == 0;
     }
 
     DetailedRecall {
