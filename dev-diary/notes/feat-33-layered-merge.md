@@ -26,43 +26,76 @@ Library only: no serve config, no wire. Serve (`layers`, `[[serve.layer]]`,
 - `RecallResult`, `RecallHit`, `CacheKey` unchanged. `format.rs` untouched
   (lane B rebase).
 
-## Decisions
+## Decisions (revised after the adversarial review)
 
-- **`Route::Layer` does not dispatch structural queries.** A dispatched
-  traversal answer has no phase-1 leg scores, so the per-layer floor would
-  drop all of it. The blend always runs in a layer, with traversal
-  expansion inside the layer's own graph (edges never cross sessions).
-  The caller's own session keeps `Route::Text` and still dispatches. Also:
-  no recent leg, never cached.
-- **Rank is the position in the session's own list, before the floor.** A
-  layer whose top hits fail its floor does not get its later hits promoted.
-- **Dedupe keeps the nearer copy at the better key**, and forces it if either
-  copy was forced, so a memory is never lost because the nearer copy ranked
-  below `top_k`. Copies in one list are never compared.
-- **Forced = Conflict, Hot or Reservation** (design 2.2; matches assembly,
-  whose hot list covers conflict and the other hot kinds).
-- **Meta text**: `from <session>` and `also <short id> in <session>`, not
-  `<session>:<id>`, following PR 1's marker ruling (`resolve_focus` does not
-  parse a session prefix). Inserted into `ContextBlock::for_hit`'s label by
-  `layered::block_with_meta`.
-- **Warnings**: the caller's session's lines unchanged; each layer's lines
-  and response annotations prefixed `[<session>] `; a hit's lines leave
-  `warnings` only when no copy of it reached the answer (a dedupe-dropped
-  copy keeps its lines). Unavailable: one `layer_unavailable` annotation and
-  one line per layer, `recall: layer X is unavailable; results are from
-  <available sessions>` (`<s> only` when one remains).
-- **Contract check is unconditional**: a layer whose contract differs is
-  unavailable even when no query vector exists, since dedupe compares holder
-  vectors across sessions.
-- **Embed once**: by the caller; if the caller's store cannot vector-search
-  but a compatible layer's can, the caller still embeds once for the layers.
-- **Unlayered and refused calls are the plain recall**: no layers, or a
-  `top_k` the pipeline refuses, return `recall_detailed` wrapped, so output
-  is byte-identical.
-- **Accesses (#30)**: each session notes only its own hits the merge
-  returned.
+- **The floor is absolute.** A layer hit merges only with keyword evidence,
+  vector cosine at or above the layer's floor, or as a dependent in the
+  layer's own traversal answer (anchored evidence). Forcing (Conflict, Hot,
+  Reservation; design 2.2) only lifts the `top_k` cut (review H1: a busy
+  `general`'s hot or reserved concepts at cosine 0.1 crowded the caller).
+  The set is wider than assembly's: assembly forces hot-list payloads
+  (Conflict and the Hot kinds) and reservations only in cold mode
+  (`assemble.rs` 255-284); the first draft's "matches assembly" was wrong.
+- **Layers answer dependency questions** (orchestrator decision on M1).
+  `Route::Layer` dispatches to traversal when the query's anchor resolves
+  in the layer (`resolve_anchor` gates relevance); the merge admits those
+  dependents as anchored evidence (the tier's `traversal` response
+  annotation). Why: after the #33 split rulings live in `general` and
+  cross-session edges are dropped, so otherwise "what depends on X" for an
+  X in `general` has no answer anywhere. Traversal stays inside one graph.
+  After the merged cut, each session's headline is recomputed from its own
+  dependents the merged context renders (T9-R1-N4), via
+  `dispatch::traversal_headline`. No recent leg, never cached.
+- **Rank is the position in the session's own list, before the floor.**
+- **Merge walk.** Candidates are walked in merged order (key desc, tier
+  asc, position asc). A candidate that is the same memory as an emitted
+  group joins it: equal canonical key (hash map), or holder-vector cosine
+  at or above the threshold against **every** member (transitive, L1),
+  and a group takes at most one copy per tier. The group shows its
+  nearest tier's copy at its best copy's position. A copy cut by `top_k`
+  before its group exists is remembered by key and joins later (so a
+  forced farther copy still shows as the nearer one); by key only.
+  Vector comparisons are capped at `MAX_VECTOR_DEDUPE_PAIRS` (65,536)
+  per merge (L7); past it only keys dedupe.
+- **Meta text**: `from <session>`, `also <short id> in <session>`;
+  `ContextBlock::for_hit`'s label extended by `layered::block_with_meta`.
+- **Warnings**: caller's lines unchanged; layer lines and response
+  annotations prefixed `[<session>] `; a hit's lines leave `warnings` only
+  when no copy of it reached the answer. Unavailable: one
+  `layer_unavailable` annotation and one line per layer.
+- **Unavailable** means closed, contract mismatch, or a panic in that
+  layer's recall (caught per layer in `join_all`, L3). A failed vector read
+  is not unavailability: the layer degrades to its other legs with a
+  prefixed warning.
+- **Embed once**: by the caller. When the caller's store cannot search but
+  a compatible layer's can, the caller still embeds once for the layers,
+  its own side runs with no vector (so its recall cache serves, as its
+  plain recall would), and an embed failure goes to the layers that lost
+  their vector leg, prefixed (L4).
+- **Weights**: finite and positive; 0 is refused at the library boundary
+  (L5). Floors in `[0, 1]`.
+- **Contract check is unconditional.** L6 (note only): it is
+  `EmbeddingContract` equality, so `model: None` and `Some("")` differ and
+  such a layer is unavailable; PR 3's start-time contract check should
+  normalise or report it.
+- **Order of checks**: the stack is checked first, so a bad stack is a
+  Config error even with a `top_k` the pipeline refuses (M3); then no
+  layers or a refused `top_k` return the plain recall, byte-identical.
+- **Legs**: `detail.legs` keeps the caller's session only (keyed by node
+  id, unique within a session); `LayeredRecall.hit_legs` holds legs per
+  merged hit by position, because the split may replicate identity nodes
+  with one UUID across sessions (L2).
+- **Identities** are copied 64 hits per graph read, so a large `top_k`
+  does not hold one lock across a long vector copy (L7).
+- **Send**: a compile-time check that `recall_layered`'s future is `Send`
+  (L8).
+- **`layer_unavailable` on the wire (L9)**: it reaches no wire in PR 2.
+  The portal (`web/app.js`) renders annotation kinds generically
+  (`a.kind.replace(/_/g, " ")`, CSS class `a-<kind>`), the ledger writes
+  its own string, and the only Rust deserializer of `DetailedRecall` is the
+  same binary's portal parity test, so no consumer rejects the new value.
 - Concurrency without a `futures` dependency: `tokio::join!` for the caller
-  and a small `poll_fn` join over the layer futures.
+  and a `poll_fn` join over the layer futures.
 
 ## For PR 3
 
@@ -75,15 +108,22 @@ Library only: no serve config, no wire. Serve (`layers`, `[[serve.layer]]`,
 
 ## Tests
 
-`recall::layered::tests`: 2-list and 3-list interleave; weights (above 1,
-zero); floor (below, at, keyword, expansion-only, custom floor); forced
-members past floor and `top_k` with warning-line handling; dedupe by key at
-the better rank with `also` meta and kept warning; 3-tier dedupe by vector
-precedence, key-only without vectors, never within one list; one budget and
-flag reset; truncated layer first block with `(scope general)`; degradation
-(2 and 3 tiers, context equal to the caller's own blocks); prefixes;
-determinism and tie-breaks; `block_with_meta` identity.
-`memory::tests::layered`: unlayered byte identity at three budgets and for a
-refused `top_k`; a real two-session merge (session names, meta, no layer
-recent leg, per-session accesses); closed and incompatible layers degrade to
-the plain answer; refused stacks.
+`recall::layered::tests`: 2- and 3-list interleave; weights; floor (below,
+at, keyword, expansion-only, custom); forced members past `top_k` but never
+the floor; a layer's traversal answer admitted as anchored evidence with
+its headline recomputed after the cut, and the caller's own headline;
+dedupe by key at the better rank, with a forced cut copy shown as the
+nearer one; 3-tier precedence by vector; transitive dedupe and one copy
+per tier; the vector budget falling back to keys; per-hit legs with a node
+id shared across sessions; one budget and flag reset; truncated layer
+first block with `(scope general)`; degradation; prefixes; determinism and
+tie-breaks; `block_with_meta` identity; `layer_unavailable` serde.
+`memory::layered::tests`: a panicking future is that future's error only.
+`memory::tests::layered`: unlayered byte identity field by field
+(`DetailedRecall` equality, both flags, per-hit legs, access counts) at
+three budgets including a truncation; a refused `top_k` (2049) is the plain
+answer and a bad stack is still refused; the query embedded once with two
+layers (counting embedder); a caller without vector search embeds once for
+its layer; a real two-session merge (no layer recent leg, per-session
+accesses); a layer answering a dependency question; closed and
+incompatible layers degrade; refused stacks (weight 0 included).
