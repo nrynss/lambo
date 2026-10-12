@@ -99,8 +99,10 @@ pub struct LamboServer {
     /// `lambo serve`.
     activity: Option<Arc<crate::mcp::serve::activity::SessionActivity>>,
     /// The shared layers this session's `lambo_recall` also reads (#33 PR
-    /// 3), nearest tier first; empty for an unlayered session, whose every
-    /// answer is byte-identical to 0.5.0's. Set by a multi-session serve
+    /// 3), nearest tier first; empty for an unlayered session, whose tool
+    /// results and instructions are byte-identical to 0.5.0's (its
+    /// `tools/list` is not: recall and inspect list `scope`). Set by a
+    /// multi-session serve
     /// from `[serve] layers`.
     layers: layers::ServerLayers,
 }
@@ -476,7 +478,8 @@ impl ServerHandler for LamboServer {
             self.mem.session().0
         ));
         // #33 PR 3: a layered session names its layers. Appended, so an
-        // unlayered session's instructions are byte-identical to 0.5.0's.
+        // unlayered session's instructions are byte-identical to 0.5.0's
+        // (its `tools/list` is not: recall and inspect list `scope`).
         if !self.layers.is_empty()
             && let Some(text) = info.instructions.as_mut()
         {

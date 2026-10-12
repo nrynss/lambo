@@ -438,9 +438,11 @@ async fn a_recall_by_image_on_a_layered_session_says_the_layers_were_not_searche
     general.mem.close().await.expect("close");
 }
 
-/// Byte identity for an unlayered session: `lambo_recall`'s result equals,
-/// byte for byte, what the 0.5.0 body built from the same recall (that
-/// body is reproduced here as the reference). The second recall of the
+/// Byte identity for an unlayered session against the pre-#33 body
+/// (main 92c0f4af, v0.5.0's plus #130's `truncated_in_context`),
+/// reproduced here as the reference, at a budget that fits and one that
+/// truncates. The frozen v0.5.0 golden is
+/// `an_unlayered_recall_matches_the_frozen_v0_5_0_projection`. The second recall of the
 /// same query is served from the session's recall cache, so both read one
 /// answer.
 #[tokio::test]
@@ -675,6 +677,63 @@ async fn inspect_scope_on_an_unlayered_session_and_a_layer_that_is_down() {
         ),
         "{}",
         text_of(&down)
+    );
+    plain.mem.close().await.expect("close");
+}
+
+/// Review L4: an unlayered recall answers exactly as v0.5.0 did, checked
+/// against the tag's projection frozen verbatim in
+/// `fixtures/recall_v0_5_0.rs`: the whole result (`content[0]`, the
+/// `content[1]` warnings block, `structuredContent`, `isError`) for a
+/// recall with a non-empty warning (another agent's reservation) whose
+/// blocks fit the budget. The second recall of the query is served from
+/// the session's recall cache, so both read one answer. `tools/list` is
+/// not covered: `scope` is new in the recall and inspect schemas.
+#[tokio::test]
+async fn an_unlayered_recall_matches_the_frozen_v0_5_0_projection() {
+    let plain = server("frozen-proj").await;
+    let ids = derive_created(
+        &plain,
+        "agent-a",
+        json!([{"content": PROJECT_FACT, "concept_type": "logic"}]),
+    )
+    .await;
+    derive(&plain, GENERAL_RULING).await;
+    let reserved = call(
+        &plain,
+        "lambo_reserve",
+        json!({"agent_id": "agent-b", "node_id": ids[0]}),
+    )
+    .await;
+    assert_eq!(reserved.is_error, Some(false), "{reserved:?}");
+    let query = crate::types::RecallQuery {
+        query: "worktree branches".into(),
+        top_k: 5,
+        max_tokens: 2_000,
+        traversal_depth: 2,
+    };
+    let detailed = plain.memory().recall_detailed(query).await.expect("recall");
+    assert!(detailed.truncated_hit().is_none(), "v0.5.0 predates #130");
+    let frozen = super::recall_v0_5_0::v0_5_0_recall_result(detailed);
+    let out = plain
+        .recall_impl(super::super::params::RecallParams {
+            agent_id: "agent-a".into(),
+            query: "worktree branches".into(),
+            top_k: Some(5),
+            max_tokens: Some(2_000),
+            traversal_depth: Some(2),
+            ..Default::default()
+        })
+        .await;
+    let warnings = structured(&out)["warnings"].as_array().expect("warnings");
+    assert!(
+        !warnings.is_empty(),
+        "a warning is part of what is compared"
+    );
+    assert_eq!(out.content.len(), 2, "content[1] carries the warnings");
+    assert_eq!(
+        serde_json::to_string(&out).unwrap(),
+        serde_json::to_string(&frozen).unwrap()
     );
     plain.mem.close().await.expect("close");
 }

@@ -33,6 +33,9 @@ mod inspect;
 mod layered;
 mod ledger;
 mod recall_image;
+/// #33 PR 3 review L4: the v0.5.0 recall projection, frozen.
+#[path = "fixtures/recall_v0_5_0.rs"]
+mod recall_v0_5_0;
 mod receipts;
 mod schemas;
 mod stats;

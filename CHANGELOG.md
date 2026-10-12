@@ -158,7 +158,9 @@
   carries `scope` when the call sent one. The server instructions of a
   layered session name its layers. A stdio serve holding its session itself stays unlayered and
   says so once; one that forwards to an HTTP holder gets the holder's
-  layering. Unlayered sessions answer byte for byte as before;
+  layering. Unlayered sessions' tool results and server instructions are
+  unchanged byte for byte (`tools/list` is not: `lambo_recall` and
+  `lambo_inspect` list the new optional `scope`);
   `lambo recall` and `lambo serve-web` read one session, as before. New
   library items: `config::{LayerConfig, LayerSpec, ServeLayers}`,
   `ServeConfig::{resolve_layers, layer_stack_of, stdio_layers}`,
