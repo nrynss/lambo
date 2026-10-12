@@ -164,6 +164,28 @@ pub(super) fn recall_facts(
     )
 }
 
+/// [`recall_facts`] for a layered session's recall (#33 PR 3): every hit
+/// line also names its `session`, and the line carries `session_hits`, the
+/// hit count per session (a map keyed by session, so N tiers fit). Legs
+/// come from [`LayeredRecall`](crate::memory::LayeredRecall)'s per-hit
+/// list, by position: node ids are unique within a session, not across
+/// sessions, so the merged `legs` map holds the caller's session only.
+/// Additive keys; `v` stays 1.
+pub(super) fn layered_recall_facts(
+    query: &str,
+    top_k: usize,
+    recalled: &crate::memory::LayeredRecall,
+) -> serde_json::Value {
+    let sessions: Vec<&str> = recalled.hits.iter().map(|h| h.session.as_str()).collect();
+    recall_facts_with(
+        query,
+        top_k,
+        &recalled.detail,
+        |i, _| recalled.hit_legs.get(i).copied().flatten(),
+        Some(&sessions),
+    )
+}
+
 /// The recall line's facts, with each hit's legs from `legs_of(position,
 /// hit)` and, for a layered session, each hit's session by position.
 fn recall_facts_with(

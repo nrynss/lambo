@@ -300,6 +300,8 @@ async fn f18_tool_schemas_match_the_golden_property_set() {
                 "query_vector.contract.kind",
                 "query_vector.contract.model",
                 "query_vector.values",
+                // #33 PR 3: a session name, not a time.
+                "scope",
                 "top_k",
                 "traversal_depth",
             ],

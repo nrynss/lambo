@@ -448,6 +448,14 @@
           ],
           "description": "Optional: recall what is close to a vector you computed, in this\nsession's embedding space (accepted only when the operator enabled\nclient vectors). Send at most one of `image` and `query_vector`. Not\nstored."
         },
+        "scope": {
+          "description": "Optional: read one session only. Omit it to read this session\ntogether with its shared layers (when the operator configured any);\nname this session, or one of its layers (as `get_info` lists them),\nto read that session alone.",
+          "maxLength": 16384,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "top_k": {
           "description": "Hits to return. Defaults to the session config's `default_top_k`.",
           "format": "uint",

@@ -469,6 +469,29 @@ impl ServerHandler for LamboServer {
                  fire at once have no order to keep).",
             self.mem.session().0
         ));
+        // #33 PR 3: a layered session names its layers. Appended, so an
+        // unlayered session's instructions are byte-identical to 0.5.0's.
+        if !self.layers.is_empty()
+            && let Some(text) = info.instructions.as_mut()
+        {
+            let names: Vec<&str> = self
+                .layers
+                .handles
+                .iter()
+                .map(|h| h.session.as_str())
+                .collect();
+            text.push_str(&format!(
+                " lambo_recall in session '{session}' also searches its shared layers: {layers}. \
+                 Every recall hit names the session it is from (structuredContent \
+                 hits[].session, and 'from <session>' in a layer hit's block), and its id \
+                 belongs to that session. Pass scope = \"{first}\" to lambo_recall to read that \
+                 layer alone, or scope = \"{session}\" for this session alone. Every other \
+                 tool, and every write, acts on session '{session}' only.",
+                session = self.mem.session().0,
+                layers = names.join(", "),
+                first = names[0],
+            ));
+        }
         info
     }
 }

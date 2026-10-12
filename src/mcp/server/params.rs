@@ -119,6 +119,12 @@ pub struct RecallParams {
     /// client vectors). Send at most one of `image` and `query_vector`. Not
     /// stored.
     pub query_vector: Option<WireQueryVector>,
+    /// Optional: read one session only. Omit it to read this session
+    /// together with its shared layers (when the operator configured any);
+    /// name this session, or one of its layers (as `get_info` lists them),
+    /// to read that session alone.
+    #[schemars(length(max = 16_384))]
+    pub scope: Option<String>,
 }
 
 /// A query vector you computed, in this session's embedding space.
