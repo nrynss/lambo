@@ -118,7 +118,7 @@ mod watchdog;
 pub use authority::check_serve_credentials;
 pub use builder::{build_memory, resolve_serve_backends};
 pub use heartbeat::authorize_ledger;
-pub use layers::{plan_layers, stdio_layer_warning};
+pub use layers::plan_layers;
 pub use pinned::{pin_sessions, PinnedSessions};
 
 use authority::{
@@ -385,16 +385,15 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     authorize_ledger(&opts)?;
     // #32 PR 4: the pinned sessions, refused before any lease too.
     check_pinned(&opts.session, &opts.sessions, opts.transport)?;
-    // #33 PR 3: the layers, refused before any lease too. Stdio holds one
-    // session and serves it unlayered; the CLI never hands it stacks, a
-    // library caller's are dropped with a warning.
+    // #33 PR 3: the layers, refused before any lease too. A stdio serve is
+    // never layered: its stack (if its session would have one over HTTP)
+    // is set aside, and warned of only if this process ends up the holder.
     let mut opts = opts;
-    if opts.transport == Transport::Stdio && !opts.layers.is_empty() {
-        tracing::warn!(
-            "lambo serve: a stdio serve holds one session and serves it unlayered; the layer              stacks in ServeOptions are ignored"
-        );
-        opts.layers = crate::config::ServeLayers::default();
-    }
+    let stdio_layers = if opts.transport == Transport::Stdio {
+        std::mem::take(&mut opts.layers)
+    } else {
+        crate::config::ServeLayers::default()
+    };
     layers::check_pinned_layers(&opts.layers, &opts.sessions)?;
     if let Some(authority) = &authority {
         layers::check_coverage(authority, &opts.layers)?;
@@ -506,7 +505,14 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
             }
             return Err(e);
         }
-        Ok(Role::Holder(mem)) => Arc::from(mem),
+        Ok(Role::Holder(mem)) => {
+            // #33 PR 3 review M2: only the holder serves unlayered; a proxy
+            // reaches the HTTP holder's session, layers included.
+            if let Some(warning) = layers::stdio_unlayered_warning(&opts.session, &stdio_layers) {
+                tracing::warn!("lambo serve: {warning}");
+            }
+            Arc::from(mem)
+        }
         Ok(Role::Proxy(proxy)) => {
             drop(embedder);
             // **The proxy branch is deliberately NOT armed for durability, and

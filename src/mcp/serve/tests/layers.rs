@@ -3,7 +3,9 @@
 
 use super::*;
 use crate::config::{ServeConfig, ServeCredential, ServeLayers};
-use crate::mcp::serve::layers::{check_contracts, check_coverage, check_pinned_layers};
+use crate::mcp::serve::layers::{
+    check_contracts, check_coverage, check_pinned_layers, stdio_unlayered_warning,
+};
 use crate::surface::session::{parse_addressed, SessionCapabilities, SessionGrant, SessionScope};
 use crate::types::EmbeddingContract;
 
@@ -120,23 +122,27 @@ fn a_layer_must_share_its_consumers_embedding_contract() {
     );
 }
 
-/// Stdio holds one session and serves it unlayered: `plan_layers` gives no
-/// stacks, and `stdio_layer_warning` names the layers it does not read,
+/// Stdio holds one session and serves it unlayered. `plan_layers` keeps
+/// the stdio session's configured stack unchecked (its layer need not be
+/// pinned), and `stdio_unlayered_warning`, which `serve` logs on the holder
+/// path only (a proxy gets the HTTP holder's layering), names the layers
 /// only when the session would be layered.
 #[test]
-fn a_stdio_serve_is_unlayered_and_says_so_once() {
+fn a_stdio_holder_is_unlayered_and_says_so_once() {
     let cfg = config(
         "sessions = [\"proj\", \"general\"]\nlayers = [\"general\"]\n[serve.session_layers]\nout = []\n",
     );
-    assert!(plan_layers(&cfg, &["proj".into()], Transport::Stdio)
-        .expect("stdio never refuses")
-        .is_empty());
-    let warning = stdio_layer_warning(&cfg, "proj", Transport::Stdio).expect("warned");
+    let planned =
+        plan_layers(&cfg, &["proj".into()], Transport::Stdio).expect("stdio never refuses");
+    assert_eq!(planned.stack("proj")[0].session, "general");
+    let warning = stdio_unlayered_warning("proj", &planned).expect("warned");
     assert!(warning.contains("serves it unlayered"), "{warning}");
     assert!(warning.contains("general"), "{warning}");
-    assert!(stdio_layer_warning(&cfg, "general", Transport::Stdio).is_none());
-    assert!(stdio_layer_warning(&cfg, "out", Transport::Stdio).is_none());
-    assert!(stdio_layer_warning(&cfg, "proj", Transport::Http).is_none());
+    for unlayered in ["general", "out"] {
+        let planned = plan_layers(&cfg, &[unlayered.into()], Transport::Stdio).expect("plan");
+        assert!(planned.is_empty(), "{unlayered}");
+        assert!(stdio_unlayered_warning(unlayered, &planned).is_none());
+    }
     // Over HTTP the same table resolves, and refuses an unpinned layer.
     let layers = plan_layers(&cfg, &cfg.sessions, Transport::Http).expect("resolve");
     assert_eq!(layers.stack("proj")[0].session, "general");
@@ -144,4 +150,6 @@ fn a_stdio_serve_is_unlayered_and_says_so_once() {
         .unwrap_err()
         .to_string();
     assert!(err.contains("every layer must be pinned"), "{err}");
+    // L6: the refusal names the opt-out too.
+    assert!(err.contains("[serve.session_layers] proj = []"), "{err}");
 }

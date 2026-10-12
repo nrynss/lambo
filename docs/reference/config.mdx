@@ -343,7 +343,7 @@ Further rules once credentials are in play:
 
 ### Layers
 
-A layer is a shared session, such as `general`, whose memories a project session's recall reads too. With `layers = ["general"]`, a `lambo_recall` to `lambo` reads `lambo` and `general` in one call and merges the two answers under one token budget. Writes, and every other tool, still act on the addressed session only. Layers are an HTTP serve's: a stdio serve holds one session and serves it unlayered, logging one warning when its session would be layered.
+A layer is a shared session, such as `general`, whose memories a project session's recall reads too. With `layers = ["general"]`, a `lambo_recall` to `lambo` reads `lambo` and `general` in one call and merges the two answers under one token budget. Writes, and every other tool, still act on the addressed session only. Layers are an HTTP serve's. A stdio serve that holds its session itself serves it unlayered and logs one warning when the session would be layered; a stdio serve that forwards to an HTTP `lambo serve` holding the session (the usual case on a machine running one) reaches that session through the holder, layers included, and warns of nothing.
 
 ```toml
 [serve]

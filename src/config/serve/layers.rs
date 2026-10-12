@@ -226,33 +226,54 @@ impl ServeConfig {
                 )));
             }
         }
-        let knob = |layer: &str| self.layer.iter().find(|k| k.session == layer);
         let mut stacks = BTreeMap::new();
         for session in pinned {
             let stack = self.layer_stack_of(session);
             if stack.is_empty() {
                 continue;
             }
-            let mut specs = Vec::with_capacity(stack.len());
             for layer in stack {
                 if !is_pinned(layer) {
                     return Err(serve_err(format!(
                         "{session:?} is layered with {layer:?}, which this serve does not pin: \
-                         every layer must be pinned (list it in [serve] sessions)"
+                         every layer must be pinned (list it in [serve] sessions), or opt \
+                         {session:?} out with [serve.session_layers] {session} = []"
                     )));
                 }
-                let k = knob(layer);
-                specs.push(LayerSpec {
+            }
+            stacks.insert(session.clone(), self.specs_for(stack));
+        }
+        Ok(ServeLayers { stacks })
+    }
+
+    /// The stack `session` would have over HTTP, by configuration alone
+    /// (no pinning check), for a stdio serve: it serves its one session
+    /// unlayered, and says so only once it is the holder (a stdio serve
+    /// that proxies to an HTTP holder gets the holder's layering).
+    pub fn stdio_layers(&self, session: &str) -> ServeLayers {
+        let stack = self.layer_stack_of(session);
+        let mut stacks = BTreeMap::new();
+        if !stack.is_empty() {
+            stacks.insert(session.to_string(), self.specs_for(stack));
+        }
+        ServeLayers { stacks }
+    }
+
+    /// `stack` resolved against `[[serve.layer]]`, absent knobs defaulted.
+    fn specs_for(&self, stack: &[String]) -> Vec<LayerSpec> {
+        stack
+            .iter()
+            .map(|layer| {
+                let k = self.layer.iter().find(|k| &k.session == layer);
+                LayerSpec {
                     session: layer.clone(),
                     weight: k.and_then(|k| k.weight).unwrap_or(DEFAULT_LAYER_WEIGHT),
                     min_similarity: k
                         .and_then(|k| k.min_similarity)
                         .unwrap_or(DEFAULT_LAYER_MIN_SIMILARITY),
-                });
-            }
-            stacks.insert(session.clone(), specs);
-        }
-        Ok(ServeLayers { stacks })
+                }
+            })
+            .collect()
     }
 }
 

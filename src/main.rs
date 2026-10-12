@@ -698,8 +698,9 @@ fn serve_preflight(
         }
     };
     // #33 PR 3: the layer stacks over HTTP, every layer and layered session
-    // pinned, refused here before any backend is built. A stdio serve
-    // holds one session and serves it unlayered, saying so once.
+    // pinned, refused here before any backend is built. A stdio serve's
+    // stack is only planned: it is served unlayered, and `serve` says so
+    // once, if (and only if) it becomes the holder.
     let layers = match lambo::mcp::plan_layers(&file.serve, &pinned.sessions, transport) {
         Ok(layers) => layers,
         Err(e) => {
@@ -707,10 +708,6 @@ fn serve_preflight(
             return Err(ExitCode::from(2));
         }
     };
-    if let Some(warning) = lambo::mcp::stdio_layer_warning(&file.serve, &pinned.default, transport)
-    {
-        tracing::warn!("{warning}");
-    }
     // Env beats flag (T8.7), resolved before any of it reaches a log line.
     // A set-but-empty LAMBO_AUTH_TOKEN is a usage error, not a silent
     // fallback to the flag. HTTP only (#32 PR 5 review S3): a stdio serve

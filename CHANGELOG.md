@@ -149,12 +149,13 @@
   differ. With `--ledger`, a layered session's recall line names each
   hit's session and counts them in `session_hits`, and any recall line
   carries `scope` when the call sent one. The server instructions of a
-  layered session name its layers. A stdio serve stays unlayered and
-  says so once. Unlayered sessions answer byte for byte as before;
+  layered session name its layers. A stdio serve holding its session itself stays unlayered and
+  says so once; one that forwards to an HTTP holder gets the holder's
+  layering. Unlayered sessions answer byte for byte as before;
   `lambo recall` and `lambo serve-web` read one session, as before. New
   library items: `config::{LayerConfig, LayerSpec, ServeLayers}`,
-  `ServeConfig::{resolve_layers, layer_stack_of}`,
-  `mcp::{plan_layers, stdio_layer_warning}`.
+  `ServeConfig::{resolve_layers, layer_stack_of, stdio_layers}`,
+  `mcp::plan_layers`.
 
 ### Changed
 

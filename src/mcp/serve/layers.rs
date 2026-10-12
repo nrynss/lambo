@@ -15,8 +15,9 @@
 //!   and its layers share one embedding contract, so one query vector is
 //!   valid everywhere and cosines are comparable.
 //!
-//! A stdio serve holds one session and serves it unlayered, with one
-//! warning ([`stdio_layer_warning`]).
+//! A stdio holder holds one session and serves it unlayered, with one
+//! warning ([`stdio_unlayered_warning`]); a stdio serve that proxies to an
+//! HTTP holder gets that holder's layering and warns of nothing.
 
 use super::authority::ServeAuthority;
 use super::Transport;
@@ -135,38 +136,39 @@ pub(super) fn check_contracts<'a>(
     Ok(())
 }
 
-/// The one warning a stdio serve logs when its session would be layered
-/// over HTTP: it holds one session, so it serves it unlayered (design
-/// section 1, Stdio). `None` over HTTP or for an unlayered session.
-pub fn stdio_layer_warning(
-    cfg: &crate::config::ServeConfig,
-    session: &str,
-    transport: Transport,
-) -> Option<String> {
-    if transport != Transport::Stdio {
-        return None;
-    }
-    let stack = cfg.layer_stack_of(session);
+/// The one warning a stdio holder logs when its session would be layered
+/// over HTTP (design section 1, Stdio): it holds one session and serves it
+/// unlayered. `serve` logs it only on the holder path, after the
+/// election: a stdio serve that proxies to an HTTP holder reaches that
+/// holder's session, layers included, and must not claim otherwise.
+/// `None` for an unlayered session.
+pub(super) fn stdio_unlayered_warning(session: &str, layers: &ServeLayers) -> Option<String> {
+    let stack = layers.stack(session);
     (!stack.is_empty()).then(|| {
+        let names: Vec<&str> = stack.iter().map(|l| l.session.as_str()).collect();
         format!(
-            "lambo.toml [serve] layers {session:?} with {}, but a stdio serve holds one session \
-             and serves it unlayered; recall through the HTTP serve (/mcp/s/{session}) to read \
-             its layers",
-            stack.join(", ")
+            "lambo.toml [serve] layers {session:?} with {}, but this stdio serve holds the \
+             session itself and serves it unlayered; recall through the HTTP serve \
+             (/mcp/s/{session}) to read its layers",
+            names.join(", ")
         )
     })
 }
 
 /// The layer stacks a serve over `transport` pinning `sessions` uses:
-/// `[serve]`'s, resolved, over HTTP; none over stdio (logged once by the
-/// caller through [`stdio_layer_warning`]).
+/// `[serve]`'s, resolved, over HTTP. Over stdio, the one session's stack
+/// by configuration alone, unchecked: `serve` never layers a stdio
+/// session, and uses it only to warn if it ends up the holder.
 pub fn plan_layers(
     cfg: &crate::config::ServeConfig,
     sessions: &[String],
     transport: Transport,
 ) -> Result<ServeLayers, LamboError> {
     match transport {
-        Transport::Stdio => Ok(ServeLayers::default()),
+        Transport::Stdio => Ok(sessions
+            .first()
+            .map(|s| cfg.stdio_layers(s))
+            .unwrap_or_default()),
         Transport::Http => cfg.resolve_layers(sessions),
     }
 }
