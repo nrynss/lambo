@@ -80,11 +80,13 @@ fn edge_cleanup_spares_non_decaying_edge_types() {
         };
         g.insert_concept(c, iid).unwrap();
     }
-    // Stale + under weight, but structural: must survive (ALGO-9).
+    // Stale + under weight, but structural or explicit opposition (#19):
+    // must survive (ALGO-9).
     for (id, ty) in [
         (200u64, EdgeType::Dependency),
         (201, EdgeType::Causal),
         (202, EdgeType::Hierarchical),
+        (204, EdgeType::Contradicts),
     ] {
         g.upsert_edge(edge(id, 10, 11, ty, 0.4, 0)).unwrap();
     }
@@ -98,7 +100,7 @@ fn edge_cleanup_spares_non_decaying_edge_types() {
         vec![nid(203)],
         "only the decaying edge is collected"
     );
-    for id in [200u64, 201, 202] {
+    for id in [200u64, 201, 202, 204] {
         assert!(
             g.edge(nid(id)).is_some(),
             "structural edge {id} must survive step 1 (spec §5 table)"

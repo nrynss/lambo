@@ -937,8 +937,10 @@ fn is_root_goal_concept(c: &Concept, goal_texts: &[String]) -> bool {
 fn dead_edge_ids(graph: &Graph, params: GcParams) -> Vec<NodeId> {
     const DECAYING_TYPES: [EdgeType; 2] = [EdgeType::CoOccurrence, EdgeType::Semantic];
     debug_assert!(
-        DECAYING_TYPES.iter().all(|t| t.decays()),
-        "DECAYING_TYPES must mirror EdgeType::decays (spec §5 table)"
+        EdgeType::ALL
+            .iter()
+            .all(|t| t.decays() == DECAYING_TYPES.contains(t)),
+        "DECAYING_TYPES must mirror EdgeType::decays in both directions (spec §5 table)"
     );
     let mut dead: Vec<NodeId> = Vec::new();
     for node in graph

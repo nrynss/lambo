@@ -206,6 +206,21 @@ pub enum EdgeType {
 }
 
 impl EdgeType {
+    /// Every variant, in declaration order. Crate-internal: it lets a table
+    /// keyed by edge type (for example GC's decaying set) be checked in both
+    /// directions. `edge_type_all_is_complete` fails to compile until a new
+    /// variant is added here too.
+    pub(crate) const ALL: [EdgeType; 8] = [
+        Self::Temporal,
+        Self::Derives,
+        Self::CoOccurrence,
+        Self::Causal,
+        Self::Dependency,
+        Self::Hierarchical,
+        Self::Semantic,
+        Self::Contradicts,
+    ];
+
     /// Whether this edge type participates in weight decay (spec §5 table).
     pub const fn decays(self) -> bool {
         matches!(self, Self::CoOccurrence | Self::Semantic)
@@ -2040,6 +2055,27 @@ mod tests {
         assert!(!EdgeType::Hierarchical.decays());
         assert!(EdgeType::Semantic.decays());
         assert!(!EdgeType::Contradicts.decays());
+    }
+
+    /// `EdgeType::ALL` lists every variant once, in declaration order: the
+    /// exhaustive match stops compiling when a variant is added.
+    #[test]
+    fn edge_type_all_is_complete() {
+        const fn index(ty: EdgeType) -> usize {
+            match ty {
+                EdgeType::Temporal => 0,
+                EdgeType::Derives => 1,
+                EdgeType::CoOccurrence => 2,
+                EdgeType::Causal => 3,
+                EdgeType::Dependency => 4,
+                EdgeType::Hierarchical => 5,
+                EdgeType::Semantic => 6,
+                EdgeType::Contradicts => 7,
+            }
+        }
+        for (i, ty) in EdgeType::ALL.iter().enumerate() {
+            assert_eq!(index(*ty), i, "{ty:?}");
+        }
     }
 
     /// #19: every edge type counts toward score density except
