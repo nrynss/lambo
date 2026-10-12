@@ -46,6 +46,7 @@
 //! | `writes` | metadata writes, `derive*`, `record_action*`, `demote`, `retract`, soft locks |
 //! | `image` | `derive_image_as`, `derive_image_async_as` (#22): the call-path image embed and checks |
 //! | `reads` | `recall*`, saints, stats, events, the access ledger hooks |
+//! | `layered` | `recall_layered` and `LayerRef` (#33): one recall over a session and its layers |
 //! | `shutdown` | `close`, `Drop`, `HandleCustody`, `TailCustody`, `final_flush` |
 //!
 //! This file keeps the [`Memory`] struct, so its fields stay private to
@@ -78,6 +79,7 @@ use crate::writeq::WritePipeline;
 mod builder;
 mod gate;
 mod image;
+mod layered;
 mod lease_refusal;
 mod leases;
 mod reads;
@@ -85,8 +87,10 @@ mod shutdown;
 mod types;
 mod writes;
 
+pub use crate::recall::layered::{LayerCopy, LayeredHit, LayeredRecall};
 pub(crate) use builder::AttachShutdown;
 pub use builder::{Attach, LeaseHeldElsewhere, MemoryBuilder};
+pub use layered::LayerRef;
 pub(crate) use lease_refusal::{holder_looks_gone, lease_held_message, lease_remaining};
 pub(crate) use leases::LeaseLostSignal;
 pub use types::{CanonicalMemory, DryRun, GcStats, GcSweepSummary, ImpactReport, MemoryStats};

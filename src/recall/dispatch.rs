@@ -356,8 +356,7 @@ pub(crate) fn try_structural(
     // context does show), not the pre-truncation hit set.
     let count = fitted.rendered();
     let mut warnings = Vec::new();
-    let traversal =
-        format!("recall: dependency question answered by graph traversal ({count} dependents)");
+    let traversal = traversal_headline(count);
     warnings.push(traversal.clone());
     // H3: included_in_context at the cut; the traversal explanation is
     // response-global — one annotation, never attached to a hit.
@@ -376,6 +375,13 @@ pub(crate) fn try_structural(
         detailed,
         response_annotations: vec![Annotation::new(AnnotationKind::Traversal, traversal)],
     })
+}
+
+/// The structural-dispatch headline (the `traversal` response annotation
+/// and its warning line) for `count` rendered dependents (T9-R1-N4). The
+/// layered merge recomputes it after its own budget cut (#33 PR 2).
+pub(crate) fn traversal_headline(count: usize) -> String {
+    format!("recall: dependency question answered by graph traversal ({count} dependents)")
 }
 
 #[cfg(test)]
