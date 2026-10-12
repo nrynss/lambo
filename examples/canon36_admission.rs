@@ -134,6 +134,46 @@ async fn run() -> Result<(), String> {
     }
     println!("starting status/type: {start:?}");
 
+    // What is one gate away: concepts that already have more than five
+    // dependents (Stage 3's bar) but do not hold Stage 2. 0 Canonical today
+    // is not a forecast while this list is non-empty.
+    {
+        let params = EvalParams::default();
+        let mut waiting = Vec::new();
+        for c in &snapshot.concepts {
+            let blast = sqlite
+                .blast_radius(&session, c.id, params.min_edge_age, now)
+                .await
+                .map_err(|e| e.to_string())?;
+            if blast <= 5 {
+                continue;
+            }
+            let span = sqlite
+                .interaction_span_with_window(
+                    &session,
+                    c.id,
+                    params.min_age,
+                    now,
+                    params.coverage_window,
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+            waiting.push(format!(
+                "{} {:?} {:?} dependents={blast} distinct={} coverage={:.3} stage2={}",
+                c.id,
+                c.concept_type,
+                c.canonization_status,
+                span.distinct,
+                span.coverage,
+                lambo::canon::stage2_evidence_passes(span)
+            ));
+        }
+        println!("more than five dependents: {}", waiting.len());
+        for line in waiting {
+            println!("  {line}");
+        }
+    }
+
     for policy in [PromotionPolicy::Swarm, PromotionPolicy::Solo] {
         let params = EvalParams {
             promotion_policy: policy,
