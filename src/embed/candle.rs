@@ -2563,6 +2563,69 @@ mod tests {
         );
     }
 
+    /// LIVE Metal probe (issue #125): forward throughput at batch sizes 1, 4,
+    /// 16, 32 and 64 on texts shaped like a write-queue derive's contexts
+    /// (a concept framed with the call's `"; "`-joined prompt), then one
+    /// 16-wide batch with a single long text in it, which `BatchLongest`
+    /// padding makes every row pay for. Needs the cached published f16
+    /// weights (offline, never downloads) and a Metal build. Run with:
+    /// `cargo test --release --features embed-candle-metal --lib -- --ignored --nocapture metal_batch_throughput`
+    #[cfg(target_os = "macos")]
+    #[ignore]
+    #[test]
+    fn metal_batch_throughput() {
+        let e = CandleEmbedder::new(
+            BGE_M3_DIM,
+            CandleOpts {
+                device: Some("metal".into()),
+                offline: true,
+                ..Default::default()
+            },
+        )
+        .expect("cached weights, Metal");
+        assert!(e.on_metal());
+        let core = &e.slot.handle.get().expect("loaded").shared.core;
+        let text = |i: usize| {
+            let a = format!("conc-s1-w{}-{i}: note about write queue batching", i % 16);
+            let b = format!("decision s1.{}.{i} on write handling", i % 16);
+            format!("{a} — {a}; {b}")
+        };
+        let texts: Vec<String> = (0..64).map(text).collect();
+        let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+        // Warm the kernels at every width first.
+        for n in [1, 4, 16, 32, 64] {
+            core.forward(&refs[..n]).expect("warm-up forward");
+        }
+        let time = |batch: &[&str], reps: usize| {
+            let mut ms: Vec<f64> = (0..reps)
+                .map(|_| {
+                    let t = std::time::Instant::now();
+                    core.forward(batch).expect("forward");
+                    t.elapsed().as_secs_f64() * 1e3
+                })
+                .collect();
+            ms.sort_by(f64::total_cmp);
+            ms[ms.len() / 2]
+        };
+        for n in [1, 4, 16, 32, 64] {
+            let median = time(&refs[..n], 15);
+            eprintln!(
+                "#125 METAL BATCH {n:>2}: median forward {median:7.2} ms, {:7.1} texts/s",
+                n as f64 * 1e3 / median
+            );
+        }
+        let long = "canonization promotes a concept once independent sessions agree. ".repeat(14);
+        let mut mixed = refs[..15].to_vec();
+        mixed.push(long.as_str());
+        let median = time(&mixed, 15);
+        eprintln!(
+            "#125 METAL BATCH 16 with one {}-byte text: median forward {median:7.2} ms, \
+             {:7.1} texts/s",
+            long.len(),
+            16.0 * 1e3 / median
+        );
+    }
+
     // Compile-time sanity (clippy wants const assertions, not runtime tests).
     const _: () = {
         assert!(MAX_BATCH >= 1);
