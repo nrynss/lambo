@@ -476,3 +476,37 @@ async fn bad_layer_stacks_are_refused() {
     a.close().await.unwrap();
     b.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn a_layer_cannot_traverse_from_a_shorter_anchor_than_the_callers_subject() {
+    let project = seeded("anchor-project", &[("user db schema", ConceptType::Entity)]).await;
+    let general = slow_session(Arc::new(MemoryStore::new()), "anchor-general", "fixture").await;
+    general
+        .derive(
+            &[
+                ("db", ConceptType::Entity),
+                ("unrelated dependent", ConceptType::Resource),
+            ],
+            &ParentOf::from_pairs(&[("db", "unrelated dependent")]),
+        )
+        .await
+        .unwrap();
+    general.settle_daemon().await;
+    let r = project
+        .recall_layered(
+            &[LayerRef::new(&general)],
+            query("what depends on user db schema"),
+        )
+        .await
+        .unwrap();
+    assert!(!r
+        .hits
+        .iter()
+        .any(|h| h.hit.content == "unrelated dependent"));
+    assert!(!r
+        .warnings
+        .iter()
+        .any(|s| s.contains("[anchor-general] recall: dependency question")));
+    project.close().await.unwrap();
+    general.close().await.unwrap();
+}

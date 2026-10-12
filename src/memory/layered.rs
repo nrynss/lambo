@@ -161,7 +161,11 @@ impl Memory {
                 .recall_text_with(query.clone(), own_vector, own_warning)
                 .await;
             let identities = self.hit_identities(&recall.hits);
-            TierRecall { recall, identities }
+            TierRecall {
+                recall,
+                identities,
+                anchor: self.recall_anchor(&query.query),
+            }
         };
         let layer_futures: Vec<LayerFuture<'_>> = layers
             .iter()
@@ -287,6 +291,7 @@ impl Memory {
         }
         let vectors = self.vector_candidates();
         let lead = embed_warning.filter(|_| vectors.available());
+        let anchor = self.recall_anchor(&query.query);
         let mut recall = self
             .daemon
             .recall_layer_with(
@@ -301,7 +306,20 @@ impl Memory {
             recall.warnings.insert(0, line.to_string());
         }
         let identities = self.hit_identities(&recall.hits);
-        Ok(TierRecall { recall, identities })
+        Ok(TierRecall {
+            recall,
+            identities,
+            anchor,
+        })
+    }
+
+    fn recall_anchor(&self, query: &str) -> Option<String> {
+        let graph = self.graph.read();
+        let id = crate::recall::dispatch::resolve_anchor(&graph, query)?;
+        match graph.node(id) {
+            Some(Node::Concept(c)) => Some(crate::recall::dispatch::anchor_text(&c.content)),
+            _ => None,
+        }
     }
 
     /// What dedupe compares for each hit: its canonical key and holder

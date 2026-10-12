@@ -112,6 +112,7 @@ fn recall(tier: usize, hits: &[H], extra: &[&str]) -> TierRecall {
         detailed.push(d);
     }
     TierRecall {
+        anchor: None,
         recall: DetailedRecall {
             hits: out_hits,
             context: "ignored per-session context".into(),
@@ -851,4 +852,24 @@ fn layer_unavailable_is_a_snake_case_kind_on_the_wire() {
     let json = serde_json::to_string(&a).unwrap();
     assert_eq!(json, r#"{"kind":"layer_unavailable","text":"x"}"#);
     assert_eq!(serde_json::from_str::<Annotation>(&json).unwrap(), a);
+}
+
+#[test]
+fn a_different_layer_anchor_cannot_admit_dependents_past_the_floor() {
+    let mut caller = primary(&[kw("caller dependent")]);
+    caller.recall.as_mut().unwrap().anchor = Some("user db schema".into());
+    let mut general = layer(1, "general", 1.0, &[expanded("db dependent")]);
+    let t = general.recall.as_mut().unwrap();
+    t.anchor = Some("db".into());
+    let headline = crate::recall::dispatch::traversal_headline(1);
+    t.recall.warnings.push(headline.clone());
+    t.recall
+        .response_annotations
+        .push(Annotation::new(AnnotationKind::Traversal, headline));
+    let rejected = run(&[caller.clone(), general.clone()], params(10));
+    assert_eq!(order(&rejected), ["lambo/caller dependent"]);
+    assert!(rejected.warnings.is_empty());
+    general.recall.as_mut().unwrap().anchor = Some("user db schema".into());
+    let accepted = run(&[caller, general], params(10));
+    assert!(order(&accepted).contains(&"general/db dependent".to_string()));
 }
