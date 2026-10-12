@@ -99,4 +99,6 @@ Fresh adversarial review of c6bcd2e3: 0 High, 1 Medium, 0 Low.
   the full 2249/0/7 baseline gate above remains applicable. Request example
   validation, mirror drift and diff checks PASS. Existing focused scope
   regression rerun: 1 passed, 0 failed, 0 ignored, with a fresh runtime dir.
-  Focused review pending.
+  Focused verification completed on f20ef0fb with zero open High, Medium or Low
+  findings. The reviewer checked response construction, scope regression,
+  client/runbook boundaries and mirrored docs; mirror drift and diff checks pass.
