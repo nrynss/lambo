@@ -279,13 +279,8 @@ impl WritePipeline {
                         }
                         ReceiptAnswer::AppliedAfterRestart(summary.summary)
                     }
-                    // Transient — the status-classifier draw is "embedder
-                    // momentarily unwilling / unreachable": evidence of sickness,
-                    // NOT a statement about this intent. Leave THIS intent durable
-                    // (unconsumed) and accumulate; concluding sickness at the
-                    // threshold keeps the rest of the backlog durable too.
                     // #125 (Sonnet review): a vector-candidate lookup that
-                    // ran out of budget. The embedder answered before it, so
+                    // did not answer within its own budget. The embedder answered before it, so
                     // it is no evidence of a sick embedder and never counts
                     // toward that streak. Left durable, a lookup that is slow
                     // every time for this input would hold the backlog on
@@ -294,8 +289,9 @@ impl WritePipeline {
                     // deferred there unattempted), and it settles `failed`
                     // with a reason that says so. A run of them with nothing
                     // applied between means the store is slow for everyone:
-                    // stop and leave the rest durable, so at most
-                    // REPLAY_LOOKUP_TIMEOUT_LIMIT - 1 are settled per attach.
+                    // stop and leave the rest durable, so when the store is
+                    // slow at most REPLAY_LOOKUP_TIMEOUT_LIMIT - 1 (two) are
+                    // settled failed per attach.
                     Err(err) if err.is_lookup_timeout() => {
                         lookup_streak += 1;
                         if lookup_streak >= REPLAY_LOOKUP_TIMEOUT_LIMIT {
@@ -347,6 +343,11 @@ impl WritePipeline {
                         );
                         ReceiptAnswer::Failed(why)
                     }
+                    // Transient — the status-classifier draw is "embedder
+                    // momentarily unwilling / unreachable": evidence of sickness,
+                    // NOT a statement about this intent. Leave THIS intent durable
+                    // (unconsumed) and accumulate; concluding sickness at the
+                    // threshold keeps the rest of the backlog durable too.
                     Err(LamboError::EmbedUnavailable(e)) => {
                         transient_streak += 1;
                         if transient_streak >= EMBEDDER_SICK_THRESHOLD {

@@ -195,14 +195,30 @@ with the seed scoped to the jobs it was embedded for.
   counts toward embedder sickness, the replay is its last attempt and it
   settles `failed` with a reason that says the lookup did not answer, and
   `REPLAY_LOOKUP_TIMEOUT_LIMIT` (3) in a row with nothing applied between
-  stop the replay as a store fault with the rest durable. A slow store thus
-  costs at most two settled writes per attach, and every attach makes
-  progress. Test:
+  stop the replay as a store fault with the rest durable. So when the store
+  is slow, at most two writes are settled failed per attach (an accepted
+  trade-off), and every attach makes progress. Test:
   `a_lookup_timeout_at_replay_settles_failed_and_a_run_of_them_stops_it`.
+- **Focused check, the lookup's budget (medium):** the lookup shared the
+  call's one deadline with the embeds, so slow embeds surfaced as a lookup
+  timeout and the replay settled the write with the wrong reason. The
+  lookup now has its own `VECTOR_LOOKUP_TIMEOUT` (15 s, half the call's
+  budget) from when it starts, capped by the call's deadline so one call
+  still fits one `HYBRID_IO_TIMEOUT`. Only its own deadline firing is a
+  lookup timeout; the call's budget running out first is the ordinary
+  embed-budget error. Test:
+  `slow_embeds_that_spend_the_budget_are_not_a_lookup_timeout`.
 - **Sonnet review, priority per take (medium):** candle now checks for
   queued single embeds before every forward of a take (`serve_take`,
   `take_singles`), so a recall waits for at most the forward in flight.
   Test: `a_single_embed_queued_during_a_take_waits_for_one_forward_only`.
+  The focused check found the preference could starve the take's bulk
+  texts under a steady stream of recalls: after `MAX_SINGLE_STREAK` (3)
+  single forwards in a row one bulk chunk runs anyway, new singles are
+  pulled only while the take has bulk texts left, and none are pulled once
+  shutdown is requested. Tests:
+  `a_stream_of_single_embeds_does_not_starve_a_takes_bulk_texts`,
+  `a_take_pulls_no_new_singles_once_shutdown_is_requested`.
 - **Harness:** `mcp_concurrent.py` set its stop time before the client
   handshakes and warm-up recalls, so a slow warm-up shortened the measured
   load; it now starts the clock when the workers start.
