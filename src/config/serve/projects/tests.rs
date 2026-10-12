@@ -827,3 +827,55 @@ fn native_windows_parent_component_patterns_are_refused() {
     }
     check_project_path(r"C:\work\lambo-wt-*").unwrap();
 }
+
+#[cfg(unix)]
+#[test]
+fn stars_in_home_are_literal_data_not_project_pattern_syntax() {
+    let root = ScratchDir::new("lambo-pattern-literal-home");
+    let home = mkdir(&root, "user*");
+    let descendant = mkdir(&home, "src/deep");
+    let sibling = mkdir(&root, "user-unrelated/src");
+    for path in ["~", "~/"] {
+        let cfg = config(vec![project(path, "home")], Some("general"));
+        for cwd in [&home, &descendant] {
+            let got = cfg
+                .select_stdio_session_with(None, || Ok(cwd.clone()), Some(&home))
+                .unwrap();
+            assert_eq!(got.session, "home", "{path}");
+        }
+        assert_eq!(
+            session(cfg.select_stdio_session_with(None, || Ok(sibling.clone()), Some(&home))),
+            "general",
+            "{path}"
+        );
+
+        // The literal HOME root must retain literal priority against a pattern
+        // that matches the same directory, whichever entry appears first.
+        let pattern = project(format!("{}/user*", s(&root)), "pattern");
+        for projects in [
+            vec![project(path, "home"), pattern.clone()],
+            vec![pattern.clone(), project(path, "home")],
+        ] {
+            let cfg = config(projects, None);
+            assert_eq!(
+                session(cfg.select_stdio_session_with(
+                    None,
+                    || Ok(descendant.clone()),
+                    Some(&home)
+                )),
+                "home"
+            );
+        }
+    }
+    let child = mkdir(&home, "lambo-wt-one/src");
+    let unrelated = mkdir(&root, "user-other/lambo-wt-one/src");
+    let cfg = config(vec![project("~/lambo-wt-*", "project")], Some("general"));
+    assert_eq!(
+        session(cfg.select_stdio_session_with(None, || Ok(child.clone()), Some(&home))),
+        "project"
+    );
+    assert_eq!(
+        session(cfg.select_stdio_session_with(None, || Ok(unrelated.clone()), Some(&home))),
+        "general"
+    );
+}

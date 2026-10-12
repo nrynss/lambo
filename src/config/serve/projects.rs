@@ -257,12 +257,12 @@ fn matches_name(pattern: &[u8], name: &[u8]) -> bool {
 /// a matching symlink equivalent to spelling that directory literally, even
 /// when its target is outside the pattern parent. Retain only one score, never
 /// a list of children. A failed parent listing skips the whole pattern.
-fn project_depth(expanded: &Path, cwd: &Path) -> Option<(usize, bool)> {
+fn project_depth(expanded: &Path, cwd: &Path, is_pattern: bool) -> Option<(usize, bool)> {
     let name = expanded
         .file_name()
         .map(|n| n.as_encoded_bytes())
         .unwrap_or_default();
-    if !name.contains(&b'*') {
+    if !is_pattern {
         let canonical = std::fs::canonicalize(expanded).ok()?;
         return cwd
             .starts_with(&canonical)
@@ -380,12 +380,14 @@ impl ServeConfig {
         let mut covering: Vec<((usize, bool), usize)> = Vec::new();
         let mut tilde_entries_skipped = false;
         for (i, project) in self.projects.iter().enumerate() {
+            // Classify syntax before expansion: stars in HOME are literal data.
+            let is_pattern = project.path.contains('*');
             let Some(expanded) = expand_home(&project.path, home) else {
                 tilde_entries_skipped = true;
                 continue;
             };
             check_project_path(&project.path).map_err(SessionSelectionError::Config)?;
-            if let Some(score) = project_depth(&expanded, cwd) {
+            if let Some(score) = project_depth(&expanded, cwd, is_pattern) {
                 covering.push((score, i));
             }
         }
