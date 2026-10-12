@@ -124,7 +124,7 @@ let mem = Memory::builder()
 | `canonization_eval_interval` | 60 seconds | How often promotion is evaluated. Also settable from the file, as `[daemon] canonization_eval_interval_secs`. |
 | `canonization_eval_batch_size` | `50` | Concepts evaluated per pass. |
 | `canonization_repromotion_cooldown` | 300 seconds | Wait before a demoted concept can be promoted again. |
-| `promotion_policy` | `Swarm` | Which promotion policy canonization runs. `Swarm` admits a Candidate on evidence: `gc_survived >= 3` and dependents from at least two interactions other than the concept's own (no peer minimum, no percentile cut; the composite score only orders the queue), and every later hop is its stage's verdict. `Solo` (single-writer promotion) admits a Candidate when `(Sessions × 1.0) + (Human Confirmed × 4.0) + (Dependent Interactions × 2.0) − (Reverts × 3.0)`, multiplied by its concept type's eviction resistance (Constraint 1.5 … Observation 0.7), reaches 3.0; sessions are distinct ≥24-hour-apart supports measured on **event time**, dependent interactions are the same count Swarm's Stage 1 reads, and human confirmations enter only through the confirm verb (`Memory::confirm_human`), never an agent write. Under `Solo` the Candidate → Venerable and Venerable → Canonical hops need the score's band (6.0 / 10.0) **and** the stage verdict Swarm needs, cooldown included (since 0.6.0; before, the band alone decided). `Swarm` stays the default. Selectable from `lambo.toml` or `LAMBO_PROMOTION_POLICY` (see [Configuration](/lambo/config/)); there is no `serve` flag. |
+| `promotion_policy` | `Swarm` | Which promotion policy canonization runs. `Swarm` admits a Candidate on evidence: `gc_survived >= 3` and dependents from at least two interactions other than the concept's own (no peer minimum, no percentile cut; the composite score only orders the queue), and every later hop is its stage's verdict. `Solo` (single-writer promotion) admits a Candidate when `(Sessions × 1.0) + (Human Confirmed × 4.0) + (Dependent Interactions × 2.0) − (Reverts × 3.0)`, multiplied by its concept type's eviction resistance (Constraint 1.5 … Observation 0.7), reaches 3.0; sessions are distinct ≥24-hour-apart supports (derivations and declared dependents; since 0.6.0 not actions that only produced or modified the concept) measured on **event time**, dependent interactions are the same count Swarm's Stage 1 reads, and human confirmations enter only through the confirm verb (`Memory::confirm_human`), never an agent write. Under `Solo` the Candidate → Venerable and Venerable → Canonical hops need the score's band (6.0 / 10.0) **and** the stage verdict Swarm needs, cooldown included (since 0.6.0; before, the band alone decided). `Swarm` stays the default. Selectable from `lambo.toml` or `LAMBO_PROMOTION_POLICY` (see [Configuration](/lambo/config/)); there is no `serve` flag. |
 | `scoring` | `0.25`, `0.20`, `0.20`, `0.35` | Recency, frequency, session activity, and density weights. |
 | `recall_weights` | `0.5`, `0.5` | How much the background score and the query relevance each contribute. |
 
@@ -254,9 +254,13 @@ its band and the same Stage 2 or Stage 3 verdict `Swarm` needs, cooldown
 included.
 
 `canon::stage1_candidates(graph, scores, min_age, now)` returns the admitted
-set in that order. `PromotionScorer::admits_hop` takes the cycle's
-`EvalParams` and clock, and the evaluator only asks it about a node whose
-stage verdict passed. `canon::solo_breakdown` returns the Solo score's terms.
+set in that order. `PromotionScorer::admits_hop(graph, node, to, params,
+now)` lost its `evidence` argument: the evaluator only asks it about a node
+whose stage verdict passed, and asks it first when building the Stage 2 and
+Stage 3 windows, so under Solo a node whose band cannot admit the hop is
+never probed. `canon::solo_breakdown` returns the Solo score's terms.
+`EvalParams::min_peer_count` and `Config::canonization_min_peer_count` are
+`#[deprecated]` and inert.
 
 To explain a concept, read its graph-side inputs under the read guard with
 `canon::admission_inputs(&graph, node, &params, now)`, then call
@@ -267,5 +271,10 @@ measurement and bar (`checks`), Solo's score terms, and one reason per gate
 that fails; `canon::render_admission` renders it as the text `lambo_inspect`
 and `lambo inspect` print. A store without the window-aware span is
 explained the way the evaluator treats it: no Stage 2 evidence, said in the
-reasons. `/api/inspect` carries the same object as `admission`, beside
-`gate_progress`, whose four-gate shape is unchanged.
+reasons. A Venerable is not eligible while the Canonical budget is full
+(the `canonical_budget` gate), because no Stage 3 window runs then.
+`/api/inspect` carries the same object as `admission`, beside
+`gate_progress`, whose four-gate shape is unchanged; a caller that needs
+both can take the store measurements once with `canon::Measurements::take`
+and pass them to `canon::explain_measured` and
+`canon::gate_progress_measured`.

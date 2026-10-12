@@ -68,21 +68,25 @@ no load; evidence-gated Solo matched Swarm's set in the design measurement
 it used to pay for and ignore.
 
 **Structural, not advisory.** `canon::eval::apply` skips a node whose stage
-verdict failed **before** asking the policy, and `SoloScorer::admits_hop`
-also returns `false` without the verdict. A policy can narrow the evidence,
-never replace it. The pre-PR 3 cooldown gate on the "score-admitted" Stage 3
+verdict failed **before** asking the policy, so a policy can narrow the
+evidence, never replace it. (Review L4 then dropped `admits_hop`'s
+always-true `evidence` argument.) The pre-PR 3 cooldown gate on the "score-admitted" Stage 3
 path is gone with that path: the cooldown is part of every Stage 3 verdict.
 `verdicts` now asks the Stage 2 span under both policies (PR 2 review M1 had
 Solo skip it because Solo then ignored it), and a store without
 `interaction_span_with_window` degrades Solo the way it degrades Swarm: no
 Stage 2 evidence for that node, one warning per cycle.
 
-The recurrence term is unchanged and still counts the interactions of
-`Causal` touches. That is why a file modified on five separated days is a
-Solo Candidate on the fixture and on the rig (below). It cannot climb past
-Candidate without declared dependents, so it never reaches Canonical; whether
-recurrence should stop counting `Causal` touches is left for the rollout
-review, not changed here (the design changed only the valid-action term).
+The recurrence term no longer counts `Causal` touches either (review,
+orchestrator decision 1): `supporting_interaction_times` keeps `Derives`
+and `Dependency`. Before that change a file modified on five separated days
+scored five sessions and was a Solo Candidate on the fixture and on the rig.
+
+**Spec §3.2 errata.** The solo score's "Valid Actions" term reads as
+distinct dependent interactions (aged, own origin excluded), and its
+"Sessions" term counts the ≥ 24 h-separated about-times of the concept's
+derivations and of the interactions of concepts that declared they depend
+on it, not of actions that only produced or modified it (`Causal`).
 
 ### Inspect explains admission per node
 
@@ -168,7 +172,7 @@ mechanism for accepted-but-inert settings (#29's idle floor).
 | Burst | `identity_burst`: six dependents, three interactions inside two hours | Candidate / Candidate |
 | One interaction | `ack_single`: six dependents from one interaction | None / Candidate |
 | Self-vouching | `lease_self`: six `parent_of` children from its own interaction | None / None |
-| File chaff | three file Resources modified by actions on five separated days | None / Candidate |
+| File chaff | three file Resources modified by actions on five separated days | None / None (Candidate before `Causal` left recurrence) |
 | Read chaff | an Observation read 17 times; an association hub | None / None |
 | Alias | a short Entity cited by three actions on three days | Venerable / Venerable |
 | Contradiction | `lease_revoke -Contradicts-> lease_stays` | changes nothing |
@@ -211,7 +215,7 @@ Design list:
 | Fewer than 20 peers qualify on evidence | `a_graph_with_fewer_than_twenty_peers_qualifies_on_evidence` (three concepts), `the_swarm_arm_admits_on_evidence_not_score` |
 | < 3 survivals or < 2 other origins refused | `fewer_than_three_survivals_is_refused`, `fewer_than_two_other_dependent_interactions_is_refused` (one interaction thrice; own origin; young origin), `the_swarm_arm_still_enforces_gc_survived_through_the_seam` |
 | Replayed reads preserve eligibility | `replayed_reads_preserve_eligibility` (graph), `replayed_reads_preserve_the_fixed_point` (fixture, k = 1/10/100, both policies) |
-| Solo cannot bypass Stage 2, Stage 3, cooldown | `solo_cannot_bypass_stage_2_on_its_band`, `solo_cannot_bypass_stage_3_on_its_band`, `solo_cannot_bypass_the_repromotion_cooldown`, `solo_needs_stage_2_again_at_stage_3_and_stamps_the_measured_blast`, `solo_admission_needs_the_band_and_the_verdict` |
+| Solo cannot bypass Stage 2, Stage 3, cooldown | `solo_cannot_bypass_stage_2_on_its_band`, `solo_cannot_bypass_stage_3_on_its_band`, `solo_cannot_bypass_the_repromotion_cooldown`, `solo_needs_stage_2_again_at_stage_3_and_stamps_the_measured_blast`, `solo_admission_climbs_with_the_band` |
 | Five dependents fail, six pass | `five_dependents_fail_and_six_pass` (fixture, both policies) |
 | Bounded probes stay fair | `bounded_probes_stay_fair` (batch 1, both policies, reaches the unbounded fixed point) |
 | Fixture promotes supported invariants, no seeded statuses, no reciprocal tricks | `both_policies_promote_the_supported_rulings_on_memory`, `..._on_sqlite`, `the_fixture_is_real_shaped`, `fair_test_fixture_is_current` |
@@ -240,9 +244,12 @@ gains the two-line canonization section (the cloudops parser self-test still
 passes); `tool_schemas.golden.json` (the `lambo_inspect` description);
 `tests/binary_parity.rs` `canonization_events 5 -> 15` (ten Candidates,
 four Venerable, `user schema` Canonical as before; the demo's narration line
-of untouched thresholds changed); `tests/t84_demo.rs` agent B's recall
-warnings `9 -> 10` (a Venerable with four dependents is high-value, so it
-gains a high-risk modification line). Tests rewritten because they pinned the
+of untouched thresholds changed, and the CANONIZATION section narrates the
+nine other promotions); `tests/t84_demo.rs` agent B's recall warnings
+`9 -> 8` after review M2 (only Canonical or more than five live dependents
+is high-value, so `auth middleware`, five dependents, no longer raises one;
+the first version of this PR had `9 -> 10` because any Venerable was
+high-value). Tests rewritten because they pinned the
 P90 quota or Solo's band bypass: `the_default_policy_gathers_the_evidence_led_stage1_set`,
 the twenty-peer fixtures in `eval/tests` and `canon/task.rs` (now give the
 pillar real dependents), the Solo band tests (inverted into the bypass
@@ -251,66 +258,146 @@ tests), and `a_single_writer_historical_constraint_is_admitted_only_under_solo`
 
 ## Gate (local)
 
-All on the branch head, each with a fresh `XDG_RUNTIME_DIR`:
-`cargo fmt --check`; `cargo clippy --all-targets -- -D warnings` on
-`store-sqlite,fixtures`, `ship,fixtures`, `--no-default-features
-store-postgres`, `store-postgres,store-sqlite,fixtures`, `embed-eg2`,
-`recall-elastic`, `embed-candle`; `cargo test --features
-store-sqlite,fixtures` (2225 passed, 0 failed, 7 ignored; main 9b768768:
-2214 / 0 / 7); `cargo test --no-run --no-default-features --features
+Final, after the review round and the merge of `origin/main` (#142, #143),
+each command with a fresh `XDG_RUNTIME_DIR`: `cargo fmt --check`; `cargo
+clippy --all-targets -- -D warnings` on `store-sqlite,fixtures`,
+`ship,fixtures`, `--no-default-features store-postgres`,
+`store-postgres,store-sqlite,fixtures`, `embed-eg2`, `recall-elastic`,
+`embed-candle` and `store-cockroach,fixtures` (for the new conformance
+leg); `cargo test --features store-sqlite,fixtures` (2277 passed, 0
+failed, 7 ignored); `cargo test --no-run --no-default-features --features
 store-sqlite`; `cargo check --no-default-features`; `cargo check
---features demo`; `scripts/docs/check-mirror-drift.sh`. All pass. Also
-`cargo test --no-default-features --features store-postgres`: 1166 / 0 / 17
-(main 1170 / 0 / 17). The four fewer are accounted for by name: Stage 1's
-thirteen ungated P90 tests became nine evidence tests (-4), the inspect
-golden test now needs `store-memory` because the golden carries the
-explanation, which needs a store (-1), and the inert-peer-minimum config
-test is new (+1). No live Postgres or Cockroach run (none in this lane; no
-store SQL changed).
+--features demo`; `scripts/docs/check-mirror-drift.sh`; the cloudops
+parser self-test (`python3 scripts/cloudops/_lambo.py`). All pass. Also
+`cargo test --no-default-features --features store-postgres`: 1194 / 0 /
+18 (the 18th ignored is the new live Postgres fair test). No live Postgres
+or Cockroach run.
+
+Before the review round (first submission, on 9b768768): sqlite,fixtures
+2225 / 0 / 7 (main 2214 / 0 / 7) and store-postgres 1166 / 0 / 17 (main
+1170 / 0 / 17; Stage 1's thirteen ungated P90 tests became nine evidence
+tests, the inspect golden test now needs `store-memory`, and the
+inert-peer-minimum config test is new).
 
 ## Rig dry run (aggregates only)
 
-A copy of `rig-backup-2026-10-12-0726.db` in the lane's scratch directory
-(SHA-256 `1c9d3f5d…c43d`, identical before and after the runs), session
-`lambo-dev`, 5,005 concepts, 1,786 interactions, 12,195 edges, evaluated at
-2026-10-12T12:00Z with `examples/canon36_admission.rs` (release build).
-Starting statuses: 404 Candidate (164 Resource, 156 Constraint, 71 Logic,
-13 Entity), 7 Venerable (6 Resource, 1 Entity), 0 Canonical.
+Redone after the review round on a fresh copy of
+`rig-backup-2026-10-12-0726.db` in the lane's scratch directory (SHA-256
+`1c9d3f5d…c43d`, identical before and after the runs, deleted afterwards),
+session `lambo-dev`, 5,005 concepts, 1,786 interactions, 12,195 edges,
+evaluated at 2026-10-12T12:00Z with `examples/canon36_admission.rs`
+(release build). Starting statuses: 404 Candidate (164 Resource, 156
+Constraint, 71 Logic, 13 Entity), 7 Venerable (6 Resource, 1 Entity), 0
+Canonical.
 
 | | Swarm | Solo |
 |---|---:|---:|
-| First evaluation, newly eligible Candidate (unbatched) | 63 | 244 |
-| of which Resource / non-Resource | 42 / 21 (20 Entity, 1 Constraint) | 164 / 80 (70 Entity, 8 Constraint, 2 Logic) |
+| First evaluation, newly eligible Candidate (unbatched) | 63 | 218 (first run: 244) |
+| of which Resource / non-Resource | 42 / 21 (20 Entity, 1 Constraint) | 140 / 78 (68 Entity, 8 Constraint, 2 Logic) |
 | First evaluation, newly eligible Venerable / Canonical | 0 / 0 | 0 / 0 |
 | First real cycle (batch 50) | 50 Candidates (35 Resource) | 50 Candidates (29 Resource) |
-| Fixed point (35 / 36 cycles): new Candidates, new Venerables | 63, 2 (both Resource) | 244, 2 (both Resource) |
+| Fixed point (35 cycles each): new Candidates, new Venerables | 63, 2 (both Resource) | 218, 2 (both Resource) |
 | **Turns Canonical** | **0** | **0** |
 
-With `--assume-survived` (every `gc_survived` raised to 3, 433 concepts
-raised) the numbers are identical: survival is not what binds on today's
-store, dependence is. The two new Venerables are PR 2's two status-None
-Resources that the cap moved past Stage 2.
+Dropping `Causal` from Solo's recurrence removed 26 Solo Candidates (24
+Resources, 2 Entities); the review estimated about 40 Resources. Swarm is
+unchanged by the round. With `--assume-survived` (433 concepts raised to
+`gc_survived = 3`) every number is identical: dependence binds, not
+survival. The two new Venerables are PR 2's two status-None Resources that
+the cap moved past Stage 2.
+
+**0 Canonical is a snapshot, not a forecast (review M1).** Two Entities
+already have more than five dependents (7 and 10, from 6 and 9 other
+interactions) and fail Stage 2 only on spread (coverage 0.065 and 0.119
+against 0.3; they need about 4.2 days between their first and last citing
+interaction). A few more days of `depends_on` on them would take them, and
+any artifact like them, to Canonical with the load-bearing warning. The
+example now lists such concepts by id. **This PR queues depended-on
+artifacts and names for promotion: the rig must not be re-pinned to a build
+containing it until #36 PR 5's dry run has been reviewed** (on the owner's
+pre-tag checklist).
 
 Against the design's 0% artifact target: **the newly admitted set is almost
-entirely artifacts** (Swarm 62 of 63 Resource or Entity; Solo 234 of 244).
-This is PR 2's warning come true one stage earlier: on today's history only
-`record_action` declares dependence, and it declares it on files and names,
-so evidence-led admission admits what actions depend on. Nothing reaches
-Canonical (no Logic or Constraint has dependents from three interactions
-with spread yet; rulings need PR 4's citations), so no load-bearing warning
-fires on an artifact. Existing Candidates are not demoted, and none of the
-404 passes Stage 2, so none of them climbs. PR 5's dry run should carry this split per stage at
-each re-pin; if artifact Candidates matter operationally before PR 4 lands,
-the lever is the rollout (keep the rig on Swarm, which only admits
-Candidates here), not a type filter in Stage 1.
+entirely artifacts** (Swarm 62 of 63 Resource or Entity; Solo 208 of 218).
+On today's history only `record_action` declares dependence, and it declares
+it on files and names, so evidence-led admission admits what actions depend
+on. Rulings need PR 4's citations. Existing Candidates are not demoted, and
+none of the 404 passes Stage 2, so none of them climbs. PR 5's dry run
+should carry this split per stage at each re-pin.
+
+## Review round (2026-10-13)
+
+Adversarial review: 0 High, 3 Medium, 9 Low, plus the Solo recurrence
+question. Each resolved in its own commit unless noted.
+
+- **Solo recurrence** (orchestrator decision 1): `Causal` dropped from
+  `supporting_interaction_times`; §3.2 errata above; fixture expectation
+  for the three file rows under Solo is now None.
+- **M1 (rig upgrade)**: documented above and in the CHANGELOG Upgrading
+  section; the example lists concepts one gate from Canonical.
+- **M2 (high-value)**: `is_high_value` is Canonical or more than five live
+  dependents (`> HIGH_RISK_BLAST_RADIUS`, Stage 3's bar; it was any
+  Venerable or `>= 5`). Edge-write freshness unchanged, per the owner's
+  #19(c) decision. The demo narrates its other promotions; t84 expects eight
+  warnings.
+- **M3 (live stores)**: `store::pg::fair_test_live` runs the fair test on a
+  live store with the shared `fixed_point`/`assert_expected` (moved into
+  `test_util::fair_test`), erasing the session first. By hand only:
+  `LAMBO_POSTGRES_DSN=<dsn> cargo test --no-default-features --features store-postgres --lib store::pg::fair_test_live -- --ignored`;
+  Cockroach: `LAMBO_COCKROACH_DSN=<dsn> cargo test --features store-cockroach,fixtures --lib conformance_suite -- --ignored`.
+  Not run here (no live database).
+- **L1**: `gather` builds the Stage 2 and Stage 3 rings from members
+  `admits_hop` would admit, so Solo never probes a node its band refuses;
+  Swarm's rings are unchanged. Test `solo_probes_only_candidates_its_band_could_admit`.
+- **L2**: `solo_breakdown` only under Solo; `canon::Measurements` taken
+  once and shared by `explain_measured` and `gate_progress_measured` in
+  `/api/inspect` (test `inspect_measures_once_for_the_gate_block_and_the_admission`).
+- **L3 (per-cycle Stage 1 recount): left as is.** Caching by graph epoch is
+  not trivial and would be wrong: the count is aged against the injected
+  clock, so it changes as edges age past `min_age` with no epoch change. A
+  cache would need `(epoch, cutoff)` and invalidation on every cycle's new
+  `now`. The recount is one pass over the edges per cycle (60 s default),
+  O(E) with hash lookups (12,195 edges on the rig snapshot; not separately
+  benchmarked, but the whole 35-cycle dry run took a few seconds).
+- **L4**: `admits_hop` lost its always-true `evidence` argument (CHANGELOG,
+  Breaking).
+- **L5**: `#[deprecated]` on `EvalParams::min_peer_count` and
+  `Config::canonization_min_peer_count`; the binary still warns.
+- **L6**: fixture ids are SHA-256-derived (version-8) UUIDs of each row's
+  natural key, so insertions renumber nothing; the "time order" and
+  "append" instructions no longer conflict. (v5 needs the `uuid` crate's
+  `v5` feature, which would be a `Cargo.toml` change.)
+- **L7**: `lease_alias` reaching Venerable is labelled in
+  `fair_test::expected` as the known name-resolution defect PR 4 or the
+  backfill should flip.
+- **L8**: CHANGELOG Upgrading names that a third-party store without
+  `interaction_span_with_window` stops every Solo concept at Candidate,
+  and that Solo Canonicals from 0.5.0 are kept.
+- **L9**: exact-cutoff rows added to the graph/MemoryStore/SQLite parity
+  tests (inclusive cutoff); the explanation now has a `canonical_budget`
+  gate, so a Venerable is not explained eligible while no Stage 3 window
+  runs, and the site's "never disagrees" sentence is corrected to say timing
+  (batch, ring order) is not predicted. **Bounded-probe starvation is not
+  reachable**: Stage 1's queue drains (an admitted node leaves it, and the
+  next cycle takes the next members of the same ordered set); the Stage 2
+  and 3 rings are walked by identity cursors that advance past every member
+  evaluated, so with `batch_size >= 1` every ring member is evaluated
+  within `ceil(ring / batch_size)` cycles (`bounded_probes_stay_fair`,
+  `sustained_inflow_does_not_starve_the_waiting_ring_members`). L1's
+  filtering keeps the rings NodeId-ascending, so the cursor argument holds.
+- **Merge integration**: #33 PR 3 gave `lambo_inspect` a `scope` that reads
+  a layer's Memory; the explanation now reads the same Memory (it read the
+  serving session's, so a layer hit's explanation was null). Test in
+  `mcp::server::tests::layered`.
 
 ## Follow-ups
 
 - PR 4 (citations) is what gives rulings dependents; re-run this example on
   a snapshot after citations have been live.
-- Solo's recurrence still counts `Causal` touches, which admits files as
-  Solo Candidates (never further). Revisit at the rollout review.
 - PR 5's `lambo canon dry-run` can reuse `canon::explain_admission` for its
   per-stage failure counts.
-- Live Postgres/Cockroach: no SQL changed in this PR, so the PR 2 owner
-  checklist covers the stores; the fair test runs on Memory and SQLite only.
+- Live Postgres/Cockroach: no SQL changed in this PR. Add the
+  `fair_test_live` commands above to the owner's pre-tag checklist beside
+  PR 2's.
+- Do not re-pin the rig to a build containing this PR before PR 5's dry run
+  is reviewed (M1).

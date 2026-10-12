@@ -99,13 +99,13 @@ $$
 \Big(\text{sessions} \times 1.0 + \text{confirmations} \times 4.0 + \text{distinct} \times 2.0 - \text{reverts} \times 3.0\Big) \times r(\tau) \;\ge\; 3.0
 $$
 
-`sessions` counts the 24-hour-separated days on which work touched the concept, by event time. `distinct` is the dependent-interaction count above; it replaced a count of the actions that touched the concept, which rewarded files modified many times and canonized artifacts. $r(\tau)$ is the type's eviction resistance, from 1.5 for a Constraint to 0.7 for an Observation.
+`sessions` counts the 24-hour-separated days on which the concept was derived or something declared that it depends on it, by event time. Since 0.6.0 an action that only produced or modified the concept does not count: a file edited on five days recurred as work, not as a fact anything rests on. `distinct` is the dependent-interaction count above; it replaced a count of the actions that touched the concept, which rewarded files modified many times and canonized artifacts. $r(\tau)$ is the type's eviction resistance, from 1.5 for a Constraint to 0.7 for an Observation.
 
 The later bands are 6.0 for Venerable and 10.0 for Canonical, and since 0.6.0 a band is necessary but not sufficient: every Solo hop past Candidate also needs the Stage 2 or Stage 3 verdict that Swarm needs, cooldown included. A Solo session can admit Candidates without GC sweeps, but nothing reaches Canonical without more than five dependents from enough other interactions.
 
 ### Why a concept is where it is
 
-`lambo_inspect`, `lambo inspect` and the portal's inspect panel explain each concept's next hop under the live policy: which gates it is checked against, its value and bar for each, and one sentence per gate that fails. The explanation runs the evaluator's own predicates with the evaluator's own inputs, so it never disagrees with what the next cycle would decide. Whether a cycle reaches an eligible concept this minute is up to the batch size, the round-robin order and the Canonical budget.
+`lambo_inspect`, `lambo inspect` and the portal's inspect panel explain each concept's next hop under the live policy: which gates it is checked against, its value and bar for each, and one sentence per gate that fails. The explanation runs the evaluator's own predicates with the evaluator's own inputs, the Canonical budget included: a Venerable is not reported eligible while the budget is full, because no Stage 3 window runs then. What it does not predict is timing: whether a cycle reaches an eligible concept this minute is up to the batch size and the round-robin order.
 
 ## What recall does with it
 
@@ -117,7 +117,7 @@ $$
 
 $Q$ is the BM25 keyword score, or the merged similarity score for a vector hit. It is $0$ for a concept that arrived through graph traversal rather than as a query hit.
 
-A recalled concept that was just written to is also flagged as a high-risk modification when it is high-value: Canonical, Venerable, or with five or more dependents counted live from the graph. That count has no age floor, unlike Stage 3, so the edge that gives a concept its fifth dependent is itself the fresh write that raises the flag.
+A recalled concept that was just written to is also flagged as a high-risk modification when it is high-value: Canonical, or with more than five dependents counted live from the graph, the same bar as Stage 3. Since 0.6.0 being Venerable is not enough on its own, because evidence-led admission lets a file with a handful of dependents reach Venerable. The live count has no age floor, unlike Stage 3, so the edge that gives a concept its sixth dependent is itself the fresh write that raises the flag.
 
 That last rule is the one that makes dependency retrieval work. A concept nobody searched for still surfaces if the graph says it is load-bearing, carried entirely by the daemon half of the mix. Canonical concepts are partitioned ahead of everything else regardless of score, and each one returns marked with its blast radius and a warning.
 

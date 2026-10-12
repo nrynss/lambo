@@ -60,21 +60,44 @@
   Candidates or 7 Venerables moves. The new Candidates are almost all
   artifacts, because on today's history only actions declare dependence;
   rulings need #36 PR 4's citations.
+- **This build queues depended-on artifacts and names for promotion; do
+  not re-pin the rig to it until #36 PR 5's dry run has been reviewed.**
+  "No concept turns Canonical" holds for today's snapshot only and is not
+  a forecast: on the same copy two Entities already have more than five
+  dependents (7 and 10, from 6 and 9 other interactions) and lack only
+  Stage 2's spread (coverage 0.065 and 0.119 against 0.3). A few more days
+  of citations would take them to Canonical with the load-bearing warning.
+  `examples/canon36_admission.rs` lists such concepts by id.
 - **Solo needs the stage evidence (#36 PR 3).** Under `Solo` a concept
   still becomes a Candidate by its score band, but every later hop now also
-  needs the Stage 2 or Stage 3 verdict Swarm needs, cooldown included, and
-  the score's "valid actions" term is now distinct dependent interactions
-  (a file many actions modified no longer scores for it). A Solo session
-  that promoted on its bands alone stops climbing until it has declared
-  dependents. Nothing is demoted. On the same store copy, Solo's first
-  evaluation would admit 244 new Candidates (164 Resource, 70 Entity, 8
-  Constraint, 2 Logic), 2 become Venerable at the fixed point, and **no
-  concept turns Canonical**.
+  needs the Stage 2 or Stage 3 verdict Swarm needs, cooldown included. The
+  score's "valid actions" term is now distinct dependent interactions, and
+  its recurrence term no longer counts actions that only produced or
+  modified the concept (`Causal`), so a file many actions modified no
+  longer scores for either. A Solo session that promoted on its bands alone
+  stops climbing until it has declared dependents. Nothing is demoted, and
+  Solo Canonicals from 0.5.0 are kept (budget demotion still applies). On
+  the same store copy, Solo's first evaluation would admit 218 new
+  Candidates (140 Resource, 68 Entity, 8 Constraint, 2 Logic; 244 before
+  `Causal` left recurrence), 2 become Venerable at the fixed point, and
+  **no concept turns Canonical**.
+- **A third-party store without `interaction_span_with_window` stops every
+  Solo concept at Candidate (#36 PR 3).** Solo now needs the Stage 2
+  verdict, which such a store cannot give: each Candidate gets no evidence
+  and each cycle logs one `CanonizationStage2Unsupported` warning, as under
+  Swarm since PR 2. Forward the call if your adapter wraps a built-in
+  store.
+- **High-risk alerts fire on fewer nodes (#36 PR 3).** A node is
+  high-value only when it is Canonical or has more than five live
+  dependents (Stage 3's bar; it was Canonical, any Venerable, or five or
+  more). A fresh write to a Venerable with five or fewer dependents no
+  longer raises "High-risk modification".
 - **`lambo demo` ends with 15 canonization events, not 5.** Ten concepts
   with dependents from two other interactions become Candidates, four
-  reach Venerable, and `user schema` alone goes Canonical as before. Agent
-  B's recall carries ten warnings, not nine: one more Venerable is
-  high-value.
+  reach Venerable, and `user schema` alone goes Canonical as before; the
+  CANONIZATION section now narrates the nine other promotions. Agent B's
+  recall carries eight warnings, not nine: `auth middleware` (five
+  dependents) is no longer high-value.
 - **Downgrading or mixing versions with `Contradicts` edges (#19).** No
   0.6.0 tool writes a `Contradicts` edge yet; only a library caller or a
   hand-built batch can. A 0.5.0 (or older) binary refuses to load a
@@ -93,14 +116,17 @@
   `stage1_candidates(graph, scores, min_peer_count)`: Stage 1 admits on
   evidence aged by `min_age` at `now`, and returns the admitted set ordered
   by composite score (highest first), not by `NodeId`.
-- **`PromotionScorer::admits_hop` takes `params: &EvalParams` and `now`**
-  (#36 PR 3), so Solo's dependent-interaction term ages its evidence like
-  Stage 1. `PromotionScorer::candidates` now returns its admitted set in the
-  order a bounded cycle should take it. The evaluator no longer asks a
-  scorer about a hop whose stage verdict failed.
+- **`PromotionScorer::admits_hop(graph, node, to, params, now)`** (#36
+  PR 3): it takes the cycle's `EvalParams` and clock, so Solo's
+  dependent-interaction term ages its evidence like Stage 1, and it no
+  longer takes `evidence`: the evaluator asks only about a node whose
+  stage verdict passed, and asks first when building the Stage 2 and 3
+  windows. `PromotionScorer::candidates` now returns its admitted set in
+  the order a bounded cycle should take it.
 - **`EvalParams::min_peer_count` and `Config::canonization_min_peer_count`
-  are inert** (#36 PR 3). They still exist and deserialize, no policy reads
-  them, and `Config::warnings` names a non-default value.
+  are `#[deprecated]` and inert** (#36 PR 3). They still exist and
+  deserialize, no policy reads them, and `Config::warnings` names a
+  non-default value.
 - **`Config` gains `canonization_coverage_window` and `EvalParams` gains
   `coverage_window`** ([#36](https://github.com/nrynss/lambo/issues/36)
   PR 2). Exhaustive struct literals need the field, or
@@ -188,12 +214,17 @@
   `canon::explain_admission`, `canon::render_admission`, `Admission`,
   `AdmissionCheck`, `AdmissionInputs`, `Comparison`,
   `canon::dependent_interaction_counts`, `canon::dependent_interactions`,
-  `canon::solo_breakdown`, `SoloBreakdown` and
-  `cli::inspect::run_with_policy`.
+  `canon::solo_breakdown`, `SoloBreakdown`, `canon::Measurements`,
+  `canon::explain_measured`, `canon::gate_progress_measured` and
+  `cli::inspect::run_with_policy`. A Venerable is not explained eligible
+  while the Canonical budget is full (`canonical_budget`).
 - **The canonization fair-test fixture** (`fixtures/session-fair-test.json`,
   #36 PR 3): four supported rulings, under-supported variants, chaff and one
   contradiction. Both policies promote exactly the four rulings to
-  Canonical on Memory and SQLite, with no seeded statuses.
+  Canonical on Memory and SQLite, with no seeded statuses. A live
+  Postgres and Cockroach run is manual, like the dependents check:
+  `LAMBO_POSTGRES_DSN=<dsn> cargo test --no-default-features --features store-postgres --lib store::pg::fair_test_live -- --ignored`,
+  and the Cockroach conformance suite.
 - `examples/canon36_admission.rs` measures what PR 3's admission does on a
   copy of a SQLite store (counts and ids only, no concept text).
 - **Stdio project patterns (#33 PR 5).** `[[serve.projects]] path` accepts
