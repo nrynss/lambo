@@ -87,8 +87,17 @@ impl ContextBlock {
     /// `warnings` lines, with its content and label offsets.
     pub(crate) fn for_hit(hit: &RecallHit, warnings: &[String]) -> Self {
         let text = super::render_block(hit, warnings);
-        // render_block joins the label line and each warning line with '\n'.
-        let label_end = text.len() - warnings.iter().map(|w| w.len() + 1).sum::<usize>();
+        // The label line is exactly what render_block renders with no
+        // warnings, and the full block starts with it. Deriving the offset
+        // from that, not from the warnings' lengths, keeps it right if the
+        // join format changes; if the prefix ever fails to hold, fall back
+        // to the content end (the least that is still a valid slice).
+        let label = super::render_block(hit, &[]);
+        let label_end = if text.starts_with(&label) {
+            label.len()
+        } else {
+            hit.content.len().min(text.len())
+        };
         debug_assert!(text.starts_with(&hit.content));
         debug_assert!(text.is_char_boundary(label_end));
         Self {
@@ -349,6 +358,38 @@ mod tests {
         assert_eq!(&b.text[..b.label_end], super::super::render_block(&h, &[]));
         assert_eq!(b.inspect_id, super::super::short_id(h.node_id));
         assert_eq!(b.scope, None);
+    }
+
+    #[test]
+    fn label_end_is_the_label_lines_end_with_warnings_and_multibyte() {
+        let mut h = hit("héllo wörld 日本語 🦀 schéma", true);
+        for warnings in [
+            vec![],
+            vec![blast_radius_warning(3)],
+            vec![
+                "⚑ Réserved by ägent-日本".to_string(),
+                "🔥 hot: 日本語".to_string(),
+                "Reserved by agent-b".to_string(),
+            ],
+        ] {
+            for blast in [None, Some(12)] {
+                h.blast_radius = blast;
+                let b = ContextBlock::for_hit(&h, &warnings);
+                // Release-mode checks: no debug_assert involved.
+                assert!(b.text.is_char_boundary(b.label_end));
+                assert!(b.text.is_char_boundary(b.content_len));
+                let label = &b.text[..b.label_end];
+                assert_eq!(label, super::super::render_block(&h, &[]));
+                assert!(!label.contains('\n'), "label is a single line");
+                assert!(label.ends_with(')'), "label ends at the meta suffix");
+                let rest = &b.text[b.label_end..];
+                if warnings.is_empty() {
+                    assert_eq!(rest, "");
+                } else {
+                    assert_eq!(rest, format!("\n{}", warnings.join("\n")));
+                }
+            }
+        }
     }
 
     #[test]
