@@ -54,7 +54,8 @@ whole forward, often a wide padded one of a few hundred ms, so a lane
 retired a two-text write in two or more such waits. At 16 agents each
 agent submits about one write per second, close to what one lane could
 retire, so lanes backed up. This is an argument from the code and the
-probe, not a measurement under load; the acceptance run below decides.
+probe; the load runs (see "Measured under load") did not reproduce the
+backlog on 0.5.0, so they neither confirm nor refute it.
 
 So the change cuts **rounds per write** and removes padding waste.
 
@@ -171,8 +172,8 @@ The orchestrator removed it: the probe shows Metal throughput is flat past
 length chunking. H2's partial-results fix, M1's priority and the
 deadline handling have since landed for the per-write path, which removes
 most of the objections' mechanism, and M4 cannot arise without a
-cross-call seed. If the acceptance run at 16 agents still shows lane
-backlogs, the prefetch is the next thing to measure: with its own budget
+cross-call seed. If a later run at 16 agents or more shows lane backlogs,
+the prefetch is the next thing to measure: with its own budget
 (not the running job's), behind single embeds in candle's queue, and
 with the seed scoped to the jobs it was embedded for.
 
@@ -182,7 +183,29 @@ with the seed scoped to the jobs it was embedded for.
   because the deadline passed) is now `EmbedUnavailable`, transient, so
   the write queue leaves the durable intent unconsumed instead of settling
   an acked write `failed`. Test:
-  `a_candidate_lookup_timeout_is_transient_and_writes_nothing`.
+  `a_candidate_lookup_timeout_is_transient_and_writes_nothing`. Nothing
+  retries it within the session: the session's next serve replays the
+  intent.
+- **Sonnet review, replay stall (medium):** as an embedder outage, a
+  lookup timeout was left durable at replay and counted toward
+  `EMBEDDER_SICK_THRESHOLD`, so three writes whose lookup is slow every
+  time stopped the replay with none settled, on every restart. A lookup
+  timeout is now told apart (`LamboError::is_lookup_timeout`, a fixed
+  message prefix, so no public enum gains a variant): at replay it never
+  counts toward embedder sickness, the replay is its last attempt and it
+  settles `failed` with a reason that says the lookup did not answer, and
+  `REPLAY_LOOKUP_TIMEOUT_LIMIT` (3) in a row with nothing applied between
+  stop the replay as a store fault with the rest durable. A slow store thus
+  costs at most two settled writes per attach, and every attach makes
+  progress. Test:
+  `a_lookup_timeout_at_replay_settles_failed_and_a_run_of_them_stops_it`.
+- **Sonnet review, priority per take (medium):** candle now checks for
+  queued single embeds before every forward of a take (`serve_take`,
+  `take_singles`), so a recall waits for at most the forward in flight.
+  Test: `a_single_embed_queued_during_a_take_waits_for_one_forward_only`.
+- **Harness:** `mcp_concurrent.py` set its stop time before the client
+  handshakes and warm-up recalls, so a slow warm-up shortened the measured
+  load; it now starts the clock when the workers start.
 - **H2:** no embed, lookup or round is started after the deadline (a
   `timeout_at` past its deadline still polls once); a round keeps the
   slots it finished. Tests: `a_gathered_round_keeps_the_slots_done_before_its_deadline`,
@@ -229,37 +252,46 @@ with the seed scoped to the jobs it was embedded for.
   single embeds and applies; record_action in one round and a refused
   path failing as `Embed`; the H1 and H2 tests above.
 
-## Not measured here: the #125 acceptance run
+## Measured under load
 
-The acceptance check is `mcp_concurrent.py` at 16 agents (think 0.5 s,
-120 s) on a copy of a realistic store, with apply p90 under 2 s and 0
-failed or dropped writes, plus `replay_parity.py` against 0.5.0 with
-canonization off. This lane did not run it: it needs a copy of the
-dogfood store (this lane may not read `~/lambo-dogfood`), a bearer token,
-and the GPU the dogfood serve is using. To run it, as the owner:
+The owner ran `scripts/loadtest/mcp_concurrent.py` (120 s, the default
+40/38/18/4 mix) on an Apple M3 Pro with the candle BGE-M3 embedder on
+Metal, against copies of a realistic store, for this branch and the 0.5.0
+release asset:
+
+| agents, think | build | apply p50 | apply p90 |
+|---|---|---:|---:|
+| 8, 1.0 s | 0.5.0 | 64 ms | 94 ms |
+| 8, 1.0 s | this branch | 51 ms | 71 ms |
+| 16, 0.5 s | 0.5.0 | 113 ms | 189 ms |
+| 16, 0.5 s | this branch | 70 ms | 134 ms |
+
+Recall p99 was the same or better on the branch. Every run had 0 failed
+and 0 dropped writes.
+
+**Caveat.** In these runs 0.5.0 did not reproduce the multi-second backlog
+the issue reported (apply p90 12.3 s at 16 agents), so these numbers
+compare two queues that did not back up. They show the change makes a
+write faster at 8 and 16 agents and does not slow recall; they do not
+show what it does to the backlog the issue measured, and no "seconds to
+milliseconds" claim follows from them. The 8-agent check (must not be
+slower) passes.
+
+To repeat the runs:
 
 ```bash
-# 1. a scratch copy of the store and a scratch config on port 17701
-#    (never 7700); embedder kind = "candle", offline = true
+# A scratch copy of the store and a scratch config on port 17701
+# (never 7700); embedder kind = "candle", offline = true.
 cargo build --release --features ship,embed-candle-metal
-lambo provision --config scratch/lambo.toml
 XDG_RUNTIME_DIR=$(mktemp -d /tmp/lbc.XXXX) target/release/lambo serve \
     --config scratch/lambo.toml --session conc-125 --agent conc \
     --transport http --port 17701 --bind 127.0.0.1 \
     --ledger scratch/serve-ledger.jsonl 2> scratch/serve.stderr.log &
 
-# 2. 8 agents (must not be slower than p50 93 ms / p90 146 ms) and
-#    16 agents (target p90 < 2 s), each on a FRESH copy of the store
-python3 scripts/loadtest/mcp_concurrent.py --endpoint http://127.0.0.1:17701/mcp \
-    --workers 8 --think 1.0 --secs 120 --seed 1 --out conc-125-w8.json
 python3 scripts/loadtest/mcp_concurrent.py --endpoint http://127.0.0.1:17701/mcp \
     --workers 16 --think 0.5 --secs 120 --seed 1 --out conc-125-w16.json
-
-jq '{drained: .drain.drained, rate: .writes.write_failure_rate_all,
-     p50: .final_stats.write_queue_apply_ms_p50,
-     p90: .final_stats.write_queue_apply_ms_p90,
-     max: .final_stats.write_queue_apply_ms_max}' conc-125-w16.json
 ```
 
-Run the 0.5.0 release asset the same way on fresh copies for the
-baseline, then `replay_parity.py` against 0.5.0 per the loadtest README.
+Run each build on a fresh copy of the store. The harness's `--secs` clock
+now starts after its warm-up (fixed on this branch), so runs before that
+fix may have had slightly less load than `--secs`.

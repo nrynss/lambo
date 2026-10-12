@@ -120,7 +120,11 @@ pub trait Embedder: Send + Sync {
     async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbedError>;
 
     // Optional, with defaults:
-    async fn embed_batch(&self, texts: &[&str]) -> Vec<Result<Vec<f32>, EmbedError>>;
+    async fn embed_batch(
+        &self,
+        texts: &[&str],
+        deadline: tokio::time::Instant,
+    ) -> Vec<Result<Vec<f32>, EmbedError>>;
     fn batch_capacity(&self) -> usize; // default 1
 }
 ```

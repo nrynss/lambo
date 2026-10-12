@@ -33,12 +33,22 @@
   also expires a new, healthy writer that took the lease after you read the
   row.
 
+- **A vector-candidate lookup timeout is `LamboError::EmbedUnavailable`,
+  not `LamboError::Store`** (#125). `hybrid::derive` and `Memory::derive`
+  return it when a hybrid derive's lookup does not answer within the call's
+  30 s embed-and-lookup budget. Its message reads `embed: hybrid vector
+  candidate lookup timed out after 30s; ...` and its error kind is
+  "embedding error" (it was `store error`), on write receipts too. Other
+  store errors from the lookup are unchanged.
+
 ### Added
 
 - `Embedder::embed_batch(texts, deadline)` and `Embedder::batch_capacity`,
   default methods (non-breaking): embed several texts in one call, one result
   per text, keeping the texts finished by the deadline. The defaults call
   `embed` per text and report a capacity of 1.
+- `writeq::REPLAY_LOOKUP_TIMEOUT_LIMIT` (3): consecutive lookup timeouts at
+  replay that stop it (#125).
 
 ### Changed
 
@@ -110,8 +120,13 @@
   (#125 review).** The lookup runs under the same deadline as a derive's
   embeds, and its timeout was a store error, which the write queue settles
   `failed`, consuming the write's durable intent. It is now transient, like an
-  embed timeout, so the intent stays for a later attempt. A derive also no
-  longer starts an embed or a lookup once its deadline has passed.
+  embed timeout: the receipt says `failed`, the intent stays durable, and the
+  session's next serve replays it (nothing retries it within the session). If
+  the lookup times out again at replay, the intent settles `failed` with a
+  reason that says so, rather than holding the backlog on every restart;
+  three in a row with nothing applied between stop the replay and leave the
+  rest durable. A derive also no longer starts an embed or a lookup once its
+  deadline has passed.
 
 ### Performance
 
@@ -120,9 +135,13 @@
   concept, when the embedder batches (the candle adapter does; the HTTP
   adapters keep their one-at-a-time behaviour). Each write still plans,
   validates and commits on its own; a text the call could not embed is
-  embedded alone, so one bad text fails only its own write. Not yet
-  re-measured with `mcp_concurrent.py`; see
-  `dev-diary/notes/perf-125-batched-embeds.md`.
+  embedded alone, so one bad text fails only its own write. Measured with
+  `mcp_concurrent.py` on an M3 Pro (candle on Metal, a store copy, 120 s),
+  apply latency p50/p90: 51/71 ms against 64/94 ms on 0.5.0 at 8 agents, and
+  70/134 ms against 113/189 ms at 16 agents; recall p99 the same or better;
+  0 failed and 0 dropped writes in every run. 0.5.0 did not show its earlier
+  multi-second backlog in these runs, so this compares two unbacklogged
+  queues. See `dev-diary/notes/perf-125-batched-embeds.md`.
 - **Candle forwards in short, length-sorted chunks (#125).** A coalesced
   take now runs as forwards of at most 8 texts of similar length, so one long
   text no longer pads every other text in its batch. Measured on Metal: a
