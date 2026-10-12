@@ -190,6 +190,10 @@ The existing `gate_progress` wrapper selects the default fourteen days.
 the selected cap. The built-in stores and `TieredStore` implement it.
 Third-party adapters still compile without an override, but Stage 2 returns
 `StoreError::Capability` until they implement the new accessor; it never
-silently substitutes raw coverage. `stage2_passes` selects fourteen days,
+silently substitutes raw coverage. Until then, any canonization cycle that
+has a Candidate to check, or under Swarm a Venerable to re-check, fails and
+is logged as `CanonizationCycleFailed` with no transitions, and the
+portal's inspect panel omits the four gates. Forward the call if your
+adapter wraps a built-in store. `stage2_passes` selects fourteen days,
 `stage2_passes_with_window` accepts a custom cap, and
 `stage2_evidence_passes` shares the origin/coverage threshold comparison.

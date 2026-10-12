@@ -27,6 +27,14 @@
   the dogfood store taken 2026-10-12, no Candidate or Venerable would have
   promoted on the first evaluation, with or without this check, and all 7
   Venerables lose their Stage 2 support.
+- **Long sessions can pass Stage 2 with less spread (#36 PR 2).** In a
+  session older than fourteen days, coverage now divides by fourteen days,
+  so a concept that fell just short before may become Venerable, and a
+  Venerable that also has more than five dependents may go Canonical.
+  Nothing is demoted. On a copy of the dogfood store taken 2026-10-12 (one
+  53-day session), 3 concepts move from failing to passing Stage 2, all of
+  them Resources with three dependents: none is a Candidate, and the one
+  Venerable has blast radius 3, so no transition follows.
 - **Stored blast-radius stamps are history.** `Concept::blast_radius` and
   `CanonizationEvent::blast_radius` rows written by 0.5.0 hold the older
   exclusive count. Readers that show a current count (recall, inspect,
@@ -38,13 +46,24 @@
 
 ### Breaking (library API)
 
-- `Config` adds `canonization_coverage_window`; `EvalParams` adds
-  `coverage_window` (#36 PR2). Update exhaustive struct literals or use
-  `..Default::default()`. Older serialized `Config` values default the
-  absent field to fourteen days. Third-party `GraphStore` implementations
-  compile unchanged, but Stage 2 now requires their explicit
-  `interaction_span_with_window` implementation, otherwise returning
-  `StoreError::Capability`. The raw `interaction_span` contract is unchanged.
+- **`Config` gains `canonization_coverage_window` and `EvalParams` gains
+  `coverage_window`** ([#36](https://github.com/nrynss/lambo/issues/36)
+  PR 2). Exhaustive struct literals need the field, or
+  `..Default::default()`. A serialized `Config` without the field
+  deserializes to fourteen days. `Config::validate` rejects a zero cap, a
+  cap with a fraction of a millisecond, and one above `i64::MAX`
+  milliseconds.
+- **Stage 2 needs `GraphStore::interaction_span_with_window`** (#36 PR 2).
+  The new trait method has a default body, so a third-party store still
+  compiles, but the default returns `StoreError::Capability`: Stage 2 never
+  substitutes the uncapped measurement. Until the store implements it (a
+  wrapper forwards it), any canonization cycle with a Candidate to check,
+  or under Swarm a Venerable to re-check, fails as
+  `CanonizationCycleFailed`, and the portal's inspect panel omits the
+  gates. `stage2_passes` and `gate_progress` keep their signatures and now
+  measure against the default cap; `stage2_passes_with_window` and
+  `gate_progress_with_config` take a chosen one. `interaction_span` itself
+  is unchanged and still divides by the whole session extent.
 
 - **`LeaseHolder::token()` and its `Display`, and the
   `session_leases.holder` column, have a new format** (#126). A holder for
@@ -129,12 +148,16 @@
 
 ### Changed
 
-- Stage 2 caps its coverage denominator at fourteen days (#36 PR2),
-  keeping the three-origin and 0.3 floors. Short sessions keep their
-  coverage; long sessions need 4.2 days of eligible evidence spread.
-  The cap does not expire evidence. Library configuration is validated,
-  evaluation and inspect share it, and `stage2_evidence_passes` exposes
-  the reusable evidence threshold predicate.
+- **Stage 2 coverage is measured against at most fourteen days** ([#36](https://github.com/nrynss/lambo/issues/36)
+  PR 2). The bars are unchanged (three dependent origin interactions,
+  coverage at least 0.3), but the denominator is min(session extent, 14
+  days), so a session older than two weeks needs 4.2 days of spread
+  instead of 30% of its whole life. Sessions of up to fourteen days, the
+  demo and the REST API fixture included, measure exactly as before. This
+  is a cap on the denominator, not an expiry: evidence older than fourteen
+  days still counts. Evaluation and the portal's inspect panel use the
+  same configured cap, and `stage2_evidence_passes` is the shared
+  comparison later stages reuse.
 
 - The MCP tool descriptions say what a concept is and how to send
   `agent_id` ([#98](https://github.com/nrynss/lambo/issues/98),
