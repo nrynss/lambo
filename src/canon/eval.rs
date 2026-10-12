@@ -13,7 +13,10 @@
 //! 3. Stage 3: `Venerable → Canonical` for a **round-robin** window of
 //!    at most [`EvalParams::batch_size`] Venerable nodes, **score-
 //!    descending** (canonical key ascending, then NodeId ascending —
-//!    [`tie_break_by_key`], issue #2) within the window.
+//!    [`tie_break_by_key`], issue #2) within the window. A member's Stage 3
+//!    verdict also requires it to pass Stage 2 again (#36 upgrade guard): a
+//!    Venerable admitted under an older support rule cannot jump to
+//!    Canonical on blast radius alone.
 //!    The cursor lives on [`Evaluator`] so the next cycle continues
 //!    around the ring.
 //! 4. Budget: if Canonical count exceeds `max_canonical_nodes`, demote
@@ -39,7 +42,8 @@
 //!    stage windows, the Stage-3 cooldown inputs and the budget probe out of
 //!    the graph. No I/O.
 //! 2. [`verdicts`] — **async, no lock.** One `interaction_span` per Stage-2
-//!    window member and one `blast_radius` per Stage-3 window member /
+//!    window member, one `interaction_span` and (when it passes) one
+//!    `blast_radius` per Stage-3 window member, and one `blast_radius` per
 //!    budget probe. Touches no graph.
 //! 3. [`apply`] — **synchronous, write guard.** Re-checks each node's
 //!    current status, applies the transitions, emits `DaemonEvent::Canonized`.
@@ -563,6 +567,19 @@ async fn verdicts(
         }
     }
     for probe in &plan.stage3 {
+        // #36 upgrade guard: a Venerable is re-checked against Stage 2 before
+        // its Stage 3 probe. Stage 2 is not a one-time admission. A node
+        // admitted under an older definition of support (before #36, inbound
+        // `Causal` edges counted), or whose support has since thinned, must
+        // still hold the evidence the ladder rests on before it can become
+        // Canonical; otherwise a stale Venerable with more than five
+        // dependents would promote on the first cycle after an upgrade.
+        // Under Swarm this makes the Stage 3 verdict "Stage 2 still holds and
+        // blast > 5". The span query runs first so a failing node costs no
+        // blast probe.
+        if !stage2_passes(store, &plan.session, probe.node, params.min_age, now).await? {
+            continue;
+        }
         if let Some(blast) = stage3::stage3_passes(
             store,
             &plan.session,
