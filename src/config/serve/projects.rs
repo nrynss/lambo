@@ -13,7 +13,11 @@
 //! 2. Otherwise the `[[serve.projects]]` entry whose path is the **longest
 //!    prefix** of the process's canonical working directory. Prefixes are
 //!    compared by path component, so `/w/lambo` covers `/w/lambo/src` but not
-//!    `/w/lambo-wt`.
+//!    `/w/lambo-wt`. A `*` in the final component matches whole child names
+//!    (zero or more bytes, case-sensitive). Matching directory roots are
+//!    canonicalized, including symlinks outside the parent. Deepest canonical
+//!    root wins; a literal beats a pattern at equal depth. Conflicting pattern
+//!    ties refuse rather than guessing which glob is more specific.
 //! 3. Otherwise `default_session`.
 //! 4. Otherwise refuse with the text clap printed for a missing `--session`
 //!    before the flag became optional ([`SESSION_REQUIRED`]).
@@ -36,8 +40,10 @@
 //! So entering a project through a symlink selects the entry for the
 //! directory the link points at, and an entry written through a symlink (for
 //! example `/tmp/...` on macOS, which is `/private/tmp/...`) still matches.
-//! Canonicalizing only stats the path; nothing is opened or read. An entry
-//! whose path does not exist (or cannot be canonicalized) is skipped: an
+//! Literal canonicalization resolves filesystem paths. An entry
+//! whose path does not exist (or cannot be canonicalized) is skipped. Patterns
+//! scan only immediate children of the canonical parent, without retaining a
+//! child list; an unreadable parent listing skips the whole pattern. An
 //! existing canonical working directory cannot be inside it.
 //!
 //! When the working directory itself cannot be determined or canonicalized
@@ -162,6 +168,19 @@ impl std::error::Error for SessionSelectionError {}
 /// Called by [`ServeConfig::validate`]. Quotes the path, which is
 /// configuration, not a secret.
 pub(super) fn check_project_path(path: &str) -> Result<(), LamboError> {
+    let parts: Vec<_> = path
+        .split(|c| c == '/' || (cfg!(windows) && c == '\\'))
+        .filter(|p| !p.is_empty())
+        .collect();
+    if parts
+        .iter()
+        .take(parts.len().saturating_sub(1))
+        .any(|p| p.contains('*'))
+    {
+        return Err(serve_err(format!(
+            "[[serve.projects]] path {path:?}: `*` is supported only in the final component"
+        )));
+    }
     if let Some(rest) = path.strip_prefix('~') {
         if rest.is_empty() || rest.starts_with('/') {
             return Ok(());
@@ -203,6 +222,66 @@ fn depth(path: &Path) -> usize {
     path.components()
         .filter(|c| matches!(c, Component::Normal(_)))
         .count()
+}
+
+/// Match a whole filename using `*` only, without lossy Unicode conversion.
+/// Byte-exact, case-sensitive matching is independent of filesystem lookup rules.
+/// Iterative backtracking uses constant space and at most pattern × name work.
+fn matches_name(pattern: &[u8], name: &[u8]) -> bool {
+    let (mut p, mut n) = (0, 0);
+    let mut star = None;
+    let mut retry = 0;
+    while n < name.len() {
+        if p < pattern.len() && pattern[p] == b'*' {
+            star = Some(p);
+            p += 1;
+            retry = n;
+        } else if p < pattern.len() && pattern[p] == name[n] {
+            p += 1;
+            n += 1;
+        } else if let Some(s) = star {
+            retry += 1;
+            n = retry;
+            p = s + 1;
+        } else {
+            return false;
+        }
+    }
+    while p < pattern.len() && pattern[p] == b'*' {
+        p += 1;
+    }
+    p == pattern.len()
+}
+
+/// Best canonical root depth for an entry. Enumerating immediate children makes
+/// a matching symlink equivalent to spelling that directory literally, even
+/// when its target is outside the pattern parent. Retain only one score, never
+/// a list of children. A failed parent listing skips the whole pattern.
+fn project_depth(expanded: &Path, cwd: &Path) -> Option<(usize, bool)> {
+    let name = expanded
+        .file_name()
+        .map(|n| n.as_encoded_bytes())
+        .unwrap_or_default();
+    if !name.contains(&b'*') {
+        let canonical = std::fs::canonicalize(expanded).ok()?;
+        return cwd
+            .starts_with(&canonical)
+            .then(|| (depth(&canonical), true));
+    }
+    let parent = std::fs::canonicalize(expanded.parent()?).ok()?;
+    let entries = std::fs::read_dir(parent).ok()?;
+    let mut best = None;
+    for entry in entries {
+        let entry = entry.ok()?;
+        if matches_name(name, entry.file_name().as_encoded_bytes())
+            && let Ok(root) = std::fs::canonicalize(entry.path())
+            && root.is_dir()
+            && cwd.starts_with(&root)
+        {
+            best = Some(best.unwrap_or(0).max(depth(&root)));
+        }
+    }
+    best.map(|d| (d, false))
 }
 
 /// A session name from the file, through the strict addressed-id rule.
@@ -297,19 +376,17 @@ impl ServeConfig {
         cwd: &Path,
         home: Option<&Path>,
     ) -> Result<MapMatch, SessionSelectionError> {
-        // (depth, entry index) of every entry covering `cwd`.
-        let mut covering: Vec<(usize, usize)> = Vec::new();
+        // ((canonical root depth, literal), entry index): literal wins ties.
+        let mut covering: Vec<((usize, bool), usize)> = Vec::new();
         let mut tilde_entries_skipped = false;
         for (i, project) in self.projects.iter().enumerate() {
             let Some(expanded) = expand_home(&project.path, home) else {
                 tilde_entries_skipped = true;
                 continue;
             };
-            // A path that does not exist cannot contain an existing cwd.
-            if let Ok(canonical) = std::fs::canonicalize(&expanded)
-                && cwd.starts_with(&canonical)
-            {
-                covering.push((depth(&canonical), i));
+            check_project_path(&project.path).map_err(SessionSelectionError::Config)?;
+            if let Some(score) = project_depth(&expanded, cwd) {
+                covering.push((score, i));
             }
         }
         let none = MapMatch {
@@ -319,8 +396,7 @@ impl ServeConfig {
         let Some(longest) = covering.iter().map(|&(d, _)| d).max() else {
             return Ok(none);
         };
-        // Entries at the same depth that both cover `cwd` are the same
-        // directory: they agree, or the map is ambiguous.
+        // Equal-priority entries must agree, including overlapping patterns.
         let mut tied = covering
             .iter()
             .filter(|&&(d, _)| d == longest)
@@ -330,7 +406,7 @@ impl ServeConfig {
         };
         if let Some(other) = tied.find(|p| p.session != project.session) {
             return Err(SessionSelectionError::Config(serve_err(format!(
-                "[[serve.projects]] paths {:?} and {:?} are the same directory but name \
+                "[[serve.projects]] paths {:?} and {:?} cover the same directory with equal priority but name \
                  different sessions ({:?} and {:?}); keep one entry",
                 project.path, other.path, project.session, other.session
             ))));
