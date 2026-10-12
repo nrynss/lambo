@@ -13,8 +13,16 @@ signal on id shape.
 - `lambo_record_action` description: this is where activity goes, a short
   line naming the act; a fact or decision to recall is a concept.
 - Every `agent_id` parameter doc (seven identical, plus `lambo_reserve`'s):
-  one stable id naming your model or client, same on every call, never a
-  per-task or per-role id, with good and bad examples and the reason.
+  one stable id for the agent's whole life, never per call, task or topic,
+  so attribution stays whole; agents sharing an id share soft locks and can
+  release each other's, so concurrent agents that must keep out of each
+  other's edits need distinct stable ids (model id plus a stable instance
+  suffix). Examples from more than one vendor.
+- Review M1 correction: the first draft (and #99's premise) said per-task
+  ids keep agents from seeing each other's locks. Backwards: locks are per
+  node, distinct ids contend (`graph::reserve` refuses a cross-agent live
+  lock, naming the holder), and it is a SHARED id that lets two agents
+  extend and release each other's locks.
 - Server instructions: both rules, with the reason for the id rule.
 - Write acks (derive, derive_image, record_action) end with
   `Recorded under agent_id "<id>"; send this same id on every call.` and

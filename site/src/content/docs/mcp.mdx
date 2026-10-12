@@ -116,10 +116,10 @@ Send the id of the agent making the call. Lambo honours it: your work is recorde
 
 The id is **caller-asserted and unverified**. Nothing authenticates it: over stdio the client owns the process, and over HTTP one bearer token authenticates the server rather than each agent. So identity here is a cooperative declaration, which is the same trust level Lambo's soft locks already have — they are advisory and live in RAM. In practice:
 
-- Send one stable id that names your model or client, the same on every call, such as `claude-opus-5-5` or `codex-agent`. Never send a per-task or per-role id such as `b1-review`, `implement-m12` or `claude-orchestrator`. Attribution and soft locks are keyed on the id, so per-task ids scatter your work across many names in the graph, and two agents doing the same work under different ids never contend for the same lock.
+- Use one stable id for an agent's whole life, never one per call, per task or per topic: your model or client id, such as `claude-opus-5-5`, `gpt-5.6` or `codex-agent`. Ids such as `b1-review` or `implement-m12` scatter one agent's work across many names in the ledger.
 - Send the id on one line, at most 256 characters. `agent_id` refuses newlines, tabs, any other control character, the Unicode line and paragraph separators `U+2028`/`U+2029`, and length over 256 even though other strings accept some of them, because your id is rendered into other agents' context blocks as the holder of your locks: a line break there would let you write lines into someone else's context, and a very long id could push the block it annotates out of a budgeted context entirely.
-- Distinct ids get distinct locks and contend honestly: one agent reserving a node another holds gets a conflict that names the holder and the expiry, so it can wait or work elsewhere.
-- Two callers sending the **same** id share one lock and can release each other's. That is by design, and worth knowing before you let two clients default to the same name.
+- Distinct ids contend honestly: one agent reserving a node another holds gets a conflict that names the holder and the expiry, so it can wait or work elsewhere.
+- Two callers sending the **same** id share one lock and can release each other's. That is by design, and worth knowing before you let two clients default to the same name. Concurrent agents that must keep out of each other's edits need distinct stable ids, for example the model id plus a stable instance suffix (`claude-opus-5-5-worker-2`).
 - Every write ack (`lambo_derive`, `lambo_derive_image`, `lambo_record_action`) names the id the write is recorded under, in its text and as `agent_id` in its structured content, so an agent sending a per-task id sees it at the point of use.
 
 ### Errors
@@ -417,11 +417,13 @@ to load relevant prior memory, lambo_derive and lambo_record_action to write wha
 learned and did, lambo_reserve before editing a shared concept, and lambo_inspect /
 lambo_saints / lambo_stats to look around. A concept is one fact, stated atomically and
 short, such as a decision with its reason; it is not a log line or a paragraph, and
-activity goes to lambo_record_action. Every tool takes your agent_id: send one stable id
-that names your model or client, the same on every call (such as claude-opus-5-5), never a
-per-task or per-role id (such as b1-review). It is caller-asserted and unverified: work is
-recorded under it and soft locks are held under it, so distinct ids get distinct locks,
-callers sharing an id share locks, and per-task ids split attribution. created_at is
+activity goes to lambo_record_action. Every tool takes your agent_id: use one stable id
+for as long as you run, never one per call, task or topic: your model or client id
+(<your-model-id>), with a stable instance suffix if several of you run at once. It is
+caller-asserted and unverified. Work is recorded under it, so a stable id keeps
+attribution whole. Soft locks are held under it: distinct ids contend for a node, and
+callers sharing an id share its locks and can release each other's, so concurrent agents
+that must keep out of each other's edits need distinct stable ids. created_at is
 server-stamped: do not send a client flush timestamp. lambo_derive and lambo_record_action
 may take optional RFC3339 event_time for historical about-time, such as a commit or
 document date; omit it for a live fact, which is about now. Ordering is yours to manage,

@@ -423,12 +423,14 @@ impl ServerHandler for LamboServer {
                  lambo_stats to look around. A concept is one fact, stated atomically \
                  and short, such as a decision with its reason; it is not a log line or a \
                  paragraph, and activity goes to lambo_record_action. Every tool takes \
-                 your agent_id: send one stable id that names your model or client, the \
-                 same on every call (such as claude-opus-5-5), never a per-task or \
-                 per-role id (such as b1-review). It is caller-asserted and unverified: \
-                 work is recorded under it and soft locks are held under it, so distinct \
-                 ids get distinct locks, callers sharing an id share locks, and per-task \
-                 ids split attribution. created_at is \
+                 your agent_id: use one stable id for as long as you run, never one per \
+                 call, task or topic: your model or client id (<your-model-id>), with a \
+                 stable instance suffix if several of you run at once. It is \
+                 caller-asserted and unverified. Work is recorded under it, so a stable \
+                 id keeps attribution whole. Soft locks are held under it: distinct ids \
+                 contend for a node, and callers sharing an id share its locks and can \
+                 release each other's, so concurrent agents that must keep out of each \
+                 other's edits need distinct stable ids. created_at is \
                  server-stamped: do not send a client flush timestamp. lambo_derive and \
                  lambo_record_action may take optional RFC3339 event_time for historical \
                  about-time, such as a commit or document date; omit it for a live fact, \

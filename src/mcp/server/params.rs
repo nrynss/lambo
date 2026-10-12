@@ -82,13 +82,15 @@ impl From<WireConceptType> for ConceptType {
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RecallParams {
-    /// Id of the agent making this call. Send one stable id that names your
-    /// model or client, the same on every call (good: `claude-opus-5-5`,
-    /// `codex-agent`); never a per-task or per-role id (bad: `b1-review`,
-    /// `implement-m12`). Caller-asserted and unverified: work is recorded, and
-    /// soft locks are held, under exactly the id you send, so per-task ids
-    /// split your attribution and keep agents doing the same work from seeing
-    /// each other's locks.
+    /// Id of the agent making this call. Use one stable id for the agent's
+    /// whole life, never one per call, task or topic (good: your model or
+    /// client id, such as `claude-opus-5-5` or `gpt-5.6`, with a stable
+    /// instance suffix such as `-worker-2` if several run at once; bad:
+    /// `b1-review`, `implement-m12`). Caller-asserted and unverified: work is
+    /// recorded under exactly the id you send, so a stable id keeps your
+    /// attribution whole. Agents sharing an id share soft locks and can
+    /// release each other's; concurrent agents that must keep out of each
+    /// other's edits need distinct stable ids.
     #[schemars(length(max = 16_384))]
     pub agent_id: String,
     /// Natural-language query. Required, unless you send `image` or
@@ -155,13 +157,15 @@ pub struct WireParentOf {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DeriveParams {
-    /// Id of the agent making this call. Send one stable id that names your
-    /// model or client, the same on every call (good: `claude-opus-5-5`,
-    /// `codex-agent`); never a per-task or per-role id (bad: `b1-review`,
-    /// `implement-m12`). Caller-asserted and unverified: work is recorded, and
-    /// soft locks are held, under exactly the id you send, so per-task ids
-    /// split your attribution and keep agents doing the same work from seeing
-    /// each other's locks.
+    /// Id of the agent making this call. Use one stable id for the agent's
+    /// whole life, never one per call, task or topic (good: your model or
+    /// client id, such as `claude-opus-5-5` or `gpt-5.6`, with a stable
+    /// instance suffix such as `-worker-2` if several run at once; bad:
+    /// `b1-review`, `implement-m12`). Caller-asserted and unverified: work is
+    /// recorded under exactly the id you send, so a stable id keeps your
+    /// attribution whole. Agents sharing an id share soft locks and can
+    /// release each other's; concurrent agents that must keep out of each
+    /// other's edits need distinct stable ids.
     #[schemars(length(max = 16_384))]
     pub agent_id: String,
     /// Concepts to derive from this interaction.
@@ -185,13 +189,15 @@ pub struct WireResource(#[schemars(length(max = 16_384))] pub String);
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RecordActionParams {
-    /// Id of the agent making this call. Send one stable id that names your
-    /// model or client, the same on every call (good: `claude-opus-5-5`,
-    /// `codex-agent`); never a per-task or per-role id (bad: `b1-review`,
-    /// `implement-m12`). Caller-asserted and unverified: work is recorded, and
-    /// soft locks are held, under exactly the id you send, so per-task ids
-    /// split your attribution and keep agents doing the same work from seeing
-    /// each other's locks.
+    /// Id of the agent making this call. Use one stable id for the agent's
+    /// whole life, never one per call, task or topic (good: your model or
+    /// client id, such as `claude-opus-5-5` or `gpt-5.6`, with a stable
+    /// instance suffix such as `-worker-2` if several run at once; bad:
+    /// `b1-review`, `implement-m12`). Caller-asserted and unverified: work is
+    /// recorded under exactly the id you send, so a stable id keeps your
+    /// attribution whole. Agents sharing an id share soft locks and can
+    /// release each other's; concurrent agents that must keep out of each
+    /// other's edits need distinct stable ids.
     #[schemars(length(max = 16_384))]
     pub agent_id: String,
     /// The action taken — becomes a `Resource` concept.
@@ -214,12 +220,13 @@ pub struct RecordActionParams {
 #[serde(deny_unknown_fields)]
 pub struct ReserveParams {
     /// Id of the agent making this call — the identity the lock is held under.
-    /// Send one stable id that names your model or client, the same on every
-    /// call (good: `claude-opus-5-5`, `codex-agent`); never a per-task or
-    /// per-role id (bad: `b1-review`, `implement-m12`). Caller-asserted and
-    /// unverified: locks are cooperative. A distinct id gets a distinct lock;
-    /// two callers sending the SAME id share one lock and can release each
-    /// other's.
+    /// Use one stable id for the agent's whole life, never one per call, task
+    /// or topic (good: `claude-opus-5-5`, `gpt-5.6`, with a stable instance
+    /// suffix such as `-worker-2` if several run at once; bad: `b1-review`).
+    /// Caller-asserted and unverified: locks are cooperative. Distinct ids
+    /// contend: reserving a node another id holds is refused, naming the
+    /// holder. Two callers sending the SAME id share one lock and can release
+    /// each other's.
     #[schemars(length(max = 16_384))]
     pub agent_id: String,
     /// Node to reserve, as a UUID string (from `lambo_recall` or
@@ -236,13 +243,15 @@ pub struct ReserveParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct InspectParams {
-    /// Id of the agent making this call. Send one stable id that names your
-    /// model or client, the same on every call (good: `claude-opus-5-5`,
-    /// `codex-agent`); never a per-task or per-role id (bad: `b1-review`,
-    /// `implement-m12`). Caller-asserted and unverified: work is recorded, and
-    /// soft locks are held, under exactly the id you send, so per-task ids
-    /// split your attribution and keep agents doing the same work from seeing
-    /// each other's locks.
+    /// Id of the agent making this call. Use one stable id for the agent's
+    /// whole life, never one per call, task or topic (good: your model or
+    /// client id, such as `claude-opus-5-5` or `gpt-5.6`, with a stable
+    /// instance suffix such as `-worker-2` if several run at once; bad:
+    /// `b1-review`, `implement-m12`). Caller-asserted and unverified: work is
+    /// recorded under exactly the id you send, so a stable id keeps your
+    /// attribution whole. Agents sharing an id share soft locks and can
+    /// release each other's; concurrent agents that must keep out of each
+    /// other's edits need distinct stable ids.
     #[schemars(length(max = 16_384))]
     pub agent_id: String,
     /// Concept content, a node UUID, or the short-form id rendered in recall
@@ -257,13 +266,15 @@ pub struct InspectParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SaintsParams {
-    /// Id of the agent making this call. Send one stable id that names your
-    /// model or client, the same on every call (good: `claude-opus-5-5`,
-    /// `codex-agent`); never a per-task or per-role id (bad: `b1-review`,
-    /// `implement-m12`). Caller-asserted and unverified: work is recorded, and
-    /// soft locks are held, under exactly the id you send, so per-task ids
-    /// split your attribution and keep agents doing the same work from seeing
-    /// each other's locks.
+    /// Id of the agent making this call. Use one stable id for the agent's
+    /// whole life, never one per call, task or topic (good: your model or
+    /// client id, such as `claude-opus-5-5` or `gpt-5.6`, with a stable
+    /// instance suffix such as `-worker-2` if several run at once; bad:
+    /// `b1-review`, `implement-m12`). Caller-asserted and unverified: work is
+    /// recorded under exactly the id you send, so a stable id keeps your
+    /// attribution whole. Agents sharing an id share soft locks and can
+    /// release each other's; concurrent agents that must keep out of each
+    /// other's edits need distinct stable ids.
     #[schemars(length(max = 16_384))]
     pub agent_id: String,
 }
@@ -271,13 +282,15 @@ pub struct SaintsParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct StatsParams {
-    /// Id of the agent making this call. Send one stable id that names your
-    /// model or client, the same on every call (good: `claude-opus-5-5`,
-    /// `codex-agent`); never a per-task or per-role id (bad: `b1-review`,
-    /// `implement-m12`). Caller-asserted and unverified: work is recorded, and
-    /// soft locks are held, under exactly the id you send, so per-task ids
-    /// split your attribution and keep agents doing the same work from seeing
-    /// each other's locks.
+    /// Id of the agent making this call. Use one stable id for the agent's
+    /// whole life, never one per call, task or topic (good: your model or
+    /// client id, such as `claude-opus-5-5` or `gpt-5.6`, with a stable
+    /// instance suffix such as `-worker-2` if several run at once; bad:
+    /// `b1-review`, `implement-m12`). Caller-asserted and unverified: work is
+    /// recorded under exactly the id you send, so a stable id keeps your
+    /// attribution whole. Agents sharing an id share soft locks and can
+    /// release each other's; concurrent agents that must keep out of each
+    /// other's edits need distinct stable ids.
     #[schemars(length(max = 16_384))]
     pub agent_id: String,
     /// A write receipt id from a `lambo_derive` or `lambo_record_action` ack.
@@ -404,13 +417,15 @@ pub struct WireVector {
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DeriveImageParams {
-    /// Id of the agent making this call. Send one stable id that names your
-    /// model or client, the same on every call (good: `claude-opus-5-5`,
-    /// `codex-agent`); never a per-task or per-role id (bad: `b1-review`,
-    /// `implement-m12`). Caller-asserted and unverified: work is recorded, and
-    /// soft locks are held, under exactly the id you send, so per-task ids
-    /// split your attribution and keep agents doing the same work from seeing
-    /// each other's locks.
+    /// Id of the agent making this call. Use one stable id for the agent's
+    /// whole life, never one per call, task or topic (good: your model or
+    /// client id, such as `claude-opus-5-5` or `gpt-5.6`, with a stable
+    /// instance suffix such as `-worker-2` if several run at once; bad:
+    /// `b1-review`, `implement-m12`). Caller-asserted and unverified: work is
+    /// recorded under exactly the id you send, so a stable id keeps your
+    /// attribution whole. Agents sharing an id share soft locks and can
+    /// release each other's; concurrent agents that must keep out of each
+    /// other's edits need distinct stable ids.
     #[schemars(length(max = 16_384))]
     pub agent_id: String,
     /// What the image is, in words. It is the concept's text: keyword recall

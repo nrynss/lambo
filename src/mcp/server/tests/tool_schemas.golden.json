@@ -56,7 +56,7 @@
       "additionalProperties": false,
       "properties": {
         "agent_id": {
-          "description": "Id of the agent making this call. Send one stable id that names your\nmodel or client, the same on every call (good: `claude-opus-5-5`,\n`codex-agent`); never a per-task or per-role id (bad: `b1-review`,\n`implement-m12`). Caller-asserted and unverified: work is recorded, and\nsoft locks are held, under exactly the id you send, so per-task ids\nsplit your attribution and keep agents doing the same work from seeing\neach other's locks.",
+          "description": "Id of the agent making this call. Use one stable id for the agent's\nwhole life, never one per call, task or topic (good: your model or\nclient id, such as `claude-opus-5-5` or `gpt-5.6`, with a stable\ninstance suffix such as `-worker-2` if several run at once; bad:\n`b1-review`, `implement-m12`). Caller-asserted and unverified: work is\nrecorded under exactly the id you send, so a stable id keeps your\nattribution whole. Agents sharing an id share soft locks and can\nrelease each other's; concurrent agents that must keep out of each\nother's edits need distinct stable ids.",
           "maxLength": 16384,
           "type": "string"
         },
@@ -211,7 +211,7 @@
       "additionalProperties": false,
       "properties": {
         "agent_id": {
-          "description": "Id of the agent making this call. Send one stable id that names your\nmodel or client, the same on every call (good: `claude-opus-5-5`,\n`codex-agent`); never a per-task or per-role id (bad: `b1-review`,\n`implement-m12`). Caller-asserted and unverified: work is recorded, and\nsoft locks are held, under exactly the id you send, so per-task ids\nsplit your attribution and keep agents doing the same work from seeing\neach other's locks.",
+          "description": "Id of the agent making this call. Use one stable id for the agent's\nwhole life, never one per call, task or topic (good: your model or\nclient id, such as `claude-opus-5-5` or `gpt-5.6`, with a stable\ninstance suffix such as `-worker-2` if several run at once; bad:\n`b1-review`, `implement-m12`). Caller-asserted and unverified: work is\nrecorded under exactly the id you send, so a stable id keeps your\nattribution whole. Agents sharing an id share soft locks and can\nrelease each other's; concurrent agents that must keep out of each\nother's edits need distinct stable ids.",
           "maxLength": 16384,
           "type": "string"
         },
@@ -290,7 +290,7 @@
       "additionalProperties": false,
       "properties": {
         "agent_id": {
-          "description": "Id of the agent making this call. Send one stable id that names your\nmodel or client, the same on every call (good: `claude-opus-5-5`,\n`codex-agent`); never a per-task or per-role id (bad: `b1-review`,\n`implement-m12`). Caller-asserted and unverified: work is recorded, and\nsoft locks are held, under exactly the id you send, so per-task ids\nsplit your attribution and keep agents doing the same work from seeing\neach other's locks.",
+          "description": "Id of the agent making this call. Use one stable id for the agent's\nwhole life, never one per call, task or topic (good: your model or\nclient id, such as `claude-opus-5-5` or `gpt-5.6`, with a stable\ninstance suffix such as `-worker-2` if several run at once; bad:\n`b1-review`, `implement-m12`). Caller-asserted and unverified: work is\nrecorded under exactly the id you send, so a stable id keeps your\nattribution whole. Agents sharing an id share soft locks and can\nrelease each other's; concurrent agents that must keep out of each\nother's edits need distinct stable ids.",
           "maxLength": 16384,
           "type": "string"
         },
@@ -406,7 +406,7 @@
       "additionalProperties": false,
       "properties": {
         "agent_id": {
-          "description": "Id of the agent making this call. Send one stable id that names your\nmodel or client, the same on every call (good: `claude-opus-5-5`,\n`codex-agent`); never a per-task or per-role id (bad: `b1-review`,\n`implement-m12`). Caller-asserted and unverified: work is recorded, and\nsoft locks are held, under exactly the id you send, so per-task ids\nsplit your attribution and keep agents doing the same work from seeing\neach other's locks.",
+          "description": "Id of the agent making this call. Use one stable id for the agent's\nwhole life, never one per call, task or topic (good: your model or\nclient id, such as `claude-opus-5-5` or `gpt-5.6`, with a stable\ninstance suffix such as `-worker-2` if several run at once; bad:\n`b1-review`, `implement-m12`). Caller-asserted and unverified: work is\nrecorded under exactly the id you send, so a stable id keeps your\nattribution whole. Agents sharing an id share soft locks and can\nrelease each other's; concurrent agents that must keep out of each\nother's edits need distinct stable ids.",
           "maxLength": 16384,
           "type": "string"
         },
@@ -494,7 +494,7 @@
           "type": "string"
         },
         "agent_id": {
-          "description": "Id of the agent making this call. Send one stable id that names your\nmodel or client, the same on every call (good: `claude-opus-5-5`,\n`codex-agent`); never a per-task or per-role id (bad: `b1-review`,\n`implement-m12`). Caller-asserted and unverified: work is recorded, and\nsoft locks are held, under exactly the id you send, so per-task ids\nsplit your attribution and keep agents doing the same work from seeing\neach other's locks.",
+          "description": "Id of the agent making this call. Use one stable id for the agent's\nwhole life, never one per call, task or topic (good: your model or\nclient id, such as `claude-opus-5-5` or `gpt-5.6`, with a stable\ninstance suffix such as `-worker-2` if several run at once; bad:\n`b1-review`, `implement-m12`). Caller-asserted and unverified: work is\nrecorded under exactly the id you send, so a stable id keeps your\nattribution whole. Agents sharing an id share soft locks and can\nrelease each other's; concurrent agents that must keep out of each\nother's edits need distinct stable ids.",
           "maxLength": 16384,
           "type": "string"
         },
@@ -552,7 +552,7 @@
       "additionalProperties": false,
       "properties": {
         "agent_id": {
-          "description": "Id of the agent making this call — the identity the lock is held under.\nSend one stable id that names your model or client, the same on every\ncall (good: `claude-opus-5-5`, `codex-agent`); never a per-task or\nper-role id (bad: `b1-review`, `implement-m12`). Caller-asserted and\nunverified: locks are cooperative. A distinct id gets a distinct lock;\ntwo callers sending the SAME id share one lock and can release each\nother's.",
+          "description": "Id of the agent making this call — the identity the lock is held under.\nUse one stable id for the agent's whole life, never one per call, task\nor topic (good: `claude-opus-5-5`, `gpt-5.6`, with a stable instance\nsuffix such as `-worker-2` if several run at once; bad: `b1-review`).\nCaller-asserted and unverified: locks are cooperative. Distinct ids\ncontend: reserving a node another id holds is refused, naming the\nholder. Two callers sending the SAME id share one lock and can release\neach other's.",
           "maxLength": 16384,
           "type": "string"
         },
@@ -593,7 +593,7 @@
       "additionalProperties": false,
       "properties": {
         "agent_id": {
-          "description": "Id of the agent making this call. Send one stable id that names your\nmodel or client, the same on every call (good: `claude-opus-5-5`,\n`codex-agent`); never a per-task or per-role id (bad: `b1-review`,\n`implement-m12`). Caller-asserted and unverified: work is recorded, and\nsoft locks are held, under exactly the id you send, so per-task ids\nsplit your attribution and keep agents doing the same work from seeing\neach other's locks.",
+          "description": "Id of the agent making this call. Use one stable id for the agent's\nwhole life, never one per call, task or topic (good: your model or\nclient id, such as `claude-opus-5-5` or `gpt-5.6`, with a stable\ninstance suffix such as `-worker-2` if several run at once; bad:\n`b1-review`, `implement-m12`). Caller-asserted and unverified: work is\nrecorded under exactly the id you send, so a stable id keeps your\nattribution whole. Agents sharing an id share soft locks and can\nrelease each other's; concurrent agents that must keep out of each\nother's edits need distinct stable ids.",
           "maxLength": 16384,
           "type": "string"
         }
@@ -611,7 +611,7 @@
       "additionalProperties": false,
       "properties": {
         "agent_id": {
-          "description": "Id of the agent making this call. Send one stable id that names your\nmodel or client, the same on every call (good: `claude-opus-5-5`,\n`codex-agent`); never a per-task or per-role id (bad: `b1-review`,\n`implement-m12`). Caller-asserted and unverified: work is recorded, and\nsoft locks are held, under exactly the id you send, so per-task ids\nsplit your attribution and keep agents doing the same work from seeing\neach other's locks.",
+          "description": "Id of the agent making this call. Use one stable id for the agent's\nwhole life, never one per call, task or topic (good: your model or\nclient id, such as `claude-opus-5-5` or `gpt-5.6`, with a stable\ninstance suffix such as `-worker-2` if several run at once; bad:\n`b1-review`, `implement-m12`). Caller-asserted and unverified: work is\nrecorded under exactly the id you send, so a stable id keeps your\nattribution whole. Agents sharing an id share soft locks and can\nrelease each other's; concurrent agents that must keep out of each\nother's edits need distinct stable ids.",
           "maxLength": 16384,
           "type": "string"
         },

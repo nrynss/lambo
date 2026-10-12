@@ -117,17 +117,30 @@ async fn every_tool_schema_is_an_object_requiring_agent_id() {
         let id_doc = schema["properties"]["agent_id"]["description"]
             .as_str()
             .unwrap_or_default();
+        // #99 review M1: sharing an id shares locks; distinct ids contend.
+        let flat = id_doc.replace('\n', " ");
         assert!(
-            id_doc.contains("one stable id that names your\nmodel or client")
-                || id_doc.contains("one stable id that names your model or client"),
-            "{} agent_id must say to send one stable model or client id: {id_doc}",
+            flat.contains("one stable id for the agent's whole life")
+                && flat.contains("never one per call, task or topic"),
+            "{} agent_id must say to keep one stable id: {flat}",
             t.name
         );
         assert!(
-            id_doc.contains("per-task or")
-                && id_doc.contains("claude-opus-5-5")
-                && id_doc.contains("b1-review"),
-            "{} agent_id must forbid per-task ids, with examples: {id_doc}",
+            flat.contains("b1-review")
+                && flat.contains("gpt-5.6")
+                && flat.contains("claude-opus-5-5"),
+            "{} agent_id must give good and bad examples from more than one vendor: {flat}",
+            t.name
+        );
+        assert!(
+            flat.contains("can release each other's"),
+            "{} agent_id must say a shared id shares locks: {flat}",
+            t.name
+        );
+        assert!(
+            !flat.contains("per-task ids split")
+                && !flat.contains("from seeing each other's locks"),
+            "{} agent_id must not claim distinct ids avoid contention: {flat}",
             t.name
         );
         let required = schema["required"].as_array().cloned().unwrap_or_default();
@@ -800,10 +813,12 @@ async fn get_info_advertises_tools_and_names_the_session() {
         "instructions must say what a concept is: {instructions}"
     );
     assert!(
-        instructions.contains("one stable id that names your model or client")
-            && instructions.contains("never a per-task or per-role id")
-            && instructions.contains("soft locks are held under it")
-            && instructions.contains("per-task ids split attribution"),
+        instructions.contains("use one stable id for as long as you run")
+            && instructions.contains("never one per call, task or topic")
+            && instructions.contains("<your-model-id>")
+            && instructions.contains("distinct ids contend for a node")
+            && instructions.contains("callers sharing an id share its locks")
+            && instructions.contains("need distinct stable ids"),
         "instructions must carry the agent_id rule and its reason: {instructions}"
     );
     assert!(

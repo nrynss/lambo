@@ -11,9 +11,11 @@
   fact, stated atomically and short, such as a decision with its reason, not
   a log line or a paragraph, with a good and a bad example;
   `lambo_record_action` says it is where activity goes. Every tool's
-  `agent_id` description and the server instructions say to send one stable
-  id naming your model or client, never a per-task or per-role id, with
-  examples and the reason (attribution and soft locks are keyed on it). The
+  `agent_id` description and the server instructions say to keep one stable
+  id for an agent's whole life, never one per call, task or topic, so
+  attribution stays whole; and that agents sharing an id share soft locks,
+  so concurrent agents that must keep out of each other's edits need
+  distinct stable ids (a model id plus a stable instance suffix). The
   published tool schemas change only in these descriptions; the golden is
   updated to match. Write acks now name the id the write is recorded under:
   a last text line and an `agent_id` key in `structuredContent` (additive).
