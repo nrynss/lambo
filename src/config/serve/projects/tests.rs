@@ -549,3 +549,333 @@ fn macos_case_and_unicode_normalization_variants_are_one_directory() {
     let msg = config_error(select(&both, &inner));
     assert!(msg.contains("same directory"), "{msg}");
 }
+
+#[test]
+fn patterns_cover_siblings_and_descendants_with_whole_name_boundaries() {
+    let root = ScratchDir::new("lambo-pattern-siblings");
+    let pattern = format!("{}/lambo-wt-*", s(&root));
+    let cfg = config(vec![project(&pattern, "lambo")], Some("general"));
+    for rel in ["lambo-wt-", "lambo-wt-one", "lambo-wt-two/src/deep"] {
+        let cwd = mkdir(&root, rel);
+        let got = select(&cfg, &cwd).unwrap();
+        assert_eq!(got.session, "lambo");
+        assert_eq!(
+            got.source,
+            SessionSource::Project {
+                path: pattern.clone()
+            }
+        );
+    }
+    for rel in [
+        "lambo-wt",
+        "xlambo-wt-one",
+        "other/lambo-wt-one",
+        "lambo-wt-otherish",
+    ] {
+        let cwd = mkdir(&root, rel);
+        if rel == "lambo-wt-otherish" {
+            let suffix = config(
+                vec![project(format!("{}/lambo-wt-*ishx", s(&root)), "bad")],
+                Some("general"),
+            );
+            assert_eq!(session(select(&suffix, &cwd)), "general");
+        } else {
+            assert_eq!(session(select(&cfg, &cwd)), "general");
+        }
+    }
+    assert_eq!(session(select(&cfg, &root)), "general");
+    let absent = config(
+        vec![project(format!("{}/absent/*", s(&root)), "bad")],
+        Some("general"),
+    );
+    assert_eq!(session(select(&absent, &root)), "general");
+    let no_default = config(vec![project(&pattern, "lambo")], None);
+    assert!(matches!(
+        select(&no_default, &root),
+        Err(SessionSelectionError::Missing(_))
+    ));
+}
+
+#[test]
+fn pattern_priority_is_depth_then_literal_and_conflicting_ties_refuse() {
+    let root = ScratchDir::new("lambo-pattern-priority");
+    let dir = mkdir(&root, "lambo-wt-one");
+    let deep = mkdir(&dir, "src/private-cwd-marker");
+    let broad = project(format!("{}/*", s(&root)), "broad");
+    let narrow = project(format!("{}/lambo-wt-*", s(&root)), "narrow");
+    for projects in [
+        vec![broad.clone(), narrow.clone()],
+        vec![narrow.clone(), broad.clone()],
+    ] {
+        let msg = config_error(select(&config(projects, Some("general")), &deep));
+        assert!(msg.contains("equal priority"));
+        assert!(!msg.contains("private-cwd-marker"));
+    }
+    for projects in [
+        vec![broad.clone(), project(s(&dir), "literal")],
+        vec![project(s(&dir), "literal"), broad.clone()],
+    ] {
+        assert_eq!(session(select(&config(projects, None), &deep)), "literal");
+    }
+    let deeper = project(s(&dir.join("src")), "deep");
+    assert_eq!(
+        session(select(&config(vec![broad, narrow, deeper], None), &deep)),
+        "deep"
+    );
+    let agree = config(
+        vec![
+            project(format!("{}/*", s(&root)), "same"),
+            project(format!("{}/lambo*", s(&root)), "same"),
+        ],
+        None,
+    );
+    assert_eq!(session(select(&agree, &deep)), "same");
+}
+
+#[test]
+fn patterns_expand_home_and_preserve_flag_and_fallback_behavior() {
+    let home = ScratchDir::new("lambo-pattern-home");
+    let cwd = mkdir(&home, "work/lambo-wt-one/src");
+    let cfg = config(vec![project("~/work/lambo-wt-*", "lambo")], Some("general"));
+    assert_eq!(
+        session(cfg.select_stdio_session_with(None, || Ok(cwd.clone()), Some(&home))),
+        "lambo"
+    );
+    for home in [None, Some(Path::new("relative-home"))] {
+        let got = cfg
+            .select_stdio_session_with(None, || Ok(cwd.clone()), home)
+            .unwrap();
+        assert_eq!(got.session, "general");
+        assert!(got.tilde_entries_skipped);
+    }
+    assert_eq!(
+        session(cfg.select_stdio_session_with(Some("flag"), || panic!("flag bypass"), None)),
+        "flag"
+    );
+    let got = select(&cfg, &home.join("gone")).unwrap();
+    assert_eq!(got.source, SessionSource::DefaultSessionCwdUnavailable);
+}
+
+#[cfg(unix)]
+#[test]
+fn patterns_canonicalize_parent_children_and_cwd_symlinks() {
+    let root = ScratchDir::new("lambo-pattern-links");
+    let parent = mkdir(&root, "work");
+    let target = mkdir(&root, "outside/target/src");
+    std::os::unix::fs::symlink(root.join("outside/target"), parent.join("lambo-wt-link")).unwrap();
+    std::os::unix::fs::symlink(&parent, root.join("alias")).unwrap();
+    std::os::unix::fs::symlink(root.join("gone"), parent.join("lambo-wt-broken")).unwrap();
+    std::fs::write(parent.join("lambo-wt-file"), "ordinary file").unwrap();
+    let cfg = config(
+        vec![project(
+            format!("{}/alias/../alias/lambo-wt-*", s(&root)),
+            "lambo",
+        )],
+        None,
+    );
+    for cwd in [&target, &parent.join("lambo-wt-link/src")] {
+        assert_eq!(session(select(&cfg, cwd)), "lambo");
+    }
+    let literal = project(s(&root.join("outside/target")), "literal");
+    assert_eq!(
+        session(select(
+            &config(vec![cfg.projects[0].clone(), literal], None),
+            &target
+        )),
+        "literal"
+    );
+    let bad_parent = config(
+        vec![project(format!("{}/work/lambo-wt-file/*", s(&root)), "bad")],
+        Some("general"),
+    );
+    assert_eq!(session(select(&bad_parent, &root)), "general");
+}
+
+#[test]
+fn pattern_syntax_is_only_final_component_stars() {
+    for ok in [
+        "/work/lambo-wt-*",
+        "/work/*/",
+        "~/work/*a*b**",
+        "/work/[?]*",
+    ] {
+        check_project_path(ok).unwrap();
+    }
+    for bad in ["/work/*/child", "~/work/*/..", "/work/*/.", "/work/a*/b*"] {
+        let msg = parse(&format!(
+            "[[serve.projects]]\npath = {bad:?}\nsession = \"a\"\n"
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(msg.contains("final component"), "{msg}");
+    }
+    for (pattern, name, yes) in [
+        ("a*b*c", "abc", true),
+        ("a**b", "axxb", true),
+        ("*", "", true),
+        ("a*b", "axxbc", false),
+        ("[?]*", "[?]x", true),
+        ("[?]*", "ax", false),
+        ("Lambo*", "lambo-one", false),
+        ("café*", "cafe\u{301}-one", false),
+    ] {
+        assert_eq!(
+            matches_name(pattern.as_bytes(), name.as_bytes()),
+            yes,
+            "{pattern} / {name}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn patterns_match_non_utf8_names_without_lossy_conversion() {
+    use std::os::unix::ffi::OsStringExt;
+    let root = ScratchDir::new("lambo-pattern-bytes");
+    let dir = root.join(std::ffi::OsString::from_vec(b"lambo-wt-\xff".to_vec()));
+    assert!(matches_name(b"lambo-wt-*", b"lambo-wt-\xff"));
+    if let Err(error) = std::fs::create_dir(&dir) {
+        // APFS rejects invalid UTF-8 names; byte matching is still verified.
+        assert_eq!(
+            error.raw_os_error(),
+            Some(92),
+            "unexpected mkdir failure: {error}"
+        );
+        return;
+    }
+    let cfg = config(
+        vec![project(format!("{}/lambo-wt-*", s(&root)), "lambo")],
+        None,
+    );
+    assert_eq!(session(select(&cfg, &dir)), "lambo");
+}
+
+#[test]
+fn pattern_case_and_unicode_are_byte_exact_even_on_insensitive_filesystems() {
+    let root = ScratchDir::new("lambo-pattern-case");
+    for (name, pattern) in [("Lambo-wt-one", "lambo-wt-*"), ("cafe\u{301}-one", "café*")] {
+        let dir = mkdir(&root, name);
+        let cfg = config(
+            vec![project(format!("{}/{pattern}", s(&root)), "bad")],
+            Some("general"),
+        );
+        assert_eq!(session(select(&cfg, &dir)), "general");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn an_unreadable_pattern_parent_is_skipped() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = ScratchDir::new("lambo-pattern-unreadable");
+    let parent = mkdir(&root, "parent");
+    let target = mkdir(&root, "outside/target");
+    std::os::unix::fs::symlink(&target, parent.join("lambo-one")).unwrap();
+    let old = std::fs::metadata(&parent).unwrap().permissions();
+    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o0)).unwrap();
+    let denied = std::fs::read_dir(&parent).is_err();
+    let cfg = config(
+        vec![project(format!("{}/lambo-*", s(&parent)), "bad")],
+        Some("general"),
+    );
+    let result = select(&cfg, &target);
+    std::fs::set_permissions(&parent, old).unwrap();
+    if denied {
+        assert_eq!(session(result), "general");
+    }
+}
+
+#[test]
+fn large_parent_scans_match_without_retaining_child_lists() {
+    let root = ScratchDir::new("lambo-pattern-many");
+    for n in 0..256 {
+        mkdir(&root, &format!("sibling-{n}"));
+    }
+    let cwd = mkdir(&root, "lambo-wt-last/src");
+    let cfg = config(
+        vec![project(format!("{}/lambo-wt-*", s(&root)), "lambo")],
+        None,
+    );
+    assert_eq!(session(select(&cfg, &cwd)), "lambo");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_deeper_canonical_pattern_root_beats_a_shallower_literal() {
+    let root = ScratchDir::new("lambo-pattern-depth");
+    let parent = mkdir(&root, "parent");
+    let target = mkdir(&root, "target/deep/src");
+    std::os::unix::fs::symlink(root.join("target/deep"), parent.join("project-link")).unwrap();
+    let cfg = config(
+        vec![
+            project(s(&root.join("target")), "literal"),
+            project(format!("{}/project-*", s(&parent)), "pattern"),
+        ],
+        None,
+    );
+    assert_eq!(session(select(&cfg, &target)), "pattern");
+}
+
+#[cfg(windows)]
+#[test]
+fn native_windows_parent_component_patterns_are_refused() {
+    for bad in [r"C:\work\*\child", r"C:\work\a*\..", r"C:\work\*\."] {
+        assert!(check_project_path(bad)
+            .unwrap_err()
+            .to_string()
+            .contains("final component"));
+    }
+    check_project_path(r"C:\work\lambo-wt-*").unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn stars_in_home_are_literal_data_not_project_pattern_syntax() {
+    let root = ScratchDir::new("lambo-pattern-literal-home");
+    let home = mkdir(&root, "user*");
+    let descendant = mkdir(&home, "src/deep");
+    let sibling = mkdir(&root, "user-unrelated/src");
+    for path in ["~", "~/"] {
+        let cfg = config(vec![project(path, "home")], Some("general"));
+        for cwd in [&home, &descendant] {
+            let got = cfg
+                .select_stdio_session_with(None, || Ok(cwd.clone()), Some(&home))
+                .unwrap();
+            assert_eq!(got.session, "home", "{path}");
+        }
+        assert_eq!(
+            session(cfg.select_stdio_session_with(None, || Ok(sibling.clone()), Some(&home))),
+            "general",
+            "{path}"
+        );
+
+        // The literal HOME root must retain literal priority against a pattern
+        // that matches the same directory, whichever entry appears first.
+        let pattern = project(format!("{}/user*", s(&root)), "pattern");
+        for projects in [
+            vec![project(path, "home"), pattern.clone()],
+            vec![pattern.clone(), project(path, "home")],
+        ] {
+            let cfg = config(projects, None);
+            assert_eq!(
+                session(cfg.select_stdio_session_with(
+                    None,
+                    || Ok(descendant.clone()),
+                    Some(&home)
+                )),
+                "home"
+            );
+        }
+    }
+    let child = mkdir(&home, "lambo-wt-one/src");
+    let unrelated = mkdir(&root, "user-other/lambo-wt-one/src");
+    let cfg = config(vec![project("~/lambo-wt-*", "project")], Some("general"));
+    assert_eq!(
+        session(cfg.select_stdio_session_with(None, || Ok(child.clone()), Some(&home))),
+        "project"
+    );
+    assert_eq!(
+        session(cfg.select_stdio_session_with(None, || Ok(unrelated.clone()), Some(&home))),
+        "general"
+    );
+}

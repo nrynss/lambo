@@ -134,6 +134,12 @@
 
 ### Added
 
+- **Stdio project patterns (#33 PR 5).** `[[serve.projects]] path` accepts
+  `*` in its final component, covering matching sibling directories and
+  descendants. Matching roots follow symlinks; deepest canonical root wins,
+  then literal over pattern, with conflicting pattern ties refused. Patterns
+  are byte-exact and case-sensitive. Parent-component stars are refused.
+
 - `EdgeType::Contradicts` persistence and synthetic exclusion checks across
   the store adapters (#19(a)). It does not decay. Write-tool fields,
   contradiction warnings and evidence-driven supersession follow separately.
