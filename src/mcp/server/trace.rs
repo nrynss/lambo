@@ -197,7 +197,7 @@ pub(super) fn recall_facts(
                     AnnotationKind::Traversal | AnnotationKind::VectorDegraded => {}
                 }
             }
-            json!({
+            let mut line = json!({
                 "node_id": hit.node_id.0.to_string(),
                 "content": truncate_for_ledger(&hit.content),
                 "score": hit.score,
@@ -206,7 +206,15 @@ pub(super) fn recall_facts(
                 "blast_radius": hit.blast_radius,
                 "included_in_context": d.included_in_context,
                 "annotations": kinds,
-            })
+            });
+            // #130: additive, and only on the truncated hit, so a line
+            // without it reads as before (`v` stays 1).
+            if d.truncated_in_context
+                && let Some(map) = line.as_object_mut()
+            {
+                map.insert("truncated_in_context".into(), json!(true));
+            }
+            line
         })
         .collect();
 

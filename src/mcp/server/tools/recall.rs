@@ -172,6 +172,9 @@ impl LamboServer {
             }
             facts
         });
+        // #130: whether the first hit is in `context` truncated (read from
+        // the single source before the projection drops it).
+        let first_truncated = detailed.truncated_hit().is_some();
         let result: RecallResult = detailed.into();
         // These include `Memory::recall`'s embed-failure degradation warning —
         // the signal that a recall dropped its vector leg and returned
@@ -187,15 +190,25 @@ impl LamboServer {
         let hits: Vec<_> = result
             .hits
             .iter()
-            .map(|h| {
-                json!({
+            .enumerate()
+            .map(|(i, h)| {
+                let mut hit = json!({
                     "node_id": h.node_id.0.to_string(),
                     "content": h.content,
                     "concept_type": h.concept_type,
                     "score": h.score,
                     "is_canonical": h.is_canonical,
                     "blast_radius": h.blast_radius,
-                })
+                });
+                // #130: additive, on the truncated first hit only, so every
+                // other response is byte-identical.
+                if i == 0
+                    && first_truncated
+                    && let Some(map) = hit.as_object_mut()
+                {
+                    map.insert("truncated_in_context".into(), json!(true));
+                }
+                hit
             })
             .collect();
 
