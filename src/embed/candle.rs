@@ -1446,6 +1446,16 @@ fn coalesce_loop(shared: Arc<Shared>) {
 /// that arrives while a write's batch is being forwarded waits for at most
 /// the one forward in flight, never for the rest of the take.
 ///
+/// Two bounds keep that preference from starving the take's bulk texts:
+/// after [`MAX_SINGLE_STREAK`] single forwards in a row, one bulk chunk runs
+/// even with singles waiting; and new singles are pulled from the queue only
+/// while the take still has bulk texts to protect, so a steady stream of
+/// recalls cannot keep the take from ending (the outer loop then takes
+/// them, singles first, alongside the queued bulk work).
+///
+/// Once shutdown is requested no new singles are pulled: the take finishes
+/// and the outer loop drains what is queued before it exits (K2-R1-7).
+///
 /// A caller that stopped waiting (its deadline passed and it dropped its
 /// receiver) is not forwarded (review H2).
 fn serve_take<F>(queue: &BatchQueue, take: Vec<Pending>, dim: usize, forward: F)
@@ -1454,11 +1464,18 @@ where
 {
     let (mut single, mut bulk): (Vec<Pending>, Vec<Pending>) =
         take.into_iter().partition(|p| !p.bulk);
+    let mut single_streak = 0usize;
     loop {
-        single.extend(queue.take_singles(MAX_BATCH));
-        let group = if single.is_empty() {
+        if !bulk.is_empty() && !queue.shutdown_requested() {
+            single.extend(queue.take_singles(MAX_BATCH));
+        }
+        let run_bulk =
+            !bulk.is_empty() && (single.is_empty() || single_streak >= MAX_SINGLE_STREAK);
+        let group = if run_bulk {
+            single_streak = 0;
             &mut bulk
         } else {
+            single_streak += 1;
             &mut single
         };
         if group.is_empty() {
@@ -1483,6 +1500,12 @@ where
         }
     }
 }
+
+/// Single forwards a take runs in a row before it runs one bulk chunk even
+/// with singles waiting (#125 focused check): a recall waits at most one
+/// bulk forward more, and a write's batch is never starved by a stream of
+/// recalls.
+const MAX_SINGLE_STREAK: usize = 3;
 
 /// Most texts one forward runs (#125). Measured on Metal (M3 Pro, f16,
 /// `metal_batch_throughput`): 53 texts/s alone, 80 at 4 wide, then flat
@@ -2106,6 +2129,91 @@ mod tests {
                 "every bulk text answered"
             );
         }
+    }
+
+    #[test]
+    fn a_stream_of_single_embeds_does_not_starve_a_takes_bulk_texts() {
+        // #125 focused check: every forward brings a new single (a recall).
+        // After MAX_SINGLE_STREAK single forwards, a bulk chunk runs anyway.
+        let q = BatchQueue::new();
+        let mut take = Vec::new();
+        let mut bulk_rxs = Vec::new();
+        for i in 0..(2 * FORWARD_WIDTH) {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            bulk_rxs.push(rx);
+            take.push(Pending {
+                text: format!("bulk text {i:02}"),
+                tx,
+                bulk: true,
+            });
+        }
+        let kept_rxs = std::sync::Mutex::new(Vec::new());
+        let order: std::sync::Mutex<Vec<bool>> = Default::default();
+        serve_take(&q, take, 4, |texts: &[&str]| {
+            let bulk = texts[0].starts_with("bulk");
+            order.lock().unwrap().push(bulk);
+            // Bounded, so a regression fails the assertions below instead
+            // of looping forever.
+            if kept_rxs.lock().unwrap().len() < 20 {
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                kept_rxs.lock().unwrap().push(rx);
+                q.push(Pending {
+                    text: "recall".into(),
+                    tx,
+                    bulk: false,
+                });
+            }
+            Ok(texts.iter().map(|_| vec![1.0, 0.0, 0.0, 0.0]).collect())
+        });
+        let order = order.into_inner().unwrap();
+        let bulk_at: Vec<usize> = (0..order.len()).filter(|&i| order[i]).collect();
+        assert_eq!(bulk_at, vec![0, 1 + MAX_SINGLE_STREAK], "{order:?}");
+        for rx in bulk_rxs {
+            assert!(
+                rx.blocking_recv().unwrap().is_ok(),
+                "every bulk text answered"
+            );
+        }
+        assert!(
+            order.len() <= 2 + 2 * MAX_SINGLE_STREAK,
+            "the take ends once its bulk is done: {order:?}"
+        );
+    }
+
+    #[test]
+    fn a_take_pulls_no_new_singles_once_shutdown_is_requested() {
+        let q = BatchQueue::new();
+        let (tx, _rx_queued) = tokio::sync::oneshot::channel();
+        q.push(Pending {
+            text: "queued recall".into(),
+            tx,
+            bulk: false,
+        });
+        q.request_shutdown();
+        let (tx, rx_bulk) = tokio::sync::oneshot::channel();
+        let take = vec![Pending {
+            text: "bulk text".into(),
+            tx,
+            bulk: true,
+        }];
+        let forwarded = std::sync::Mutex::new(Vec::new());
+        serve_take(&q, take, 4, |texts: &[&str]| {
+            forwarded
+                .lock()
+                .unwrap()
+                .extend(texts.iter().map(|t| t.to_string()));
+            Ok(texts.iter().map(|_| vec![1.0, 0.0, 0.0, 0.0]).collect())
+        });
+        assert_eq!(
+            forwarded.into_inner().unwrap(),
+            vec!["bulk text".to_string()]
+        );
+        assert!(rx_bulk.blocking_recv().unwrap().is_ok());
+        assert_eq!(
+            q.len(),
+            1,
+            "the queued recall is left for the outer loop's drain"
+        );
     }
 
     #[test]
