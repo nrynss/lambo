@@ -1378,45 +1378,77 @@ fn coalesce_loop(shared: Arc<Shared>) {
         }
 
         let texts: Vec<&str> = batch.iter().map(|p| p.text.as_str()).collect();
-        let batch_len = batch.len();
-        // K2-R1-5: a candle panic fails THIS batch and the loop goes on.
-        let result =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| shared.core.forward(&texts)));
-        match result {
-            Ok(Ok(vectors)) => {
-                debug_assert_eq!(vectors.len(), batch.len());
-                // K2-R1-4 defense in depth: never hand a caller a vector whose
-                // width disagrees with the stamped contract.
-                if vectors.iter().any(|v| v.len() != shared.dim) {
-                    let got = vectors.first().map(Vec::len).unwrap_or(0);
-                    fail_batch(
-                        batch,
-                        &format!(
-                            "candle returned {got}-wide vectors but the contract pins {} — \
-                             refusing to serve width-mismatched embeddings",
-                            shared.dim
-                        ),
-                    );
-                } else {
-                    for (item, vector) in batch.into_iter().zip(vectors) {
-                        let _ = item.tx.send(Ok(vector));
-                    }
-                }
-            }
-            Ok(Err(e)) => fail_batch(
-                batch,
-                &format!("candle forward failed for a batch of {batch_len} texts: {e}"),
-            ),
-            Err(panic) => fail_batch(
-                batch,
-                &format!(
-                    "candle coalescer panicked running a batch of {} texts: {}; the worker \
-                     keeps serving",
-                    batch_len,
-                    panic_message(panic.as_ref())
-                ),
-            ),
+        let results = forward_isolated(&texts, shared.dim, |chunk| shared.core.forward(chunk));
+        for (item, result) in batch.into_iter().zip(results) {
+            let _ = item.tx.send(result);
         }
+    }
+}
+
+/// One forward over `texts`, with each caller's failure kept to that
+/// caller (#125).
+///
+/// A forward that fails or panics for a batch of several texts is run again
+/// one text at a time, so a text the model cannot embed (a degenerate
+/// tokenization that yields a zero-norm vector, a panic on one input) fails
+/// only its own caller. Before this, the coalescer failed every caller in
+/// the batch with the batch's error: another agent's write, coalesced into
+/// the same forward by timing alone, failed as a permanent `Backend` refusal
+/// and its durable intent was settled `failed`.
+///
+/// A width mismatch is not retried: it is a fact about the loaded model, not
+/// about a text, so every caller gets it (K2-R1-4).
+fn forward_isolated<F>(texts: &[&str], dim: usize, forward: F) -> Vec<Result<Vec<f32>, EmbedError>>
+where
+    F: Fn(&[&str]) -> Result<Vec<Vec<f32>>, EmbedError>,
+{
+    let once = |chunk: &[&str]| -> Result<Vec<Vec<f32>>, String> {
+        // K2-R1-5: a candle panic fails THIS forward and the loop goes on.
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| forward(chunk))) {
+            Ok(Ok(vectors)) if vectors.len() == chunk.len() => Ok(vectors),
+            Ok(Ok(vectors)) => Err(format!(
+                "candle returned {} vectors for a batch of {} texts",
+                vectors.len(),
+                chunk.len()
+            )),
+            Ok(Err(e)) => Err(format!(
+                "candle forward failed for a batch of {} texts: {e}",
+                chunk.len()
+            )),
+            Err(panic) => Err(format!(
+                "candle coalescer panicked running a batch of {} texts: {}; the worker \
+                 keeps serving",
+                chunk.len(),
+                panic_message(panic.as_ref())
+            )),
+        }
+    };
+    let width_checked = |vectors: Vec<Vec<f32>>| -> Vec<Result<Vec<f32>, EmbedError>> {
+        // K2-R1-4 defense in depth: never hand a caller a vector whose
+        // width disagrees with the stamped contract.
+        if let Some(bad) = vectors.iter().find(|v| v.len() != dim) {
+            let msg = format!(
+                "candle returned {}-wide vectors but the contract pins {dim} — refusing to \
+                 serve width-mismatched embeddings",
+                bad.len()
+            );
+            return vectors
+                .iter()
+                .map(|_| Err(EmbedError::Backend(msg.clone())))
+                .collect();
+        }
+        vectors.into_iter().map(Ok).collect()
+    };
+    match once(texts) {
+        Ok(vectors) => width_checked(vectors),
+        Err(msg) if texts.len() <= 1 => vec![Err(EmbedError::Backend(msg))],
+        Err(_) => texts
+            .iter()
+            .map(|text| match once(std::slice::from_ref(text)) {
+                Ok(vectors) => width_checked(vectors).pop().expect("one text, one vector"),
+                Err(msg) => Err(EmbedError::Backend(msg)),
+            })
+            .collect(),
     }
 }
 
@@ -1424,12 +1456,6 @@ fn coalesce_loop(shared: Arc<Shared>) {
 /// shared state it actually uses.
 fn shared_debounce() -> Duration {
     BATCH_DEBOUNCE
-}
-
-fn fail_batch(batch: Vec<Pending>, msg: &str) {
-    for item in batch {
-        let _ = item.tx.send(Err(EmbedError::Backend(msg.to_string())));
-    }
 }
 
 fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
@@ -1607,31 +1633,84 @@ pub(crate) mod test_artifact {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn fail_batch_resolves_every_caller_even_after_a_panic() {
-        // K2-R1-5: the panic path fails each oneshot with the panic named.
-        let mut rxs = Vec::new();
-        let batch: Vec<Pending> = (0..3)
-            .map(|_| {
-                let (tx, rx) = tokio::sync::oneshot::channel();
-                rxs.push(rx);
-                Pending {
-                    text: "x".into(),
-                    tx,
-                }
-            })
-            .collect();
-        fail_batch(
-            batch,
-            "candle coalescer panicked running a batch of 3 texts: bad tensor; the worker \
-             keeps serving",
-        );
-        for rx in rxs {
-            let err = rx.await.unwrap().unwrap_err().to_string();
-            assert!(
-                err.contains("panicked") && err.contains("bad tensor"),
-                "{err}"
+    /// A stand-in forward: a unit vector per text, a panic for any batch
+    /// holding "panic", an error for any batch holding "bad", and a count of
+    /// forwards run.
+    fn fake_forward<'a>(
+        forwards: &'a AtomicUsize,
+        dim: usize,
+    ) -> impl Fn(&[&str]) -> Result<Vec<Vec<f32>>, EmbedError> + 'a {
+        move |texts: &[&str]| {
+            forwards.fetch_add(1, Ordering::SeqCst);
+            if texts.contains(&"panic") {
+                panic!("bad tensor");
+            }
+            if texts.contains(&"bad") {
+                return Err(EmbedError::Backend("degenerate input".into()));
+            }
+            Ok(texts
+                .iter()
+                .map(|t| {
+                    let mut v = vec![0.0; dim];
+                    v[t.len() % dim] = 1.0;
+                    v
+                })
+                .collect())
+        }
+    }
+
+    #[test]
+    fn a_healthy_batch_is_one_forward() {
+        let forwards = AtomicUsize::new(0);
+        let out = forward_isolated(&["a", "bb", "ccc"], 4, fake_forward(&forwards, 4));
+        assert_eq!(forwards.load(Ordering::SeqCst), 1);
+        for (i, r) in out.iter().enumerate() {
+            assert_eq!(
+                r.as_ref().unwrap()[i + 1],
+                1.0,
+                "slot {i} got its own vector"
             );
+        }
+    }
+
+    #[test]
+    fn one_bad_text_fails_only_its_own_caller() {
+        // #125: before, the batch's error failed every caller in it.
+        let forwards = AtomicUsize::new(0);
+        let out = forward_isolated(&["a", "bad", "ccc"], 4, fake_forward(&forwards, 4));
+        assert_eq!(
+            forwards.load(Ordering::SeqCst),
+            4,
+            "the batch, then each text alone"
+        );
+        assert_eq!(out[0].as_ref().unwrap()[1], 1.0);
+        let err = out[1].as_ref().unwrap_err().to_string();
+        assert!(err.contains("degenerate input"), "{err}");
+        assert_eq!(out[2].as_ref().unwrap()[3], 1.0);
+    }
+
+    #[test]
+    fn a_panicking_text_fails_only_its_own_caller_and_names_the_panic() {
+        // K2-R1-5 kept: the panic is caught and named, now per text.
+        let forwards = AtomicUsize::new(0);
+        let out = forward_isolated(&["panic", "bb"], 4, fake_forward(&forwards, 4));
+        let err = out[0].as_ref().unwrap_err().to_string();
+        assert!(
+            err.contains("panicked") && err.contains("bad tensor"),
+            "{err}"
+        );
+        assert!(out[1].is_ok());
+    }
+
+    #[test]
+    fn a_width_mismatch_fails_every_caller_without_a_retry() {
+        // K2-R1-4: a property of the model, not of any one text.
+        let forwards = AtomicUsize::new(0);
+        let out = forward_isolated(&["a", "bb"], 8, fake_forward(&forwards, 4));
+        assert_eq!(forwards.load(Ordering::SeqCst), 1);
+        for r in out {
+            let err = r.unwrap_err().to_string();
+            assert!(err.contains("4-wide") && err.contains("pins 8"), "{err}");
         }
     }
 
