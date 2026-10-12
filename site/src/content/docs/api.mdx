@@ -78,7 +78,14 @@ Library callers with exhaustive `EdgeType` matches must add an arm.
 
 A contradiction is informational: it does not change either concept's
 canonization status, count as dependence or promotion evidence, increase blast
-radius, or protect a Resource from the GC score cut. Its weight does not decay.
+radius, raise either concept's score (it adds nothing to density or the edge
+bonus), or protect a Resource from the GC score cut. Its weight does not decay.
+
+GC's connectivity rules are unchanged and count it like any other edge: a
+concept with a contradiction is not an orphan, and a contradiction can keep a
+concept reachable from the interaction chain. Because the edge never decays,
+it keeps that connection until either endpoint is collected for another
+reason.
 This release groundwork adds the typed edge only; derive/action tool fields,
 recall contradiction warnings and supersession are separate follow-ups.
 

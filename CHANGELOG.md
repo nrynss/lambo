@@ -35,14 +35,25 @@
   dependents, so a file or entity that many actions name in `depends_on`
   reports a larger count than before, and an action record that depended
   on many things reports a smaller one.
+- **Downgrading or mixing versions with `Contradicts` edges (#19).** No
+  0.6.0 tool writes a `Contradicts` edge yet; only a library caller or a
+  hand-built batch can. A 0.5.0 (or older) binary refuses to load a
+  session, and to read a snapshot, that holds one: `load_session` fails on
+  the unknown edge type. Before downgrading, or before a 0.5.0 writer
+  opens a store a newer one wrote, remove them on that store:
+
+  ```sql
+  DELETE FROM edges WHERE edge_type = 'Contradicts';
+  ```
 
 ### Breaking (library API)
 
 - **`EdgeType` gains `Contradicts` (#19, edge groundwork).** Exhaustive
   matches must handle the new variant. It connects concepts, persists as
   `Contradicts`, and declares opposition without dependence, canonization
-  support, blast radius or GC Resource protection. Existing schemas accept
-  it without migration. Older binaries cannot decode rows containing it.
+  support, blast radius, score density or edge bonus, or GC Resource
+  protection. Existing schemas accept it without migration. Older binaries
+  cannot decode rows containing it (see Upgrading).
 - **`LeaseHolder::token()` and its `Display`, and the
   `session_leases.holder` column, have a new format** (#126). A holder for
   the current process writes `agent@host#pid;boot=<id>;pidns=<inode>`
