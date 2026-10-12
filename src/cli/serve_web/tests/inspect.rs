@@ -733,3 +733,27 @@ async fn inspect_surfaces_a_cooling_concepts_repromotion_cooldown() {
     );
     handle.abort();
 }
+
+/// #36: the portal's inspect list is the same relation as blast radius and
+/// the store queries, on the shared dependents case.
+#[test]
+fn inspect_dependents_follow_the_dependents_case() {
+    use crate::cli::serve_web::projections::structural_dependents;
+    use crate::test_util::dependents as case;
+    let g = case::graph();
+    for (name, want) in case::expected_graph() {
+        let (deps, truncated) = structural_dependents(&g, case::concept_id(name));
+        assert!(!truncated);
+        let mut got: Vec<String> = deps.into_iter().map(|d| d.content).collect();
+        got.sort();
+        let mut want: Vec<String> = want
+            .iter()
+            .map(|n| match g.node(case::concept_id(n)) {
+                Some(crate::types::Node::Concept(c)) => c.content.clone(),
+                other => panic!("{n}: {other:?}"),
+            })
+            .collect();
+        want.sort();
+        assert_eq!(got, want, "inspect dependents of {name}");
+    }
+}

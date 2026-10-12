@@ -177,9 +177,10 @@ async fn structural_queries_agree_with_memory_on_both_fixtures() {
         total_assertions += assert_structural_agreement_matrix(&sqlite, &memory, &sid, &snap).await;
 
         // Deterministic sanity anchors on rest-api (independent of the
-        // oracle): eight concepts depend on the Canonical hub 1001
-        // exclusively; span = 6 distinct interactions over 25 of 55
-        // minutes.
+        // oracle): fourteen concepts depend on the Canonical hub 1001 (six
+        // Dependency sources plus eight Hierarchical children, #36); span
+        // = 7 distinct interactions (its own origin excluded) over 30 of
+        // 55 minutes.
         if fixture == "session-rest-api" {
             let hub: NodeId = snap
                 .concepts
@@ -192,14 +193,14 @@ async fn structural_queries_agree_with_memory_on_both_fixtures() {
                     .blast_radius(&sid, hub, Duration::from_secs(0), Utc::now())
                     .await
                     .unwrap(),
-                8
+                14
             );
             let span = sqlite
                 .interaction_span(&sid, hub, Duration::from_secs(0), Utc::now())
                 .await
                 .unwrap();
-            assert_eq!(span.distinct, 6);
-            assert!((span.coverage - 25.0 / 55.0).abs() < 1e-9, "{span:?}");
+            assert_eq!(span.distinct, 7);
+            assert!((span.coverage - 30.0 / 55.0).abs() < 1e-9, "{span:?}");
         }
     }
     // Matrix dimensions: rest-api 34 nodes (22 concepts + 12
@@ -235,8 +236,9 @@ async fn blast_radius_errata_derives_must_not_un_orphan() {
             plant_concept(&sid, pillar, i1, "pillar", ConceptType::Entity, ts),
             plant_concept(&sid, orphan, i1, "orphan", ConceptType::Entity, ts),
             plant_concept(&sid, alone, i1, "alone", ConceptType::Entity, ts),
-            // pillar -> orphan (Dependency): the only structural inbound.
-            plant_edge(&sid, pillar, orphan, EdgeType::Dependency, ts),
+            // pillar -> orphan (Hierarchical): orphan is pillar's child, its
+            // one dependent (#36).
+            plant_edge(&sid, pillar, orphan, EdgeType::Hierarchical, ts),
             // orphan ALSO has the mandatory §5.7 Derives from its origin
             // interaction — counting it would un-orphan orphan.
             plant_edge(&sid, i1, orphan, EdgeType::Derives, ts),
@@ -285,6 +287,8 @@ async fn blast_radius_counts_only_structural_edges_from_the_focus() {
     let co = NodeId::new();
     let sem = NodeId::new();
     let tmp = NodeId::new();
+    let made = NodeId::new();
+    let maker = NodeId::new();
     let batch = MutationBatch {
         mutation_epoch: 0,
         gc_mark: Default::default(),
@@ -295,8 +299,15 @@ async fn blast_radius_counts_only_structural_edges_from_the_focus() {
             plant_concept(&sid, co, i1, "co", ConceptType::Entity, ts),
             plant_concept(&sid, sem, i1, "sem", ConceptType::Entity, ts),
             plant_concept(&sid, tmp, i1, "tmp", ConceptType::Entity, ts),
-            // The one real dependent.
-            plant_edge(&sid, pillar, dep, EdgeType::Dependency, ts),
+            plant_concept(&sid, made, i1, "made", ConceptType::Resource, ts),
+            plant_concept(&sid, maker, i1, "maker", ConceptType::Resource, ts),
+            // The one real dependent: `dep` depends on the pillar.
+            plant_edge(&sid, dep, pillar, EdgeType::Dependency, ts),
+            // Causal is provenance in both directions (#36): the pillar
+            // producing `made`, or `maker` producing the pillar, confers no
+            // load.
+            plant_edge(&sid, pillar, made, EdgeType::Causal, ts),
+            plant_edge(&sid, maker, pillar, EdgeType::Causal, ts),
             // Non-structural edges from the focus: none of these targets
             // has any structural inbound edge, so a missing filter on the
             // first EXISTS would count each as an exclusive dependent.
@@ -314,7 +325,7 @@ async fn blast_radius_counts_only_structural_edges_from_the_focus() {
             .blast_radius(&sid, pillar, min_age, Utc::now())
             .await
             .unwrap();
-        assert_eq!(want, 1, "oracle sanity: only the Dependency target counts");
+        assert_eq!(want, 1, "oracle sanity: only the Dependency source counts");
         let got = store
             .blast_radius(&sid, pillar, min_age, Utc::now())
             .await
@@ -361,11 +372,13 @@ async fn blast_radius_ignores_cross_session_sources_like_memory() {
             plant_interaction(&here, i1, None, ts),
             plant_concept(&here, hub, i1, "hub", ConceptType::Entity, ts),
             plant_concept(&here, dep, i1, "dep", ConceptType::Entity, ts),
-            plant_edge(&here, hub, dep, EdgeType::Dependency, ts),
+            // `dep` depends on `hub` (#36).
+            plant_edge(&here, dep, hub, EdgeType::Dependency, ts),
             // An edge recorded in `here` whose source concept belongs to
             // `there` — the schema permits it (edges carry no FK) and
-            // `GraphStore::flush` is public.
-            plant_edge(&here, foreign, dep, EdgeType::Dependency, ts),
+            // `GraphStore::flush` is public. It must not count as a
+            // dependent of `hub`.
+            plant_edge(&here, foreign, hub, EdgeType::Dependency, ts),
         ],
     };
     let elsewhere = MutationBatch {
@@ -388,7 +401,7 @@ async fn blast_radius_ignores_cross_session_sources_like_memory() {
         .unwrap();
     assert_eq!(
         want, 1,
-        "oracle sanity: a foreign-session source cannot un-orphan `dep`"
+        "oracle sanity: a foreign-session concept is not a dependent"
     );
     let got = store
         .blast_radius(&here, hub, Duration::from_secs(0), Utc::now())
@@ -434,6 +447,7 @@ async fn structural_queries_aged_vs_fresh_edge_agree_with_memory() {
     let i1 = NodeId::new();
     let i2 = NodeId::new();
     let i3 = NodeId::new();
+    let i4 = NodeId::new();
     let pillar = NodeId::new();
     let orphan = NodeId::new();
     let other = NodeId::new();
@@ -450,8 +464,11 @@ async fn structural_queries_aged_vs_fresh_edge_agree_with_memory() {
             plant_interaction(&sid, i1, None, old_ts),
             plant_interaction(&sid, i2, None, old_ts),
             plant_interaction(&sid, i3, None, now),
+            plant_interaction(&sid, i4, None, old_ts),
             plant_concept(&sid, pillar, i1, "pillar", ConceptType::Entity, old_ts),
-            plant_concept(&sid, orphan, i1, "orphan", ConceptType::Entity, old_ts),
+            // `orphan` has its own origin (i4) so its dependents' origins
+            // (i1, i2) are not excluded as its own (#36).
+            plant_concept(&sid, orphan, i4, "orphan", ConceptType::Entity, old_ts),
             plant_concept(&sid, other, i2, "other", ConceptType::Entity, old_ts),
             plant_concept(
                 &sid,
@@ -486,7 +503,17 @@ async fn structural_queries_aged_vs_fresh_edge_agree_with_memory() {
     memory.flush(&fresh, None).await.unwrap();
 
     let one_hour = Duration::from_secs(3600);
-    for node in [pillar, orphan, other, probe_src, probe_victim, i1, i2, i3] {
+    for node in [
+        pillar,
+        orphan,
+        other,
+        probe_src,
+        probe_victim,
+        i1,
+        i2,
+        i3,
+        i4,
+    ] {
         for min_age in [Duration::from_secs(0), one_hour] {
             let br = store
                 .blast_radius(&sid, node, min_age, Utc::now())
@@ -549,30 +576,31 @@ async fn structural_queries_aged_vs_fresh_edge_agree_with_memory() {
         0,
         "i-gate: aged edge with fresh origin excluded at min_age=1h"
     );
-    // blast_radius is origin-agnostic: the aged probe edge counts at 1h
-    // even though its origin is fresh (span-only i-gate, MemoryStore parity).
+    // blast_radius is origin-agnostic: probe_src's aged edge makes it a
+    // dependent of probe_victim at 1h even though its origin is fresh
+    // (span-only i-gate, MemoryStore parity).
     assert_eq!(
         store
-            .blast_radius(&sid, probe_src, one_hour, Utc::now())
+            .blast_radius(&sid, probe_victim, one_hour, Utc::now())
             .await
             .unwrap(),
         1,
         "blast_radius ignores origin age"
     );
     // The age filter is doing real work for blast_radius (independent of
-    // the oracle): with min-age 0 the fresh edge un-orphans; with min-age
-    // 1h it is filtered and the orphan still counts.
+    // the oracle): pillar and other both depend on orphan (#36); with
+    // min-age 0 the fresh edge counts, with min-age 1h it is filtered.
     assert_eq!(
         store
-            .blast_radius(&sid, pillar, Duration::from_secs(0), Utc::now())
+            .blast_radius(&sid, orphan, Duration::from_secs(0), Utc::now())
             .await
             .unwrap(),
-        0,
+        2,
         "fresh edge counts at min_age=0"
     );
     assert_eq!(
         store
-            .blast_radius(&sid, pillar, one_hour, Utc::now())
+            .blast_radius(&sid, orphan, one_hour, Utc::now())
             .await
             .unwrap(),
         1,
@@ -592,14 +620,25 @@ fn structural_span_sql_gates_both_timestamps() {
     // D: each gate resolves the stored instant through the fallback rule
     // (COALESCE(event_time, created_at)), so the assertion tracks the
     // about-time expression, not a bare column.
+    let sql = with_dependents(INTERACTION_SPAN_SQL);
     assert!(
-        INTERACTION_SPAN_SQL.contains("COALESCE(e.event_time, e.created_at) <= ?"),
+        sql.contains("COALESCE(e.event_time, e.created_at) <= ?"),
         "span SQL must gate the EDGE about-time"
     );
     assert!(
-        INTERACTION_SPAN_SQL.contains("COALESCE(i.event_time, i.created_at) <= ?"),
+        sql.contains("COALESCE(i.event_time, i.created_at) <= ?"),
         "span SQL must gate the ORIGIN-INTERACTION about-time"
     );
+    // #36: one dependents set (Dependency sources, Hierarchical children),
+    // shared with blast radius, and never Causal or provenance.
+    for sql in [sql, with_dependents(BLAST_RADIUS_SQL)] {
+        assert!(sql.contains("e.edge_type = 'Dependency'"), "{sql}");
+        assert!(sql.contains("e.edge_type = 'Hierarchical'"), "{sql}");
+        for absent in ["Causal", "Derives", "Temporal", "CoOccurrence", "Semantic"] {
+            assert!(!sql.contains(absent), "{absent} in {sql}");
+        }
+        assert!(!sql.contains("{DEPENDENTS_CTE}"), "{sql}");
+    }
 }
 
 /// F5: `concepts.origin_interaction` is a **global** FK, so a concept in
@@ -690,14 +729,19 @@ async fn interaction_span_single_point_session_coverage_is_one() {
     let sid = SessionId::from("single-span");
     let ts = Utc.with_ymd_and_hms(2026, 8, 10, 9, 0, 0).unwrap();
     let i1 = NodeId::new();
+    let i2 = NodeId::new();
     let pillar = NodeId::new();
     let orphan = NodeId::new();
     let batch = MutationBatch {
         mutation_epoch: 0,
         gc_mark: Default::default(),
         mutations: vec![
+            // Two interactions at one instant: a single-point extent, and
+            // `pillar` (which depends on `orphan`) is not from `orphan`'s
+            // own origin (#36).
             plant_interaction(&sid, i1, None, ts),
-            plant_concept(&sid, pillar, i1, "pillar", ConceptType::Entity, ts),
+            plant_interaction(&sid, i2, None, ts),
+            plant_concept(&sid, pillar, i2, "pillar", ConceptType::Entity, ts),
             plant_concept(&sid, orphan, i1, "orphan", ConceptType::Entity, ts),
             Mutation::UpsertEdge {
                 edge: Edge {
@@ -743,4 +787,71 @@ async fn interaction_span_single_point_session_coverage_is_one() {
     assert_eq!(empty, empty_want);
     assert_eq!(empty.distinct, 0);
     assert_eq!(empty.coverage, 0.0);
+}
+
+/// #36: SQLite answers the shared dependents case
+/// (`crate::test_util::dependents`) exactly as MemoryStore does and as the
+/// case expects, for every concept and both ages: `Dependency` sources and
+/// `Hierarchical` children count (a shared dependent for each pillar);
+/// `Causal`, provenance and association edges, a self-loop, a foreign
+/// concept and a young edge do not; the span drops the node's own origin, a
+/// foreign origin and a young interaction.
+#[cfg(feature = "store-memory")]
+#[tokio::test]
+async fn structural_queries_follow_the_dependents_case_like_memory() {
+    use crate::test_util::dependents as case;
+    let store = test_store();
+    store.init_schema().await.unwrap();
+    let memory = MemoryStore::new();
+    let batch = case::store_batch();
+    store.flush(&batch, None).await.unwrap();
+    memory.flush(&batch, None).await.unwrap();
+    let sid = case::session();
+    for (name, age, blast, distinct, coverage) in case::expected_store() {
+        let node = case::concept_id(name);
+        let got = store
+            .blast_radius(&sid, node, age, case::now())
+            .await
+            .unwrap();
+        assert_eq!(got, blast, "blast_radius({name}, {age:?})");
+        let span = store
+            .interaction_span(&sid, node, age, case::now())
+            .await
+            .unwrap();
+        assert_eq!(span.distinct, distinct, "span distinct({name}, {age:?})");
+        assert!(
+            (span.coverage - coverage).abs() < 1e-9,
+            "span coverage({name}, {age:?}) = {} want {coverage}",
+            span.coverage
+        );
+    }
+    let snap = memory.load_session(&sid).await.unwrap();
+    for c in &snap.concepts {
+        for age in [std::time::Duration::ZERO, case::MIN_AGE] {
+            assert_eq!(
+                store
+                    .blast_radius(&sid, c.id, age, case::now())
+                    .await
+                    .unwrap(),
+                memory
+                    .blast_radius(&sid, c.id, age, case::now())
+                    .await
+                    .unwrap(),
+                "blast_radius {} {age:?}",
+                c.content
+            );
+            assert_eq!(
+                store
+                    .interaction_span(&sid, c.id, age, case::now())
+                    .await
+                    .unwrap(),
+                memory
+                    .interaction_span(&sid, c.id, age, case::now())
+                    .await
+                    .unwrap(),
+                "interaction_span {} {age:?}",
+                c.content
+            );
+        }
+    }
 }

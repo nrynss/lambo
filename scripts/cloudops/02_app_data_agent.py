@@ -30,10 +30,11 @@ gateway the design deliberately does not have.
 is the load-bearing detail of the whole demo: it is what makes the database show
 up as a *dependent* when the next script inspects the shared security group, and
 what turns "delete an idle security group" into "the database loses its
-network". It also means the RDS action below must not `--produces` the database.
-A produce would write a second structural edge into it, and a concept with two
-structural sources counts toward neither of them, so the group's blast radius
-would quietly drop by one and take the dependent's name off the warning with it.
+network": as a `--parent-of` child, the database is one of the group's
+dependents (#36), named in `lambo inspect`'s `dependents` section. The RDS
+action below names the group in `--depends-on`, which makes the action a
+dependent too; it does not `--produces` the database, because a produce
+records provenance and adds nothing to anyone's blast radius.
 
 ## RDS is not a Lambo store
 
@@ -83,7 +84,6 @@ from _lambo import (  # noqa: E402
     account_binding,
     add_common_args,
     add_lambo_args,
-    check_single_source,
     derived,
     find_secret,
     note,
@@ -334,8 +334,8 @@ def derive_topology(lam: Lambo, app: AppData, skip_rds: bool, skip_lambda: bool)
     Containment parents, and the reasoning behind each:
 
     * `lambo-cloudops-db-subnets` under `VPC-Enterprise-Prod`. It spans both
-      private subnets, so neither one of them can own it without the other
-      becoming a second structural source.
+      private subnets, and a concept has at most one `--parent-of` parent
+      (Lambo refuses a second), so neither subnet can own it.
     * `RDS-Lambo-Demo-DB` under `SG-Base-VPC`. Membership of the shared group is
       the relationship the demo is about; the subnet placement is recorded as an
       action dependency instead.
@@ -354,7 +354,6 @@ def derive_topology(lam: Lambo, app: AppData, skip_rds: bool, skip_lambda: bool)
 
     if not skip_rds:
         rds_pairs = [(VPC_NAME, DB_SUBNET_GROUP), (SG_BASE_NAME, RDS_NAME)]
-        check_single_source(rds_pairs)
         out = lam.derive(
             AGENT_APP_DATA,
             DB_SUBNET_GROUP,
@@ -388,9 +387,8 @@ def derive_facts(lam: Lambo, app: AppData, skip_rds: bool, skip_lambda: bool) ->
     Every one of these is read back out of the account rather than asserted from
     the plan, which is the point: a concept that says the database is private is
     only worth having if it went stale when the database stopped being private.
-    They are also the children that nothing else ever points at, so they are what
-    keeps a parent's blast radius above zero once the cross-tier dependency edges
-    below start landing on the network tier.
+    As `--parent-of` children they are also their parent's dependents, so they
+    count toward its blast radius.
 
     None of them is derived as an `observation`, however natural that would read.
     See `IDENTITY_KIND` in `_lambo.py`: `canonicalize` skips observations when
@@ -444,7 +442,6 @@ def derive_facts(lam: Lambo, app: AppData, skip_rds: bool, skip_lambda: bool) ->
         return
 
     pairs = [(parent, content) for parent, content, _ in facts]
-    check_single_source(pairs)
     out = lam.derive(
         AGENT_APP_DATA,
         facts[0][1],
@@ -466,10 +463,10 @@ def record_actions(lam: Lambo, app: AppData, skip_rds: bool, skip_lambda: bool) 
     """The cross-over binding (plan §3 Track 2 step 3).
 
     `--produces` is used only for concepts with no hierarchy parent, which here
-    means the Lambda and the IAM roles. `RDS-Lambo-Demo-DB` is deliberately not
-    produced: it already has a structural source in `SG-Base-VPC`, and a second
-    one would take it out of that group's blast radius, which is exactly the
-    number the next script reads to decide whether to abort.
+    means the Lambda and the IAM roles. `RDS-Lambo-Demo-DB` is not produced: it
+    is already placed under `SG-Base-VPC`, and a produce records provenance
+    only. Each `--depends-on` here makes the action a dependent of what it
+    names, which is what the next script reads to decide whether to abort.
     """
     steps: list[tuple[str, list[str], list[str]]] = []
 

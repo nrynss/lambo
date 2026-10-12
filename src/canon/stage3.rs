@@ -17,7 +17,10 @@
 //!    Default cooldown is
 //!    [`crate::Config::canonization_repromotion_cooldown`] (300s).
 //! 2. **`store.blast_radius(session, node, min_edge_age, now) > 5`**
-//!    (strict). The store returns [`u64`]; the comparison is against
+//!    (strict): more than five concepts declare a dependence on the node
+//!    (#36: `Dependency` sources into it plus its `Hierarchical` children,
+//!    all of them, not only exclusive ones). The store returns [`u64`]; the
+//!    comparison is against
 //!    `5u64`. [`Concept::blast_radius`](crate::types::Concept::blast_radius) is a frozen `Option<i32>`
 //!    (CON-6) and is **not** consulted — never a silent `as i32`.
 //!
@@ -37,9 +40,13 @@
 //!
 //! `min_edge_age` is forwarded unchanged (same inflation idea as
 //! Stage 2). Callers that want the T1.4 / T3.6 fixture numbers
-//! (`user schema` = 8, `api layer` = 1) pass [`Duration::ZERO`].
+//! (`user schema` = 14, `api layer` = 3) pass [`Duration::ZERO`].
 //! Callers that want the inflation guard pass
 //! [`crate::Config::canonization_edge_min_age`] (default 60s).
+//!
+//! The eval cycle (`canon::eval::verdicts`) runs this predicate only for a
+//! Venerable that passes Stage 2 again in the same cycle (#36 upgrade guard),
+//! so Canonical means both supported and load-bearing.
 //!
 //! Stage 3 is evidence-only: [`CanonizationStatus`](crate::types::CanonizationStatus) is not consulted.
 //! Venerable is not a prerequisite (T6.4 sequences transitions).
@@ -188,14 +195,14 @@ mod tests {
         }
     }
 
-    fn edge(id: u64, src: u64, tgt: u64, at: DateTime<Utc>) -> Edge {
+    fn edge(id: u64, src: u64, tgt: u64, ty: EdgeType, at: DateTime<Utc>) -> Edge {
         Edge {
             event_time: None,
             id: nid(3, id),
             session_id: sid(),
             source: cid(src),
             target: cid(tgt),
-            edge_type: EdgeType::Dependency,
+            edge_type: ty,
             weight: 1.0,
             reinforcements: 1,
             created_at: at,
@@ -227,9 +234,9 @@ mod tests {
         store
     }
 
-    /// Hub `cid(10)` plus `n` exclusive dependents (`cid(1..=n)`).
-    /// Each dependent has only the hub as an inbound structural source,
-    /// so `blast_radius(hub) == n`.
+    /// Hub `cid(10)` plus `n` dependents (`cid(1..=n)`), so
+    /// `blast_radius(hub) == n` (#36): odd ones depend on the hub through a
+    /// `Dependency` edge into it, even ones are its `Hierarchical` children.
     async fn store_with_blast(n: u64) -> MemoryStore {
         let at = ts();
         let interactions = [interaction(1, at)];
@@ -237,7 +244,11 @@ mod tests {
         let mut edges = Vec::new();
         for i in 1..=n {
             concepts.push(concept(i, 1, at, None));
-            edges.push(edge(i, 10, i, at));
+            edges.push(if i % 2 == 1 {
+                edge(i, i, 10, EdgeType::Dependency, at)
+            } else {
+                edge(i, 10, i, EdgeType::Hierarchical, at)
+            });
         }
         seed(&interactions, &concepts, &edges).await
     }
@@ -477,8 +488,8 @@ mod tests {
             .id
     }
 
-    /// Planted pillar `user schema` (blast 8, last_demotion None) passes;
-    /// `api layer` (blast 1) does not.
+    /// Planted pillar `user schema` (blast 14, last_demotion None) passes;
+    /// `api layer` (blast 3) does not.
     #[cfg(feature = "fixtures")]
     #[tokio::test]
     async fn rest_api_user_schema_passes_api_layer_fails() {
@@ -492,7 +503,7 @@ mod tests {
             .blast_radius(&sid, us, Duration::ZERO, now)
             .await
             .unwrap();
-        assert_eq!(us_blast, 8, "fixture premise: user schema blast=8");
+        assert_eq!(us_blast, 14, "fixture premise: user schema blast=14");
         match graph.node(us) {
             Some(Node::Concept(c)) => assert!(c.last_demotion_time.is_none()),
             other => panic!("user schema must be a concept, got {other:?}"),
@@ -509,8 +520,8 @@ mod tests {
             )
             .await
             .unwrap()
-                == Some(8),
-            "user schema blast=8 / last_demotion None must pass Stage 3 and \
+                == Some(14),
+            "user schema blast=14 / last_demotion None must pass Stage 3 and \
              report the measurement that admitted it"
         );
 
@@ -518,7 +529,7 @@ mod tests {
             .blast_radius(&sid, api, Duration::ZERO, now)
             .await
             .unwrap();
-        assert_eq!(api_blast, 1, "fixture premise: api layer blast=1");
+        assert_eq!(api_blast, 3, "fixture premise: api layer blast=3");
         assert!(
             stage3_passes(
                 &store,
@@ -532,12 +543,12 @@ mod tests {
             .await
             .unwrap()
             .is_none(),
-            "api layer blast=1 must fail Stage 3"
+            "api layer blast=3 must fail Stage 3"
         );
     }
 
     /// Fixture pillar with `last_demotion_time = now` is refused at
-    /// 300s even though store blast is 8. Would pass if cooldown were
+    /// 300s even though store blast is 14. Would pass if cooldown were
     /// ignored.
     #[cfg(feature = "fixtures")]
     #[tokio::test]
@@ -566,7 +577,7 @@ mod tests {
                 .blast_radius(&sid, us_id, Duration::ZERO, now)
                 .await
                 .unwrap(),
-            8
+            14
         );
         assert!(
             stage3_passes(
@@ -581,7 +592,7 @@ mod tests {
             .await
             .unwrap()
             .is_none(),
-            "just-demoted user schema must be refused despite blast 8"
+            "just-demoted user schema must be refused despite blast 14"
         );
     }
 }

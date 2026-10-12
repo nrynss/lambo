@@ -1415,8 +1415,8 @@ async fn canonization_cycle_makes_the_stage2_hop_on_postgres() {
     }
     graph
         .insert_concept(
-            mk_concept(hub, iids[0], 5, CanonizationStatus::Candidate),
-            iids[0],
+            mk_concept(hub, iids[3], 5, CanonizationStatus::Candidate),
+            iids[3],
         )
         .expect("seed hub");
 
@@ -1600,6 +1600,22 @@ async fn interaction_span_coverage_decodes_on_both_arms() {
                 }),
             });
         }
+        // The peer's own origin interaction (#36: a dependent whose origin is
+        // the concept's own interaction does not count toward its span). It
+        // shares `origin`'s timestamp, so the single-point session keeps
+        // hi == lo and still takes the ELSE arm.
+        let peer_origin = NodeId::new();
+        mutations.push(Mutation::UpsertNode {
+            node: Node::Interaction(Interaction {
+                id: peer_origin,
+                session_id: sid.clone(),
+                agent_id: agent.clone(),
+                prompt_text: Some("peer".into()),
+                previous_id: None,
+                created_at: now,
+                event_time: None,
+            }),
+        });
         mutations.push(Mutation::UpsertNode {
             node: Node::Concept(Concept {
                 id: concept_id,
@@ -1635,7 +1651,7 @@ async fn interaction_span_coverage_decodes_on_both_arms() {
                 content: "peer".into(),
                 canonical_key: "peer".into(),
                 concept_type: ConceptType::Entity,
-                origin_interaction: origin,
+                origin_interaction: peer_origin,
                 origin_agent: agent.clone(),
                 created_at: now - chrono::Duration::seconds(7_200),
                 access_count: 0,

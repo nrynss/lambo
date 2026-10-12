@@ -112,7 +112,7 @@ D1, D2, D3, D4, D5, D6, D7, D8 = 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020
 P1, P2 = 1021, 1022                       # extra non-Canonical peers for the Stage-1 gate
 
 concepts = [
-    concept(US,    "user schema",       1, A, 0,  4, "Canonical", 8),
+    concept(US,    "user schema",       1, A, 0,  4, "Canonical", 14),
     concept(CREATE,"create user",       3, A, 10, 2, "None"),
     concept(AUTH,  "auth middleware",   4, B, 15, 2, "None"),
     concept(VALID, "validation rules",  5, A, 20, 2, "None"),
@@ -123,7 +123,7 @@ concepts = [
     concept(DOCS,  "api docs",          10, B, 45, 1, "None"),
     concept(CACHE, "caching layer",     11, A, 55, 0, "None"),
     concept(LOAD,  "load testing",      12, B, 55, 0, "None"),
-    concept(API,   "api layer",         12, B, 55, 3, "Venerable", 1),
+    concept(API,   "api layer",         12, B, 55, 3, "Venerable", 3),
     concept(D1,    "user id",           1, A, 0,  0, "None"),
     concept(D2,    "user email",        2, B, 5,  0, "None"),
     concept(D3,    "user password hash",3, A, 10, 0, "None"),
@@ -154,16 +154,23 @@ for i in range(2, 13):
 for c in concepts:
     add_edge(int(c["origin_interaction"][-12:]), int(c["id"][-12:]), "Derives", 0.9, 5)
 
-# supporters -> user schema (interaction_span: 6 distinct origins, span 25/55 ~0.455)
+# Dependents (#36): the sources of Dependency edges into a node plus its
+# Hierarchical children. Causal confers no load.
+#
+# six concepts depend on user schema (dependent -> pillar Dependency)
 for s, tm in [(CREATE,10),(AUTH,15),(VALID,20),(RESET,25),(RATE,30),(ERROR,35)]:
     add_edge(s, US, "Dependency", 1.0, tm)
-# user schema -> orphans (blast_radius = 8 > 5)
+# user schema's eight field children (parent -> child Hierarchical).
+# blast_radius = 6 + 8 = 14 > 5. Stage 2: dependents' origin interactions
+# other than user schema's own (interaction 1) are 2..8, 7 distinct, span
+# 30/55 ~0.545.
 for o, tm in [(D1,0),(D2,5),(D3,10),(D4,15),(D5,20),(D6,25),(D7,30),(D8,35)]:
-    add_edge(US, o, "Dependency", 0.8, tm)
-# api layer supporters (Stage 2: 3 distinct origins, span 30/55 ~0.545)
+    add_edge(US, o, "Hierarchical", 0.8, tm)
+# three concepts depend on api layer (Stage 2: 3 distinct origins, span
+# 30/55 ~0.545; blast_radius = 3 <= 5, fails Stage 3)
 for s, tm in [(CREATE,10),(RATE,30),(PAG,40)]:
     add_edge(s, API, "Dependency", 1.0, tm)
-# api layer -> exclusive dependents (computed blast_radius = 1 <= 5, fails Stage 3)
+# api layer depends on api docs and caching layer
 add_edge(API, DOCS, "Dependency", 0.7, 45)
 add_edge(API, CACHE, "Dependency", 0.7, 50)
 # conflict seed: both agents touch caching layer (load-test from B, derive from A)

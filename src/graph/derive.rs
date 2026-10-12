@@ -284,9 +284,8 @@ pub fn validate(
         reject_empty_key(content, &key)?;
         reject_repeated_observation(content, concept_type, &key, graph)?;
     }
-    // T1 part 2 #3 — a child may have at most ONE Hierarchical parent. A second
-    // one silently removes the child from EVERY parent's blast radius (blast
-    // radius counts concepts whose SOLE inbound structural edge is the parent;
+    // T1 part 2 #3 — a child may have at most ONE Hierarchical parent: the
+    // hierarchy is a tree (see `reject_second_hierarchical_parent`;
     // `scripts/cloudops/_lambo.py::check_single_source` used to guard this
     // client-side — the engine now owns it). Checked here, up front, across
     // both this call and any Hierarchical parent already in the graph.
@@ -691,22 +690,20 @@ fn reject_repeated_observation(
 /// T1 part 2 #3 — a concept may have at most ONE Hierarchical parent, checked
 /// at the derive `parent_of` boundary (validate-then-mutate: nothing written).
 ///
-/// Blast radius counts, for a node, the concepts whose **sole** inbound
-/// structural edge comes from it (`recall::format::blast_radii`), so a second
-/// parent silently removes the child from EVERY parent's count — it can drive
-/// a pillar's blast radius to zero with nothing logged and no promotion ever
-/// admitted. `scripts/cloudops/_lambo.py::check_single_source` guarded this
-/// client-side; the engine now owns it, persisted across calls. Re-deriving
-/// the SAME containment (same parent) is fine — it reinforces, it does not
-/// add a second parent.
+/// The hierarchy is a tree: `parent_of` names one containing parent per
+/// child. Before #36 a second parent also silently removed the child from
+/// every parent's (then exclusive) blast radius; since #36 a child counts as a
+/// dependent of each parent, so the guard is kept for the tree shape, not for
+/// the count. `scripts/cloudops/_lambo.py::check_single_source` guarded this
+/// client-side; the engine owns it, persisted across calls. Re-deriving the
+/// SAME containment (same parent) is fine — it reinforces, it does not add a
+/// second parent.
 ///
 /// Scope is deliberately limited to a second **Hierarchical** parent
-/// (T1b-R1-4): a child given one Hierarchical + one Dependency/Causal parent —
-/// a second structural source of a *different* type — still zeroes its blast
-/// radius silently and is out of this guard's scope by design, because
-/// Dependency/Causal fan-in IS the designed multi-source case (`record-action`
-/// fans `produces`/`modifies`/`depends_on`). Refusing those would be wrong, not
-/// a gap.
+/// (T1b-R1-4): a child that also depends on something through
+/// `Dependency`/`Causal` edges is the designed multi-source case
+/// (`record-action` fans `produces`/`modifies`/`depends_on`). Refusing those
+/// would be wrong, not a gap.
 fn reject_second_hierarchical_parent(
     child: &str,
     child_key: &str,
@@ -717,10 +714,9 @@ fn reject_second_hierarchical_parent(
     let second_parent = |prev_key: &str| {
         LamboError::Store(StoreError::Invariant(format!(
             "derive: child {child:?} already has Hierarchical parent '{prev_key}'; declaring \
-             parent '{parent_key}' would give it a second structural source. A concept has at \
-             most one structural source, because a second one silently zeroes its blast radius \
-             (it then counts toward neither parent's count). Keep the existing parent '{prev_key}' \
-             and express the other relationship as a record-action edge."
+             parent '{parent_key}' would give it a second Hierarchical parent. A concept has at \
+             most one Hierarchical parent: the hierarchy is a tree. Keep the existing parent \
+             '{prev_key}' and express the other relationship as a record-action edge."
         )))
     };
     // In-batch: the child was already assigned a (different) parent this call.
@@ -1081,9 +1077,9 @@ mod tests {
 
     #[test]
     fn derive_second_hierarchy_parent_is_refused() {
-        // T1 part 2 #3 — a second Hierarchical parent silently removes the
-        // child from EVERY parent's blast radius (blast_radii counts concepts
-        // whose SOLE inbound structural edge is the parent). It was guarded
+        // T1 part 2 #3 — the hierarchy is a tree: a second Hierarchical
+        // parent is refused (before #36 it also silently removed the child
+        // from every parent's exclusive blast radius). It was guarded
         // client-side by `scripts/cloudops/_lambo.py::check_single_source`;
         // the engine now refuses it at the derive boundary, both within one
         // call and across calls.
@@ -1116,11 +1112,12 @@ mod tests {
             "refusal must name the parent already claiming the child: {msg}"
         );
         assert!(
-            msg.contains("second structural source"),
-            "refusal must explain the blast-radius zeroing: {msg}"
+            msg.contains("second Hierarchical parent"),
+            "refusal must say the child would get a second parent: {msg}"
         );
 
-        // The child still has exactly ONE structural source — no silent zero.
+        // The child still has exactly ONE Hierarchical parent: nothing was
+        // written.
         let api = g
             .concepts()
             .find(|c| c.canonical_key == "api layer")
@@ -1130,7 +1127,7 @@ mod tests {
             .edges()
             .filter(|e| e.edge_type == EdgeType::Hierarchical && e.target == api)
             .count();
-        assert_eq!(hier, 1, "only one structural source for the child");
+        assert_eq!(hier, 1, "only one Hierarchical parent for the child");
 
         // In-batch: the same child declared under two parents in ONE call is
         // also refused.
@@ -1148,7 +1145,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            err2.to_string().contains("second structural source"),
+            err2.to_string().contains("second Hierarchical parent"),
             "in-batch second parent must refuse: {err2}"
         );
         g.assert_invariants().unwrap();

@@ -127,11 +127,13 @@ has been placed in the wrong tier. Re-check the placement before provisioning it
    ```
 3. **Lambo Intercepts**:
    ```text
-   VPC-Enterprise-Prod [Entity, canonical] (score <s>, blast radius 8)
-   ⚑ Load-bearing pillar — 8 nodes depend on this. Modify with caution.
+   VPC-Enterprise-Prod [Entity, canonical] (score <s>, blast radius <n>)
+   ⚑ Load-bearing pillar — <n> nodes depend on this. Modify with caution.
    Agent app-data-agent wrote to it <n> seconds ago
-   Dependents: RDS-Lambo-Demo-DB, Lambda-LamboStats-API, SG-Base-VPC, Subnet-Private-1a...
    ```
+   The names come from `lambo inspect`, whose `dependents (N):` section lists what
+   the count is made of: the VPC's `parent_of` children and every action that
+   named it in `depends_on` (#36). Recall itself renders the count, not the names.
 4. `network-infra-agent` aborts destructive action, averting outage.
 
 ---

@@ -1179,9 +1179,10 @@ async fn check_fixture_structural_agreement(store: &CockroachStore, fixture: &st
         }
     }
 
-    // Deterministic anchors on rest-api (independent of the oracle): eight
-    // concepts depend on the Canonical hub 1001 exclusively; span = 6
-    // distinct interactions over 25 of 55 minutes.
+    // Deterministic anchors on rest-api (independent of the oracle):
+    // fourteen concepts depend on the Canonical hub 1001 (six Dependency
+    // sources plus eight Hierarchical children, #36); span = 7 distinct
+    // interactions (its own origin excluded) over 30 of 55 minutes.
     if fixture == "session-rest-api" {
         let hub: NodeId = snap
             .concepts
@@ -1194,16 +1195,16 @@ async fn check_fixture_structural_agreement(store: &CockroachStore, fixture: &st
                 .blast_radius(&sid, hub, Duration::ZERO, Utc::now())
                 .await
                 .unwrap(),
-            8,
+            14,
             "hub 1001 blast radius anchor"
         );
         let span = store
             .interaction_span(&sid, hub, Duration::ZERO, Utc::now())
             .await
             .unwrap();
-        assert_eq!(span.distinct, 6);
+        assert_eq!(span.distinct, 7);
         assert!(
-            (span.coverage - 25.0 / 55.0).abs() < 1e-9,
+            (span.coverage - 30.0 / 55.0).abs() < 1e-9,
             "hub 1001 span anchor: {span:?}"
         );
     }
@@ -1212,7 +1213,7 @@ async fn check_fixture_structural_agreement(store: &CockroachStore, fixture: &st
 
 /// T3.6 acceptance: the three-way agreement matrix on BOTH fixture graphs —
 /// `session-rest-api` (22 concepts incl. Canonical hub 1001, Venerable
-/// 1012, D1–D8 orphans, P1/P2 peers) and `session-drift` (9 concepts) —
+/// 1012, D1–D8 children, P1/P2 peers) and `session-drift` (9 concepts) —
 /// every node × min-age {0, 3600s}, blast_radius + interaction_span
 /// (distinct AND coverage) exactly equal to MemoryStore.
 async fn check_structural_queries_agree_with_memory_store(store: &CockroachStore) {
@@ -1248,6 +1249,7 @@ async fn check_structural_queries_age_filter_agrees(store: &CockroachStore) {
     let i1 = NodeId::new();
     let i2 = NodeId::new();
     let i3 = NodeId::new();
+    let i4 = NodeId::new();
     let pillar = NodeId::new();
     let orphan = NodeId::new();
     let other = NodeId::new();
@@ -1264,8 +1266,11 @@ async fn check_structural_queries_age_filter_agrees(store: &CockroachStore) {
             plant_interaction(&sid, i1, old_ts),
             plant_interaction(&sid, i2, old_ts),
             plant_interaction(&sid, i3, now),
+            plant_interaction(&sid, i4, old_ts),
             plant_concept(&sid, pillar, i1, "pillar", old_ts, None),
-            plant_concept(&sid, orphan, i1, "orphan", old_ts, None),
+            // `orphan` has its own origin (i4) so its dependents' origins
+            // (i1, i2) are not excluded as its own (#36).
+            plant_concept(&sid, orphan, i4, "orphan", old_ts, None),
             plant_concept(&sid, other, i2, "other", old_ts, None),
             plant_concept(&sid, probe_src, i3, "probe-src", old_ts, None),
             plant_concept(&sid, probe_victim, i1, "probe-victim", old_ts, None),
@@ -1289,7 +1294,17 @@ async fn check_structural_queries_age_filter_agrees(store: &CockroachStore) {
     // Aged-vs-fresh edge interaction: EVERY node × both cutoffs must agree
     // with MemoryStore exactly (the aged pillar -> orphan edge vs the
     // freshly created other -> orphan edge, plus the i-gate probe).
-    for node in [pillar, orphan, other, probe_src, probe_victim, i1, i2, i3] {
+    for node in [
+        pillar,
+        orphan,
+        other,
+        probe_src,
+        probe_victim,
+        i1,
+        i2,
+        i3,
+        i4,
+    ] {
         for min_age in [Duration::ZERO, one_hour] {
             let mem_br = mem
                 .blast_radius(&sid, node, min_age, Utc::now())
@@ -1355,30 +1370,31 @@ async fn check_structural_queries_age_filter_agrees(store: &CockroachStore) {
         0,
         "i-gate: aged edge with fresh origin excluded at min_age=1h"
     );
-    // blast_radius is origin-agnostic: the aged probe edge counts at 1h
-    // even though its origin is fresh (span-only i-gate, MemoryStore parity).
+    // blast_radius is origin-agnostic: probe_src's aged edge makes it a
+    // dependent of probe_victim at 1h even though its origin is fresh
+    // (span-only i-gate, MemoryStore parity).
     assert_eq!(
         store
-            .blast_radius(&sid, probe_src, one_hour, Utc::now())
+            .blast_radius(&sid, probe_victim, one_hour, Utc::now())
             .await
             .unwrap(),
         1,
         "blast_radius ignores origin age"
     );
-    // The age filter is doing real work for blast_radius: with min_age=0 the
-    // fresh edge un-orphans; with min_age=1h it is filtered and the orphan
-    // still counts.
+    // The age filter is doing real work for blast_radius: pillar and other
+    // both depend on orphan (#36); with min_age=0 the fresh edge counts,
+    // with min_age=1h it is filtered.
     assert_eq!(
         store
-            .blast_radius(&sid, pillar, Duration::ZERO, Utc::now())
+            .blast_radius(&sid, orphan, Duration::ZERO, Utc::now())
             .await
             .unwrap(),
-        0,
+        2,
         "fresh edge counts at min_age=0"
     );
     assert_eq!(
         store
-            .blast_radius(&sid, pillar, one_hour, Utc::now())
+            .blast_radius(&sid, orphan, one_hour, Utc::now())
             .await
             .unwrap(),
         1,
@@ -1409,8 +1425,9 @@ async fn check_structural_queries_errata_derives_probe(store: &CockroachStore) {
             plant_concept(&sid, pillar, i1, "pillar", old_ts, None),
             plant_concept(&sid, orphan, i1, "orphan", old_ts, None),
             plant_concept(&sid, alone, i1, "alone", old_ts, None),
-            // pillar -> orphan (Dependency): the only structural inbound.
-            plant_edge(&sid, pillar, orphan, EdgeType::Dependency, old_ts),
+            // pillar -> orphan (Hierarchical): orphan is pillar's child, its
+            // one dependent (#36).
+            plant_edge(&sid, pillar, orphan, EdgeType::Hierarchical, old_ts),
             // orphan ALSO has the mandatory §5.7 Derives from its origin
             // interaction — counting it would un-orphan orphan.
             plant_edge(&sid, i1, orphan, EdgeType::Derives, old_ts),
@@ -1447,6 +1464,7 @@ async fn check_interaction_span_single_point_session_coverage(store: &CockroachS
     let sid = SessionId::from(format!("conformance-span-single-{}", Uuid::new_v4()));
     let ts = Utc.with_ymd_and_hms(2026, 8, 10, 9, 0, 0).unwrap();
     let i1 = NodeId::new();
+    let i2 = NodeId::new();
     let pillar = NodeId::new();
     let orphan = NodeId::new();
     store
@@ -1455,8 +1473,12 @@ async fn check_interaction_span_single_point_session_coverage(store: &CockroachS
                 mutation_epoch: 0,
                 gc_mark: Default::default(),
                 mutations: vec![
+                    // Two interactions at one instant: a single-point extent,
+                    // and `pillar` (which depends on `orphan`) is not from
+                    // `orphan`'s own origin (#36).
                     plant_interaction(&sid, i1, ts),
-                    plant_concept(&sid, pillar, i1, "pillar", ts, None),
+                    plant_interaction(&sid, i2, ts),
+                    plant_concept(&sid, pillar, i2, "pillar", ts, None),
                     plant_concept(&sid, orphan, i1, "orphan", ts, None),
                     plant_edge(&sid, pillar, orphan, EdgeType::Dependency, ts),
                 ],
@@ -1473,7 +1495,8 @@ async fn check_interaction_span_single_point_session_coverage(store: &CockroachS
             gc_mark: Default::default(),
             mutations: vec![
                 plant_interaction(&sid, i1, ts),
-                plant_concept(&sid, pillar, i1, "pillar", ts, None),
+                plant_interaction(&sid, i2, ts),
+                plant_concept(&sid, pillar, i2, "pillar", ts, None),
                 plant_concept(&sid, orphan, i1, "orphan", ts, None),
                 plant_edge(&sid, pillar, orphan, EdgeType::Dependency, ts),
             ],
@@ -1789,6 +1812,8 @@ async fn conformance_suite() {
     check_structural_queries_age_filter_agrees(&store).await;
     check_structural_queries_errata_derives_probe(&store).await;
     check_interaction_span_single_point_session_coverage(&store).await;
+    // #36: the shared dependents case, with MemoryStore parity.
+    crate::store::pg::dependents_live::check_dependents_case(&store).await;
     check_record_canonization_appends_and_is_idempotent(&store).await;
     check_corrupt_contract_row_load_errors(&store).await;
     check_unstamped_vector_candidates_are_empty_until_contract_commit(&store).await;

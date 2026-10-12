@@ -180,9 +180,9 @@ mod parity {
         // then id) is genuinely exercised. "user schema" parents two children (blast_radius 2);
         // "auth middleware" and "config loader" parent one each (blast_radius 1,
         // a tie broken by created_at / id). The children stay non-canonical, so
-        // only the three parents appear in saints. Hierarchical edges are the
-        // structural edges blast_radii counts, and a child's sole structural
-        // source is its parent, so each parent's blast_radius is its child count.
+        // only the three parents appear in saints. A Hierarchical child is a
+        // dependent of its parent (#36), so each parent's blast_radius is its
+        // child count.
         mem.derive(
             &[
                 ("user schema", ConceptType::Entity),

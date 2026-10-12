@@ -284,7 +284,7 @@
     }
   },
   "lambo_inspect": {
-    "description": "Inspect the neighbourhood around a concept: its type, canonization status, blast radius and typed edges out to a depth.",
+    "description": "Inspect the neighbourhood around a concept: its type, canonization status, blast radius, the dependents it counts, and typed edges out to a depth.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": false,

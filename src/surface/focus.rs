@@ -769,8 +769,8 @@ mod tests {
             g.insert_concept(c, iid).unwrap();
         }
         // An old concept made load-bearing enters the subset through the
-        // blast-radius side: concept-1 depends on it exclusively, so its live
-        // radius is 1.
+        // blast-radius side: concept-1 depends on it (a Dependency edge into
+        // it, #36), so its live radius is 1.
         let mut anchor = concept(9_999, iid, "blast anchor pad");
         anchor.created_at = ts();
         let anchor_id = anchor.id;
@@ -780,7 +780,7 @@ mod tests {
             .find(|c| c.content == "concept-1")
             .map(|c| c.id)
             .unwrap();
-        g.upsert_edge(dep_edge(1, anchor_id, dependent)).unwrap();
+        g.upsert_edge(dep_edge(1, dependent, anchor_id)).unwrap();
 
         // Inside the recency window: fuzzy, announced as bounded, with a
         // subset size the two sides bound.

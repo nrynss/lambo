@@ -182,26 +182,28 @@
 //! Cockroach's — T3.3/T3.6 contract). Semantics, all locked by the T3.6
 //! three-way agreement matrix against `MemoryStore` on both fixture graphs:
 //!
-//! - **Errata exclusions (2026-08-11 / T1.4):** only concept-sourced
-//!   `Dependency` / `Causal` / `Hierarchical` edges count (the
-//!   [`structural::STRUCTURAL_EDGE_IN`] predicate). Provenance `Derives`
-//!   (interaction → concept, mandatory §5.7) and `Temporal`
-//!   (interaction → interaction) edges must **never un-orphan** a concept —
-//!   counting them as "another inbound source" would zero Stage-3 blast
-//!   radius on every legal graph. The `JOIN concepts src ON src.id =
-//!   e.source` also pins the source to a concept row, so an interaction id
-//!   can never be mistaken for a structural source.
-//! - **Aged edges only (`e.created_at <= cutoff`).** An inbound structural
-//!   edge younger than the cutoff is invisible to both queries, exactly like
-//!   MemoryStore's naive scan (`cutoff = now - min_age`, Rust-computed).
-//! - **`c.id <> $node` self-exclusion (`blast_radius`).** A hypothetical
-//!   structural self-loop is not counted (MemoryStore's skip; semantically
-//!   equivalent to the spec text — the graph tier rejects structural
-//!   self-loops as cycle invariants).
-//! - **Span gates BOTH timestamps** (`e.created_at <= cutoff AND
-//!   i.created_at <= cutoff`): the span is built from edges, so an edge
-//!   younger than the cutoff is excluded even when its origin interaction is
-//!   older (spec §4.1 second errata, 2026-08-11 / P3 T3.3 review — do not
+//! - **Dependents (#36 errata, read-time, no migration):** both queries
+//!   read one set, `node`'s dependents
+//!   ([`structural::DEPENDENTS_CTE`]): the sources of `Dependency` edges into
+//!   `node` (`record_action`'s `action -> depends_on` direction) plus the
+//!   targets of `node`'s `Hierarchical` edges (its children). Blast radius
+//!   counts **all** of them, not only those `node` would orphan. `Causal`
+//!   (provenance of an artifact), `Derives`/`Temporal` (provenance) and
+//!   `CoOccurrence`/`Semantic` (association) declare no dependence. A
+//!   dependent must be a concept row of the session, so an interaction id
+//!   can never count.
+//! - **Aged edges only (`COALESCE(e.event_time, e.created_at) <= cutoff`).**
+//!   A dependent declared only by edges younger than the cutoff is invisible
+//!   to both queries, exactly like MemoryStore's scan (`cutoff = now -
+//!   min_age`, Rust-computed).
+//! - **`d.id <> $node` self-exclusion.** A structural self-loop is never its
+//!   own dependent (MemoryStore's `Edge::dependence`; the graph tier also
+//!   rejects structural self-loops as cycle invariants).
+//! - **Own origin excluded from the span.** `node`'s own origin interaction
+//!   is not support for it.
+//! - **Span gates BOTH timestamps** (edge and origin interaction, each on
+//!   its about-time): the span is built from edges, so an edge younger than
+//!   the cutoff is excluded even when its origin interaction is older (spec §4.1 second errata, 2026-08-11 / P3 T3.3 review — do not
 //!   "simplify" back to the literal text). Coverage is computed in Rust in
 //!   milliseconds — the identical formula to MemoryStore (span of the
 //!   distinct origin-interaction timestamps over the session extent).
@@ -313,7 +315,7 @@ use {
     crate::types::{Concept, Edge, GcMark, Interaction, Mutation},
     persistence::BULK_LIMITS,
     schema::INIT_SQL,
-    structural::INTERACTION_SPAN_SQL,
+    structural::{with_dependents, BLAST_RADIUS_SQL, INTERACTION_SPAN_SQL},
     write_rows::update_accesses_query,
 };
 #[cfg(all(test, feature = "fixtures"))]

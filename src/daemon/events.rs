@@ -44,7 +44,7 @@
 //!     at scale — wrapping the same cycle's `Conflict` out of the ring.
 //!   * **HighRisk** — a fresh write to a **high-value** node: Canonical,
 //!     Venerable, or `blast_radius >= HIGH_RISK_BLAST_RADIUS` (spec §10
-//!     Stage-3 threshold: hypothetical removal would orphan > 5 nodes).
+//!     Stage-3 threshold: more than 5 dependents, #36).
 //!     Modifying such a node is the "high-risk modification" the hot list
 //!     names. A write is fresh when the node itself or any incident edge was
 //!     written inside [`HIGH_RISK_WRITE_WINDOW`] (the same 30s recency story
@@ -100,9 +100,9 @@ pub const STALE_WINDOW: Duration = Duration::from_secs(3600);
 /// Same recency story as conflict's `CONFLICT_RECENCY_WINDOW`.
 pub const HIGH_RISK_WRITE_WINDOW: Duration = Duration::from_secs(30);
 
-/// A node whose hypothetical removal would orphan at least this many nodes
-/// (spec §10 Stage-3 threshold: "orphan > 5 nodes") is high-value; modifying
-/// it is high-risk.
+/// A node with at least this many dependents (spec §10 Stage-3 threshold,
+/// counted as declared dependents since #36) is high-value; modifying it is
+/// high-risk.
 pub const HIGH_RISK_BLAST_RADIUS: u64 = 5;
 
 /// The §6.1 channel's send half: the broadcast sender plus the **publication
@@ -380,13 +380,17 @@ pub struct HighRiskHit {
 }
 
 /// Is `c` a high-value node — modifying it is a high-risk modification?
-fn is_high_value(c: &crate::types::Concept) -> bool {
+///
+/// `live_radius` is the node's dependent count read from the graph now
+/// (`recall::format::blast_radius`, #36), not the stored
+/// [`crate::types::Concept::blast_radius`] stamp: the stamp is written only
+/// at Stage 3 promotion, nulled on demotion, and a stamp written before #36
+/// holds the older exclusive count.
+fn is_high_value(c: &crate::types::Concept, live_radius: u64) -> bool {
     matches!(
         c.canonization_status,
         CanonizationStatus::Canonical | CanonizationStatus::Venerable
-    ) || c
-        .blast_radius
-        .is_some_and(|b| b >= HIGH_RISK_BLAST_RADIUS as i32)
+    ) || live_radius >= HIGH_RISK_BLAST_RADIUS
 }
 
 /// Is a fresh write to this one high-value node in flight at `now`? The
@@ -402,22 +406,31 @@ pub fn high_risk_at(
         Some(crate::types::Node::Concept(c)) => c,
         _ => return None,
     };
-    if !is_high_value(c) {
-        return None;
-    }
+    // The fresh-write check first: most concepts on most cycles have none,
+    // and then the dependent count is never computed (this runs for every
+    // concept on every daemon cycle, under the graph read lock).
     let own_write = c.created_at >= window_start && c.created_at <= now;
-    let edge_write = graph.incident_edges(node).iter().any(|e| {
-        let w = e.last_reinforced.max(e.created_at);
-        w >= window_start && w <= now
-    });
+    let edge_write = own_write
+        || graph.incident_edges(node).iter().any(|e| {
+            let w = e.last_reinforced.max(e.created_at);
+            w >= window_start && w <= now
+        });
     if !(own_write || edge_write) {
         return None;
     }
+    // O(degree) through the adjacency index. No age floor, unlike Stage 3:
+    // this asks what rests on the node right now, so the edge that makes a
+    // fifth dependent is itself the fresh write that fires the check.
+    let live_radius = crate::recall::format::blast_radius(graph, node);
+    if !is_high_value(c, live_radius) {
+        return None;
+    }
     let status = format!("{:?}", c.canonization_status);
-    let radius = c
-        .blast_radius
-        .map(|b| format!(", blast radius {b}"))
-        .unwrap_or_default();
+    let radius = if live_radius > 0 {
+        format!(", blast radius {live_radius}")
+    } else {
+        String::new()
+    };
     Some(HighRiskHit {
         node,
         reason: format!(
@@ -931,7 +944,11 @@ mod tests {
         );
         let c1_id = c1.id;
         g.insert_concept(c1, i1_id).unwrap();
-        // c2: blast radius 8, write at 95 (5s ago) -> hit.
+        // c2: five live dependents (the writer below plus four older
+        // ones), write at 95 (5s ago) -> hit. No stored stamp: the live
+        // count decides (#36). The fresh edge is also the one that makes the
+        // fifth dependent: reaching five fires immediately, because the live
+        // count has no age floor.
         let c2 = concept(
             2,
             i1_id,
@@ -939,10 +956,37 @@ mod tests {
             "big radius",
             0,
             CanonizationStatus::None,
-            Some(8),
+            None,
         );
         let c2_id = c2.id;
         g.insert_concept(c2, i1_id).unwrap();
+        for k in 0..4u64 {
+            let d = concept(
+                20 + k,
+                i1_id,
+                "agent-a",
+                &format!("depends on big radius {k}"),
+                0,
+                CanonizationStatus::None,
+                None,
+            );
+            let d_id = d.id;
+            g.insert_concept(d, i1_id).unwrap();
+            g.upsert_edge(edge(20 + k, d_id, c2_id, 10)).unwrap();
+        }
+        // c6: a stale 0.5.0 stamp of 8 but no dependents in the graph, fresh
+        // write -> not high-value, no hit.
+        let c6 = concept(
+            6,
+            i1_id,
+            "agent-a",
+            "stale stamp",
+            0,
+            CanonizationStatus::None,
+            Some(8),
+        );
+        let c6_id = c6.id;
+        g.insert_concept(c6, i1_id).unwrap();
         // c3: Venerable but write at 50 is outside the 30s window -> no hit.
         let c3 = concept(
             3,
@@ -983,6 +1027,7 @@ mod tests {
         g.upsert_edge(edge(2, cw_id, c2_id, 95)).unwrap();
         g.upsert_edge(edge(3, cw_id, c3_id, 50)).unwrap();
         g.upsert_edge(edge(4, cw_id, c4_id, 95)).unwrap();
+        g.upsert_edge(edge(5, c6_id, cw_id, 95)).unwrap();
 
         let hits = detect_high_risk(&g, HIGH_RISK_WRITE_WINDOW, now);
         assert_eq!(hits.len(), 2, "only c1 and c2 fire: {hits:?}");
@@ -994,7 +1039,7 @@ mod tests {
         );
         assert_eq!(hits[1].node, c2_id);
         assert!(
-            hits[1].reason.contains("blast radius 8"),
+            hits[1].reason.contains("blast radius 5"),
             "reason: {}",
             hits[1].reason
         );
