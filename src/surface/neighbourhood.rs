@@ -51,9 +51,12 @@ pub(crate) fn render_neighbourhood(
     // #36: name the dependents the count is made of, so a warning says what
     // rests on the focus instead of leaving the caller to read edge
     // directions off the hops below (which list neighbours both ways).
-    let (dependents, dependents_truncated) = dependents_listing(g, target);
+    let (dependents, dependents_total) = dependents_listing(g, target);
+    let dependents_truncated = dependents_total > dependents.len();
     if !dependents.is_empty() {
-        text.push_str(&format!("dependents ({}):\n", dependents.len()));
+        // The header carries the true total; the rows stop at the cap and the
+        // truncation row says so.
+        text.push_str(&format!("dependents ({dependents_total}):\n"));
         for d in &dependents {
             text.push_str(&format!("  {} ({:?})\n", label(d.id), d.edge_type));
         }
@@ -163,8 +166,8 @@ struct Dependent {
 /// that depend on it (`Dependency` edges into it) and its `parent_of`
 /// children, labelled with the declaring edge kind (`Dependency` when both
 /// kinds declare the same dependent). Ordered by label then node id, capped
-/// at [`MAX_INSPECT_NODES`] with the cut reported.
-fn dependents_listing(g: &Graph, target: NodeId) -> (Vec<Dependent>, bool) {
+/// at [`MAX_INSPECT_NODES`]; returns the capped rows and the true total.
+fn dependents_listing(g: &Graph, target: NodeId) -> (Vec<Dependent>, usize) {
     let dependency_sources: std::collections::HashSet<NodeId> = g
         .incident_edges(target)
         .into_iter()
@@ -187,14 +190,15 @@ fn dependents_listing(g: &Graph, target: NodeId) -> (Vec<Dependent>, bool) {
         _ => "",
     };
     out.sort_by(|a, b| content(a.id).cmp(content(b.id)).then(a.id.0.cmp(&b.id.0)));
-    let truncated = out.len() > MAX_INSPECT_NODES;
+    let total = out.len();
     out.truncate(MAX_INSPECT_NODES);
-    (out, truncated)
+    (out, total)
 }
 
 #[cfg(test)]
 mod tests {
     use super::render_neighbourhood;
+    use crate::surface::limits::MAX_INSPECT_NODES;
     use crate::test_util::dependents as case;
 
     /// #36: inspect names the dependents its blast radius counts, in text
@@ -243,7 +247,57 @@ mod tests {
             "{json}"
         );
 
+        // Past the cap the header keeps the true total, the rows stop at
+        // the cap and the truncation row says so.
+        let mut g = case::graph();
+        let x = case::concept_id("X");
+        let origin = g
+            .interactions()
+            .next()
+            .map(|i| i.id)
+            .expect("an interaction");
+        let extra = MAX_INSPECT_NODES + 3;
+        for k in 0..extra {
+            let mut c = match g.node(case::concept_id("A1")) {
+                Some(crate::types::Node::Concept(c)) => c.clone(),
+                _ => unreachable!(),
+            };
+            c.id = crate::types::NodeId::new();
+            c.content = format!("zz extra dependent {k:04}");
+            c.canonical_key = c.content.clone();
+            c.origin_interaction = origin;
+            let id = c.id;
+            g.insert_concept(c, origin).unwrap();
+            g.upsert_edge(crate::types::Edge {
+                event_time: None,
+                id: crate::types::NodeId::new(),
+                session_id: case::session(),
+                source: id,
+                target: x,
+                edge_type: crate::types::EdgeType::Dependency,
+                weight: 1.0,
+                reinforcements: 1,
+                created_at: case::now(),
+                last_reinforced: case::now(),
+            })
+            .unwrap();
+        }
+        let total = 8 + extra;
+        let (text, json) = render_neighbourhood(&g, x, 0);
+        assert!(text.contains(&format!("dependents ({total}):\n")), "{text}");
+        assert!(
+            text.contains(&format!("(truncated at {MAX_INSPECT_NODES} dependents)")),
+            "{text}"
+        );
+        assert_eq!(
+            json["dependents"].as_array().unwrap().len(),
+            MAX_INSPECT_NODES
+        );
+        assert_eq!(json["dependents_truncated"], true);
+        assert_eq!(json["blast_radius"], total as u64);
+
         // A node nothing depends on lists no dependents.
+        let g = case::graph();
         let (text, json) = render_neighbourhood(&g, case::concept_id("K"), 1);
         assert!(!text.contains("dependents ("), "{text}");
         assert!(json["dependents"].as_array().unwrap().is_empty());
