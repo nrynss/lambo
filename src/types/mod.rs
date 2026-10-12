@@ -208,8 +208,8 @@ pub enum EdgeType {
 impl EdgeType {
     /// Every variant, in declaration order. Crate-internal: it lets a table
     /// keyed by edge type (for example GC's decaying set) be checked in both
-    /// directions. `edge_type_all_is_complete` fails to compile until a new
-    /// variant is added here too.
+    /// directions. The test `edge_type_all_is_complete` stops compiling (under
+    /// `cargo test`, not a plain build) until a new variant is added here too.
     pub(crate) const ALL: [EdgeType; 8] = [
         Self::Temporal,
         Self::Derives,
@@ -2058,7 +2058,7 @@ mod tests {
     }
 
     /// `EdgeType::ALL` lists every variant once, in declaration order: the
-    /// exhaustive match stops compiling when a variant is added.
+    /// exhaustive match stops the test build compiling when a variant is added.
     #[test]
     fn edge_type_all_is_complete() {
         const fn index(ty: EdgeType) -> usize {
