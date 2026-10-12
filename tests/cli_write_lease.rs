@@ -272,3 +272,89 @@ fn h1_mismatch_refusal_releases_lease_for_immediate_cross_process_retries() {
         String::from_utf8_lossy(&override_retry.stderr)
     );
 }
+
+/// #126 review L7, end to end: a real holder is SIGKILLed with its lease
+/// unexpired, and the next writer's refusal says plainly that the holder
+/// process is gone. Both processes run on this boot in this PID namespace,
+/// so the holder string carries matching ids. Linux and macOS are the
+/// platforms that report a boot id; elsewhere the wording stays hedged.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn a_sigkilled_holder_is_named_gone_without_a_hedge() {
+    let (_dir, cfg, db_str) = scratch();
+    let runtime = RuntimeDir::new();
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    rt.block_on(async {
+        let store = SqliteStore::connect(&db_str).expect("connect");
+        store.init_schema().await.expect("init_schema");
+    });
+
+    let mut a = ServeChild::new(
+        serve_cmd(&cfg, "agent-a", &runtime)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("spawn serve"),
+    );
+    let a_pid = a.id();
+    let a_stdout = a.stdout.take().expect("stdout");
+    let (tx, rx) = mpsc::channel::<String>();
+    let reader = std::thread::spawn(move || {
+        let mut lines = BufReader::new(a_stdout).lines();
+        while let Some(Ok(line)) = lines.next() {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let mut a_stdin = a.stdin.take().expect("stdin");
+    write_frame(
+        &mut a_stdin,
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"cli-lease","version":"1"}}}"#,
+    );
+    let init = read_response(&rx, 1);
+    assert!(
+        init.contains("\"serverInfo\""),
+        "serve did not initialize: {init}"
+    );
+
+    let holder = rt
+        .block_on(async {
+            let store = SqliteStore::connect(&db_str).expect("connect");
+            store
+                .read_lease(&lambo::types::SessionId::from(SESSION))
+                .await
+                .expect("read lease")
+        })
+        .expect("the serve holds a lease")
+        .holder;
+    assert!(
+        holder.starts_with("agent-a@") && holder.contains(&format!("#{a_pid};boot=")),
+        "the holder string must carry this boot's id: {holder}"
+    );
+
+    // SIGKILL: no release, the lease stays unexpired. Reap it, or the zombie
+    // keeps the pid visible.
+    a.kill().expect("SIGKILL the holder");
+    let _ = a.wait();
+    drop(a_stdin);
+    let _ = reader.join();
+
+    let refused = derive_cmd(&cfg, "agent-b")
+        .stderr(Stdio::piped())
+        .stdout(Stdio::piped())
+        .output()
+        .expect("derive after the holder died");
+    assert!(
+        !refused.status.success(),
+        "the lease is unexpired, so the write must still be refused"
+    );
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.contains("the holder process is gone")
+            && stderr.contains(&format!("no process {a_pid} exists"))
+            && !stderr.contains("looks gone"),
+        "the refusal must say plainly that the holder is gone; stderr=\n{stderr}"
+    );
+}
