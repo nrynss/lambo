@@ -202,8 +202,8 @@ mod tests {
     use crate::test_util::dependents as case;
 
     /// #36: inspect names the dependents its blast radius counts, in text
-    /// and JSON, with the declaring edge kind; a parent, a Causal producer
-    /// and an association neighbour are not listed.
+    /// and JSON, with the declaring edge kind; a parent, a Causal producer,
+    /// an association neighbour and a contradiction (#19) are not listed.
     /// The inspect text the cloudops guard parses
     /// (`scripts/cloudops/_lambo.py::parse_dependents`), pinned byte for byte
     /// in `fixtures/inspect-dependents-golden.txt`. The Python self-test reads
@@ -250,7 +250,13 @@ mod tests {
         assert_eq!(deps.len(), 8, "{json}");
         assert_eq!(json["dependents_truncated"], false);
         let labels: Vec<&str> = deps.iter().map(|d| d["label"].as_str().unwrap()).collect();
-        for absent in ["concept P [", "concept K [", "concept N [", "concept D ["] {
+        for absent in [
+            "concept P [",
+            "concept K [",
+            "concept N [",
+            "concept D [",
+            "concept Q [",
+        ] {
             assert!(
                 !labels.iter().any(|l| l.starts_with(absent)),
                 "{absent}: {labels:?}"

@@ -35,7 +35,8 @@
 //! * **session_activity** — the share of the session's interactions that
 //!   derived this concept (a `Derives` edge from the interaction), clamped.
 //! * **density** — incident-edge count normalized by the session's most
-//!   connected concept (densest concept = `1.0`), clamped.
+//!   connected concept (densest concept = `1.0`), clamped. `Contradicts`
+//!   edges are not counted ([`EdgeType::counts_toward_density`], #19).
 //! * **edge_type_bonus** — additive per incident edge by type; structural /
 //!   load-bearing types carry the most, provenance (`Derives`, `Temporal`)
 //!   carries none; capped at [`MAX_EDGE_BONUS`]. The v0.6.0 table is not
@@ -88,7 +89,7 @@ pub fn edge_type_bonus_value(ty: EdgeType) -> f64 {
         EdgeType::Hierarchical => 0.015,
         EdgeType::Semantic => 0.01,
         EdgeType::CoOccurrence => 0.005,
-        EdgeType::Derives | EdgeType::Temporal => 0.0,
+        EdgeType::Derives | EdgeType::Temporal | EdgeType::Contradicts => 0.0,
     }
 }
 
@@ -287,11 +288,23 @@ pub struct SessionContext {
     derived_by: HashMap<NodeId, usize>,
 }
 
+/// A concept's incident-edge count for the `density` dimension: every
+/// incident edge whose type [`EdgeType::counts_toward_density`] (all but
+/// `Contradicts`, #19).
+fn density_degree(graph: &Graph, node: NodeId) -> usize {
+    graph
+        .incident_edges(node)
+        .iter()
+        .filter(|e| e.edge_type.counts_toward_density())
+        .count()
+}
+
 impl SessionContext {
     /// Aggregate the session's temporal extent and connectivity baselines.
     ///
-    /// `max_incident` is the incident-edge count of the session's most
-    /// connected concept (density is normalized against it).
+    /// `max_incident` is the density degree (incident edges that
+    /// [`EdgeType::counts_toward_density`]) of the session's most connected
+    /// concept; density is normalized against it.
     pub fn compute(graph: &Graph) -> Self {
         let interactions: Vec<_> = graph.interactions().collect();
         let total_interactions = interactions.len();
@@ -307,7 +320,7 @@ impl SessionContext {
             .unwrap_or(start);
         let max_incident = graph
             .concepts()
-            .map(|c| graph.incident_edges(c.id).len())
+            .map(|c| density_degree(graph, c.id))
             .max()
             .unwrap_or(0);
         let mut derived_by: HashMap<NodeId, usize> = HashMap::new();
@@ -383,7 +396,7 @@ pub fn score_concept(graph: &Graph, c: &Concept, ctx: &SessionContext) -> ScoreD
     let density = if ctx.max_incident == 0 {
         0.0
     } else {
-        incident.len() as f64 / ctx.max_incident as f64
+        density_degree(graph, c.id) as f64 / ctx.max_incident as f64
     };
     let edge_type_bonus = incident
         .iter()
@@ -520,7 +533,7 @@ mod tests {
         let density = if ctx.max_incident == 0 {
             0.0
         } else {
-            incident.len() as f64 / ctx.max_incident as f64
+            density_degree(graph, c.id) as f64 / ctx.max_incident as f64
         };
         let edge_type_bonus = incident
             .iter()
@@ -998,6 +1011,7 @@ mod tests {
     fn edge_type_bonus_table_provenance_is_zero_structural_is_positive() {
         assert_eq!(edge_type_bonus_value(EdgeType::Derives), 0.0);
         assert_eq!(edge_type_bonus_value(EdgeType::Temporal), 0.0);
+        assert_eq!(edge_type_bonus_value(EdgeType::Contradicts), 0.0);
         for ty in [
             EdgeType::Causal,
             EdgeType::Dependency,
@@ -1318,6 +1332,60 @@ mod tests {
         };
         assert_eq!(score_concept(&g, &c1, &ctx).density, 1.0);
         assert_eq!(score_concept(&g, &c2, &ctx).density, 1.0);
+    }
+
+    /// #19: being contradicted (or contradicting) moves no score. A
+    /// `Contradicts` pair leaves every dimension, the composite and the
+    /// ranking bit-identical, both for the endpoints' own density and for
+    /// the session's `max_incident` baseline every other concept is
+    /// normalized against.
+    #[test]
+    fn contradictions_leave_every_score_unchanged() {
+        let (mut g, c1, c2) = graph_with_two_concepts();
+        let i1 = NodeId(Uuid::from_u64_pair(0, 1));
+        let c3 = concept(3, i1, "bystander", 5);
+        let c3_id = c3.id;
+        g.insert_concept(c3, i1).unwrap();
+        let edge = |id: u64, src: NodeId, tgt: NodeId, ty: EdgeType| crate::types::Edge {
+            event_time: None,
+            id: NodeId(Uuid::from_u64_pair(6, id)),
+            session_id: sid(),
+            source: src,
+            target: tgt,
+            edge_type: ty,
+            weight: 1.0,
+            reinforcements: 1,
+            created_at: ts(0),
+            last_reinforced: ts(0),
+        };
+        // c1 -> c3 Causal: c1 is the densest (2), c2 and c3 trail it.
+        g.upsert_edge(edge(1, c1, c3_id, EdgeType::Causal)).unwrap();
+        let dims = |g: &Graph| {
+            let ctx = SessionContext::compute(g);
+            [c1, c2, c3_id].map(|id| match g.node(id) {
+                Some(Node::Concept(c)) => score_concept(g, c, &ctx),
+                _ => unreachable!(),
+            })
+        };
+        let weights = ScoringWeights::default();
+        let before = (dims(&g), rescore(&g, &weights));
+        // Counted, these would make c2 the densest (3 > 2) and lift c1.
+        g.upsert_edge(edge(2, c2, c1, EdgeType::Contradicts))
+            .unwrap();
+        g.upsert_edge(edge(3, c1, c2, EdgeType::Contradicts))
+            .unwrap();
+        let c4 = concept(4, i1, "second contrarian", 6);
+        let c4_id = c4.id;
+        g.insert_concept(c4, i1).unwrap();
+        g.upsert_edge(edge(4, c4_id, c2, EdgeType::Contradicts))
+            .unwrap();
+        let after_rank: Vec<_> = rescore(&g, &weights)
+            .into_iter()
+            .filter(|s| s.item != c4_id)
+            .collect();
+        assert_eq!(dims(&g), before.0);
+        assert_eq!(after_rank, before.1);
+        assert_scores_match_reference(&g);
     }
 
     #[test]

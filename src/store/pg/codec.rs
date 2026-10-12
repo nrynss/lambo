@@ -133,6 +133,7 @@ pub(super) fn edge_type_sql(et: EdgeType) -> &'static str {
         EdgeType::Dependency => "Dependency",
         EdgeType::Hierarchical => "Hierarchical",
         EdgeType::Semantic => "Semantic",
+        EdgeType::Contradicts => "Contradicts",
     }
 }
 
@@ -145,8 +146,23 @@ pub(super) fn parse_edge_type(s: &str) -> Result<EdgeType, StoreError> {
         "Dependency" => EdgeType::Dependency,
         "Hierarchical" => EdgeType::Hierarchical,
         "Semantic" => EdgeType::Semantic,
+        "Contradicts" => EdgeType::Contradicts,
         other => return Err(backend(format!("unknown edge_type {other:?} in store"))),
     })
+}
+
+#[cfg(test)]
+mod contradiction_tests {
+    use super::*;
+
+    #[test]
+    fn contradiction_codec_matches_serde() {
+        let ty = EdgeType::Contradicts;
+        assert_eq!(edge_type_sql(ty), "Contradicts");
+        assert_eq!(parse_edge_type("Contradicts").unwrap(), ty);
+        assert_eq!(serde_json::to_string(&ty).unwrap(), "\"Contradicts\"");
+        assert!(parse_edge_type("contradicts").is_err());
+    }
 }
 
 pub(super) fn canonization_status_sql(cs: CanonizationStatus) -> &'static str {
