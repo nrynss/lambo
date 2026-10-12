@@ -21,10 +21,10 @@
   stays Venerable instead of jumping to Canonical on its first cycle.
   Nothing is demoted. This includes a session's root goal, which
   `set_root_goal` makes Venerable directly: under Swarm it now needs Stage 2
-  support (three dependents' interactions spanning 30% of the capped session extent) to
-  go Canonical. Solo is unchanged: it still probes and stamps blast radius
-  and admits by its score bands. On a copy of
-  the dogfood store taken 2026-10-12, no Candidate or Venerable would have
+  support (three dependents' interactions spanning 30% of the capped
+  session extent) to go Canonical. Solo is unchanged: it still probes and
+  stamps blast radius and admits by its score bands. On a copy of the
+  dogfood store taken 2026-10-12, no Candidate or Venerable would have
   promoted on the first evaluation, with or without this check, and all 7
   Venerables lose their Stage 2 support.
 - **Long sessions can pass Stage 2 with less spread (#36 PR 2).** In a
@@ -75,11 +75,11 @@
   Canonical budget's demotions continue, and each cycle logs one
   `CanonizationStage2Unsupported` warning naming the missing capability.
   Solo never asks for the span and is unaffected. The portal's inspect
-  panel omits the Swarm gates for such a store. `stage2_passes` and `gate_progress` keep their signatures and now
-  measure against the default cap; `stage2_passes_with_window` and
-  `gate_progress_with_config` take a chosen one. `interaction_span` itself
-  is unchanged and still divides by the whole session extent.
-
+  panel omits the Swarm gates for such a store. `stage2_passes` and
+  `gate_progress` keep their signatures and now measure against the
+  default cap; `stage2_passes_with_window` and `gate_progress_with_config`
+  take a chosen one. `interaction_span` itself is unchanged and still
+  divides by the whole session extent.
 - **`EdgeType` gains `Contradicts` (#19, edge groundwork).** Exhaustive
   matches must handle the new variant. It connects concepts, persists as
   `Contradicts`, and declares opposition without dependence, canonization
@@ -172,18 +172,17 @@
 
 ### Changed
 
-- **Stage 2 coverage is measured against at most fourteen days** ([#36](https://github.com/nrynss/lambo/issues/36)
-  PR 2). The bars are unchanged (three dependent origin interactions,
-  coverage at least 0.3), but the denominator is min(session extent, 14
-  days), so a session whose about-time extent exceeds fourteen days needs
-  4.2 days of spread instead of 30% of that extent. Sessions whose extent
-  is fourteen days or less, the demo and the REST API fixture included,
-  measure exactly as before. This
-  is a cap on the denominator, not an expiry: evidence older than fourteen
-  days still counts. Evaluation and the portal's inspect panel use the
-  same configured cap, and `stage2_evidence_passes` is the shared
+- **Stage 2 coverage is measured against at most fourteen days**
+  ([#36](https://github.com/nrynss/lambo/issues/36) PR 2). The bars are
+  unchanged (three dependent origin interactions, coverage at least 0.3),
+  but the denominator is min(session extent, 14 days), so a session whose
+  about-time extent exceeds fourteen days needs 4.2 days of spread instead
+  of 30% of that extent. Sessions whose extent is fourteen days or less,
+  the demo and the REST API fixture included, measure exactly as before.
+  This is a cap on the denominator, not an expiry: evidence older than
+  fourteen days still counts. Evaluation and the portal's inspect panel
+  use the same configured cap, and `stage2_evidence_passes` is the shared
   comparison later stages reuse.
-
 - The MCP tool descriptions say what a concept is and how to send
   `agent_id` ([#98](https://github.com/nrynss/lambo/issues/98),
   [#99](https://github.com/nrynss/lambo/issues/99)). `lambo_derive`, its
