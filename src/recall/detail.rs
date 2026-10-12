@@ -49,6 +49,9 @@ pub(crate) enum AnnotationKind {
     Traversal,
     /// Query embedding failed; the vector leg was skipped — response-global.
     VectorDegraded,
+    /// A layer of a layered recall was unavailable, so its hits are missing
+    /// (#33) — response-global, one per unavailable layer.
+    LayerUnavailable,
 }
 
 /// One typed warning: its kind and the exact line that renders it.
