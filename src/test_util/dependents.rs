@@ -382,6 +382,182 @@ pub async fn check_window_case(store: &dyn crate::store::GraphStore) {
     }
 }
 
+/// One extents session: interactions at the given offsets (seconds after
+/// `start`), a pillar originating in the first, and one `Dependency`
+/// dependent per listed support interaction. Edges are aged at `start`.
+fn extents_batch(
+    session: &SessionId,
+    tag: u64,
+    start: DateTime<Utc>,
+    offsets: &[i64],
+    supports: &[usize],
+) -> MutationBatch {
+    let iid = |n: usize| NodeId(Uuid::from_u64_pair(0x36_07, (tag << 8) | n as u64));
+    let mut batch = MutationBatch::new();
+    for (n, seconds) in offsets.iter().enumerate() {
+        let mut i = interaction("i1", 0);
+        i.id = iid(n);
+        i.session_id = session.clone();
+        i.created_at = start + ChronoDuration::seconds(*seconds);
+        batch.push(Mutation::UpsertNode {
+            node: Node::Interaction(i),
+        });
+    }
+    let concept_at = |n: usize, origin: usize| {
+        let mut c = concept("X", "i1", ConceptType::Logic);
+        c.id = extents_concept(tag, n);
+        c.origin_interaction = iid(origin);
+        c.session_id = session.clone();
+        c.created_at = start;
+        c.content = format!("extents-{tag}-{n}");
+        c.canonical_key = c.content.clone();
+        c
+    };
+    batch.push(Mutation::UpsertNode {
+        node: Node::Concept(concept_at(0, 0)),
+    });
+    for (k, origin) in supports.iter().enumerate() {
+        let n = k + 1;
+        batch.push(Mutation::UpsertNode {
+            node: Node::Concept(concept_at(n, *origin)),
+        });
+        let mut e = edge(
+            n as u64,
+            extents_concept(tag, n),
+            extents_concept(tag, 0),
+            EdgeType::Dependency,
+            0,
+        );
+        e.id = NodeId(Uuid::from_u64_pair(0x36_09, (tag << 8) | n as u64));
+        e.session_id = session.clone();
+        e.created_at = start;
+        e.last_reinforced = start;
+        batch.push(Mutation::UpsertEdge { edge: e });
+    }
+    batch
+}
+
+fn extents_concept(tag: u64, n: usize) -> NodeId {
+    NodeId(Uuid::from_u64_pair(0x36_08, (tag << 8) | n as u64))
+}
+
+/// #36 PR 2 extents: the cap leaves every session no longer than fourteen
+/// days exactly as it was, keeps the F1 single-point rule and the empty and
+/// single-point evidence answers, and does not turn one supporting instant
+/// into spread. Raw and capped answers are compared on the same store, so an
+/// adapter that capped its raw accessor, or capped a short session, fails.
+pub async fn check_extents_case(store: &dyn crate::store::GraphStore) {
+    use std::time::Duration;
+    let day = 86_400;
+    let wide = Duration::from_secs(28 * 86_400);
+    let caps = [crate::store::DEFAULT_COVERAGE_WINDOW, wide];
+
+    // The ordinary `deps` session (120 minutes): every concept, both ages,
+    // under both caps, answers exactly what the raw accessor answers.
+    store.flush(&store_batch(), None).await.unwrap();
+    for (name, _, _) in CONCEPTS {
+        for age in [std::time::Duration::ZERO, MIN_AGE] {
+            let node = concept_id(name);
+            let raw = store
+                .interaction_span(&session(), node, age, now())
+                .await
+                .unwrap();
+            for cap in caps {
+                let capped = store
+                    .interaction_span_with_window(&session(), node, age, now(), cap)
+                    .await
+                    .unwrap();
+                assert_eq!(capped, raw, "short session {name} at {age:?}, cap {cap:?}");
+            }
+        }
+    }
+    // Not vacuous: X's coverage is a proper fraction (20/120 aged).
+    let x = store
+        .interaction_span_with_window(&session(), concept_id("X"), MIN_AGE, now(), caps[0])
+        .await
+        .unwrap();
+    assert!((x.coverage - 20.0 / 120.0).abs() < 1e-9, "{x:?}");
+
+    // Single-point extent: four interactions at one instant, thirty days
+    // old. Three supports cover the whole (zero-length) session: 1.0.
+    let point = SessionId::from("deps-extent-point");
+    let start = now() - ChronoDuration::days(30);
+    store
+        .flush(
+            &extents_batch(&point, 1, start, &[0, 0, 0, 0], &[1, 2, 3]),
+            None,
+        )
+        .await
+        .unwrap();
+    // Exactly fourteen days: three supports spread 4.2 days. Raw and capped
+    // denominators coincide, so both land exactly on the 0.3 bar.
+    let fortnight = SessionId::from("deps-extent-fortnight");
+    let start14 = now() - ChronoDuration::days(20);
+    store
+        .flush(
+            &extents_batch(
+                &fortnight,
+                2,
+                start14,
+                &[0, day, 2 * day, day + 362_880, 14 * day],
+                &[1, 2, 3],
+            ),
+            None,
+        )
+        .await
+        .unwrap();
+    // A sixty-day session: a pillar with no dependents (zero points), and
+    // a pillar whose only support is one interaction (one point, spread 0).
+    let long = SessionId::from("deps-extent-long");
+    let start60 = now() - ChronoDuration::days(70);
+    store
+        .flush(
+            &extents_batch(&long, 3, start60, &[0, 30 * day, 60 * day], &[]),
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .flush(
+            &extents_batch(&long, 4, start60, &[0, 30 * day, 60 * day], &[1]),
+            None,
+        )
+        .await
+        .unwrap();
+
+    for (sid, tag, distinct, coverage, passes) in [
+        (&point, 1, 3, 1.0, true),
+        (&fortnight, 2, 3, 0.3, true),
+        (&long, 3, 0, 0.0, false),
+        (&long, 4, 1, 0.0, false),
+    ] {
+        let pillar = extents_concept(tag, 0);
+        let raw = store
+            .interaction_span(sid, pillar, MIN_AGE, now())
+            .await
+            .unwrap();
+        assert_eq!(
+            (raw.distinct, raw.coverage),
+            (distinct, coverage),
+            "raw {sid:?}"
+        );
+        for cap in caps {
+            let capped = store
+                .interaction_span_with_window(sid, pillar, MIN_AGE, now(), cap)
+                .await
+                .unwrap();
+            assert_eq!(capped, raw, "{sid:?} under cap {cap:?}");
+            assert_eq!(
+                crate::canon::stage2_passes_with_window(store, sid, pillar, MIN_AGE, now(), cap)
+                    .await
+                    .unwrap(),
+                passes,
+                "{sid:?} under cap {cap:?}"
+            );
+        }
+    }
+}
+
 /// The `deps` session as a legal in-RAM graph: the interactions chained in
 /// time order, every concept inserted with its origin's `Derives` edge, and
 /// every concept-to-concept edge except the self-loop, `G` (foreign origin)

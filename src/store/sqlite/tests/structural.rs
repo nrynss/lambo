@@ -862,3 +862,10 @@ async fn capped_span_follows_window_case() {
     store.init_schema().await.unwrap();
     crate::test_util::dependents::check_window_case(&store).await;
 }
+
+#[tokio::test]
+async fn capped_span_follows_extents_case() {
+    let store = test_store();
+    store.init_schema().await.unwrap();
+    crate::test_util::dependents::check_extents_case(&store).await;
+}

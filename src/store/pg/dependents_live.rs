@@ -19,9 +19,10 @@
 //! The SQL text itself is checked offline in `cockroach::tests::sql_shapes`,
 //! and the same case runs offline on MemoryStore and SQLite.
 //!
-//! The case uses fixed node ids and the session ids `deps` / `deps-other`, so
-//! a re-run against a persistent database upserts the same rows and expects
-//! the same answers.
+//! The case uses fixed node ids and the session ids `deps` / `deps-other`
+//! (plus `deps-window` and the `deps-extent-*` sessions of the #36 PR 2
+//! coverage-cap cases), so a re-run against a persistent database upserts the
+//! same rows and expects the same answers.
 
 use crate::store::GraphStore;
 use crate::test_util::dependents as case;
@@ -31,6 +32,7 @@ use crate::test_util::dependents as case;
 /// compiled in.
 pub(crate) async fn check_dependents_case(store: &dyn GraphStore) {
     case::check_window_case(store).await;
+    case::check_extents_case(store).await;
     let batch = case::store_batch();
     store.flush(&batch, None).await.expect("flush the case");
     let sid = case::session();

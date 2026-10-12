@@ -3073,3 +3073,13 @@ async fn tier_forwards_custom_coverage_window_to_primary() {
     );
     crate::test_util::dependents::check_window_case(&store).await;
 }
+
+#[tokio::test]
+async fn tier_forwards_capped_extents_to_primary() {
+    let store = TieredStore::new(
+        Box::new(MemoryStore::new()),
+        Box::new(Arc::new(FakeIndex::new())),
+        Some(4),
+    );
+    crate::test_util::dependents::check_extents_case(&store).await;
+}

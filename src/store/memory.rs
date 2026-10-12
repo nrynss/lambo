@@ -1946,6 +1946,13 @@ mod tests {
         crate::test_util::dependents::check_window_case(&MemoryStore::new()).await;
     }
 
+    /// #36 PR 2: short, fourteen-day, single-point and empty extents answer
+    /// the same capped as raw.
+    #[tokio::test]
+    async fn capped_span_follows_extents_case() {
+        crate::test_util::dependents::check_extents_case(&MemoryStore::new()).await;
+    }
+
     /// #36: the shared dependents case (`crate::test_util::dependents`):
     /// `Dependency` sources into a node and its `Hierarchical` children
     /// count, all of them (a dependent shared with another pillar counts for

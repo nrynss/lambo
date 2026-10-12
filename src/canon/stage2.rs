@@ -553,6 +553,19 @@ mod tests {
             "coverage={} (expected 30/55)",
             span.coverage
         );
+        // #36 PR 2: the 55-minute fixture is far below the fourteen-day cap,
+        // so the capped measurement Stage 2 uses is the raw one, unchanged.
+        let capped = store
+            .interaction_span_with_window(
+                &sid,
+                api,
+                Duration::ZERO,
+                Utc::now(),
+                crate::store::DEFAULT_COVERAGE_WINDOW,
+            )
+            .await
+            .unwrap();
+        assert_eq!(capped, span, "api layer: capped span must equal raw");
         assert!(
             stage2_passes(&store, &sid, api, Duration::ZERO, Utc::now())
                 .await
@@ -600,6 +613,19 @@ mod tests {
             "coverage={} (expected 30/55)",
             span.coverage
         );
+        // #36 PR 2: the 55-minute fixture is far below the fourteen-day cap,
+        // so the capped measurement Stage 2 uses is the raw one, unchanged.
+        let capped = store
+            .interaction_span_with_window(
+                &sid,
+                us.id,
+                Duration::ZERO,
+                Utc::now(),
+                crate::store::DEFAULT_COVERAGE_WINDOW,
+            )
+            .await
+            .unwrap();
+        assert_eq!(capped, span, "user schema: capped span must equal raw");
         assert!(
             stage2_passes(&store, &sid, us.id, Duration::ZERO, Utc::now())
                 .await
