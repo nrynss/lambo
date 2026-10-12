@@ -11,7 +11,7 @@ use rmcp::model::{CallToolResult, ContentBlock};
 use serde_json::json;
 
 use crate::embed::Modalities;
-use crate::mcp::server::layers::{LayerHandle, LiveLayer};
+use crate::mcp::server::layers::{LayerRead, LiveLayer};
 use crate::mcp::server::params::{check_size, RecallParams};
 use crate::mcp::server::response::{
     attach_warnings, bad_param, config_refusal, layer_unavailable, redact_urls, tool_err,
@@ -175,7 +175,7 @@ impl LamboServer {
                     .layers()
                     .handles
                     .iter()
-                    .map(LayerHandle::live)
+                    .map(|h| h.live(LayerRead::Merged).ok())
                     .collect();
                 let slots: Vec<LayerSlot<'_>> = self
                     .layers()
@@ -334,9 +334,17 @@ impl LamboServer {
             )));
         };
         self.authorize_layer(scope)?;
-        match handle.live() {
-            Some(live) => Ok(RecallTarget::Layer(live)),
-            None => Err(layer_unavailable(TOOL, scope, self.mem.session().as_str())),
+        match handle.live(LayerRead::Direct) {
+            Ok(live) => Ok(RecallTarget::Layer(live)),
+            Err(down) => Err(layer_unavailable(
+                TOOL,
+                scope,
+                down,
+                &format!(
+                    "recall without scope for results from {}",
+                    self.mem.session()
+                ),
+            )),
         }
     }
 

@@ -5,7 +5,9 @@
 use std::sync::Weak;
 
 use super::*;
-use crate::mcp::server::layers::{LayerHandle, LayerSource, LiveLayer, ServerLayers};
+use crate::mcp::server::layers::{
+    LayerDown, LayerHandle, LayerRead, LayerSource, LiveLayer, ServerLayers,
+};
 use crate::mcp::server::trace::with_caller;
 use crate::recall::layered::{DEFAULT_LAYER_MIN_SIMILARITY, DEFAULT_LAYER_WEIGHT};
 use crate::surface::session::{
@@ -21,9 +23,12 @@ const GENERAL_RULING: &str = "worktree branches are always rebased onto origin m
 struct Fixed(parking_lot::Mutex<Option<Arc<Memory>>>);
 
 impl LayerSource for Fixed {
-    fn live_layer(&self, session: &str) -> Option<LiveLayer> {
-        let mem = self.0.lock().clone()?;
-        (mem.session().as_str() == session).then_some(LiveLayer {
+    fn live_layer(&self, session: &str, _read: LayerRead) -> Result<LiveLayer, LayerDown> {
+        let mem = self.0.lock().clone().ok_or(LayerDown::Transient)?;
+        if mem.session().as_str() != session {
+            return Err(LayerDown::Transient);
+        }
+        Ok(LiveLayer {
             mem,
             _in_flight: None,
         })
@@ -265,7 +270,7 @@ async fn a_dropped_source_is_freed_and_the_layer_is_unavailable() {
         0,
         "the server kept no strong reference"
     );
-    assert!(s.layers().handles[0].live().is_none());
+    assert!(s.layers().handles[0].live(LayerRead::Merged).is_err());
     let out = recall(&s, json!({"query": "worktree"})).await;
     assert_eq!(out.is_error, Some(false));
     assert!(structured(&out)["warnings"]
@@ -483,4 +488,63 @@ async fn an_unlayered_recall_is_byte_identical_to_the_0_5_0_body() {
         }
     }
     plain.mem.close().await.expect("close");
+}
+
+/// A source whose layer is down for a fixed reason.
+struct Down(LayerDown);
+
+impl LayerSource for Down {
+    fn live_layer(&self, _session: &str, _read: LayerRead) -> Result<LiveLayer, LayerDown> {
+        Err(self.0)
+    }
+}
+
+/// Review L1: a `scope` naming a failed or erased layer is refused as
+/// permanent, not "retry shortly"; one over its rate is retryable.
+#[tokio::test]
+async fn a_scoped_read_of_a_layer_that_will_not_come_back_says_so() {
+    let own = server("why-proj").await;
+    for (down, says, not) in [
+        (
+            LayerDown::Failed,
+            "is not retried until the serve restarts",
+            "retry shortly",
+        ),
+        (
+            LayerDown::Erased,
+            "was erased and will not come back",
+            "retry shortly",
+        ),
+        (
+            LayerDown::RateLimited,
+            "is over its request rate; retry shortly",
+            "operator",
+        ),
+        (
+            LayerDown::Transient,
+            "is unavailable right now; retry shortly",
+            "operator",
+        ),
+    ] {
+        let source: Arc<dyn LayerSource> = Arc::new(Down(down));
+        let s = own.clone().with_layers(ServerLayers {
+            handles: vec![LayerHandle::new(
+                "general",
+                DEFAULT_LAYER_WEIGHT,
+                DEFAULT_LAYER_MIN_SIMILARITY,
+                Arc::downgrade(&source),
+            )],
+            authority: None,
+        });
+        let out = recall(&s, json!({"query": "worktree", "scope": "general"})).await;
+        assert_eq!(out.is_error, Some(true), "{down:?}");
+        let text = text_of(&out);
+        assert!(text.contains(says), "{down:?}: {text}");
+        assert!(!text.contains(not), "{down:?}: {text}");
+        assert!(
+            text.contains("without scope for results from why-proj"),
+            "{text}"
+        );
+    }
+    own.mem.close().await.expect("close");
 }

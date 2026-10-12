@@ -168,16 +168,40 @@ pub(super) fn config_refusal(what: &str, msg: &str) -> CallToolResult {
     ))])
 }
 
-/// A layer a recall's `scope` named is not serving right now (#33 PR 3,
-/// design section 2.6): held by another writer, detaching or failed. A
-/// retryable refusal naming the layer, which the caller's credential
-/// reaches (the start checked it), so it is no oracle; its own session
-/// still answers a recall without the scope.
-pub(super) fn layer_unavailable(what: &str, layer: &str, session: &str) -> CallToolResult {
-    note_error("layer unavailable");
+/// A layer a `scope` named is not served right now (#33 PR 3, design
+/// section 2.6), said by why (review L1): held elsewhere, detaching or
+/// over its rate is retryable; failed or erased is not, and is said to
+/// need the operator. The caller's credential reaches the layer (the start
+/// checked it), so naming it is no oracle. `fallback` says what the caller
+/// can still do without the scope.
+pub(super) fn layer_unavailable(
+    what: &str,
+    layer: &str,
+    down: crate::mcp::server::layers::LayerDown,
+    fallback: &str,
+) -> CallToolResult {
+    use crate::mcp::server::layers::LayerDown;
+    note_error(if down == LayerDown::RateLimited {
+        "rate limited"
+    } else {
+        "layer unavailable"
+    });
+    let why = match down {
+        LayerDown::Transient => format!("layer {layer} is unavailable right now; retry shortly"),
+        LayerDown::RateLimited => {
+            format!("layer {layer} is over its request rate; retry shortly")
+        }
+        LayerDown::Failed => format!(
+            "layer {layer} failed to attach and is not retried until the serve restarts; \
+             retrying will not help, ask the operator"
+        ),
+        LayerDown::Erased => format!(
+            "layer {layer} was erased and will not come back; retrying will not help, ask \
+             the operator to take it off [serve] layers"
+        ),
+    };
     CallToolResult::error(vec![ContentBlock::text(format!(
-        "{what}: layer {layer} is unavailable right now; retry shortly, or recall without \
-         scope for results from {session}"
+        "{what}: {why}, or {fallback}"
     ))])
 }
 

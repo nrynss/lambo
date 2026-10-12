@@ -37,9 +37,40 @@ use crate::types::SessionId;
 /// Where a layer handle finds its layer: the serve's session registry.
 pub(crate) trait LayerSource: Send + Sync {
     /// The layer `session` if it is attached and serving now, with a call
-    /// in flight on it for as long as the answer is held; `None` while it
-    /// is held elsewhere, detaching, failed, erased or not hosted.
-    fn live_layer(&self, session: &str) -> Option<LiveLayer>;
+    /// in flight on it for as long as the answer is held; otherwise why
+    /// not. A [`LayerRead::Direct`] read also draws one token from the
+    /// layer's own request bucket (`[serve] per_session_rps`).
+    fn live_layer(&self, session: &str, read: LayerRead) -> Result<LiveLayer, LayerDown>;
+}
+
+/// How a call reads a layer (#33 PR 3 review L3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LayerRead {
+    /// One tier of a merged recall. Draws nothing from the layer's own
+    /// rate: the call was admitted by its own session's bucket and its
+    /// credential's, which bound the layer reads it causes to the
+    /// consumers' rates, and a flood on the layer must not silently empty
+    /// every consumer's merged answer of the layer (it would degrade to
+    /// `layer_unavailable` with no refusal to say why).
+    Merged,
+    /// A `scope` naming the layer: the call reads the layer alone, as a
+    /// request to `/mcp/s/<layer>` would, so it draws the layer's token.
+    Direct,
+}
+
+/// Why a layer is not served right now (#33 PR 3 review L1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LayerDown {
+    /// Held by another writer, being attached, detached or erased, or the
+    /// serve is shutting down: retrying can help.
+    Transient,
+    /// Its attach failed with an error that will not clear on its own; it
+    /// is not retried until the serve restarts.
+    Failed,
+    /// Erased: it never comes back in this serve.
+    Erased,
+    /// Its own request bucket is empty (a direct read only).
+    RateLimited,
 }
 
 /// A layer found live, held for one call.
@@ -80,10 +111,13 @@ impl LayerHandle {
         }
     }
 
-    /// The layer, looked up now; `None` when it is not serving or the
-    /// registry is gone.
-    pub(crate) fn live(&self) -> Option<LiveLayer> {
-        self.source.upgrade()?.live_layer(self.session.as_str())
+    /// The layer, looked up now; why not when it is not serving (a gone
+    /// registry is a serve shutting down: transient).
+    pub(crate) fn live(&self, read: LayerRead) -> Result<LiveLayer, LayerDown> {
+        match self.source.upgrade() {
+            Some(source) => source.live_layer(self.session.as_str(), read),
+            None => Err(LayerDown::Transient),
+        }
     }
 }
 

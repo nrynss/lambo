@@ -172,3 +172,27 @@ pub fn plan_layers(
         Transport::Http => cfg.resolve_layers(sessions),
     }
 }
+
+/// One startup warning per layer that is erased once the pinned sessions
+/// are in (#33 PR 3 review L1): every layered recall of its consumers will
+/// answer without it for the life of the serve, which an operator should
+/// hear about at start, not from an agent. `erased` says whether a layer
+/// is erased (the registry's slot).
+pub(super) fn erased_layer_warnings(
+    layers: &ServeLayers,
+    erased: impl Fn(&str) -> bool,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for (session, stack) in layers.iter() {
+        for layer in stack {
+            if erased(&layer.session) {
+                out.push(format!(
+                    "layer {:?} of {session:?} is erased: every layered recall of {session:?} \
+                     answers without it until the layer is taken off [serve] layers",
+                    layer.session
+                ));
+            }
+        }
+    }
+    out
+}

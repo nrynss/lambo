@@ -963,6 +963,19 @@ async fn serve_pinned_with(
         );
     }
     registry.mark_started();
+    // #33 PR 3 review L1: an erased layer never comes back in this serve.
+    for warning in layers::erased_layer_warnings(&opts.layers, |layer| {
+        matches!(
+            crate::mcp::server::layers::LayerSource::live_layer(
+                registry.as_ref(),
+                layer,
+                crate::mcp::server::layers::LayerRead::Merged,
+            ),
+            Err(crate::mcp::server::layers::LayerDown::Erased)
+        )
+    }) {
+        tracing::warn!("lambo serve: {warning}");
+    }
     registry.spawn_retry_loop();
     registry.spawn_idle_sweeper();
     tracing::info!(

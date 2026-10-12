@@ -86,7 +86,9 @@ use super::shutdown::{
 use super::signals::EarlyShutdown;
 use super::stages::{ShutdownProgress, Stage};
 use crate::ledger::Ledger;
-use crate::mcp::server::layers::{LayerHandle, LayerSource, LiveLayer, ServerLayers};
+use crate::mcp::server::layers::{
+    LayerDown, LayerHandle, LayerRead, LayerSource, LiveLayer, ServerLayers,
+};
 use crate::memory::{Attach, LeaseHeldElsewhere, Memory, MemoryBuilder};
 use crate::store::StoreConfig;
 use crate::types::LamboError;
@@ -2010,17 +2012,28 @@ async fn watch_lease(
 
 /// A layered session's server finds each layer here, per call (#33 PR 3):
 /// only a live slot answers, with a call in flight on the layer for as
-/// long as the answer is held.
+/// long as the answer is held. A failed or erased slot says so (review
+/// L1), so a caller is not told to retry what will not come back.
 impl LayerSource for SessionRegistry {
-    fn live_layer(&self, session: &str) -> Option<LiveLayer> {
-        let slots = self.slots.lock();
-        match slots.get(session) {
-            Some(Slot::Live(live)) => Some(LiveLayer {
-                mem: Arc::clone(&live.mem),
-                _in_flight: Some(live.activity.enter()),
-            }),
-            _ => None,
+    fn live_layer(&self, session: &str, read: LayerRead) -> Result<LiveLayer, LayerDown> {
+        let live = {
+            let slots = self.slots.lock();
+            match slots.get(session) {
+                Some(Slot::Live(live)) => Arc::clone(live),
+                Some(Slot::Failed) => return Err(LayerDown::Failed),
+                Some(Slot::Erased) => return Err(LayerDown::Erased),
+                _ => return Err(LayerDown::Transient),
+            }
+        };
+        // The rate is drawn outside the slots' lock, as the router draws a
+        // request's (`transport::serve_session`).
+        if read == LayerRead::Direct && !live.admits_request() {
+            return Err(LayerDown::RateLimited);
         }
+        Ok(LiveLayer {
+            mem: Arc::clone(&live.mem),
+            _in_flight: Some(live.activity.enter()),
+        })
     }
 }
 

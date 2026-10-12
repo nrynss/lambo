@@ -3,7 +3,8 @@
 //! embedder, one layered with the other.
 
 use super::*;
-use crate::mcp::serve::registry::DetachReason;
+use crate::mcp::serve::registry::{DetachReason, ForcedState};
+use crate::mcp::server::layers::{LayerDown, LayerRead, LayerSource};
 
 const PROJECT: &str = "lay-proj";
 const GENERAL: &str = "general";
@@ -29,6 +30,11 @@ fn project_layered_with_general() -> crate::config::ServeLayers {
 /// A `DetachSession` registry hosting both sessions with the layer stack,
 /// nothing attached yet.
 fn layered_registry(backends: ResolvedBackends) -> Arc<SessionRegistry> {
+    layered_registry_at(backends, 0)
+}
+
+/// [`layered_registry`] whose sessions each have `session_rps` (0: none).
+fn layered_registry_at(backends: ResolvedBackends, session_rps: u32) -> Arc<SessionRegistry> {
     let opts = ServeOptions::new(PROJECT, "agent-a");
     let early = EarlyShutdown::unarmed();
     let store_cfg = backends.store_cfg.clone();
@@ -51,7 +57,7 @@ fn layered_registry(backends: ResolvedBackends) -> Arc<SessionRegistry> {
             max_sessions: 32,
             host_check: HostCheck::Loopback,
             agent: "agent-a".into(),
-            session_rps: 0,
+            session_rps,
             layers: project_layered_with_general(),
             authority: None,
         }),
@@ -265,12 +271,18 @@ async fn a_layer_handle_follows_a_re_attached_layer_and_holds_no_strong_referenc
     // re-attach waits for the old handle to go).
     let first = {
         let first = session_of(&registry, GENERAL).mem.clone();
-        assert!(Arc::ptr_eq(&handle.live().expect("live").mem, &first));
+        assert!(Arc::ptr_eq(
+            &handle.live(LayerRead::Merged).expect("live").mem,
+            &first
+        ));
         Arc::downgrade(&first)
     };
 
     registry.detach(GENERAL, DetachReason::Idle).await;
-    assert!(handle.live().is_none(), "a detached layer is not served");
+    assert!(
+        handle.live(LayerRead::Merged).is_err(),
+        "a detached layer is not served"
+    );
     let deadline = Instant::now() + PINNED_RETRY * 3;
     while registry.attached().len() < 2 {
         assert!(Instant::now() < deadline, "general was never re-attached");
@@ -279,7 +291,7 @@ async fn a_layer_handle_follows_a_re_attached_layer_and_holds_no_strong_referenc
     let second = session_of(&registry, GENERAL).mem.clone();
     assert!(first.upgrade().is_none(), "the old Memory is gone");
     assert!(Arc::ptr_eq(
-        &handle.live().expect("live again").mem,
+        &handle.live(LayerRead::Merged).expect("live again").mem,
         &second
     ));
     drop(second);
@@ -298,6 +310,82 @@ async fn a_layer_handle_follows_a_re_attached_layer_and_holds_no_strong_referenc
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert!(handle.live().is_none(), "no registry, no layer");
+    assert!(
+        handle.live(LayerRead::Merged).is_err(),
+        "no registry, no layer"
+    );
     drop(project_server);
+}
+
+/// Review L1: a failed or erased layer says so (and an erased one is
+/// warned of at start), so a caller is not told to retry what will not
+/// come back; held elsewhere, detaching and attaching stay transient.
+#[tokio::test]
+async fn a_layer_lookup_says_why_the_layer_is_not_served() {
+    let registry = started_registry().await;
+    let source: &dyn LayerSource = registry.as_ref();
+    for (state, down) in [
+        (ForcedState::HeldElsewhere, LayerDown::Transient),
+        (ForcedState::Detaching, LayerDown::Transient),
+        (ForcedState::Erasing, LayerDown::Transient),
+        (ForcedState::Failed, LayerDown::Failed),
+        (ForcedState::Erased, LayerDown::Erased),
+    ] {
+        let live = session_of(&registry, GENERAL);
+        registry.force_state(GENERAL, state);
+        assert_eq!(
+            source.live_layer(GENERAL, LayerRead::Direct).err(),
+            Some(down),
+            "{state:?}"
+        );
+        let warnings = crate::mcp::serve::layers::erased_layer_warnings(
+            &project_layered_with_general(),
+            |l| {
+                matches!(
+                    source.live_layer(l, LayerRead::Merged),
+                    Err(LayerDown::Erased)
+                )
+            },
+        );
+        assert_eq!(
+            warnings.len(),
+            usize::from(down == LayerDown::Erased),
+            "{warnings:?}"
+        );
+        if let Some(w) = warnings.first() {
+            assert!(
+                w.contains("layer \"general\" of \"lay-proj\" is erased"),
+                "{w}"
+            );
+        }
+        registry.insert_live(live);
+    }
+    for session in registry.close_set().await {
+        session.mem.close().await.expect("close");
+    }
+}
+
+/// Review L3: a direct read of a layer (`scope`) draws the layer's own
+/// `per_session_rps` token; a merged read does not.
+#[tokio::test]
+async fn a_direct_layer_read_draws_the_layers_rate_and_a_merged_one_does_not() {
+    let registry = layered_registry_at(
+        backends_over(Box::new(MemoryStore::new()), fast_config(1_000)),
+        1,
+    );
+    attach_or_hold(&registry, PROJECT).await;
+    attach_or_hold(&registry, GENERAL).await;
+    let source: &dyn LayerSource = registry.as_ref();
+    // The burst is twice the rate: two direct reads pass, the third waits.
+    let mut direct = Vec::new();
+    for _ in 0..3 {
+        direct.push(source.live_layer(GENERAL, LayerRead::Direct).err());
+    }
+    assert_eq!(direct, [None, None, Some(LayerDown::RateLimited)]);
+    for _ in 0..10 {
+        assert!(source.live_layer(GENERAL, LayerRead::Merged).is_ok());
+    }
+    for session in registry.close_set().await {
+        session.mem.close().await.expect("close");
+    }
 }
