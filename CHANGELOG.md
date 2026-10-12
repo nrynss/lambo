@@ -81,6 +81,26 @@
 - `lambo inspect` and `lambo_inspect` list the dependents their blast radius
   counts: a `dependents (N):` section in the text, and `dependents` plus
   `dependents_truncated` in the structured result.
+- **Layered recall in the library (#33).** `Memory::recall_layered` reads
+  a session and a stack of layers (other sessions, such as a shared
+  `general`), passed nearest tier first as `LayerRef`s, and returns a
+  `LayeredRecall` whose hits each name their session. The query is embedded
+  once. Lists are merged by `weight / rank` (a layer's weight defaults to
+  0.5 and must be greater than 0); a layer hit needs keyword evidence,
+  vector similarity of at least its `min_similarity` (default 0.40), or a
+  place in the layer's traversal answer, and no warning lifts that floor;
+  hits with a conflict, hot or reservation warning are kept beyond
+  `top_k`; the same memory in two tiers keeps the nearer copy; and one
+  `max_tokens` budget covers the merged context, where a layer hit's label
+  says `from <session>`. A dependency question ("what depends on X") is
+  answered by traversal in every session where X is found, layers included,
+  and each traversal warning counts that session's dependents shown in the
+  merged context. A layer that is closed, has another embedding contract or
+  panics is left out with a warning; a layer whose vector search fails
+  answers from its keyword results. The default weight and floor are not
+  calibrated yet (#87). With no layers the call returns exactly what
+  `recall` returns. Serve configuration and the MCP surface follow in later
+  0.6.0 changes.
 
 ### Changed
 
@@ -165,29 +185,6 @@
   - The portal shows it as "Partly in context (truncated)", expanded, and
     does not list its warnings as excluded. In `lambo recall` and the portal
     text, warning lines that did not fit print above the context.
-
-### Added
-
-- **Layered recall in the library (#33).** `Memory::recall_layered` reads
-  a session and a stack of layers (other sessions, such as a shared
-  `general`), passed nearest tier first as `LayerRef`s, and returns a
-  `LayeredRecall` whose hits each name their session. The query is embedded
-  once. Lists are merged by `weight / rank` (a layer's weight defaults to
-  0.5 and must be greater than 0); a layer hit needs keyword evidence,
-  vector similarity of at least its `min_similarity` (default 0.40), or a
-  place in the layer's traversal answer, and no warning lifts that floor;
-  hits with a conflict, hot or reservation warning are kept beyond
-  `top_k`; the same memory in two tiers keeps the nearer copy; and one
-  `max_tokens` budget covers the merged context, where a layer hit's label
-  says `from <session>`. A dependency question ("what depends on X") is
-  answered by traversal in every session where X is found, layers included,
-  and each traversal warning counts that session's dependents shown in the
-  merged context. A layer that is closed, has another embedding contract or
-  panics is left out with a warning; a layer whose vector search fails
-  answers from its keyword results. The default weight and floor are not
-  calibrated yet (#87). With no layers the call returns exactly what
-  `recall` returns. Serve configuration and the MCP surface follow in later
-  0.6.0 changes.
 
 ## 0.5.0 (2026-10-12)
 
