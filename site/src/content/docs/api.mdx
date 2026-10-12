@@ -67,6 +67,21 @@ The accessors `session`, `agent`, `config`, `embedding_contract`, `graph`, `inde
 - A layer that is closed, has a different embedding contract, or whose recall panics is left out, with the warning `recall: layer <name> is unavailable; results are from <sessions>`. It never fails the call. A layer whose vector search fails is not left out: it answers from its keyword results, with a warning. Warnings from a layer start with `[<name>] `.
 - Graph edges are never followed from one session into another.
 
+## Contradiction edges
+
+`EdgeType::Contradicts` is a directed concept-to-concept relation:
+`newer assertion -> older assertion`. Its serialized and stored name is
+`Contradicts`, following the other edge types. Graph snapshots and store
+mutation batches can carry it; existing database schemas need no migration.
+Older binaries cannot decode a store or snapshot containing the new variant.
+Library callers with exhaustive `EdgeType` matches must add an arm.
+
+A contradiction is informational: it does not change either concept's
+canonization status, count as dependence or promotion evidence, increase blast
+radius, or protect a Resource from the GC score cut. Its weight does not decay.
+This release groundwork adds the typed edge only; derive/action tool fields,
+recall contradiction warnings and supersession are separate follow-ups.
+
 ## Settings
 
 `Config` holds the product settings: recall defaults, flush timing, canonization thresholds, and scoring weights. Pass it to the builder with `.config(...)`.

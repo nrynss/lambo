@@ -1140,6 +1140,41 @@ mod tests {
         );
     }
 
+    /// Opposition is not an action endorsement or another supporting turn.
+    #[test]
+    fn contradictions_do_not_supply_solo_support_or_valid_actions() {
+        let (mut graph, hub) = spread_support_graph(ConceptType::Entity);
+        let before = supporting_interaction_times(&graph, &concept_of(&graph, hub));
+        let mut action = concept(20, 0);
+        action.concept_type = ConceptType::Resource;
+        action.content = "contrary action".into();
+        action.canonical_key = action.content.clone();
+        graph.insert_concept(action.clone(), nid_inter(1)).unwrap();
+        graph
+            .upsert_edge(test_edge(
+                30,
+                action.id,
+                hub,
+                EdgeType::Contradicts,
+                ts_at(90),
+            ))
+            .unwrap();
+        graph
+            .upsert_edge(test_edge(
+                31,
+                hub,
+                action.id,
+                EdgeType::Contradicts,
+                ts_at(90),
+            ))
+            .unwrap();
+        assert_eq!(valid_action_count(&graph, &concept_of(&graph, hub)), 0);
+        assert_eq!(
+            supporting_interaction_times(&graph, &concept_of(&graph, hub)),
+            before
+        );
+    }
+
     /// Reverts subtract: one demotion (−3.0) pulls a three-session fact back
     /// under the bar. Only rank-DECREASING transitions count; promotions do
     /// not.

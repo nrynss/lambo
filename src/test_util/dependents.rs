@@ -23,6 +23,7 @@
 //! | `F` (session `other`) | `F -Dependency-> X` in session `deps` | no: foreign concept |
 //! | `V` (`i3`) | `V -Dependency-> X` and `X -Hierarchical-> V` (store-only 2-cycle) | yes, counted once |
 //! | `E` (`ie`) | `E -Dependency-> X`; edge and interaction flushed now but carrying an old `event_time` | yes, aged by its event time |
+//! | `Q` (`i6`) | `Q -Contradicts-> X`, `X -Contradicts-> Q` | no in either direction: opposition is not support |
 //!
 //! [`store_batch`] carries everything above (stores accept the self-loop,
 //! the 2-cycle, the foreign concept and the foreign origin); [`graph`] drops
@@ -100,7 +101,7 @@ const INTERACTIONS: [(&str, i64); 9] = [
 const EVENT_TIMED: i64 = 100;
 
 /// Concepts: name, origin interaction, session is `deps` unless `F`.
-const CONCEPTS: [(&str, &str, ConceptType); 16] = [
+const CONCEPTS: [(&str, &str, ConceptType); 17] = [
     ("X", "i1", ConceptType::Logic),
     ("A1", "i2", ConceptType::Resource),
     ("A2", "i3", ConceptType::Resource),
@@ -117,6 +118,7 @@ const CONCEPTS: [(&str, &str, ConceptType); 16] = [
     ("F", "ix", ConceptType::Resource),
     ("V", "i3", ConceptType::Entity),
     ("E", "ie", ConceptType::Resource),
+    ("Q", "i6", ConceptType::Resource),
 ];
 
 fn at(minutes_before: i64) -> DateTime<Utc> {
@@ -219,6 +221,8 @@ fn edges() -> Vec<(Edge, bool)> {
             },
             true,
         ),
+        (edge(21, c("Q"), c("X"), EdgeType::Contradicts, 70), true),
+        (edge(22, c("X"), c("Q"), EdgeType::Contradicts, 70), true),
     ]
 }
 
@@ -239,6 +243,44 @@ pub fn store_batch() -> MutationBatch {
         batch.push(Mutation::UpsertEdge { edge: e });
     }
     batch
+}
+
+/// #19(a): persistence accepts opposition as an ordinary typed edge, with
+/// natural-key replay idempotency, without changing either endpoint's status.
+/// Called by each adapter's synthetic dependents harness (live SQL stays manual).
+pub async fn check_contradiction_persistence(store: &dyn crate::store::GraphStore) {
+    let before = store.load_session(&session()).await.unwrap();
+    let original: Vec<_> = before
+        .edges
+        .iter()
+        .filter(|e| e.edge_type == EdgeType::Contradicts)
+        .cloned()
+        .collect();
+    assert_eq!(original.len(), 2, "both directed contradictions persisted");
+    let mut replay = MutationBatch::new();
+    for e in &original {
+        let mut e = e.clone();
+        e.id = NodeId::new(); // another id must still match the natural key
+        replay.push(Mutation::UpsertEdge { edge: e });
+    }
+    store.flush(&replay, None).await.unwrap();
+    let after = store.load_session(&session()).await.unwrap();
+    assert_eq!(after.edges.len(), before.edges.len());
+    assert_eq!(
+        after.concepts, before.concepts,
+        "opposition never changes status"
+    );
+    for e in original {
+        let rows: Vec<_> = after
+            .edges
+            .iter()
+            .filter(|r| r.source == e.source && r.target == e.target && r.edge_type == e.edge_type)
+            .collect();
+        assert_eq!(rows.len(), 1, "natural-key replay creates no second edge");
+        assert_eq!(rows[0].weight, e.weight);
+        assert_eq!(rows[0].event_time, e.event_time);
+        assert_eq!(rows[0].created_at, e.created_at);
+    }
 }
 
 /// The `deps` session as a legal in-RAM graph: the interactions chained in
@@ -300,6 +342,8 @@ pub fn expected_store() -> Vec<(&'static str, std::time::Duration, u64, u64, f64
         ("C1", MIN_AGE, 0, 0, 0.0),
         ("K", MIN_AGE, 0, 0, 0.0),
         ("N", MIN_AGE, 0, 0, 0.0),
+        ("Q", MIN_AGE, 0, 0, 0.0),
+        ("Q", zero, 0, 0, 0.0),
     ]
 }
 
@@ -317,5 +361,6 @@ pub fn expected_graph() -> Vec<(&'static str, Vec<&'static str>)> {
         ("K", vec![]),
         ("N", vec![]),
         ("W", vec![]),
+        ("Q", vec![]),
     ]
 }

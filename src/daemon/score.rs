@@ -88,7 +88,7 @@ pub fn edge_type_bonus_value(ty: EdgeType) -> f64 {
         EdgeType::Hierarchical => 0.015,
         EdgeType::Semantic => 0.01,
         EdgeType::CoOccurrence => 0.005,
-        EdgeType::Derives | EdgeType::Temporal => 0.0,
+        EdgeType::Derives | EdgeType::Temporal | EdgeType::Contradicts => 0.0,
     }
 }
 
@@ -998,6 +998,7 @@ mod tests {
     fn edge_type_bonus_table_provenance_is_zero_structural_is_positive() {
         assert_eq!(edge_type_bonus_value(EdgeType::Derives), 0.0);
         assert_eq!(edge_type_bonus_value(EdgeType::Temporal), 0.0);
+        assert_eq!(edge_type_bonus_value(EdgeType::Contradicts), 0.0);
         for ty in [
             EdgeType::Causal,
             EdgeType::Dependency,

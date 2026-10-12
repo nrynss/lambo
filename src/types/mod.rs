@@ -178,7 +178,7 @@ impl ConceptType {
     }
 }
 
-/// Edge types retained in v0.1 (spec §5). Seven of nine; CrossOccurrence/Fixes cut.
+/// Seven edge types retained in v0.1 (spec §5), plus explicit contradiction (#19).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub enum EdgeType {
@@ -196,6 +196,9 @@ pub enum EdgeType {
     Hierarchical,
     /// Two concepts are close in embedding space. Decays.
     Semantic,
+    /// The source asserts the opposite of the target. Informational only:
+    /// declares no dependence, support or blast, and does not decay.
+    Contradicts,
 }
 
 impl EdgeType {
@@ -215,7 +218,7 @@ impl EdgeType {
     /// * Every other type declares no dependence. `Causal` is provenance
     ///   (`action -> produced/modified artifact`) and confers no load;
     ///   `Derives`/`Temporal` are provenance and `CoOccurrence`/`Semantic`
-    ///   are association.
+    ///   are association. `Contradicts` declares opposition, never support.
     ///
     /// This one table is the definition every implementation follows: the
     /// stores' `blast_radius`/`interaction_span`, the graph-side
@@ -227,9 +230,12 @@ impl EdgeType {
         match self {
             Self::Dependency => Some(DependentEnd::Source),
             Self::Hierarchical => Some(DependentEnd::Target),
-            Self::Temporal | Self::Derives | Self::CoOccurrence | Self::Causal | Self::Semantic => {
-                None
-            }
+            Self::Temporal
+            | Self::Derives
+            | Self::CoOccurrence
+            | Self::Causal
+            | Self::Semantic
+            | Self::Contradicts => None,
         }
     }
 }
@@ -2011,6 +2017,7 @@ mod tests {
         assert!(!EdgeType::Dependency.decays());
         assert!(!EdgeType::Hierarchical.decays());
         assert!(EdgeType::Semantic.decays());
+        assert!(!EdgeType::Contradicts.decays());
     }
 
     /// #36: only `Dependency` (source rests on target) and `Hierarchical`
@@ -2034,6 +2041,7 @@ mod tests {
             EdgeType::CoOccurrence,
             EdgeType::Causal,
             EdgeType::Semantic,
+            EdgeType::Contradicts,
         ] {
             assert_eq!(ty.dependent_end(), None, "{ty:?} must confer no load");
         }
@@ -2062,6 +2070,7 @@ mod tests {
             Some((a, b))
         );
         assert_eq!(edge(a, b, EdgeType::Causal).dependence(), None);
+        assert_eq!(edge(a, b, EdgeType::Contradicts).dependence(), None);
         assert_eq!(edge(a, a, EdgeType::Dependency).dependence(), None);
         assert_eq!(edge(a, a, EdgeType::Hierarchical).dependence(), None);
     }
@@ -2294,6 +2303,7 @@ mod tests {
             EdgeType::Dependency,
             EdgeType::Hierarchical,
             EdgeType::Semantic,
+            EdgeType::Contradicts,
         ] {
             let s = serde_json::to_string(&et).unwrap();
             let back: EdgeType = serde_json::from_str(&s).unwrap();

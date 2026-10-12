@@ -1939,6 +1939,7 @@ mod tests {
         use crate::test_util::dependents as case;
         let store = MemoryStore::new();
         store.flush(&case::store_batch(), None).await.unwrap();
+        case::check_contradiction_persistence(&store).await;
         for (name, age, blast, distinct, coverage) in case::expected_store() {
             let node = case::concept_id(name);
             let got = store

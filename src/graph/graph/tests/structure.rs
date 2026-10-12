@@ -4,6 +4,41 @@
 use super::*;
 
 #[test]
+fn contradictions_are_directed_concept_edges_with_natural_key_replay() {
+    let (mut g, iid, older) = small_graph();
+    let c = concept(2, iid, "contrary assertion");
+    let newer = c.id;
+    g.insert_concept(c, iid).unwrap();
+    let before = g.snapshot().concepts;
+    g.upsert_edge(edge(1, newer, older, EdgeType::Contradicts, 0.5))
+        .unwrap();
+    g.upsert_edge(edge(2, newer, older, EdgeType::Contradicts, 0.5))
+        .unwrap();
+    assert_eq!(
+        g.edge_count(),
+        3,
+        "two provenance edges plus one contradiction"
+    );
+    assert!(g
+        .edge_between(older, newer, EdgeType::Contradicts)
+        .is_none());
+    assert_eq!(g.snapshot().concepts, before, "no canonization change");
+    assert!(g.cycle_neighbors(newer).is_empty());
+    assert!(g.cycle_neighbors(older).is_empty());
+    for (a, b) in [(iid, older), (older, iid)] {
+        let err = g
+            .upsert_edge(edge(3, a, b, EdgeType::Contradicts, 0.5))
+            .unwrap_err();
+        assert!(err.to_string().contains("Concept -> Concept"));
+    }
+    let restored = Graph::from_snapshot(g.snapshot()).unwrap();
+    assert!(restored
+        .edge_between(newer, older, EdgeType::Contradicts)
+        .is_some());
+    restored.assert_invariants().unwrap();
+}
+
+#[test]
 fn empty_graph_is_consistent() {
     let g = Graph::new(sid());
     assert!(g.is_empty());

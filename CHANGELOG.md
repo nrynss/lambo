@@ -38,6 +38,11 @@
 
 ### Breaking (library API)
 
+- **`EdgeType` gains `Contradicts` (#19, edge groundwork).** Exhaustive
+  matches must handle the new variant. It connects concepts, persists as
+  `Contradicts`, and declares opposition without dependence, canonization
+  support, blast radius or GC Resource protection. Existing schemas accept
+  it without migration. Older binaries cannot decode rows containing it.
 - **`LeaseHolder::token()` and its `Display`, and the
   `session_leases.holder` column, have a new format** (#126). A holder for
   the current process writes `agent@host#pid;boot=<id>;pidns=<inode>`
@@ -72,6 +77,9 @@
 
 ### Added
 
+- `EdgeType::Contradicts` persistence and synthetic exclusion checks across
+  the store adapters (#19(a)). It does not decay. Write-tool fields,
+  contradiction warnings and evidence-driven supersession follow separately.
 - A live check of the #36 dependents case on Postgres and Cockroach, with
   MemoryStore parity. It is manual by the owner's decision and is not part
   of CI: run `LAMBO_POSTGRES_DSN=<dsn> cargo test --no-default-features --features store-postgres --lib store::pg::dependents_live -- --ignored` or, for

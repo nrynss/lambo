@@ -634,7 +634,14 @@ fn structural_span_sql_gates_both_timestamps() {
     for sql in [sql, with_dependents(BLAST_RADIUS_SQL)] {
         assert!(sql.contains("e.edge_type = 'Dependency'"), "{sql}");
         assert!(sql.contains("e.edge_type = 'Hierarchical'"), "{sql}");
-        for absent in ["Causal", "Derives", "Temporal", "CoOccurrence", "Semantic"] {
+        for absent in [
+            "Causal",
+            "Derives",
+            "Temporal",
+            "CoOccurrence",
+            "Semantic",
+            "Contradicts",
+        ] {
             assert!(!sql.contains(absent), "{absent} in {sql}");
         }
         assert!(!sql.contains("{DEPENDENTS_CTE}"), "{sql}");
@@ -806,6 +813,8 @@ async fn structural_queries_follow_the_dependents_case_like_memory() {
     let batch = case::store_batch();
     store.flush(&batch, None).await.unwrap();
     memory.flush(&batch, None).await.unwrap();
+    case::check_contradiction_persistence(&store).await;
+    case::check_contradiction_persistence(&memory).await;
     let sid = case::session();
     for (name, age, blast, distinct, coverage) in case::expected_store() {
         let node = case::concept_id(name);
