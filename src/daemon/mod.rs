@@ -810,6 +810,11 @@ impl Daemon {
             now,
             assemble::default_token_count,
         );
+        // Capture the subject under the same guard as assembly. A caller with
+        // no dependents still constrains a layer's traversal exemption.
+        result.anchor = structural
+            .then(|| dispatch::resolved_anchor_text(&graph, &query.query))
+            .flatten();
         // I1: attach the phase-1 leg provenance for the hits that survived
         // assembly. Filtered to the returned hits rather than passed whole —
         // phase 1 is a bounded over-approximation (keyword is over-fetched by
