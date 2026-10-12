@@ -6,6 +6,11 @@
 //! helpers (`redact_urls`, `attach_warnings`), which kept their 0.5.0
 //! behaviour. Never edit the body: it is the golden.
 //!
+//! Not frozen: the body begins with `detailed.into()`, which is today's
+//! `From<DetailedRecall> for RecallResult`. A regression inside that
+//! conversion would change both sides of the comparison equally; the
+//! context and hit fields are still compared against `recall_detailed`.
+//!
 //! v0.5.0 predates #130, whose `truncated_in_context` key is the one
 //! intended change to this projection since the tag, so this reference
 //! holds only for an answer whose first block fits the budget.
