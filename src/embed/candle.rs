@@ -153,6 +153,17 @@ impl BatchQueue {
         self.wake.notify_all();
     }
 
+    /// Queue several requests under one lock (#125), so one take sees all of
+    /// them.
+    fn push_many(&self, pending: Vec<Pending>) {
+        if pending.is_empty() {
+            return;
+        }
+        let mut q = self.lock_queue();
+        q.extend(pending);
+        self.wake.notify_all();
+    }
+
     #[cfg(test)]
     fn len(&self) -> usize {
         self.lock_queue().len()
@@ -1377,12 +1388,55 @@ fn coalesce_loop(shared: Arc<Shared>) {
             shared.queue.top_up(&mut batch, MAX_BATCH);
         }
 
-        let texts: Vec<&str> = batch.iter().map(|p| p.text.as_str()).collect();
-        let results = forward_isolated(&texts, shared.dim, |chunk| shared.core.forward(chunk));
-        for (item, result) in batch.into_iter().zip(results) {
-            let _ = item.tx.send(result);
+        // #125: forward texts of similar length together, shortest first,
+        // and answer each chunk's callers as soon as their chunk is done.
+        let lens: Vec<usize> = batch.iter().map(|p| p.text.len()).collect();
+        let mut slots: Vec<Option<Pending>> = batch.into_iter().map(Some).collect();
+        for chunk in length_chunks(&lens) {
+            let items: Vec<Pending> = chunk.iter().filter_map(|&i| slots[i].take()).collect();
+            let texts: Vec<&str> = items.iter().map(|p| p.text.as_str()).collect();
+            let results = forward_isolated(&texts, shared.dim, |chunk| shared.core.forward(chunk));
+            for (item, result) in items.into_iter().zip(results) {
+                let _ = item.tx.send(result);
+            }
         }
     }
+}
+
+/// Most texts one forward runs (#125). Measured on Metal (M3 Pro, f16,
+/// `metal_batch_throughput`): 53 texts/s alone, 80 at 4 wide, then flat
+/// (78 at 16, 76 at 32). A wider forward buys no throughput and makes every
+/// caller in it wait for the whole of it, so a take of up to [`MAX_BATCH`]
+/// runs as several forwards of at most this many.
+const FORWARD_WIDTH: usize = 8;
+
+/// How much longer than the shortest text of a forward another text may be
+/// to join it: twice its length plus this many bytes (#125). Padding makes
+/// every row of a forward cost as much as its longest; one 910-byte text in
+/// a 16-wide forward of short ones measured 798 ms against 206 ms without it.
+const CHUNK_SLACK_BYTES: usize = 64;
+
+/// Split a take into forwards (#125): indices into `lens`, shortest texts
+/// first, at most [`FORWARD_WIDTH`] per forward, and no text in a forward
+/// longer than twice the forward's shortest plus [`CHUNK_SLACK_BYTES`].
+/// Byte length stands in for token count: it orders texts the same way
+/// closely enough, and costs nothing to read.
+fn length_chunks(lens: &[usize]) -> Vec<Vec<usize>> {
+    let mut order: Vec<usize> = (0..lens.len()).collect();
+    order.sort_by_key(|&i| lens[i]);
+    let mut chunks: Vec<Vec<usize>> = Vec::new();
+    for i in order {
+        match chunks.last_mut() {
+            Some(chunk)
+                if chunk.len() < FORWARD_WIDTH
+                    && lens[i] <= 2 * lens[chunk[0]] + CHUNK_SLACK_BYTES =>
+            {
+                chunk.push(i)
+            }
+            _ => chunks.push(vec![i]),
+        }
+    }
+    chunks
 }
 
 /// One forward over `texts`, with each caller's failure kept to that
@@ -1538,6 +1592,60 @@ impl Embedder for CandleEmbedder {
         });
         recv_bounded(rx, EMBED_WAIT).await
     }
+
+    /// #125: every text is queued under one lock, so the coalescer takes
+    /// them together (up to [`MAX_BATCH`]) instead of whichever of them
+    /// arrive within its debounce. An empty text fails its own slot (CON-7)
+    /// and is never queued.
+    async fn embed_batch(&self, texts: &[&str]) -> Vec<Result<Vec<f32>, EmbedError>> {
+        if !self.is_loaded()
+            && let Err(e) = self.prepare().await
+        {
+            let msg = e.to_string();
+            return texts
+                .iter()
+                .map(|_| Err(EmbedError::Unavailable(msg.clone())))
+                .collect();
+        }
+        let Some(handle) = self.slot.handle.get() else {
+            return texts
+                .iter()
+                .map(|_| {
+                    Err(EmbedError::Unavailable(
+                        "candle embedder weights are not loaded".into(),
+                    ))
+                })
+                .collect();
+        };
+        let mut waits = Vec::with_capacity(texts.len());
+        let mut queued = Vec::with_capacity(texts.len());
+        for text in texts {
+            match reject_empty(text) {
+                Err(e) => waits.push(Err(e)),
+                Ok(()) => {
+                    let (tx, rx) = tokio::sync::oneshot::channel();
+                    queued.push(Pending {
+                        text: (*text).to_string(),
+                        tx,
+                    });
+                    waits.push(Ok(rx));
+                }
+            }
+        }
+        handle.shared.queue.push_many(queued);
+        let mut out = Vec::with_capacity(texts.len());
+        for wait in waits {
+            out.push(match wait {
+                Err(e) => Err(e),
+                Ok(rx) => recv_bounded(rx, EMBED_WAIT).await,
+            });
+        }
+        out
+    }
+
+    fn batch_capacity(&self) -> usize {
+        MAX_BATCH
+    }
 }
 
 /// A tiny, real BGE-M3-shaped artifact on disk for tests (issue #31): a
@@ -1656,6 +1764,53 @@ mod tests {
                     v
                 })
                 .collect())
+        }
+    }
+
+    #[test]
+    fn length_chunks_keep_long_texts_out_of_short_forwards() {
+        // #125: one long text must not pad a forward of short ones.
+        let mut lens = vec![40; 15];
+        lens.push(910);
+        let chunks = length_chunks(&lens);
+        assert_eq!(chunks.len(), 3, "{chunks:?}");
+        assert_eq!(chunks[0].len(), FORWARD_WIDTH);
+        assert_eq!(chunks[1].len(), 7);
+        assert_eq!(chunks[2], vec![15], "the long text runs alone, last");
+        let mut all: Vec<usize> = chunks.concat();
+        all.sort_unstable();
+        assert_eq!(all, (0..16).collect::<Vec<_>>(), "every text exactly once");
+        assert!(length_chunks(&[]).is_empty());
+    }
+
+    #[test]
+    fn length_chunks_join_texts_within_the_slack() {
+        let chunks = length_chunks(&[100, 10, 84, 85]);
+        // 10 * 2 + 64 = 84: 84 joins the 10, 85 does not; 100 joins 85.
+        assert_eq!(chunks, vec![vec![1, 2], vec![3, 0]]);
+    }
+
+    #[tokio::test]
+    async fn embed_batch_matches_single_embeds_and_fails_empty_text_in_its_slot() {
+        let dir = crate::test_util::ScratchDir::new("lambo-125-batch");
+        let artifact = dir.join("artifact");
+        test_artifact::write(&artifact);
+        let e = test_artifact::deferred(&artifact, &dir.join("cache")).unwrap();
+        assert_eq!(e.batch_capacity(), MAX_BATCH);
+        let texts = ["user schema", "  ", "write queue batching"];
+        let out = e.embed_batch(&texts).await;
+        assert_eq!(out.len(), 3);
+        assert!(
+            matches!(out[1], Err(EmbedError::Unavailable(_))),
+            "{:?}",
+            out[1]
+        );
+        for i in [0, 2] {
+            let single = e.embed(texts[i]).await.unwrap();
+            let batched = out[i].as_ref().unwrap();
+            assert_eq!(batched.len(), BGE_M3_DIM);
+            let cos: f32 = single.iter().zip(batched).map(|(a, b)| a * b).sum();
+            assert!(cos > 0.999, "slot {i}: cosine {cos}");
         }
     }
 
@@ -2703,6 +2858,46 @@ mod tests {
             long.len(),
             16.0 * 1e3 / median
         );
+        // The same take as the coalescer now runs it: length chunks of at
+        // most FORWARD_WIDTH, shortest first.
+        let lens: Vec<usize> = mixed.iter().map(|t| t.len()).collect();
+        let chunks = length_chunks(&lens);
+        let mut ms: Vec<f64> = (0..15)
+            .map(|_| {
+                let t = std::time::Instant::now();
+                for chunk in &chunks {
+                    let texts: Vec<&str> = chunk.iter().map(|&i| mixed[i]).collect();
+                    core.forward(&texts).expect("forward");
+                }
+                t.elapsed().as_secs_f64() * 1e3
+            })
+            .collect();
+        ms.sort_by(f64::total_cmp);
+        let median = ms[ms.len() / 2];
+        eprintln!(
+            "#125 METAL BATCH 16 with one long text, as {} length chunks: median {median:7.2} \
+             ms, {:7.1} texts/s",
+            chunks.len(),
+            16.0 * 1e3 / median
+        );
+        for n in [16, 32] {
+            let mut ms: Vec<f64> = (0..15)
+                .map(|_| {
+                    let t = std::time::Instant::now();
+                    for chunk in refs[..n].chunks(FORWARD_WIDTH) {
+                        core.forward(chunk).expect("forward");
+                    }
+                    t.elapsed().as_secs_f64() * 1e3
+                })
+                .collect();
+            ms.sort_by(f64::total_cmp);
+            let median = ms[ms.len() / 2];
+            eprintln!(
+                "#125 METAL TAKE {n} as {FORWARD_WIDTH}-wide forwards: median {median:7.2} ms, \
+                 {:7.1} texts/s",
+                n as f64 * 1e3 / median
+            );
+        }
     }
 
     // Compile-time sanity (clippy wants const assertions, not runtime tests).
