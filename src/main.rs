@@ -632,6 +632,8 @@ struct ServePlan {
     /// The `[serve]` bounds on attached sessions (#32 PR 6), read here
     /// because `file` is handed to the resolve before the serve starts.
     bounds: lambo::mcp::SessionBounds,
+    /// Each pinned session's layer stack (#33 PR 3); empty over stdio.
+    layers: lambo::config::ServeLayers,
 }
 
 /// `lambo serve`'s checks that need no backend (#32 PR 4), run before the
@@ -695,6 +697,20 @@ fn serve_preflight(
             return Err(ExitCode::from(2));
         }
     };
+    // #33 PR 3: the layer stacks over HTTP, every layer and layered session
+    // pinned, refused here before any backend is built. A stdio serve
+    // holds one session and serves it unlayered, saying so once.
+    let layers = match lambo::mcp::plan_layers(&file.serve, &pinned.sessions, transport) {
+        Ok(layers) => layers,
+        Err(e) => {
+            eprintln!("lambo serve: {e}");
+            return Err(ExitCode::from(2));
+        }
+    };
+    if let Some(warning) = lambo::mcp::stdio_layer_warning(&file.serve, &pinned.default, transport)
+    {
+        tracing::warn!("{warning}");
+    }
     // Env beats flag (T8.7), resolved before any of it reaches a log line.
     // A set-but-empty LAMBO_AUTH_TOKEN is a usage error, not a silent
     // fallback to the flag. HTTP only (#32 PR 5 review S3): a stdio serve
@@ -739,6 +755,7 @@ fn serve_preflight(
         file,
         auth_token,
         credentials,
+        layers,
     })
 }
 
@@ -1060,6 +1077,7 @@ fn main() -> ExitCode {
                 auth_token,
                 credentials,
                 bounds,
+                layers,
                 ..
             } = serve_plan.expect("serve_preflight ran for serve");
             // A zero `--ledger-heartbeat` would spin the heartbeat loop as fast
@@ -1084,6 +1102,7 @@ fn main() -> ExitCode {
                 ledger,
                 ledger_heartbeat: ledger_heartbeat.map(std::time::Duration::from_secs),
                 bounds,
+                layers,
             };
 
             // `backends` is the single resolve from `resolve_for_command` above

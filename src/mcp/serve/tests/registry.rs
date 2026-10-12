@@ -135,6 +135,8 @@ fn new_registry_ledgered(
             host_check,
             agent: "agent-a".into(),
             session_rps: 0,
+            layers: Default::default(),
+            authority: None,
         }),
         early,
         RegistryBounds::pinned_only(),

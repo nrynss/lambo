@@ -102,6 +102,7 @@ pub(crate) use frames::MAX_MCP_FRAME_BYTES;
 mod heartbeat;
 mod http_guards;
 mod hub;
+mod layers;
 mod openers;
 mod pinned;
 mod process;
@@ -117,6 +118,7 @@ mod watchdog;
 pub use authority::check_serve_credentials;
 pub use builder::{build_memory, resolve_serve_backends};
 pub use heartbeat::authorize_ledger;
+pub use layers::{plan_layers, stdio_layer_warning};
 pub use pinned::{pin_sessions, PinnedSessions};
 
 use authority::{
@@ -234,6 +236,12 @@ pub struct ServeOptions {
     /// concurrent attaches, the idle detach and the per-session rate.
     /// [`ServeOptions::new`] fills the defaults.
     pub bounds: SessionBounds,
+    /// Each pinned session's layer stack (#33 PR 3): the shared sessions
+    /// its `lambo_recall` also reads. From [`plan_layers`] (`[serve]
+    /// layers`, `[serve.session_layers]`, `[[serve.layer]]`); empty (the
+    /// default) for no layers. HTTP only: a stdio serve serves its one
+    /// session unlayered.
+    pub layers: crate::config::ServeLayers,
 }
 
 /// The `[serve]` bounds on the sessions one serve attaches (#32 PR 6,
@@ -312,6 +320,7 @@ impl ServeOptions {
             ledger: None,
             ledger_heartbeat: None,
             bounds: SessionBounds::default(),
+            layers: crate::config::ServeLayers::default(),
         }
     }
 }
@@ -376,6 +385,20 @@ pub async fn serve(opts: ServeOptions, backends: ResolvedBackends) -> Result<(),
     authorize_ledger(&opts)?;
     // #32 PR 4: the pinned sessions, refused before any lease too.
     check_pinned(&opts.session, &opts.sessions, opts.transport)?;
+    // #33 PR 3: the layers, refused before any lease too. Stdio holds one
+    // session and serves it unlayered; the CLI never hands it stacks, a
+    // library caller's are dropped with a warning.
+    let mut opts = opts;
+    if opts.transport == Transport::Stdio && !opts.layers.is_empty() {
+        tracing::warn!(
+            "lambo serve: a stdio serve holds one session and serves it unlayered; the layer              stacks in ServeOptions are ignored"
+        );
+        opts.layers = crate::config::ServeLayers::default();
+    }
+    layers::check_pinned_layers(&opts.layers, &opts.sessions)?;
+    if let Some(authority) = &authority {
+        layers::check_coverage(authority, &opts.layers)?;
+    }
     if opts.transport == Transport::Http && opts.sessions.len() > opts.bounds.max_attached {
         return Err(LamboError::Config(format!(
             "ServeOptions: {} pinned sessions exceed max_attached ({})",
@@ -837,6 +860,8 @@ async fn serve_pinned_with(
             host_check: HostCheck::for_authority(Some(&authority)),
             agent: opts.agent.clone(),
             session_rps: opts.bounds.session_rps(opts.rate_limit_rps),
+            layers: opts.layers.clone(),
+            authority: Some(Arc::clone(&authority)),
         }),
         early.clone(),
         bounds,
@@ -880,6 +905,32 @@ async fn serve_pinned_with(
         }
     }
 
+    // #33 PR 3: a layered session and its layers share one embedding
+    // contract, checked over the sessions this start acquired (one held
+    // elsewhere is checked by every layered recall instead: a mismatched
+    // layer is unavailable). A mismatch refuses the start like any other
+    // attach failure, releasing what was taken.
+    let contracts = layers::check_contracts(&opts.layers, |id| {
+        acquired
+            .iter()
+            .find(|(mem, _)| mem.session().as_str() == id)
+            .map(|(mem, _)| mem.embedding_contract())
+    });
+    if let Err(e) = contracts {
+        for (mem, _) in &acquired {
+            if let Err(close) = close_bounded(mem, &early).await {
+                tracing::error!(
+                    session = %mem.session(),
+                    error = %close,
+                    "lambo serve: closing a session after a failed start"
+                );
+            }
+        }
+        tracing::error!(error = %e, "lambo serve: refusing to start");
+        close_ledger(ledger);
+        return Err(e);
+    }
+
     let progress = ShutdownProgress::with_production_watchdog();
     let _disarm = progress.disarm_on_drop();
     let shutdown = registry_shutdown(early.clone(), progress.clone());
@@ -914,6 +965,14 @@ async fn serve_pinned_with(
         "lambo serve: serving {} pinned sessions",
         opts.sessions.len()
     );
+    for (session, stack) in opts.layers.iter() {
+        let names: Vec<&str> = stack.iter().map(|l| l.session.as_str()).collect();
+        tracing::info!(
+            session = %session,
+            layers = ?names,
+            "lambo serve: recall in this session also reads its layers"
+        );
+    }
     if registry.attaches_on_demand() {
         tracing::info!(
             max_attached = opts.bounds.max_attached,

@@ -145,6 +145,8 @@ impl OnDemand {
                 host_check: HostCheck::for_authority(Some(&authority)),
                 agent: "agent-a".into(),
                 session_rps,
+                layers: Default::default(),
+                authority: None,
             }),
             early,
             RegistryBounds {
