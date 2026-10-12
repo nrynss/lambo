@@ -113,6 +113,23 @@ async fn every_tool_schema_is_an_object_requiring_agent_id() {
             "{} must take agent_id",
             t.name
         );
+        // #99: the stable-id rule is stated where the id is filled in.
+        let id_doc = schema["properties"]["agent_id"]["description"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            id_doc.contains("one stable id that names your\nmodel or client")
+                || id_doc.contains("one stable id that names your model or client"),
+            "{} agent_id must say to send one stable model or client id: {id_doc}",
+            t.name
+        );
+        assert!(
+            id_doc.contains("per-task or")
+                && id_doc.contains("claude-opus-5-5")
+                && id_doc.contains("b1-review"),
+            "{} agent_id must forbid per-task ids, with examples: {id_doc}",
+            t.name
+        );
         let required = schema["required"].as_array().cloned().unwrap_or_default();
         assert!(
             required.iter().any(|r| r == "agent_id"),
@@ -775,6 +792,19 @@ async fn get_info_advertises_tools_and_names_the_session() {
     assert!(
         !instructions.contains("Never send a timestamp"),
         "the obsolete blanket timestamp prohibition must not suppress event_time: {instructions}"
+    );
+    // #98 / #99: what a concept is, and the stable agent_id rule with why.
+    assert!(
+        instructions.contains("A concept is one fact, stated atomically")
+            && instructions.contains("not a log line or a paragraph"),
+        "instructions must say what a concept is: {instructions}"
+    );
+    assert!(
+        instructions.contains("one stable id that names your model or client")
+            && instructions.contains("never a per-task or per-role id")
+            && instructions.contains("soft locks are held under it")
+            && instructions.contains("per-task ids split attribution"),
+        "instructions must carry the agent_id rule and its reason: {instructions}"
     );
     assert!(
         instructions.contains("Ordering is yours to manage"),

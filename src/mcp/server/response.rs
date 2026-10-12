@@ -117,6 +117,17 @@ pub(super) fn conflict_err(what: &str, msg: &str, nothing: &str) -> CallToolResu
     ))])
 }
 
+/// The line a write ack ends with (#99): the agent_id the write is recorded
+/// under, so a caller sending a per-task id sees it at the point of use. It
+/// echoes only the caller's own id, which `caller_agent` has already checked
+/// to be one line of at most 256 characters.
+pub(super) fn recorded_under(agent: &crate::types::AgentId) -> String {
+    format!(
+        "Recorded under agent_id {:?}; send this same id on every call.",
+        agent.to_string()
+    )
+}
+
 /// Replace any whitespace-delimited token that looks like a URL with a
 /// placeholder (N3), so a warning that surfaced a store/embedder endpoint does
 /// not carry it into a model-facing string. Idempotent — a redacted token has

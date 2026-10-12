@@ -114,10 +114,11 @@ Send the id of the agent making the call. Lambo honours it: your work is recorde
 
 The id is **caller-asserted and unverified**. Nothing authenticates it: over stdio the client owns the process, and over HTTP one bearer token authenticates the server rather than each agent. So identity here is a cooperative declaration, which is the same trust level Lambo's soft locks already have — they are advisory and live in RAM. In practice:
 
-- Use one stable id per agent, such as `claude-orchestrator` or `codex-agent`.
+- Send one stable id that names your model or client, the same on every call, such as `claude-opus-5-5` or `codex-agent`. Never send a per-task or per-role id such as `b1-review`, `implement-m12` or `claude-orchestrator`. Attribution and soft locks are keyed on the id, so per-task ids scatter your work across many names in the graph, and two agents doing the same work under different ids never contend for the same lock.
 - Send the id on one line, at most 256 characters. `agent_id` refuses newlines, tabs, any other control character, the Unicode line and paragraph separators `U+2028`/`U+2029`, and length over 256 even though other strings accept some of them, because your id is rendered into other agents' context blocks as the holder of your locks: a line break there would let you write lines into someone else's context, and a very long id could push the block it annotates out of a budgeted context entirely.
 - Distinct ids get distinct locks and contend honestly: one agent reserving a node another holds gets a conflict that names the holder and the expiry, so it can wait or work elsewhere.
 - Two callers sending the **same** id share one lock and can release each other's. That is by design, and worth knowing before you let two clients default to the same name.
+- Every write ack (`lambo_derive`, `lambo_derive_image`, `lambo_record_action`) names the id the write is recorded under, in its text and as `agent_id` in its structured content, so an agent sending a per-task id sees it at the point of use.
 
 ### Errors
 
@@ -197,6 +198,13 @@ Recall still works without a vector leg. You get matches on the words you use ra
 
 Store new concepts learned from the current interaction.
 
+**A concept is one fact, stated atomically and short**: short enough that a later restatement of the same fact matches it instead of minting a new node. A decision with its reason is a good concept. A paragraph narrating what you did and found is not: it never matches anything, so every such write creates a node and the graph fills with one-off prose.
+
+* Good: `Lease TTL is 45s because it must exceed the 15s shutdown budget`.
+* Bad: `Today I looked at the lease code, found the TTL was 45s, checked it against shutdown, ran the tests and they passed, so I think it is fine.`
+
+Activity (what you did) goes to [`lambo_record_action`](#lambo_record_action). To tie a decision to the facts it rests on, send each fact as its own concept and link them with `parent_of`.
+
 **This call returns before the write is applied.** Lambo validates your input, fixes this write's place in the session's order, and answers — the embedding and the graph insert happen in the background. A warm derive against a local BGE-M3 embedder went from a 14 ms call to a 0.05 ms call this way, because the embedder is no longer inside it. Two consequences worth planning around:
 
 * The ack carries a **receipt id** instead of the node ids, because it does not yet know them. Its outcome — what was created, what matched an existing concept, or why it failed — is delivered two ways: piggybacked onto your next tool response as a `write receipts:` text block, and fetchable at any time by passing the receipt to [`lambo_stats`](#lambo_stats).
@@ -228,9 +236,10 @@ Writes you send one after another are applied in that order, whatever other agen
 ```
 
 ```json
-{"content": [{"type": "text", "text": "accepted 1 concept(s) for background write; validated and ordered, not yet applied\nreceipt lwr1.708217ebbf356946.1a01fa59db7.15: pending — admitted, not yet applied; ask again\nThe outcome arrives on your next tool response. To wait for it, call lambo_stats with receipt=lwr1.708217ebbf356946.1a01fa59db7.15 (add wait_ms to block)."}],
+{"content": [{"type": "text", "text": "accepted 1 concept(s) for background write; validated and ordered, not yet applied\nreceipt lwr1.708217ebbf356946.1a01fa59db7.15: pending — admitted, not yet applied; ask again\nThe outcome arrives on your next tool response. To wait for it, call lambo_stats with receipt=lwr1.708217ebbf356946.1a01fa59db7.15 (add wait_ms to block).\nRecorded under agent_id \"agent-a\"; send this same id on every call."}],
  "structuredContent": {"summary": "accepted 1 concept(s) for background write; validated and ordered, not yet applied",
-   "receipt": "lwr1.708217ebbf356946.1a01fa59db7.15", "receipt_state": "pending", "warnings": []},
+   "receipt": "lwr1.708217ebbf356946.1a01fa59db7.15", "receipt_state": "pending",
+   "agent_id": "agent-a", "warnings": []},
  "isError": false}
 ```
 
@@ -275,7 +284,7 @@ The same caption and `image_id` derived again is the same concept, and two image
 
 ### lambo_record_action
 
-Record something the agent did, along with what it produces, modifies, and depends on. The action becomes a `Resource` concept, `produces` and `modifies` become causal edges, and `depends_on` becomes dependency edges.
+Record something the agent did, along with what it produces, modifies, and depends on. This is where activity goes: name the act in a short line, such as `merged PR #52`, rather than a narrative. A fact or decision that later work should recall is a concept for [`lambo_derive`](#lambo_derive). The action becomes a `Resource` concept, `produces` and `modifies` become causal edges, and `depends_on` becomes dependency edges.
 
 **Like `lambo_derive`, this returns before the write is applied**, and its ack carries a receipt resolved the same way. It has no embedding step of its own, so what asynchrony buys here is ordering: both write tools feed one queue per agent, so an action you record and then derive from is applied in that order.
 
@@ -294,9 +303,10 @@ Record something the agent did, along with what it produces, modifies, and depen
 ```
 
 ```json
-{"content": [{"type": "text", "text": "accepted action 'created migrations/003.sql' for background write; validated and ordered, not yet applied\nreceipt lwr1.708217ebbf356946.1a01fa59db7.16: pending — admitted, not yet applied; ask again\nThe outcome arrives on your next tool response. To wait for it, call lambo_stats with receipt=lwr1.708217ebbf356946.1a01fa59db7.16 (add wait_ms to block)."}],
+{"content": [{"type": "text", "text": "accepted action 'created migrations/003.sql' for background write; validated and ordered, not yet applied\nreceipt lwr1.708217ebbf356946.1a01fa59db7.16: pending — admitted, not yet applied; ask again\nThe outcome arrives on your next tool response. To wait for it, call lambo_stats with receipt=lwr1.708217ebbf356946.1a01fa59db7.16 (add wait_ms to block).\nRecorded under agent_id \"agent-a\"; send this same id on every call."}],
  "structuredContent": {"summary": "accepted action 'created migrations/003.sql' for background write; validated and ordered, not yet applied",
-   "receipt": "lwr1.708217ebbf356946.1a01fa59db7.16", "receipt_state": "pending", "warnings": []},
+   "receipt": "lwr1.708217ebbf356946.1a01fa59db7.16", "receipt_state": "pending",
+   "agent_id": "agent-a", "warnings": []},
  "isError": false}
 ```
 
@@ -400,21 +410,25 @@ When the server was started with `serve --ledger`, the payload also carries `led
 When your client connects, the server names the session and tells the model how to use it. For a session called `demo`, the instructions read:
 
 ```text
-Lambo agentic graph memory for session 'demo'. Call lambo_recall before acting on a
-task to load relevant prior memory, lambo_derive and lambo_record_action to write what
-you learned and did, lambo_reserve before editing a shared concept, and lambo_inspect /
-lambo_saints / lambo_stats to look around. Every tool takes your agent_id: it is
-caller-asserted and unverified, so send one stable id of your own — work is recorded under
-it, soft locks are held under it, distinct ids get distinct locks, and callers sharing an
-id share locks. created_at is server-stamped: do not send a client flush timestamp.
-lambo_derive and lambo_record_action may take optional RFC3339 event_time for historical
-about-time, such as a commit or document date; omit it for a live fact, which is about now.
-Ordering is yours to manage, and writes are applied in the BACKGROUND: lambo_derive and
-lambo_record_action return once your input is validated and ordered, and their ack carries
-a receipt id. Their outcome arrives on your next tool response. If you need a write visible
-to the very next read, call lambo_stats with that receipt and a wait_ms first; otherwise
-carry on — writes you send one after another are applied in that order (two you fire at once
-have no order to keep).
+Lambo agentic graph memory for session 'demo'. Call lambo_recall before acting on a task
+to load relevant prior memory, lambo_derive and lambo_record_action to write what you
+learned and did, lambo_reserve before editing a shared concept, and lambo_inspect /
+lambo_saints / lambo_stats to look around. A concept is one fact, stated atomically and
+short, such as a decision with its reason; it is not a log line or a paragraph, and
+activity goes to lambo_record_action. Every tool takes your agent_id: send one stable id
+that names your model or client, the same on every call (such as claude-opus-5-5), never a
+per-task or per-role id (such as b1-review). It is caller-asserted and unverified: work is
+recorded under it and soft locks are held under it, so distinct ids get distinct locks,
+callers sharing an id share locks, and per-task ids split attribution. created_at is
+server-stamped: do not send a client flush timestamp. lambo_derive and lambo_record_action
+may take optional RFC3339 event_time for historical about-time, such as a commit or
+document date; omit it for a live fact, which is about now. Ordering is yours to manage,
+and writes are applied in the BACKGROUND: lambo_derive and lambo_record_action return once
+your input is validated and ordered, and their ack carries a receipt id. Their outcome
+arrives on your next tool response. If you need a write visible to the very next read,
+call lambo_stats with that receipt and a wait_ms first; otherwise carry on — writes you
+send one after another are applied in that order (two you fire at once have no order to
+keep).
 ```
 
 ## Limits

@@ -1,6 +1,6 @@
 {
   "lambo_derive": {
-    "description": "Derive concepts from the current interaction into session memory. created_at is stamped server-side. event_time is optional RFC3339 historical about-time, such as a commit or document date; omit it for a live fact, which is about now. Returns as soon as the input is validated and ordered — the write is applied in the background and the ack carries a receipt id. The outcome is piggybacked on your next tool response; to wait for it, call lambo_stats with that receipt and a wait_ms. On a store with vector search each concept is embedded with the whole call's text, so a concept sent alone may be at most 8189 bytes; a longer call is refused before the ack, naming the part that is too long.",
+    "description": "Derive concepts from the current interaction into session memory. A concept is one fact, stated atomically and short enough that a later restatement of the same fact matches it, such as a decision with its reason. Good: 'Lease TTL is 45s because it must exceed the 15s shutdown budget'. Bad: a paragraph narrating what you did and found. It is not a log: record activity with lambo_record_action, and link a decision to the facts it rests on with parent_of. created_at is stamped server-side. event_time is optional RFC3339 historical about-time, such as a commit or document date; omit it for a live fact, which is about now. Returns as soon as the input is validated and ordered — the write is applied in the background and the ack carries a receipt id. The outcome is piggybacked on your next tool response; to wait for it, call lambo_stats with that receipt and a wait_ms. On a store with vector search each concept is embedded with the whole call's text, so a concept sent alone may be at most 8189 bytes; a longer call is refused before the ack, naming the part that is too long.",
     "inputSchema": {
       "$defs": {
         "WireConcept": {
@@ -11,7 +11,7 @@
               "description": "One of `entity`, `logic`, `constraint`, `resource`, `observation`."
             },
             "content": {
-              "description": "The concept text.",
+              "description": "The concept text: one fact, stated atomically and short — a sentence,\nnot a paragraph or a log of what you did.",
               "maxLength": 16384,
               "type": "string"
             }
@@ -56,7 +56,7 @@
       "additionalProperties": false,
       "properties": {
         "agent_id": {
-          "description": "Id of the agent making this call. Caller-asserted and unverified: work\nis recorded under exactly the id you send. Use one stable id per agent —\ncallers sharing an id share its memory attribution and its soft locks.",
+          "description": "Id of the agent making this call. Send one stable id that names your\nmodel or client, the same on every call (good: `claude-opus-5-5`,\n`codex-agent`); never a per-task or per-role id (bad: `b1-review`,\n`implement-m12`). Caller-asserted and unverified: work is recorded, and\nsoft locks are held, under exactly the id you send, so per-task ids\nsplit your attribution and keep agents doing the same work from seeing\neach other's locks.",
           "maxLength": 16384,
           "type": "string"
         },
@@ -211,7 +211,7 @@
       "additionalProperties": false,
       "properties": {
         "agent_id": {
-          "description": "Id of the agent making this call. Caller-asserted and unverified: work\nis recorded under exactly the id you send. Use one stable id per agent —\ncallers sharing an id share its memory attribution and its soft locks.",
+          "description": "Id of the agent making this call. Send one stable id that names your\nmodel or client, the same on every call (good: `claude-opus-5-5`,\n`codex-agent`); never a per-task or per-role id (bad: `b1-review`,\n`implement-m12`). Caller-asserted and unverified: work is recorded, and\nsoft locks are held, under exactly the id you send, so per-task ids\nsplit your attribution and keep agents doing the same work from seeing\neach other's locks.",
           "maxLength": 16384,
           "type": "string"
         },
@@ -290,7 +290,7 @@
       "additionalProperties": false,
       "properties": {
         "agent_id": {
-          "description": "Id of the agent making this call. Caller-asserted and unverified: work\nis recorded under exactly the id you send. Use one stable id per agent —\ncallers sharing an id share its memory attribution and its soft locks.",
+          "description": "Id of the agent making this call. Send one stable id that names your\nmodel or client, the same on every call (good: `claude-opus-5-5`,\n`codex-agent`); never a per-task or per-role id (bad: `b1-review`,\n`implement-m12`). Caller-asserted and unverified: work is recorded, and\nsoft locks are held, under exactly the id you send, so per-task ids\nsplit your attribution and keep agents doing the same work from seeing\neach other's locks.",
           "maxLength": 16384,
           "type": "string"
         },
@@ -406,7 +406,7 @@
       "additionalProperties": false,
       "properties": {
         "agent_id": {
-          "description": "Id of the agent making this call. Caller-asserted and unverified: work\nis recorded under exactly the id you send. Use one stable id per agent —\ncallers sharing an id share its memory attribution and its soft locks.",
+          "description": "Id of the agent making this call. Send one stable id that names your\nmodel or client, the same on every call (good: `claude-opus-5-5`,\n`codex-agent`); never a per-task or per-role id (bad: `b1-review`,\n`implement-m12`). Caller-asserted and unverified: work is recorded, and\nsoft locks are held, under exactly the id you send, so per-task ids\nsplit your attribution and keep agents doing the same work from seeing\neach other's locks.",
           "maxLength": 16384,
           "type": "string"
         },
@@ -476,7 +476,7 @@
     }
   },
   "lambo_record_action": {
-    "description": "Record an action the agent took, with what it produces, modifies and depends on. created_at is stamped server-side. event_time is optional RFC3339 historical about-time, such as a commit or document date; omit it for a live fact, which is about now. Returns as soon as the input is validated and ordered — the write is applied in the background and the ack carries a receipt id, resolved the same way as lambo_derive's.",
+    "description": "Record an action the agent took, with what it produces, modifies and depends on. This is where activity goes: name the act in a short line (e.g. 'merged PR #52'), not a narrative. A fact or decision that later work should recall is a concept for lambo_derive. created_at is stamped server-side. event_time is optional RFC3339 historical about-time, such as a commit or document date; omit it for a live fact, which is about now. Returns as soon as the input is validated and ordered — the write is applied in the background and the ack carries a receipt id, resolved the same way as lambo_derive's.",
     "inputSchema": {
       "$defs": {
         "WireResource": {
@@ -494,7 +494,7 @@
           "type": "string"
         },
         "agent_id": {
-          "description": "Id of the agent making this call. Caller-asserted and unverified: work\nis recorded under exactly the id you send. Use one stable id per agent —\ncallers sharing an id share its memory attribution and its soft locks.",
+          "description": "Id of the agent making this call. Send one stable id that names your\nmodel or client, the same on every call (good: `claude-opus-5-5`,\n`codex-agent`); never a per-task or per-role id (bad: `b1-review`,\n`implement-m12`). Caller-asserted and unverified: work is recorded, and\nsoft locks are held, under exactly the id you send, so per-task ids\nsplit your attribution and keep agents doing the same work from seeing\neach other's locks.",
           "maxLength": 16384,
           "type": "string"
         },
@@ -552,7 +552,7 @@
       "additionalProperties": false,
       "properties": {
         "agent_id": {
-          "description": "Id of the agent making this call — the identity the lock is held under.\nCaller-asserted and unverified: locks are cooperative. A distinct id\ngets a distinct lock; two callers sending the SAME id share one lock and\ncan release each other's. Use one stable id per agent.",
+          "description": "Id of the agent making this call — the identity the lock is held under.\nSend one stable id that names your model or client, the same on every\ncall (good: `claude-opus-5-5`, `codex-agent`); never a per-task or\nper-role id (bad: `b1-review`, `implement-m12`). Caller-asserted and\nunverified: locks are cooperative. A distinct id gets a distinct lock;\ntwo callers sending the SAME id share one lock and can release each\nother's.",
           "maxLength": 16384,
           "type": "string"
         },
@@ -593,7 +593,7 @@
       "additionalProperties": false,
       "properties": {
         "agent_id": {
-          "description": "Id of the agent making this call. Caller-asserted and unverified: work\nis recorded under exactly the id you send. Use one stable id per agent —\ncallers sharing an id share its memory attribution and its soft locks.",
+          "description": "Id of the agent making this call. Send one stable id that names your\nmodel or client, the same on every call (good: `claude-opus-5-5`,\n`codex-agent`); never a per-task or per-role id (bad: `b1-review`,\n`implement-m12`). Caller-asserted and unverified: work is recorded, and\nsoft locks are held, under exactly the id you send, so per-task ids\nsplit your attribution and keep agents doing the same work from seeing\neach other's locks.",
           "maxLength": 16384,
           "type": "string"
         }
@@ -611,7 +611,7 @@
       "additionalProperties": false,
       "properties": {
         "agent_id": {
-          "description": "Id of the agent making this call. Caller-asserted and unverified: work\nis recorded under exactly the id you send. Use one stable id per agent —\ncallers sharing an id share its memory attribution and its soft locks.",
+          "description": "Id of the agent making this call. Send one stable id that names your\nmodel or client, the same on every call (good: `claude-opus-5-5`,\n`codex-agent`); never a per-task or per-role id (bad: `b1-review`,\n`implement-m12`). Caller-asserted and unverified: work is recorded, and\nsoft locks are held, under exactly the id you send, so per-task ids\nsplit your attribution and keep agents doing the same work from seeing\neach other's locks.",
           "maxLength": 16384,
           "type": "string"
         },

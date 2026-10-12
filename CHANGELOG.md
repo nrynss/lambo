@@ -4,6 +4,19 @@
 
 ### Changed
 
+- The MCP tool descriptions say what a concept is and how to send
+  `agent_id` ([#98](https://github.com/nrynss/lambo/issues/98),
+  [#99](https://github.com/nrynss/lambo/issues/99)). `lambo_derive`, its
+  `concept.content` field and the server instructions say a concept is one
+  fact, stated atomically and short, such as a decision with its reason, not
+  a log line or a paragraph, with a good and a bad example;
+  `lambo_record_action` says it is where activity goes. Every tool's
+  `agent_id` description and the server instructions say to send one stable
+  id naming your model or client, never a per-task or per-role id, with
+  examples and the reason (attribution and soft locks are keyed on it). The
+  published tool schemas change only in these descriptions; the golden is
+  updated to match. Write acks now name the id the write is recorded under:
+  a last text line and an `agent_id` key in `structuredContent` (additive).
 - The lease holder string now names the holder's boot and PID namespace
   ([#126](https://github.com/nrynss/lambo/issues/126)). A writer stores
   `agent@host#pid;boot=<id>;pidns=<inode>` in `session_leases.holder`

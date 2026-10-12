@@ -85,7 +85,7 @@ infrastructure section above, applied to design surface instead of resources:
   what was done; the graph records what the next agent must not re-derive.
 - **`record_action` on merges** — workstream landed, review round closed, dogfood
   binary re-pinned.
-- Use a stable `agent_id` naming your client (`claude-orchestrator`, `codex-agent`,
-  `cursor-agent`, …) so the ledger attributes work.
+- Use one stable `agent_id` naming your model or client (`claude-opus-5-5`, `codex-agent`,
+  `cursor-agent`, …), never a per-task or per-role id: attribution and soft locks key on it.
 - No server attached = no obligation. Never block on the memory being up; fall back
   to the dev-diary and note the outage.
