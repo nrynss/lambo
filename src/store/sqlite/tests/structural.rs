@@ -871,3 +871,32 @@ async fn capped_span_follows_extents_case() {
     store.init_schema().await.unwrap();
     crate::test_util::dependents::check_extents_case(&store).await;
 }
+
+/// #36 PR 3 parity: Stage 1's graph-side count of dependent interactions
+/// (`canon::dependent_interaction_counts`, batched over the in-RAM graph) is
+/// SQLite's Stage 2 `distinct` for every concept of the shared dependents
+/// case, at both ages. The graph cannot hold `G` (foreign origin), whose
+/// origin never counts anyway.
+#[tokio::test]
+async fn stage1_graph_counts_equal_sqlite_span_distinct() {
+    use crate::test_util::dependents as case;
+    let store = test_store();
+    store.init_schema().await.unwrap();
+    store.flush(&case::store_batch(), None).await.unwrap();
+    let g = case::graph();
+    for age in [case::MIN_AGE, std::time::Duration::ZERO] {
+        let counts = crate::canon::dependent_interaction_counts(&g, age, case::now());
+        for c in g.concepts() {
+            let span = store
+                .interaction_span(&case::session(), c.id, age, case::now())
+                .await
+                .unwrap();
+            assert_eq!(
+                counts.get(&c.id).copied().unwrap_or(0) as u64,
+                span.distinct,
+                "{} at {age:?}",
+                c.content
+            );
+        }
+    }
+}

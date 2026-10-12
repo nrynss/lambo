@@ -86,13 +86,16 @@
 //! measured against the session, never against the wall clock) *and* the
 //! session's own temporal extent is the script's rather than the scheduler's
 //! ([`script_clock`]), so the score table is a pure function of the graph.
-//! `user schema` is the only concept in
-//! the session with a Stage-3 blast radius above the floor, so it is the only
-//! concept that can leave the non-Canonical peer set; removing the single
-//! highest scorer can only lower the P90 cut, so any concept admitted earlier
-//! is still admitted at the end. The fixed point is therefore exactly
-//! "every concept whose composite exceeds the final P90", independent of the
-//! order in which the cycles happened to run.
+//! Since #36 PR 3 every stage admits on evidence alone (Stage 1:
+//! `gc_survived >= 3` and dependents from two other interactions; Stage 2:
+//! three dependent interactions and coverage; Stage 3: Stage 2 again and
+//! more than five dependents), and each of those is a function of the frozen
+//! graph once its edges have aged past the compressed floor. A concept that
+//! qualifies keeps qualifying, and the score only orders the queue. The fixed
+//! point is therefore exactly "every concept as far up the ladder as its own
+//! evidence reaches", independent of the order in which the cycles ran.
+//! `user schema` is the only concept with more than five dependents, so it is
+//! the only Canonical.
 //!
 //! # The knobs (documented, per the T8.4 brief)
 //!
@@ -147,12 +150,13 @@
 //! of a partially-written session.
 //!
 //! Left at spec defaults, deliberately, because they are the thresholds the
-//! demo is claiming to satisfy: `canonization_min_peer_count` (20),
-//! `canonization_eval_batch_size` (50), `canonization_repromotion_cooldown`
-//! (300s), `max_canonical_nodes` (1000), the scoring and recall weights, and
-//! every stage constant in `src/canon`
-//! (`gc_survived >= 3`, strictly above P90, `distinct >= 3`,
-//! `coverage >= 0.3`, `blast_radius > 5`).
+//! demo is claiming to satisfy: `canonization_eval_batch_size` (50),
+//! `canonization_repromotion_cooldown` (300s), `max_canonical_nodes` (1000),
+//! the scoring and recall weights, and every stage constant in `src/canon`
+//! (`gc_survived >= 3`, at least two other dependent interactions,
+//! `distinct >= 3`, `coverage >= 0.3`, `blast_radius > 5`).
+//! `canonization_min_peer_count` (20) is also left at its default, but no
+//! stage reads it since #36 PR 3.
 //!
 //! # Fresh sessions (P6 review R3-1)
 //!
@@ -554,15 +558,11 @@ pub const ACT_III: &[Step] = &[Step::Action {
     action: "add oauth_id to user schema",
     produces: &[],
     modifies: &[USER_SCHEMA],
-    // Four dependencies, not one, and deliberately so: this action and
-    // `wire login endpoint` are the two concepts that compete for the
-    // non-`user schema` places above canonization Stage 1's P90 cut, and with
-    // a near-tie between them the P90 boundary was decided by the last digit
-    // of the recency dimension — i.e. by scheduling. Giving the last edit the
-    // structure it would really have (the oauth column reaches the repo, the
-    // handler and the JWT middleware) separates the two by an order of
-    // magnitude more than the jitter, so the Candidate set is the same set
-    // every run.
+    // Six dependencies, not one: the last edit has the structure it would
+    // really have (the oauth column reaches the repo, the handlers and the
+    // middleware). Before #36 PR 3 this also kept a near-tie off the P90 cut
+    // that decided Stage 1; Stage 1 now admits on evidence, so the Candidate
+    // set no longer depends on scores at all.
     depends_on: &[
         "auth middleware",
         "repo/users.rs",
@@ -1794,8 +1794,7 @@ fn header(n: &mut Narrator, scenario: &str, session: &str, store: &dyn GraphStor
         SCRIPT_LAST_EDIT_INDEX as u64 * SCRIPT_STEP.as_secs() / 60
     ));
     n.say(
-        "  Untouched: min_peer_count 20, gc_survived ≥ 3, strictly > P90, distinct ≥ 3,"
-            .to_string(),
+        "  Untouched: gc_survived ≥ 3, 2 other dependent interactions, distinct ≥ 3,".to_string(),
     );
     n.say("  coverage ≥ 0.3, blast radius > 5.".to_string());
 }

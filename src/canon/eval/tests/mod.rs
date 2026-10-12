@@ -96,8 +96,43 @@ fn status_of(graph: &Graph, id: NodeId) -> CanonizationStatus {
     concept_status(graph, id).expect("concept")
 }
 
-/// Twenty still-`None` peers off one interaction — enough to open the
-/// Stage-1 session gate, which is all these two tests need.
+/// Give `pillar` Stage 1 evidence (#36 PR 3): two dependents (ids
+/// `9_000 + 2 * pillar` and the next) originating in interactions 2 and 3,
+/// each citing it through an aged `Dependency` edge. Interactions 2 and 3
+/// are created at [`ts`] when missing (the chain must already hold 1). The
+/// dependents carry `gc_survived = 0`, so they are never admitted themselves.
+#[cfg(feature = "store-memory")]
+fn admit_on_evidence(g: &mut Graph, pillar: u64) {
+    for k in 2..=3u64 {
+        if g.node(iid(k)).is_none() {
+            g.insert_interaction(interaction(k, Some(k - 1), ts()))
+                .unwrap();
+        }
+    }
+    for k in 2..=3u64 {
+        let dep = 9_000 + 2 * pillar + (k - 2);
+        g.insert_concept(concept(dep, k, 0, CanonizationStatus::None), iid(k))
+            .unwrap();
+        g.upsert_edge(Edge {
+            event_time: None,
+            id: eid(9_000 + dep),
+            session_id: sid(),
+            source: nid(dep),
+            target: nid(pillar),
+            edge_type: EdgeType::Dependency,
+            weight: 1.0,
+            reinforcements: 1,
+            created_at: ts(),
+            last_reinforced: ts(),
+        })
+        .unwrap();
+    }
+}
+
+/// Twenty still-`None` concepts off one interaction, all past the survival
+/// floor; only id 20 has dependents from two other interactions, so it is
+/// the one Stage 1 admits. The score table ranks it highest too, but since
+/// #36 PR 3 that only orders the queue.
 #[cfg(feature = "store-memory")]
 fn twenty_peer_graph() -> (Graph, ScoreTable) {
     let mut g = Graph::new(sid());
@@ -106,6 +141,7 @@ fn twenty_peer_graph() -> (Graph, ScoreTable) {
         g.insert_concept(concept(id, 1, 5, CanonizationStatus::None), iid(1))
             .unwrap();
     }
+    admit_on_evidence(&mut g, 20);
     let mut pairs: Vec<(u64, f64)> = (1..=19).map(|i| (i, 0.1)).collect();
     pairs.push((20, 1.0));
     (g, table(&pairs))
@@ -125,11 +161,12 @@ fn twenty_peer_graph() -> (Graph, ScoreTable) {
 /// could: four event-timed turns ≥24h apart (flushed inside one minute —
 /// the bulk bootstrap), one Entity re-derived by each. Solo's recurrence
 /// term counts four sessions → 4.8 ≥ 3.0; Stage 1's swarm gate needs
-/// twenty peers and `gc_survived >= 3`, neither of which exists here.
+/// `gc_survived >= 3` and dependents from two other interactions, neither
+/// of which exists here.
 ///
-/// Mutation: replace the dispatch in `gather` with the original
-/// `stage1_candidates(graph, scores, params.min_peer_count)` → the solo
-/// half goes empty and the assertion fails. Verified red.
+/// Mutation: replace the dispatch in `gather` with a direct
+/// `stage1_candidates` call → the solo half goes empty and the assertion
+/// fails.
 #[cfg(feature = "store-memory")]
 #[test]
 fn gather_dispatches_on_the_configured_promotion_policy() {
@@ -169,15 +206,14 @@ fn gather_dispatches_on_the_configured_promotion_policy() {
     let plan = Evaluator::new().gather(&g, &scores, &solo_params, ts());
     assert_eq!(plan.stage1, vec![hub_id]);
 
-    // Swarm: the same rows clear nothing — no peers, no gc survival.
+    // Swarm: the same rows clear nothing — no dependents, no gc survival.
     let plan = Evaluator::new().gather(&g, &scores, &params(), ts());
     assert!(plan.stage1.is_empty(), "swarm must refuse this corpus");
 }
 
-/// The complement: under the **default** policy the same fixture goes
-/// through the seam and produces the Stage-1 set the welded pipeline
-/// always produced — nearest-rank P90 over twenty peers leaves exactly
-/// the one concept scoring strictly above it.
+/// The complement: under the **default** policy the seam produces the
+/// evidence-led Stage 1 set: of twenty survivors, the one with dependents
+/// from two other interactions.
 ///
 /// Without this, `gather_dispatches_on_the_configured_promotion_policy`
 /// would still pass if the swarm arm were broken to refuse as well.
@@ -185,7 +221,7 @@ fn gather_dispatches_on_the_configured_promotion_policy() {
 /// Mutation: make `SwarmScorer::candidates` return `Vec::new()` → red.
 #[cfg(feature = "store-memory")]
 #[test]
-fn the_default_policy_still_gathers_the_welded_stage1_set() {
+fn the_default_policy_gathers_the_evidence_led_stage1_set() {
     let (g, scores) = twenty_peer_graph();
     let params = params();
     assert_eq!(params.promotion_policy, PromotionPolicy::Swarm);
