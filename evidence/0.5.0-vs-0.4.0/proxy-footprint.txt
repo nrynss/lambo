@@ -1,0 +1,4 @@
+0.4.0 proxy pid=28525 rss_mb=346 footprint=90 MB holder_footprint=1462 MB
+2026-10-12T03:54:17.394588Z  INFO lambo::mcp::proxy: lambo serve: proxying to the session holder (this process takes no lease and holds no graph; every write ha
+0.5.0 proxy pid=28652 rss_mb=21 footprint=6465 KB holder_footprint=1495 MB
+2026-10-12T03:54:42.671403Z  INFO lambo::mcp::proxy: lambo serve: proxying to the session holder (this process takes no lease and holds no graph; every write ha

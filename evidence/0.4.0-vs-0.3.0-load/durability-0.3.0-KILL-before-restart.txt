@@ -35,7 +35,7 @@ store readback
   concepts       : 119
   edges          : 1991
   canon_events   : 0
-  lease row      : ('c-load@Narayans-MacBook-Pro.local#35921', '2026-10-11T12:37:09.455Z', 1)
+  lease row      : ('c-load@<HOST>#<PID>', '2026-10-11T12:37:09.455Z', 1)
   session row    : created=2026-10-11T12:35:40.454Z closed=—
 
 comparison
