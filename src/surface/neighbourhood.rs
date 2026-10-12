@@ -204,13 +204,15 @@ mod tests {
     fn inspect_lists_the_dependents_it_counts() {
         let g = case::graph();
         let (text, json) = render_neighbourhood(&g, case::concept_id("X"), 1);
-        assert!(text.contains("blast radius: 6\n"), "{text}");
-        assert!(text.contains("dependents (6):\n"), "{text}");
+        assert!(text.contains("blast radius: 8\n"), "{text}");
+        assert!(text.contains("dependents (8):\n"), "{text}");
         for (name, kind) in [
             ("A1", "Dependency"),
             ("A2", "Dependency"),
             ("Z", "Dependency"),
             ("W", "Dependency"),
+            ("V", "Dependency"),
+            ("E", "Dependency"),
             ("C1", "Hierarchical"),
             ("C2", "Hierarchical"),
         ] {
@@ -221,7 +223,7 @@ mod tests {
             );
         }
         let deps = json["dependents"].as_array().expect("dependents");
-        assert_eq!(deps.len(), 6, "{json}");
+        assert_eq!(deps.len(), 8, "{json}");
         assert_eq!(json["dependents_truncated"], false);
         let labels: Vec<&str> = deps.iter().map(|d| d["label"].as_str().unwrap()).collect();
         for absent in ["concept P [", "concept K [", "concept N [", "concept D ["] {

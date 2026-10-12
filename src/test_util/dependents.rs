@@ -21,12 +21,19 @@
 //! | interaction `i6` | `i6 -Derives-> X`, `i6 -Temporal-> i5` | no: provenance |
 //! | `X` | `X -Dependency-> X` (store-only self-loop) | no |
 //! | `F` (session `other`) | `F -Dependency-> X` in session `deps` | no: foreign concept |
+//! | `V` (`i3`) | `V -Dependency-> X` and `X -Hierarchical-> V` (store-only 2-cycle) | yes, counted once |
+//! | `E` (`ie`) | `E -Dependency-> X`; edge and interaction flushed now but carrying an old `event_time` | yes, aged by its event time |
 //!
 //! [`store_batch`] carries everything above (stores accept the self-loop,
-//! the foreign concept and the foreign origin); [`graph`] drops the
-//! rows a legal in-RAM graph cannot hold (the self-loop, `G` with its foreign
-//! origin, and the edge from `F`), so the graph-side answers differ from the
-//! stores' only by `G` and by having no age floor.
+//! the 2-cycle, the foreign concept and the foreign origin); [`graph`] drops
+//! the rows a legal in-RAM graph cannot hold (the self-loop, `V`'s
+//! `Hierarchical` edge, `G` with its foreign origin, and the edge from `F`),
+//! so the graph-side answers differ from the stores' only by `G` and by
+//! having no age floor.
+//!
+//! `ie` and `E`'s edge are flushed at [`now`] but carry an `event_time` 100
+//! minutes back, so an adapter that ages on `created_at` instead of
+//! `COALESCE(event_time, created_at)` drops `E` and `ie` at the age floor.
 
 #![cfg(test)]
 
@@ -75,7 +82,7 @@ pub const MIN_AGE: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Interactions: name and minutes before [`now`]. `iy` is at `now`;
 /// `ix` belongs to [`other_session`].
-const INTERACTIONS: [(&str, i64); 8] = [
+const INTERACTIONS: [(&str, i64); 9] = [
     ("i1", 120),
     ("i2", 110),
     ("i3", 100),
@@ -84,10 +91,16 @@ const INTERACTIONS: [(&str, i64); 8] = [
     ("i6", 70),
     ("iy", 0),
     ("ix", 100),
+    // Flushed now; its event time is 100 minutes back (see `EVENT_TIMED`).
+    ("ie", 0),
 ];
 
+/// Interactions and edges flushed at [`now`] that carry an older event time,
+/// in minutes before [`now`].
+const EVENT_TIMED: i64 = 100;
+
 /// Concepts: name, origin interaction, session is `deps` unless `F`.
-const CONCEPTS: [(&str, &str, ConceptType); 14] = [
+const CONCEPTS: [(&str, &str, ConceptType); 16] = [
     ("X", "i1", ConceptType::Logic),
     ("A1", "i2", ConceptType::Resource),
     ("A2", "i3", ConceptType::Resource),
@@ -102,6 +115,8 @@ const CONCEPTS: [(&str, &str, ConceptType); 14] = [
     ("K", "i5", ConceptType::Resource),
     ("N", "i6", ConceptType::Entity),
     ("F", "ix", ConceptType::Resource),
+    ("V", "i3", ConceptType::Entity),
+    ("E", "ie", ConceptType::Resource),
 ];
 
 fn at(minutes_before: i64) -> DateTime<Utc> {
@@ -115,7 +130,7 @@ fn interaction(name: &str, minutes_before: i64) -> Interaction {
         session()
     };
     Interaction {
-        event_time: None,
+        event_time: (name == "ie").then(|| at(EVENT_TIMED)),
         id: interaction_id(name),
         session_id: session,
         agent_id: AgentId::from("agent-36"),
@@ -195,6 +210,15 @@ fn edges() -> Vec<(Edge, bool)> {
         (edge(15, i("i6"), i("i5"), EdgeType::Temporal, 70), true),
         (edge(16, c("X"), c("X"), EdgeType::Dependency, 120), false),
         (edge(17, c("F"), c("X"), EdgeType::Dependency, 100), false),
+        (edge(18, c("V"), c("X"), EdgeType::Dependency, 100), true),
+        (edge(19, c("X"), c("V"), EdgeType::Hierarchical, 100), false),
+        (
+            Edge {
+                event_time: Some(at(EVENT_TIMED)),
+                ..edge(20, c("E"), c("X"), EdgeType::Dependency, 0)
+            },
+            true,
+        ),
     ]
 }
 
@@ -258,11 +282,14 @@ pub fn graph() -> crate::graph::Graph {
 pub fn expected_store() -> Vec<(&'static str, std::time::Duration, u64, u64, f64)> {
     let zero = std::time::Duration::ZERO;
     vec![
-        // Aged: A1, A2, C1, C2, G, Z. Span: i2, i3, i4 (C1 is X's own
-        // origin, G's is foreign, Z's interaction is young) = 20/120.
-        ("X", MIN_AGE, 6, 3, 20.0 / 120.0),
+        // Aged: A1, A2, C1, C2, G, Z, V (two edges, counted once) and E
+        // (aged by event time). Span: i2, i3, i4, ie (C1 is X's own origin,
+        // G's is foreign, Z's interaction is young) spanning 110..90 = 20/120.
+        ("X", MIN_AGE, 8, 4, 20.0 / 120.0),
         // No floor: W joins (i4, already counted); iy now counts too.
-        ("X", zero, 7, 4, 110.0 / 120.0),
+        ("X", zero, 9, 5, 110.0 / 120.0),
+        ("V", MIN_AGE, 0, 0, 0.0),
+        ("E", MIN_AGE, 0, 0, 0.0),
         ("Y", MIN_AGE, 1, 1, 0.0),
         // X originates in i1, D's own origin: no span support.
         ("D", MIN_AGE, 1, 0, 0.0),
@@ -280,7 +307,7 @@ pub fn expected_store() -> Vec<(&'static str, std::time::Duration, u64, u64, f64
 /// its dependents.
 pub fn expected_graph() -> Vec<(&'static str, Vec<&'static str>)> {
     vec![
-        ("X", vec!["A1", "A2", "C1", "C2", "Z", "W"]),
+        ("X", vec!["A1", "A2", "C1", "C2", "Z", "W", "V", "E"]),
         ("Y", vec!["A2"]),
         ("D", vec!["X"]),
         ("P", vec!["X"]),
