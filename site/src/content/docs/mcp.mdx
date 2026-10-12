@@ -251,9 +251,13 @@ To read a single session's memories with `lambo_recall`:
 Set `scope` to `"lambo"` for the project alone. It does not select another
 arbitrary served project: `"rustydocs"` is refused unless it is this session
 or a configured layer. An empty string is not the same as omitting `scope`.
-Scoped recall is a plain single-session result, so its hits do not carry
-the layered `session` meta; a direct layer read supplies a warning naming
-the layer instead. MCP `scope` is not a CLI flag and is not accepted by
+Scoped recall renders the selected session's context alone, without `from general`
+on its blocks. Through a layered endpoint, every structured hit still carries
+`session`, regardless of `scope`. An unlayered endpoint, such as a direct
+connection to unlayered `/mcp/s/general`, omits that field. A direct layer
+read through the project's endpoint also supplies a warning naming the layer;
+the warning does not replace its hits' `session` fields.
+MCP `scope` is not a CLI flag and is not accepted by
 the write tools yet. To write to another session today, deliberately connect
 to its own endpoint; a read of `general` does not redirect later project writes.
 

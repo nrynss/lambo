@@ -8,8 +8,10 @@ Base829397b0 (#142 merged), branch `codex/33-layered-docs`.
   `src/config/serve/layers.rs` enforces one layer, pinning, no self/transitive
   layer; `src/mcp/serve/layers.rs` checks grants/contracts and stdio holder vs
   forwarded behavior. `tools/scope.rs` resolves only own session/configured
-  layer and looks up a direct layer late. Unlayered and scoped results keep
-  plain wire shape. Existing source/schema goldens remain untouched.
+  layer and looks up a direct layer late. Scoped reads render one session's
+  context without layer `from` labels, but structured hits through a layered
+  endpoint retain `session` regardless of scope. Unlayered endpoints omit that
+  field. Existing source/schema goldens remain untouched.
 - CLI recall/inspect read one explicit session, not the layered MCP stack;
   main.rs exposes --query/--focus/--session and no --scope. Examples use those
   actual flags. No HTTP header routing or new client folder inference.
@@ -85,5 +87,16 @@ credentials, Postgres/Cockroach and cut-over were not tested or changed.
 
 ## Review trail
 
-Implementation handoff: ready for root's fresh adversarial review and focused
-review. Findings/remediation are recorded here as they arrive.
+Fresh adversarial review of c6bcd2e3: 0 High, 1 Medium, 0 Low.
+
+- M1 fixed: the read example incorrectly said scoped recall omits structured
+  `hits[].session`. Corrected reference/site and source-verification prose to
+  distinguish single-session context rendering from endpoint-based wire meta.
+  Source `tools/recall.rs:251–254,303–306` and the existing
+  `scope_reads_one_session_and_names_only_this_sessions_scopes` regression assert
+  this distinction. Direct scoped-layer warnings are additional, not replacement.
+- Remediation changes documentation only. Recheck examples, mirrors and diff;
+  the full 2249/0/7 baseline gate above remains applicable. Request example
+  validation, mirror drift and diff checks PASS. Existing focused scope
+  regression rerun: 1 passed, 0 failed, 0 ignored, with a fresh runtime dir.
+  Focused review pending.
