@@ -257,6 +257,10 @@ pub fn window_batch() -> MutationBatch {
         (3, 449_280),
         (4, 49 * 86_400),
         (5, 60 * 86_400),
+        // c5's own origin: aged, and outside the 1..5.2-day support span,
+        // so an adapter that drops the edge-age filter counts a fourth
+        // origin and a 29-day spread.
+        (6, 30 * 86_400),
     ] {
         let mut i = interaction("i1", 0);
         i.id = iid(n);
@@ -270,7 +274,7 @@ pub fn window_batch() -> MutationBatch {
             node: Node::Interaction(i),
         });
     }
-    for (n, origin) in [(0, 0), (1, 1), (2, 2), (3, 3), (4, 0), (5, 3), (6, 5)] {
+    for (n, origin) in [(0, 0), (1, 1), (2, 2), (3, 3), (4, 0), (5, 6), (6, 5)] {
         let mut c = concept("X", "i1", ConceptType::Logic);
         c.id = cid(n);
         c.origin_interaction = iid(origin);
@@ -349,7 +353,8 @@ pub async fn check_window_case(store: &dyn crate::store::GraphStore) {
             .unwrap()
     );
     let later = now() + ChronoDuration::days(30);
-    // The two young rows now qualify; coverage saturates, never exceeds one.
+    // The two young rows (c5's edge, c6's origin) now qualify: five origins,
+    // coverage saturates, never exceeds one.
     let later_span = store
         .interaction_span_with_window(
             &sid,
@@ -360,7 +365,7 @@ pub async fn check_window_case(store: &dyn crate::store::GraphStore) {
         )
         .await
         .unwrap();
-    assert_eq!(later_span.distinct, 4);
+    assert_eq!(later_span.distinct, 5);
     assert_eq!(later_span.coverage, 1.0);
     let premature = store
         .interaction_span_with_window(
