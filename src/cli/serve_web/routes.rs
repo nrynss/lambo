@@ -25,7 +25,10 @@ use super::scope::{resolve_session, ScopedRequest, SessionCtx};
 use super::state::AppState;
 use super::views::RECALL_PERMIT_WAIT;
 use super::{APP_CSS, APP_JS, INDEX_HTML, POLL_INTERVAL};
-use crate::canon::{admission_inputs, explain_admission, gate_progress_with_config, EvalParams};
+use crate::canon::{
+    admission_inputs, explain_measured, gate_progress_measured, EvalParams, Measurements,
+    PromotionPolicy,
+};
 use crate::cli::caps::CliError;
 use crate::cli::recall::RecallRequest;
 use crate::recall::format::blast_radii;
@@ -360,48 +363,50 @@ pub(super) async fn api_inspect(
             // Every absence is labelled. `gate_progress: null` used to mean
             // three unrelated things at once; it now means two, and
             // `gate_progress_omitted` names which.
-            let (gate_progress, gate_progress_omitted) =
-                if concept.canonization_status == CanonizationStatus::Canonical {
-                    (None, Some("already_canonical"))
-                } else {
-                    match gate_progress_with_config(
-                        state.store(),
-                        &ctx.session,
-                        &concept,
-                        &state.backends.config,
-                        now,
-                    )
-                    .await
-                    {
-                        Ok(p) => (Some(p), None),
-                        Err(e) => {
-                            tracing::warn!(
-                                error = %e,
-                                "gate_progress for /api/inspect failed; omitted"
-                            );
-                            (None, Some("unavailable"))
-                        }
+            // #36 PR 3 review L2: one measurement of the span and the blast
+            // radius serves both the gate block and the admission
+            // explanation, each taken only when one of them needs it. A store
+            // fault degrades both additive payloads to labelled absences.
+            let canonical = concept.canonization_status == CanonizationStatus::Canonical;
+            let swarm_gates =
+                !canonical && state.backends.config.promotion_policy == PromotionPolicy::Swarm;
+            let (span, blast_needed) = inputs.as_ref().map_or((false, false), |i| i.needs());
+            let measured = Measurements::take(
+                state.store(),
+                &ctx.session,
+                concept.id,
+                &eval_params,
+                now,
+                swarm_gates || span,
+                swarm_gates || blast_needed,
+            )
+            .await;
+            if let Err(e) = &measured {
+                tracing::warn!(
+                    error = %e,
+                    "gate measurements for /api/inspect failed; gate_progress and admission omitted"
+                );
+            }
+            let (gate_progress, gate_progress_omitted) = if canonical {
+                (None, Some("already_canonical"))
+            } else {
+                match measured
+                    .as_ref()
+                    .map(|m| gate_progress_measured(&concept, &state.backends.config, m, now))
+                {
+                    Ok(Ok(p)) => (Some(p), None),
+                    Ok(Err(e)) => {
+                        tracing::warn!(error = %e, "gate_progress for /api/inspect failed; omitted");
+                        (None, Some("unavailable"))
                     }
-                };
-            // #36 PR 3: the per-gate admission explanation, through the
-            // evaluator's own predicates. A store fault degrades it to an
-            // absence, like `gate_progress`.
-            let admission = match &inputs {
-                Some(inputs) => {
-                    match explain_admission(state.store(), &ctx.session, inputs, &eval_params, now)
-                        .await
-                    {
-                        Ok(a) => Some(a),
-                        Err(e) => {
-                            tracing::warn!(
-                                error = %e,
-                                "admission explanation for /api/inspect failed; omitted"
-                            );
-                            None
-                        }
-                    }
+                    Err(_) => (None, Some("unavailable")),
                 }
-                None => None,
+            };
+            // #36 PR 3: the per-gate admission explanation, through the
+            // evaluator's own predicates, on the same measurements.
+            let admission = match (&inputs, &measured) {
+                (Some(inputs), Ok(m)) => Some(explain_measured(inputs, &eval_params, now, m)),
+                _ => None,
             };
             InspectResponse {
                 focus: params.focus,

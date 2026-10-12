@@ -244,28 +244,50 @@ pub async fn gate_progress_with_config(
     config: &crate::Config,
     now: DateTime<Utc>,
 ) -> Result<GateProgress, StoreError> {
+    // Not an optimisation. Under Solo, running the two gate-only queries here
+    // would put four numbers on the wire the C2 block does not ship.
+    let swarm = config.promotion_policy == PromotionPolicy::Swarm;
+    let measured = crate::canon::Measurements::take(
+        store,
+        session,
+        concept.id,
+        &crate::canon::EvalParams::from_config(config),
+        now,
+        swarm,
+        swarm,
+    )
+    .await?;
+    gate_progress_measured(concept, config, &measured, now)
+}
+
+/// [`gate_progress_with_config`] on measurements already taken, so a caller
+/// that also explains the concept ([`crate::canon::explain_measured`]) asks
+/// the store once (#36 PR 3 review L2). Under Swarm the span and the blast
+/// radius must have been measured; a store without the window-aware span
+/// answers `StoreError::Capability`, as the direct call does.
+pub fn gate_progress_measured(
+    concept: &Concept,
+    config: &crate::Config,
+    measured: &crate::canon::Measurements,
+    now: DateTime<Utc>,
+) -> Result<GateProgress, StoreError> {
     let policy = config.promotion_policy;
-    let min_edge_age = config.canonization_edge_min_age;
     let cooldown = config.canonization_repromotion_cooldown;
     let gates = match policy {
-        // Not an optimisation. Running the two gate-only queries here would put
-        // four numbers on the wire that no solo promotion decision consults,
-        // which is the contradiction this module exists to avoid.
         PromotionPolicy::Solo => None,
         PromotionPolicy::Swarm => {
-            // Stage 3's measurement: the aged dependent count, `>` 5.
-            let blast = store
-                .blast_radius(session, concept.id, min_edge_age, now)
-                .await?;
-            let span = store
-                .interaction_span_with_window(
-                    session,
-                    concept.id,
-                    min_edge_age,
-                    now,
-                    config.canonization_coverage_window,
-                )
-                .await?;
+            let span = match &measured.span {
+                Some(Ok(span)) => *span,
+                Some(Err(what)) => return Err(StoreError::Capability(what.clone())),
+                None => {
+                    return Err(StoreError::Invariant(
+                        "gate_progress: the Stage 2 span was not measured".into(),
+                    ))
+                }
+            };
+            let blast = measured.blast.ok_or_else(|| {
+                StoreError::Invariant("gate_progress: the blast radius was not measured".into())
+            })?;
             Some(SwarmGates {
                 gc_survived: GateMetric::at_least(
                     concept.gc_survived as f64,

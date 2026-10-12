@@ -1733,3 +1733,53 @@ async fn solo_probes_only_candidates_its_band_could_admit() {
         );
     }
 }
+
+/// #36 PR 3 review L9: with the Canonical budget full the cycle runs no
+/// Stage 3 window, and the explanation says so instead of reporting a
+/// Venerable whose other Stage 3 gates hold as eligible.
+#[tokio::test]
+async fn the_explanation_reports_a_full_canonical_budget() {
+    let mut g = Graph::new(sid());
+    g.insert_interaction(interaction(1, None, ts())).unwrap();
+    let mut existing = concept(10, 1, 5, CanonizationStatus::Canonical);
+    existing.blast_radius = Some(8);
+    g.insert_concept(existing, iid(1)).unwrap();
+    attach_blast(&mut g, 10, 8, 100);
+    g.insert_concept(concept(20, 1, 5, CanonizationStatus::Venerable), iid(1))
+        .unwrap();
+    attach_blast(&mut g, 20, 6, 200);
+    let store = store_from_graph(&g).await;
+    for (budget, eligible) in [(1usize, false), (2, true)] {
+        let p = EvalParams {
+            max_canonical_nodes: budget,
+            ..params()
+        };
+        let inputs = crate::canon::admission_inputs(&g, nid(20), &p, ts()).unwrap();
+        let a = crate::canon::explain_admission(&store, &sid(), &inputs, &p, ts())
+            .await
+            .unwrap();
+        assert_eq!(a.eligible, eligible, "budget {budget}: {a:?}");
+        if !eligible {
+            assert_eq!(a.reasons.len(), 1, "{:?}", a.reasons);
+            assert!(
+                a.reasons[0].contains("the Canonical budget is full (1 of 1)"),
+                "{:?}",
+                a.reasons
+            );
+        }
+        let gr = RwLock::new(g.clone());
+        let (tx, _rx) = channel();
+        let out = eval_cycle(
+            &mut Evaluator::new(),
+            &gr,
+            &store,
+            &table(&[]),
+            &tx,
+            &p,
+            ts(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(!out.promotions.is_empty(), eligible, "budget {budget}");
+    }
+}

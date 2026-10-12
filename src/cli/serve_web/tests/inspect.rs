@@ -798,3 +798,58 @@ fn inspect_dependents_follow_the_dependents_case() {
         assert_eq!(got, want, "inspect dependents of {name}");
     }
 }
+
+/// #36 PR 3 review L2: `gate_progress` and `admission` share one
+/// measurement. A Venerable focus under Swarm needs the span and the blast
+/// radius for both, and the store is asked for each exactly once.
+#[tokio::test]
+async fn inspect_measures_once_for_the_gate_block_and_the_admission() {
+    let store = Arc::new(MemoryStore::new());
+    let session = "t93-inspect-shared-measurement";
+    let sid = SessionId::new(session);
+    let iid = NodeId::new();
+    let now = Utc::now();
+    let cid = NodeId::new();
+    let mut c = concept(sid.clone(), cid, iid, "venerable concept", now);
+    c.canonization_status = CanonizationStatus::Venerable;
+    let mut batch = MutationBatch::new();
+    batch.push(Mutation::UpsertNode {
+        node: Node::Interaction(Interaction {
+            event_time: None,
+            id: iid,
+            session_id: sid.clone(),
+            agent_id: AgentId::from("agent-a"),
+            prompt_text: Some("shared measurement".to_string()),
+            previous_id: None,
+            created_at: now,
+        }),
+    });
+    batch.push(Mutation::UpsertNode {
+        node: Node::Concept(c),
+    });
+    batch.push(Mutation::UpsertEdge {
+        edge: edge(NodeId::new(), sid.clone(), iid, cid, EdgeType::Derives, now),
+    });
+    store.flush(&batch, None).await.expect("seed");
+    let blast_calls = Arc::new(AtomicUsize::new(0));
+    let span_calls = Arc::new(AtomicUsize::new(0));
+    let counted = Counting {
+        inner: Shared(store),
+        blast_radius_calls: blast_calls.clone(),
+        interaction_span_calls: span_calls.clone(),
+        fail_gate_queries: false,
+    };
+    let (addr, handle) = spawn(state_from_backends(
+        backends_with_store(Box::new(counted)),
+        session,
+        None,
+    ))
+    .await;
+    let hit = get_json(addr, "/api/inspect?focus=venerable%20concept").await;
+    assert_eq!(hit["status"], "Venerable", "{hit}");
+    assert!(hit["gate_progress"].is_object(), "{hit}");
+    assert_eq!(hit["admission"]["next"], "Canonical", "{hit}");
+    assert_eq!(blast_calls.load(Ordering::SeqCst), 1, "one blast_radius");
+    assert_eq!(span_calls.load(Ordering::SeqCst), 1, "one span");
+    handle.abort();
+}

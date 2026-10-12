@@ -36,6 +36,7 @@ use crate::canon::stage3::{in_repromotion_cooldown, MIN_BLAST_RADIUS};
 use crate::canon::{EvalParams, PromotionPolicy};
 use crate::graph::Graph;
 use crate::store::GraphStore;
+use crate::types::InteractionSpan;
 use crate::types::{CanonizationStatus, Concept, Node, NodeId, SessionId, StoreError};
 
 /// How a check compares its measurement with its bar.
@@ -48,6 +49,8 @@ pub enum Comparison {
     Above,
     /// `current <= bar` (seconds of cooldown left, bar 0).
     AtMost,
+    /// `current < bar` (Canonical count against the budget).
+    Below,
 }
 
 /// One gate of the next hop: what it measures, the concept's value, the bar,
@@ -56,7 +59,7 @@ pub enum Comparison {
 pub struct AdmissionCheck {
     /// Stable machine name: `gc_survived`, `dependent_interactions`,
     /// `distinct_interactions`, `coverage`, `blast_radius`, `cooldown`,
-    /// `solo_score`.
+    /// `canonical_budget`, `solo_score`.
     pub gate: &'static str,
     /// The stage whose verdict this check is part of (1, 2 or 3).
     pub stage: u8,
@@ -77,6 +80,7 @@ impl AdmissionCheck {
                 Comparison::AtLeast => current >= bar,
                 Comparison::Above => current > bar,
                 Comparison::AtMost => current <= bar,
+                Comparison::Below => current < bar,
             };
         Self {
             gate,
@@ -126,6 +130,12 @@ impl AdmissionCheck {
                 "stage 3: demoted recently, {}s of the re-promotion cooldown left",
                 n(self.current.ceil())
             ),
+            "canonical_budget" => format!(
+                "stage 3: the Canonical budget is full ({} of {}), so no Stage 3 \
+                 window runs until a Canonical is demoted",
+                n(self.current),
+                n(self.bar)
+            ),
             "solo_score" => format!(
                 "solo score {:.2}, needs at least {:.2}",
                 self.current, self.bar
@@ -164,10 +174,16 @@ pub struct Admission {
 pub struct AdmissionInputs {
     concept: Concept,
     dependent_interactions: usize,
-    solo: SoloBreakdown,
+    /// Solo's score terms; computed only when the inputs were read under
+    /// Solo (#36 PR 3 review L2).
+    solo: Option<SoloBreakdown>,
+    /// `(canonical count, budget)` when the next hop is Canonical: Stage 3
+    /// evaluates nothing while the budget is full.
+    budget: Option<(usize, usize)>,
 }
 
-/// Read `node`'s graph-side inputs, or `None` when it is not a concept.
+/// Read `node`'s graph-side inputs under `params`' policy, or `None` when it
+/// is not a concept. Pass the same `params` to [`explain_admission`].
 pub fn admission_inputs(
     graph: &Graph,
     node: NodeId,
@@ -178,11 +194,91 @@ pub fn admission_inputs(
         return None;
     };
     let deps = dependent_interactions(graph, node, params.min_age, now);
+    let solo = match params.promotion_policy {
+        PromotionPolicy::Solo => Some(solo_breakdown(graph, c, deps)),
+        PromotionPolicy::Swarm => None,
+    };
+    let budget = (c.canonization_status == CanonizationStatus::Venerable).then(|| {
+        let canonical = graph
+            .concepts()
+            .filter(|c| c.canonization_status == CanonizationStatus::Canonical)
+            .count();
+        (canonical, params.max_canonical_nodes)
+    });
     Some(AdmissionInputs {
         concept: c.clone(),
         dependent_interactions: deps,
-        solo: solo_breakdown(graph, c, deps),
+        solo,
+        budget,
     })
+}
+
+impl AdmissionInputs {
+    /// Which store measurements the next hop needs: `(span, blast)`.
+    /// Candidate → Venerable needs the span; Venerable → Canonical both.
+    pub fn needs(&self) -> (bool, bool) {
+        match self.concept.canonization_status {
+            CanonizationStatus::Candidate => (true, false),
+            CanonizationStatus::Venerable => (true, true),
+            CanonizationStatus::None | CanonizationStatus::Canonical => (false, false),
+        }
+    }
+}
+
+/// The store measurements Stages 2 and 3 compare, taken once so callers that
+/// need them twice (the portal's `gate_progress` and `admission`, review L2)
+/// share one round trip each.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Measurements {
+    /// Stage 2's capped span; `Err(capability)` when the store does not
+    /// implement `interaction_span_with_window`. `None` when not measured.
+    pub span: Option<Result<InteractionSpan, String>>,
+    /// Stage 3's aged dependent count. `None` when not measured.
+    pub blast: Option<u64>,
+}
+
+impl Measurements {
+    /// Measure `node` with the evaluator's own queries and parameters: the
+    /// span when `span`, the blast radius when `blast`. A missing
+    /// window-aware span is recorded, not raised; any other store error is.
+    pub async fn take(
+        store: &dyn GraphStore,
+        session: &SessionId,
+        node: NodeId,
+        params: &EvalParams,
+        now: DateTime<Utc>,
+        span: bool,
+        blast: bool,
+    ) -> Result<Self, StoreError> {
+        let span = if span {
+            match store
+                .interaction_span_with_window(
+                    session,
+                    node,
+                    params.min_age,
+                    now,
+                    params.coverage_window,
+                )
+                .await
+            {
+                Ok(s) => Some(Ok(s)),
+                Err(StoreError::Capability(what)) => Some(Err(what)),
+                Err(e) => return Err(e),
+            }
+        } else {
+            None
+        };
+        let blast = if blast {
+            Some(
+                store
+                    .blast_radius(session, node, params.min_edge_age, now)
+                    .await?,
+            )
+        } else {
+            None
+        };
+        Ok(Self { span, blast })
+    }
 }
 
 /// Explain the next hop of the concept `inputs` was read for. Issues the
@@ -194,12 +290,29 @@ pub async fn explain_admission(
     params: &EvalParams,
     now: DateTime<Utc>,
 ) -> Result<Admission, StoreError> {
+    let (span, blast) = inputs.needs();
+    let m = Measurements::take(store, session, inputs.concept.id, params, now, span, blast).await?;
+    Ok(explain_measured(inputs, params, now, &m))
+}
+
+/// [`explain_admission`] on measurements already taken (at least those
+/// [`AdmissionInputs::needs`] names). A needed measurement that is missing
+/// is reported as unavailable, never as a pass.
+pub fn explain_measured(
+    inputs: &AdmissionInputs,
+    params: &EvalParams,
+    now: DateTime<Utc>,
+    m: &Measurements,
+) -> Admission {
     let c = &inputs.concept;
     let policy = params.promotion_policy;
     let solo = match policy {
-        PromotionPolicy::Solo => Some(inputs.solo),
+        PromotionPolicy::Solo => inputs.solo,
         PromotionPolicy::Swarm => None,
     };
+    // Inputs read under another policy carry no Solo terms: the score check
+    // then reads NaN and fails, rather than inventing a score.
+    let solo_score = inputs.solo.map_or(f64::NAN, |b| b.score);
     let next = match c.canonization_status {
         CanonizationStatus::None => Some(CanonizationStatus::Candidate),
         CanonizationStatus::Candidate => Some(CanonizationStatus::Venerable),
@@ -207,7 +320,7 @@ pub async fn explain_admission(
         CanonizationStatus::Canonical => None,
     };
     let mut checks = Vec::new();
-    let mut unavailable = None;
+    let mut unavailable: Option<String> = None;
     match next {
         None => {}
         Some(CanonizationStatus::Candidate) => match policy {
@@ -228,7 +341,7 @@ pub async fn explain_admission(
                 ));
             }
             PromotionPolicy::Solo => {
-                checks.push(solo_check(1, inputs.solo.score, CANDIDATE_BAR));
+                checks.push(solo_check(1, solo_score, CANDIDATE_BAR));
             }
         },
         Some(to) => {
@@ -243,19 +356,10 @@ pub async fn explain_admission(
                 } else {
                     CANONICAL_BAR
                 };
-                checks.push(solo_check(stage, inputs.solo.score, bar));
+                checks.push(solo_check(stage, solo_score, bar));
             }
-            match store
-                .interaction_span_with_window(
-                    session,
-                    c.id,
-                    params.min_age,
-                    now,
-                    params.coverage_window,
-                )
-                .await
-            {
-                Ok(span) => {
+            match &m.span {
+                Some(Ok(span)) => {
                     checks.push(AdmissionCheck::new(
                         "distinct_interactions",
                         2,
@@ -271,17 +375,14 @@ pub async fn explain_admission(
                         Comparison::AtLeast,
                     ));
                 }
-                Err(StoreError::Capability(what)) => unavailable = Some(what),
-                Err(e) => return Err(e),
+                Some(Err(what)) => unavailable = Some(what.clone()),
+                None => unavailable = Some("the Stage 2 span (not measured)".into()),
             }
             if stage == 3 {
-                let blast = store
-                    .blast_radius(session, c.id, params.min_edge_age, now)
-                    .await?;
                 checks.push(AdmissionCheck::new(
                     "blast_radius",
                     3,
-                    blast as f64,
+                    m.blast.map_or(f64::NAN, |b| b as f64),
                     MIN_BLAST_RADIUS as f64,
                     Comparison::Above,
                 ));
@@ -292,6 +393,17 @@ pub async fn explain_admission(
                     0.0,
                     Comparison::AtMost,
                 ));
+                // Review L9: with the budget full the cycle evaluates no
+                // Stage 3 window at all, so the hop cannot happen.
+                if let Some((canonical, budget)) = inputs.budget {
+                    checks.push(AdmissionCheck::new(
+                        "canonical_budget",
+                        3,
+                        canonical as f64,
+                        budget as f64,
+                        Comparison::Below,
+                    ));
+                }
             }
         }
     }
@@ -305,14 +417,12 @@ pub async fn explain_admission(
     reasons.extend(checks.iter().filter(|k| !k.met).map(AdmissionCheck::reason));
     match next {
         None => reasons.push("canonical: no further promotion".into()),
-        Some(_) if eligible => reasons.push(
-            "every gate holds; the cycle's batch, ring order and the Canonical budget \
-             decide when"
-                .into(),
-        ),
+        Some(_) if eligible => {
+            reasons.push("every gate holds; the cycle's batch and ring order decide when".into())
+        }
         Some(_) => {}
     }
-    Ok(Admission {
+    Admission {
         policy,
         status: c.canonization_status,
         next,
@@ -320,7 +430,7 @@ pub async fn explain_admission(
         checks,
         solo,
         reasons,
-    })
+    }
 }
 
 fn solo_check(stage: u8, score: f64, bar: f64) -> AdmissionCheck {

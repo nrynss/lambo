@@ -32,7 +32,11 @@ pub use explain::{
     admission_inputs, explain_admission, render_admission, Admission, AdmissionCheck,
     AdmissionInputs, Comparison,
 };
-pub use gate::{gate_progress, gate_progress_with_config, GateMetric, GateProgress, SwarmGates};
+pub use explain::{explain_measured, Measurements};
+pub use gate::{
+    gate_progress, gate_progress_measured, gate_progress_with_config, GateMetric, GateProgress,
+    SwarmGates,
+};
 pub use policy::{
     solo_breakdown, PromotionPolicy, PromotionScorer, SoloBreakdown, SoloScorer, SwarmScorer,
 };
