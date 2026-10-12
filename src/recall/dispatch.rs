@@ -292,6 +292,12 @@ pub(crate) fn resolve_anchor(graph: &Graph, query: &str) -> Option<NodeId> {
             })
     });
     if let Some((c, _)) = matches.first() {
+        tracing::trace!(
+            target: "lambo::recall",
+            anchor = %c.id,
+            content = %c.content,
+            "recall dispatch: resolved named anchor"
+        );
         return Some(c.id);
     }
 
