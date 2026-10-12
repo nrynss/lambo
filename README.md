@@ -56,11 +56,14 @@ That score is only the entry fee. Promotion runs three gates, one hop per cycle:
 - **Candidate.** Survived 3 GC sweeps, and scores strictly above the 90th percentile of its
   non-canonical peers. The percentile is nearest-rank, so the bar is a real peer's score
   rather than an interpolated value nobody scored.
-- **Venerable.** At least 3 inbound structural edges from distinct origin interactions,
-  covering at least 0.3 of the session's temporal extent. Edges younger than 60 seconds do
-  not count, so a burst of writes cannot inflate a span.
-- **Canonical.** Blast radius strictly greater than 5, and outside the 300 second
-  re-promotion cooldown, so a flapping concept cannot oscillate into permanence.
+- **Venerable.** Its dependents (concepts with a `Dependency` edge to it, such as an action
+  that named it in `depends_on`, and its `parent_of` children) come from at least 3
+  distinct origin interactions other than its own, covering at least 0.3 of the session's
+  temporal extent. Edges younger than 60 seconds do not count, so a burst of writes cannot
+  inflate a span.
+- **Canonical.** Still meets the Venerable bar, has more than 5 dependents (its blast
+  radius), and is outside the 300 second re-promotion cooldown, so a flapping concept
+  cannot oscillate into permanence.
 
 Recall mixes the two halves, `0.5 × daemon score + 0.5 × query relevance`. A concept reached
 by graph traversal scores zero on relevance and surfaces on structure alone, which is what

@@ -1113,10 +1113,11 @@ mod tests {
         );
         assert!(
             msg.contains("second Hierarchical parent"),
-            "refusal must explain the blast-radius zeroing: {msg}"
+            "refusal must say the child would get a second parent: {msg}"
         );
 
-        // The child still has exactly ONE structural source — no silent zero.
+        // The child still has exactly ONE Hierarchical parent: nothing was
+        // written.
         let api = g
             .concepts()
             .find(|c| c.canonical_key == "api layer")
@@ -1126,7 +1127,7 @@ mod tests {
             .edges()
             .filter(|e| e.edge_type == EdgeType::Hierarchical && e.target == api)
             .count();
-        assert_eq!(hier, 1, "only one structural source for the child");
+        assert_eq!(hier, 1, "only one Hierarchical parent for the child");
 
         // In-batch: the same child declared under two parents in ONE call is
         // also refused.

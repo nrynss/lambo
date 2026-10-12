@@ -11,6 +11,27 @@
   the holder-scoped operator statement below, not a rebuilt `LeaseHolder`.
   See Breaking (library API).
 
+1. **Nothing to migrate.** No schema, stored edge or `lambo.toml` key
+   changed. Stored edges are read with the #36 meaning when the store
+   answers.
+2. **Existing Venerables are re-checked before they can go Canonical.**
+   Venerables admitted by 0.5.0 counted inbound `Causal` edges (actions
+   that produced or modified them) as support. That no longer counts, and a
+   Venerable must now pass Stage 2 again before Stage 3 can promote it, so
+   an old Venerable with only `Causal` support stays Venerable instead of
+   jumping to Canonical on its first cycle. Nothing is demoted. On a copy of
+   the dogfood store taken 2026-10-12, no Candidate or Venerable would have
+   promoted on the first evaluation, with or without this check, and all 7
+   Venerables lose their Stage 2 support.
+3. **Stored blast-radius stamps are history.** `Concept::blast_radius` and
+   `CanonizationEvent::blast_radius` rows written by 0.5.0 hold the older
+   exclusive count. Readers that show a current count (recall, inspect,
+   saints, the portal, the high-risk check) compute it from the graph.
+4. **Expect different counts.** Blast radius is now the number of
+   dependents, so a file or entity that many actions name in `depends_on`
+   reports a larger count than before, and an action record that depended
+   on many things reports a smaller one.
+
 ### Breaking (library API)
 
 - **`LeaseHolder::token()` and its `Display`, and the
@@ -38,15 +59,21 @@
   sources of `Dependency` edges into it plus its `Hierarchical` children.
   Blast radius counts all of them instead of the concepts the node would
   orphan, and the span drops the node's own origin interaction. `Causal`
-  edges no longer count anywhere. A third-party adapter must follow
+  edges no longer count in either. A third-party adapter must follow
   `MemoryStore`; the SQL is in `src/store/sqlite/structural.rs` and
   `src/store/pg/sql.rs`.
 - `lambo::recall::format::{blast_radius, blast_radii}` and
   `lambo::recall::dispatch::dependents` return the same relation, so their
   values change for the same graph. `recall::format::inbound_sources` is
   unchanged and is now documented as #29's GC input only.
-- New: `EdgeType::dependent_end`, `DependentEnd` (re-exported at the crate
+
+### Added
+
+- `EdgeType::dependent_end`, `DependentEnd` (re-exported at the crate
   root), `Edge::dependence` and `recall::format::dependents_of`.
+- `lambo inspect` and `lambo_inspect` list the dependents their blast radius
+  counts: a `dependents (N):` section in the text, and `dependents` plus
+  `dependents_truncated` in the structured result.
 
 ### Changed
 
@@ -82,19 +109,25 @@
   versions is unaffected, since the host still reads the same.
 
 - **Load-bearing means "other work depends on this" (#36).** The ⚑ warning,
-  `lambo inspect`/`lambo_inspect`, the portal's dependents list, `saints`,
-  canonization Stage 2 and Stage 3, and budget demotion now count the
+  inspect, the portal's dependents list, `saints`, Swarm canonization
+  Stage 2 and Stage 3, budget demotion and the high-risk check now count the
   concepts that depend on a node: actions that named it in `depends_on`,
-  concepts with a `Dependency` edge to it, and its `parent_of` children.
-  Before, an action that depended on many things looked load-bearing and the
-  things it depended on did not. An action that produced or modified a node
-  no longer counts toward it. Nothing is migrated: stored edges are read the
-  new way.
+  concepts with a `Dependency` edge to it, and its `parent_of` children. An
+  action that produced or modified a node no longer counts toward it there.
+  `Causal` edges still count where they did outside that relation: Solo's
+  valid-action count, the score's edge-type bonus, and #29's GC protection.
+- A Venerable must pass Stage 2 again before Stage 3 can promote it.
+- The high-risk check reads a node's live dependent count instead of the
+  stored blast-radius stamp, so a node with five or more dependents counts
+  as high-value whatever its status. The demo's agent B recall gains one
+  such line, for `auth middleware`.
 - The REST API fixture plants `user schema`'s eight fields as `parent_of`
   children, so it has 14 dependents (was 8). The demo's `user schema` reports
   15 (its nine children plus the six actions that depend on it; was 9).
 - The second-`parent_of` refusal no longer says a second parent would zero
   the blast radius. The refusal itself is unchanged.
+- The cloudops scripts read inspect's dependents list, and the client-side
+  `check_single_source` guard is gone (Lambo refuses a second parent itself).
 
 ### Fixed
 
@@ -121,7 +154,6 @@
   - The portal shows it as "Partly in context (truncated)", expanded, and
     does not list its warnings as excluded. In `lambo recall` and the portal
     text, warning lines that did not fit print above the context.
-
 
 ## 0.5.0 (2026-10-12)
 

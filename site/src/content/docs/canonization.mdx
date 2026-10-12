@@ -81,7 +81,7 @@ $$
 
 A dependent is a concept with a `Dependency` edge into $c$, which is what `lambo_record_action`'s `depends_on` writes, or one of $c$'s `parent_of` children. Every dependent counts, including one that also depends on something else. `Causal` edges, which `produces` and `modifies` write, record provenance and count for nothing, and neither do association edges. Lambo reads the stored edges this way when it answers; nothing is migrated.
 
-The comparison is strict. A concept that was demoted also stays inside a `canonization_repromotion_cooldown` of 300 seconds before it can be promoted again, so a flapping concept cannot oscillate its way into permanence. The cooldown is checked first, because it is a field comparison while blast radius is a store round trip.
+The comparison is strict. Stage 3 also asks again whether the concept still meets Stage 2: Venerable is not a permanent pass, so a concept whose support has thinned, or was admitted under an older definition of support, waits at Venerable instead of promoting on blast radius alone. A concept that was demoted also stays inside a `canonization_repromotion_cooldown` of 300 seconds before it can be promoted again, so a flapping concept cannot oscillate its way into permanence. The cooldown is checked first, because it is a field comparison while blast radius is a store round trip.
 
 <Note>
 The blast radius that admitted the concept is the one stamped on the audit row. It is not re-queried afterwards, which on a live store could write a row that contradicts the gate that let the concept through.

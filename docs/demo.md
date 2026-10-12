@@ -64,8 +64,8 @@ the wider window keeps every scripted write inside it. Do not put it back to
 has its own fixed 30-second window and is unaffected.
 
 `canonization_edge_min_age` is the knob T8.4 names. It is the age floor Stage 2
-applies to inbound structural edges and Stage 3 applies to the blast-radius
-query — the guard that stops a burst of same-tick edges from inflating either
+applies to the edges that declare a concept's dependents and Stage 3 applies to
+the blast-radius query — the guard that stops a burst of same-tick edges from inflating either
 measure. Compressing it from 60s to 10ms keeps the guard **live**: every cycle
 still applies it, and an edge younger than 10ms would not count. Cycles are
 frozen during the build, so the floor is not applied then. The newest

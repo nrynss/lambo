@@ -44,6 +44,10 @@
 //! Callers that want the inflation guard pass
 //! [`crate::Config::canonization_edge_min_age`] (default 60s).
 //!
+//! The eval cycle (`canon::eval::verdicts`) runs this predicate only for a
+//! Venerable that passes Stage 2 again in the same cycle (#36 upgrade guard),
+//! so Canonical means both supported and load-bearing.
+//!
 //! Stage 3 is evidence-only: [`CanonizationStatus`](crate::types::CanonizationStatus) is not consulted.
 //! Venerable is not a prerequisite (T6.4 sequences transitions).
 
