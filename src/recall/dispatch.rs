@@ -74,7 +74,7 @@ const STRUCTURAL_MARKERS: [&str; 7] = [
 ///
 /// Classify a query into a recall arm (lexical/vector vs structural).
 pub fn classify(query: &str) -> RecallKind {
-    let lower = anchor_text(query);
+    let lower = query.to_lowercase();
     let structural = STRUCTURAL_MARKERS.iter().any(|m| lower.contains(m));
     tracing::trace!(
         target: "lambo::recall",
@@ -89,37 +89,29 @@ pub fn classify(query: &str) -> RecallKind {
     }
 }
 
-/// Function words that make up the scaffolding of a dependency question
-/// ("is **it** safe to delete **the** ...", "**what** depends **on** ...").
-/// A concept whose every word is one of these never anchors: after the
-/// word-boundary fix a concept such as `"it"` or `"the"` would otherwise match
-/// the scaffolding of nearly every structural query and hijack the dispatch.
-/// Kept to closed-class English function words on purpose; identifiers
-/// (`"db"`, `"id"`, `"vpc"`) are NOT here, because whole-word matching already
-/// stops them anchoring from inside longer words and the longest-match rule
-/// stops them beating the concept that contains them. A query that names one
-/// of these words as its real subject falls through to the blended recall,
-/// which still finds it by word match.
+/// Closed-class scaffolding never anchors, except explicitly named uppercase
+/// acronyms. Ordinary recall may also omit these words in its tokenizer.
 const ANCHOR_STOP_WORDS: &[&str] = &[
     "a", "an", "and", "any", "anything", "are", "be", "can", "do", "does", "for", "if", "in", "is",
     "it", "its", "my", "of", "on", "or", "our", "the", "this", "to", "what", "which", "that",
     "with", "from", "by", "at", "how", "who", "when", "will", "i", "we",
 ];
 
-/// Whether `c` counts as a word character for anchor boundaries. Unicode-aware
-/// (`char::is_alphanumeric`), so a multibyte word is one word, and `-`, `_`,
-/// `/`, `.` and spaces all separate words.
+const MAX_ANCHOR_QUERY_BYTES: usize = 16 * 1024;
+const MAX_ANCHOR_SPANS: usize = 256;
+
+/// NFC followed by per-character lowercase avoids contextual final-sigma
+/// folding and makes composed and decomposed names equivalent.
 pub(crate) fn anchor_text(text: &str) -> String {
     text.nfc().flat_map(char::to_lowercase).nfc().collect()
 }
-
-const MAX_ANCHOR_QUERY_BYTES: usize = 16 * 1024;
-const MAX_ANCHOR_SPANS: usize = 256;
 
 fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_' || is_combining_mark(c)
 }
 
+/// A hyphen joins an identifier only between word characters. Standalone
+/// punctuation still delimits a word; SG-Base cannot name SG-Base-VPC.
 fn word_at(hay: &str, at: usize) -> bool {
     let c = hay[at..].chars().next().expect("character offset");
     is_word_char(c)
@@ -192,26 +184,10 @@ fn is_stop_content(lower_content: &str) -> bool {
     any && all
 }
 
-/// Resolve the entity a structural query names.
-///
-/// Precedence:
-/// 1. A concept whose `content` appears in the query as whole words
-///    (case-insensitive; see [`word_bounded_spans`]) — e.g.
-///    `"what depends on SG-Base-VPC"` names `"SG-Base-VPC"`, but `"db"` does
-///    not match inside `"dbadmin"`. A match wholly inside a structural marker
-///    phrase, or a concept made only of [`ANCHOR_STOP_WORDS`], does not count.
-///    A match every occurrence of which sits inside a longer matching
-///    concept's occurrence is dropped (`"db"` inside `"user db schema"`: the
-///    query named the longer one). Among the rest, prefer Entity/Resource,
-///    then the LONGEST content (the most specific thing named; before word
-///    boundaries existed the shortest won, which let a stray short concept
-///    beat the one the query spelled out in full).
-/// 2. A query that references a security group without naming one
-///    ("the shared security group") picks the SG-shaped concept with the most
-///    structural dependents — the one whose deletion is dangerous. This
-///    requires explicit `"security group"` language, so a structural phrasing
-///    that names nothing real ("what depends on nothing-imaginary") still
-///    refuses.
+/// Resolve a named subject, removing strictly contained occurrences before
+/// ranking by distance after the marker, type, length, content and stable key.
+/// Over-budget queries or candidates refuse dispatch instead of using partial
+/// evidence. The security-group prose fallback remains the second choice.
 pub(crate) fn resolve_anchor(graph: &Graph, query: &str) -> Option<NodeId> {
     if query.len() > MAX_ANCHOR_QUERY_BYTES {
         return None;
@@ -302,9 +278,9 @@ pub(crate) fn resolve_anchor(graph: &Graph, query: &str) -> Option<NodeId> {
         crate::types::ConceptType::Entity | crate::types::ConceptType::Resource => 0,
         _ => 1,
     };
-    matches.sort_by(|(a, _), (b, _)| {
-        ty_prio(a)
-            .cmp(&ty_prio(b))
+    matches.sort_by(|(a, ad), (b, bd)| {
+        ad.cmp(bd)
+            .then_with(|| ty_prio(a).cmp(&ty_prio(b)))
             .then_with(|| b.content.chars().count().cmp(&a.content.chars().count()))
             .then_with(|| a.content.cmp(&b.content))
             .then_with(|| {
@@ -899,29 +875,22 @@ mod tests {
     }
 
     #[test]
-    fn normalized_accents_combining_marks_and_sigma_preserve_word_boundaries() {
+    fn separate_names_choose_the_subject_nearest_after_the_marker() {
         let g = anchors(&[
-            (10, "café", ConceptType::Entity),
-            (11, "ΟΣ", ConceptType::Entity),
-            (12, "x", ConceptType::Entity),
+            (10, "SG-Base-VPC", ConceptType::Entity),
+            (11, "VPC-Enterprise-Prod", ConceptType::Resource),
         ]);
+        for marker in ["safe to delete", "depends on", "dependents of", "what uses"] {
+            let q = format!("is it {marker} SG-Base-VPC in VPC-Enterprise-Prod");
+            assert_eq!(anchor_content(&g, &q).as_deref(), Some("SG-Base-VPC"));
+            assert_eq!(
+                content_of(&try_structural(&g, &q, 10, 500).unwrap().hits),
+                vec!["SG-Base-VPC consumer"]
+            );
+        }
         assert_eq!(
-            anchor_content(&g, "what depends on cafe\u{301}").as_deref(),
-            Some("café")
-        );
-        assert_eq!(
-            anchor_content(&g, "what depends on ΟΣ").as_deref(),
-            Some("ΟΣ")
-        );
-        assert_eq!(
-            anchor_content(&g, "what depends on οσ").as_deref(),
-            Some("ΟΣ")
-        );
-        assert_eq!(anchor_content(&g, "what depends on x\u{307}y"), None);
-        let decomposed = anchors(&[(10, "cafe\u{301}", ConceptType::Entity)]);
-        assert_eq!(
-            anchor_content(&decomposed, "what depends on CAFÉ").as_deref(),
-            Some("cafe\u{301}")
+            anchor_content(&g, "SG-Base-VPC depends on VPC-Enterprise-Prod").as_deref(),
+            Some("VPC-Enterprise-Prod")
         );
     }
 
@@ -971,12 +940,51 @@ mod tests {
     }
 
     #[test]
+    fn normalized_accents_combining_marks_and_sigma_preserve_word_boundaries() {
+        let g = anchors(&[
+            (10, "café", ConceptType::Entity),
+            (11, "ΟΣ", ConceptType::Entity),
+            (12, "x", ConceptType::Entity),
+        ]);
+        assert_eq!(
+            anchor_content(&g, "what depends on cafe\u{301}").as_deref(),
+            Some("café")
+        );
+        assert_eq!(
+            anchor_content(&g, "what depends on ΟΣ").as_deref(),
+            Some("ΟΣ")
+        );
+        assert_eq!(
+            anchor_content(&g, "what depends on οσ").as_deref(),
+            Some("ΟΣ")
+        );
+        assert_eq!(anchor_content(&g, "what depends on x\u{307}y"), None);
+        let decomposed = anchors(&[(10, "cafe\u{301}", ConceptType::Entity)]);
+        assert_eq!(
+            anchor_content(&decomposed, "what depends on CAFÉ").as_deref(),
+            Some("cafe\u{301}")
+        );
+    }
+
+    #[test]
     fn punctuation_only_concepts_never_anchor() {
         let g = anchors(&[
             (10, "?", ConceptType::Entity),
             (11, "...", ConceptType::Resource),
         ]);
         assert_eq!(anchor_content(&g, "what depends on unknown...?"), None);
+    }
+
+    #[test]
+    fn marker_overlapping_clause_cannot_hide_its_named_subject() {
+        let g = anchors(&[
+            (10, "safe to delete db", ConceptType::Logic),
+            (11, "db", ConceptType::Entity),
+        ]);
+        assert_eq!(
+            anchor_content(&g, "is it safe to delete db").as_deref(),
+            Some("db")
+        );
     }
 
     #[test]
@@ -1001,18 +1009,6 @@ mod tests {
             None
         );
         assert!(word_bounded_spans(&q, "x").len() <= MAX_ANCHOR_SPANS + 1);
-    }
-
-    #[test]
-    fn marker_overlapping_clause_cannot_hide_its_named_subject() {
-        let g = anchors(&[
-            (10, "safe to delete db", ConceptType::Logic),
-            (11, "db", ConceptType::Entity),
-        ]);
-        assert_eq!(
-            anchor_content(&g, "is it safe to delete db").as_deref(),
-            Some("db")
-        );
     }
 
     #[test]
@@ -1097,12 +1093,8 @@ mod tests {
             // The short concept still anchors where it stands alone.
             assert_eq!(
                 anchor_content(&g, "what depends on user db schema or db").as_deref(),
-                if long_ty == ConceptType::Entity {
-                    Some("user db schema")
-                } else {
-                    Some("db")
-                },
-                "a free-standing db competes on type, then length"
+                Some("user db schema"),
+                "the first named subject wins over a later free-standing db"
             );
         }
         // Disjoint Entity matches: the longer (more specific) one wins.
@@ -1112,7 +1104,7 @@ mod tests {
         ]);
         assert_eq!(
             anchor_content(&g, "what depends on cache and orders queue").as_deref(),
-            Some("orders queue")
+            Some("cache")
         );
     }
 
