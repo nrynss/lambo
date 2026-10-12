@@ -216,7 +216,27 @@ impl Embedder for FixtureEmbedder {
         }
         Ok(self.embed_sync(text))
     }
+
+    /// Native batch (#125): each text gets exactly what [`Self::embed`]
+    /// gives it, empty-input refusal included, so a batched write and an
+    /// unbatched one are indistinguishable in their vectors.
+    async fn embed_batch(&self, texts: &[&str]) -> Vec<Result<Vec<f32>, EmbedError>> {
+        let mut out = Vec::with_capacity(texts.len());
+        for text in texts {
+            out.push(self.embed(text).await);
+        }
+        out
+    }
+
+    /// The candle adapter's coalescer width, so tests over the fixture take
+    /// the same gathered write path a batching deployment takes.
+    fn batch_capacity(&self) -> usize {
+        FIXTURE_BATCH_CAPACITY
+    }
 }
+
+/// What [`FixtureEmbedder`] reports from [`Embedder::batch_capacity`] (#125).
+pub(crate) const FIXTURE_BATCH_CAPACITY: usize = 32;
 
 #[cfg(test)]
 mod tests {

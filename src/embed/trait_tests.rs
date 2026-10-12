@@ -68,6 +68,23 @@ async fn default_embed_image_is_unsupported_and_permanent() {
     );
 }
 
+#[tokio::test]
+async fn default_embed_batch_is_embed_per_text_in_order() {
+    // #125: the default is a loop of `embed`, each slot its own result.
+    let e = TextOnly;
+    let out = e.embed_batch(&["a", "  ", "abc"]).await;
+    assert_eq!(out.len(), 3);
+    assert_eq!(out[0].as_ref().unwrap(), &vec![1.0, 1.0]);
+    assert!(
+        matches!(out[1], Err(EmbedError::Unavailable(_))),
+        "{:?}",
+        out[1]
+    );
+    assert_eq!(out[2].as_ref().unwrap(), &vec![3.0, 1.0]);
+    assert_eq!(e.batch_capacity(), 1, "a loop batches nothing");
+    assert!(e.embed_batch(&[]).await.is_empty());
+}
+
 #[test]
 fn unsupported_is_not_transient_and_the_old_classes_are_unchanged() {
     assert!(!EmbedError::Unsupported("x".into()).is_transient());
@@ -129,4 +146,20 @@ async fn the_fixture_embeds_images_and_keeps_the_query_default() {
     );
     let v = f.embed_image(image()).await.unwrap();
     assert_eq!(v.len(), f.dimensions());
+}
+
+#[cfg(feature = "embed-fixture")]
+#[tokio::test]
+async fn the_fixture_batch_matches_its_single_embeds() {
+    // #125: a batched write must store the vectors an unbatched one would.
+    let f = FixtureEmbedder::new();
+    assert!(f.batch_capacity() > 1);
+    let texts = ["user schema", "", "red silk saree"];
+    let out = f.embed_batch(&texts).await;
+    for (text, got) in texts.iter().zip(&out) {
+        match f.embed(text).await {
+            Ok(v) => assert_eq!(got.as_ref().unwrap(), &v, "{text:?}"),
+            Err(_) => assert!(got.is_err(), "{text:?} must fail in its own slot"),
+        }
+    }
 }

@@ -313,7 +313,10 @@ impl std::fmt::Debug for ImageInput<'_> {
 /// from the registry, whatever the inner adapter does. So a delegating
 /// embedder forwards [`Self::embed_query`], [`Self::embed_image`],
 /// [`Self::modalities`], [`Self::prepare`], [`Self::is_prepared`] and
-/// [`Self::as_any`] to its inner embedder as well.
+/// [`Self::as_any`] to its inner embedder as well. A wrapper that does not
+/// forward [`Self::embed_batch`] and [`Self::batch_capacity`] is still
+/// correct (its texts go through its own `embed` one at a time); it only
+/// gives up the inner adapter's batching (#125).
 #[async_trait]
 pub trait Embedder: Send + Sync {
     /// Embedding dimensionality this backend emits.
@@ -358,6 +361,38 @@ pub trait Embedder: Send + Sync {
     /// [`crate::types::EmbeddingContract`]'s `model`.
     async fn embed_query(&self, text: &str) -> Result<Vec<f32>, EmbedError> {
         self.embed(text).await
+    }
+
+    /// Embed several texts in the **document** role (#125): one result per
+    /// text, in the order given, each under [`Self::embed`]'s input and
+    /// output contract.
+    ///
+    /// **Each result is that text's own.** An adapter that sends the texts
+    /// to its backend together must not let one text's failure become
+    /// another's: a refused or malformed text fails its own slot, and the
+    /// rest get their vectors. A whole-call failure (the backend is
+    /// unreachable) may fail every slot, each with that error.
+    ///
+    /// The default embeds the texts one after another through
+    /// [`Self::embed`], so it is exactly as fast as calling `embed` in a loop.
+    /// An adapter whose backend embeds a batch in one round overrides this
+    /// and reports how many texts that round takes from
+    /// [`Self::batch_capacity`].
+    async fn embed_batch(&self, texts: &[&str]) -> Vec<Result<Vec<f32>, EmbedError>> {
+        let mut out = Vec::with_capacity(texts.len());
+        for text in texts {
+            out.push(self.embed(text).await);
+        }
+        out
+    }
+
+    /// How many texts one [`Self::embed_batch`] call embeds together in one
+    /// backend round (#125). The default, 1, says `embed_batch` is a loop of
+    /// [`Self::embed`]: a caller gains nothing by gathering texts for it, and
+    /// the write paths then embed one text at a time as they always did. An
+    /// adapter answering more than 1 is sent up to that many texts at once.
+    fn batch_capacity(&self) -> usize {
+        1
     }
 
     /// The kinds of input this adapter embeds. Default: text only.
