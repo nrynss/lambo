@@ -31,11 +31,13 @@ pub struct LayerRef<'a> {
     /// embedding contract must equal the caller's (else it is unavailable).
     pub memory: &'a Memory,
     /// `w` in the merge's `w / rank` key; the caller's own session has 1.0.
-    /// Finite and non-negative. Defaults to [`DEFAULT_LAYER_WEIGHT`]
+    /// Finite and positive (0 is refused: it would rank every hit of the
+    /// layer last yet still fill free slots). Defaults to [`DEFAULT_LAYER_WEIGHT`]
     /// (uncalibrated until #87).
     pub weight: f64,
-    /// The layer's floor: a hit without keyword evidence merges only at
-    /// vector cosine `>=` this. In `[0, 1]`. Defaults to
+    /// The layer's floor: a hit without keyword evidence (and outside a
+    /// traversal answer anchored in this layer) merges only at vector
+    /// cosine `>=` this; no warning lifts it. In `[0, 1]`. Defaults to
     /// [`DEFAULT_LAYER_MIN_SIMILARITY`] (uncalibrated until #87).
     pub min_similarity: f64,
 }
@@ -75,6 +77,10 @@ impl std::fmt::Debug for LayerRef<'_> {
 
 type LayerFuture<'a> = Pin<Box<dyn Future<Output = Result<TierRecall, String>> + Send + 'a>>;
 
+/// How many hits' identities are copied per graph read: the copy clones
+/// holder vectors, so a large `top_k` takes the lock in short sections.
+const IDENTITY_CHUNK: usize = 64;
+
 impl Memory {
     /// Recall from this session and its `layers` (nearest tier first),
     /// merged into one answer under one `max_tokens` budget (#33).
@@ -83,28 +89,35 @@ impl Memory {
     /// context and warnings, every hit in this session.
     ///
     /// With layers, each session's list is merged by weighted rank
-    /// interleave (`weight / rank`, this session at 1.0); a layer hit
-    /// merges only with keyword evidence or vector cosine at or above the
-    /// layer's floor; hits with a Conflict, Hot or Reservation warning are
-    /// always kept; the same memory in two tiers (equal canonical key, or
+    /// interleave (`weight / rank`, this session at 1.0). A layer hit
+    /// merges only with keyword evidence, vector cosine at or above the
+    /// layer's floor, or as a dependent in the layer's traversal answer to
+    /// a dependency question whose anchor is in that layer. Hits with a
+    /// Conflict, Hot or Reservation warning are kept past `top_k` (never
+    /// past a floor). The same memory in two tiers (equal canonical key, or
     /// holder vectors at cosine at or above this session's
-    /// `semantic_match_threshold`) keeps the nearer tier's copy. `top_k`
-    /// bounds the merged non-forced hits. A layer hit's block names its
-    /// session, and a truncated layer block's marker names the scope to
-    /// inspect it with. See [`crate::recall::layered`] for the full rule.
+    /// `semantic_match_threshold`) keeps the nearer tier's copy. A layer
+    /// hit's block names its session, and a truncated layer block's marker
+    /// names the scope to inspect it with. See [`crate::recall::layered`]
+    /// for the full rule.
     ///
-    /// A layer that is closed, has a different embedding contract, or whose
-    /// recall fails is left out with a warning; it never fails the call.
-    /// No edge is followed across sessions.
+    /// A layer is left out, with a warning, when it is closed, when its
+    /// embedding contract is not this session's, or when its recall
+    /// panics; it never fails the call. A layer whose vector read fails is
+    /// not left out: it answers from its other legs, and its warning says
+    /// so with the layer's `[<session>] ` prefix. No edge is followed
+    /// across sessions.
     ///
     /// Refused with [`LamboError::Config`] when a layer is this session, a
-    /// session appears twice, or a weight or floor is out of range; with
-    /// whatever [`Memory::recall`] refuses for this session itself.
+    /// session appears twice, a weight is not finite and positive, or a
+    /// floor is outside `[0, 1]`; with whatever [`Memory::recall`] refuses
+    /// for this session itself.
     pub async fn recall_layered(
         &self,
         layers: &[LayerRef<'_>],
         query: RecallQuery,
     ) -> Result<LayeredRecall, LamboError> {
+        self.check_layers(layers)?;
         // An unlayered call, or one this session's pipeline refuses before
         // running (a `top_k` out of range answers with a warning only), is
         // the plain recall, unchanged.
@@ -115,13 +128,17 @@ impl Memory {
                 .await
                 .map(|d| LayeredRecall::single(&self.session, d));
         }
-        self.check_layers(layers)?;
         self.ensure_open()?;
 
-        // Embed once. The caller's vector source decides, unless it cannot
-        // search and a layer's can: then the embed still runs once, here.
+        // Embed once. This session's vector source decides, unless it
+        // cannot search and a compatible layer's can: then the embed still
+        // runs once, here, for the layers only. This session's own side then
+        // gets no vector (as its plain recall would, so its recall cache
+        // still serves), and an embed failure is reported by the layers
+        // that lost their vector leg, not by this session.
         let own = self.vector_candidates();
-        let source = if own.available() {
+        let own_searches = own.available();
+        let source = if own_searches {
             own
         } else {
             layers
@@ -133,19 +150,28 @@ impl Memory {
         };
         let (embedding, warning) = self.embed_recall_query(&query.query, source).await;
         let vector = embedding.as_deref();
+        let (own_vector, own_warning, layer_warning) = if own_searches {
+            (vector, warning, None)
+        } else {
+            (None, None, warning)
+        };
 
         let primary = async {
-            let recall = self.recall_text_with(query.clone(), vector, warning).await;
+            let recall = self
+                .recall_text_with(query.clone(), own_vector, own_warning)
+                .await;
             let identities = self.hit_identities(&recall.hits);
             TierRecall { recall, identities }
         };
         let layer_futures: Vec<LayerFuture<'_>> = layers
             .iter()
             .map(|l| {
-                Box::pin(
-                    l.memory
-                        .recall_as_layer(query.clone(), vector, &self.embedding),
-                ) as LayerFuture<'_>
+                Box::pin(l.memory.recall_as_layer(
+                    query.clone(),
+                    vector,
+                    &self.embedding,
+                    layer_warning.as_deref(),
+                )) as LayerFuture<'_>
             })
             .collect();
         let (primary, layer_results) = tokio::join!(primary, join_all(layer_futures));
@@ -158,7 +184,7 @@ impl Memory {
             recall: Some(primary),
         });
         for (layer, result) in layers.iter().zip(layer_results) {
-            let recall = match result {
+            let recall = match result.and_then(|r| r) {
                 Ok(t) => Some(t),
                 Err(reason) => {
                     tracing::warn!(
@@ -183,6 +209,7 @@ impl Memory {
                 top_k: query.top_k,
                 max_tokens: query.max_tokens,
                 dedupe_threshold: self.config.semantic_match_threshold,
+                vector_pairs: layered::MAX_VECTOR_DEDUPE_PAIRS,
             },
             format::default_token_count,
         );
@@ -219,9 +246,9 @@ impl Memory {
                 )));
             }
             seen.push(session);
-            if !(layer.weight.is_finite() && layer.weight >= 0.0) {
+            if !(layer.weight.is_finite() && layer.weight > 0.0) {
                 return Err(LamboError::Config(format!(
-                    "layered recall: layer {session} weight must be finite and non-negative, got {}",
+                    "layered recall: layer {session} weight must be finite and positive, got {}",
                     layer.weight
                 )));
             }
@@ -241,12 +268,15 @@ impl Memory {
     /// as a layer right now: it is closed, or its embedding contract is not
     /// the caller's `contract` (checked with or without a query vector: the
     /// merge compares holder vectors across sessions, which is meaningful
-    /// only in one embedding space).
+    /// only in one embedding space). `embed_warning` is the caller's query
+    /// embed failure when the caller embedded for its layers only; it leads
+    /// this layer's warnings when this layer's vector leg could have run.
     pub(crate) async fn recall_as_layer(
         &self,
         query: RecallQuery,
         embedding: Option<&[f32]>,
         contract: &EmbeddingContract,
+        embed_warning: Option<&str>,
     ) -> Result<TierRecall, String> {
         self.ensure_open().map_err(|e| e.to_string())?;
         if contract != &self.embedding {
@@ -255,53 +285,74 @@ impl Memory {
                 self.embedding
             ));
         }
-        let recall = self
+        let vectors = self.vector_candidates();
+        let lead = embed_warning.filter(|_| vectors.available());
+        let mut recall = self
             .daemon
             .recall_layer_with(
                 &self.session,
                 query,
-                self.vector_candidates(),
+                vectors,
                 embedding.map(|vector| (vector, &self.embedding)),
                 self.config.recall_weights,
             )
             .await;
+        if let Some(line) = lead {
+            recall.warnings.insert(0, line.to_string());
+        }
         let identities = self.hit_identities(&recall.hits);
         Ok(TierRecall { recall, identities })
     }
 
     /// What dedupe compares for each hit: its canonical key and holder
-    /// vector from this session's graph (one brief read).
+    /// vector from this session's graph, read [`IDENTITY_CHUNK`] hits per
+    /// lock so a large `top_k` never holds the graph lock for one long
+    /// copy. A concept removed between the recall and this read has an
+    /// unknown identity, which never matches.
     fn hit_identities(&self, hits: &[RecallHit]) -> Vec<HitIdentity> {
-        let g = self.graph.read();
-        hits.iter()
-            .map(|h| match g.node(h.node_id) {
+        let mut out = Vec::with_capacity(hits.len());
+        for chunk in hits.chunks(IDENTITY_CHUNK) {
+            let g = self.graph.read();
+            out.extend(chunk.iter().map(|h| match g.node(h.node_id) {
                 Some(Node::Concept(c)) => HitIdentity {
                     canonical_key: Some(c.canonical_key.clone()),
                     embedding: c.embedding.clone(),
                 },
                 _ => HitIdentity::default(),
-            })
-            .collect()
+            }));
+        }
+        out
     }
 }
 
 /// Poll every future to completion concurrently and return their outputs
 /// in order (the crate has no `futures` dependency, and adding one for this
-/// is not worth it).
-async fn join_all<T>(futures: Vec<Pin<Box<dyn Future<Output = T> + Send + '_>>>) -> Vec<T> {
+/// is not worth it). A future that panics is dropped and gives `Err`, so
+/// one layer's panic leaves that layer out instead of failing the call;
+/// the others keep running. The unwind-safety assertion holds because a
+/// panicked future is never polled again, and the sessions' locks either
+/// do not poison (`parking_lot`) or release on unwind (`tokio`).
+async fn join_all<T>(
+    futures: Vec<Pin<Box<dyn Future<Output = T> + Send + '_>>>,
+) -> Vec<Result<T, String>> {
     let mut slots: Vec<Option<Pin<Box<dyn Future<Output = T> + Send + '_>>>> =
         futures.into_iter().map(Some).collect();
-    let mut out: Vec<Option<T>> = slots.iter().map(|_| None).collect();
+    let mut out: Vec<Option<Result<T, String>>> = slots.iter().map(|_| None).collect();
     std::future::poll_fn(|cx| {
         let mut pending = false;
         for (slot, done) in slots.iter_mut().zip(out.iter_mut()) {
-            if let Some(f) = slot {
-                match f.as_mut().poll(cx) {
-                    Poll::Ready(v) => {
-                        *done = Some(v);
-                        *slot = None;
-                    }
-                    Poll::Pending => pending = true,
+            let Some(f) = slot else { continue };
+            let polled =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f.as_mut().poll(cx)));
+            match polled {
+                Ok(Poll::Ready(v)) => {
+                    *done = Some(Ok(v));
+                    *slot = None;
+                }
+                Ok(Poll::Pending) => pending = true,
+                Err(_) => {
+                    *done = Some(Err("the layer's recall panicked".to_string()));
+                    *slot = None;
                 }
             }
         }
@@ -315,4 +366,37 @@ async fn join_all<T>(futures: Vec<Pin<Box<dyn Future<Output = T> + Send + '_>>>)
     out.into_iter()
         .map(|o| o.expect("every future completed"))
         .collect()
+}
+
+/// L8: `recall_layered`'s future is `Send`, so a serve handler can spawn
+/// it. Checked at compile time; never called.
+#[allow(dead_code)]
+fn recall_layered_is_send(memory: &Memory, layers: &[LayerRef<'_>], query: RecallQuery) {
+    fn send<T: Send>(_: T) {}
+    send(memory.recall_layered(layers, query));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// L3: a panicking layer future gives `Err` for that layer only.
+    #[tokio::test]
+    async fn join_all_turns_a_panic_into_that_futures_error() {
+        let futures: Vec<Pin<Box<dyn Future<Output = u32> + Send>>> = vec![
+            Box::pin(async { 1 }),
+            Box::pin(async {
+                tokio::task::yield_now().await;
+                panic!("layer recall blew up")
+            }),
+            Box::pin(async {
+                tokio::task::yield_now().await;
+                3
+            }),
+        ];
+        let out = join_all(futures).await;
+        assert_eq!(out[0], Ok(1));
+        assert!(out[1].is_err());
+        assert_eq!(out[2], Ok(3));
+    }
 }
