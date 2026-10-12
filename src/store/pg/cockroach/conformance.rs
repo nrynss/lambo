@@ -1812,6 +1812,8 @@ async fn conformance_suite() {
     check_structural_queries_age_filter_agrees(&store).await;
     check_structural_queries_errata_derives_probe(&store).await;
     check_interaction_span_single_point_session_coverage(&store).await;
+    // #36: the shared dependents case, with MemoryStore parity.
+    crate::store::pg::dependents_live::check_dependents_case(&store).await;
     check_record_canonization_appends_and_is_idempotent(&store).await;
     check_corrupt_contract_row_load_errors(&store).await;
     check_unstamped_vector_candidates_are_empty_until_contract_commit(&store).await;
