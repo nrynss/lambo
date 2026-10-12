@@ -322,6 +322,21 @@ enum Commands {
             help = "Extra concept CONTENT:KIND (repeatable) so one invocation can match a multi-concept MCP lambo_derive."
         )]
         concept: Vec<String>,
+        /// An existing concept the first concept rests on (repeatable, at most 8): its 8-hex id from recall, its full node id, its exact content or a name. Must match exactly one concept, or nothing is written.
+        #[arg(
+            long = "depends-on",
+            value_name = "REF",
+            action = ArgAction::Append,
+            help = "An existing concept the first concept rests on (repeatable, at most 8): its 8-hex id from recall, its full node id, its exact content or a name. Must match exactly one concept, or nothing is written."
+        )]
+        depends_on: Vec<String>,
+        /// A short name for the first concept that later depends-on references can cite. Refused if it names another concept; forgotten when the writer restarts.
+        #[arg(
+            long,
+            value_name = "NAME",
+            help = "A short name for the first concept that later depends-on references can cite. Refused if it names another concept; forgotten when the writer restarts."
+        )]
+        name: Option<String>,
         /// DANGEROUS: attach despite a same-width stored/configured model-id mismatch.
         #[arg(long)]
         allow_embedding_mismatch: bool,
@@ -1301,6 +1316,8 @@ fn main() -> ExitCode {
                 kind,
                 parent_of,
                 concept,
+                depends_on,
+                name,
                 allow_embedding_mismatch: _,
             },
             Resolved::Full(backends),
@@ -1315,6 +1332,8 @@ fn main() -> ExitCode {
                     kind,
                     parent_of,
                     concept,
+                    depends_on,
+                    name,
                 },
             ),
         ),

@@ -71,7 +71,8 @@ mod trace;
 pub use params::{
     DeriveImageParams, DeriveParams, InspectParams, RecallParams, RecordActionParams,
     ReserveParams, SaintsParams, StatsParams, WireConcept, WireConceptType, WireEmbeddingContract,
-    WireImage, WireImageConceptType, WireParentOf, WireQueryVector, WireResource, WireVector,
+    WireImage, WireImageConceptType, WireParentOf, WireQueryVector, WireReference, WireResource,
+    WireVector,
 };
 use response::attach_receipts;
 pub(crate) use trace::{CallCredential, CallGrant};
@@ -268,7 +269,12 @@ impl LamboServer {
                        shutdown budget'. Bad: a paragraph narrating what you did and found. \
                        It is not a log: record activity with lambo_record_action. To group \
                        facts under a decision, send each as its own concept and add parent_of \
-                       pairs with the decision as parent and each fact as child. \
+                       pairs with the decision as parent and each fact as child. When a \
+                       concept rests on one already in memory (a ruling it applies), list that \
+                       one in the concept's depends_on, by the id recall shows or its exact \
+                       content: it must already exist and match exactly one concept, or the \
+                       whole call is refused. name gives a concept a short name later \
+                       depends_on entries can cite. \
                        created_at is stamped server-side. event_time is optional RFC3339 \
                        historical about-time, such as a commit or document date; omit it for \
                        a live fact, which is about now. Returns as soon \

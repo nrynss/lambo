@@ -594,6 +594,8 @@ async fn seed(session: &str) -> Arc<MemoryStore> {
             kind: ConceptKind::Entity,
             parent_of: vec!["auth middleware:user schema".into()],
             concept: vec!["auth middleware:entity".into()],
+            depends_on: Vec::new(),
+            name: None,
         },
     )
     .await

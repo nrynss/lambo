@@ -2,11 +2,12 @@
 
 use super::caps::{check_size_cli, require_nonempty, CliError, ConceptKind};
 use super::{close_writer, open_writer};
+use crate::graph::cite::{MAX_NAME_BYTES, MAX_REFERENCES_PER_CONCEPT};
 use crate::graph::derive::ParentOf;
 use crate::graph::hybrid;
 use crate::resolve::ResolvedBackends;
 use crate::surface::validate::{check_concept_count, check_no_image_suffix};
-use crate::types::ConceptType;
+use crate::types::{ConceptCitations, ConceptType};
 
 /// Parsed `derive` flags.
 pub struct Args {
@@ -16,6 +17,11 @@ pub struct Args {
     pub kind: ConceptKind,
     pub parent_of: Vec<String>,
     pub concept: Vec<String>,
+    /// `--depends-on` (#36 PR 4): existing concepts the first concept rests
+    /// on.
+    pub depends_on: Vec<String>,
+    /// `--name` (#36 PR 4): a name for the first concept.
+    pub name: Option<String>,
 }
 
 /// `--parent-of CHILD:PARENT` → `(parent, child)` for [`ParentOf::from_pairs`].
@@ -82,6 +88,36 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
         pairs.push((parent, child));
     }
 
+    // #36 PR 4: the first concept's citations, shape-checked before the
+    // writer opens; whether each resolves is the core's question.
+    if args.depends_on.len() > MAX_REFERENCES_PER_CONCEPT {
+        return Err(CliError::Usage(format!(
+            "depends-on may be given at most {MAX_REFERENCES_PER_CONCEPT} times"
+        )));
+    }
+    for r in &args.depends_on {
+        require_nonempty("depends-on", r)?;
+        check_size_cli("depends-on", r)?;
+    }
+    if let Some(name) = &args.name {
+        require_nonempty("name", name)?;
+        check_size_cli("name", name)?;
+        if name.len() > MAX_NAME_BYTES {
+            return Err(CliError::Usage(format!(
+                "name may be at most {MAX_NAME_BYTES} bytes"
+            )));
+        }
+    }
+    let citations: Vec<ConceptCitations> = if args.depends_on.is_empty() && args.name.is_none() {
+        Vec::new()
+    } else {
+        vec![ConceptCitations {
+            content: args.content.clone(),
+            depends_on: args.depends_on.clone(),
+            name: args.name.clone(),
+        }]
+    };
+
     let mem = open_writer(backends, &args.session, &args.agent).await?;
     let refs: Vec<(&str, ConceptType)> = concepts.iter().map(|(c, t)| (c.as_str(), *t)).collect();
     let pair_refs: Vec<(&str, &str)> = pairs
@@ -100,14 +136,25 @@ pub async fn run(backends: ResolvedBackends, args: Args) -> Result<String, CliEr
     {
         return close_writer(mem, Err(CliError::Usage(msg))).await;
     }
-    let out = match mem.derive(&refs, &parent_of).await {
+    let out = match mem
+        .derive_cited_as(mem.agent(), &refs, &parent_of, &citations)
+        .await
+    {
         Ok(outcome) => {
-            let summary = format!(
+            let mut summary = format!(
                 "derived {} concept(s): {} created, {} matched existing",
                 concepts.len(),
                 outcome.created.len(),
                 outcome.matched.len()
             );
+            // #36 PR 4: said only when the call cited or named something,
+            // so a derive without them prints exactly what it printed.
+            if !citations.is_empty() {
+                summary.push_str(&format!(
+                    "; {} citation(s) recorded, {} name(s) registered",
+                    outcome.cited, outcome.named
+                ));
+            }
             Ok(summary)
         }
         Err(e) => Err(CliError::from(e)),

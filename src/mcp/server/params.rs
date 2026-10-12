@@ -149,7 +149,29 @@ pub struct WireConcept {
     pub content: String,
     /// One of `entity`, `logic`, `constraint`, `resource`, `observation`.
     pub concept_type: WireConceptType,
+    /// Optional: up to 8 existing concepts this one rests on, such as the
+    /// ruling a decision applies. Name each by the id recall shows (8 hex
+    /// characters), its full node id, its exact content, or a `name`. Each
+    /// must already exist in this session and match exactly one concept;
+    /// one that does not, or that names this concept itself, refuses the
+    /// whole call before the ack and writes nothing. Recorded as this concept
+    /// depending on each, which makes the cited concept load-bearing. At most
+    /// 32 across the call.
+    #[schemars(length(max = 8))]
+    pub depends_on: Option<Vec<WireReference>>,
+    /// Optional: a short name for this concept that a later `depends_on`
+    /// (here or in `lambo_record_action`) can cite it by, such as
+    /// `writer lease rule`. Refused if it already names another concept.
+    /// Kept in the server's memory: it is forgotten when the server restarts,
+    /// so cite by id when a citation must work later.
+    #[schemars(length(max = 256))]
+    pub name: Option<String>,
 }
+
+/// One `depends_on` entry of a `lambo_derive` concept: an existing concept,
+/// by the id recall shows, its full node id, its exact content or a name.
+#[derive(Clone, Debug, Deserialize, schemars::JsonSchema)]
+pub struct WireReference(#[schemars(length(max = 16_384))] pub String);
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -218,7 +240,11 @@ pub struct RecordActionParams {
     pub produces: Option<Vec<WireResource>>,
     /// Resources this action mutates (`Causal` edges).
     pub modifies: Option<Vec<WireResource>>,
-    /// Things this action depends on (`Dependency` edges).
+    /// Things this action depends on (`Dependency` edges). An entry that is
+    /// an existing concept's id (the 8 hex characters recall shows, or its
+    /// full node id) cites that concept; a full node id that names nothing
+    /// in this session, or a short id several concepts share, is refused.
+    /// Any other entry names a concept by its text, created if new.
     pub depends_on: Option<Vec<WireResource>>,
 }
 

@@ -429,6 +429,8 @@ mod tests {
                 kind: ConceptKind::Entity,
                 parent_of: vec!["auth middleware:user schema".into()],
                 concept: vec!["auth middleware:entity".into()],
+                depends_on: Vec::new(),
+                name: None,
             },
         )
         .await
@@ -442,10 +444,14 @@ mod tests {
                     WireConcept {
                         content: "user schema".into(),
                         concept_type: WireConceptType::Entity,
+                        depends_on: None,
+                        name: None,
                     },
                     WireConcept {
                         content: "auth middleware".into(),
                         concept_type: WireConceptType::Entity,
+                        depends_on: None,
+                        name: None,
                     },
                 ],
                 parent_of: Some(vec![WireParentOf {
@@ -545,6 +551,8 @@ mod tests {
                 kind: ConceptKind::Entity,
                 parent_of: vec![],
                 concept: vec![],
+                depends_on: Vec::new(),
+                name: None,
             },
         )
         .await
@@ -561,6 +569,8 @@ mod tests {
                 kind: ConceptKind::Entity,
                 parent_of: vec![],
                 concept: vec![],
+                depends_on: Vec::new(),
+                name: None,
             },
         )
         .await
@@ -590,6 +600,8 @@ mod tests {
                     kind: ConceptKind::Entity,
                     parent_of: vec![],
                     concept,
+                    depends_on: Vec::new(),
+                    name: None,
                 },
             )
             .await
@@ -670,6 +682,8 @@ mod tests {
                 concept: (1..=MAX_CONCEPTS_PER_DERIVE)
                     .map(|i| format!("c{i}:entity"))
                     .collect(),
+                depends_on: Vec::new(),
+                name: None,
             },
         )
         .await
@@ -681,6 +695,8 @@ mod tests {
                     .map(|i| WireConcept {
                         content: format!("c{i}"),
                         concept_type: WireConceptType::Entity,
+                        depends_on: None,
+                        name: None,
                     })
                     .collect(),
                 parent_of: None,
@@ -745,6 +761,8 @@ mod tests {
                 kind: ConceptKind::Entity,
                 parent_of: vec!["auth middleware:user schema".into()],
                 concept: vec!["auth middleware:entity".into()],
+                depends_on: Vec::new(),
+                name: None,
             },
         )
         .await
@@ -796,6 +814,8 @@ mod tests {
                 kind: ConceptKind::Entity,
                 parent_of: vec![],
                 concept: vec![],
+                depends_on: Vec::new(),
+                name: None,
             },
         )
         .await
@@ -876,6 +896,8 @@ mod tests {
                 kind: ConceptKind::Entity,
                 parent_of: vec![],
                 concept: vec![],
+                depends_on: Vec::new(),
+                name: None,
             },
         )
         .await
@@ -1167,6 +1189,8 @@ mod sqlite_tests {
                 kind: ConceptKind::Entity,
                 parent_of: vec![],
                 concept: vec!["auth middleware:entity".into()],
+                depends_on: Vec::new(),
+                name: None,
             },
         )
         .await
@@ -1318,6 +1342,8 @@ mod sqlite_tests {
                 kind: ConceptKind::Observation,
                 parent_of: vec![],
                 concept: vec![],
+                depends_on: Vec::new(),
+                name: None,
             },
         )
         .await
@@ -1335,6 +1361,8 @@ mod sqlite_tests {
                 kind: ConceptKind::Observation,
                 parent_of: vec![],
                 concept: vec![],
+                depends_on: Vec::new(),
+                name: None,
             },
         )
         .await
@@ -1357,6 +1385,8 @@ mod sqlite_tests {
                 kind: ConceptKind::Observation,
                 parent_of: vec![],
                 concept: vec![],
+                depends_on: Vec::new(),
+                name: None,
             },
         )
         .await
@@ -1402,6 +1432,8 @@ mod sqlite_tests {
                 kind: ConceptKind::Observation,
                 parent_of: vec![],
                 concept: vec![],
+                depends_on: Vec::new(),
+                name: None,
             },
         )
         .await

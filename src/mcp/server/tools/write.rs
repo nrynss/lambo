@@ -5,6 +5,7 @@ use rmcp::model::{CallToolResult, ContentBlock};
 use serde_json::json;
 
 use crate::graph::action::Action;
+use crate::graph::cite::{MAX_NAME_BYTES, MAX_REFERENCES_PER_CONCEPT, MAX_REFERENCES_PER_DERIVE};
 use crate::graph::derive::ParentOf;
 use crate::graph::hybrid;
 use crate::mcp::server::params::{check_size, DeriveParams, RecordActionParams};
@@ -14,7 +15,58 @@ use crate::mcp::server::LamboServer;
 use crate::surface::validate::{
     check_action_targets, check_concept_count, check_no_image_suffix, require_nonempty,
 };
-use crate::types::ConceptType;
+use crate::types::{ConceptCitations, ConceptType};
+
+use super::scope::LayerProbe;
+
+/// A derive's per-concept `depends_on` and `name` as core citations (#36 PR
+/// 4), refused with `bad_param` when one is empty, too long or over a count
+/// limit. Concepts with neither are left out, so a call without citations
+/// is exactly the call it was before.
+fn wire_citations(p: &DeriveParams) -> Result<Vec<ConceptCitations>, CallToolResult> {
+    let mut out = Vec::new();
+    let mut total = 0usize;
+    for c in &p.concepts {
+        let depends_on: Vec<String> = c.depends_on.iter().flatten().map(|r| r.0.clone()).collect();
+        if depends_on.is_empty() && c.name.is_none() {
+            continue;
+        }
+        if depends_on.len() > MAX_REFERENCES_PER_CONCEPT {
+            return Err(bad_param(format!(
+                "a concept's depends_on may list at most {MAX_REFERENCES_PER_CONCEPT} concepts"
+            )));
+        }
+        total += depends_on.len();
+        if total > MAX_REFERENCES_PER_DERIVE {
+            return Err(bad_param(format!(
+                "depends_on may list at most {MAX_REFERENCES_PER_DERIVE} concepts across one call"
+            )));
+        }
+        for r in &depends_on {
+            if let Err(e) = require_nonempty("concept.depends_on entry", r) {
+                return Err(bad_param(e));
+            }
+            check_size("concept.depends_on entry", r)?;
+        }
+        if let Some(name) = &c.name {
+            if let Err(e) = require_nonempty("concept.name", name) {
+                return Err(bad_param(e));
+            }
+            check_size("concept.name", name)?;
+            if name.len() > MAX_NAME_BYTES {
+                return Err(bad_param(format!(
+                    "concept.name may be at most {MAX_NAME_BYTES} bytes"
+                )));
+            }
+        }
+        out.push(ConceptCitations {
+            content: c.content.clone(),
+            depends_on,
+            name: c.name.clone(),
+        });
+    }
+    Ok(out)
+}
 
 impl LamboServer {
     pub(crate) async fn derive_impl(&self, p: DeriveParams) -> CallToolResult {
@@ -83,6 +135,12 @@ impl LamboServer {
         } else {
             ParentOf::from_pairs(&pairs)
         };
+        // #36 PR 4: each concept's citations and name, checked for shape
+        // here; whether each resolves is the core pre-pass's question.
+        let citations = match wire_citations(&p) {
+            Ok(c) => c,
+            Err(e) => return e,
+        };
 
         // #74: on a session that embeds, a call whose embedding context
         // would exceed the hybrid limit is refused now, naming the limit,
@@ -99,7 +157,14 @@ impl LamboServer {
         // canonicalize and insert happen in the background.
         let submitted = match self
             .mem
-            .derive_async_as(&acting, &concepts, &parent_of, event_time)
+            .derive_cited_async_scoped(
+                &acting,
+                &concepts,
+                &parent_of,
+                &citations,
+                event_time,
+                &LayerProbe { server: self },
+            )
             .await
         {
             Ok(s) => s,
@@ -248,7 +313,11 @@ impl LamboServer {
         // J3: acknowledged after validation, before the graph write. Unlike
         // `derive` this path has no embedder hop, so what asynchrony buys here
         // is ORDERING with derive — see `Memory::record_action_async_as`.
-        let submitted = match self.mem.record_action_async_as(&acting, &action).await {
+        let submitted = match self
+            .mem
+            .record_action_async_scoped(&acting, &action, &LayerProbe { server: self })
+            .await
+        {
             Ok(s) => s,
             Err(e) => return tool_err("lambo_record_action", e),
         };
