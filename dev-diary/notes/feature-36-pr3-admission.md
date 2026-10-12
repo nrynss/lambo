@@ -342,7 +342,15 @@ question. Each resolved in its own commit unless noted.
   warnings.
 - **M3 (live stores)**: `store::pg::fair_test_live` runs the fair test on a
   live store with the shared `fixed_point`/`assert_expected` (moved into
-  `test_util::fair_test`), erasing the session first. By hand only:
+  `test_util::fair_test`). Each run uses a fresh `session-fair-test-<uuid>`
+  session whose ids are seeded by that name (`fair_test::snapshot_in`); the
+  first version erased the default session first, which tombstones the id
+  and refuses every later flush (Sonnet review, High), so it could never
+  pass. Seeding the ids by session name, rather than reusing the default's
+  ids under another session column, keeps runs disjoint on stores whose ids
+  are unique across sessions; `the_fixture_runs_under_another_session_id`
+  checks the ids are disjoint and that the run meets `assert_expected` on
+  MemoryStore and SQLite. By hand only:
   `LAMBO_POSTGRES_DSN=<dsn> cargo test --no-default-features --features store-postgres --lib store::pg::fair_test_live -- --ignored`;
   Cockroach: `LAMBO_COCKROACH_DSN=<dsn> cargo test --features store-cockroach,fixtures --lib conformance_suite -- --ignored`.
   Not run here (no live database).

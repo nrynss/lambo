@@ -96,8 +96,8 @@
   with dependents from two other interactions become Candidates, four
   reach Venerable, and `user schema` alone goes Canonical as before; the
   CANONIZATION section now narrates the nine other promotions. Agent B's
-  recall carries eight warnings, not nine: `auth middleware` (five
-  dependents) is no longer high-value.
+  recall carries eight warnings, as in 0.5.0: `auth middleware` (five
+  dependents) is not high-value.
 - **Downgrading or mixing versions with `Contradicts` edges (#19).** No
   0.6.0 tool writes a `Contradicts` edge yet; only a library caller or a
   hand-built batch can. A 0.5.0 (or older) binary refuses to load a
@@ -368,18 +368,19 @@
   concepts that depend on a node: actions that named it in `depends_on`,
   concepts with a `Dependency` edge to it, and its `parent_of` children. An
   action that produced or modified a node no longer counts toward it there.
-  `Causal` edges still count where they did outside that relation: Solo's
-  valid-action count, the score's edge-type bonus, and #29's GC protection.
-- Under Swarm, a Venerable must pass Stage 2 again before Stage 3 can
-  promote it. Solo is unchanged.
+  `Causal` edges still count for the score's edge-type bonus and #29's GC
+  protection; since #36 PR 3 they no longer count anywhere in the Solo
+  score.
+- A Venerable must pass Stage 2 again before Stage 3 can promote it, under
+  both policies (Swarm since #36 PR 1, Solo since PR 3).
 - The high-risk check reads a node's live dependent count instead of the
-  stored blast-radius stamp, so a node with five or more dependents counts
-  as high-value whatever its status. The live count has no age floor,
-  unlike Stage 3, and the edge that gives a node its fifth dependent is
-  itself a fresh write, so reaching five fires a high-risk warning at once.
-  In the demo, `auth middleware` (five actions depend on it) is now
-  high-value, so agent B's recall carries a high-risk line for it: nine
-  warnings instead of eight.
+  stored blast-radius stamp. A node is high-value when it is Canonical or
+  has more than five live dependents (Stage 3's bar); being Venerable is
+  not enough on its own. The live count has no age floor, unlike Stage 3,
+  and the edge that gives a node its sixth dependent is itself a fresh
+  write, so passing five fires a high-risk warning at once. In the demo,
+  agent B's recall carries eight warnings, as in 0.5.0: `auth middleware`
+  (five dependents) is not high-value.
 - The REST API fixture plants `user schema`'s eight fields as `parent_of`
   children, so it has 14 dependents (was 8). The demo's `user schema` reports
   15 (its nine children plus the six actions that depend on it; was 9).
