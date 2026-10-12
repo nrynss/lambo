@@ -296,7 +296,7 @@ pub(crate) fn try_structural(
     let radii = format::blast_radii(graph);
     let mut hits: Vec<RecallHit> = Vec::new();
     let mut detailed: Vec<DetailedHit> = Vec::new();
-    let mut blocks: Vec<String> = Vec::new();
+    let mut blocks: Vec<format::ContextBlock> = Vec::new();
     for s in deps.into_iter().take(top_k) {
         let crate::types::Node::Concept(c) = graph.node(s.item)? else {
             continue;
@@ -332,8 +332,10 @@ pub(crate) fn try_structural(
                 .push(Annotation::new(AnnotationKind::LoadBearing, text.clone()));
             lines.push(text);
         }
-        let block = format::render_block(&hit, &lines);
-        blocks.push(block);
+        blocks.push(format::ContextBlock {
+            text: format::render_block(&hit, &lines),
+            inspect_id: format::short_id(c.id),
+        });
         hits.push(hit);
         detailed.push(detailed_hit);
     }
@@ -341,19 +343,9 @@ pub(crate) fn try_structural(
         return None;
     }
 
-    // Truncate context to the token budget (whole blocks, longest prefix first).
-    let mut kept: Vec<String> = Vec::new();
-    for block in blocks {
-        let mut provisional = kept.join("\n\n");
-        if !provisional.is_empty() {
-            provisional.push_str("\n\n");
-        }
-        provisional.push_str(&block);
-        if format::default_token_count(&provisional) > max_tokens {
-            break;
-        }
-        kept.push(block);
-    }
+    // The shared budget cut (`format::fit_blocks`, the same one assemble
+    // runs): whole blocks, longest prefix first.
+    let fitted = format::fit_blocks(&blocks, max_tokens, format::default_token_count);
 
     tracing::debug!(
         target: "lambo::recall",
@@ -363,7 +355,7 @@ pub(crate) fn try_structural(
     );
     // T9-R1-N4: headline names only the dependents the context actually
     // renders (kept whole blocks), not the pre-truncation hit set.
-    let count = kept.len();
+    let count = fitted.whole;
     let mut warnings = Vec::new();
     let traversal =
         format!("recall: dependency question answered by graph traversal ({count} dependents)");
@@ -371,11 +363,11 @@ pub(crate) fn try_structural(
     // H3: included_in_context at the cut; the traversal explanation is
     // response-global — one annotation, never attached to a hit.
     for (i, d) in detailed.iter_mut().enumerate() {
-        d.included_in_context = i < count;
+        d.included_in_context = i < fitted.whole;
     }
     Some(DetailedRecall {
         hits,
-        context: format::render_context(&kept),
+        context: fitted.context,
         warnings,
         // A dispatched structural query answers by traversal and skips the
         // phase-1 blend entirely (T9-R1-3), so there are no leg scores to

@@ -120,10 +120,12 @@
 //! whole block ([`crate::recall::format`]); the context is truncated to
 //! `max_tokens` by keeping the **longest score-ordered prefix** of blocks
 //! whose cumulative `token_fn` count fits — equivalently, whole
-//! lowest-scoring blocks are dropped from the tail. A block is never split,
-//! and a dropped block still appears in `RecallResult::hits` and contributes
-//! its warnings (a warning is actionable regardless of the token budget; the
-//! caller renders `context` and `warnings` separately).
+//! lowest-scoring blocks are dropped from the tail. A block is never split.
+//! The cut is the shared [`format::fit_blocks`], which `dispatch` uses too.
+//! A dropped
+//! block still appears in `RecallResult::hits` and contributes its warnings
+//! (a warning is actionable regardless of the token budget; the caller
+//! renders `context` and `warnings` separately).
 //!
 //! The default estimator is [`default_token_count`] (`ceil(bytes / 3.5)`);
 //! callers pass their own `Fn(&str) -> usize` to override.
@@ -327,7 +329,7 @@ where
     let mut hits: Vec<RecallHit> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
     let mut detailed: Vec<DetailedHit> = Vec::new();
-    let mut hit_blocks: Vec<String> = Vec::new(); // block per emitted hit, score order
+    let mut hit_blocks: Vec<format::ContextBlock> = Vec::new(); // block per emitted hit, score order
     for s in emitted(graph, &members, forced, query.top_k) {
         let Some(Node::Concept(c)) = graph.node(s.item) else {
             continue; // `emitted` yields graph concepts only
@@ -393,46 +395,35 @@ where
         // Warning lines reflect the included hit set, independent of the token
         // budget (see module docs); a block truncated from the context still
         // reports its conditions.
-        let block = format::render_block(&hit, &lines);
+        let block = format::ContextBlock {
+            text: format::render_block(&hit, &lines),
+            inspect_id: format::short_id(c.id),
+        };
         warnings.extend(lines);
         hit_blocks.push(block);
         hits.push(hit);
         detailed.push(detailed_hit);
     }
 
-    // Context: ranked-prefix over the hit blocks in score order, stopping at
-    // the first block that does not fit. The measured token count is of the
-    // ACTUAL joined context (separators `\n\n` included), so the rendered
-    // output is within budget; a lower-ranked block never follows a skipped
-    // one (GPT5.6sol P1-4). Checked arithmetic keeps overflow a no-op stop.
-    let mut blocks: Vec<String> = Vec::new();
-    for block in hit_blocks {
-        let mut provisional = blocks.join("\n\n");
-        if !provisional.is_empty() {
-            provisional.push('\n');
-            provisional.push('\n');
-        }
-        provisional.push_str(&block);
-        let tokens = token_fn(&provisional);
-        if tokens.checked_add(1).is_none() || tokens > query.max_tokens {
-            break;
-        }
-        blocks.push(block);
-    }
+    // Context: the shared budget cut (`format::fit_blocks`): the longest
+    // ranked prefix of whole blocks, measured on the ACTUAL joined text
+    // (separators included) so the rendered output is within budget; a
+    // lower-ranked block never follows a skipped one (GPT5.6sol P1-4).
+    // Checked arithmetic keeps overflow a no-op stop.
+    let fitted = format::fit_blocks(&hit_blocks, query.max_tokens, &token_fn);
 
     // H3: `included_in_context` is recorded AT the token-budget cut — true
     // exactly for the longest ranked prefix of hits whose complete rendered
     // blocks appear in the context. Every hit stays in `hits`; later ones
     // report `false` (their annotations remain, token exclusion never
     // discards them).
-    let kept = blocks.len();
     for (i, d) in detailed.iter_mut().enumerate() {
-        d.included_in_context = i < kept;
+        d.included_in_context = i < fitted.whole;
     }
 
     DetailedRecall {
         hits,
-        context: format::render_context(&blocks),
+        context: fitted.context,
         warnings,
         // I1: attached by the caller, which owns the phase-1 result this
         // assembly ran over. Assembly itself sees only the expanded member
