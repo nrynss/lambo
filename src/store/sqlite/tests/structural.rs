@@ -900,3 +900,26 @@ async fn stage1_graph_counts_equal_sqlite_span_distinct() {
         }
     }
 }
+
+/// #36 PR 3 review L9: SQLite agrees with the graph-side count on rows
+/// exactly at the age cutoff (count) and one second younger (do not).
+#[tokio::test]
+async fn stage1_graph_counts_equal_sqlite_at_the_exact_cutoff() {
+    use crate::test_util::dependents as case;
+    let store = test_store();
+    store.init_schema().await.unwrap();
+    store.flush(&case::cutoff_batch(), None).await.unwrap();
+    let g = case::cutoff_graph();
+    let pillar = case::cutoff_pillar();
+    for (age, want) in [(case::MIN_AGE, 2u64), (std::time::Duration::ZERO, 4)] {
+        let span = store
+            .interaction_span(g.session_id(), pillar, age, case::now())
+            .await
+            .unwrap();
+        assert_eq!(span.distinct, want, "{age:?}");
+        assert_eq!(
+            crate::canon::dependent_interactions(&g, pillar, age, case::now()) as u64,
+            want
+        );
+    }
+}

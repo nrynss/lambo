@@ -575,6 +575,31 @@ mod tests {
         }
     }
 
+    /// Review L9: an edge and an interaction exactly at `now - min_age`
+    /// count, one second younger do not, on the graph and on MemoryStore.
+    #[cfg(feature = "store-memory")]
+    #[tokio::test]
+    async fn rows_exactly_at_the_cutoff_count_on_graph_and_memory_store() {
+        use crate::store::{GraphStore, MemoryStore};
+        use crate::test_util::dependents as case;
+        let g = case::cutoff_graph();
+        let pillar = case::cutoff_pillar();
+        let store = MemoryStore::new();
+        store.flush(&case::cutoff_batch(), None).await.unwrap();
+        for (age, want) in [(case::MIN_AGE, 2usize), (Duration::ZERO, 4)] {
+            assert_eq!(dependent_interactions(&g, pillar, age, case::now()), want);
+            assert_eq!(
+                dependent_interaction_counts(&g, age, case::now()).get(&pillar),
+                Some(&want)
+            );
+            let span = store
+                .interaction_span(g.session_id(), pillar, age, case::now())
+                .await
+                .unwrap();
+            assert_eq!(span.distinct, want as u64, "{age:?}");
+        }
+    }
+
     /// An unrepresentable age floor counts nothing rather than everything.
     #[test]
     fn an_absurd_age_floor_counts_nothing() {
