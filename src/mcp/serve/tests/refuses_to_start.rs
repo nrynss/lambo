@@ -68,3 +68,59 @@ async fn serve_refuses_a_zero_idle_detach() {
         .expect_err("a zero idle_detach is refused");
     assert!(err.to_string().contains("idle_detach"), "{err}");
 }
+
+/// #33 PR 3: a credential that reaches a layered session but not its layer
+/// refuses the start, through the real entry point, before any lease.
+#[tokio::test]
+async fn serve_refuses_a_credential_that_reaches_a_session_but_not_its_layer() {
+    let cfg = crate::LamboFile::from_toml_str(
+        "[serve]\nsessions = [\"pr3-proj\", \"general\"]\nlayers = [\"general\"]\n",
+    )
+    .expect("parse")
+    .serve;
+    let mut opts = ServeOptions {
+        transport: Transport::Http,
+        port: 0,
+        ..ServeOptions::new("pr3-proj", "agent-a")
+    };
+    opts.sessions = cfg.sessions.clone();
+    opts.layers = cfg.resolve_layers(&cfg.sessions).expect("resolve");
+    opts.credentials = vec![crate::config::ServeCredential {
+        grant: crate::surface::session::SessionGrant::new(
+            "narrow",
+            crate::surface::session::SessionScope::new(
+                [crate::surface::session::parse_addressed("pr3-proj").expect("id")],
+                false,
+                None,
+            ),
+            Default::default(),
+        ),
+        token: SecretToken::new(["fake", "narrow", "pr3"].join("-")).expect("token"),
+    }];
+    // The store, shared with the test so it can look for a lease after.
+    let probe = std::sync::Arc::new(MemoryStore::new());
+    let mut backends = backends();
+    backends.store = Box::new(crate::test_util::VectorSearchable(std::sync::Arc::clone(
+        &probe,
+    )));
+    let err = serve(opts, backends)
+        .await
+        .expect_err("the start is refused");
+    assert!(
+        err.to_string()
+            .contains("reaches \"pr3-proj\" but not its layer \"general\""),
+        "{err}"
+    );
+    for session in ["pr3-proj", "general"] {
+        assert!(
+            crate::store::GraphStore::read_lease(
+                probe.as_ref(),
+                &crate::types::SessionId::new(session),
+            )
+            .await
+            .expect("read")
+            .is_none(),
+            "no lease was taken for {session}"
+        );
+    }
+}

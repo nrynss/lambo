@@ -30,6 +30,7 @@ use std::time::Duration;
 mod derive_image;
 mod errors;
 mod inspect;
+mod layered;
 mod ledger;
 mod recall_image;
 mod receipts;
