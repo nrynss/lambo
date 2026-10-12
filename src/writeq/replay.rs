@@ -238,14 +238,18 @@ impl WritePipeline {
                     agent: intent.agent.clone(),
                     interaction: intent.interaction,
                     bytes: 0,
-                    payload: JobPayload::from_intent_payload(intent.payload),
+                    payload: Arc::new(JobPayload::from_intent_payload(intent.payload)),
                     admitted: tokio::time::Instant::now(),
                 };
                 let stamp = ConsumeStamp {
                     tag: "applied_after_restart",
                     at: (this.clock)(),
                 };
-                let answer = match this.ctx.run(&job, Some(stamp)).await {
+                let answer = match this
+                    .ctx
+                    .run(&job, Some(stamp), crate::graph::hybrid::Gather::default())
+                    .await
+                {
                     Ok(summary) => {
                         // Observed health: the embedder just worked. Resets the
                         // consecutive-transient streak.
@@ -389,7 +393,7 @@ impl WritePipeline {
                     // its own block reason and log line, because the text
                     // intents behind it would apply and the fix is specific.
                     Err(LamboError::Config(e))
-                        if matches!(job.payload, JobPayload::DeriveImage { .. }) =>
+                        if matches!(*job.payload, JobPayload::DeriveImage { .. }) =>
                     {
                         this.counters
                             .set_replay_blocked(ReplayBlockReason::ImageConfig);
