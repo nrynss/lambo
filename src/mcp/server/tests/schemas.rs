@@ -282,7 +282,8 @@ async fn f18_tool_schemas_match_the_golden_property_set() {
                 "parent_of[].parent",
             ],
         ),
-        ("lambo_inspect", vec!["agent_id", "depth", "focus"]),
+        // #33 PR 3: `scope` is a session name, not a time.
+        ("lambo_inspect", vec!["agent_id", "depth", "focus", "scope"]),
         // #22 PR 6: recall by image or by a client query vector. Nothing
         // here is a time.
         (

@@ -204,9 +204,10 @@ release notes are drafted before the tag [Logic] (score 0.71, id 57fc442c, also 
 worktree branches are always rebased onto origin main first [Logic] (score 0.42, id b86d4709, from general)
 ```
 
-* Every hit of a layered session carries `session` in `structuredContent.hits[]`, the session it is from; its `node_id` and short id belong to that session. The other tools act on the addressed session only, so inspect a layer hit through the layer's own URL, `/mcp/s/<layer>`. An unlayered session's hits never carry `session`, and its answer is byte-identical to 0.5.0's.
+* Every hit of a layered session carries `session` in `structuredContent.hits[]`, the session it is from; its `node_id` and short id belong to that session. Pass that session as `scope` to [`lambo_inspect`](#lambo_inspect) to inspect a layer hit. An unlayered session's hits never carry `session`, and its answer is unchanged by layering.
 * `score` is each hit's own session's score. Scores are not comparable across sessions, so `hits` is in merged order, which is not monotone in `score`.
-* `scope` reads one session alone, as its own plain recall: `"general"` reads the layer, the session's own name reads only the session. A layer that is not serving right now (another writer holds its lease, or it is being detached) leaves a merged recall to the session's own hits with one warning, `recall: layer general is unavailable; results are from lambo only`, and refuses a `scope` naming it with a retryable error.
+* `scope` reads one session alone, as its own plain recall: `"general"` reads the layer, the session's own name reads only the session. A recall with `scope = "general"` adds one warning, `recall: these hits are from layer general, and their ids belong to it; pass scope = "general" to lambo_inspect to inspect one`. A direct read of a layer draws on the layer's own `per_session_rps`; a merged recall draws only on the addressed session's.
+* A layer that is not serving right now leaves a merged recall to the session's own hits with one warning, `recall: layer general is unavailable; results are from lambo only`. A `scope` naming it is refused: retryably while another writer holds its lease, it is being detached or it is over its rate; as permanent, telling you to ask the operator, when its attach failed for good or it was erased.
 * A layer's warnings start with its name, such as `[general] `. A truncated layer block's marker reads `lambo_inspect <id> (scope general)`.
 * A recall by `image` or `query_vector` reads one session: on a layered session without `scope` it reads the session itself and says its layers were not searched.
 * With `--ledger`, a layered session's recall line names each hit's `session` and counts hits per session in `session_hits`; a line carries `scope` when the call sent one.
@@ -369,6 +370,7 @@ Look at the neighbourhood around a concept, including its type, whether it is ca
 | `agent_id` | string | Yes | |
 | `focus` | string | Yes | Concept text or a node UUID. Up to 16 KB. |
 | `depth` | integer | No | `0` to `5`. Defaults to `2`. |
+| `scope` | string | No | Inspect in one of this session's layers instead of the session itself, as a recall hit from that layer needs (its id belongs to the layer). Resolved and refused as `lambo_recall`'s `scope` is. |
 
 Lambo resolves `focus` exactly first, then as the short id a recall block renders, then as a single substring match, and says in the result text when it resolved a substring. Past the 2,000-concept scan cap the substring leg runs on a bounded recency-plus-blast-radius subset instead of refusing, and says it did. If the focus matches several concepts it refuses rather than guessing, and lists up to ten candidates with their node ids; a focus matching nothing gets the same treatment with the closest concepts as suggestions. The rendered neighbourhood stops after 200 neighbours and says so.
 
@@ -466,7 +468,8 @@ A layered session (see [Layers](/config#layers)) appends one more paragraph, nam
 ```text
 lambo_recall in session 'lambo' also searches its shared layers: general. Every recall hit
 names the session it is from (structuredContent hits[].session, and 'from <session>' in a
-layer hit's block), and its id belongs to that session. Pass scope = "general" to
+layer hit's block), and its id belongs to that session: pass the same scope (scope =
+"general") to lambo_inspect to inspect a hit from that layer. Pass scope = "general" to
 lambo_recall to read that layer alone, or scope = "lambo" for this session alone. Every
 other tool, and every write, acts on session 'lambo' only.
 ```

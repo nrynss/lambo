@@ -426,7 +426,7 @@ sessions = ["lambo", "general"]
 layers = ["general"]
 ```
 
-a recall at `/mcp/s/lambo` reads `lambo` and `general` and merges them under one budget. Each hit names its session, a `general` hit's block says `from general`, and `scope` reads one of the two alone. `general` itself is not layered: a recall at `/mcp/s/general` reads `general` only. Writes and every other tool act on the addressed session only.
+a recall at `/mcp/s/lambo` reads `lambo` and `general` and merges them under one budget. Each hit names its session, a `general` hit's block says `from general`, and `scope` reads one of the two alone, on `lambo_recall` and `lambo_inspect` (a `general` hit's id is inspected with `scope = "general"`). `general` itself is not layered: a recall at `/mcp/s/general` reads `general` only. Writes and every other tool act on the addressed session only.
 
 A layer is pinned like any other session and keeps its own lease. If it loses the lease, only the layer is detached: `lambo` keeps serving, and its recalls answer from `lambo` alone with the warning `recall: layer general is unavailable; results are from lambo only` until the layer is taken back. The start is refused when a credential reaches `lambo` but not `general`, or when a layer is not pinned. A stdio `lambo serve --session lambo` that forwards to this serve gets `lambo`'s layering from it; one that holds `lambo` itself serves it unlayered, with one warning.
 

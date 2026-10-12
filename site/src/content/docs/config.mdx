@@ -345,7 +345,7 @@ Further rules once credentials are in play:
 
 ### Layers
 
-A layer is a shared session, such as `general`, whose memories a project session's recall reads too. With `layers = ["general"]`, a `lambo_recall` to `lambo` reads `lambo` and `general` in one call and merges the two answers under one token budget. Writes, and every other tool, still act on the addressed session only. Layers are an HTTP serve's. A stdio serve that holds its session itself serves it unlayered and logs one warning when the session would be layered; a stdio serve that forwards to an HTTP `lambo serve` holding the session (the usual case on a machine running one) reaches that session through the holder, layers included, and warns of nothing.
+A layer is a shared session, such as `general`, whose memories a project session's recall reads too. With `layers = ["general"]`, a `lambo_recall` to `lambo` reads `lambo` and `general` in one call and merges the two answers under one token budget. `lambo_recall` and `lambo_inspect` take `scope` to read one of the two alone. Writes, and every other tool, still act on the addressed session only. Layers are an HTTP serve's. A stdio serve that holds its session itself serves it unlayered and logs one warning when the session would be layered; a stdio serve that forwards to an HTTP `lambo serve` holding the session (the usual case on a machine running one) reaches that session through the holder, layers included, and warns of nothing.
 
 ```toml
 [serve]
@@ -374,7 +374,7 @@ Refused when an HTTP `lambo serve` starts (exit `2`), before any lease is taken:
 
 Once the pinned sessions are attached, a layer whose embedding contract differs from its session's refuses the start too (a model left unset in one and set to `""` in the other counts as different, and the message says so).
 
-While the serve runs, a layer can stop serving: another writer took its lease, it is being detached, or its attach failed. Losing `general`'s lease detaches `general` alone. Until it is attached again, every layered recall answers from its own session with one warning, `recall: layer general is unavailable; results are from lambo only`, and a `scope` naming the layer is refused with a retryable error.
+While the serve runs, a layer can stop serving: another writer took its lease, it is being detached, or its attach failed. Losing `general`'s lease detaches `general` alone. Until it is attached again, every layered recall answers from its own session with one warning, `recall: layer general is unavailable; results are from lambo only`, and a `scope` naming the layer is refused: retryably while it is held elsewhere or detaching, and as permanent once its attach has failed for good or it was erased (an erased layer is also warned of at start).
 
 ### Choosing a stdio serve's session
 

@@ -77,12 +77,12 @@
   (`ServeConfig`) or `..ServeOptions::new(..)` keeps compiling.
   The new `LayerConfig` is `#[non_exhaustive]` (team tiers may add
   knobs): build it with `LayerConfig::default()` and set its fields.
-- **`RecallParams` gains `scope: Option<String>`** (#33 PR 3), breaking a
-  struct literal that names every field; `..Default::default()` keeps
+- **`RecallParams` and `InspectParams` gain `scope: Option<String>`** (#33
+  PR 3), breaking a struct literal that names every field; `..Default::default()` keeps
   compiling. `DeriveParams`, `RecordActionParams`, `ReserveParams`,
   `InspectParams`, `SaintsParams` and `DeriveImageParams` now derive
-  `Default` too, so the `scope` fields 0.6.0 adds to them later will not
-  break literals written that way.
+  `Default` too, so optional fields added later (such as the write tools'
+  `scope`) do not break literals written that way.
 
 ### Added
 
@@ -141,11 +141,16 @@
   `[serve.session_layers]` overrides the stack per session (`[]` opts
   out) and `[[serve.layer]]` sets a layer's `weight` and
   `min_similarity`. Every shape is a list; one layer per session is
-  supported in this release. `lambo_recall` takes `scope` to read one
-  session alone: the session itself or one of its layers. A layer that is
+  supported in this release. `lambo_recall` and `lambo_inspect` take
+  `scope` to read one session alone: the session itself or one of its
+  layers (a layer hit's id is inspected with its layer's `scope`; a
+  `scope = <layer>` recall says so in a warning). A direct layer read
+  draws on the layer's `per_session_rps`. A layer that is
   not serving (its lease lost, detaching) leaves each layered recall to
   the session's own hits with a `layer_unavailable` warning, and losing
-  its lease detaches the layer alone. A serve refuses to start when a
+  its lease detaches the layer alone; a `scope` naming a layer that failed
+  for good or was erased is refused as permanent, and an erased layer is
+  warned of at start. A serve refuses to start when a
   layer or a layered session is not pinned, when a credential reaches a
   layered session but not its layer, or when their embedding contracts
   differ. With `--ledger`, a layered session's recall line names each

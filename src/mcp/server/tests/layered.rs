@@ -565,3 +565,116 @@ async fn a_scoped_read_of_a_layer_that_will_not_come_back_says_so() {
     }
     own.mem.close().await.expect("close");
 }
+
+/// Review M1: a layer hit's id belongs to the layer, so `lambo_inspect`
+/// takes the same `scope`. A `scope = <layer>` recall says so in one
+/// warning line; the id it returns is inspected with that scope and is
+/// not found without it. `scope` on inspect is resolved as on recall.
+#[tokio::test]
+async fn a_layer_hit_is_inspected_with_the_same_scope() {
+    let (s, general, _source) = project_and_general("insp").await;
+    let out = recall(&s, json!({"query": "worktree", "scope": "general"})).await;
+    let warnings = structured(&out)["warnings"].as_array().expect("warnings");
+    assert!(
+        warnings.contains(&json!(
+            "recall: these hits are from layer general, and their ids belong to it; pass \
+             scope = \"general\" to lambo_inspect to inspect one"
+        )),
+        "{warnings:?}"
+    );
+    // No such line on a merged recall or a recall of this session.
+    for args in [
+        json!({"query": "worktree"}),
+        json!({"query": "worktree", "scope": "insp-proj"}),
+    ] {
+        let out = recall(&s, args).await;
+        assert!(!structured(&out)["warnings"]
+            .to_string()
+            .contains("to lambo_inspect"));
+    }
+    let id = structured(&out)["hits"][0]["node_id"]
+        .as_str()
+        .expect("node id")[..8]
+        .to_string();
+
+    let inspect = |args: serde_json::Value| {
+        let mut args = args;
+        args["agent_id"] = json!("agent-a");
+        call(&s, "lambo_inspect", args)
+    };
+    let found = inspect(json!({"focus": id, "scope": "general"})).await;
+    assert_eq!(found.is_error, Some(false), "{found:?}");
+    assert!(
+        text_of(&found).contains(GENERAL_RULING),
+        "{}",
+        text_of(&found)
+    );
+    let missing = inspect(json!({"focus": id})).await;
+    assert_eq!(missing.is_error, Some(true), "the id is not this session's");
+    let own = inspect(json!({"focus": PROJECT_FACT, "scope": "insp-proj"})).await;
+    assert_eq!(own.is_error, Some(false), "{own:?}");
+    let refused = inspect(json!({"focus": id, "scope": "elsewhere"})).await;
+    assert_eq!(refused.is_error, Some(true));
+    assert!(
+        text_of(&refused)
+            .contains("scope must name this session or one of its layers: insp-proj, general"),
+        "{}",
+        text_of(&refused)
+    );
+
+    let info = s.get_info().instructions.expect("instructions");
+    assert!(
+        info.contains("pass the same scope (scope = \"general\") to lambo_inspect"),
+        "{info}"
+    );
+    s.mem.close().await.expect("close");
+    general.mem.close().await.expect("close");
+}
+
+/// Review M1: an unlayered session's inspect accepts its own name as
+/// `scope` and nothing else; a layer that is down refuses its scope.
+#[tokio::test]
+async fn inspect_scope_on_an_unlayered_session_and_a_layer_that_is_down() {
+    let plain = server("insp-plain").await;
+    derive(&plain, PROJECT_FACT).await;
+    let ok = call(
+        &plain,
+        "lambo_inspect",
+        json!({"agent_id": "agent-a", "focus": PROJECT_FACT, "scope": "insp-plain"}),
+    )
+    .await;
+    assert_eq!(ok.is_error, Some(false), "{ok:?}");
+    let refused = call(
+        &plain,
+        "lambo_inspect",
+        json!({"agent_id": "agent-a", "focus": PROJECT_FACT, "scope": "general"}),
+    )
+    .await;
+    assert!(text_of(&refused).contains("one of its layers: insp-plain"));
+
+    let source: Arc<dyn LayerSource> = Arc::new(Down(LayerDown::Transient));
+    let s = plain.clone().with_layers(ServerLayers {
+        handles: vec![LayerHandle::new(
+            "general",
+            DEFAULT_LAYER_WEIGHT,
+            DEFAULT_LAYER_MIN_SIMILARITY,
+            Arc::downgrade(&source),
+        )],
+        authority: None,
+    });
+    let down = call(
+        &s,
+        "lambo_inspect",
+        json!({"agent_id": "agent-a", "focus": "x", "scope": "general"}),
+    )
+    .await;
+    assert!(
+        text_of(&down).contains(
+            "lambo_inspect: layer general is unavailable right now; retry shortly, or inspect \
+             without scope to read insp-plain"
+        ),
+        "{}",
+        text_of(&down)
+    );
+    plain.mem.close().await.expect("close");
+}

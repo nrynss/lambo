@@ -10,13 +10,14 @@
 use rmcp::model::{CallToolResult, ContentBlock};
 use serde_json::json;
 
+use super::scope::Scoped;
 use crate::embed::Modalities;
-use crate::mcp::server::layers::{LayerRead, LiveLayer};
+use crate::mcp::server::layers::{LayerHandle, LayerRead, LiveLayer};
 use crate::mcp::server::params::{check_size, RecallParams};
 use crate::mcp::server::response::{
-    attach_warnings, bad_param, config_refusal, layer_unavailable, redact_urls, tool_err,
+    attach_warnings, bad_param, config_refusal, redact_urls, tool_err,
 };
-use crate::mcp::server::trace::{call_auth, layered_recall_facts, note_facts, recall_facts};
+use crate::mcp::server::trace::{layered_recall_facts, note_facts, recall_facts};
 use crate::mcp::server::LamboServer;
 use crate::memory::{LayerRef, LayerSlot, LayeredRecall, Memory};
 use crate::recall::query_vector::QueryBy;
@@ -98,10 +99,10 @@ impl LamboServer {
             Err(e) => return e,
         };
         let scope = p.scope;
-        let mem: &Memory = match &target {
-            RecallTarget::Layer(live) => &live.mem,
-            RecallTarget::Own | RecallTarget::Stack => &self.mem,
-        };
+        // The deployment checks below read this session's embedder, store
+        // and config. A layer was built from the same serve template, so
+        // they hold for it too; its own contract is checked by the read.
+        let mem: &Memory = &self.mem;
 
         // Beside an image or a vector, blank text is no text.
         let text = if by_kind.is_some() && crate::surface::validate::is_blank(&p.query) {
@@ -167,6 +168,24 @@ impl LamboServer {
             // Neither (a text recall); both was refused above.
             _ => None,
         };
+        // Review L5: a scoped layer is looked up only now, after the
+        // payload is decoded, so the call holds the layer's `Memory` (and
+        // delays its re-attach) only for the read itself.
+        let layer = match &target {
+            RecallTarget::Layer(handle) => match self.read_layer(
+                TOOL,
+                handle,
+                &format!(
+                    "recall without scope for results from {}",
+                    self.mem.session()
+                ),
+            ) {
+                Ok(live) => Some(live),
+                Err(e) => return e,
+            },
+            RecallTarget::Own | RecallTarget::Stack => None,
+        };
+        let mem: &Memory = layer.as_ref().map_or(&self.mem, |l| &l.mem);
         let recalled = match (by, &target) {
             // A layered session's text recall: its own session and its
             // layers, merged (design section 2).
@@ -210,6 +229,15 @@ impl LamboServer {
             Ok(r) => r,
             Err(e) => return tool_err(TOOL, e),
         };
+        // Review M1: a layer's own answer carries ids that belong to the
+        // layer, so say how to inspect one.
+        if let RecallTarget::Layer(handle) = &target {
+            recalled.warnings.push(format!(
+                "recall: these hits are from layer {layer}, and their ids belong to it; pass \
+                 scope = \"{layer}\" to lambo_inspect to inspect one",
+                layer = handle.session
+            ));
+        }
         // A recall by image or vector reads one session (the library's
         // layered recall is by text): a layered session says its layers
         // were not searched.
@@ -294,91 +322,36 @@ impl LamboServer {
         out
     }
 
-    /// The configured layers' names, nearest tier first.
-    fn layer_names(&self) -> Vec<&str> {
-        self.layers()
-            .handles
-            .iter()
-            .map(|h| h.session.as_str())
-            .collect()
-    }
-
     /// Which session(s) a recall with `scope` reads (#33 PR 3, design
-    /// sections 2.6 and 3).
-    ///
-    /// No scope: this session, with its layers when it has any. A scope
-    /// naming this session: this session alone. A scope naming one of its
-    /// layers: that layer alone, looked up now; refused, retryably, while
-    /// it is not serving. Anything else is `bad_param`, listing only this
-    /// session's own scopes and never quoting the value sent.
-    fn recall_target(&self, scope: Option<&str>) -> Result<RecallTarget, CallToolResult> {
+    /// sections 2.6 and 3): no scope is this session, with its layers when
+    /// it has any (each authorized for the call); a scope is resolved as
+    /// every read tool resolves it (`scope`), and a layer is looked up
+    /// only when the recall reads it.
+    fn recall_target(&self, scope: Option<&str>) -> Result<RecallTarget<'_>, CallToolResult> {
         let Some(scope) = scope else {
             if self.layers().is_empty() {
                 return Ok(RecallTarget::Own);
             }
             for name in self.layer_names() {
-                self.authorize_layer(name)?;
+                self.authorize_layer(TOOL, name)?;
             }
             return Ok(RecallTarget::Stack);
         };
-        check_size("scope", scope)?;
-        if scope == self.mem.session().as_str() {
-            return Ok(RecallTarget::Own);
-        }
-        let Some(handle) = self.layers().handle(scope) else {
-            let mut scopes = vec![self.mem.session().as_str()];
-            scopes.extend(self.layer_names());
-            return Err(bad_param(format!(
-                "scope must name this session or one of its layers: {}",
-                scopes.join(", ")
-            )));
-        };
-        self.authorize_layer(scope)?;
-        match handle.live(LayerRead::Direct) {
-            Ok(live) => Ok(RecallTarget::Layer(live)),
-            Err(down) => Err(layer_unavailable(
-                TOOL,
-                scope,
-                down,
-                &format!(
-                    "recall without scope for results from {}",
-                    self.mem.session()
-                ),
-            )),
-        }
-    }
-
-    /// Defence in depth (design section 1, Auth): the call's grant must
-    /// reach `layer`. The start refused any credential that reaches this
-    /// session but not one of its layers, so a refusal here is a
-    /// configuration bug: answered generically, without naming the layer,
-    /// and logged by name for the operator.
-    fn authorize_layer(&self, layer: &str) -> Result<(), CallToolResult> {
-        if self.layers().authorize(call_auth().as_ref(), layer) {
-            return Ok(());
-        }
-        tracing::error!(
-            session = %self.mem.session(),
-            layer = %layer,
-            "mcp: a credential reaching a layered session was refused its layer; the serve's \
-             start check should have refused this configuration"
-        );
-        Err(config_refusal(
-            TOOL,
-            "this credential cannot read every session this recall reads; ask the operator \
-             to check the serve's layer and credential configuration",
-        ))
+        Ok(match self.resolve_scope(TOOL, scope)? {
+            Scoped::Own => RecallTarget::Own,
+            Scoped::Layer(handle) => RecallTarget::Layer(handle),
+        })
     }
 }
 
 /// What a recall reads (see [`LamboServer::recall_target`]).
-enum RecallTarget {
+enum RecallTarget<'a> {
     /// This session alone.
     Own,
     /// This session and its layers.
     Stack,
-    /// One layer alone, held live for the call.
-    Layer(LiveLayer),
+    /// One layer alone, looked up when it is read.
+    Layer(&'a LayerHandle),
 }
 
 /// The deployment preconditions of a recall by image (`image`) or by a

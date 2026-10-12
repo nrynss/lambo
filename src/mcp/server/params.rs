@@ -267,6 +267,11 @@ pub struct InspectParams {
     /// Hops out from the focus (default 2, max 5).
     #[schemars(range(min = 0, max = 5))]
     pub depth: Option<usize>,
+    /// Optional: the session to inspect in. Omit it for this session; name
+    /// one of its layers (as `get_info` lists them) to inspect a concept
+    /// there, such as a recall hit from that layer, whose id belongs to it.
+    #[schemars(length(max = 16_384))]
+    pub scope: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]

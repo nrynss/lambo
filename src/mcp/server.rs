@@ -490,9 +490,11 @@ impl ServerHandler for LamboServer {
                 " lambo_recall in session '{session}' also searches its shared layers: {layers}. \
                  Every recall hit names the session it is from (structuredContent \
                  hits[].session, and 'from <session>' in a layer hit's block), and its id \
-                 belongs to that session. Pass scope = \"{first}\" to lambo_recall to read that \
-                 layer alone, or scope = \"{session}\" for this session alone. Every other \
-                 tool, and every write, acts on session '{session}' only.",
+                 belongs to that session: pass the same scope (scope = \"{first}\") to \
+                 lambo_inspect to inspect a hit from that layer. Pass scope = \"{first}\" to \
+                 lambo_recall to read that layer alone, or scope = \"{session}\" for this \
+                 session alone. Every other tool, and every write, acts on session \
+                 '{session}' only.",
                 session = self.mem.session().0,
                 layers = names.join(", "),
                 first = names[0],
