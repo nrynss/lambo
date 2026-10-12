@@ -28,16 +28,13 @@ Containment is expressed once, as a `Hierarchical` edge from parent to child
 (`lambo derive --parent-of`). Everything else is a `record-action` edge pointing
 out of the action node.
 
-That split is not cosmetic. Blast radius counts, for a node, the concepts whose
-**only** inbound structural edge comes from it. Give a subnet both a hierarchy
-parent and a `--produces` edge from the action that created it and the subnet
-stops counting toward either, silently. Do that across the tier and
-`VPC-Enterprise-Prod` never clears Stage 3, never becomes Canonical, and the
-load-bearing-pillar warning the whole demo turns on simply never renders, with
-nothing anywhere reporting an error. `check_single_source` refuses the hierarchy
-half of that mistake; the actions below avoid the other half by naming the tier
-root in `--depends-on` rather than re-producing resources the derive step has
-already placed.
+Blast radius counts the concepts that depend on a node (#36): its
+`--parent-of` children, and every action that names it in `--depends-on`. A
+`--produces` or `--modifies` edge records where something came from and counts
+for nothing. So the subnets, groups and bindings count toward
+`VPC-Enterprise-Prod` as its children, and the actions below count toward the
+tier root by naming it in `--depends-on`. Lambo itself refuses to give a
+concept a second `--parent-of` parent: the hierarchy is a tree.
 
 Usage:
 
@@ -80,7 +77,6 @@ from _lambo import (  # noqa: E402
     account_binding,
     add_common_args,
     add_lambo_args,
-    check_single_source,
     derived,
     find_instance,
     find_secret,
@@ -225,8 +221,8 @@ def _peer_label(peer: str) -> str:
     requires SSH ingress be restricted to it rather than 0.0.0.0/0. These
     concepts are rendered on the public judge portal by `lambo serve-web`,
     so the literal would publish a home IP address to every visitor. What
-    matters for blast radius is that the rule is scoped to one host, not
-    which host, so the label keeps the property and drops the value.
+    matters to a reader is that the rule is scoped to one host, not which
+    host, so the label keeps the property and drops the value.
 
     `scripts/aws-infra/README.md` makes the same argument for the account
     id. This is that rule applied to the graph rather than to the captures.
@@ -325,7 +321,6 @@ def derive_topology(lam: Lambo, net: Network) -> None:
     its siblings, which is the association a human operator would expect.
     """
     pairs = [(VPC_NAME, child) for child in VPC_CHILDREN]
-    check_single_source(pairs)
     out = lam.derive(
         AGENT_NETWORK,
         VPC_NAME,
@@ -342,9 +337,8 @@ def derive_account_bindings(lam: Lambo, net: Network) -> None:
 
     Two jobs. It records which account object each graph node actually is, so a
     reviewer can check the graph rather than trust it. And each binding is a
-    child that nothing else ever points at, which is what gives its parent a
-    blast radius that survives the cross-tier dependency edges the app-data
-    agent adds in the next script.
+    `--parent-of` child, so it is one of its parent's dependents and counts
+    toward the parent's blast radius.
 
     The secret is deliberately absent: its identifier is an ARN, and an ARN's
     colons cannot appear on the CHILD end of `--parent-of` (the first colon is
@@ -353,7 +347,6 @@ def derive_account_bindings(lam: Lambo, net: Network) -> None:
     names = [VPC_NAME, *VPC_CHILDREN]
     bindings = [(name, account_binding(name, net.ids[name])) for name in names]
     pairs = [(name, binding) for name, binding in bindings]
-    check_single_source(pairs)
     first = bindings[0][1]
     out = lam.derive(
         AGENT_NETWORK,
@@ -385,7 +378,6 @@ def derive_vpc_invariants(lam: Lambo, net: Network) -> None:
         nat = f"{VPC_NAME} has no NAT gateway, by design"
 
     pairs = [(VPC_NAME, cidr), (VPC_NAME, nat)]
-    check_single_source(pairs)
     out = lam.derive(
         AGENT_NETWORK,
         cidr,
@@ -401,10 +393,10 @@ def derive_vpc_invariants(lam: Lambo, net: Network) -> None:
 def derive_security_rules(lam: Lambo, net: Network) -> None:
     """Every discovered rule as a constraint under its security group.
 
-    This is what gives `SG-Base-VPC` a blast radius of its own rather than only
-    an inbound degree. The rules are the part of the group that would be lost
-    with it, so counting them as dependents is the honest reading, not a padded
-    one.
+    The rules are `--parent-of` children of their group, so they count toward
+    `SG-Base-VPC`'s blast radius beside the workloads that depend on it. They
+    are the part of the group that would be lost with it, so counting them as
+    dependents is the honest reading, not a padded one.
     """
     usable: list[tuple[str, str]] = []
     for sg_name, text in net.rules:
@@ -421,7 +413,6 @@ def derive_security_rules(lam: Lambo, net: Network) -> None:
         return
 
     pairs = [(sg_name, text) for sg_name, text in usable]
-    check_single_source(pairs)
     out = lam.derive(
         AGENT_NETWORK,
         usable[0][1],
@@ -456,7 +447,6 @@ def derive_exhibit(lam: Lambo, net: Network) -> None:
         return
     binding = account_binding(EC2_NAME, net.instance_id)
     pairs = [(SUBNET_PUBLIC_NAME, EC2_NAME), (EC2_NAME, binding)]
-    check_single_source(pairs)
     out = lam.derive(
         AGENT_NETWORK,
         EC2_NAME,
@@ -476,19 +466,17 @@ def derive_exhibit(lam: Lambo, net: Network) -> None:
 def record_actions(lam: Lambo, net: Network) -> None:
     """What the agent did, as `record-action` edges.
 
-    Read the `--produces` lists carefully before changing them. `--produces` and
-    `--modifies` write a `Causal` edge from the action into the named concept,
-    which makes the action a second structural source of that concept. For a
-    resource the derive step already placed under a hierarchy parent, that
-    removes it from the parent's blast radius. So the only things produced here
-    are the two concepts with no hierarchy parent: the tier root, and the
-    secret, which sits in Secrets Manager and not in the VPC. Everything else is
-    recorded as a dependency on the root, which points the other way and costs
-    nothing.
+    `--produces` and `--modifies` write a `Causal` edge from the action into
+    the named concept. That records provenance and counts toward no blast
+    radius (#36), so the only things produced here are the two concepts with no
+    hierarchy parent: the tier root, and the secret, which sits in Secrets
+    Manager and not in the VPC. Everything else is recorded as a
+    `--depends-on` on the root, which makes each action one of the root's
+    dependents.
 
     Each call is its own interaction, and that matters beyond tidiness: Stage 2
     of canonization wants at least three *distinct origin interactions* among a
-    node's inbound structural sources before it will promote anything.
+    node's dependents (other than its own) before it will promote anything.
     """
     steps: list[tuple[str, list[str], list[str]]] = [
         (

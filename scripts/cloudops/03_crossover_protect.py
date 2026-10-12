@@ -82,7 +82,7 @@ from _lambo import (  # noqa: E402
     indent,
     note,
     parse_blast_radius,
-    parse_outbound_neighbours,
+    parse_dependents,
     queried,
     require_boto3,
     require_sg,
@@ -223,7 +223,7 @@ class Verdict:
         if self.blast_radius > 0:
             out.append(f"{SG_BASE_NAME} has a blast radius of {self.blast_radius}")
         if self.dependents:
-            out.append(f"{len(self.dependents)} concept(s) hang off it and would be stranded")
+            out.append(f"{len(self.dependents)} concept(s) depend on it")
         return out
 
 
@@ -267,7 +267,7 @@ def run_guard(lam: Lambo, query: str, top_k: int) -> Verdict:
     say(indent(verdict.inspect_text))
     say()
     verdict.blast_radius = parse_blast_radius(verdict.inspect_text)
-    verdict.dependents = parse_outbound_neighbours(verdict.inspect_text)
+    verdict.dependents = parse_dependents(verdict.inspect_text)
     queried("inspect", SG_BASE_NAME, f"blast radius {verdict.blast_radius}")
     return verdict
 
@@ -292,7 +292,7 @@ def render_blocked(verdict: Verdict, target: Target, action: str) -> None:
         note(reason)
     if verdict.dependents:
         say()
-        step("what would have been stranded")
+        step("what depends on it")
         for name in verdict.dependents:
             note(name)
     say()
