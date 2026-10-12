@@ -196,8 +196,12 @@ pub enum EdgeType {
     Hierarchical,
     /// Two concepts are close in embedding space. Decays.
     Semantic,
-    /// The source asserts the opposite of the target. Informational only:
-    /// declares no dependence, support or blast, and does not decay.
+    /// The source asserts the opposite of the target (#19), directed
+    /// `newer assertion -> older assertion`, concept to concept.
+    /// Informational only: it declares no dependence, support or blast,
+    /// counts toward neither score density nor the edge bonus, and does not
+    /// decay. No product path writes it yet; the derive and record_action
+    /// write fields arrive with #19(b).
     Contradicts,
 }
 
@@ -205,6 +209,24 @@ impl EdgeType {
     /// Whether this edge type participates in weight decay (spec §5 table).
     pub const fn decays(self) -> bool {
         matches!(self, Self::CoOccurrence | Self::Semantic)
+    }
+
+    /// Whether an edge of this type counts toward a concept's score
+    /// `density` (spec §9): the incident-edge numerator and the session's
+    /// `max_incident` baseline. Every type does except `Contradicts`, so
+    /// being contradicted never raises the composite that feeds Stage 1
+    /// candidate selection, recall ranking or the GC score cut (#19).
+    pub const fn counts_toward_density(self) -> bool {
+        match self {
+            Self::Temporal
+            | Self::Derives
+            | Self::CoOccurrence
+            | Self::Causal
+            | Self::Dependency
+            | Self::Hierarchical
+            | Self::Semantic => true,
+            Self::Contradicts => false,
+        }
     }
 
     /// Which end of an edge of this type is the **dependent**: the concept
@@ -2018,6 +2040,24 @@ mod tests {
         assert!(!EdgeType::Hierarchical.decays());
         assert!(EdgeType::Semantic.decays());
         assert!(!EdgeType::Contradicts.decays());
+    }
+
+    /// #19: every edge type counts toward score density except
+    /// `Contradicts`, which must never raise a concept's composite.
+    #[test]
+    fn edge_type_density_table() {
+        for ty in [
+            EdgeType::Temporal,
+            EdgeType::Derives,
+            EdgeType::CoOccurrence,
+            EdgeType::Causal,
+            EdgeType::Dependency,
+            EdgeType::Hierarchical,
+            EdgeType::Semantic,
+        ] {
+            assert!(ty.counts_toward_density(), "{ty:?}");
+        }
+        assert!(!EdgeType::Contradicts.counts_toward_density());
     }
 
     /// #36: only `Dependency` (source rests on target) and `Hierarchical`
