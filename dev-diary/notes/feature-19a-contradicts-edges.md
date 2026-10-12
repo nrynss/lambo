@@ -1,24 +1,73 @@
 # #19(a): explicit contradiction edge groundwork
 
-Approved Phase0 design: issue19 comments6127049450/6127133919; issue20 comments6127052910/6127137552. Implementation based on422ed101, branch `codex/19-contradicts-edges`.
+Approved Phase 0 design: issue #19 comments 6127049450 (design) and
+6127133919 (approval); issue #20 comments 6127052910 and 6127137552.
+Started on base `422ed101`, branch `codex/19-contradicts-edges`, then merged
+with `origin/main` at `92c0f4af` (#139, the recall anchor fix). The merge was
+clean.
 
 ## Decisions
 
-- Add public `EdgeType::Contradicts`, directed concept to concept. PascalCase serde/SQL naming follows every existing edge variant; the original lowercase suggestion was superseded during Phase0. Existing unconstrained TEXT/STRING edge columns and unique(source,target,edge_type) accept it without DDL changes.
-- `dependent_end` explicitly returns None. It adds no dependence/support/blast, no Solo action/recurrence support and no GC Resource score-cut protection. Preserve the independently defined GC relation and structural cycle edge set. Explicit opposition does not decay and receives zero additive edge bonus; existing graph topology density still counts incident edges, as for provenance/association.
-- This PR adds an edge only. No new MCP/CLI writer fields, typed resolver, detector, recall annotation or supersession; #19(b) waits #36 PR4. #20 additionally waits #36 PR2/3 and the rest of #19.
-- Extending the shared synthetic #36 dependent case checks both contradiction directions across graph recall/inspect and all store harnesses instead of building a divergent case. Dedicated GC, graph endpoint/replay/snapshot and Solo tests cover the other structural sets. Offline PG codec/SQL tests cover both shared dialects; live regressions remain manual and ignored.
-- Older binaries cannot decode Contradicts rows/snapshots. Exhaustive public EdgeType matches need another arm; CHANGELOG and mirrored API docs explicitly describe both compatibility limits.
+- Add public `EdgeType::Contradicts`, directed concept to concept
+  (`newer -> older`). Serde and the SQL codec use the PascalCase name
+  `Contradicts`, like every other edge variant; the original issue's
+  lowercase suggestion was superseded in Phase 0. SQLite stores the serde
+  name; Postgres and Cockroach share `store::pg::codec`. Edge columns are
+  unconstrained TEXT/STRING with `UNIQUE (source, target, edge_type)` in
+  every migration, so no DDL change.
+- `dependent_end` returns `None`. The edge adds no dependence, Stage 2
+  support, blast radius, Solo action or recurrence support, and no GC
+  Resource protection. The GC's own structural set
+  (`recall::format::STRUCTURAL_EDGE_TYPES`), recall traversal
+  (`recall::expand::TRAVERSAL_ORDER`) and the web graph's `is_structural`
+  are explicit lists and stay unchanged, so `Contradicts` is outside all of
+  them.
+- It does not decay and has a zero additive edge bonus. The general
+  topology-density term still counts incident edges, as it does for
+  provenance and association.
+- Edge only. No MCP or CLI write field, resolver, detector, recall
+  annotation or supersession: #19(b) waits for #36 PR 4.
+- The shared synthetic #36 dependents case gains concept `Q` with
+  contradictions in both directions, so the graph recall, inspect,
+  MemoryStore, SQLite and (manual, ignored) live PG/Cockroach harnesses all
+  inherit the exclusion and replay checks. Dedicated tests cover the GC score
+  cut, the graph endpoint matrix, natural-key replay and snapshots, and Solo
+  support.
+- `EdgeType` is not `#[non_exhaustive]`, so the variant is a library API
+  break (CHANGELOG, Breaking). Older binaries cannot decode rows or
+  snapshots that contain it.
 
-## Verification and review
+## Golden
 
-- Initial focused dependents case:4passed,0failed,0ignored (graph recall, inspect, MemoryStore, SQLite).
-- First focused contradiction run:3passed,1failed,0ignored. GC assertion incorrectly expected an empty inbound_sources map; this function retains empty source-list entries. Fixed the assertion to check both endpoints, preserving product logic.
-- First full SQLite run:2094passed,1failed,5ignored. The sole failure was the shared synthetic inspect golden: adding Q to the case makes the generic neighbourhood list show its contradiction. Updated exactly two lines in `fixtures/inspect-dependents-golden.txt`: the `Contradicts` heading and `<- concept Q [Resource]`. The dependent list, count8 and blast warning are unchanged; no blanket golden regeneration. The cloudops parser self-test passed with this delta.
-- Full lane gate running; final counts and review history will be appended before handoff. No live Postgres/Cockroach services used; forbidden PG test source not read. No manifest, lockfile, workflow, version or migration changes.
+`fixtures/inspect-dependents-golden.txt` gains exactly two lines: a
+`Contradicts` heading and `<- concept Q [Resource]` in the hop listing.
+Inspect lists each neighbour once, by the first incident edge, so the mutual
+pair shows one direction. The dependents list, its count (8) and the blast
+warning are unchanged. Main did not touch this golden between `422ed101`
+and `92c0f4af`. The cloudops parser self-test
+(`python3 scripts/cloudops/_lambo.py`) passes against it, and
+`inspect_lists_the_dependents_it_counts` now asserts `Q` is not a dependent.
+
+## Verification (after the merge)
+
+- `cargo fmt --check`: pass.
+- `cargo clippy --all-targets -- -D warnings` on `store-sqlite,fixtures`,
+  `ship,fixtures`, `--no-default-features store-postgres`,
+  `store-postgres,store-sqlite,fixtures`, `embed-eg2`, `recall-elastic`,
+  `embed-candle`: all pass.
+- `cargo test --features store-sqlite,fixtures`: 2192 passed, 0 failed,
+  7 ignored (lib 2112/0/5).
+- `cargo test --no-default-features --features store-postgres`: 1158
+  passed, 0 failed, 17 ignored.
+- `cargo test --no-run --no-default-features --features store-sqlite`,
+  `cargo check --no-default-features`, `scripts/docs/check-mirror-drift.sh`:
+  pass.
+- No live Postgres or Cockroach run. No manifest, lockfile, workflow,
+  version or migration change.
 
 ## Follow-ups
 
-- #19(b) shared resolver/writer surfaces after #36 PR4.
-- #19(c) detection, revalidation, bounded companion recall and absolute layer floors.
-- #20 supersession on #36 PR2/3's shared predicate/fixture; scoped general challenge workflow after #33 PR4.
+- #19(b): write fields on the shared strict resolver after #36 PR 4.
+- #19(c): detector, revalidation, bounded companion recall, absolute layer
+  floors.
+- #20: supersession on #36 PR 2/3's shared predicate and fixture.
