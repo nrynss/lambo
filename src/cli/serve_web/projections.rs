@@ -38,9 +38,11 @@ pub(super) fn is_structural(ty: EdgeType) -> bool {
 pub(super) fn structural_dependents(g: &Graph, node: NodeId) -> (Vec<InspectDependent>, bool) {
     let mut deps: Vec<InspectDependent> = Vec::new();
     let mut seen: HashSet<NodeId> = HashSet::new();
+    let mut listed: HashMap<NodeId, usize> = HashMap::new();
     let mut truncated = false;
-    // incident_edges returns id-ascending (deterministic); the first edge
-    // declaring a dependent decides its edge label.
+    // incident_edges returns id-ascending (deterministic). A dependent that
+    // is both a `Dependency` source and a `Hierarchical` child is labelled
+    // `Dependency`, as `surface::neighbourhood` labels it.
     for edge in g.incident_edges(node) {
         let Some((pillar, other)) = edge.dependence() else {
             continue;
@@ -55,12 +57,18 @@ pub(super) fn structural_dependents(g: &Graph, node: NodeId) -> (Vec<InspectDepe
             continue;
         };
         if !seen.insert(other) {
+            if edge.edge_type == EdgeType::Dependency
+                && let Some(&i) = listed.get(&other)
+            {
+                deps[i].edge = format!("{:?}", EdgeType::Dependency);
+            }
             continue;
         }
         if deps.len() >= MAX_INSPECT_NODES {
             truncated = true;
-            break;
+            continue;
         }
+        listed.insert(other, deps.len());
         deps.push(InspectDependent {
             content: c.content.clone(),
             concept_type: c.concept_type,

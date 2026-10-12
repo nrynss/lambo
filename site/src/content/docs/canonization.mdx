@@ -73,7 +73,7 @@ One agent writing the same idea five times in one minute produces one distinct s
 
 ### Stage 3, Canonical
 
-[`src/canon/stage3.rs`](https://github.com/nrynss/lambo/blob/main/src/canon/stage3.rs). Consequence. Blast radius is the number of concepts that declare a dependence on this one, one hop out:
+[`src/canon/stage3.rs`](https://github.com/nrynss/lambo/blob/main/src/canon/stage3.rs). Consequence. Blast radius is the number of its direct dependents: the concepts that depend on it through a `Dependency` edge, plus its `Hierarchical` children:
 
 $$
 B(c) = \big|\{\, d \ne c : d \xrightarrow{\text{Dependency}} c \;\vee\; c \xrightarrow{\text{Hierarchical}} d \,\}\big|, \qquad B(c) > 5
