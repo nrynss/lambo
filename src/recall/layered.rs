@@ -12,37 +12,51 @@
 //!
 //! 1. **Admission.** Every hit of a list without a floor is a candidate (the
 //!    caller's own session). A hit of a list with a floor is a candidate
-//!    only with keyword evidence (a BM25 leg score) or vector evidence at
-//!    cosine `>=` the floor, read from the session's phase-1 leg provenance
-//!    (`DetailedRecall::legs`). A hit that arrived only through traversal
-//!    expansion has no leg score and is not admitted from a layer. A
-//!    **forced** hit (a Conflict, Hot or Reservation annotation) is always
-//!    admitted.
+//!    only with evidence: a keyword (BM25) leg score, a vector leg score at
+//!    cosine `>=` the floor (both from the session's phase-1 leg
+//!    provenance, `DetailedRecall::legs`), or an **anchored** answer: the
+//!    session answered a dependency question by traversal from an anchor
+//!    the query names (its `traversal` response annotation), so every
+//!    dependent it returned is admitted. A hit that arrived only through
+//!    phase-2 expansion of a blended recall has no leg score and is not
+//!    admitted from a layer. **Nothing else passes a floor**, warnings
+//!    included: a busy shared session's hot or reserved concepts must not
+//!    crowd the caller's answer on that alone.
 //! 2. **Rank key.** Each list is already in its session's own final order.
 //!    A hit at 1-based position `r` of a list with weight `w` gets the key
 //!    `w / r`. `r` is the position in the session's own list, before any
 //!    floor: a layer whose top hits fail its floor has shown weak relevance,
 //!    and its later hits do not move up for it.
-//! 3. **Dedupe by tier order.** Two candidates from different lists are the
-//!    same memory when their canonical keys are equal, or both carry holder
-//!    vectors with cosine `>=` the dedupe threshold. The copy from the
-//!    nearer tier (earlier in the slice) is kept; it takes the larger of the
-//!    two keys, so a memory is never lost because its nearer copy ranked
-//!    low, and it is forced if either copy was. The dropped copy leaves the
-//!    hits and the context, its warning lines stay in `warnings`, and the
-//!    kept block's meta names it (`also <id> in <session>`).
-//! 4. **Order and cut.** Candidates sort by key descending, then tier
-//!    ascending (ties go to the nearer tier), then position ascending: a
-//!    total order, so the merge is deterministic. The first `top_k`
-//!    non-forced candidates are emitted, plus every forced one wherever it
-//!    sorts.
-//! 5. **One budget.** Every emitted hit's block is re-rendered (a layer
+//! 3. **Order, cut and dedupe.** Candidates are walked by key descending,
+//!    then tier ascending (ties go to the nearer tier), then position
+//!    ascending: a total order, so the merge is deterministic. A candidate
+//!    that is the same memory as an already emitted hit joins that hit's
+//!    group instead of being emitted: same memory means an equal canonical
+//!    key, or holder vectors at cosine `>=` the dedupe threshold, compared
+//!    against **every** member of the group (so dedupe is transitive), and
+//!    a group takes at most one copy per tier. The group is shown as its
+//!    nearest tier's copy, at the position of its best-ranked copy, so a
+//!    memory is never lost because its nearer copy ranked low; the other
+//!    copies are named in its meta (`also <id> in <session>`), leave the
+//!    hits and the context, and keep their warning lines in `warnings`.
+//!    A copy cut by `top_k` before its group was emitted still joins it
+//!    when their canonical keys are equal (by key only: vectors are compared
+//!    against emitted groups alone, which bounds the work).
+//!    Otherwise the candidate is emitted while fewer than `top_k`
+//!    non-forced hits are, or when it is **forced** (a Conflict, Hot or
+//!    Reservation annotation, design 2.2). Forcing only lifts the `top_k`
+//!    cut, never a floor. The set is design 2.2's and is wider than
+//!    assembly's own: assembly forces hot-list payloads (Conflict and the
+//!    Hot kinds), and reservations only in cold mode.
+//! 4. **One budget.** Every emitted hit's block is re-rendered (a layer
 //!    hit's meta gains `from <session>`, and its truncation marker gets
 //!    `(scope <session>)`), `format::fit_blocks` runs once over the merged
 //!    list, and `DetailedRecall::mark_context` resets every per-session
-//!    context flag
-//!    from that one cut. Each session's own `context` is ignored.
-//! 6. **Degradation.** A list whose recall is unavailable contributes no
+//!    context flag from that one cut. Each session's own `context` is
+//!    ignored. A session that answered by traversal gets its headline
+//!    recomputed from the dependents of its own that the merged context
+//!    renders (T9-R1-N4).
+//! 5. **Degradation.** A list whose recall is unavailable contributes no
 //!    hits; the answer gets one `layer_unavailable` response annotation and
 //!    one warning per such list, naming it and the sessions the results
 //!    came from. A layer never fails the merge.
@@ -51,6 +65,13 @@
 //! `[<session>] `. The caller's own session's warnings are unchanged, so a
 //! merge whose layers all degrade answers exactly the caller's own recall
 //! plus the degradation lines.
+//!
+//! ## Cost
+//!
+//! Keys are matched through a hash map. Holder-vector comparisons are
+//! bounded by [`MAX_VECTOR_DEDUPE_PAIRS`] per merge (a `top_k` near the
+//! 2048 limit would otherwise mean millions of 1024-wide dot products);
+//! past it, only canonical keys dedupe.
 //!
 //! ## Calibration
 //!
@@ -100,8 +121,9 @@ pub(crate) struct TierRecall {
 #[derive(Clone, Debug)]
 pub(crate) struct TierList {
     pub(crate) session: SessionId,
-    /// `w` in the `w / rank` key. Finite and non-negative (checked by the
-    /// caller).
+    /// `w` in the `w / rank` key. Finite and positive (the library
+    /// boundary refuses anything else). A list of weight 0 would rank all
+    /// its hits last and still fill free `top_k` slots.
     pub(crate) weight: f64,
     /// The per-layer floor (rule 1); `None` for the caller's own session.
     pub(crate) floor: Option<f64>,
@@ -119,6 +141,9 @@ pub(crate) struct MergeParams {
     /// Cosine at or above which two holder vectors are the same memory (the
     /// caller's `semantic_match_threshold`).
     pub(crate) dedupe_threshold: f64,
+    /// The most holder-vector comparisons dedupe makes
+    /// ([`MAX_VECTOR_DEDUPE_PAIRS`] outside tests).
+    pub(crate) vector_pairs: usize,
 }
 
 /// Another tier's copy of a hit, dropped by dedupe in favour of the nearer
@@ -167,17 +192,29 @@ pub struct LayeredRecall {
     pub warnings: Vec<String>,
     /// The layers whose recall was unavailable, in tier order.
     pub unavailable_layers: Vec<SessionId>,
-    /// The merged presentation model (hits, annotations, context flags,
-    /// legs), for the serve wire and the call ledger (#33 PR 3). Its
-    /// `hits` and `detailed` are parallel to [`Self::hits`].
+    /// The merged presentation model (hits, annotations, context flags),
+    /// for the serve wire and the call ledger (#33 PR 3). Its `hits` and
+    /// `detailed` are parallel to [`Self::hits`]. Its `legs` map holds the
+    /// caller's own session's hits only: node ids are unique within a
+    /// session, not across sessions (the #33 split replicates identity
+    /// nodes), so per-hit legs for every session are in [`Self::hit_legs`].
     #[allow(dead_code)] // read by the serve wire and ledger in #33 PR 3
     pub(crate) detail: DetailedRecall,
+    /// Phase-1 leg scores per merged hit, parallel to [`Self::hits`]; `None`
+    /// for a hit with no leg score (expansion or traversal).
+    #[allow(dead_code)] // read by the call ledger in #33 PR 3
+    pub(crate) hit_legs: Vec<Option<LegScores>>,
 }
 
 impl LayeredRecall {
     /// An unlayered recall's answer, unchanged: every hit is `session`'s,
     /// and `context` and `warnings` are the recall's own.
     pub(crate) fn single(session: &SessionId, detail: DetailedRecall) -> Self {
+        let hit_legs = detail
+            .hits
+            .iter()
+            .map(|h| detail.legs.get(&h.node_id).copied())
+            .collect();
         let hits = detail
             .hits
             .iter()
@@ -196,13 +233,18 @@ impl LayeredRecall {
             warnings: detail.warnings.clone(),
             unavailable_layers: Vec::new(),
             detail,
+            hit_legs,
         }
     }
 }
 
-/// A hit is forced (kept beyond `top_k`, and past a floor) when it carries
-/// a Conflict, Hot or Reservation annotation (design 2.2, matching
-/// assembly's own forced members).
+/// Most holder-vector comparisons one merge makes before dedupe falls back
+/// to canonical keys alone (see the module docs' Cost section). 65,536
+/// comparisons of 1024-wide vectors is about 67 M multiply-adds.
+pub(crate) const MAX_VECTOR_DEDUPE_PAIRS: usize = 65_536;
+
+/// A hit is forced (kept beyond `top_k`, never past a floor) when it
+/// carries a Conflict, Hot or Reservation annotation (design 2.2).
 fn is_forced(d: &DetailedHit) -> bool {
     d.annotations.iter().any(|a| {
         matches!(
@@ -212,24 +254,23 @@ fn is_forced(d: &DetailedHit) -> bool {
     })
 }
 
-/// Rule 1's evidence test for a layer hit.
+/// Whether a session's recall answered a dependency question by traversal
+/// (its anchor resolved in that session's graph).
+fn is_anchored(recall: &DetailedRecall) -> bool {
+    recall
+        .response_annotations
+        .iter()
+        .any(|a| a.kind == AnnotationKind::Traversal)
+}
+
+/// Rule 1's leg-evidence test for a layer hit.
 fn has_evidence(legs: Option<&LegScores>, floor: f64) -> bool {
     legs.is_some_and(|l| l.keyword.is_some() || l.vector.is_some_and(|v| v >= floor))
 }
 
-/// Rule 3's sameness test.
-fn same_memory(a: &HitIdentity, b: &HitIdentity, threshold: f64) -> bool {
-    if let (Some(ka), Some(kb)) = (&a.canonical_key, &b.canonical_key)
-        && ka == kb
-    {
-        return true;
-    }
-    match (&a.embedding, &b.embedding) {
-        (Some(va), Some(vb)) if va.len() == vb.len() && !va.is_empty() => {
-            f64::from(crate::embed::cosine(va, vb)) >= threshold
-        }
-        _ => false,
-    }
+/// Holder-vector sameness.
+fn same_vector(a: &[f32], b: &[f32], threshold: f64) -> bool {
+    a.len() == b.len() && !a.is_empty() && f64::from(crate::embed::cosine(a, b)) >= threshold
 }
 
 /// The `[<session>] ` prefix on a layer's warning lines.
@@ -238,14 +279,31 @@ fn prefixed(session: &SessionId, line: &str) -> String {
 }
 
 /// A candidate of the merge.
+#[derive(Clone, Copy)]
 struct Candidate {
     tier: usize,
     /// 0-based position in its session's own list.
     pos: usize,
     key: f64,
     forced: bool,
-    /// Farther-tier copies merged into this one: `(tier, pos)`.
+}
+
+/// An emitted hit and the copies of the same memory merged into it.
+struct Group {
+    /// The shown copy: the nearest tier's.
+    shown: (usize, usize),
+    /// The other copies, in the order they joined.
     also: Vec<(usize, usize)>,
+}
+
+impl Group {
+    fn members(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
+        std::iter::once(self.shown).chain(self.also.iter().copied())
+    }
+
+    fn has_tier(&self, tier: usize) -> bool {
+        self.members().any(|(t, _)| t == tier)
+    }
 }
 
 /// Merge `lists` (tier order, the caller's own session first) into one
@@ -254,128 +312,172 @@ pub(crate) fn merge<F>(lists: &[TierList], params: MergeParams, token_fn: F) -> 
 where
     F: Fn(&str) -> usize,
 {
+    let recall_of = |tier: usize| lists[tier].recall.as_ref();
+    let identity = |(tier, pos): (usize, usize)| -> Option<&HitIdentity> {
+        recall_of(tier).and_then(|t| t.identities.get(pos))
+    };
+
     // Rules 1 and 2: admission and keys.
-    let mut admitted: Vec<Candidate> = Vec::new();
+    let mut candidates: Vec<Candidate> = Vec::new();
     for (tier, list) in lists.iter().enumerate() {
         let Some(t) = &list.recall else { continue };
         debug_assert_eq!(t.recall.hits.len(), t.recall.detailed.len());
         debug_assert_eq!(t.recall.hits.len(), t.identities.len());
+        let anchored = is_anchored(&t.recall);
         let n = t.recall.hits.len().min(t.recall.detailed.len());
         for pos in 0..n {
             let hit = &t.recall.hits[pos];
-            let forced = is_forced(&t.recall.detailed[pos]);
             let admit = match list.floor {
                 None => true,
-                Some(floor) => forced || has_evidence(t.recall.legs.get(&hit.node_id), floor),
+                Some(floor) => anchored || has_evidence(t.recall.legs.get(&hit.node_id), floor),
             };
             if admit {
-                admitted.push(Candidate {
+                candidates.push(Candidate {
                     tier,
                     pos,
                     key: list.weight / (pos as f64 + 1.0),
-                    forced,
-                    also: Vec::new(),
+                    forced: is_forced(&t.recall.detailed[pos]),
                 });
             }
         }
     }
 
-    // Rule 3: dedupe in tier order, nearer copies first. `admitted` is
-    // already in (tier, pos) order.
-    let identity = |c: &Candidate| -> Option<&HitIdentity> {
-        lists[c.tier]
-            .recall
-            .as_ref()
-            .and_then(|t| t.identities.get(c.pos))
-    };
-    let mut kept: Vec<Candidate> = Vec::new();
-    for cand in admitted {
-        let dup = identity(&cand).and_then(|ci| {
-            kept.iter().position(|k| {
-                k.tier < cand.tier
-                    && identity(k).is_some_and(|ki| same_memory(ki, ci, params.dedupe_threshold))
-            })
-        });
-        match dup {
-            Some(i) => {
-                let k = &mut kept[i];
-                if cand.key > k.key {
-                    k.key = cand.key;
-                }
-                k.forced |= cand.forced;
-                k.also.push((cand.tier, cand.pos));
-            }
-            None => kept.push(cand),
-        }
-    }
-
-    // Rule 4: total order, then the top_k cut with forced members kept.
-    kept.sort_by(|a, b| {
+    // Rule 3: walk in merged order; dedupe against emitted groups; cut.
+    candidates.sort_by(|a, b| {
         b.key
             .total_cmp(&a.key)
             .then(a.tier.cmp(&b.tier))
             .then(a.pos.cmp(&b.pos))
     });
+    let mut groups: Vec<Group> = Vec::new();
+    let mut by_key: HashMap<&str, Vec<usize>> = HashMap::new();
+    let mut cut_by_key: HashMap<&str, Vec<(usize, usize)>> = HashMap::new();
+    let mut vector_budget = params.vector_pairs;
     let mut slots = 0usize;
-    let emitted: Vec<Candidate> = kept
-        .into_iter()
-        .filter(|c| {
-            if c.forced {
-                return true;
+    for c in candidates {
+        let member = (c.tier, c.pos);
+        let ci = identity(member);
+        let mut found = ci
+            .and_then(|ci| ci.canonical_key.as_deref())
+            .and_then(|k| by_key.get(k))
+            .and_then(|gs| gs.iter().copied().find(|&g| !groups[g].has_tier(c.tier)));
+        if found.is_none()
+            && let Some(cv) = ci.and_then(|ci| ci.embedding.as_deref())
+        {
+            'groups: for (g, group) in groups.iter().enumerate() {
+                if group.has_tier(c.tier) {
+                    continue;
+                }
+                for m in group.members() {
+                    let Some(mv) = identity(m).and_then(|i| i.embedding.as_deref()) else {
+                        continue;
+                    };
+                    if vector_budget == 0 {
+                        break 'groups;
+                    }
+                    vector_budget -= 1;
+                    if same_vector(cv, mv, params.dedupe_threshold) {
+                        found = Some(g);
+                        break 'groups;
+                    }
+                }
             }
-            if slots >= params.top_k {
-                return false;
+        }
+        let g = match found {
+            Some(g) => {
+                let group = &mut groups[g];
+                if c.tier < group.shown.0 {
+                    let previous = std::mem::replace(&mut group.shown, member);
+                    group.also.push(previous);
+                } else {
+                    group.also.push(member);
+                }
+                g
             }
-            slots += 1;
-            true
-        })
-        .collect();
+            None => {
+                if !c.forced {
+                    if slots >= params.top_k {
+                        // Cut, but remembered by key: a forced farther copy
+                        // emitted later is still shown as this nearer one.
+                        if let Some(k) = ci.and_then(|ci| ci.canonical_key.as_deref()) {
+                            cut_by_key.entry(k).or_default().push(member);
+                        }
+                        continue;
+                    }
+                    slots += 1;
+                }
+                groups.push(Group {
+                    shown: member,
+                    also: Vec::new(),
+                });
+                groups.len() - 1
+            }
+        };
+        if let Some(k) = ci.and_then(|ci| ci.canonical_key.as_deref()) {
+            let entry = by_key.entry(k).or_default();
+            if !entry.contains(&g) {
+                entry.push(g);
+            }
+            if let Some(cut) = cut_by_key.get_mut(k) {
+                let group = &mut groups[g];
+                cut.retain(|&m| {
+                    if group.has_tier(m.0) {
+                        return true;
+                    }
+                    if m.0 < group.shown.0 {
+                        let previous = std::mem::replace(&mut group.shown, m);
+                        group.also.push(previous);
+                    } else {
+                        group.also.push(m);
+                    }
+                    false
+                });
+            }
+        }
+    }
 
-    // Every (tier, pos) whose copy reached the answer, itself or as `also`.
+    // Every (tier, pos) whose copy reached the answer, shown or as `also`.
     let mut contributed: Vec<Vec<bool>> = lists
         .iter()
         .map(|l| vec![false; l.recall.as_ref().map_or(0, |t| t.recall.hits.len())])
         .collect();
-    for c in &emitted {
-        contributed[c.tier][c.pos] = true;
-        for &(t, p) in &c.also {
+    for g in &groups {
+        for (t, p) in g.members() {
             contributed[t][p] = true;
         }
     }
 
-    // Rule 5: re-render and cut once.
-    let mut hits = Vec::with_capacity(emitted.len());
-    let mut detailed = Vec::with_capacity(emitted.len());
-    let mut blocks = Vec::with_capacity(emitted.len());
-    let mut sessions = Vec::with_capacity(emitted.len());
-    let mut alsos = Vec::with_capacity(emitted.len());
-    let mut legs = HashMap::new();
-    for c in &emitted {
-        let list = &lists[c.tier];
-        let t = list
-            .recall
-            .as_ref()
-            .expect("emitted from an available tier");
-        let hit = &t.recall.hits[c.pos];
-        let mut d = t.recall.detailed[c.pos].clone();
+    // Rule 4: re-render and cut once.
+    let mut hits = Vec::with_capacity(groups.len());
+    let mut detailed = Vec::with_capacity(groups.len());
+    let mut blocks = Vec::with_capacity(groups.len());
+    let mut sessions = Vec::with_capacity(groups.len());
+    let mut tiers = Vec::with_capacity(groups.len());
+    let mut alsos = Vec::with_capacity(groups.len());
+    let mut hit_legs = Vec::with_capacity(groups.len());
+    let mut own_legs = HashMap::new();
+    for g in &groups {
+        let (tier, pos) = g.shown;
+        let list = &lists[tier];
+        let t = recall_of(tier).expect("shown from an available tier");
+        let hit = &t.recall.hits[pos];
+        let mut d = t.recall.detailed[pos].clone();
         d.included_in_context = false;
         d.truncated_in_context = false;
-        let also: Vec<LayerCopy> = c
+        let also: Vec<LayerCopy> = g
             .also
             .iter()
-            .map(|&(tier, pos)| LayerCopy {
-                session: lists[tier].session.clone(),
-                node_id: lists[tier]
-                    .recall
-                    .as_ref()
+            .map(|&(at, ap)| LayerCopy {
+                session: lists[at].session.clone(),
+                node_id: recall_of(at)
                     .expect("merged from an available tier")
                     .recall
-                    .hits[pos]
+                    .hits[ap]
                     .node_id,
             })
             .collect();
         let mut meta = Vec::new();
-        if c.tier > 0 {
+        if tier > 0 {
             meta.push(format!("from {}", list.session));
         }
         meta.extend(
@@ -383,22 +485,28 @@ where
                 .map(|a| format!("also {} in {}", format::short_id(a.node_id), a.session)),
         );
         let lines: Vec<String> = d.annotations.iter().map(|a| a.text.clone()).collect();
-        let scope = (c.tier > 0).then(|| list.session.to_string());
+        let scope = (tier > 0).then(|| list.session.to_string());
         blocks.push(block_with_meta(hit, &lines, &meta, scope));
-        if let Some(l) = t.recall.legs.get(&hit.node_id) {
-            legs.insert(hit.node_id, *l);
+        let legs = t.recall.legs.get(&hit.node_id).copied();
+        if tier == 0
+            && let Some(l) = legs
+        {
+            own_legs.insert(hit.node_id, l);
         }
+        hit_legs.push(legs);
         hits.push(hit.clone());
         detailed.push(d);
         sessions.push(list.session.clone());
+        tiers.push(tier);
         alsos.push(also);
     }
     let fitted = format::fit_blocks(&blocks, params.max_tokens, token_fn);
     let truncation = DetailedRecall::mark_context(&mut detailed, &fitted);
+    let rendered = fitted.rendered();
 
-    // Warnings and response annotations, tier by tier (rule 6 and the
-    // prefix rule). A hit's lines leave `warnings` only when no copy of it
-    // reached the answer.
+    // Warnings and response annotations, tier by tier (rule 5, the prefix
+    // rule and the traversal headline). A hit's lines leave `warnings` only
+    // when no copy of it reached the answer.
     let mut warnings = Vec::new();
     let mut response_annotations = Vec::new();
     let mut unavailable = Vec::new();
@@ -418,14 +526,25 @@ where
                 }
             }
         }
+        let mut annotations = t.recall.response_annotations.clone();
+        for a in annotations
+            .iter_mut()
+            .filter(|a| a.kind == AnnotationKind::Traversal)
+        {
+            let count = tiers[..rendered].iter().filter(|&&x| x == tier).count();
+            let headline = crate::recall::dispatch::traversal_headline(count);
+            if let Some(line) = lines.iter_mut().find(|l| **l == a.text) {
+                *line = headline.clone();
+            }
+            a.text = headline;
+        }
         if tier == 0 {
             warnings.extend(lines);
-            response_annotations.extend(t.recall.response_annotations.iter().cloned());
+            response_annotations.extend(annotations);
         } else {
             warnings.extend(lines.iter().map(|l| prefixed(&list.session, l)));
             response_annotations.extend(
-                t.recall
-                    .response_annotations
+                annotations
                     .iter()
                     .map(|a| Annotation::new(a.kind, prefixed(&list.session, &a.text))),
             );
@@ -457,7 +576,7 @@ where
         context: fitted.context,
         truncation,
         warnings,
-        legs,
+        legs: own_legs,
         cold_start: lists
             .first()
             .and_then(|l| l.recall.as_ref())
@@ -485,6 +604,7 @@ where
         warnings: detail.warnings.clone(),
         unavailable_layers: unavailable,
         detail,
+        hit_legs,
     }
 }
 

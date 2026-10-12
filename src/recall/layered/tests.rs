@@ -158,6 +158,7 @@ fn params(top_k: usize) -> MergeParams {
         top_k,
         max_tokens: 100_000,
         dedupe_threshold: 0.85,
+        vector_pairs: MAX_VECTOR_DEDUPE_PAIRS,
     }
 }
 
@@ -286,7 +287,7 @@ fn the_floor_admits_keyword_or_vector_evidence_only() {
 }
 
 #[test]
-fn forced_members_pass_the_floor_and_top_k() {
+fn forced_members_pass_top_k_but_never_the_floor() {
     let lists = [
         primary(&[
             kw("p1"),
@@ -298,10 +299,16 @@ fn forced_members_pass_the_floor_and_top_k() {
             0.5,
             &[
                 kw("g1"),
-                expanded("g-conflict").with(AnnotationKind::Conflict, "Agent B wrote g-conflict"),
-                expanded("g-reserved").with(AnnotationKind::Reservation, "Reserved by x"),
-                expanded("g-hot").with(AnnotationKind::Hot, "High-risk modification: y"),
-                expanded("g-plain"),
+                kw("g-conflict").with(AnnotationKind::Conflict, "Agent B wrote g-conflict"),
+                vec_hit("g-reserved", 0.5).with(AnnotationKind::Reservation, "Reserved by x"),
+                kw("g-hot").with(AnnotationKind::Hot, "High-risk modification: y"),
+                // Forced kinds without evidence: a busy shared session's
+                // hot, reserved or conflicting concepts at low similarity,
+                // or reached by expansion only, stay out.
+                vec_hit("g-weak-conflict", 0.1).with(AnnotationKind::Conflict, "Agent C wrote it"),
+                expanded("g-expanded-reserved").with(AnnotationKind::Reservation, "Reserved by z"),
+                expanded("g-expanded-hot").with(AnnotationKind::Hot, "Drifted 3 hops"),
+                kw("g-plain"),
             ],
         ),
     ];
@@ -315,7 +322,8 @@ fn forced_members_pass_the_floor_and_top_k() {
             "general/g-hot"
         ]
     );
-    // Forced layer hits' lines stay, prefixed; the cut p2's line leaves.
+    // Forced layer hits' lines stay, prefixed; the cut p2's line and the
+    // floored hits' lines leave.
     assert_eq!(
         r.warnings,
         [
@@ -325,6 +333,110 @@ fn forced_members_pass_the_floor_and_top_k() {
         ]
     );
     assert_eq!(r.detail.warnings, r.warnings);
+}
+
+#[test]
+fn a_layer_traversal_answer_is_anchored_evidence_with_its_headline_recomputed() {
+    // A layer that answered a dependency question by traversal: no leg
+    // scores, a traversal headline counting its own cut.
+    let mut g = layer(
+        1,
+        "general",
+        2.0,
+        &[
+            expanded("dep one"),
+            expanded("dep two"),
+            expanded("dep three"),
+        ],
+    );
+    let t = g.recall.as_mut().unwrap();
+    let old = crate::recall::dispatch::traversal_headline(3);
+    t.recall.warnings.insert(0, old.clone());
+    t.recall
+        .response_annotations
+        .push(Annotation::new(AnnotationKind::Traversal, old));
+    let lists = [primary(&[kw("p1")]), g];
+    let r = run(&lists, params(10));
+    assert_eq!(
+        order(&r),
+        [
+            "general/dep one",
+            "lambo/p1",
+            "general/dep two",
+            "general/dep three"
+        ]
+    );
+    assert_eq!(
+        r.warnings,
+        ["[general] recall: dependency question answered by graph traversal (3 dependents)"]
+    );
+    // A budget for the first two blocks: the layer rendered one dependent.
+    let two = fit_blocks(
+        &[
+            block_with_meta(
+                &r.detail.hits[0],
+                &[],
+                &["from general".into()],
+                Some("general".into()),
+            ),
+            block_with_meta(&r.detail.hits[1], &[], &[], None),
+        ],
+        100_000,
+        default_token_count,
+    );
+    let cut = run(
+        &lists,
+        MergeParams {
+            max_tokens: default_token_count(&two.context),
+            ..params(10)
+        },
+    );
+    let headline =
+        "[general] recall: dependency question answered by graph traversal (1 dependents)";
+    assert_eq!(cut.warnings, [headline]);
+    assert_eq!(cut.detail.response_annotations[0].text, headline);
+    assert_eq!(
+        cut.detail.response_annotations[0].kind,
+        AnnotationKind::Traversal
+    );
+    // Without the traversal annotation the same hits fail the floor.
+    let mut plain = lists.clone();
+    let t = plain[1].recall.as_mut().unwrap();
+    t.recall.response_annotations.clear();
+    assert_eq!(order(&run(&plain, params(10))), ["lambo/p1"]);
+}
+
+#[test]
+fn the_callers_own_traversal_headline_counts_its_rendered_dependents() {
+    let mut p = primary(&[expanded("dep a"), expanded("dep b")]);
+    let t = p.recall.as_mut().unwrap();
+    let old = crate::recall::dispatch::traversal_headline(2);
+    t.recall.warnings.push(old.clone());
+    t.recall
+        .response_annotations
+        .push(Annotation::new(AnnotationKind::Traversal, old));
+    let lists = [p, layer(1, "general", 0.5, &[kw("g1")])];
+    let one = fit_blocks(
+        &[block_with_meta(
+            &lists[0].recall.as_ref().unwrap().recall.hits[0],
+            &[],
+            &[],
+            None,
+        )],
+        100_000,
+        default_token_count,
+    );
+    let r = run(
+        &lists,
+        MergeParams {
+            max_tokens: default_token_count(&one.context),
+            ..params(10)
+        },
+    );
+    assert_eq!(
+        r.warnings,
+        ["recall: dependency question answered by graph traversal (1 dependents)"]
+    );
 }
 
 #[test]
@@ -369,14 +481,16 @@ fn dedupe_keeps_the_nearer_tier_at_the_better_rank() {
     assert!(r.context.contains(&also), "{}", r.context);
     // The dropped copy's warning line still reaches `warnings`.
     assert_eq!(r.warnings, ["[general] ⚑ general pillar"]);
-    // A forced dropped copy forces the kept one.
+    // A forced copy that joins an emitted group adds no slot; a forced
+    // layer copy of a primary hit cut by top_k is emitted, shown as the
+    // nearer (primary) copy.
     let lists = [
         primary(&[kw("p1"), kw("same").key("k")]),
         layer(
             1,
             "general",
             0.5,
-            &[expanded("same")
+            &[kw("same")
                 .key("k")
                 .with(AnnotationKind::Conflict, "Agent B wrote it")],
         ),
@@ -643,4 +757,98 @@ fn block_with_meta_without_meta_is_the_plain_block() {
     );
     assert!(b.text[b.label_end..].starts_with("\n⚑ pillar"));
     assert_eq!(b.scope.as_deref(), Some("general"));
+}
+
+#[test]
+fn dedupe_is_transitive_and_takes_one_copy_per_tier() {
+    let v = |x: f32, y: f32| vec![x, y];
+    let lists = [
+        primary(&[kw("p1"), kw("primary copy").key("k")]),
+        // Same key as the primary copy, and a vector.
+        layer(
+            1,
+            "team",
+            0.5,
+            &[kw("team copy").key("k").embedding(v(1.0, 0.0))],
+        ),
+        // Another key, but the team copy's vector: same memory through the
+        // team member of the group, not through the shown primary copy
+        // (which has no vector).
+        layer(
+            2,
+            "general",
+            0.5,
+            &[kw("general copy").key("other").embedding(v(1.0, 0.05))],
+        ),
+    ];
+    let r = run(&lists, params(10));
+    assert_eq!(order(&r), ["lambo/p1", "lambo/primary copy"]);
+    let also: Vec<&str> = r.hits[1].also.iter().map(|a| a.session.as_str()).collect();
+    assert_eq!(also, ["team", "general"]);
+
+    // Two hits of one tier with the same key: the group takes one, the
+    // other is a hit of its own.
+    let lists = [
+        primary(&[kw("p1").key("k")]),
+        layer(1, "general", 0.5, &[kw("g1").key("k"), kw("g2").key("k")]),
+    ];
+    let r = run(&lists, params(10));
+    assert_eq!(order(&r), ["lambo/p1", "general/g2"]);
+    assert_eq!(r.hits[0].also.len(), 1);
+}
+
+#[test]
+fn vector_dedupe_stops_at_its_budget_and_keys_still_match() {
+    let v = vec![1.0f32, 0.0];
+    let lists = [
+        primary(&[kw("p1").key("a").embedding(v.clone())]),
+        layer(
+            1,
+            "team",
+            0.5,
+            &[kw("same vector").key("b").embedding(v.clone())],
+        ),
+        layer(2, "general", 0.5, &[kw("same key").key("a")]),
+    ];
+    let full = run(&lists, params(10));
+    assert_eq!(order(&full), ["lambo/p1"]);
+    assert_eq!(full.hits[0].also.len(), 2);
+    let capped = run(
+        &lists,
+        MergeParams {
+            vector_pairs: 0,
+            ..params(10)
+        },
+    );
+    // No vector comparison is made; the key still dedupes.
+    assert_eq!(order(&capped), ["lambo/p1", "team/same vector"]);
+    assert_eq!(capped.hits[0].also.len(), 1);
+}
+
+#[test]
+fn per_hit_legs_survive_a_node_id_shared_across_sessions() {
+    let mut g = layer(1, "general", 0.5, &[vec_hit("g", 0.9).key("g-key")]);
+    let t = g.recall.as_mut().unwrap();
+    // The #33 split replicates identity nodes: same UUID, another session.
+    let shared = nid(0, 0);
+    let legs = t.recall.legs.remove(&t.recall.hits[0].node_id).unwrap();
+    t.recall.hits[0].node_id = shared;
+    t.recall.detailed[0].node_id = shared;
+    t.recall.legs.insert(shared, legs);
+    let r = run(&[primary(&[kw("p")]), g], params(10));
+    assert_eq!(order(&r), ["lambo/p", "general/g"]);
+    assert_eq!(r.hits[0].hit.node_id, r.hits[1].hit.node_id);
+    assert_eq!(r.hit_legs[0].and_then(|l| l.keyword), Some(1.0));
+    assert_eq!(r.hit_legs[1].and_then(|l| l.vector), Some(0.9));
+    // The caller-keyed map holds the caller's legs only.
+    assert_eq!(r.detail.legs.len(), 1);
+    assert_eq!(r.detail.legs[&shared].keyword, Some(1.0));
+}
+
+#[test]
+fn layer_unavailable_is_a_snake_case_kind_on_the_wire() {
+    let a = Annotation::new(AnnotationKind::LayerUnavailable, "x");
+    let json = serde_json::to_string(&a).unwrap();
+    assert_eq!(json, r#"{"kind":"layer_unavailable","text":"x"}"#);
+    assert_eq!(serde_json::from_str::<Annotation>(&json).unwrap(), a);
 }
