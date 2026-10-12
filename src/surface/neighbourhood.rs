@@ -1,6 +1,7 @@
 //! The `inspect` neighbourhood projection, shared by `lambo inspect` and
-//! `lambo_inspect`: a bounded BFS around a resolved focus, rendered as text
-//! and as structured JSON. Caps: [`MAX_INSPECT_NODES`] (a total across every
+//! `lambo_inspect`: the focus's blast radius and the dependents it counts
+//! (#36), then a bounded BFS around the focus, rendered as text and as
+//! structured JSON. Caps: [`MAX_INSPECT_NODES`] (a total across every
 //! hop); the depth bound ([`super::limits::MAX_INSPECT_DEPTH`]) is each
 //! caller's door check.
 
@@ -45,6 +46,21 @@ pub(crate) fn render_neighbourhood(
         text.push_str(&format!("blast radius: {r}\n"));
         if *r > 0 {
             text.push_str(&format!("{}\n", format::blast_radius_warning(*r)));
+        }
+    }
+    // #36: name the dependents the count is made of, so a warning says what
+    // rests on the focus instead of leaving the caller to read edge
+    // directions off the hops below (which list neighbours both ways).
+    let (dependents, dependents_truncated) = dependents_listing(g, target);
+    if !dependents.is_empty() {
+        text.push_str(&format!("dependents ({}):\n", dependents.len()));
+        for d in &dependents {
+            text.push_str(&format!("  {} ({:?})\n", label(d.id), d.edge_type));
+        }
+        if dependents_truncated {
+            text.push_str(&format!(
+                "  (truncated at {MAX_INSPECT_NODES} dependents)\n"
+            ));
         }
     }
     if let Some(res) = g.reservation(target) {
@@ -116,11 +132,118 @@ pub(crate) fn render_neighbourhood(
         }
     }
 
+    let dependents_json: Vec<serde_json::Value> = dependents
+        .iter()
+        .map(|d| {
+            json!({
+                "node_id": d.id.0.to_string(),
+                "label": label(d.id),
+                "edge_type": format!("{:?}", d.edge_type),
+            })
+        })
+        .collect();
     let structured = json!({
         "node_id": target.0.to_string(),
         "label": label(target),
         "blast_radius": radii.get(&target).copied().unwrap_or(0),
+        "dependents": dependents_json,
+        "dependents_truncated": dependents_truncated,
         "levels": levels,
     });
     (text, structured)
+}
+
+/// One dependent of the inspect focus and the edge kind that declares it.
+struct Dependent {
+    id: NodeId,
+    edge_type: EdgeType,
+}
+
+/// The focus's dependents (#36, [`format::dependents_of`]): the concepts
+/// that depend on it (`Dependency` edges into it) and its `parent_of`
+/// children, labelled with the declaring edge kind (`Dependency` when both
+/// kinds declare the same dependent). Ordered by label then node id, capped
+/// at [`MAX_INSPECT_NODES`] with the cut reported.
+fn dependents_listing(g: &Graph, target: NodeId) -> (Vec<Dependent>, bool) {
+    let dependency_sources: std::collections::HashSet<NodeId> = g
+        .incident_edges(target)
+        .into_iter()
+        .filter(|e| e.edge_type == EdgeType::Dependency && e.target == target)
+        .map(|e| e.source)
+        .collect();
+    let mut out: Vec<Dependent> = format::dependents_of(g, target)
+        .into_iter()
+        .map(|(id, _)| Dependent {
+            id,
+            edge_type: if dependency_sources.contains(&id) {
+                EdgeType::Dependency
+            } else {
+                EdgeType::Hierarchical
+            },
+        })
+        .collect();
+    let content = |id: NodeId| match g.node(id) {
+        Some(Node::Concept(c)) => c.content.as_str(),
+        _ => "",
+    };
+    out.sort_by(|a, b| content(a.id).cmp(content(b.id)).then(a.id.0.cmp(&b.id.0)));
+    let truncated = out.len() > MAX_INSPECT_NODES;
+    out.truncate(MAX_INSPECT_NODES);
+    (out, truncated)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_neighbourhood;
+    use crate::test_util::dependents as case;
+
+    /// #36: inspect names the dependents its blast radius counts, in text
+    /// and JSON, with the declaring edge kind; a parent, a Causal producer
+    /// and an association neighbour are not listed.
+    #[test]
+    fn inspect_lists_the_dependents_it_counts() {
+        let g = case::graph();
+        let (text, json) = render_neighbourhood(&g, case::concept_id("X"), 1);
+        assert!(text.contains("blast radius: 6\n"), "{text}");
+        assert!(text.contains("dependents (6):\n"), "{text}");
+        for (name, kind) in [
+            ("A1", "Dependency"),
+            ("A2", "Dependency"),
+            ("Z", "Dependency"),
+            ("W", "Dependency"),
+            ("C1", "Hierarchical"),
+            ("C2", "Hierarchical"),
+        ] {
+            assert!(
+                text.contains(&format!("  concept {name} ["))
+                    && text.contains(&format!("({kind})")),
+                "{name}: {text}"
+            );
+        }
+        let deps = json["dependents"].as_array().expect("dependents");
+        assert_eq!(deps.len(), 6, "{json}");
+        assert_eq!(json["dependents_truncated"], false);
+        let labels: Vec<&str> = deps.iter().map(|d| d["label"].as_str().unwrap()).collect();
+        for absent in ["concept P [", "concept K [", "concept N [", "concept D ["] {
+            assert!(
+                !labels.iter().any(|l| l.starts_with(absent)),
+                "{absent}: {labels:?}"
+            );
+        }
+        let c1 = deps
+            .iter()
+            .find(|d| d["label"].as_str().unwrap().starts_with("concept C1 ["))
+            .unwrap();
+        assert_eq!(c1["edge_type"], "Hierarchical");
+        assert_eq!(
+            c1["node_id"],
+            case::concept_id("C1").0.to_string(),
+            "{json}"
+        );
+
+        // A node nothing depends on lists no dependents.
+        let (text, json) = render_neighbourhood(&g, case::concept_id("K"), 1);
+        assert!(!text.contains("dependents ("), "{text}");
+        assert!(json["dependents"].as_array().unwrap().is_empty());
+    }
 }

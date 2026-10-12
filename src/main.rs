@@ -226,7 +226,7 @@ enum Commands {
         )]
         session: String,
     },
-    /// Inspect the neighbourhood around a concept: its type, canonization status, blast radius and typed edges out to a depth.
+    /// Inspect the neighbourhood around a concept: its type, canonization status, blast radius, the dependents it counts, and typed edges out to a depth.
     Inspect {
         /// Session to inspect (reader process; does not take the writer lease).
         #[arg(

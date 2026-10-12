@@ -346,7 +346,7 @@ Reservations are advisory and live in memory only, so they do not survive a serv
 
 ### lambo_inspect
 
-Look at the neighbourhood around a concept, including its type, whether it is canonical, its blast radius, and the edges leading out from it. The blast radius counts the concepts that depend on this one: those with a `Dependency` edge to it (an action's `depends_on`) and its `parent_of` children.
+Look at the neighbourhood around a concept, including its type, whether it is canonical, its blast radius, its dependents, and its edges in both directions. The blast radius counts the concepts that depend on this one: those with a `Dependency` edge to it (an action's `depends_on`) and its `parent_of` children. The text lists them under `dependents (N):`, and the structured result carries them as `dependents` (each with `node_id`, `label` and `edge_type`) plus `dependents_truncated`.
 
 | Argument | Type | Required | Notes |
 |---|---|---|---|
