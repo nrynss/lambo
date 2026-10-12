@@ -42,22 +42,33 @@
 //!
 //! # Extending it
 //!
-//! Add interactions to [`INTERACTIONS`] (keep them in time order), concepts
-//! to [`CONCEPTS`], citations to [`DEPENDS`], and the new rows' expected
-//! fixed-point statuses to [`expected`], then regenerate. Keys are stable
-//! names; ids are derived from a row's position, so append rather than
-//! insert to keep existing ids stable.
+//! Add interactions to [`INTERACTIONS`] (keep them in time order: the table
+//! is the temporal chain), concepts to [`CONCEPTS`], citations to
+//! [`DEPENDS`], and the new rows' expected fixed-point statuses to
+//! [`expected`], then regenerate. Every id is derived from a hash of its
+//! row's natural key (an interaction's or concept's key; an edge's source,
+//! target and type), never from a position, so a row inserted anywhere
+//! leaves every existing id unchanged and only adds rows to the JSON. The
+//! ids are SHA-256-derived UUIDs (version 8, "custom"): the name-based v5
+//! constructor needs the `uuid` crate's `v5` feature, which this crate does
+//! not enable, and a deterministic hash is all the fixture needs.
 
 #![cfg(test)]
 
 use chrono::{DateTime, Duration as ChronoDuration, TimeZone, Utc};
-use uuid::Uuid;
 
-use crate::canon::PromotionPolicy;
+use std::collections::HashMap;
+
+use parking_lot::RwLock;
+
+use crate::canon::{EvalParams, Evaluator, PromotionPolicy};
+use crate::config::ScoringWeights;
+use crate::daemon::score::rescore;
 use crate::graph::Graph;
+use crate::store::GraphStore;
 use crate::types::{
     AgentId, CanonizationStatus, Concept, ConceptType, Edge, EdgeType, GraphSnapshot, Interaction,
-    NodeId, SessionId,
+    Mutation, MutationBatch, Node, NodeId, ScoreTable, SessionId,
 };
 
 /// The fixture's name under `fixtures/`.
@@ -301,21 +312,28 @@ pub const CONTRADICTION: (&str, &str) = ("lease_revoke", "lease_stays");
 /// Read traffic: `(concept, access_count)`, last accessed on day 19.
 pub const ACCESSES: &[(&str, i32)] = &[("soak_note", 17), ("write_path_hub", 9)];
 
+/// A stable id for `name` in the fixture's namespace: the first 16 bytes of
+/// `SHA-256("session-fair-test/" + name)` as a version-8 UUID.
+pub fn hashed_id(name: &str) -> NodeId {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(format!("{NAME}/{name}").as_bytes());
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    NodeId(uuid::Builder::from_custom_bytes(bytes).into_uuid())
+}
+
 fn interaction_id(key: &str) -> NodeId {
-    let n = INTERACTIONS
-        .iter()
-        .position(|(k, ..)| *k == key)
-        .unwrap_or_else(|| panic!("no interaction {key}"));
-    NodeId(Uuid::from_u64_pair(0x3603_0001, n as u64))
+    assert!(
+        INTERACTIONS.iter().any(|(k, ..)| *k == key),
+        "no interaction {key}"
+    );
+    hashed_id(&format!("interaction/{key}"))
 }
 
 /// The id of the concept keyed `key`.
 pub fn concept_id(key: &str) -> NodeId {
-    let n = CONCEPTS
-        .iter()
-        .position(|(k, ..)| *k == key)
-        .unwrap_or_else(|| panic!("no concept {key}"));
-    NodeId(Uuid::from_u64_pair(0x3603_0002, n as u64))
+    assert!(CONCEPTS.iter().any(|(k, ..)| *k == key), "no concept {key}");
+    hashed_id(&format!("concept/{key}"))
 }
 
 fn interaction_time(key: &str) -> DateTime<Utc> {
@@ -457,8 +475,11 @@ pub fn snapshot(with_contradiction: bool) -> GraphSnapshot {
             format!("{:?}", b.edge_type),
         ))
     });
-    for (n, e) in snap.edges.iter_mut().enumerate() {
-        e.id = NodeId(Uuid::from_u64_pair(0x3603_0003, n as u64));
+    for e in snap.edges.iter_mut() {
+        e.id = hashed_id(&format!(
+            "edge/{}/{}/{:?}",
+            e.source.0, e.target.0, e.edge_type
+        ));
     }
     snap
 }
@@ -478,7 +499,13 @@ pub fn expected(policy: PromotionPolicy) -> Vec<(&'static str, CanonizationStatu
         ("wedge_five", Venerable),
         // Three interactions inside two hours: Stage 2 coverage fails.
         ("identity_burst", Candidate),
-        // Three citations with spread: supported, not load-bearing.
+        // KNOWN DEFECT, pinned on purpose: the short name "writer lease"
+        // reaches Venerable because three actions cited the name instead of
+        // the `lease_stays` ruling it stands for (design note section 2, the
+        // name-resolution defect). #36 PR 4's resolver, or the reviewed alias
+        // backfill, is expected to redirect those citations to the ruling and
+        // flip this row to None; when it does, update this line rather than
+        // the resolver.
         ("lease_alias", Venerable),
     ];
     match policy {
@@ -490,4 +517,109 @@ pub fn expected(policy: PromotionPolicy) -> Vec<(&'static str, CanonizationStatu
         PromotionPolicy::Solo => out.push(("ack_single", Candidate)),
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// Running the fair test (shared by the offline tests in
+// `canon::fair_test_tests` and the live Postgres/Cockroach check in
+// `store::pg::fair_test_live`).
+// ---------------------------------------------------------------------------
+
+/// The snapshot as a store batch.
+pub fn batch_of(snap: &GraphSnapshot) -> MutationBatch {
+    let mut batch = MutationBatch::new();
+    for i in &snap.interactions {
+        batch.push(Mutation::UpsertNode {
+            node: Node::Interaction(i.clone()),
+        });
+    }
+    for c in &snap.concepts {
+        batch.push(Mutation::UpsertNode {
+            node: Node::Concept(c.clone()),
+        });
+    }
+    for e in &snap.edges {
+        batch.push(Mutation::UpsertEdge { edge: e.clone() });
+    }
+    batch
+}
+
+/// Run the evaluator from `snap` until `quiet` consecutive cycles commit
+/// nothing, rescoring before every cycle like the daemon; returns the final
+/// graph. The clock advances 61 s a cycle.
+pub async fn fixed_point(
+    store: &dyn GraphStore,
+    snap: GraphSnapshot,
+    params: &EvalParams,
+    quiet: usize,
+) -> Graph {
+    let graph = RwLock::new(Graph::from_snapshot(snap).unwrap());
+    let (tx, _rx) = crate::daemon::events::event_channel();
+    let mut ev = Evaluator::new();
+    let mut now = now();
+    let mut idle = 0;
+    for _ in 0..500 {
+        let scores = {
+            let g = graph.read();
+            ScoreTable {
+                epoch: g.epoch(),
+                ranked: rescore(&g, &ScoringWeights::default()),
+            }
+        };
+        let out = ev
+            .eval_cycle(&graph, store, &scores, &tx, params, now, None)
+            .await
+            .unwrap();
+        now += chrono::Duration::seconds(61);
+        if out.is_empty() {
+            idle += 1;
+            if idle >= quiet {
+                return graph.into_inner();
+            }
+        } else {
+            idle = 0;
+        }
+    }
+    panic!("no fixed point within 500 cycles");
+}
+
+pub fn statuses(g: &Graph) -> HashMap<&'static str, CanonizationStatus> {
+    CONCEPTS
+        .iter()
+        .map(|(key, ..)| {
+            let status = match g.node(concept_id(key)) {
+                Some(Node::Concept(c)) => c.canonization_status,
+                _ => panic!("{key} is a concept"),
+            };
+            (*key, status)
+        })
+        .collect()
+}
+
+pub fn expected_map(policy: PromotionPolicy) -> HashMap<&'static str, CanonizationStatus> {
+    let listed: HashMap<_, _> = expected(policy).into_iter().collect();
+    CONCEPTS
+        .iter()
+        .map(|(key, ..)| {
+            (
+                *key,
+                listed.get(key).copied().unwrap_or(CanonizationStatus::None),
+            )
+        })
+        .collect()
+}
+
+pub fn assert_expected(
+    got: &HashMap<&'static str, CanonizationStatus>,
+    policy: PromotionPolicy,
+    on: &str,
+) {
+    let want = expected_map(policy);
+    let mut wrong: Vec<String> = CONCEPTS
+        .iter()
+        .filter(|(key, ..)| got[key] != want[key])
+        .map(|(key, ..)| format!("{key}: got {:?}, want {:?}", got[key], want[key]))
+        .collect();
+    wrong.sort();
+    assert!(wrong.is_empty(), "{policy:?} on {on}: {wrong:#?}");
 }

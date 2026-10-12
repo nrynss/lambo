@@ -8,23 +8,19 @@
 //! `fair_test::expected` lists. The fixture's one `Contradicts` edge must
 //! change nothing.
 
-use std::collections::HashMap;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use parking_lot::RwLock;
 
 use crate::canon::{
-    admission_inputs, explain_admission, render_admission, EvalParams, Evaluator, PromotionPolicy,
+    admission_inputs, explain_admission, render_admission, EvalParams, PromotionPolicy,
 };
 use crate::config::ScoringWeights;
 use crate::daemon::score::rescore;
 use crate::graph::Graph;
 use crate::store::{GraphStore, MemoryStore};
 use crate::test_util::fair_test as fair;
-use crate::types::{
-    CanonizationStatus, EdgeType, GraphSnapshot, Mutation, MutationBatch, Node, NodeId, ScoreTable,
-};
+use crate::types::{CanonizationStatus, EdgeType, GraphSnapshot, Node, NodeId, ScoreTable};
 
 const POLICIES: [PromotionPolicy; 2] = [PromotionPolicy::Swarm, PromotionPolicy::Solo];
 
@@ -35,108 +31,10 @@ fn params(policy: PromotionPolicy) -> EvalParams {
     }
 }
 
-fn batch_of(snap: &GraphSnapshot) -> MutationBatch {
-    let mut batch = MutationBatch::new();
-    for i in &snap.interactions {
-        batch.push(Mutation::UpsertNode {
-            node: Node::Interaction(i.clone()),
-        });
-    }
-    for c in &snap.concepts {
-        batch.push(Mutation::UpsertNode {
-            node: Node::Concept(c.clone()),
-        });
-    }
-    for e in &snap.edges {
-        batch.push(Mutation::UpsertEdge { edge: e.clone() });
-    }
-    batch
-}
-
 async fn memory_store(snap: &GraphSnapshot) -> MemoryStore {
     let store = MemoryStore::new();
-    store.flush(&batch_of(snap), None).await.unwrap();
+    store.flush(&fair::batch_of(snap), None).await.unwrap();
     store
-}
-
-/// Run the evaluator from `snap` until `quiet` consecutive cycles commit
-/// nothing, rescoring before every cycle like the daemon; returns the final
-/// graph. The clock advances 61 s a cycle.
-async fn fixed_point(
-    store: &dyn GraphStore,
-    snap: GraphSnapshot,
-    params: &EvalParams,
-    quiet: usize,
-) -> Graph {
-    let graph = RwLock::new(Graph::from_snapshot(snap).unwrap());
-    let (tx, _rx) = crate::daemon::events::event_channel();
-    let mut ev = Evaluator::new();
-    let mut now = fair::now();
-    let mut idle = 0;
-    for _ in 0..500 {
-        let scores = {
-            let g = graph.read();
-            ScoreTable {
-                epoch: g.epoch(),
-                ranked: rescore(&g, &ScoringWeights::default()),
-            }
-        };
-        let out = ev
-            .eval_cycle(&graph, store, &scores, &tx, params, now, None)
-            .await
-            .unwrap();
-        now += chrono::Duration::seconds(61);
-        if out.is_empty() {
-            idle += 1;
-            if idle >= quiet {
-                return graph.into_inner();
-            }
-        } else {
-            idle = 0;
-        }
-    }
-    panic!("no fixed point within 500 cycles");
-}
-
-fn statuses(g: &Graph) -> HashMap<&'static str, CanonizationStatus> {
-    fair::CONCEPTS
-        .iter()
-        .map(|(key, ..)| {
-            let status = match g.node(fair::concept_id(key)) {
-                Some(Node::Concept(c)) => c.canonization_status,
-                _ => panic!("{key} is a concept"),
-            };
-            (*key, status)
-        })
-        .collect()
-}
-
-fn expected_map(policy: PromotionPolicy) -> HashMap<&'static str, CanonizationStatus> {
-    let listed: HashMap<_, _> = fair::expected(policy).into_iter().collect();
-    fair::CONCEPTS
-        .iter()
-        .map(|(key, ..)| {
-            (
-                *key,
-                listed.get(key).copied().unwrap_or(CanonizationStatus::None),
-            )
-        })
-        .collect()
-}
-
-fn assert_expected(
-    got: &HashMap<&'static str, CanonizationStatus>,
-    policy: PromotionPolicy,
-    on: &str,
-) {
-    let want = expected_map(policy);
-    let mut wrong: Vec<String> = fair::CONCEPTS
-        .iter()
-        .filter(|(key, ..)| got[key] != want[key])
-        .map(|(key, ..)| format!("{key}: got {:?}, want {:?}", got[key], want[key]))
-        .collect();
-    wrong.sort();
-    assert!(wrong.is_empty(), "{policy:?} on {on}: {wrong:#?}");
 }
 
 fn snapshot() -> GraphSnapshot {
@@ -176,6 +74,24 @@ async fn the_fixture_is_real_shaped() {
         .iter()
         .all(|c| c.canonization_status == CanonizationStatus::None && c.gc_survived >= 3));
     assert!(snap.canonization_events.is_empty());
+    // #36 PR 3 review L6: every edge id is the hash of its natural key, so
+    // rows #20 inserts anywhere leave existing ids alone; and ids are unique.
+    for e in &snap.edges {
+        assert_eq!(
+            e.id,
+            fair::hashed_id(&format!(
+                "edge/{}/{}/{:?}",
+                e.source.0, e.target.0, e.edge_type
+            ))
+        );
+    }
+    let mut ids: Vec<NodeId> = snap.edges.iter().map(|e| e.id).collect();
+    ids.extend(snap.concepts.iter().map(|c| c.id));
+    ids.extend(snap.interactions.iter().map(|i| i.id));
+    let n = ids.len();
+    ids.sort_by_key(|id| id.0);
+    ids.dedup();
+    assert_eq!(ids.len(), n, "fixture ids collide");
     let rulings = [
         "lease_stays",
         "wedge",
@@ -253,8 +169,8 @@ async fn both_policies_promote_the_supported_rulings_on_memory() {
     for policy in POLICIES {
         let snap = snapshot();
         let store = memory_store(&snap).await;
-        let g = fixed_point(&store, snap, &params(policy), 3).await;
-        assert_expected(&statuses(&g), policy, "MemoryStore");
+        let g = fair::fixed_point(&store, snap, &params(policy), 3).await;
+        fair::assert_expected(&fair::statuses(&g), policy, "MemoryStore");
         for r in ["lease_stays", "wedge", "identity", "async_ack"] {
             match g.node(fair::concept_id(r)) {
                 Some(Node::Concept(c)) => assert_eq!(c.blast_radius, Some(6), "{r}"),
@@ -272,9 +188,9 @@ async fn both_policies_promote_the_supported_rulings_on_sqlite() {
         let snap = snapshot();
         let store = crate::store::SqliteStore::connect("sqlite::memory:").unwrap();
         store.init_schema().await.unwrap();
-        store.flush(&batch_of(&snap), None).await.unwrap();
-        let g = fixed_point(&store, snap, &params(policy), 3).await;
-        assert_expected(&statuses(&g), policy, "SQLite");
+        store.flush(&fair::batch_of(&snap), None).await.unwrap();
+        let g = fair::fixed_point(&store, snap, &params(policy), 3).await;
+        fair::assert_expected(&fair::statuses(&g), policy, "SQLite");
     }
 }
 
@@ -324,10 +240,14 @@ async fn the_contradiction_changes_nothing() {
         );
     }
     for policy in POLICIES {
-        let a = fixed_point(&s_with, with.clone(), &params(policy), 3).await;
-        let b = fixed_point(&s_without, without.clone(), &params(policy), 3).await;
-        assert_eq!(statuses(&a), statuses(&b), "{policy:?}");
-        assert_expected(&statuses(&a), policy, "MemoryStore with the contradiction");
+        let a = fair::fixed_point(&s_with, with.clone(), &params(policy), 3).await;
+        let b = fair::fixed_point(&s_without, without.clone(), &params(policy), 3).await;
+        assert_eq!(fair::statuses(&a), fair::statuses(&b), "{policy:?}");
+        fair::assert_expected(
+            &fair::statuses(&a),
+            policy,
+            "MemoryStore with the contradiction",
+        );
     }
 }
 
@@ -339,8 +259,11 @@ async fn five_dependents_fail_and_six_pass() {
     for policy in POLICIES {
         let mut snap = snapshot();
         let store = memory_store(&snap).await;
-        let g = fixed_point(&store, snap.clone(), &params(policy), 3).await;
-        assert_eq!(statuses(&g)["wedge_five"], CanonizationStatus::Venerable);
+        let g = fair::fixed_point(&store, snap.clone(), &params(policy), 3).await;
+        assert_eq!(
+            fair::statuses(&g)["wedge_five"],
+            CanonizationStatus::Venerable
+        );
 
         // A sixth: decision d06 (interaction w19) also cites wedge_five.
         let sixth = crate::types::Edge {
@@ -357,9 +280,9 @@ async fn five_dependents_fail_and_six_pass() {
         };
         snap.edges.push(sixth);
         let store = memory_store(&snap).await;
-        let g = fixed_point(&store, snap, &params(policy), 3).await;
+        let g = fair::fixed_point(&store, snap, &params(policy), 3).await;
         assert_eq!(
-            statuses(&g)["wedge_five"],
+            fair::statuses(&g)["wedge_five"],
             CanonizationStatus::Canonical,
             "{policy:?}"
         );
@@ -380,8 +303,8 @@ async fn bounded_probes_stay_fair() {
         };
         // A quiet stretch longer than any ring, so a pass over every member
         // has happened before the run stops.
-        let g = fixed_point(&store, snap, &p, fair::CONCEPTS.len() + 3).await;
-        assert_expected(&statuses(&g), policy, "MemoryStore, batch 1");
+        let g = fair::fixed_point(&store, snap, &p, fair::CONCEPTS.len() + 3).await;
+        fair::assert_expected(&fair::statuses(&g), policy, "MemoryStore, batch 1");
     }
 }
 
@@ -403,8 +326,8 @@ async fn replayed_reads_preserve_the_fixed_point() {
         }
         for policy in POLICIES {
             let store = memory_store(&snap).await;
-            let g = fixed_point(&store, snap.clone(), &params(policy), 3).await;
-            assert_expected(&statuses(&g), policy, &format!("MemoryStore, k={k}"));
+            let g = fair::fixed_point(&store, snap.clone(), &params(policy), 3).await;
+            fair::assert_expected(&fair::statuses(&g), policy, &format!("MemoryStore, k={k}"));
         }
     }
 }
@@ -439,7 +362,7 @@ async fn inspect_explains_every_outcome() {
             );
         }
 
-        let end = fixed_point(&store, snap, &p, 3).await;
+        let end = fair::fixed_point(&store, snap, &p, 3).await;
         for (key, ..) in fair::CONCEPTS {
             let a = explain_at(&store, &end, key, &p).await;
             assert!(
