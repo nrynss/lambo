@@ -612,7 +612,8 @@ fn structural_query_placeholder_order_and_counts() {
         assert!(sql.contains("d.id <> $2"), "{sql}");
     }
     // #36: the node's own origin interaction is not support for it.
-    assert!(INTERACTION_SPAN_SQL.contains("own.id = $2 AND own.origin_interaction = i.id"));
+    assert!(INTERACTION_SPAN_SQL
+        .contains("own.id = $2 AND own.session_id = $1 AND own.origin_interaction = i.id"));
     // MemoryStore parity: interaction_span filters BOTH edge and interaction
     // age — each resolved through D's fallback rule (COALESCE with event_time).
     assert!(INTERACTION_SPAN_SQL.contains("COALESCE(e.event_time, e.created_at) <= $3"));

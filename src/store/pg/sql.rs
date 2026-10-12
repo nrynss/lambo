@@ -442,7 +442,8 @@ span AS (
     WHERE d.id <> $2
       AND COALESCE(i.event_time, i.created_at) <= $3
       AND NOT EXISTS (
-          SELECT 1 FROM concepts own WHERE own.id = $2 AND own.origin_interaction = i.id
+          SELECT 1 FROM concepts own
+          WHERE own.id = $2 AND own.session_id = $1 AND own.origin_interaction = i.id
       )
 ),
 extent AS (

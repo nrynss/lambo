@@ -54,7 +54,7 @@ pub(super) const BLAST_RADIUS_SQL: &str = "WITH {DEPENDENTS_CTE} \
 /// when that interaction is younger than the cutoff. `{DEPENDENTS_CTE}` is
 /// substituted at the call site; the substitution keeps this const
 /// assertable verbatim in tests. Binds: the six of `DEPENDENTS_CTE`, then
-/// session, session, node, cutoff, node, session.
+/// session, session, node, cutoff, node, session, session.
 ///
 /// **Own origin (#36).** `node`'s own origin interaction never counts as
 /// support: a parent derived together with its children, or an action that
@@ -76,7 +76,8 @@ pub(super) const INTERACTION_SPAN_SQL: &str = "WITH {DEPENDENTS_CTE}, \
      WHERE d.id <> ? \
        AND COALESCE(i.event_time, i.created_at) <= ? \
        AND NOT EXISTS ( \
-           SELECT 1 FROM concepts own WHERE own.id = ? AND own.origin_interaction = i.id) \
+           SELECT 1 FROM concepts own \
+           WHERE own.id = ? AND own.session_id = ? AND own.origin_interaction = i.id) \
  ), \
  extent AS ( \
      SELECT min(COALESCE(event_time, created_at)) AS lo, \
@@ -240,6 +241,7 @@ impl SqliteStore {
             .bind(&node_text)
             .bind(&cutoff)
             .bind(&node_text)
+            .bind(&session.0)
             .bind(&session.0)
             .fetch_one(self.pool())
             .await
