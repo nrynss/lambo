@@ -211,6 +211,27 @@ impl BatchQueue {
         batch.extend(take_prioritized(&mut q, max_batch - batch.len()));
     }
 
+    /// Take up to `n` queued single embeds, leaving bulk ones queued in
+    /// order (#125): checked before every forward of a take, so a recall
+    /// does not wait for the rest of a write's batch.
+    fn take_singles(&self, n: usize) -> Vec<Pending> {
+        let mut q = self.lock_queue();
+        if !q.iter().any(|p| !p.bulk) {
+            return Vec::new();
+        }
+        let mut taken = Vec::new();
+        let mut kept = Vec::with_capacity(q.len());
+        for p in q.drain(..) {
+            if !p.bulk && taken.len() < n {
+                taken.push(p);
+            } else {
+                kept.push(p);
+            }
+        }
+        *q = kept;
+        taken
+    }
+
     /// Fail everything still queued at shutdown (their callers are awaiting).
     fn drain_all(&self) -> Vec<Pending> {
         std::mem::take(&mut *self.lock_queue())
@@ -1409,27 +1430,56 @@ fn coalesce_loop(shared: Arc<Shared>) {
             shared.queue.top_up(&mut batch, MAX_BATCH);
         }
 
-        // #125: forward texts of similar length together, shortest first,
-        // single embeds before bulk ones (review M1), and answer each
-        // chunk's callers as soon as their chunk is done.
-        let (single, bulk): (Vec<Pending>, Vec<Pending>) = batch.into_iter().partition(|p| !p.bulk);
-        for group in [single, bulk] {
-            let lens: Vec<usize> = group.iter().map(|p| p.text.len()).collect();
-            let mut slots: Vec<Option<Pending>> = group.into_iter().map(Some).collect();
-            for chunk in length_chunks(&lens) {
-                // Review H2: a caller that stopped waiting (its deadline
-                // passed and it dropped the receiver) is not forwarded.
-                let items = still_awaited(chunk.iter().filter_map(|&i| slots[i].take()));
-                if items.is_empty() {
-                    continue;
-                }
-                let texts: Vec<&str> = items.iter().map(|p| p.text.as_str()).collect();
-                let results =
-                    forward_isolated(&texts, shared.dim, |chunk| shared.core.forward(chunk));
-                for (item, result) in items.into_iter().zip(results) {
-                    let _ = item.tx.send(result);
-                }
-            }
+        serve_take(&shared.queue, batch, shared.dim, |chunk| {
+            shared.core.forward(chunk)
+        });
+    }
+}
+
+/// Run one take as forwards (#125): texts of similar length together,
+/// shortest first, and each chunk's callers answered as soon as their chunk
+/// is done.
+///
+/// Single embeds (a recall's query, a lone text) go before bulk ones, and
+/// the queue is checked for new single embeds **before every forward**
+/// (review M1, Sonnet review), not only when the take is made: a recall
+/// that arrives while a write's batch is being forwarded waits for at most
+/// the one forward in flight, never for the rest of the take.
+///
+/// A caller that stopped waiting (its deadline passed and it dropped its
+/// receiver) is not forwarded (review H2).
+fn serve_take<F>(queue: &BatchQueue, take: Vec<Pending>, dim: usize, forward: F)
+where
+    F: Fn(&[&str]) -> Result<Vec<Vec<f32>>, EmbedError>,
+{
+    let (mut single, mut bulk): (Vec<Pending>, Vec<Pending>) =
+        take.into_iter().partition(|p| !p.bulk);
+    loop {
+        single.extend(queue.take_singles(MAX_BATCH));
+        let group = if single.is_empty() {
+            &mut bulk
+        } else {
+            &mut single
+        };
+        if group.is_empty() {
+            return;
+        }
+        // The first length chunk of the group, taken out of it.
+        let lens: Vec<usize> = group.iter().map(|p| p.text.len()).collect();
+        let mut chunk = length_chunks(&lens).swap_remove(0);
+        chunk.sort_unstable_by(|a, b| b.cmp(a));
+        // Highest index first, so each `remove` leaves the indices still to
+        // take where they were, and the rest of the group keeps its order.
+        let mut items: Vec<Pending> = chunk.into_iter().map(|i| group.remove(i)).collect();
+        items.reverse();
+        let items = still_awaited(items.into_iter());
+        if items.is_empty() {
+            continue;
+        }
+        let texts: Vec<&str> = items.iter().map(|p| p.text.as_str()).collect();
+        let results = forward_isolated(&texts, dim, &forward);
+        for (item, result) in items.into_iter().zip(results) {
+            let _ = item.tx.send(result);
         }
     }
 }
@@ -2003,6 +2053,59 @@ mod tests {
         let rest = q.wait_for_batch(3).unwrap();
         let texts: Vec<&str> = rest.iter().map(|p| p.text.as_str()).collect();
         assert_eq!(texts, ["b2", "b3"], "the rest stays queued in order");
+    }
+
+    #[test]
+    fn a_single_embed_queued_during_a_take_waits_for_one_forward_only() {
+        // Sonnet review of #125: priority was per take, so a recall arriving
+        // during a write's batch waited for the whole take. Now the queue is
+        // checked before every forward.
+        let q = BatchQueue::new();
+        let mut rxs = Vec::new();
+        let mut take = Vec::new();
+        for i in 0..(3 * FORWARD_WIDTH) {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            rxs.push(rx);
+            take.push(Pending {
+                text: format!("bulk text {i:02}"),
+                tx,
+                bulk: true,
+            });
+        }
+        let (tx, rx_recall) = tokio::sync::oneshot::channel();
+        let recall = std::sync::Mutex::new(Some(Pending {
+            text: "recall query".into(),
+            tx,
+            bulk: false,
+        }));
+        let order: std::sync::Mutex<Vec<Vec<String>>> = Default::default();
+        serve_take(&q, take, 4, |texts: &[&str]| {
+            order
+                .lock()
+                .unwrap()
+                .push(texts.iter().map(|t| t.to_string()).collect());
+            // The recall arrives while the first forward runs.
+            let arrived = recall.lock().unwrap().take();
+            if let Some(p) = arrived {
+                q.push(p);
+            }
+            Ok(texts.iter().map(|_| vec![1.0, 0.0, 0.0, 0.0]).collect())
+        });
+        let order = order.into_inner().unwrap();
+        assert_eq!(order.len(), 4, "three bulk forwards and the recall's");
+        assert_eq!(order[0].len(), FORWARD_WIDTH);
+        assert_eq!(
+            order[1],
+            vec!["recall query".to_string()],
+            "next forward is the recall's"
+        );
+        assert!(rx_recall.blocking_recv().unwrap().is_ok());
+        for rx in rxs {
+            assert!(
+                rx.blocking_recv().unwrap().is_ok(),
+                "every bulk text answered"
+            );
+        }
     }
 
     #[test]
