@@ -308,6 +308,14 @@
           "description": "Concept content, a node UUID, or the short-form id rendered in recall\nblocks, to centre the neighbourhood on.",
           "maxLength": 16384,
           "type": "string"
+        },
+        "scope": {
+          "description": "Optional: the session to inspect in. Omit it for this session; name\none of its layers (as `get_info` lists them) to inspect a concept\nthere, such as a recall hit from that layer, whose id belongs to it.",
+          "maxLength": 16384,
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -447,6 +455,14 @@
             }
           ],
           "description": "Optional: recall what is close to a vector you computed, in this\nsession's embedding space (accepted only when the operator enabled\nclient vectors). Send at most one of `image` and `query_vector`. Not\nstored."
+        },
+        "scope": {
+          "description": "Optional: read one session only. Omit it to read this session\ntogether with its shared layers (when the operator configured any);\nname this session, or one of its layers (as `get_info` lists them),\nto read that session alone.",
+          "maxLength": 16384,
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "top_k": {
           "description": "Hits to return. Defaults to the session config's `default_top_k`.",

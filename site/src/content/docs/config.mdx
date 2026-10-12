@@ -294,8 +294,11 @@ erase = true
 | `attach_concurrency` | `2` | Sessions that may attach at once, on demand or retried in the background. At least 1. Always 1 on SQLite, whose one connection serializes attaches with every flush. |
 | `idle_detach_secs` | `900` | Seconds an on-demand session may go without a tool call before it is detached (its tail flushed, its lease released). At least 1. Pinned sessions are never idle-detached. |
 | `per_session_rps` | `--rate-limit-rps` | Request rate for each attached session (burst twice that), drawn after the credential's; a request over it gets `429`. `0` turns the per-session limit off. A serve of one session that attaches nothing on demand applies it only when it is set. |
-| `[[serve.projects]]` | none | `path` and `session`: a stdio serve started without `--session` under `path` uses `session`. `path` must be absolute or start with `~/`. An HTTP serve does not read it. |
+| `[[serve.projects]]` | none | `path` and `session`: a stdio serve started without `--session` under `path` uses `session`. `path` must be absolute or start with `~/`; `*` is supported in its final component. An HTTP serve does not read it. |
 | `[[serve.credential]]` | none | A bearer credential and the sessions it may reach (below). |
+| `layers` | none | The shared sessions every pinned session that is not itself a layer also reads on `lambo_recall`, as an ordered list, nearest tier first. At most one in this release. See [Layers](#layers). |
+| `[serve.session_layers]` | none | Per-session overrides of `layers`, each the same list form; `[]` opts a session out. |
+| `[[serve.layer]]` | none | Per-layer ranking: `session`, `weight` (default `0.5`) and `min_similarity` (default `0.40`). |
 
 Every session named in `[serve]` must be addressable by URL: 1 to 128 bytes of `A-Z`, `a-z`, `0-9`, `.`, `_`, `:` and `-`, not starting with `.`. A name outside that rule is refused here, but you can still serve it on its own with `lambo serve --session <name>`, which keeps its looser rule.
 
@@ -340,6 +343,39 @@ Further rules once credentials are in play:
 - **Attribution.** With `--ledger`, each `call` line made through a configured credential carries `credential`, that credential's name. Calls as `default` or `local` carry no such field.
 - **What a token does not guard.** The credential count is not secret: response timing scales with it. A stdio `lambo serve --session <name>` run by the same OS user forwards to the HTTP serve's per-session Unix socket (a directory only that user can enter) and reaches that session whatever the credentials say. Credentials guard the network; the OS user is the boundary on the machine.
 
+### Layers
+
+A layer is a shared session, such as `general`, whose memories a project session's recall reads too. With `layers = ["general"]`, a `lambo_recall` to `lambo` reads `lambo` and `general` in one call and merges the two answers under one token budget. `lambo_recall` and `lambo_inspect` take `scope` to read one of the two alone. Writes, and every other tool, still act on the addressed session only. Layers are an HTTP serve's. A stdio serve that holds its session itself serves it unlayered and logs one warning when the session would be layered; a stdio serve that forwards to an HTTP `lambo serve` holding the session (the usual case on a machine running one) reaches that session through the holder, layers included, and warns of nothing.
+
+```toml
+[serve]
+sessions = ["lambo", "rustydocs", "lambo-paper", "general"]
+layers = ["general"]               # ordered, nearest tier first
+
+[serve.session_layers]
+lambo-paper = []                   # opt one session out
+
+[[serve.layer]]
+session = "general"
+weight = 0.5                       # uncalibrated until #87
+min_similarity = 0.40              # uncalibrated until #87
+```
+
+`layers` applies to every pinned session that is not itself a layer; `[serve.session_layers]` overrides it per session. Every shape is a list, but this release supports one layer per session, and a longer list is refused (`lists 2 layers; at most 1 is supported`). On-demand sessions are never layered.
+
+A merged recall interleaves the two answers by rank: the layer's hit at position `r` ranks as `weight / r`, against `1 / r` for the session's own. At the default `0.5` the layer's first hit sits beside the session's second. A layer hit is admitted only with keyword evidence, a vector similarity at or above its `min_similarity`, or as a dependent in the layer's own answer to a dependency question. Both numbers are uncalibrated until [issue #87](https://github.com/nrynss/lambo/issues/87). See [`lambo_recall`](/lambo/mcp/#lambo_recall) for what a layered answer looks like.
+
+Refused when the file is read (every command): a name outside the session charset or listed twice, more than one layer per session, a session that lists itself, a layer that has layers of its own (no transitive layering), and a `[[serve.layer]]` entry that names no configured layer or sets `weight` to anything but a finite positive number or `min_similarity` outside `[0, 1]`. Unknown keys in these tables are refused like any other.
+
+Refused when an HTTP `lambo serve` starts (exit `2`), before any lease is taken:
+
+- a layer, or a session with a non-empty `[serve.session_layers]` list, that the serve does not pin (by `[serve] sessions` or `--session`). Pinned sessions hold their lease for the serve's life, so a recall never attaches a layer on demand and a layer is never evicted;
+- a credential that reaches a layered session but not each of its layers, naming the credential and both sessions. The implicit `local` and legacy `default` credentials reach every pinned session, so a serve using only those needs nothing more.
+
+Once the pinned sessions are attached, a layer whose embedding contract differs from its session's refuses the start too (a model left unset in one and set to `""` in the other counts as different, and the message says so).
+
+While the serve runs, a layer can stop serving: another writer took its lease, it is being detached, or its attach failed. Losing `general`'s lease detaches `general` alone. Until it is attached again, every layered recall answers from its own session with one warning, `recall: layer general is unavailable; results are from lambo only`, and a `scope` naming the layer is refused: retryably while it is held elsewhere or detaching, and as permanent once its attach has failed for good or it was erased (an erased layer is also warned of at start).
+
 ### Choosing a stdio serve's session
 
 A `stdio` serve given `--session` uses it and reads none of this. Without `--session` it picks, in order:
@@ -348,7 +384,11 @@ A `stdio` serve given `--session` uses it and reads none of this. Without `--ses
 2. `default_session`.
 3. Nothing: the serve refuses with the usual missing `--session` error and exit code 2, before it builds any backend.
 
-A leading `~` in `path` expands to `$HOME` (`~user` is refused). The working directory and every entry are resolved to real paths first, following symlinks, `.` and `..`, so a project entered through a symlink uses the entry for the directory the link points to. An entry whose directory does not exist never matches. If the working directory itself cannot be resolved (for example, it was deleted), the map is skipped and `default_session` applies. Two entries that resolve to the same directory but name different sessions are refused rather than picked by file order, as a configuration error (exit code 1). When `HOME` is unset or is not an absolute path, every `~` entry is skipped and the rest of the map still applies; the serve logs one warning saying so. The serve logs which entry it used, by its configured `path`. Neither that line, the warning, nor any refusal quotes the working directory or `$HOME`.
+A leading `~` in `path` expands to `$HOME` (`~user` is refused). Stars in the value of `$HOME` remain literal; only the configured path supplies pattern syntax. The working directory and every entry are resolved to real paths first, following symlinks, `.` and `..`, so a project entered through a symlink uses the entry for the directory the link points to. An entry whose directory does not exist never matches. If the working directory itself cannot be resolved (for example, it was deleted), the map is skipped and `default_session` applies. Two entries that resolve to the same directory but name different sessions are refused rather than picked by file order, as a configuration error (exit code 1). When `HOME` is unset or is not an absolute path, every `~` entry is skipped and the rest of the map still applies; the serve logs one warning saying so. The serve logs which entry it used, by its configured `path`. Neither that line, the warning, nor any refusal quotes the working directory or `$HOME`.
+
+A `*` in the final component of `path` matches zero or more filename bytes, so `~/work/lambo-wt-*` covers sibling worktrees and their descendants. The whole filename must match. Multiple stars are allowed; `?` and brackets are ordinary characters, backslashes are path separators on Windows and ordinary characters elsewhere, and there is no escape for a literal star. Stars in parent components are refused, including `*/..` or `*/.`; a trailing slash is allowed. Pattern matching is byte-exact and case-sensitive, including Unicode form, even on filesystems where literal path lookup ignores case or Unicode normalization. Non-UTF8 child names can match `*`.
+
+The literal parent is resolved first, then its immediate children are scanned and matching directory roots are resolved, following symlinks even when their target is outside the parent. Each matching root covers its descendants by whole components. The deepest canonical root wins; at equal depth a literal entry wins over a pattern. Equal-depth patterns naming different sessions are refused, regardless of how many literal characters their patterns contain; agreeing ties are allowed. Missing, non-directory or unreadable parents skip that pattern, as does a failed directory listing. Startup scans every immediate child once per pattern, retaining only the best match, so a large parent directory adds startup work. No recursive directory scan is performed.
 
 The map is read from the `lambo.toml` the serve loads: `--config`, then `LAMBO_CONFIG`, then `./lambo.toml` in the working directory. So a single global map used by every project needs the client to pass `--config` or set `LAMBO_CONFIG`; otherwise each serve reads its project's own `./lambo.toml`, if any, whose `default_session` or `[[serve.projects]]` then chooses the session, just as it already chooses the store. See [Serve a session](/lambo/cli/#serve-a-session).
 

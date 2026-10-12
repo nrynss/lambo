@@ -65,7 +65,7 @@
 //! the variable goes through `secret_env::shown`. The rule is shared with
 //! `[embedder] api_key_env` in [`super::secret_env`].
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 
 use serde::{Deserialize, Serialize};
@@ -80,6 +80,8 @@ use crate::types::LamboError;
 
 pub use super::credential::{EVERY_HOSTED_SESSION, RESERVED_CREDENTIAL_NAMES};
 
+mod layers;
+pub use layers::{LayerConfig, LayerSpec, ServeLayers};
 mod projects;
 pub use projects::{
     MissingSession, SelectedSession, SessionSelectionError, SessionSource, SESSION_REQUIRED,
@@ -129,6 +131,18 @@ pub struct ServeConfig {
     /// The credentials, `[[serve.credential]]`.
     #[serde(default, rename = "credential", skip_serializing_if = "Vec::is_empty")]
     pub credentials: Vec<CredentialConfig>,
+    /// The layer stack every pinned session that is not itself a layer
+    /// reads beside its own (#33): an ordered list, nearest tier first. At
+    /// most one layer in v1. See [`ServeConfig::resolve_layers`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub layers: Vec<String>,
+    /// Per-session overrides of [`ServeConfig::layers`], each the same
+    /// ordered form (`[]` opts a session out), `[serve.session_layers]`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub session_layers: BTreeMap<String, Vec<String>>,
+    /// Per-layer ranking knobs, `[[serve.layer]]`, keyed by `session`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub layer: Vec<LayerConfig>,
 }
 
 /// One `[[serve.projects]]` entry: a stdio serve whose canonical cwd is under
@@ -138,7 +152,8 @@ pub struct ServeConfig {
 #[serde(deny_unknown_fields)]
 pub struct ProjectConfig {
     /// A directory: absolute, `~` or `~/...`. `~` is expanded to `$HOME` and
-    /// the result canonicalized when the map is resolved.
+    /// the result canonicalized when the map is resolved. `*` in the final
+    /// component matches zero or more filename bytes; other components are literal.
     pub path: String,
     /// The session a stdio serve started under `path` uses.
     pub session: String,
@@ -291,7 +306,10 @@ impl ServeConfig {
     /// `max_attached`, and every malformed credential: no or a reserved name,
     /// an inline token, a missing or malformed `token_env` (or the legacy
     /// `LAMBO_AUTH_TOKEN`), an empty scope, a bad prefix, and a name or
-    /// `token_env` shared by two entries.
+    /// `token_env` shared by two entries; and every malformed layer setting
+    /// (#33): a bad or duplicate name, more than one layer per session, a
+    /// session layered with itself or a layer with layers of its own, and a
+    /// `[[serve.layer]]` knob out of range or naming no configured layer.
     pub fn validate(&self) -> Result<(), LamboError> {
         let mut pinned = BTreeSet::new();
         for name in &self.sessions {
@@ -337,6 +355,8 @@ impl ServeConfig {
                 )));
             }
         }
+
+        layers::check_static(self)?;
 
         credential::validate_set(
             self.credentials.iter().map(CredentialConfig::entry),

@@ -135,6 +135,8 @@ fn new_registry_ledgered(
             host_check,
             agent: "agent-a".into(),
             session_rps: 0,
+            layers: Default::default(),
+            authority: None,
         }),
         early,
         RegistryBounds::pinned_only(),
@@ -1156,6 +1158,8 @@ async fn a_pinned_session_that_can_no_longer_attach_is_not_retried() {
 /// The real multi-session serve, in-process (#32 review M1/M2).
 mod authority;
 mod erase;
+/// #33 PR 3: layered recall over two pinned sessions.
+mod layered;
 /// #32 PR 6: sessions attached on demand.
 mod on_demand;
 /// #101: an oversized tool-call body is refused before it is read.

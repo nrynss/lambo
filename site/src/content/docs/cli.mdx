@@ -111,6 +111,8 @@ migrations/003.sql [Resource] (score 0.25, id 9d44f8b1)
 
 If the top hit alone is longer than `--max-tokens`, the output shows its text cut short and marked `…`, its label (type, canonical marker, score, id), and a `[truncated: N tokens left out; lambo_inspect <id> for the full concept]` line instead of nothing. Any warning line that did not fit is printed above it. `lambo inspect --session <session> --focus <id>` shows the whole concept. See [`lambo_recall`](/lambo/mcp/#lambo_recall) for the rule.
 
+**One session.** `lambo recall` reads the one session `--session` names and never applies `[serve] layers`: it is a reader with no lease, and layers belong to an HTTP serve. To read a layer, name it: `lambo recall --session general`. A layered `lambo_recall` through `lambo serve` is described in [Layered recall](#layered-recall).
+
 **Recall by image or by vector.** With `--image` or `--query-vector-json`, the vector leg searches by that image's or vector's embedding instead of the query text's, with the same rules as `lambo_recall`'s `image` and `query_vector`. `--query` is then optional and still matches words through the keyword leg; without it, recent interactions are left out, as for `lambo_recall`. The files are read under the same size caps as `derive-image`'s and are never printed, stored or cached. A store without vector search, or a vector search that fails, is an error rather than a keyword-only answer, since the vector leg is the point.
 
 ```bash
@@ -333,6 +335,8 @@ Over `stdio`, `--session` can be left out when `lambo.toml` names the session in
 cd ~/Documents/work/lambo && lambo serve --config ~/lambo.toml   # session from [[serve.projects]]
 ```
 
+A final-component `*` in a project path covers matching sibling directories and their descendants, for example `~/work/lambo-wt-*`. It matches whole filenames, case-sensitively, with zero or more bytes per star. Parent-component stars are refused. Matching roots are resolved through symlinks; the deepest canonical root wins, a literal wins a same-depth pattern tie, and conflicting same-depth patterns are refused. See [Choosing a stdio serve's session](/lambo/config/#choosing-a-stdio-serves-session) for syntax and fallback rules.
+
 The map is only read from the `lambo.toml` the serve loads, so a global client config must name that file with `--config` (as above) or `LAMBO_CONFIG`. Without either, each serve reads its project's own `./lambo.toml`, if there is one, and that file's `default_session` or `[[serve.projects]]` chooses the session, just as it already chooses the store.
 
 See [MCP tools](/lambo/mcp/) for the tools it exposes.
@@ -403,7 +407,7 @@ lambo serve --config lambo.toml --transport http --session lambo --session gener
 
 Each session is a full writer of its own. It has its own lease and fencing token, graph, caches, write queue and local endpoint. So a stdio `lambo serve --session <name>` on the same machine forwards to this process for that session.
 
-Nothing crosses between sessions. Recall, inspect, saints, stats and GC each see only the session the request addressed. An MCP session opened on one session's URL is unknown at another's.
+Nothing crosses between sessions. Inspect, saints, stats, writes and GC each see only the session the request addressed, and so does recall, unless the operator layered the session (below). An MCP session opened on one session's URL is unknown at another's.
 
 The embedder, the store connection and the HTTP listener are shared. With more than one session, every name must be addressable by URL: 1 to 128 bytes of `A-Z`, `a-z`, `0-9`, `.`, `_`, `:` and `-`, not starting with `.`. A single session keeps `--session`'s looser rule and is served at `/mcp`.
 
@@ -418,6 +422,20 @@ A session found erased, at startup or on a retry, is not retried either. It gets
 A store or embedder that cannot be reached is retried, and logged once per outage.
 
 A serve with one session and nothing on demand behaves as it always has: losing the lease ends the process, so its client respawns into a proxy to the new holder.
+
+#### Layered recall
+
+`[serve] layers` names shared sessions that a pinned session's `lambo_recall` reads too (see [Layers](/lambo/config/#layers)). With
+
+```toml
+[serve]
+sessions = ["lambo", "general"]
+layers = ["general"]
+```
+
+a recall at `/mcp/s/lambo` reads `lambo` and `general` and merges them under one budget. Each hit names its session, a `general` hit's block says `from general`, and `scope` reads one of the two alone, on `lambo_recall` and `lambo_inspect` (a `general` hit's id is inspected with `scope = "general"`). `general` itself is not layered: a recall at `/mcp/s/general` reads `general` only. Writes and every other tool act on the addressed session only.
+
+A layer is pinned like any other session and keeps its own lease. If it loses the lease, only the layer is detached: `lambo` keeps serving, and its recalls answer from `lambo` alone with the warning `recall: layer general is unavailable; results are from lambo only` until the layer is taken back. The start is refused when a credential reaches `lambo` but not `general`, or when a layer is not pinned. A stdio `lambo serve --session lambo` that forwards to this serve gets `lambo`'s layering from it; one that holds `lambo` itself serves it unlayered, with one warning.
 
 #### Who reaches which session
 
@@ -510,6 +528,8 @@ Under a supervisor (launchd, systemd, Kubernetes), give the server more than 20 
 lambo serve-web --config lambo.toml --session demo
 lambo serve-web --config lambo.toml --session lambo --session rustydocs
 ```
+
+The window reads each session on its own and never merges a session with its `[serve] layers`; a layered answer is `lambo serve`'s (see [Layered recall](#layered-recall)).
 
 **Several sessions in one window.** One `lambo serve-web` can show several sessions, as one `lambo serve` can hold several ([Several sessions in one serve](#several-sessions-in-one-serve)), but the window is a reader and differs in what it reaches:
 

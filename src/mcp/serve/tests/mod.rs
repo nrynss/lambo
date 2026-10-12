@@ -32,6 +32,8 @@ mod frame_id;
 mod frames;
 mod heartbeat;
 mod http_guards;
+/// #33 PR 3: a layered serve's start checks.
+mod layers;
 mod roles;
 mod transport;
 

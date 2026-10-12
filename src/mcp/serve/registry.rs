@@ -86,6 +86,9 @@ use super::shutdown::{
 use super::signals::EarlyShutdown;
 use super::stages::{ShutdownProgress, Stage};
 use crate::ledger::Ledger;
+use crate::mcp::server::layers::{
+    LayerDown, LayerHandle, LayerRead, LayerSource, LiveLayer, ServerLayers,
+};
 use crate::memory::{Attach, LeaseHeldElsewhere, Memory, MemoryBuilder};
 use crate::store::StoreConfig;
 use crate::types::LamboError;
@@ -359,6 +362,12 @@ pub(super) struct SessionAttacher {
     /// Each session's own request rate, `[serve] per_session_rps` (#32 PR
     /// 6); 0 is none.
     pub(super) session_rps: u32,
+    /// Each pinned session's layer stack (#33 PR 3), resolved and checked
+    /// at start; empty when no session is layered.
+    pub(super) layers: crate::config::ServeLayers,
+    /// The serve's credential set, for a layered call's per-layer check
+    /// (#33 PR 3); `None` outside an HTTP serve.
+    pub(super) authority: Option<Arc<super::authority::ServeAuthority>>,
 }
 
 /// A pinned session's startup attach: the lease is ours, or another writer
@@ -1254,8 +1263,12 @@ impl SessionRegistry {
 
     /// The serving parts of a session whose lease `mem` holds (its server,
     /// endpoint and event pump), not yet held by the registry.
+    ///
+    /// A layered pinned session's server gets one handle per layer over
+    /// this registry, held weakly (#33 PR 3): each call looks the layer up,
+    /// so a re-attached layer is found and no `Arc` cycle forms.
     fn build_session(
-        &self,
+        self: &Arc<Self>,
         mem: Arc<Memory>,
         endpoint: Option<SessionEndpoint>,
     ) -> Arc<AttachedSession> {
@@ -1273,7 +1286,23 @@ impl SessionRegistry {
                 0,
             ),
         };
-        let server = session_server(&mem, &ledger);
+        let mut server = session_server(&mem, &ledger);
+        if let Some(attacher) = &self.attacher {
+            let stack = attacher.layers.stack(mem.session().as_str());
+            if !stack.is_empty() {
+                let weak: Weak<SessionRegistry> = Arc::downgrade(self);
+                let source: Weak<dyn LayerSource> = weak;
+                server = server.with_layers(ServerLayers {
+                    handles: stack
+                        .iter()
+                        .map(|l| {
+                            LayerHandle::new(&l.session, l.weight, l.min_similarity, source.clone())
+                        })
+                        .collect(),
+                    authority: attacher.authority.clone(),
+                });
+            }
+        }
         Arc::new(AttachedSession::attach(
             mem,
             server,
@@ -1978,6 +2007,33 @@ async fn watch_lease(
     drop(mem);
     if let Some(registry) = registry.upgrade() {
         registry.spawn_detach(id, DetachReason::LeaseLost);
+    }
+}
+
+/// A layered session's server finds each layer here, per call (#33 PR 3):
+/// only a live slot answers, with a call in flight on the layer for as
+/// long as the answer is held. A failed or erased slot says so (review
+/// L1), so a caller is not told to retry what will not come back.
+impl LayerSource for SessionRegistry {
+    fn live_layer(&self, session: &str, read: LayerRead) -> Result<LiveLayer, LayerDown> {
+        let live = {
+            let slots = self.slots.lock();
+            match slots.get(session) {
+                Some(Slot::Live(live)) => Arc::clone(live),
+                Some(Slot::Failed) => return Err(LayerDown::Failed),
+                Some(Slot::Erased) => return Err(LayerDown::Erased),
+                _ => return Err(LayerDown::Transient),
+            }
+        };
+        // The rate is drawn outside the slots' lock, as the router draws a
+        // request's (`transport::serve_session`).
+        if read == LayerRead::Direct && !live.admits_request() {
+            return Err(LayerDown::RateLimited);
+        }
+        Ok(LiveLayer {
+            mem: Arc::clone(&live.mem),
+            _in_flight: Some(live.activity.enter()),
+        })
     }
 }
 

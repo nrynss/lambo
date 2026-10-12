@@ -44,6 +44,10 @@ tokio::task_local! {
     /// The configured credential the current tool call arrived as, set by
     /// `call_tool` for the whole call (#32 PR 5 review I6).
     static CALLER: Option<Arc<str>>;
+
+    /// How the current tool call arrived (#33 PR 3), set by `call_tool`
+    /// for the whole call; a layered call checks it against each layer.
+    static AUTH: Option<CallAuth>;
 }
 
 /// The configured `[[serve.credential]]` an HTTP request authenticated as,
@@ -59,14 +63,41 @@ tokio::task_local! {
 #[derive(Clone, Debug)]
 pub(crate) struct CallCredential(pub(crate) Arc<str>);
 
-/// Run one tool call with `caller` as its credential.
-pub(super) async fn with_caller<F: Future>(caller: Option<Arc<str>>, call: F) -> F::Output {
-    CALLER.scope(caller, call).await
+/// The grant an HTTP request authenticated as, whatever its name (#33 PR
+/// 3): the serve's guard puts it in the request's extensions beside
+/// [`CallCredential`], for a layered recall's per-layer authorization.
+#[derive(Clone, Debug)]
+pub(crate) struct CallGrant(pub(crate) Arc<crate::surface::session::SessionGrant>);
+
+/// How a tool call arrived, for a layered call's per-layer check (#33 PR
+/// 3 review L2). A call with no request parts at all (the J2 session
+/// endpoint, stdio, a library caller) has none.
+#[derive(Clone, Debug)]
+pub(crate) enum CallAuth {
+    /// An HTTP request, with the grant the guard resolved for it. `None`
+    /// means the parts carried no grant (a router served without the
+    /// guard), which a layered call refuses rather than trusts.
+    Http(Option<Arc<crate::surface::session::SessionGrant>>),
+}
+
+/// Run one tool call with `caller` as its credential and `auth` as how it
+/// arrived.
+pub(super) async fn with_caller<F: Future>(
+    caller: Option<Arc<str>>,
+    auth: Option<CallAuth>,
+    call: F,
+) -> F::Output {
+    CALLER.scope(caller, AUTH.scope(auth, call)).await
 }
 
 /// The current call's configured credential, if any.
 fn caller() -> Option<Arc<str>> {
     CALLER.try_with(Clone::clone).ok().flatten()
+}
+
+/// How the current call arrived; `None` without request parts.
+pub(super) fn call_auth() -> Option<CallAuth> {
+    AUTH.try_with(Clone::clone).ok().flatten()
 }
 
 /// The I1 `lambo_recall` payload facts: the query, the top-k hits with **final
@@ -134,6 +165,46 @@ pub(super) fn recall_facts(
     top_k: usize,
     detailed: &crate::recall::detail::DetailedRecall,
 ) -> serde_json::Value {
+    recall_facts_with(
+        query,
+        top_k,
+        detailed,
+        |_, hit| detailed.legs.get(&hit.node_id).copied(),
+        None,
+    )
+}
+
+/// [`recall_facts`] for a layered session's recall (#33 PR 3): every hit
+/// line also names its `session`, and the line carries `session_hits`, the
+/// hit count per session (a map keyed by session, so N tiers fit). Legs
+/// come from [`LayeredRecall`](crate::memory::LayeredRecall)'s per-hit
+/// list, by position: node ids are unique within a session, not across
+/// sessions, so the merged `legs` map holds the caller's session only.
+/// Additive keys; `v` stays 1.
+pub(super) fn layered_recall_facts(
+    query: &str,
+    top_k: usize,
+    recalled: &crate::memory::LayeredRecall,
+) -> serde_json::Value {
+    let sessions: Vec<&str> = recalled.hits.iter().map(|h| h.session.as_str()).collect();
+    recall_facts_with(
+        query,
+        top_k,
+        &recalled.detail,
+        |i, _| recalled.hit_legs.get(i).copied().flatten(),
+        Some(&sessions),
+    )
+}
+
+/// The recall line's facts, with each hit's legs from `legs_of(position,
+/// hit)` and, for a layered session, each hit's session by position.
+fn recall_facts_with(
+    query: &str,
+    top_k: usize,
+    detailed: &crate::recall::detail::DetailedRecall,
+    legs_of: impl Fn(usize, &crate::types::RecallHit) -> Option<crate::recall::candidates::LegScores>,
+    sessions: Option<&[&str]>,
+) -> serde_json::Value {
     let mut canonical_marker = false;
     let mut blast_radius_warning = false;
     let mut conflict_line = false;
@@ -158,7 +229,7 @@ pub(super) fn recall_facts(
             canonical_marker |=
                 hit.is_canonical && (d.included_in_context || (i == 0 && truncated_label));
             let mut legs = serde_json::Map::new();
-            if let Some(l) = detailed.legs.get(&hit.node_id) {
+            if let Some(l) = legs_of(i, hit) {
                 if let Some(s) = l.keyword {
                     legs.insert("bm25".into(), json!(s));
                 }
@@ -216,6 +287,12 @@ pub(super) fn recall_facts(
             {
                 map.insert("truncated_in_context".into(), json!(true));
             }
+            // #33: additive, on a layered session's lines only.
+            if let Some(session) = sessions.and_then(|s| s.get(i))
+                && let Some(map) = line.as_object_mut()
+            {
+                map.insert("session".into(), json!(session));
+            }
             line
         })
         .collect();
@@ -234,7 +311,7 @@ pub(super) fn recall_facts(
         })
         .collect();
 
-    json!({
+    let mut facts = json!({
         "query": truncate_to(query, LEDGER_QUERY_PREFIX),
         "top_k": top_k,
         "hit_count": detailed.hits.len(),
@@ -247,7 +324,18 @@ pub(super) fn recall_facts(
         "response_annotations": response_kinds,
         "warning_count": detailed.warnings.len(),
         "cold_start": detailed.cold_start,
-    })
+    });
+    // #33: per-session hit counts, on a layered session's lines only.
+    if let Some(sessions) = sessions
+        && let Some(map) = facts.as_object_mut()
+    {
+        let mut counts = std::collections::BTreeMap::<&str, usize>::new();
+        for s in sessions {
+            *counts.entry(s).or_default() += 1;
+        }
+        map.insert("session_hits".into(), json!(counts));
+    }
+    facts
 }
 
 /// Longest concept-text prefix a ledger line carries.

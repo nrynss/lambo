@@ -8,6 +8,11 @@ use crate::mcp::server::params::{check_size, InspectParams};
 use crate::mcp::server::response::{attach_warnings, bad_param};
 use crate::mcp::server::trace::{focus_for_ledger, note_facts};
 use crate::mcp::server::LamboServer;
+use crate::memory::Memory;
+
+use super::scope::Scoped;
+
+const TOOL: &str = "lambo_inspect";
 use crate::surface::focus::{
     ambiguous_refusal, fuzzy_note, missing_refusal, oversized_refusal, resolve_focus, Focus,
 };
@@ -31,10 +36,27 @@ impl LamboServer {
         if let Err(e) = check_in_range("depth", depth, 0, MAX_INSPECT_DEPTH) {
             return bad_param(e);
         }
+        // #33 PR 3 review M1: `scope` reads a layer's concept, as a recall
+        // hit from that layer names it. Resolved as `lambo_recall` resolves
+        // it; the layer is looked up last, just before the read.
+        let layer = match p.scope.as_deref().map(|s| self.resolve_scope(TOOL, s)) {
+            None | Some(Ok(Scoped::Own)) => None,
+            Some(Ok(Scoped::Layer(handle))) => match self.read_layer(
+                TOOL,
+                handle,
+                &format!("inspect without scope to read {}", self.mem.session()),
+            ) {
+                Ok(live) => Some(live),
+                Err(e) => return e,
+            },
+            Some(Err(e)) => return e,
+        };
+        let mem: &Memory = layer.as_ref().map_or(&self.mem, |l| &l.mem);
+        let scope = p.scope.clone();
 
         // One short read section, no `.await` inside (spec §6.4).
         let resolved = {
-            let g = self.mem.graph().read();
+            let g = mem.graph().read();
             match resolve_focus(&g, p.focus.trim()) {
                 Focus::Exact(id) => Ok((id, None, render_neighbourhood_parts(&g, id, depth))),
                 Focus::Fuzzy {
@@ -102,7 +124,7 @@ impl LamboServer {
                 // node ids, announced as suggestions.
                 let msg = format!(
                     "lambo_inspect: {}",
-                    missing_refusal(&p.focus, &self.mem.session().0, &near)
+                    missing_refusal(&p.focus, &mem.session().0, &near)
                 );
                 note_facts(|| {
                     json!({
@@ -157,14 +179,23 @@ impl LamboServer {
         // whole neighbourhood into the ledger. `fuzzy` is worth a field — a
         // resolution the caller did not ask for is exactly the friction
         // DOGFOOD metric 6 is looking for.
-        note_facts(|| json!({ "depth": depth, "fuzzy": note.is_some() }));
+        note_facts(|| {
+            let mut facts = json!({ "depth": depth, "fuzzy": note.is_some() });
+            // #33: additive, only when the caller sent a scope.
+            if let Some(scope) = &scope
+                && let Some(map) = facts.as_object_mut()
+            {
+                map.insert("scope".into(), json!(scope));
+            }
+            facts
+        });
 
         // Issue #30: an inspect that resolved returned its focus concept to the
         // caller — an access. The focus only: the neighbourhood is context
         // around what was asked for (depth up to 5 can reach hundreds of
         // concepts), and a refusal (ambiguous / missing / oversized) returned
         // no concept at all.
-        self.mem.note_accesses([focus_id]);
+        mem.note_accesses([focus_id]);
 
         let mut out = CallToolResult::success(vec![ContentBlock::text(text.clone())]);
         attach_warnings(&mut out, &warnings);

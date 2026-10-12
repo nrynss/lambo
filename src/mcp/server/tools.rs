@@ -16,5 +16,6 @@ mod inspect;
 mod recall;
 mod reserve;
 mod saints;
+mod scope;
 mod stats;
 mod write;
