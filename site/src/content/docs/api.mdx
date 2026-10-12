@@ -169,11 +169,20 @@ See [MCP tools](/lambo/mcp/) and [Configuration](/lambo/config/).
 
 Stage 2 requires at least three eligible dependent origin interactions and
 coverage of at least `0.3`. It divides their time spread by **min(session
-extent, 14 days)** by default. In a long session, a spread of exactly **4.2
-days** passes the coverage bar. Sessions shorter than fourteen days keep
-their existing coverage, including the REST API fixture and demo. Empty
-support has coverage zero; nonempty support in a single-point session has
-coverage one. Coverage is clamped to one.
+extent, 14 days)** by default. The session extent is its about-time
+extent: from the earliest to the latest of all its interactions, each at its
+event time, else its creation time. When that extent exceeds fourteen days,
+a spread of exactly **4.2 days** passes the coverage bar. A session whose
+extent is fourteen days or less, the REST API fixture and the demo
+included, keeps its existing coverage. Empty support has coverage zero;
+nonempty support in a single-point session has coverage one. Coverage is
+clamped to one.
+
+The extent counts every interaction in the session, including ones younger
+than the age floor and ones whose about-time is after the evaluation clock
+(a backdated or future `event_time`). Only the evidence side is age-gated.
+This predates the cap; the cap bounds its effect, since a far-future
+interaction can stretch the denominator to at most fourteen days.
 
 This is a denominator cap, **not a rolling expiry window**: evidence older
 than fourteen days still counts. Age checks use the caller's injected clock

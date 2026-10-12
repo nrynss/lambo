@@ -28,7 +28,9 @@
   promoted on the first evaluation, with or without this check, and all 7
   Venerables lose their Stage 2 support.
 - **Long sessions can pass Stage 2 with less spread (#36 PR 2).** In a
-  session older than fourteen days, coverage now divides by fourteen days,
+  session whose about-time extent (first to last interaction, by event
+  time, else creation time) exceeds fourteen days, coverage now divides by
+  fourteen days,
   so a concept that fell just short before may become Venerable, and a
   Venerable that also has more than five dependents may go Canonical.
   Nothing is demoted. On a copy of the dogfood store taken 2026-10-12 (one
@@ -154,9 +156,10 @@
 - **Stage 2 coverage is measured against at most fourteen days** ([#36](https://github.com/nrynss/lambo/issues/36)
   PR 2). The bars are unchanged (three dependent origin interactions,
   coverage at least 0.3), but the denominator is min(session extent, 14
-  days), so a session older than two weeks needs 4.2 days of spread
-  instead of 30% of its whole life. Sessions of up to fourteen days, the
-  demo and the REST API fixture included, measure exactly as before. This
+  days), so a session whose about-time extent exceeds fourteen days needs
+  4.2 days of spread instead of 30% of that extent. Sessions whose extent
+  is fourteen days or less, the demo and the REST API fixture included,
+  measure exactly as before. This
   is a cap on the denominator, not an expiry: evidence older than fourteen
   days still counts. Evaluation and the portal's inspect panel use the
   same configured cap, and `stage2_evidence_passes` is the shared
