@@ -1675,15 +1675,18 @@ impl LamboError {
     const LOOKUP_TIMEOUT: &'static str = "hybrid vector candidate lookup timed out";
 
     /// A hybrid derive's vector-candidate lookup that did not answer inside
-    /// the call's embed-and-lookup budget (#125 review H1). It is
+    /// its own budget, `graph::hybrid::VECTOR_LOOKUP_TIMEOUT` from when it
+    /// started (#125 review H1). A call whose overall budget ran out first
+    /// (slow embeds before the lookup) is the ordinary embed-budget
+    /// [`LamboError::EmbedUnavailable`], not this. It is
     /// [`LamboError::EmbedUnavailable`]: transient, so the in-session write
     /// queue leaves the write's durable intent for the next serve to replay.
     /// Its `Display` is `embed: hybrid vector candidate lookup timed out ...`,
     /// and its error kind is "embedding error", like an embed timeout.
     pub(crate) fn lookup_timeout(budget: std::time::Duration) -> Self {
         LamboError::EmbedUnavailable(format!(
-            "{} after {budget:?}; nothing was written — the write's embed and lookup budget \
-             ran out, which says nothing about its input",
+            "{} after {budget:?}; nothing was written — the store did not answer the lookup \
+             in its own budget, which says nothing about the write's input",
             Self::LOOKUP_TIMEOUT
         ))
     }
@@ -1745,11 +1748,11 @@ pub enum LamboError {
     /// Produced only where the cause is known: `graph::hybrid::derive`'s embed
     /// timeout arm, its embed-error arm when
     /// [`crate::embed::EmbedError::is_transient`] says so, and (#125 review
-    /// H1) its vector-candidate lookup when the call's embed-and-lookup
-    /// budget ran out before the lookup answered ([`Self::lookup_timeout`]):
-    /// that lookup runs under the same deadline as the embeds, and its
-    /// timeout likewise says nothing about the input, so the in-session write
-    /// queue leaves the durable intent unconsumed. Before 0.6.0 a lookup
+    /// H1) its vector-candidate lookup when the store did not answer within
+    /// the lookup's own budget ([`Self::lookup_timeout`]), or when the call's
+    /// embed-and-lookup budget ran out before or during the lookup (the
+    /// ordinary budget message). Neither says anything about the input, so
+    /// the in-session write queue leaves the durable intent unconsumed. Before 0.6.0 a lookup
     /// timeout was a store error (`store error`, `Backend`); it now reads
     /// `embed: hybrid vector candidate lookup timed out ...` with the
     /// "embedding error" kind. Nothing retries a transient write within the

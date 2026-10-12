@@ -319,7 +319,7 @@ impl WritePipeline {
                             "replay after restart was refused (the vector candidate lookup did \
                              not answer within {:?}, so the write is not retried again); \
                              nothing was written",
-                            crate::graph::hybrid::HYBRID_IO_TIMEOUT
+                            crate::graph::hybrid::VECTOR_LOOKUP_TIMEOUT
                         );
                         if let Some(ledger) = &this.ctx.ledger {
                             ledger.append(&crate::ledger::completion_line(

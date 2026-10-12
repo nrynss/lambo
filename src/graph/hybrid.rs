@@ -539,11 +539,13 @@ fn reject_empty_key(content: &str, key: &str) -> Result<(), LamboError> {
 /// did not answer in time, [`LamboError::Embed`] when it answered and the answer
 /// was unusable for this input. The two render identically to a caller.
 ///
-/// A vector-candidate lookup that does not answer before the call's
-/// [`HYBRID_IO_TIMEOUT`] (it shares the embeds' deadline) is also
-/// [`LamboError::EmbedUnavailable`] (#125): it reads `embed: hybrid vector
-/// candidate lookup timed out ...` with the "embedding error" kind, where
-/// before 0.6.0 it was a store error. Any other store error from the lookup
+/// A vector-candidate lookup that does not answer within its own
+/// [`VECTOR_LOOKUP_TIMEOUT`] (from when it starts, inside the call's
+/// [`HYBRID_IO_TIMEOUT`]) is also [`LamboError::EmbedUnavailable`] (#125): it
+/// reads `embed: hybrid vector candidate lookup timed out ...` with the
+/// "embedding error" kind, where before 0.6.0 it was a store error. When the
+/// call's budget runs out first (slow embeds before the lookup), the error is
+/// the ordinary budget one, not a lookup timeout. Any other store error from the lookup
 /// still propagates as [`LamboError::Store`]. Nothing here retries; a write
 /// queue intent that fails transiently is replayed by the session's next
 /// serve.
@@ -2127,28 +2129,56 @@ async fn checked_candidates(
     io_deadline: tokio::time::Instant,
 ) -> Result<Option<Vec<crate::types::Scored<NodeId>>>, LamboError> {
     // Review H2: a lookup is not started once the budget is spent (a
-    // `timeout_at` past its deadline still polls the future once).
-    let lookup = async {
-        if tokio::time::Instant::now() >= io_deadline {
-            return None;
-        }
-        tokio::time::timeout_at(
-            io_deadline,
-            vectors.checked(session_id, emb, embedding, limit),
-        )
-        .await
-        .ok()
-    };
-    match lookup.await {
-        // Review H1: transient, like an embed timeout. The budget ran out
-        // (often in the embeds before this lookup), so nothing was learned
-        // about this write's input, and its durable intent must stay
-        // unconsumed for a later attempt rather than settle `failed`.
-        None => Err(LamboError::lookup_timeout(HYBRID_IO_TIMEOUT)),
-        Some(Ok(hits)) => Ok(Some(hits)),
-        Some(Err(StoreError::Capability(_))) => Ok(None),
-        Some(Err(e)) => Err(e.into()),
+    // `timeout_at` past its deadline still polls the future once). That is
+    // the call's budget running out, not the store failing to answer.
+    let started = tokio::time::Instant::now();
+    if started >= io_deadline {
+        return Err(LamboError::EmbedUnavailable(budget_spent(
+            "before its vector candidate lookup could start",
+        )));
     }
+    // #125: the lookup has its own sub-budget from when it starts, capped
+    // by the call's. Only the lookup's own deadline firing means the store
+    // did not answer; the call's firing first means the embeds before it
+    // used the budget up, which is the ordinary budget path.
+    let own_deadline = started + VECTOR_LOOKUP_TIMEOUT;
+    let deadline = own_deadline.min(io_deadline);
+    match tokio::time::timeout_at(deadline, vectors.checked(session_id, emb, embedding, limit))
+        .await
+    {
+        // Review H1: transient either way. Nothing was learned about this
+        // write's input, so its durable intent must stay unconsumed.
+        Err(_) if own_deadline <= io_deadline => {
+            Err(LamboError::lookup_timeout(VECTOR_LOOKUP_TIMEOUT))
+        }
+        Err(_) => Err(LamboError::EmbedUnavailable(budget_spent(
+            "while its vector candidate lookup was running",
+        ))),
+        Ok(Ok(hits)) => Ok(Some(hits)),
+        Ok(Err(StoreError::Capability(_))) => Ok(None),
+        Ok(Err(e)) => Err(e.into()),
+    }
+}
+
+/// How long one vector-candidate lookup may take, from when it starts, inside
+/// the call's [`HYBRID_IO_TIMEOUT`] (#125). Its own budget, so a lookup
+/// timeout ([`LamboError::is_lookup_timeout`]) means the store did not answer
+/// in this long, not that slow embeds before it used up the call's budget.
+/// Half the call's budget: a lookup normally takes milliseconds (the holder's
+/// graph, or one indexed query), and the SQLite exact scan the store
+/// module measures stays well inside it, while the cap keeps one call's I/O
+/// within one [`HYBRID_IO_TIMEOUT`].
+pub const VECTOR_LOOKUP_TIMEOUT: Duration = Duration::from_secs(HYBRID_IO_TIMEOUT.as_secs() / 2);
+
+/// The message for a hybrid call whose [`HYBRID_IO_TIMEOUT`] ran out (#125):
+/// the ordinary embed-budget path, not a [lookup
+/// timeout](LamboError::is_lookup_timeout).
+fn budget_spent(when: &str) -> String {
+    format!(
+        "hybrid embed and lookup budget of {HYBRID_IO_TIMEOUT:?} ran out {when}; nothing was \
+         written — the write is refused rather than applied without its vector (a concept \
+         stored with no embedding is unfindable by semantic recall)"
+    )
 }
 
 /// Log, once per session, that the store refused the checked vector lookup.

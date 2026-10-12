@@ -190,11 +190,68 @@ async fn a_candidate_lookup_timeout_is_transient_and_writes_nothing() {
     .await
     .unwrap_err();
     assert!(matches!(err, LamboError::EmbedUnavailable(_)), "{err:?}");
+    assert!(err.is_lookup_timeout(), "the store did not answer: {err:?}");
     assert_eq!(
         store.vector_calls(),
         1,
         "no lookup is started past the deadline"
     );
+    assert_eq!(graph.read().concepts().count(), 0);
+}
+
+/// Embeds after a fixed (virtual) delay.
+struct SlowEmbeds {
+    inner: FixtureEmbedder,
+    delay: Duration,
+}
+
+#[async_trait]
+impl Embedder for SlowEmbeds {
+    fn dimensions(&self) -> usize {
+        self.inner.dimensions()
+    }
+    async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbedError> {
+        tokio::time::sleep(self.delay).await;
+        self.inner.embed(text).await
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn slow_embeds_that_spend_the_budget_are_not_a_lookup_timeout() {
+    // #125 focused check: the lookup has its own budget from when it starts.
+    // When slow embeds leave it less than that and the call's budget runs
+    // out during the lookup, the error is the ordinary budget one, so the
+    // replay does not settle the write as "the store did not answer".
+    let (graph, iid) = graph_with_interaction("b125-slow-embeds", 1, 0, PROMPT);
+    let store = SpyStore::hanging();
+    let embedder = SlowEmbeds {
+        inner: FixtureEmbedder::new(),
+        delay: HYBRID_IO_TIMEOUT - VECTOR_LOOKUP_TIMEOUT + Duration::from_secs(5),
+    };
+    let start = tokio::time::Instant::now();
+    let err = derive_with(
+        graph.clone(),
+        VectorCandidates::from_store(&store),
+        &embedder,
+        &contract("fixture", 1024),
+        iid,
+        &agent(),
+        &[("slow embed item", ConceptType::Entity)],
+        &ParentOf::none(),
+        10,
+        SEMANTIC_MATCH_THRESHOLD_DEFAULT,
+        None,
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, LamboError::EmbedUnavailable(_)), "{err:?}");
+    assert!(
+        !err.is_lookup_timeout(),
+        "the embeds spent the budget: {err:?}"
+    );
+    assert_eq!(store.vector_calls(), 1);
+    assert_eq!(tokio::time::Instant::now() - start, HYBRID_IO_TIMEOUT);
     assert_eq!(graph.read().concepts().count(), 0);
 }
 

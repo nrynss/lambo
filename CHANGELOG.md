@@ -35,9 +35,10 @@
 
 - **A vector-candidate lookup timeout is `LamboError::EmbedUnavailable`,
   not `LamboError::Store`** (#125). `hybrid::derive` and `Memory::derive`
-  return it when a hybrid derive's lookup does not answer within the call's
-  30 s embed-and-lookup budget. Its message reads `embed: hybrid vector
-  candidate lookup timed out after 30s; ...` and its error kind is
+  return it when a hybrid derive's lookup does not answer within its own
+  15 s budget (`hybrid::VECTOR_LOOKUP_TIMEOUT`, from when the lookup starts,
+  inside the call's 30 s). Its message reads `embed: hybrid vector
+  candidate lookup timed out after 15s; ...` and its error kind is
   "embedding error" (it was `store error`), on write receipts too. Other
   store errors from the lookup are unchanged.
 
@@ -49,6 +50,8 @@
   `embed` per text and report a capacity of 1.
 - `writeq::REPLAY_LOOKUP_TIMEOUT_LIMIT` (3): consecutive lookup timeouts at
   replay that stop it (#125).
+- `graph::hybrid::VECTOR_LOOKUP_TIMEOUT` (15 s): one vector-candidate
+  lookup's own budget inside a hybrid call's 30 s (#125).
 
 ### Changed
 
@@ -117,15 +120,19 @@
   and every caller gets a transient error with no per-text retries;
   otherwise each text is rerun alone and only the bad one fails.
 - **A vector-candidate lookup timeout no longer loses an acked write
-  (#125 review).** The lookup runs under the same deadline as a derive's
+  (#125 review).** The lookup ran under the same deadline as a derive's
   embeds, and its timeout was a store error, which the write queue settles
   `failed`, consuming the write's durable intent. It is now transient, like an
-  embed timeout: the receipt says `failed`, the intent stays durable, and the
+  embed timeout, and it has its own 15 s budget from when it starts, so a
+  lookup timeout means the store did not answer (slow embeds that use up the
+  call's budget fail as an ordinary embed-budget error instead): the receipt
+  says `failed`, the intent stays durable, and the
   session's next serve replays it (nothing retries it within the session). If
   the lookup times out again at replay, the intent settles `failed` with a
   reason that says so, rather than holding the backlog on every restart;
   three in a row with nothing applied between stop the replay and leave the
-  rest durable. A derive also no longer starts an embed or a lookup once its
+  rest durable, so at most two writes are settled failed per attach when the
+  store is slow. A derive also no longer starts an embed or a lookup once its
   deadline has passed.
 
 ### Performance
