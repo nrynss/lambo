@@ -617,6 +617,51 @@ mod tests {
         );
     }
 
+    /// #19(a) pins the current behaviour, which #19(c) must revisit
+    /// deliberately: a `Contradicts` edge's writer joins the conflict agent
+    /// set like any incident edge's, so agent-b contradicting agent-a's node
+    /// turns agent-a's own fresh `Dependency` write into a two-agent
+    /// conflict. The contradiction is never the qualifying write itself
+    /// (only `Causal`/`Dependency` are): the named writer stays agent-a.
+    #[test]
+    fn a_contradiction_writer_joins_the_conflict_agent_set() {
+        let now = t(3600);
+        let mut g = Graph::new(sid());
+        let i1 = interaction(1, None, "agent-a", 3600 - 60);
+        g.insert_interaction(i1.clone()).unwrap();
+        let c1 = concept(1, i1.id, "agent-a", "shared node", 3600 - 60);
+        let c1_id = c1.id;
+        g.insert_concept(c1, i1.id).unwrap();
+        let c2 = concept(2, i1.id, "agent-a", "same agent", 3600 - 60);
+        let c2_id = c2.id;
+        g.insert_concept(c2, i1.id).unwrap();
+        g.upsert_edge(dep_edge(1, c2_id, c1_id, 3600 - 25)).unwrap();
+        assert!(
+            conflict_at(&g, c1_id, CONFLICT_RECENCY_WINDOW, now).is_none(),
+            "one agent alone is not a conflict"
+        );
+
+        let i2 = interaction(2, Some(1), "agent-b", 3600 - 20);
+        g.insert_interaction(i2.clone()).unwrap();
+        let c3 = concept(3, i2.id, "agent-b", "contrary view", 3600 - 20);
+        let c3_id = c3.id;
+        g.insert_concept(c3, i2.id).unwrap();
+        g.upsert_edge(Edge {
+            edge_type: EdgeType::Contradicts,
+            ..dep_edge(2, c3_id, c1_id, 3600 - 15)
+        })
+        .unwrap();
+        assert!(g.assert_invariants().is_ok());
+        let hit = conflict_at(&g, c1_id, CONFLICT_RECENCY_WINDOW, now)
+            .expect("the contradiction's writer makes a second agent");
+        assert_eq!(
+            hit.agents,
+            vec![AgentId::from("agent-a"), AgentId::from("agent-b")]
+        );
+        assert_eq!(hit.writer, AgentId::from("agent-a"));
+        assert_eq!(hit.seconds_ago, 25);
+    }
+
     #[test]
     fn stale_window_does_not_fire() {
         let now = t(3600);

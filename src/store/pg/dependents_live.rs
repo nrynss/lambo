@@ -35,6 +35,7 @@ pub(crate) async fn check_dependents_case(store: &dyn GraphStore) {
     case::check_extents_case(store).await;
     let batch = case::store_batch();
     store.flush(&batch, None).await.expect("flush the case");
+    case::check_contradiction_persistence(store).await;
     let sid = case::session();
     for (name, age, blast, distinct, coverage) in case::expected_store() {
         let node = case::concept_id(name);

@@ -23,7 +23,7 @@ The four weighted dimensions are session-relative, so the same graph scores iden
 | $R$ | recency | $1 - \dfrac{t_{\text{end}} - t_{\text{last}}}{\max(t_{\text{end}} - t_{\text{start}},\ 10\text{ min})}$, clamped to $[0,1]$, in integer milliseconds. A session of at least 10 minutes uses its own span, and those scores match the historical ratio. A younger session scores every concept near 1, so a few milliseconds between derives cannot sweep the dimension. |
 | $F$ | frequency | $\min\!\left(1,\ \dfrac{\text{access count}}{10}\right)$ |
 | $A$ | session activity | share of the session's interactions that derived this concept |
-| $D$ | density | incident edge count normalized by the most connected concept in the session |
+| $D$ | density | incident edge count, excluding `Contradicts`, normalized by the most connected concept in the session |
 
 The two additive terms are where the shape of the graph leaks into the number.
 
@@ -35,7 +35,7 @@ $b(\tau)$ pays per incident edge by type, and it pays structure rather than prov
 | `Hierarchical` | 0.015 |
 | `Semantic` | 0.01 |
 | `CoOccurrence` | 0.005 |
-| `Derives`, `Temporal` | 0.0 |
+| `Derives`, `Temporal`, `Contradicts` | 0.0 |
 
 An agent can write a thousand observations and move the score by zero, because the `Derives` edges those writes create are worth nothing. The sum is capped at 0.25.
 

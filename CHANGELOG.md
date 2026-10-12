@@ -45,6 +45,16 @@
   dependents, so a file or entity that many actions name in `depends_on`
   reports a larger count than before, and an action record that depended
   on many things reports a smaller one.
+- **Downgrading or mixing versions with `Contradicts` edges (#19).** No
+  0.6.0 tool writes a `Contradicts` edge yet; only a library caller or a
+  hand-built batch can. A 0.5.0 (or older) binary refuses to load a
+  session, and to read a snapshot, that holds one: `load_session` fails on
+  the unknown edge type. Before downgrading, or before a 0.5.0 writer
+  opens a store a newer one wrote, remove them on that store:
+
+  ```sql
+  DELETE FROM edges WHERE edge_type = 'Contradicts';
+  ```
 
 ### Breaking (library API)
 
@@ -70,6 +80,12 @@
   `gate_progress_with_config` take a chosen one. `interaction_span` itself
   is unchanged and still divides by the whole session extent.
 
+- **`EdgeType` gains `Contradicts` (#19, edge groundwork).** Exhaustive
+  matches must handle the new variant. It connects concepts, persists as
+  `Contradicts`, and declares opposition without dependence, canonization
+  support, blast radius, score density or edge bonus, or GC Resource
+  protection. Existing schemas accept it without migration. Older binaries
+  cannot decode rows containing it (see Upgrading).
 - **`LeaseHolder::token()` and its `Display`, and the
   `session_leases.holder` column, have a new format** (#126). A holder for
   the current process writes `agent@host#pid;boot=<id>;pidns=<inode>`
@@ -104,6 +120,9 @@
 
 ### Added
 
+- `EdgeType::Contradicts` persistence and synthetic exclusion checks across
+  the store adapters (#19(a)). It does not decay. Write-tool fields,
+  contradiction warnings and evidence-driven supersession follow separately.
 - A live check of the #36 dependents case on Postgres and Cockroach, with
   MemoryStore parity. It is manual by the owner's decision and is not part
   of CI: run `LAMBO_POSTGRES_DSN=<dsn> cargo test --no-default-features --features store-postgres --lib store::pg::dependents_live -- --ignored` or, for
@@ -241,7 +260,6 @@
   with the caller's resolved subject; layers still answer when the caller
   resolves none. The security-group prose fallback is unchanged. No fixture
   or golden output changed.
-
 
 - **A recall no longer comes back empty when its top hit is long (#130).**
   `context` keeps whole hit blocks while they fit `max_tokens` and stops at
