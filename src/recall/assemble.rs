@@ -422,6 +422,7 @@ where
     let truncation = DetailedRecall::mark_context(&mut detailed, &fitted);
 
     DetailedRecall {
+        anchor: None,
         hits,
         context: fitted.context,
         truncation,

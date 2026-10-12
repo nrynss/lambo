@@ -323,7 +323,11 @@ where
         let Some(t) = &list.recall else { continue };
         debug_assert_eq!(t.recall.hits.len(), t.recall.detailed.len());
         debug_assert_eq!(t.recall.hits.len(), t.identities.len());
-        let anchored = is_anchored(&t.recall);
+        let anchored = is_anchored(&t.recall)
+            && (tier == 0
+                || recall_of(0)
+                    .and_then(|p| p.recall.anchor.as_ref())
+                    .is_none_or(|a| t.recall.anchor.as_ref() == Some(a)));
         let n = t.recall.hits.len().min(t.recall.detailed.len());
         for pos in 0..n {
             let hit = &t.recall.hits[pos];
@@ -527,6 +531,18 @@ where
             }
         }
         let mut annotations = t.recall.response_annotations.clone();
+        if tier > 0
+            && recall_of(0)
+                .and_then(|p| p.recall.anchor.as_ref())
+                .is_some_and(|a| t.recall.anchor.as_ref() != Some(a))
+        {
+            for a in &annotations {
+                if a.kind == AnnotationKind::Traversal {
+                    lines.retain(|line| *line != a.text);
+                }
+            }
+            annotations.retain(|a| a.kind != AnnotationKind::Traversal);
+        }
         for a in annotations
             .iter_mut()
             .filter(|a| a.kind == AnnotationKind::Traversal)
@@ -572,6 +588,7 @@ where
     }
 
     let detail = DetailedRecall {
+        anchor: recall_of(0).and_then(|t| t.recall.anchor.clone()),
         hits,
         context: fitted.context,
         truncation,
