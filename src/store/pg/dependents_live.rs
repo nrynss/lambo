@@ -30,6 +30,7 @@ use crate::test_util::dependents as case;
 /// MemoryStore parity for every concept at both ages when `store-memory` is
 /// compiled in.
 pub(crate) async fn check_dependents_case(store: &dyn GraphStore) {
+    case::check_window_case(store).await;
     let batch = case::store_batch();
     store.flush(&batch, None).await.expect("flush the case");
     let sid = case::session();

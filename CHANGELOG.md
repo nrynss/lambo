@@ -21,7 +21,7 @@
   stays Venerable instead of jumping to Canonical on its first cycle.
   Nothing is demoted. This includes a session's root goal, which
   `set_root_goal` makes Venerable directly: under Swarm it now needs Stage 2
-  support (three dependents' interactions spanning 30% of the session) to
+  support (three dependents' interactions spanning 30% of the capped session extent) to
   go Canonical. Solo is unchanged: it still probes and stamps blast radius
   and admits by its score bands. On a copy of
   the dogfood store taken 2026-10-12, no Candidate or Venerable would have
@@ -37,6 +37,14 @@
   on many things reports a smaller one.
 
 ### Breaking (library API)
+
+- `Config` adds `canonization_coverage_window`; `EvalParams` adds
+  `coverage_window` (#36 PR2). Update exhaustive struct literals or use
+  `..Default::default()`. Older serialized `Config` values default the
+  absent field to fourteen days. Third-party `GraphStore` implementations
+  compile unchanged, but Stage 2 now requires their explicit
+  `interaction_span_with_window` implementation, otherwise returning
+  `StoreError::Capability`. The raw `interaction_span` contract is unchanged.
 
 - **`LeaseHolder::token()` and its `Display`, and the
   `session_leases.holder` column, have a new format** (#126). A holder for
@@ -120,6 +128,13 @@
   lookup's own budget inside a hybrid call's 30 s (#125).
 
 ### Changed
+
+- Stage 2 caps its coverage denominator at fourteen days (#36 PR2),
+  keeping the three-origin and 0.3 floors. Short sessions keep their
+  coverage; long sessions need 4.2 days of eligible evidence spread.
+  The cap does not expire evidence. Library configuration is validated,
+  evaluation and inspect share it, and `stage2_evidence_passes` exposes
+  the reusable evidence threshold predicate.
 
 - The MCP tool descriptions say what a concept is and how to send
   `agent_id` ([#98](https://github.com/nrynss/lambo/issues/98),

@@ -223,6 +223,33 @@ pub async fn gate_progress(
     cooldown: Duration,
     now: DateTime<Utc>,
 ) -> Result<GateProgress, StoreError> {
+    gate_progress_with_config(
+        store,
+        session,
+        concept,
+        &crate::Config {
+            promotion_policy: policy,
+            canonization_edge_min_age: min_edge_age,
+            canonization_repromotion_cooldown: cooldown,
+            ..crate::Config::default()
+        },
+        now,
+    )
+    .await
+}
+
+/// Gate progress using the same coverage cap as the configured evaluator.
+/// The compatibility wrapper [`gate_progress`] uses the default cap.
+pub async fn gate_progress_with_config(
+    store: &dyn GraphStore,
+    session: &SessionId,
+    concept: &Concept,
+    config: &crate::Config,
+    now: DateTime<Utc>,
+) -> Result<GateProgress, StoreError> {
+    let policy = config.promotion_policy;
+    let min_edge_age = config.canonization_edge_min_age;
+    let cooldown = config.canonization_repromotion_cooldown;
     let gates = match policy {
         // Not an optimisation. Running the two gate-only queries here would put
         // four numbers on the wire that no solo promotion decision consults,
@@ -234,7 +261,13 @@ pub async fn gate_progress(
                 .blast_radius(session, concept.id, min_edge_age, now)
                 .await?;
             let span = store
-                .interaction_span(session, concept.id, min_edge_age, now)
+                .interaction_span_with_window(
+                    session,
+                    concept.id,
+                    min_edge_age,
+                    now,
+                    config.canonization_coverage_window,
+                )
                 .await?;
             Some(SwarmGates {
                 gc_survived: GateMetric::at_least(

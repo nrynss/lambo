@@ -218,7 +218,9 @@ impl SqliteStore {
         node: NodeId,
         min_age: Duration,
         now: DateTime<Utc>,
+        window: Duration,
     ) -> Result<InteractionSpan, StoreError> {
+        crate::store::validate_coverage_window(window)?;
         // Spec §4.1 span query with the #36 errata: distinct origin
         // interactions of `node`'s dependents other than its own, aged on BOTH
         // the dependence edge and the origin interaction (MemoryStore
@@ -265,18 +267,9 @@ impl SqliteStore {
                     Some(s) => text_to_ts(&s)?,
                     None => hi,
                 };
-                let sess_span = (sess_hi - sess_lo).num_milliseconds().max(0) as f64;
-                if sess_span <= 0.0 {
-                    // F1: single-point session extent (one interaction, or all
-                    // interactions sharing a timestamp) with at least one
-                    // supported interaction (span_lo/hi are Some here, so
-                    // distinct >= 1) -> coverage 1.0, mirroring MemoryStore
-                    // and the Cockroach SQL (canonization Stage 2 parity).
-                    1.0
-                } else {
-                    let span = (hi - lo).num_milliseconds().max(0) as f64;
-                    (span / sess_span).clamp(0.0, 1.0)
-                }
+                let sess_span = (sess_hi - sess_lo).num_milliseconds().max(0);
+                let span = (hi - lo).num_milliseconds().max(0);
+                crate::store::span::coverage(span, sess_span, window)
             }
             _ => 0.0,
         };

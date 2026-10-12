@@ -1586,6 +1586,19 @@ impl GraphStore for TieredStore {
             .await
     }
 
+    async fn interaction_span_with_window(
+        &self,
+        session: &SessionId,
+        node: NodeId,
+        min_age: Duration,
+        now: DateTime<Utc>,
+        window: Duration,
+    ) -> Result<InteractionSpan, StoreError> {
+        self.primary
+            .interaction_span_with_window(session, node, min_age, now, window)
+            .await
+    }
+
     async fn record_canonization(
         &self,
         event: &CanonizationEvent,

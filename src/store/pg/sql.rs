@@ -423,7 +423,7 @@ WHERE d.id <> $2
 /// while the extent CTE stayed session-filtered. The `least`/`greatest` clamp is the
 /// same guard `MemoryStore` and SQLite apply in Rust (`clamp(0.0, 1.0)`): a span whose
 /// endpoints fall outside the session extent must not report a ratio above 1.0.
-/// Placeholders: `$1` session, `$2` node, `$3` cutoff timestamp.
+/// Placeholders: `$1` session, `$2` node, `$3` cutoff timestamp, `$4` denominator cap seconds.
 pub(super) const INTERACTION_SPAN_SQL: &str = r#"
 WITH dependents AS (
     SELECT e.source AS id FROM edges e
@@ -471,7 +471,7 @@ SELECT
             WHEN extract(epoch FROM (extent.hi - extent.lo)) > 0
                 THEN least(1.0, greatest(0.0,
                      extract(epoch FROM ((SELECT max(ts) FROM span) - (SELECT min(ts) FROM span)))
-                     / extract(epoch FROM (extent.hi - extent.lo))))
+                     / least(extract(epoch FROM (extent.hi - extent.lo)), CAST($4 AS double precision))))
             -- F1: non-empty span over a single-point session extent covers the
             -- whole session -> 1.0 (the count = 0 arm above handles empty spans).
             ELSE 1.0

@@ -615,6 +615,21 @@ impl GraphStore for FaultyStore {
             .interaction_span(session, node, min_age, now)
             .await
     }
+    async fn interaction_span_with_window(
+        &self,
+        session: &SessionId,
+        node: NodeId,
+        min_age: Duration,
+        now: DateTime<Utc>,
+        window: Duration,
+    ) -> Result<crate::types::InteractionSpan, crate::types::StoreError> {
+        if self.fail_span {
+            return Err(StoreError::Backend("interaction_span is down".into()));
+        }
+        self.inner
+            .interaction_span_with_window(session, node, min_age, now, window)
+            .await
+    }
     async fn record_canonization(
         &self,
         event: &CanonizationEvent,
@@ -1371,6 +1386,83 @@ async fn a_venerable_that_holds_stage_2_and_stage_3_promotes() {
     assert_eq!(status_of(&g.read(), nid(10)), CanonizationStatus::Canonical);
     assert_eq!(outcome.promotions.len(), 1);
     assert_eq!(outcome.promotions[0].blast_radius, Some(6));
+}
+
+/// The configured cap controls both Candidate admission and the Swarm
+/// upgrade re-check; inspect must explain those same numbers.
+#[tokio::test]
+async fn configured_window_controls_both_stage_2_paths_and_inspect() {
+    use crate::canon::gate_progress_with_config;
+    for initial in [CanonizationStatus::Candidate, CanonizationStatus::Venerable] {
+        for (days, expected) in [(14, true), (28, false)] {
+            let mut g = Graph::new(sid());
+            let start = ts() - chrono::Duration::days(60);
+            for (n, seconds) in [
+                (1, 0),
+                (2, 86_400),
+                (3, 267_840),
+                (4, 449_280),
+                (5, 49 * 86_400),
+            ] {
+                let mut turn = interaction(n, (n > 1).then(|| n - 1), ts());
+                turn.event_time = Some(start + chrono::Duration::seconds(seconds));
+                g.insert_interaction(turn).unwrap();
+            }
+            g.insert_concept(concept(10, 1, 5, initial), iid(1))
+                .unwrap();
+            for k in 30..36 {
+                let origin = 2 + (k - 30) % 3;
+                g.insert_concept(concept(k, origin, 0, CanonizationStatus::None), iid(origin))
+                    .unwrap();
+                let mut e = edge(k, k, 10, ts());
+                e.event_time = Some(start);
+                g.upsert_edge(e).unwrap();
+            }
+            let store = store_from_graph(&g).await;
+            let cfg = crate::Config {
+                canonization_coverage_window: Duration::from_secs(days * 86_400),
+                ..crate::Config::default()
+            };
+            let hub = concept(10, 1, 5, initial);
+            let progress = gate_progress_with_config(&store, &sid(), &hub, &cfg, ts())
+                .await
+                .unwrap();
+            let gates = progress.gates.unwrap();
+            assert_eq!(gates.coverage.met, expected);
+            assert_eq!(gates.distinct_interactions.current, 3.0);
+            assert_eq!(gates.coverage.current, if days == 14 { 0.3 } else { 0.15 });
+            let graph = RwLock::new(g);
+            let (tx, _rx) = channel();
+            let out = eval_cycle(
+                &mut Evaluator::new(),
+                &graph,
+                &store,
+                &table(&[]),
+                &tx,
+                &EvalParams::from_config(&cfg),
+                ts(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                !out.promotions.is_empty(),
+                expected,
+                "{initial:?}, {days} days"
+            );
+            assert_eq!(
+                status_of(&graph.read(), nid(10)),
+                if expected {
+                    if initial == CanonizationStatus::Candidate {
+                        CanonizationStatus::Venerable
+                    } else {
+                        CanonizationStatus::Canonical
+                    }
+                } else {
+                    initial
+                }
+            );
+        }
+    }
 }
 
 /// #36 review M1: the Stage 2 re-check is Swarm's. A Solo Venerable whose

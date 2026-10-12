@@ -22,7 +22,7 @@ mod task;
 
 pub use eval::{eval_cycle, EvalError, EvalOutcome, EvalParams, Evaluator};
 pub use event_time::separated_session_count;
-pub use gate::{gate_progress, GateMetric, GateProgress, SwarmGates};
+pub use gate::{gate_progress, gate_progress_with_config, GateMetric, GateProgress, SwarmGates};
 pub use policy::{PromotionPolicy, PromotionScorer, SoloScorer, SwarmScorer};
 // `deserialize_promotion_policy` is re-exported because `lambo.toml`'s
 // `promotion_policy` key must be parsed by `PromotionPolicy::from_str` and not
@@ -33,6 +33,6 @@ pub use policy::{PromotionPolicy, PromotionScorer, SoloScorer, SwarmScorer};
 // surface (there is nothing an external caller could do with it).
 pub(crate) use policy::deserialize_config_value as deserialize_promotion_policy;
 pub use stage1::stage1_candidates;
-pub use stage2::stage2_passes;
+pub use stage2::{stage2_evidence_passes, stage2_passes, stage2_passes_with_window};
 pub use stage3::{last_demotion_time, stage3_passes};
 pub use task::CanonizationTask;

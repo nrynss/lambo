@@ -241,6 +241,147 @@ pub fn store_batch() -> MutationBatch {
     batch
 }
 
+/// A 60-day session with exactly three aged support origins spanning 4.2
+/// days, all older than fourteen days at the injected clock. Two young rows
+/// and an own-origin dependent must not contribute. IDs do not collide with
+/// the ordinary dependents case, including on persistent live adapters.
+pub fn window_batch() -> MutationBatch {
+    let start = now() - ChronoDuration::days(60);
+    let iid = |n| NodeId(Uuid::from_u64_pair(0x36_04, n));
+    let cid = |n| NodeId(Uuid::from_u64_pair(0x36_05, n));
+    let mut batch = MutationBatch::new();
+    for (n, seconds) in [
+        (0, 0),
+        (1, 86_400),
+        (2, 267_840),
+        (3, 449_280),
+        (4, 49 * 86_400),
+        (5, 60 * 86_400),
+    ] {
+        let mut i = interaction("i1", 0);
+        i.id = iid(n);
+        i.session_id = window_session();
+        i.created_at = start + ChronoDuration::seconds(seconds);
+        if (1..=3).contains(&n) {
+            i.event_time = Some(i.created_at);
+            i.created_at = now();
+        }
+        batch.push(Mutation::UpsertNode {
+            node: Node::Interaction(i),
+        });
+    }
+    for (n, origin) in [(0, 0), (1, 1), (2, 2), (3, 3), (4, 0), (5, 3), (6, 5)] {
+        let mut c = concept("X", "i1", ConceptType::Logic);
+        c.id = cid(n);
+        c.origin_interaction = iid(origin);
+        c.session_id = window_session();
+        c.content = format!("window-{n}");
+        c.canonical_key = c.content.clone();
+        c.canonization_status = if n == 0 {
+            CanonizationStatus::Candidate
+        } else {
+            CanonizationStatus::None
+        };
+        batch.push(Mutation::UpsertNode {
+            node: Node::Concept(c),
+        });
+        if n > 0 {
+            let mut e = edge(n, cid(n), cid(0), EdgeType::Dependency, 0);
+            e.id = NodeId(Uuid::from_u64_pair(0x36_06, n));
+            e.session_id = window_session();
+            // n=5 is an unaged edge; n=6 has an aged edge but a young origin.
+            e.event_time = (n != 5).then_some(start);
+            batch.push(Mutation::UpsertEdge { edge: e });
+        }
+    }
+    batch
+}
+
+pub fn window_session() -> SessionId {
+    SessionId::from("deps-window")
+}
+pub fn window_pillar() -> NodeId {
+    NodeId(Uuid::from_u64_pair(0x36_05, 0))
+}
+
+/// Independent expected arithmetic and the same injected-clock/age checks
+/// for every adapter. No rolling expiry is allowed; old evidence still wins.
+pub async fn check_window_case(store: &dyn crate::store::GraphStore) {
+    use std::time::Duration;
+    store.flush(&window_batch(), None).await.unwrap();
+    let sid = window_session();
+    let pillar = window_pillar();
+    let raw = store
+        .interaction_span(&sid, pillar, MIN_AGE, now())
+        .await
+        .unwrap();
+    assert_eq!(raw.distinct, 3);
+    // The young interaction still extends the full session to sixty days.
+    assert!((raw.coverage - 4.2 / 60.0).abs() < 1e-12);
+    let capped = store
+        .interaction_span_with_window(
+            &sid,
+            pillar,
+            MIN_AGE,
+            now(),
+            crate::store::DEFAULT_COVERAGE_WINDOW,
+        )
+        .await
+        .unwrap();
+    assert_eq!(capped.distinct, 3);
+    assert_eq!(capped.coverage, 0.3);
+    assert!(crate::canon::stage2_evidence_passes(capped));
+    assert!(
+        crate::canon::stage2_passes(store, &sid, pillar, MIN_AGE, now())
+            .await
+            .unwrap()
+    );
+    let wide = Duration::from_secs(28 * 86_400);
+    let wider = store
+        .interaction_span_with_window(&sid, pillar, MIN_AGE, now(), wide)
+        .await
+        .unwrap();
+    assert_eq!(wider.distinct, 3);
+    assert_eq!(wider.coverage, 0.15);
+    assert!(
+        !crate::canon::stage2_passes_with_window(store, &sid, pillar, MIN_AGE, now(), wide)
+            .await
+            .unwrap()
+    );
+    let later = now() + ChronoDuration::days(30);
+    // The two young rows now qualify; coverage saturates, never exceeds one.
+    let later_span = store
+        .interaction_span_with_window(
+            &sid,
+            pillar,
+            MIN_AGE,
+            later,
+            crate::store::DEFAULT_COVERAGE_WINDOW,
+        )
+        .await
+        .unwrap();
+    assert_eq!(later_span.distinct, 4);
+    assert_eq!(later_span.coverage, 1.0);
+    let premature = store
+        .interaction_span_with_window(
+            &sid,
+            pillar,
+            MIN_AGE,
+            now() - ChronoDuration::days(70),
+            crate::store::DEFAULT_COVERAGE_WINDOW,
+        )
+        .await
+        .unwrap();
+    assert_eq!(premature.distinct, 0);
+    assert_eq!(premature.coverage, 0.0);
+    for bad in [Duration::ZERO, Duration::from_nanos(1), Duration::MAX] {
+        assert!(store
+            .interaction_span_with_window(&sid, pillar, MIN_AGE, now(), bad)
+            .await
+            .is_err());
+    }
+}
+
 /// The `deps` session as a legal in-RAM graph: the interactions chained in
 /// time order, every concept inserted with its origin's `Derives` edge, and
 /// every concept-to-concept edge except the self-loop, `G` (foreign origin)

@@ -506,3 +506,17 @@ You can also run the script directly.
 Set `LAMBO_COCKROACH_DSN` in a `.env` file first, and run `./scripts/provision.sh --check` to verify the schema without applying it.
 
 See [Installation](/lambo/installation/) and [Library API](/lambo/api/).
+
+## Canonization coverage in the library
+
+`Config::canonization_coverage_window` is a library setting, defaulting to
+fourteen days. Stage 2 divides eligible dependent origin time spread by
+min(session extent, this cap), with the existing three-origin and `0.3`
+coverage bars. A long session needs 4.2 days of spread at the default cap;
+a shorter session retains its previous coverage. This cap does not expire
+older evidence. Set a positive duration in whole milliseconds, no larger
+than `i64::MAX` milliseconds, and validate the `Config` before use.
+It is not a `lambo.toml` key or an environment override. The file's daemon
+cadences and promotion policy retain their existing roles. See
+[Library API](/api#stage-2-coverage-cap) for the store accessor contract and
+custom-window evaluation and inspect helpers.

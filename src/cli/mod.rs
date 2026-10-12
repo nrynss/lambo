@@ -1002,6 +1002,26 @@ mod tests {
             .await
             .expect("a store-only reader attaches no embedder, so no mismatch");
     }
+    #[tokio::test]
+    async fn legacy_adapter_fails_closed_for_capped_stage_2() {
+        let store = SharedMemory(Arc::new(MemoryStore::new()), Capabilities::empty());
+        for window in [
+            crate::store::DEFAULT_COVERAGE_WINDOW,
+            Duration::from_secs(28 * 86_400),
+        ] {
+            let err = store
+                .interaction_span_with_window(
+                    &SessionId::from("legacy"),
+                    NodeId::new(),
+                    Duration::ZERO,
+                    Utc::now(),
+                    window,
+                )
+                .await
+                .unwrap_err();
+            assert!(matches!(err, StoreError::Capability(_)));
+        }
+    }
 }
 
 #[cfg(all(test, feature = "store-sqlite", feature = "embed-fixture"))]

@@ -103,7 +103,7 @@ use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 
 use crate::canon::stage3;
-use crate::canon::{stage2_passes, PromotionPolicy};
+use crate::canon::{stage2_passes_with_window, PromotionPolicy};
 use crate::daemon::events::{self, EventSender};
 use crate::graph::Graph;
 use crate::store::GraphStore;
@@ -127,6 +127,8 @@ pub struct EvalParams {
     pub min_peer_count: usize,
     /// Forwarded to Stage 2 (`interaction_span` age floor).
     pub min_age: Duration,
+    /// Denominator cap forwarded to Stage 2; no evidence expiry.
+    pub coverage_window: Duration,
     /// Forwarded to Stage 3 / budget (`blast_radius` age floor).
     pub min_edge_age: Duration,
     pub cooldown: Duration,
@@ -215,6 +217,7 @@ impl EvalParams {
         Self {
             min_peer_count: config.canonization_min_peer_count,
             min_age: config.canonization_edge_min_age,
+            coverage_window: config.canonization_coverage_window,
             min_edge_age: config.canonization_edge_min_age,
             cooldown: config.canonization_repromotion_cooldown,
             batch_size: config.canonization_eval_batch_size,
@@ -562,7 +565,16 @@ async fn verdicts(
 ) -> Result<Verdicts, StoreError> {
     let mut out = Verdicts::default();
     for &id in &plan.stage2 {
-        if stage2_passes(store, &plan.session, id, params.min_age, now).await? {
+        if stage2_passes_with_window(
+            store,
+            &plan.session,
+            id,
+            params.min_age,
+            now,
+            params.coverage_window,
+        )
+        .await?
+        {
             out.stage2_pass.push(id);
         }
     }
@@ -588,7 +600,15 @@ async fn verdicts(
             PromotionPolicy::Solo => false,
         };
         if recheck_stage2
-            && !stage2_passes(store, &plan.session, probe.node, params.min_age, now).await?
+            && !stage2_passes_with_window(
+                store,
+                &plan.session,
+                probe.node,
+                params.min_age,
+                now,
+                params.coverage_window,
+            )
+            .await?
         {
             continue;
         }

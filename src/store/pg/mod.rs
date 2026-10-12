@@ -470,7 +470,27 @@ impl<D: Dialect> GraphStore for PgStore<D> {
         min_age: Duration,
         now: DateTime<Utc>,
     ) -> Result<InteractionSpan, StoreError> {
-        self.select_interaction_span(session, node, min_age, now)
+        // Preserve the raw accessor: chrono's full timestamp domain spans
+        // less than i64::MAX milliseconds, so this cap cannot shorten it.
+        self.select_interaction_span(
+            session,
+            node,
+            min_age,
+            now,
+            Duration::from_millis(i64::MAX as u64),
+        )
+        .await
+    }
+
+    async fn interaction_span_with_window(
+        &self,
+        session: &SessionId,
+        node: NodeId,
+        min_age: Duration,
+        now: DateTime<Utc>,
+        window: Duration,
+    ) -> Result<InteractionSpan, StoreError> {
+        self.select_interaction_span(session, node, min_age, now, window)
             .await
     }
 

@@ -3063,3 +3063,13 @@ async fn a_recall_by_vector_fails_when_the_tier_and_its_fallback_both_fail() {
     }
     mem.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn tier_forwards_custom_coverage_window_to_primary() {
+    let store = TieredStore::new(
+        Box::new(MemoryStore::new()),
+        Box::new(Arc::new(FakeIndex::new())),
+        Some(4),
+    );
+    crate::test_util::dependents::check_window_case(&store).await;
+}

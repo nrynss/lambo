@@ -9,7 +9,8 @@
 //!
 //! 1. **`distinct >= 3`** origin interactions behind the concept's
 //!    dependents, not counting the concept's own origin interaction.
-//! 2. **`coverage >= 0.3`** of the session's temporal extent.
+//! 2. **`coverage >= 0.3`** of min(session temporal extent, fourteen days).
+//!    The denominator is capped; older eligible evidence does not expire.
 //!
 //! The dependents relation (#36: `Dependency` sources into the concept plus
 //! its `Hierarchical` children; `Causal` confers no load) and the age cutoff
@@ -30,12 +31,19 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 
 use crate::store::GraphStore;
-use crate::types::{NodeId, SessionId, StoreError};
+use crate::types::{InteractionSpan, NodeId, SessionId, StoreError};
 
 /// Distinct-origin floor (spec §10).
 pub(super) const MIN_DISTINCT: u64 = 3;
 /// Session-extent coverage floor (spec §10).
 pub(super) const MIN_COVERAGE: f64 = 0.3;
+
+/// Reusable Stage 2 evidence predicate. Callers must obtain the span after
+/// eligibility filters (including any future supersession cutoff), before
+/// counting origins and measuring spread. Nonfinite coverage fails closed.
+pub fn stage2_evidence_passes(span: InteractionSpan) -> bool {
+    span.distinct >= MIN_DISTINCT && span.coverage.is_finite() && span.coverage >= MIN_COVERAGE
+}
 
 /// Whether `node` currently clears Stage 2 on `store`.
 pub async fn stage2_passes(
@@ -45,8 +53,45 @@ pub async fn stage2_passes(
     min_age: Duration,
     now: DateTime<Utc>,
 ) -> Result<bool, StoreError> {
-    let span = store.interaction_span(session, node, min_age, now).await?;
-    Ok(span.distinct >= MIN_DISTINCT && span.coverage >= MIN_COVERAGE)
+    stage2_passes_with_window(
+        store,
+        session,
+        node,
+        min_age,
+        now,
+        crate::store::DEFAULT_COVERAGE_WINDOW,
+    )
+    .await
+}
+
+/// Stage 2 with a validated caller-selected denominator cap.
+pub async fn stage2_passes_with_window(
+    store: &dyn GraphStore,
+    session: &SessionId,
+    node: NodeId,
+    min_age: Duration,
+    now: DateTime<Utc>,
+    window: Duration,
+) -> Result<bool, StoreError> {
+    let span = store
+        .interaction_span_with_window(session, node, min_age, now, window)
+        .await?;
+    Ok(stage2_evidence_passes(span))
+}
+
+#[cfg(test)]
+#[test]
+fn reusable_predicate_keeps_threshold_equality_and_refuses_nonfinite() {
+    assert!(stage2_evidence_passes(InteractionSpan {
+        distinct: 3,
+        coverage: 0.3
+    }));
+    for (distinct, coverage) in [(2, 1.0), (3, 0.299), (3, f64::NAN), (3, f64::INFINITY)] {
+        assert!(!stage2_evidence_passes(InteractionSpan {
+            distinct,
+            coverage
+        }));
+    }
 }
 
 #[cfg(all(test, feature = "store-memory"))]

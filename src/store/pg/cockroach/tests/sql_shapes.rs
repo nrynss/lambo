@@ -583,7 +583,10 @@ fn concept_upsert_does_not_write_the_canonization_columns_on_conflict() {
 fn structural_query_placeholder_order_and_counts() {
     // §4.1 SQL construction: exactly three binds, in (session, node, cutoff) order.
     assert_eq!(placeholder_max(BLAST_RADIUS_SQL), 3);
-    assert_eq!(placeholder_max(INTERACTION_SPAN_SQL), 3);
+    assert_eq!(placeholder_max(INTERACTION_SPAN_SQL), 4);
+    assert!(INTERACTION_SPAN_SQL.contains(
+        "/ least(extract(epoch FROM (extent.hi - extent.lo)), CAST($4 AS double precision))"
+    ));
     for sql in [BLAST_RADIUS_SQL, INTERACTION_SPAN_SQL] {
         let p1 = sql.find("$1").unwrap();
         let p2 = sql.find("$2").unwrap();
