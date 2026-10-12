@@ -11,8 +11,11 @@ reused after a reboot. So the #118 "looks gone" hint had to stay hedged.
   the OS reports it) **only when the holder names this process** (pid and
   host equal this process's). A process can read only its own boot id and
   PID namespace, so a holder describing another pid carries neither. This
-  keeps `LeaseHolder`'s fields unchanged: no library API break, and the
-  test holders built with fake pids keep the old format.
+  keeps `LeaseHolder`'s fields unchanged and test holders built with fake
+  pids keep the old format. It is still a library API break: the
+  `token()`/`Display` output and the stored holder column change, and a
+  rebuilt holder can no longer release another process's lease (see the
+  CHANGELOG's Breaking section).
 - Sources: Linux `/proc/sys/kernel/random/boot_id` and the inode of
   `/proc/self/ns/pid`; macOS `kern.bootsessionuuid` through
   `libc::sysctlbyname` (libc was already a dependency); nothing elsewhere.
