@@ -286,24 +286,55 @@ fn resources_with_dependents_survive_the_score_cut_isolated_ones_age_out() {
     assert_eq!(outcome.resources_spared_by_dependents, 3);
 }
 
-/// Opposition in either direction does not protect an old Resource from GC.
+/// Opposition in either direction neither rescores nor protects an old
+/// Resource at the GC score cut (#19): its eviction score is bit-identical
+/// with and without the contradictions, the default-bar sweep collects the
+/// same set, and a bar set just above the uncontradicted score collects
+/// both endpoints with nothing spared.
 #[test]
-fn contradiction_only_resources_age_out_without_structural_protection() {
-    let mut g = hub_session(&[(22, ConceptType::Resource), (23, ConceptType::Resource)]);
-    g.upsert_edge(edge(200, 22, 23, EdgeType::Contradicts, 1.0, 0))
+fn contradictions_neither_rescore_nor_protect_resources_at_the_score_cut() {
+    let leaves = [(22, ConceptType::Resource), (23, ConceptType::Resource)];
+    let plain = hub_session(&leaves);
+    let mut contradicted = hub_session(&leaves);
+    contradicted
+        .upsert_edge(edge(200, 22, 23, EdgeType::Contradicts, 1.0, 0))
         .unwrap();
-    g.upsert_edge(edge(201, 23, 22, EdgeType::Contradicts, 1.0, 0))
+    contradicted
+        .upsert_edge(edge(201, 23, 22, EdgeType::Contradicts, 1.0, 0))
         .unwrap();
-    assert!(resources_with_dependents(&g).is_empty());
-    let sources = crate::recall::format::inbound_sources(&g);
-    for id in [nid(22), nid(23)] {
-        assert!(sources.get(&id).is_none_or(Vec::is_empty));
-    }
-    let params = GcParams {
-        min_concept_score: 5.0,
-        ..aged_params()
+    assert!(resources_with_dependents(&contradicted).is_empty());
+
+    let params = aged_params();
+    let scores = |g: &Graph| {
+        let ctx = crate::daemon::score::SessionContext::compute(g);
+        [22u64, 23].map(|n| match g.node(nid(n)) {
+            Some(Node::Concept(c)) => eviction_score(g, c, &ctx, params),
+            _ => unreachable!(),
+        })
     };
-    let outcome = run(&mut g, params);
+    let base = scores(&plain);
+    assert_eq!(scores(&contradicted), base, "opposition moves no score");
+
+    let collected = |mut g: Graph, params: GcParams| {
+        let mut out = run(&mut g, params).concepts_collected;
+        out.sort_by_key(|n| n.0);
+        out
+    };
+    assert_eq!(
+        collected(contradicted.clone(), params),
+        collected(plain.clone(), params),
+        "the default bar collects the same set"
+    );
+
+    // Just above both uncontradicted scores: a density lift or a dependents
+    // protection from the contradictions would keep them.
+    let top = base[0].max(base[1]);
+    let tight = GcParams {
+        min_concept_score: top + top * 1e-9,
+        ..params
+    };
+    let mut g = contradicted;
+    let outcome = run(&mut g, tight);
     assert!(outcome.concepts_collected.contains(&nid(22)));
     assert!(outcome.concepts_collected.contains(&nid(23)));
     assert_eq!(outcome.resources_spared_by_dependents, 0);
