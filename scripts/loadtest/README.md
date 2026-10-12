@@ -66,6 +66,11 @@ target; their text is a pure function of `(--seed, worker, call number)`, so
 two runs with the same seed send the same writes in the same per-worker order.
 Recall queries come from `--queries FILE` (one per line) or mcp_ab.py's list.
 
+The `--secs` clock starts once every worker's client has connected and three
+warm-up recalls have returned. Before #125 it started before them, so a slow
+handshake or a cold first embed shortened the measured load; runs made before
+that fix may have had less than `--secs` of load.
+
 After `--secs` the workers stop and the driver polls `lambo_stats` until the
 write queue, log and flush depths are all zero, for at most `--drain-timeout`
 seconds. Then, using each worker's own session (receipts are scoped to the
