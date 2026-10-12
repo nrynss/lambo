@@ -48,9 +48,23 @@ The accessors `session`, `agent`, `config`, `embedding_contract`, `graph`, `inde
 | Method | What it returns |
 |---|---|
 | `recall` | The context block for a query. Async. |
+| `recall_layered` | One recall over this session and its layers, merged under one budget. Async. See [Layered recall](#layered-recall). |
 | `canonical_memories` | The session's canonical memories. |
 | `stats` | Flush lag, log depth, counts, and degraded state. |
 | `events` | A live feed of background events. |
+
+### Layered recall
+
+`recall_layered(&layers, query)` reads this session and a stack of other sessions (layers, such as a shared `general` session) in one call. Pass the layers nearest tier first, each as `LayerRef::new(&memory)`, optionally with `.with_weight(w)` and `.with_min_similarity(s)`. It returns a `LayeredRecall`: merged `hits`, each naming its `session`, one `context` and the `warnings`. With no layers it returns exactly what `recall` returns.
+
+- The query is embedded once and the vector is passed to every layer. A layer's embedding contract must equal this session's.
+- Each session ranks its own hits. The lists are merged by `weight / rank`: this session has weight 1.0, a layer 0.5 by default, and ties go to the nearer tier. `score` stays each hit's own session score, so the merged order is not sorted by `score`.
+- A layer hit is merged only if the keyword leg found it or its vector similarity is at least the layer's `min_similarity` (0.40 by default). The default weight and floor are not calibrated yet.
+- Hits with a conflict, hot or reservation warning are always kept. `top_k` limits the other merged hits.
+- When the same memory is in two tiers (same canonical key, or vectors at or above `semantic_match_threshold`), the nearer tier's copy is kept and its label names the other copy: `also 9f8e7d6c in general`.
+- One `max_tokens` budget covers the merged context. A layer hit's label ends with `from <session>`, and if its block is truncated the marker reads `lambo_inspect <id> (scope <session>)`.
+- A layer that is closed, has a different embedding contract or fails is left out, with the warning `recall: layer <name> is unavailable; results are from <sessions>`. It never fails the call. Warnings from a layer start with `[<name>] `.
+- Graph edges are never followed from one session into another.
 
 ## Settings
 

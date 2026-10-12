@@ -92,6 +92,23 @@
     does not list its warnings as excluded. In `lambo recall` and the portal
     text, warning lines that did not fit print above the context.
 
+### Added
+
+- **Layered recall in the library (#33).** `Memory::recall_layered` reads
+  a session and a stack of layers (other sessions, such as a shared
+  `general`), passed nearest tier first as `LayerRef`s, and returns a
+  `LayeredRecall` whose hits each name their session. The query is embedded
+  once. Lists are merged by `weight / rank` (a layer's weight defaults to
+  0.5); a layer hit needs keyword evidence or vector similarity of at least
+  its `min_similarity` (default 0.40); hits with a conflict, hot or
+  reservation warning are always kept; the same memory in two tiers keeps
+  the nearer copy; and one `max_tokens` budget covers the merged context,
+  where a layer hit's label says `from <session>`. A layer that is closed,
+  has another embedding contract or fails is left out with a warning. The
+  default weight and floor are not calibrated yet (#87). With no layers the
+  call returns exactly what `recall` returns. Serve configuration and the
+  MCP surface follow in later 0.6.0 changes.
+
 ## 0.5.0 (2026-10-12)
 
 ### Highlights
