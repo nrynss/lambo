@@ -1,94 +1,70 @@
-# Dependency-question anchors match whole words only (0.6.0)
+# Dependency-question anchor remediation (0.6.0)
 
-No issue number: found while reviewing #33 PR 2 (layered recall, #134). That
-PR lets a layer's traversal answer bypass the layer's relevance floor on the
-strength of the resolved anchor, so a wrong anchor now admits a wrong answer
-past a floor as well as dispatching it.
+Updated 2026-10-12. Existing implementation commits 9fbb0e62 and b632f661
+remain in history. Main 422ed101 (#137) was fetched and merged without a
+CHANGELOG conflict. No public API, schema, dependency or manifest changed.
 
-## The defect
+## Decisions and reasons
 
-`recall::dispatch::resolve_anchor` chose the anchor of a dependency question
-("what depends on X", "blast radius of X", ...) as any concept whose whole
-content was a case-insensitive **substring** of the query, ranked
-Entity/Resource first, then **shortest** content. Two failures followed:
+- H1: choose the surviving occurrence nearest after a structural marker.
+  Type, length, content, canonical key and node id break ties. Choosing the
+  longest disjoint name confused the deleted SG with its parent VPC. Refusing
+  every multi-name question would discard useful unambiguous object syntax.
+- M1: sort spans by start ascending/end descending and sweep the furthest
+  end. Equal spans remain eligible. Queries over 16 KiB or any candidate
+  over 256 bounded spans refuse all anchoring, preserving complete evidence
+  instead of truncating a candidate and selecting the wrong subject. The
+  stop-word check follows the span search. The span helper stops after the
+  first overflow span (257), so repetitive queries cannot collect all spans.
+- M2: underscores and hyphens between word characters join identifiers.
+  `db` cannot name `user_db`; `SG-Base` cannot name `SG-Base-VPC`, even if the
+  full identifier is absent from the graph. Standalone hyphens delimit prose.
+- M3: function-word concepts require an exact bounded uppercase occurrence
+  when they are uppercase acronyms. The exception uses only those uppercase
+  occurrences, not earlier lowercase question scaffolding. Added that, with,
+  from, by, at, how, who, when, will, i and we. The earlier claim that ordinary
+  recall always finds IT was wrong: canonical tokenization omits it too.
+- M4: a private TierRecall anchor identity is compared at merge admission.
+  A different layer anchor cannot lift its traversal dependents past the
+  floor; its rejected traversal headline is removed too. The normalized
+  caller identity is resolved even when it has no dependents. When the
+  caller has no anchor, layer-only traversal remains valid under #33.
+- L1: NFC on query/content followed by per-character lowercase and NFC;
+  combining marks count as word characters. This avoids contextual sigma
+  lowercasing and matches composed/decomposed accents. Existing Unicode
+  crates suffice; no dependency change.
+- L2: require a word character; punctuation-only text cannot anchor.
+- L3: marker-overlapping clauses remain eligible but cannot contain/suppress
+  other subjects; wholly marker-contained matches are ignored. This keeps a
+  real `blast radius report` query possible while preserving `db` in a
+  `safe to delete db` question with a longer matching clause.
+- L4: both MCP docs mirrors and CHANGELOG now explain the per-edge boundary
+  rule: `.env` matches in `config/.env`; `src/main.rs` has word edges.
+- L5: CHANGELOG names the #134 floor-bypass consequence explicitly.
 
-- A short concept anchored from inside a longer word: `db` anchored "what
-  depends on dbadmin", `a` anchored nearly every query ("what", "safe"), and
-  all of that concept's dependents were returned as the answer.
-- The shortest match won, so `db` beat `user db schema` when the query spelled
-  out `user db schema`. The shortest rule was written to prefer "the bare
-  identifier, not a longer clause that happens to contain it", but a longer
-  clause can only match when the query contains all of it, in which case it is
-  the thing the query named.
+The initial anchor helper declared Dependency edges from anchor to consumer,
+which stopped its traversal assertions passing after #135 changed the meaning
+of dependents. Fixed separately to declare consumer -> anchor; this is test
+fixture repair, not a relaxation of the production relation.
 
-## The rule now
+## Regressions and validation
 
-1. **Whole words.** `word_bounded_spans(lower_query, lower_content)` returns
-   every occurrence (overlapping ones included, so an embedded first hit
-   cannot hide a later whole-word one) whose edges sit on word boundaries.
-   Word characters are `char::is_alphanumeric` (Unicode-aware: `café`, `数据`,
-   `Ωmega` are words; CJK runs are one word, so `数据` does not match inside
-   `数据库`). A content edge that is itself punctuation delimits itself, so
-   `.env` matches in `config/.env` and `prod.env`, and `src/main.rs` matches
-   in "what depends on `src/main.rs`?". `_`, `-`, `/` and `.` separate words,
-   following the task's definition; `db` therefore matches in `user_db`, and
-   the containment rule below is what keeps a longer `user_db` concept ahead.
-2. **The question's own wording never anchors.**
-   - A match wholly inside a structural-marker occurrence (`marker_spans`) is
-     ignored: a concept literally called `blast radius` would otherwise anchor
-     every "blast radius of ..." question, and with longest-wins it would beat
-     the real subject. A longer concept that only starts with marker words
-     (`blast radius report`) is not inside the span and still anchors.
-   - `ANCHOR_STOP_WORDS`: a concept made only of closed-class function words
-     (`it`, `the`, `what`, `of`, `on`, `is`, ...) never anchors. Justified
-     after the boundary fix: "is **it** safe to delete the payments queue"
-     still contains `it` as a whole word, so a concept `it` (or `IT`) would
-     hijack the dispatch whenever the real subject is not a concept. The cost
-     is that "what depends on IT" falls through to the blended recall, which
-     still finds `IT` by word match, a safe refusal.
-   - No minimum length: `db`, `id`, `vpc` are real identifiers, and once
-     boundaries exist they no longer match inside words.
-3. **Containment.** A candidate is dropped when every one of its spans lies
-   inside a strictly longer span of another candidate (`db` inside
-   `user db schema`, `main.rs` inside `src/main.rs`, `café` inside `Café-DB`).
-   This decides the overlap case regardless of concept type, so an Entity `db`
-   no longer beats a Logic `user db schema` the query spelled out.
-4. **Rank** what is left: Entity/Resource first (unchanged), then the
-   **longest** content in chars (was shortest), then content, then the
-   issue-2 chain (canonical key, node id). Only disjoint matches reach the
-   length key now ("what depends on cache and orders queue"), and there the
-   longer name is the more specific one.
-5. The "security group" prose fallback is unchanged.
+Nine new tests cover separate SG/VPC subjects with four markers and a
+pre-marker name; underscore/internal-hyphen identifiers; eight uppercase
+acronyms and eleven added scaffolding words; NFC in both directions, combining
+marks and sigma; punctuation-only names; marker-overlapping clauses; a 16 KiB
+repetitive query with 30 names plus oversized refusal; merge-level wrong and
+matching layer identities; and real Memory layered recall where the caller
+holds `user db schema` without dependents and the layer holds `db`.
 
-## Goldens
+The repetitive-span regression has a one-second ceiling in a debug test and
+asserts the helper's 257-span bound. Recall tests: 172 passed/0 failed/0 ignored;
+Memory layered tests: 9 passed/0 failed/0 ignored. Full gate results follow.
+Private logs live in the handoff scratch/A directory, never the repository.
+No fixture or golden was updated. No live database was used.
 
-No fixture or golden output changed: `fixtures/recall-*`, the H3 goldens
-(`h3_structural_payload_matches_golden`, `h3_blended_payload_matches_golden`),
-`recall_entry_reproduces_context_golden`, `t84_demo` and `binary_parity` all
-pass untouched. The only structural queries in fixtures and tests name a
-concept as a whole word (`SG-Base-VPC`, `the anchor`) or use the
-security-group fallback, and none had a competing shorter or longer match.
+## Follow-ups
 
-## Tests
-
-In `src/recall/dispatch.rs`: `word_bounded_spans_need_word_edges_and_see_overlaps`,
-`short_concept_inside_a_longer_word_does_not_anchor`,
-`short_whole_word_concept_anchors_when_it_is_the_best_match`,
-`the_longer_named_anchor_wins_over_a_word_inside_it`,
-`multibyte_anchors_match_on_unicode_word_boundaries`,
-`punctuation_and_path_anchors_match_inside_a_query`,
-`marker_and_stop_word_concepts_do_not_anchor_on_question_scaffolding`.
-
-## Other resolvers checked (not changed here)
-
-- `surface::focus::resolve_focus` fuzzy leg (`fuzzy_candidates`): the focus
-  is a substring of concept content, the reverse direction. A short focus such
-  as `db` resolves to a lone `dbadmin` concept as `Focus::Fuzzy`, which the
-  caller is told about, and several matches refuse as `Ambiguous`; its sort is
-  shortest-first, which is right for that direction (least padding around
-  what was typed). Not silent, so lower risk, but it is the same substring
-  class and could prefer whole-word matches first.
-- `near_matches_over` counts focus tokens by substring for suggestions only.
-- Store `keyword_candidates` (memory `contains`, SQLite `instr`, Postgres
-  equivalent) score by token substring by design, with cross-store parity
-  pinned; that is ranking, not anchor resolution.
+Fresh adversarial review and Luna verification are orchestrator-owned. The
+orchestrator creates the issue/PR and handles push/merge. No release or rig
+change belongs to this branch.
