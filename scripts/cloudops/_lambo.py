@@ -102,8 +102,8 @@ PILLAR_WARNING_PREFIX = "⚑ Load-bearing pillar"
 # the focus (an action's `--depends-on`) or is one of the focus's
 # `--parent-of` children. `Causal` (`--produces`/`--modifies`) records
 # provenance and never makes a dependent, nor do the association kinds
-# (`CoOccurrence`, `Semantic`) or interaction provenance (`Derives`,
-# `Temporal`). This tuple mirrors `EdgeType::dependent_end` in
+# (`CoOccurrence`, `Semantic`), interaction provenance (`Derives`,
+# `Temporal`) or opposition (`Contradicts`, #19). This tuple mirrors `EdgeType::dependent_end` in
 # `src/types/mod.rs`; `_self_test_dependents_section` pins the reader to the
 # section's grammar.
 DEPENDENT_EDGE_LABELS = ("Dependency", "Hierarchical")
@@ -608,8 +608,9 @@ def _self_test_dependents_section() -> None:
     for the shared dependents case, pinned byte for byte by the Rust test
     `inspect_text_matches_the_golden_the_cloudops_guard_parses`
     (`src/surface/neighbourhood.rs`). Its hop listing names a parent, a
-    `Causal` producer, an association neighbour and a concept the focus
-    depends on, none of which may be read as a dependent.
+    `Causal` producer, an association neighbour, a contradicting concept
+    and a concept the focus depends on, none of which may be read as a
+    dependent.
 
     The truncation row cannot appear in that small case, so its text is
     pinned to the renderer's source instead, and a truncated banner is built
