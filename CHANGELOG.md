@@ -68,6 +68,22 @@
 
 ### Fixed
 
+- **A dependency question no longer anchors on a word fragment.** A
+  query such as "what depends on X" or "blast radius of X" picked as X any
+  concept whose text was a substring of the query, and the shortest one
+  won. A short concept such as `db` answered "what depends on dbadmin" with
+  its own dependents, and beat `user db schema` when the query named that.
+  X must now appear in the query as whole words (Unicode letters and
+  digits are word characters; a text such as `.env` or `src/main.rs` that
+  starts or ends with punctuation matches wherever it appears). A concept
+  that appears only inside a longer named concept is skipped, then an
+  Entity or Resource is preferred and the longest text wins. A concept
+  named like the question's own wording (`blast radius`) or made only of
+  function words (`it`, `the`, `what`) never anchors. A question that no
+  longer names a concept is answered by the ordinary recall. The
+  "security group" fallback is unchanged, and no fixture or golden output
+  changed.
+
 - **A recall no longer comes back empty when its top hit is long (#130).**
   `context` keeps whole hit blocks while they fit `max_tokens` and stops at
   the first that does not. When that was the first block, the context was
