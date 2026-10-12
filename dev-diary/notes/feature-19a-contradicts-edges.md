@@ -22,9 +22,20 @@ clean.
   (`recall::expand::TRAVERSAL_ORDER`) and the web graph's `is_structural`
   are explicit lists and stay unchanged, so `Contradicts` is outside all of
   them.
-- It does not decay and has a zero additive edge bonus. The general
-  topology-density term still counts incident edges, as it does for
-  provenance and association.
+- It does not decay, has a zero additive edge bonus, and does not count
+  toward score density (`EdgeType::counts_toward_density`, both the
+  concept's numerator and the session's `max_incident`). The first commit
+  left density counting it; adversarial review (H1) found that being
+  contradicted therefore raised the composite feeding Stage 1, recall
+  `final_score` and the GC cut, so a contradicted concept became more
+  promotable. Fixed in `e4b2f4b7`; the orchestrator chose exclusion.
+- GC's connectivity rules are unchanged: the orphan check and reachability
+  from the interaction chain count a contradiction like any edge, and it
+  never decays, so it keeps both endpoints connected.
+- The conflict detector counts a contradiction's writer in its agent set,
+  so another agent contradicting a node can complete a two-agent conflict.
+  Kept as is and pinned by
+  `daemon::conflict::tests::a_contradiction_writer_joins_the_conflict_agent_set`.
 - Edge only. No MCP or CLI write field, resolver, detector, recall
   annotation or supersession: #19(b) waits for #36 PR 4.
 - The shared synthetic #36 dependents case gains concept `Q` with
@@ -36,6 +47,36 @@ clean.
 - `EdgeType` is not `#[non_exhaustive]`, so the variant is a library API
   break (CHANGELOG, Breaking). Older binaries cannot decode rows or
   snapshots that contain it.
+
+## Spec errata
+
+The frozen spec's §5 says "seven edge types" (v0.1 cut `CrossOccurrence`
+and `Fixes` from nine). `Contradicts` is now the eighth. The spec stays
+frozen; this note is the record, and the `EdgeType` rustdoc says so.
+
+## Review findings (round 1) and resolutions
+
+- H1 density: excluded, see above; `contradictions_leave_every_score_unchanged`.
+- M2: the GC test's 5.0 bar could not fail. It now compares eviction
+  scores with and without the contradictions, the default-bar outcome, and
+  a bar just above the uncontradicted score.
+- L3: `canon::contradicts_tests` runs daemon scores, Stage 1, Solo, and
+  Stage 2/3 on MemoryStore over the dependents case with and without the
+  pair; both halves fail under a density or dependent-end mutation.
+  Assertions that could not fail were removed.
+- L4: CHANGELOG Upgrading covers downgrade and mixed fleets.
+- L5, L6: documented above and in the API page; L6 pinned by a test.
+- L7: stale under-weight `Contradicts` survives GC step 1; the decay-set
+  debug_assert checks both directions through `EdgeType::ALL`.
+- L8: rustdoc states direction and that no product path writes it yet.
+
+## Open for #19(c)
+
+- Should a GC-collected contradicting source drop the warning, and should
+  a contradiction keep its endpoints out of GC's orphan and island sets at
+  all?
+- Should a contradiction writer count toward a multi-agent conflict? The
+  pinned test must change with that decision.
 
 ## Golden
 
@@ -55,9 +96,9 @@ and `92c0f4af`. The cloudops parser self-test
   `ship,fixtures`, `--no-default-features store-postgres`,
   `store-postgres,store-sqlite,fixtures`, `embed-eg2`, `recall-elastic`,
   `embed-candle`: all pass.
-- `cargo test --features store-sqlite,fixtures`: 2192 passed, 0 failed,
-  7 ignored (lib 2112/0/5).
-- `cargo test --no-default-features --features store-postgres`: 1158
+- `cargo test --features store-sqlite,fixtures`: 2198 passed, 0 failed,
+  7 ignored (lib 2118/0/5) after the review fixes; 2192 before them.
+- `cargo test --no-default-features --features store-postgres`: 1162
   passed, 0 failed, 17 ignored.
 - `cargo test --no-run --no-default-features --features store-sqlite`,
   `cargo check --no-default-features`, `scripts/docs/check-mirror-drift.sh`:
