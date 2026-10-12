@@ -134,6 +134,50 @@ async fn recall_endpoint_payload_carries_typed_hits_and_warning_parity() {
     handle.abort();
 }
 
+/// #130 review L10: a budget above the truncation marker but below the
+/// top block renders that block truncated, and the payload flags it on
+/// that hit only (additive: absent on every other hit). The page's
+/// `context` ends with the marker naming the hit's id.
+///
+/// The H3 re-render parity the other tests check cannot hold here: the
+/// truncated text depends on the budget and the estimator, which the
+/// payload does not carry, so `context` is the authority for it.
+#[tokio::test]
+async fn recall_endpoint_flags_a_truncated_top_hit() {
+    let store = seed("t130-recall-trunc").await;
+    let (addr, handle) = spawn(state_on(store, "t130-recall-trunc")).await;
+
+    let body = get_json(addr, "/api/recall?q=update%20user%20schema&max_tokens=30").await;
+    let context = body["context"].as_str().expect("context");
+    let hits = body["hits"].as_array().expect("hits").clone();
+    let top = &hits[0];
+    assert_eq!(
+        top["truncated_in_context"],
+        serde_json::json!(true),
+        "{top}"
+    );
+    assert_eq!(
+        top["included_in_context"],
+        serde_json::json!(false),
+        "{top}"
+    );
+    assert!(
+        hits[1..]
+            .iter()
+            .all(|h| h.get("truncated_in_context").is_none()),
+        "{hits:?}"
+    );
+    let id = top["node_id"].as_str().expect("node_id");
+    let short: String = id.chars().filter(|c| *c != '-').take(8).collect();
+    assert!(
+        context.ends_with(&format!("lambo_inspect {short} for the full concept]")),
+        "{context}"
+    );
+    assert!(context.contains("[truncated: "), "{context}");
+
+    handle.abort();
+}
+
 #[tokio::test]
 async fn recall_endpoint_tiny_budget_excludes_block_but_keeps_its_warning() {
     let store = seed("t85-recall-tiny").await;

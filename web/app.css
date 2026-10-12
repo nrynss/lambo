@@ -477,6 +477,8 @@ h2 { font-size: 17px; margin: 0 0 4px; letter-spacing: -0.01em; }
 .card.is-excluded { border-style: dashed; opacity: 0.9; }
 .card.is-excluded .card-body { display: none; }
 .card.is-excluded.is-open .card-body { display: block; }
+/* #130: a top hit in the context truncated: expanded, marked partial. */
+.card.is-truncated { border-style: dashed; }
 .card-excluded-bar {
   display: flex; align-items: center; justify-content: space-between; gap: 8px;
   flex-wrap: wrap; margin-bottom: 2px;
