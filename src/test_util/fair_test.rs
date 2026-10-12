@@ -312,28 +312,42 @@ pub const CONTRADICTION: (&str, &str) = ("lease_revoke", "lease_stays");
 /// Read traffic: `(concept, access_count)`, last accessed on day 19.
 pub const ACCESSES: &[(&str, i32)] = &[("soak_note", 17), ("write_path_hub", 9)];
 
-/// A stable id for `name` in the fixture's namespace: the first 16 bytes of
-/// `SHA-256("session-fair-test/" + name)` as a version-8 UUID.
+/// A stable id for `name` in the default session's namespace: the first 16
+/// bytes of `SHA-256("session-fair-test/" + name)` as a version-8 UUID.
 pub fn hashed_id(name: &str) -> NodeId {
+    hashed_id_in(NAME, name)
+}
+
+/// [`hashed_id`] in session `sid`'s namespace. The session name seeds the
+/// hash, so a fixture built under another session id (the live tests' fresh
+/// `session-fair-test-<uuid>`) shares no node or edge id with the default's
+/// rows or with another run's: on a store whose ids are unique across
+/// sessions, a second run cannot upsert into the first one's rows.
+pub fn hashed_id_in(sid: &str, name: &str) -> NodeId {
     use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(format!("{NAME}/{name}").as_bytes());
+    let digest = Sha256::digest(format!("{sid}/{name}").as_bytes());
     let mut bytes = [0u8; 16];
     bytes.copy_from_slice(&digest[..16]);
     NodeId(uuid::Builder::from_custom_bytes(bytes).into_uuid())
 }
 
-fn interaction_id(key: &str) -> NodeId {
+fn interaction_id_in(sid: &str, key: &str) -> NodeId {
     assert!(
         INTERACTIONS.iter().any(|(k, ..)| *k == key),
         "no interaction {key}"
     );
-    hashed_id(&format!("interaction/{key}"))
+    hashed_id_in(sid, &format!("interaction/{key}"))
 }
 
-/// The id of the concept keyed `key`.
+/// The id of the concept keyed `key` in the default session.
 pub fn concept_id(key: &str) -> NodeId {
+    concept_id_in(NAME, key)
+}
+
+/// The id of the concept keyed `key` in the fixture built under `sid`.
+pub fn concept_id_in(sid: &str, key: &str) -> NodeId {
     assert!(CONCEPTS.iter().any(|(k, ..)| *k == key), "no concept {key}");
-    hashed_id(&format!("concept/{key}"))
+    hashed_id_in(sid, &format!("concept/{key}"))
 }
 
 fn interaction_time(key: &str) -> DateTime<Utc> {
@@ -352,11 +366,17 @@ fn origin_of(key: &str) -> &'static str {
         .expect("concept")
 }
 
-fn edge(source: NodeId, target: NodeId, edge_type: EdgeType, when: DateTime<Utc>) -> Edge {
+fn edge(
+    sid: &SessionId,
+    source: NodeId,
+    target: NodeId,
+    edge_type: EdgeType,
+    when: DateTime<Utc>,
+) -> Edge {
     Edge {
         event_time: None,
         id: NodeId::new(),
-        session_id: session(),
+        session_id: sid.clone(),
         source,
         target,
         edge_type,
@@ -370,13 +390,20 @@ fn edge(source: NodeId, target: NodeId, edge_type: EdgeType, when: DateTime<Utc>
 /// The fixture as a graph, built through the graph's own write path.
 /// `with_contradiction = false` leaves out the one `Contradicts` edge.
 pub fn build(with_contradiction: bool) -> Graph {
-    let mut g = Graph::new(session());
+    build_in(NAME, with_contradiction)
+}
+
+/// [`build`] under session id `sid`, with every id seeded by `sid` (see
+/// [`hashed_id_in`]).
+pub fn build_in(sid: &str, with_contradiction: bool) -> Graph {
+    let session_id = SessionId::from(sid);
+    let mut g = Graph::new(session_id.clone());
     let mut previous = None;
     for (key, _, _, agent, prompt) in INTERACTIONS {
         let i = Interaction {
             event_time: None,
-            id: interaction_id(key),
-            session_id: session(),
+            id: interaction_id_in(sid, key),
+            session_id: session_id.clone(),
             agent_id: AgentId::from(*agent),
             prompt_text: Some((*prompt).to_string()),
             previous_id: previous,
@@ -394,12 +421,12 @@ pub fn build(with_contradiction: bool) -> Graph {
             .map(|(.., agent, _)| *agent)
             .expect("origin");
         let c = Concept {
-            id: concept_id(key),
-            session_id: session(),
+            id: concept_id_in(sid, key),
+            session_id: session_id.clone(),
             content: (*content).to_string(),
             canonical_key: crate::graph::canonical::canonical_key(content, |_| None),
             concept_type: *concept_type,
-            origin_interaction: interaction_id(origin),
+            origin_interaction: interaction_id_in(sid, origin),
             origin_agent: AgentId::from(agent),
             created_at: born,
             access_count: accessed(key).unwrap_or(0),
@@ -413,15 +440,16 @@ pub fn build(with_contradiction: bool) -> Graph {
             embedding_source: None,
             chunk_group_id: None,
         };
-        g.insert_concept(c, interaction_id(origin)).unwrap();
+        g.insert_concept(c, interaction_id_in(sid, origin)).unwrap();
     }
     // Every concept-to-concept edge is written two minutes into its
     // source's interaction, the way record_action or derive stamps it.
     let stamped = |source: &str| interaction_time(origin_of(source)) + ChronoDuration::minutes(2);
     for (dependent, ruling) in DEPENDS {
         g.upsert_edge(edge(
-            concept_id(dependent),
-            concept_id(ruling),
+            &session_id,
+            concept_id_in(sid, dependent),
+            concept_id_in(sid, ruling),
             EdgeType::Dependency,
             stamped(dependent),
         ))
@@ -429,8 +457,9 @@ pub fn build(with_contradiction: bool) -> Graph {
     }
     for (action, file) in MODIFIES {
         g.upsert_edge(edge(
-            concept_id(action),
-            concept_id(file),
+            &session_id,
+            concept_id_in(sid, action),
+            concept_id_in(sid, file),
             EdgeType::Causal,
             stamped(action),
         ))
@@ -438,22 +467,30 @@ pub fn build(with_contradiction: bool) -> Graph {
     }
     for (parent, child) in CHILDREN {
         g.upsert_edge(edge(
-            concept_id(parent),
-            concept_id(child),
+            &session_id,
+            concept_id_in(sid, parent),
+            concept_id_in(sid, child),
             EdgeType::Hierarchical,
             stamped(parent),
         ))
         .unwrap();
     }
     for (a, b, ty) in ASSOCIATIONS {
-        g.upsert_edge(edge(concept_id(a), concept_id(b), *ty, stamped(a)))
-            .unwrap();
+        g.upsert_edge(edge(
+            &session_id,
+            concept_id_in(sid, a),
+            concept_id_in(sid, b),
+            *ty,
+            stamped(a),
+        ))
+        .unwrap();
     }
     if with_contradiction {
         let (newer, older) = CONTRADICTION;
         g.upsert_edge(edge(
-            concept_id(newer),
-            concept_id(older),
+            &session_id,
+            concept_id_in(sid, newer),
+            concept_id_in(sid, older),
             EdgeType::Contradicts,
             stamped(newer),
         ))
@@ -465,7 +502,14 @@ pub fn build(with_contradiction: bool) -> Graph {
 /// [`build`] as a deterministic snapshot: edge ids derived from each edge's
 /// natural key, every list in a stable order, no process-local stamps.
 pub fn snapshot(with_contradiction: bool) -> GraphSnapshot {
-    let mut snap = build(with_contradiction).snapshot();
+    snapshot_in(NAME, with_contradiction)
+}
+
+/// [`snapshot`] under session id `sid` (ids seeded by `sid`). The live
+/// tests use a fresh `session-fair-test-<uuid>` per run, because an erased
+/// session id is tombstoned and refuses every later flush.
+pub fn snapshot_in(sid: &str, with_contradiction: bool) -> GraphSnapshot {
+    let mut snap = build_in(sid, with_contradiction).snapshot();
     snap.created_at = Some(interaction_time("i01"));
     snap.mutation_epoch = 0;
     snap.edges.sort_by(|a, b| {
@@ -476,10 +520,10 @@ pub fn snapshot(with_contradiction: bool) -> GraphSnapshot {
         ))
     });
     for e in snap.edges.iter_mut() {
-        e.id = hashed_id(&format!(
-            "edge/{}/{}/{:?}",
-            e.source.0, e.target.0, e.edge_type
-        ));
+        e.id = hashed_id_in(
+            sid,
+            &format!("edge/{}/{}/{:?}", e.source.0, e.target.0, e.edge_type),
+        );
     }
     snap
 }
@@ -583,11 +627,14 @@ pub async fn fixed_point(
     panic!("no fixed point within 500 cycles");
 }
 
+/// Every concept's status in `g`, keyed by concept key; ids are resolved in
+/// `g`'s own session, so a graph built with [`build_in`] works too.
 pub fn statuses(g: &Graph) -> HashMap<&'static str, CanonizationStatus> {
+    let sid = g.session_id().0.clone();
     CONCEPTS
         .iter()
         .map(|(key, ..)| {
-            let status = match g.node(concept_id(key)) {
+            let status = match g.node(concept_id_in(&sid, key)) {
                 Some(Node::Concept(c)) => c.canonization_status,
                 _ => panic!("{key} is a concept"),
             };

@@ -435,3 +435,38 @@ fn an_age_floor_longer_than_the_fixture_admits_nothing() {
         .candidates(&g, &scores, &p, fair::now())
         .is_empty());
 }
+
+/// Sonnet review HIGH: the live check runs the fixture under a fresh session
+/// id. The same parameterised batch, under a non-default id, reaches the
+/// expected fixed point on MemoryStore and SQLite, and shares no id with the
+/// default fixture (the session name seeds every hash).
+#[tokio::test]
+async fn the_fixture_runs_under_another_session_id() {
+    let sid = format!("{}-{}", fair::NAME, uuid::Uuid::new_v4());
+    let snap = fair::snapshot_in(&sid, true);
+    assert_eq!(snap.session_id.0, sid);
+    let default = fair::snapshot(true);
+    let ids = |s: &GraphSnapshot| -> std::collections::HashSet<NodeId> {
+        s.interactions
+            .iter()
+            .map(|i| i.id)
+            .chain(s.concepts.iter().map(|c| c.id))
+            .chain(s.edges.iter().map(|e| e.id))
+            .collect()
+    };
+    assert!(ids(&snap).is_disjoint(&ids(&default)), "ids collide");
+    assert_eq!(ids(&snap).len(), ids(&default).len());
+    for policy in POLICIES {
+        let memory = memory_store(&snap).await;
+        let g = fair::fixed_point(&memory, snap.clone(), &params(policy), 3).await;
+        fair::assert_expected(&fair::statuses(&g), policy, "MemoryStore, fresh session");
+        #[cfg(feature = "store-sqlite")]
+        {
+            let sqlite = crate::store::SqliteStore::connect("sqlite::memory:").unwrap();
+            sqlite.init_schema().await.unwrap();
+            sqlite.flush(&fair::batch_of(&snap), None).await.unwrap();
+            let g = fair::fixed_point(&sqlite, snap.clone(), &params(policy), 3).await;
+            fair::assert_expected(&fair::statuses(&g), policy, "SQLite, fresh session");
+        }
+    }
+}
