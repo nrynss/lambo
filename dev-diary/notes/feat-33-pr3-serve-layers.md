@@ -200,3 +200,76 @@ No live database was used. No Cargo.toml, Cargo.lock or workflow change;
   accepted on writes.
 - Piggyback drain over all pipelines and epoch-routed receipts are not
   needed by PR 3 (recall writes nothing), and are untouched.
+
+## Review round 1 (0 High, 2 Medium, 8 Low): resolutions
+
+- **M1, the marker named a parameter that did not exist.** Orchestrator
+  decision: `scope` on `lambo_inspect` (read only) moves into PR 3. One
+  resolver for both read tools (`src/mcp/server/tools/scope.rs`): this
+  session or its own layers, the per-call grant check, the same generic
+  `bad_param`, the same refusals by why a layer is down. A
+  `scope = <layer>` recall adds the warning `recall: these hits are from
+  layer general, and their ids belong to it; pass scope = "general" to
+  lambo_inspect to inspect one` (wording pinned by a test). get_info,
+  mcp/config/cli docs, the schema golden and the F18 set updated.
+  Commit 006a3f5c.
+- **M2, the stdio warning fired on a proxy.** The CLI now only plans a
+  stdio session's stack (`ServeConfig::stdio_layers`, unchecked); `serve`
+  logs `stdio_unlayered_warning` on the `Role::Holder` path only, since a
+  proxy reaches the HTTP holder's session, layers included. Docs say so.
+  Not end-to-end tested: a stdio holder blocks on stdin and the proxy
+  path needs a second process; the warning function and the plan are
+  unit-tested, the call site is one `if let` inside the `Role::Holder`
+  arm. Commit 0582ff41 (with L6 and L7).
+- **L1.** `LayerSource::live_layer` returns `LayerDown` (Transient,
+  Failed, Erased, RateLimited). Failed and erased scopes are refused as
+  permanent, naming the operator; an erased pinned layer is warned of at
+  start. Commit 8c498bac.
+- **L2.** `call_tool` records `CallAuth::Http(grant)` when request parts
+  exist; HTTP parts without a grant are refused, no parts (J2 endpoint,
+  stdio) allowed. Both paths tested; the registry end-to-end tests now
+  run the real grant check. Commit 35f4193d.
+- **L3, chosen: direct reads draw, merged reads do not.** A `scope` read
+  draws the layer's `per_session_rps` token (as `/mcp/s/<layer>` would).
+  A merged recall's tier draws nothing: the call was admitted by the
+  consumer's own bucket and its credential's, which bound the layer
+  reads it causes, while drawing would let a flood on the layer silently
+  empty every consumer's merged answer of the layer (it degrades to
+  `layer_unavailable`, no refusal saying why). Commit 8c498bac.
+- **L4.** A frozen golden from the tag: `fixtures/recall_v0_5_0.rs`
+  holds v0.5.0's projection verbatim (checked with a diff against `git
+  show v0.5.0:src/mcp/server/tools/recall.rs` lines 175-210), and a test
+  compares the whole result, warnings block and `content[1]` included,
+  for a recall with a reservation warning. It covers fitting budgets
+  only: #130's `truncated_in_context` is an intended change since the
+  tag, and the pre-#33 reference test still covers truncation. Claims of
+  byte identity now exclude `tools/list`. Commit 23b5d301.
+- **L5.** A scoped layer is resolved and authorized early and looked up
+  just before the read (after the image is decoded; an embed runs inside
+  the layer's own recall). The residual: a re-attach waits at most
+  `PREVIOUS_HANDLE_WAIT` (30 s) for an old handle, so only a direct read
+  outliving 30 s would make it re-attach anyway and log a second-writer
+  error; recall and inspect are bounded well inside that. Documented in
+  `tools/scope.rs`. Commit 006a3f5c.
+- **L6.** The unpinned-layer refusal also names
+  `[serve.session_layers] <name> = []`. Commit 0582ff41.
+- **L7.** The 14-space literal was the library-caller stdio warning; it
+  went with the M2 rework. A search of the branch's diff for string
+  literals with long space runs finds no other. Commit 0582ff41.
+- **L8.** `LayerConfig` is `#[non_exhaustive]` now (only serde builds it
+  in-tree); CHANGELOG notes it. Commit bbd6f1b9.
+
+Merged origin/main 9b768768 (#140 Contradicts, #141 #36 PR 2) in
+751b6c62 with no conflicts: CHANGELOG has one Unreleased section, each
+subsection once, no duplicate bullets.
+
+Gate after the merge: `cargo fmt --check` pass; clippy `-D warnings`
+on store-sqlite,fixtures / ship,fixtures / --no-default-features
+store-postgres / store-postgres,store-sqlite,fixtures / embed-eg2 /
+recall-elastic / embed-candle all pass; `cargo test --features
+store-sqlite,fixtures` 2,249 passed, 0 failed, 7 ignored (unit 2,169,
+5 ignored), which is main's suite plus this branch's 35 tests (29 in
+round 0, 6 in this round: two registry, four server); `cargo test
+--no-run --no-default-features --features store-sqlite`, `cargo check
+--no-default-features`, `check-mirror-drift.sh` pass; postgres-only
+`--lib layer` 37 passed.
