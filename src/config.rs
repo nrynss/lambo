@@ -156,6 +156,10 @@ pub struct Config {
     /// dependents from two other interactions) with no peer minimum, and no
     /// policy reads this. Kept so existing configs deserialize;
     /// [`Config::warnings`] names a non-default value.
+    #[deprecated(
+        since = "0.6.0",
+        note = "inert since #36 PR 3: Stage 1 admits on evidence with no peer minimum"
+    )]
     pub canonization_min_peer_count: usize,
     /// Age floor for the dependence evidence Stages 1, 2 and 3 count.
     pub canonization_edge_min_age: Duration,
@@ -208,6 +212,7 @@ pub struct Config {
 }
 
 impl Default for Config {
+    #[allow(deprecated)] // the inert canonization_min_peer_count keeps its default
     fn default() -> Self {
         Self {
             backend_flush_interval: Duration::from_secs(1),
@@ -339,6 +344,7 @@ impl Config {
     ///   included: at exactly `gc_interval` mutations the mutation trigger is
     ///   checked first. Not an error, because sweeping on mutations alone is a
     ///   legitimate (pre-#29) configuration — only the time bound is dead.
+    #[allow(deprecated)] // names the inert canonization_min_peer_count
     pub fn warnings(&self) -> Vec<String> {
         let mut out = Vec::new();
         if self.gc_idle_floor >= self.gc_interval {
@@ -721,6 +727,7 @@ mod tests {
     use crate::store::StoreKind;
 
     #[test]
+    #[allow(deprecated)] // pins the inert canonization_min_peer_count default too
     fn defaults_match_spec() {
         let c = Config::default();
         assert_eq!(c.backend_flush_interval, Duration::from_secs(1));
@@ -1015,6 +1022,7 @@ mod tests {
     /// value is named as such rather than silently ignored; the default is
     /// silent and every value still validates.
     #[test]
+    #[allow(deprecated)]
     fn a_non_default_peer_minimum_warns_that_it_is_inert() {
         for (peers, warns) in [(20, false), (0, true), (5, true), (200, true)] {
             let c = Config {
