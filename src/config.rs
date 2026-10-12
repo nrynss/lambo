@@ -21,10 +21,10 @@ pub use credential::check_credential_set;
 /// An environment variable name for an error message, or `(value not shown)`
 /// when it may be a pasted secret (shared by `[serve]` and `[recall]`).
 pub use serve::{
-    CredentialConfig, InlineToken, MissingSession, ProjectConfig, SelectedSession, ServeConfig,
-    ServeCredential, SessionSelectionError, SessionSource, DEFAULT_ATTACH_CONCURRENCY,
-    DEFAULT_IDLE_DETACH_SECS, DEFAULT_MAX_ATTACHED, EVERY_HOSTED_SESSION,
-    RESERVED_CREDENTIAL_NAMES, SERVE_UNENFORCED_NOTICE, SESSION_REQUIRED,
+    CredentialConfig, InlineToken, LayerConfig, LayerSpec, MissingSession, ProjectConfig,
+    SelectedSession, ServeConfig, ServeCredential, ServeLayers, SessionSelectionError,
+    SessionSource, DEFAULT_ATTACH_CONCURRENCY, DEFAULT_IDLE_DETACH_SECS, DEFAULT_MAX_ATTACHED,
+    EVERY_HOSTED_SESSION, RESERVED_CREDENTIAL_NAMES, SERVE_UNENFORCED_NOTICE, SESSION_REQUIRED,
 };
 pub use web::{
     AllowedHost, WebConfig, WebCredentialConfig, DEFAULT_LOAD_CONCURRENCY,
