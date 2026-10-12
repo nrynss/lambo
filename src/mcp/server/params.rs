@@ -154,7 +154,7 @@ pub struct WireParentOf {
     pub child: String,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DeriveParams {
     /// Id of the agent making this call. Use one stable id for the agent's
@@ -186,7 +186,7 @@ pub struct DeriveParams {
 #[derive(Clone, Debug, Deserialize, schemars::JsonSchema)]
 pub struct WireResource(#[schemars(length(max = 16_384))] pub String);
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RecordActionParams {
     /// Id of the agent making this call. Use one stable id for the agent's
@@ -216,7 +216,7 @@ pub struct RecordActionParams {
     pub depends_on: Option<Vec<WireResource>>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ReserveParams {
     /// Id of the agent making this call — the identity the lock is held under.
@@ -240,7 +240,7 @@ pub struct ReserveParams {
     pub release: Option<bool>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct InspectParams {
     /// Id of the agent making this call. Use one stable id for the agent's
@@ -263,7 +263,7 @@ pub struct InspectParams {
     pub depth: Option<usize>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SaintsParams {
     /// Id of the agent making this call. Use one stable id for the agent's
@@ -350,9 +350,13 @@ pub struct StatsParams {
 
 /// What kind of thing the image is. One of `entity`, `logic`, `constraint`,
 /// `resource` (an image cannot be an `observation`).
-#[derive(Clone, Copy, Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum WireImageConceptType {
+    // The `Default` a struct literal's `..Default::default()` fills; not a
+    // wire default (the field stays required). A plain comment, so the
+    // published schema is unchanged.
+    #[default]
     Entity,
     Logic,
     Constraint,
@@ -414,7 +418,7 @@ pub struct WireVector {
     pub contract: WireEmbeddingContract,
 }
 
-#[derive(Deserialize, schemars::JsonSchema)]
+#[derive(Default, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DeriveImageParams {
     /// Id of the agent making this call. Use one stable id for the agent's
