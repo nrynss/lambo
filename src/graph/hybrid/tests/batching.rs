@@ -20,10 +20,9 @@ async fn run(
     interaction: NodeId,
     concepts: &[(&str, ConceptType)],
     parent_of: &ParentOf<'_>,
-    gather: Gather<'_>,
 ) -> Result<DeriveOutcome, LamboError> {
     let store = SpyStore::with_vector(Vec::new());
-    derive_with_gather(
+    derive_with(
         graph,
         VectorCandidates::from_store(&store),
         embedder,
@@ -36,7 +35,6 @@ async fn run(
         SEMANTIC_MATCH_THRESHOLD_DEFAULT,
         None,
         None,
-        gather,
     )
     .await
 }
@@ -63,7 +61,6 @@ async fn a_derive_embeds_its_items_and_parent_ends_in_one_round() {
         iid,
         &items(),
         &ParentOf::from_pairs(&pairs),
-        Gather::default(),
     )
     .await
     .unwrap();
@@ -90,16 +87,9 @@ async fn a_derive_embeds_its_items_and_parent_ends_in_one_round() {
 async fn a_non_batching_embedder_keeps_the_one_at_a_time_path() {
     let (graph, iid) = graph_with_interaction("b125-cap1", 1, 0, PROMPT);
     let e = BatchingEmbedder::new(1);
-    run(
-        graph,
-        &e,
-        iid,
-        &items(),
-        &ParentOf::none(),
-        Gather::default(),
-    )
-    .await
-    .unwrap();
+    run(graph, &e, iid, &items(), &ParentOf::none())
+        .await
+        .unwrap();
     assert_eq!(e.rounds(), 0);
     assert_eq!(e.singles(), 3);
 }
@@ -116,16 +106,9 @@ async fn a_refused_item_fails_its_write_with_its_own_class_and_nothing_is_writte
         (bad.as_str(), ConceptType::Entity),
         ("batched gamma", ConceptType::Entity),
     ];
-    let err = run(
-        graph.clone(),
-        &e,
-        iid,
-        &concepts,
-        &ParentOf::none(),
-        Gather::default(),
-    )
-    .await
-    .unwrap_err();
+    let err = run(graph.clone(), &e, iid, &concepts, &ParentOf::none())
+        .await
+        .unwrap_err();
     assert!(matches!(err, LamboError::Embed(_)), "{err:?}");
     assert_eq!((e.rounds(), e.singles()), (1, 1));
     assert_eq!(graph.read().concepts().count(), 0, "nothing was written");
@@ -137,74 +120,12 @@ async fn a_whole_round_outage_falls_back_to_single_embeds() {
     let (graph, iid) = graph_with_interaction("b125-outage", 1, 0, PROMPT);
     let e = BatchingEmbedder::new(32);
     e.fail_rounds.store(true, Ordering::SeqCst);
-    let out = run(
-        graph.clone(),
-        &e,
-        iid,
-        &items(),
-        &ParentOf::none(),
-        Gather::default(),
-    )
-    .await
-    .unwrap();
+    let out = run(graph.clone(), &e, iid, &items(), &ParentOf::none())
+        .await
+        .unwrap();
     assert_eq!(out.created.len(), 3);
     assert_eq!(out.embedded, 3);
     assert_eq!((e.rounds(), e.singles()), (1, 3));
-}
-
-#[tokio::test]
-async fn seeded_vectors_are_used_and_only_the_rest_is_embedded() {
-    let (graph, iid) = graph_with_interaction("b125-seed", 1, 0, PROMPT);
-    let e = BatchingEmbedder::new(32);
-    let fixture = FixtureEmbedder::new();
-    let mut seed = EmbedSeed::default();
-    for content in ["batched alpha", "batched beta"] {
-        let text = context_text(content, Some(PROMPT));
-        let vector = fixture.embed(&text).await.unwrap();
-        seed.extend([(text, vector)]);
-    }
-    let out = run(
-        graph.clone(),
-        &e,
-        iid,
-        &items(),
-        &ParentOf::none(),
-        Gather {
-            seed: Some(&seed),
-            io_started: None,
-        },
-    )
-    .await
-    .unwrap();
-    assert_eq!(out.created.len(), 3);
-    // One text is left, and one text is never a round.
-    assert_eq!((e.rounds(), e.singles()), (0, 1));
-}
-
-#[tokio::test]
-async fn a_spent_io_budget_refuses_as_unavailable_before_any_embed_lands() {
-    // The lane prefetch passes the instant its round started; a call whose
-    // budget is already spent times out rather than overrunning it. The
-    // embedder is held shut, so only the deadline can end the call.
-    let (graph, iid) = graph_with_interaction("b125-budget", 1, 0, PROMPT);
-    let mut e = BatchingEmbedder::new(32);
-    e.gate = Some(Arc::new(tokio::sync::Semaphore::new(0)));
-    let started = tokio::time::Instant::now() - HYBRID_IO_TIMEOUT - Duration::from_secs(1);
-    let err = run(
-        graph.clone(),
-        &e,
-        iid,
-        &items(),
-        &ParentOf::none(),
-        Gather {
-            seed: None,
-            io_started: Some(started),
-        },
-    )
-    .await
-    .unwrap_err();
-    assert!(matches!(err, LamboError::EmbedUnavailable(_)), "{err:?}");
-    assert_eq!(graph.read().concepts().count(), 0);
 }
 
 #[tokio::test]
