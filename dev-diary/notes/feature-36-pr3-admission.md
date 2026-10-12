@@ -240,12 +240,33 @@ gains the two-line canonization section (the cloudops parser self-test still
 passes); `tool_schemas.golden.json` (the `lambo_inspect` description);
 `tests/binary_parity.rs` `canonization_events 5 -> 15` (ten Candidates,
 four Venerable, `user schema` Canonical as before; the demo's narration line
-of untouched thresholds changed). Tests rewritten because they pinned the
+of untouched thresholds changed); `tests/t84_demo.rs` agent B's recall
+warnings `9 -> 10` (a Venerable with four dependents is high-value, so it
+gains a high-risk modification line). Tests rewritten because they pinned the
 P90 quota or Solo's band bypass: `the_default_policy_gathers_the_evidence_led_stage1_set`,
 the twenty-peer fixtures in `eval/tests` and `canon/task.rs` (now give the
 pillar real dependents), the Solo band tests (inverted into the bypass
 tests), and `a_single_writer_historical_constraint_is_admitted_only_under_solo`
 (Solo now stops at Candidate with no dependents).
+
+## Gate (local)
+
+All on the branch head, each with a fresh `XDG_RUNTIME_DIR`:
+`cargo fmt --check`; `cargo clippy --all-targets -- -D warnings` on
+`store-sqlite,fixtures`, `ship,fixtures`, `--no-default-features
+store-postgres`, `store-postgres,store-sqlite,fixtures`, `embed-eg2`,
+`recall-elastic`, `embed-candle`; `cargo test --features
+store-sqlite,fixtures` (2225 passed, 0 failed, 7 ignored; main 9b768768:
+2214 / 0 / 7); `cargo test --no-run --no-default-features --features
+store-sqlite`; `cargo check --no-default-features`; `cargo check
+--features demo`; `scripts/docs/check-mirror-drift.sh`. All pass. Also
+`cargo test --no-default-features --features store-postgres`: 1166 / 0 / 17
+(main 1170 / 0 / 17). The four fewer are accounted for by name: Stage 1's
+thirteen ungated P90 tests became nine evidence tests (-4), the inspect
+golden test now needs `store-memory` because the golden carries the
+explanation, which needs a store (-1), and the inert-peer-minimum config
+test is new (+1). No live Postgres or Cockroach run (none in this lane; no
+store SQL changed).
 
 ## Rig dry run (aggregates only)
 

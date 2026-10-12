@@ -72,7 +72,9 @@
   concept turns Canonical**.
 - **`lambo demo` ends with 15 canonization events, not 5.** Ten concepts
   with dependents from two other interactions become Candidates, four
-  reach Venerable, and `user schema` alone goes Canonical as before.
+  reach Venerable, and `user schema` alone goes Canonical as before. Agent
+  B's recall carries ten warnings, not nine: one more Venerable is
+  high-value.
 - **Downgrading or mixing versions with `Contradicts` edges (#19).** No
   0.6.0 tool writes a `Contradicts` edge yet; only a library caller or a
   hand-built batch can. A 0.5.0 (or older) binary refuses to load a
