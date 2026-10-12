@@ -150,7 +150,14 @@ pub struct Config {
     pub gc_idle_floor: u64,
     pub max_canonical_nodes: usize,
 
+    /// **Inert since #36 PR 3.** Swarm's Stage 1 used to open only once the
+    /// session held this many non-Canonical concepts, then cut at the P90 of
+    /// their scores; Stage 1 now admits on evidence (`gc_survived >= 3` and
+    /// dependents from two other interactions) with no peer minimum, and no
+    /// policy reads this. Kept so existing configs deserialize;
+    /// [`Config::warnings`] names a non-default value.
     pub canonization_min_peer_count: usize,
+    /// Age floor for the dependence evidence Stages 1, 2 and 3 count.
     pub canonization_edge_min_age: Duration,
     /// Stage 2 divides eligible evidence spread by min(session extent, this
     /// cap). Default fourteen days; no evidence expires at the cap. Library
@@ -342,6 +349,14 @@ impl Config {
                 self.gc_idle_floor, self.gc_interval
             ));
         }
+        if self.canonization_min_peer_count != Config::default().canonization_min_peer_count {
+            out.push(format!(
+                "canonization_min_peer_count ({}) is inert: since #36 PR 3 Stage 1 admits on \
+                 evidence (gc_survived >= 3 and dependents from two other interactions) with \
+                 no peer minimum, so no promotion policy reads it",
+                self.canonization_min_peer_count
+            ));
+        }
         out
     }
 }
@@ -375,19 +390,19 @@ impl Config {
 /// counter toward zero. Before that, a low-write single-writer deployment
 /// could never cross even one sweep in any single process — GC never ran,
 /// `gc_survived` never left 0, and Stage 1 was closed by construction. The
-/// cadence itself is unchanged: every threshold (peer count, `gc_survived >=
-/// 3`, the P90 cut) stays exactly as designed.
+/// cadence itself is unchanged: every threshold (`gc_survived >= 3`, the
+/// dependence floors of #36) stays exactly as designed.
 ///
 /// # Both paragraphs above are policy-conditional (C2)
 ///
-/// `promotion_policy = "Solo"` reads none of it. [`crate::canon::SoloScorer`]
-/// scores on recurrence — `gc_survived`, blast radius, distinct interactions
-/// and coverage are all ignored, and the score's own bands drive the ladder in
-/// place of the store-evidence stages — so a lone writer reaches Canonical in a
-/// handful of mutations with zero GC sweeps. **With `Solo` you do not need to
-/// lower `gc_interval`**; lowering it changes nothing about promotion. The
-/// "30 000 mutations" arithmetic and the "not settable from a file" framing
-/// both describe swarm, which remains the default.
+/// `promotion_policy = "Solo"` does not read `gc_survived`:
+/// [`crate::canon::SoloScorer`] admits a Candidate by its score band, so a
+/// lone writer reaches Candidate with zero GC sweeps and **with `Solo` you do
+/// not need to lower `gc_interval`**. Since #36 PR 3 every later Solo hop also
+/// needs the Stage 2 and Stage 3 evidence Swarm needs (dependents from other
+/// interactions, coverage, more than five dependents), which no cadence
+/// setting changes. The "30 000 mutations" arithmetic describes swarm's
+/// Stage 1, which remains the default.
 ///
 /// # GC also sweeps on time (issue #29)
 ///
@@ -994,6 +1009,25 @@ mod tests {
         let mut cfg = Config::default();
         file.daemon.apply_to(&mut cfg);
         assert_eq!(cfg.warnings().len(), 1);
+    }
+
+    /// #36 PR 3: `canonization_min_peer_count` is inert, so a non-default
+    /// value is named as such rather than silently ignored; the default is
+    /// silent and every value still validates.
+    #[test]
+    fn a_non_default_peer_minimum_warns_that_it_is_inert() {
+        for (peers, warns) in [(20, false), (0, true), (5, true), (200, true)] {
+            let c = Config {
+                canonization_min_peer_count: peers,
+                ..Config::default()
+            };
+            c.validate().expect("still a valid config");
+            let w = c.warnings();
+            assert_eq!(!w.is_empty(), warns, "{peers}: {w:?}");
+            if warns {
+                assert!(w[0].contains("canonization_min_peer_count") && w[0].contains("inert"));
+            }
+        }
     }
 
     /// Wire-visible `[daemon]` field names, parsed from real TOML text, must
