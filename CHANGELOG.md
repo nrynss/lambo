@@ -33,6 +33,14 @@
   also expires a new, healthy writer that took the lease after you read the
   row.
 
+### Added
+
+- `Embedder::embed_batch` and `Embedder::batch_capacity`, default methods
+  (non-breaking): embed several texts in one call, one result per text. The
+  defaults call `embed` per text and report a capacity of 1.
+- `writeq::LANE_PREFETCH_MAX_TEXTS` (16) and `writeq::LANE_PREFETCH_MAX_JOBS`
+  (8).
+
 ### Changed
 
 - The MCP tool descriptions say what a concept is and how to send
@@ -91,6 +99,31 @@
   - The portal shows it as "Partly in context (truncated)", expanded, and
     does not list its warnings as excluded. In `lambo recall` and the portal
     text, warning lines that did not fit print above the context.
+
+- **One bad text no longer fails other agents' writes on candle (#125).** The
+  candle coalescer failed every caller in a batch when the batch's forward
+  failed or panicked, so a write coalesced with a bad text by timing alone
+  failed as a permanent refusal. A failed batch is now rerun one text at a
+  time and only the bad text fails.
+
+### Performance
+
+- **Fewer embedder rounds per write under concurrent agents (#125).** A
+  hybrid derive or record_action now embeds all of its texts in one batched
+  round instead of one at a time, and each write-queue lane embeds the write
+  it is about to apply together with up to seven writes queued behind it (at
+  most 16 texts) in one round. Writes still plan, validate and commit one at
+  a time in lane order, each with its own receipt; a text a round could not
+  embed is embedded alone, so one bad text fails only its own write. This
+  needs an embedder that batches: the candle adapter does, the HTTP adapters
+  keep their one-at-a-time behaviour. Not yet re-measured with
+  `mcp_concurrent.py`; see `dev-diary/notes/perf-125-batched-embeds.md`.
+- **Candle forwards in short, length-sorted chunks (#125).** A coalesced
+  take now runs as forwards of at most 8 texts of similar length, so one long
+  text no longer pads every other text in its batch. Measured on Metal: a
+  16-wide batch with one 910-byte text took 1,280 ms padded and 312 ms as
+  three chunks.
+
 
 ## 0.5.0 (2026-10-12)
 
