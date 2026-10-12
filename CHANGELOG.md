@@ -73,17 +73,24 @@
   the first that does not. When that was the first block, the context was
   empty although `hits` held the answer, so a client reading only the text
   saw a miss. With the default budget of 500 tokens this hit any concept over
-  about 1,700 bytes. Now the first block's start is rendered, cut at a
-  character boundary, followed by
-  `… [truncated: N more tokens; lambo_inspect <id> for the full concept]`.
-  The marker counts toward the budget, nothing follows a truncated block,
-  and a budget too small for the marker (about 22 tokens) still gives an
-  empty context. Every recall whose first block fits renders byte for byte as
-  before. The blended and the structural (dependency-question) recall share
-  one budget cut now, so they behave the same. In the web portal's recall
-  payload the truncated hit carries `truncated_in_context: true` (absent
-  otherwise) and keeps `included_in_context: false`. In `lambo recall` and
-  the portal text, the warnings cut off with the block print above it.
+  about 1,700 bytes. Now the concept's text is cut at a character boundary
+  and marked `…`, the block's label (type, canonical marker, score, id,
+  blast radius) and, when they fit, its warning lines are kept, and a
+  `[truncated: N tokens left out; lambo_inspect <id> for the full concept]`
+  line follows. The marker counts toward the budget, nothing follows a
+  truncated block, and a budget too small for the marker (about 22 tokens)
+  still gives an empty context. Every recall whose first block fits renders
+  byte for byte as before. The blended and the structural
+  (dependency-question) recall share one budget cut now, so they behave the
+  same.
+  - The truncated hit carries `truncated_in_context: true` (absent on every
+    other hit) in `lambo_recall`'s `structuredContent`, in the web portal's
+    recall payload and on the `--ledger` recall line, and keeps
+    `included_in_context: false`. The ledger's `canonical_marker` counts it
+    when its label was kept.
+  - The portal shows it as "Partly in context (truncated)", expanded, and
+    does not list its warnings as excluded. In `lambo recall` and the portal
+    text, warning lines that did not fit print above the context.
 
 ## 0.5.0 (2026-10-12)
 

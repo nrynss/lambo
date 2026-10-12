@@ -634,7 +634,8 @@ impl LamboServer {
         //
         // Length IS tightened here, by operator ruling (2026-08-20, closing
         // the question round-1 remediation declared): an id is a *name*, and
-        // because the recall budget drops whole blocks, a holder id at the
+        // because the recall budget drops whole blocks (only the first block
+        // is ever truncated, #130), a holder id at the
         // uniform 16 KiB cap can evict the very block it annotates from
         // another agent's context — denial-of-context rather than injection.
         // 256 chars is generous for any real client id and reduces that vector
