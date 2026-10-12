@@ -1939,6 +1939,13 @@ mod tests {
         assert_eq!(*after, expect, "no other column moves");
     }
 
+    /// #36 PR 2: the fourteen-day cap on the shared window case (long
+    /// session, injected clock, event time, age guards).
+    #[tokio::test]
+    async fn capped_span_follows_window_case() {
+        crate::test_util::dependents::check_window_case(&MemoryStore::new()).await;
+    }
+
     /// #36: the shared dependents case (`crate::test_util::dependents`):
     /// `Dependency` sources into a node and its `Hierarchical` children
     /// count, all of them (a dependent shared with another pillar counts for
@@ -1946,11 +1953,6 @@ mod tests {
     /// do not; a self-loop, a foreign concept and a young edge do not; the
     /// span drops the node's own origin, a foreign origin and a young
     /// interaction.
-    #[tokio::test]
-    async fn capped_span_follows_window_case() {
-        crate::test_util::dependents::check_window_case(&MemoryStore::new()).await;
-    }
-
     #[tokio::test]
     async fn blast_radius_and_span_follow_the_dependents_case() {
         use crate::test_util::dependents as case;
