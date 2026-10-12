@@ -44,6 +44,11 @@ pub(crate) const MAX_LAYERS: usize = 1;
 /// consuming session's. Absent knobs take the library defaults
 /// ([`DEFAULT_LAYER_WEIGHT`], [`DEFAULT_LAYER_MIN_SIMILARITY`]), both
 /// uncalibrated until #87.
+///
+/// `#[non_exhaustive]`: team tiers (#131) may add knobs. Build one with
+/// `LayerConfig::default()` and set its fields, or parse it from
+/// `lambo.toml`.
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct LayerConfig {

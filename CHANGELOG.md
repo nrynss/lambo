@@ -75,6 +75,8 @@
   `layer: Vec<LayerConfig>`; `ServeOptions` gains
   `layers: ServeLayers`. A literal that ends in `..Default::default()`
   (`ServeConfig`) or `..ServeOptions::new(..)` keeps compiling.
+  The new `LayerConfig` is `#[non_exhaustive]` (team tiers may add
+  knobs): build it with `LayerConfig::default()` and set its fields.
 - **`RecallParams` gains `scope: Option<String>`** (#33 PR 3), breaking a
   struct literal that names every field; `..Default::default()` keeps
   compiling. `DeriveParams`, `RecordActionParams`, `ReserveParams`,
