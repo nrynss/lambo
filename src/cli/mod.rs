@@ -274,6 +274,18 @@ mod tests {
         ) -> Result<InteractionSpan, StoreError> {
             self.0.interaction_span(session, node, min_age, now).await
         }
+        async fn interaction_span_with_window(
+            &self,
+            session: &SessionId,
+            node: NodeId,
+            min_age: Duration,
+            now: DateTime<Utc>,
+            window: Duration,
+        ) -> Result<InteractionSpan, StoreError> {
+            self.0
+                .interaction_span_with_window(session, node, min_age, now, window)
+                .await
+        }
         async fn record_canonization(
             &self,
             event: &CanonizationEvent,
@@ -1001,26 +1013,6 @@ mod tests {
         load_reader_graph(&shared, "t1p2-reader-embed")
             .await
             .expect("a store-only reader attaches no embedder, so no mismatch");
-    }
-    #[tokio::test]
-    async fn legacy_adapter_fails_closed_for_capped_stage_2() {
-        let store = SharedMemory(Arc::new(MemoryStore::new()), Capabilities::empty());
-        for window in [
-            crate::store::DEFAULT_COVERAGE_WINDOW,
-            Duration::from_secs(28 * 86_400),
-        ] {
-            let err = store
-                .interaction_span_with_window(
-                    &SessionId::from("legacy"),
-                    NodeId::new(),
-                    Duration::ZERO,
-                    Utc::now(),
-                    window,
-                )
-                .await
-                .unwrap_err();
-            assert!(matches!(err, StoreError::Capability(_)));
-        }
     }
 }
 

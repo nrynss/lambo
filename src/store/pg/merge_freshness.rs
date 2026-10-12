@@ -552,6 +552,19 @@ impl<D: Dialect> GraphStore for LaggingDatabase<D> {
             coverage: 0.0,
         })
     }
+    async fn interaction_span_with_window(
+        &self,
+        _: &SessionId,
+        _: NodeId,
+        _: Duration,
+        _: DateTime<Utc>,
+        _window: Duration,
+    ) -> Result<InteractionSpan, StoreError> {
+        Ok(InteractionSpan {
+            distinct: 0,
+            coverage: 0.0,
+        })
+    }
     async fn record_canonization(
         &self,
         _: &CanonizationEvent,

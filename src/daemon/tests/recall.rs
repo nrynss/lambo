@@ -741,6 +741,16 @@ async fn gather_contract_race_annotates_vector_degraded() {
         ) -> Result<crate::types::InteractionSpan, StoreError> {
             panic!("E2E-6 stub: interaction_span")
         }
+        async fn interaction_span_with_window(
+            &self,
+            _session: &SessionId,
+            _node: NodeId,
+            _min_age: Duration,
+            _now: DateTime<Utc>,
+            _window: Duration,
+        ) -> Result<crate::types::InteractionSpan, StoreError> {
+            panic!("E2E-6 stub: interaction_span_with_window")
+        }
         async fn record_canonization(
             &self,
             _event: &crate::types::CanonizationEvent,

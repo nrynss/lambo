@@ -177,6 +177,18 @@ impl GraphStore for Shared {
     ) -> Result<InteractionSpan, StoreError> {
         self.0.interaction_span(s, n, a, now).await
     }
+    async fn interaction_span_with_window(
+        &self,
+        s: &SessionId,
+        n: NodeId,
+        a: Duration,
+        now: chrono::DateTime<Utc>,
+        window: Duration,
+    ) -> Result<InteractionSpan, StoreError> {
+        self.0
+            .interaction_span_with_window(s, n, a, now, window)
+            .await
+    }
     async fn record_canonization(
         &self,
         e: &CanonizationEvent,
@@ -1791,6 +1803,18 @@ impl GraphStore for CountingLoads {
         now: chrono::DateTime<Utc>,
     ) -> Result<InteractionSpan, StoreError> {
         self.0.interaction_span(s, n, a, now).await
+    }
+    async fn interaction_span_with_window(
+        &self,
+        s: &SessionId,
+        n: NodeId,
+        a: Duration,
+        now: chrono::DateTime<Utc>,
+        window: Duration,
+    ) -> Result<InteractionSpan, StoreError> {
+        self.0
+            .interaction_span_with_window(s, n, a, now, window)
+            .await
     }
     async fn record_canonization(
         &self,

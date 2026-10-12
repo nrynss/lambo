@@ -255,6 +255,16 @@ mod postgres_arm_tests {
         ) -> Result<crate::types::InteractionSpan, StoreError> {
             panic!("provision Postgres arm must not touch the store");
         }
+        async fn interaction_span_with_window(
+            &self,
+            _session: &crate::types::SessionId,
+            _node: crate::types::NodeId,
+            _min_age: std::time::Duration,
+            _now: chrono::DateTime<chrono::Utc>,
+            _window: std::time::Duration,
+        ) -> Result<crate::types::InteractionSpan, StoreError> {
+            panic!("provision Postgres arm must not touch the store");
+        }
         async fn record_canonization(
             &self,
             _event: &crate::types::CanonizationEvent,

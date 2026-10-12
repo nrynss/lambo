@@ -133,6 +133,18 @@ impl GraphStore for LoadCounting {
             .interaction_span(session, node, min_age, now)
             .await
     }
+    async fn interaction_span_with_window(
+        &self,
+        session: &SessionId,
+        node: NodeId,
+        min_age: Duration,
+        now: DateTime<Utc>,
+        window: Duration,
+    ) -> Result<crate::types::InteractionSpan, StoreError> {
+        self.inner
+            .interaction_span_with_window(session, node, min_age, now, window)
+            .await
+    }
     async fn record_canonization(
         &self,
         event: &CanonizationEvent,
@@ -549,6 +561,18 @@ async fn a_failing_schema_preflight_still_fails_startup() {
             now: DateTime<Utc>,
         ) -> Result<crate::types::InteractionSpan, StoreError> {
             self.0.interaction_span(s, n, a, now).await
+        }
+        async fn interaction_span_with_window(
+            &self,
+            s: &SessionId,
+            n: NodeId,
+            a: Duration,
+            now: DateTime<Utc>,
+            window: Duration,
+        ) -> Result<crate::types::InteractionSpan, StoreError> {
+            self.0
+                .interaction_span_with_window(s, n, a, now, window)
+                .await
         }
         async fn record_canonization(
             &self,

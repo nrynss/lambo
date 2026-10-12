@@ -426,6 +426,18 @@ impl GraphStore for VectorSearch {
     ) -> Result<crate::types::InteractionSpan, StoreError> {
         self.0.interaction_span(session, node, min_age, now).await
     }
+    async fn interaction_span_with_window(
+        &self,
+        session: &SessionId,
+        node: NodeId,
+        min_age: Duration,
+        now: DateTime<Utc>,
+        window: Duration,
+    ) -> Result<crate::types::InteractionSpan, StoreError> {
+        self.0
+            .interaction_span_with_window(session, node, min_age, now, window)
+            .await
+    }
     async fn record_canonization(
         &self,
         event: &CanonizationEvent,
