@@ -483,15 +483,11 @@ pub fn expected(policy: PromotionPolicy) -> Vec<(&'static str, CanonizationStatu
     ];
     match policy {
         PromotionPolicy::Swarm => {}
-        PromotionPolicy::Solo => out.extend([
-            // Solo's band admits these as Candidates (recurrence across
-            // days, or one other interaction's dependents on a Constraint);
-            // Stage 2 stops every one of them there.
-            ("ack_single", Candidate),
-            ("file_flush", Candidate),
-            ("file_lease", Candidate),
-            ("file_changelog", Candidate),
-        ]),
+        // Solo's band admits this one as a Candidate (one other
+        // interaction's dependents on a Constraint); Stage 2 stops it there.
+        // The file rows stay None: since #36 PR 3 a `Causal` touch is not
+        // recurrence, so files modified on many days no longer score.
+        PromotionPolicy::Solo => out.push(("ack_single", Candidate)),
     }
     out
 }

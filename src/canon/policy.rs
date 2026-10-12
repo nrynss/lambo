@@ -405,11 +405,17 @@ fn status_rank(s: CanonizationStatus) -> u8 {
     }
 }
 
-/// Resolved about-times of every interaction whose work touched this concept:
+/// Resolved about-times of every interaction that supported this concept:
 /// direct derivations (`Derives` from an interaction), plus the writing
-/// interaction of every action concept that recorded a `Causal`/`Dependency`
-/// edge against it. Sorted, deduplicated — this is the recurrence term's
-/// input, and it resolves through `about_time`, never flush stamps.
+/// interaction of every concept that declared it depends on this one
+/// (`Dependency` into it). Sorted, deduplicated — this is the recurrence
+/// term's input, and it resolves through `about_time`, never flush stamps.
+///
+/// `Causal` (an action produced or modified this concept) is **not** support
+/// since #36 PR 3, the same reason it confers no load (#36 PR 1): a file
+/// modified on five separate days recurred as work, not as a fact anyone
+/// rests on, and that alone made files Solo Candidates. This is the spec
+/// §3.2 errata recorded in `dev-diary/notes/feature-36-pr3-admission.md`.
 ///
 /// A fact with no event time contributes its flush time (D's fallback rule),
 /// so a live session behaves exactly as it did pre-D: one cluster.
@@ -421,9 +427,9 @@ pub fn supporting_interaction_times(graph: &Graph, c: &Concept) -> Vec<DateTime<
         }
         let writer = match e.edge_type {
             EdgeType::Derives => Some(e.source),
-            EdgeType::Causal | EdgeType::Dependency => match graph.node(e.source) {
-                // record_action sources its structural edges from the action
-                // node (a Resource concept); credit that action's turn.
+            EdgeType::Dependency => match graph.node(e.source) {
+                // record_action sources `depends_on` from the action node (a
+                // Resource concept); credit that action's turn.
                 Some(Node::Concept(s)) => Some(s.origin_interaction),
                 _ => None,
             },
@@ -1142,6 +1148,46 @@ mod tests {
         // The hub's own interaction never counts.
         add_action(&mut g, 24, 1, EdgeType::Dependency);
         assert_eq!(dependent_interactions(&g, hub, age, later), 2);
+    }
+
+    /// #36 PR 3 (spec §3.2 errata): a `Causal` touch is not recurrence.
+    /// A second concept derived once in turn 1 and modified by actions from
+    /// turns 2, 3 and 4 (days 2/4/6) still has one supporting session; the
+    /// same actions declaring `depends_on` it give four.
+    #[test]
+    fn causal_touches_are_not_recurrence() {
+        let (mut g, _) = spread_support_graph(ConceptType::Resource);
+        let mut file = concept(40, 0);
+        file.concept_type = ConceptType::Resource;
+        file.content = "src/lib.rs".into();
+        file.canonical_key = file.content.clone();
+        g.insert_concept(file.clone(), nid_inter(1)).unwrap();
+        for (k, ty) in [
+            (2u64, EdgeType::Causal),
+            (3, EdgeType::Causal),
+            (4, EdgeType::Causal),
+        ] {
+            let mut action = concept(40 + k, 0);
+            action.concept_type = ConceptType::Resource;
+            action.content = format!("modify lib {k}");
+            action.canonical_key = action.content.clone();
+            action.origin_interaction = nid_inter(k);
+            g.insert_concept(action, nid_inter(k)).unwrap();
+            g.upsert_edge(test_edge(40 + k, nid(40 + k), file.id, ty, ts_at(90)))
+                .unwrap();
+        }
+        assert_eq!(recurrence_sessions(&g, &concept_of(&g, file.id)), 1);
+        for k in 2..=4u64 {
+            g.upsert_edge(test_edge(
+                50 + k,
+                nid(40 + k),
+                file.id,
+                EdgeType::Dependency,
+                ts_at(90),
+            ))
+            .unwrap();
+        }
+        assert_eq!(recurrence_sessions(&g, &concept_of(&g, file.id)), 4);
     }
 
     /// Opposition is not a dependent or another supporting turn.
