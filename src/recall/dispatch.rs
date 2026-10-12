@@ -332,10 +332,7 @@ pub(crate) fn try_structural(
                 .push(Annotation::new(AnnotationKind::LoadBearing, text.clone()));
             lines.push(text);
         }
-        blocks.push(format::ContextBlock {
-            text: format::render_block(&hit, &lines),
-            inspect_id: format::short_id(c.id),
-        });
+        blocks.push(format::ContextBlock::for_hit(&hit, &lines));
         hits.push(hit);
         detailed.push(detailed_hit);
     }
@@ -364,13 +361,11 @@ pub(crate) fn try_structural(
     warnings.push(traversal.clone());
     // H3: included_in_context at the cut; the traversal explanation is
     // response-global — one annotation, never attached to a hit.
-    for (i, d) in detailed.iter_mut().enumerate() {
-        d.included_in_context = i < fitted.whole;
-        d.truncated_in_context = fitted.first_truncated && i == 0;
-    }
+    let truncation = DetailedRecall::mark_context(&mut detailed, &fitted);
     Some(DetailedRecall {
         hits,
         context: fitted.context,
+        truncation,
         warnings,
         // A dispatched structural query answers by traversal and skips the
         // phase-1 blend entirely (T9-R1-3), so there are no leg scores to
@@ -950,9 +945,12 @@ mod tests {
         result
             .detailed
             .iter()
-            .map(|h| format::ContextBlock {
-                text: format::render_detailed_block(h),
-                inspect_id: format::short_id(h.node_id),
+            .zip(&result.hits)
+            .map(|(d, h)| {
+                let lines: Vec<String> = d.annotations.iter().map(|a| a.text.clone()).collect();
+                let block = format::ContextBlock::for_hit(h, &lines);
+                assert_eq!(block.text, format::render_detailed_block(d));
+                block
             })
             .collect()
     }
@@ -978,6 +976,14 @@ mod tests {
             "{}",
             result.context
         );
+        // The label survives the cut (M1): content head, `…`, then the
+        // block's own label line.
+        assert!(
+            result.context.contains("… [Entity] (score "),
+            "{}",
+            result.context
+        );
+        assert_eq!(result.truncation, Some(format::Truncation::WithWarnings));
         assert!(format::default_token_count(&result.context) <= 500);
         assert!(
             !result.context.contains("payments handler"),
@@ -1047,7 +1053,7 @@ mod tests {
                 );
                 assert_eq!(
                     h.truncated_in_context,
-                    fitted.first_truncated && i == 0,
+                    fitted.truncation.is_some() && i == 0,
                     "{site} budget {budget}"
                 );
             }
@@ -1077,16 +1083,18 @@ mod tests {
             assert_eq!(blended.hits[0].node_id, big);
             let s = check("dispatch", &structural, budget);
             let b = check("assemble", &blended, budget);
-            assert_eq!(s.first_truncated, b.first_truncated, "budget {budget}");
+            assert_eq!(s.truncation, b.truncation, "budget {budget}");
+            assert_eq!(structural.truncation, s.truncation, "budget {budget}");
+            assert_eq!(blended.truncation, b.truncation, "budget {budget}");
             assert_eq!(s.rendered() == 0, b.rendered() == 0, "budget {budget}");
-            if s.first_truncated {
+            if s.truncation.is_some() {
                 let tail = format!(
                     "lambo_inspect {} for the full concept]",
                     format::short_id(big)
                 );
                 assert!(s.context.ends_with(&tail) && b.context.ends_with(&tail));
             }
-            regimes.insert((s.whole.min(1), s.first_truncated));
+            regimes.insert((s.whole.min(1), s.truncation.is_some()));
         }
         assert_eq!(
             regimes.len(),

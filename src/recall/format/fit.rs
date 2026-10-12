@@ -14,24 +14,31 @@
 //!    lower-ranked block never follows a skipped one (GPT5.6sol P1-4), even
 //!    when it would fit on its own.
 //! 2. **A first block that is too long is truncated, not dropped (#130).**
-//!    When not even the first block fits, the context is that block's head,
-//!    cut at a UTF-8 boundary, followed on its own line by the marker
+//!    When not even the first block fits, the **concept content** is cut at
+//!    a UTF-8 char boundary and marked with `…`, the rest of the block is
+//!    kept, and the marker follows on its own line:
 //!    ```text
-//!    … [truncated: <n> more tokens; lambo_inspect <id> for the full concept]
+//!    <content head>… [Entity, canonical] (score 0.50, id 1a2b3c4d, blast radius 3)
+//!    ⚑ Load-bearing pillar — 3 nodes depend on this. Modify with caution.
+//!    [truncated: 1342 tokens left out; lambo_inspect 1a2b3c4d for the full concept]
 //!    ```
-//!    where `<n>` is the estimator's count for the omitted tail and `<id>` is
-//!    the block's [`ContextBlock::inspect_id`]. Trailing whitespace of the
-//!    head is trimmed so the marker never sits after a blank line (which
-//!    would read as a block separator). Nothing follows a truncated block,
-//!    so rule 1's "never skip ahead" still holds. Only the first block is
-//!    ever truncated: once one whole block is in, every later block is
-//!    whole or absent.
+//!    So the label (type, canonical marker, score, id, blast radius) survives
+//!    the cut. The first form that fits wins ([`Truncation`]): the whole rest
+//!    of the block ([`Truncation::WithWarnings`]), then the label line
+//!    without the warning lines ([`Truncation::LabelOnly`]; the warnings
+//!    still reach the caller in `warnings`), then the content head alone
+//!    ([`Truncation::ContentOnly`]), whose shortest form is the marker
+//!    alone. `<n>` is the estimator's count for exactly the text of this
+//!    block that was left out. The marker names
+//!    [`ContextBlock::inspect_id`], and with a [`ContextBlock::scope`] reads
+//!    `lambo_inspect <id> (scope <session>)`. Nothing follows a truncated
+//!    block, so rule 1's "never skip ahead" still holds, and only the first
+//!    block is ever truncated.
 //! 3. **A budget too small for the marker gives an empty context.** If the
-//!    marker alone (an empty head) does not fit, the context is `""` and no
-//!    block is rendered, exactly as before #130. So `max_tokens = 0` still
-//!    gives an empty context, and with the default estimator so does any
-//!    budget below the marker's own size (a marker with an 8-char id is
-//!    about 22 tokens).
+//!    marker alone does not fit, the context is `""` and no block is
+//!    rendered, exactly as before #130. So `max_tokens = 0` still gives an
+//!    empty context, and with the default estimator so does any budget below
+//!    the marker's own size (about 22 tokens with an 8-char id).
 //!
 //! A recall whose first block fits renders byte-identically to the
 //! pre-#130 loop: rule 2 only runs when rule 1 rendered nothing.
@@ -39,56 +46,126 @@
 //! ## Arithmetic
 //!
 //! A token count of `usize::MAX` never fits (`checked_add(1)` fails), so an
-//! estimator that saturates cannot admit an unbounded block. The truncation
-//! point is found by binary search over the head's char boundaries; every
-//! candidate is measured as the exact string returned, so the result is
-//! within budget for any estimator. With a monotone estimator (the default
-//! `ceil(bytes / 3.5)` is) the head is also the longest that fits: growing
-//! the head by one char adds at least a byte, while the marker's count
-//! shrinks by at most one digit.
+//! estimator that saturates cannot admit an unbounded block. The cut point
+//! is found by binary search over the content's char boundaries that do not
+//! follow whitespace (so the head never ends in whitespace and needs no
+//! trimming). Every candidate is measured as the exact string returned, so
+//! the result is within budget for any estimator. For an estimator that is
+//! monotone in bytes (the default `ceil(bytes / 3.5)` is) the head is also
+//! the longest such head that fits: each step adds at least one byte of head
+//! and removes it from the left-out text, and a count that loses a digit
+//! does so only after losing at least one byte, so the total never shrinks.
+//!
+//! Cuts are on char boundaries, not grapheme boundaries: a head may end
+//! inside a combined emoji or a base letter's combining marks. That is
+//! cosmetic (the string is valid UTF-8 and the marker says the rest is
+//! elsewhere) and not worth a segmentation dependency.
 
-/// One rendered hit block, as [`fit_blocks`] takes it.
+use crate::types::RecallHit;
+
+/// One rendered hit block, as [`fit_blocks`] takes it. Build it with
+/// [`ContextBlock::for_hit`], which keeps the offsets consistent.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ContextBlock {
     /// The block exactly as [`super::render_block`] produced it.
     pub(crate) text: String,
-    /// The focus the truncation marker names, which `lambo_inspect` must
-    /// resolve: the hit's [`super::short_id`], or `<session>:<short id>` for
-    /// a hit from a layer (#33 PR 2).
+    /// `text[..content_len]` is the concept content (the block opens with it).
+    pub(crate) content_len: usize,
+    /// `text[..label_end]` is the label line; the warning lines follow.
+    pub(crate) label_end: usize,
+    /// The id the truncation marker names: the hit's [`super::short_id`],
+    /// which `lambo_inspect` resolves as a focus.
     pub(crate) inspect_id: String,
+    /// The session the hit belongs to, when it is not the caller's own (a
+    /// layer hit, #33 PR 2): the marker then tells the agent to pass it as
+    /// `lambo_inspect`'s `scope`. `None` renders exactly as before.
+    pub(crate) scope: Option<String>,
+}
+
+impl ContextBlock {
+    /// The block [`super::render_block`] renders for `hit` with its
+    /// `warnings` lines, with its content and label offsets.
+    pub(crate) fn for_hit(hit: &RecallHit, warnings: &[String]) -> Self {
+        let text = super::render_block(hit, warnings);
+        // render_block joins the label line and each warning line with '\n'.
+        let label_end = text.len() - warnings.iter().map(|w| w.len() + 1).sum::<usize>();
+        debug_assert!(text.starts_with(&hit.content));
+        debug_assert!(text.is_char_boundary(label_end));
+        Self {
+            content_len: hit.content.len(),
+            label_end,
+            text,
+            inspect_id: super::short_id(hit.node_id),
+            scope: None,
+        }
+    }
+}
+
+/// How the first block was truncated, from the most kept to the least.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Truncation {
+    /// Content head, then the whole rest of the block: label and every
+    /// warning line are in the context.
+    WithWarnings,
+    /// Content head, then the label line's rest (type, canonical marker,
+    /// score, id, blast radius); the warning lines are not in the context.
+    LabelOnly,
+    /// Content head only (possibly empty, leaving the marker alone).
+    ContentOnly,
+}
+
+impl Truncation {
+    /// Whether the block's label (and so its `[…, canonical]` marker) is in
+    /// the context.
+    pub(crate) fn keeps_label(self) -> bool {
+        matches!(self, Truncation::WithWarnings | Truncation::LabelOnly)
+    }
+
+    /// Whether the block's warning lines are in the context.
+    pub(crate) fn keeps_warnings(self) -> bool {
+        self == Truncation::WithWarnings
+    }
 }
 
 /// What [`fit_blocks`] rendered.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct FittedContext {
     /// The context text: whole blocks joined by a blank line, or one
-    /// truncated head with its marker, or `""`.
+    /// truncated block with its marker, or `""`.
     pub(crate) context: String,
     /// How many leading blocks appear whole. Hits `0..whole` are
     /// `included_in_context`.
     pub(crate) whole: usize,
-    /// True when the context is the first block's truncated head with the
-    /// marker (then `whole == 0`).
-    pub(crate) first_truncated: bool,
+    /// `Some` when the context is the first block truncated (then
+    /// `whole == 0`).
+    pub(crate) truncation: Option<Truncation>,
 }
 
 impl FittedContext {
     /// How many leading blocks the context renders at all, whole or
     /// truncated.
     pub(crate) fn rendered(&self) -> usize {
-        self.whole + usize::from(self.first_truncated)
+        self.whole + usize::from(self.truncation.is_some())
     }
 }
 
 /// The separator between two whole blocks ([`super::render_context`]).
 const SEPARATOR: &str = "\n\n";
 
-/// The marker after a truncated first block (#130). `more_tokens` is the
-/// estimator's count for the omitted tail; `inspect_id` names the concept.
-pub(crate) fn truncation_marker(more_tokens: usize, inspect_id: &str) -> String {
-    format!(
-        "… [truncated: {more_tokens} more tokens; lambo_inspect {inspect_id} for the full concept]"
-    )
+/// The mark at the content cut.
+const ELLIPSIS: &str = "…";
+
+/// The line after a truncated first block (#130). `left_out` is the
+/// estimator's count for the block text left out.
+pub(crate) fn truncation_marker(left_out: usize, inspect_id: &str, scope: Option<&str>) -> String {
+    match scope {
+        None => format!(
+            "[truncated: {left_out} tokens left out; lambo_inspect {inspect_id} for the full concept]"
+        ),
+        Some(s) => format!(
+            "[truncated: {left_out} tokens left out; lambo_inspect {inspect_id} (scope {s}) for the full concept]"
+        ),
+    }
 }
 
 /// A count fits when it is within budget and is not the saturated
@@ -124,80 +201,123 @@ where
 
     if whole == 0
         && let Some(first) = blocks.first()
-        && let Some(head) = truncated_head(first, max_tokens, &token_fn)
+        && let Some((text, form)) = truncate_first(first, max_tokens, &token_fn)
     {
         return FittedContext {
-            context: head,
+            context: text,
             whole: 0,
-            first_truncated: true,
+            truncation: Some(form),
         };
     }
     FittedContext {
         context,
         whole,
-        first_truncated: false,
+        truncation: None,
     }
 }
 
-/// The longest head of `block` that fits with its marker, or `None` when
-/// not even the marker alone fits. Only called for a block that does not
-/// fit whole.
-fn truncated_head<F>(block: &ContextBlock, max_tokens: usize, token_fn: &F) -> Option<String>
+/// The candidate cut points in the content: char boundaries before its end
+/// that do not follow whitespace. `0` is always one.
+fn content_cuts(content: &str) -> Vec<usize> {
+    let mut cuts = vec![0usize];
+    let mut prev_ws = false;
+    for (i, ch) in content.char_indices() {
+        if i > 0 && !prev_ws {
+            cuts.push(i);
+        }
+        prev_ws = ch.is_whitespace();
+    }
+    cuts
+}
+
+/// The first block truncated in the first [`Truncation`] form that fits, or
+/// `None` when not even the marker alone fits. Only called for a block that
+/// does not fit whole.
+fn truncate_first<F>(
+    block: &ContextBlock,
+    max_tokens: usize,
+    token_fn: &F,
+) -> Option<(String, Truncation)>
 where
     F: Fn(&str) -> usize,
 {
     let text = block.text.as_str();
-    let render = |cut: usize| -> String {
-        let marker = truncation_marker(token_fn(&text[cut..]), &block.inspect_id);
-        let head = text[..cut].trim_end();
-        if head.is_empty() {
-            marker
-        } else {
-            format!("{head}\n{marker}")
-        }
-    };
-    let ok = |cut: usize| fits(token_fn(&render(cut)), max_tokens);
+    let content_len = block.content_len;
+    let cuts = content_cuts(&text[..content_len]);
 
-    // Candidate cuts: every char boundary before the end (a cut at the end
-    // is the whole block, which already did not fit). Cut 0 is the
-    // marker-only rendering, so the list is never empty.
-    let mut cuts: Vec<usize> = text.char_indices().map(|(i, _)| i).collect();
-    if cuts.is_empty() {
-        cuts.push(0);
+    let mut forms = vec![(Truncation::WithWarnings, text.len())];
+    if block.label_end < text.len() {
+        forms.push((Truncation::LabelOnly, block.label_end));
     }
-    if !ok(cuts[0]) {
-        return None;
-    }
-    // Invariant: cuts[lo] fits; every index >= hi is known not to, or is
-    // past the end.
-    let (mut lo, mut hi) = (0usize, cuts.len());
-    while hi - lo > 1 {
-        let mid = lo + (hi - lo) / 2;
-        if ok(cuts[mid]) {
-            lo = mid;
-        } else {
-            hi = mid;
+    forms.push((Truncation::ContentOnly, content_len));
+
+    for (form, kept_end) in forms {
+        let render = |cut: usize| -> String {
+            let left_out = format!("{}{}", &text[cut..content_len], &text[kept_end..]);
+            let marker = truncation_marker(
+                token_fn(&left_out),
+                &block.inspect_id,
+                block.scope.as_deref(),
+            );
+            if form == Truncation::ContentOnly && cut == 0 {
+                marker
+            } else {
+                format!(
+                    "{}{ELLIPSIS}{}\n{marker}",
+                    &text[..cut],
+                    &text[content_len..kept_end]
+                )
+            }
+        };
+        let ok = |cut: usize| fits(token_fn(&render(cut)), max_tokens);
+        if !ok(cuts[0]) {
+            continue;
         }
+        // Invariant: cuts[lo] fits; every index >= hi does not, or is past
+        // the end.
+        let (mut lo, mut hi) = (0usize, cuts.len());
+        while hi - lo > 1 {
+            let mid = lo + (hi - lo) / 2;
+            if ok(cuts[mid]) {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        return Some((render(cuts[lo]), form));
     }
-    Some(render(cuts[lo]))
+    None
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::recall::format::default_token_count;
+    use crate::recall::format::{blast_radius_warning, default_token_count};
+    use crate::types::{ConceptType, NodeId};
 
-    fn block(text: &str, id: &str) -> ContextBlock {
-        ContextBlock {
-            text: text.to_string(),
-            inspect_id: id.to_string(),
+    fn hit(content: &str, canonical: bool) -> RecallHit {
+        RecallHit {
+            node_id: NodeId(uuid::Uuid::from_u64_pair(0x1a2b_3c4d_0000_0000, 7)),
+            content: content.to_string(),
+            concept_type: Some(ConceptType::Entity),
+            score: 0.5,
+            is_canonical: canonical,
+            blast_radius: canonical.then_some(3),
         }
+    }
+
+    fn plain(content: &str) -> ContextBlock {
+        ContextBlock::for_hit(&hit(content, false), &[])
     }
 
     /// The pre-#130 loop, verbatim in behaviour: longest prefix of whole
     /// blocks, stop at the first that does not fit. The byte-identity
     /// oracle for every budget where the first block fits.
-    fn legacy(blocks: &[String], max_tokens: usize, token_fn: impl Fn(&str) -> usize) -> String {
+    fn legacy(
+        blocks: &[String],
+        max_tokens: usize,
+        token_fn: impl Fn(&str) -> usize,
+    ) -> (String, usize) {
         let mut kept: Vec<String> = Vec::new();
         for b in blocks {
             let mut provisional = kept.join("\n\n");
@@ -211,7 +331,24 @@ mod tests {
             }
             kept.push(b.clone());
         }
-        kept.join("\n\n")
+        (kept.join("\n\n"), kept.len())
+    }
+
+    /// The truncated text's last line, the marker.
+    fn marker_of(context: &str) -> &str {
+        context.rsplit_once('\n').map_or(context, |(_, m)| m)
+    }
+
+    #[test]
+    fn for_hit_offsets_match_the_rendered_block() {
+        let h = hit("user schema", true);
+        let w = vec![blast_radius_warning(3), "Reserved by agent-b".to_string()];
+        let b = ContextBlock::for_hit(&h, &w);
+        assert_eq!(b.text, super::super::render_block(&h, &w));
+        assert_eq!(&b.text[..b.content_len], "user schema");
+        assert_eq!(&b.text[..b.label_end], super::super::render_block(&h, &[]));
+        assert_eq!(b.inspect_id, super::super::short_id(h.node_id));
+        assert_eq!(b.scope, None);
     }
 
     #[test]
@@ -219,47 +356,90 @@ mod tests {
         for budget in [0, 1, 500, usize::MAX] {
             let f = fit_blocks(&[], budget, default_token_count);
             assert_eq!(f.context, "");
-            assert_eq!(f.whole, 0);
-            assert!(!f.first_truncated);
+            assert_eq!((f.whole, f.truncation), (0, None));
             assert_eq!(f.rendered(), 0);
         }
     }
 
     #[test]
     fn first_block_that_fits_exactly_is_whole_with_no_marker() {
-        let text = "x".repeat(35); // ceil(35 / 3.5) = 10 tokens
-        let blocks = [block(&text, "1a2b3c4d")];
-        let f = fit_blocks(&blocks, 10, default_token_count);
-        assert_eq!(f.context, text);
-        assert_eq!((f.whole, f.first_truncated), (1, false));
-        assert!(!f.context.contains("truncated"));
+        let b = plain("some content");
+        let budget = default_token_count(&b.text);
+        let f = fit_blocks(std::slice::from_ref(&b), budget, default_token_count);
+        assert_eq!(f.context, b.text);
+        assert_eq!((f.whole, f.truncation), (1, None));
     }
 
     #[test]
-    fn first_block_one_token_over_is_truncated_with_its_id() {
-        // 200 bytes = 58 tokens; budget 57.
-        let text = "y".repeat(200);
-        let blocks = [block(&text, "1a2b3c4d"), block("small", "5e6f7a8b")];
-        let f = fit_blocks(&blocks, 57, default_token_count);
-        assert!(f.first_truncated);
-        assert_eq!(f.whole, 0);
-        assert_eq!(f.rendered(), 1);
-        assert!(default_token_count(&f.context) <= 57, "{}", f.context);
-        let (head, marker) = f.context.split_once('\n').expect("head, then marker");
-        assert!(text.starts_with(head) && !head.is_empty());
-        let omitted = default_token_count(&text[head.len()..]);
-        assert_eq!(marker, truncation_marker(omitted, "1a2b3c4d"));
+    fn first_block_one_token_over_keeps_its_label_and_names_its_id() {
+        let b = plain(&"y".repeat(400));
+        let over = default_token_count(&b.text) - 1;
+        let blocks = [b.clone(), plain("small")];
+        let f = fit_blocks(&blocks, over, default_token_count);
+        assert_eq!(f.truncation, Some(Truncation::WithWarnings));
+        assert_eq!((f.whole, f.rendered()), (0, 1));
+        assert!(default_token_count(&f.context) <= over, "{}", f.context);
+        let (body, marker) = f.context.rsplit_once('\n').unwrap();
+        let label_rest = &b.text[b.content_len..];
+        let head = body
+            .strip_suffix(&format!("{ELLIPSIS}{label_rest}"))
+            .expect("content head, ellipsis, then the label kept whole");
+        assert!(b.text.starts_with(head) && !head.is_empty());
+        assert_eq!(
+            marker,
+            truncation_marker(
+                default_token_count(&b.text[head.len()..b.content_len]),
+                &b.inspect_id,
+                None
+            )
+        );
         assert!(
             !f.context.contains("small"),
             "nothing follows a truncated block"
         );
-        // The head is the longest that fits: one more byte does not.
-        let longer = format!(
-            "{}\n{}",
-            &text[..head.len() + 1],
-            truncation_marker(default_token_count(&text[head.len() + 1..]), "1a2b3c4d")
-        );
-        assert!(default_token_count(&longer) > 57);
+    }
+
+    #[test]
+    fn a_truncated_canonical_hit_keeps_its_canonical_marker_and_warning() {
+        let h = hit(&"pillar prose ".repeat(400), true);
+        let w = vec![blast_radius_warning(3)];
+        let b = ContextBlock::for_hit(&h, &w);
+        let f = fit_blocks(std::slice::from_ref(&b), 500, default_token_count);
+        assert_eq!(f.truncation, Some(Truncation::WithWarnings));
+        assert!(f.context.contains("… [Entity, canonical] (score 0.50, id "));
+        assert!(f.context.contains(&w[0]));
+        assert!(Truncation::WithWarnings.keeps_label());
+    }
+
+    #[test]
+    fn long_warnings_fall_back_to_the_label_line_then_to_the_content() {
+        let h = hit(&"c".repeat(300), true);
+        let w = vec!["w".repeat(2_000)];
+        let b = ContextBlock::for_hit(&h, &w);
+        let f = fit_blocks(std::slice::from_ref(&b), 120, default_token_count);
+        assert_eq!(f.truncation, Some(Truncation::LabelOnly));
+        assert!(f.context.contains("… [Entity, canonical]"));
+        assert!(!f.context.contains("www"));
+        assert!(default_token_count(&f.context) <= 120);
+
+        // A budget below label + marker: the content head alone, then the
+        // marker alone.
+        let label_rest = &b.text[b.content_len..b.label_end];
+        let marker_only_tokens = default_token_count(&truncation_marker(
+            default_token_count(&format!(
+                "{}{}",
+                &b.text[..b.content_len],
+                &b.text[b.content_len..]
+            )),
+            &b.inspect_id,
+            None,
+        ));
+        let budget = marker_only_tokens + 3;
+        assert!(budget < default_token_count(label_rest) + marker_only_tokens);
+        let f = fit_blocks(std::slice::from_ref(&b), budget, default_token_count);
+        assert_eq!(f.truncation, Some(Truncation::ContentOnly));
+        assert!(f.context.starts_with('c') && f.context.contains("…\n[truncated: "));
+        assert!(!Truncation::ContentOnly.keeps_label());
     }
 
     #[test]
@@ -269,61 +449,58 @@ mod tests {
             "日本語のテキスト".repeat(700),  // 3-byte chars
             "🦀👩‍👩‍👧 crab family ".repeat(600), // 4-byte chars and ZWJ joins
         ];
-        for text in &samples {
-            for budget in [30, 31, 57, 500, 2_000] {
-                let blocks = [block(text, "deadbeef")];
-                let f = fit_blocks(&blocks, budget, default_token_count);
-                assert!(f.first_truncated, "budget {budget}");
-                assert!(
-                    default_token_count(&f.context) <= budget,
-                    "budget {budget}: {} tokens",
-                    default_token_count(&f.context)
-                );
-                // A valid String by construction; the head is a prefix of
-                // the block at a char boundary.
-                let (head, marker) = f
-                    .context
-                    .rsplit_once('\n')
-                    .unwrap_or(("", f.context.as_str()));
-                assert!(text.starts_with(head), "head is a prefix");
-                assert!(text.is_char_boundary(head.len()));
-                assert!(marker.starts_with("… [truncated: "), "{marker}");
-                assert!(marker.ends_with("lambo_inspect deadbeef for the full concept]"));
+        for content in &samples {
+            let b = plain(content);
+            for budget in [30, 45, 57, 500, 2_000] {
+                let f = fit_blocks(std::slice::from_ref(&b), budget, default_token_count);
+                assert!(f.truncation.is_some(), "budget {budget}");
+                assert!(default_token_count(&f.context) <= budget, "budget {budget}");
+                let marker = marker_of(&f.context);
+                assert!(marker.starts_with("[truncated: "), "{marker}");
+                assert!(marker.ends_with(&format!(
+                    "lambo_inspect {} for the full concept]",
+                    b.inspect_id
+                )));
+                if let Some((body, _)) = f.context.rsplit_once('\n') {
+                    let head = &body[..body.find(ELLIPSIS).unwrap()];
+                    assert!(content.starts_with(head), "head is a content prefix");
+                    assert!(content.is_char_boundary(head.len()));
+                    assert!(!head.ends_with(char::is_whitespace));
+                }
             }
         }
     }
 
     #[test]
     fn budget_below_the_marker_gives_an_empty_context() {
-        let text = "z".repeat(10_000);
-        let blocks = [block(&text, "1a2b3c4d")];
-        let marker_only = truncation_marker(default_token_count(&text), "1a2b3c4d");
+        let b = plain(&"z".repeat(10_000));
+        let marker_only = truncation_marker(default_token_count(&b.text), &b.inspect_id, None);
         let marker_tokens = default_token_count(&marker_only);
         for budget in [0, 1, marker_tokens - 1] {
-            let f = fit_blocks(&blocks, budget, default_token_count);
+            let f = fit_blocks(std::slice::from_ref(&b), budget, default_token_count);
             assert_eq!(f.context, "", "budget {budget}");
-            assert_eq!((f.whole, f.first_truncated), (0, false));
+            assert_eq!((f.whole, f.truncation), (0, None));
         }
-        // At the marker's size something renders, and it names the concept
-        // (the estimator's ceil slack may admit a byte or two of head).
-        let f = fit_blocks(&blocks, marker_tokens, default_token_count);
-        assert!(f.first_truncated);
-        assert!(f
-            .context
-            .ends_with("lambo_inspect 1a2b3c4d for the full concept]"));
         // With an exact byte estimator, a budget of exactly the marker's
-        // bytes is the marker alone, and one byte less is empty.
-        let byte_marker = truncation_marker(text.len(), "1a2b3c4d");
-        let exact = byte_marker.len();
-        let f = fit_blocks(&blocks, exact, |s: &str| s.len());
+        // bytes is the marker alone (it still names the concept), and one
+        // byte less is empty.
+        let byte_marker = truncation_marker(b.text.len(), &b.inspect_id, None);
+        let f = fit_blocks(std::slice::from_ref(&b), byte_marker.len(), |s: &str| {
+            s.len()
+        });
         assert_eq!(f.context, byte_marker);
-        let f = fit_blocks(&blocks, exact - 1, |s: &str| s.len());
+        assert_eq!(f.truncation, Some(Truncation::ContentOnly));
+        let f = fit_blocks(
+            std::slice::from_ref(&b),
+            byte_marker.len() - 1,
+            |s: &str| s.len(),
+        );
         assert_eq!(f.context, "");
     }
 
     #[test]
     fn max_tokens_one_is_empty() {
-        let blocks = [block("a block of ordinary length", "1a2b3c4d")];
+        let blocks = [plain("a block of ordinary length")];
         let f = fit_blocks(&blocks, 1, default_token_count);
         assert_eq!(f.context, "");
         assert_eq!(f.rendered(), 0);
@@ -332,69 +509,136 @@ mod tests {
     #[test]
     fn second_block_that_does_not_fit_is_dropped_whole_and_nothing_after_it() {
         let blocks = [
-            block("first block", "11111111"),
-            block(&"second ".repeat(100), "22222222"),
-            block("third", "33333333"),
+            plain("first"),
+            plain(&"second ".repeat(100)),
+            plain("third"),
         ];
         // Budget fits block 1 and would fit block 3, never block 2.
-        let budget = default_token_count("first block\n\nthird");
+        let budget = default_token_count(&format!("{}\n\n{}", blocks[0].text, blocks[2].text));
         let f = fit_blocks(&blocks, budget, default_token_count);
-        assert_eq!(f.context, "first block");
-        assert_eq!((f.whole, f.first_truncated), (1, false));
-        assert!(!f.context.contains("truncated"));
+        assert_eq!(f.context, blocks[0].text);
+        assert_eq!((f.whole, f.truncation), (1, None));
     }
 
     #[test]
     fn whole_blocks_are_byte_identical_to_the_pre_130_loop() {
-        let texts: Vec<String> = (0..6)
-            .map(|i| format!("concept {i} {}", "w".repeat(i * 37)))
+        let blocks: Vec<ContextBlock> = (0..6)
+            .map(|i| plain(&format!("concept {i} {}", "w".repeat(i * 37))))
             .collect();
-        let blocks: Vec<ContextBlock> = texts.iter().map(|t| block(t, "abcdef01")).collect();
-        let first = default_token_count(&texts[0]);
-        for budget in first..400 {
+        let texts: Vec<String> = blocks.iter().map(|b| b.text.clone()).collect();
+        for budget in default_token_count(&texts[0])..400 {
             let f = fit_blocks(&blocks, budget, default_token_count);
-            assert_eq!(
-                f.context,
-                legacy(&texts, budget, default_token_count),
-                "budget {budget}"
-            );
-            assert!(!f.first_truncated);
+            let (context, whole) = legacy(&texts, budget, default_token_count);
+            assert_eq!((f.context, f.whole), (context, whole), "budget {budget}");
+            assert_eq!(f.truncation, None);
         }
-        // A byte-length estimator too.
-        for budget in texts[0].len()..600 {
+        for budget in texts[0].len()..900 {
             let f = fit_blocks(&blocks, budget, |s: &str| s.len());
-            assert_eq!(
-                f.context,
-                legacy(&texts, budget, |s: &str| s.len()),
-                "budget {budget}"
-            );
+            let (context, whole) = legacy(&texts, budget, |s: &str| s.len());
+            assert_eq!((f.context, f.whole), (context, whole), "budget {budget}");
         }
     }
 
     #[test]
     fn saturated_estimator_never_fits() {
-        let blocks = [block("anything", "1a2b3c4d")];
+        let blocks = [plain("anything")];
         let f = fit_blocks(&blocks, usize::MAX, |_| usize::MAX);
         assert_eq!(f.context, "");
         assert_eq!(f.rendered(), 0);
     }
 
     #[test]
-    fn head_trailing_whitespace_is_trimmed_before_the_marker() {
-        // A head that would end on the blank line between two lines.
-        let text = format!("line one\n\n{}", "q".repeat(500));
-        let blocks = [block(&text, "1a2b3c4d")];
-        // Byte-length estimator, budget = "line one" + "\n" + a marker that
-        // names 502 more bytes: the head stops before the blank line.
-        let marker = truncation_marker(text.len() - "line one".len(), "1a2b3c4d");
-        let budget = "line one".len() + 1 + marker.len();
-        let f = fit_blocks(&blocks, budget, |s: &str| s.len());
-        assert!(f.first_truncated);
-        assert!(!f.context.contains("\n\n"), "{:?}", f.context);
+    fn the_head_never_ends_in_whitespace() {
+        let b = plain(&format!("line one\n\n{}", "q ".repeat(300)));
+        for budget in 25..120 {
+            let f = fit_blocks(std::slice::from_ref(&b), budget, default_token_count);
+            if let Some((body, _)) = f.context.rsplit_once('\n') {
+                let head = &body[..body.find(ELLIPSIS).unwrap()];
+                assert!(!head.ends_with(char::is_whitespace), "{head:?}");
+            }
+        }
+    }
+
+    /// L6: the binary search finds the longest head a linear scan finds,
+    /// for the default estimator and an exact byte estimator, over content
+    /// with whitespace runs and multibyte text.
+    #[test]
+    fn the_head_is_the_longest_that_fits() {
+        let contents = [
+            "a".repeat(700),
+            "word ".repeat(150),
+            format!("{}  \n\n {}", "é".repeat(90), "x y z ".repeat(80)),
+            "🦀 ".repeat(200),
+        ];
+        let estimators: [fn(&str) -> usize; 2] = [default_token_count, |s: &str| s.len()];
+        for content in &contents {
+            let b = plain(content);
+            let cuts = content_cuts(&b.text[..b.content_len]);
+            for est in estimators {
+                for budget in (20..400).step_by(7) {
+                    let Some((got, form)) = truncate_first(&b, budget, &est) else {
+                        continue;
+                    };
+                    let kept_end = match form {
+                        Truncation::WithWarnings => b.text.len(),
+                        Truncation::LabelOnly => b.label_end,
+                        Truncation::ContentOnly => b.content_len,
+                    };
+                    let render = |cut: usize| {
+                        let left_out =
+                            format!("{}{}", &b.text[cut..b.content_len], &b.text[kept_end..]);
+                        let marker = truncation_marker(est(&left_out), &b.inspect_id, None);
+                        if form == Truncation::ContentOnly && cut == 0 {
+                            marker
+                        } else {
+                            format!(
+                                "{}{ELLIPSIS}{}\n{marker}",
+                                &b.text[..cut],
+                                &b.text[b.content_len..kept_end]
+                            )
+                        }
+                    };
+                    let best = cuts
+                        .iter()
+                        .copied()
+                        .filter(|&c| fits(est(&render(c)), budget))
+                        .max()
+                        .unwrap();
+                    assert_eq!(got, render(best), "budget {budget}");
+                }
+            }
+        }
+    }
+
+    /// L7: `<n>` counts exactly the block text left out.
+    #[test]
+    fn the_marker_counts_exactly_the_text_left_out() {
+        let b = plain(&"m".repeat(500));
+        let f = fit_blocks(std::slice::from_ref(&b), 300, |s: &str| s.len());
+        assert_eq!(f.truncation, Some(Truncation::WithWarnings));
+        let (body, marker) = f.context.rsplit_once('\n').unwrap();
+        let head_len = body.find(ELLIPSIS).unwrap();
+        let left_out = b.content_len - head_len;
+        assert_eq!(marker, truncation_marker(left_out, &b.inspect_id, None));
+    }
+
+    /// M3: a layer hit's marker names the scope to pass; without a scope the
+    /// marker is unchanged.
+    #[test]
+    fn a_scoped_block_names_its_scope_in_the_marker() {
+        let mut b = plain(&"s".repeat(2_000));
+        let unscoped = fit_blocks(std::slice::from_ref(&b), 200, default_token_count);
+        assert!(!unscoped.context.contains("scope"));
+        b.scope = Some("general".into());
+        let f = fit_blocks(std::slice::from_ref(&b), 200, default_token_count);
         assert!(
-            f.context.starts_with("line one\n… [truncated: "),
-            "{:?}",
+            marker_of(&f.context).ends_with(&format!(
+                "lambo_inspect {} (scope general) for the full concept]",
+                b.inspect_id
+            )),
+            "{}",
             f.context
         );
+        assert!(default_token_count(&f.context) <= 200);
     }
 }

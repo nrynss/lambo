@@ -111,9 +111,10 @@ fn caller() -> Option<Arc<str>> {
 /// * **`canonical_marker` is budget-gated.** `[canonical]` exists *only* inside a
 ///   hit's context block (`format::render_block`), and the block is emitted only
 ///   while the token budget lasts. So this flag counts hits with
-///   `included_in_context == true`, plus a truncated first block (#130) whose
-///   head reached the end of its label line, and nothing else. A `max_tokens: 1` recall of
-///   a Canonical concept therefore reports `canonical_marker: false` — correctly:
+///   `included_in_context == true`, plus a truncated first block (#130)
+///   whose cut kept its label line, and nothing else. A `max_tokens: 1`
+///   recall of a Canonical concept therefore reports `canonical_marker:
+///   false` — correctly:
 ///   the agent received an empty context and the string `[canonical]` appeared
 ///   nowhere in the response. (Per-hit `is_canonical` is still on every hit, so
 ///   "was a Canonical concept *returned*" remains answerable — from the hits,
@@ -139,21 +140,23 @@ pub(super) fn recall_facts(
     let mut hot_warning = false;
     let mut reservation_warning = false;
 
+    // #130: the truncated first hit, if any, and whether its cut kept the
+    // label line (and so `[…, canonical]`).
+    let truncated_label = detailed
+        .truncated_hit()
+        .is_some_and(|(_, form)| form.keeps_label());
     let hits: Vec<serde_json::Value> = detailed
         .hits
         .iter()
         .zip(detailed.detailed.iter())
-        .map(|(hit, d)| {
+        .enumerate()
+        .map(|(i, (hit, d))| {
             // Budget-gated: `[canonical]` renders inside the hit's block, so a
             // hit the budget cut rendered no marker. See this function's docs.
-            // A truncated first block (#130) rendered the marker only if its
-            // head reached the end of the label (`<content> [Type, canonical]`).
-            canonical_marker |= hit.is_canonical
-                && (d.included_in_context
-                    || (d.truncated_in_context
-                        && detailed
-                            .context
-                            .starts_with(&crate::recall::format::concept_label(hit))));
+            // A truncated first block (#130) renders it when the cut kept the
+            // label line, which is every form but content-only.
+            canonical_marker |=
+                hit.is_canonical && (d.included_in_context || (i == 0 && truncated_label));
             let mut legs = serde_json::Map::new();
             if let Some(l) = detailed.legs.get(&hit.node_id) {
                 if let Some(s) = l.keyword {
