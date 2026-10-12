@@ -100,9 +100,10 @@ pub fn classify(query: &str) -> RecallKind {
 /// stops them beating the concept that contains them. A query that names one
 /// of these words as its real subject falls through to the blended recall,
 /// which still finds it by word match.
-const ANCHOR_STOP_WORDS: [&str; 26] = [
+const ANCHOR_STOP_WORDS: &[&str] = &[
     "a", "an", "and", "any", "anything", "are", "be", "can", "do", "does", "for", "if", "in", "is",
-    "it", "its", "my", "of", "on", "or", "our", "the", "this", "to", "what", "which",
+    "it", "its", "my", "of", "on", "or", "our", "the", "this", "to", "what", "which", "that",
+    "with", "from", "by", "at", "how", "who", "when", "will", "i", "we",
 ];
 
 /// Whether `c` counts as a word character for anchor boundaries. Unicode-aware
@@ -206,6 +207,7 @@ fn is_stop_content(lower_content: &str) -> bool {
 ///    that names nothing real ("what depends on nothing-imaginary") still
 ///    refuses.
 fn resolve_anchor(graph: &Graph, query: &str) -> Option<NodeId> {
+    let raw_q: String = query.nfc().collect();
     let lower_q = anchor_text(query);
     let markers = marker_spans(&lower_q);
     let inside_marker = |(s, e): (usize, usize)| markers.iter().any(|&(ms, me)| ms <= s && e <= me);
@@ -214,13 +216,31 @@ fn resolve_anchor(graph: &Graph, query: &str) -> Option<NodeId> {
         .concepts()
         .filter_map(|c| {
             let lower_c = anchor_text(&c.content);
-            if lower_c.trim().is_empty() || is_stop_content(&lower_c) {
+            if lower_c.trim().is_empty() {
                 return None;
             }
-            let spans: Vec<(usize, usize)> = word_bounded_spans(&lower_q, &lower_c)
-                .into_iter()
-                .filter(|&sp| !inside_marker(sp))
-                .collect();
+            let mut found = word_bounded_spans(&lower_q, &lower_c);
+            if found.is_empty() {
+                return None;
+            }
+            if is_stop_content(&lower_c) {
+                let raw_c: String = c.content.nfc().collect();
+                let uppercase =
+                    raw_c.chars().any(char::is_uppercase) && !raw_c.chars().any(char::is_lowercase);
+                if !uppercase {
+                    return None;
+                }
+                found = word_bounded_spans(&raw_q, &raw_c)
+                    .into_iter()
+                    .map(|(s, e)| {
+                        (
+                            anchor_text(&raw_q[..s]).len(),
+                            anchor_text(&raw_q[..e]).len(),
+                        )
+                    })
+                    .collect();
+            }
+            let spans: Vec<_> = found.into_iter().filter(|&sp| !inside_marker(sp)).collect();
             (!spans.is_empty()).then_some((c, spans))
         })
         .collect();
@@ -893,6 +913,36 @@ mod tests {
             anchor_content(&g, "what depends on (SG-Base) - db").as_deref(),
             Some("SG-Base")
         );
+    }
+
+    #[test]
+    fn uppercase_scaffolding_acronyms_require_an_exact_uppercase_occurrence() {
+        for name in ["IT", "CAN", "OR", "DO", "IS", "MY", "IF", "ANY"] {
+            let g = anchors(&[(10, name, ConceptType::Entity)]);
+            assert_eq!(
+                anchor_content(&g, &format!("what depends on {name}")).as_deref(),
+                Some(name)
+            );
+            assert_eq!(
+                anchor_content(&g, &format!("what depends on {}", name.to_lowercase())),
+                None
+            );
+            assert_eq!(anchor_content(&g, "is it safe to delete unknown"), None);
+        }
+        let g = anchors(&[
+            (10, "IS", ConceptType::Entity),
+            (11, "queue", ConceptType::Entity),
+        ]);
+        assert_eq!(
+            anchor_content(&g, "is it safe to delete queue in IS").as_deref(),
+            Some("queue")
+        );
+        for name in [
+            "that", "with", "from", "by", "at", "how", "who", "when", "will", "i", "we",
+        ] {
+            let g = anchors(&[(10, name, ConceptType::Entity)]);
+            assert_eq!(anchor_content(&g, &format!("what depends on {name}")), None);
+        }
     }
 
     #[test]
