@@ -203,7 +203,7 @@ pub(crate) fn resolve_anchor(graph: &Graph, query: &str) -> Option<NodeId> {
     let mut marker_clauses = Vec::new();
     for c in graph.concepts() {
         let lower_c = anchor_text(&c.content);
-        if !lower_c.chars().any(is_word_char) {
+        if !lower_c.chars().any(char::is_alphanumeric) {
             continue;
         }
         let mut found = word_bounded_spans(&lower_q, &lower_c);
@@ -971,8 +971,10 @@ mod tests {
         let g = anchors(&[
             (10, "?", ConceptType::Entity),
             (11, "...", ConceptType::Resource),
+            (12, "_", ConceptType::Entity),
+            (13, "---", ConceptType::Resource),
         ]);
-        assert_eq!(anchor_content(&g, "what depends on unknown...?"), None);
+        assert_eq!(anchor_content(&g, "what depends on unknown...?_ ---"), None);
     }
 
     #[test]

@@ -33,7 +33,9 @@ CHANGELOG conflict. No public API, schema, dependency or manifest changed.
   combining marks count as word characters. This avoids contextual sigma
   lowercasing and matches composed/decomposed accents. Existing Unicode
   crates suffice; no dependency change.
-- L2: require a word character; punctuation-only text cannot anchor.
+- L2: require an alphanumeric base character; punctuation-only text cannot
+  anchor, including underscore-only names even though underscores and combining
+  marks act as word continuations at boundaries.
 - L3: marker-overlapping clauses remain eligible but cannot contain/suppress
   other subjects; wholly marker-contained matches are ignored. This keeps a
   real `blast radius report` query possible while preserving `db` in a
