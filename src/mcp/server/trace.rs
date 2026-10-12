@@ -194,7 +194,9 @@ pub(super) fn recall_facts(
                     }
                     // Response-global kinds are never hit-owned (H3 contract),
                     // so they are reported once, below.
-                    AnnotationKind::Traversal | AnnotationKind::VectorDegraded => {}
+                    AnnotationKind::Traversal
+                    | AnnotationKind::VectorDegraded
+                    | AnnotationKind::LayerUnavailable => {}
                 }
             }
             let mut line = json!({
@@ -224,6 +226,7 @@ pub(super) fn recall_facts(
         .map(|a| match a.kind {
             AnnotationKind::Traversal => "traversal",
             AnnotationKind::VectorDegraded => "vector_degraded",
+            AnnotationKind::LayerUnavailable => "layer_unavailable",
             AnnotationKind::LoadBearing => "load_bearing",
             AnnotationKind::Conflict => "conflict",
             AnnotationKind::Hot => "hot",

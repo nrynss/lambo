@@ -1,0 +1,646 @@
+//! `recall::layered::merge` over hand-built ranked lists: N-list interleave,
+//! weights, floors, forced members, dedupe precedence, the one budget,
+//! degradation and determinism.
+
+use uuid::Uuid;
+
+use super::*;
+use crate::recall::format::{default_token_count, fit_blocks, short_id};
+use crate::types::ConceptType;
+
+/// A test hit: content, phase-1 legs `(keyword, vector)`, annotations,
+/// canonical key and holder vector.
+#[derive(Clone)]
+struct H {
+    content: String,
+    keyword: Option<f64>,
+    vector: Option<f64>,
+    annotations: Vec<(AnnotationKind, String)>,
+    key: Option<String>,
+    embedding: Option<Vec<f32>>,
+}
+
+/// A hit found by the keyword leg, with its content as canonical key.
+fn kw(content: &str) -> H {
+    H {
+        content: content.into(),
+        keyword: Some(1.0),
+        vector: None,
+        annotations: Vec::new(),
+        key: Some(content.into()),
+        embedding: None,
+    }
+}
+
+/// A hit found only by the vector leg at `cos`.
+fn vec_hit(content: &str, cos: f64) -> H {
+    H {
+        keyword: None,
+        vector: Some(cos),
+        ..kw(content)
+    }
+}
+
+/// A hit with no leg score (it came in through traversal expansion).
+fn expanded(content: &str) -> H {
+    H {
+        keyword: None,
+        ..kw(content)
+    }
+}
+
+impl H {
+    fn with(mut self, kind: AnnotationKind, text: &str) -> Self {
+        self.annotations.push((kind, text.into()));
+        self
+    }
+    fn key(mut self, key: &str) -> Self {
+        self.key = Some(key.into());
+        self
+    }
+    fn embedding(mut self, v: Vec<f32>) -> Self {
+        self.embedding = Some(v);
+        self
+    }
+}
+
+/// A node id unique to `(tier, pos)`.
+fn nid(tier: usize, pos: usize) -> NodeId {
+    NodeId(Uuid::from_u64_pair(tier as u64 + 1, pos as u64 + 1))
+}
+
+/// One session's recall as the pipeline would hand it over: hits in rank
+/// order, per-hit warning lines in `warnings` (plus `extra` lines), and
+/// context flags set as a per-session cut would (to show the merge resets
+/// them).
+fn recall(tier: usize, hits: &[H], extra: &[&str]) -> TierRecall {
+    let mut out_hits = Vec::new();
+    let mut detailed = Vec::new();
+    let mut warnings: Vec<String> = extra.iter().map(|s| s.to_string()).collect();
+    let mut legs = HashMap::new();
+    let mut identities = Vec::new();
+    for (pos, h) in hits.iter().enumerate() {
+        let hit = RecallHit {
+            node_id: nid(tier, pos),
+            content: h.content.clone(),
+            concept_type: Some(ConceptType::Logic),
+            score: 1.0 / (pos as f64 + 1.0),
+            is_canonical: false,
+            blast_radius: None,
+        };
+        let mut d = DetailedHit::new(&hit, None);
+        d.included_in_context = true;
+        for (kind, text) in &h.annotations {
+            d.annotations.push(Annotation::new(*kind, text.clone()));
+            warnings.push(text.clone());
+        }
+        if h.keyword.is_some() || h.vector.is_some() {
+            legs.insert(
+                hit.node_id,
+                LegScores {
+                    keyword: h.keyword,
+                    recent: None,
+                    vector: h.vector,
+                },
+            );
+        }
+        identities.push(HitIdentity {
+            canonical_key: h.key.clone(),
+            embedding: h.embedding.clone(),
+        });
+        out_hits.push(hit);
+        detailed.push(d);
+    }
+    TierRecall {
+        recall: DetailedRecall {
+            hits: out_hits,
+            context: "ignored per-session context".into(),
+            truncation: None,
+            warnings,
+            legs,
+            cold_start: false,
+            detailed,
+            response_annotations: Vec::new(),
+        },
+        identities,
+    }
+}
+
+fn primary(hits: &[H]) -> TierList {
+    TierList {
+        session: SessionId::new("lambo"),
+        weight: PRIMARY_WEIGHT,
+        floor: None,
+        recall: Some(recall(0, hits, &[])),
+    }
+}
+
+fn layer(tier: usize, name: &str, weight: f64, hits: &[H]) -> TierList {
+    TierList {
+        session: SessionId::new(name),
+        weight,
+        floor: Some(DEFAULT_LAYER_MIN_SIMILARITY),
+        recall: Some(recall(tier, hits, &[])),
+    }
+}
+
+fn unavailable(name: &str) -> TierList {
+    TierList {
+        session: SessionId::new(name),
+        weight: DEFAULT_LAYER_WEIGHT,
+        floor: Some(DEFAULT_LAYER_MIN_SIMILARITY),
+        recall: None,
+    }
+}
+
+fn params(top_k: usize) -> MergeParams {
+    MergeParams {
+        top_k,
+        max_tokens: 100_000,
+        dedupe_threshold: 0.85,
+    }
+}
+
+fn run(lists: &[TierList], p: MergeParams) -> LayeredRecall {
+    merge(lists, p, default_token_count)
+}
+
+/// `session/content` per merged hit, in merged order.
+fn order(r: &LayeredRecall) -> Vec<String> {
+    r.hits
+        .iter()
+        .map(|h| format!("{}/{}", h.session, h.hit.content))
+        .collect()
+}
+
+#[test]
+fn two_lists_interleave_by_weight_over_rank() {
+    let lists = [
+        primary(&[kw("p1"), kw("p2"), kw("p3"), kw("p4")]),
+        layer(1, "general", 0.5, &[kw("g1"), kw("g2"), kw("g3")]),
+    ];
+    let r = run(&lists, params(10));
+    // keys: p1 1, p2 .5, g1 .5, p3 .33, p4 .25, g2 .25, g3 .17; ties go to
+    // the nearer tier.
+    assert_eq!(
+        order(&r),
+        [
+            "lambo/p1",
+            "lambo/p2",
+            "general/g1",
+            "lambo/p3",
+            "lambo/p4",
+            "general/g2",
+            "general/g3"
+        ]
+    );
+    // top_k bounds the merged list.
+    let r = run(&lists, params(3));
+    assert_eq!(order(&r), ["lambo/p1", "lambo/p2", "general/g1"]);
+    assert!(r.unavailable_layers.is_empty());
+}
+
+#[test]
+fn three_lists_interleave_with_per_layer_weights() {
+    let lists = [
+        primary(&[kw("p1"), kw("p2")]),
+        layer(1, "team", 0.5, &[kw("t1"), kw("t2")]),
+        layer(2, "general", 0.25, &[kw("g1"), kw("g2")]),
+    ];
+    // keys: p1 1, p2 .5, t1 .5, t2 .25, g1 .25, g2 .125.
+    let r = run(&lists, params(10));
+    assert_eq!(
+        order(&r),
+        [
+            "lambo/p1",
+            "lambo/p2",
+            "team/t1",
+            "team/t2",
+            "general/g1",
+            "general/g2"
+        ]
+    );
+    let r = run(&lists, params(4));
+    assert_eq!(order(&r), ["lambo/p1", "lambo/p2", "team/t1", "team/t2"]);
+}
+
+#[test]
+fn weights_move_a_layer_up_or_down() {
+    let heavy = [
+        primary(&[kw("p1"), kw("p2")]),
+        layer(1, "general", 2.0, &[kw("g1"), kw("g2")]),
+    ];
+    // keys: g1 2, p1 1, g2 1, p2 .5.
+    assert_eq!(
+        order(&run(&heavy, params(10))),
+        ["general/g1", "lambo/p1", "general/g2", "lambo/p2"]
+    );
+    let zero = [
+        primary(&[kw("p1"), kw("p2")]),
+        layer(1, "general", 0.0, &[kw("g1")]),
+    ];
+    assert_eq!(
+        order(&run(&zero, params(10))),
+        ["lambo/p1", "lambo/p2", "general/g1"]
+    );
+    assert_eq!(order(&run(&zero, params(2))), ["lambo/p1", "lambo/p2"]);
+}
+
+#[test]
+fn the_floor_admits_keyword_or_vector_evidence_only() {
+    let lists = [
+        primary(&[expanded("p-expanded"), vec_hit("p-weak", 0.1)]),
+        layer(
+            1,
+            "general",
+            0.5,
+            &[
+                vec_hit("g-below", 0.39),
+                vec_hit("g-at", 0.40),
+                kw("g-keyword"),
+                expanded("g-expanded"),
+                vec_hit("g-above", 0.9),
+            ],
+        ),
+    ];
+    let r = run(&lists, params(10));
+    // The caller's own session has no floor; a layer's hits need evidence.
+    // Keys keep each hit's own position: g-at is 2nd (.25), not 1st.
+    assert_eq!(
+        order(&r),
+        [
+            "lambo/p-expanded",
+            "lambo/p-weak",
+            "general/g-at",
+            "general/g-keyword",
+            "general/g-above"
+        ]
+    );
+    // A custom floor is the layer's own.
+    let mut strict = lists.clone();
+    strict[1].floor = Some(0.95);
+    assert_eq!(
+        order(&run(&strict, params(10))),
+        ["lambo/p-expanded", "lambo/p-weak", "general/g-keyword"]
+    );
+}
+
+#[test]
+fn forced_members_pass_the_floor_and_top_k() {
+    let lists = [
+        primary(&[
+            kw("p1"),
+            kw("p2").with(AnnotationKind::LoadBearing, "⚑ p2 pillar"),
+        ]),
+        layer(
+            1,
+            "general",
+            0.5,
+            &[
+                kw("g1"),
+                expanded("g-conflict").with(AnnotationKind::Conflict, "Agent B wrote g-conflict"),
+                expanded("g-reserved").with(AnnotationKind::Reservation, "Reserved by x"),
+                expanded("g-hot").with(AnnotationKind::Hot, "High-risk modification: y"),
+                expanded("g-plain"),
+            ],
+        ),
+    ];
+    let r = run(&lists, params(1));
+    assert_eq!(
+        order(&r),
+        [
+            "lambo/p1",
+            "general/g-conflict",
+            "general/g-reserved",
+            "general/g-hot"
+        ]
+    );
+    // Forced layer hits' lines stay, prefixed; the cut p2's line leaves.
+    assert_eq!(
+        r.warnings,
+        [
+            "[general] Agent B wrote g-conflict",
+            "[general] Reserved by x",
+            "[general] High-risk modification: y"
+        ]
+    );
+    assert_eq!(r.detail.warnings, r.warnings);
+}
+
+#[test]
+fn dedupe_keeps_the_nearer_tier_at_the_better_rank() {
+    let lists = [
+        primary(&[
+            kw("p1"),
+            kw("p2"),
+            kw("p3"),
+            kw("same, primary copy").key("k"),
+        ]),
+        layer(
+            1,
+            "general",
+            0.5,
+            &[kw("same, general copy")
+                .key("k")
+                .with(AnnotationKind::LoadBearing, "⚑ general pillar")],
+        ),
+    ];
+    let r = run(&lists, params(10));
+    // The primary copy (key .25) takes the layer copy's key (.5) and sits
+    // after p2 (equal key, its own position later).
+    assert_eq!(
+        order(&r),
+        [
+            "lambo/p1",
+            "lambo/p2",
+            "lambo/same, primary copy",
+            "lambo/p3"
+        ]
+    );
+    let kept = &r.hits[2];
+    assert_eq!(
+        kept.also,
+        [LayerCopy {
+            session: SessionId::new("general"),
+            node_id: nid(1, 0)
+        }]
+    );
+    let also = format!("also {} in general)", short_id(nid(1, 0)));
+    assert!(r.context.contains(&also), "{}", r.context);
+    // The dropped copy's warning line still reaches `warnings`.
+    assert_eq!(r.warnings, ["[general] ⚑ general pillar"]);
+    // A forced dropped copy forces the kept one.
+    let lists = [
+        primary(&[kw("p1"), kw("same").key("k")]),
+        layer(
+            1,
+            "general",
+            0.5,
+            &[expanded("same")
+                .key("k")
+                .with(AnnotationKind::Conflict, "Agent B wrote it")],
+        ),
+    ];
+    assert_eq!(order(&run(&lists, params(1))), ["lambo/p1", "lambo/same"]);
+}
+
+#[test]
+fn dedupe_precedence_follows_tier_order_over_three_lists() {
+    let v = |x: f32, y: f32| vec![x, y];
+    let lists = [
+        primary(&[kw("p1")]),
+        layer(
+            1,
+            "team",
+            0.5,
+            &[kw("team copy").key("a").embedding(v(1.0, 0.0))],
+        ),
+        layer(
+            2,
+            "general",
+            0.5,
+            &[
+                // Cosine ~0.995 with the team copy: the same memory.
+                kw("general copy").key("b").embedding(v(1.0, 0.1)),
+                // Cosine 0.8 < 0.85: a different memory.
+                kw("general other").key("c").embedding(v(0.8, 0.6)),
+            ],
+        ),
+    ];
+    let r = run(&lists, params(10));
+    assert_eq!(
+        order(&r),
+        ["lambo/p1", "team/team copy", "general/general other"]
+    );
+    assert_eq!(r.hits[1].also[0].session, SessionId::new("general"));
+    // Without vectors only the key decides.
+    let mut no_vectors = lists.clone();
+    for l in &mut no_vectors {
+        for id in &mut l.recall.as_mut().unwrap().identities {
+            id.embedding = None;
+        }
+    }
+    assert_eq!(run(&no_vectors, params(10)).hits.len(), 4);
+    // Hits of one list are never deduped against each other.
+    let same_list = [
+        primary(&[kw("x").key("k"), kw("y").key("k")]),
+        layer(1, "general", 0.5, &[]),
+    ];
+    assert_eq!(run(&same_list, params(10)).hits.len(), 2);
+}
+
+#[test]
+fn one_budget_over_the_merged_blocks() {
+    let lists = [
+        primary(&[kw("primary fact one"), kw("primary fact two")]),
+        layer(1, "general", 0.5, &[kw("general ruling")]),
+    ];
+    let full = run(&lists, params(10));
+    // Each session's own context is ignored; the merged one names the layer.
+    assert!(!full.context.contains("ignored"));
+    let g = short_id(nid(1, 0));
+    assert!(
+        full.context.contains(&format!(
+            "general ruling [Logic] (score 1.00, id {g}, from general)"
+        )),
+        "{}",
+        full.context
+    );
+    assert!(full.hits.iter().all(|h| h.included_in_context));
+    // A budget for two whole blocks: the third is out, flags follow the cut.
+    let two = fit_blocks(
+        &[
+            block_with_meta(&full.detail.hits[0], &[], &[], None),
+            block_with_meta(&full.detail.hits[1], &[], &[], None),
+        ],
+        100_000,
+        default_token_count,
+    );
+    let cut = run(
+        &lists,
+        MergeParams {
+            max_tokens: default_token_count(&two.context),
+            ..params(10)
+        },
+    );
+    assert_eq!(cut.context, two.context);
+    assert_eq!(
+        cut.hits
+            .iter()
+            .map(|h| h.included_in_context)
+            .collect::<Vec<_>>(),
+        [true, true, false]
+    );
+}
+
+#[test]
+fn a_truncated_layer_first_block_names_its_scope() {
+    let long = "general ruling ".repeat(200);
+    let lists = [
+        primary(&[kw("p1")]),
+        layer(1, "general", 2.0, &[kw(long.trim())]),
+    ];
+    let r = run(
+        &lists,
+        MergeParams {
+            max_tokens: 120,
+            ..params(10)
+        },
+    );
+    assert_eq!(r.hits[0].session, SessionId::new("general"));
+    assert!(r.hits[0].truncated_in_context);
+    assert!(!r.hits[0].included_in_context);
+    assert!(!r.hits[1].included_in_context);
+    let marker = format!(
+        "lambo_inspect {} (scope general) for the full concept]",
+        short_id(nid(1, 0))
+    );
+    assert!(r.context.ends_with(&marker), "{}", r.context);
+    assert!(r.context.contains(", from general)"), "{}", r.context);
+    assert!(r.detail.truncated_hit().is_some());
+    assert!(default_token_count(&r.context) <= 120);
+}
+
+#[test]
+fn an_unavailable_layer_leaves_the_primary_answer_and_says_so() {
+    let p = [
+        kw("p1"),
+        kw("p2").with(AnnotationKind::Reservation, "Reserved by x"),
+    ];
+    let mut alone = primary(&p);
+    alone
+        .recall
+        .as_mut()
+        .unwrap()
+        .recall
+        .warnings
+        .insert(0, "recall: embed failed".into());
+    let lists = [alone.clone(), unavailable("general")];
+    let r = run(&lists, params(10));
+    assert_eq!(order(&r), ["lambo/p1", "lambo/p2"]);
+    assert_eq!(r.unavailable_layers, [SessionId::new("general")]);
+    assert_eq!(
+        r.warnings,
+        [
+            "recall: embed failed",
+            "Reserved by x",
+            "recall: layer general is unavailable; results are from lambo only"
+        ]
+    );
+    let annotations: Vec<_> = r
+        .detail
+        .response_annotations
+        .iter()
+        .map(|a| a.kind)
+        .collect();
+    assert_eq!(annotations, [AnnotationKind::LayerUnavailable]);
+    // The context is exactly what the caller's own blocks render to.
+    let own = alone.recall.as_ref().unwrap();
+    let blocks: Vec<_> = own
+        .recall
+        .hits
+        .iter()
+        .zip(&own.recall.detailed)
+        .map(|(h, d)| {
+            let lines: Vec<String> = d.annotations.iter().map(|a| a.text.clone()).collect();
+            ContextBlock::for_hit(h, &lines)
+        })
+        .collect();
+    assert_eq!(
+        r.context,
+        fit_blocks(&blocks, 100_000, default_token_count).context
+    );
+
+    // Three tiers, one down: the line names the sessions that answered.
+    let lists = [
+        primary(&[kw("p1")]),
+        unavailable("team"),
+        layer(2, "general", 0.5, &[kw("g1")]),
+    ];
+    let r = run(&lists, params(10));
+    assert_eq!(order(&r), ["lambo/p1", "general/g1"]);
+    assert_eq!(
+        r.warnings,
+        ["recall: layer team is unavailable; results are from lambo, general"]
+    );
+}
+
+#[test]
+fn layer_warnings_and_response_annotations_are_prefixed() {
+    let mut g = layer(1, "general", 0.5, &[kw("g1")]);
+    let t = g.recall.as_mut().unwrap();
+    t.recall.warnings.push("recall: vector leg skipped".into());
+    t.recall.response_annotations.push(Annotation::new(
+        AnnotationKind::VectorDegraded,
+        "recall: vector leg skipped",
+    ));
+    let r = run(&[primary(&[kw("p1")]), g], params(10));
+    assert_eq!(r.warnings, ["[general] recall: vector leg skipped"]);
+    assert_eq!(
+        r.detail.response_annotations,
+        [Annotation::new(
+            AnnotationKind::VectorDegraded,
+            "[general] recall: vector leg skipped"
+        )]
+    );
+}
+
+#[test]
+fn the_merge_is_deterministic_with_total_tie_breaks() {
+    let lists = [
+        primary(&[kw("p1"), kw("p2")]),
+        layer(1, "team", 0.5, &[kw("t1"), kw("t2")]),
+        layer(2, "general", 0.5, &[kw("g1"), kw("g2")]),
+    ];
+    // p2, t1 and g1 all key .5; t2 and g2 key .25: tier order decides.
+    let a = run(&lists, params(10));
+    assert_eq!(
+        order(&a),
+        [
+            "lambo/p1",
+            "lambo/p2",
+            "team/t1",
+            "general/g1",
+            "team/t2",
+            "general/g2"
+        ]
+    );
+    for _ in 0..5 {
+        let b = run(&lists, params(10));
+        assert_eq!(a.hits, b.hits);
+        assert_eq!(a.context, b.context);
+        assert_eq!(a.warnings, b.warnings);
+    }
+}
+
+#[test]
+fn block_with_meta_without_meta_is_the_plain_block() {
+    let hit = RecallHit {
+        node_id: nid(0, 0),
+        content: "c".into(),
+        concept_type: Some(ConceptType::Entity),
+        score: 0.5,
+        is_canonical: true,
+        blast_radius: Some(3),
+    };
+    let lines = vec!["⚑ pillar".to_string()];
+    assert_eq!(
+        block_with_meta(&hit, &lines, &[], None),
+        ContextBlock::for_hit(&hit, &lines)
+    );
+    let b = block_with_meta(
+        &hit,
+        &lines,
+        &["from general".into()],
+        Some("general".into()),
+    );
+    assert_eq!(
+        &b.text[..b.label_end],
+        format!(
+            "c [Entity, canonical] (score 0.50, id {}, blast radius 3, from general)",
+            short_id(hit.node_id)
+        )
+    );
+    assert!(b.text[b.label_end..].starts_with("\n⚑ pillar"));
+    assert_eq!(b.scope.as_deref(), Some("general"));
+}
