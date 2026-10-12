@@ -17,7 +17,6 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 mod admission;
-mod batching;
 mod calibration;
 mod drain;
 mod receipts;

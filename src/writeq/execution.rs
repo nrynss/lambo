@@ -26,7 +26,6 @@ use serde_json::json;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
-use super::prefetch::LanePrefetch;
 use super::{
     model_safe_failure, settle_one, AppliedSummary, Job, JobPayload, ReceiptAnswer, WriteKind,
     WritePipeline, MAX_RECEIPT_IDS,
@@ -228,24 +227,19 @@ impl WriteCtx {
     /// `ConsumeWriteIntent` always travel in one batch — one store
     /// transaction — and a crash can never leave the write durable beside a
     /// still-unconsumed intent (the double-apply this design excludes).
-    ///
-    /// `gather` carries vectors the lane worker embedded ahead for this job
-    /// and the instant its I/O budget started (#125); replay passes the
-    /// default.
     pub(super) async fn run(
         &self,
         job: &Job,
         consume: Option<ConsumeStamp>,
-        gather: hybrid::Gather<'_>,
     ) -> Result<AppliedSummary, LamboError> {
-        match &*job.payload {
+        match &job.payload {
             JobPayload::Derive { concepts, pairs }
             | JobPayload::DeriveImage {
                 concepts, pairs, ..
             } => {
                 // #22: an image derive is this derive with one concept's
                 // vector supplied (`hybrid::derive_with`'s `supplied`).
-                let supplied = match &*job.payload {
+                let supplied = match &job.payload {
                     JobPayload::DeriveImage { supplied, .. } => Some(supplied),
                     _ => None,
                 };
@@ -293,7 +287,7 @@ impl WriteCtx {
                                 },
                             ) as hybrid::CommitHook
                         });
-                        hybrid::derive_with_gather(
+                        hybrid::derive_with(
                             self.graph.clone(),
                             self.derive_vector_candidates(),
                             self.embedder.as_ref(),
@@ -306,7 +300,6 @@ impl WriteCtx {
                             self.semantic_match_threshold,
                             supplied,
                             on_commit,
-                            gather,
                         )
                         .await?
                     }
@@ -390,12 +383,8 @@ impl WriteCtx {
                 let vector_search = self.vector_candidates().available();
                 let embeddings = match self.match_strategy {
                     MatchStrategy::Hybrid if vector_search => {
-                        crate::graph::action::embed_action_contents_gathered(
-                            self.embedder.as_ref(),
-                            &act,
-                            gather,
-                        )
-                        .await?
+                        crate::graph::action::embed_action_contents(self.embedder.as_ref(), &act)
+                            .await?
                     }
                     MatchStrategy::Hybrid | MatchStrategy::Canonical => ActionEmbeddings::new(),
                 };
@@ -467,8 +456,6 @@ impl WritePipeline {
         let observed = self.observed.clone();
         let apply_latency = self.apply_latency.clone();
         tokio::spawn(async move {
-            // #125: vectors embedded ahead for the jobs queued in this lane.
-            let mut prefetch = LanePrefetch::default();
             loop {
                 let job = {
                     let mut l = lanes.lock();
@@ -551,18 +538,7 @@ impl WritePipeline {
                         tag: "applied",
                         at: (clock)(),
                     };
-                    // #125: embed this job's texts and the next queued jobs'
-                    // in one round. The round's time is this job's service
-                    // time (`started` is before it) and its I/O budget
-                    // (`io_started`); the jobs it embedded for later read
-                    // their vectors from the seed. It commits nothing, and a
-                    // text it fails to embed is embedded alone by its job.
-                    let io_started = prefetch.ahead(&ctx, &lanes, &agent, &job).await;
-                    let gather = hybrid::Gather {
-                        seed: Some(prefetch.seed()),
-                        io_started,
-                    };
-                    let raw_outcome = ctx.run(&job, Some(stamp), gather).await;
+                    let raw_outcome = ctx.run(&job, Some(stamp)).await;
                     if raw_outcome.is_ok() {
                         observed.lock().sample(started.elapsed().as_secs_f64());
                     } else {

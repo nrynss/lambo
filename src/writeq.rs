@@ -52,7 +52,6 @@
 //! | `counters` | `WriteQueueCounters`, `ReplayBlockReason` |
 //! | `admission` | the bounds, `DropReason`, `Job`, the per-agent `Lanes`, `admit` |
 //! | `execution` | `WriteCtx::run`, index mirroring, the lane worker and its settle |
-//! | `prefetch` | the lane round that embeds ahead for queued jobs (#125) |
 //! | `drain` | `quiesce` / `abort_workers` / `settle_deferred` for `close()`, `abort_all_sync` for `Drop` |
 //! | `replay` | the durable-intent replay spawned at attach |
 //!
@@ -78,7 +77,6 @@ mod calibration;
 mod counters;
 mod drain;
 mod execution;
-mod prefetch;
 mod receipts;
 mod replay;
 
@@ -101,7 +99,6 @@ pub use counters::{
 pub(crate) use drain::CloseFlush;
 pub use drain::WRITE_QUEUE_DRAIN_BUDGET;
 pub(crate) use execution::{mirror_concepts, ConsumeStamp, WriteCtx};
-pub use prefetch::{LANE_PREFETCH_MAX_JOBS, LANE_PREFETCH_MAX_TEXTS};
 pub use receipts::{
     AppliedSummary, ReceiptAnswer, ReceiptId, WriteKind, MAX_CONCURRENT_RECEIPT_WAITS,
     MAX_PIGGYBACK_RECEIPTS, MAX_RECEIPT_IDS, MAX_RECEIPT_WAITS_PER_AGENT, MAX_RETAINED_RECEIPTS,

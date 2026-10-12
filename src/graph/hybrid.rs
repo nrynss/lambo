@@ -980,57 +980,6 @@ pub fn validate_embed_budget(
     check_embed_budget(&items, &parent_ends)
 }
 
-/// The texts a hybrid derive of these inputs would embed if it were planned
-/// against `graph` now (#125): each unmatched concept and each `parent_of`
-/// end the call would create, framed with the interaction's text exactly as
-/// the gather frames them. Empty when the plan would refuse the call (an
-/// invalid input, a missing interaction, the embed budget or a context
-/// cap), so ahead-of-time embedding never sends what the call itself would
-/// not. The caller checks the store's vector capability; a supplied (image)
-/// derive is not predicted.
-///
-/// A prediction, not a plan: the graph can change before the call runs, and
-/// then the call embeds what it needs itself.
-pub(crate) fn planned_embed_texts(
-    graph: &Graph,
-    interaction: NodeId,
-    concepts: &[(&str, ConceptType)],
-    parent_of: &ParentOf<'_>,
-    semantic_match_threshold: f64,
-) -> Vec<String> {
-    let predict = || -> Result<Vec<String>, LamboError> {
-        validate_limits(concepts, parent_of, semantic_match_threshold)?;
-        let Some(Node::Interaction(i)) = graph.node(interaction) else {
-            return Ok(Vec::new());
-        };
-        let origin = i.prompt_text.as_deref();
-        if origin.is_some_and(|origin| origin.len() > MAX_HYBRID_CONTEXT_BYTES) {
-            return Ok(Vec::new());
-        }
-        // `validate_graph_inputs` (its cycle walk) is left to the call: a
-        // call it refuses costs at most this round's wasted embeds.
-        let (items, parent_ends) = plan_inputs(graph, concepts, parent_of)?;
-        check_embed_budget(&items, &parent_ends)?;
-        let contents: Vec<&str> = items
-            .iter()
-            .filter(|(_, _, _, matched)| matched.is_none())
-            .map(|(content, _, _, _)| *content)
-            .chain(parent_ends.iter().map(|(content, _)| *content))
-            .collect();
-        if contents
-            .iter()
-            .any(|content| context_len(content, origin) > MAX_HYBRID_CONTEXT_BYTES)
-        {
-            return Ok(Vec::new());
-        }
-        Ok(contents
-            .into_iter()
-            .map(|content| context_text(content, origin))
-            .collect())
-    };
-    predict().unwrap_or_default()
-}
-
 /// [`derive`](fn@derive)'s plan/embed/write loop, after [`validate_limits`].
 #[allow(clippy::too_many_arguments)]
 async fn derive_planned(
@@ -2164,16 +2113,9 @@ impl EmbedSeed {
         self.by_text.get(text)
     }
 
-    pub(crate) fn contains(&self, text: &str) -> bool {
-        self.by_text.contains_key(text)
-    }
-
+    #[allow(dead_code)] // The write queue's lane prefetch fills it (next commit).
     pub(crate) fn extend(&mut self, vectors: impl IntoIterator<Item = (String, Vec<f32>)>) {
         self.by_text.extend(vectors);
-    }
-
-    pub(crate) fn clear(&mut self) {
-        self.by_text.clear();
     }
 }
 

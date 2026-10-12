@@ -20,7 +20,6 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 
 use tokio::task::JoinHandle;
 
@@ -172,9 +171,7 @@ pub(super) struct Job {
     pub(super) agent: AgentId,
     pub(super) interaction: NodeId,
     pub(super) bytes: usize,
-    /// Shared, so the lane worker can read a queued job's payload to embed
-    /// ahead for it (#125) without copying it under the lanes lock.
-    pub(super) payload: Arc<JobPayload>,
+    pub(super) payload: JobPayload,
     /// When the job was admitted, for the apply-latency window (#11).
     pub(super) admitted: tokio::time::Instant,
 }
@@ -488,7 +485,7 @@ impl WritePipeline {
                         agent: agent.clone(),
                         interaction,
                         bytes,
-                        payload: Arc::new(payload),
+                        payload,
                         admitted: tokio::time::Instant::now(),
                     });
                 if !lanes.workers.contains_key(&agent) {
