@@ -826,7 +826,7 @@ mod tests {
             let dep = format!("{content} consumer");
             g.insert_concept(concept(id + 100, &dep, ConceptType::Logic), i1.id)
                 .unwrap();
-            g.upsert_edge(edge(n as u64 + 1, *id, id + 100, EdgeType::Dependency, 5.0))
+            g.upsert_edge(edge(n as u64 + 1, id + 100, *id, EdgeType::Dependency, 5.0))
                 .unwrap();
         }
         g
