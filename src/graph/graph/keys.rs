@@ -11,9 +11,11 @@
 //! are left out because canonicalization never matches one (GRAPH-1) and the
 //! UNIQUE gate exempts them (spec errata 2026-08-11). The ids under one key
 //! are kept sorted by their UUID, so the first is the scan's
-//! `min_by_key(|c| c.id.0)` pick. A key normally holds one id; it can hold
-//! more only for a loaded snapshot that already carried a duplicate, and then
-//! the lowest id still wins, as before.
+//! `min_by_key(|c| c.id.0)` pick. A key holds one id: `insert_concept`'s
+//! UNIQUE gate refuses a second, and so does a load, since
+//! [`Graph::from_snapshot`] runs `assert_invariants` (which checks the same
+//! UNIQUE rule) before it returns. The list form and the lowest-id pick are
+//! defence in depth, not a reachable state.
 //!
 //! Maintained wherever a concept enters or leaves `nodes`: `insert_concept`,
 //! `remove_node`, `from_snapshot` and a transaction rollback. Every other
@@ -26,7 +28,7 @@ use crate::types::{Concept, ConceptType, NodeId};
 
 impl Graph {
     /// The concept canonicalization matches for `key`: the non-`Observation`
-    /// concept carrying it, the lowest id if a loaded snapshot holds two.
+    /// concept carrying it (the lowest id, were two ever to hold it).
     pub fn concept_by_key(&self, key: &str) -> Option<NodeId> {
         self.concept_keys
             .get(key)
