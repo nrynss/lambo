@@ -245,8 +245,9 @@ impl LamboServer {
                        restatement of the same fact matches it, such as a decision with its \
                        reason. Good: 'Lease TTL is 45s because it must exceed the 15s \
                        shutdown budget'. Bad: a paragraph narrating what you did and found. \
-                       It is not a log: record activity with lambo_record_action, and link a \
-                       decision to the facts it rests on with parent_of. \
+                       It is not a log: record activity with lambo_record_action. To group \
+                       facts under a decision, send each as its own concept and add parent_of \
+                       pairs with the decision as parent and each fact as child. \
                        created_at is stamped server-side. event_time is optional RFC3339 \
                        historical about-time, such as a commit or document date; omit it for \
                        a live fact, which is about now. Returns as soon \

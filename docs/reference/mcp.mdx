@@ -203,7 +203,7 @@ Store new concepts learned from the current interaction.
 * Good: `Lease TTL is 45s because it must exceed the 15s shutdown budget`.
 * Bad: `Today I looked at the lease code, found the TTL was 45s, checked it against shutdown, ran the tests and they passed, so I think it is fine.`
 
-Activity (what you did) goes to [`lambo_record_action`](#lambo_record_action). To tie a decision to the facts it rests on, send each fact as its own concept and link them with `parent_of`.
+Activity (what you did) goes to [`lambo_record_action`](#lambo_record_action). To group facts under a decision, send each fact as its own concept and add `parent_of` pairs with the decision as `parent` and each fact as `child`.
 
 **This call returns before the write is applied.** Lambo validates your input, fixes this write's place in the session's order, and answers — the embedding and the graph insert happen in the background. A warm derive against a local BGE-M3 embedder went from a 14 ms call to a 0.05 ms call this way, because the embedder is no longer inside it. Two consequences worth planning around:
 

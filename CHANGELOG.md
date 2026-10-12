@@ -17,8 +17,9 @@
   so concurrent agents that must keep out of each other's edits need
   distinct stable ids (a model id plus a stable instance suffix). The
   published tool schemas change only in these descriptions; the golden is
-  updated to match. Write acks now name the id the write is recorded under:
-  a last text line and an `agent_id` key in `structuredContent` (additive).
+  updated to match. Write acks now name the id the write is recorded under,
+  as the last line of their first text block and as
+  `structuredContent.agent_id` (both additive).
 - The lease holder string now names the holder's boot and PID namespace
   ([#126](https://github.com/nrynss/lambo/issues/126)). A writer stores
   `agent@host#pid;boot=<id>;pidns=<inode>` in `session_leases.holder`
