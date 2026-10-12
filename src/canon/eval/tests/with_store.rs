@@ -1372,3 +1372,74 @@ async fn a_venerable_that_holds_stage_2_and_stage_3_promotes() {
     assert_eq!(outcome.promotions.len(), 1);
     assert_eq!(outcome.promotions[0].blast_radius, Some(6));
 }
+
+/// #36 review M1: the Stage 2 re-check is Swarm's. A Solo Venerable whose
+/// six dependents all come from its own interaction fails Stage 2, but Solo
+/// admits by its score band, and the Stage 3 probe must still run so the
+/// audit row carries the measured blast radius, exactly as before the
+/// re-check existed.
+#[tokio::test]
+async fn solo_keeps_its_stage_3_probe_and_stamps_the_measured_blast() {
+    let mut g = Graph::new(sid());
+    let mut prev = None;
+    for n in 1..=2u64 {
+        let mut turn = interaction(n, prev, ts());
+        turn.event_time = Some(ts() - chrono::Duration::hours(n as i64));
+        g.insert_interaction(turn).unwrap();
+        prev = Some(n);
+    }
+    let mut hub = concept(10, 1, 0, CanonizationStatus::Venerable);
+    hub.concept_type = ConceptType::Entity;
+    hub.human_confirmed = 2;
+    let hub_id = hub.id;
+    g.insert_concept(hub, iid(1)).unwrap();
+    g.upsert_edge(Edge {
+        id: eid(2),
+        session_id: sid(),
+        source: iid(2),
+        target: hub_id,
+        edge_type: EdgeType::Derives,
+        weight: 0.9,
+        reinforcements: 1,
+        created_at: ts(),
+        last_reinforced: ts(),
+        event_time: Some(ts() - chrono::Duration::hours(2)),
+    })
+    .unwrap();
+    // Six children from the hub's own interaction: blast 6, no Stage 2.
+    for k in 100..106u64 {
+        g.insert_concept(concept(k, 1, 0, CanonizationStatus::None), iid(1))
+            .unwrap();
+        let mut child = edge(k, 10, k, ts());
+        child.edge_type = EdgeType::Hierarchical;
+        g.upsert_edge(child).unwrap();
+    }
+
+    let store = store_from_graph(&g).await;
+    assert!(
+        !stage2_passes(&store, &sid(), hub_id, Duration::ZERO, ts())
+            .await
+            .unwrap(),
+        "fixture premise: Stage 2 fails"
+    );
+    let g = RwLock::new(g);
+    let solo_params = EvalParams {
+        promotion_policy: PromotionPolicy::Solo,
+        ..params()
+    };
+    let (tx, _rx) = channel();
+    let mut ev = Evaluator::new();
+    let outcome = eval_cycle(&mut ev, &g, &store, &table(&[]), &tx, &solo_params, ts())
+        .await
+        .unwrap();
+    assert_eq!(status_of(&g.read(), hub_id), CanonizationStatus::Canonical);
+    let hop = outcome
+        .transitions()
+        .find(|e| e.node_id == hub_id)
+        .expect("the canonical hop must be audited");
+    assert_eq!(
+        hop.blast_radius,
+        Some(6),
+        "Solo's audit row must carry the measured blast radius"
+    );
+}
