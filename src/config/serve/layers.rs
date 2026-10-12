@@ -210,15 +210,16 @@ impl ServeConfig {
     ///
     /// Refuses (a hard error, exit 2): a layer some pinned session would
     /// read that is not itself pinned, and a `[serve.session_layers]` key
-    /// that is not pinned. Pinned sessions hold their lease for the serve's
+    /// with a non-empty list that is not pinned. Pinned sessions hold their lease for the serve's
     /// life and are never idle-detached or evicted, so a recall never
     /// attaches a layer on demand and a layer never vanishes by eviction;
     /// on-demand sessions get no layers in v1.
     pub fn resolve_layers(&self, pinned: &[String]) -> Result<ServeLayers, LamboError> {
         self.validate()?;
         let is_pinned = |s: &str| pinned.iter().any(|p| p == s);
-        for session in self.session_layers.keys() {
-            if !is_pinned(session) {
+        // An empty override layers nothing, so it may name any session.
+        for (session, stack) in &self.session_layers {
+            if !stack.is_empty() && !is_pinned(session) {
                 return Err(serve_err(format!(
                     "[serve.session_layers] names {session:?}, which this serve does not pin: \
                      only pinned sessions are layered (list it in [serve] sessions)"
