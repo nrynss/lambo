@@ -31,12 +31,12 @@
 //! collected. This is default-invisible (no subscriber enables trace on the
 //! CLI/daemon path) and is the T9 instrumentation for the structural arm.
 
-use unicode_normalization::{UnicodeNormalization, char::is_combining_mark};
+use unicode_normalization::{char::is_combining_mark, UnicodeNormalization};
 
 use crate::graph::Graph;
 use crate::recall::detail::{Annotation, AnnotationKind, DetailedHit, DetailedRecall};
 use crate::recall::format;
-use crate::types::{CanonizationStatus, Node, NodeId, RecallHit, Scored, tie_break_by_key};
+use crate::types::{tie_break_by_key, CanonizationStatus, Node, NodeId, RecallHit, Scored};
 
 /// What kind of question a recall query is, for routing (T9).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1384,11 +1384,10 @@ mod tests {
         assert!(payments.annotations.is_empty());
         assert!(result.detailed.iter().all(|h| h.included_in_context));
         // Response-global explanations never appear as hit annotations.
-        assert!(result.detailed.iter().all(|h| {
-            !h.annotations
-                .iter()
-                .any(|a| a.kind == AnnotationKind::Traversal)
-        }));
+        assert!(result.detailed.iter().all(|h| !h
+            .annotations
+            .iter()
+            .any(|a| a.kind == AnnotationKind::Traversal)));
 
         let actual = serde_json::to_value(&result).expect("payload serializes");
         let golden_path = concat!(
@@ -1493,11 +1492,9 @@ mod tests {
         );
         assert!(result.detailed[0].truncated_in_context);
         assert!(!result.detailed[0].included_in_context);
-        assert!(
-            result.detailed[1..]
-                .iter()
-                .all(|h| !h.included_in_context && !h.truncated_in_context)
-        );
+        assert!(result.detailed[1..]
+            .iter()
+            .all(|h| !h.included_in_context && !h.truncated_in_context));
         // The headline counts the truncated dependent the context shows.
         assert_eq!(
             result.response_annotations[0].text,
