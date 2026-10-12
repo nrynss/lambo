@@ -295,40 +295,23 @@ fn resolve_short_id(g: &Graph, focus: &str) -> Option<Focus> {
     if !bytes.iter().all(u8::is_ascii_hexdigit) {
         return None;
     }
-    let mut matches: Vec<FocusCandidate> = g
-        .concepts()
-        .filter(|c| id_has_hex_prefix(c.id.0, focus))
-        .map(focus_candidate)
+    // #36 PR 4: one prefix match for reads and writes
+    // (`super::resolve::short_id_matches`, already in the issue #2 order).
+    let mut matches: Vec<FocusCandidate> = super::resolve::short_id_matches(g, focus)
+        .into_iter()
+        .filter_map(|id| match g.node(id) {
+            Some(crate::types::Node::Concept(c)) => Some(focus_candidate(c)),
+            _ => None,
+        })
         .collect();
     match matches.len() {
         0 => None,
         1 => Some(Focus::Exact(matches.remove(0).id)),
-        _ => {
-            matches.sort_by(|a, b| {
-                tie_break_by_key(Some(&a.canonical_key), &a.id, Some(&b.canonical_key), &b.id)
-            });
-            Some(Focus::Ambiguous {
-                candidates: matches,
-                bounded: None,
-            })
-        }
+        _ => Some(Focus::Ambiguous {
+            candidates: matches,
+            bounded: None,
+        }),
     }
-}
-
-/// Whether `id`'s simple hex form starts with `prefix` (already validated as
-/// lowercase-or-uppercase hex of length 1..=32). Allocation-free so the
-/// short-form leg stays O(concepts) compares.
-fn id_has_hex_prefix(id: uuid::Uuid, prefix: &str) -> bool {
-    let bytes = id.as_bytes();
-    for (i, ch) in prefix.bytes().enumerate() {
-        let nibble = (ch as char).to_digit(16).unwrap_or(0) as u8;
-        let byte = bytes[i / 2];
-        let target = if i % 2 == 0 { byte >> 4 } else { byte & 0x0f };
-        if nibble != target {
-            return false;
-        }
-    }
-    true
 }
 
 /// The bounded fuzzy pass for a graph past the scan cap (issue #9): scan only

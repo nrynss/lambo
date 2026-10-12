@@ -7,6 +7,13 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use uuid::Uuid;
 
+mod reference;
+pub(crate) use reference::shown;
+pub use reference::{
+    ConceptCitations, PinnedCitations, PinnedReference, ReferenceCandidate, ReferenceField,
+    ReferenceRefusal, ReferenceRefusalKind,
+};
+
 // ---------------------------------------------------------------------------
 // Ids
 // ---------------------------------------------------------------------------
@@ -903,6 +910,33 @@ pub enum WriteIntentPayload {
         modifies: Vec<String>,
         /// Concept contents this action depends on.
         depends_on: Vec<String>,
+        /// #36 PR 4: per `depends_on` entry, the concept it named by id at
+        /// the ack (`None`: resolved the legacy way). Empty, and then not
+        /// serialized, when no entry reads as an id, so such a payload is
+        /// byte-identical to one written before 0.6.0. A build that predates
+        /// it ignores the field and resolves the entries afresh, the 0.5.0
+        /// rule.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        depends_on_pins: Vec<Option<NodeId>>,
+    },
+    /// A `lambo_derive` job with citations or names (#36 PR 4): the derive
+    /// above plus what its references resolved to at the ack.
+    ///
+    /// Its own variant, not a defaulted field on [`Self::Derive`], for the
+    /// reason [`Self::DeriveImage`] is (design Q18): a build that predates
+    /// citations fails to decode an unconsumed cited intent and says so,
+    /// where a defaulted field would let it apply the derive with its
+    /// citations silently dropped. A derive without citations stays
+    /// [`Self::Derive`], byte-identical.
+    DeriveCited {
+        /// `(content, concept_type)` pairs, in submission order.
+        concepts: Vec<(String, ConceptType)>,
+        /// `(parent, child)` hierarchy pairs, in submission order.
+        pairs: Vec<(String, String)>,
+        /// The citations and names as accepted at the ack. A replay
+        /// re-resolves every reference and refuses one that resolves
+        /// differently.
+        citations: PinnedCitations,
     },
 }
 
@@ -926,7 +960,7 @@ impl WriteIntentPayload {
                 concepts: Vec::new(),
                 pairs: Vec::new(),
             }),
-            Self::Derive { .. } | Self::Action { .. } => None,
+            Self::Derive { .. } | Self::DeriveCited { .. } | Self::Action { .. } => None,
         }
     }
 }
@@ -1915,6 +1949,20 @@ pub enum LamboError {
     /// intent that meets it settles `failed` instead of blocking the replay.
     #[error("image id taken: a text concept in this session already holds the caption with image id {0:?}; derive the image with another image id")]
     ImageIdTaken(String),
+    /// A reference to an existing concept was refused (#36 PR 4): a derive's
+    /// `depends_on` or `name`, or a `record_action` `depends_on` entry that
+    /// names a concept by id, did not resolve to exactly one concept of the
+    /// session the write targets, or would cite the concept itself, close a
+    /// cycle, or resolved differently at apply than at the ack.
+    ///
+    /// Its message is built only from the caller's own reference (shortened
+    /// and escaped) and session-local ids and content the caller can already
+    /// read, which is what lets every surface render it intact
+    /// (`crate::surface::error`), the J1-R2-2 rule by type. It is a fact
+    /// about this input against this graph, like [`LamboError::Embed`]: a
+    /// replayed intent that meets it settles `failed`.
+    #[error("reference refused: {0}")]
+    Reference(Box<ReferenceRefusal>),
     /// Any other failure, kept whole.
     #[error(transparent)]
     Other(#[from] anyhow::Error),
@@ -2017,6 +2065,7 @@ mod tests {
                 produces: vec![],
                 modifies: vec![],
                 depends_on: vec![],
+                depends_on_pins: vec![],
             },
         ] {
             assert!(!serde_json::to_string(&text)

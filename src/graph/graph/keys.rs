@@ -36,6 +36,14 @@ impl Graph {
             .copied()
     }
 
+    /// Every non-`Observation` concept carrying `key`, lowest id first: one,
+    /// by the UNIQUE invariant. The strict reference resolver
+    /// (`crate::surface::resolve`) would refuse a key held twice instead of
+    /// picking the lowest id.
+    pub(crate) fn concepts_by_key(&self, key: &str) -> &[NodeId] {
+        self.concept_keys.get(key).map_or(&[], Vec::as_slice)
+    }
+
     /// A non-`Observation` concept other than `id` that carries `key`.
     pub(super) fn key_holder_other_than(&self, key: &str, id: NodeId) -> Option<NodeId> {
         self.concept_keys

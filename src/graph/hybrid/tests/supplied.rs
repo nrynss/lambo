@@ -53,6 +53,7 @@ async fn run(
         10,
         SEMANTIC_MATCH_THRESHOLD_DEFAULT,
         supplied,
+        &crate::graph::cite::PinnedCitations::default(),
         None,
     )
     .await

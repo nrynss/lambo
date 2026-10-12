@@ -193,6 +193,7 @@ use parking_lot::RwLock;
 
 use crate::embed::Embedder;
 use crate::graph::canonical::{canonicalize, CanonicalizeResult};
+use crate::graph::cite::PinnedCitations;
 use crate::graph::derive::{
     DeriveOutcome, ParentOf, COOCCURRENCE_WEIGHT, HIERARCHICAL_WEIGHT, PARENT_OF_CONCEPT_TYPE,
 };
@@ -591,6 +592,7 @@ pub async fn derive(
         max_cooccurrence_per_derive,
         semantic_match_threshold,
         None,
+        &PinnedCitations::default(),
         on_commit,
     )
     .await
@@ -640,6 +642,7 @@ pub(crate) async fn derive_with(
     max_cooccurrence_per_derive: usize,
     semantic_match_threshold: f64,
     supplied: Option<&SuppliedVector>,
+    pinned: &PinnedCitations,
     on_commit: Option<CommitHook>,
 ) -> Result<DeriveOutcome, LamboError> {
     validate_limits(concepts, parent_of, semantic_match_threshold)?;
@@ -665,6 +668,7 @@ pub(crate) async fn derive_with(
         semantic_match_threshold,
         io_deadline,
         supplied,
+        pinned,
         on_commit,
     )
     .await
@@ -968,6 +972,7 @@ async fn derive_planned(
     semantic_match_threshold: f64,
     io_deadline: tokio::time::Instant,
     supplied: Option<&SuppliedVector>,
+    pinned: &PinnedCitations,
     on_commit: Option<CommitHook>,
 ) -> Result<DeriveOutcome, LamboError> {
     let is_supplied =
@@ -1381,10 +1386,19 @@ async fn derive_planned(
         // ordered mutation log untouched, as the whole-graph clone this
         // replaced did, at a cost proportional to what the call writes.
         let committed = guard.transaction(|g| {
+            // #36 PR 4: every citation must still name what it named at the
+            // ack, checked against the graph as it is now and before this
+            // call writes anything (a cited concept removed, renamed or
+            // shadowed since refuses the write; it never dangles or
+            // redirects). Not part of `plan_still_holds`: a changed citation
+            // is a refusal, not a reason to plan again.
+            crate::graph::cite::recheck(g, pinned)?;
             if attempted_embed && g.embedding().is_none() {
                 g.stamp_embedding(embedding.clone())?;
             }
             let session_id = g.session_id().clone();
+            // #36 PR 4: what each content was written as, for its citations.
+            let mut by_content: HashMap<String, NodeId> = HashMap::new();
 
             let mut outcome = DeriveOutcome::default();
             let mut written: HashSet<NodeId> = HashSet::new();
@@ -1427,6 +1441,7 @@ async fn derive_planned(
                 if let CanonicalizeResult::Matched { node, .. } = canonicalize(content, g)?
                     && written.contains(&node)
                 {
+                    by_content.insert((*content).to_string(), node);
                     outcome.matched.push(node);
                     if !call_nodes.contains(&node) {
                         call_nodes.push(node);
@@ -1594,6 +1609,7 @@ async fn derive_planned(
                         this_node = id;
                     }
                 }
+                by_content.insert((*content).to_string(), this_node);
                 if !call_nodes.contains(&this_node) {
                     call_nodes.push(this_node);
                 }
@@ -1707,9 +1723,31 @@ async fn derive_planned(
                 })?;
             }
 
-            Ok(outcome)
+            // Step 7 (#36 PR 4) — citation edges, against the sources as
+            // written: a hybrid write can match differently at commit than
+            // the pre-pass saw, so the self and cycle checks run again here.
+            let names = if pinned.is_empty() {
+                Vec::new()
+            } else {
+                crate::graph::cite::write_edges(
+                    g,
+                    pinned,
+                    &by_content,
+                    crate::graph::cite::Stamp {
+                        created_at: interaction_created_at,
+                        event_time: interaction_event_time,
+                    },
+                    &session_id,
+                    &mut outcome,
+                )?
+            };
+
+            Ok((outcome, names))
         });
-        let outcome = committed?;
+        let (mut outcome, names) = committed?;
+        // Synonyms are outside the transaction's undo log, so the names go in
+        // once it has committed, under the same write-lock hold.
+        crate::graph::cite::declare_names(&mut guard, &names, &mut outcome);
         // J3: run the commit hook (intent consumption) under THIS write-lock
         // hold, after the mutations — the flush drain takes the same lock, so the
         // committed mutations and whatever the hook appends travel in one

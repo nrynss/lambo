@@ -404,6 +404,7 @@ fn seeded_intents_replay_in_lane_order_and_answer_applied_after_restart() {
                 produces: vec!["seeded artifact".into()],
                 modifies: Vec::new(),
                 depends_on: Vec::new(),
+                depends_on_pins: Vec::new(),
             },
         ),
     ]);

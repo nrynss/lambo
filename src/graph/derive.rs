@@ -93,6 +93,7 @@ use std::collections::{HashMap, HashSet};
 use chrono::{DateTime, Utc};
 
 use crate::graph::canonical::{canonicalize, CanonicalizeResult};
+use crate::graph::cite::PinnedCitations;
 use crate::graph::Graph;
 
 mod cycles;
@@ -174,6 +175,13 @@ pub struct DeriveOutcome {
     /// is always `0` here and only [`crate::graph::hybrid::derive`] can raise
     /// it. `matched` entries are pre-existing rows and are not re-counted.
     pub embedded: usize,
+    /// Citation `Dependency` edges this call **added** (#36 PR 4): a
+    /// re-sent citation reinforces its edge and is counted in
+    /// [`Self::reinforced`] instead.
+    pub cited: usize,
+    /// Names this call registered or changed (#36 PR 4); a name declared
+    /// again for the same concept is not counted.
+    pub named: usize,
 }
 
 /// The primary write path (spec §7): derive `concepts` from `interaction`,
@@ -206,6 +214,35 @@ pub fn derive(
     parent_of: &ParentOf,
     max_cooccurrence_per_derive: usize,
 ) -> Result<DeriveOutcome, LamboError> {
+    derive_cited(
+        graph,
+        interaction,
+        agent,
+        concepts,
+        parent_of,
+        max_cooccurrence_per_derive,
+        &PinnedCitations::default(),
+    )
+}
+
+/// [`derive`](fn@derive) with citations and names (#36 PR 4), as accepted
+/// by [`crate::graph::cite::validate`]. With none it is exactly `derive`.
+///
+/// Inside the one transaction: the pinned references are re-resolved
+/// against the graph before anything is written (`cite::recheck`), the
+/// concepts and their edges are written, then the citation edges and the
+/// name checks (`cite::write_edges`); any refusal undoes the whole write.
+/// The names are declared after the commit, because synonyms are outside the
+/// transaction's undo log.
+pub(crate) fn derive_cited(
+    graph: &mut Graph,
+    interaction: NodeId,
+    agent: &AgentId,
+    concepts: &[(&str, ConceptType)],
+    parent_of: &ParentOf,
+    max_cooccurrence_per_derive: usize,
+    pinned: &PinnedCitations,
+) -> Result<DeriveOutcome, LamboError> {
     // Step 1 — validate the interaction node. Both a missing node and a node
     // that is not an Interaction are NotFound per the pinned contract.
     let (interaction_created_at, interaction_event_time) = match graph.node(interaction) {
@@ -229,8 +266,11 @@ pub fn derive(
     // and the write loop's own refusal (a Hierarchical cycle a concurrent
     // writer closed after the pre-pass could have seen it) undoes whatever
     // the loop wrote before it.
-    graph.transaction(|graph| {
-        derive_after_validation(
+    let mut names: Vec<(String, String)> = Vec::new();
+    let mut outcome = graph.transaction(|graph| {
+        crate::graph::cite::recheck(graph, pinned)?;
+        let mut by_content: HashMap<String, NodeId> = HashMap::new();
+        let mut outcome = derive_after_validation(
             graph,
             interaction,
             agent,
@@ -239,9 +279,26 @@ pub fn derive(
             max_cooccurrence_per_derive,
             interaction_created_at,
             interaction_event_time,
-            session_id,
-        )
-    })
+            session_id.clone(),
+            &mut by_content,
+        )?;
+        if !pinned.is_empty() {
+            names = crate::graph::cite::write_edges(
+                graph,
+                pinned,
+                &by_content,
+                crate::graph::cite::Stamp {
+                    created_at: interaction_created_at,
+                    event_time: interaction_event_time,
+                },
+                &session_id,
+                &mut outcome,
+            )?;
+        }
+        Ok(outcome)
+    })?;
+    crate::graph::cite::declare_names(graph, &names, &mut outcome);
+    Ok(outcome)
 }
 
 /// [`derive`](fn@derive)'s read-only pre-pass, on its own so a caller can run
@@ -341,6 +398,7 @@ fn derive_after_validation(
     interaction_created_at: DateTime<Utc>,
     interaction_event_time: Option<DateTime<Utc>>,
     session_id: SessionId,
+    by_content: &mut HashMap<String, NodeId>,
 ) -> Result<DeriveOutcome, LamboError> {
     let mut outcome = DeriveOutcome::default();
     // Nodes written earlier in THIS call (created, or matched and re-upserted).
@@ -373,6 +431,8 @@ fn derive_after_validation(
             &mut outcome,
             &mut call_by_key,
         )?;
+        // #36 PR 4: what each content was written as, for its citations.
+        by_content.insert(content.to_string(), node);
         // Two different contents can canonicalize to the same node (key
         // collision); dedup by node id so the CoOccurrence step never writes a
         // self-loop for them.

@@ -31,18 +31,16 @@ use super::{
     WritePipeline, MAX_RECEIPT_IDS,
 };
 use crate::embed::Embedder;
-use crate::graph::action::{
-    record_action_with_embeddings as graph_record_action_embedded, Action, ActionEmbeddings,
-};
-use crate::graph::derive::{derive as graph_derive, ParentOf};
+use crate::graph::action::{record_action_pinned, Action, ActionEmbeddings};
+use crate::graph::derive::{derive_cited, ParentOf};
 use crate::graph::hybrid;
 use crate::graph::index::InvertedIndex;
 use crate::graph::Graph;
 use crate::store::vector_source::VectorCandidates;
 use crate::store::GraphStore;
 use crate::types::{
-    AgentId, ConceptType, EmbeddingContract, LamboError, MatchStrategy, Node, NodeId, SessionId,
-    WriteIntentOutcome,
+    AgentId, ConceptType, EmbeddingContract, LamboError, MatchStrategy, Node, NodeId,
+    PinnedCitations, SessionId, WriteIntentOutcome,
 };
 
 /// Everything the background worker needs, and **nothing more** — in
@@ -149,6 +147,25 @@ pub(super) fn derive_sentence_of(
     outcome: &crate::graph::derive::DeriveOutcome,
     image: bool,
 ) -> String {
+    let sentence = derive_sentence_core(strategy, submitted, outcome, image);
+    // #36 PR 4: what the call's citations and names added, only when they
+    // added something, so a derive without them reads exactly as before.
+    if outcome.cited > 0 || outcome.named > 0 {
+        format!(
+            "{sentence}; {} citation(s) recorded, {} name(s) registered",
+            outcome.cited, outcome.named
+        )
+    } else {
+        sentence
+    }
+}
+
+fn derive_sentence_core(
+    strategy: MatchStrategy,
+    submitted: usize,
+    outcome: &crate::graph::derive::DeriveOutcome,
+    image: bool,
+) -> String {
     if image {
         return format!(
             "derived {} image concept(s): {} created ({} embedded), {} matched existing",
@@ -233,10 +250,18 @@ impl WriteCtx {
         consume: Option<ConsumeStamp>,
     ) -> Result<AppliedSummary, LamboError> {
         match &job.payload {
-            JobPayload::Derive { concepts, pairs }
+            JobPayload::Derive {
+                concepts, pairs, ..
+            }
             | JobPayload::DeriveImage {
                 concepts, pairs, ..
             } => {
+                // #36 PR 4: what the ack accepted; the commit re-resolves it.
+                let no_citations = PinnedCitations::default();
+                let pinned = match &job.payload {
+                    JobPayload::Derive { citations, .. } => citations,
+                    _ => &no_citations,
+                };
                 // #22: an image derive is this derive with one concept's
                 // vector supplied (`hybrid::derive_with`'s `supplied`).
                 let supplied = match &job.payload {
@@ -299,19 +324,21 @@ impl WriteCtx {
                             self.max_cooccurrence_per_derive,
                             self.semantic_match_threshold,
                             supplied,
+                            pinned,
                             on_commit,
                         )
                         .await?
                     }
                     MatchStrategy::Canonical => {
                         let mut g = self.graph.write();
-                        let outcome = graph_derive(
+                        let outcome = derive_cited(
                             &mut g,
                             job.interaction,
                             &job.agent,
                             &borrowed,
                             &parent_of,
                             self.max_cooccurrence_per_derive,
+                            pinned,
                         )?;
                         // Same lock hold as the commit — see `run`'s doc.
                         if let Some(stamp) = consume {
@@ -359,6 +386,7 @@ impl WriteCtx {
                 produces,
                 modifies,
                 depends_on,
+                depends_on_pins,
             } => {
                 let p: Vec<&str> = produces.iter().map(String::as_str).collect();
                 let m: Vec<&str> = modifies.iter().map(String::as_str).collect();
@@ -397,12 +425,15 @@ impl WriteCtx {
                     if !embeddings.is_empty() {
                         g.stamp_embedding(self.embedding.clone())?;
                     }
-                    let outcome = graph_record_action_embedded(
+                    // #36 PR 4: an entry that named a concept by id at the
+                    // ack must name the same one now.
+                    let outcome = record_action_pinned(
                         &mut g,
                         job.interaction,
                         &job.agent,
                         &act,
                         &embeddings,
+                        depends_on_pins,
                     )?;
                     // Same lock hold as the commit — see `run`'s doc.
                     if let Some(stamp) = consume {

@@ -157,6 +157,7 @@ impl Rig {
                 interaction,
                 vec![(content.to_string(), ConceptType::Entity)],
                 Vec::new(),
+                Default::default(),
             )
             .await
     }
