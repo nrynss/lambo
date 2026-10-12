@@ -31,6 +31,8 @@
 //! collected. This is default-invisible (no subscriber enables trace on the
 //! CLI/daemon path) and is the T9 instrumentation for the structural arm.
 
+use unicode_normalization::{char::is_combining_mark, UnicodeNormalization};
+
 use crate::graph::Graph;
 use crate::recall::detail::{Annotation, AnnotationKind, DetailedHit, DetailedRecall};
 use crate::recall::format;
@@ -87,44 +89,209 @@ pub fn classify(query: &str) -> RecallKind {
     }
 }
 
-/// Resolve the entity a structural query names.
-///
-/// Precedence:
-/// 1. A concept whose `content` appears verbatim (case-insensitive substring)
-///    in the query — e.g. `"what depends on SG-Base-VPC"` names
-///    `"SG-Base-VPC"`. Among several, prefer Entity/Resource and the shortest
-///    content (the bare identifier, not a longer clause that happens to
-///    contain it).
-/// 2. A query that references a security group without naming one
-///    ("the shared security group") picks the SG-shaped concept with the most
-///    structural dependents — the one whose deletion is dangerous. This
-///    requires explicit `"security group"` language, so a structural phrasing
-///    that names nothing real ("what depends on nothing-imaginary") still
-///    refuses.
-fn resolve_anchor(graph: &Graph, query: &str) -> Option<NodeId> {
-    let lower_q = query.to_lowercase();
-    let mut substring_matches: Vec<&crate::types::Concept> = graph
-        .concepts()
-        .filter(|c| !c.content.is_empty() && lower_q.contains(&c.content.to_lowercase()))
+/// Closed-class scaffolding never anchors, except explicitly named uppercase
+/// acronyms. Ordinary recall may also omit these words in its tokenizer.
+const ANCHOR_STOP_WORDS: &[&str] = &[
+    "a", "an", "and", "any", "anything", "are", "be", "can", "do", "does", "for", "if", "in", "is",
+    "it", "its", "my", "of", "on", "or", "our", "the", "this", "to", "what", "which", "that",
+    "with", "from", "by", "at", "how", "who", "when", "will", "i", "we",
+];
+
+const MAX_ANCHOR_QUERY_BYTES: usize = 16 * 1024;
+const MAX_ANCHOR_SPANS: usize = 256;
+
+/// NFC followed by per-character lowercase avoids contextual final-sigma
+/// folding and makes composed and decomposed names equivalent.
+pub(crate) fn anchor_text(text: &str) -> String {
+    text.nfc().flat_map(char::to_lowercase).nfc().collect()
+}
+
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || is_combining_mark(c)
+}
+
+/// A hyphen joins an identifier only between word characters. Standalone
+/// punctuation still delimits a word; SG-Base cannot name SG-Base-VPC.
+fn word_at(hay: &str, at: usize) -> bool {
+    let c = hay[at..].chars().next().expect("character offset");
+    is_word_char(c)
+        || (c == '-'
+            && hay[..at].chars().next_back().is_some_and(is_word_char)
+            && hay[at + 1..].chars().next().is_some_and(is_word_char))
+}
+
+/// Byte spans of every occurrence of `needle` in `hay` that sits on word
+/// boundaries. Both strings are expected lowercased already. A side of the
+/// needle that ends in a word character must meet the start/end of `hay` or a
+/// non-word character; a side that ends in punctuation (`.env`, `/etc/`) is
+/// its own delimiter and needs nothing more. Overlapping occurrences are all
+/// tried, so a first embedded hit cannot hide a later whole-word one.
+fn word_bounded_spans(hay: &str, needle: &str) -> Vec<(usize, usize)> {
+    let (Some(first), Some(last)) = (needle.chars().next(), needle.chars().next_back()) else {
+        return Vec::new();
+    };
+    let mut spans = Vec::new();
+    let mut from = 0;
+    while let Some(i) = hay[from..].find(needle) {
+        let start = from + i;
+        let end = start + needle.len();
+        let left_ok = !is_word_char(first)
+            || hay[..start]
+                .chars()
+                .next_back()
+                .is_none_or(|c| !word_at(hay, start - c.len_utf8()));
+        let right_ok =
+            !is_word_char(last) || hay[end..].chars().next().is_none_or(|_| !word_at(hay, end));
+        if left_ok && right_ok {
+            spans.push((start, end));
+            if spans.len() > MAX_ANCHOR_SPANS {
+                break;
+            }
+        }
+        // Step one char, not one match, so overlapping occurrences are seen.
+        from = start + hay[start..].chars().next().map_or(1, char::len_utf8);
+    }
+    spans
+}
+
+/// Byte spans of every structural-marker occurrence in the lowercased query.
+/// A concept match that lies wholly inside one of these is the question's
+/// own wording (a concept literally named `"blast radius"`), not the thing
+/// it names, so it does not anchor.
+fn marker_spans(lower_q: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    for m in STRUCTURAL_MARKERS {
+        let mut from = 0;
+        while let Some(i) = lower_q[from..].find(m) {
+            let start = from + i;
+            spans.push((start, start + m.len()));
+            from = start + lower_q[start..].chars().next().map_or(1, char::len_utf8);
+        }
+    }
+    spans
+}
+
+/// Whether every word of `lower_content` is an [`ANCHOR_STOP_WORDS`] entry.
+fn is_stop_content(lower_content: &str) -> bool {
+    let mut words = lower_content
+        .split(|c: char| !is_word_char(c))
+        .filter(|w| !w.is_empty());
+    let mut any = false;
+    let all = words.all(|w| {
+        any = true;
+        ANCHOR_STOP_WORDS.contains(&w)
+    });
+    any && all
+}
+
+/// Resolve a named subject, removing strictly contained occurrences before
+/// ranking by distance after the marker, type, length, content and stable key.
+/// Over-budget queries or candidates refuse dispatch instead of using partial
+/// evidence. The security-group prose fallback remains the second choice.
+pub(crate) fn resolve_anchor(graph: &Graph, query: &str) -> Option<NodeId> {
+    if query.len() > MAX_ANCHOR_QUERY_BYTES {
+        return None;
+    }
+    let raw_q: String = query.nfc().collect();
+    let lower_q = anchor_text(query);
+    if lower_q.len() > MAX_ANCHOR_QUERY_BYTES {
+        return None;
+    }
+    let markers = marker_spans(&lower_q);
+    let mut candidates = Vec::new();
+    let mut spans = Vec::new();
+    let mut marker_clauses = Vec::new();
+    for c in graph.concepts() {
+        let lower_c = anchor_text(&c.content);
+        if !lower_c.chars().any(char::is_alphanumeric) {
+            continue;
+        }
+        let mut found = word_bounded_spans(&lower_q, &lower_c);
+        if found.len() > MAX_ANCHOR_SPANS {
+            return None;
+        }
+        if found.is_empty() {
+            continue;
+        }
+        if is_stop_content(&lower_c) {
+            let raw_c: String = c.content.nfc().collect();
+            let uppercase =
+                raw_c.chars().any(char::is_uppercase) && !raw_c.chars().any(char::is_lowercase);
+            if !uppercase {
+                continue;
+            }
+            found = word_bounded_spans(&raw_q, &raw_c)
+                .into_iter()
+                .map(|(s, e)| {
+                    (
+                        anchor_text(&raw_q[..s]).len(),
+                        anchor_text(&raw_q[..e]).len(),
+                    )
+                })
+                .collect();
+            if found.is_empty() {
+                continue;
+            }
+        }
+        let index = candidates.len();
+        candidates.push(c);
+        for (start, end) in found {
+            // Marker-overlapping clauses must not suppress the subject.
+            if markers.iter().any(|&(ms, me)| ms <= start && end <= me) {
+                continue;
+            }
+            if markers.iter().any(|&(ms, me)| start < me && ms < end) {
+                marker_clauses.push((start, index));
+            } else {
+                spans.push((start, end, index));
+            }
+        }
+    }
+    spans.sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1)));
+    let mut best = vec![None::<usize>; candidates.len()];
+    let subject_distance = |start| {
+        markers
+            .iter()
+            .filter(|&&(_, end)| end <= start)
+            .map(|&(_, end)| start - end)
+            .min()
+            .unwrap_or(usize::MAX)
+    };
+    for (start, index) in marker_clauses {
+        let distance = subject_distance(start);
+        best[index] = Some(best[index].map_or(distance, |d| d.min(distance)));
+    }
+    let mut furthest: Option<(usize, usize)> = None;
+    for (start, end, index) in spans {
+        let contained =
+            furthest.is_some_and(|(s, e)| s <= start && end <= e && (s < start || end < e));
+        if !contained {
+            let distance = subject_distance(start);
+            best[index] = Some(best[index].map_or(distance, |d| d.min(distance)));
+        }
+        if furthest.is_none_or(|(_, e)| end > e) {
+            furthest = Some((start, end));
+        }
+    }
+    let mut matches: Vec<_> = candidates
+        .into_iter()
+        .zip(best)
+        .filter_map(|(c, d)| d.map(|d| (c, d)))
         .collect();
     let ty_prio = |c: &crate::types::Concept| match c.concept_type {
         crate::types::ConceptType::Entity | crate::types::ConceptType::Resource => 0,
         _ => 1,
     };
-    // Shortest content first, then Entity/Resource; equal (type, length)
-    // matches compare full content, then the stable issue-2 chain (canonical
-    // key ascending, NodeId ascending — ids are minted per run) as the final
-    // fallback (remediation round 2; the bare id used to decide).
-    substring_matches.sort_by(|a, b| {
-        ty_prio(a)
-            .cmp(&ty_prio(b))
-            .then_with(|| a.content.len().cmp(&b.content.len()))
+    matches.sort_by(|(a, ad), (b, bd)| {
+        ad.cmp(bd)
+            .then_with(|| ty_prio(a).cmp(&ty_prio(b)))
+            .then_with(|| b.content.chars().count().cmp(&a.content.chars().count()))
             .then_with(|| a.content.cmp(&b.content))
             .then_with(|| {
                 tie_break_by_key(Some(&a.canonical_key), &a.id, Some(&b.canonical_key), &b.id)
             })
     });
-    if let Some(c) = substring_matches.first() {
+    if let Some((c, _)) = matches.first() {
         tracing::trace!(
             target: "lambo::recall",
             anchor = %c.id,
@@ -174,6 +341,15 @@ fn resolve_anchor(graph: &Graph, query: &str) -> Option<NodeId> {
         return Some(*id);
     }
     None
+}
+
+/// Normalized resolved subject, even when it has no dependents. The caller
+/// must use its pipeline's graph snapshot, never reconstruct it after recall.
+pub(crate) fn resolved_anchor_text(graph: &Graph, query: &str) -> Option<String> {
+    match graph.node(resolve_anchor(graph, query)?) {
+        Some(Node::Concept(c)) => Some(anchor_text(&c.content)),
+        _ => None,
+    }
 }
 
 /// Cheap in-memory predicate: would a structural dispatch fire for `query` on
@@ -334,6 +510,10 @@ pub(crate) fn try_structural(
     // response-global — one annotation, never attached to a hit.
     let truncation = DetailedRecall::mark_context(&mut detailed, &fitted);
     Some(DetailedRecall {
+        anchor: match graph.node(anchor) {
+            Some(Node::Concept(c)) => Some(anchor_text(&c.content)),
+            _ => None,
+        },
         hits,
         context: fitted.context,
         truncation,
@@ -681,6 +861,401 @@ mod tests {
                 "equal-dependent SGs follow canonical key, not store iteration order"
             );
         }
+    }
+
+    /// A graph of `(id, content, type)` concepts, each the sole structural
+    /// source of one dependent (id + 100, content `"<content> consumer"`), so
+    /// whichever concept anchors, `try_structural` dispatches and its first
+    /// hit names the anchor.
+    fn anchors(concepts: &[(u64, &str, ConceptType)]) -> Graph {
+        let mut g = Graph::new(sid());
+        let i1 = Interaction {
+            event_time: None,
+            id: NodeId(uuid::Uuid::from_u64_pair(1, 1)),
+            session_id: sid(),
+            agent_id: AgentId::from("agent-a"),
+            prompt_text: Some("q".into()),
+            previous_id: None,
+            created_at: ts(0),
+        };
+        g.insert_interaction(i1.clone()).unwrap();
+        for (n, (id, content, ty)) in concepts.iter().enumerate() {
+            g.insert_concept(concept(*id, content, *ty), i1.id).unwrap();
+            let dep = format!("{content} consumer");
+            g.insert_concept(concept(id + 100, &dep, ConceptType::Logic), i1.id)
+                .unwrap();
+            g.upsert_edge(edge(n as u64 + 1, id + 100, *id, EdgeType::Dependency, 5.0))
+                .unwrap();
+        }
+        g
+    }
+
+    fn anchor_content(g: &Graph, query: &str) -> Option<String> {
+        resolve_anchor(g, query).map(|id| match g.node(id) {
+            Some(Node::Concept(c)) => c.content.clone(),
+            other => panic!("anchor is not a concept: {other:?}"),
+        })
+    }
+
+    #[test]
+    fn separate_names_choose_the_subject_nearest_after_the_marker() {
+        let g = anchors(&[
+            (10, "SG-Base-VPC", ConceptType::Entity),
+            (11, "VPC-Enterprise-Prod", ConceptType::Resource),
+        ]);
+        for marker in ["safe to delete", "depends on", "dependents of", "what uses"] {
+            let q = format!("is it {marker} SG-Base-VPC in VPC-Enterprise-Prod");
+            assert_eq!(anchor_content(&g, &q).as_deref(), Some("SG-Base-VPC"));
+            assert_eq!(
+                content_of(&try_structural(&g, &q, 10, 500).unwrap().hits),
+                vec!["SG-Base-VPC consumer"]
+            );
+        }
+        assert_eq!(
+            anchor_content(&g, "SG-Base-VPC depends on VPC-Enterprise-Prod").as_deref(),
+            Some("VPC-Enterprise-Prod")
+        );
+    }
+
+    #[test]
+    fn identifier_components_do_not_anchor_underscore_or_hyphen_names() {
+        let g = anchors(&[
+            (10, "db", ConceptType::Entity),
+            (11, "SG-Base", ConceptType::Entity),
+        ]);
+        for q in ["what depends on user_db", "what depends on SG-Base-VPC"] {
+            assert_eq!(anchor_content(&g, q), None, "{q}");
+        }
+        assert_eq!(
+            anchor_content(&g, "what depends on (SG-Base) - db").as_deref(),
+            Some("SG-Base")
+        );
+    }
+
+    #[test]
+    fn uppercase_scaffolding_acronyms_require_an_exact_uppercase_occurrence() {
+        for name in ["IT", "CAN", "OR", "DO", "IS", "MY", "IF", "ANY"] {
+            let g = anchors(&[(10, name, ConceptType::Entity)]);
+            assert_eq!(
+                anchor_content(&g, &format!("what depends on {name}")).as_deref(),
+                Some(name)
+            );
+            assert_eq!(
+                anchor_content(&g, &format!("what depends on {}", name.to_lowercase())),
+                None
+            );
+            assert_eq!(anchor_content(&g, "is it safe to delete unknown"), None);
+        }
+        let g = anchors(&[
+            (10, "IS", ConceptType::Entity),
+            (11, "queue", ConceptType::Entity),
+        ]);
+        assert_eq!(
+            anchor_content(&g, "is it safe to delete queue in IS").as_deref(),
+            Some("queue")
+        );
+        for name in [
+            "that", "with", "from", "by", "at", "how", "who", "when", "will", "i", "we",
+        ] {
+            let g = anchors(&[(10, name, ConceptType::Entity)]);
+            assert_eq!(anchor_content(&g, &format!("what depends on {name}")), None);
+        }
+    }
+
+    #[test]
+    fn normalized_accents_combining_marks_and_sigma_preserve_word_boundaries() {
+        let g = anchors(&[
+            (10, "café", ConceptType::Entity),
+            (11, "ΟΣ", ConceptType::Entity),
+            (12, "x", ConceptType::Entity),
+        ]);
+        assert_eq!(
+            anchor_content(&g, "what depends on cafe\u{301}").as_deref(),
+            Some("café")
+        );
+        assert_eq!(
+            anchor_content(&g, "what depends on ΟΣ").as_deref(),
+            Some("ΟΣ")
+        );
+        assert_eq!(
+            anchor_content(&g, "what depends on οσ").as_deref(),
+            Some("ΟΣ")
+        );
+        assert_eq!(anchor_content(&g, "what depends on x\u{307}y"), None);
+        let decomposed = anchors(&[(10, "cafe\u{301}", ConceptType::Entity)]);
+        assert_eq!(
+            anchor_content(&decomposed, "what depends on CAFÉ").as_deref(),
+            Some("cafe\u{301}")
+        );
+    }
+
+    #[test]
+    fn punctuation_only_concepts_never_anchor() {
+        let g = anchors(&[
+            (10, "?", ConceptType::Entity),
+            (11, "...", ConceptType::Resource),
+            (12, "_", ConceptType::Entity),
+            (13, "---", ConceptType::Resource),
+        ]);
+        assert_eq!(anchor_content(&g, "what depends on unknown...?_ ---"), None);
+    }
+
+    #[test]
+    fn marker_overlapping_clause_cannot_hide_its_named_subject() {
+        let g = anchors(&[
+            (10, "safe to delete db", ConceptType::Logic),
+            (11, "db", ConceptType::Entity),
+        ]);
+        assert_eq!(
+            anchor_content(&g, "is it safe to delete db").as_deref(),
+            Some("db")
+        );
+        // An internal marker must not move a real subject behind later names.
+        let g = anchors(&[
+            (10, "blast radius report", ConceptType::Resource),
+            (11, "db", ConceptType::Entity),
+        ]);
+        let q = "what depends on blast radius report and db";
+        assert_eq!(
+            anchor_content(&g, q).as_deref(),
+            Some("blast radius report")
+        );
+        assert_eq!(
+            content_of(&try_structural(&g, q, 10, 500).unwrap().hits),
+            vec!["blast radius report consumer"]
+        );
+    }
+
+    #[test]
+    fn repetitive_anchor_spans_and_oversized_queries_refuse_in_bounded_time() {
+        let names: Vec<_> = (1..=30).map(|n| vec!["x"; n].join(" ")).collect();
+        let concepts: Vec<_> = names
+            .iter()
+            .enumerate()
+            .map(|(n, s)| (n as u64 + 10, s.as_str(), ConceptType::Entity))
+            .collect();
+        let g = anchors(&concepts);
+        let q = format!("what depends on {}", "x ".repeat(8000));
+        let start = std::time::Instant::now();
+        assert_eq!(anchor_content(&g, &q), None);
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(1),
+            "bounded repeated spans took {:?}",
+            start.elapsed()
+        );
+        assert_eq!(
+            anchor_content(&g, &format!("what depends on {}", "x ".repeat(9000))),
+            None
+        );
+        assert!(word_bounded_spans(&q, "x").len() <= MAX_ANCHOR_SPANS + 1);
+    }
+
+    #[test]
+    fn traversal_subject_metadata_survives_later_graph_mutations() {
+        let mut g = anchors(&[(10, "db", ConceptType::Entity)]);
+        let q = "what depends on db cache";
+        let answer = try_structural(&g, q, 10, 500).unwrap();
+        assert_eq!(answer.anchor.as_deref(), Some("db"));
+        let longer = concept(11, "db cache", ConceptType::Entity);
+        let origin = longer.origin_interaction;
+        g.insert_concept(longer, origin).unwrap();
+        assert_eq!(resolved_anchor_text(&g, q).as_deref(), Some("db cache"));
+        assert_eq!(answer.anchor.as_deref(), Some("db"));
+        assert!(serde_json::to_value(&answer)
+            .unwrap()
+            .get("anchor")
+            .is_none());
+    }
+
+    #[test]
+    fn word_bounded_spans_need_word_edges_and_see_overlaps() {
+        assert_eq!(word_bounded_spans("dbadmin db", "db"), vec![(8, 10)]);
+        assert_eq!(word_bounded_spans("dbadmin", "db"), vec![]);
+        assert_eq!(word_bounded_spans("user_db", "db"), vec![]);
+        // Overlapping occurrences are all tried: a non-overlapping scan
+        // would stop after (0, 5) and miss (3, 8).
+        assert_eq!(
+            word_bounded_spans("aa aa aa", "aa aa"),
+            vec![(0, 5), (3, 8)]
+        );
+        // A punctuation edge is its own delimiter.
+        assert_eq!(word_bounded_spans("prod.env", ".env"), vec![(4, 8)]);
+        assert_eq!(word_bounded_spans("", "db"), vec![]);
+        assert_eq!(word_bounded_spans("db", ""), vec![]);
+    }
+
+    /// The reported bug: a short concept embedded in a longer word anchored
+    /// any structural query, admitting all its dependents.
+    #[test]
+    fn short_concept_inside_a_longer_word_does_not_anchor() {
+        let g = anchors(&[
+            (10, "db", ConceptType::Entity),
+            (11, "a", ConceptType::Entity),
+        ]);
+        assert_eq!(anchor_content(&g, "what depends on dbadmin"), None);
+        assert_eq!(
+            try_structural(&g, "what depends on dbadmin", 5, 500),
+            None,
+            "an embedded short concept must not dispatch the traversal"
+        );
+        assert!(!fits_structural(&g, "what depends on dbadmin"));
+        // "a" is a stop word as well as a substring of "what"/"safe": it never
+        // anchors on scaffolding.
+        assert_eq!(anchor_content(&g, "is it safe to delete a cache"), None);
+    }
+
+    /// A short concept that IS a whole word in the query still anchors when
+    /// it is the only (hence best) match.
+    #[test]
+    fn short_whole_word_concept_anchors_when_it_is_the_best_match() {
+        let g = anchors(&[
+            (10, "db", ConceptType::Entity),
+            (11, "id", ConceptType::Entity),
+        ]);
+        assert_eq!(
+            anchor_content(&g, "what depends on db").as_deref(),
+            Some("db")
+        );
+        assert_eq!(
+            anchor_content(&g, "what depends on DB?").as_deref(),
+            Some("db")
+        );
+        assert_eq!(
+            anchor_content(&g, "blast radius of the id").as_deref(),
+            Some("id")
+        );
+        let hit = try_structural(&g, "what depends on db", 5, 500).expect("dispatches");
+        assert_eq!(content_of(&hit.hits), vec!["db consumer"]);
+    }
+
+    /// The intended longer anchor wins over a short concept that is one of
+    /// its words, whatever the short one's type.
+    #[test]
+    fn the_longer_named_anchor_wins_over_a_word_inside_it() {
+        for long_ty in [ConceptType::Entity, ConceptType::Logic] {
+            let g = anchors(&[
+                (10, "db", ConceptType::Entity),
+                (11, "user db schema", long_ty),
+                (12, "schema", ConceptType::Entity),
+            ]);
+            assert_eq!(
+                anchor_content(&g, "what depends on user db schema").as_deref(),
+                Some("user db schema"),
+                "{long_ty:?}"
+            );
+            let hit =
+                try_structural(&g, "what depends on user db schema", 5, 500).expect("dispatches");
+            assert_eq!(content_of(&hit.hits), vec!["user db schema consumer"]);
+            // The short concept still anchors where it stands alone.
+            assert_eq!(
+                anchor_content(&g, "what depends on user db schema or db").as_deref(),
+                Some("user db schema"),
+                "the first named subject wins over a later free-standing db"
+            );
+        }
+        // Disjoint Entity matches: the longer (more specific) one wins.
+        let g = anchors(&[
+            (10, "cache", ConceptType::Entity),
+            (11, "orders queue", ConceptType::Entity),
+        ]);
+        assert_eq!(
+            anchor_content(&g, "what depends on cache and orders queue").as_deref(),
+            Some("cache")
+        );
+    }
+
+    #[test]
+    fn multibyte_anchors_match_on_unicode_word_boundaries() {
+        let g = anchors(&[
+            (10, "café", ConceptType::Entity),
+            (11, "Café-DB", ConceptType::Entity),
+            (12, "数据", ConceptType::Entity),
+            (13, "Ωmega", ConceptType::Entity),
+        ]);
+        // Case-insensitive across a multibyte letter; "café" is a word of the
+        // longer match and drops.
+        assert_eq!(
+            anchor_content(&g, "what depends on CAFÉ-DB now").as_deref(),
+            Some("Café-DB")
+        );
+        // An accented letter is a word character: no match inside "cafébar".
+        assert_eq!(anchor_content(&g, "what depends on cafébar"), None);
+        // CJK runs are one word: "数据" does not match inside "数据库".
+        assert_eq!(anchor_content(&g, "what depends on 数据库"), None);
+        assert_eq!(
+            anchor_content(&g, "what depends on 数据").as_deref(),
+            Some("数据")
+        );
+        assert_eq!(
+            anchor_content(&g, "blast radius of ωMEGA?").as_deref(),
+            Some("Ωmega")
+        );
+        assert_eq!(anchor_content(&g, "blast radius of ωmegas"), None);
+    }
+
+    #[test]
+    fn punctuation_and_path_anchors_match_inside_a_query() {
+        let g = anchors(&[
+            (10, "src/main.rs", ConceptType::Resource),
+            (11, "main.rs", ConceptType::Resource),
+            (12, ".env", ConceptType::Resource),
+            (13, "rs", ConceptType::Entity),
+        ]);
+        assert_eq!(
+            anchor_content(&g, "what depends on src/main.rs?").as_deref(),
+            Some("src/main.rs")
+        );
+        assert_eq!(
+            anchor_content(&g, "what depends on `src/main.rs`").as_deref(),
+            Some("src/main.rs")
+        );
+        assert_eq!(
+            anchor_content(&g, "blast radius of main.rs").as_deref(),
+            Some("main.rs")
+        );
+        assert_eq!(
+            anchor_content(&g, "what uses .env").as_deref(),
+            Some(".env")
+        );
+        assert_eq!(
+            anchor_content(&g, "what uses config/.env").as_deref(),
+            Some(".env")
+        );
+        // "main.rs" must not match inside "domain.rs".
+        assert_eq!(
+            anchor_content(&g, "what depends on domain.rs").as_deref(),
+            Some("rs"),
+            "only the whole-word rs matches"
+        );
+    }
+
+    /// The question's own wording never anchors: a concept named like a
+    /// marker phrase, or made only of function words, is skipped.
+    #[test]
+    fn marker_and_stop_word_concepts_do_not_anchor_on_question_scaffolding() {
+        let g = anchors(&[
+            (10, "blast radius", ConceptType::Entity),
+            (11, "user schema", ConceptType::Entity),
+            (12, "it", ConceptType::Entity),
+            (13, "the", ConceptType::Entity),
+        ]);
+        assert_eq!(
+            anchor_content(&g, "blast radius of user schema").as_deref(),
+            Some("user schema")
+        );
+        assert_eq!(
+            anchor_content(&g, "is it safe to delete the payments queue"),
+            None
+        );
+        // Any "blast radius" in a query is itself a marker occurrence, so the
+        // bare concept never anchors; a longer concept that only starts with
+        // the marker words is not inside the marker span and does.
+        assert_eq!(anchor_content(&g, "what depends on blast radius"), None);
+        let g = anchors(&[(14, "blast radius report", ConceptType::Resource)]);
+        assert_eq!(
+            anchor_content(&g, "what depends on blast radius report").as_deref(),
+            Some("blast radius report")
+        );
     }
 
     #[test]

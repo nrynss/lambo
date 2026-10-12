@@ -194,6 +194,26 @@
 
 ### Fixed
 
+- **A dependency question no longer anchors on a word fragment.**
+  Substring matching picked `db` in `dbadmin`, and shortest-first picked
+  `db` over a named `user db schema`. Under layered recall (#134), the wrong
+  anchor also admitted a layer's traversal answer past its relevance floor.
+  Anchors now match whole words after NFC normalization and per-character
+  lowercase; Unicode letters, digits, combining marks and underscores are
+  word characters, and internal hyphens join identifiers. An edge that is
+  punctuation needs no word boundary on that side (`.env` matches in
+  `config/.env`); `src/main.rs` needs boundaries on both word edges.
+  Contained names are skipped, then the subject nearest after the question
+  marker wins, with type and length breaking ties. Marker-overlapping
+  clauses cannot hide the subject. Function-word concepts are skipped
+  except uppercase acronyms explicitly written uppercase in the query.
+  Queries over 16 KiB or candidates over 256 bounded occurrences refuse
+  anchoring; containment uses a sorted sweep. A layer's anchor must agree
+  with the caller's resolved subject; layers still answer when the caller
+  resolves none. The security-group prose fallback is unchanged. No fixture
+  or golden output changed.
+
+
 - **A recall no longer comes back empty when its top hit is long (#130).**
   `context` keeps whole hit blocks while they fit `max_tokens` and stops at
   the first that does not. When that was the first block, the context was
