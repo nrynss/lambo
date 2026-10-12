@@ -512,8 +512,8 @@ fourteen days. Stage 2 divides eligible dependent origin time spread by
 min(session extent, this cap), with the existing three-origin and `0.3`
 coverage bars. A long session needs 4.2 days of spread at the default cap;
 a shorter session retains its previous coverage. This cap does not expire
-older evidence. Set a positive duration in whole milliseconds, no larger
-than `i64::MAX` milliseconds, and validate the `Config` before use.
+older evidence. Set a duration of at least one day, in whole milliseconds,
+no larger than `i64::MAX` milliseconds, and validate the `Config` before use.
 It is not a `lambo.toml` key or an environment override. The file's daemon
 cadences and promotion policy retain their existing roles. See
 [Library API](/api#stage-2-coverage-cap) for the store accessor contract and

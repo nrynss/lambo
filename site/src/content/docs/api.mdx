@@ -98,7 +98,7 @@ let mem = Memory::builder()
 | `max_canonical_nodes` | `1000` | Cap on canonical concepts. |
 | `canonization_min_peer_count` | `20` | Peers a concept needs before it can be promoted. |
 | `canonization_edge_min_age` | 60 seconds | How long an edge must exist before it counts as evidence. |
-| `canonization_coverage_window` | 14 days | Stage 2 denominator cap: eligible evidence spread / min(session extent, cap). Positive whole milliseconds, at most `i64::MAX` milliseconds. A library setting only; older evidence does not expire. |
+| `canonization_coverage_window` | 14 days | Stage 2 denominator cap: eligible evidence spread / min(session extent, cap). At least one day, in whole milliseconds, at most `i64::MAX` milliseconds. A library setting only; older evidence does not expire. |
 | `canonization_eval_interval` | 60 seconds | How often promotion is evaluated. Also settable from the file, as `[daemon] canonization_eval_interval_secs`. |
 | `canonization_eval_batch_size` | `50` | Concepts evaluated per pass. |
 | `canonization_repromotion_cooldown` | 300 seconds | Wait before a demoted concept can be promoted again. |
@@ -182,8 +182,11 @@ The node's own origin interaction never supports itself.
 
 Library callers can set `Config::canonization_coverage_window`, for example
 `Duration::from_secs(28 * 86_400)`, then call `Config::validate`. The duration
-must be positive, in whole milliseconds, and fit within `i64::MAX`
-milliseconds. The window-aware store boundary validates it again.
+must be at least one day (`MIN_COVERAGE_WINDOW`), in whole milliseconds,
+and fit within `i64::MAX` milliseconds. A shorter cap would let a burst of
+citations minutes apart cover the whole denominator of any longer session,
+which is the burst Stage 2 exists to refuse. The window-aware store
+boundary validates it again.
 `EvalParams::from_config` and `gate_progress_with_config` use the same cap.
 The existing `gate_progress` wrapper selects the default fourteen days.
 

@@ -379,7 +379,13 @@ pub async fn check_window_case(store: &dyn crate::store::GraphStore) {
         .unwrap();
     assert_eq!(premature.distinct, 0);
     assert_eq!(premature.coverage, 0.0);
-    for bad in [Duration::ZERO, Duration::from_nanos(1), Duration::MAX] {
+    // Below the one-day floor, sub-millisecond, or past i64::MAX ms.
+    for bad in [
+        Duration::ZERO,
+        Duration::from_nanos(1),
+        Duration::from_secs(3_600),
+        Duration::MAX,
+    ] {
         assert!(store
             .interaction_span_with_window(&sid, pillar, MIN_AGE, now(), bad)
             .await

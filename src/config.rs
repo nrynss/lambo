@@ -154,7 +154,8 @@ pub struct Config {
     pub canonization_edge_min_age: Duration,
     /// Stage 2 divides eligible evidence spread by min(session extent, this
     /// cap). Default fourteen days; no evidence expires at the cap. Library
-    /// setting only, validated as positive whole milliseconds.
+    /// setting only, validated as at least one day
+    /// ([`crate::store::MIN_COVERAGE_WINDOW`]) in whole milliseconds.
     #[serde(default = "default_coverage_window")]
     pub canonization_coverage_window: Duration,
     pub canonization_eval_interval: Duration,
@@ -1485,7 +1486,12 @@ kind = "fake"
 #[cfg(test)]
 #[test]
 fn coverage_window_config_is_validated_and_backward_deserializable() {
-    for bad in [Duration::ZERO, Duration::from_nanos(1), Duration::MAX] {
+    for bad in [
+        Duration::ZERO,
+        Duration::from_nanos(1),
+        Duration::from_secs(3_600),
+        Duration::MAX,
+    ] {
         let cfg = Config {
             canonization_coverage_window: bad,
             ..Config::default()

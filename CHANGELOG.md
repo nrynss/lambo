@@ -50,9 +50,9 @@
   `coverage_window`** ([#36](https://github.com/nrynss/lambo/issues/36)
   PR 2). Exhaustive struct literals need the field, or
   `..Default::default()`. A serialized `Config` without the field
-  deserializes to fourteen days. `Config::validate` rejects a zero cap, a
-  cap with a fraction of a millisecond, and one above `i64::MAX`
-  milliseconds.
+  deserializes to fourteen days. `Config::validate` rejects a cap below one
+  day (`MIN_COVERAGE_WINDOW`), a cap with a fraction of a millisecond, and
+  one above `i64::MAX` milliseconds.
 - **Stage 2 needs `GraphStore::interaction_span_with_window`** (#36 PR 2).
   The new trait method has a default body, so a third-party store still
   compiles, but the default returns `StoreError::Capability`: Stage 2 never

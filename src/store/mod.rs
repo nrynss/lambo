@@ -72,7 +72,7 @@ pub mod batch;
 // T3.5 — `load_session()` / startup materialization (see `load.rs`).
 pub mod load;
 pub(crate) mod span;
-pub use span::{validate_coverage_window, DEFAULT_COVERAGE_WINDOW};
+pub use span::{validate_coverage_window, DEFAULT_COVERAGE_WINDOW, MIN_COVERAGE_WINDOW};
 // T3.4 — write-behind flush task (spec §2.4–§2.5); drains any GraphStore.
 pub mod flush;
 // T8.6 — single-writer lease (spec §2.2, store-enforced). Holder identity,
