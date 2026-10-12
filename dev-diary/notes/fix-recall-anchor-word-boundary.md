@@ -59,7 +59,27 @@ holds `user db schema` without dependents and the layer holds `db`.
 
 The repetitive-span regression has a one-second ceiling in a debug test and
 asserts the helper's 257-span bound. Recall tests: 172 passed/0 failed/0 ignored;
-Memory layered tests: 9 passed/0 failed/0 ignored. Full gate results follow.
+Memory layered tests: 9 passed/0 failed/0 ignored. Full prescribed lane gate passed on the final implementation:
+
+- `cargo fmt --check`.
+- `cargo clippy --all-targets --features store-sqlite,fixtures -- -D warnings`.
+- `cargo clippy --all-targets --features ship,fixtures -- -D warnings`.
+- `cargo clippy --all-targets --no-default-features --features store-postgres -- -D warnings`.
+- `cargo clippy --all-targets --features store-postgres,store-sqlite,fixtures -- -D warnings`.
+- `cargo clippy --all-targets --features embed-eg2 -- -D warnings`.
+- `cargo clippy --all-targets --features recall-elastic -- -D warnings`.
+- `cargo clippy --all-targets --features embed-candle -- -D warnings`.
+- `cargo test --features store-sqlite,fixtures`: 2,188 passed, 0 failed,
+  7 ignored across unit, integration and doc tests. The unit block has
+  2,108 passed and 5 ignored (2,113 total); the initial focused run's unit
+  inventory was 2,104 including filtered tests, so nine tests were added.
+  No test was removed or newly ignored.
+- `cargo test --no-run --no-default-features --features store-sqlite`.
+- `cargo check --no-default-features`.
+- `bash scripts/docs/check-mirror-drift.sh`.
+
+Every cargo invocation had its own temporary XDG_RUNTIME_DIR. Live database
+rows were not run; the prescribed lane gate does not require them.
 Private logs live in the handoff scratch/A directory, never the repository.
 No fixture or golden was updated. No live database was used.
 
