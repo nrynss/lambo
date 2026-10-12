@@ -140,15 +140,17 @@ fn assert_spec_13(outcome: &DemoOutcome) {
     );
 }
 
-/// Agent B's recall carries eight warnings, two of them agent B's own
+/// Agent B's recall carries nine warnings, two of them agent B's own
 /// conflict lines on `redis backend` and `middleware/session.rs`. Those
 /// writes are act II's, minutes before the recall on the script clock, so
 /// they hold only while the demo's conflict window spans the script (#95).
+/// One is the high-risk line for `auth middleware`: five actions depend on
+/// it, and since #36 the high-value check reads that live count.
 fn assert_conflict_lines(outcome: &DemoOutcome) {
     const AGENT_B_LINE: &str = "Agent B wrote to it <n> seconds ago";
     assert_eq!(
         outcome.recall_warnings.len(),
-        8,
+        9,
         "agent B's recall must carry every warning main's demo renders: {:?}",
         outcome.recall_warnings
     );
