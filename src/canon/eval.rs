@@ -448,7 +448,16 @@ impl Evaluator {
 
         // Stage 2 — one `interaction_span_with_window` round-trip per member, so the
         // window is capped and walks the identity cursor (F13).
-        let candidates = ids_with_status(graph, CanonizationStatus::Candidate);
+        //
+        // #36 PR 3 review L1: the ring holds only members the policy could
+        // admit (`admits_hop` for the hop, asked before the verdict). Swarm
+        // admits every member, so its ring is unchanged; Solo drops the
+        // Candidates whose band cannot reach Venerable, which would cost a
+        // store probe every pass and could never promote.
+        let scorer = params.promotion_policy.scorer();
+        let mut candidates = ids_with_status(graph, CanonizationStatus::Candidate);
+        candidates
+            .retain(|&id| scorer.admits_hop(graph, id, CanonizationStatus::Venerable, params, now));
         let stage2 = ring_window(&candidates, self.stage2_cursor, params.batch_size);
         if let Some(&last) = stage2.last() {
             self.stage2_cursor = Some(last);
@@ -475,7 +484,10 @@ impl Evaluator {
         let remaining = params
             .max_canonical_nodes
             .saturating_sub(canonical_count(graph));
-        let venerable = ids_with_status(graph, CanonizationStatus::Venerable);
+        let mut venerable = ids_with_status(graph, CanonizationStatus::Venerable);
+        // Same filter as Stage 2's ring (review L1).
+        venerable
+            .retain(|&id| scorer.admits_hop(graph, id, CanonizationStatus::Canonical, params, now));
         let mut window = if remaining == 0 {
             Vec::new()
         } else {
@@ -725,7 +737,7 @@ fn apply(
         if !verdicts.stage2_pass.contains(&id) {
             continue;
         }
-        if !scorer.admits_hop(graph, id, CanonizationStatus::Venerable, true, params, now) {
+        if !scorer.admits_hop(graph, id, CanonizationStatus::Venerable, params, now) {
             continue;
         }
         let event = promotion_event(
@@ -774,7 +786,6 @@ fn apply(
             graph,
             probe.node,
             CanonizationStatus::Canonical,
-            true,
             params,
             now,
         ) {

@@ -245,8 +245,8 @@ fn solo_params() -> EvalParams {
 /// fails and the hop is refused. Given three children from three other
 /// interactions (Stage 2 holds), the same Candidate climbs.
 ///
-/// Mutation: `SoloScorer::admits_hop` ignoring `evidence` and apply's Stage 2
-/// loop asking the policy without the verdict (the pre-PR 3 bypass) → red.
+/// Mutation: apply's Stage 2 loop asking the policy without first requiring
+/// the verdict (the pre-PR 3 bypass) → red.
 #[tokio::test]
 async fn solo_cannot_bypass_stage_2_on_its_band() {
     let (g, hub_id) = solo_band_only_graph(CanonizationStatus::Candidate, 1);
@@ -1694,5 +1694,42 @@ async fn the_explanation_matches_the_evaluator_on_a_store_without_the_window_spa
             .await
             .unwrap();
         assert!(a.eligible, "{a:?}");
+    }
+}
+
+/// #36 PR 3 review L1: under Solo a Candidate whose band can never admit
+/// the Venerable hop is not probed (no store query), while one whose band
+/// can is. Swarm probes every Candidate, as before.
+#[tokio::test]
+async fn solo_probes_only_candidates_its_band_could_admit() {
+    for (confirmed, policy, probes) in [
+        (0, PromotionPolicy::Solo, 0usize),
+        (1, PromotionPolicy::Solo, 1),
+        (0, PromotionPolicy::Swarm, 1),
+    ] {
+        let (g, _) = solo_band_only_graph(CanonizationStatus::Candidate, confirmed);
+        let store = FaultyStore::healthy(store_from_graph(&g).await);
+        let g = RwLock::new(g);
+        let (tx, _rx) = channel();
+        let p = EvalParams {
+            promotion_policy: policy,
+            ..params()
+        };
+        eval_cycle(
+            &mut Evaluator::new(),
+            &g,
+            &store,
+            &table(&[]),
+            &tx,
+            &p,
+            ts(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            store.window_calls(),
+            probes,
+            "{policy:?} with {confirmed} confirmation(s)"
+        );
     }
 }

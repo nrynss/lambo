@@ -298,8 +298,9 @@ where
 /// Canonical hops: [`PromotionScorer::admits_hop`] receives the stage's
 /// evidence verdict and may refuse a hop the evidence supports. Since #36
 /// PR 3 it can no longer admit a hop the evidence refuses: the evaluator
-/// skips a node whose verdict failed before asking the policy, and both
-/// shipped scorers also return `false` without the verdict.
+/// asks the policy only about a node whose stage verdict passed, so the
+/// policy can narrow the evidence but never replace it. (The method lost its
+/// `evidence` argument in the same release: it was always `true`.)
 pub trait PromotionScorer: Send + Sync + std::fmt::Debug {
     /// Concepts that currently clear the Candidate bar, in the order a
     /// bounded cycle should take them (highest priority first).
@@ -314,18 +315,18 @@ pub trait PromotionScorer: Send + Sync + std::fmt::Debug {
         now: DateTime<Utc>,
     ) -> Vec<NodeId>;
 
-    /// Whether `node` may take the promotion hop to `to` this cycle.
-    ///
-    /// `evidence` is the stage predicate's verdict for this node — stage 2's
-    /// capped interaction-span pass, or stage 3's "Stage 2 still holds and
-    /// blast radius > 5 outside the cooldown". A `to` below the node's current
-    /// status is never asked — the ladder only climbs.
+    /// Whether the policy lets `node` take the promotion hop to `to`, given
+    /// that the stage verdict for that hop holds (Stage 2's capped span, or
+    /// Stage 3's "Stage 2 still holds, blast radius > 5, cooldown clear"):
+    /// the evaluator never asks about a node whose verdict failed. It also
+    /// asks before probing (`Evaluator::gather`), so a node the policy would
+    /// refuse costs no store query. A `to` below the node's current status is
+    /// never asked — the ladder only climbs.
     fn admits_hop(
         &self,
         graph: &Graph,
         node: NodeId,
         to: CanonizationStatus,
-        evidence: bool,
         params: &EvalParams,
         now: DateTime<Utc>,
     ) -> bool;
@@ -355,12 +356,12 @@ impl PromotionScorer for SwarmScorer {
         _graph: &Graph,
         _node: NodeId,
         _to: CanonizationStatus,
-        evidence: bool,
         _params: &EvalParams,
         _now: DateTime<Utc>,
     ) -> bool {
-        // Swarm has no score of its own: the stage verdict is the decision.
-        evidence
+        // Swarm has no score of its own: the stage verdict, which the
+        // evaluator has already required, is the decision.
+        true
     }
 }
 
@@ -605,13 +606,9 @@ impl PromotionScorer for SoloScorer {
         graph: &Graph,
         node: NodeId,
         to: CanonizationStatus,
-        evidence: bool,
         params: &EvalParams,
         now: DateTime<Utc>,
     ) -> bool {
-        if !evidence {
-            return false;
-        }
         match graph.node(node) {
             Some(Node::Concept(c)) => {
                 let deps = dependent_interactions(graph, node, params.min_age, now);
@@ -1495,36 +1492,30 @@ mod tests {
     // C-R1-1 closure — the published bands drive the ladder admission
     // -----------------------------------------------------------------------
 
-    /// Under solo, hop admission is the node's band **and** the stage verdict
-    /// (#36 PR 3). A Resource hub with four event-timed sessions sits at
-    /// resistant 4.0: the band refuses Venerable even with a passing verdict.
-    /// One human confirmation lifts it to 8.0 (Venerable band), which a
-    /// failing verdict still refuses. One dependent interaction lands it on
-    /// exactly [`CANONICAL_BAR`] (10.0), admitted with the verdict and refused
-    /// without it.
+    /// Under solo, hop admission is the node's band (#36 PR 3: on top of the
+    /// stage verdict the evaluator requires first; see
+    /// `solo_cannot_bypass_stage_2_on_its_band` for that half). A Resource
+    /// hub with four event-timed sessions sits at resistant 4.0: the band
+    /// refuses Venerable. One human confirmation lifts it to 8.0 (Venerable
+    /// band, not Canonical). One dependent interaction lands it on exactly
+    /// [`CANONICAL_BAR`] (10.0), which the inclusive comparison admits.
     ///
-    /// Mutations: `SoloScorer::admits_hop` ignoring `evidence` (the pre-#36
-    /// bypass) → red; its rank comparison made exclusive (`>`) → red at
-    /// exactly 10.0.
+    /// Mutation: the rank comparison made exclusive (`>`) → red at 10.0.
     #[test]
-    fn solo_admission_needs_the_band_and_the_verdict() {
+    fn solo_admission_climbs_with_the_band() {
         let (mut graph, hub) = spread_support_graph_with(ConceptType::Resource, true);
         let solo = PromotionPolicy::Solo.scorer();
         let p = params();
         let at = day(10);
-        assert!(solo.admits_hop(&graph, hub, CanonizationStatus::Candidate, true, &p, at));
+        assert!(solo.admits_hop(&graph, hub, CanonizationStatus::Candidate, &p, at));
         assert!(
-            !solo.admits_hop(&graph, hub, CanonizationStatus::Venerable, true, &p, at),
-            "4.0 < 6.0: below the bar even a PASSING stage-2 verdict admits nothing"
+            !solo.admits_hop(&graph, hub, CanonizationStatus::Venerable, &p, at),
+            "4.0 < 6.0: below the bar the band refuses whatever the evidence"
         );
 
         graph.confirm_human(hub).unwrap();
-        assert!(solo.admits_hop(&graph, hub, CanonizationStatus::Venerable, true, &p, at));
-        assert!(
-            !solo.admits_hop(&graph, hub, CanonizationStatus::Venerable, false, &p, at),
-            "the band cannot bypass a failing Stage 2 verdict"
-        );
-        assert!(!solo.admits_hop(&graph, hub, CanonizationStatus::Canonical, true, &p, at));
+        assert!(solo.admits_hop(&graph, hub, CanonizationStatus::Venerable, &p, at));
+        assert!(!solo.admits_hop(&graph, hub, CanonizationStatus::Canonical, &p, at));
 
         let mut actor = concept(11, 0);
         actor.origin_interaction = nid_inter(2);
@@ -1536,24 +1527,17 @@ mod tests {
         let hub_concept = concept_of(&graph, hub);
         let deps = dependent_interactions(&graph, hub, p.min_age, at);
         assert_eq!(solo_score(&graph, &hub_concept, deps), 10.0);
-        assert!(solo.admits_hop(&graph, hub, CanonizationStatus::Canonical, true, &p, at));
-        assert!(
-            !solo.admits_hop(&graph, hub, CanonizationStatus::Canonical, false, &p, at),
-            "the band cannot bypass a failing Stage 3 verdict"
-        );
+        assert!(solo.admits_hop(&graph, hub, CanonizationStatus::Canonical, &p, at));
     }
 
-    /// The swarm arm keeps the evidence verdict as the whole decision — the
-    /// pre-seam pipeline byte-for-byte. It has no score to admit with.
-    ///
-    /// Mutation: make `SwarmScorer::admits_hop` ignore `evidence` → red.
+    /// The swarm arm adds nothing to the stage verdict the evaluator has
+    /// already required: it admits every hop it is asked about.
     #[test]
     fn swarm_admission_is_the_evidence_verdict() {
         let (graph, hub) = spread_support_graph(ConceptType::Entity);
         let swarm = PromotionPolicy::Swarm.scorer();
         let (p, at) = (params(), ts());
-        assert!(swarm.admits_hop(&graph, hub, CanonizationStatus::Venerable, true, &p, at));
-        assert!(!swarm.admits_hop(&graph, hub, CanonizationStatus::Venerable, false, &p, at));
-        assert!(swarm.admits_hop(&graph, hub, CanonizationStatus::Canonical, true, &p, at));
+        assert!(swarm.admits_hop(&graph, hub, CanonizationStatus::Venerable, &p, at));
+        assert!(swarm.admits_hop(&graph, hub, CanonizationStatus::Canonical, &p, at));
     }
 }
