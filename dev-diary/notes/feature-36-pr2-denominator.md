@@ -119,9 +119,12 @@ defines `interaction_span` now forwards `interaction_span_with_window` too
 (`every_in_tree_store_forwards_the_window_aware_span`, `src/store/span.rs`)
 keeps it that way, and `cycles_through_a_forwarding_wrapper_log_no_capability_warning`
 (`src/canon/task.rs`) asserts a cycle loop logs neither warning; it fails if
-that wrapper stops forwarding. The scan skips
-`src/store/pg/postgres/tests.rs`, which no agent in this lane may read; if a
-wrapper there runs cycles it needs the same forward. The trait default
+that wrapper stops forwarding. The scan reads only `impl ... GraphStore for`
+header lines (47 impls at the 2026-10-13 merge), so its own literals never
+count. It cannot see `src/store/pg/postgres/tests.rs`, which it skips and no
+agent in this lane may read, or anything under `tests/` and `examples/`,
+which it does not walk; a wrapper there that runs cycles needs the same
+forward by hand. The trait default
 itself is tested on a dedicated `Legacy` stub in `src/store/span.rs`.
 
 ## Shape
