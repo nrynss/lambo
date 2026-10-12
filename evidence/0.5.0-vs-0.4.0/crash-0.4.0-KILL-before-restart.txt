@@ -1,0 +1,48 @@
+==============================================================================
+C3 durability check — ledger vs store
+==============================================================================
+ledger : <SCRATCH>/cmp050/t5-0.4.0-KILL/ledger-20261012-034633.jsonl
+db     : <SCRATCH>/cmp050/t5-0.4.0-KILL/c-crash-0.4.0-KILL.db
+session: c-crash-0.4.0-KILL
+
+ledger accounting (successful calls only)
+------------------------------------------------------------------------------
+  calls recorded                : 3920
+  calls ok (no tool error)      : 1709
+  acked lambo_derive            : 607
+  acked lambo_record_action     : 517
+  refused at ack (queue full)   : 1
+  expected interactions         : 1125
+  unrecognised write responses  : 0
+  refused (tool-level)          : 378
+  rate-limit 429s               : 1713
+  transport failures            : 120
+
+receipt outcomes (admitted writes, as last seen in the ledger)
+------------------------------------------------------------------------------
+  applied                       : 375
+  failed                        : 183
+  pending (never seen settled)  : 566
+  settled applied               : 375
+  UNSETTLED (not counted below) : 566
+  applied derive created / matched : 87 / 323
+  applied record_action created / edges: 65 / 357
+  daemon GC collected concepts  : 0 (edges removed 0, 0 sweep line(s) in stderr)
+
+store readback
+------------------------------------------------------------------------------
+  interactions   : 1105
+  concepts       : 151
+  edges          : 2106
+  canon_events   : 0
+  lease row      : ('c-load@Narayans-MacBook-Pro.local#24182', '2026-10-12T03:48:06.115Z', 1)
+  session row    : created=2026-10-12T03:46:37.120Z closed=—
+
+comparison
+------------------------------------------------------------------------------
+  expected interactions == store interactions: SHORTFALL 20
+  settled-applied concepts <= store concepts : shortfall 1 UNVERIFIABLE (no GC counts in the transcript and --gc-logged not given — GC may or may not explain it; re-run with --stderr captured at lambo::daemon::gc=debug and --gc-logged)
+  settled record_action edges <= store edges : OK (store 2106 + GC-removed 0 >= ledger 357; derive edges add more, unreported)
+  note: 566 admitted write(s) never settled in the ledger; their interactions are counted above, their concepts are not
+
+verdict: tail NOT fully durable — ledger-acknowledged writes are missing; see the shortfall rows above

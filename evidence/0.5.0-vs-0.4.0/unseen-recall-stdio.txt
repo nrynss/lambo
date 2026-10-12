@@ -1,0 +1,2 @@
+lambo-0.4.0: startup 3446 ms, first recall 57 ms, n=75 p50 25.9 p90 28.3 p99 38.3 max 38.3 mean 26.2 ms
+lambo-0.5.0: startup 832 ms, first recall 68 ms, n=75 p50 26.2 p90 29.4 p99 36.8 max 36.8 mean 26.7 ms

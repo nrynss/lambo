@@ -1,0 +1,48 @@
+==============================================================================
+C3 durability check — ledger vs store
+==============================================================================
+ledger : <SCRATCH>/cmp050/t5-0.5.0-KILL/ledger-20261012-035059.jsonl
+db     : <SCRATCH>/cmp050/t5-0.5.0-KILL/c-crash-0.5.0-KILL.db
+session: c-crash-0.5.0-KILL
+
+ledger accounting (successful calls only)
+------------------------------------------------------------------------------
+  calls recorded                : 3914
+  calls ok (no tool error)      : 1709
+  acked lambo_derive            : 610
+  acked lambo_record_action     : 527
+  refused at ack (queue full)   : 0
+  expected interactions         : 1137
+  unrecognised write responses  : 0
+  refused (tool-level)          : 378
+  rate-limit 429s               : 1707
+  transport failures            : 120
+
+receipt outcomes (admitted writes, as last seen in the ledger)
+------------------------------------------------------------------------------
+  applied                       : 973
+  failed                        : 0
+  pending (never seen settled)  : 164
+  settled applied               : 973
+  UNSETTLED (not counted below) : 164
+  applied derive created / matched : 753 / 1066
+  applied record_action created / edges: 839 / 1166
+  daemon GC collected concepts  : 0 (edges removed 0, 1 sweep line(s) in stderr)
+
+store readback
+------------------------------------------------------------------------------
+  interactions   : 1125
+  concepts       : 1640
+  edges          : 9719
+  canon_events   : 0
+  lease row      : ('lambo:released', '2026-10-12T03:54:09.236Z', 2)
+  session row    : created=2026-10-12T03:51:01.825Z closed=—
+
+comparison
+------------------------------------------------------------------------------
+  expected interactions == store interactions: SHORTFALL 12
+  settled-applied concepts <= store concepts : store AHEAD by 48 (164 unsettled receipt(s) not counted)
+  settled record_action edges <= store edges : OK (store 9719 + GC-removed 0 >= ledger 1166; derive edges add more, unreported)
+  note: 164 admitted write(s) never settled in the ledger; their interactions are counted above, their concepts are not
+
+verdict: tail NOT fully durable — ledger-acknowledged writes are missing; see the shortfall rows above
