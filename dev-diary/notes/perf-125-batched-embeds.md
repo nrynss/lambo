@@ -52,133 +52,182 @@ another (a derive: embed, candidate lookup, embed, ...; a record_action:
 one embed per content string). Under load every embed round waits for a
 whole forward, often a wide padded one of a few hundred ms, so a lane
 retired a two-text write in two or more such waits. At 16 agents each
-agent submits about one write per second, which is close to what one lane
-could retire, so lanes backed up. The embedder's total throughput was not
-the only limit; the number of serial rounds per write was.
+agent submits about one write per second, close to what one lane could
+retire, so lanes backed up. This is an argument from the code and the
+probe, not a measurement under load; the acceptance run below decides.
 
-So the design reduces **rounds per write**, and removes padding waste.
+So the change cuts **rounds per write** and removes padding waste.
 
-## Design
+## Design (what landed)
 
 ### 1. `Embedder::embed_batch` and `batch_capacity` (non-breaking)
 
-Default methods. `embed_batch(&[&str]) -> Vec<Result<..>>`, one result per
-text in order, each that text's own; the default loops over `embed`.
-`batch_capacity()` defaults to 1, which tells callers gathering gains
-nothing, and every write path then behaves exactly as before. Candle
-overrides both (pushes every text under one queue lock so one take sees
-them; capacity `MAX_BATCH` = 32). The fixture embeds batches natively
-(capacity 32) so tests over it take the gathered path. The HTTP adapters
-(BGE-M3 over llama-server, EmbeddingGemma 2, Gemini) are unchanged:
-llama-server accepts an array input and could override later, but its
-error for one bad text is an HTTP error for the whole request, so that
-adapter would need per-slot isolation first. Not done here.
+Default methods. `embed_batch(&[&str], deadline) -> Vec<Result<..>>`: one
+result per text in order, each that text's own. It answers by `deadline`:
+a text not embedded by then fails its own slot `Unavailable`, the texts
+already done keep their vectors, and no work starts after the deadline.
+The default loops over `embed`, each bounded by the deadline.
+`batch_capacity()` is the most texts worth gathering into one call; a
+larger call is allowed and must still answer every slot. The default, 1,
+tells callers gathering gains nothing, and every write path then behaves
+exactly as before.
 
-### 2. One round per write (`hybrid::derive_with_gather`)
+Candle overrides both: it queues every text under one lock as **bulk**
+work, waits for all slots against one shared deadline (the caller's or
+`EMBED_WAIT`, whichever is sooner), keeps a load failure's own class, and
+reports `FORWARD_WIDTH` (8), one forward's width. The fixture batches
+natively with capacity 8. The HTTP adapters (BGE-M3 over llama-server,
+EmbeddingGemma 2, Gemini) are unchanged: llama-server accepts an array
+input and could override later, but its error for one bad text is an HTTP
+error for the whole request, so that adapter needs per-slot isolation
+first.
+
+### 2. One round per write (`hybrid::embed_gathered`)
 
 Before its per-item loop, a hybrid derive sends every text it will embed
 (unmatched items and `parent_of` ends, framed with `context_text`) to
 `embed_gathered`, which calls `embed_batch` in rounds of the embedder's
-capacity under the call's I/O deadline and keeps what comes back in the
-per-call `EmbedCache` (#116). The loop is unchanged: a hit costs nothing;
-a text the round did not embed is embedded alone through
+capacity, handing each round the call's deadline, and keeps what comes
+back in the per-call `EmbedCache` (#116). The loop is unchanged: a hit
+costs nothing; a text the round did not embed is embedded alone through
 `embed_or_refuse`, so the write meets **that text's own error and class**
 (`Embed` permanent, `EmbedUnavailable` transient). `record_action` does
-the same (`embed_action_contents_gathered`; the public
-`embed_action_contents` keeps its signature).
+the same; the public `embed_action_contents` keeps its signature. A round
+that has not returned `BATCH_DEADLINE_GRACE` (100 ms) after the deadline
+(an adapter overrunning it) is abandoned; `RECEIPT_WAIT_MAX` has 4 s of
+headroom over `HYBRID_IO_TIMEOUT`, so its bound holds.
 
-### 3. One round per several writes (the lane prefetch, `writeq::prefetch`)
+### 3. Candle: length-sorted chunks, priority, failure isolation
 
-Before running a job, the lane worker predicts the texts of that job and
-of up to `LANE_PREFETCH_MAX_JOBS - 1` (7) jobs queued behind it in the
-same lane, against the graph as it is now (`hybrid::planned_embed_texts`,
-which shares the plan's `plan_inputs`, budget and context-cap checks, and
-returns nothing for a call the plan would refuse; record_action's distinct
-contents). It embeds up to `LANE_PREFETCH_MAX_TEXTS` (16) of them in one
-round, and hands the vectors to each job as an `EmbedSeed` read on a cache
-miss. A job whose texts the seed already covers runs no round.
+A coalesced take (up to 32) runs as forwards of at most `FORWARD_WIDTH`
+(8) texts, shortest first, where no text in a forward is longer than twice
+the forward's shortest plus 64 bytes (`length_chunks`). Each chunk's
+callers are answered when their chunk is done.
 
-Peeking does not pop: `Job.payload` became `Arc<JobPayload>` so the worker
-clones handles, not strings, under the lanes lock. Lanes are not joined
-with each other: the candle coalescer already takes every lane's queued
-round together, and joining lanes in the queue would make one lane wait
-for another.
-
-### 4. Candle: length-sorted chunks, and failure isolation
-
-A coalesced take (up to 32) now runs as forwards of at most
-`FORWARD_WIDTH` (8) texts, shortest first, where no text in a forward is
-longer than twice the forward's shortest plus 64 bytes
-(`length_chunks`). Each chunk's callers are answered when their chunk is
-done.
+Single embeds (a recall's query, a lone text) are taken before bulk
+`embed_batch` texts (`take_prioritized`) and forwarded first, so a recall
+does not wait behind a write's gathered texts. A request whose caller has
+dropped its receiver (its deadline passed) is not forwarded
+(`still_awaited`).
 
 Found while doing this (pre-existing, own `fix` commit): a forward that
 failed or panicked failed **every** caller in the batch, as a permanent
 `Backend` refusal, so a write coalesced with a bad text by timing alone
-failed and its durable intent was settled `failed`. `forward_isolated`
-reruns a failed batch one text at a time. A width mismatch is still
-reported to every caller without a retry (a property of the model,
-K2-R1-4); a panic is still caught and named (K2-R1-5).
+failed and its durable intent was settled `failed`. Now a failed forward
+is followed by a one-word canary forward (`forward_isolated`):
+
+- canary fails too: the device or model is at fault; every caller gets
+  `Unavailable` (transient), and nothing is retried per text, so a broken
+  device costs two forwards per chunk, not one per text;
+- canary passes: each text runs alone and only a text that fails alone
+  gets `Backend`.
+
+A width mismatch is still reported to every caller without a retry (a
+property of the model, K2-R1-4); a panic is still caught and named
+(K2-R1-5).
+
+### Batched equals unbatched, within tolerance (review M2)
+
+The ignored live test `metal_batched_matches_single_within_tolerance`
+compares, on the real f16 weights on Metal, each of seven texts (11 to
+910 bytes, Japanese and code included) embedded alone against
+`embed_batch` and against one forward over all seven padded to the
+longest. Measured: max absolute difference 0 for `embed_batch` (its
+chunks here held up to four short texts padded together, so padding alone
+did not move them on this run) and 3.3e-4 for the one padded forward that
+included the 910-byte text. So a batched vector is **equal within
+tolerance** (under 1e-3), not bit-identical in general: a derive whose
+two texts land in one chunk is padded to the longer one. Stores written
+before and after this change can therefore differ in the last bits of
+vectors, and `replay_parity.py`'s vector-drift detector may report it;
+that is expected, not a behaviour change, if the drift stays at this
+scale.
+
+```text
+cargo test --release --features embed-candle-metal --lib -- --ignored --nocapture metal_batched_matches_single
+```
+
+## Removed after review: the lane prefetch (a future option)
+
+A first version also had each write-queue lane embed the texts of the job
+it was about to run **and of up to seven jobs queued behind it** (16
+texts at most) in one round, seeding each later job's cache
+(`writeq/prefetch.rs`, commit 58173ae6, reverted in this branch). With
+`BatchingEmbedder`, five queued two-concept derives in one lane cost 2
+rounds instead of 3 rounds and 2 single embeds. The adversarial review
+objected:
+
+- **H1:** the round's time was charged to the running job's 30 s I/O
+  budget, so that job's own embeds and lookups could be starved by other
+  jobs' texts;
+- **H2:** a timeout around the whole round dropped vectors it had already
+  computed;
+- **M1:** wider bulk pushes made recalls queue behind other agents' write
+  texts in candle's FIFO;
+- **M4:** the seed outlived the call that embedded it.
+
+The orchestrator removed it: the probe shows Metal throughput is flat past
+4 texts per forward, so the measured wins are one call per write and
+length chunking. H2's partial-results fix, M1's priority and the
+deadline handling have since landed for the per-write path, which removes
+most of the objections' mechanism, and M4 cannot arise without a
+cross-call seed. If the acceptance run at 16 agents still shows lane
+backlogs, the prefetch is the next thing to measure: with its own budget
+(not the running job's), behind single embeds in candle's queue, and
+with the seed scoped to the jobs it was embedded for.
+
+## Review resolutions (the ones not covered above)
+
+- **H1:** a vector-candidate lookup that times out (or is not started
+  because the deadline passed) is now `EmbedUnavailable`, transient, so
+  the write queue leaves the durable intent unconsumed instead of settling
+  an acked write `failed`. Test:
+  `a_candidate_lookup_timeout_is_transient_and_writes_nothing`.
+- **H2:** no embed, lookup or round is started after the deadline (a
+  `timeout_at` past its deadline still polls once); a round keeps the
+  slots it finished. Tests: `a_gathered_round_keeps_the_slots_done_before_its_deadline`,
+  `a_round_that_overruns_its_deadline_is_abandoned_just_past_it`, and
+  `default_embed_batch_keeps_what_finished_by_the_deadline_and_starts_nothing_after`.
+- **L3:** the calibration probe's representative write now embeds the way
+  a derive does (one batched call when the embedder batches), so the probe
+  and the observed rate measure the same unit and `probe_optimism` keeps
+  its meaning: the probe's write rate over the observed write rate.
+- **L5:** `batch_capacity` is defined as the most texts worth gathering
+  per call; candle reports its forward width (8), not its take (32).
+- **L7:** the API reference lists the shipped embedders.
 
 ## Invariants kept
 
-- **Per-lane order and receipts.** The round only embeds. Every job still
-  plans, validates (`plan_still_holds`) and commits on its own, in FIFO
-  order, through `WriteCtx::run`, and settles its own receipt.
-- **#116's commit model.** Unchanged: only the vector gather is shared,
-  through the per-call cache. A seeded vector is keyed by the exact text
-  sent to the embedder, as the cache is; the live embedder is the
-  process's one, so a text's vector does not depend on when it was
-  embedded. The seed is dropped with the cache if the session's stamp
-  moves between contracts.
+- **Per-write receipts and lane order.** Untouched: batching happens
+  inside one write's call.
+- **#116's commit model.** Only the vector gather is shared, through the
+  per-call cache, keyed by the exact text sent to the embedder.
 - **Failure isolation.** A failed slot, or a round that fails or times out
-  as a whole, is only missing from the seed or cache; the job embeds that
-  text alone. Nothing in a round can fail another write.
-- **The I/O bound.** The lane round runs inside the running job's
-  `HYBRID_IO_TIMEOUT` budget (`Gather::io_started` is the round's start),
-  so a job's round plus its own I/O never exceed one budget and
-  `RECEIPT_WAIT_MAX` (built on that bound) is unchanged.
-- **Fairness.** A lane has at most one round in flight, of at most 16
-  texts, so one busy agent puts at most 16 texts ahead of another's at the
-  embedder (two 8-wide forwards, about 200 ms on Metal). The lane bound is
-  unchanged.
-- **Low load.** No wait or debounce is added in the queue. A lane with one
-  job embeds that job's texts in one round. One cost to note: the first
-  job of a backlog now waits for the whole round (up to 16 texts) before
-  it commits, so its own latency rises while the jobs behind it cost no
-  round; at 8 agents backlogs are rare (apply p50 93 ms).
-- **Telemetry.** `write_queue_serial_items_per_sec` (the observed rate) is
-  still per applied write, but a round's time is charged to the job that
-  ran it, so individual samples are less even; the mean is unchanged in
-  meaning.
+  as a whole, is only missing from the cache; the write embeds that text
+  alone and meets its own error with its own class.
+- **The I/O bound.** One `HYBRID_IO_TIMEOUT` per call, plus at most
+  `BATCH_DEADLINE_GRACE` for an adapter that overruns.
+- **Low load.** No wait is added. A lone derive's two texts go out in one
+  call instead of two; if their lengths are close they share one forward
+  (padded to the longer, within the tolerance above).
 
 ## Tests
 
 - `embed::trait_tests`: the default `embed_batch` is `embed` per text, in
-  order, each slot its own; the fixture's batch equals its single embeds.
-- `embed::candle`: `one_bad_text_fails_only_its_own_caller`,
-  `a_panicking_text_fails_only_its_own_caller_and_names_the_panic`,
-  `a_width_mismatch_fails_every_caller_without_a_retry`,
-  `a_healthy_batch_is_one_forward`, the two `length_chunks` tests, and
-  `embed_batch_matches_single_embeds_and_fails_empty_text_in_its_slot` on
-  the tiny CPU artifact. Probe: `metal_batch_throughput` (ignored).
-- `graph::hybrid::tests::batching` (over `test_util::BatchingEmbedder`,
-  which counts rounds and single embeds, can refuse a text, fail every
-  round, and hold a gate): one round for a derive's items and parent ends
-  with the unbatched vectors stored; capacity 1 keeps the old path; a
-  refused item fails the write as `Embed` with nothing written; a
-  whole-round outage falls back to single embeds and applies; seeded
-  vectors are used; a spent I/O budget refuses as `EmbedUnavailable`;
-  record_action in one round and a refused path failing as `Embed`;
-  `planned_embed_texts` predicting exactly what the call embeds and
-  nothing it would refuse.
-- `writeq::pipeline_tests::batching`: five queued two-concept derives in
-  one lane cost **2 rounds and 0 single embeds** (3 rounds and 2 singles
-  with the prefetch disabled; checked by breaking it), apply in lane order
-  (created then matched) and store the unbatched vectors; a refused text
-  fails only its own write and its neighbours apply; a whole-round outage
-  leaves each write to embed alone; two lanes prefetch independently and
-  keep their own order.
+  order, each slot its own; it keeps finished slots and starts nothing
+  after the deadline; the fixture's batch equals its single embeds.
+- `embed::candle`: failure isolation (one bad text; a panicking text; a
+  failing device fails all transient in two forwards; a lone bad text is
+  permanent; a width mismatch fails all without a retry), single-before-bulk
+  takes, a closed request not forwarded, the two `length_chunks` tests, and
+  `embed_batch` on the tiny CPU artifact. Live probes (ignored):
+  `metal_batch_throughput`, `metal_batched_matches_single_within_tolerance`.
+- `graph::hybrid::tests::batching` (over `test_util::BatchingEmbedder`):
+  one round for a derive's items and parent ends with the unbatched
+  vectors stored; capacity 1 keeps the old path; a refused item fails the
+  write as `Embed` with nothing written; a whole-round outage falls back to
+  single embeds and applies; record_action in one round and a refused
+  path failing as `Embed`; the H1 and H2 tests above.
 
 ## Not measured here: the #125 acceptance run
 

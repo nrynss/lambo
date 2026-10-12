@@ -35,11 +35,10 @@
 
 ### Added
 
-- `Embedder::embed_batch` and `Embedder::batch_capacity`, default methods
-  (non-breaking): embed several texts in one call, one result per text. The
-  defaults call `embed` per text and report a capacity of 1.
-- `writeq::LANE_PREFETCH_MAX_TEXTS` (16) and `writeq::LANE_PREFETCH_MAX_JOBS`
-  (8).
+- `Embedder::embed_batch(texts, deadline)` and `Embedder::batch_capacity`,
+  default methods (non-breaking): embed several texts in one call, one result
+  per text, keeping the texts finished by the deadline. The defaults call
+  `embed` per text and report a capacity of 1.
 
 ### Changed
 
@@ -103,27 +102,33 @@
 - **One bad text no longer fails other agents' writes on candle (#125).** The
   candle coalescer failed every caller in a batch when the batch's forward
   failed or panicked, so a write coalesced with a bad text by timing alone
-  failed as a permanent refusal. A failed batch is now rerun one text at a
-  time and only the bad text fails.
+  failed as a permanent refusal. A failed forward is now followed by a
+  one-word canary forward: if the canary fails too, the device is at fault
+  and every caller gets a transient error with no per-text retries;
+  otherwise each text is rerun alone and only the bad one fails.
+- **A vector-candidate lookup timeout no longer loses an acked write
+  (#125 review).** The lookup runs under the same deadline as a derive's
+  embeds, and its timeout was a store error, which the write queue settles
+  `failed`, consuming the write's durable intent. It is now transient, like an
+  embed timeout, so the intent stays for a later attempt. A derive also no
+  longer starts an embed or a lookup once its deadline has passed.
 
 ### Performance
 
-- **Fewer embedder rounds per write under concurrent agents (#125).** A
-  hybrid derive or record_action now embeds all of its texts in one batched
-  round instead of one at a time, and each write-queue lane embeds the write
-  it is about to apply together with up to seven writes queued behind it (at
-  most 16 texts) in one round. Writes still plan, validate and commit one at
-  a time in lane order, each with its own receipt; a text a round could not
-  embed is embedded alone, so one bad text fails only its own write. This
-  needs an embedder that batches: the candle adapter does, the HTTP adapters
-  keep their one-at-a-time behaviour. Not yet re-measured with
-  `mcp_concurrent.py`; see `dev-diary/notes/perf-125-batched-embeds.md`.
+- **One embedder call per write (#125).** A hybrid derive or record_action
+  now embeds all of its texts in one batched call instead of one call per
+  concept, when the embedder batches (the candle adapter does; the HTTP
+  adapters keep their one-at-a-time behaviour). Each write still plans,
+  validates and commits on its own; a text the call could not embed is
+  embedded alone, so one bad text fails only its own write. Not yet
+  re-measured with `mcp_concurrent.py`; see
+  `dev-diary/notes/perf-125-batched-embeds.md`.
 - **Candle forwards in short, length-sorted chunks (#125).** A coalesced
   take now runs as forwards of at most 8 texts of similar length, so one long
   text no longer pads every other text in its batch. Measured on Metal: a
   16-wide batch with one 910-byte text took 1,280 ms padded and 312 ms as
-  three chunks.
-
+  three chunks. Single embeds (a recall's query) are served before batched
+  ones, and a request whose caller has stopped waiting is not forwarded.
 
 ## 0.5.0 (2026-10-12)
 
