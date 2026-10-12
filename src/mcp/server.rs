@@ -421,16 +421,22 @@ impl ServerHandler for LamboServer {
         let caller = parts
             .and_then(|parts| parts.extensions.get::<CallCredential>())
             .map(|credential| Arc::clone(&credential.0));
-        // #33 PR 3: the request's grant, for a layered recall's per-layer
-        // check. None over stdio and the J2 endpoint.
-        let grant = parts
-            .and_then(|parts| parts.extensions.get::<CallGrant>())
-            .map(|grant| Arc::clone(&grant.0));
+        // #33 PR 3: how the call arrived, for a layered call's per-layer
+        // check: an HTTP request with its grant (or, refused, without one),
+        // or no parts at all (stdio and the J2 endpoint).
+        let auth = parts.map(|parts| {
+            trace::CallAuth::Http(
+                parts
+                    .extensions
+                    .get::<CallGrant>()
+                    .map(|grant| Arc::clone(&grant.0)),
+            )
+        });
         // In flight to the end of the call, so neither the idle sweeper nor
         // an eviction takes the session down under it (#32 PR 6).
         let _in_flight = self.activity.as_ref().map(|activity| activity.enter());
         let call = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
-        trace::with_caller(caller, grant, self.tool_router.call(call)).await
+        trace::with_caller(caller, auth, self.tool_router.call(call)).await
     }
 
     fn get_info(&self) -> ServerInfo {

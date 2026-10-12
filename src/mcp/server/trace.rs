@@ -45,10 +45,9 @@ tokio::task_local! {
     /// `call_tool` for the whole call (#32 PR 5 review I6).
     static CALLER: Option<Arc<str>>;
 
-    /// The grant the current HTTP tool call authenticated as (#33 PR 3),
-    /// set by `call_tool` for the whole call; a layered recall checks it
-    /// against each layer.
-    static GRANT: Option<Arc<crate::surface::session::SessionGrant>>;
+    /// How the current tool call arrived (#33 PR 3), set by `call_tool`
+    /// for the whole call; a layered call checks it against each layer.
+    static AUTH: Option<CallAuth>;
 }
 
 /// The configured `[[serve.credential]]` an HTTP request authenticated as,
@@ -70,24 +69,35 @@ pub(crate) struct CallCredential(pub(crate) Arc<str>);
 #[derive(Clone, Debug)]
 pub(crate) struct CallGrant(pub(crate) Arc<crate::surface::session::SessionGrant>);
 
-/// Run one tool call with `caller` as its credential and `grant` as its
-/// grant.
-pub(super) async fn with_caller<F: Future>(
-    caller: Option<Arc<str>>,
-    grant: Option<Arc<crate::surface::session::SessionGrant>>,
-    call: F,
-) -> F::Output {
-    CALLER.scope(caller, GRANT.scope(grant, call)).await
+/// How a tool call arrived, for a layered call's per-layer check (#33 PR
+/// 3 review L2). A call with no request parts at all (the J2 session
+/// endpoint, stdio, a library caller) has none.
+#[derive(Clone, Debug)]
+pub(crate) enum CallAuth {
+    /// An HTTP request, with the grant the guard resolved for it. `None`
+    /// means the parts carried no grant (a router served without the
+    /// guard), which a layered call refuses rather than trusts.
+    Http(Option<Arc<crate::surface::session::SessionGrant>>),
 }
 
-/// The current call's grant, if it arrived over HTTP.
-pub(super) fn grant() -> Option<Arc<crate::surface::session::SessionGrant>> {
-    GRANT.try_with(Clone::clone).ok().flatten()
+/// Run one tool call with `caller` as its credential and `auth` as how it
+/// arrived.
+pub(super) async fn with_caller<F: Future>(
+    caller: Option<Arc<str>>,
+    auth: Option<CallAuth>,
+    call: F,
+) -> F::Output {
+    CALLER.scope(caller, AUTH.scope(auth, call)).await
 }
 
 /// The current call's configured credential, if any.
 fn caller() -> Option<Arc<str>> {
     CALLER.try_with(Clone::clone).ok().flatten()
+}
+
+/// How the current call arrived; `None` without request parts.
+pub(super) fn call_auth() -> Option<CallAuth> {
+    AUTH.try_with(Clone::clone).ok().flatten()
 }
 
 /// The I1 `lambo_recall` payload facts: the query, the top-k hits with **final

@@ -59,7 +59,15 @@ fn layered_registry_at(backends: ResolvedBackends, session_rps: u32) -> Arc<Sess
             agent: "agent-a".into(),
             session_rps,
             layers: project_layered_with_general(),
-            authority: None,
+            // The implicit `local` credential the router's guard resolves
+            // (`serve_router`), so a layered call's per-layer check runs on
+            // the real grant from the request's parts.
+            authority: Some(authority_for(&{
+                let mut opts = ServeOptions::new(PROJECT, "agent-a");
+                opts.sessions = vec![PROJECT.to_string(), GENERAL.to_string()];
+                opts.transport = Transport::Http;
+                opts
+            })),
         }),
         early,
         RegistryBounds::pinned_only(),

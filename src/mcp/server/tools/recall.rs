@@ -16,7 +16,7 @@ use crate::mcp::server::params::{check_size, RecallParams};
 use crate::mcp::server::response::{
     attach_warnings, bad_param, config_refusal, layer_unavailable, redact_urls, tool_err,
 };
-use crate::mcp::server::trace::{grant, layered_recall_facts, note_facts, recall_facts};
+use crate::mcp::server::trace::{call_auth, layered_recall_facts, note_facts, recall_facts};
 use crate::mcp::server::LamboServer;
 use crate::memory::{LayerRef, LayerSlot, LayeredRecall, Memory};
 use crate::recall::query_vector::QueryBy;
@@ -354,7 +354,7 @@ impl LamboServer {
     /// configuration bug: answered generically, without naming the layer,
     /// and logged by name for the operator.
     fn authorize_layer(&self, layer: &str) -> Result<(), CallToolResult> {
-        if self.layers().authorize(grant().as_deref(), layer) {
+        if self.layers().authorize(call_auth().as_ref(), layer) {
             return Ok(());
         }
         tracing::error!(

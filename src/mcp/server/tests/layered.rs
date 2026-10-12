@@ -8,7 +8,7 @@ use super::*;
 use crate::mcp::server::layers::{
     LayerDown, LayerHandle, LayerRead, LayerSource, LiveLayer, ServerLayers,
 };
-use crate::mcp::server::trace::with_caller;
+use crate::mcp::server::trace::{with_caller, CallAuth};
 use crate::recall::layered::{DEFAULT_LAYER_MIN_SIMILARITY, DEFAULT_LAYER_WEIGHT};
 use crate::surface::session::{
     parse_addressed, HostedSessions, SessionAuthority, SessionCapabilities, SessionGrant,
@@ -327,7 +327,7 @@ async fn a_grant_refused_its_layer_gets_a_generic_refusal() {
     for scope in [None, Some("general")] {
         let out = with_caller(
             None,
-            Some(Arc::new(narrow.clone())),
+            Some(CallAuth::Http(Some(Arc::new(narrow.clone())))),
             s.recall_impl(params(scope)),
         )
         .await;
@@ -336,10 +336,27 @@ async fn a_grant_refused_its_layer_gets_a_generic_refusal() {
         assert!(text.contains("cannot read every session"), "{text}");
         assert!(!text.contains("general"), "names no session: {text}");
     }
-    let out = with_caller(None, Some(Arc::new(wide)), s.recall_impl(params(None))).await;
+    let out = with_caller(
+        None,
+        Some(CallAuth::Http(Some(Arc::new(wide)))),
+        s.recall_impl(params(None)),
+    )
+    .await;
     assert_eq!(out.is_error, Some(false), "{out:?}");
+    // Review L2: no request parts at all (the J2 endpoint) is allowed;
+    // HTTP parts without a grant are refused, for the stack and a scope.
     let out = with_caller(None, None, s.recall_impl(params(Some("general")))).await;
-    assert_eq!(out.is_error, Some(false), "no grant: the J2 endpoint");
+    assert_eq!(out.is_error, Some(false), "no parts: the J2 endpoint");
+    for scope in [None, Some("general")] {
+        let out = with_caller(
+            None,
+            Some(CallAuth::Http(None)),
+            s.recall_impl(params(scope)),
+        )
+        .await;
+        assert_eq!(out.is_error, Some(true), "parts without a grant: {scope:?}");
+        assert!(text_of(&out).contains("cannot read every session"));
+    }
     s.mem.close().await.expect("close");
     general.mem.close().await.expect("close");
 }

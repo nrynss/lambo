@@ -23,15 +23,17 @@
 //! unless every credential reaching a layered session reaches each of its
 //! layers. Each layered call still authorizes the request's grant for the
 //! layer ([`ServerLayers::authorize`]); a refusal there is a configuration
-//! bug and is answered with a generic error. A call with no grant (the J2
-//! session endpoint, whose boundary is the OS user) is allowed, as today.
+//! bug and is answered with a generic error. A call with no request parts
+//! (the J2 session endpoint, whose boundary is the OS user) is allowed, as
+//! today; an HTTP call whose parts carry no grant is refused.
 
 use std::sync::{Arc, Weak};
 
+use super::trace::CallAuth;
 use crate::mcp::serve::activity::InFlight;
 use crate::mcp::SecretToken;
 use crate::memory::Memory;
-use crate::surface::session::{SessionAuthority, SessionGrant, SessionNeed};
+use crate::surface::session::{SessionAuthority, SessionNeed};
 use crate::types::SessionId;
 
 /// Where a layer handle finds its layer: the serve's session registry.
@@ -153,14 +155,18 @@ impl ServerLayers {
         self.handles.iter().find(|h| h.session.as_str() == session)
     }
 
-    /// May the current call's `grant` read layer `session`? Always, without
-    /// a grant (the J2 endpoint) or without a credential set (not HTTP).
-    pub(crate) fn authorize(&self, grant: Option<&SessionGrant>, session: &str) -> bool {
-        match (&self.authority, grant) {
-            (Some(authority), Some(grant)) => authority
+    /// May the current call read layer `session`? Review L2: a call with
+    /// no request parts (the J2 endpoint, stdio, a library caller) may,
+    /// as may any call outside an HTTP serve (no credential set). An HTTP
+    /// call must carry a grant that reaches the layer: parts without a
+    /// grant are refused, never trusted.
+    pub(crate) fn authorize(&self, auth: Option<&CallAuth>, session: &str) -> bool {
+        match (&self.authority, auth) {
+            (_, None) | (None, _) => true,
+            (Some(authority), Some(CallAuth::Http(Some(grant)))) => authority
                 .authorize(grant, session, SessionNeed::Use)
                 .is_ok(),
-            _ => true,
+            (Some(_), Some(CallAuth::Http(None))) => false,
         }
     }
 }
