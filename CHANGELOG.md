@@ -179,21 +179,25 @@
 
 ### Fixed
 
-- **A dependency question no longer anchors on a word fragment.** A
-  query such as "what depends on X" or "blast radius of X" picked as X any
-  concept whose text was a substring of the query, and the shortest one
-  won. A short concept such as `db` answered "what depends on dbadmin" with
-  its own dependents, and beat `user db schema` when the query named that.
-  X must now appear in the query as whole words (Unicode letters and
-  digits are word characters; a text such as `.env` or `src/main.rs` that
-  starts or ends with punctuation matches wherever it appears). A concept
-  that appears only inside a longer named concept is skipped, then an
-  Entity or Resource is preferred and the longest text wins. A concept
-  named like the question's own wording (`blast radius`) or made only of
-  function words (`it`, `the`, `what`) never anchors. A question that no
-  longer names a concept is answered by the ordinary recall. The
-  "security group" fallback is unchanged, and no fixture or golden output
-  changed.
+- **A dependency question no longer anchors on a word fragment.**
+  Substring matching picked `db` in `dbadmin`, and shortest-first picked
+  `db` over a named `user db schema`. Under layered recall (#134), the wrong
+  anchor also admitted a layer's traversal answer past its relevance floor.
+  Anchors now match whole words after NFC normalization and per-character
+  lowercase; Unicode letters, digits, combining marks and underscores are
+  word characters, and internal hyphens join identifiers. An edge that is
+  punctuation needs no word boundary on that side (`.env` matches in
+  `config/.env`); `src/main.rs` needs boundaries on both word edges.
+  Contained names are skipped, then the subject nearest after the question
+  marker wins, with type and length breaking ties. Marker-overlapping
+  clauses cannot hide the subject. Function-word concepts are skipped
+  except uppercase acronyms explicitly written uppercase in the query.
+  Queries over 16 KiB or candidates over 256 bounded occurrences refuse
+  anchoring; containment uses a sorted sweep. A layer's anchor must agree
+  with the caller's resolved subject; layers still answer when the caller
+  resolves none. The security-group prose fallback is unchanged. No fixture
+  or golden output changed.
+
 
 - **A recall no longer comes back empty when its top hit is long (#130).**
   `context` keeps whole hit blocks while they fit `max_tokens` and stops at
