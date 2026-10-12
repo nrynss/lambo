@@ -618,7 +618,11 @@ async fn a_layer_hit_is_inspected_with_the_same_scope() {
         "{}",
         structured(&found)
     );
-    assert!(text_of(&found).contains("canonization ("), "{}", text_of(&found));
+    assert!(
+        text_of(&found).contains("canonization ("),
+        "{}",
+        text_of(&found)
+    );
     let missing = inspect(json!({"focus": id})).await;
     assert_eq!(missing.is_error, Some(true), "the id is not this session's");
     let own = inspect(json!({"focus": PROJECT_FACT, "scope": "insp-proj"})).await;
