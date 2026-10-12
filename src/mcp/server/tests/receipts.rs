@@ -266,27 +266,27 @@ async fn wire_derived_history_recurs_under_solo_event_time() {
 /// The process-selected policy must reach the live canonization task, not
 /// merely the scorer unit tests. The same seven historical Constraint
 /// derives are seven >=24h-separated sessions: Solo's 1.5 eviction
-/// resistance makes the score 10.5, past `CANONICAL_BAR`, so it climbs
-/// None → Candidate → Venerable → Canonical at one hop per cycle.
+/// resistance makes the score 10.5, past `CANONICAL_BAR`, so Solo admits it
+/// as a Candidate on the first cycle.
 ///
-/// Swarm refuses the identical corpus, and the operative reason is the
-/// **peer-count floor**, not an absent P90 convergence: `stage1_candidates`
-/// returns empty as soon as `peers.len() < canonization_min_peer_count`
-/// (default 20) and never reaches the score distribution at all. Two other
-/// swarm gates would each independently give the same answer here —
-/// `gc_survived >= 3` cannot be met with `gc_interval` at its 10 000
-/// default, and one concept has no peer distribution to cut at P90 — so the
-/// arm is over-determined. That is fine for a negative control, but the
-/// reason it fires must be stated correctly: this arm exercises the floor.
+/// Since #36 PR 3 it climbs no further: the corpus declares no dependents,
+/// so Stage 2 refuses the Candidate → Venerable hop and Solo's band cannot
+/// bypass it (before PR 3 it reached Canonical on the band alone). The arm
+/// therefore spends its whole cycle budget and must end at Candidate.
+///
+/// Swarm refuses the identical corpus at Stage 1: it has no dependents from
+/// other interactions, and `gc_survived >= 3` cannot be met with
+/// `gc_interval` at its 10 000 default. Both arms are live negative controls
+/// that burn real cycles on the finished corpus.
 #[tokio::test]
-async fn a_single_writer_historical_constraint_canonizes_only_under_solo() {
+async fn a_single_writer_historical_constraint_is_admitted_only_under_solo() {
     use crate::types::CanonizationStatus;
 
     /// Cycles the arm is given **after the corpus is complete**, counted
     /// from a baseline rather than from process start.
     ///
-    /// Solo needs exactly three: one hop per cycle is structural
-    /// (`canon::eval`). The budget is not three, and it is not absolute.
+    /// Solo needs one hop to reach Candidate; the rest of the budget is the
+    /// proof it goes no further. The budget is not absolute.
     /// An absolute `canonization_cycles >= 4` left one cycle of slack for
     /// the whole run, and the 10 ms eval interval means cycles fire *while*
     /// the seven derives are still being submitted — a cycle that sees one
@@ -349,17 +349,13 @@ async fn a_single_writer_historical_constraint_canonizes_only_under_solo() {
                 .expect("the applied derives left a constraint in the graph")
                 .canonization_status;
             let spent = s.mem.stats().canonization_cycles.saturating_sub(baseline);
-            if status == CanonizationStatus::Canonical
-                || spent >= CYCLE_BUDGET
-                || tokio::time::Instant::now() >= deadline
-            {
-                // The Swarm arm is a LIVE negative control: it must have
-                // burned its whole budget of real cycles on the finished
-                // corpus and still promoted nothing. Without this the arm
-                // could pass by never having evaluated anything.
+            if spent >= CYCLE_BUDGET || tokio::time::Instant::now() >= deadline {
+                // Both arms are LIVE controls: each must have burned its
+                // whole budget of real cycles on the finished corpus, so the
+                // final status is what the policy decides, not a timeout.
                 assert!(
-                    status == CanonizationStatus::Canonical || spent >= CYCLE_BUDGET,
-                    "{policy:?} neither promoted nor got its {CYCLE_BUDGET} cycles \
+                    spent >= CYCLE_BUDGET,
+                    "{policy:?} did not get its {CYCLE_BUDGET} cycles \
                          (spent {spent}) — the arm timed out instead of deciding"
                 );
                 s.mem.close().await.expect("close");
@@ -371,8 +367,9 @@ async fn a_single_writer_historical_constraint_canonizes_only_under_solo() {
 
     assert_eq!(
         run(PromotionPolicy::Solo, "mcp-solo-promotes").await,
-        CanonizationStatus::Canonical,
-        "seven historical recurrences must clear Solo's Canonical band"
+        CanonizationStatus::Candidate,
+        "seven historical recurrences clear Solo's Candidate bar, and with no \
+         dependents Stage 2 stops the band there"
     );
     assert_eq!(
         run(PromotionPolicy::Swarm, "mcp-swarm-does-not-promote").await,

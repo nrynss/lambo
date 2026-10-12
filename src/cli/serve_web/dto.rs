@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::canon::{GateProgress, PromotionPolicy};
+use crate::canon::{Admission, GateProgress, PromotionPolicy};
 use crate::resolve::{
     embedding_mismatch_error, session_embedding_compatibility, SessionEmbeddingCompatibility,
 };
@@ -268,6 +268,15 @@ pub(super) struct InspectResponse {
     /// concept and for a broken store query.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) gate_progress_omitted: Option<&'static str>,
+    /// #36 PR 3: why the concept is or is not admitted to its next status
+    /// under `promotion_policy`, gate by gate, with one reason per unmet
+    /// gate ([`Admission`]). Additive; present whenever the focus was found
+    /// and the store answered (a Canonical concept carries it too, with no
+    /// next status). It covers what `gate_progress` cannot: Stage 1's
+    /// dependent-interaction floor and, under `Solo`, the score band and the
+    /// Stage 2/3 verdicts Solo has needed since PR 3.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) admission: Option<Admission>,
 }
 
 impl InspectResponse {
@@ -287,6 +296,7 @@ impl InspectResponse {
             promotion_policy,
             gate_progress: None,
             gate_progress_omitted: None,
+            admission: None,
         }
     }
 }

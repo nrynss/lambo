@@ -399,7 +399,7 @@ impl Daemon {
     /// Handle to the daemon-owned score table, for readers that must follow
     /// it across cycles rather than take one snapshot — P6's
     /// [`CanonizationTask`] reads it once per `canonization_eval_interval`
-    /// for Stage 1's P90 population.
+    /// to order Stage 1's queue and the Stage 3 window.
     ///
     /// Daemon-owned: the rescore loop replaces the table wholesale each
     /// cycle, so holders must only ever read. Lock order is unchanged (this

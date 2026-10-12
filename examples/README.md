@@ -24,6 +24,29 @@ Pin `--at` to make two runs over the same copy comparable.
 
 ---
 
+## `canon36_admission.rs` — what evidence-led admission does on a store
+
+Measures #36 PR 3 on one session under both policies: how many concepts
+would newly become Candidate, Venerable or Canonical on the first evaluation
+(every concept's next hop through the evaluator's own gates and the real
+SQLite queries, unbatched), what one real cycle with the default batch
+commits, and where the evaluator settles when run to a fixed point on an
+in-memory copy. Every count is split Resource versus non-Resource or by
+concept type, and every concept that would turn Canonical is listed by node
+id and type. It prints no concept text and carries no data of its own. The
+database is opened read-only; run it on a copy of a store, never on a live
+writer's file.
+
+```text
+cargo run --features store-sqlite --example canon36_admission -- \
+    <store.db> <session-id> [--at <RFC3339>] [--assume-survived] [--quiet 30]
+```
+
+`--assume-survived` raises every `gc_survived` below 3 to 3 first, the state
+after three GC sweeps.
+
+---
+
 ## `drive_mcp_soak.py` — a demo artifact, and why that label matters
 
 Connects to a running `lambo serve` over MCP and repeatedly calls `lambo_derive`
@@ -41,7 +64,9 @@ threshold was enforced by the engine, not by this script:
 
 * blast radius strictly greater than 5, counted over structural edges only
 * `gc_survived >= 3`
-* a score in the top decile of at least 20 non-Canonical peers
+* a score in the top decile of at least 20 non-Canonical peers (the Stage 1 bar
+  when this ran; since 0.6.0 `Swarm` instead admits on `gc_survived >= 3` plus
+  dependents from at least 2 interactions other than the concept's own)
 * interaction coverage of at least 0.3
 
 `VPC-Enterprise-Prod` cleared all of them, at a real blast radius of 7 derived

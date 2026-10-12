@@ -1,81 +1,69 @@
 //! Promotion policy selection — the `PromotionScorer` seam (C1).
 //!
-//! Canonization's Stage 1 is the one place the **swarm assumption** is welded
-//! in. Spec §3.2's design has independent agents converging on the same fact;
-//! Stage 1 encodes that as a session gate on peer count plus a cut at the P90
-//! of the non-Canonical peer score distribution
-//! ([`crate::canon::stage1_candidates`]). With a single writer there are no
-//! independent peers, nothing converges, and nothing is ever promoted — so the
-//! graph never produces the load-bearing warnings that are its whole point.
+//! Each policy owns two decisions: **Stage 1 admission** (which concepts
+//! become Candidates) and the **admission of the later hops** given a stage's
+//! evidence verdict ([`PromotionScorer::admits_hop`]). Stages 2 and 3
+//! *measure* evidence (`interaction_span_with_window`, `blast_radius`), and
+//! those measurements are policy-independent: evidence means the same thing
+//! whether one writer or twenty produced it.
 //!
-//! Stage 1 is not the whole policy, though. Stages 2 and 3 *measure* evidence
-//! (`interaction_span`, `blast_radius`) rather than agreement, and those
-//! predicates are policy-independent by C1's design decision — evidence means
-//! the same thing whether one writer or twenty produced it. What each policy
-//! owns beside Stage 1 is the **admission** of the later hops
-//! ([`PromotionScorer::admits_hop`]): given a stage's evidence verdict, the
-//! policy has the final word. Swarm always defers to the evidence; solo
-//! substitutes its own score bands (spec §3.2), which is what makes the
-//! published Venerable/Canonical bars load-bearing rather than decorative.
+//! ## Since #36 PR 3: evidence first, policy second
 //!
-//! ## What C1 was, and what C2 added
+//! * **Swarm** admits a Candidate on evidence alone: `gc_survived >= 3` and
+//!   dependents from at least two interactions other than the concept's own
+//!   ([`crate::canon::stage1_candidates`]). The old 20-peer minimum and the
+//!   P90 quota are gone; the composite score only orders the queue. Each later
+//!   hop is its stage's verdict.
+//! * **Solo** admits a Candidate by its score band (spec §3.2's formula, with
+//!   the valid-action term replaced by distinct dependent interactions), and
+//!   each later hop needs **both** its band and its stage's verdict. Solo can
+//!   no longer climb past Stage 2, Stage 3 or the re-promotion cooldown on its
+//!   score: the evaluator requires the verdict before it asks the policy at
+//!   all, so a policy can only narrow the evidence, never replace it.
 //!
-//! C1 was the **seam only**: the policy becomes selectable, and swarm stays
-//! the default so no existing behaviour moves. Its scorer refused to resolve
-//! — an empty-set stub would have been indistinguishable at runtime from a
-//! finished, broken SoloPolicy.
+//! Why: on the rig snapshot, Solo by bands alone canonized 121 file paths and
+//! short names with blast radius 0 (100% artifacts), ranked by how often
+//! actions touched them; the valid-action term counted `Causal` edges, which
+//! #36 decided confer no load. Evidence-gated Solo matched Swarm's set in the
+//! design measurement. See `dev-diary/notes/feature-36-pr3-admission.md`.
 //!
-//! C2 lands that scorer. The solo score (spec §3.2) is
+//! ## The solo score
 //!
 //! ```text
-//! (Sessions × 1.0) + (Human Confirmed × 4.0) + (Valid Actions × 2.0)
-//!     − (Reverts × 3.0)
+//! (Sessions × 1.0) + (Human Confirmed × 4.0)
+//!     + (Dependent Interactions × 2.0) − (Reverts × 3.0)
 //! ```
 //!
 //! multiplied by the concept-type eviction-resistance table
 //! ([`crate::types::ConceptType::eviction_resistance`]) before the band
 //! comparison: ≥ [`CANONICAL_BAR`] Canonical, ≥ [`VENERABLE_BAR`] Venerable,
-//! ≥ [`CANDIDATE_BAR`] Candidate, else None. Three of the four inputs derive
-//! from structures the graph already carries; the fourth (`human_confirmed`)
-//! is a persisted counter bumped only through
-//! [`crate::Memory::confirm_human`] — see the field docs on
-//! [`crate::types::Concept::human_confirmed`] for the data-model decision.
+//! ≥ [`CANDIDATE_BAR`] Candidate, else None. `Dependent Interactions` is the
+//! same aged, own-origin-excluded count Swarm's Stage 1 reads
+//! ([`crate::canon::dependent_interaction_counts`]), so one write declaring a
+//! dependence moves both policies the same way, and `Causal` touches (a file
+//! modified by many actions) no longer score. `human_confirmed` is a
+//! persisted counter bumped only through [`crate::Memory::confirm_human`].
 //!
 //! The recurrence term is the reason C2 depends on D2: "sessions" are counted
 //! with [`separated_session_count`] over the **event-time** spread of the
 //! concept's supporting interactions ([`crate::types::Interaction::about_time`],
 //! never flush stamps). A bulk ingest of a decade of history in ninety
 //! minutes has that separation in commit dates and none whatsoever in flush
-//! time; built against ingest time this policy would promote nothing — and
-//! ship a passing test proving it works. The test that pins the difference
-//! is `a_bulk_ingest_recurs_only_under_event_time` below.
+//! time. The test that pins the difference is
+//! `a_bulk_ingest_recurs_only_under_event_time` below.
 //!
 //! ## Shape: enum on the params, trait for the behaviour
 //!
 //! The selector rides on [`crate::canon::EvalParams`], which is already "the
-//! knobs for one cycle" and already carries `min_peer_count`, `min_age`,
-//! `min_edge_age`, `cooldown`, `batch_size` and `max_canonical_nodes`. Nothing
-//! here duplicates one of those: the policy chooses *which predicate reads
-//! them*, it does not restate a threshold.
-//!
-//! [`Evaluator::gather`](crate::canon::Evaluator) therefore keeps its
-//! signature — the seam cost the default path one enum field and one
-//! indirection, not a refactor.
+//! knobs for one cycle". Nothing here duplicates one of its thresholds: the
+//! policy chooses *which predicate reads them*, it does not restate one.
 //!
 //! ## Injected clock
 //!
-//! [`PromotionScorer::candidates`] takes `now`, and the solo scorer reads
-//! event time from the graph's rows ([`crate::types::Interaction::about_time`])
-//! rather than from any clock. Nothing here reaches for `Utc::now()` — the
-//! same injected-clock discipline `gate.rs` keeps, unbroken across the seam.
-//!
-//! `now` is currently unused by the solo scorer's arithmetic: every term it
-//! reads is a stored instant or a stored count. The parameter stays because
-//! the trait is shared with the swarm arm and because the first solo-specific
-//! *age* term (if one is ever tuned) must enter through it, not through the
-//! wall clock.
+//! [`PromotionScorer::candidates`] and [`PromotionScorer::admits_hop`] take
+//! `now`, used for the dependent-interaction age floor; nothing here reaches
+//! for `Utc::now()`.
 
-use std::collections::HashSet;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -83,10 +71,13 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::canon::event_time::separated_session_count;
+use crate::canon::stage1::{dependent_interaction_counts, dependent_interactions};
 use crate::canon::stage1_candidates;
 use crate::canon::EvalParams;
 use crate::graph::Graph;
-use crate::types::{CanonizationStatus, Concept, EdgeType, Node, NodeId, ScoreTable};
+use crate::types::{
+    tie_break_by_key, CanonizationStatus, Concept, EdgeType, Node, NodeId, ScoreTable,
+};
 
 /// Declares [`PromotionPolicy`] **and** [`PromotionPolicy::ALL`] from one list
 /// of variants, so that a variant the valid set does not name is not a thing
@@ -169,16 +160,14 @@ promotion_policy! {
     /// is also [`PromotionPolicy::ALL`]. **A new variant goes here**, and the
     /// compiler will then name every `match` that needs an arm for it.
     pub enum PromotionPolicy {
-        /// Spec §3.2 multi-agent convergence: peer-count session gate, P90 cut on
-        /// the non-Canonical peer score distribution. The default, and the only
-        /// policy a session can currently run under.
+        /// Evidence-led admission (#36 PR 3): a Candidate needs `gc_survived >= 3`
+        /// and dependents from at least two other interactions; each later hop is
+        /// its stage's verdict. The default.
         #[default]
         Swarm,
-        /// Single-writer promotion (spec §3.2's solo score).
-        ///
-        /// Implemented as of C2: [`SoloScorer`] computes the §3.2 formula over the
-        /// graph's own evidence. The default remains [`PromotionPolicy::Swarm`] —
-        /// nothing canonizes under solo unless a session opts in.
+        /// Single-writer promotion (spec §3.2's solo score): Stage 1 by score
+        /// band, each later hop by band **and** its stage's verdict (#36 PR 3).
+        /// Nothing canonizes under solo unless a session opts in.
         Solo,
     }
 }
@@ -303,25 +292,21 @@ where
 
 /// The Stage-1 promotion decision and each later hop's admission, as a policy.
 ///
-/// Stage 1 is the only stage whose predicate encodes *how agreement is
-/// established*. Stages 2 and 3 ask the store for evidence and their
-/// predicates are policy-independent (see the module docs): stage 2's
-/// `interaction_span` and stage 3's blast radius measure the same thing
-/// whether one writer or twenty produced it.
-///
-/// What the policy owns beside Stage 1 is the **admission** of the
-/// Candidate → Venerable and Venerable → Canonical hops: [`PromotionScorer::admits_hop`]
-/// receives the stage's evidence verdict and has the final word. Swarm keeps
-/// the evidence as the whole decision — byte-for-byte the pre-seam pipeline.
-/// Solo substitutes its own resistant-score bands (spec §3.2), so the
-/// published `VENERABLE_BAR` and `CANONICAL_BAR` drive the actual ladder
-/// instead of merely describing it: a concept climbs exactly as high as its
-/// band, and no store verdict can lift it past that.
+/// Stages 2 and 3 ask the store for evidence and their predicates are
+/// policy-independent (see the module docs). What the policy owns is Stage 1
+/// and the **admission** of the Candidate → Venerable and Venerable →
+/// Canonical hops: [`PromotionScorer::admits_hop`] receives the stage's
+/// evidence verdict and may refuse a hop the evidence supports. Since #36
+/// PR 3 it can no longer admit a hop the evidence refuses: the evaluator
+/// asks the policy only about a node whose stage verdict passed, so the
+/// policy can narrow the evidence but never replace it. (The method lost its
+/// `evidence` argument in the same release: it was always `true`.)
 pub trait PromotionScorer: Send + Sync + std::fmt::Debug {
-    /// Concepts that currently clear the Candidate bar, `NodeId` ascending.
+    /// Concepts that currently clear the Candidate bar, in the order a
+    /// bounded cycle should take them (highest priority first).
     ///
-    /// `now` is injected rather than read from the clock — see the module
-    /// docs on D2 compatibility. [`SwarmScorer`] ignores it.
+    /// `now` is injected rather than read from the clock, with
+    /// `params.min_age` the dependence age floor.
     fn candidates(
         &self,
         graph: &Graph,
@@ -330,30 +315,28 @@ pub trait PromotionScorer: Send + Sync + std::fmt::Debug {
         now: DateTime<Utc>,
     ) -> Vec<NodeId>;
 
-    /// Whether `node` may take the promotion hop to `to` this cycle.
-    ///
-    /// `evidence` is the stage predicate's verdict for this node — stage 2's
-    /// interaction-span pass, or stage 3's blast-radius pass (already
-    /// cooldown-gated in the verdict phase). The stage predicates stay
-    /// policy-independent measures; this method decides what their verdict
-    /// is *worth* under the active policy. A `to` below the node's current
-    /// status is never asked — the ladder only climbs.
+    /// Whether the policy lets `node` take the promotion hop to `to`, given
+    /// that the stage verdict for that hop holds (Stage 2's capped span, or
+    /// Stage 3's "Stage 2 still holds, blast radius > 5, cooldown clear"):
+    /// the evaluator never asks about a node whose verdict failed. It also
+    /// asks before probing (`Evaluator::gather`), so a node the policy would
+    /// refuse costs no store query. A `to` below the node's current status is
+    /// never asked — the ladder only climbs.
     fn admits_hop(
         &self,
         graph: &Graph,
         node: NodeId,
         to: CanonizationStatus,
-        evidence: bool,
+        params: &EvalParams,
+        now: DateTime<Utc>,
     ) -> bool;
 }
 
-/// Spec §3.2 multi-agent convergence — the shipped policy.
+/// Evidence-led Swarm admission — the default policy.
 ///
-/// A pure delegation to [`stage1_candidates`] at Stage 1, and to the stage's
-/// own evidence verdict on every later hop. It holds no state and adds no
-/// arithmetic: the seam must be able to prove it changed nothing, and the
-/// cheapest proof is that the default arm still calls the same function with
-/// the same argument and keeps the verdict verbatim.
+/// Stage 1 is [`stage1_candidates`] (survival plus two other dependent
+/// interactions, composite-ordered); every later hop is the stage's own
+/// evidence verdict. It holds no state and adds no arithmetic.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SwarmScorer;
 
@@ -363,9 +346,9 @@ impl PromotionScorer for SwarmScorer {
         graph: &Graph,
         scores: &ScoreTable,
         params: &EvalParams,
-        _now: DateTime<Utc>,
+        now: DateTime<Utc>,
     ) -> Vec<NodeId> {
-        stage1_candidates(graph, scores, params.min_peer_count)
+        stage1_candidates(graph, scores, params.min_age, now)
     }
 
     fn admits_hop(
@@ -373,11 +356,12 @@ impl PromotionScorer for SwarmScorer {
         _graph: &Graph,
         _node: NodeId,
         _to: CanonizationStatus,
-        evidence: bool,
+        _params: &EvalParams,
+        _now: DateTime<Utc>,
     ) -> bool {
-        // Swarm has no score of its own — convergence *is* the evidence, so
-        // the stage predicate's verdict is the whole decision.
-        evidence
+        // Swarm has no score of its own: the stage verdict, which the
+        // evaluator has already required, is the decision.
+        true
     }
 }
 
@@ -401,12 +385,14 @@ pub const CANONICAL_BAR: f64 = 10.0;
 /// "sessions" in the recurrence term (spec §3.2's "separated by ≥ 24 hours").
 pub const SESSION_SEPARATION: Duration = Duration::from_secs(86_400);
 
-/// Spec §3.2 term weights, verbatim.
+/// Spec §3.2 term weights.
 pub const SESSION_WEIGHT: f64 = 1.0;
 /// See [`SESSION_WEIGHT`].
 pub const HUMAN_CONFIRMED_WEIGHT: f64 = 4.0;
-/// See [`SESSION_WEIGHT`].
-pub const VALID_ACTION_WEIGHT: f64 = 2.0;
+/// Per distinct dependent interaction (#36 PR 3). Spec §3.2's weight for
+/// "valid actions", which this term replaces: a dependence declared from
+/// another interaction is what a valid action against a ruling looks like.
+pub const DEPENDENT_INTERACTION_WEIGHT: f64 = 2.0;
 /// Subtracted per revert.
 pub const REVERT_WEIGHT: f64 = 3.0;
 
@@ -420,11 +406,17 @@ fn status_rank(s: CanonizationStatus) -> u8 {
     }
 }
 
-/// Resolved about-times of every interaction whose work touched this concept:
+/// Resolved about-times of every interaction that supported this concept:
 /// direct derivations (`Derives` from an interaction), plus the writing
-/// interaction of every action concept that recorded a `Causal`/`Dependency`
-/// edge against it. Sorted, deduplicated — this is the recurrence term's
-/// input, and it resolves through `about_time`, never flush stamps.
+/// interaction of every concept that declared it depends on this one
+/// (`Dependency` into it). Sorted, deduplicated — this is the recurrence
+/// term's input, and it resolves through `about_time`, never flush stamps.
+///
+/// `Causal` (an action produced or modified this concept) is **not** support
+/// since #36 PR 3, the same reason it confers no load (#36 PR 1): a file
+/// modified on five separate days recurred as work, not as a fact anyone
+/// rests on, and that alone made files Solo Candidates. This is the spec
+/// §3.2 errata recorded in `dev-diary/notes/feature-36-pr3-admission.md`.
 ///
 /// A fact with no event time contributes its flush time (D's fallback rule),
 /// so a live session behaves exactly as it did pre-D: one cluster.
@@ -436,9 +428,9 @@ pub fn supporting_interaction_times(graph: &Graph, c: &Concept) -> Vec<DateTime<
         }
         let writer = match e.edge_type {
             EdgeType::Derives => Some(e.source),
-            EdgeType::Causal | EdgeType::Dependency => match graph.node(e.source) {
-                // record_action sources its structural edges from the action
-                // node (a Resource concept); credit that action's turn.
+            EdgeType::Dependency => match graph.node(e.source) {
+                // record_action sources `depends_on` from the action node (a
+                // Resource concept); credit that action's turn.
                 Some(Node::Concept(s)) => Some(s.origin_interaction),
                 _ => None,
             },
@@ -462,25 +454,6 @@ pub fn recurrence_sessions(graph: &Graph, c: &Concept) -> usize {
     separated_session_count(&supporting_interaction_times(graph, c), SESSION_SEPARATION)
 }
 
-/// Distinct recorded actions against this concept — spec §3.2's "valid
-/// actions". An action *is* valid here because recording it already ran the
-/// full write-time validation pipeline ([`crate::graph::action::record_action`]:
-/// canonicalization, cycle check); a rejected action leaves no edge and no
-/// trace, so there is nothing to subtract. Counted per **source** concept, so
-/// one action producing and depending on the same thing counts once.
-pub fn valid_action_count(graph: &Graph, c: &Concept) -> usize {
-    let mut sources: HashSet<NodeId> = HashSet::new();
-    for e in graph.incident_edges(c.id) {
-        if e.target == c.id
-            && matches!(e.edge_type, EdgeType::Causal | EdgeType::Dependency)
-            && matches!(graph.node(e.source), Some(Node::Concept(_)))
-        {
-            sources.insert(e.source);
-        }
-    }
-    sources.len()
-}
-
 /// How many times this concept lost standing — every audited transition whose
 /// `to_status` ranks strictly below its `from_status`. The write gate
 /// (`legal_canonization_transition`, behind
@@ -500,11 +473,53 @@ pub fn revert_count(graph: &Graph, id: NodeId) -> usize {
         .count()
 }
 
+/// The solo score's terms for one concept, before and after the type
+/// multiplier. Inspect explains a Solo verdict with these.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct SoloBreakdown {
+    /// ≥ 24 h-separated sessions among the supporting interactions.
+    pub sessions: usize,
+    /// Human confirmations.
+    pub human_confirmed: i32,
+    /// Distinct dependent interactions other than the concept's own, aged.
+    pub dependent_interactions: usize,
+    /// Rank-decreasing transitions in the audit.
+    pub reverts: usize,
+    /// The concept type's eviction-resistance multiplier.
+    pub resistance: f64,
+    /// The resistant score the bands compare.
+    pub score: f64,
+    /// The band that score falls in.
+    pub band: CanonizationStatus,
+}
+
+/// [`SoloBreakdown`] for `c`, given its dependent-interaction count (from
+/// [`dependent_interaction_counts`] or [`dependent_interactions`]).
+pub fn solo_breakdown(graph: &Graph, c: &Concept, dependent_interactions: usize) -> SoloBreakdown {
+    let sessions = recurrence_sessions(graph, c);
+    let reverts = revert_count(graph, c.id);
+    let raw = sessions as f64 * SESSION_WEIGHT
+        + c.human_confirmed as f64 * HUMAN_CONFIRMED_WEIGHT
+        + dependent_interactions as f64 * DEPENDENT_INTERACTION_WEIGHT
+        - reverts as f64 * REVERT_WEIGHT;
+    let resistance = c.concept_type.eviction_resistance();
+    let score = raw * resistance;
+    SoloBreakdown {
+        sessions,
+        human_confirmed: c.human_confirmed,
+        dependent_interactions,
+        reverts,
+        resistance,
+        score,
+        band: classify(score),
+    }
+}
+
 /// The raw §3.2 sum, before the type multiplier.
-pub fn raw_solo_score(graph: &Graph, c: &Concept) -> f64 {
+pub fn raw_solo_score(graph: &Graph, c: &Concept, dependent_interactions: usize) -> f64 {
     recurrence_sessions(graph, c) as f64 * SESSION_WEIGHT
         + c.human_confirmed as f64 * HUMAN_CONFIRMED_WEIGHT
-        + valid_action_count(graph, c) as f64 * VALID_ACTION_WEIGHT
+        + dependent_interactions as f64 * DEPENDENT_INTERACTION_WEIGHT
         - revert_count(graph, c.id) as f64 * REVERT_WEIGHT
 }
 
@@ -517,23 +532,15 @@ pub fn raw_solo_score(graph: &Graph, c: &Concept) -> f64 {
 ///
 /// * **Daemon composite** ([`crate::daemon::score`]): spec §9 defines an
 ///   *additive* bonus term on a `[0, 1 + MAX_BONUS]` composite, so the table's
-///   score-multiplier column enters as an offset,
-///   `concept_type_modifier = score_multiplier() − 1.0`, clamped to
-///   `±[−0.10, +0.15]`. It feeds GC thresholds and ranking.
+///   score-multiplier column enters as an offset. It feeds GC thresholds and
+///   ranking.
 /// * **Solo score** (here): spec §3.2 defines resistance as a *multiplier* on
 ///   an unbounded evidence sum, so the table's eviction-resistance column
-///   enters multiplicatively via the existing
+///   enters multiplicatively via
 ///   [`crate::types::ConceptType::eviction_resistance`] (Constraint 1.5 …
-///   Observation 0.7). Applied before the band comparison, which is what makes
-///   Constraints promote first and Observations last under equal evidence —
-///   the point of calling them eviction-*resistant*.
-///
-/// Both read their numbers from the two `const fn`s on
-/// [`crate::types::ConceptType`]: exactly one table per column exists in
-/// `src/`, no parallel knob was added, and neither scorer writes anything the
-/// other reads.
-pub fn solo_score(graph: &Graph, c: &Concept) -> f64 {
-    raw_solo_score(graph, c) * c.concept_type.eviction_resistance()
+///   Observation 0.7), applied before the band comparison.
+pub fn solo_score(graph: &Graph, c: &Concept, dependent_interactions: usize) -> f64 {
+    raw_solo_score(graph, c, dependent_interactions) * c.concept_type.eviction_resistance()
 }
 
 /// Band classification of a **resistant** score. Inclusive at every bar
@@ -557,30 +564,15 @@ pub fn classify(resistant: f64) -> CanonizationStatus {
     }
 }
 
-/// Single-writer promotion — implemented (C2).
+/// Single-writer promotion (C2; evidence-gated since #36 PR 3).
 ///
-/// Computes the §3.2 score for every concept in the session and admits those
-/// whose resistant score clears the Candidate bar, `NodeId` ascending (the
-/// order `Evaluator::gather` expects). Still-`None` concepts only reach the
-/// promotion path anyway — `gather` re-filters on current status before the
-/// batch cut — so this predicate needs no state beyond the graph.
-///
-/// The bands above the Candidate bar are consumed by [`SoloScorer::admits_hop`]:
-/// under solo, the Candidate → Venerable and Venerable → Canonical hops are
-/// decided by the resistant score's band, **not** by the stage-2/3 store
-/// evidence. Spec §3.2 defines the formula as solo's promotion rule, so the
-/// graph status a solo session converges to tracks `classify(solo_score(..))`
-/// (bounded by the Canonical budget and the stage-3 re-promotion cooldown,
-/// which apply to every policy). The revert penalty is what cools a demoted
-/// concept's score down; the cooldown gate in `eval` bounds how fast it may
-/// climb back.
-///
-/// The C1-era shape was a deliberate `unimplemented!()` backstop behind
-/// `Config::validate`'s Solo refusal: an empty-set stub would have been
-/// indistinguishable at runtime from a finished policy that promoted nothing.
-/// That reasoning cost nothing here — the refusal was loud until the formula
-/// was real, and removing both gate and backstop together is this commit's
-/// clean cutover.
+/// Stage 1 admits every concept whose resistant score clears the Candidate
+/// bar, ordered by that score (highest first), then canonical key, then
+/// `NodeId`. The later hops need the node's band **and** the stage verdict:
+/// the bands cap how high a concept can climb, the verdicts decide whether it
+/// may climb at all. The Canonical budget and the stage-3 re-promotion
+/// cooldown apply as for every policy; the revert penalty is what cools a
+/// demoted concept's score down.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SoloScorer;
 
@@ -589,16 +581,24 @@ impl PromotionScorer for SoloScorer {
         &self,
         graph: &Graph,
         _scores: &ScoreTable,
-        _params: &EvalParams,
-        _now: DateTime<Utc>,
+        params: &EvalParams,
+        now: DateTime<Utc>,
     ) -> Vec<NodeId> {
-        let mut ids: Vec<NodeId> = graph
+        let counts = dependent_interaction_counts(graph, params.min_age, now);
+        let mut admitted: Vec<(f64, &Concept)> = graph
             .concepts()
-            .filter(|c| classify(solo_score(graph, c)) != CanonizationStatus::None)
-            .map(|c| c.id)
+            .map(|c| {
+                let deps = counts.get(&c.id).copied().unwrap_or(0);
+                (solo_score(graph, c, deps), c)
+            })
+            .filter(|(score, _)| classify(*score) != CanonizationStatus::None)
             .collect();
-        ids.sort_by_key(|id| id.0);
-        ids
+        admitted.sort_by(|(sa, a), (sb, b)| {
+            sb.total_cmp(sa).then_with(|| {
+                tie_break_by_key(Some(&a.canonical_key), &a.id, Some(&b.canonical_key), &b.id)
+            })
+        });
+        admitted.into_iter().map(|(_, c)| c.id).collect()
     }
 
     fn admits_hop(
@@ -606,11 +606,13 @@ impl PromotionScorer for SoloScorer {
         graph: &Graph,
         node: NodeId,
         to: CanonizationStatus,
-        _evidence: bool,
+        params: &EvalParams,
+        now: DateTime<Utc>,
     ) -> bool {
         match graph.node(node) {
             Some(Node::Concept(c)) => {
-                status_rank(classify(solo_score(graph, c))) >= status_rank(to)
+                let deps = dependent_interactions(graph, node, params.min_age, now);
+                status_rank(classify(solo_score(graph, c, deps))) >= status_rank(to)
             }
             // Not a concept (or gone): nothing to admit.
             _ => false,
@@ -707,18 +709,6 @@ mod tests {
         NodeId(Uuid::from_u64_pair(2, id))
     }
 
-    fn interaction() -> Interaction {
-        Interaction {
-            event_time: None,
-            id: NodeId(Uuid::from_u64_pair(1, 1)),
-            session_id: sid(),
-            agent_id: AgentId::from("agent-a"),
-            prompt_text: Some("prompt".into()),
-            previous_id: None,
-            created_at: ts(),
-        }
-    }
-
     fn concept(id: u64, gc: i32) -> Concept {
         Concept {
             id: nid(id),
@@ -742,39 +732,39 @@ mod tests {
         }
     }
 
-    /// Twenty peers scoring `1.0 ..= 20.0`, all with `gc_survived == 3`.
-    ///
-    /// Nearest-rank P90 over `n = 20` is `ceil(0.9 × 20) = 18` → the 18th
-    /// smallest score, `18.0`. Strictly-above leaves exactly the two
-    /// top-scoring concepts, ids 19 and 20.
-    fn graph_with(concepts: impl IntoIterator<Item = Concept>) -> Graph {
+    /// Pillar `1` (origin `i1`, `gc_survived = gc`) cited through `Dependency`
+    /// by one action from each of interactions `i2` and `i3`, all an hour
+    /// before [`ts`]; plus a second concept `2` with no dependents.
+    fn evidence_graph(gc: i32) -> (Graph, ScoreTable) {
         let mut g = Graph::new(sid());
-        let i = interaction();
-        let iid = i.id;
-        g.insert_interaction(i).unwrap();
-        for c in concepts {
-            g.insert_concept(c, iid).unwrap();
+        let mut prev = None;
+        for n in 1..=3u64 {
+            let mut turn = interaction_at(n, -3600 + n as i64, None);
+            turn.previous_id = prev;
+            prev = Some(turn.id);
+            g.insert_interaction(turn).unwrap();
         }
-        g
-    }
-
-    fn twenty_peer_graph() -> (Graph, ScoreTable) {
-        let graph = graph_with((1..=20u64).map(|i| concept(i, 3)));
+        g.insert_concept(concept(1, gc), nid_inter(1)).unwrap();
+        g.insert_concept(concept(2, gc), nid_inter(1)).unwrap();
+        for n in 2..=3u64 {
+            let mut action = concept(10 + n, 0);
+            action.origin_interaction = nid_inter(n);
+            g.insert_concept(action, nid_inter(n)).unwrap();
+            g.upsert_edge(test_edge(
+                n,
+                nid(10 + n),
+                nid(1),
+                EdgeType::Dependency,
+                ts_at(-3000),
+            ))
+            .unwrap();
+        }
         let scores = ScoreTable {
             epoch: 0,
-            ranked: (1..=20u64).map(|i| Scored::new(nid(i), i as f64)).collect(),
+            // Concept 2 outscores the pillar: the score orders, never selects.
+            ranked: vec![Scored::new(nid(2), 9.0), Scored::new(nid(1), 0.1)],
         };
-        (graph, scores)
-    }
-
-    /// The same twenty peers, with one concept's `gc_survived` overridden.
-    fn twenty_peer_graph_with_gc(target: u64, gc: i32) -> (Graph, ScoreTable) {
-        let graph = graph_with((1..=20u64).map(|i| concept(i, if i == target { gc } else { 3 })));
-        let scores = ScoreTable {
-            epoch: 0,
-            ranked: (1..=20u64).map(|i| Scored::new(nid(i), i as f64)).collect(),
-        };
-        (graph, scores)
+        (g, scores)
     }
 
     fn params() -> EvalParams {
@@ -898,35 +888,34 @@ mod tests {
         assert_eq!(params().promotion_policy, PromotionPolicy::Swarm);
     }
 
-    /// The swarm arm reproduces Stage 1 exactly, asserted against a
+    /// The swarm arm reproduces Stage 1's evidence floor, asserted against a
     /// hand-computed expected set rather than against `stage1_candidates`
-    /// itself — comparing the dispatch to the function it calls is a
-    /// tautology that survives every mutation of either.
+    /// itself: the pillar with two other dependent interactions is admitted
+    /// in a three-interaction graph with no peer population, and the
+    /// higher-scoring concept with no dependents is not.
     ///
-    /// Mutation: make `SwarmScorer::candidates` return `Vec::new()`, or drop
-    /// the `gc_survived` term, or relax `>` to `>=` in `stage1`. All red.
+    /// Mutation: make `SwarmScorer::candidates` return `Vec::new()`, or select
+    /// by score again. Both red.
     #[test]
-    fn the_swarm_arm_cuts_at_p90_of_twenty_peers() {
-        let (graph, scores) = twenty_peer_graph();
+    fn the_swarm_arm_admits_on_evidence_not_score() {
+        let (graph, scores) = evidence_graph(3);
         let got = PromotionPolicy::Swarm
             .scorer()
             .candidates(&graph, &scores, &params(), ts());
-        assert_eq!(got, vec![nid(19), nid(20)]);
+        assert_eq!(got, vec![nid(1)]);
     }
 
-    /// `gc_survived < 3` fails Stage 1 even at the top of the distribution —
-    /// carried through the seam, not just through the free function.
-    ///
-    /// Mutation: drop the `gc_survived` conjunct in `stage1_candidates` →
-    /// id 20 reappears and this goes red.
+    /// `gc_survived < 3` fails Stage 1 whatever the evidence, carried
+    /// through the seam, not just through the free function.
     #[test]
     fn the_swarm_arm_still_enforces_gc_survived_through_the_seam() {
-        let (graph, scores) = twenty_peer_graph_with_gc(20, 2);
+        let (graph, scores) = evidence_graph(2);
         let got = PromotionPolicy::Swarm
             .scorer()
             .candidates(&graph, &scores, &params(), ts());
-        assert_eq!(got, vec![nid(19)]);
+        assert!(got.is_empty(), "{got:?}");
     }
+
     /// Dispatch is real AND solo is real at once: the same event-time-spread
     /// corpus admits the hub under `Solo` and admits nothing under `Swarm`
     /// (one writer, `gc_survived == 0` — Stage 1's swarm gate refuses it). A
@@ -993,18 +982,18 @@ mod tests {
     fn eviction_resistance_multiplies_before_the_band_comparison() {
         let (entity_graph, entity) = spread_support_graph(ConceptType::Entity);
         assert_eq!(
-            raw_solo_score(&entity_graph, &concept_of(&entity_graph, entity)),
+            raw_solo_score(&entity_graph, &concept_of(&entity_graph, entity), 0),
             4.0,
             "four spread sessions, nothing else"
         );
         assert_eq!(
-            solo_score(&entity_graph, &concept_of(&entity_graph, entity)),
+            solo_score(&entity_graph, &concept_of(&entity_graph, entity), 0),
             4.8,
             "Entity resistance 1.2"
         );
 
         let (obs_graph, obs) = spread_support_graph(ConceptType::Observation);
-        let scored = solo_score(&obs_graph, &concept_of(&obs_graph, obs));
+        let scored = solo_score(&obs_graph, &concept_of(&obs_graph, obs), 0);
         assert!(
             (scored - 2.8).abs() < 1e-9,
             "Observation resistance 0.7, got {scored}"
@@ -1050,25 +1039,34 @@ mod tests {
             ))
             .unwrap();
         }
-        // Sessions 4×1 + confirmed 1×4 + actions 0 − reverts 0 = 8.0 … not yet.
+        // Sessions 4×1 + confirmed 1×4 + dependents 0 − reverts 0 = 8.0.
         let c = concept_of(&g, hub.id);
-        assert!((solo_score(&g, &c) - 8.0).abs() < 1e-9);
-        assert_eq!(classify(solo_score(&g, &c)), CanonizationStatus::Venerable);
+        assert!((solo_score(&g, &c, 0) - 8.0).abs() < 1e-9);
+        assert_eq!(
+            classify(solo_score(&g, &c, 0)),
+            CanonizationStatus::Venerable
+        );
 
-        // One valid action (an action node with a Causal edge): 8 + 2 = 10.0
-        // EXACTLY — Canonical, inclusively.
+        // One dependent interaction (an action from interaction 2 declaring
+        // `depends_on` the hub): 8 + 2 = 10.0 EXACTLY, Canonical inclusively.
         let mut action = concept(20, 0);
         action.concept_type = ConceptType::Resource;
         action.content = "deploy api".into();
         action.canonical_key = action.content.clone();
+        action.origin_interaction = nid_inter(2);
         let aid = action.id;
-        g.insert_concept(action, nid_inter(1)).unwrap();
-        g.upsert_edge(test_edge(30, aid, hub.id, EdgeType::Causal, ts_at(90)))
+        g.insert_concept(action, nid_inter(2)).unwrap();
+        g.upsert_edge(test_edge(30, aid, hub.id, EdgeType::Dependency, ts_at(90)))
             .unwrap();
+        let later = day(10);
+        let deps = dependent_interactions(&g, hub.id, Duration::from_secs(60), later);
+        assert_eq!(deps, 1);
         let c = concept_of(&g, hub.id);
-        assert_eq!(valid_action_count(&g, &c), 1);
-        assert!((solo_score(&g, &c) - 10.0).abs() < 1e-9);
-        assert_eq!(classify(solo_score(&g, &c)), CanonizationStatus::Canonical);
+        assert!((solo_score(&g, &c, deps) - 10.0).abs() < 1e-9);
+        assert_eq!(
+            classify(solo_score(&g, &c, deps)),
+            CanonizationStatus::Canonical
+        );
     }
 
     /// Human confirmations enter only through the confirm verb, and each bump
@@ -1078,16 +1076,16 @@ mod tests {
     async fn human_confirmations_are_real_and_weighted() {
         let (mut graph, hub) = spread_support_graph(ConceptType::Resource); // ×1.0
         let c = concept_of(&graph, hub);
-        assert!((raw_solo_score(&graph, &c) - 4.0).abs() < 1e-9);
+        assert!((raw_solo_score(&graph, &c, 0) - 4.0).abs() < 1e-9);
 
         assert_eq!(graph.confirm_human(hub).unwrap(), 1);
         assert_eq!(graph.confirm_human(hub).unwrap(), 2);
         let c = concept_of(&graph, hub);
         assert_eq!(c.human_confirmed, 2);
         // 4×1 + 2×4 = 12.0 — Canonical band.
-        assert!((solo_score(&graph, &c) - 12.0).abs() < 1e-9);
+        assert!((solo_score(&graph, &c, 0) - 12.0).abs() < 1e-9);
         assert_eq!(
-            classify(solo_score(&graph, &c)),
+            classify(solo_score(&graph, &c, 0)),
             CanonizationStatus::Canonical
         );
 
@@ -1108,48 +1106,98 @@ mod tests {
             .is_err());
     }
 
-    /// Valid actions count DISTINCT action concepts once each, even when one
-    /// action wrote two edges against the target (produces AND depends_on).
+    /// The dependent term counts DISTINCT other interactions: two actions
+    /// from one interaction count once, an action writing both `Causal` and
+    /// `Dependency` counts once, and `Causal` alone (an artifact an action
+    /// touched) counts nothing. Under spec §3.2's valid-action term the
+    /// `Causal` toucher scored 2.0; that is how Solo canonized file paths.
     #[test]
-    fn valid_actions_dedup_by_action_node() {
-        let (graph, hub) = spread_support_graph(ConceptType::Entity);
-        // Two more interactions so dedup assertions don't disturb sessions.
-        let c = concept_of(&graph, hub);
-        assert_eq!(valid_action_count(&graph, &c), 0, "Derives are not actions");
-
-        let mut g = graph;
-        let mut action = concept(20, 0);
-        action.concept_type = ConceptType::Resource;
-        action.content = "record act".into();
-        action.canonical_key = action.content.clone();
-        g.insert_concept(action.clone(), nid_inter(1)).unwrap();
-        g.upsert_edge(test_edge(30, action.id, hub, EdgeType::Causal, ts_at(90)))
-            .unwrap();
-        g.upsert_edge(test_edge(
-            31,
-            action.id,
-            hub,
-            EdgeType::Dependency,
-            ts_at(90),
-        ))
-        .unwrap();
+    fn dependent_interactions_dedup_and_ignore_causal_touches() {
+        let (mut g, hub) = spread_support_graph(ConceptType::Entity);
+        let later = day(10);
+        let age = Duration::from_secs(60);
+        assert_eq!(dependent_interactions(&g, hub, age, later), 0, "Derives");
+        let add_action = |g: &mut Graph, id: u64, origin: u64, ty: EdgeType| {
+            let mut action = concept(id, 0);
+            action.concept_type = ConceptType::Resource;
+            action.content = format!("action {id}");
+            action.canonical_key = action.content.clone();
+            action.origin_interaction = nid_inter(origin);
+            g.insert_concept(action, nid_inter(origin)).unwrap();
+            g.upsert_edge(test_edge(id, nid(id), hub, ty, ts_at(90)))
+                .unwrap();
+        };
+        add_action(&mut g, 20, 2, EdgeType::Causal);
         assert_eq!(
-            valid_action_count(&g, &concept_of(&g, hub)),
-            1,
-            "one action, two edges — counted once"
+            dependent_interactions(&g, hub, age, later),
+            0,
+            "Causal confers no load"
         );
+        add_action(&mut g, 21, 3, EdgeType::Dependency);
+        add_action(&mut g, 22, 3, EdgeType::Dependency);
+        assert_eq!(
+            dependent_interactions(&g, hub, age, later),
+            1,
+            "two actions from one interaction count once"
+        );
+        add_action(&mut g, 23, 4, EdgeType::Dependency);
+        assert_eq!(dependent_interactions(&g, hub, age, later), 2);
+        // The hub's own interaction never counts.
+        add_action(&mut g, 24, 1, EdgeType::Dependency);
+        assert_eq!(dependent_interactions(&g, hub, age, later), 2);
     }
 
-    /// Opposition is not an action endorsement or another supporting turn.
+    /// #36 PR 3 (spec §3.2 errata): a `Causal` touch is not recurrence.
+    /// A second concept derived once in turn 1 and modified by actions from
+    /// turns 2, 3 and 4 (days 2/4/6) still has one supporting session; the
+    /// same actions declaring `depends_on` it give four.
     #[test]
-    fn contradictions_do_not_supply_solo_support_or_valid_actions() {
+    fn causal_touches_are_not_recurrence() {
+        let (mut g, _) = spread_support_graph(ConceptType::Resource);
+        let mut file = concept(40, 0);
+        file.concept_type = ConceptType::Resource;
+        file.content = "src/lib.rs".into();
+        file.canonical_key = file.content.clone();
+        g.insert_concept(file.clone(), nid_inter(1)).unwrap();
+        for (k, ty) in [
+            (2u64, EdgeType::Causal),
+            (3, EdgeType::Causal),
+            (4, EdgeType::Causal),
+        ] {
+            let mut action = concept(40 + k, 0);
+            action.concept_type = ConceptType::Resource;
+            action.content = format!("modify lib {k}");
+            action.canonical_key = action.content.clone();
+            action.origin_interaction = nid_inter(k);
+            g.insert_concept(action, nid_inter(k)).unwrap();
+            g.upsert_edge(test_edge(40 + k, nid(40 + k), file.id, ty, ts_at(90)))
+                .unwrap();
+        }
+        assert_eq!(recurrence_sessions(&g, &concept_of(&g, file.id)), 1);
+        for k in 2..=4u64 {
+            g.upsert_edge(test_edge(
+                50 + k,
+                nid(40 + k),
+                file.id,
+                EdgeType::Dependency,
+                ts_at(90),
+            ))
+            .unwrap();
+        }
+        assert_eq!(recurrence_sessions(&g, &concept_of(&g, file.id)), 4);
+    }
+
+    /// Opposition is not a dependent or another supporting turn.
+    #[test]
+    fn contradictions_do_not_supply_solo_support_or_dependents() {
         let (mut graph, hub) = spread_support_graph(ConceptType::Entity);
         let before = supporting_interaction_times(&graph, &concept_of(&graph, hub));
         let mut action = concept(20, 0);
         action.concept_type = ConceptType::Resource;
         action.content = "contrary action".into();
         action.canonical_key = action.content.clone();
-        graph.insert_concept(action.clone(), nid_inter(1)).unwrap();
+        action.origin_interaction = nid_inter(2);
+        graph.insert_concept(action.clone(), nid_inter(2)).unwrap();
         graph
             .upsert_edge(test_edge(
                 30,
@@ -1168,7 +1216,10 @@ mod tests {
                 ts_at(90),
             ))
             .unwrap();
-        assert_eq!(valid_action_count(&graph, &concept_of(&graph, hub)), 0);
+        assert_eq!(
+            dependent_interactions(&graph, hub, Duration::ZERO, day(10)),
+            0
+        );
         assert_eq!(
             supporting_interaction_times(&graph, &concept_of(&graph, hub)),
             before
@@ -1206,7 +1257,7 @@ mod tests {
         assert_eq!(revert_count(&graph, hub), 1);
         // 4×1 − 1×3 = 1.0 → ordinary memory again.
         let c = concept_of(&graph, hub);
-        assert!((raw_solo_score(&graph, &c) - 1.0).abs() < 1e-9);
+        assert!((raw_solo_score(&graph, &c, 0) - 1.0).abs() < 1e-9);
         assert!(PromotionPolicy::Solo
             .scorer()
             .candidates(&graph, &ScoreTable::default(), &params(), ts_at(60))
@@ -1441,51 +1492,52 @@ mod tests {
     // C-R1-1 closure — the published bands drive the ladder admission
     // -----------------------------------------------------------------------
 
-    /// Under solo, hop admission is the node's band. A Resource hub with four
-    /// event-timed sessions sits at resistant 4.0: Candidate only, and the
-    /// band refuses Venerable **even when handed a passing evidence verdict** —
-    /// the score replaces the store evidence, it does not OR with it. One
-    /// human confirmation lifts it to 8.0 (Venerable, not Canonical); one
-    /// valid action lands it on exactly [`CANONICAL_BAR`] (10.0), which the
-    /// inclusive comparison must admit.
+    /// Under solo, hop admission is the node's band (#36 PR 3: on top of the
+    /// stage verdict the evaluator requires first; see
+    /// `solo_cannot_bypass_stage_2_on_its_band` for that half). A Resource
+    /// hub with four event-timed sessions sits at resistant 4.0: the band
+    /// refuses Venerable. One human confirmation lifts it to 8.0 (Venerable
+    /// band, not Canonical). One dependent interaction lands it on exactly
+    /// [`CANONICAL_BAR`] (10.0), which the inclusive comparison admits.
     ///
-    /// Mutations: `SoloScorer::admits_hop` returning `_evidence` → red;
-    /// its rank comparison made exclusive (`>`) → red at exactly 10.0.
+    /// Mutation: the rank comparison made exclusive (`>`) → red at 10.0.
     #[test]
-    fn solo_admission_climbs_with_the_score_bands() {
+    fn solo_admission_climbs_with_the_band() {
         let (mut graph, hub) = spread_support_graph_with(ConceptType::Resource, true);
         let solo = PromotionPolicy::Solo.scorer();
-        assert!(solo.admits_hop(&graph, hub, CanonizationStatus::Candidate, false));
+        let p = params();
+        let at = day(10);
+        assert!(solo.admits_hop(&graph, hub, CanonizationStatus::Candidate, &p, at));
         assert!(
-            !solo.admits_hop(&graph, hub, CanonizationStatus::Venerable, true),
-            "4.0 < 6.0: below the bar even a PASSING stage-2 verdict admits nothing"
+            !solo.admits_hop(&graph, hub, CanonizationStatus::Venerable, &p, at),
+            "4.0 < 6.0: below the bar the band refuses whatever the evidence"
         );
 
         graph.confirm_human(hub).unwrap();
-        assert!(solo.admits_hop(&graph, hub, CanonizationStatus::Venerable, false));
-        assert!(!solo.admits_hop(&graph, hub, CanonizationStatus::Canonical, false));
+        assert!(solo.admits_hop(&graph, hub, CanonizationStatus::Venerable, &p, at));
+        assert!(!solo.admits_hop(&graph, hub, CanonizationStatus::Canonical, &p, at));
 
-        let actor = concept(11, 0);
+        let mut actor = concept(11, 0);
+        actor.origin_interaction = nid_inter(2);
         let actor_id = actor.id;
-        graph.insert_concept(actor, nid_inter(1)).unwrap();
+        graph.insert_concept(actor, nid_inter(2)).unwrap();
         graph
-            .upsert_edge(test_edge(20, actor_id, hub, EdgeType::Causal, ts()))
+            .upsert_edge(test_edge(20, actor_id, hub, EdgeType::Dependency, ts()))
             .unwrap();
         let hub_concept = concept_of(&graph, hub);
-        assert_eq!(solo_score(&graph, &hub_concept), 10.0);
-        assert!(solo.admits_hop(&graph, hub, CanonizationStatus::Canonical, false));
+        let deps = dependent_interactions(&graph, hub, p.min_age, at);
+        assert_eq!(solo_score(&graph, &hub_concept, deps), 10.0);
+        assert!(solo.admits_hop(&graph, hub, CanonizationStatus::Canonical, &p, at));
     }
 
-    /// The swarm arm keeps the evidence verdict as the whole decision — the
-    /// pre-seam pipeline byte-for-byte. It has no score to admit with.
-    ///
-    /// Mutation: make `SwarmScorer::admits_hop` ignore `evidence` → red.
+    /// The swarm arm adds nothing to the stage verdict the evaluator has
+    /// already required: it admits every hop it is asked about.
     #[test]
     fn swarm_admission_is_the_evidence_verdict() {
         let (graph, hub) = spread_support_graph(ConceptType::Entity);
         let swarm = PromotionPolicy::Swarm.scorer();
-        assert!(swarm.admits_hop(&graph, hub, CanonizationStatus::Venerable, true));
-        assert!(!swarm.admits_hop(&graph, hub, CanonizationStatus::Venerable, false));
-        assert!(swarm.admits_hop(&graph, hub, CanonizationStatus::Canonical, true));
+        let (p, at) = (params(), ts());
+        assert!(swarm.admits_hop(&graph, hub, CanonizationStatus::Venerable, &p, at));
+        assert!(swarm.admits_hop(&graph, hub, CanonizationStatus::Canonical, &p, at));
     }
 }

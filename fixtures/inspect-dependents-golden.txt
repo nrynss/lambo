@@ -10,6 +10,8 @@ dependents (8):
   concept V [Entity] (Dependency)
   concept W [Resource] (Dependency)
   concept Z [Resource] (Dependency)
+canonization (Swarm): None -> Candidate refused
+  - survived 0 GC sweeps, needs at least 3
 
 hop 1:
   Causal

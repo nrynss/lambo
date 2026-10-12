@@ -611,6 +611,18 @@ async fn a_layer_hit_is_inspected_with_the_same_scope() {
         "{}",
         text_of(&found)
     );
+    // #36 PR 3: the canonization explanation is the layer's concept's,
+    // read from the layer's graph and store, not this session's.
+    assert!(
+        structured(&found)["admission"]["status"].is_string(),
+        "{}",
+        structured(&found)
+    );
+    assert!(
+        text_of(&found).contains("canonization ("),
+        "{}",
+        text_of(&found)
+    );
     let missing = inspect(json!({"focus": id})).await;
     assert_eq!(missing.is_error, Some(true), "the id is not this session's");
     let own = inspect(json!({"focus": PROJECT_FACT, "scope": "insp-proj"})).await;

@@ -1214,6 +1214,30 @@ mod sqlite_tests {
         .await
         .expect("inspect");
         assert!(view.contains("user schema"), "{view}");
+        // #36 PR 3: the reader explains the focus's canonization outcome
+        // under the policy it resolved (this session's `user schema` has
+        // survived no sweep and has no dependents).
+        assert!(
+            view.contains(
+                "canonization (Swarm): None -> Candidate refused\n  \
+                 - survived 0 GC sweeps, needs at least 3\n"
+            ),
+            "{view}"
+        );
+        let solo = crate::cli::inspect::run_with_policy(
+            resolve_clean(&cfg).store.as_ref(),
+            session,
+            "user schema",
+            0,
+            crate::canon::PromotionPolicy::Solo,
+        )
+        .await
+        .expect("inspect under Solo");
+        assert!(
+            solo.contains("canonization (Solo): None -> Candidate refused\n"),
+            "{solo}"
+        );
+        assert!(solo.contains("  - solo score "), "{solo}");
 
         let stats = crate::cli::stats::run(resolve_clean(&cfg).store.as_ref(), session)
             .await

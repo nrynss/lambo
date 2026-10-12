@@ -342,8 +342,8 @@ impl LamboServer {
     #[tool(
         name = "lambo_inspect",
         description = "Inspect the neighbourhood around a concept: its type, canonization \
-                       status, blast radius, the dependents it counts, and typed edges out \
-                       to a depth."
+                       status, blast radius, the dependents it counts, why it is or is not \
+                       promoted next, and typed edges out to a depth."
     )]
     async fn lambo_inspect(&self, Parameters(p): Parameters<InspectParams>) -> CallToolResult {
         let agent_id = p.agent_id.clone();
