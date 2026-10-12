@@ -230,6 +230,8 @@ Stores concepts from the current interaction. Lambo stamps the time itself, so t
 | `--kind <KIND>` | Yes | One of `entity`, `logic`, `constraint`, `resource`, `observation`. |
 | `--concept <CONTENT:KIND>` | No | An extra concept. Repeat it to derive several in one call. |
 | `--parent-of <CHILD:PARENT>` | No | A hierarchy pair. Repeat it for several links. |
+| `--depends-on <REF>` | No | An existing concept the first concept rests on: its 8-hex id from recall, its full node id, its exact content or a name. Repeat it, at most 8 times. Each must match exactly one concept of the session, or nothing is written (see [`lambo_derive`](/lambo/mcp/#lambo_derive)). |
+| `--name <NAME>` | No | A short name for the first concept that later `--depends-on` references can cite. Refused if it names another concept; forgotten when the writer restarts. |
 
 `--parent-of` puts the child left of the first colon and the parent right of it. Only the first colon separates, so the parent may itself contain colons (an IPv6 CIDR such as `2001:db8::/32`); the child and the parent must both be non-empty.
 
@@ -277,7 +279,7 @@ Records an action the agent took. The action becomes a `Resource` concept, and t
 | `--action <ACTION>` | Yes | |
 | `--produces <PRODUCES>` | No | Resources this action creates. Repeatable. |
 | `--modifies <MODIFIES>` | No | Resources this action mutates. Repeatable. |
-| `--depends-on <DEPENDS_ON>` | No | Things this action depends on. Repeatable. |
+| `--depends-on <DEPENDS_ON>` | No | Things this action depends on. Repeatable. An existing concept's id (8 hex characters, or a full node id) cites that concept; a full node id that names nothing, or a short id several concepts share, is a usage error and nothing is written. Any other value is matched by text and created if new. |
 
 ```bash
 $ lambo record-action --session demo --agent agent-a \

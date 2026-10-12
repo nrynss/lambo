@@ -37,6 +37,8 @@ The accessors `session`, `agent`, `config`, `embedding_contract`, `graph`, `inde
 | Method | What it does |
 |---|---|
 | `derive` | Derives concepts from an interaction. Async. |
+| `derive_cited_as` | `derive` with citations: each `ConceptCitations` names one of the call's concepts by its content, the existing concepts it depends on, and optionally a name. Every reference must resolve to exactly one concept of the session, or the call fails with `LamboError::Reference` and writes nothing. Async. |
+| `derive_cited_async_as` | The same, acknowledged before the write is applied, like `derive_async_as`; the references are resolved before the ack and checked again when the write is applied. Async. |
 | `record_action` | Records an action as a concept plus its causal and dependency edges. |
 | `demote` | Demotes a chunk. |
 | `retract` | Retracts a concept. Pass a dry-run flag to get an impact report without mutating. Async. |
