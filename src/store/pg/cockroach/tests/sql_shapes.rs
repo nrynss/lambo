@@ -585,8 +585,23 @@ fn structural_query_placeholder_order_and_counts() {
     assert_eq!(placeholder_max(BLAST_RADIUS_SQL), 3);
     assert_eq!(placeholder_max(INTERACTION_SPAN_SQL), 4);
     assert!(INTERACTION_SPAN_SQL.contains(
-        "/ least(extract(epoch FROM (extent.hi - extent.lo)), CAST($4 AS double precision))"
+        "/ least(CAST(extract(epoch FROM (extent.hi - extent.lo)) AS double precision), CAST($4 AS double precision))"
     ));
+    // #36 PR 2 review M2: no epoch reaches `least()`, the comparison or the
+    // division uncast, so neither dialect's numeric typing decides them.
+    let uncast = INTERACTION_SPAN_SQL
+        .match_indices("extract(epoch")
+        .filter(|(i, _)| !INTERACTION_SPAN_SQL[..*i].ends_with("CAST("))
+        .count();
+    assert_eq!(
+        uncast, 0,
+        "every extract(epoch ...) is cast to double precision"
+    );
+    assert_eq!(
+        INTERACTION_SPAN_SQL.matches("extract(epoch").count(),
+        3,
+        "extent test, span numerator, extent denominator"
+    );
     for sql in [BLAST_RADIUS_SQL, INTERACTION_SPAN_SQL] {
         let p1 = sql.find("$1").unwrap();
         let p2 = sql.find("$2").unwrap();
