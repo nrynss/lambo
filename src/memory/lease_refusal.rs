@@ -21,9 +21,9 @@
 //! message says so plainly. Residual risk: a VM or microVM cloned from a
 //! snapshot, or a process restored with CRIU, keeps the boot id, and every
 //! Linux kernel's root PID namespace has the same inode, so a live holder on
-//! such a clone can be called gone. The lease itself is unaffected. Neither changes what the lease does: the refusal
-//! stands until the lease expires or an operator expires it by hand. Nothing
-//! here takes over.
+//! such a clone can be called gone. None of this changes what the lease does:
+//! the refusal stands until the lease expires or an operator expires it by
+//! hand. Nothing here takes over.
 
 use std::time::Duration;
 
