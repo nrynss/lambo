@@ -82,7 +82,7 @@
   more promotable. Nothing is demoted: a 0.5.0 Candidate without that
   evidence stays a Candidate and simply cannot climb further. On a copy of
   the dogfood store taken 2026-10-12 07:26 (5,005 concepts), evaluated at
-  2026-10-12T12:00Z with `examples/canon36_admission.rs`, the first
+  2026-10-12T12:00Z with `lambo canon dry-run`, the first
   evaluation would admit 63 new Candidates (42 Resource, 20 Entity, 1
   Constraint), and, run to a fixed point, 2 of them (both Resources) become
   Venerable. **No concept turns Canonical**, and none of the 404 existing
@@ -96,7 +96,14 @@
   dependents (7 and 10, from 6 and 9 other interactions) and lack only
   Stage 2's spread (coverage 0.065 and 0.119 against 0.3). A few more days
   of citations would take them to Canonical with the load-bearing warning.
-  `examples/canon36_admission.rs` lists such concepts by id.
+  `lambo canon dry-run` lists such concepts by id.
+- **Run `lambo canon dry-run` on a backup before re-pinning a writer
+  (#36 PR 5).** It reports, per policy, what this build would promote on
+  that session and which concepts are one gate away, without writing
+  anything. On the 2026-10-12 copy it reproduces the figures above exactly.
+  `lambo canon alias-preview` shows what moving old citations of short
+  names onto their rulings would change; applying any such move is an
+  operator decision this release does not automate.
 - **Solo needs the stage evidence (#36 PR 3).** Under `Solo` a concept
   still becomes a Candidate by its score band, but every later hop now also
   needs the Stage 2 or Stage 3 verdict Swarm needs, cooldown included. The
@@ -294,8 +301,23 @@
   Postgres and Cockroach run is manual, like the dependents check:
   `LAMBO_POSTGRES_DSN=<dsn> cargo test --no-default-features --features store-postgres --lib store::pg::fair_test_live -- --ignored`,
   and the Cockroach conformance suite.
-- `examples/canon36_admission.rs` measures what PR 3's admission does on a
-  copy of a SQLite store (counts and ids only, no concept text).
+- **`lambo canon dry-run` and `lambo canon alias-preview` (#36 PR 5).**
+  Read-only operator commands over a SQLite store file: the file is hashed,
+  copied into a private scratch directory and only the copy is opened,
+  read-only; the evaluator runs on an in-memory copy of the session; no
+  lease is taken, renewed or stolen; the scratch copy is removed and the
+  input hashed again. `dry-run` reports per policy the first evaluation's
+  per-gate failures, the hops a run to the fixed point takes, new
+  Candidates, Venerables and Canonicals with their Resource split, the
+  concepts one gate away, the load-bearing concepts Stage 2 still stops,
+  and named invariants (exit 1 when one fails), with `--json` and
+  `--baseline` comparison. `alias-preview` pairs cited short names with the
+  ruling whose opening phrase they are (an ambiguous name is refused), or
+  takes a reviewed `--map` of ids, refuses chains and cycles, and reports
+  what moving their citations to the ruling would change. Ids, labels and
+  counts only, never concept text. Library: `canon::dry_run`,
+  `canon::alias`, `canon::alias_preview`, `cli::canon`. It replaces
+  `examples/canon36_admission.rs`, which is removed.
 - **Stdio project patterns (#33 PR 5).** `[[serve.projects]] path` accepts
   `*` in its final component, covering matching sibling directories and
   descendants. Matching roots follow symlinks; deepest canonical root wins,
