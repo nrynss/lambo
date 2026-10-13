@@ -77,6 +77,20 @@ pub fn scoped_resource_key(content: &str, repo_scope: Option<&str>) -> Option<St
     ))
 }
 
+/// The `(repo_scope, path)` a [`scoped_resource_key`] encodes, or `None` for
+/// any other key (a legacy canonical key, or one this build cannot parse).
+pub fn scoped_key_parts(key: &str) -> Option<(String, String)> {
+    let tuple = key.strip_prefix(RESOURCE_KEY_PREFIX)?;
+    let [repo, path]: [String; 2] = serde_json::from_str(tuple).ok()?;
+    Some((repo, path))
+}
+
+/// The repository a scoped key names, for display (recall labels, ambiguity
+/// candidates). `None` for an unscoped concept.
+pub fn repo_scope_of_key(key: &str) -> Option<String> {
+    scoped_key_parts(key).map(|(repo, _)| repo)
+}
+
 pub(crate) fn canonicalize_resource(
     content: &str,
     graph: &Graph,
@@ -148,6 +162,12 @@ mod tests {
         let parts: Vec<String> =
             serde_json::from_str(encoded.strip_prefix(RESOURCE_KEY_PREFIX).unwrap()).unwrap();
         assert_eq!(parts, ["a", "src/main.rs"]);
+        assert_eq!(
+            scoped_key_parts(&encoded),
+            Some(("a".to_string(), "src/main.rs".to_string()))
+        );
+        assert_eq!(repo_scope_of_key("main rs src"), None);
+        assert_eq!(repo_scope_of_key("RepoResource:v1:not json"), None);
     }
 
     #[test]

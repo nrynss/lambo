@@ -32,6 +32,10 @@ pub enum ReferenceField {
     Against,
     /// A `record_action` `against` entry (#19(b)).
     ActionAgainst,
+    /// The concept [`crate::memory::Memory::retract`] names (#129): text
+    /// that matches a repository-scoped path and another concept is refused
+    /// as ambiguous rather than resolved to one of them.
+    RetractTarget,
 }
 
 impl ReferenceField {
@@ -41,6 +45,7 @@ impl ReferenceField {
             ReferenceField::DependsOn => "depends_on",
             ReferenceField::ActionDependsOn => "depends_on",
             ReferenceField::Against | ReferenceField::ActionAgainst => "against",
+            ReferenceField::RetractTarget => "target",
         }
     }
 
@@ -191,7 +196,7 @@ impl fmt::Display for ReferenceRefusal {
         let r = &self.reference;
         // What the caller does with a reference of this field, for the fix
         // each refusal suggests (#19(b) review L6).
-        let verb = if self.field.is_against() {
+        let verb = if self.field.is_against() || self.field == ReferenceField::RetractTarget {
             "name"
         } else {
             "cite"

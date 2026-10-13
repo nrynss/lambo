@@ -225,7 +225,13 @@ pub(crate) fn candidates(g: &Graph, ids: &[NodeId]) -> Vec<ReferenceCandidate> {
 /// One concept as a refusal candidate.
 pub(crate) fn candidate(g: &Graph, node: NodeId) -> ReferenceCandidate {
     let content = match g.node(node) {
-        Some(Node::Concept(c)) => shown(&c.content),
+        // #129: a repository-scoped path names its repository, so two
+        // repositories' `README.md` candidates can be told apart.
+        Some(Node::Concept(c)) => match crate::graph::resource::repo_scope_of_key(&c.canonical_key)
+        {
+            Some(repo) => format!("{} (repo {repo:?})", shown(&c.content)),
+            None => shown(&c.content),
+        },
         _ => String::new(),
     };
     ReferenceCandidate { node, content }
