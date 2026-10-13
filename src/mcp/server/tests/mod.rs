@@ -27,6 +27,7 @@ use rmcp::model::ContentBlock;
 use serde_json::json;
 use std::time::Duration;
 
+mod against;
 mod citations;
 mod derive_image;
 mod errors;
