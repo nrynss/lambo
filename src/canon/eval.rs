@@ -140,6 +140,14 @@ pub struct Evaluator {
     /// The writer timeline supersession attributes edges with, rebuilt only
     /// when the graph's epoch moves (#20 review L10).
     timeline: supersession::Timeline,
+    /// Where the hold probes of Stage 3's window start next (rotating when
+    /// the probe cap cannot cover the window).
+    hold_cursor: Option<NodeId>,
+    /// Consecutive cycles Stage 3's window was held in place by a deferral.
+    hold_deferrals: usize,
+    /// The forward probe cap; `None` is
+    /// [`supersession::MAX_SUPERSESSION_PROBES`]. Tests lower it.
+    probe_cap: Option<usize>,
 }
 
 /// Knobs for one [`eval_cycle`]. Defaults match [`crate::Config`].
@@ -348,6 +356,10 @@ struct Verdicts {
     probes_capped: bool,
     /// The store lacks `dependent_evidence` (its capability), once.
     supersession_unsupported: Option<String>,
+    /// Stage 3 Venerables the probe cap left unprobed, when the hold ran
+    /// (empty when it did not: a store without the accessors defers
+    /// nothing).
+    deferred: Vec<NodeId>,
     /// Stage-2 window members that cleared the span predicate.
     stage2_pass: Vec<NodeId>,
     /// `(node, measured blast)` for Stage-3 admissions, in evaluation order.
@@ -370,6 +382,15 @@ impl Evaluator {
     /// cycle resumes at the first ring element strictly greater than it).
     pub fn stage3_cursor(&self) -> Option<NodeId> {
         self.stage3_cursor
+    }
+
+    /// An evaluator with a lower probe cap (tests of the cap's behaviour).
+    #[cfg(all(test, feature = "store-memory"))]
+    pub(crate) fn with_probe_cap(cap: usize) -> Self {
+        Self {
+            probe_cap: Some(cap),
+            ..Self::default()
+        }
     }
 
     /// The last Stage-2 Candidate this evaluator evaluated (tests).
@@ -463,8 +484,14 @@ impl Evaluator {
         // #20 review M4: a speculative Stage 3 window whose reads were
         // skipped was not evaluated, so its ring does not advance.
         // Focused review 1: a window the hold probes could not cover (the
-        // probe cap) defers its unprobed Venerables, and is evaluated again.
-        if verdicts.stage3_skipped || !plan.hold.deferred.is_empty() {
+        // probe cap) defers its unprobed Venerables and is evaluated again,
+        // at most MAX_HOLD_DEFERRALS cycles in a row (re-verify (a)). Only
+        // when the hold actually ran: a store without the accessors defers
+        // nothing (re-verify (b)).
+        let deferred = !verdicts.deferred.is_empty();
+        if verdicts.stage3_skipped
+            || supersession::restore_for_deferral(deferred, &mut self.hold_deferrals)
+        {
             self.stage3_cursor = plan.stage3_cursor_before;
         }
 
@@ -507,8 +534,13 @@ impl Evaluator {
         // Supersession (#20) — bounded probes off its own target ring. Read
         // first: whether any exist decides whether Stage 3 is gathered at a
         // full budget below.
-        // One probe budget for supersession and the hold together (review M4).
-        let mut probe_budget = supersession::MAX_SUPERSESSION_PROBES;
+        // The probe cap, once for supersession and once for the hold
+        // (re-verify (a)): Canonicals with live contradictions using the
+        // cap every cycle must not leave the hold with nothing.
+        let cap = self
+            .probe_cap
+            .unwrap_or(supersession::MAX_SUPERSESSION_PROBES);
+        let mut probe_budget = cap;
         let supersede = supersession::gather(
             graph,
             params,
@@ -624,13 +656,15 @@ impl Evaluator {
         });
         // #20's hold: the same probes for the window, so a Venerable that
         // would be superseded at once is not promoted.
+        let mut hold_budget = cap;
         let hold = supersession::gather_holds(
             graph,
             &window,
             params,
             now,
             &self.timeline,
-            &mut probe_budget,
+            &mut hold_budget,
+            &mut self.hold_cursor,
         );
         let stage3: Vec<Stage3Probe> = window
             .into_iter()
@@ -736,7 +770,10 @@ async fn verdicts(
     if !out.stage3_skipped && out.supersession_unsupported.is_none() {
         match supersession::decide(store, &plan.session, &plan.hold, params, now, &mut cache).await
         {
-            Ok(v) => out.held = v.into_iter().map(|v| v.target).collect(),
+            Ok(v) => {
+                out.held = v.into_iter().map(|v| v.target).collect();
+                out.deferred = plan.hold.deferred.clone();
+            }
             Err(StoreError::Capability(what)) => out.supersession_unsupported = Some(what),
             Err(e) => return Err(e),
         }
@@ -984,7 +1021,7 @@ fn apply(
         }
         if concept_status(graph, probe.node) != Some(CanonizationStatus::Venerable)
             || verdicts.held.contains(&probe.node)
-            || plan.hold.deferred.contains(&probe.node)
+            || verdicts.deferred.contains(&probe.node)
         {
             continue;
         }

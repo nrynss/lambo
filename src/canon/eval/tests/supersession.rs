@@ -1088,8 +1088,96 @@ async fn the_hold_does_not_fail_open_under_the_probe_cap() {
         at(NOW),
         &Default::default(),
         &mut probe_budget,
+        &mut None,
     );
     assert!(probes.capped);
     assert_eq!(probes.targets().count(), 1);
     assert_eq!(probes.deferred, window[1..].to_vec());
+}
+
+/// A Venerable with blast 6 and Stage 2 of its own (six children from six
+/// interactions spread over 75 minutes), contradicted by `source` declared
+/// at `declared` by `agent`.
+fn venerable(s: &mut Scene, v: u64, source: u64, declared: i64, agent: &'static str) {
+    let origin = s.interaction(at(2), "v");
+    s.concept(v, origin, CanonizationStatus::Venerable);
+    for (k, m) in [5, 15, 25, 35, 70, 80].into_iter().enumerate() {
+        let child_origin = s.interaction(at(m) + chrono::Duration::seconds(v as i64), "w");
+        let child = v * 100 + k as u64;
+        s.concept(child, child_origin, CanonizationStatus::None);
+        s.edge(v, child, EdgeType::Hierarchical, at(m));
+    }
+    s.contradicts(source, v, at(declared), agent);
+}
+
+/// The re-verify scene: C is a Venerable held by S (S's support is newer),
+/// and two more Venerables are contradicted by assertions only (sources
+/// with no support), so nothing holds them.
+fn deferral_scene() -> Scene {
+    let mut s = superseding();
+    s.concept_mut(C).canonization_status = CanonizationStatus::Venerable;
+    for (k, m) in [5, 15, 25, 35, 70, 80].into_iter().enumerate() {
+        let origin = s.interaction(at(m) + chrono::Duration::seconds(1), "w");
+        let child = 600 + k as u64;
+        s.concept(child, origin, CanonizationStatus::None);
+        s.edge(C, child, EdgeType::Hierarchical, at(m));
+    }
+    for (k, (v, src)) in [(800u64, 810u64), (801, 811)].into_iter().enumerate() {
+        let origin = s.interaction(at(3) + chrono::Duration::seconds(k as i64), "z");
+        s.concept(src, origin, CanonizationStatus::None);
+        venerable(&mut s, v, src, 90 + k as i64, "y");
+    }
+    s
+}
+
+/// Re-verify (a): with a probe cap of one, the hold probes rotate through
+/// Stage 3's window, so a contradicted Venerable that uses the cap up every
+/// cycle (C, held by S) cannot keep the others deferred forever: each is
+/// probed in turn and promoted, and C stays held.
+#[tokio::test]
+async fn deferral_rotates_so_no_venerable_waits_forever() {
+    let g = deferral_scene().build();
+    let store = store_of(&g).await;
+    let g = RwLock::new(g);
+    let mut ev = Evaluator::with_probe_cap(1);
+    for m in 0..6 {
+        cycle(&mut ev, &g, &store, &on(), at(NOW + m)).await;
+    }
+    let g = g.read();
+    assert_eq!(status_of(&g, nid(800)), CanonizationStatus::Canonical);
+    assert_eq!(status_of(&g, nid(801)), CanonizationStatus::Canonical);
+    assert_eq!(status_of(&g, nid(C)), CanonizationStatus::Venerable);
+}
+
+/// Re-verify (b): a store without the accessors runs no hold, so it defers
+/// nothing and restores no cursor; every Venerable that passes Stage 3 is
+/// promoted in the first cycle, and the ring moves on.
+#[tokio::test]
+async fn a_store_without_the_accessors_defers_nothing() {
+    let g = deferral_scene().build();
+    let store = Recording::without_accessors(store_of(&g).await);
+    let g = RwLock::new(g);
+    let mut ev = Evaluator::with_probe_cap(1);
+    let out = cycle(&mut ev, &g, &store, &on(), at(NOW)).await;
+    let promoted: std::collections::HashSet<_> = out.promotions.iter().map(|e| e.node_id).collect();
+    for v in [C, 800, 801] {
+        assert!(promoted.contains(&nid(v)), "{v}: {out:?}");
+    }
+    assert!(ev.stage3_cursor().is_some(), "the ring advanced");
+}
+
+/// Re-verify (a), the backstop: after MAX_HOLD_DEFERRALS consecutive
+/// deferrals the window's cursor is no longer restored, and a cycle with no
+/// deferral resets the count.
+#[test]
+fn consecutive_deferrals_stop_restoring_the_cursor() {
+    use crate::canon::supersession::{restore_for_deferral, MAX_HOLD_DEFERRALS};
+    let mut streak = 0;
+    for _ in 1..MAX_HOLD_DEFERRALS {
+        assert!(restore_for_deferral(true, &mut streak));
+    }
+    assert!(!restore_for_deferral(true, &mut streak), "advances");
+    assert!(restore_for_deferral(true, &mut streak), "a new streak");
+    assert!(!restore_for_deferral(false, &mut streak));
+    assert_eq!(streak, 0);
 }

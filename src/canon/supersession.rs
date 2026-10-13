@@ -76,10 +76,15 @@
 //!
 //! At most `batch_size` Canonical targets are probed per cycle, walking a
 //! ring by identity like Stage 3's, and at most
-//! [`MAX_SUPERSESSION_PROBES`] forward probes in all (supersession and hold
-//! together, each with at most one reverse probe for the pair rule); a cycle
-//! that hits the cap logs `CanonizationSupersessionProbeCap` and probes the
-//! rest on later cycles. Each node's evidence rows are read from the store
+//! [`MAX_SUPERSESSION_PROBES`] forward probes for supersession and as many
+//! again for the hold, each with at most one reverse probe for the pair
+//! rule; a cycle that hits the cap logs `CanonizationSupersessionProbeCap`
+//! and probes the rest on later cycles. The hold's probes start where the
+//! last capped cycle stopped, so a window the cap cannot cover is covered
+//! over several cycles, and Venerables the cap leaves unprobed are deferred
+//! (not promoted) with the window evaluated again, at most
+//! [`MAX_HOLD_DEFERRALS`] cycles in a row; a store without the accessors
+//! defers nothing. Each node's evidence rows are read from the store
 //! once per cycle ([`EvidenceCache`]). Probes run with no graph lock, so
 //! [`still_holds`] re-checks every verdict at apply time under the write
 //! guard, from the graph: statuses, sessions, both cooldowns (as of the
@@ -112,10 +117,11 @@ use crate::types::{
     Edge, EdgeType, Node, NodeId, SessionId, StoreError,
 };
 
-/// The most forward probes (supersession and hold together) one cycle runs
-/// (review M4). Each needs the evidence rows of two nodes, read once per
-/// node per cycle; with its reverse probe a cycle reads at most twice this
-/// many probes' worth. A cycle that would exceed it stops adding targets
+/// The most forward probes one cycle runs for supersession, and again for
+/// the hold (review M4; separate budgets since the re-verify, so Canonicals
+/// that use the whole cap every cycle cannot starve the hold). Each needs
+/// the evidence rows of two nodes, read once per node per cycle; with their
+/// reverse probes a cycle runs at most four times this many probes. A cycle that would exceed it stops adding targets
 /// and logs `CanonizationSupersessionProbeCap`; the ring cursor brings the
 /// rest on later cycles.
 pub const MAX_SUPERSESSION_PROBES: usize = 256;
@@ -481,6 +487,12 @@ pub(crate) fn gather(
 
 /// The hold probes for Stage 3's window: the same probes, with Venerable
 /// targets. Empty unless supersession is on.
+///
+/// The window's targets are probed in id order starting after `cursor`
+/// (re-verify review (a)), which advances to the last one probed: when the
+/// cap cannot cover the whole window, each cycle probes the next part of it,
+/// so a contradicted Venerable that uses the cap up cannot keep the others
+/// deferred forever.
 pub(crate) fn gather_holds(
     graph: &Graph,
     window: &[NodeId],
@@ -488,17 +500,52 @@ pub(crate) fn gather_holds(
     now: DateTime<Utc>,
     timeline: &Timeline,
     budget: &mut usize,
+    cursor: &mut Option<NodeId>,
 ) -> Probes {
     if !params.supersede {
         return Probes::default();
     }
     let session = graph.session_id();
-    let targets: Vec<NodeId> = window
+    let mut targets: Vec<NodeId> = window
         .iter()
         .copied()
         .filter(|&id| usable(graph, id, session, params, now, None).is_some())
         .collect();
-    probes_for(graph, &targets, params, now, &timeline.get(graph), budget)
+    targets.sort_by_key(|id| id.0);
+    let targets = super::eval::ring_window(&targets, *cursor, targets.len());
+    let probes = probes_for(graph, &targets, params, now, &timeline.get(graph), budget);
+    if probes.capped
+        && let Some(last) = probes.targets().last()
+    {
+        *cursor = Some(last);
+    }
+    probes
+}
+
+/// How many cycles in a row Stage 3's window may be held in place because
+/// the probe cap deferred some of its Venerables (re-verify review (a)).
+/// After that many, the ring advances anyway: the deferred ones are not
+/// promoted this time round (the hold fails closed) and come back with the
+/// ring. With the rotating probe start this is a backstop.
+pub const MAX_HOLD_DEFERRALS: usize = 3;
+
+/// Whether this cycle restores Stage 3's cursor for a deferral, counting
+/// consecutive deferrals in `streak` (see [`MAX_HOLD_DEFERRALS`]).
+pub(crate) fn restore_for_deferral(deferred: bool, streak: &mut usize) -> bool {
+    if !deferred {
+        *streak = 0;
+        return false;
+    }
+    *streak += 1;
+    if *streak >= MAX_HOLD_DEFERRALS {
+        *streak = 0;
+        tracing::debug!(
+            target: "lambo::canon",
+            "Stage 3's window was deferred {MAX_HOLD_DEFERRALS} cycles in a row; the ring advances"
+        );
+        return false;
+    }
+    true
 }
 
 /// The hold probes for one Venerable concept, for inspect's explanation

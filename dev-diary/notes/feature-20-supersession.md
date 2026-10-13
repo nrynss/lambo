@@ -261,7 +261,8 @@ split test. The owner decided the hold stays, under the conditions below.
 - **M4.** The store surface is now one method, `dependent_evidence`, whose
   rows the evaluator reads once per node per cycle (`EvidenceCache`); the
   two Phase 0 names live on as `DependentEvidence` methods. At most
-  `MAX_SUPERSESSION_PROBES` (256) forward probes per cycle, with a
+  `MAX_SUPERSESSION_PROBES` (256) forward probes per cycle (per phase since
+  the re-verify), with a
   `CanonizationSupersessionProbeCap` warning. Supersession is decided first;
   a speculative full-budget Stage 3 window is not read, evaluated or
   advanced when nothing was superseded
@@ -318,3 +319,30 @@ offline verify replay; `canonization_supersede` now goes through it too.
   holds a loaded `Unknown` reason cannot be persisted to another store (a
   seed, a split import, a flush of its transition): every write gate
   refuses it until the row is fixed.
+
+## Re-verify (Sonnet, READY with one Low)
+
+Deferral could stall Stage 3's ring: (a) when probes kept using the whole
+cap, the same contradicted Venerable at the head of the window was probed
+every cycle and the others stayed deferred with the cursor restored, so the
+ring never advanced; (b) a store without `dependent_evidence` still
+deferred from the graph alone and restored the cursor although the hold
+was skipped. Fixed:
+
+- Deferral and the cursor restore happen only when the hold actually ran
+  (`Verdicts::deferred` is filled only then).
+- The hold's probes start after the last target a capped cycle probed
+  (`Evaluator::hold_cursor`), so a window the cap cannot cover is covered
+  over several cycles.
+- Supersession and the hold each get the cap (they shared it). Found with
+  the test: Canonicals with live contradictions used the whole shared cap
+  every cycle and left the hold none, so its deferred Venerables waited
+  forever.
+- Backstop: after `MAX_HOLD_DEFERRALS` (3) consecutive deferring cycles the
+  ring advances anyway; the deferred Venerables are not promoted that time
+  round (the hold fails closed) and come back with the ring.
+
+Tests: `deferral_rotates_so_no_venerable_waits_forever` (cap 1, a held
+Venerable at the head, two assertion-contradicted ones promoted in turn),
+`a_store_without_the_accessors_defers_nothing`,
+`consecutive_deferrals_stop_restoring_the_cursor`.

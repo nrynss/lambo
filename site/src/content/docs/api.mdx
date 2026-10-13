@@ -239,9 +239,15 @@ own, covering at least 0.3 of min(session extent, the coverage cap).
   member is superseded rather than held. There is no n-cycle rule.
 - At most `canonization_eval_batch_size` targets and
   `canon::supersession::MAX_SUPERSESSION_PROBES` (256) forward probes per
-  cycle (a cycle at the cap logs `CanonizationSupersessionProbeCap`); each
-  node's evidence is read from the store once per cycle; and every verdict
-  is re-checked against the graph under the write lock before it commits.
+  cycle for supersession, and as many for the hold (a cycle at a cap logs
+  `CanonizationSupersessionProbeCap`). When the hold's cap cannot cover
+  Stage 3's window, the Venerables it leaves unprobed are not promoted that
+  cycle and the window is evaluated again, the next cycle's probes starting
+  where the last stopped; after `MAX_HOLD_DEFERRALS` (3) such cycles in a
+  row the ring moves on anyway. A store without `dependent_evidence` defers
+  nothing. Each node's evidence is read from the store once per cycle, and
+  every verdict is re-checked against the graph under the write lock
+  before it commits.
 
 The store surface is one method, `GraphStore::dependent_evidence`, which
 returns a node's rows unfiltered as a `DependentEvidence`; its
