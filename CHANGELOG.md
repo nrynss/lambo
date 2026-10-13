@@ -320,7 +320,8 @@
   own or other session: "cross-session contradictions are not recorded").
   Citing and contradicting one concept from the same concept or action in
   one call is refused (`DependsOnAndAgainst`); separate writes may record
-  both. A contradiction is never created. What each named is pinned at the ack and resolved again
+  both. A queued write from an earlier 0.6.0 development build that names one
+  concept in both now fails on replay. A contradiction is never created. What each named is pinned at the ack and resolved again
   inside the commit's transaction, so a target removed or shadowed in
   between fails the receipt (owner decision: not part of hybrid's plan
   check). Two concepts may contradict each other; a similarity merge keeps
