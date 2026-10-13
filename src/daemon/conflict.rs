@@ -329,7 +329,7 @@ fn conflict_at_with(
     now: DateTime<Utc>,
     timeline: &WriterTimeline,
 ) -> Option<ConflictHit> {
-    let window_start = now - chrono_window(window);
+    let window_start = window_start(window, now);
 
     let mut agents: Vec<AgentId> = Vec::new();
     // The newest qualifying write and *who made it* travel together (ALGO-2).
@@ -377,6 +377,15 @@ fn conflict_at_with(
 /// (config-reachable — see CONC-4's `from_std` sweep).
 fn chrono_window(window: Duration) -> ChronoDuration {
     ChronoDuration::from_std(window).unwrap_or(ChronoDuration::MAX)
+}
+
+/// `now - window`, or the earliest representable instant when that
+/// underflows: a window reaching past chrono's range covers all of time.
+/// `now - ChronoDuration::MAX` panicked (`DateTime - TimeDelta`
+/// overflowed), so saturating the duration alone was not enough.
+fn window_start(window: Duration, now: DateTime<Utc>) -> DateTime<Utc> {
+    now.checked_sub_signed(chrono_window(window))
+        .unwrap_or(DateTime::<Utc>::MIN_UTC)
 }
 
 /// Detect every conflict in the graph (spec §9).
@@ -1026,5 +1035,15 @@ mod tests {
         // smallest interaction id at the instant (documented ambiguity).
         assert_eq!(hit.writer, AgentId::from("agent-a"));
         assert_eq!(hit.seconds_ago, 10);
+    }
+
+    /// A window past chrono's range covers all of time instead of panicking
+    /// on `now - ChronoDuration::MAX` (#19(c) review M5).
+    #[test]
+    fn an_unrepresentable_window_saturates_instead_of_panicking() {
+        let (g, c1, _) = two_agent_graph(100, 120);
+        let hit = conflict_at(&g, c1, Duration::MAX, t(130)).expect("fires");
+        assert_eq!(hit.seconds_ago, 10);
+        assert_eq!(detect(&g, Duration::MAX, t(130)).len(), 1);
     }
 }

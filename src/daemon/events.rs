@@ -280,6 +280,15 @@ fn chrono_window(window: Duration) -> ChronoDuration {
     ChronoDuration::from_std(window).unwrap_or(ChronoDuration::MAX)
 }
 
+/// `now - window`, or the earliest representable instant when that
+/// underflows: a window reaching past chrono's range covers all of time.
+/// `now - ChronoDuration::MAX` panicked (`DateTime - TimeDelta`
+/// overflowed), so saturating the duration alone was not enough.
+fn window_start(window: Duration, now: DateTime<Utc>) -> DateTime<Utc> {
+    now.checked_sub_signed(chrono_window(window))
+        .unwrap_or(DateTime::<Utc>::MIN_UTC)
+}
+
 /// The session's most recent activity at or before `now`, as
 /// `(anchor concept, instant)`.
 ///
@@ -354,7 +363,7 @@ fn session_last_activity(graph: &Graph, now: DateTime<Utc>) -> Option<(NodeId, D
 /// fresh write and a hundred old concepts is *not* a stale session, yet it fired
 /// a hundred Stale events.
 pub fn session_stale_at(graph: &Graph, window: Duration, now: DateTime<Utc>) -> Option<StaleHit> {
-    let window_start = now - chrono_window(window);
+    let window_start = window_start(window, now);
     let (node, last) = session_last_activity(graph, now)?;
     if last >= window_start {
         return None;
@@ -407,7 +416,7 @@ pub fn high_risk_at(
     window: Duration,
     now: DateTime<Utc>,
 ) -> Option<HighRiskHit> {
-    let window_start = now - chrono_window(window);
+    let window_start = window_start(window, now);
     let c = match graph.node(node) {
         Some(crate::types::Node::Concept(c)) => c,
         _ => return None,
@@ -1364,5 +1373,24 @@ mod tests {
                 c.id
             );
         }
+    }
+
+    /// A window past chrono's range covers all of time instead of panicking
+    /// on `now - ChronoDuration::MAX` (#19(c) review M5).
+    #[test]
+    fn an_unrepresentable_window_saturates_instead_of_panicking() {
+        let (mut g, i1_id, _) = base_graph();
+        let c = concept(
+            1,
+            i1_id,
+            "agent-a",
+            "c",
+            0,
+            CanonizationStatus::Canonical,
+            None,
+        );
+        g.insert_concept(c, i1_id).unwrap();
+        assert!(session_stale_at(&g, Duration::MAX, ts(100)).is_none());
+        assert_eq!(detect_high_risk(&g, Duration::MAX, ts(100)).len(), 1);
     }
 }
