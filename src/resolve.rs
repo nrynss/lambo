@@ -259,6 +259,9 @@ pub fn resolve_backends(file: LamboFile) -> Result<ResolvedBackends, LamboError>
     if let Some(policy) = promotion_policy {
         config.promotion_policy = policy;
     }
+    if let Some(supersede) = file.canonization_supersede {
+        config.canonization_supersede = supersede;
+    }
     // #22: a process setting the surfaces read through `Memory::config`, set
     // here so every session this process attaches carries the same value.
     config.accept_client_vectors = embedder_cfg.accept_client_vectors;
@@ -1027,6 +1030,7 @@ mod tests {
             recall: None,
             serve: Default::default(),
             web: Default::default(),
+            canonization_supersede: None,
         };
         let r = resolve_backends(file).unwrap();
         assert_eq!(r.embedder.dimensions(), 1024);
@@ -1144,6 +1148,7 @@ mod tests {
             recall: None,
             serve: Default::default(),
             web: Default::default(),
+            canonization_supersede: None,
         };
 
         // The pin asserts this deployment's vectors are 768 wide; the embedder emits

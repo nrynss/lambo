@@ -29,6 +29,7 @@ mod policy;
 mod stage1;
 mod stage2;
 mod stage3;
+mod supersession;
 mod task;
 
 pub use eval::{eval_cycle, EvalError, EvalOutcome, EvalParams, Evaluator};

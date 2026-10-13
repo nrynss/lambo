@@ -279,6 +279,7 @@ impl CanonizationLoop {
                 if !outcome.is_empty() {
                     tracing::info!(
                         target: "lambo::canon",
+                        supersessions = outcome.supersessions.len(),
                         promotions = outcome.promotions.len(),
                         demotions = outcome.demotions.len(),
                         stage3_batch = outcome.stage3_batch.len(),

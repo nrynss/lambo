@@ -285,5 +285,8 @@ fn blast_radius_narrow_rejects_unrepresentable_u64() {
 #[cfg(feature = "store-memory")]
 mod with_store;
 
+#[cfg(feature = "store-memory")]
+mod supersession;
+
 #[cfg(all(feature = "store-memory", feature = "fixtures"))]
 mod fixture;
