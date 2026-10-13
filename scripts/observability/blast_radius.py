@@ -52,7 +52,14 @@ import _ledger
 
 #: Hit-owned annotation kinds, from `AnnotationKind` in `src/recall/detail.rs`.
 #: `load_bearing` IS the blast-radius warning (spec §13's load-bearing pillar).
-HIT_KINDS = ("load_bearing", "conflict", "hot", "reservation")
+HIT_KINDS = (
+    "load_bearing",
+    "conflict",
+    "hot",
+    "reservation",
+    "contradiction",
+    "contradicts",
+)
 
 #: Tokens too common to mean anything in a git-log match.
 STOPWORDS = frozenset(
