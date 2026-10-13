@@ -421,3 +421,192 @@ async fn watched_concepts_are_reported_by_id_at_the_start_and_the_stop() {
     )
     .contains(&format!("watched {}", fair::concept_id("wedge_five"))));
 }
+
+/// Review M1: a clock earlier than the data fails `clock_after_the_data`
+/// and counts what it would leave out.
+#[tokio::test]
+async fn a_clock_before_the_data_fails_and_counts_the_rows_it_leaves_out() {
+    let snap = fair::snapshot(true);
+    let ok = dry_run_all(
+        snap.clone(),
+        &[PromotionPolicy::Swarm],
+        &params(PromotionPolicy::Swarm),
+    )
+    .await
+    .unwrap();
+    assert_eq!(ok.rows_after_clock.total(), 0);
+    assert!(ok
+        .invariants
+        .iter()
+        .any(|i| i.name == "clock_after_the_data" && i.held));
+    // Day 10 of the fixture's 19: about half the rows are later.
+    let mut early = params(PromotionPolicy::Swarm);
+    early.now = fair::now() - chrono::Duration::days(11);
+    let r = dry_run_all(snap.clone(), &[PromotionPolicy::Swarm], &early)
+        .await
+        .unwrap();
+    let clock = r
+        .invariants
+        .iter()
+        .find(|i| i.name == "clock_after_the_data")
+        .unwrap();
+    assert!(!clock.held);
+    assert!(r.rows_after_clock.interactions > 0 && r.rows_after_clock.edges > 0);
+    assert!(clock.detail.contains("pin --at at or after"));
+    let a = alias_preview(snap, &PairInput::Detect, &[PromotionPolicy::Swarm], &early)
+        .await
+        .unwrap();
+    assert!(a
+        .invariants
+        .iter()
+        .any(|i| i.name == "clock_after_the_data" && !i.held));
+}
+
+/// Review M2: the run without redirects must hold its invariants too, and
+/// no flip is computed against a run that never reached its fixed point.
+#[tokio::test]
+async fn flips_need_both_runs_to_reach_their_fixed_point() {
+    let snap = fair::snapshot(true);
+    let map = format!(
+        "{} {}",
+        fair::concept_id("lease_alias").0,
+        fair::concept_id("lease_stays").0
+    );
+    let mut p = params(PromotionPolicy::Swarm);
+    p.max_cycles = 2;
+    let r = alias_preview(snap, &PairInput::Map(map), &[PromotionPolicy::Swarm], &p)
+        .await
+        .unwrap();
+    let both = r
+        .invariants
+        .iter()
+        .find(|i| i.name == "both_runs_hold_their_invariants")
+        .unwrap();
+    assert!(!both.held);
+    assert!(
+        both.detail.contains("without redirects: fixed_point"),
+        "{}",
+        both.detail
+    );
+    assert!(r.policies[0].flips.is_empty());
+}
+
+/// Review H2 (library half): a reviewed map with a refused line fails
+/// `every_reviewed_line_accepted`; detection's refusals never do.
+#[tokio::test]
+async fn a_refused_reviewed_line_fails_the_preview_and_a_detected_one_does_not() {
+    let snap = fair::snapshot(true);
+    let map = format!(
+        "{} {}\nnot a pair at all\n",
+        fair::concept_id("lease_alias").0,
+        fair::concept_id("lease_stays").0
+    );
+    let p = params(PromotionPolicy::Swarm);
+    let r = alias_preview(
+        snap.clone(),
+        &PairInput::Map(map),
+        &[PromotionPolicy::Swarm],
+        &p,
+    )
+    .await
+    .unwrap();
+    let line = r
+        .invariants
+        .iter()
+        .find(|i| i.name == "every_reviewed_line_accepted")
+        .unwrap();
+    assert!(!line.held);
+    let d = alias_preview(snap, &PairInput::Detect, &[PromotionPolicy::Swarm], &p)
+        .await
+        .unwrap();
+    assert!(d
+        .invariants
+        .iter()
+        .all(|i| i.name != "every_reviewed_line_accepted"));
+}
+
+/// Review M3: a redirected alias that already holds a status keeps it, and
+/// the report says so.
+#[tokio::test]
+async fn an_alias_keeping_its_status_is_reported() {
+    let mut snap = fair::snapshot(true);
+    let alias = fair::concept_id("lease_alias");
+    for c in snap.concepts.iter_mut().filter(|c| c.id == alias) {
+        c.canonization_status = CanonizationStatus::Venerable;
+    }
+    let map = format!("{} {}", alias.0, fair::concept_id("lease_stays").0);
+    let r = alias_preview(
+        snap,
+        &PairInput::Map(map),
+        &[PromotionPolicy::Swarm],
+        &params(PromotionPolicy::Swarm),
+    )
+    .await
+    .unwrap();
+    assert_eq!(r.redirects[0].alias_status, CanonizationStatus::Venerable);
+    assert_eq!(r.aliases_keeping_status.get("Venerable"), Some(&1));
+    let text = render_alias_preview(&r, false);
+    assert!(
+        text.contains("aliases keeping status Venerable with no citations left: 1"),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("{alias} Entity Venerable ->")),
+        "{text}"
+    );
+}
+
+/// Review L2: every Canonical id is stored and compared, not only the
+/// listed rows; a baseline of another session or version is refused.
+#[tokio::test]
+async fn every_canonical_id_is_compared_and_a_foreign_baseline_is_refused() {
+    let snap = fair::snapshot(true);
+    let mut p = params(PromotionPolicy::Swarm);
+    p.top = 1;
+    let r = dry_run_all(snap.clone(), &[PromotionPolicy::Swarm], &p)
+        .await
+        .unwrap();
+    assert_eq!(r.policies[0].canonical.len(), 1);
+    assert_eq!(r.policies[0].canonical_ids.len(), 4);
+    let mut fewer = snap.clone();
+    let rulings = ["lease_stays", "wedge", "identity", "async_ack"].map(fair::concept_id);
+    // Drop the citations of whichever ruling is not the one listed row.
+    let unlisted = *rulings
+        .iter()
+        .find(|id| **id != r.policies[0].canonical[0].id)
+        .unwrap();
+    fewer
+        .edges
+        .retain(|e| !(e.edge_type == EdgeType::Dependency && e.target == unlisted));
+    let after = dry_run_all(fewer, &[PromotionPolicy::Swarm], &p)
+        .await
+        .unwrap();
+    assert_eq!(
+        compare(&r, &after).policies[0].canonical_removed,
+        vec![unlisted]
+    );
+    assert!(baseline_mismatch(&r, &after).is_none());
+    let mut other = r.clone();
+    other.session = SessionId::from("another-session");
+    assert!(baseline_mismatch(&other, &after)
+        .unwrap()
+        .contains("session"));
+    let mut old = r.clone();
+    old.version = REPORT_VERSION - 1;
+    assert!(baseline_mismatch(&old, &after).unwrap().contains("version"));
+}
+
+/// Review L3: an error keeps its ids and withholds the rest; a non-id
+/// `--watch` argument is not echoed.
+#[test]
+fn errors_keep_ids_and_withhold_text() {
+    let id = fair::concept_id("wedge");
+    let r = redact(&format!(
+        "canonical key 'flush wedg write queue' held by {id} and more"
+    ));
+    assert!(r.contains(&id.to_string()));
+    assert!(!r.contains("wedg"));
+    assert!(!redact("key 'secret text' duplicated").contains("secret"));
+    let e = resolve_watch(&fair::snapshot(true), &["no flush may wedge".to_string()]).unwrap_err();
+    assert!(!e.contains("wedge"), "{e}");
+}

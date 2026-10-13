@@ -199,8 +199,9 @@ fn totals(c: &Census) -> BTreeMap<String, usize> {
 }
 
 /// Compare `after` with `baseline` (an earlier report, for example the
-/// previous re-pin's). Canonical id sets compare the listed rows, which are
-/// capped at the report's `top`.
+/// previous re-pin's). Canonical id sets compare every Canonical
+/// (`canonical_ids`). The caller checks that the two are of one session and
+/// one report version ([`baseline_mismatch`]).
 pub fn compare(baseline: &DryRunReport, after: &DryRunReport) -> Comparison {
     let mut out = Comparison::default();
     for a in &after.policies {
@@ -210,6 +211,25 @@ pub fn compare(baseline: &DryRunReport, after: &DryRunReport) -> Comparison {
         out.policies.push(policy_delta(b, a));
     }
     out
+}
+
+/// Why `baseline` cannot be compared with `after`, if it cannot: another
+/// session, or another report version (review L2).
+pub fn baseline_mismatch(baseline: &DryRunReport, after: &DryRunReport) -> Option<String> {
+    if baseline.version != after.version {
+        return Some(format!(
+            "the baseline is report version {}, this run is {}; re-run the baseline with this build",
+            baseline.version, after.version
+        ));
+    }
+    if baseline.session != after.session {
+        return Some(format!(
+            "the baseline is of session {:?}, this run is of {:?}",
+            baseline.session.as_str(),
+            after.session.as_str()
+        ));
+    }
+    None
 }
 
 pub(crate) fn policy_delta(b: &PolicyReport, a: &PolicyReport) -> PolicyDelta {
@@ -231,7 +251,12 @@ pub(crate) fn policy_delta(b: &PolicyReport, a: &PolicyReport) -> PolicyDelta {
             ),
         );
     }
-    let ids = |p: &PolicyReport| p.canonical.iter().map(|r| r.id.0).collect::<BTreeSet<_>>();
+    let ids = |p: &PolicyReport| {
+        p.canonical_ids
+            .iter()
+            .map(|id| id.0)
+            .collect::<BTreeSet<_>>()
+    };
     let (ib, ia) = (ids(b), ids(a));
     d.canonical_added = ia.difference(&ib).map(|u| NodeId(*u)).collect();
     d.canonical_removed = ib.difference(&ia).map(|u| NodeId(*u)).collect();

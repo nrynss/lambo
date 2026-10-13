@@ -53,7 +53,9 @@ use crate::types::{
 #[path = "dry_run_report.rs"]
 mod report;
 pub(crate) use report::policy_delta as report_delta;
-pub use report::{compare, render_comparison, render_report, Comparison, PolicyDelta};
+pub use report::{
+    baseline_mismatch, compare, render_comparison, render_report, Comparison, PolicyDelta,
+};
 
 /// One policy's report as text under a heading (the alias preview's
 /// verbose sections).
@@ -63,7 +65,7 @@ pub(crate) fn render_policy_for_preview(out: &mut String, title: &str, p: &Polic
 }
 
 /// The report format version, bumped when a field changes meaning.
-pub const REPORT_VERSION: u32 = 1;
+pub const REPORT_VERSION: u32 = 2;
 
 pub use super::dry_run_defaults::{
     DEFAULT_MAX_CYCLES, DEFAULT_MIN_QUIET, DEFAULT_STEP, DEFAULT_TOP,
@@ -90,6 +92,12 @@ pub struct DryRunParams {
     /// Concepts reported by id at the start and the stop whatever their
     /// state (the fair test's named rulings, say); see [`resolve_watch`].
     pub watch: Vec<NodeId>,
+    /// The composite score's weights, which order Stage 1's queue and the
+    /// Stage 3 window. `lambo.toml` cannot set them, so the CLI always
+    /// uses [`crate::Config`]'s defaults, which are what every writer runs;
+    /// a library caller with its own `Config` passes `config.scoring`
+    /// (review L7).
+    pub weights: ScoringWeights,
 }
 
 impl DryRunParams {
@@ -107,6 +115,7 @@ impl DryRunParams {
             top: DEFAULT_TOP,
             assume_survived: false,
             watch: Vec::new(),
+            weights: crate::Config::default().scoring,
         }
     }
 }
@@ -190,7 +199,8 @@ pub struct Survey {
 pub fn resolve_watch(snap: &GraphSnapshot, refs: &[String]) -> Result<Vec<NodeId>, String> {
     use crate::surface::resolve::{id_has_hex_prefix, is_short_id_shaped, parse_full_id};
     refs.iter()
-        .map(|r| {
+        .enumerate()
+        .map(|(i, r)| {
             let r = r.trim();
             if let Some(id) = parse_full_id(r)
                 && r.len() == 36
@@ -204,7 +214,9 @@ pub fn resolve_watch(snap: &GraphSnapshot, refs: &[String]) -> Result<Vec<NodeId
             }
             if !is_short_id_shaped(r) {
                 return Err(format!(
-                    "--watch {r}: expected a node id or an 8-character short id"
+                    "--watch argument {}: expected a node id or an 8-character short id \
+                     (the argument is not repeated here, since it may be concept text)",
+                    i + 1
                 ));
             }
             let found: Vec<NodeId> = snap
@@ -290,6 +302,10 @@ pub struct PolicyReport {
     pub canonical: Vec<IdRow>,
     /// How many Canonicals at the stop.
     pub canonical_total: usize,
+    /// Every Canonical's id at the stop, ascending: what `--baseline`
+    /// compares (review L2; `canonical` is capped at `top`).
+    #[serde(default)]
+    pub canonical_ids: Vec<NodeId>,
     /// The run's checks.
     pub invariants: Vec<Invariant>,
 }
@@ -333,6 +349,8 @@ pub struct DryRunReport {
     pub edges: usize,
     /// Survival counts raised to 3 by `assume_survived`.
     pub survival_raised: usize,
+    /// Rows dated after the clock (review M1); any fails `clock_after_the_data`.
+    pub rows_after_clock: RowsAfterClock,
     /// The source, when the CLI read one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<SourceFacts>,
@@ -409,7 +427,7 @@ pub fn prepare(snap: &mut GraphSnapshot, assume_survived: bool) -> usize {
 /// the run. The store is filled through its ordinary `flush`, unfenced: it
 /// is fresh, so it has never been leased.
 async fn overlay(snap: &GraphSnapshot) -> Result<(RwLock<Graph>, MemoryStore), LamboError> {
-    let graph = Graph::from_snapshot(snap.clone())?;
+    let graph = graph_of(snap)?;
     let store = MemoryStore::new();
     let mut batch = MutationBatch::new();
     for i in &snap.interactions {
@@ -633,7 +651,7 @@ pub async fn run(
             let g = graph.read();
             ScoreTable {
                 epoch: g.epoch(),
-                ranked: rescore(&g, &ScoringWeights::default()),
+                ranked: rescore(&g, &params.weights),
             }
         };
         let out = ev
@@ -717,6 +735,8 @@ pub async fn run(
         (end, demoted, canonical, finals, assert_ok, session)
     };
     let canonical_total = canonical.len();
+    let mut canonical_ids: Vec<NodeId> = canonical.iter().map(|(id, _)| *id).collect();
+    canonical_ids.sort_by_key(|id| id.0);
     let budget = params.eval.max_canonical_nodes;
 
     // Canonicals this run promoted must hold Stage 2 and Stage 3 at the stop.
@@ -782,7 +802,10 @@ pub async fn run(
         Invariant::new(
             "graph_invariants",
             assert_ok.is_ok(),
-            assert_ok.err().map(|e| e.to_string()).unwrap_or_default(),
+            assert_ok
+                .err()
+                .map(|e| redact(&e.to_string()))
+                .unwrap_or_default(),
         ),
     ];
 
@@ -802,6 +825,7 @@ pub async fn run(
         fixed_point,
         canonical: rows,
         canonical_total,
+        canonical_ids,
         invariants,
     };
     Ok((report, finals))
@@ -827,6 +851,7 @@ pub async fn dry_run_all(
     base: &DryRunParams,
 ) -> Result<DryRunReport, LamboError> {
     let raised = prepare(&mut snap, base.assume_survived);
+    let (clock, rows_after_clock) = clock_check(&snap, base.now);
     let mut reports = Vec::new();
     for &policy in policies {
         let mut params = base.clone();
@@ -841,11 +866,98 @@ pub async fn dry_run_all(
         interactions: snap.interactions.len(),
         edges: snap.edges.len(),
         survival_raised: raised,
+        rows_after_clock,
         source: None,
         policies: reports,
-        invariants: Vec::new(),
+        invariants: vec![clock],
         comparison: None,
     })
+}
+
+/// Rows dated after the evaluation clock.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RowsAfterClock {
+    /// Interactions written or dated after it.
+    pub interactions: usize,
+    /// Edges written or dated after it.
+    pub edges: usize,
+    /// Concepts demoted after it.
+    pub demotions: usize,
+}
+
+impl RowsAfterClock {
+    /// All of them.
+    pub fn total(&self) -> usize {
+        self.interactions + self.edges + self.demotions
+    }
+}
+
+/// Review M1: the clock must not be earlier than the newest row. The stores
+/// age every edge and interaction against the clock, so a row dated after it
+/// is not "young", it is silently left out, and a clock before most of the
+/// data reports a run on a fraction of the session. A failure is an
+/// invariant failure, not a usage refusal: the clock is well-formed, the
+/// report still shows what was measured, and the command exits 1 so the
+/// result cannot pass for a real dry run.
+pub fn clock_check(snap: &GraphSnapshot, at: DateTime<Utc>) -> (Invariant, RowsAfterClock) {
+    let later = |a: DateTime<Utc>, b: Option<DateTime<Utc>>| a > at || b.is_some_and(|b| b > at);
+    let rows = RowsAfterClock {
+        interactions: snap
+            .interactions
+            .iter()
+            .filter(|i| later(i.created_at, i.event_time))
+            .count(),
+        edges: snap
+            .edges
+            .iter()
+            .filter(|e| later(e.created_at, e.event_time))
+            .count(),
+        demotions: snap
+            .concepts
+            .iter()
+            .filter(|c| c.last_demotion_time.is_some_and(|t| t > at))
+            .count(),
+    };
+    let held = rows.total() == 0;
+    let detail = if held {
+        String::new()
+    } else {
+        format!(
+            "--at {} is earlier than the data: {} interactions, {} edges and {} demotions are dated after it and would be left out; pin --at at or after the newest row (the backup's time), or omit it",
+            at.to_rfc3339(),
+            rows.interactions,
+            rows.edges,
+            rows.demotions
+        )
+    };
+    (Invariant::new("clock_after_the_data", held, detail), rows)
+}
+
+/// `snap` as a graph, with any invariant error redacted ([`redact`]).
+pub(crate) fn graph_of(snap: &GraphSnapshot) -> Result<Graph, LamboError> {
+    Graph::from_snapshot(snap.clone()).map_err(|e| {
+        LamboError::Config(format!(
+            "the session copy fails the graph's invariants: {}",
+            redact(&e.to_string())
+        ))
+    })
+}
+
+/// Keep only the ids in a store or graph error (review L3): an invariant
+/// message can quote a canonical key, which is derived from concept text.
+pub fn redact(message: &str) -> String {
+    let ids: Vec<&str> = message
+        .split(|c: char| !(c.is_ascii_hexdigit() || c == '-'))
+        .filter(|w| crate::surface::resolve::is_hyphenated_id(w))
+        .collect();
+    if ids.is_empty() {
+        "detail withheld (it may quote concept text)".into()
+    } else {
+        format!(
+            "detail withheld (it may quote concept text); ids involved: {}",
+            ids.join(" ")
+        )
+    }
 }
 
 #[cfg(all(test, feature = "fixtures"))]

@@ -9,13 +9,14 @@ use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
 
-use crate::canon::alias::{self, AliasPlan, AliasRedirect, AliasRefusal, PairSource, RefusalKind};
+use crate::canon::alias::{
+    self, AliasPlan, AliasRedirect, AliasRefusal, AliasWarning, PairSource, RefusalKind,
+};
 use crate::canon::dry_run::{
-    self, prepare, render_policy_for_preview, DryRunParams, Invariant, PolicyDelta, PolicyReport,
-    SourceFacts, REPORT_VERSION,
+    self, clock_check, prepare, render_policy_for_preview, DryRunParams, Invariant, PolicyDelta,
+    PolicyReport, RowsAfterClock, SourceFacts, REPORT_VERSION,
 };
 use crate::canon::PromotionPolicy;
-use crate::graph::Graph;
 use crate::types::{
     CanonizationStatus, ConceptType, EdgeType, GraphSnapshot, LamboError, NodeId, SessionId,
 };
@@ -68,7 +69,9 @@ pub struct AliasPolicyPreview {
     /// Aggregate deltas.
     pub delta: PolicyDelta,
     /// Concepts whose stop status differs: every alias and ruling, then
-    /// other concepts up to the report's `top`.
+    /// other concepts up to the report's `top`. Empty unless both runs held
+    /// every invariant (review M2): a flip against a run that never reached
+    /// its fixed point means nothing.
     pub flips: Vec<Flip>,
     /// How many concepts differ in all.
     pub flips_total: usize,
@@ -102,6 +105,15 @@ pub struct AliasPreviewReport {
     pub refusals: Vec<AliasRefusal>,
     /// Refusals by kind.
     pub refusal_counts: BTreeMap<String, usize>,
+    /// Accepted reviewed pairs worth a second look (review L4).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<AliasWarning>,
+    /// Accepted aliases that keep a stored status with no citations left,
+    /// by status (review M3): canonization never demotes for lost support.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub aliases_keeping_status: BTreeMap<String, usize>,
+    /// Rows dated after the clock (review M1).
+    pub rows_after_clock: RowsAfterClock,
     /// Citation edges the overlay retires.
     pub edges_retired: usize,
     /// Citation edges the overlay adds.
@@ -114,7 +126,7 @@ pub struct AliasPreviewReport {
 
 /// Plan the pairs from `input` against `snap`.
 pub fn plan_for(snap: &GraphSnapshot, input: &PairInput) -> Result<AliasPlan, LamboError> {
-    let g = Graph::from_snapshot(snap.clone())?;
+    let g = dry_run::graph_of(snap)?;
     let (pairs, refusals) = match input {
         PairInput::Detect => alias::detect(&g),
         PairInput::Map(text) => alias::parse_map(&g, text),
@@ -151,7 +163,7 @@ fn plan_invariants(
 
     // A second plan of the same pairs on the result (for a map, the same
     // text; for detection, detection again).
-    let g = Graph::from_snapshot(after.clone())?;
+    let g = dry_run::graph_of(after)?;
     let again = match input {
         PairInput::Detect => {
             let (p, r) = alias::detect(&g);
@@ -193,6 +205,7 @@ pub async fn alias_preview(
     base: &DryRunParams,
 ) -> Result<AliasPreviewReport, LamboError> {
     let raised = prepare(&mut snap, base.assume_survived);
+    let (clock, rows_after_clock) = clock_check(&snap, base.now);
     let plan = plan_for(&snap, input)?;
     let overlaid = alias::apply(&snap, &plan);
     let mut invariants = plan_invariants(&snap, &overlaid, &plan, input)?;
@@ -210,6 +223,11 @@ pub async fn alias_preview(
         params.eval.promotion_policy = policy;
         let (before, sb) = dry_run::run(&snap, &params).await?;
         let (after, sa) = dry_run::run(&overlaid, &params).await?;
+        let both_held = before
+            .invariants
+            .iter()
+            .chain(after.invariants.iter())
+            .all(|i| i.held);
         let mut flips: Vec<Flip> = sb
             .iter()
             .filter_map(|(id, b)| {
@@ -229,6 +247,9 @@ pub async fn alias_preview(
                 })
             })
             .collect();
+        if !both_held {
+            flips.clear();
+        }
         flips.sort_by_key(|f| (f.role, f.id.0));
         let flips_total = flips.len();
         let mut others = 0;
@@ -252,14 +273,45 @@ pub async fn alias_preview(
     for r in &plan.refusals {
         *refusal_counts.entry(format!("{:?}", r.kind)).or_default() += 1;
     }
-    let held_after = previews
+    // Review M2: both runs, not only the overlaid one.
+    let failing: Vec<String> = previews
         .iter()
-        .all(|p| p.after.invariants.iter().all(|i| i.held));
+        .flat_map(|p| {
+            [("without", &p.before), ("with", &p.after)]
+                .into_iter()
+                .flat_map(move |(w, r)| {
+                    r.invariants
+                        .iter()
+                        .filter(|i| !i.held)
+                        .map(move |i| format!("{} {w} redirects: {}", p.policy, i.name))
+                })
+        })
+        .collect();
     invariants.push(Invariant::new(
-        "overlaid_runs_hold_their_invariants",
-        held_after,
-        String::new(),
+        "both_runs_hold_their_invariants",
+        failing.is_empty(),
+        failing.join("; "),
     ));
+    // Review H2: a reviewed map is the owner's decision, so a line it
+    // cannot honour fails the preview; detected refusals are information.
+    if let PairInput::Map(_) = input {
+        invariants.push(Invariant::new(
+            "every_reviewed_line_accepted",
+            plan.refusals.is_empty(),
+            format!("{} refused: {:?}", plan.refusals.len(), refusal_counts),
+        ));
+    }
+    invariants.push(clock);
+    let mut aliases_keeping_status = BTreeMap::new();
+    for r in plan
+        .redirects
+        .iter()
+        .filter(|r| r.alias_status != CanonizationStatus::None && r.citations_left() == 0)
+    {
+        *aliases_keeping_status
+            .entry(format!("{:?}", r.alias_status))
+            .or_default() += 1;
+    }
     Ok(AliasPreviewReport {
         version: REPORT_VERSION,
         session: snap.session_id.clone(),
@@ -276,6 +328,9 @@ pub async fn alias_preview(
         redirects: plan.redirects,
         refusals: plan.refusals,
         refusal_counts,
+        warnings: plan.warnings,
+        aliases_keeping_status,
+        rows_after_clock,
         edges_retired: plan.retire.len(),
         edges_added: plan.add.len(),
         policies: previews,
@@ -321,16 +376,34 @@ pub fn render_alias_preview(r: &AliasPreviewReport, verbose: bool) -> String {
     for x in &r.redirects {
         let _ = writeln!(
             out,
-            "  {} {:?} -> {} {:?} moved={} already={} self={} cycle={} other_dependents_kept={}",
+            "  {} {:?} {:?} -> {} {:?} moved={} already={} self={} cycle={} other_dependents_kept={} ruling_fan_in={}",
             x.alias,
             x.alias_type,
+            x.alias_status,
             x.ruling,
             x.ruling_type,
             x.redirected,
             x.already_cited,
             x.self_dropped,
             x.cycle_refused,
-            x.other_dependents_kept
+            x.other_dependents_kept,
+            x.ruling_fan_in
+        );
+    }
+    for (status, n) in &r.aliases_keeping_status {
+        let _ = writeln!(
+            out,
+            "aliases keeping status {status} with no citations left: {n} (canonization never demotes for lost support)"
+        );
+    }
+    for w in &r.warnings {
+        let _ = writeln!(
+            out,
+            "warning{}: {:?} ({} -> {})",
+            w.line.map_or(String::new(), |l| format!(" line {l}")),
+            w.kind,
+            w.alias,
+            w.ruling
         );
     }
     let _ = writeln!(out, "refused: {} {:?}", r.refusals.len(), r.refusal_counts);
