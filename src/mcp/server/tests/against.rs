@@ -263,3 +263,39 @@ async fn mutual_and_resent_contradictions_over_the_wire() {
     }
     s.mem.close().await.expect("close");
 }
+
+/// #19(b) review M2 over the wire: one concept, or one action, that both
+/// cites and contradicts the same concept is refused before the ack, and
+/// nothing is written.
+#[tokio::test]
+async fn citing_and_contradicting_one_concept_in_one_call_is_refused() {
+    let s = server("mcp-against-both").await;
+    let belief = belief(&s).await;
+    let before = s.mem.graph().read().snapshot();
+    let short = format::short_id(belief);
+    for (tool, args) in [
+        (
+            "lambo_derive",
+            json!({"agent_id": "agent-a", "concepts": [{
+                "content": "a newer claim", "concept_type": "logic",
+                "depends_on": [short.clone()], "against": [BELIEF],
+            }]}),
+        ),
+        (
+            "lambo_record_action",
+            json!({"agent_id": "agent-a", "action": "acted on it",
+                   "depends_on": [BELIEF], "against": [short.clone()]}),
+        ),
+    ] {
+        let out = call_raw(&s, tool, args).await;
+        assert_eq!(out.is_error, Some(true), "{tool}");
+        let text = text_of(&out);
+        assert!(
+            text.contains("reference refused: against")
+                && text.contains("also cites in depends_on"),
+            "{tool}: {text}"
+        );
+    }
+    assert_eq!(s.mem.graph().read().snapshot(), before);
+    s.mem.close().await.expect("close");
+}

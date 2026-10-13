@@ -202,11 +202,14 @@ fn against_has_its_own_budget() {
     let targets: Vec<NodeId> = (0..8)
         .map(|n| concept(&mut g, i, &format!("older belief {n}"), ConceptType::Logic))
         .collect();
+    let rulings: Vec<NodeId> = (0..8)
+        .map(|n| concept(&mut g, i, &format!("a ruling {n}"), ConceptType::Logic))
+        .collect();
     let refs: Vec<String> = targets.iter().map(|t| format::short_id(*t)).collect();
     let refs: Vec<&str> = refs.iter().map(String::as_str).collect();
     let both = ConceptCitations {
         content: NEWER.into(),
-        depends_on: refs.iter().map(|s| s.to_string()).collect(),
+        depends_on: rulings.iter().map(|t| format::short_id(*t)).collect(),
         against: refs.iter().map(|s| s.to_string()).collect(),
     };
     let out = derive_against(&mut g, i, &[(NEWER, ConceptType::Logic)], &[both]).unwrap();
@@ -538,4 +541,133 @@ fn record_action_against_rolls_back_on_a_changed_target() {
     .unwrap_err();
     assert_eq!(refusal(&err).kind, ReferenceRefusalKind::SelfReference);
     assert_eq!(aliased.snapshot(), before, "the action was rolled back");
+}
+
+/// #19(b) review M2: one call cannot both cite and contradict the same
+/// concept for the same citing concept, by any reference form; refused
+/// typed, nothing written. Another concept of the call may cite what this
+/// one contradicts, and separate writes may record both edges. The commit
+/// refuses forged pins that skipped the pre-pass.
+#[test]
+fn citing_and_contradicting_one_concept_in_one_call_is_refused() {
+    let (mut g, i) = graph("against-both");
+    let belief = concept(&mut g, i, BELIEF, ConceptType::Logic);
+    let before = g.snapshot();
+    for (dep, against_ref) in [
+        (format::short_id(belief), format::short_id(belief)),
+        (belief.0.to_string(), BELIEF.to_string()),
+    ] {
+        let call = ConceptCitations {
+            content: NEWER.into(),
+            depends_on: vec![dep],
+            against: vec![against_ref],
+        };
+        let err = derive_against(&mut g, i, &[(NEWER, ConceptType::Logic)], &[call]).unwrap_err();
+        let r = refusal(&err);
+        assert_eq!(r.field, ReferenceField::Against);
+        assert_eq!(r.kind, ReferenceRefusalKind::DependsOnAndAgainst, "{err}");
+        assert!(
+            err.to_string().contains("also cites in depends_on"),
+            "{err}"
+        );
+        assert_eq!(g.snapshot(), before);
+    }
+    // Different citing concepts in one call: fine.
+    let other = "a second claim";
+    let out = derive_against(
+        &mut g,
+        i,
+        &[(NEWER, ConceptType::Logic), (other, ConceptType::Logic)],
+        &[
+            against(NEWER, &[BELIEF]),
+            ConceptCitations {
+                content: other.into(),
+                depends_on: vec![BELIEF.into()],
+                against: vec![],
+            },
+        ],
+    )
+    .unwrap();
+    assert_eq!((out.cited, out.contradicted), (1, 1));
+    // Separate writes: the same concept may come to both cite and
+    // contradict it.
+    let mut cites = against(NEWER, &[]);
+    cites.depends_on = vec![BELIEF.into()];
+    derive_against(&mut g, i, &[(NEWER, ConceptType::Logic)], &[cites]).unwrap();
+    let newer = node_of(&g, NEWER);
+    assert!(g
+        .edge_between(newer, belief, EdgeType::Contradicts)
+        .is_some());
+    assert!(g
+        .edge_between(newer, belief, EdgeType::Dependency)
+        .is_some());
+
+    // Forged pins handed straight to the commit are refused there.
+    let forged = PinnedCitations {
+        references: vec![PinnedReference {
+            content: "a third claim".into(),
+            reference: BELIEF.into(),
+            target: belief,
+        }],
+        against: vec![PinnedReference {
+            content: "a third claim".into(),
+            reference: BELIEF.into(),
+            target: belief,
+        }],
+    };
+    let before = g.snapshot();
+    let err = derive_cited(
+        &mut g,
+        i,
+        &agent(),
+        &[("a third claim", ConceptType::Logic)],
+        &ParentOf::none(),
+        10,
+        &forged,
+    )
+    .unwrap_err();
+    assert_eq!(
+        refusal(&err).kind,
+        ReferenceRefusalKind::DependsOnAndAgainst
+    );
+    assert_eq!(g.snapshot(), before);
+}
+
+/// #19(b) review M2 on `record_action`: an `against` target that one of
+/// the action's `depends_on` entries resolves to, by id or by text, is
+/// refused at the pre-pass, and at the commit when a text entry has come
+/// to match it in between.
+#[test]
+fn an_action_that_depends_on_and_contradicts_one_concept_is_refused() {
+    let (mut g, i) = graph("against-action-both");
+    let belief = concept(&mut g, i, BELIEF, ConceptType::Logic);
+    let refs = vec![format::short_id(belief)];
+    let short = format::short_id(belief);
+    for deps in [[short.as_str()], [BELIEF]] {
+        let act = Action {
+            depends_on: &deps,
+            ..action("acted on it")
+        };
+        let err = validate_against(&g, &act, &refs).unwrap_err();
+        let r = refusal(&err);
+        assert_eq!(r.field, ReferenceField::ActionAgainst);
+        assert_eq!(r.kind, ReferenceRefusalKind::DependsOnAndAgainst, "{err}");
+    }
+    // Commit: a text entry that names nothing at the ack is created as text;
+    // if a synonym makes it match the target by the commit, it is refused.
+    let deps = ["the belief, by another name"];
+    let act = Action {
+        depends_on: &deps,
+        ..action("acted on it")
+    };
+    let pinned = validate_against(&g, &act, &refs).unwrap();
+    g.declare_synonym("the belief, by another name", BELIEF);
+    let before = g.snapshot();
+    let err = record_action_against(&mut g, i, &agent(), &act, &Default::default(), &[], &pinned)
+        .unwrap_err();
+    assert_eq!(
+        refusal(&err).kind,
+        ReferenceRefusalKind::DependsOnAndAgainst
+    );
+    assert_eq!(g.snapshot(), before);
 }

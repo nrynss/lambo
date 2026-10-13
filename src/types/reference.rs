@@ -116,6 +116,11 @@ pub enum ReferenceRefusalKind {
     /// The citation names a concept the call does not derive (a library
     /// caller's mistake; the MCP and CLI surfaces build them per concept).
     UnknownConcept,
+    /// An `against` reference names a concept the same call also cites in
+    /// `depends_on` for the same citing concept (#19(b) review M2): one
+    /// write cannot both rest on a concept and contradict it. Separate
+    /// writes may still record both edges.
+    DependsOnAndAgainst,
 }
 
 /// A refused reference: the field, the citing concept, the reference as sent
@@ -247,6 +252,11 @@ impl fmt::Display for ReferenceRefusal {
             ReferenceRefusalKind::Limit { what, limit } => {
                 write!(f, "{field} {r}{on}: {what} (the limit is {limit})")
             }
+            ReferenceRefusalKind::DependsOnAndAgainst => write!(
+                f,
+                "{field} {r}{on} names a concept this call also cites in depends_on; one write \
+                 cannot both rest on a concept and contradict it. Send one of the two"
+            ),
             ReferenceRefusalKind::UnknownConcept => write!(
                 f,
                 "{field} {r}{on}: the citing concept is not one of this call's concepts"
@@ -370,6 +380,7 @@ mod tests {
                 limit: 8,
             },
             ReferenceRefusalKind::UnknownConcept,
+            ReferenceRefusalKind::DependsOnAndAgainst,
         ];
         for kind in kinds {
             let r = ReferenceRefusal::new(

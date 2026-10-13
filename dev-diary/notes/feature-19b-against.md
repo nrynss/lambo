@@ -87,9 +87,17 @@ cap: it creates nothing and has its own bound.
 
 ### Same target in `depends_on` and `against`
 
-Allowed. The two are different edges and the graph already admits both
-from separate writes; refusing them only inside one call would be
-inconsistent. Not expected in practice.
+**One call: refused** (review M2, orchestrator decision: the conservative
+choice, easy to undo; the owner sees it in the PR body). A concept whose
+`depends_on` and `against` resolve to the same concept, or an action
+whose `depends_on` entry (by id or by text, as the action would write it)
+resolves to an `against` target, is refused with the new
+`ReferenceRefusalKind::DependsOnAndAgainst`, field `against`, before the
+ack and again at the commit (`cite::refuse_cited_and_contradicted`,
+`action::refuse_depended_and_contradicted`). Different concepts of one
+call may cite and contradict the same target. **Separate writes may still
+produce both edges** between one pair: the graph admits it, and refusing
+across writes would need history the write path does not consult.
 
 ### Refusals and wording
 

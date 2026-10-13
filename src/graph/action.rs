@@ -388,12 +388,46 @@ pub(crate) fn validate_against(
     action: &Action<'_>,
     against: &[String],
 ) -> Result<Vec<crate::types::PinnedReference>, LamboError> {
-    crate::graph::cite::pin(
+    let pinned = crate::graph::cite::pin(
         graph,
         &[(action.action, ConceptType::Resource)],
         &crate::graph::cite::ACTION_AGAINST,
         &[(action.action, against)],
-    )
+    )?;
+    if !pinned.is_empty() {
+        refuse_depended_and_contradicted(graph, action, &[], &pinned)?;
+    }
+    Ok(pinned)
+}
+
+/// #19(b) review M2: an `against` target that one of the action's own
+/// `depends_on` entries resolves to (by id or by text, as the action would
+/// write it) is refused with
+/// [`ReferenceRefusalKind::DependsOnAndAgainst`]. Read-only; run at the
+/// pre-pass and again at the commit, since a text entry can come to match
+/// a concept in between.
+fn refuse_depended_and_contradicted(
+    graph: &Graph,
+    action: &Action<'_>,
+    pins: &[Option<NodeId>],
+    against: &[crate::types::PinnedReference],
+) -> Result<(), LamboError> {
+    let plan = plan(graph, action, pins)?;
+    for p in against {
+        if plan
+            .planned_edges
+            .iter()
+            .any(|&(_, t, ty)| ty == EdgeType::Dependency && t == p.target)
+        {
+            return Err(crate::surface::resolve::refusal(
+                ReferenceField::ActionAgainst,
+                Some(action.action),
+                &p.reference,
+                ReferenceRefusalKind::DependsOnAndAgainst,
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// [`record_action_pinned`] with the action's contradictions (#19(b)):
@@ -420,6 +454,7 @@ pub(crate) fn record_action_against(
     graph.transaction(|graph| {
         let spec = &cite::ACTION_AGAINST;
         cite::recheck(graph, spec, against)?;
+        refuse_depended_and_contradicted(graph, action, pins, against)?;
         let mut outcome =
             record_action_pinned(graph, interaction, agent, action, embeddings, pins)?;
         let stamp = match graph.node(interaction) {

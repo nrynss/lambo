@@ -179,15 +179,42 @@ pub(crate) fn validate(
         .iter()
         .map(|c| (c.content.as_str(), c.against.as_slice()))
         .collect();
-    Ok(PinnedCitations {
+    let pinned = PinnedCitations {
         references: pin(g, concepts, &DEPENDS_ON, &depends_on)?,
         against: pin(g, concepts, &AGAINST, &against)?,
-    })
+    };
+    refuse_cited_and_contradicted(&pinned)?;
+    Ok(pinned)
+}
+
+/// #19(b) review M2: an `against` reference whose `(content, target)` the
+/// same call also cites in `depends_on` is refused
+/// ([`ReferenceRefusalKind::DependsOnAndAgainst`]). Both pinned lists are
+/// fixed at the ack and rechecked to the same targets at the commit, so
+/// this one check at the pre-pass (and again at the commit, for a library
+/// caller handing the commit its own pins) covers both.
+pub(crate) fn refuse_cited_and_contradicted(pinned: &PinnedCitations) -> Result<(), LamboError> {
+    for p in &pinned.against {
+        if pinned
+            .references
+            .iter()
+            .any(|r| r.content == p.content && r.target == p.target)
+        {
+            return Err(refuse(
+                &AGAINST,
+                &p.content,
+                &p.reference,
+                ReferenceRefusalKind::DependsOnAndAgainst,
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The commit's re-resolution of a derive's citations and contradictions
 /// ([`recheck`] for each list).
 pub(crate) fn recheck_all(g: &Graph, pinned: &PinnedCitations) -> Result<(), LamboError> {
+    refuse_cited_and_contradicted(pinned)?;
     recheck(g, &DEPENDS_ON, &pinned.references)?;
     recheck(g, &AGAINST, &pinned.against)
 }
