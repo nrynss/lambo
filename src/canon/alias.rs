@@ -37,8 +37,10 @@
 //! Per citation: a citer that already cites the ruling has its alias edge
 //! retired and nothing added (idempotent); the ruling citing its own alias is
 //! retired and never becomes a self-loop; a redirect that would close a
-//! `Causal`/`Dependency` cycle (the write-time acyclicity rule, spec §5.7) is
-//! left on the alias and counted. The alias's other edges (its `parent_of`
+//! `Causal`/`Dependency`/`Hierarchical` cycle (spec §5.7's acyclicity, as
+//! the graph's own invariant checks it) is
+//! left on the alias and counted. The cycle check walks `Causal`,
+//! `Dependency` and `Hierarchical` edges, as the graph's invariant does. The alias's other edges (its `parent_of`
 //! children, provenance) are untouched and counted.
 //!
 //! Planning a second time on the result changes nothing: the alias has no
@@ -51,7 +53,7 @@ use serde::{Deserialize, Serialize};
 use crate::graph::canonical::normalize_tokens;
 use crate::graph::Graph;
 use crate::surface::resolve::{resolve_reference, Leg, Resolved};
-use crate::types::{ConceptType, Edge, EdgeType, GraphSnapshot, Node, NodeId};
+use crate::types::{CanonizationStatus, ConceptType, Edge, EdgeType, GraphSnapshot, Node, NodeId};
 
 /// Where a pair came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -137,11 +139,50 @@ pub struct AliasRedirect {
     /// The ruling's own citations of the alias: retired, never a self-loop.
     pub self_dropped: usize,
     /// Citations left on the alias because re-pointing them would close a
-    /// `Causal`/`Dependency` cycle.
+    /// `Causal`/`Dependency`/`Hierarchical` cycle.
     pub cycle_refused: usize,
     /// The alias's dependents that are not citations (its `parent_of`
     /// children), left in place.
     pub other_dependents_kept: usize,
+    /// The alias's stored status. Canonization never demotes for lost
+    /// support, so a redirect leaves it as it is (review M3).
+    pub alias_status: CanonizationStatus,
+    /// How many accepted aliases name this redirect's ruling (review L4: a
+    /// ruling many names point at deserves a second look).
+    pub ruling_fan_in: usize,
+}
+
+impl AliasRedirect {
+    /// Citations still on the alias after the plan: the ones kept because
+    /// moving them would close a cycle.
+    pub fn citations_left(&self) -> usize {
+        self.cycle_refused
+    }
+}
+
+/// Something about an accepted reviewed pair worth a second look; never a
+/// refusal (review L4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WarningKind {
+    /// The alias is not an Entity (a swapped line?).
+    AliasNotAnEntity,
+    /// The ruling is not a Logic or Constraint (a swapped line?).
+    RulingNotARuling,
+}
+
+/// A warning about one accepted pair.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AliasWarning {
+    /// What.
+    pub kind: WarningKind,
+    /// The alias.
+    pub alias: NodeId,
+    /// The ruling.
+    pub ruling: NodeId,
+    /// The map line, for a reviewed pair.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<usize>,
 }
 
 /// A whole preview plan: the accepted redirects, the refusals and the edge
@@ -152,6 +193,8 @@ pub struct AliasPlan {
     pub redirects: Vec<AliasRedirect>,
     /// Refused pairs and map lines.
     pub refusals: Vec<AliasRefusal>,
+    /// Accepted pairs worth a second look.
+    pub warnings: Vec<AliasWarning>,
     /// Edge ids the overlay drops.
     pub retire: Vec<NodeId>,
     /// Edges the overlay adds.
@@ -399,11 +442,18 @@ pub fn plan(g: &Graph, pairs: &[AliasPair], refusals: Vec<AliasRefusal>) -> Alia
     kept.retain(|p| !linked(p));
     kept.sort_by_key(|p| p.alias.0);
 
-    // Citation by citation, against the graph as the plan changes it.
+    // Citation by citation, against the graph as the plan changes it. The
+    // cycle check walks `Causal`, `Dependency` and `Hierarchical` edges: the
+    // graph's own invariant refuses a cycle through any of the three (review
+    // H1: a ruling's `parent_of` child citing its alias would otherwise be
+    // moved into a cycle and abort the whole preview).
     let mut structural: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
     let mut dependency: HashSet<(NodeId, NodeId)> = HashSet::new();
     for e in g.edges() {
-        if matches!(e.edge_type, EdgeType::Causal | EdgeType::Dependency) {
+        if matches!(
+            e.edge_type,
+            EdgeType::Causal | EdgeType::Dependency | EdgeType::Hierarchical
+        ) {
             structural.entry(e.source).or_default().push(e.target);
         }
         if e.edge_type == EdgeType::Dependency {
@@ -416,7 +466,31 @@ pub fn plan(g: &Graph, pairs: &[AliasPair], refusals: Vec<AliasRefusal>) -> Alia
         else {
             continue;
         };
+        if p.source == PairSource::Reviewed {
+            for (bad, kind) in [
+                (
+                    alias_type != ConceptType::Entity,
+                    WarningKind::AliasNotAnEntity,
+                ),
+                (!is_ruling(ruling_type), WarningKind::RulingNotARuling),
+            ] {
+                if bad {
+                    out.warnings.push(AliasWarning {
+                        kind,
+                        alias: p.alias,
+                        ruling: p.ruling,
+                        line: p.line,
+                    });
+                }
+            }
+        }
+        let alias_status = match g.node(p.alias) {
+            Some(Node::Concept(c)) => c.canonization_status,
+            _ => CanonizationStatus::None,
+        };
         let mut r = AliasRedirect {
+            alias_status,
+            ruling_fan_in: 0,
             alias: p.alias,
             alias_type,
             ruling: p.ruling,
@@ -461,10 +535,18 @@ pub fn plan(g: &Graph, pairs: &[AliasPair], refusals: Vec<AliasRefusal>) -> Alia
         }
         out.redirects.push(r);
     }
+    let mut fan_in: HashMap<NodeId, usize> = HashMap::new();
+    for r in &out.redirects {
+        *fan_in.entry(r.ruling).or_default() += 1;
+    }
+    for r in out.redirects.iter_mut() {
+        r.ruling_fan_in = fan_in[&r.ruling];
+    }
     out
 }
 
-/// Whether `to` is reachable from `from` over `Causal`/`Dependency` edges.
+/// Whether `to` is reachable from `from` over `Causal`/`Dependency`/
+/// `Hierarchical` edges.
 fn reaches(adj: &HashMap<NodeId, Vec<NodeId>>, from: NodeId, to: NodeId) -> bool {
     let mut queue = VecDeque::from([from]);
     let mut seen = HashSet::from([from]);

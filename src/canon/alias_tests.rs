@@ -355,3 +355,69 @@ fn other_dependents_of_an_alias_are_counted_and_kept() {
     assert_eq!(p.redirects[0].other_dependents_kept, 1);
     assert_eq!(p.retire.len(), 3);
 }
+
+/// Review H1: the ruling is the `parent_of` parent of a concept that cites
+/// its alias. Moving that citation would make `child -> ruling -> child`,
+/// a cycle the graph's invariant refuses through `Hierarchical`, so the
+/// citation stays on the alias and is counted; the rest still move, and
+/// the overlay is a valid graph.
+#[test]
+fn a_rulings_child_citing_its_alias_is_kept_as_a_cycle() {
+    let mut snap = fair::snapshot(true);
+    let mut child = cite(&snap, id("lease_stays"), id("a30"), "parent-of-a30");
+    child.edge_type = EdgeType::Hierarchical;
+    snap.edges.push(child);
+    let g = graph(&snap);
+    let (pairs, refusals) = parse_map(
+        &g,
+        &format!("{} {}", short("lease_alias"), short("lease_stays")),
+    );
+    let p = plan(&g, &pairs, refusals);
+    let r = &p.redirects[0];
+    assert_eq!((r.redirected, r.cycle_refused), (2, 1));
+    assert_eq!(r.citations_left(), 1);
+    assert!(p.add.iter().all(|e| e.source != id("a30")));
+    graph(&apply(&snap, &p));
+}
+
+#[test]
+fn reviewed_pairs_carry_status_fan_in_and_type_warnings() {
+    let mut snap = fair::snapshot(true);
+    for c in snap
+        .concepts
+        .iter_mut()
+        .filter(|c| c.id == id("lease_alias"))
+    {
+        c.canonization_status = CanonizationStatus::Venerable;
+    }
+    let g = graph(&snap);
+    // Line 1 as intended; line 2 swapped (a ruling as the alias, a file as
+    // the ruling); line 3 a second alias for lease_stays.
+    let map = format!(
+        "{} {}\n{} {}\n{} {}\n",
+        short("lease_alias"),
+        short("lease_stays"),
+        short("wedge"),
+        short("file_flush"),
+        short("write_path_hub"),
+        short("lease_stays"),
+    );
+    let (pairs, refusals) = parse_map(&g, &map);
+    let p = plan(&g, &pairs, refusals);
+    let lease = p
+        .redirects
+        .iter()
+        .find(|r| r.alias == id("lease_alias"))
+        .unwrap();
+    assert_eq!(lease.alias_status, CanonizationStatus::Venerable);
+    assert_eq!(lease.ruling_fan_in, 2);
+    let mut w: Vec<_> = p.warnings.iter().map(|w| (w.kind, w.line)).collect();
+    w.sort_by_key(|(k, l)| (format!("{k:?}"), *l));
+    assert_eq!(
+        w,
+        vec![
+            (WarningKind::AliasNotAnEntity, Some(2)),
+            (WarningKind::RulingNotARuling, Some(2)),
+        ]
+    );
+}
