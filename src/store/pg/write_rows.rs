@@ -22,7 +22,9 @@ use super::sql::{COUNT_SESSION_VECTORS_SQL, ERASE_TOMBSTONE_SQL};
 use crate::store::batch::{AccessUpdate, ConceptRow, FlushStep};
 use crate::store::map_write_err;
 use crate::store::vector::encode_vector;
-use crate::types::{CanonizationEvent, Edge, Interaction, Mutation, Node, SessionId, StoreError};
+use crate::types::{
+    CanonizationEvent, DemotionReason, Edge, Interaction, Mutation, Node, SessionId, StoreError,
+};
 
 /// Multi-row upsert of one planned [`FlushStep::Interactions`] chunk (L82-1).
 ///
@@ -437,6 +439,8 @@ pub(super) async fn insert_canonization_event(
     tx: &mut sqlx::PgConnection,
     ev: &CanonizationEvent,
 ) -> Result<bool, StoreError> {
+    ev.check_reason()?;
+    let (reason, superseded_by) = DemotionReason::to_columns(ev.reason.as_ref());
     let res = sqlx::query(INSERT_CANONIZATION_EVENT_SQL)
         .bind(ev.id.0)
         .bind(&ev.session_id.0)
@@ -446,6 +450,8 @@ pub(super) async fn insert_canonization_event(
         .bind(ev.blast_radius)
         .bind(ev.last_demotion_time)
         .bind(ev.occurred_at)
+        .bind(reason)
+        .bind(superseded_by.map(|by| by.0))
         .execute(&mut *tx)
         .await
         .map_err(|e| map_write_err(e, |m| format!("insert canonization event: {m}")))?;

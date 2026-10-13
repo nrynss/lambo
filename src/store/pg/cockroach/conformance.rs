@@ -1563,6 +1563,7 @@ async fn check_record_canonization_appends_and_is_idempotent(store: &CockroachSt
         blast_radius: Some(9),
         last_demotion_time: None,
         occurred_at: Utc::now(),
+        reason: None,
     };
     store.record_canonization(&event, None).await.unwrap();
     // Same event re-recorded (retried flush) must not duplicate the audit row.
@@ -1591,6 +1592,7 @@ async fn check_record_canonization_appends_and_is_idempotent(store: &CockroachSt
         blast_radius: None,
         last_demotion_time: None,
         occurred_at: Utc::now(),
+        reason: None,
     };
     let err = store.record_canonization(&ghost, None).await.unwrap_err();
     assert!(matches!(err, StoreError::NotFound(_)));
@@ -1816,6 +1818,9 @@ async fn conformance_suite() {
     crate::store::pg::dependents_live::check_dependents_case(&store).await;
     // #36 PR 3: the canonization fair test, both policies.
     crate::store::pg::fair_test_live::check_fair_test(&store).await;
+    // #20: the supersession accessors and the demotion-reason columns.
+    crate::store::pg::supersession_live::check_supersession_case(&store).await;
+    crate::store::pg::supersession_live::check_unreadable_reason(&store).await;
     check_record_canonization_appends_and_is_idempotent(&store).await;
     check_corrupt_contract_row_load_errors(&store).await;
     check_unstamped_vector_candidates_are_empty_until_contract_commit(&store).await;

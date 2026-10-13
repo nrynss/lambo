@@ -679,6 +679,14 @@ impl GraphStore for SqliteStore {
             .await
     }
 
+    async fn dependent_evidence(
+        &self,
+        session: &SessionId,
+        node: NodeId,
+    ) -> Result<crate::store::DependentEvidence, StoreError> {
+        self.select_evidence_rows(session, node).await
+    }
+
     async fn erase_session(
         &self,
         session: &SessionId,

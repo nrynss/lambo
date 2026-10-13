@@ -1792,6 +1792,168 @@ pub struct CanonizationEvent {
     pub last_demotion_time: Option<DateTime<Utc>>,
     /// When the transition happened.
     pub occurred_at: DateTime<Utc>,
+    /// Why a demotion happened (#20). Demotion-only: a promotion carries
+    /// `None` and a promotion carrying a reason is refused at every write
+    /// gate. A demotion with `None` (every row written before #20, and every
+    /// budget demotion, which still writes `None` so its audit row is
+    /// unchanged) reads as [`DemotionReason::Budget`]; read it through
+    /// [`CanonizationEvent::demotion_reason`]. Serde-defaulted and skipped
+    /// when absent, so existing JSON loads and serializes unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<DemotionReason>,
+}
+
+/// Why a `Canonical -> None` demotion happened (#20).
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DemotionReason {
+    /// The Canonical count exceeded `max_canonical_nodes` (the only demotion
+    /// before #20, and what a historical demotion without a reason means).
+    Budget,
+    /// Newer dependent evidence for a contradicting concept overturned it
+    /// (`canonization_supersede`). `by` is the contradicting concept, kept as
+    /// an id even after that concept is collected.
+    Superseded {
+        /// The contradicting concept whose newer evidence demoted this one.
+        by: NodeId,
+    },
+    /// A stored reason this build cannot read (#20 review M3): unknown text,
+    /// a malformed `(reason, superseded_by)` pair, or a reason on a
+    /// promotion. Produced only when loading, with a warning, so one bad row
+    /// never stops a session's load; it is never read as `Budget`, and every
+    /// write gate refuses it. The raw pair is kept as found.
+    Unknown {
+        /// The `reason` column as stored.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        /// The `superseded_by` column as stored.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        superseded_by: Option<NodeId>,
+    },
+}
+
+impl DemotionReason {
+    /// The `reason` column text.
+    pub const BUDGET: &'static str = "budget";
+    /// The `reason` column text.
+    pub const SUPERSEDED: &'static str = "superseded";
+
+    /// The stored `(reason, superseded_by)` column pair for `reason`.
+    pub fn to_columns(reason: Option<&Self>) -> (Option<&str>, Option<NodeId>) {
+        match reason {
+            None => (None, None),
+            Some(Self::Budget) => (Some(Self::BUDGET), None),
+            Some(Self::Superseded { by }) => (Some(Self::SUPERSEDED), Some(*by)),
+            Some(Self::Unknown {
+                reason,
+                superseded_by,
+            }) => (reason.as_deref(), *superseded_by),
+        }
+    }
+
+    /// Parse the stored `(reason, superseded_by)` pair strictly. `(NULL,
+    /// NULL)` is "no recorded reason" (historical rows). Every other
+    /// combination that does not name exactly one variant is an error:
+    /// `budget` with an id, `superseded` without one, an id without a
+    /// reason, or unknown text. Loading uses [`Self::read_columns`].
+    pub fn from_columns(
+        reason: Option<&str>,
+        by: Option<NodeId>,
+    ) -> Result<Option<Self>, StoreError> {
+        match (reason, by) {
+            (None, None) => Ok(None),
+            (Some(Self::BUDGET), None) => Ok(Some(Self::Budget)),
+            (Some(Self::SUPERSEDED), Some(by)) => Ok(Some(Self::Superseded { by })),
+            (reason, by) => Err(StoreError::Invariant(format!(
+                "malformed canonization event reason: reason {reason:?}, superseded_by {by:?}"
+            ))),
+        }
+    }
+
+    /// The load-time reading of a stored pair (#20 review M3): what
+    /// [`Self::from_columns`] accepts, and [`Self::Unknown`] (never
+    /// `Budget`) for anything else, so the session still loads. The caller
+    /// logs the warning through [`CanonizationEvent::loaded`].
+    pub fn read_columns(reason: Option<&str>, by: Option<NodeId>) -> Option<Self> {
+        Self::from_columns(reason, by).unwrap_or_else(|_| {
+            Some(Self::Unknown {
+                reason: reason.map(str::to_owned),
+                superseded_by: by,
+            })
+        })
+    }
+}
+
+impl CanonizationEvent {
+    /// Whether this event is a demotion (`Canonical -> None`).
+    pub fn is_demotion(&self) -> bool {
+        self.from_status == CanonizationStatus::Canonical
+            && self.to_status == CanonizationStatus::None
+    }
+
+    /// Why this demotion happened: the recorded reason, or
+    /// [`DemotionReason::Budget`] for a demotion without one (historical
+    /// rows and budget demotions). `None` for every promotion.
+    pub fn demotion_reason(&self) -> Option<DemotionReason> {
+        self.is_demotion()
+            .then(|| self.reason.clone().unwrap_or(DemotionReason::Budget))
+    }
+
+    /// The write-gate check for [`Self::reason`]: a reason only on a
+    /// demotion, a supersession never by the demoted concept itself, and
+    /// never [`DemotionReason::Unknown`] (which only a load produces).
+    pub fn check_reason(&self) -> Result<(), StoreError> {
+        match &self.reason {
+            None => Ok(()),
+            Some(DemotionReason::Unknown {
+                reason,
+                superseded_by,
+            }) => Err(StoreError::Invariant(format!(
+                "canonization event {} carries an unreadable demotion reason \
+                 (reason {reason:?}, superseded_by {superseded_by:?})",
+                self.id
+            ))),
+            Some(_) if !self.is_demotion() => Err(StoreError::Invariant(format!(
+                "canonization event {} carries a demotion reason on {:?} -> {:?}",
+                self.id, self.from_status, self.to_status
+            ))),
+            Some(DemotionReason::Superseded { by }) if *by == self.node_id => {
+                Err(StoreError::Invariant(format!(
+                    "canonization event {} claims {} superseded itself",
+                    self.id, self.node_id
+                )))
+            }
+            Some(_) => Ok(()),
+        }
+    }
+
+    /// The load-time form of [`Self::check_reason`] (#20 review M3, L7): an
+    /// event read from a store or a snapshot whose reason does not pass the
+    /// write gate keeps loading, with its reason turned into
+    /// [`DemotionReason::Unknown`] (the raw pair kept) and one warning. It is
+    /// never read as `Budget`. An event that passes is returned unchanged.
+    pub fn loaded(mut self) -> Self {
+        if self.check_reason().is_ok() {
+            return self;
+        }
+        let (reason, by) = DemotionReason::to_columns(self.reason.as_ref());
+        let unknown = DemotionReason::Unknown {
+            reason: reason.map(str::to_owned),
+            superseded_by: by,
+        };
+        tracing::warn!(
+            target: "lambo::store",
+            event = %self.id,
+            node = %self.node_id,
+            from = ?self.from_status,
+            to = ?self.to_status,
+            reason = ?unknown,
+            "CanonizationReasonUnreadable: a canonization event's demotion reason \
+             cannot be read by this build; it loads as an unknown reason"
+        );
+        self.reason = Some(unknown);
+        self
+    }
 }
 
 /// An advisory soft lock on one node, so two agents do not edit it at once.
@@ -2087,6 +2249,64 @@ pub enum LamboError {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    /// #20: the column pair names exactly one reason or none, the JSON shape
+    /// is tagged, and an event without a reason keeps its pre-#20 JSON.
+    #[test]
+    fn demotion_reason_columns_and_wire_shape() {
+        let by = NodeId::new();
+        for reason in [
+            None,
+            Some(DemotionReason::Budget),
+            Some(DemotionReason::Superseded { by }),
+        ] {
+            let (text, id) = DemotionReason::to_columns(reason.as_ref());
+            assert_eq!(DemotionReason::from_columns(text, id).unwrap(), reason);
+        }
+        for (text, id) in [
+            (Some("budget"), Some(by)),
+            (Some("superseded"), None),
+            (None, Some(by)),
+            (Some("Budget"), None),
+            (Some(""), None),
+        ] {
+            assert!(matches!(
+                DemotionReason::from_columns(text, id),
+                Err(StoreError::Invariant(_))
+            ));
+        }
+        assert_eq!(
+            serde_json::to_value(DemotionReason::Superseded { by }).unwrap(),
+            serde_json::json!({ "kind": "superseded", "by": by })
+        );
+        let event = CanonizationEvent {
+            id: NodeId::new(),
+            session_id: SessionId::from("s"),
+            node_id: NodeId::new(),
+            from_status: CanonizationStatus::Canonical,
+            to_status: CanonizationStatus::None,
+            blast_radius: None,
+            last_demotion_time: None,
+            occurred_at: Utc.with_ymd_and_hms(2026, 10, 1, 0, 0, 0).unwrap(),
+            reason: None,
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert!(json.get("reason").is_none(), "absent, as before #20");
+        let back: CanonizationEvent = serde_json::from_value(json).unwrap();
+        assert_eq!(back.demotion_reason(), Some(DemotionReason::Budget));
+        let promotion = CanonizationEvent {
+            from_status: CanonizationStatus::Venerable,
+            to_status: CanonizationStatus::Canonical,
+            ..event.clone()
+        };
+        assert_eq!(promotion.demotion_reason(), None);
+        assert!(CanonizationEvent {
+            reason: Some(DemotionReason::Budget),
+            ..promotion
+        }
+        .check_reason()
+        .is_err());
+    }
 
     /// #116 review M1: only the two cycle producers' refusals are marked;
     /// any other `Invariant` (which can mean an inconsistent graph) is not.

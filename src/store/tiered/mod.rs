@@ -1599,6 +1599,14 @@ impl GraphStore for TieredStore {
             .await
     }
 
+    async fn dependent_evidence(
+        &self,
+        session: &SessionId,
+        node: NodeId,
+    ) -> Result<crate::store::DependentEvidence, StoreError> {
+        self.primary.dependent_evidence(session, node).await
+    }
+
     async fn record_canonization(
         &self,
         event: &CanonizationEvent,

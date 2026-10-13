@@ -34,6 +34,7 @@ fn canon_event_feed_ties_break_on_node_canonical_key_ahead_of_id() {
                 blast_radius: None,
                 occurred_at: at,
                 last_demotion_time: None,
+                reason: None,
             },
             // Larger event id on the SMALLER-key node.
             CanonizationEvent {
@@ -45,6 +46,7 @@ fn canon_event_feed_ties_break_on_node_canonical_key_ahead_of_id() {
                 blast_radius: None,
                 occurred_at: at,
                 last_demotion_time: None,
+                reason: None,
             },
         ],
         ..GraphSnapshot::default()

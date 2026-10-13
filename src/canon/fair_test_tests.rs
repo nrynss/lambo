@@ -101,6 +101,10 @@ async fn the_fixture_is_real_shaped() {
         "identity_burst",
         "ack_single",
         "lease_self",
+        "retry_forever",
+        "retry_bounded",
+        "ttl_fixed",
+        "ttl_sliding",
     ];
     for r in rulings {
         let id = fair::concept_id(r);
@@ -129,7 +133,7 @@ async fn the_fixture_is_real_shaped() {
             .iter()
             .filter(|e| e.edge_type == EdgeType::Contradicts)
             .count(),
-        1
+        fair::CONTRADICTIONS.len()
     );
     let times: Vec<DateTime<Utc>> = snap.interactions.iter().map(|i| i.about_time()).collect();
     let extent = *times.iter().max().unwrap() - *times.iter().min().unwrap();
@@ -201,7 +205,10 @@ async fn both_policies_promote_the_supported_rulings_on_sqlite() {
 async fn the_contradiction_changes_nothing() {
     let with = fair::snapshot(true);
     let without = fair::snapshot(false);
-    assert_eq!(with.edges.len(), without.edges.len() + 1);
+    assert_eq!(
+        with.edges.len(),
+        without.edges.len() + fair::CONTRADICTIONS.len()
+    );
     let (s_with, s_without) = (memory_store(&with).await, memory_store(&without).await);
     let sid = fair::session();
     let p = EvalParams::default();
@@ -469,4 +476,153 @@ async fn the_fixture_runs_under_another_session_id() {
             fair::assert_expected(&fair::statuses(&g), policy, "SQLite, fresh session");
         }
     }
+}
+
+/// #20 on the fixture, both policies, MemoryStore and SQLite: with
+/// supersession on from the start, `retry_forever` is held at Venerable and
+/// nothing is demoted; turned on after a fixed point reached without it,
+/// `retry_forever` is demoted once, `Superseded { by: retry_bounded }`,
+/// re-climbs to Venerable and is held there. `ttl_fixed` (older support) and
+/// `lease_stays` (an assertion alone) keep Canonical, and no contradictor
+/// is promoted by supersession.
+#[tokio::test]
+async fn supersession_on_the_fixture() {
+    use crate::types::DemotionReason;
+    for policy in POLICIES {
+        let on = EvalParams {
+            supersede: true,
+            ..params(policy)
+        };
+        for name in STORES {
+            let store = fresh_store(name).await;
+            let snap = snapshot();
+            store.flush(&fair::batch_of(&snap), None).await.unwrap();
+            let held = fair::fixed_point(store.as_ref(), snap.clone(), &on, 3).await;
+            fair::assert_expected_superseding(&fair::statuses(&held), policy, name);
+            assert!(
+                held.canonization_events()
+                    .iter()
+                    .all(|e| e.reason.is_none()),
+                "{policy:?} {name}: nothing superseded from the start"
+            );
+
+            // A second store: off to a fixed point, then on.
+            let store2 = fresh_store(name).await;
+            store2.flush(&fair::batch_of(&snap), None).await.unwrap();
+            let (g, t) = fair::fixed_point_from(
+                store2.as_ref(),
+                Graph::from_snapshot(snap).unwrap(),
+                &params(policy),
+                3,
+                fair::now(),
+            )
+            .await;
+            fair::assert_expected(&fair::statuses(&g), policy, name);
+            let (g, _) = fair::fixed_point_from(store2.as_ref(), g, &on, 3, t).await;
+            fair::assert_expected_superseding(&fair::statuses(&g), policy, name);
+            let forever = fair::concept_id("retry_forever");
+            let hops: Vec<_> = g
+                .canonization_events()
+                .iter()
+                .filter(|e| e.node_id == forever)
+                .map(|e| (e.from_status, e.to_status, e.reason.clone()))
+                .collect();
+            use CanonizationStatus::{Candidate, Canonical, Venerable};
+            let reason = DemotionReason::Superseded {
+                by: fair::concept_id("retry_bounded"),
+            };
+            let superseded = Some(reason.clone());
+            assert_eq!(
+                hops,
+                vec![
+                    (CanonizationStatus::None, Candidate, None),
+                    (Candidate, Venerable, None),
+                    (Venerable, Canonical, None),
+                    (Canonical, CanonizationStatus::None, superseded),
+                    (CanonizationStatus::None, Candidate, None),
+                    (Candidate, Venerable, None),
+                ],
+                "{policy:?} {name}"
+            );
+            let superseding: Vec<_> = g
+                .canonization_events()
+                .iter()
+                .filter(|e| e.reason.is_some())
+                .map(|e| e.node_id)
+                .collect();
+            assert_eq!(superseding, vec![forever], "{policy:?} {name}");
+            // The durable audit agrees after a reload.
+            let reloaded = store2.load_session(&fair::session()).await.unwrap();
+            let durable: Vec<_> = reloaded
+                .canonization_events
+                .iter()
+                .filter(|e| e.node_id == forever)
+                .filter_map(|e| e.demotion_reason())
+                .collect();
+            assert_eq!(durable, vec![reason], "{policy:?} {name}");
+        }
+    }
+}
+
+/// The stores the supersession fixture test runs on.
+#[cfg(feature = "store-sqlite")]
+const STORES: [&str; 2] = ["MemoryStore", "SQLite"];
+#[cfg(not(feature = "store-sqlite"))]
+const STORES: [&str; 1] = ["MemoryStore"];
+
+async fn fresh_store(name: &str) -> Box<dyn GraphStore> {
+    match name {
+        #[cfg(feature = "store-sqlite")]
+        "SQLite" => {
+            let s = crate::store::SqliteStore::connect("sqlite::memory:").unwrap();
+            s.init_schema().await.unwrap();
+            Box::new(s)
+        }
+        _ => Box::new(MemoryStore::new()),
+    }
+}
+
+/// #20 review M2: `lambo inspect` reads `canonization_supersede`, and with it
+/// on explains the hold the evaluator applies to `retry_forever`; without
+/// it, the same concept reads as eligible.
+#[tokio::test]
+async fn inspect_explains_the_hold_with_the_setting() {
+    let snap = snapshot();
+    let store = memory_store(&snap).await;
+    let on = EvalParams {
+        supersede: true,
+        ..params(PromotionPolicy::Swarm)
+    };
+    let g = fair::fixed_point(&store, snap, &on, 3).await;
+    assert_eq!(
+        fair::statuses(&g)["retry_forever"],
+        CanonizationStatus::Venerable
+    );
+    let focus = crate::recall::format::short_id(fair::concept_id("retry_forever"));
+    let held = format!(
+        "held: contradicted by {} with newer evidence",
+        crate::recall::format::short_id(fair::concept_id("retry_bounded"))
+    );
+    let text = crate::cli::inspect::run_with_settings(
+        &store,
+        fair::NAME,
+        &focus,
+        1,
+        PromotionPolicy::Swarm,
+        true,
+    )
+    .await
+    .unwrap();
+    assert!(text.contains(&held), "{text}");
+    let off = crate::cli::inspect::run_with_settings(
+        &store,
+        fair::NAME,
+        &focus,
+        1,
+        PromotionPolicy::Swarm,
+        false,
+    )
+    .await
+    .unwrap();
+    assert!(!off.contains("held:"), "{off}");
 }

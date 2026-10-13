@@ -184,7 +184,11 @@ impl Graph {
                     ev.session_id, sid
                 )));
             }
-            g.canonization_events.push(ev.clone());
+            // #20 review L7: an event whose reason the write gate would refuse
+            // (a reason on a promotion, a self-supersession, an unknown
+            // reason) loads as an unknown reason with a warning; the snapshot
+            // still loads.
+            g.canonization_events.push(ev.clone().loaded());
         }
 
         g.assert_invariants()?;

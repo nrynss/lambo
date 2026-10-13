@@ -42,19 +42,29 @@ async fn the_dry_run_reaches_the_fair_test_fixed_point_under_both_policies() {
         fair::assert_expected(&by_key(&finals), policy, "the dry-run overlay");
         all_held(&report);
         assert_eq!(report.stop, StopReason::FixedPoint);
-        assert_eq!(report.canonical_total, 4);
+        // The four #36 rulings and #20's two beliefs (supersession is off).
+        assert_eq!(report.canonical_total, 6);
+        let canonical: HashSet<NodeId> = [
+            "lease_stays",
+            "wedge",
+            "identity",
+            "async_ack",
+            "retry_forever",
+            "ttl_fixed",
+        ]
+        .map(fair::concept_id)
+        .into_iter()
+        .collect();
+        let rulings = canonical.clone();
         let canonical: HashSet<NodeId> = report.canonical.iter().map(|r| r.id).collect();
-        let rulings: HashSet<NodeId> = ["lease_stays", "wedge", "identity", "async_ack"]
-            .map(fair::concept_id)
-            .into_iter()
-            .collect();
         assert_eq!(canonical, rulings);
         assert!(report.canonical.iter().all(|r| r.dependents == 6));
-        // Four Canonicals, all rulings: no Resource reached Canonical.
-        assert_eq!(report.reached["Canonical"].total, 4);
+        // Six Canonicals, all rulings: no Resource reached Canonical.
+        assert_eq!(report.reached["Canonical"].total, 6);
         assert_eq!(report.reached["Canonical"].resource, 0);
-        // The alias is the one Venerable that is not a ruling or wedge_five.
-        assert_eq!(report.reached["Venerable"].total, 6);
+        // The alias is the one Venerable that is not a ruling, wedge_five or
+        // one of #20's two contradictors.
+        assert_eq!(report.reached["Venerable"].total, 10);
         assert_eq!(report.demoted.total, 0);
     }
 }
@@ -145,14 +155,14 @@ async fn a_full_budget_stops_deterministically() {
         assert_eq!(a.stop, StopReason::FixedPoint);
         assert!(a.budget_saturated);
         assert_eq!(a.canonical_total, 2);
-        // The other two supported rulings wait at Venerable, and the
-        // explanation names the budget.
+        // The other four supported rulings (two of them #20's) wait at
+        // Venerable, and the explanation names the budget.
         assert_eq!(
             a.fixed_point
                 .one_gate_away
                 .get("Venerable->Canonical stage3/canonical_budget")
                 .map(|s| s.total),
-            Some(2)
+            Some(4)
         );
     }
 }
@@ -291,7 +301,7 @@ async fn a_report_compares_with_its_baseline() {
     let c = compare(&r, &after);
     for d in &c.policies {
         assert_eq!(d.canonical_removed, vec![wedge]);
-        assert_eq!(d.reached["Canonical"], (4, 3));
+        assert_eq!(d.reached["Canonical"], (6, 5));
     }
     assert!(render_comparison(&c).contains(&format!("canonical removed: {wedge}")));
 }
@@ -331,8 +341,8 @@ async fn the_alias_preview_flips_the_fixture_alias() {
         assert_eq!(p.flips_total, 1, "{:?}: {:?}", p.policy, p.flips);
         let lease = p.after.canonical.iter().find(|c| c.id == ruling).unwrap();
         assert_eq!(lease.dependents, 9);
-        assert_eq!(p.delta.reached["Venerable"], (6, 5));
-        assert_eq!(p.delta.reached["Canonical"], (4, 4));
+        assert_eq!(p.delta.reached["Venerable"], (10, 9));
+        assert_eq!(p.delta.reached["Canonical"], (6, 6));
         all_held(&p.after);
     }
     // Detection proposes nothing on the fixture, so nothing flips.
@@ -690,7 +700,7 @@ async fn every_canonical_id_is_compared_and_a_foreign_baseline_is_refused() {
         .await
         .unwrap();
     assert_eq!(r.policies[0].canonical.len(), 1);
-    assert_eq!(r.policies[0].canonical_ids.len(), 4);
+    assert_eq!(r.policies[0].canonical_ids.len(), 6);
     let mut fewer = snap.clone();
     let rulings = ["lease_stays", "wedge", "identity", "async_ack"].map(fair::concept_id);
     // Drop the citations of whichever ruling is not the one listed row.
@@ -732,4 +742,35 @@ fn errors_keep_ids_and_withhold_text() {
     assert!(!redact("key 'secret text' duplicated").contains("secret"));
     let e = resolve_watch(&fair::snapshot(true), &["no flush may wedge".to_string()]).unwrap_err();
     assert!(!e.contains("wedge"), "{e}");
+}
+
+/// #20 review L1: the dry run with supersession on reaches the fixture's
+/// supersession fixed point under both policies, every invariant holding:
+/// `retry_forever` is held at Venerable (its explanation names the hold, so
+/// `nothing_eligible_at_the_stop` holds), and the report says it ran on.
+#[tokio::test]
+async fn the_dry_run_with_supersession_reaches_the_held_fixed_point() {
+    let mut snap = fair::snapshot(true);
+    prepare(&mut snap, false);
+    for policy in BOTH {
+        let mut p = params(policy);
+        p.eval.supersede = true;
+        let (report, finals) = run(&snap, &p).await.unwrap();
+        fair::assert_expected_superseding(&by_key(&finals), policy, "the dry run, supersede on");
+        all_held(&report);
+        assert_eq!(report.stop, StopReason::FixedPoint);
+    }
+    let mut p = params(PromotionPolicy::Swarm);
+    p.eval.supersede = true;
+    let r = dry_run_all(fair::snapshot(true), &BOTH, &p).await.unwrap();
+    assert!(r.supersede);
+    assert!(render_report(&r).contains("supersede: on"));
+    assert!(serde_json::to_value(&r).unwrap()["supersede"] == serde_json::json!(true));
+    let off = dry_run_all(fair::snapshot(true), &BOTH, &params(PromotionPolicy::Swarm))
+        .await
+        .unwrap();
+    assert!(serde_json::to_value(&off)
+        .unwrap()
+        .get("supersede")
+        .is_none());
 }

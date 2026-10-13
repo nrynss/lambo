@@ -665,6 +665,7 @@ async fn promote(store: &Arc<MemoryStore>, session: &str, content: &str) {
                     blast_radius: Some(1),
                     occurred_at: Utc::now(),
                     last_demotion_time: None,
+                    reason: None,
                 },
                 Some(lease.token),
             )

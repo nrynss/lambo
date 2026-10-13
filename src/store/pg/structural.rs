@@ -9,8 +9,11 @@ use sqlx::Row;
 use std::time::Duration;
 
 use super::codec::{backend, cutoff, order_candidates, parse_node_id};
-use super::sql::{keyword_candidates_sql, BLAST_RADIUS_SQL, INTERACTION_SPAN_SQL};
+use super::sql::{
+    keyword_candidates_sql, BLAST_RADIUS_SQL, EVIDENCE_EXTENT_SQL, INTERACTION_SPAN_SQL,
+};
 use super::{Dialect, PgStore};
+use crate::store::evidence::{DependentEvidence, DependentEvidenceRow};
 use crate::types::{InteractionSpan, NodeId, Scored, SessionId, StoreError};
 
 /// Keyword hit count for one candidate row, case-folded on BOTH sides (MemoryStore
@@ -143,6 +146,62 @@ impl<D: Dialect> PgStore<D> {
         Ok(InteractionSpan {
             distinct: distinct as u64,
             coverage,
+        })
+    }
+    /// #20: the raw evidence rows `crate::store::evidence` reads.
+    pub(super) async fn select_evidence_rows(
+        &self,
+        session: &SessionId,
+        node: NodeId,
+    ) -> Result<DependentEvidence, StoreError> {
+        if !self.session_exists(session).await? {
+            return Err(StoreError::SessionNotFound(session.0.clone()));
+        }
+        let pool = &self.pool().await?;
+        let own = sqlx::query(&self.sql.select_evidence_own_origin)
+            .bind(&session.0)
+            .bind(node.0)
+            .fetch_optional(pool)
+            .await
+            .map_err(backend)?;
+        let own_origin = match own {
+            Some(row) => Some(parse_node_id(
+                &row.try_get::<String, _>("origin").map_err(backend)?,
+            )?),
+            None => None,
+        };
+        let rows = sqlx::query(&self.sql.select_evidence_rows)
+            .bind(&session.0)
+            .bind(node.0)
+            .fetch_all(pool)
+            .await
+            .map_err(backend)?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let origin_created: Option<DateTime<Utc>> =
+                row.try_get("origin_created").map_err(backend)?;
+            let origin_event: Option<DateTime<Utc>> =
+                row.try_get("origin_event").map_err(backend)?;
+            out.push(DependentEvidenceRow {
+                edge: parse_node_id(&row.try_get::<String, _>("edge_id").map_err(backend)?)?,
+                edge_created: row.try_get("edge_created").map_err(backend)?,
+                edge_event: row.try_get("edge_event").map_err(backend)?,
+                dependent: parse_node_id(&row.try_get::<String, _>("dependent").map_err(backend)?)?,
+                origin: parse_node_id(&row.try_get::<String, _>("origin").map_err(backend)?)?,
+                origin_dates: origin_created.map(|created| (created, origin_event)),
+            });
+        }
+        let extent = sqlx::query(EVIDENCE_EXTENT_SQL)
+            .bind(&session.0)
+            .fetch_one(pool)
+            .await
+            .map_err(backend)?;
+        let lo: Option<DateTime<Utc>> = extent.try_get("lo").map_err(backend)?;
+        let hi: Option<DateTime<Utc>> = extent.try_get("hi").map_err(backend)?;
+        Ok(DependentEvidence {
+            own_origin,
+            rows: out,
+            extent: lo.zip(hi),
         })
     }
 }

@@ -213,6 +213,7 @@ fn set_root_goal_leaves_canonical_goal_untouched() {
         blast_radius: Some(3),
         last_demotion_time: None,
         occurred_at: ts(at),
+        reason: None,
     };
     g.apply_canonization_transition(promote(crate::types::CanonizationStatus::Canonical, 1))
         .unwrap();
@@ -276,6 +277,7 @@ fn set_root_goal_promotes_candidate_goal_to_venerable() {
         blast_radius: Some(2),
         last_demotion_time: None,
         occurred_at: ts(at),
+        reason: None,
     };
     g.apply_canonization_transition(promote(
         crate::types::CanonizationStatus::None,

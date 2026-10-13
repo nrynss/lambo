@@ -46,6 +46,7 @@ mod recall_by;
 mod replay;
 mod repo_scope;
 mod shutdown;
+mod supersession;
 mod writes;
 
 fn contract(kind: &str, dim: usize) -> EmbeddingContract {

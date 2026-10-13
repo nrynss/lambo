@@ -255,6 +255,7 @@ pub(crate) fn source() -> GraphSnapshot {
             blast_radius: Some(1),
             last_demotion_time: None,
             occurred_at: at(minute),
+            reason: None,
         });
     }
     let outcome = WriteIntentOutcome {
@@ -977,6 +978,75 @@ mod sqlite {
         outcomes
     }
 
+    /// #20 (focused review blocker): a split carrying a supersession imports
+    /// with its `reason` and `superseded_by`, reloads identical to the built
+    /// target, and its digest covers the pair, so D3's verify (which compares
+    /// target digests) refuses a destination that lost it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_supersession_survives_import_and_reload() {
+        use crate::types::DemotionReason;
+        let mut source = source();
+        source.canonization_events.push(CanonizationEvent {
+            id: id(403),
+            session_id: source.session_id.clone(),
+            node_id: id(11),
+            from_status: CanonizationStatus::Canonical,
+            to_status: CanonizationStatus::None,
+            blast_radius: None,
+            last_demotion_time: Some(at(22)),
+            occurred_at: at(22),
+            reason: Some(DemotionReason::Superseded { by: id(13) }),
+        });
+        let out = build_split(&plan_for(&source), &source).unwrap();
+        let dir = temp_dir();
+        let path = dir.join("split.db");
+        let store = new_destination(&path).await;
+        import_all(&store, &out).await;
+        let mut seen = 0;
+        for t in &out.targets {
+            let loaded = store
+                .load_session(&SessionId::from(t.session.as_str()))
+                .await
+                .unwrap();
+            for built in t
+                .snapshot
+                .canonization_events
+                .iter()
+                .filter(|e| e.reason.is_some())
+            {
+                seen += 1;
+                let got = loaded
+                    .canonization_events
+                    .iter()
+                    .find(|e| e.id == built.id)
+                    .unwrap();
+                assert_eq!(got.reason, built.reason, "{}", t.session);
+                assert_eq!(
+                    got.reason,
+                    Some(DemotionReason::Superseded {
+                        by: mapped(&out, 13, &t.session)
+                    })
+                );
+            }
+            assert_eq!(target_sha256(&loaded).unwrap(), t.sha256, "{}", t.session);
+            // A destination that lost the pair no longer matches its digest.
+            let mut lost = loaded.clone();
+            for e in lost.canonization_events.iter_mut() {
+                e.reason = None;
+            }
+            if t.snapshot
+                .canonization_events
+                .iter()
+                .any(|e| e.reason.is_some())
+            {
+                assert_ne!(target_sha256(&lost).unwrap(), t.sha256);
+            }
+        }
+        assert!(seen > 0);
+        store.finish_split_destination().await.unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn import_round_trips_and_a_verified_rerun_writes_nothing() {
         let source = source();
@@ -1547,4 +1617,43 @@ fn a_general_replica_is_a_stub_unless_it_passes_the_general_interaction_test() {
     }
     // Deterministic with stubs and full-text replicas alike.
     assert_eq!(build_split(&plan, &source).unwrap(), out);
+}
+
+/// #20: a supersession's source is remapped with the concept ids, so the
+/// split audit row names the target's copy of the superseding concept,
+/// never the source session's id.
+#[test]
+fn a_supersession_source_is_remapped_with_its_concept() {
+    use crate::types::DemotionReason;
+    let mut source = source();
+    source.canonization_events.push(CanonizationEvent {
+        id: id(403),
+        session_id: source.session_id.clone(),
+        node_id: id(11),
+        from_status: CanonizationStatus::Canonical,
+        to_status: CanonizationStatus::None,
+        blast_radius: None,
+        last_demotion_time: Some(at(22)),
+        occurred_at: at(22),
+        reason: Some(DemotionReason::Superseded { by: id(13) }),
+    });
+    let plan = plan_for(&source);
+    let out = build_split(&plan, &source).unwrap();
+    let mut seen = 0;
+    for t in &out.targets {
+        for e in t
+            .snapshot
+            .canonization_events
+            .iter()
+            .filter(|e| e.occurred_at == at(22))
+        {
+            seen += 1;
+            let Some(DemotionReason::Superseded { by }) = &e.reason else {
+                panic!("{e:?}");
+            };
+            assert_ne!(*by, id(13), "never the source session's id");
+            assert_eq!(*by, mapped(&out, 13, &t.session), "{}", t.session);
+        }
+    }
+    assert!(seen > 0);
 }

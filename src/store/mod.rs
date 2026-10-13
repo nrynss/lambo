@@ -74,6 +74,10 @@ pub mod batch;
 // T3.5 — `load_session()` / startup materialization (see `load.rs`).
 pub mod load;
 pub(crate) mod span;
+// #20 supersession evidence: one reading of the dependence rows for every
+// adapter and the evaluator's revalidation.
+pub mod evidence;
+pub use evidence::{DependentEvidence, DependentEvidenceRow};
 pub use span::{validate_coverage_window, DEFAULT_COVERAGE_WINDOW, MIN_COVERAGE_WINDOW};
 // T3.4 — write-behind flush task (spec §2.4–§2.5); drains any GraphStore.
 pub mod flush;
@@ -577,6 +581,33 @@ pub trait GraphStore: Send + Sync {
         validate_coverage_window(window)?;
         Err(StoreError::Capability(
             "capped interaction-span coverage".into(),
+        ))
+    }
+
+    /// Supersession evidence (#20): `node`'s **dependent evidence rows**,
+    /// unfiltered: one [`DependentEvidenceRow`] per dependence edge into it
+    /// (a `Dependency` source or a `Hierarchical` child, a concept of the
+    /// session other than `node`) with the edge's dates and its dependent's
+    /// origin interaction (with dates only when that interaction is in the
+    /// session), plus `node`'s own origin and the session's about-time
+    /// extent. The rules live in [`DependentEvidence`]'s methods, so every
+    /// adapter agrees by construction: #19(c)'s clock (eligible by write time
+    /// against the age floor, dated by about-time clamped to write time, own
+    /// origin excluded), the watermark
+    /// ([`DependentEvidence::latest_structural_evidence_at`]) and Stage 2's
+    /// span after it ([`DependentEvidence::interaction_span_since`]). The
+    /// evaluator reads it once per node per cycle.
+    ///
+    /// Default: [`StoreError::Capability`]. Built-in stores implement it; a
+    /// third-party store compiles unchanged and the evaluator skips
+    /// supersession for the cycle with one diagnostic.
+    async fn dependent_evidence(
+        &self,
+        _session: &SessionId,
+        _node: NodeId,
+    ) -> Result<DependentEvidence, StoreError> {
+        Err(StoreError::Capability(
+            "supersession evidence (dependent_evidence)".into(),
         ))
     }
 

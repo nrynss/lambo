@@ -19,6 +19,7 @@ pub mod dependents;
 #[cfg(feature = "embed-fixture")]
 pub mod dresscode;
 pub mod fair_test;
+pub mod supersession;
 #[cfg(feature = "store-memory")]
 mod vector_searchable;
 #[cfg(feature = "store-memory")]

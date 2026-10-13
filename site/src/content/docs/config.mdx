@@ -30,7 +30,7 @@ url = "http://127.0.0.1:8080"
 Unknown keys are refused, so a typo fails at startup instead of silently falling back to a default. A misspelled `knd`, a misspelled `[embeder]` section, and a key that belongs to the library rather than the file all stop the process before it attaches a session.
 </Warning>
 
-Recall defaults, flush timing, canonization thresholds, and scoring weights are not `lambo.toml` keys. They are library settings you pass when you build a `Memory` in Rust, so putting one in the file stops the process rather than tuning anything. Five settings are exceptions, and none of them is a threshold: `promotion_policy` below, and the four cadence keys in [Daemon cadence](#daemon-cadence). `promotion_policy` is a selector — it sets no number. But do not read that as "the numbers stay the same": `Solo` replaces the ladder rather than re-tuning it, and the store-evidence gates stop deciding anything. See [Library API](/lambo/api/) for what each policy actually measures.
+Recall defaults, flush timing, canonization thresholds, and scoring weights are not `lambo.toml` keys. They are library settings you pass when you build a `Memory` in Rust, so putting one in the file stops the process rather than tuning anything. Six settings are exceptions, and none of them is a threshold: `promotion_policy` and `canonization_supersede` below, and the four cadence keys in [Daemon cadence](#daemon-cadence). `promotion_policy` is a selector — it sets no number. But do not read that as "the numbers stay the same": `Solo` replaces the ladder rather than re-tuning it, and the store-evidence gates stop deciding anything. See [Library API](/lambo/api/) for what each policy actually measures.
 
 ```
 $ lambo --config lambo.toml provision
@@ -71,6 +71,22 @@ lambo demo: failed to build backends: config: LAMBO_PROMOTION_POLICY: unknown pr
 ```
 
 [`[daemon]`](#daemon-cadence) is the same bargain with a narrower scope: the demo discards the cadence you set and still refuses a degenerate one, but only the commands that resolve an embedder refuse it at all.
+
+## Supersession
+
+`canonization_supersede` turns on evidence-driven supersession (0.6.0). It is a top-level boolean, like `promotion_policy` a selector rather than a threshold, and it defaults to `false`, so a file without it behaves exactly as before:
+
+```toml
+canonization_supersede = true   # optional; top-level, before the first [table]
+```
+
+With it on, each canonization cycle first demotes a Canonical concept to ordinary memory when a concept that contradicts it (written with `against`) has since earned its own structural support: dependents from at least three other interactions, newer than the Canonical concept's latest eligible evidence, with Stage 2's spread. A contradiction with no newer support never demotes anything, and the contradicting concept is not promoted by it: it climbs on its own evidence. The bar is deliberately uneven: the contradicting side must clear Stage 2 again with newer support, while one new piece of support for the Canonical concept, from anyone but the agent that declared the contradiction, puts it ahead again.
+
+The demoted concept enters the usual re-promotion cooldown, and a concept inside its cooldown cannot supersede another. With the setting on, Stage 3 also **holds** at Venerable any concept a contradicting concept would supersede at once: a superseded one climbing back, and also one that was never Canonical, since promoting it would only demote it on the next cycle. It waits there until it earns support newer than the contradicting side's. When two concepts contradict each other and each qualifies against the other, only the one with the newest counted support may supersede or hold the other, so they cannot hold each other forever. `lambo inspect` shows it (`held: contradicted by <id> with newer evidence`) and names a concept's latest demotion and why; recall marks a superseded concept with a `⤓ Superseded at ... by ...` line. No new numbers: it reuses Stage 2's bars, the age floor and the cooldown. A value that is not `true` or `false` stops the process at startup, as does the key under a table.
+
+<Warning>
+**Give agents distinct ids before turning this on.** Support written by the agent that declared a contradiction never counts for the concept it contradicted: a writer cannot defend a belief against its own contradiction. So with a single writer, or several agents sharing one `agent_id`, nothing that writer adds for the contradicted concept can ever release it from a contradiction it declared; only another agent's support can. Who wrote a piece of support is decided by the agent acting when it was written; when two agents acted at the same instant and it cannot be told whose it is, that pair is not probed at all, so an ambiguity never demotes anything.
+</Warning>
 
 ## Store
 

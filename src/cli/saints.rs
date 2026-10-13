@@ -226,6 +226,7 @@ mod parity {
                     blast_radius: Some(0),
                     occurred_at: Utc::now(),
                     last_demotion_time: None,
+                    reason: None,
                 };
                 mem.graph()
                     .write()

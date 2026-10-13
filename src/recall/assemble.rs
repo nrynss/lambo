@@ -347,6 +347,7 @@ where
     // GPT5.6sol P2-5), plus every force-included hot member, in score order.
     // Blast radii for every canonical hit, computed ONCE (P2-7).
     let radii = format::blast_radii(graph);
+    let superseded = superseded_by(graph);
     let mut hits: Vec<RecallHit> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
     let mut detailed: Vec<DetailedHit> = Vec::new();
@@ -428,6 +429,18 @@ where
                 lines.push(text);
             }
         }
+        // #20: history, after the live lines. Not a hot-list condition and
+        // never forced: it annotates a hit that is already in the result.
+        if c.canonization_status != CanonizationStatus::Canonical
+            && let Some((by, at)) = superseded.get(&c.id)
+        {
+            let by_content = same_session_concept(graph, c, *by).map(|b| b.content.as_str());
+            let text = format::superseded_warning(*by, *at, by_content);
+            detailed_hit
+                .annotations
+                .push(Annotation::new(AnnotationKind::Superseded, text.clone()));
+            lines.push(text);
+        }
         if let Some(r) = active_reservation(graph, c.id, now) {
             let text = format::reservation_warning(r);
             detailed_hit
@@ -489,6 +502,33 @@ fn same_session_concept<'g>(
         Some(Node::Concept(c)) if c.session_id == of.session_id && c.id != of.id => Some(c),
         _ => None,
     }
+}
+
+/// #20's history: every concept whose **latest** demotion in the graph's
+/// audit was a supersession, with its source and time. One pass over the
+/// audit per assembly; a later budget demotion replaces an earlier
+/// supersession (the line names why it is down now).
+fn superseded_by(graph: &Graph) -> HashMap<NodeId, (NodeId, chrono::DateTime<chrono::Utc>)> {
+    let mut latest: HashMap<NodeId, Option<(NodeId, chrono::DateTime<chrono::Utc>)>> =
+        HashMap::new();
+    for e in graph.canonization_events() {
+        match e.demotion_reason() {
+            Some(crate::types::DemotionReason::Superseded { by }) => {
+                latest.insert(e.node_id, Some((by, e.occurred_at)));
+            }
+            // A later budget (or unreadable) demotion is why it is down now.
+            Some(
+                crate::types::DemotionReason::Budget | crate::types::DemotionReason::Unknown { .. },
+            ) => {
+                latest.insert(e.node_id, None);
+            }
+            None => {}
+        }
+    }
+    latest
+        .into_iter()
+        .filter_map(|(node, s)| s.map(|s| (node, s)))
+        .collect()
 }
 
 /// The contradicting concepts recall pulls in (#19(c)): every `by` of a
@@ -889,6 +929,7 @@ mod tests {
                     blast_radius: None,
                     last_demotion_time: None,
                     occurred_at: ts(0),
+                    reason: None,
                 })
                 .unwrap();
             }
@@ -1970,6 +2011,7 @@ mod tests {
                 blast_radius: None,
                 last_demotion_time: None,
                 occurred_at: ts(0),
+                reason: None,
             })
             .unwrap();
             if target == to {

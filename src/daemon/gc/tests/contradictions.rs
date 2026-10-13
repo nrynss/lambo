@@ -18,6 +18,7 @@ fn promote(g: &mut Graph, ev: u64, node: u64, to: CanonizationStatus) {
         blast_radius: None,
         last_demotion_time: (to == CanonizationStatus::None).then(|| ts(2)),
         occurred_at: ts(1),
+        reason: None,
     })
     .unwrap();
 }

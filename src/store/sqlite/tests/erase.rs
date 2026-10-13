@@ -227,6 +227,7 @@ async fn a_pre_erase_token_cannot_write_or_recreate_the_session() {
         blast_radius: None,
         last_demotion_time: None,
         occurred_at: Utc::now(),
+        reason: None,
     };
     let err = store
         .record_canonization(&event, Some(lease.token))

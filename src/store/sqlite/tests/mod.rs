@@ -12,6 +12,7 @@ use chrono::TimeZone;
 
 mod access;
 mod connection;
+mod demotion_reason;
 mod erase;
 mod leases;
 mod persistence;

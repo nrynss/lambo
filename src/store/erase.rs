@@ -690,6 +690,7 @@ pub(crate) mod testkit {
                         blast_radius: Some(1),
                         last_demotion_time: None,
                         occurred_at: ts,
+                        reason: None,
                     },
                 },
                 Mutation::RecordAccess {
@@ -934,6 +935,7 @@ pub(crate) mod testkit {
                             blast_radius: Some(1),
                             last_demotion_time: None,
                             occurred_at: Utc::now(),
+                            reason: None,
                         },
                         token,
                     )

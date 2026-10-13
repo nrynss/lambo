@@ -184,6 +184,17 @@ pub struct Config {
     /// default agree: both are `Swarm`.
     pub promotion_policy: PromotionPolicy,
 
+    /// Evidence-driven supersession (#20). Default `false`, so existing
+    /// sessions and goldens behave exactly as before. When `true`, each
+    /// canonization cycle first demotes a Canonical concept (`Canonical ->
+    /// None`, audited as `Superseded { by }`) when a concept contradicting it
+    /// has earned newer dependent evidence clearing Stage 2's bars. No new
+    /// thresholds: it reuses Stage 2's, the age floor and the re-promotion
+    /// cooldown. An assertion alone never demotes anything. Set from
+    /// `lambo.toml`'s top-level `canonization_supersede`.
+    #[serde(default)]
+    pub canonization_supersede: bool,
+
     pub semantic_match_threshold: f64,
     pub max_cooccurrence_per_derive: usize,
 
@@ -242,6 +253,7 @@ impl Default for Config {
             canonization_repromotion_cooldown: Duration::from_secs(300),
 
             promotion_policy: PromotionPolicy::Swarm,
+            canonization_supersede: false,
 
             semantic_match_threshold: crate::graph::hybrid::SEMANTIC_MATCH_THRESHOLD_DEFAULT,
             max_cooccurrence_per_derive: 10,
@@ -492,6 +504,12 @@ pub struct LamboFile {
         deserialize_with = "crate::canon::deserialize_promotion_policy"
     )]
     pub promotion_policy: Option<PromotionPolicy>,
+    /// Evidence-driven supersession (#20), a selector like
+    /// `promotion_policy`, not a threshold. `None` leaves the product default
+    /// (`false`) alone. Not serialized when unset, so a file written from a
+    /// [`LamboFile`] without it stays readable by a binary that predates it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonization_supersede: Option<bool>,
     /// `[recall]`: an optional recall tier beside the durable store (#18).
     /// `None` (no section) keeps the store exactly as `[store]` builds it. A
     /// section naming a tier this binary was not built with is refused at
@@ -1319,6 +1337,28 @@ mod tests {
         assert!(err.contains("ulr"), "{err}");
     }
 
+    /// #20: supersession is off unless the file turns it on; the key is a
+    /// boolean, an unset key leaves the default alone, and a wrong type
+    /// fails closed.
+    #[test]
+    fn canonization_supersede_defaults_off_and_parses_from_the_file() {
+        assert!(!Config::default().canonization_supersede);
+        assert_eq!(
+            LamboFile::from_toml_str("").unwrap().canonization_supersede,
+            None
+        );
+        for (text, want) in [("true", true), ("false", false)] {
+            let f =
+                LamboFile::from_toml_str(&format!("canonization_supersede = {text}\n")).unwrap();
+            assert_eq!(f.canonization_supersede, Some(want));
+        }
+        assert!(LamboFile::from_toml_str("canonization_supersede = \"yes\"\n").is_err());
+        assert!(LamboFile::from_toml_str("[daemon]\ncanonization_supersede = true\n").is_err());
+        // An unset key is not written back, so an older binary can read it.
+        let text = toml::to_string(&LamboFile::default()).unwrap();
+        assert!(!text.contains("canonization_supersede"), "{text}");
+    }
+
     #[test]
     fn lambo_file_rejects_unknown_keys() {
         assert!(
@@ -1539,6 +1579,7 @@ kind = "fake"
             recall: None,
             serve: Default::default(),
             web: Default::default(),
+            canonization_supersede: None,
         };
         let s = toml::to_string(&f).unwrap();
         let back: LamboFile = toml::from_str(&s).unwrap();

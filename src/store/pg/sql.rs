@@ -343,8 +343,8 @@ WHERE id = $1 AND session_id = $4
 pub(super) const INSERT_CANONIZATION_EVENT_SQL: &str = r#"
 INSERT INTO canonization_events (
     id, session_id, node_id, from_status, to_status, blast_radius,
-    last_demotion_time, occurred_at
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+    last_demotion_time, occurred_at, reason, superseded_by
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 ON CONFLICT (id) DO NOTHING
 "#;
 
@@ -533,7 +533,24 @@ pub(super) struct DialectSql {
     pub(super) select_edges: String,
     pub(super) select_canonization_events: String,
     pub(super) select_reservations: String,
+    /// #20 supersession evidence rows (`crate::store::evidence`): one row
+    /// per dependence edge into `$2` (a `Dependency` source or a
+    /// `Hierarchical` child, concepts of session `$1` other than `$2`), with
+    /// the edge's dates and its dependent's origin interaction, whose dates
+    /// are present only when it is an interaction of the session. No age
+    /// filter: the shared rules apply it. Twin of SQLite's
+    /// `EVIDENCE_ROWS_SQL`.
+    pub(super) select_evidence_rows: String,
+    /// #20: the node's own origin interaction. `$1` session, `$2` node.
+    pub(super) select_evidence_own_origin: String,
 }
+
+/// #20: the session's about-time extent, Stage 2's denominator. `$1` session.
+pub(super) const EVIDENCE_EXTENT_SQL: &str = r#"
+SELECT min(COALESCE(event_time, created_at)) AS lo,
+       max(COALESCE(event_time, created_at)) AS hi
+FROM interactions WHERE session_id = $1
+"#;
 
 impl DialectSql {
     pub(super) fn for_dialect<D: Dialect>() -> Self {
@@ -635,7 +652,8 @@ ORDER BY id
             select_canonization_events: format!(
                 r#"
 SELECT id{s} AS id, session_id, node_id{s} AS node_id,
-       from_status, to_status, blast_radius, last_demotion_time, occurred_at
+       from_status, to_status, blast_radius, last_demotion_time, occurred_at,
+       reason, superseded_by{s} AS superseded_by
 FROM canonization_events
 WHERE session_id = $1
 ORDER BY occurred_at, id
@@ -646,6 +664,28 @@ ORDER BY occurred_at, id
 SELECT session_id, node_id{s} AS node_id, agent_id, expires_at
 FROM reservations
 WHERE session_id = $1
+"#
+            ),
+            select_evidence_rows: format!(
+                r#"
+SELECT e.id{s} AS edge_id, e.created_at AS edge_created, e.event_time AS edge_event,
+       c.id{s} AS dependent, c.origin_interaction{s} AS origin,
+       i.created_at AS origin_created, i.event_time AS origin_event
+FROM edges e
+JOIN concepts c ON c.session_id = $1 AND c.id = CASE e.edge_type
+    WHEN 'Dependency' THEN e.source ELSE e.target END
+LEFT JOIN interactions i ON i.id = c.origin_interaction AND i.session_id = $1
+WHERE e.session_id = $1
+  AND ((e.edge_type = 'Dependency' AND e.target = $2)
+    OR (e.edge_type = 'Hierarchical' AND e.source = $2))
+  AND c.id <> $2
+ORDER BY e.id
+"#
+            ),
+            select_evidence_own_origin: format!(
+                r#"
+SELECT origin_interaction{s} AS origin
+FROM concepts WHERE session_id = $1 AND id = $2
 "#
             ),
         }

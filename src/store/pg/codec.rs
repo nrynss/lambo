@@ -15,9 +15,9 @@ use uuid::Uuid;
 
 use crate::store::vector::decode_vector;
 use crate::types::{
-    tie_break_by_key, CanonizationEvent, CanonizationStatus, Concept, ConceptType, Edge, EdgeType,
-    EmbeddingContract, EmbeddingSource, Interaction, NodeId, Reservation, Scored, SessionId,
-    StoreError, Synonym,
+    tie_break_by_key, CanonizationEvent, CanonizationStatus, Concept, ConceptType, DemotionReason,
+    Edge, EdgeType, EmbeddingContract, EmbeddingSource, Interaction, NodeId, Reservation, Scored,
+    SessionId, StoreError, Synonym,
 };
 
 /// Parse pgvector `format_type` output (`vector(768)`). Rejects Cockroach
@@ -299,7 +299,10 @@ pub(super) fn row_to_canonization_event(row: &PgRow) -> Result<CanonizationEvent
     let id: String = row.try_get("id").map_err(backend)?;
     let node_id: String = row.try_get("node_id").map_err(backend)?;
     let blast_radius: Option<i64> = row.try_get("blast_radius").map_err(backend)?;
-    Ok(CanonizationEvent {
+    let reason: Option<String> = row.try_get("reason").map_err(backend)?;
+    let superseded_by: Option<String> = row.try_get("superseded_by").map_err(backend)?;
+    let superseded_by = superseded_by.as_deref().map(parse_node_id).transpose()?;
+    let event = CanonizationEvent {
         id: parse_node_id(&id)?,
         session_id: SessionId(row.try_get("session_id").map_err(backend)?),
         node_id: parse_node_id(&node_id)?,
@@ -312,7 +315,12 @@ pub(super) fn row_to_canonization_event(row: &PgRow) -> Result<CanonizationEvent
         blast_radius: blast_radius.map(|v| v as i32),
         last_demotion_time: row.try_get("last_demotion_time").map_err(backend)?,
         occurred_at: row.try_get("occurred_at").map_err(backend)?,
-    })
+        // #20: (NULL, NULL) is a historical row. A malformed pair or a reason
+        // on a promotion loads as an unknown reason with a warning (review
+        // M3), never as Budget, and never stops the load.
+        reason: DemotionReason::read_columns(reason.as_deref(), superseded_by),
+    };
+    Ok(event.loaded())
 }
 
 #[cfg(test)]

@@ -609,6 +609,7 @@ async fn flush_load_roundtrip_deep_equals_graph() {
         blast_radius: Some(2),
         last_demotion_time: None,
         occurred_at: ts(12),
+        reason: None,
     })
     .unwrap();
     // RAM-local metadata that has no Mutation kind (S5).
@@ -922,6 +923,7 @@ async fn canonization_events_append_and_update_concept() {
         blast_radius: Some(2),
         last_demotion_time: None,
         occurred_at: ts,
+        reason: None,
     };
     store
         .flush(
@@ -954,6 +956,7 @@ async fn canonization_events_append_and_update_concept() {
         blast_radius: Some(4),
         last_demotion_time: None,
         occurred_at: ts + chrono::Duration::minutes(1),
+        reason: None,
     };
     store.record_canonization(&ev2, None).await.unwrap();
     let snap = store.load_session(&sid).await.unwrap();
@@ -974,6 +977,7 @@ async fn canonization_events_append_and_update_concept() {
         blast_radius: None,
         last_demotion_time: None,
         occurred_at: ts,
+        reason: None,
     };
     let err = store.record_canonization(&ghost, None).await.unwrap_err();
     assert!(matches!(err, StoreError::NotFound(_)));
@@ -1039,6 +1043,7 @@ async fn demotion_event_sets_and_roundtrips_last_demotion_time() {
         blast_radius: None,
         last_demotion_time: Some(demote_at),
         occurred_at: demote_at,
+        reason: None,
     };
     store.record_canonization(&ev, None).await.unwrap();
 
@@ -1062,6 +1067,7 @@ async fn demotion_event_sets_and_roundtrips_last_demotion_time() {
         blast_radius: Some(2),
         last_demotion_time: None,
         occurred_at: demote_at + chrono::Duration::minutes(1),
+        reason: None,
     };
     store.record_canonization(&promo, None).await.unwrap();
     let snap = store.load_session(&sid).await.unwrap();
@@ -1145,6 +1151,7 @@ async fn stale_upsert_before_a_recorded_transition_does_not_regress_the_status()
         blast_radius: None,
         last_demotion_time: None,
         occurred_at: ts,
+        reason: None,
     };
     store.record_canonization(&hop, None).await.unwrap();
 
@@ -1452,6 +1459,7 @@ async fn stale_upsert_before_a_recorded_demotion_does_not_erase_the_cooldown() {
                 blast_radius: Some(8),
                 last_demotion_time: None,
                 occurred_at: ts,
+                reason: None,
             },
             None,
         )
@@ -1468,6 +1476,7 @@ async fn stale_upsert_before_a_recorded_demotion_does_not_erase_the_cooldown() {
         blast_radius: None,
         last_demotion_time: Some(demote_at),
         occurred_at: demote_at,
+        reason: None,
     };
     store.record_canonization(&demote, None).await.unwrap();
 

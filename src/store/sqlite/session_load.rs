@@ -15,8 +15,8 @@ use super::codec::{
 use super::SqliteStore;
 use crate::store::vector::decode_vector_blob;
 use crate::types::{
-    CanonizationEvent, Concept, Edge, EmbeddingSource, GcMark, GraphSnapshot, Interaction,
-    SessionId, StoreError,
+    CanonizationEvent, Concept, DemotionReason, Edge, EmbeddingSource, GcMark, GraphSnapshot,
+    Interaction, SessionId, StoreError,
 };
 
 /// Load a session's write intents (J3), in replay order — (`issued_ms`,
@@ -306,7 +306,7 @@ pub(super) async fn load_canonization_events(
 ) -> Result<Vec<CanonizationEvent>, StoreError> {
     let rows = sqlx::query(
         "SELECT id, session_id, node_id, from_status, to_status, blast_radius, \
-             last_demotion_time, occurred_at \
+             last_demotion_time, occurred_at, reason, superseded_by \
          FROM canonization_events WHERE session_id = ? ORDER BY occurred_at ASC, id ASC",
     )
     .bind(&session.0)
@@ -339,7 +339,30 @@ pub(super) async fn load_canonization_events(
         let occurred: String = row
             .try_get(7)
             .map_err(|e| db_err("load canonization events", e))?;
-        out.push(CanonizationEvent {
+        let reason: Option<String> = row
+            .try_get(8)
+            .map_err(|e| db_err("load canonization events", e))?;
+        let superseded_by: Option<String> = row
+            .try_get(9)
+            .map_err(|e| db_err("load canonization events", e))?;
+        // A `superseded_by` that is not an id makes the pair unreadable: the
+        // reason loads as unknown (review M3) instead of failing the load.
+        let (reason, superseded_by, unreadable_by) = match superseded_by.as_deref() {
+            None => (reason, None, false),
+            Some(by) => match node_id(by, "canonization superseded_by") {
+                Ok(by) => (reason, Some(by), false),
+                Err(_) => (reason, None, true),
+            },
+        };
+        let reason = if unreadable_by {
+            Some(DemotionReason::Unknown {
+                reason,
+                superseded_by: None,
+            })
+        } else {
+            DemotionReason::read_columns(reason.as_deref(), superseded_by)
+        };
+        let event = CanonizationEvent {
             id: node_id(&id, "canonization event id")?,
             session_id: SessionId::from(sid),
             node_id: node_id(&node, "canonization node")?,
@@ -348,7 +371,12 @@ pub(super) async fn load_canonization_events(
             blast_radius,
             last_demotion_time: last_demotion.as_deref().map(text_to_ts).transpose()?,
             occurred_at: text_to_ts(&occurred)?,
-        });
+            // #20: (NULL, NULL) is a historical row. A malformed pair or a
+            // reason on a promotion loads as an unknown reason with a warning
+            // (review M3), never as Budget, and never stops the load.
+            reason,
+        };
+        out.push(event.loaded());
     }
     Ok(out)
 }

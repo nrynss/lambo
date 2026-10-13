@@ -517,6 +517,7 @@ async fn non_daemon_caller_can_emit_canonized_on_the_daemon_channel() {
         blast_radius: Some(3),
         occurred_at: ts(0),
         last_demotion_time: None,
+        reason: None,
     };
     assert_eq!(sender.emitted_total(), 0, "nothing published yet");
     events::emit_canonized(&sender, event.clone());
@@ -587,6 +588,7 @@ async fn external_publisher_flood_cannot_permanently_evict_a_held_conflict() {
                 blast_radius: Some(3),
                 occurred_at: ts(0),
                 last_demotion_time: None,
+                reason: None,
             },
         );
     }
@@ -869,6 +871,7 @@ async fn a_contradiction_is_held_on_the_hot_list_without_an_event() {
             blast_radius: None,
             last_demotion_time: Some(now),
             occurred_at: now,
+            reason: None,
         })
         .unwrap();
     wake_and_settle(&daemon).await;

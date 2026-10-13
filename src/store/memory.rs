@@ -288,6 +288,9 @@ impl MemoryStore {
                 // an already-recorded transition would otherwise regress the
                 // status (or erase a demotion cooldown) with the repair
                 // skipped. See `Mutation::UpsertNode`.
+                // #20: a reason only on a demotion, never "superseded by
+                // itself" (the SQL adapters refuse the same rows).
+                event.check_reason()?;
                 if data.recorded_events.contains(&event.id) {
                     return Ok(());
                 }
@@ -949,6 +952,20 @@ impl GraphStore for MemoryStore {
         Ok(InteractionSpan { distinct, coverage })
     }
 
+    async fn dependent_evidence(
+        &self,
+        session: &SessionId,
+        node: NodeId,
+    ) -> Result<super::DependentEvidence, StoreError> {
+        // #20: the rows from the session's snapshot; the rules are shared
+        // with every adapter (`store::evidence`).
+        let map = self.inner.read();
+        let data = map
+            .get(&session.0)
+            .ok_or_else(|| StoreError::SessionNotFound(session.0.clone()))?;
+        Ok(super::evidence::rows_from_snapshot(&data.snapshot, node))
+    }
+
     /// #23. One critical section under every lock the session's state lives
     /// behind, taken in the store's one order (`inner`, then `leases`, then
     /// `flush_stats` and `refusals`), so there is no step between the gate and
@@ -1462,6 +1479,7 @@ mod tests {
             blast_radius: None,
             last_demotion_time: None,
             occurred_at: at,
+            reason: None,
         };
         let hop1 = hop(CanonizationStatus::None, CanonizationStatus::Candidate, ts);
         let hop2 = hop(
@@ -1580,6 +1598,7 @@ mod tests {
             blast_radius: None,
             last_demotion_time: None,
             occurred_at: ts,
+            reason: None,
         };
         // The evaluator's immediate durable write.
         store.record_canonization(&hop, None).await.unwrap();
@@ -1659,6 +1678,7 @@ mod tests {
             blast_radius: Some(8),
             last_demotion_time: None,
             occurred_at: ts,
+            reason: None,
         };
         store.record_canonization(&promote, None).await.unwrap();
 
@@ -1672,6 +1692,7 @@ mod tests {
             blast_radius: None,
             last_demotion_time: Some(demote_at),
             occurred_at: demote_at,
+            reason: None,
         };
         store.record_canonization(&demote, None).await.unwrap();
 
@@ -1947,6 +1968,14 @@ mod tests {
 
     /// #36 PR 2: the fourteen-day cap on the shared window case (long
     /// session, injected clock, event time, age guards).
+    /// #20: the shared supersession case (accessors and audit columns).
+    #[tokio::test]
+    async fn supersession_case() {
+        let store = MemoryStore::new();
+        crate::test_util::supersession::check_accessors(&store).await;
+        crate::test_util::supersession::check_reason_persistence(&store).await;
+    }
+
     #[tokio::test]
     async fn capped_span_follows_window_case() {
         crate::test_util::dependents::check_window_case(&MemoryStore::new()).await;
@@ -2333,6 +2362,7 @@ mod tests {
                         blast_radius: None,
                         last_demotion_time: None,
                         occurred_at: ts,
+                        reason: None,
                     },
                 },
             ],
@@ -2413,6 +2443,7 @@ mod tests {
             blast_radius: None,
             last_demotion_time: None,
             occurred_at: ts,
+            reason: None,
         };
         let err = store.record_canonization(&ev, Some(0)).await.unwrap_err();
         assert!(

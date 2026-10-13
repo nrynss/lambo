@@ -82,6 +82,9 @@ pub struct CommonArgs {
     pub scratch: Option<PathBuf>,
     /// Concepts to report by id whatever their state.
     pub watch: Vec<String>,
+    /// Run with `canonization_supersede` on (#20): supersession and the
+    /// Stage 3 hold, as a writer with the setting runs them.
+    pub supersede: bool,
 }
 
 /// `lambo canon dry-run`'s options.
@@ -433,6 +436,7 @@ mod imp {
         p.max_cycles = c.max_cycles;
         p.top = c.top;
         p.assume_survived = c.assume_survived;
+        p.eval.supersede = c.supersede;
         p.watch = resolve_watch(snapshot, &c.watch).map_err(CliError::Usage)?;
         Ok(p)
     }

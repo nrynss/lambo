@@ -146,6 +146,16 @@ pub(crate) mod dependents_live;
     )
 ))]
 pub(crate) mod fair_test_live;
+// #20: the supersession accessors and audit columns, live and by hand only
+// (Postgres test here, Cockroach leg in its conformance suite).
+#[cfg(all(
+    test,
+    any(
+        feature = "store-postgres",
+        all(feature = "store-cockroach", feature = "fixtures")
+    )
+))]
+pub(crate) mod supersession_live;
 
 // Postgres-only: the flush fence's lease row stays locked until commit.
 #[cfg(all(test, feature = "store-postgres"))]
@@ -502,6 +512,14 @@ impl<D: Dialect> GraphStore for PgStore<D> {
     ) -> Result<InteractionSpan, StoreError> {
         self.select_interaction_span(session, node, min_age, now, window)
             .await
+    }
+
+    async fn dependent_evidence(
+        &self,
+        session: &SessionId,
+        node: NodeId,
+    ) -> Result<crate::store::DependentEvidence, StoreError> {
+        self.select_evidence_rows(session, node).await
     }
 
     async fn erase_session(

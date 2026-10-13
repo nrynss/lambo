@@ -47,6 +47,7 @@ async fn fixture_db(dir: &Path) -> (PathBuf, crate::store::LeaseInfo) {
 
 fn common(store: PathBuf, scratch: &Path, json: bool) -> CommonArgs {
     CommonArgs {
+        supersede: false,
         store,
         session: fair::NAME.into(),
         policy: PolicyChoice::Both,
@@ -87,8 +88,8 @@ async fn the_input_is_unchanged_its_lease_untouched_and_the_copy_removed() {
         .invariants
         .iter()
         .any(|i| i.name == "source_unchanged" && i.held));
-    // Both policies reach the fixture's four Canonicals.
-    assert!(report.policies.iter().all(|p| p.canonical_total == 4));
+    // Both policies reach the fixture's six Canonicals.
+    assert!(report.policies.iter().all(|p| p.canonical_total == 6));
 
     // Nothing beside the input, no copy left behind, the hash unchanged.
     assert_eq!(listing(&input_dir), files_before);
@@ -226,7 +227,7 @@ async fn a_store_with_an_uncheckpointed_wal_is_read_in_full() {
     assert!(out.ok, "{}", out.output);
     let report: crate::canon::dry_run::DryRunReport = serde_json::from_str(&out.output).unwrap();
     assert_eq!(report.concepts, fair::CONCEPTS.len());
-    assert!(report.policies.iter().all(|p| p.canonical_total == 4));
+    assert!(report.policies.iter().all(|p| p.canonical_total == 6));
     assert_eq!(imp::fingerprint(&path).unwrap(), before);
     assert_eq!(listing(&input_dir), files_before);
     assert!(listing(&scratch).is_empty());

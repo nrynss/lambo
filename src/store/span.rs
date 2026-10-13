@@ -35,7 +35,6 @@ pub fn validate_coverage_window(window: Duration) -> Result<(), StoreError> {
     Ok(())
 }
 
-#[cfg(any(feature = "store-memory", feature = "store-sqlite", test))]
 pub(crate) fn coverage(span_ms: i64, session_ms: i64, window: Duration) -> f64 {
     if session_ms <= 0 {
         // Called only for nonempty support. F1: a single-point session.
@@ -185,6 +184,19 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, StoreError::Invariant(_)), "{err:?}");
+    }
+
+    /// #20: `dependent_evidence` defaults to `Capability` (the evaluator
+    /// then skips supersession for the cycle).
+    #[tokio::test]
+    async fn the_supersession_default_fails_closed() {
+        use crate::store::GraphStore;
+        let session = crate::types::SessionId::from("legacy");
+        let err = Legacy
+            .dependent_evidence(&session, crate::types::NodeId::new())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Capability(_)), "{err:?}");
     }
 
     /// #36 PR 2 review L4: after M1 a store that does not forward the

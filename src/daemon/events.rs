@@ -679,6 +679,7 @@ mod tests {
             blast_radius: Some(3),
             last_demotion_time: None,
             occurred_at: ts(0),
+            reason: None,
         };
         emit_canonized(&tx, canon.clone());
 

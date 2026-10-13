@@ -219,6 +219,8 @@ CREATE TABLE IF NOT EXISTS canonization_events (
     blast_radius    INT,
     last_demotion_time TIMESTAMPTZ,
     occurred_at     TIMESTAMPTZ NOT NULL,
+    reason          STRING,
+    superseded_by   UUID,
     INDEX (session_id, occurred_at)
 );
 -- Wave 3 (COH-3): canonization_events carries the demotion timestamp. Existing
@@ -226,6 +228,12 @@ CREATE TABLE IF NOT EXISTS canonization_events (
 -- sessions embedding-contract columns above) covers them; fresh installs get it
 -- from the CREATE TABLE and the ALTER is a no-op.
 ALTER TABLE canonization_events ADD COLUMN IF NOT EXISTS last_demotion_time TIMESTAMPTZ;
+-- #20: why a demotion happened ('budget' | 'superseded') and the superseding
+-- concept. Nullable and additive: a historical row's NULL pair reads as a
+-- budget demotion (no reason on a promotion). No foreign key, so collecting the
+-- superseding concept never deletes audit rows.
+ALTER TABLE canonization_events ADD COLUMN IF NOT EXISTS reason STRING;
+ALTER TABLE canonization_events ADD COLUMN IF NOT EXISTS superseded_by UUID;
 
 -- Soft locks (S5): an expired row persists until a later write overwrites it,
 -- so external SQL readers MUST filter `WHERE expires_at > now()` — never read

@@ -46,6 +46,8 @@ use crate::store::erase::{
 use crate::store::lease::LeaseHolder;
 use crate::store::{map_write_err, SessionFlushStats};
 #[cfg(feature = "fixtures")]
+use crate::types::DemotionReason;
+#[cfg(feature = "fixtures")]
 use crate::types::GraphSnapshot;
 use crate::types::{CanonizationEvent, GcMark, Mutation, MutationBatch, SessionId, StoreError};
 
@@ -280,13 +282,15 @@ impl SqliteStore {
             .map_err(|e| map_write_err(e, |m| format!("upsert reservation: {m}")))?;
         }
         for ev in &snapshot.canonization_events {
+            ev.check_reason()?;
             let from_status = enum_to_text(&ev.from_status, "from_status")?;
             let to_status = enum_to_text(&ev.to_status, "to_status")?;
+            let (reason, superseded_by) = DemotionReason::to_columns(ev.reason.as_ref());
             sqlx::query(
                 "INSERT INTO canonization_events (\
                      id, session_id, node_id, from_status, to_status, blast_radius, \
-                     last_demotion_time, occurred_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+                     last_demotion_time, occurred_at, reason, superseded_by) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
                  ON CONFLICT (id) DO NOTHING",
             )
             .bind(ev.id.0.to_string())
@@ -297,6 +301,8 @@ impl SqliteStore {
             .bind(ev.blast_radius)
             .bind(ev.last_demotion_time.map(ts_to_text))
             .bind(ts_to_text(ev.occurred_at))
+            .bind(reason)
+            .bind(superseded_by.map(|by| by.0.to_string()))
             .execute(&mut *tx)
             .await
             .map_err(|e| map_write_err(e, |m| format!("append canonization event: {m}")))?;

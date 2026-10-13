@@ -187,6 +187,7 @@ async fn i1_recall_lines_carry_per_leg_scores_and_the_warning_flags() {
                 blast_radius: Some(1),
                 last_demotion_time: None,
                 occurred_at: now,
+                reason: None,
             })
             .expect("audited promotion");
         }
@@ -332,6 +333,7 @@ async fn i1_the_canonical_marker_flag_is_false_when_the_budget_rendered_nothing(
                 blast_radius: Some(1),
                 last_demotion_time: None,
                 occurred_at: now,
+                reason: None,
             })
             .expect("audited promotion");
         }

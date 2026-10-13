@@ -59,7 +59,8 @@ pub enum Comparison {
 pub struct AdmissionCheck {
     /// Stable machine name: `gc_survived`, `dependent_interactions`,
     /// `distinct_interactions`, `coverage`, `blast_radius`, `cooldown`,
-    /// `canonical_budget`, `solo_score`.
+    /// `canonical_budget`, `solo_score`, `held` (#20: supersession would
+    /// demote it at once).
     pub gate: &'static str,
     /// The stage whose verdict this check is part of (1, 2 or 3).
     pub stage: u8,
@@ -180,6 +181,9 @@ pub struct AdmissionInputs {
     /// `(canonical count, budget)` when the next hop is Canonical: Stage 3
     /// evaluates nothing while the budget is full.
     budget: Option<(usize, usize)>,
+    /// #20 review M2: the evaluator's hold probes for a Venerable concept
+    /// when supersession is on (empty otherwise).
+    hold: crate::canon::supersession::Probes,
 }
 
 /// Read `node`'s graph-side inputs under `params`' policy, or `None` when it
@@ -210,6 +214,7 @@ pub fn admission_inputs(
         dependent_interactions: deps,
         solo,
         budget,
+        hold: crate::canon::supersession::gather_hold_for(graph, node, params, now),
     })
 }
 
@@ -235,6 +240,11 @@ pub struct Measurements {
     pub span: Option<Result<InteractionSpan, String>>,
     /// Stage 3's aged dependent count. `None` when not measured.
     pub blast: Option<u64>,
+    /// #20 review M2: the contradicting concept that holds this Venerable at
+    /// Venerable (supersession on, its newer evidence would supersede it at
+    /// once, under the pair rule); `None` when nothing holds it or it was not
+    /// measured ([`Self::take_hold`]).
+    pub held_by: Option<NodeId>,
 }
 
 impl Measurements {
@@ -277,7 +287,49 @@ impl Measurements {
         } else {
             None
         };
-        Ok(Self { span, blast })
+        Ok(Self {
+            span,
+            blast,
+            held_by: None,
+        })
+    }
+
+    /// Run the evaluator's hold probe for `inputs` (#20 review M2): the same
+    /// probes, the same store reads and the same pair rule as a cycle.
+    /// Nothing to do unless supersession is on and the concept is Venerable;
+    /// a store without `dependent_evidence` holds nothing, as in a cycle.
+    pub async fn take_hold(
+        &mut self,
+        store: &dyn GraphStore,
+        session: &SessionId,
+        inputs: &AdmissionInputs,
+        params: &EvalParams,
+        now: DateTime<Utc>,
+    ) -> Result<(), StoreError> {
+        if inputs.hold.is_empty() {
+            return Ok(());
+        }
+        let mut cache = crate::canon::supersession::EvidenceCache::default();
+        match crate::canon::supersession::decide(
+            store,
+            session,
+            &inputs.hold,
+            params,
+            now,
+            &mut cache,
+        )
+        .await
+        {
+            Ok(v) => {
+                self.held_by = v
+                    .into_iter()
+                    .find(|v| v.target == inputs.concept.id)
+                    .map(|v| v.source);
+                Ok(())
+            }
+            Err(StoreError::Capability(_)) => Ok(()),
+            Err(e) => Err(e),
+        }
     }
 }
 
@@ -291,7 +343,9 @@ pub async fn explain_admission(
     now: DateTime<Utc>,
 ) -> Result<Admission, StoreError> {
     let (span, blast) = inputs.needs();
-    let m = Measurements::take(store, session, inputs.concept.id, params, now, span, blast).await?;
+    let mut m =
+        Measurements::take(store, session, inputs.concept.id, params, now, span, blast).await?;
+    m.take_hold(store, session, inputs, params, now).await?;
     Ok(explain_measured(inputs, params, now, &m))
 }
 
@@ -395,6 +449,10 @@ pub fn explain_measured(
                 ));
                 // Review L9: with the budget full the cycle evaluates no
                 // Stage 3 window at all, so the hop cannot happen.
+                // #20 review M2: the evaluator's hold, as a failing check.
+                if m.held_by.is_some() {
+                    checks.push(AdmissionCheck::new("held", 3, 1.0, 0.0, Comparison::AtMost));
+                }
                 if let Some((canonical, budget)) = inputs.budget {
                     checks.push(AdmissionCheck::new(
                         "canonical_budget",
@@ -414,7 +472,18 @@ pub fn explain_measured(
             "stage 2: the store cannot measure {what}, so there is no evidence"
         ));
     }
-    reasons.extend(checks.iter().filter(|k| !k.met).map(AdmissionCheck::reason));
+    reasons.extend(
+        checks
+            .iter()
+            .filter(|k| !k.met)
+            .map(|k| match (k.gate, m.held_by) {
+                ("held", Some(by)) => format!(
+                    "held: contradicted by {} with newer evidence",
+                    crate::recall::format::short_id(by)
+                ),
+                _ => k.reason(),
+            }),
+    );
     match next {
         None => reasons.push("canonical: no further promotion".into()),
         Some(_) if eligible => {
@@ -481,6 +550,61 @@ pub fn render_admission(a: &Admission) -> String {
         out.push('\n');
     }
     out
+}
+
+/// Inspect's line for `node`'s latest demotion (#20), when it has one: why
+/// (`budget`, or `superseded by` the contradicting concept, quoted while it
+/// is in the graph and named by id either way) and when.
+///
+/// ```text
+/// last demotion 2026-09-30T12:00:00Z: superseded by "flushes give up after three attempts" (id 1a2b3c4d)
+/// last demotion 2026-09-30T12:00:00Z: budget
+/// ```
+pub(crate) fn render_last_demotion(graph: &Graph, node: NodeId) -> Option<String> {
+    let event = graph
+        .canonization_events()
+        .iter()
+        .rev()
+        .find(|e| e.node_id == node && e.is_demotion())?;
+    let at = event
+        .occurred_at
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let why = match event.demotion_reason()? {
+        crate::types::DemotionReason::Budget => "budget".to_string(),
+        crate::types::DemotionReason::Superseded { by } => {
+            let id = crate::recall::format::short_id(by);
+            match graph.node(by) {
+                // Review L6: the same 80-character excerpt recall quotes.
+                Some(crate::types::Node::Concept(c)) => format!(
+                    "superseded by \"{}\" (id {id})",
+                    crate::recall::format::excerpt(&c.content)
+                ),
+                _ => format!("superseded by a concept no longer in memory (id {id})"),
+            }
+        }
+        crate::types::DemotionReason::Unknown {
+            reason,
+            superseded_by,
+        } => format!(
+            "a reason this build cannot read (reason {}, superseded_by {})",
+            reason.as_deref().unwrap_or("none"),
+            superseded_by.map_or("none".to_string(), crate::recall::format::short_id)
+        ),
+    };
+    Some(format!("last demotion {at}: {why}\n"))
+}
+
+/// The canonization section inspect prints: the admission explanation, then
+/// the latest demotion line (#20).
+pub(crate) fn with_last_demotion(
+    section: Option<String>,
+    graph: &Graph,
+    node: NodeId,
+) -> Option<String> {
+    match (section, render_last_demotion(graph, node)) {
+        (Some(s), Some(d)) => Some(s + &d),
+        (s, d) => s.or(d),
+    }
 }
 
 /// Inspect's explanation for `node`: [`admission_inputs`] under a short read

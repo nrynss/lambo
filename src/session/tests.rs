@@ -206,6 +206,7 @@ fn sorted_full_source_binding_detects_vectors_metadata_and_audit_changes() {
             blast_radius: None,
             last_demotion_time: None,
             occurred_at: source.interactions[0].created_at,
+            reason: None,
         });
     assert!(validate_plan(&plan, &changed).is_err());
     changed = source.clone();
@@ -395,6 +396,7 @@ fn ordered_vectors_audit_and_metadata_arrays_remain_in_the_fingerprint() {
                 blast_radius: None,
                 last_demotion_time: None,
                 occurred_at: source.interactions[0].created_at,
+                reason: None,
             });
     }
     source.root_goal = Some(serde_json::json!({"ordered":[1,2], "map":{"a":1,"b":2}}));

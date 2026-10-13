@@ -172,6 +172,25 @@
   `against`. Removing `Contradicts` edges does not help there: shut the
   0.6.0 writer down cleanly first, so its queue drains and every intent is
   consumed, then downgrade.
+- **Supersession (#20) is off until you turn it on.** Nothing changes for
+  a session that does not set `canonization_supersede = true`. Before you
+  turn it on, give every agent its own `agent_id`: support written by the
+  agent that declared a contradiction never counts for the concept it
+  contradicted, so with one writer (or a shared id) nothing that writer adds
+  can release a contradicted belief. The audit table `canonization_events`
+  gains two nullable columns, `reason` and `superseded_by`: Postgres and
+  Cockroach converge an existing table with `ADD COLUMN IF NOT EXISTS` at
+  `lambo provision` / `init_schema`, SQLite through its column guard on
+  attach. Existing rows keep a `NULL` pair, which reads as a budget demotion
+  (or no reason, on a promotion), and budget demotions keep writing `NULL`.
+  A row whose pair this build cannot read loads as an unknown reason with a
+  `CanonizationReasonUnreadable` warning instead of failing the load; a
+  session holding one cannot be copied to another store (seed, split
+  import) until that row is fixed, since every write refuses it.
+  Downgrading to 0.5.0 after a supersession loads the session; 0.5.0
+  ignores the columns, so that row reads as an ordinary demotion (see also
+  *Downgrading to 0.5.0 after cited writes*, above, for what else a
+  downgrade needs).
 
 ### Breaking (library API)
 
@@ -303,6 +322,25 @@
   optional and omitting it changes nothing; a server older than this one
   refuses a call that sends it (the parameters deny unknown fields), so a
   scoped write never lands in the wrong session.
+- **#20 supersession.** `CanonizationEvent` gains `reason:
+  Option<DemotionReason>` (new public enum `DemotionReason { Budget,
+  Superseded { by }, Unknown { reason, superseded_by } }`, not `Copy`,
+  serialized `{"kind": "budget"}` / `{"kind": "superseded", "by": ...}` and
+  omitted when `None`), so struct literals need `reason: None`; read it
+  through `CanonizationEvent::demotion_reason()`. `Unknown` is produced only
+  by a load; every write gate refuses it, a reason on a promotion, and a
+  supersession by the demoted concept itself. `EvalOutcome` gains
+  `supersessions` (committed first) and `transitions()` now yields
+  supersessions, promotions, then demotions; audit event ids of a cycle are
+  time-ordered. `EvalParams` gains `supersede`, `Config` and `LamboFile`
+  gain `canonization_supersede`. `GraphStore` gains `dependent_evidence`
+  (default `StoreError::Capability`, so a third-party store compiles
+  unchanged and skips supersession), returning the new public
+  `store::DependentEvidence` / `DependentEvidenceRow`.
+  `canon::Measurements` gains `held_by` and `take_hold`, an admission can
+  carry a `held` check, `canon::dry_run::DryRunReport` gains `supersede`,
+  `cli::canon::CommonArgs` gains `supersede`, and `cli::inspect` gains
+  `run_with_settings`.
 - **`Action` gains `repo_scope: Option<&str>`, and `WriteIntentPayload`
   gains the `RepoScoped { repo_scope, payload }` variant** (#129, #33 PR 7).
   An `Action { .. }` literal needs the field (`None` keeps 0.5.0
@@ -651,6 +689,27 @@
   optional `scope`). New library items: `WritePipeline::knows_receipt`,
   `take_piggyback_at_most`, `lookup_for` and `wait_for`, and
   `ServeLayers::is_layer`.
+- **Evidence-driven supersession (#20).** With `canonization_supersede =
+  true` (top-level `lambo.toml` key or `Config` field, default `false`), a
+  Canonical concept is demoted to `None` when a concept contradicting it
+  has earned dependent evidence newer than the Canonical concept's latest
+  that clears Stage 2's bars (three other origins, coverage 0.3). An
+  assertion alone never demotes; the contradicting concept is not
+  promoted; evidence uses #19(c)'s clock and self-suppression (only
+  certain attributions; an ambiguous one skips the pair rather than
+  demote); both sides respect the re-promotion cooldown; supersession
+  commits before promotions, so a freed slot is spent in the same cycle.
+  The **hold** (owner-approved): while a contradicting concept would
+  supersede it at once, a Venerable stays Venerable, whether or not it was
+  ever Canonical. The **pair rule**: of two concepts that each qualify
+  against the other, only the one with the newest counted evidence acts,
+  decided before anything commits. The audit records `Superseded { by }`,
+  recall marks such a hit with a `superseded` annotation and a
+  `⤓ Superseded at ...` line (history: never forced), inspect names the
+  latest demotion and shows the hold, and `lambo canon dry-run` /
+  `alias-preview` take `--supersede`. Each node's evidence is read once per
+  cycle, at most 256 probes run per cycle, and a full budget reads no Stage
+  3 window unless something was superseded.
 - **`repo_scope` on `lambo_derive` and `lambo_record_action`, and
   `--repo-scope` on `lambo derive` and `lambo record-action`**
   ([#129](https://github.com/nrynss/lambo/issues/129) part 2, #33 PR 7).
@@ -806,6 +865,28 @@
   the blast radius. The refusal itself is unchanged.
 - The cloudops scripts read inspect's dependents list, and the client-side
   `check_single_source` guard is gone (Lambo refuses a second parent itself).
+- **Inspect names a concept's latest demotion (#20).** `lambo inspect`
+  and `lambo_inspect` end the canonization section with `last demotion
+  <time>: budget` or `superseded by "..." (id ...)` for a concept that was
+  ever demoted; concepts never demoted print as before. `lambo inspect`
+  reads `canonization_supersede` from `lambo.toml`.
+- **Supersessions count toward Solo's revert penalty (#20).** `revert_count`
+  counts every Canonical -> None demotion, so with supersession on a
+  superseded concept carries the same -3.0 per revert a budget-demoted one
+  does.
+- **Splitting a session keeps a supersession (#20, #33 D2).**
+  `superseded_by` goes through the same per-target concept mapping as the
+  rest of the row, and `lambo session split`'s importer writes the
+  `reason` / `superseded_by` pair (it used to drop it, so the row reloaded
+  as a budget demotion); the target digest covers the pair, so verify
+  catches a destination that lost it.
+- **The budget cut passes over concepts that are no longer Canonical
+  (#20).** It used to take the first `overflow` ranked concepts and skip
+  any that had moved, demoting fewer than the overflow; it now demotes the
+  next Canonical one instead.
+- **The fair-test fixture grew (#20).** `fixtures/session-fair-test.json`
+  gains two supersession pairs; its dry-run golden counts six Canonicals
+  instead of four, and no existing row's outcome moved.
 
 ### Fixed
 

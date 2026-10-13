@@ -162,7 +162,12 @@ impl LamboServer {
                 None
             }
         };
-        let text = view.text(admission.as_ref().map(render_admission).as_deref());
+        let section = crate::canon::with_last_demotion(
+            admission.as_ref().map(render_admission),
+            &mem.graph().read(),
+            focus_id,
+        );
+        let text = view.text(section.as_deref());
         let structured = view.json;
 
         // A fuzzy resolution is stated in the *text*, not only in a warning:

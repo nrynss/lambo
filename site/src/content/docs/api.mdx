@@ -170,11 +170,117 @@ keep an otherwise collectable concept alive indefinitely by contradicting a
 promoted one; this is the owner's decision (#19(c) decision 1C), noted here
 as a store-growth consideration.
 
+## Supersession
+
+Off by default (`Config::canonization_supersede`, or the top-level
+`canonization_supersede` key in `lambo.toml`). When it is on, each
+canonization cycle first demotes a Canonical concept `C` (`Canonical ->
+None`) when a concept `S` with a `S -Contradicts-> C` edge of the same
+session has earned dependent evidence, after `C`'s **watermark**, that
+clears Stage 2's bars: at least three origin interactions other than `S`'s
+own, covering at least 0.3 of min(session extent, the coverage cap).
+
+- Evidence is #19(c)'s: one dependence edge (a `Dependency` source or a
+  `Hierarchical` child, a concept of the session, not from the concept's
+  own origin interaction), eligible once **written** at least
+  `canonization_edge_min_age` before the cycle's clock, dated by its
+  about-time clamped to its write time. For `S`, both the edge and its
+  dependent's origin interaction must be dated strictly after the
+  watermark, and the filter runs before origins are counted and spread is
+  measured.
+- The watermark is the later of `C`'s origin about-time and its latest
+  eligible evidence, not counting evidence the agent that declared the
+  contradiction certainly wrote, nor `S`'s own dependence on `C`. When the
+  declarer, or whether a piece of `C`'s evidence is the declarer's, cannot
+  be told apart (several agents acting at one instant), the pair is not
+  probed: an ambiguity never demotes.
+- The bar is asymmetric on purpose: `S` must clear Stage 2 again with
+  newer evidence, while one new eligible piece of evidence for `C` (not
+  the declarer's) moves the watermark past `S`'s support.
+- Because the declarer's own evidence never counts for `C`, a single
+  writer (or agents sharing one `agent_id`) can never release `C` from a
+  contradiction it declared; use distinct agent ids before enabling this.
+- An assertion alone (no newer support for `S`) never demotes anything.
+- Neither side may be inside its re-promotion cooldown: a source demoted
+  within `canonization_repromotion_cooldown` cannot supersede, and a target
+  demoted within it cannot be superseded again. Competing sources for one
+  target rank by their newest **counted** evidence, then canonical key,
+  then id.
+- **The pair rule.** When two concepts each qualify against the other,
+  only the one with the newest counted evidence (then key, then id) may
+  supersede or hold the other. It is applied before anything commits, and
+  the apply step judges cooldowns as of the start of the cycle, so the
+  order targets are applied in changes nothing.
+- `C` is stamped `last_demotion_time = now` and its `CanonizationEvent`
+  carries `reason: Some(DemotionReason::Superseded { by: S })`. `S` is not
+  promoted by it. A supersession counts toward Solo's revert penalty like
+  any demotion.
+- **The hold.** Stage 3 does not promote a Venerable that
+  a contradicting concept would supersede at once, under the same rules,
+  whether or not it was ever Canonical. It waits at Venerable until it
+  earns newer evidence. `explain_admission` and `Measurements::take_hold`
+  report it as a failing `held` check ("held: contradicted by <id> with
+  newer evidence"; `Measurements::held_by`).
+- Order within a cycle: supersessions commit first, then promotions against
+  the recomputed budget (so a freed slot is spent in the same cycle), then
+  budget demotions. At a full budget Stage 3 is gathered only when
+  supersession probes are pending, and its store reads are skipped (the
+  window is not evaluated and its ring does not move) when nothing was
+  superseded. `EvalOutcome::supersessions` holds them, and
+  `EvalOutcome::transitions()` and the durable audit follow that order.
+  A cycle's audit ids are time-ordered with a commit-order sequence, so a
+  reload, which orders one instant's rows by id, keeps commit order.
+- The pair rule covers two concepts that contradict each other. Longer
+  cycles have soft spots it does not settle: in a 3-cycle (A against B, B
+  against C, C against A) each member can hold the next at Venerable at
+  once, and a source that is itself held at Venerable can still hold
+  another Venerable. Neither deadlocks permanently: any member that earns
+  evidence newer than its contradictor's is released, and a Canonical
+  member is superseded rather than held. There is no n-cycle rule.
+- At most `canonization_eval_batch_size` targets and
+  `canon::supersession::MAX_SUPERSESSION_PROBES` (256) forward probes per
+  cycle for supersession, and as many for the hold (a cycle at a cap logs
+  `CanonizationSupersessionProbeCap`). When the hold's cap cannot cover
+  Stage 3's window, the Venerables it leaves unprobed are not promoted that
+  cycle and the window is evaluated again, the next cycle's probes starting
+  where the last stopped; after `MAX_HOLD_DEFERRALS` (3) such cycles in a
+  row the ring moves on anyway. A store without `dependent_evidence` defers
+  nothing. Each node's evidence is read from the store once per cycle, and
+  every verdict is re-checked against the graph under the write lock
+  before it commits.
+
+The store surface is one method, `GraphStore::dependent_evidence`, which
+returns a node's rows unfiltered as a `DependentEvidence`; its
+`latest_structural_evidence_at`, `interaction_span_since` and
+`newest_counted_at` apply the rules, so every adapter agrees. It defaults
+to `StoreError::Capability`; the built-in stores implement it, and a store
+that does not skips supersession and the hold for the cycle with one
+`CanonizationSupersessionUnsupported` warning while the rest of the cycle
+runs.
+
+`CanonizationEvent::reason` is demotion-only. A demotion without one (every
+row written before 0.6.0, and every budget demotion, which still writes
+none) reads as `DemotionReason::Budget` through
+`CanonizationEvent::demotion_reason()`; a promotion has no reason. Each
+store keeps it in two nullable columns, `reason` and `superseded_by`. A
+stored pair this build cannot read (unknown text, a malformed pair, a
+reason on a promotion) loads as `DemotionReason::Unknown` with the raw
+pair and a `CanonizationReasonUnreadable` warning, never as `Budget`, and
+the session still loads; every write gate refuses it, so a snapshot that
+holds a loaded `Unknown` reason cannot be persisted to another store (a
+seed, a split import, a flush of its transition) until that row is fixed. Recall marks a hit
+whose latest demotion was a supersession, while it is not Canonical again,
+with the annotation kind `superseded` and the line
+`recall::format::superseded_warning`; it never forces a hit into a result.
+Inspect ends its canonization section with the latest demotion and its
+reason. `lambo canon dry-run --supersede` runs a dry run with the setting
+on.
+
 ## Settings
 
 `Config` holds the product settings: recall defaults, flush timing, canonization thresholds, and scoring weights. Pass it to the builder with `.config(...)`.
 
-These are library settings you pass in Rust when you build a `Memory`. Five of them can also come from the process file. `promotion_policy` is a top-level `lambo.toml` key with a `LAMBO_PROMOTION_POLICY` override, so a `lambo serve` process can select a policy without a code change; `[daemon]` carries the cadence settings: `canonization_eval_interval` (spelled `canonization_eval_interval_secs` there), `gc_interval`, and GC's time bound, `gc_max_interval` (spelled `gc_max_interval_secs`) and `gc_idle_floor`. Everything else is code-only, and the file refuses it along with any key it does not know. No canonization *threshold* is settable from the file under either policy. See [Configuration](/lambo/config/).
+These are library settings you pass in Rust when you build a `Memory`. Six of them can also come from the process file. `promotion_policy` is a top-level `lambo.toml` key with a `LAMBO_PROMOTION_POLICY` override, so a `lambo serve` process can select a policy without a code change; `canonization_supersede` is a top-level boolean; `[daemon]` carries the cadence settings: `canonization_eval_interval` (spelled `canonization_eval_interval_secs` there), `gc_interval`, and GC's time bound, `gc_max_interval` (spelled `gc_max_interval_secs`) and `gc_idle_floor`. Everything else is code-only, and the file refuses it along with any key it does not know. No canonization *threshold* is settable from the file under either policy. See [Configuration](/lambo/config/).
 
 ```rust
 let mem = Memory::builder()
@@ -205,6 +311,7 @@ let mem = Memory::builder()
 | `canonization_eval_interval` | 60 seconds | How often promotion is evaluated. Also settable from the file, as `[daemon] canonization_eval_interval_secs`. |
 | `canonization_eval_batch_size` | `50` | Concepts evaluated per pass. |
 | `canonization_repromotion_cooldown` | 300 seconds | Wait before a demoted concept can be promoted again. |
+| `canonization_supersede` | `false` | Evidence-driven supersession (see [Supersession](#supersession)). Also settable from the file, as the top-level `canonization_supersede` key. |
 | `promotion_policy` | `Swarm` | Which promotion policy canonization runs. `Swarm` admits a Candidate on evidence: `gc_survived >= 3` and dependents from at least two interactions other than the concept's own (no peer minimum, no percentile cut; the composite score only orders the queue), and every later hop is its stage's verdict. `Solo` (single-writer promotion) admits a Candidate when `(Sessions × 1.0) + (Human Confirmed × 4.0) + (Dependent Interactions × 2.0) − (Reverts × 3.0)`, multiplied by its concept type's eviction resistance (Constraint 1.5 … Observation 0.7), reaches 3.0; sessions are distinct ≥24-hour-apart supports (derivations and declared dependents; since 0.6.0 not actions that only produced or modified the concept) measured on **event time**, dependent interactions are the same count Swarm's Stage 1 reads, and human confirmations enter only through the confirm verb (`Memory::confirm_human`), never an agent write. Under `Solo` the Candidate → Venerable and Venerable → Canonical hops need the score's band (6.0 / 10.0) **and** the stage verdict Swarm needs, cooldown included (since 0.6.0; before, the band alone decided). `Swarm` stays the default. Selectable from `lambo.toml` or `LAMBO_PROMOTION_POLICY` (see [Configuration](/lambo/config/)); there is no `serve` flag. |
 | `scoring` | `0.25`, `0.20`, `0.20`, `0.35` | Recency, frequency, session activity, and density weights. |
 | `recall_weights` | `0.5`, `0.5` | How much the background score and the query relevance each contribute. |
@@ -227,7 +334,7 @@ Backends are chosen by Cargo feature and configuration, not loaded as plugins. S
 
 ### The GraphStore trait
 
-`GraphStore` handles durable graph storage. The implementations are the in-memory store, the SQLite store, and the CockroachDB store. Its methods cover schema setup, flushing a batch, loading a session, keyword and vector candidate lookup, blast radius, interaction spans, and canonization records, plus the lease methods below.
+`GraphStore` handles durable graph storage. The implementations are the in-memory store, the SQLite store, and the CockroachDB store. Its methods cover schema setup, flushing a batch, loading a session, keyword and vector candidate lookup, blast radius, interaction spans, the two supersession evidence accessors, and canonization records, plus the lease methods below.
 
 A store also declares what it can do. `capabilities` reports its features, and `vector_dimensions` reports the width of its vector column, or nothing when it has none. A store that reports a width must agree with the embedder's, and Lambo refuses to start when they differ.
 

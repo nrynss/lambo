@@ -251,12 +251,16 @@ pub fn check_vector_search_contract(
 fn process_config(
     daemon_cfg: &crate::config::DaemonConfig,
     promotion_policy: Option<crate::canon::PromotionPolicy>,
+    canonization_supersede: Option<bool>,
     embedder_cfg: &EmbedderConfig,
 ) -> Result<crate::Config, LamboError> {
     let mut config = crate::Config::default();
     daemon_cfg.apply_to(&mut config);
     if let Some(policy) = promotion_policy {
         config.promotion_policy = policy;
+    }
+    if let Some(supersede) = canonization_supersede {
+        config.canonization_supersede = supersede;
     }
     // #22: a process setting the surfaces read through `Memory::config`, set
     // here so every session this process attaches carries the same value.
@@ -305,7 +309,12 @@ pub fn resolve_backends(file: LamboFile) -> Result<ResolvedBackends, LamboError>
     // degenerate cadence here, uniformly and BEFORE any store/embedder build
     // (an embedder build may hash a weight file or dial a credential source,
     // so we reject the file first; since #31 none loads a model, see below).
-    let config = process_config(&daemon_cfg, promotion_policy, &embedder_cfg)?;
+    let config = process_config(
+        &daemon_cfg,
+        promotion_policy,
+        file.canonization_supersede,
+        &embedder_cfg,
+    )?;
     // A store whose vector column carries no width of its own (SQLite's BLOB) reports
     // the operator's `store.vector_dim` pin when one is set, and otherwise **echoes**
     // the configured embedder width — an echo, not a store-side authority, which is
@@ -638,7 +647,12 @@ pub fn resolve_verify_io(
                 .into(),
         ));
     }
-    let process = process_config(&file.daemon, file.promotion_policy, &file.embedder)?;
+    let process = process_config(
+        &file.daemon,
+        file.promotion_policy,
+        file.canonization_supersede,
+        &file.embedder,
+    )?;
     file.serve.validate()?;
     let source = resolve_classification_source(database, snapshot)?;
     let split = VerifySplitOutput::open(split_database)?;
@@ -1260,6 +1274,7 @@ mod tests {
             recall: None,
             serve: Default::default(),
             web: Default::default(),
+            canonization_supersede: None,
         };
         let r = resolve_backends(file).unwrap();
         assert_eq!(r.embedder.dimensions(), 1024);
@@ -1270,6 +1285,22 @@ mod tests {
             r.config.promotion_policy,
             crate::canon::PromotionPolicy::Solo,
             "the process-file selector must reach Memory's Config"
+        );
+        assert!(
+            !r.config.canonization_supersede,
+            "#20: an unset canonization_supersede leaves supersession off"
+        );
+        let on = resolve_backends(LamboFile {
+            canonization_supersede: Some(true),
+            ..LamboFile::from_toml_str(
+                "[store]\nkind = \"memory\"\n[embedder]\nkind = \"fixture\"\ndim = 1024\n",
+            )
+            .unwrap()
+        })
+        .unwrap();
+        assert!(
+            on.config.canonization_supersede,
+            "#20: the file's canonization_supersede must reach Memory's Config"
         );
         assert!(
             !r.config.accept_client_vectors,
@@ -1332,6 +1363,7 @@ mod tests {
             recall: None,
             serve: Default::default(),
             web: Default::default(),
+            canonization_supersede: None,
         };
         let r = resolve_backends(file).unwrap();
         assert_eq!(r.embedding.kind, "gemini");
@@ -1377,6 +1409,7 @@ mod tests {
             recall: None,
             serve: Default::default(),
             web: Default::default(),
+            canonization_supersede: None,
         };
 
         // The pin asserts this deployment's vectors are 768 wide; the embedder emits
@@ -1681,6 +1714,7 @@ mod tests {
                 recall: None,
                 serve: Default::default(),
                 web: Default::default(),
+                canonization_supersede: None,
             }
         }
 

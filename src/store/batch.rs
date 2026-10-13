@@ -752,6 +752,7 @@ mod tests {
                 blast_radius: Some(1),
                 last_demotion_time: None,
                 occurred_at: ts(1),
+                reason: None,
             },
         });
         assert_eq!(
@@ -875,6 +876,7 @@ mod tests {
                     blast_radius: Some(1),
                     last_demotion_time: None,
                     occurred_at: ts(1),
+                    reason: None,
                 },
             },
         ] {
