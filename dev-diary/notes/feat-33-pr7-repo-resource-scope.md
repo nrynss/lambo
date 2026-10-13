@@ -297,3 +297,40 @@ round two or `1c5a6bc2`, the same ignored set; SQLite-only `--no-run`,
 all-targets `--no-run` pass; Postgres non-live 1276/0/18 (live Postgres and
 Cockroach not run); goldens and mirrors pass; `git diff --check` clean.
 Each remediation commit compiles on its own.
+
+### Focused review (Sonnet): READY, Lows fixed (2026-10-13)
+
+- **L1, line references.** The scoped key now strips a trailing line
+  reference (`:12`, `:12:5`, `#L12`, `#L3-L5`) as the predicates do, so
+  `src/main.rs:12` and `src/main.rs` are one scoped file. Decision: the
+  reference is dropped from the **key** only; the concept's content keeps
+  the spelling of its first write. Rewriting stored content would change
+  its embedding text and recall output for no identity gain, and a later
+  write with a different line lands on the same node anyway.
+- **L2, loose names in either order: documented, not changed.** I tried
+  the consistent option first: let an explicit `produces` of loosely
+  path-like text (`scripts/build`) take an existing plain concept. Its
+  test showed it is not safe: repo B's `produces scripts/build` then joined
+  repo A's plain Entity, re-joining repositories, the defect #129 fixes.
+  So a loose name a `depends_on` meets first stays plain, and a later
+  `produces` is a separate scoped path. Spelled as a clear path
+  (`./scripts/build`, `scripts/build/`), both orders name the one scoped
+  concept. Documented in `canonicalize_resource`, the MCP reference, the
+  CHANGELOG and a test.
+- **L3**: `--repo-scope` row and the CLI Limits table state the 512-byte
+  cap and the character rule (both mirrors).
+- **L4**: the `MAX_REPO_SCOPE_BYTES` comment no longer implies the index
+  entry is bounded; a long path can still make a long key, as a long
+  legacy key can.
+- **L5, L6**: the CHANGELOG Added entry is rewrapped, and Upgrading notes
+  that an old session's plain `README.md` makes a scoped reference
+  `Ambiguous` once a scoped `README.md` also exists.
+- The root-goal issue is not filed: the owner is deciding.
+
+Gate on the focused-review head (fresh `XDG_RUNTIME_DIR` per cargo call):
+fmt pass; the 8 clippy rows pass; `cargo test --features
+store-sqlite,fixtures` 2483 passed, 0 failed, 7 ignored (lib 2400/0/5), no
+test lost against the review round; SQLite-only `--no-run`, `cargo check
+--no-default-features`, Postgres and Postgres+SQLite all-targets `--no-run`
+pass; Postgres non-live 1276/0/18; mirror drift pass; `git diff --check`
+clean.

@@ -156,6 +156,13 @@
   (`repo_scoped`): settled, it is rewritten to the empty `derive` 0.5.0
   decodes; unconsumed, 0.5.0 refuses it by name, so let the 0.6.0 writer
   drain its queue before downgrading.
+- **A plain concept can make a scoped reference ambiguous.** In a session
+  that already holds a plain (non-Resource) concept named like a file, for
+  example an Entity `README.md` minted by an unscoped `depends_on`, a
+  scoped `depends_on`, citation or `against` of `README.md` reaches that
+  concept while no scoped `README.md` exists, and is refused as
+  `Ambiguous` once one does, listing both with their ids. Name the one you
+  mean by its id.
 
   A derive's `against` rides in the `derive_cited` intent and an action's
   in a new `action_cited` intent. Once settled (applied or failed), both
@@ -579,18 +586,24 @@
   In a shared layer, a relative path the scope covers is no longer
   refused. The scope is caller-asserted and never verified; one that is
   empty, over 512 bytes, or holds whitespace, a control or an invisible
-  character is refused before the ack. The keyword search matches a
-  scoped path by its text, not its repository. The library exposes `lambo::graph::resource` (the path
-  predicate and key). See *Repository-scoped paths* in the MCP reference.
-  `against` (#19(b)) resolves path text under the scope like
-  `depends_on`, and a scoped write with `against` is durably the same
-  `repo_scoped` wrapper. A recall hit for a scoped path carries
-  `repo_scope` and its label names the repository (`README.md [Resource,
-  repo "github.com/acme/widgets"]`), as does `lambo_inspect`'s label for
-  the node; unscoped hits, nodes and recall output are unchanged. Text that matches a scoped path and another concept is no
-  longer resolved to one of them quietly: `lambo_inspect`'s focus and
-  `Memory::retract` refuse it as ambiguous, listing each candidate's id and
-  repository, and `retract` now also takes a concept's full node id.
+  character is refused before the ack. The keyword search matches a scoped
+  path by its text, not its repository. A trailing line reference names
+  the same file (`src/main.rs:12` is `src/main.rs`). A name only loosely a
+  path (`scripts/build`) that a `depends_on` meets first stays plain text,
+  and a later `produces` of it is a separate scoped path; spelled
+  `./scripts/build` or `scripts/build/`, both are the one scoped path. The
+  library exposes `lambo::graph::resource` (the path predicate and key).
+  See *Repository-scoped paths* in the MCP reference. `against` (#19(b))
+  resolves path text under the scope like `depends_on`, and a scoped write
+  with `against` is durably the same `repo_scoped` wrapper. A recall hit
+  for a scoped path carries `repo_scope` and its label names the
+  repository (`README.md [Resource, repo "github.com/acme/widgets"]`), as
+  does `lambo_inspect`'s label for the node; unscoped hits, nodes and
+  recall output are unchanged. Text that matches a scoped path and another
+  concept is no longer resolved to one of them quietly: `lambo_inspect`'s
+  focus and `Memory::retract` refuse it as ambiguous, listing each
+  candidate's id and repository, and `retract` now also takes a concept's
+  full node id.
 
 ### Changed
 
