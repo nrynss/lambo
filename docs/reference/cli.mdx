@@ -230,6 +230,7 @@ Stores concepts from the current interaction. Lambo stamps the time itself, so t
 | `--parent-of <CHILD:PARENT>` | No | A hierarchy pair. Repeat it for several links. |
 | `--depends-on <REF>` | No | An existing concept the first concept rests on: its 8-hex id from recall or its full node id (its exact content also works). Repeat it, at most 8 times. Each must match exactly one concept of the session, or nothing is written (see [`lambo_derive`](/mcp#lambo_derive)). |
 | `--against <REF>` | No | An existing concept the first concept contradicts, by the same forms. Repeat it, at most 8 times. Each must match exactly one concept of the session other than the first concept, or nothing is written, and naming it in `--depends-on` too is refused; it is recorded as a contradiction, not a dependency (see *Saying an existing concept is wrong* under [`lambo_derive`](/mcp#lambo_derive)). |
+| `--repo-scope <REPO>` | No | The repository this call's path-like `resource` concepts, `--parent-of` ends and `--depends-on` and `--against` path text belong to, such as `github.com/acme/widgets`, so the same path in two repositories is two concepts. Matched as exact text. At most 512 bytes, with no whitespace, control or invisible character inside (the ends are trimmed); anything else, or an empty value, is a usage error. See [Repository-scoped paths](/mcp#repository-scoped-paths). |
 
 `--parent-of` puts the child left of the first colon and the parent right of it. Only the first colon separates, so the parent may itself contain colons (an IPv6 CIDR such as `2001:db8::/32`); the child and the parent must both be non-empty.
 
@@ -279,6 +280,7 @@ Records an action the agent took. The action becomes a `Resource` concept, and t
 | `--modifies <MODIFIES>` | No | Resources this action mutates. Repeatable. |
 | `--depends-on <DEPENDS_ON>` | No | Things this action depends on. Repeatable. An existing concept's full node id (hyphenated), or exactly 8 hex characters that name no concept by text and start exactly one concept's id, cites that concept; an interaction's id, or a short id several concepts share, is a usage error and nothing is written. Any other value (9 to 32 hex characters, the unhyphenated form included), and an id that names nothing, is matched by text and created if new, as before 0.6.0. |
 | `--against <REF>` | No | An existing concept this action contradicts: its 8-hex id from recall, its full node id or its exact content. Repeatable, at most 8. Never created: each must match exactly one existing concept other than the action, or it is a usage error and nothing is written. Naming the same concept in `--depends-on` is refused the same way. |
+| `--repo-scope <REPO>` | No | As for `derive`: the repository this action's path-like `--produces`, `--modifies`, `--depends-on` and `--against` entries belong to. |
 
 ```bash
 $ lambo record-action --session demo --agent agent-a \
@@ -765,6 +767,7 @@ The command line enforces the same limits as the MCP tools.
 | `--traversal-depth` and `--depth` | 5 |
 | `--max-tokens` | 100,000 |
 | `--ttl-seconds` | 3600 |
+| `--repo-scope` | 512 bytes, with no whitespace, control or invisible character inside |
 | Neighbours rendered by `inspect` | 200 |
 
 **The embedding-text limit.** On a store with vector search (and the default `hybrid` matching), `derive` embeds every concept and every `--parent-of` end it might create as the item's text, ` — `, then the call's text: all of the call's concepts joined by `; `. That framed text, and the call's text alone, must each fit in 16,384 bytes, so a concept sent alone may be at most 8,189 bytes, and less in a larger call. For `derive-image` only the `--parent-of` ends are framed, with the caption and its suffix. A call over the limit is a usage error naming the part that is too long, before anything is written. A store without vector search embeds nothing and takes any string up to 16 KB.

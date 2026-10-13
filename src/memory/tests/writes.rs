@@ -326,6 +326,7 @@ async fn every_write_path_mirrors_the_inverted_index() {
     assert!(!mem.index().read().search("limiter", 10).is_empty());
 
     mem.record_action(&Action {
+        repo_scope: None,
         event_time: None,
         action: "wrote docs/api.md",
         produces: &["docs/api.md"],
@@ -371,6 +372,7 @@ async fn retract_dry_run_reports_impact_and_mutates_nothing() {
     .await
     .unwrap();
     mem.record_action(&Action {
+        repo_scope: None,
         event_time: None,
         action: "wired the client",
         produces: &[],
@@ -886,6 +888,7 @@ async fn a_hybrid_record_action_on_a_store_without_vector_search_embeds_nothing(
         .record_action_embedded_as(
             &AgentId::new("agent-a"),
             &Action {
+                repo_scope: None,
                 event_time: None,
                 action: "ran the migration",
                 produces: &["schema v2"],

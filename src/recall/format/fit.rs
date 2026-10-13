@@ -306,6 +306,7 @@ mod tests {
 
     fn hit(content: &str, canonical: bool) -> RecallHit {
         RecallHit {
+            repo_scope: None,
             node_id: NodeId(uuid::Uuid::from_u64_pair(0x1a2b_3c4d_0000_0000, 7)),
             content: content.to_string(),
             concept_type: Some(ConceptType::Entity),

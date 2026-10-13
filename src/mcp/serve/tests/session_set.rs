@@ -104,6 +104,7 @@ mod closes {
 
     fn is_closed(m: &Memory) -> bool {
         let action = Action {
+            repo_scope: None,
             event_time: None,
             action: "post-close write",
             produces: &[],
@@ -392,6 +393,7 @@ mod folds {
 
     fn action(what: &'static str) -> Action<'static> {
         Action {
+            repo_scope: None,
             event_time: None,
             action: what,
             produces: &[],

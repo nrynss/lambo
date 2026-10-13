@@ -792,10 +792,16 @@ impl GraphStore for MemoryStore {
             .iter()
             .filter_map(|c| {
                 let content = c.content.to_lowercase();
-                let key = c.canonical_key.to_lowercase();
+                // #129: a scoped key is a fixed prefix and a JSON tuple; its
+                // content (the path) is what the leg matches.
+                let key = crate::graph::resource::keyword_matches_key(&c.canonical_key)
+                    .then(|| c.canonical_key.to_lowercase());
                 let hits = tokens_l
                     .iter()
-                    .filter(|t| content.contains(t.as_str()) || key.contains(t.as_str()))
+                    .filter(|t| {
+                        content.contains(t.as_str())
+                            || key.as_deref().is_some_and(|k| k.contains(t.as_str()))
+                    })
                     .count();
                 if hits == 0 {
                     return None;

@@ -59,16 +59,59 @@ pub(super) const RETRACT_IO_TIMEOUT: Duration = hybrid::HYBRID_IO_TIMEOUT;
 /// reachable, since canonicalization's match step skips them by design.
 /// The fallback picks the lowest id among equal matches so the choice is
 /// deterministic rather than `HashMap`-iteration dependent.
+///
+/// #129: a full node id names exactly that concept. Text that reaches a
+/// repository-scoped path and any other concept (the unscoped one through
+/// its key, or another repository's same file by content) is refused as
+/// [`ReferenceRefusalKind::Ambiguous`](crate::types::ReferenceRefusalKind),
+/// listing the candidates with their ids and repositories, rather than
+/// resolved to whichever the legacy order reaches first. Without scoped
+/// concepts nothing changes.
 pub(super) fn resolve_concept(graph: &Graph, target: &str) -> Result<NodeId, LamboError> {
-    if let CanonicalizeResult::Matched { node, .. } = canonicalize(target, graph)? {
-        return Ok(node);
+    use crate::graph::resource::RESOURCE_KEY_PREFIX;
+    use crate::surface::resolve::{is_hyphenated_id, parse_full_id};
+    if let Some(id) = is_hyphenated_id(target.trim())
+        .then(|| parse_full_id(target.trim()))
+        .flatten()
+        && matches!(graph.node(id), Some(Node::Concept(_)))
+    {
+        return Ok(id);
     }
-    let exact: Option<&Concept> = graph
-        .concepts()
-        .filter(|c| c.content == target)
-        .min_by_key(|c| c.id.0);
-    match exact {
-        Some(c) => Ok(c.id),
+    let keyed = match canonicalize(target, graph)? {
+        CanonicalizeResult::Matched { node, .. } => Some(node),
+        CanonicalizeResult::Unmatched { .. } => None,
+    };
+    let mut exact: Vec<&Concept> = graph.concepts().filter(|c| c.content == target).collect();
+    exact.sort_by_key(|c| c.id.0);
+    let mut candidates: Vec<NodeId> = keyed.into_iter().collect();
+    for c in &exact {
+        if !candidates.contains(&c.id) {
+            candidates.push(c.id);
+        }
+    }
+    let scoped = |id: &NodeId| {
+        matches!(graph.node(*id), Some(Node::Concept(c))
+            if c.canonical_key.starts_with(RESOURCE_KEY_PREFIX))
+    };
+    if candidates.len() > 1 && candidates.iter().any(scoped) {
+        let key_of = |id: NodeId| match graph.node(id) {
+            Some(Node::Concept(c)) => Some(c.canonical_key.clone()),
+            _ => None,
+        };
+        candidates.sort_by(|a, b| {
+            crate::types::tie_break_by_key(key_of(*a).as_deref(), a, key_of(*b).as_deref(), b)
+        });
+        return Err(crate::surface::resolve::refusal(
+            crate::types::ReferenceField::RetractTarget,
+            None,
+            target,
+            crate::types::ReferenceRefusalKind::Ambiguous {
+                candidates: crate::surface::resolve::candidates(graph, &candidates),
+            },
+        ));
+    }
+    match keyed.or_else(|| exact.first().map(|c| c.id)) {
+        Some(id) => Ok(id),
         None => Err(LamboError::Store(StoreError::NotFound(format!(
             "no concept matching {target:?} in session {}",
             graph.session_id()
@@ -248,6 +291,8 @@ impl Memory {
         parent_of: &ParentOf<'_>,
         citations: &[ConceptCitations],
     ) -> Result<DeriveOutcome, LamboError> {
+        // #129: the full repo_scope check, once, on the call path.
+        crate::graph::resource::validate_repo_scope(parent_of.repo_scope())?;
         // Held across every await below, so a concurrent `close()` either
         // waits for this whole derive or refuses it (T81-1).
         let _writing = self.begin_write().await?;
@@ -258,7 +303,7 @@ impl Memory {
         // so a refused reference leaves nothing behind. The guard is dropped
         // at the end of the statement; the commit re-resolves under the
         // write lock.
-        let pinned = cite::validate(&self.graph.read(), concepts, citations)?;
+        let pinned = cite::validate_scoped(&self.graph.read(), concepts, citations, parent_of)?;
         let prompt = hybrid::derive_prompt(concepts.iter().map(|(content, _)| *content));
         let interaction = self.begin_interaction_full(agent, Some(prompt), event_time)?;
 
@@ -338,6 +383,7 @@ impl Memory {
         action: &Action<'_>,
         against: &[String],
     ) -> Result<ActionOutcome, LamboError> {
+        crate::graph::resource::validate_repo_scope(action.repo_scope)?;
         let _writing = self.begin_write_sync()?;
         // #19(b): refused before the interaction opens, so a bad reference
         // leaves nothing behind. Empty (and nothing changes) without any.
@@ -413,6 +459,7 @@ impl Memory {
         action: &Action<'_>,
         against: &[String],
     ) -> Result<ActionOutcome, LamboError> {
+        crate::graph::resource::validate_repo_scope(action.repo_scope)?;
         if self.config.match_strategy == MatchStrategy::Canonical {
             return self.record_action_sync(agent, action, against);
         }
@@ -590,6 +637,8 @@ impl Memory {
         foreign: &dyn ForeignScopes,
         deliver_to: Option<&SessionId>,
     ) -> Result<Submitted, LamboError> {
+        // #129: the full repo_scope check, once, on the call path.
+        crate::graph::resource::validate_repo_scope(parent_of.repo_scope())?;
         let _writing = self.begin_write().await?;
         // The pre-pass, on the call path. The background path re-runs its own
         // planning validation; this one exists so the common errors do not have
@@ -606,7 +655,7 @@ impl Memory {
             let g = self.graph.read();
             match self.config.match_strategy {
                 MatchStrategy::Hybrid => {
-                    hybrid::validate_graph_inputs(&g, parent_of)?;
+                    hybrid::validate_graph_inputs_scoped(&g, parent_of, concepts)?;
                     // The embed budget too: an over-budget call is refused
                     // here, not after the ack as a timeout at apply.
                     hybrid::validate_embed_budget(
@@ -630,7 +679,7 @@ impl Memory {
             }
             // #36 PR 4: the citations, against the same graph read. The
             // background commit re-resolves them (`cite::recheck`).
-            cite::validate(&g, concepts, citations)
+            cite::validate_scoped(&g, concepts, citations, parent_of)
         };
         // This session's guard is gone: only now may another session's be
         // read for the foreign-scope label.
@@ -652,6 +701,7 @@ impl Memory {
                     .map(|(a, b)| ((*a).to_string(), (*b).to_string()))
                     .collect(),
                 pinned,
+                parent_of.repo_scope().map(str::to_string),
                 deliver_to.cloned(),
             )
             .await)
@@ -725,6 +775,8 @@ impl Memory {
         foreign: &dyn ForeignScopes,
         deliver_to: Option<&SessionId>,
     ) -> Result<Submitted, LamboError> {
+        // #129: the full repo_scope check, once, on the call path.
+        crate::graph::resource::validate_repo_scope(action.repo_scope)?;
         let _writing = self.begin_write().await?;
         // The guard is a temporary of this statement only; `foreign` reads
         // another session in the next one, after it is gone.
@@ -756,7 +808,7 @@ impl Memory {
                 .copied()
                 .filter(|e| {
                     matches!(
-                        crate::surface::resolve::resolve_reference(&g, e),
+                        crate::surface::resolve::resolve_reference_scoped(&g, e, action.repo_scope),
                         crate::surface::resolve::Resolved::Missing
                     )
                 })
@@ -785,6 +837,7 @@ impl Memory {
                 action.modifies.iter().map(|s| (*s).to_string()).collect(),
                 action.depends_on.iter().map(|s| (*s).to_string()).collect(),
                 pins,
+                action.repo_scope.map(str::to_string),
                 against,
                 deliver_to.cloned(),
             )

@@ -367,6 +367,7 @@ async fn a_scoped_write_is_refused_for_a_grant_that_does_not_reach_the_layer() {
     let auth = || Some(CallAuth::Http(Some(Arc::new(narrow.clone()))));
     let before = general.memory().graph().read().snapshot();
     let params = |scope: Option<&str>| super::super::params::DeriveParams {
+        repo_scope: None,
         agent_id: "agent-a".into(),
         concepts: vec![WireConcept {
             content: "a narrow write".into(),
@@ -866,6 +867,205 @@ async fn a_relative_path_is_refused_in_a_layer() {
     .await;
     assert_eq!(out.is_error, Some(false), "{out:?}");
     assert!(contents(&s).contains(&"src/main.rs".to_string()));
+    s.mem.close().await.expect("close");
+    general.mem.close().await.expect("close");
+}
+
+/// #129 review L9: the project's own unscoped `README.md` (a legacy path
+/// Resource) is not what a repo-scoped `depends_on` names, so a write
+/// scoped to `general` is not refused as cross-session for it; the scoped
+/// path is minted in `general`.
+#[tokio::test]
+async fn a_project_legacy_path_does_not_refuse_a_repo_scoped_layer_write() {
+    use crate::graph::resource::scoped_resource_key;
+    let (s, general, _source) = project_and_general("legacy-holder").await;
+    let out = call(
+        &s,
+        "lambo_record_action",
+        action_args("wrote the readme", "produces", &["README.md"], None),
+    )
+    .await;
+    assert_eq!(out.is_error, Some(false), "{out:?}");
+    let mut args = action_args(
+        "checked the readme",
+        "depends_on",
+        &["README.md"],
+        Some("general"),
+    );
+    args["repo_scope"] = json!("github.com/acme/widgets");
+    let out = call(&s, "lambo_record_action", args).await;
+    assert_eq!(out.is_error, Some(false), "{}", text_of(&out));
+    let key = scoped_resource_key("README.md", Some("github.com/acme/widgets")).unwrap();
+    assert!(general
+        .memory()
+        .graph()
+        .read()
+        .concepts()
+        .any(|c| c.canonical_key == key));
+    s.mem.close().await.expect("close");
+    general.mem.close().await.expect("close");
+}
+
+/// The action text is written as a Resource, so a layer refuses one that
+/// is a bare relative path, as it refuses a target; prose passes.
+#[tokio::test]
+async fn a_layer_refuses_an_action_text_that_is_a_relative_path() {
+    let (s, general, _source) = project_and_general("action-path").await;
+    let before = general.memory().graph().read().snapshot();
+    let out = call_raw(
+        &s,
+        "lambo_record_action",
+        json!({"agent_id": "agent-a", "action": "README.md", "scope": "general"}),
+    )
+    .await;
+    assert_eq!(out.is_error, Some(true));
+    assert!(
+        text_of(&out).contains("action entry \"README.md\" is a relative path"),
+        "{}",
+        text_of(&out)
+    );
+    assert_eq!(before, general.memory().graph().read().snapshot());
+    let out = call(
+        &s,
+        "lambo_record_action",
+        json!({"agent_id": "agent-a", "action": "set the merge policy", "scope": "general"}),
+    )
+    .await;
+    assert_eq!(out.is_error, Some(false), "{out:?}");
+    s.mem.close().await.expect("close");
+    general.mem.close().await.expect("close");
+}
+
+/// #129 (#33 PR 7): a validated `repo_scope` exempts exactly the relative
+/// paths it covers, the path-like Resources, from a layer's refusal: action
+/// targets, Resource concepts and Resource `parent_of` ends. A non-Resource
+/// concept stays refused under a scope, and an invalid scope is refused
+/// before anything is written in either session.
+#[tokio::test]
+async fn a_repo_scope_exempts_only_the_resource_paths_it_covers_in_a_layer() {
+    use crate::graph::resource::scoped_resource_key;
+    const REPO: &str = "github.com/acme/widgets";
+    let (s, general, _source) = project_and_general("repo-paths").await;
+    let with_repo = |mut args: serde_json::Value, repo: &str| {
+        args["repo_scope"] = json!(repo);
+        args
+    };
+    let keys = |s: &LamboServer| -> Vec<String> {
+        s.memory()
+            .graph()
+            .read()
+            .concepts()
+            .map(|c| c.canonical_key.clone())
+            .collect()
+    };
+    let before = (
+        s.memory().graph().read().snapshot(),
+        general.memory().graph().read().snapshot(),
+    );
+    // Refused: an invalid scope, whatever the destination.
+    for repo in ["", "   ", "a\u{0}b", "a\u{202e}b"] {
+        for scope in [Some("general"), None] {
+            let out = call_raw(
+                &s,
+                "lambo_record_action",
+                with_repo(
+                    action_args("edited", "produces", &["src/main.rs"], scope),
+                    repo,
+                ),
+            )
+            .await;
+            assert_eq!(out.is_error, Some(true), "{repo:?} {scope:?}");
+            let text = text_of(&out);
+            assert!(text.contains("repo_scope"), "{text}");
+            assert!(!text.contains("config:"), "a parameter error: {text}");
+            let out = call_raw(
+                &s,
+                "lambo_derive",
+                with_repo(derive_args("Cargo.toml", "resource", scope), repo),
+            )
+            .await;
+            assert_eq!(out.is_error, Some(true), "{repo:?} {scope:?}");
+        }
+    }
+    // Refused: a scope covers Resources only, not a Logic concept's content.
+    let out = call_raw(
+        &s,
+        "lambo_derive",
+        with_repo(derive_args("README.md", "logic", Some("general")), REPO),
+    )
+    .await;
+    assert!(
+        text_of(&out).contains("concept.content entry \"README.md\" is a relative path"),
+        "{}",
+        text_of(&out)
+    );
+    assert!(text_of(&out).contains("or a validated repo_scope"));
+    assert_eq!(
+        before,
+        (
+            s.memory().graph().read().snapshot(),
+            general.memory().graph().read().snapshot(),
+        )
+    );
+
+    // Accepted in the layer, under the scoped key.
+    for (field, entry) in [
+        ("produces", "src/main.rs"),
+        ("modifies", "README.md"),
+        // An inferred depends_on is a path by a file name or a trailing
+        // separator; `docs/reference/` keys as `docs/reference`.
+        ("depends_on", "docs/reference/"),
+    ] {
+        let out = call(
+            &s,
+            "lambo_record_action",
+            with_repo(
+                action_args("edited a file", field, &[entry], Some("general")),
+                REPO,
+            ),
+        )
+        .await;
+        assert_eq!(out.is_error, Some(false), "{field}: {out:?}");
+        let key = scoped_resource_key(entry, Some(REPO)).unwrap();
+        assert!(keys(&general).contains(&key), "{field} {entry}");
+    }
+    let out = call(
+        &s,
+        "lambo_derive",
+        with_repo(derive_args("Cargo.toml", "resource", Some("general")), REPO),
+    )
+    .await;
+    assert_eq!(out.is_error, Some(false), "{out:?}");
+    let out = call(
+        &s,
+        "lambo_derive",
+        with_repo(
+            json!({"agent_id": "agent-a", "scope": "general",
+                   "concepts": [{"content": "a ruling on layout", "concept_type": "logic"}],
+                   "parent_of": [{"parent": "a ruling on layout", "child": "src/lib.rs"}]}),
+            REPO,
+        ),
+    )
+    .await;
+    assert_eq!(out.is_error, Some(false), "{out:?}");
+    for path in ["Cargo.toml", "src/lib.rs"] {
+        assert!(keys(&general).contains(&scoped_resource_key(path, Some(REPO)).unwrap()));
+    }
+    // No legacy (unscoped) path key was minted in the layer.
+    let legacy = crate::graph::canonical::canonical_key("src/main.rs", |_| None);
+    assert!(!keys(&general).contains(&legacy));
+    // The project's own write with the same scope is its own scoped node.
+    let out = call(
+        &s,
+        "lambo_record_action",
+        with_repo(
+            action_args("edited", "produces", &["src/main.rs"], None),
+            REPO,
+        ),
+    )
+    .await;
+    assert_eq!(out.is_error, Some(false), "{out:?}");
+    assert!(keys(&s).contains(&scoped_resource_key("src/main.rs", Some(REPO)).unwrap()));
     s.mem.close().await.expect("close");
     general.mem.close().await.expect("close");
 }

@@ -184,11 +184,37 @@ fn is_stop_content(lower_content: &str) -> bool {
     any && all
 }
 
+/// What a structural question's named subject resolved to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum AnchorChoice {
+    /// One concept.
+    One(NodeId),
+    /// Several concepts share the best-ranked text and at least one is a
+    /// repository-scoped path (#129): two repositories' `README.md`, or one
+    /// beside the unscoped concept. The question does not say which.
+    Ambiguous(Vec<NodeId>),
+}
+
+/// [`resolve_anchor_choice`] for the callers that need one concept: an
+/// ambiguous subject resolves to none.
+pub(crate) fn resolve_anchor(graph: &Graph, query: &str) -> Option<NodeId> {
+    match resolve_anchor_choice(graph, query)? {
+        AnchorChoice::One(id) => Some(id),
+        AnchorChoice::Ambiguous(_) => None,
+    }
+}
+
 /// Resolve a named subject, removing strictly contained occurrences before
 /// ranking by distance after the marker, type, length, content and stable key.
 /// Over-budget queries or candidates refuse dispatch instead of using partial
 /// evidence. The security-group prose fallback remains the second choice.
-pub(crate) fn resolve_anchor(graph: &Graph, query: &str) -> Option<NodeId> {
+///
+/// #129: when the best match ties, by distance and text, with other
+/// concepts and one of them is a repository-scoped path, the canonical-key
+/// order no longer picks one. A query that names exactly one of their
+/// repositories (its id appears in the question) picks that repository's
+/// concept; otherwise the subject is [`AnchorChoice::Ambiguous`].
+pub(crate) fn resolve_anchor_choice(graph: &Graph, query: &str) -> Option<AnchorChoice> {
     if query.len() > MAX_ANCHOR_QUERY_BYTES {
         return None;
     }
@@ -291,14 +317,49 @@ pub(crate) fn resolve_anchor(graph: &Graph, query: &str) -> Option<NodeId> {
                 tie_break_by_key(Some(&a.canonical_key), &a.id, Some(&b.canonical_key), &b.id)
             })
     });
-    if let Some((c, _)) = matches.first() {
+    if let Some(&(first, distance)) = matches.first() {
+        let text = anchor_text(&first.content);
+        let tied: Vec<&crate::types::Concept> = matches
+            .iter()
+            .take_while(|(c, d)| *d == distance && anchor_text(&c.content) == text)
+            .map(|(c, _)| *c)
+            .collect();
+        if tied.len() > 1
+            && tied
+                .iter()
+                .any(|c| crate::graph::resource::is_scoped_key(&c.canonical_key))
+        {
+            let named: Vec<&crate::types::Concept> = tied
+                .iter()
+                .copied()
+                .filter(|c| {
+                    crate::graph::resource::repo_scope_of_key(&c.canonical_key).is_some_and(
+                        |repo| {
+                            // Word-bounded, so `a` does not match every
+                            // question with an `a` in it.
+                            !word_bounded_spans(&lower_q, &anchor_text(&repo)).is_empty()
+                        },
+                    )
+                })
+                .collect();
+            if let [one] = named.as_slice() {
+                tracing::trace!(
+                    target: "lambo::recall",
+                    anchor = %one.id,
+                    "recall dispatch: resolved a scoped anchor by its named repository"
+                );
+                return Some(AnchorChoice::One(one.id));
+            }
+            let pool = if named.is_empty() { tied } else { named };
+            return Some(AnchorChoice::Ambiguous(pool.iter().map(|c| c.id).collect()));
+        }
         tracing::trace!(
             target: "lambo::recall",
-            anchor = %c.id,
-            content = %c.content,
+            anchor = %first.id,
+            content = %first.content,
             "recall dispatch: resolved named anchor"
         );
-        return Some(c.id);
+        return Some(AnchorChoice::One(first.id));
     }
 
     if !lower_q.contains("security group") {
@@ -338,16 +399,53 @@ pub(crate) fn resolve_anchor(graph: &Graph, query: &str) -> Option<NodeId> {
             anchor = %id,
             "recall dispatch: prose structural query, chose most-shared SG anchor"
         );
-        return Some(*id);
+        return Some(AnchorChoice::One(*id));
     }
     None
+}
+
+/// The anchor text a structural answer reports: the normalized content, and
+/// for a repository-scoped path its repository too, so a layered merge
+/// aligns structural answers only for the same repository's file (#129).
+fn anchor_label(c: &crate::types::Concept) -> String {
+    match crate::graph::resource::repo_scope_of_key(&c.canonical_key) {
+        Some(repo) => format!("{} (repo {repo:?})", anchor_text(&c.content)),
+        None => anchor_text(&c.content),
+    }
+}
+
+/// The warning-only answer to a structural question whose subject is
+/// ambiguous between repositories (#129): no dependents are guessed; each
+/// candidate is listed with its short id and repository, and the caller is
+/// told to name the repository.
+fn ambiguous_anchor_answer(graph: &Graph, ids: &[NodeId]) -> DetailedRecall {
+    let mut text = String::new();
+    let mut listed = Vec::new();
+    for id in ids {
+        if let Some(Node::Concept(c)) = graph.node(*id) {
+            if text.is_empty() {
+                text = c.content.clone();
+            }
+            let repo = match crate::graph::resource::repo_scope_of_key(&c.canonical_key) {
+                Some(repo) => format!("repo {repo:?}"),
+                None => "no repository".to_string(),
+            };
+            listed.push(format!("{} {} ({repo})", format::short_id(*id), c.content));
+        }
+    }
+    DetailedRecall::warn_only(format!(
+        "recall: {text:?} names {} concepts in different repositories: {}; name the \
+         repository in the question to ask about one",
+        listed.len(),
+        listed.join("; ")
+    ))
 }
 
 /// Normalized resolved subject, even when it has no dependents. The caller
 /// must use its pipeline's graph snapshot, never reconstruct it after recall.
 pub(crate) fn resolved_anchor_text(graph: &Graph, query: &str) -> Option<String> {
     match graph.node(resolve_anchor(graph, query)?) {
-        Some(Node::Concept(c)) => Some(anchor_text(&c.content)),
+        Some(Node::Concept(c)) => Some(anchor_label(c)),
         _ => None,
     }
 }
@@ -365,8 +463,10 @@ pub fn fits_structural(graph: &Graph, query: &str) -> bool {
     if !matches!(classify(query), RecallKind::Structural) {
         return false;
     }
-    match resolve_anchor(graph, query) {
-        Some(anchor) => !dependents(graph, anchor).is_empty(),
+    match resolve_anchor_choice(graph, query) {
+        Some(AnchorChoice::One(anchor)) => !dependents(graph, anchor).is_empty(),
+        // #129: the dispatch answers an ambiguous subject itself.
+        Some(AnchorChoice::Ambiguous(_)) => true,
         None => false,
     }
 }
@@ -435,7 +535,11 @@ pub(crate) fn try_structural(
     if !matches!(classify(query), RecallKind::Structural) {
         return None;
     }
-    let anchor = resolve_anchor(graph, query)?;
+    let anchor = match resolve_anchor_choice(graph, query)? {
+        AnchorChoice::One(id) => id,
+        // #129: never answer for whichever repository sorts first.
+        AnchorChoice::Ambiguous(ids) => return Some(ambiguous_anchor_answer(graph, &ids)),
+    };
     let deps = dependents(graph, anchor);
     if deps.is_empty() {
         return None;
@@ -461,6 +565,7 @@ pub(crate) fn try_structural(
             } else {
                 None
             },
+            repo_scope: crate::graph::resource::repo_scope_of_key(&c.canonical_key),
         };
         // H3: status from the same graph snapshot, typed annotation attached
         // where its producer is known (mirrors assemble). Status `None` is
@@ -511,7 +616,7 @@ pub(crate) fn try_structural(
     let truncation = DetailedRecall::mark_context(&mut detailed, &fitted);
     Some(DetailedRecall {
         anchor: match graph.node(anchor) {
-            Some(Node::Concept(c)) => Some(anchor_text(&c.content)),
+            Some(Node::Concept(c)) => Some(anchor_label(c)),
             _ => None,
         },
         hits,

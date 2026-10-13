@@ -332,6 +332,7 @@ async fn a_lost_lease_fences_the_writer_and_stops_the_flush() {
 
     let action_err = first
         .record_action(&Action {
+            repo_scope: None,
             event_time: None,
             action: "write after loss",
             produces: &["x"],

@@ -320,6 +320,7 @@ async fn the_memory_default_agent_path_is_unchanged() {
         .expect("derive");
     s.mem
         .record_action(&Action {
+            repo_scope: None,
             event_time: None,
             action: "default action",
             produces: &[],

@@ -354,6 +354,11 @@ enum Commands {
         /// DANGEROUS: attach despite a same-width stored/configured model-id mismatch.
         #[arg(long)]
         allow_embedding_mismatch: bool,
+        /// Repository this call's path-like resource concepts and --parent-of ends belong to,
+        /// such as github.com/acme/widgets: the same path in two repositories is then two
+        /// concepts. Matched as exact text; omit it for the unscoped identity.
+        #[arg(long, value_name = "REPO")]
+        repo_scope: Option<String>,
     },
     /// Derive one image concept from a local image file or a client-computed vector file (#22). Its content is the caption plus [image:<id>] and its vector is the image's.
     DeriveImage {
@@ -455,6 +460,11 @@ enum Commands {
         /// DANGEROUS: attach despite a same-width stored/configured model-id mismatch.
         #[arg(long)]
         allow_embedding_mismatch: bool,
+        /// Repository this action's path-like --produces, --modifies and --depends-on entries
+        /// belong to, such as github.com/acme/widgets: the same path in two repositories is
+        /// then two concepts. Matched as exact text; omit it for the unscoped identity.
+        #[arg(long, value_name = "REPO")]
+        repo_scope: Option<String>,
     },
     /// Take a soft lock on a memory node before editing it. On the CLI the reservation ends when this process exits; it is not durable.
     Reserve {
@@ -1922,6 +1932,7 @@ fn main() -> ExitCode {
         }
         (
             Commands::Derive {
+                repo_scope,
                 session,
                 agent,
                 content,
@@ -1938,6 +1949,7 @@ fn main() -> ExitCode {
             lambo::cli::derive::run(
                 *backends,
                 lambo::cli::derive::Args {
+                    repo_scope,
                     session,
                     agent,
                     content,
@@ -1982,6 +1994,7 @@ fn main() -> ExitCode {
         ),
         (
             Commands::RecordAction {
+                repo_scope,
                 session,
                 agent,
                 action,
@@ -1997,6 +2010,7 @@ fn main() -> ExitCode {
             lambo::cli::record_action::run(
                 *backends,
                 lambo::cli::record_action::Args {
+                    repo_scope,
                     session,
                     agent,
                     action,

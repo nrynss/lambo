@@ -86,7 +86,7 @@ use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 
-use crate::graph::canonical::{canonicalize, CanonicalizeResult};
+use crate::graph::canonical::CanonicalizeResult;
 use crate::graph::derive::DeriveOutcome;
 use crate::graph::Graph;
 use crate::surface::resolve::{self, Resolved};
@@ -179,13 +179,40 @@ fn refuse(
 }
 
 /// The derive's call-time pre-pass for `depends_on` and `against` (see
-/// [`pin`]). `depends_on` is resolved first, so a call with a bad entry in
-/// each is refused for the citation.
+/// [`pin_scoped`]), unscoped. `depends_on` is resolved first, so a call with
+/// a bad entry in each is refused for the citation.
+#[cfg(test)]
 pub(crate) fn validate(
     g: &Graph,
     concepts: &[(&str, ConceptType)],
     citations: &[ConceptCitations],
 ) -> Result<PinnedCitations, LamboError> {
+    validate_scoped(
+        g,
+        concepts,
+        citations,
+        &crate::graph::derive::ParentOf::none(),
+    )
+}
+
+/// [`validate`] for a derive under its `parent_of` context, which carries
+/// the repository scope (#129): path text in `depends_on` and `against`
+/// resolves to the scoped path (or an existing non-Resource concept under
+/// its legacy key), never an unscoped path Resource; each citing concept is
+/// keyed as the derive writes it ([`ParentOf::identity`]).
+///
+/// [`ParentOf::identity`]: crate::graph::derive::ParentOf::identity
+pub(crate) fn validate_scoped(
+    g: &Graph,
+    concepts: &[(&str, ConceptType)],
+    citations: &[ConceptCitations],
+    parent_of: &crate::graph::derive::ParentOf<'_>,
+) -> Result<PinnedCitations, LamboError> {
+    let repo_scope = parent_of.repo_scope();
+    crate::graph::resource::require_repo_scope(repo_scope)?;
+    let canon = |content: &str, kind: ConceptType| {
+        parent_of.canonicalize_concept(content, kind, concepts, g)
+    };
     let depends_on: Vec<(&str, &[String])> = citations
         .iter()
         .map(|c| (c.content.as_str(), c.depends_on.as_slice()))
@@ -195,8 +222,8 @@ pub(crate) fn validate(
         .map(|c| (c.content.as_str(), c.against.as_slice()))
         .collect();
     let pinned = PinnedCitations {
-        references: pin(g, concepts, &DEPENDS_ON, &depends_on)?,
-        against: pin(g, concepts, &AGAINST, &against)?,
+        references: pin_scoped(g, concepts, &DEPENDS_ON, &depends_on, repo_scope, &canon)?,
+        against: pin_scoped(g, concepts, &AGAINST, &against, repo_scope, &canon)?,
     };
     refuse_cited_and_contradicted(&pinned)?;
     Ok(pinned)
@@ -227,11 +254,15 @@ pub(crate) fn refuse_cited_and_contradicted(pinned: &PinnedCitations) -> Result<
 }
 
 /// The commit's re-resolution of a derive's citations and contradictions
-/// ([`recheck`] for each list).
-pub(crate) fn recheck_all(g: &Graph, pinned: &PinnedCitations) -> Result<(), LamboError> {
+/// ([`recheck`] for each list), under the call's repository scope.
+pub(crate) fn recheck_all(
+    g: &Graph,
+    pinned: &PinnedCitations,
+    repo_scope: Option<&str>,
+) -> Result<(), LamboError> {
     refuse_cited_and_contradicted(pinned)?;
-    recheck(g, &DEPENDS_ON, &pinned.references)?;
-    recheck(g, &AGAINST, &pinned.against)
+    recheck(g, &DEPENDS_ON, &pinned.references, repo_scope)?;
+    recheck(g, &AGAINST, &pinned.against, repo_scope)
 }
 
 /// Write a derive's citation and contradiction edges ([`write_edges`] for
@@ -265,11 +296,18 @@ pub(crate) fn write_all_edges(
 /// session's graph, under `spec`'s limits; refuse self references and, for
 /// an acyclic spec, an edge that would close a cycle with what the graph
 /// already shows. Returns what it accepted, to pin on the job. Read-only.
-pub(crate) fn pin(
+///
+/// #129: references resolve under `repo_scope`
+/// ([`resolve::resolve_reference_scoped`]), and `canon` keys each citing
+/// concept exactly as the write will, so a self reference is caught under
+/// the scoped key too.
+pub(crate) fn pin_scoped(
     g: &Graph,
     concepts: &[(&str, ConceptType)],
     spec: &ReferenceSpec,
     entries: &[(&str, &[String])],
+    repo_scope: Option<&str>,
+    canon: &dyn Fn(&str, ConceptType) -> Result<CanonicalizeResult, LamboError>,
 ) -> Result<Vec<PinnedReference>, LamboError> {
     let mut pinned: Vec<PinnedReference> = Vec::new();
     if entries.iter().all(|(_, refs)| refs.is_empty()) {
@@ -277,11 +315,11 @@ pub(crate) fn pin(
     }
     // Each of the call's contents and its current canonical match.
     let mut matched: HashMap<&str, Option<NodeId>> = HashMap::new();
-    for &(content, _) in concepts {
+    for &(content, kind) in concepts {
         if matched.contains_key(content) {
             continue;
         }
-        let m = match canonicalize(content, g)? {
+        let m = match canon(content, kind)? {
             CanonicalizeResult::Matched { node, .. } => Some(node),
             CanonicalizeResult::Unmatched { .. } => None,
         };
@@ -330,7 +368,13 @@ pub(crate) fn pin(
             ));
         };
         for reference in refs {
-            let (target, _) = resolve::resolve_existing(g, spec.field, Some(content), reference)?;
+            let (target, _) = resolve::resolve_existing_scoped(
+                g,
+                spec.field,
+                Some(content),
+                reference,
+                repo_scope,
+            )?;
             if *source == Some(target) {
                 return Err(refuse(
                     spec,
@@ -382,9 +426,10 @@ pub(crate) fn recheck(
     g: &Graph,
     spec: &ReferenceSpec,
     pinned: &[PinnedReference],
+    repo_scope: Option<&str>,
 ) -> Result<(), LamboError> {
     for p in pinned {
-        let now = match resolve::resolve_reference(g, &p.reference) {
+        let now = match resolve::resolve_reference_scoped(g, &p.reference, repo_scope) {
             Resolved::Concept { node, .. } if node == p.target => continue,
             Resolved::Concept { node, .. } => Some(node),
             Resolved::Missing | Resolved::Ambiguous(_) | Resolved::NotAConcept(_) => None,
