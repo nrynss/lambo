@@ -533,18 +533,18 @@ enum CanonAction {
             help = "Promotion policy to run: swarm, solo or both."
         )]
         policy: String,
-        /// Evaluation clock for the first cycle, RFC 3339 (default: now). Pin it to compare runs.
+        /// Evaluation clock for the first cycle, RFC 3339 (default: now). To compare runs, pin it at or after the newest row in the store (the backup's time): rows dated after the clock would be left out, so a clock earlier than the data fails the clock_after_the_data invariant (exit 1).
         #[arg(
             long,
             value_name = "RFC3339",
-            help = "Evaluation clock for the first cycle, RFC 3339 (default: now). Pin it to compare runs."
+            help = "Evaluation clock for the first cycle, RFC 3339 (default: now). To compare runs, pin it at or after the newest row in the store (the backup's time): rows dated after the clock would be left out, so a clock earlier than the data fails the clock_after_the_data invariant (exit 1)."
         )]
         at: Option<String>,
         /// Print the report as JSON.
         #[arg(long, help = "Print the report as JSON.")]
         json: bool,
-        /// Fewest consecutive empty cycles that end a run (more are added to cover the rings and any running cooldown).
-        #[arg(long, default_value_t = lambo::canon::dry_run_defaults::DEFAULT_MIN_QUIET, help = "Fewest consecutive empty cycles that end a run (more are added to cover the rings and any running cooldown).")]
+        /// Fewest consecutive empty cycles that end a run. More are needed when the Stage 2 or Stage 3 queue takes longer to go round once at the batch size, and the count pauses (resets) while any re-promotion cooldown is running.
+        #[arg(long, default_value_t = lambo::canon::dry_run_defaults::DEFAULT_MIN_QUIET, help = "Fewest consecutive empty cycles that end a run. More are needed when the Stage 2 or Stage 3 queue takes longer to go round once at the batch size, and the count pauses (resets) while any re-promotion cooldown is running.")]
         quiet: usize,
         /// Safety limit on cycles; reaching it fails the fixed_point invariant.
         #[arg(long, default_value_t = lambo::canon::dry_run_defaults::DEFAULT_MAX_CYCLES, help = "Safety limit on cycles; reaching it fails the fixed_point invariant.")]
@@ -552,10 +552,10 @@ enum CanonAction {
         /// Ids listed per list.
         #[arg(long, default_value_t = lambo::canon::dry_run_defaults::DEFAULT_TOP, help = "Ids listed per list.")]
         top: usize,
-        /// Raise every survival count below 3 to 3 first: the state after three GC sweeps.
+        /// Raise every survival count below 3 to 3 first: the state after three GC sweeps. The dry run runs no GC, so without it a concept short of three sweeps stays short; use it to see what Swarm would admit once survival no longer binds.
         #[arg(
             long,
-            help = "Raise every survival count below 3 to 3 first: the state after three GC sweeps."
+            help = "Raise every survival count below 3 to 3 first: the state after three GC sweeps. The dry run runs no GC, so without it a concept short of three sweeps stays short; use it to see what Swarm would admit once survival no longer binds."
         )]
         assume_survived: bool,
         /// Directory the private copy goes under (default: the system temp directory). Removed afterwards.
@@ -599,18 +599,18 @@ enum CanonAction {
             help = "Promotion policy to run: swarm, solo or both."
         )]
         policy: String,
-        /// Evaluation clock for the first cycle, RFC 3339 (default: now). Pin it to compare runs.
+        /// Evaluation clock for the first cycle, RFC 3339 (default: now). To compare runs, pin it at or after the newest row in the store (the backup's time): rows dated after the clock would be left out, so a clock earlier than the data fails the clock_after_the_data invariant (exit 1).
         #[arg(
             long,
             value_name = "RFC3339",
-            help = "Evaluation clock for the first cycle, RFC 3339 (default: now). Pin it to compare runs."
+            help = "Evaluation clock for the first cycle, RFC 3339 (default: now). To compare runs, pin it at or after the newest row in the store (the backup's time): rows dated after the clock would be left out, so a clock earlier than the data fails the clock_after_the_data invariant (exit 1)."
         )]
         at: Option<String>,
         /// Print the report as JSON.
         #[arg(long, help = "Print the report as JSON.")]
         json: bool,
-        /// Fewest consecutive empty cycles that end a run (more are added to cover the rings and any running cooldown).
-        #[arg(long, default_value_t = lambo::canon::dry_run_defaults::DEFAULT_MIN_QUIET, help = "Fewest consecutive empty cycles that end a run (more are added to cover the rings and any running cooldown).")]
+        /// Fewest consecutive empty cycles that end a run. More are needed when the Stage 2 or Stage 3 queue takes longer to go round once at the batch size, and the count pauses (resets) while any re-promotion cooldown is running.
+        #[arg(long, default_value_t = lambo::canon::dry_run_defaults::DEFAULT_MIN_QUIET, help = "Fewest consecutive empty cycles that end a run. More are needed when the Stage 2 or Stage 3 queue takes longer to go round once at the batch size, and the count pauses (resets) while any re-promotion cooldown is running.")]
         quiet: usize,
         /// Safety limit on cycles; reaching it fails the fixed_point invariant.
         #[arg(long, default_value_t = lambo::canon::dry_run_defaults::DEFAULT_MAX_CYCLES, help = "Safety limit on cycles; reaching it fails the fixed_point invariant.")]
@@ -618,10 +618,10 @@ enum CanonAction {
         /// Ids listed per list.
         #[arg(long, default_value_t = lambo::canon::dry_run_defaults::DEFAULT_TOP, help = "Ids listed per list.")]
         top: usize,
-        /// Raise every survival count below 3 to 3 first: the state after three GC sweeps.
+        /// Raise every survival count below 3 to 3 first: the state after three GC sweeps. The dry run runs no GC, so without it a concept short of three sweeps stays short; use it to see what Swarm would admit once survival no longer binds.
         #[arg(
             long,
-            help = "Raise every survival count below 3 to 3 first: the state after three GC sweeps."
+            help = "Raise every survival count below 3 to 3 first: the state after three GC sweeps. The dry run runs no GC, so without it a concept short of three sweeps stays short; use it to see what Swarm would admit once survival no longer binds."
         )]
         assume_survived: bool,
         /// Directory the private copy goes under (default: the system temp directory). Removed afterwards.

@@ -231,3 +231,155 @@ async fn a_store_with_an_uncheckpointed_wal_is_read_in_full() {
     assert_eq!(listing(&input_dir), files_before);
     assert!(listing(&scratch).is_empty());
 }
+
+/// Review H2: a reviewed map with any refused line makes the command fail
+/// (exit 1 through `Outcome::ok`), with the report still printed.
+#[tokio::test]
+async fn a_reviewed_map_with_a_refused_line_fails_the_command() {
+    let input_dir = ScratchDir::new("lambo-canon-input");
+    let scratch = ScratchDir::new("lambo-canon-scratch");
+    let (path, _) = fixture_db(&input_dir).await;
+    let map = input_dir.join("aliases.map");
+    std::fs::write(&map, "writer lease and something\n").unwrap();
+    let out = alias_preview(AliasPreviewArgs {
+        common: common(path, &scratch, false),
+        map: Some(map),
+        verbose: false,
+    })
+    .await
+    .unwrap();
+    assert!(!out.ok, "{}", out.output);
+    assert!(
+        out.output.contains("FAIL every_reviewed_line_accepted"),
+        "{}",
+        out.output
+    );
+    assert!(
+        !out.output.contains("writer lease"),
+        "the map line is not echoed"
+    );
+}
+
+/// Review L1: a stop signal while the work runs removes the scratch copy
+/// and reports it; the work is abandoned.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_interrupted_run_removes_its_scratch_copy() {
+    let parent = ScratchDir::new("lambo-canon-scratch");
+    let scratch = imp::Scratch::new(Some(&parent)).unwrap();
+    let dir = scratch.path().to_path_buf();
+    std::fs::write(dir.join("store.db"), b"copy").unwrap();
+    let work = async {
+        tokio::time::sleep(Duration::from_secs(3_600)).await;
+        Ok::<(), CliError>(())
+    };
+    let err = imp::guarded(scratch, work, async { "SIGINT" })
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("interrupted by SIGINT"), "{err}");
+    assert!(!dir.exists());
+    assert!(listing(&parent).is_empty());
+    // A completed run reports its removal too.
+    let scratch = imp::Scratch::new(Some(&parent)).unwrap();
+    let ((), removed) = imp::guarded(scratch, async { Ok(()) }, std::future::pending())
+        .await
+        .unwrap();
+    assert_eq!(removed, Ok(()));
+    assert!(listing(&parent).is_empty());
+}
+
+/// Review L6: the scratch directory is private to the operator.
+#[cfg(unix)]
+#[test]
+fn the_scratch_directory_is_0700() {
+    use std::os::unix::fs::PermissionsExt;
+    let parent = ScratchDir::new("lambo-canon-scratch");
+    let scratch = imp::Scratch::new(Some(&parent)).unwrap();
+    let mode = std::fs::metadata(scratch.path())
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o700);
+    scratch.remove().unwrap();
+}
+
+/// Review L6: an input written while it is copied is refused, and nothing
+/// is loaded from the copy.
+#[tokio::test]
+async fn an_input_that_changes_while_it_is_copied_is_refused() {
+    let input_dir = ScratchDir::new("lambo-canon-input");
+    let scratch = ScratchDir::new("lambo-canon-scratch");
+    let (path, _) = fixture_db(&input_dir).await;
+    let c = common(path.clone(), &scratch, false);
+    let target = path.clone();
+    let writer = move || {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&target)
+            .unwrap();
+        f.write_all(b"a live writer").unwrap();
+    };
+    let err = match imp::load_copy(&c, &scratch, fair::now(), &writer).await {
+        Ok(_) => panic!("a changed input must be refused"),
+        Err(e) => e,
+    };
+    assert_eq!(err.exit_code(), 1);
+    assert!(
+        err.to_string().contains("changed while it was copied"),
+        "{err}"
+    );
+}
+
+/// Review L5: a hot rollback journal is refused (opening would roll it
+/// back, a write), and a path holding `?` and `%` is a path.
+#[tokio::test]
+async fn a_hot_journal_is_refused_and_odd_paths_open() {
+    let input_dir = ScratchDir::new("lambo-canon-input");
+    let scratch = ScratchDir::new("lambo-canon-scratch");
+    let (path, _) = fixture_db(&input_dir).await;
+    let odd = input_dir.join("store?mode=memory%20x.db");
+    std::fs::copy(&path, &odd).unwrap();
+    let out = dry_run(DryRunArgs {
+        common: common(odd.clone(), &scratch, true),
+        baseline: None,
+    })
+    .await
+    .unwrap();
+    assert!(out.ok, "{}", out.output);
+    std::fs::write(imp::sidecar(&odd, "-journal"), b"hot").unwrap();
+    let err = dry_run(DryRunArgs {
+        common: common(odd, &scratch, true),
+        baseline: None,
+    })
+    .await
+    .unwrap_err();
+    assert_eq!(err.exit_code(), 1);
+    assert!(err.to_string().contains("-journal"), "{err}");
+    assert!(listing(&scratch).is_empty());
+}
+
+/// Review L2: a baseline of another session is refused before the run.
+#[tokio::test]
+async fn a_baseline_of_another_session_is_refused() {
+    let input_dir = ScratchDir::new("lambo-canon-input");
+    let scratch = ScratchDir::new("lambo-canon-scratch");
+    let (path, _) = fixture_db(&input_dir).await;
+    let out = dry_run(DryRunArgs {
+        common: common(path.clone(), &scratch, true),
+        baseline: None,
+    })
+    .await
+    .unwrap();
+    let mut v: serde_json::Value = serde_json::from_str(&out.output).unwrap();
+    v["session"] = serde_json::json!("another");
+    let base = input_dir.join("base.json");
+    std::fs::write(&base, v.to_string()).unwrap();
+    let err = dry_run(DryRunArgs {
+        common: common(path, &scratch, true),
+        baseline: Some(base),
+    })
+    .await
+    .unwrap_err();
+    assert_eq!(err.exit_code(), 2);
+    assert!(err.to_string().contains("session"), "{err}");
+}
