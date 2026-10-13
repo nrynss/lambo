@@ -216,17 +216,31 @@ pub fn check_no_image_suffix(field: &str, value: &str) -> Result<(), String> {
 /// different file in each and joins them into one concept (#129). A write
 /// into a layer refuses such an entry before the ack.
 ///
-/// The rule is deliberately narrow, so prose, ids, branch names and repo
-/// slugs pass (`feat/33-pr4`, `nrynss/lambo#147`, `api.example.com`): an
-/// entry is a bare relative path when it holds no whitespace, is not
-/// absolute (`/`, `~`, `\`, a drive letter) or a URL (`://`), and either
-/// starts with `./` or `../`, ends with a separator (a directory), or ends
-/// in a file name: a stem and a 1-to-10 character alphanumeric extension
-/// holding a letter. A lone name with no separator counts only with
-/// exactly one dot, so a domain name is not a file. A directory named
-/// without a trailing separator (`docs/reference`) is not caught.
+/// The rule, after trimming and dropping a trailing line reference
+/// (`:12`, `:12:5`, `#L12`, `#L12-L20`):
+///
+/// * never a path: an entry holding whitespace, an absolute path (`/`,
+///   `~`, `\`, a drive letter), a URL (`://`), an scp-style remote
+///   (`git@host:path`), or a name whose first segment is a domain
+///   (`github.com/x/y.md`, a dot inside the segment, not leading);
+/// * a path: a `./`, `../`, `.\` or `..\` prefix, or a name with a
+///   separator that ends in one (a directory), or whose last segment is a
+///   file name: a dotfile (`.env`), a known extensionless file
+///   ([`EXTENSIONLESS_FILES`]: `Makefile`, `Dockerfile`, ...), or a stem
+///   with a 1-to-10 character alphanumeric extension holding a letter;
+/// * a lone name with no separator: only a dotfile, a known extensionless
+///   file, or a name whose extension is a source or config one
+///   ([`FILE_EXTENSIONS`]), so `crates.io`, `socket.io` and
+///   `api.example.com` pass and `lambo.example.toml` does not.
+///
+/// Product names spelled like files (`Node.js`, `next.js`, `docs.rs`, see
+/// [`NOT_FILES`]) pass as a last segment. Prose with slashes (`and/or`,
+/// `I/O`, `TCP/IP`, `50/50`, `N/A`) passes: its last segment is no file
+/// name. Not caught: a directory named without a trailing separator
+/// (`docs/reference`), and a lone file name whose extension is not on the
+/// list.
 pub(crate) fn is_bare_relative_path(entry: &str) -> bool {
-    let s = entry.trim();
+    let s = strip_line_reference(entry.trim());
     if s.is_empty() || s.chars().any(char::is_whitespace) || s.contains("://") {
         return false;
     }
@@ -235,24 +249,246 @@ pub(crate) fn is_bare_relative_path(entry: &str) -> bool {
     if s.starts_with(['/', '\\', '~']) || (drive && matches!(b[2], b'/' | b'\\')) {
         return false;
     }
-    if s.starts_with("./") || s.starts_with("../") || s.starts_with(".\\") {
+    if is_scp_like(s) {
+        return false;
+    }
+    if ["./", "../", ".\\", "..\\"]
+        .iter()
+        .any(|p| s.starts_with(p))
+    {
         return true;
     }
+    let mut segments = s.split(['/', '\\']);
+    let first = segments.next().unwrap_or(s);
     let separated = s.contains(['/', '\\']);
-    if separated && s.ends_with(['/', '\\']) {
-        return true;
+    if separated {
+        // A domain-led name (`github.com/...`) is a remote, not a path here.
+        if first.trim_start_matches('.').contains('.') {
+            return false;
+        }
+        if s.ends_with(['/', '\\']) {
+            return true;
+        }
     }
     let name = s.rsplit(['/', '\\']).next().unwrap_or(s);
+    if NOT_FILES.iter().any(|n| n.eq_ignore_ascii_case(name)) {
+        return false;
+    }
+    if is_dotfile(name) || EXTENSIONLESS_FILES.contains(&name) {
+        return true;
+    }
     let Some((stem, ext)) = name.rsplit_once('.') else {
         return false;
     };
-    if !separated && stem.contains('.') {
+    if stem.is_empty() {
         return false;
     }
-    !stem.is_empty()
-        && (1..=10).contains(&ext.len())
-        && ext.chars().all(|c| c.is_ascii_alphanumeric())
-        && ext.chars().any(|c| c.is_ascii_alphabetic())
+    if separated {
+        (1..=10).contains(&ext.len())
+            && ext.chars().all(|c| c.is_ascii_alphanumeric())
+            && ext.chars().any(|c| c.is_ascii_alphabetic())
+    } else {
+        FILE_EXTENSIONS
+            .iter()
+            .any(|known| known.eq_ignore_ascii_case(ext))
+    }
+}
+
+/// Source and config file extensions a lone name is a file by.
+pub(crate) const FILE_EXTENSIONS: &[&str] = &[
+    "md",
+    "mdx",
+    "markdown",
+    "rst",
+    "txt",
+    "adoc",
+    "rs",
+    "toml",
+    "lock",
+    "json",
+    "jsonc",
+    "json5",
+    "yaml",
+    "yml",
+    "ini",
+    "cfg",
+    "conf",
+    "env",
+    "properties",
+    "xml",
+    "csv",
+    "tsv",
+    "ts",
+    "tsx",
+    "mts",
+    "cts",
+    "js",
+    "jsx",
+    "mjs",
+    "cjs",
+    "vue",
+    "svelte",
+    "astro",
+    "html",
+    "htm",
+    "css",
+    "scss",
+    "sass",
+    "less",
+    "py",
+    "pyi",
+    "ipynb",
+    "go",
+    "mod",
+    "sum",
+    "sh",
+    "bash",
+    "zsh",
+    "fish",
+    "ps1",
+    "bat",
+    "sql",
+    "java",
+    "kt",
+    "kts",
+    "gradle",
+    "scala",
+    "groovy",
+    "c",
+    "h",
+    "cc",
+    "cpp",
+    "cxx",
+    "hpp",
+    "hh",
+    "m",
+    "mm",
+    "swift",
+    "cs",
+    "fs",
+    "rb",
+    "erb",
+    "php",
+    "pl",
+    "pm",
+    "lua",
+    "ex",
+    "exs",
+    "erl",
+    "hrl",
+    "hs",
+    "elm",
+    "clj",
+    "dart",
+    "zig",
+    "nim",
+    "nix",
+    "tf",
+    "tfvars",
+    "hcl",
+    "proto",
+    "graphql",
+    "gql",
+    "patch",
+    "diff",
+    "log",
+    "pem",
+    "png",
+    "jpg",
+    "jpeg",
+    "gif",
+    "svg",
+    "webp",
+    "pdf",
+    "wasm",
+];
+
+/// File names without an extension that are files all the same.
+pub(crate) const EXTENSIONLESS_FILES: &[&str] = &[
+    "Makefile",
+    "makefile",
+    "GNUmakefile",
+    "Dockerfile",
+    "Containerfile",
+    "Justfile",
+    "justfile",
+    "Rakefile",
+    "Gemfile",
+    "Procfile",
+    "Vagrantfile",
+    "Brewfile",
+    "Pipfile",
+    "Jenkinsfile",
+    "Caddyfile",
+    "Tiltfile",
+    "Earthfile",
+    "LICENSE",
+    "COPYING",
+    "NOTICE",
+    "README",
+    "CHANGELOG",
+    "CODEOWNERS",
+    "AUTHORS",
+    "CONTRIBUTORS",
+    "OWNERS",
+];
+
+/// Product and site names spelled like file names.
+pub(crate) const NOT_FILES: &[&str] = &[
+    "node.js",
+    "next.js",
+    "nuxt.js",
+    "vue.js",
+    "three.js",
+    "d3.js",
+    "react.js",
+    "express.js",
+    "ember.js",
+    "backbone.js",
+    "chart.js",
+    "p5.js",
+    "nest.js",
+    "solid.js",
+    "alpine.js",
+    "docs.rs",
+    "bun.sh",
+    "go.dev",
+];
+
+/// `entry` without a trailing line reference: `:12`, `:12:5`, `#L12`,
+/// `#L12-L20` (or `#L12-20`).
+fn strip_line_reference(entry: &str) -> &str {
+    let digits = |t: &str| !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit());
+    if let Some((head, tail)) = entry.rsplit_once("#L") {
+        let ok = match tail.split_once('-') {
+            Some((a, b)) => digits(a) && digits(b.strip_prefix('L').unwrap_or(b)),
+            None => digits(tail),
+        };
+        if ok {
+            return head;
+        }
+    }
+    let mut s = entry;
+    for _ in 0..2 {
+        match s.rsplit_once(':') {
+            Some((head, tail)) if digits(tail) && !head.is_empty() => s = head,
+            _ => break,
+        }
+    }
+    s
+}
+
+/// `user@host:path`, the scp-style remote git takes.
+fn is_scp_like(s: &str) -> bool {
+    let Some((before, after)) = s.split_once(':') else {
+        return false;
+    };
+    before.contains('@') && !before.contains(['/', '\\']) && !after.starts_with("//")
+}
+
+/// `.env`, `.gitignore`: a leading dot and a name after it.
+fn is_dotfile(name: &str) -> bool {
+    name.len() > 1 && name.starts_with('.') && name != ".."
 }
 
 #[cfg(test)]
@@ -509,45 +745,74 @@ mod tests {
         );
     }
 
-    /// #33 PR 4: what a write into a shared layer refuses as a bare
-    /// relative path, and what it lets through.
+    /// #33 PR 4 (and its review M1): what a write into a shared layer
+    /// refuses as a bare relative path, and what it lets through. Every
+    /// input the review listed is here.
     #[test]
     fn bare_relative_paths_are_told_from_prose_ids_and_absolute_paths() {
-        for path in [
-            "README.md",
-            "Cargo.toml",
-            "src/main.rs",
-            "src/mcp/server/tools/scope.rs",
-            "./run.sh",
-            "../lambo/AGENTS.md",
-            ".github/workflows/ci.yml",
-            "docs/reference/",
-            "src\\lib.rs",
-            "lambo.example.toml/x.toml",
-            " src/main.rs ",
-        ] {
-            assert!(is_bare_relative_path(path), "{path:?} is a relative path");
-        }
-        for other in [
-            "/Users/narayan/Documents/work/lambo/README.md",
-            "~/lambo/README.md",
-            "C:\\work\\lambo\\README.md",
-            "\\\\host\\share\\x.txt",
-            "https://github.com/nrynss/lambo/blob/main/README.md",
-            "merged PR #52",
-            "edited src/main.rs",
-            "feat/33-pr4-write-scope",
-            "nrynss/lambo#147",
-            "api.endorlabs.com",
-            "lambo-0.5.0",
-            "v0.6.0",
-            "e333bc7c",
-            "1dc87ca4-4410-4ed2-8777-d8748aa68013",
-            ".gitignore",
-            "docs/reference",
-            "",
-        ] {
-            assert!(!is_bare_relative_path(other), "{other:?} is not");
+        let table: &[(&str, bool)] = &[
+            // Relative paths.
+            ("README.md", true),
+            ("Cargo.toml", true),
+            ("lambo.example.toml", true),
+            ("foo.test.ts", true),
+            ("src/main.rs", true),
+            ("src/mcp/server/tools/scope.rs", true),
+            ("./run.sh", true),
+            ("../lambo/AGENTS.md", true),
+            ("..\\lambo\\AGENTS.md", true),
+            (".\\run.ps1", true),
+            (".github/workflows/ci.yml", true),
+            ("docs/reference/", true),
+            ("src\\lib.rs", true),
+            (" src/main.rs ", true),
+            (".env", true),
+            (".gitignore", true),
+            ("Makefile", true),
+            ("Dockerfile", true),
+            ("Justfile", true),
+            ("docker/Dockerfile", true),
+            ("src/main.rs:42", true),
+            ("src/main.rs:42:7", true),
+            ("README.md#L10", true),
+            ("src/lib.rs#L10-L20", true),
+            ("Cargo.toml:3", true),
+            // Domains, libraries and remotes.
+            ("github.com", false),
+            ("crates.io", false),
+            ("Node.js", false),
+            ("socket.io", false),
+            ("vercel/next.js", false),
+            ("docs.rs", false),
+            ("api.endorlabs.com", false),
+            ("github.com/nrynss/lambo/blob/main/README.md", false),
+            ("git@github.com:nrynss/lambo.git", false),
+            ("https://github.com/nrynss/lambo/blob/main/README.md", false),
+            // Absolute paths.
+            ("/Users/narayan/Documents/work/lambo/README.md", false),
+            ("~/lambo/README.md", false),
+            ("C:\\work\\lambo\\README.md", false),
+            ("\\\\host\\share\\x.txt", false),
+            // Prose, ids, branches and slugs.
+            ("and/or", false),
+            ("I/O", false),
+            ("TCP/IP", false),
+            ("50/50", false),
+            ("N/A", false),
+            ("merged PR #52", false),
+            ("edited src/main.rs", false),
+            ("feat/33-pr4-write-scope", false),
+            ("nrynss/lambo#147", false),
+            ("lambo-0.5.0", false),
+            ("v0.6.0", false),
+            ("e333bc7c", false),
+            ("1dc87ca4-4410-4ed2-8777-d8748aa68013", false),
+            ("docs/reference", false),
+            ("..", false),
+            ("", false),
+        ];
+        for (entry, path) in table {
+            assert_eq!(is_bare_relative_path(entry), *path, "{entry:?}");
         }
     }
 }
