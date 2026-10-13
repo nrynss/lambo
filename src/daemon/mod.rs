@@ -1266,18 +1266,22 @@ fn run_cycle(
     let (conflict_hits, drift_hits, stale_hits, high_risk_hits, fresh) = {
         let g = graph.read();
         let mut h = hot.write();
-        let conflict_hits = conflict::insert_conflicts(&mut h, &g, params.conflict_window, now);
-        let drift_hits = drift::record(&mut h, &g, params.drift_threshold);
-        let stale_hits = events::insert_stale(&mut h, &g, params.stale_window, now);
-        let high_risk_hits = events::insert_high_risk(&mut h, &g, params.high_risk_window, now);
         // #19(c): hot-list only, so its pairs keep their entries below but
-        // never enter `fresh`, which drives events.
+        // never enter `fresh`, which drives events. Inserted FIRST (review
+        // L3): it shares conflict's severity tier, and within a tier the
+        // entry inserted last ranks higher and is evicted last, so a
+        // persistent contradiction never pushes a transient conflict off a
+        // full hot list. Lower tiers are evicted before either.
         let contradiction_hits = contradiction::insert_contradictions(
             &mut h,
             &g,
             params.contradiction_evidence_min_age,
             now,
         );
+        let conflict_hits = conflict::insert_conflicts(&mut h, &g, params.conflict_window, now);
+        let drift_hits = drift::record(&mut h, &g, params.drift_threshold);
+        let stale_hits = events::insert_stale(&mut h, &g, params.stale_window, now);
+        let high_risk_hits = events::insert_high_risk(&mut h, &g, params.high_risk_window, now);
         // Hot list = this cycle's fresh hits (finding 2): drop entries
         // whose (condition, node) is no longer detected — a HighRisk
         // entry whose 30s window elapsed ages out here, not in a frozen

@@ -104,7 +104,10 @@ impl Condition {
     /// (one tier), then `HighRiskModification`, `Drift`, `StaleSession`.
     /// Higher = more urgent on the hot list. A contradiction shares the
     /// conflict tier (#19(c)): both are warnings an agent should act on
-    /// before trusting the node; between the two, recency decides.
+    /// before trusting the node. Within the tier, insertion order decides
+    /// (the later insert ranks higher and is evicted last); the daemon cycle
+    /// inserts contradictions before conflicts, so on a full list a
+    /// persistent contradiction is evicted before a transient conflict.
     pub fn severity(self) -> u8 {
         match self {
             Condition::Conflict | Condition::Contradiction => 3,

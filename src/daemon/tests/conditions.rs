@@ -878,3 +878,52 @@ async fn a_contradiction_is_held_on_the_hot_list_without_an_event() {
     );
     handle.abort();
 }
+
+/// #19(c) review L3: contradictions share conflict's tier and are inserted
+/// before conflicts each cycle, so on a full hot list the persistent
+/// contradictions are evicted before the transient conflict.
+#[tokio::test(start_paused = true)]
+async fn a_full_hot_list_keeps_the_conflict_over_contradictions() {
+    let (graph, c1_id, _, _) = conflicted_graph();
+    {
+        let mut g = graph.write();
+        let i1_id = NodeId(Uuid::from_u64_pair(0, 1));
+        let c2_id = NodeId(Uuid::from_u64_pair(1, 2));
+        for (n, content) in [(3u64, "x holds"), (4, "y holds")] {
+            let mut c = concept_at(n, i1_id, "agent-a", content, wall_ts(60));
+            c.canonization_status = CanonizationStatus::Canonical;
+            let id = c.id;
+            g.insert_concept(c, i1_id).unwrap();
+            g.upsert_edge(Edge {
+                edge_type: EdgeType::Contradicts,
+                ..dep_edge_at(10 + n, c2_id, id, wall_ts(30))
+            })
+            .unwrap();
+        }
+    }
+    let params = CycleParams {
+        hot_list_max: 2,
+        ..Default::default()
+    };
+    let daemon = Daemon::with_params(
+        graph.clone(),
+        ScoringWeights::default(),
+        Duration::from_secs(3600),
+        params,
+    );
+    let handle = daemon.spawn();
+    wait_until(|| daemon.cycles() >= 1).await;
+    let hot = daemon.hot_list();
+    let hot = hot.read();
+    assert_eq!(hot.len(), 2);
+    assert!(
+        hot.iter()
+            .any(|e| e.node() == c1_id && e.condition() == Condition::Conflict),
+        "{hot:?}"
+    );
+    assert!(hot
+        .iter()
+        .any(|e| e.condition() == Condition::Contradiction));
+    drop(hot);
+    handle.abort();
+}
