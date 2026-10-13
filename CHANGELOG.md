@@ -333,7 +333,10 @@
   deterministic per-target ids, shared-hub copies, origin replicas (for
   assigned concepts and for hub copies, across projects as well as into
   `general`) and Temporal chains rebuilt as subsequences of the original
-  chain, and each is validated as a complete graph first. An interaction with
+  chain, and each is validated as a complete graph first. A replica outside
+  its own session is a stub without prompt text (the full text stays in its
+  own target); in `general` it keeps its text only when the interaction
+  passes the general-interaction test. An interaction with
   hard protected provenance is never copied out of its session. Every source
   edge lands in exactly one ledger category (intra, cross-session Temporal,
   hub reattached, Derives reattached, dropped with a named reason). Each

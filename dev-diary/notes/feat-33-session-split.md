@@ -41,10 +41,19 @@ performs no cut-over. D3 (layered recall comparison) is separate.
 - **Hard provenance never leaves its session.** An interaction with an
   excluded project's actor or repository folder (D1's never-waivable
   evidence) refuses the split if any placement would copy it elsewhere.
-- **Soft replicas** go through one policy function, `replica_interaction`.
-  It copies the interaction in full today. The owner is choosing between a
-  full copy, a stub without the prompt, and refusal unless an interaction-level
-  audit authorizes it; each is a change to that function alone.
+- **Soft replicas are stubs** (owner decision A, 2026-10-13; split algorithm
+  version 2). `replica_interaction` writes a replica outside its
+  interaction's own session with the same mapped id, agent, created and event
+  times and `prompt_text` None. The full text stays in the primary target, so
+  nothing is lost, and no project's prompt reaches another project's session.
+  A stub is a state the system already produces (chunk-ingest interactions),
+  and tests show `Graph::from_snapshot` and the import verification accept it.
+  Exception: in `general` a replica keeps its text when the interaction
+  passes D1's general-interaction test (it has origin concepts, all in
+  general). Hub-only replicas are kept, as stubs. Rewriting provenance and
+  refusing were both rejected. The report lists every stub with its primary
+  session and every general replica (ids and counts); the summary prints the
+  counts.
 - Ids: a v8 UUID from a domain-separated SHA-256 over the algorithm version,
   source and plan digests, row kind, target and original id. New chain links
   also bind the older interaction.
@@ -109,7 +118,9 @@ or target graph.
 accounting with drop reasons and the replica matrix, chain subsequence with an
 out-of-order event time and a created-at tie, hub replication with vector bit
 equality and hub-hub multiplicity, one shared origin replica for two concepts,
-metadata and dropped receipts, determinism under source reordering, refusals
+metadata and dropped receipts, stubs in a non-primary project and in general,
+a full-text general replica that passes D1's test, determinism under source
+reordering, refusals
 (pending intents, synonyms, timestamps, key collisions, orphan events, stale or
 tampered plans, non-finite vectors), the hard-provenance replica refusal (a
 valid plan for a project target, a constructed plan for `general`), surfaced

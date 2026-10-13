@@ -923,6 +923,15 @@ anything is written:
 - An interaction with hard protected provenance (the actor or a repository
   folder of a project excluded from general) is never copied out of its own
   session; such a plan is refused.
+- A replica is a stub: the same agent, creation and event times, with no
+  prompt text. The full text stays in the interaction's own target, so
+  nothing is lost and no project's prompt is copied into another project's
+  session. A stub is a state Lambo already produces (chunk-ingest
+  interactions have no prompt text). The one exception is `general`: a
+  replica there keeps its text when the interaction would itself pass the
+  general-interaction test (it has origin concepts and all of them are in
+  general). The report lists every stub with its own session, and every
+  replica in `general`; the summary prints the counts.
 - Every row gets a new id per target, derived deterministically from the
   source and plan fingerprints. The report maps every original id to its
   target ids.
