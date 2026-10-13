@@ -867,6 +867,266 @@ fn stale_or_tampered_plans_are_refused() {
     assert!(build_split(&tampered, &source).is_err());
 }
 
+/// The SQLite destination: transaction boundaries, verification and
+/// zero-write reruns.
+#[cfg(feature = "store-sqlite")]
+mod sqlite {
+    use std::collections::BTreeSet;
+    use std::io::Read;
+
+    use super::*;
+    use crate::resolve::SplitDestination;
+    use crate::store::{GraphStore, SplitImportOutcome, SplitReceipt, SqliteStore};
+    use crate::types::StoreError;
+
+    fn temp_dir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("lambo-split-{}", Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        dir
+    }
+
+    async fn new_destination(path: &std::path::Path) -> SqliteStore {
+        std::fs::File::create(path).unwrap();
+        let store = SplitDestination::open(path);
+        store.provision_split_destination().await.unwrap();
+        store
+    }
+
+    fn receipt(out: &SplitOutput, t: &SplitTarget) -> SplitReceipt {
+        SplitReceipt::for_target(
+            &t.snapshot,
+            &out.split_sha256,
+            &t.sha256,
+            out.algorithm_version,
+            &out.source_sha256,
+            &out.plan_sha256,
+        )
+    }
+
+    fn names(out: &SplitOutput) -> BTreeSet<String> {
+        out.targets.iter().map(|t| t.session.clone()).collect()
+    }
+
+    fn file_bytes(path: &std::path::Path) -> Vec<u8> {
+        let mut out = Vec::new();
+        for p in [
+            path.to_path_buf(),
+            std::path::PathBuf::from(format!("{}-wal", path.display())),
+        ] {
+            if let Ok(mut f) = std::fs::File::open(&p) {
+                f.read_to_end(&mut out).unwrap();
+            }
+        }
+        out
+    }
+
+    async fn import_all(store: &SqliteStore, out: &SplitOutput) -> Vec<SplitImportOutcome> {
+        let mut outcomes = Vec::new();
+        for t in &out.targets {
+            outcomes.push(
+                store
+                    .import_split_target(&receipt(out, t), &t.snapshot, &names(out))
+                    .await
+                    .unwrap(),
+            );
+        }
+        outcomes
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn import_round_trips_and_a_verified_rerun_writes_nothing() {
+        let source = source();
+        let out = build_split(&plan_for(&source), &source).unwrap();
+        let dir = temp_dir();
+        let path = dir.join("split.db");
+        let store = new_destination(&path).await;
+        let first = import_all(&store, &out).await;
+        assert!(first
+            .iter()
+            .all(|o| matches!(o, SplitImportOutcome::Imported { changes } if *changes > 0)));
+        for t in &out.targets {
+            let loaded = store
+                .load_session(&SessionId::from(t.session.as_str()))
+                .await
+                .unwrap();
+            assert_eq!(
+                canonical_target(loaded),
+                canonical_target(t.snapshot.clone())
+            );
+            // A loaded target is a valid graph.
+            crate::graph::Graph::from_snapshot(t.snapshot.clone()).unwrap();
+        }
+        store.close().await;
+
+        // Rerun: read-only destination check, then verification only.
+        let before = file_bytes(&path);
+        let store = SplitDestination::open(&path);
+        store
+            .verify_split_destination(&out.split_sha256, &names(&out))
+            .await
+            .unwrap();
+        let second = import_all(&store, &out).await;
+        assert!(second
+            .iter()
+            .all(|o| *o == SplitImportOutcome::AlreadyPresent));
+        store.close().await;
+        assert_eq!(
+            file_bytes(&path),
+            before,
+            "a verified rerun changed the file"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_target_leaves_no_rows_and_a_rerun_resumes() {
+        let source = source();
+        let out = build_split(&plan_for(&source), &source).unwrap();
+        let dir = temp_dir();
+        let path = dir.join("split.db");
+        let store = new_destination(&path).await;
+        let (alpha, beta) = (&out.targets[0], &out.targets[1]);
+        store
+            .import_split_target(&receipt(&out, alpha), &alpha.snapshot, &names(&out))
+            .await
+            .unwrap();
+        // Fail beta after its edges, before its receipt: everything since
+        // its BEGIN IMMEDIATE rolls back.
+        for step in ["sessions", "edges", "receipt"] {
+            let fault = move |at: &str| {
+                if at == step {
+                    Err(StoreError::Backend(format!("injected at {at}")))
+                } else {
+                    Ok(())
+                }
+            };
+            let err = store
+                .import_split_target_hooked(
+                    &receipt(&out, beta),
+                    &beta.snapshot,
+                    &names(&out),
+                    &fault,
+                )
+                .await
+                .unwrap_err();
+            assert!(err.to_string().contains("injected"), "{err}");
+            assert!(matches!(
+                store.load_session(&SessionId::from("beta")).await,
+                Err(StoreError::SessionNotFound(_))
+            ));
+        }
+        store.close().await;
+        let raw = sqlx::SqlitePool::connect(&format!("sqlite://{}", path.display()))
+            .await
+            .unwrap();
+        for table in [
+            "interactions",
+            "concepts",
+            "edges",
+            "synonyms",
+            "write_intents",
+        ] {
+            let n: i64 = sqlx::query_scalar(&format!(
+                "SELECT count(*) FROM {table} WHERE session_id = 'beta'"
+            ))
+            .fetch_one(&raw)
+            .await
+            .unwrap();
+            assert_eq!(n, 0, "{table}");
+        }
+        let receipts: i64 = sqlx::query_scalar("SELECT count(*) FROM split_imports")
+            .fetch_one(&raw)
+            .await
+            .unwrap();
+        assert_eq!(receipts, 1);
+        raw.close().await;
+
+        let store = SplitDestination::open(&path);
+        let outcomes = import_all(&store, &out).await;
+        assert_eq!(outcomes[0], SplitImportOutcome::AlreadyPresent);
+        assert!(matches!(outcomes[1], SplitImportOutcome::Imported { .. }));
+        assert!(matches!(outcomes[2], SplitImportOutcome::Imported { .. }));
+        store.close().await;
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mismatched_existing_outputs_are_refused_without_writing() {
+        let source = source();
+        let out = build_split(&plan_for(&source), &source).unwrap();
+        let dir = temp_dir();
+        let path = dir.join("split.db");
+        let store = new_destination(&path).await;
+        import_all(&store, &out).await;
+        store.close().await;
+
+        // A drifted row in a committed target.
+        let raw = sqlx::SqlitePool::connect(&format!("sqlite://{}", path.display()))
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE concepts SET access_count = access_count + 1 WHERE session_id = 'alpha'",
+        )
+        .execute(&raw)
+        .await
+        .unwrap();
+        raw.close().await;
+        let before = file_bytes(&path);
+        let store = SplitDestination::open(&path);
+        let t = &out.targets[0];
+        let err = store
+            .import_split_target(&receipt(&out, t), &t.snapshot, &names(&out))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("no longer verifies"), "{err}");
+        // Another split's identity is refused at the destination check.
+        assert!(store
+            .verify_split_destination(&"f".repeat(64), &names(&out))
+            .await
+            .is_err());
+        store.close().await;
+        assert_eq!(file_bytes(&path), before);
+
+        // A plain store file is not a split output.
+        let plain = dir.join("plain.db");
+        let ordinary = SqliteStore::connect(plain.to_str().unwrap()).unwrap();
+        ordinary.init_schema().await.unwrap();
+        ordinary.close().await;
+        let store = SplitDestination::open(&plain);
+        let err = store
+            .verify_split_destination(&out.split_sha256, &names(&out))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("not a split output"), "{err}");
+        store.close().await;
+
+        // A destination holding a session this split never receipted.
+        let path = dir.join("foreign.db");
+        let store = new_destination(&path).await;
+        store.close().await;
+        let raw = sqlx::SqlitePool::connect(&format!("sqlite://{}", path.display()))
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO sessions (session_id) VALUES ('alpha')")
+            .execute(&raw)
+            .await
+            .unwrap();
+        raw.close().await;
+        let store = SplitDestination::open(&path);
+        let err = store
+            .import_split_target(
+                &receipt(&out, &out.targets[0]),
+                &out.targets[0].snapshot,
+                &names(&out),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("without a receipt"), "{err}");
+        store.close().await;
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
 #[test]
 fn general_origin_replicas_from_excluded_projects_are_surfaced() {
     // An audited general ruling whose origin interaction the plan assigns to

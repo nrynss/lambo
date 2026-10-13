@@ -27,7 +27,9 @@ pub use pg::postgres;
 mod sqlite;
 
 #[cfg(feature = "store-sqlite")]
-pub use sqlite::SqliteStore;
+pub use sqlite::{
+    SplitImportHook, SplitImportOutcome, SplitReceipt, SqliteStore, SPLIT_IMPORTS_DDL,
+};
 
 // STORE-4 — shared backend-error classification (sqlx-backed adapters only;
 // `store-cockroach` / `store-postgres` / `store-sqlite` pull `sqlx`).

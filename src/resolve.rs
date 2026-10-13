@@ -429,6 +429,93 @@ pub fn resolve_classification_source(
     }
 }
 
+/// The split's explicit inputs and output (#33 D2): the immutable source,
+/// resolved exactly as classification resolves it, and the destination file.
+pub struct SplitIo {
+    pub source: ClassificationSource,
+    /// The `--database` or `--snapshot` file, for the output alias checks.
+    pub source_path: std::path::PathBuf,
+    pub destination: SplitDestination,
+}
+
+/// An explicit filesystem SQLite file for split targets. Never derived from
+/// `lambo.toml` or the environment, so ambient store configuration can never
+/// redirect an offline import.
+#[derive(Clone, Debug)]
+pub struct SplitDestination {
+    path: std::path::PathBuf,
+}
+
+impl SplitDestination {
+    /// The output file.
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    /// Open `file`, which must already exist, as a split destination:
+    /// file-backed, no creation, foreign keys on and a busy timeout. No
+    /// journal mode is set, so opening an existing file never rewrites its
+    /// header; a new output is created in SQLite's default rollback-journal
+    /// mode, so every committed byte is in the file itself and no WAL
+    /// sidecar is ever left under the private provisioning name.
+    #[cfg(feature = "store-sqlite")]
+    pub fn open(file: &std::path::Path) -> crate::store::SqliteStore {
+        crate::store::SqliteStore::new(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(file)
+                .create_if_missing(false)
+                .foreign_keys(true)
+                .busy_timeout(std::time::Duration::from_secs(8)),
+        )
+    }
+}
+
+/// One construction site for the split. The source follows
+/// [`resolve_classification_source`]; the destination must be a plain file
+/// path. Import is implemented only for an offline SQLite file: a URI, an
+/// in-memory spelling, a DSN or any other store kind is refused, as is an
+/// import in a build without `store-sqlite`.
+pub fn resolve_split_io(
+    database: Option<&std::path::Path>,
+    snapshot: Option<&std::path::Path>,
+    output: &std::path::Path,
+    dry_run: bool,
+) -> Result<SplitIo, LamboError> {
+    let source = resolve_classification_source(database, snapshot)?;
+    let text = output.to_string_lossy();
+    if text.contains("://")
+        || text.starts_with("sqlite:")
+        || text.starts_with("file:")
+        || text.contains(":memory:")
+        || output.file_name().is_none()
+        || text.ends_with('/')
+    {
+        return Err(LamboError::Config(
+            "split import is supported only into an explicit SQLite database file path; \
+             other stores and URI spellings do not support import"
+                .into(),
+        ));
+    }
+    // A dry run builds and reports the split without a destination, so it
+    // works wherever classification does.
+    if !dry_run && !cfg!(feature = "store-sqlite") {
+        return Err(LamboError::Config(
+            "split import requires --features store-sqlite; --dry-run works without it".into(),
+        ));
+    }
+    let source_path = database
+        .or(snapshot)
+        .expect("the source resolver accepted exactly one input")
+        .to_path_buf();
+    Ok(SplitIo {
+        source,
+        source_path,
+        destination: SplitDestination {
+            path: output.to_path_buf(),
+        },
+    })
+}
+
 /// Refuse to use an embedder that disagrees with the session's stamped contract.
 ///
 /// Call on `load_session` / serve attach when `GraphSnapshot.embedding` is `Some`.
