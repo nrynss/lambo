@@ -17,7 +17,10 @@
 //! **Why the receipt table is not in `001_init.sql`.** The preflight of every
 //! ordinary store derives its required tables from that file, so a new table
 //! there would refuse every store provisioned before it. `split_imports`
-//! exists only in split destinations.
+//! exists only in split destinations. It has no foreign key: a receipt is a
+//! standalone record of what was imported, so ordinary verbs on the output
+//! (`erase-session` among them) never trip over it. A rerun after such an
+//! erase finds a receipt without its target and refuses.
 
 use std::collections::BTreeSet;
 
@@ -26,7 +29,7 @@ use sqlx::Row;
 use super::codec::{db_err, enum_to_text, ts_to_text};
 use super::persistence::BULK_LIMITS;
 use super::session_load::load_snapshot_in;
-use super::write_rows::{put_write_intent, upsert_concepts, upsert_edges, upsert_interactions};
+use super::write_rows::{upsert_concepts, upsert_edges, upsert_interactions};
 use super::SqliteStore;
 use crate::session::canonical_target;
 use crate::store::batch::{seed_concept_rows, seed_edge_rows};
@@ -34,8 +37,8 @@ use crate::store::map_write_err;
 use crate::types::{GraphSnapshot, StoreError};
 
 /// The receipt table, created only in a new split destination.
-pub const SPLIT_IMPORTS_DDL: &str = "CREATE TABLE split_imports (\
-    target_session      TEXT PRIMARY KEY REFERENCES sessions(session_id), \
+pub(crate) const SPLIT_IMPORTS_DDL: &str = "CREATE TABLE split_imports (\
+    target_session      TEXT PRIMARY KEY, \
     split_sha256        TEXT NOT NULL, \
     target_sha256       TEXT NOT NULL, \
     algorithm_version   INTEGER NOT NULL, \
@@ -45,12 +48,11 @@ pub const SPLIT_IMPORTS_DDL: &str = "CREATE TABLE split_imports (\
     concepts            INTEGER NOT NULL, \
     edges               INTEGER NOT NULL, \
     canonization_events INTEGER NOT NULL, \
-    synonyms            INTEGER NOT NULL, \
-    write_intents       INTEGER NOT NULL)";
+    synonyms            INTEGER NOT NULL)";
 
 /// What a committed target import recorded about itself.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SplitReceipt {
+pub(crate) struct SplitReceipt {
     pub target_session: String,
     pub split_sha256: String,
     pub target_sha256: String,
@@ -62,12 +64,11 @@ pub struct SplitReceipt {
     pub edges: usize,
     pub canonization_events: usize,
     pub synonyms: usize,
-    pub write_intents: usize,
 }
 
 impl SplitReceipt {
     /// The receipt a complete import of `snapshot` records.
-    pub fn for_target(
+    pub(crate) fn for_target(
         snapshot: &GraphSnapshot,
         split_sha256: &str,
         target_sha256: &str,
@@ -87,14 +88,13 @@ impl SplitReceipt {
             edges: snapshot.edges.len(),
             canonization_events: snapshot.canonization_events.len(),
             synonyms: snapshot.synonyms.len(),
-            write_intents: snapshot.write_intents.len(),
         }
     }
 }
 
 /// How one target import ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SplitImportOutcome {
+pub(crate) enum SplitImportOutcome {
     /// The target was absent and is now committed; `changes` is SQLite's
     /// count of rows the transaction inserted.
     Imported { changes: u64 },
@@ -104,11 +104,17 @@ pub enum SplitImportOutcome {
     AlreadyPresent,
 }
 
-/// A failure point inside a target import, for the rollback tests.
-pub type SplitImportHook<'a> = &'a (dyn Fn(&str) -> Result<(), StoreError> + Sync);
+/// A failure point inside a target import, for the rollback tests. Test
+/// only: under `fixtures` alone nothing in the library would use it, and the
+/// clippy rows deny dead code.
+#[cfg(test)]
+pub(crate) type SplitImportHook<'a> = &'a (dyn Fn(&str) -> Result<(), StoreError> + Sync);
 
-fn no_fault(_: &str) -> Result<(), StoreError> {
-    Ok(())
+/// The hook as the import sees it; production passes none.
+type Hook<'a> = Option<&'a (dyn Fn(&str) -> Result<(), StoreError> + Sync)>;
+
+fn step(hook: Hook<'_>, at: &str) -> Result<(), StoreError> {
+    hook.map_or(Ok(()), |h| h(at))
 }
 
 fn refused(msg: impl Into<String>) -> StoreError {
@@ -136,8 +142,7 @@ async fn read_receipt(
 ) -> Result<Option<SplitReceipt>, StoreError> {
     let row = sqlx::query(
         "SELECT target_session, split_sha256, target_sha256, algorithm_version, source_sha256, \
-                plan_sha256, interactions, concepts, edges, canonization_events, synonyms, \
-                write_intents \
+                plan_sha256, interactions, concepts, edges, canonization_events, synonyms \
          FROM split_imports WHERE target_session = ?",
     )
     .bind(target)
@@ -167,7 +172,6 @@ async fn read_receipt(
         edges: int(8)?,
         canonization_events: int(9)?,
         synonyms: int(10)?,
-        write_intents: int(11)?,
     }))
 }
 
@@ -276,7 +280,7 @@ async fn insert_target(
     tx: &mut sqlx::SqliteConnection,
     s: &GraphSnapshot,
     receipt: &SplitReceipt,
-    hook: SplitImportHook<'_>,
+    hook: Hook<'_>,
 ) -> Result<(), StoreError> {
     let (kind, model, dim) = match &s.embedding {
         Some(c) => (
@@ -289,9 +293,13 @@ async fn insert_target(
     let created_at = s
         .created_at
         .ok_or_else(|| refused("a target has no created_at"))?;
-    if s.root_goal.is_some() || s.closed_at.is_some() || !s.reservations.is_empty() {
+    if s.root_goal.is_some()
+        || s.closed_at.is_some()
+        || !s.reservations.is_empty()
+        || !s.write_intents.is_empty()
+    {
         return Err(refused(
-            "a split target carries a root goal, close time or reservation",
+            "a split target carries a root goal, close time, reservation or write intent",
         ));
     }
     let too_big = |_| refused("a counter exceeds the SQLite integer range");
@@ -311,21 +319,21 @@ async fn insert_target(
     .execute(&mut *tx)
     .await
     .map_err(|e| map_write_err(e, |m| format!("split: insert session: {m}")))?;
-    hook("sessions")?;
+    step(hook, "sessions")?;
     // Chain order (head first), so every previous_id already exists.
     let interactions: Vec<_> = s.interactions.iter().collect();
     for chunk in interactions.chunks(BULK_LIMITS.interactions) {
         upsert_interactions(&mut *tx, chunk).await?;
     }
-    hook("interactions")?;
+    step(hook, "interactions")?;
     for chunk in seed_concept_rows(&s.concepts).chunks(BULK_LIMITS.concepts) {
         upsert_concepts(&mut *tx, chunk).await?;
     }
-    hook("concepts")?;
+    step(hook, "concepts")?;
     for chunk in seed_edge_rows(&s.edges).chunks(BULK_LIMITS.edges) {
         upsert_edges(&mut *tx, chunk).await?;
     }
-    hook("edges")?;
+    step(hook, "edges")?;
     for syn in &s.synonyms {
         sqlx::query(
             "INSERT INTO synonyms (session_id, source_key, canonical_key) VALUES (?, ?, ?)",
@@ -337,7 +345,7 @@ async fn insert_target(
         .await
         .map_err(|e| map_write_err(e, |m| format!("split: insert synonym: {m}")))?;
     }
-    hook("synonyms")?;
+    step(hook, "synonyms")?;
     for ev in &s.canonization_events {
         sqlx::query(
             "INSERT INTO canonization_events (id, session_id, node_id, from_status, to_status, \
@@ -356,17 +364,13 @@ async fn insert_target(
         .await
         .map_err(|e| map_write_err(e, |m| format!("split: insert canonization event: {m}")))?;
     }
-    hook("canonization_events")?;
-    for intent in &s.write_intents {
-        put_write_intent(&mut *tx, intent).await?;
-    }
-    hook("write_intents")?;
+    step(hook, "canonization_events")?;
     let count = |n: usize| i64::try_from(n).map_err(|_| refused("a count is out of range"));
     sqlx::query(
         "INSERT INTO split_imports (target_session, split_sha256, target_sha256, \
              algorithm_version, source_sha256, plan_sha256, interactions, concepts, edges, \
-             canonization_events, synonyms, write_intents) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             canonization_events, synonyms) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&receipt.target_session)
     .bind(&receipt.split_sha256)
@@ -379,18 +383,26 @@ async fn insert_target(
     .bind(count(receipt.edges)?)
     .bind(count(receipt.canonization_events)?)
     .bind(count(receipt.synonyms)?)
-    .bind(count(receipt.write_intents)?)
     .execute(&mut *tx)
     .await
     .map_err(|e| map_write_err(e, |m| format!("split: insert receipt: {m}")))?;
-    hook("receipt")
+    step(hook, "receipt")
 }
 
-/// Whether the target as stored on `tx` is exactly `expected`.
+/// Whether the target and its receipt as stored on `tx` are exactly
+/// `expected` and `receipt`.
 async fn matches_expected(
     tx: &mut sqlx::SqliteConnection,
     expected: &GraphSnapshot,
+    receipt: &SplitReceipt,
 ) -> Result<bool, StoreError> {
+    if read_receipt(&mut *tx, &receipt.target_session)
+        .await?
+        .as_ref()
+        != Some(receipt)
+    {
+        return Ok(false);
+    }
     let stored = load_snapshot_in(&mut *tx, &expected.session_id).await?;
     Ok(stored.map(canonical_target) == Some(canonical_target(expected.clone())))
 }
@@ -398,7 +410,7 @@ async fn matches_expected(
 impl SqliteStore {
     /// Create the schema in a brand-new destination file: the store DDL plus
     /// the receipt table. Never called on an existing output.
-    pub async fn provision_split_destination(&self) -> Result<(), StoreError> {
+    pub(crate) async fn provision_split_destination(&self) -> Result<(), StoreError> {
         let tables: i64 = sqlx::query_scalar("SELECT count(*) FROM sqlite_master")
             .fetch_one(self.pool())
             .await
@@ -417,7 +429,7 @@ impl SqliteStore {
     /// Read-only checks of an existing destination before any import: the
     /// store schema and the receipt table are present, and it holds only
     /// targets of this split. Runs no DDL and no DML.
-    pub async fn verify_split_destination(
+    pub(crate) async fn verify_split_destination(
         &self,
         split_sha256: &str,
         targets: &BTreeSet<String>,
@@ -448,23 +460,34 @@ impl SqliteStore {
 
     /// Import one target atomically, or verify it when this split already
     /// committed it. See the module doc for the transaction boundaries.
-    pub async fn import_split_target(
+    pub(crate) async fn import_split_target(
         &self,
         receipt: &SplitReceipt,
         expected: &GraphSnapshot,
         targets: &BTreeSet<String>,
     ) -> Result<SplitImportOutcome, StoreError> {
-        self.import_split_target_hooked(receipt, expected, targets, &no_fault)
-            .await
+        self.import_with(receipt, expected, targets, None).await
     }
 
     /// [`Self::import_split_target`] with a fault hook between steps.
-    pub async fn import_split_target_hooked(
+    #[cfg(test)]
+    pub(crate) async fn import_split_target_hooked(
         &self,
         receipt: &SplitReceipt,
         expected: &GraphSnapshot,
         targets: &BTreeSet<String>,
         hook: SplitImportHook<'_>,
+    ) -> Result<SplitImportOutcome, StoreError> {
+        self.import_with(receipt, expected, targets, Some(hook))
+            .await
+    }
+
+    async fn import_with(
+        &self,
+        receipt: &SplitReceipt,
+        expected: &GraphSnapshot,
+        targets: &BTreeSet<String>,
+        hook: Hook<'_>,
     ) -> Result<SplitImportOutcome, StoreError> {
         if receipt.target_session != expected.session_id.0 {
             return Err(refused("receipt and target name different sessions"));
@@ -484,7 +507,7 @@ impl SqliteStore {
                         "target {target} has a receipt that does not match this split"
                     )));
                 }
-                if !matches_expected(&mut tx, expected).await? {
+                if !matches_expected(&mut tx, expected, receipt).await? {
                     return Err(refused(format!(
                         "target {target} changed after its import; it no longer verifies"
                     )));
@@ -504,7 +527,7 @@ impl SqliteStore {
                 }
                 check_ids_free(&mut tx, expected).await?;
                 insert_target(&mut tx, expected, receipt, hook).await?;
-                if !matches_expected(&mut tx, expected).await? {
+                if !matches_expected(&mut tx, expected, receipt).await? {
                     return Err(refused(format!(
                         "target {target} did not read back exactly as built; rolled back"
                     )));
@@ -520,14 +543,21 @@ impl SqliteStore {
         }
     }
 
-    /// Fold the WAL back into the database file (a no-op when it is empty,
-    /// as after a verify-only run), then close the pool.
-    pub async fn close(&self) {
-        if let Some(pool) = self.pool.get() {
-            let _ = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
-                .execute(pool)
-                .await;
-            pool.close().await;
-        }
+    /// End a split's use of a destination file: fold any WAL back into the
+    /// file (a no-op in the rollback-journal mode new outputs use, and for
+    /// an empty WAL), then close the pool so nothing is left open before
+    /// the file is linked into place or the command exits. A checkpoint
+    /// failure is returned, not swallowed.
+    pub(crate) async fn finish_split_destination(&self) -> Result<(), StoreError> {
+        let Some(pool) = self.pool.get() else {
+            return Ok(());
+        };
+        let checkpoint = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+            .execute(pool)
+            .await
+            .map(|_| ())
+            .map_err(|e| db_err("split: checkpoint destination", e));
+        pool.close().await;
+        checkpoint
     }
 }

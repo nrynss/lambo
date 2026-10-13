@@ -15,8 +15,17 @@
 //!   in the SQL stores, so even a primary placement is remapped.
 //! * **Edge ledger.** Every source edge gets exactly one category, computed
 //!   from the original primary assignments, never from final placements:
-//!   intra, cross-session Temporal (rebuilt), hub reattached, origin
-//!   reattached, dropped.
+//!   intra, cross-session Temporal (rebuilt), hub reattached, Derives
+//!   reattached, dropped (with a named reason). Only Temporal and Derives
+//!   edges may touch an interaction (the endpoint matrix
+//!   `Graph::from_snapshot` enforces on the source), so no other edge type
+//!   can attach to an origin replica.
+//! * **Replicas.** An interaction copied outside its own session (an origin
+//!   replica) is refused when it carries hard protected provenance (an
+//!   excluded project's actor or repository folder): that evidence is never
+//!   waivable, so it never leaves its project. What a soft replica carries is
+//!   one policy function, [`replica_interaction`]. The accounting carries a
+//!   replica matrix (origin session -> target session).
 //! * **Output edges.** A non-Temporal edge that is not dropped is written into
 //!   every target holding both endpoints. Temporal links are not copied: each
 //!   target's chain is the subsequence of the original `previous_id` chain
@@ -27,10 +36,13 @@
 //!   into every target), `created_at`, the mutation epoch and the GC watermark
 //!   are inherited together, `closed_at` is cleared because every target is a
 //!   new writable session, and the transient GC reset flag is false.
-//! * **Refusals.** Pending write intents, a consumed intent whose typed
-//!   reference has no target-local concept, a canonization event or synonym
-//!   that resolves to no concept, sub-millisecond timestamps and any target
-//!   that fails [`Graph::from_snapshot`] stop the split before any write.
+//! * **Write intents.** Pending intents are refused (they are owed a
+//!   replay). Consumed ones are receipts only, so they are not migrated:
+//!   they are counted, and no payload text crosses into a target.
+//! * **Refusals.** Pending write intents, a canonization event or synonym
+//!   that resolves to no concept, sub-millisecond timestamps, non-finite
+//!   vectors or weights, a hard-provenance replica and any target that fails
+//!   [`Graph::from_snapshot`] stop the split before any write.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -44,7 +56,7 @@ use super::{validate_plan, ClassificationPlan, ClassifyError, ItemKind, ItemRef}
 use crate::graph::Graph;
 use crate::types::{
     CanonizationEvent, Concept, ConceptType, Edge, EdgeType, GcMark, GraphSnapshot, Interaction,
-    NodeId, SessionId, Synonym, WriteIntent, WriteIntentPayload,
+    NodeId, SessionId, Synonym,
 };
 
 /// Version of the split transform. It is part of every derived id and of the
@@ -62,6 +74,8 @@ pub enum SplitError {
     Plan(#[from] ClassifyError),
     #[error("split refused: {0}")]
     Refused(String),
+    #[error("split report: {0}")]
+    Render(#[from] serde_json::Error),
 }
 
 fn refuse<T>(msg: impl Into<String>) -> Result<T, SplitError> {
@@ -78,10 +92,23 @@ pub enum EdgeDisposition {
     CrossTemporalRebuilt,
     /// One end is a shared hub with a copy in the other end's session.
     HubReattached,
-    /// A Derives edge whose interaction is replicated into the concept's session.
-    OriginReattached,
-    /// A cross-session structural edge with no hub or origin to attach to.
+    /// A cross-session Derives edge whose interaction is replicated into the
+    /// concept's session (as the origin of that concept or of another one).
+    DerivesReattached,
+    /// Not written anywhere; see [`DropReason`].
     Dropped,
+}
+
+/// Why a [`EdgeDisposition::Dropped`] edge was dropped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DropReason {
+    /// A concept-to-concept edge between sessions with no hub copy on either
+    /// side (design decision: no cross-session edges in v1).
+    CrossSessionStructural,
+    /// A Derives edge whose interaction is not copied into the concept's
+    /// session; the concept keeps its own origin's Derives edge.
+    DerivesWithoutReplica,
 }
 
 /// One source edge, its category and the rows it produced.
@@ -90,6 +117,9 @@ pub struct LedgerEntry {
     pub edge: NodeId,
     pub edge_type: EdgeType,
     pub category: EdgeDisposition,
+    /// Set exactly when `category` is `Dropped`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drop_reason: Option<DropReason>,
     /// Primary session of the edge's source end.
     pub from_session: String,
     /// Primary session of the edge's target end.
@@ -137,7 +167,6 @@ pub struct TargetCounts {
     pub vectors: usize,
     pub canonization_events: usize,
     pub synonyms: usize,
-    pub write_intents: usize,
 }
 
 /// Source-edge ledger totals and output-edge totals, kept apart.
@@ -147,8 +176,10 @@ pub struct EdgeAccounting {
     pub intra: usize,
     pub cross_temporal_rebuilt: usize,
     pub hub_reattached: usize,
-    pub origin_reattached: usize,
+    pub derives_reattached: usize,
     pub dropped: usize,
+    /// Dropped edges by [`DropReason`].
+    pub dropped_by_reason: BTreeMap<String, usize>,
     /// Dropped edges by edge type.
     pub dropped_by_type: BTreeMap<String, usize>,
     /// Dropped edges by `"from -> to"` primary sessions.
@@ -181,7 +212,8 @@ pub struct SplitAccounting {
     pub source_concepts: usize,
     pub source_synonyms: usize,
     pub source_canonization_events: usize,
-    pub source_write_intents: usize,
+    /// Consumed (settled) write intents: receipts only, not migrated.
+    pub consumed_write_intents_dropped: usize,
     /// Volatile soft locks, never migrated.
     pub excluded_reservations: usize,
     pub target_interactions: usize,
@@ -193,6 +225,8 @@ pub struct SplitAccounting {
     /// Replicas only hub copies need: a copy keeps its true origin locally
     /// so its `origin_interaction` and Derives edge stay in its session.
     pub replicas_for_hub_copies_only: usize,
+    /// Origin replicas by `"origin session -> target session"`.
+    pub replica_matrix: BTreeMap<String, usize>,
     /// Origin replicas placed in the general session.
     pub general_replicas: usize,
     /// Of those, interactions assigned to a project excluded from general:
@@ -211,7 +245,6 @@ pub struct SplitAccounting {
     pub target_vectors: usize,
     pub target_canonization_events: usize,
     pub target_synonyms: usize,
-    pub target_write_intents: usize,
     pub per_target: BTreeMap<String, TargetCounts>,
 }
 
@@ -321,10 +354,6 @@ fn check_round_trip(s: &GraphSnapshot) -> Result<(), SplitError> {
         times.push(ev.occurred_at);
         times.extend(ev.last_demotion_time);
     }
-    for w in &s.write_intents {
-        times.push(w.created_at);
-        times.extend(w.outcome.as_ref().map(|o| o.consumed_at));
-    }
     if times.iter().any(|t| !ms_aligned(t)) {
         return refuse(
             "the source carries sub-millisecond timestamps, which a SQLite target cannot \
@@ -332,11 +361,16 @@ fn check_round_trip(s: &GraphSnapshot) -> Result<(), SplitError> {
         );
     }
     let too_big = |v: u64| i64::try_from(v).is_err();
-    if too_big(s.mutation_epoch)
-        || too_big(s.gc_mark.last_gc_epoch)
-        || s.write_intents.iter().any(|w| too_big(w.lane_seq))
-    {
+    if too_big(s.mutation_epoch) || too_big(s.gc_mark.last_gc_epoch) {
         return refuse("a counter exceeds the SQLite integer range");
+    }
+    if s.concepts.iter().any(|c| {
+        c.embedding
+            .as_ref()
+            .is_some_and(|v| v.iter().any(|x| !x.is_finite()))
+    }) || s.edges.iter().any(|e| !e.weight.is_finite())
+    {
+        return refuse("the source carries a non-finite vector component or edge weight");
     }
     Ok(())
 }
@@ -389,6 +423,15 @@ fn resolve_synonym<'a>(
     }
 }
 
+/// What an origin replica (an interaction copied into a session other than
+/// its own) carries. The single policy point for soft replicas, pending the
+/// owner's choice between a full copy (current), a stub without the prompt,
+/// or refusal unless an interaction-level audit authorizes it. Hard
+/// provenance never reaches here: it is refused before materialization.
+fn replica_interaction(original: &Interaction) -> Result<Interaction, SplitError> {
+    Ok(original.clone())
+}
+
 /// Build every target of the split. Pure and deterministic: the same plan and
 /// source always give byte-identical targets, ids and accounting.
 pub fn build_split(
@@ -396,6 +439,15 @@ pub fn build_split(
     source: &GraphSnapshot,
 ) -> Result<SplitOutput, SplitError> {
     validate_plan(plan, source)?;
+    build_validated(plan, source)
+}
+
+/// [`build_split`] after [`validate_plan`]. Separate so tests can reach the
+/// guards that a valid plan never triggers; it assumes complete assignments.
+pub(super) fn build_validated(
+    plan: &ClassificationPlan,
+    source: &GraphSnapshot,
+) -> Result<SplitOutput, SplitError> {
     let pending: Vec<&str> = source
         .write_intents
         .iter()
@@ -466,6 +518,38 @@ pub fn build_split(
     let targets: BTreeSet<&str> = places.values().flatten().copied().collect();
     let placed = |node: Uuid, t: &str| places.get(&node).is_some_and(|p| p.contains(t));
 
+    // Hard protected provenance (an excluded project's actor or repository
+    // folder) is never waivable, so such an interaction never leaves its own
+    // session, not even as an origin replica. D1 already refuses it in
+    // general; this re-derives the barrier from the source for every target.
+    let (protected, _) = super::classify::protected_source_items(source, &plan.rules);
+    let mut hard_replicas: Vec<String> = Vec::new();
+    for i in &source.interactions {
+        if !protected.contains(&i.id.0) {
+            continue;
+        }
+        for t in &places[&i.id.0] {
+            if *t != primary[&i.id.0] {
+                hard_replicas.push(format!("{} ({} -> {t})", i.id, primary[&i.id.0]));
+            }
+        }
+    }
+    if !hard_replicas.is_empty() {
+        hard_replicas.sort();
+        return refuse(format!(
+            "{} origin replica(s) would copy an interaction with hard protected project \
+             provenance out of its session: {}; place the concepts that originated there \
+             in that session, or drop their hub copies",
+            hard_replicas.len(),
+            hard_replicas
+                .iter()
+                .take(20)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+
     // The exclusive source-edge ledger, from primary assignments only.
     let mut ledger: Vec<LedgerEntry> = Vec::with_capacity(source.edges.len());
     let mut sorted_edges: Vec<&Edge> = source.edges.iter().collect();
@@ -473,25 +557,34 @@ pub fn build_split(
     for e in &sorted_edges {
         let (s, t) = (e.source.0, e.target.0);
         let (ps, pt) = (primary[&s], primary[&t]);
-        let category = if ps == pt {
-            EdgeDisposition::Intra
+        let (category, drop_reason) = if ps == pt {
+            (EdgeDisposition::Intra, None)
         } else if e.edge_type == EdgeType::Temporal {
-            EdgeDisposition::CrossTemporalRebuilt
+            (EdgeDisposition::CrossTemporalRebuilt, None)
         } else if (hubs.contains(&s) && placed(s, pt)) || (hubs.contains(&t) && placed(t, ps)) {
-            EdgeDisposition::HubReattached
-        } else if e.edge_type == EdgeType::Derives
-            && interactions.contains_key(&s)
-            && concepts.contains_key(&t)
-            && placed(s, pt)
-        {
-            EdgeDisposition::OriginReattached
+            (EdgeDisposition::HubReattached, None)
+        } else if e.edge_type == EdgeType::Derives {
+            // The source graph was validated: a Derives edge runs from an
+            // interaction to a concept, and no other type touches one.
+            if placed(s, pt) {
+                (EdgeDisposition::DerivesReattached, None)
+            } else {
+                (
+                    EdgeDisposition::Dropped,
+                    Some(DropReason::DerivesWithoutReplica),
+                )
+            }
         } else {
-            EdgeDisposition::Dropped
+            (
+                EdgeDisposition::Dropped,
+                Some(DropReason::CrossSessionStructural),
+            )
         };
         ledger.push(LedgerEntry {
             edge: e.id,
             edge_type: e.edge_type,
             category,
+            drop_reason,
             from_session: ps.to_owned(),
             to_session: pt.to_owned(),
             outputs: Vec::new(),
@@ -528,10 +621,6 @@ pub fn build_split(
     synonyms.sort_by(|a, b| a.source_key.cmp(&b.source_key));
     let mut events: Vec<&CanonizationEvent> = source.canonization_events.iter().collect();
     events.sort_by_key(|e| (e.occurred_at, e.id.0));
-    let mut intents: Vec<&WriteIntent> = source.write_intents.iter().collect();
-    intents.sort_by(|a, b| {
-        (a.issued_ms, a.lane_seq, &a.receipt).cmp(&(b.issued_ms, b.lane_seq, &b.receipt))
-    });
     let mut synonym_concept: Vec<(&Synonym, Uuid)> = Vec::with_capacity(synonyms.len());
     for s in synonyms {
         synonym_concept.push((s, resolve_synonym(&s.source_key, &aliases, &by_key)?));
@@ -539,11 +628,6 @@ pub fn build_split(
     for ev in &source.canonization_events {
         if !concepts.contains_key(&ev.node_id.0) {
             return refuse("a canonization event names no source concept");
-        }
-    }
-    for w in &source.write_intents {
-        if !interactions.contains_key(&w.interaction.0) {
-            return refuse("a write intent names no source interaction");
         }
     }
 
@@ -569,15 +653,22 @@ pub fn build_split(
         for (n, &orig) in local_chain.iter().enumerate() {
             let src = interactions[&orig];
             let prev = n.checked_sub(1).map(|p| local_chain[p]);
+            let row = if primary[&orig] == t {
+                Interaction::clone(src)
+            } else {
+                counts.origin_replicas += 1;
+                *accounting
+                    .replica_matrix
+                    .entry(format!("{} -> {t}", primary[&orig]))
+                    .or_default() += 1;
+                replica_interaction(src)?
+            };
             snap_interactions.push(Interaction {
                 id: map("interaction", orig),
                 session_id: sid.clone(),
                 previous_id: prev.map(|p| map("interaction", p)),
-                ..Interaction::clone(src)
+                ..row
             });
-            if primary[&orig] != t {
-                counts.origin_replicas += 1;
-            }
             let Some(prev) = prev else { continue };
             counts.chain_links += 1;
             if let Some(kept) = temporal_link.get(&(orig, prev)) {
@@ -671,43 +762,6 @@ pub fn build_split(
             })
             .collect();
 
-        // Consumed receipts go only to their interaction's primary target, in
-        // their stored (settled) form; typed refs must stay local.
-        let mut snap_intents = Vec::new();
-        for w in intents.iter().filter(|w| primary[&w.interaction.0] == t) {
-            let mut payload = w.payload.settled().unwrap_or_else(|| w.payload.clone());
-            if let WriteIntentPayload::Action {
-                depends_on_pins, ..
-            } = &mut payload
-            {
-                for pin in depends_on_pins.iter_mut().flatten() {
-                    if !concepts.contains_key(&pin.0) || !placed(pin.0, t) {
-                        return refuse(format!(
-                            "consumed write intent {} pins a concept outside its target {t}; \
-                             its history cannot be kept locally",
-                            w.receipt
-                        ));
-                    }
-                    *pin = map("concept", pin.0);
-                }
-            }
-            if !matches!(
-                payload,
-                WriteIntentPayload::Derive { .. } | WriteIntentPayload::Action { .. }
-            ) {
-                return refuse(format!(
-                    "consumed write intent {} has an unsettled typed payload",
-                    w.receipt
-                ));
-            }
-            snap_intents.push(WriteIntent {
-                session_id: sid.clone(),
-                interaction: map("interaction", w.interaction.0),
-                payload,
-                ..WriteIntent::clone(w)
-            });
-        }
-
         let snapshot = GraphSnapshot {
             session_id: sid.clone(),
             root_goal: None,
@@ -720,7 +774,9 @@ pub fn build_split(
             reservations: Vec::new(),
             canonization_events: snap_events,
             embedding: source.embedding.clone(),
-            write_intents: snap_intents,
+            // Consumed intents are receipts, not memory: they are counted
+            // and dropped, so no payload text crosses sessions.
+            write_intents: Vec::new(),
             mutation_epoch: source.mutation_epoch,
             gc_mark: GcMark {
                 last_gc_at_reset: false,
@@ -735,7 +791,6 @@ pub fn build_split(
         counts.edges = snapshot.edges.len();
         counts.canonization_events = snapshot.canonization_events.len();
         counts.synonyms = snapshot.synonyms.len();
-        counts.write_intents = snapshot.write_intents.len();
         accounting.per_target.insert(t.to_owned(), counts);
         out_targets.push(SplitTarget {
             session: t.to_owned(),
@@ -793,7 +848,7 @@ pub fn build_split(
     a.source_concepts = source.concepts.len();
     a.source_synonyms = source.synonyms.len();
     a.source_canonization_events = source.canonization_events.len();
-    a.source_write_intents = source.write_intents.len();
+    a.consumed_write_intents_dropped = source.write_intents.len();
     a.excluded_reservations = source.reservations.len();
     for c in a.per_target.values() {
         a.target_interactions += c.interactions;
@@ -801,7 +856,6 @@ pub fn build_split(
         a.target_vectors += c.vectors;
         a.target_canonization_events += c.canonization_events;
         a.target_synonyms += c.synonyms;
-        a.target_write_intents += c.write_intents;
         a.edges.output_edges += c.edges;
         a.edges.output_chain_links += c.chain_links;
         a.edges.output_preserved_links += c.preserved_links;
@@ -816,11 +870,9 @@ pub fn build_split(
         .collect();
     a.replicas_for_primary_concepts = for_primaries.len();
     a.replicas_for_hub_copies_only = a.interaction_replicas - for_primaries.len();
-    // The shared layer: hard excluded-project provenance never reaches it,
-    // even as an origin replica (D1 validation already refuses such a
-    // general ruling; this re-derives the barrier from the source). A
-    // replica merely assigned to an excluded project is surfaced instead.
-    let (protected, _) = super::classify::protected_source_items(source, &plan.rules);
+    // Soft replicas into the shared layer of an interaction assigned to a
+    // project excluded from general are surfaced for owner review (hard
+    // provenance was refused above).
     let excluded: BTreeSet<&str> = plan
         .rules
         .projects
@@ -831,12 +883,6 @@ pub fn build_split(
     for i in &source.interactions {
         if primary[&i.id.0] == general || !placed(i.id.0, general) {
             continue;
-        }
-        if protected.contains(&i.id.0) {
-            return refuse(
-                "an interaction with protected project provenance would be copied into the \
-                 general session",
-            );
         }
         a.general_replicas += 1;
         if excluded.contains(primary[&i.id.0]) {
@@ -860,9 +906,17 @@ pub fn build_split(
             EdgeDisposition::Intra => e.intra += 1,
             EdgeDisposition::CrossTemporalRebuilt => e.cross_temporal_rebuilt += 1,
             EdgeDisposition::HubReattached => e.hub_reattached += 1,
-            EdgeDisposition::OriginReattached => e.origin_reattached += 1,
+            EdgeDisposition::DerivesReattached => e.derives_reattached += 1,
             EdgeDisposition::Dropped => {
                 e.dropped += 1;
+                *e.dropped_by_reason
+                    .entry(
+                        serde_json::to_value(l.drop_reason)?
+                            .as_str()
+                            .unwrap_or("unknown")
+                            .to_owned(),
+                    )
+                    .or_default() += 1;
                 *e.dropped_by_type
                     .entry(format!("{:?}", l.edge_type))
                     .or_default() += 1;
@@ -888,7 +942,7 @@ pub fn build_split(
             e.output_structural_extra += l.outputs.len() - 1;
         }
     }
-    if e.intra + e.cross_temporal_rebuilt + e.hub_reattached + e.origin_reattached + e.dropped
+    if e.intra + e.cross_temporal_rebuilt + e.hub_reattached + e.derives_reattached + e.dropped
         != e.source_edges
     {
         return refuse("the edge ledger does not account for every source edge");

@@ -438,12 +438,15 @@ pub struct SplitIo {
     pub destination: SplitDestination,
 }
 
-/// An explicit filesystem SQLite file for split targets. Never derived from
-/// `lambo.toml` or the environment, so ambient store configuration can never
-/// redirect an offline import.
-#[derive(Clone, Debug)]
+/// An explicit filesystem SQLite file for split targets, and the store over
+/// it, constructed once here. Never derived from `lambo.toml` or the
+/// environment, so ambient store configuration can never redirect an offline
+/// import. The store's pool is lazy: nothing touches the file until the
+/// command uses it (a dry run never does).
 pub struct SplitDestination {
     path: std::path::PathBuf,
+    #[cfg(feature = "store-sqlite")]
+    store: crate::store::SqliteStore,
 }
 
 impl SplitDestination {
@@ -452,14 +455,21 @@ impl SplitDestination {
         &self.path
     }
 
+    /// The store over the output file.
+    #[cfg(feature = "store-sqlite")]
+    pub(crate) fn store(&self) -> &crate::store::SqliteStore {
+        &self.store
+    }
+
     /// Open `file`, which must already exist, as a split destination:
     /// file-backed, no creation, foreign keys on and a busy timeout. No
     /// journal mode is set, so opening an existing file never rewrites its
     /// header; a new output is created in SQLite's default rollback-journal
     /// mode, so every committed byte is in the file itself and no WAL
     /// sidecar is ever left under the private provisioning name.
+    /// Also used for the private sibling a new output is provisioned in.
     #[cfg(feature = "store-sqlite")]
-    pub fn open(file: &std::path::Path) -> crate::store::SqliteStore {
+    pub(crate) fn open(file: &std::path::Path) -> crate::store::SqliteStore {
         crate::store::SqliteStore::new(
             sqlx::sqlite::SqliteConnectOptions::new()
                 .filename(file)
@@ -512,6 +522,8 @@ pub fn resolve_split_io(
         source_path,
         destination: SplitDestination {
             path: output.to_path_buf(),
+            #[cfg(feature = "store-sqlite")]
+            store: SplitDestination::open(output),
         },
     })
 }

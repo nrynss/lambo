@@ -3,6 +3,7 @@
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use uuid::Uuid;
 
+use super::split::build_validated;
 use super::*;
 use crate::types::{
     AgentId, CanonizationEvent, CanonizationStatus, Concept, ConceptType, Edge, EdgeType,
@@ -23,7 +24,9 @@ fn at(minutes: i64) -> DateTime<Utc> {
 /// 6 alpha, 7 beta, 8 beta.
 const INTERACTIONS: [(u64, &str, &str, &str); 8] = [
     (1, "alpha-build", "alpha cache work", "alpha"),
-    (2, "beta-build", "beta parser work", "beta"),
+    // A neutral actor: its prompt names beta (soft evidence only), so it may
+    // be copied into alpha as the origin of the Cargo.toml hub copy.
+    (2, "worker", "beta parser work", "beta"),
     (3, "alpha-build", "alpha planning for beta", "alpha"),
     (4, "alpha-build", "alpha follow-up", "alpha"),
     (
@@ -428,13 +431,13 @@ fn every_source_edge_is_in_the_ledger_exactly_once_with_exact_accounting() {
             e.intra,
             e.cross_temporal_rebuilt,
             e.hub_reattached,
-            e.origin_reattached,
+            e.derives_reattached,
             e.dropped
         ),
         (26, 14, 5, 2, 2, 3)
     );
     assert_eq!(
-        e.intra + e.cross_temporal_rebuilt + e.hub_reattached + e.origin_reattached + e.dropped,
+        e.intra + e.cross_temporal_rebuilt + e.hub_reattached + e.derives_reattached + e.dropped,
         e.source_edges
     );
     assert_eq!(e.dropped_ids, vec![id(213), id(304), id(305)]);
@@ -444,6 +447,26 @@ fn every_source_edge_is_in_the_ledger_exactly_once_with_exact_accounting() {
     assert_eq!(e.dropped_by_sessions["beta -> general"], 1);
     assert_eq!(e.dropped_by_sessions["alpha -> beta"], 1);
     assert_eq!(e.dropped_by_sessions["beta -> alpha"], 1);
+    assert_eq!(
+        e.dropped_by_reason,
+        [
+            ("cross_session_structural".to_owned(), 2),
+            ("derives_without_replica".to_owned(), 1)
+        ]
+        .into()
+    );
+    assert_eq!(
+        entry(&out, 213).drop_reason,
+        Some(DropReason::DerivesWithoutReplica)
+    );
+    assert_eq!(
+        entry(&out, 304).drop_reason,
+        Some(DropReason::CrossSessionStructural)
+    );
+    assert!(out
+        .ledger
+        .iter()
+        .all(|l| (l.category == EdgeDisposition::Dropped) == l.drop_reason.is_some()));
     assert_eq!((e.intra_temporal, e.intra_temporal_preserved), (2, 2));
     assert_eq!(e.intra_temporal_replaced, 0);
     assert_eq!(
@@ -479,11 +502,19 @@ fn every_source_edge_is_in_the_ledger_exactly_once_with_exact_accounting() {
         (1, 2)
     );
     assert_eq!(
+        a.replica_matrix,
+        [
+            ("alpha -> beta".to_owned(), 2),
+            ("beta -> alpha".to_owned(), 1)
+        ]
+        .into()
+    );
+    assert_eq!(
         (
             a.target_vectors,
             a.target_canonization_events,
             a.target_synonyms,
-            a.target_write_intents,
+            a.consumed_write_intents_dropped,
             a.excluded_reservations
         ),
         (13, 3, 4, 2, 1)
@@ -697,7 +728,7 @@ fn derives_reattach_to_one_shared_origin_replica() {
     );
     for (edge, concept) in [(205, 15), (206, 16)] {
         let l = entry(&out, edge);
-        assert_eq!(l.category, EdgeDisposition::OriginReattached);
+        assert_eq!(l.category, EdgeDisposition::DerivesReattached);
         let row = beta.edges.iter().find(|e| e.id == l.outputs[0].1).unwrap();
         assert_eq!(
             (row.source, row.target),
@@ -718,7 +749,7 @@ fn derives_reattach_to_one_shared_origin_replica() {
 }
 
 #[test]
-fn targets_get_the_approved_metadata_and_local_receipts() {
+fn targets_get_the_approved_metadata_and_no_receipts() {
     let source = source();
     let out = build_split(&plan_for(&source), &source).unwrap();
     assert!(out.root_goal_cleared);
@@ -733,30 +764,12 @@ fn targets_get_the_approved_metadata_and_local_receipts() {
         assert_eq!(s.embedding, source.embedding);
         assert_eq!(t.sha256, target_sha256(s).unwrap());
     }
-    let alpha = target(&out, "alpha");
-    assert_eq!(alpha.write_intents.len(), 1);
-    let w = &alpha.write_intents[0];
-    assert_eq!(w.interaction, mapped(&out, 3, "alpha"));
-    let WriteIntentPayload::Action {
-        depends_on_pins, ..
-    } = &w.payload
-    else {
-        panic!("action kept");
-    };
-    assert_eq!(
-        depends_on_pins,
-        &vec![Some(mapped(&out, 11, "alpha")), None]
-    );
-    // A consumed cited derive is kept in its stored, settled form.
-    let beta = target(&out, "beta");
-    assert_eq!(beta.write_intents.len(), 1);
-    assert_eq!(
-        beta.write_intents[0].payload,
-        WriteIntentPayload::Derive {
-            concepts: vec![],
-            pairs: vec![]
-        }
-    );
+    // Consumed receipts are counted, not migrated: no payload text crosses.
+    assert!(out
+        .targets
+        .iter()
+        .all(|t| t.snapshot.write_intents.is_empty()));
+    assert_eq!(out.accounting.consumed_write_intents_dropped, 2);
 }
 
 #[test]
@@ -806,7 +819,7 @@ fn pending_intents_are_refused_before_anything_is_built() {
 }
 
 #[test]
-fn a_consumed_pin_without_a_local_concept_is_refused() {
+fn a_consumed_pin_outside_its_target_no_longer_blocks() {
     let mut source = source();
     // Interaction 3 is alpha's; concept 12 lives only in beta.
     if let WriteIntentPayload::Action {
@@ -815,11 +828,45 @@ fn a_consumed_pin_without_a_local_concept_is_refused() {
     {
         depends_on_pins[0] = Some(id(12));
     }
+    let out = build_split(&plan_for(&source), &source).unwrap();
+    assert_eq!(out.accounting.consumed_write_intents_dropped, 2);
+}
+
+#[test]
+fn hard_provenance_never_leaves_its_session_as_a_replica() {
+    // The Cargo.toml hub now originates in i7, whose actor is beta's: a hub
+    // copy in alpha would carry beta's hard provenance there. A valid plan.
+    let mut source = source();
+    source.concepts[9].origin_interaction = id(7);
+    source.concepts[9].origin_agent = AgentId::from("beta-build");
+    source
+        .edges
+        .iter_mut()
+        .find(|e| e.id == id(210))
+        .unwrap()
+        .source = id(7);
     let msg = refusal(&source);
-    assert!(
-        msg.contains("pins a concept outside its target alpha"),
-        "{msg}"
-    );
+    assert!(msg.contains("hard protected project provenance"), "{msg}");
+    assert!(msg.contains("beta -> alpha"), "{msg}");
+
+    // The same barrier for general, which D1 already refuses, reached with
+    // a constructed plan that skips validation.
+    let (mut source, labels, overrides) = general_replica_variant();
+    let plan = classify_reviewed(&source, &rules(), &labels, &overrides).unwrap();
+    source.interactions[7].agent_id = AgentId::from("beta-build");
+    let msg = build_validated(&plan, &source).unwrap_err().to_string();
+    assert!(msg.contains("beta -> general"), "{msg}");
+}
+
+#[test]
+fn non_finite_vectors_are_refused_at_build_time() {
+    let source = source();
+    let plan = plan_for(&source);
+    let mut bad = source.clone();
+    bad.concepts[0].embedding = Some(vec![f32::NAN, 0.5]);
+    let msg = build_validated(&plan, &bad).unwrap_err().to_string();
+    assert!(msg.contains("non-finite"), "{msg}");
+    assert!(build_split(&plan, &bad).is_err());
 }
 
 #[test]
@@ -956,7 +1003,7 @@ mod sqlite {
             // A loaded target is a valid graph.
             crate::graph::Graph::from_snapshot(t.snapshot.clone()).unwrap();
         }
-        store.close().await;
+        store.finish_split_destination().await.unwrap();
 
         // Rerun: read-only destination check, then verification only.
         let before = file_bytes(&path);
@@ -969,7 +1016,7 @@ mod sqlite {
         assert!(second
             .iter()
             .all(|o| *o == SplitImportOutcome::AlreadyPresent));
-        store.close().await;
+        store.finish_split_destination().await.unwrap();
         assert_eq!(
             file_bytes(&path),
             before,
@@ -1015,7 +1062,7 @@ mod sqlite {
                 Err(StoreError::SessionNotFound(_))
             ));
         }
-        store.close().await;
+        store.finish_split_destination().await.unwrap();
         let raw = sqlx::SqlitePool::connect(&format!("sqlite://{}", path.display()))
             .await
             .unwrap();
@@ -1046,7 +1093,7 @@ mod sqlite {
         assert_eq!(outcomes[0], SplitImportOutcome::AlreadyPresent);
         assert!(matches!(outcomes[1], SplitImportOutcome::Imported { .. }));
         assert!(matches!(outcomes[2], SplitImportOutcome::Imported { .. }));
-        store.close().await;
+        store.finish_split_destination().await.unwrap();
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1058,7 +1105,7 @@ mod sqlite {
         let path = dir.join("split.db");
         let store = new_destination(&path).await;
         import_all(&store, &out).await;
-        store.close().await;
+        store.finish_split_destination().await.unwrap();
 
         // A drifted row in a committed target.
         let raw = sqlx::SqlitePool::connect(&format!("sqlite://{}", path.display()))
@@ -1084,26 +1131,26 @@ mod sqlite {
             .verify_split_destination(&"f".repeat(64), &names(&out))
             .await
             .is_err());
-        store.close().await;
+        store.finish_split_destination().await.unwrap();
         assert_eq!(file_bytes(&path), before);
 
         // A plain store file is not a split output.
         let plain = dir.join("plain.db");
         let ordinary = SqliteStore::connect(plain.to_str().unwrap()).unwrap();
         ordinary.init_schema().await.unwrap();
-        ordinary.close().await;
+        ordinary.finish_split_destination().await.unwrap();
         let store = SplitDestination::open(&plain);
         let err = store
             .verify_split_destination(&out.split_sha256, &names(&out))
             .await
             .unwrap_err();
         assert!(err.to_string().contains("not a split output"), "{err}");
-        store.close().await;
+        store.finish_split_destination().await.unwrap();
 
         // A destination holding a session this split never receipted.
         let path = dir.join("foreign.db");
         let store = new_destination(&path).await;
-        store.close().await;
+        store.finish_split_destination().await.unwrap();
         let raw = sqlx::SqlitePool::connect(&format!("sqlite://{}", path.display()))
             .await
             .unwrap();
@@ -1122,16 +1169,230 @@ mod sqlite {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("without a receipt"), "{err}");
-        store.close().await;
+        store.finish_split_destination().await.unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    async fn raw(path: &std::path::Path) -> sqlx::SqlitePool {
+        sqlx::SqlitePool::connect(&format!("sqlite://{}", path.display()))
+            .await
+            .unwrap()
+    }
+
+    async fn count(pool: &sqlx::SqlitePool, sql: &str) -> i64 {
+        sqlx::query_scalar(sql).fetch_one(pool).await.unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_output_a_writer_attached_to_is_refused() {
+        let source = source();
+        let out = build_split(&plan_for(&source), &source).unwrap();
+        let dir = temp_dir();
+        let path = dir.join("split.db");
+        let store = new_destination(&path).await;
+        import_all(&store, &out).await;
+        store.finish_split_destination().await.unwrap();
+        let pool = raw(&path).await;
+        sqlx::query(
+            "INSERT INTO session_leases (session_id, holder, acquired_at, expires_at) \
+             VALUES ('alpha', 'w@h#1', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+        let store = SplitDestination::open(&path);
+        let err = store
+            .verify_split_destination(&out.split_sha256, &names(&out))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("a writer has attached"), "{err}");
+        let t = &out.targets[1];
+        let err = store
+            .import_split_target(&receipt(&out, t), &t.snapshot, &names(&out))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("a writer has attached"), "{err}");
+        store.finish_split_destination().await.unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    async fn try_all(
+        store: &SqliteStore,
+        out: &SplitOutput,
+    ) -> Vec<Result<SplitImportOutcome, StoreError>> {
+        let mut outcomes = Vec::new();
+        for t in &out.targets {
+            outcomes.push(
+                store
+                    .import_split_target(&receipt(out, t), &t.snapshot, &names(out))
+                    .await,
+            );
+        }
+        outcomes
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn concurrent_imports_serialize_and_fail_closed() {
+        let source = source();
+        let out = build_split(&plan_for(&source), &source).unwrap();
+        let dir = temp_dir();
+        let path = dir.join("split.db");
+        new_destination(&path)
+            .await
+            .finish_split_destination()
+            .await
+            .unwrap();
+        // Two independent pools on one file race every target.
+        let (a, b) = (SplitDestination::open(&path), SplitDestination::open(&path));
+        let (ra, rb) = tokio::join!(try_all(&a, &out), try_all(&b, &out));
+        for (x, y) in ra.iter().zip(&rb) {
+            let imported = [x, y]
+                .iter()
+                .filter(|r| matches!(r, Ok(SplitImportOutcome::Imported { .. })))
+                .count();
+            // Never two imports of one target; the loser verified or refused.
+            assert!(imported <= 1, "{x:?} {y:?}");
+            for r in [x, y] {
+                assert!(matches!(
+                    r,
+                    Ok(_) | Err(StoreError::Invariant(_)) | Err(StoreError::Backend(_))
+                ));
+            }
+        }
+        a.finish_split_destination().await.unwrap();
+        b.finish_split_destination().await.unwrap();
+        // Whatever happened, a rerun finds a complete, exact output.
+        let store = SplitDestination::open(&path);
+        for o in import_all(&store, &out).await {
+            assert!(matches!(
+                o,
+                SplitImportOutcome::AlreadyPresent | SplitImportOutcome::Imported { .. }
+            ));
+        }
+        let again = import_all(&store, &out).await;
+        assert!(again
+            .iter()
+            .all(|o| *o == SplitImportOutcome::AlreadyPresent));
+        store.finish_split_destination().await.unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_target_that_does_not_read_back_exactly_rolls_back() {
+        let source = source();
+        let out = build_split(&plan_for(&source), &source).unwrap();
+        let dir = temp_dir();
+        let path = dir.join("split.db");
+        let store = new_destination(&path).await;
+        // A sub-millisecond instant is stored truncated, so the re-read on
+        // the import transaction differs and the whole target rolls back.
+        let mut t = out.targets[0].clone();
+        t.snapshot.concepts[0].last_accessed = Some(at(100) + Duration::nanoseconds(5));
+        let err = store
+            .import_split_target(&receipt(&out, &t), &t.snapshot, &names(&out))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("did not read back exactly"),
+            "{err}"
+        );
+        store.finish_split_destination().await.unwrap();
+        let pool = raw(&path).await;
+        for table in [
+            "sessions",
+            "interactions",
+            "concepts",
+            "edges",
+            "split_imports",
+        ] {
+            assert_eq!(
+                count(&pool, &format!("SELECT count(*) FROM {table}")).await,
+                0,
+                "{table}"
+            );
+        }
+        pool.close().await;
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// H3: a split output must work as an ordinary store afterwards,
+    /// erase-session included (the receipt has no foreign key).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_split_output_serves_as_an_ordinary_store_and_erases() {
+        use crate::store::{EraseOutcome, LeaseHolder, LeaseOutcome};
+        use crate::types::{Mutation, MutationBatch};
+        let source = source();
+        let out = build_split(&plan_for(&source), &source).unwrap();
+        let dir = temp_dir();
+        let path = dir.join("split.db");
+        let store = new_destination(&path).await;
+        import_all(&store, &out).await;
+        store.finish_split_destination().await.unwrap();
+
+        let ordinary = SqliteStore::connect(path.to_str().unwrap()).unwrap();
+        ordinary.init_schema().await.unwrap();
+        ordinary.preflight_schema().await.unwrap();
+        let sid = SessionId::from("alpha");
+        let holder = LeaseHolder {
+            agent: AgentId::from("writer"),
+            pid: 1,
+            host: "test".into(),
+            endpoint: None,
+        };
+        let LeaseOutcome::Acquired(lease) = ordinary
+            .acquire_lease(&sid, &holder, std::time::Duration::from_secs(60))
+            .await
+            .unwrap()
+        else {
+            panic!("lease refused");
+        };
+        let mut batch = MutationBatch::new();
+        batch.push(Mutation::SetRootGoal {
+            session_id: sid.clone(),
+            goal: Some(serde_json::json!({"goal": "alpha only"})),
+        });
+        ordinary.flush(&batch, Some(lease.token)).await.unwrap();
+        assert!(ordinary
+            .load_session(&sid)
+            .await
+            .unwrap()
+            .root_goal
+            .is_some());
+        let EraseOutcome::Erased(report) = ordinary.erase_session(&sid, &holder).await.unwrap()
+        else {
+            panic!("erase refused");
+        };
+        assert!(!report.already_absent);
+        assert!(matches!(
+            ordinary.load_session(&sid).await,
+            Err(StoreError::SessionNotFound(_))
+        ));
+        // Other targets are untouched.
+        ordinary
+            .load_session(&SessionId::from("beta"))
+            .await
+            .unwrap();
+        ordinary.finish_split_destination().await.unwrap();
+
+        // The erased, leased output is no longer a split output.
+        let store = SplitDestination::open(&path);
+        assert!(store
+            .verify_split_destination(&out.split_sha256, &names(&out))
+            .await
+            .is_err());
+        store.finish_split_destination().await.unwrap();
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
 
-#[test]
-fn general_origin_replicas_from_excluded_projects_are_surfaced() {
-    // An audited general ruling whose origin interaction the plan assigns to
-    // beta (excluded from general) through a neutral actor: the replica is
-    // provenance, copied as design section 8 requires, and listed for review.
+/// A source with an audited general ruling whose origin interaction (i8)
+/// the plan assigns to beta, through a neutral actor.
+fn general_replica_variant() -> (
+    GraphSnapshot,
+    Vec<ReviewedAssignment>,
+    Vec<OperatorOverride>,
+) {
     let mut source = source();
     source.interactions[7].agent_id = AgentId::from("worker");
     let mut ruling = source.concepts[10].clone();
@@ -1171,6 +1432,14 @@ fn general_origin_replicas_from_excluded_projects_are_surfaced() {
         reason: "owner: operator-wide ruling".into(),
         ..overrides[0].clone()
     });
+    (source, labels, overrides)
+}
+
+#[test]
+fn general_origin_replicas_from_excluded_projects_are_surfaced() {
+    // The replica is provenance, copied as design section 8 requires, and
+    // listed for review.
+    let (source, labels, overrides) = general_replica_variant();
     let plan = classify_reviewed(&source, &rules(), &labels, &overrides).unwrap();
     let out = build_split(&plan, &source).unwrap();
     let a = &out.accounting;

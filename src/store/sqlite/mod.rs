@@ -308,7 +308,7 @@ use crate::types::{
     Scored, SessionId, StoreError,
 };
 use leases::acquire_or_refresh;
-pub use split_import::{SplitImportHook, SplitImportOutcome, SplitReceipt, SPLIT_IMPORTS_DDL};
+pub(crate) use split_import::{SplitImportOutcome, SplitReceipt};
 
 // The unit tests in `tests/` reach the adapter's items through `use super::*`,
 // as they did when this was one file. These test-only imports keep every name

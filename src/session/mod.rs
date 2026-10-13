@@ -13,9 +13,9 @@ pub use plan::{
     PLAN_VERSION,
 };
 pub use split::{
-    build_split, canonical_target, target_sha256, EdgeAccounting, EdgeDisposition, LedgerEntry,
-    LowConfidenceItem, Placement, SplitAccounting, SplitError, SplitOutput, SplitTarget,
-    TargetCounts, NEW_CHAIN_LINK_WEIGHT, SPLIT_ALGORITHM_VERSION,
+    build_split, canonical_target, target_sha256, DropReason, EdgeAccounting, EdgeDisposition,
+    LedgerEntry, LowConfidenceItem, Placement, SplitAccounting, SplitError, SplitOutput,
+    SplitTarget, TargetCounts, NEW_CHAIN_LINK_WEIGHT, SPLIT_ALGORITHM_VERSION,
 };
 
 #[cfg(test)]

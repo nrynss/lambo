@@ -351,6 +351,9 @@ fn reproduce_plan(
             "--rules differ from the rules the plan was classified with".into(),
         ));
     }
+    // The plan's overrides never authorize themselves: the operator's
+    // overrides file is an input the plan must reproduce from, exactly as
+    // the reviewed labels are.
     let overrides = match &args.overrides {
         Some(path) => {
             let mut given = read_overrides(path)?;
@@ -362,7 +365,12 @@ fn reproduce_plan(
             }
             given
         }
-        None => plan.overrides.clone(),
+        None if plan.overrides.is_empty() => Vec::new(),
+        None => {
+            return Err(CliError::Usage(
+                "the plan carries audited overrides; pass the same --overrides file".into(),
+            ))
+        }
     };
     let reproduced = match (
         &args.reviewed_assignments,
@@ -453,12 +461,12 @@ fn summary(split: &SplitOutput, output: &Path, report: &Path, outcome: &str) -> 
     ));
     out.push_str(&format!(
         "source edges {}: intra {}, cross-session Temporal rebuilt {}, hub reattached {}, \
-         origin reattached {}, dropped {}\n",
+         Derives reattached {}, dropped {}\n",
         e.source_edges,
         e.intra,
         e.cross_temporal_rebuilt,
         e.hub_reattached,
-        e.origin_reattached,
+        e.derives_reattached,
         e.dropped
     ));
     out.push_str(&format!(
@@ -471,6 +479,20 @@ fn summary(split: &SplitOutput, output: &Path, report: &Path, outcome: &str) -> 
         e.output_structural,
         e.output_structural_extra
     ));
+    if a.consumed_write_intents_dropped > 0 {
+        out.push_str(&format!(
+            "{} consumed write receipts were not migrated (receipts only)\n",
+            a.consumed_write_intents_dropped
+        ));
+    }
+    if !a.replica_matrix.is_empty() {
+        let cells: Vec<String> = a
+            .replica_matrix
+            .iter()
+            .map(|(k, v)| format!("{k} {v}"))
+            .collect();
+        out.push_str(&format!("origin replicas: {}\n", cells.join(", ")));
+    }
     if !a.general_replicas_from_excluded_projects.is_empty() {
         out.push_str(&format!(
             "GENERAL PROVENANCE: {} interactions assigned to projects excluded from general are \
@@ -531,7 +553,7 @@ pub async fn split_session(io: SplitIo, args: SplitArgs) -> Result<String, CliEr
         }
         "dry run, nothing written".to_owned()
     } else {
-        import(&split, &output, &mut targets).await?
+        import(&split, &io.destination, &mut targets).await?
     };
     let report = SplitReport {
         report_version: 1,
@@ -573,7 +595,7 @@ pub async fn split_session(io: SplitIo, args: SplitArgs) -> Result<String, CliEr
 #[cfg(not(feature = "store-sqlite"))]
 async fn import<'a>(
     _: &'a SplitOutput,
-    _: &Path,
+    _: &crate::resolve::SplitDestination,
     _: &mut Vec<TargetReport<'a>>,
 ) -> Result<String, CliError> {
     Err(CliError::Usage(
@@ -602,8 +624,9 @@ async fn create_destination(output: &Path) -> Result<(), CliError> {
         .map_err(|e| CliError::Usage(format!("create {}: {e}", temp.display())))?;
     let store = SplitDestination::open(&temp);
     let provisioned = store.provision_split_destination().await;
-    store.close().await;
+    let finished = store.finish_split_destination().await;
     let linked = provisioned
+        .and(finished)
         .map_err(|e| CliError::Runtime(format!("provision split destination: {e}")))
         .and_then(|_| {
             std::fs::hard_link(&temp, output).map_err(|e| {
@@ -627,11 +650,11 @@ async fn create_destination(output: &Path) -> Result<(), CliError> {
 #[cfg(feature = "store-sqlite")]
 async fn import<'a>(
     split: &'a SplitOutput,
-    output: &Path,
+    destination: &crate::resolve::SplitDestination,
     reports: &mut Vec<TargetReport<'a>>,
 ) -> Result<String, CliError> {
-    use crate::resolve::SplitDestination;
     use crate::store::{SplitImportOutcome, SplitReceipt};
+    let output = destination.path();
     let created = match std::fs::symlink_metadata(output) {
         Ok(_) => false,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -647,7 +670,7 @@ async fn import<'a>(
     };
     let names: std::collections::BTreeSet<String> =
         split.targets.iter().map(|t| t.session.clone()).collect();
-    let store = SplitDestination::open(output);
+    let store = destination.store();
     let result =
         async {
             store
@@ -698,8 +721,13 @@ async fn import<'a>(
         ))
         }
         .await;
-    store.close().await;
-    result
+    let finished = store
+        .finish_split_destination()
+        .await
+        .map_err(|e| CliError::Runtime(format!("close split destination: {e}")));
+    let summary = result?;
+    finished?;
+    Ok(summary)
 }
 
 #[cfg(test)]
@@ -843,7 +871,7 @@ mod tests {
     mod split {
         use super::super::*;
         use crate::resolve::resolve_split_io;
-        use crate::session::split_tests::{labels, plan_for, rules, source};
+        use crate::session::split_tests::{labels, overrides, plan_for, rules, source};
 
         struct Inputs {
             dir: PathBuf,
@@ -866,6 +894,12 @@ mod tests {
                 .map(|l| serde_json::to_string(l).unwrap())
                 .collect();
             std::fs::write(&labels_file, lines.join("\n")).unwrap();
+            let overrides_file = dir.join("overrides.jsonl");
+            let lines: Vec<String> = overrides()
+                .iter()
+                .map(|o| serde_json::to_string(o).unwrap())
+                .collect();
+            std::fs::write(&overrides_file, lines.join("\n")).unwrap();
             let plan = dir.join("plan.json");
             std::fs::write(&plan, serde_json::to_vec(&plan_for(&source)).unwrap()).unwrap();
             Inputs {
@@ -874,7 +908,7 @@ mod tests {
                     plan,
                     rules: rules_file,
                     reviewed_assignments: Some(labels_file),
-                    overrides: None,
+                    overrides: Some(overrides_file),
                     report: dir.join("report.json"),
                     dry_run: false,
                 },
@@ -920,7 +954,7 @@ mod tests {
                 summary.contains("3 targets, dry run, nothing written"),
                 "{summary}"
             );
-            assert!(summary.contains("source edges 26: intra 14, cross-session Temporal rebuilt 5, hub reattached 2, origin reattached 2, dropped 3"), "{summary}");
+            assert!(summary.contains("source edges 26: intra 14, cross-session Temporal rebuilt 5, hub reattached 2, Derives reattached 2, dropped 3"), "{summary}");
             assert!(summary.contains("LOW CONFIDENCE: 2 items"), "{summary}");
             assert!(!output.exists());
             let report: serde_json::Value =
@@ -1067,6 +1101,15 @@ mod tests {
                 run(&i, &output, args).await,
                 "pass the same --reviewed-assignments",
             );
+            // The plan's own overrides do not authorize themselves.
+            let mut args = again(&i.args, "r2b.json");
+            args.overrides = None;
+            refused(run(&i, &output, args).await, "pass the same --overrides");
+            let empty = i.dir.join("empty.jsonl");
+            std::fs::write(&empty, "").unwrap();
+            let mut args = again(&i.args, "r2c.json");
+            args.overrides = Some(empty);
+            refused(run(&i, &output, args).await, "--overrides differ");
             // An edited and resealed plan no longer reproduces.
             let mut plan = plan_for(&source());
             let row = plan
@@ -1086,6 +1129,58 @@ mod tests {
             std::fs::remove_dir_all(&i.dir).unwrap();
         }
 
+        #[cfg(feature = "store-sqlite")]
+        #[tokio::test(flavor = "multi_thread")]
+        async fn a_report_that_fails_after_the_imports_commit_says_so_and_a_rerun_writes_nothing() {
+            use std::os::unix::fs::PermissionsExt;
+            let i = inputs();
+            let output = i.dir.join("split.db");
+            let locked = i.dir.join("locked");
+            std::fs::create_dir(&locked).unwrap();
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).unwrap();
+            let mut args = again(&i.args, "unused.json");
+            args.report = locked.join("report.json");
+            let err = run(&i, &output, args).await.unwrap_err().to_string();
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+            assert!(err.contains("the imports are committed"), "{err}");
+            let before = db_bytes(&output);
+            let summary = run(&i, &output, again(&i.args, "report.json"))
+                .await
+                .unwrap();
+            assert!(
+                summary.contains("0 imported, 3 already present"),
+                "{summary}"
+            );
+            assert_eq!(db_bytes(&output), before);
+            std::fs::remove_dir_all(&i.dir).unwrap();
+        }
+
+        #[cfg(feature = "store-sqlite")]
+        #[tokio::test(flavor = "multi_thread")]
+        async fn two_concurrent_runs_on_a_new_output_fail_closed() {
+            let i = inputs();
+            let output = i.dir.join("split.db");
+            let (a, b) = tokio::join!(
+                run(&i, &output, again(&i.args, "a.json")),
+                run(&i, &output, again(&i.args, "b.json"))
+            );
+            // At most one provisioned the file; the other either refused or
+            // verified what the first committed. Never a corrupt output.
+            assert!(a.is_ok() || b.is_ok(), "{a:?} {b:?}");
+            let summary = run(&i, &output, again(&i.args, "c.json")).await.unwrap();
+            assert!(
+                summary.contains("3 already present and verified, 0 rows written")
+                    || summary.contains("imported"),
+                "{summary}"
+            );
+            let summary = run(&i, &output, again(&i.args, "d.json")).await.unwrap();
+            assert!(
+                summary.contains("0 imported, 3 already present"),
+                "{summary}"
+            );
+            std::fs::remove_dir_all(&i.dir).unwrap();
+        }
+
         #[cfg(all(feature = "store-sqlite", feature = "fixtures"))]
         #[tokio::test(flavor = "multi_thread")]
         async fn a_database_source_is_only_read() {
@@ -1098,7 +1193,7 @@ mod tests {
                 .await
                 .unwrap();
             seeded.seed(&source()).await.unwrap();
-            seeded.close().await;
+            seeded.finish_split_destination().await.unwrap();
             let db = i.dir.join("backup.db");
             let raw = sqlx::SqlitePool::connect(&format!("sqlite://{}", live.display()))
                 .await
@@ -1109,17 +1204,14 @@ mod tests {
                 .await
                 .unwrap();
             raw.close().await;
-            let loaded = {
-                let store = SqliteStore::connect_read_only(&db).unwrap();
-                let s = crate::store::GraphStore::load_session(
-                    &store,
-                    &crate::types::SessionId::from("mixed"),
-                )
-                .await
-                .unwrap();
-                store.close().await;
-                s
-            };
+            let store = SqliteStore::connect_read_only(&db).unwrap();
+            let loaded = crate::store::GraphStore::load_session(
+                &store,
+                &crate::types::SessionId::from("mixed"),
+            )
+            .await
+            .unwrap();
+            drop(store);
             std::fs::write(
                 &i.args.plan,
                 serde_json::to_vec(&plan_for(&loaded)).unwrap(),

@@ -595,7 +595,7 @@ enum SessionAction {
         /// The reviewed labels the plan imported, when it imported any.
         #[arg(long)]
         reviewed_assignments: Option<PathBuf>,
-        /// The overrides file the plan was made with (default: the plan's own audited overrides).
+        /// The overrides file the plan was made with; required when the plan carries overrides.
         #[arg(long)]
         overrides: Option<PathBuf>,
         /// Destination SQLite file: new, or this same split's earlier output to resume and verify.
@@ -841,7 +841,7 @@ impl Commands {
 /// Single construction site for store + embedder (T8.x must reuse this, not rebuild).
 enum Resolved {
     Classification(lambo::resolve::ClassificationSource),
-    Split(lambo::resolve::SplitIo),
+    Split(Box<lambo::resolve::SplitIo>),
     Full(Box<ResolvedBackends>),
     StoreOnly {
         store: Box<dyn GraphStore>,
@@ -887,7 +887,7 @@ fn resolve_for_command(
             output_database,
             *dry_run,
         )
-        .map(Resolved::Split)
+        .map(|io| Resolved::Split(Box::new(io)))
         .map_err(|e| e.to_string());
     }
     if let Commands::Session {
@@ -1565,7 +1565,7 @@ fn main() -> ExitCode {
         ) => run_async(
             "session split",
             lambo::cli::session::split_session(
-                io,
+                *io,
                 lambo::cli::session::SplitArgs {
                     session,
                     plan,
