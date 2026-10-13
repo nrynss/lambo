@@ -100,11 +100,11 @@ pub enum Condition {
 }
 
 impl Condition {
-    /// Priority severity: `Conflict = Contradiction > HighRiskModification
-    /// > Drift > StaleSession`. Higher = more urgent on the hot list. A
-    /// contradiction shares the conflict tier (#19(c)): both are warnings an
-    /// agent should act on before trusting the node; between the two,
-    /// recency decides.
+    /// Priority severity, highest first: `Conflict` and `Contradiction`
+    /// (one tier), then `HighRiskModification`, `Drift`, `StaleSession`.
+    /// Higher = more urgent on the hot list. A contradiction shares the
+    /// conflict tier (#19(c)): both are warnings an agent should act on
+    /// before trusting the node; between the two, recency decides.
     pub fn severity(self) -> u8 {
         match self {
             Condition::Conflict | Condition::Contradiction => 3,
